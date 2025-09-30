@@ -1,0 +1,157 @@
+{
+  "features": {
+    "USER_MANAGEMENT": {
+      "name": "User Management",
+      "description": "Create and manage users",
+      "endpoints": [
+        "/api/users",
+        "/api/users/*"
+      ]
+    },
+    "LLM_CHAT": {
+      "name": "LLM Chat Service",
+      "description": "Access to LLM chat endpoints",
+      "endpoints": [
+        "/api/llm/chat",
+        "/api/llm/chat/*"
+      ]
+    },
+    "LLM_EMBEDDINGS": {
+      "name": "LLM Embeddings",
+      "description": "Generate text embeddings",
+      "endpoints": [
+        "/api/llm/embeddings",
+        "/api/llm/embeddings/*"
+      ]
+    },
+    "AGENT_ORCHESTRATION": {
+      "name": "Agent Orchestration",
+      "description": "Create and manage AI agents",
+      "endpoints": [
+        "/api/agents",
+        "/api/agents/*"
+      ]
+    },
+    "VECTOR_STORE": {
+      "name": "Vector Store",
+      "description": "Store and query vector embeddings",
+      "endpoints": [
+        "/api/vectors",
+        "/api/vectors/*"
+      ]
+    },
+    "WORKFLOW_AUTOMATION": {
+      "name": "Workflow Automation",
+      "description": "Create automated workflows",
+      "endpoints": [
+        "/api/workflows",
+        "/api/workflows/*"
+      ]
+    },
+    "ANALYTICS": {
+      "name": "Analytics & Monitoring",
+      "description": "Access analytics and monitoring features",
+      "endpoints": [
+        "/api/analytics",
+        "/api/analytics/*"
+      ]
+    },
+    "API_KEYS": {
+      "name": "API Key Management",
+      "description": "Create and manage API keys",
+      "endpoints": [
+        "/api/keys",
+        "/api/keys/*",
+        "/api/tokens",
+        "/api/tokens/*"
+      ]
+    },
+    "AGENT_TRACING": {
+      "name": "Agent SDK Tracing",
+      "description": "Monitor and trace agent execution with detailed analytics",
+      "endpoints": [
+        "/api/tracing",
+        "/api/tracing/*"
+      ]
+    }
+  },
+  "licenses": {
+    "FREE": {
+      "name": "Free Tier",
+      "features": [
+        "USER_MANAGEMENT",
+        "LLM_CHAT",
+        "API_KEYS",
+        "AGENT_TRACING"
+      ],
+      "limits": {
+        "requestsPerMonth": 1000,
+        "maxAgents": 1
+      }
+    },
+    "STARTER": {
+      "name": "Starter Plan",
+      "features": [
+        "LLM_CHAT",
+        "LLM_EMBEDDINGS",
+        "API_KEYS"
+      ],
+      "limits": {
+        "requestsPerMonth": 10000,
+        "maxAgents": 5
+      }
+    },
+    "PROFESSIONAL": {
+      "name": "Professional Plan",
+      "features": [
+        "LLM_CHAT",
+        "LLM_EMBEDDINGS",
+        "AGENT_ORCHESTRATION",
+        "VECTOR_STORE",
+        "API_KEYS",
+        "ANALYTICS",
+        "AGENT_TRACING"
+      ],
+      "limits": {
+        "requestsPerMonth": 100000,
+        "maxAgents": 25
+      }
+    },
+    "ENTERPRISE": {
+      "name": "Enterprise Plan",
+      "features": [
+        "USER_MANAGEMENT",
+        "LLM_CHAT",
+        "LLM_EMBEDDINGS",
+        "AGENT_ORCHESTRATION",
+        "VECTOR_STORE",
+        "WORKFLOW_AUTOMATION",
+        "ANALYTICS",
+        "API_KEYS",
+        "AGENT_TRACING"
+      ],
+      "limits": {
+        "requestsPerMonth": -1,
+        "maxAgents": -1
+      }
+    },
+    "ON_PREMISE": {
+      "name": "On-Premise",
+      "features": [
+        "USER_MANAGEMENT",
+        "LLM_CHAT",
+        "LLM_EMBEDDINGS",
+        "AGENT_ORCHESTRATION",
+        "VECTOR_STORE",
+        "WORKFLOW_AUTOMATION",
+        "ANALYTICS",
+        "API_KEYS",
+        "AGENT_TRACING"
+      ],
+      "limits": {
+        "requestsPerMonth": -1,
+        "maxAgents": -1
+      }
+    }
+  }
+}
