@@ -4,15 +4,16 @@ import { resolveTenantDbName } from '@/lib/utils/tenant';
 
 export const runtime = 'nodejs';
 
-export async function GET(request: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
+    const { id } = await params;
     const tenantSlug = request.headers.get('x-tenant-slug');
     if (!tenantSlug) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
     const { tenantDbName } = await resolveTenantDbName(tenantSlug);
-    const model = await getModelById(tenantDbName, params.id);
+    const model = await getModelById(tenantDbName, id);
 
     if (!model) {
       return NextResponse.json({ error: 'Model not found' }, { status: 404 });
@@ -30,8 +31,8 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
     });
 
     return NextResponse.json({ usage: aggregate });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Fetch model usage error', error);
-    return NextResponse.json({ error: error.message || 'Internal error' }, { status: 500 });
+    return NextResponse.json({ error: error instanceof Error ? error.message : 'Internal error' }, { status: 500 });
   }
 }

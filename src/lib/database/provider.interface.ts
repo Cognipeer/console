@@ -3,8 +3,10 @@
  * This abstraction allows switching between different database providers (MongoDB, PostgreSQL, etc.)
  */
 
+import { ObjectId } from 'mongodb';
+
 export interface ITenant {
-  _id?: string;
+  _id?: ObjectId | string;
   companyName: string;
   slug: string;
   dbName: string;
@@ -15,7 +17,7 @@ export interface ITenant {
 }
 
 export interface IUser {
-  _id?: string;
+  _id?: ObjectId | string;
   email: string;
   password: string;
   name: string;
@@ -30,7 +32,7 @@ export interface IUser {
 }
 
 export interface IApiToken {
-  _id?: string;
+  _id?: ObjectId | string;
   userId: string;
   tenantId: string;
   label: string;
@@ -41,23 +43,23 @@ export interface IApiToken {
 }
 
 export interface IAgentTracingSession {
-  _id?: string;
+  _id?: ObjectId | string;
   sessionId: string;
   tenantId: string;
-  agent?: any;
+  agent?: Record<string, unknown>;
   agentName?: string;
   agentVersion?: string;
   agentModel?: string;
-  config?: any;
-  summary?: any;
+  config?: Record<string, unknown>;
+  summary?: Record<string, unknown>;
   status?: string;
   startedAt?: Date;
   endedAt?: Date;
   durationMs?: number;
-  errors?: any[];
+  errors?: Array<Record<string, unknown>>;
   modelsUsed?: string[];
   toolsUsed?: string[];
-  eventCounts?: any;
+  eventCounts?: Record<string, number>;
   totalEvents?: number;
   totalInputTokens?: number;
   totalOutputTokens?: number;
@@ -71,7 +73,7 @@ export interface IAgentTracingSession {
 }
 
 export interface IAgentTracingEvent {
-  _id?: string;
+  _id?: ObjectId | string;
   sessionId: string;
   tenantId: string;
   id?: string;
@@ -80,12 +82,12 @@ export interface IAgentTracingEvent {
   sequence?: number;
   timestamp?: Date;
   status?: string;
-  actor?: any;
-  metadata?: any;
-  sections?: any[];
+  actor?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  sections?: Array<Record<string, unknown>>;
   modelNames?: string[];
   model?: string;
-  error?: any;
+  error?: Record<string, unknown>;
   durationMs?: number;
   actorName?: string;
   actorRole?: string;
@@ -114,7 +116,7 @@ export interface IModelPricing {
 }
 
 export interface IModel {
-  _id?: string;
+  _id?: ObjectId | string;
   tenantId: string;
   name: string;
   description?: string;
@@ -142,15 +144,15 @@ export interface IModelUsageCostSnapshot {
 }
 
 export interface IModelUsageLog {
-  _id?: string;
+  _id?: ObjectId | string;
   tenantId: string;
   modelKey: string;
   modelId?: string;
   requestId: string;
   route: string;
   status: 'success' | 'error';
-  providerRequest: any;
-  providerResponse: any;
+  providerRequest: Record<string, unknown>;
+  providerResponse: Record<string, unknown>;
   errorMessage?: string;
   latencyMs?: number;
   inputTokens: number;
@@ -217,7 +219,7 @@ export interface DatabaseProvider {
   createAgentTracingSession(session: Omit<IAgentTracingSession, '_id' | 'createdAt' | 'updatedAt'>): Promise<IAgentTracingSession>;
   updateAgentTracingSession(sessionId: string, data: Partial<IAgentTracingSession>): Promise<IAgentTracingSession | null>;
   findAgentTracingSessionById(sessionId: string): Promise<IAgentTracingSession | null>;
-  listAgentTracingSessions(filters?: any): Promise<{ sessions: IAgentTracingSession[], total: number }>;
+  listAgentTracingSessions(filters?: Record<string, unknown>): Promise<{ sessions: IAgentTracingSession[], total: number }>;
   
   // Agent Tracing Event operations (tenant-specific)
   createAgentTracingEvent(event: Omit<IAgentTracingEvent, '_id' | 'createdAt'>): Promise<IAgentTracingEvent>;

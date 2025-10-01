@@ -1,10 +1,9 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Badge,
-  Box,
   Button,
   Center,
   Checkbox,
@@ -20,6 +19,7 @@ import {
   Text,
   TextInput,
   Textarea,
+  ThemeIcon,
   Title,
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
@@ -80,7 +80,6 @@ export default function NewModelPage() {
   const tModels = useTranslations('models');
   const [activeStep, setActiveStep] = useState(0);
   const [providers, setProviders] = useState<ProviderDefinition[]>([]);
-  const [selectedProviderId, setSelectedProviderId] = useState<string>('');
   const [loading, setLoading] = useState(true);
 
   const form = useForm<FormValues>({
@@ -108,6 +107,7 @@ export default function NewModelPage() {
     },
   });
 
+  // Load providers on mount
   useEffect(() => {
     let cancelled = false;
 
@@ -119,33 +119,17 @@ export default function NewModelPage() {
         }
         const data = await response.json();
         if (!cancelled) {
-          const definitions: ProviderDefinition[] = data.providers || [];
-          setProviders(definitions);
-
-          if (definitions.length > 0) {
-            const existingProvider = definitions.find((provider) => provider.id === form.values.provider);
-            if (existingProvider) {
-              setSelectedProviderId(existingProvider.id);
-            } else {
-              const fallbackProvider =
-                definitions.find((provider) => provider.categories.includes(form.values.category)) || definitions[0];
-
-              if (fallbackProvider) {
-                setSelectedProviderId(fallbackProvider.id);
-                form.setFieldValue('provider', fallbackProvider.id);
-                form.setFieldValue('pricing.currency', fallbackProvider.defaultPricingCurrency || 'USD');
-                form.setFieldValue('settings', {});
-              }
-            }
-          }
+          setProviders(data.providers || []);
         }
       } catch (error) {
         console.error(error);
-        notifications.show({
-          title: t('notifications.errorTitle'),
-          message: t('notifications.loadProvidersError'),
-          color: 'red',
-        });
+        if (!cancelled) {
+          notifications.show({
+            title: t('notifications.errorTitle'),
+            message: t('notifications.loadProvidersError'),
+            color: 'red',
+          });
+        }
       } finally {
         if (!cancelled) {
           setLoading(false);
@@ -157,34 +141,53 @@ export default function NewModelPage() {
     return () => {
       cancelled = true;
     };
-  }, [form, t]);
+  }, [t]);
 
+  // Filter providers by category
   const availableProviders = useMemo(
     () => providers.filter((provider) => provider.categories.includes(form.values.category)),
     [providers, form.values.category],
   );
 
-  useEffect(() => {
-    if (availableProviders.length === 0) {
-      setSelectedProviderId('');
-      form.setFieldValue('provider', '');
-      return;
-    }
-
-    const currentProvider = availableProviders.find((provider) => provider.id === selectedProviderId);
-    if (!currentProvider) {
-      const fallback = availableProviders[0];
-      setSelectedProviderId(fallback.id);
-      form.setFieldValue('provider', fallback.id);
-      form.setFieldValue('pricing.currency', fallback.defaultPricingCurrency || 'USD');
-      form.setFieldValue('settings', {});
-    }
-  }, [availableProviders, selectedProviderId, form]);
-
+  // Get current selected provider
   const selectedProvider = useMemo(
-    () => availableProviders.find((provider) => provider.id === selectedProviderId),
-    [availableProviders, selectedProviderId],
+    () => providers.find((provider) => provider.id === form.values.provider),
+    [providers, form.values.provider],
   );
+
+  // Handle category change - reset provider if not compatible
+  useEffect(() => {
+    if (form.values.provider && selectedProvider) {
+      if (!selectedProvider.categories.includes(form.values.category)) {
+        form.setFieldValue('provider', '');
+        form.setFieldValue('settings', {});
+      }
+    }
+  }, [form.values.category]); // Only depend on category
+
+  // Handle provider selection
+  const handleProviderSelect = useCallback((providerId: string) => {
+    const provider = providers.find((p) => p.id === providerId);
+    if (!provider) return;
+
+    // Create empty settings object based on provider's credential fields
+    const emptySettings: Record<string, string> = {};
+    provider.credentialFields.forEach((field) => {
+      emptySettings[field.name] = '';
+    });
+
+    form.setValues({
+      ...form.values,
+      provider: providerId,
+      settings: emptySettings,
+      pricing: {
+        ...form.values.pricing,
+        currency: provider.defaultPricingCurrency || 'USD',
+      },
+    });
+
+    setActiveStep(1);
+  }, [providers, form]);
 
   const handleNext = () => {
     if (activeStep === 0) {
@@ -272,179 +275,202 @@ export default function NewModelPage() {
   }
 
   return (
-    <Stack gap="xl">
-      <Group justify="space-between" align="flex-start">
-        <div>
-          <Title order={2}>{t('title')}</Title>
-          <Text size="sm" c="dimmed">
-            {t('subtitle')}
-          </Text>
-        </div>
-      </Group>
+    <Stack gap="md">
+      <div>
+        <Title order={2}>{t('title')}</Title>
+        <Text size="sm" c="dimmed" mt={4}>
+          {t('subtitle')}
+        </Text>
+      </div>
 
-  <Stepper active={activeStep} onStepClick={setActiveStep} allowNextStepsSelect={false} iconSize={28}>
+      <Stepper active={activeStep} onStepClick={setActiveStep} allowNextStepsSelect={false} iconSize={32} mt="md">
         <Stepper.Step label={t('steps.provider.label')} description={t('steps.provider.description')}>
-          <Stack gap="lg">
-            <Radio.Group
-              label={t('fields.category.label')}
-              description={t('fields.category.description')}
-              value={form.values.category}
-              onChange={(value: string) => form.setFieldValue('category', value as FormValues['category'])}
-            >
-              <Group mt="xs">
-                <Radio value="llm" label={t('fields.category.options.llm')} />
-                <Radio value="embedding" label={t('fields.category.options.embedding')} />
-              </Group>
-            </Radio.Group>
+          <Stack gap="md" mt="md">
+            <Paper withBorder radius="md" p="md">
+              <Radio.Group
+                label={t('fields.category.label')}
+                description={t('fields.category.description')}
+                value={form.values.category}
+                onChange={(value: string) => form.setFieldValue('category', value as FormValues['category'])}
+              >
+                <Group mt="xs" gap="md">
+                  <Radio value="llm" label={t('fields.category.options.llm')} size="md" />
+                  <Radio value="embedding" label={t('fields.category.options.embedding')} size="md" />
+                </Group>
+              </Radio.Group>
+            </Paper>
 
-            <Grid>
-              {availableProviders.map((provider) => (
-                <Grid.Col key={provider.id} span={{ base: 12, md: 6, lg: 4 }}>
-                  <Paper
-                    withBorder
-                    radius="md"
-                    p="md"
-                    onClick={() => {
-                      setSelectedProviderId(provider.id);
-                      form.setFieldValue('provider', provider.id);
-                      form.setFieldValue('pricing.currency', provider.defaultPricingCurrency || 'USD');
-                      form.setFieldValue('settings', {});
-                      setActiveStep(1);
-                    }}
-                    style={{
-                      borderColor: provider.id === selectedProviderId ? 'var(--mantine-color-blue-5)' : undefined,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    <Stack gap={8}>
-                      <Group gap={8}>
-                        <IconPlug size={18} />
-                        <Text fw={600}>{provider.label}</Text>
-                      </Group>
-                      <Text size="sm" c="dimmed">
-                        {provider.description}
-                      </Text>
-                      <Group gap={6}>
-                        {provider.categories.map((category) => (
-                          <Badge key={category} variant="light" color={category === 'llm' ? 'indigo' : 'teal'}>
-                            {category === 'llm' ? tModels('list.badges.llm') : tModels('list.badges.embedding')}
-                          </Badge>
-                        ))}
-                      </Group>
-                    </Stack>
-                  </Paper>
-                </Grid.Col>
-              ))}
-            </Grid>
+            <Stack gap="xs">
+              <Text size="sm" fw={500}>{t('steps.provider.selectProvider')}</Text>
+              <Grid>
+                {availableProviders.map((provider) => (
+                  <Grid.Col key={provider.id} span={{ base: 12, md: 6, lg: 4 }}>
+                    <Paper
+                      withBorder
+                      radius="md"
+                      p="md"
+                      onClick={() => handleProviderSelect(provider.id)}
+                      style={{
+                        borderWidth: provider.id === form.values.provider ? 2 : 1,
+                        borderColor: provider.id === form.values.provider ? 'var(--mantine-color-blue-6)' : undefined,
+                        cursor: 'pointer',
+                        transition: 'all 0.2s ease',
+                        backgroundColor: provider.id === form.values.provider ? 'var(--mantine-color-blue-0)' : undefined,
+                      }}
+                      className="hover:shadow-md"
+                    >
+                      <Stack gap={8}>
+                        <Group gap={8}>
+                          <ThemeIcon variant="light" size="md" radius="md" color={provider.id === form.values.provider ? 'blue' : 'gray'}>
+                            <IconPlug size={18} />
+                          </ThemeIcon>
+                          <Text fw={600} size="sm">{provider.label}</Text>
+                        </Group>
+                        <Text size="xs" c="dimmed" lineClamp={2}>
+                          {provider.description}
+                        </Text>
+                        <Group gap={4}>
+                          {provider.categories.map((category) => (
+                            <Badge key={category} variant="light" color="gray" size="sm">
+                              {category === 'llm' ? tModels('list.badges.llm') : tModels('list.badges.embedding')}
+                            </Badge>
+                          ))}
+                        </Group>
+                      </Stack>
+                    </Paper>
+                  </Grid.Col>
+                ))}
+              </Grid>
+            </Stack>
           </Stack>
         </Stepper.Step>
 
         <Stepper.Step label={t('steps.credentials.label')} description={t('steps.credentials.description')}>
-          <Stack gap="md">
-            {selectedProvider?.credentialFields.map((field) => {
-              const value = (form.values.settings?.[field.name] as string) || '';
-              const setValue = (val: string) => {
-                form.setFieldValue('settings', {
-                  ...form.values.settings,
-                  [field.name]: val,
-                });
-              };
-
-              if (field.type === 'select') {
-                return (
-                  <Select
-                    key={field.name}
-                    label={field.label}
-                    placeholder={field.placeholder}
-                    data={field.options || []}
-                    required={field.required}
-                    value={value}
-                    onChange={(val) => setValue(val || '')}
-                  />
-                );
-              }
-
-              return (
-                <TextInput
-                  key={field.name}
-                  type={field.type === 'password' ? 'password' : 'text'}
-                  label={field.label}
-                  placeholder={field.placeholder}
-                  description={field.description}
-                  required={field.required}
-                  value={value}
-                  onChange={(event) => setValue(event.currentTarget.value)}
-                />
-              );
-            })}
-            {!selectedProvider?.credentialFields?.length && (
-              <Paper withBorder p="md" radius="md">
+          <Stack gap="md" mt="md">
+            {selectedProvider && (
+              <Paper withBorder radius="md" p="md">
                 <Group gap="sm">
-                  <IconShieldCheck size={18} />
-                  <Text size="sm">{t('steps.credentials.noCredentials')}</Text>
+                  <ThemeIcon variant="light" size="md" radius="md" color="blue">
+                    <IconPlug size={18} />
+                  </ThemeIcon>
+                  <div>
+                    <Text fw={600} size="sm">{selectedProvider.label}</Text>
+                    <Text size="xs" c="dimmed">{selectedProvider.description}</Text>
+                  </div>
                 </Group>
               </Paper>
             )}
+
+            <Stack gap="sm">
+              {selectedProvider?.credentialFields.map((field) => {
+                const value = form.values.settings[field.name] || '';
+
+                if (field.type === 'select') {
+                  return (
+                    <Select
+                      key={field.name}
+                      label={field.label}
+                      placeholder={field.placeholder}
+                      data={field.options || []}
+                      required={field.required}
+                      value={value}
+                      onChange={(val) => form.setFieldValue(`settings.${field.name}`, val || '')}
+                      size="md"
+                    />
+                  );
+                }
+
+                return (
+                  <TextInput
+                    key={field.name}
+                    type={field.type === 'password' ? 'password' : 'text'}
+                    label={field.label}
+                    placeholder={field.placeholder}
+                    description={field.description}
+                    required={field.required}
+                    value={value}
+                    onChange={(event) => form.setFieldValue(`settings.${field.name}`, event.currentTarget.value)}
+                    size="md"
+                  />
+                );
+              })}
+              {!selectedProvider?.credentialFields?.length && (
+                <Paper withBorder p="md" radius="md">
+                  <Group gap="sm">
+                    <ThemeIcon variant="light" size="md" radius="md" color="green">
+                      <IconShieldCheck size={18} />
+                    </ThemeIcon>
+                    <Text size="sm">{t('steps.credentials.noCredentials')}</Text>
+                  </Group>
+                </Paper>
+              )}
+            </Stack>
           </Stack>
         </Stepper.Step>
 
         <Stepper.Step label={t('steps.configuration.label')} description={t('steps.configuration.description')}>
-          <Stack gap="md">
-            <Grid>
-              <Grid.Col span={{ base: 12, md: 6 }}>
-                <TextInput
-                  label={t('fields.name.label')}
-                  placeholder={t('fields.name.placeholder')}
-                  required
-                  value={form.values.name}
-                  onChange={(event) => {
-                    form.setFieldValue('name', event.currentTarget.value);
-                    if (!form.values.key) {
-                      form.setFieldValue('key', slugify(event.currentTarget.value));
-                    }
-                  }}
-                />
-              </Grid.Col>
-              <Grid.Col span={{ base: 12, md: 6 }}>
-                <TextInput
-                  label={t('fields.key.label')}
-                  placeholder={t('fields.key.placeholder')}
-                  value={form.values.key}
-                  onChange={(event) => form.setFieldValue('key', slugify(event.currentTarget.value))}
-                />
-              </Grid.Col>
-              <Grid.Col span={12}>
-                <Textarea
-                  label={t('fields.description.label')}
-                  placeholder={t('fields.description.placeholder')}
-                  value={form.values.description}
-                  onChange={(event) => form.setFieldValue('description', event.currentTarget.value)}
-                  autosize
-                  minRows={2}
-                />
-              </Grid.Col>
-              <Grid.Col span={{ base: 12, md: 6 }}>
-                <TextInput
-                  label={t('fields.modelId.label')}
-                  placeholder={selectedProvider?.modelIdHint || t('fields.modelId.placeholder')}
-                  required
-                  value={form.values.modelId}
-                  onChange={(event) => form.setFieldValue('modelId', event.currentTarget.value)}
-                />
-              </Grid.Col>
-              <Grid.Col span={{ base: 12, md: 6 }}>
-                <TextInput
-                  label={t('fields.currency.label')}
-                  value={form.values.pricing.currency}
-                  onChange={(event) => form.setFieldValue('pricing.currency', event.currentTarget.value.toUpperCase().slice(0, 8))}
-                />
-              </Grid.Col>
-            </Grid>
+          <Stack gap="md" mt="md">
+            <Paper withBorder radius="md" p="md">
+              <Text fw={600} size="sm" mb="sm">{t('steps.configuration.basicInfo')}</Text>
+              <Grid>
+                <Grid.Col span={{ base: 12, md: 6 }}>
+                  <TextInput
+                    label={t('fields.name.label')}
+                    placeholder={t('fields.name.placeholder')}
+                    required
+                    value={form.values.name}
+                    onChange={(event) => {
+                      form.setFieldValue('name', event.currentTarget.value);
+                      if (!form.values.key) {
+                        form.setFieldValue('key', slugify(event.currentTarget.value));
+                      }
+                    }}
+                    size="md"
+                  />
+                </Grid.Col>
+                <Grid.Col span={{ base: 12, md: 6 }}>
+                  <TextInput
+                    label={t('fields.key.label')}
+                    placeholder={t('fields.key.placeholder')}
+                    value={form.values.key}
+                    onChange={(event) => form.setFieldValue('key', slugify(event.currentTarget.value))}
+                    size="md"
+                  />
+                </Grid.Col>
+                <Grid.Col span={12}>
+                  <Textarea
+                    label={t('fields.description.label')}
+                    placeholder={t('fields.description.placeholder')}
+                    value={form.values.description}
+                    onChange={(event) => form.setFieldValue('description', event.currentTarget.value)}
+                    autosize
+                    minRows={2}
+                    size="md"
+                  />
+                </Grid.Col>
+                <Grid.Col span={{ base: 12, md: 6 }}>
+                  <TextInput
+                    label={t('fields.modelId.label')}
+                    placeholder={selectedProvider?.modelIdHint || t('fields.modelId.placeholder')}
+                    required
+                    value={form.values.modelId}
+                    onChange={(event) => form.setFieldValue('modelId', event.currentTarget.value)}
+                    size="md"
+                  />
+                </Grid.Col>
+                <Grid.Col span={{ base: 12, md: 6 }}>
+                  <TextInput
+                    label={t('fields.currency.label')}
+                    value={form.values.pricing.currency}
+                    onChange={(event) => form.setFieldValue('pricing.currency', event.currentTarget.value.toUpperCase().slice(0, 8))}
+                    size="md"
+                  />
+                </Grid.Col>
+              </Grid>
+            </Paper>
 
             <Paper withBorder radius="md" p="md">
-              <Title order={5} mb="sm">
-                {t('fields.pricing.title')}
-              </Title>
+              <Text fw={600} size="sm" mb="sm">{t('fields.pricing.title')}</Text>
               <Grid>
                 <Grid.Col span={{ base: 12, md: 4 }}>
                   <NumberInput
@@ -452,6 +478,7 @@ export default function NewModelPage() {
                     value={form.values.pricing.inputTokenPer1M}
                     onChange={(value) => form.setFieldValue('pricing.inputTokenPer1M', Number(value) || 0)}
                     min={0}
+                    size="md"
                   />
                 </Grid.Col>
                 <Grid.Col span={{ base: 12, md: 4 }}>
@@ -460,6 +487,7 @@ export default function NewModelPage() {
                     value={form.values.pricing.outputTokenPer1M}
                     onChange={(value) => form.setFieldValue('pricing.outputTokenPer1M', Number(value) || 0)}
                     min={0}
+                    size="md"
                   />
                 </Grid.Col>
                 <Grid.Col span={{ base: 12, md: 4 }}>
@@ -468,95 +496,120 @@ export default function NewModelPage() {
                     value={form.values.pricing.cachedTokenPer1M}
                     onChange={(value) => form.setFieldValue('pricing.cachedTokenPer1M', Number(value) || 0)}
                     min={0}
+                    size="md"
                   />
                 </Grid.Col>
               </Grid>
             </Paper>
 
-            <Group>
-              <Checkbox
-                label={t('fields.isMultimodal.label')}
-                description={t('fields.isMultimodal.description')}
-                checked={form.values.isMultimodal}
-                onChange={(event) => form.setFieldValue('isMultimodal', event.currentTarget.checked)}
-              />
-              <Checkbox
-                label={t('fields.supportsToolCalls.label')}
-                description={t('fields.supportsToolCalls.description')}
-                checked={form.values.supportsToolCalls}
-                onChange={(event) => form.setFieldValue('supportsToolCalls', event.currentTarget.checked)}
-              />
-            </Group>
+            <Paper withBorder radius="md" p="md">
+              <Text fw={600} size="sm" mb="sm">{t('steps.configuration.capabilities')}</Text>
+              <Stack gap="sm">
+                <Checkbox
+                  label={t('fields.isMultimodal.label')}
+                  description={t('fields.isMultimodal.description')}
+                  checked={form.values.isMultimodal}
+                  onChange={(event) => form.setFieldValue('isMultimodal', event.currentTarget.checked)}
+                  size="md"
+                />
+                <Checkbox
+                  label={t('fields.supportsToolCalls.label')}
+                  description={t('fields.supportsToolCalls.description')}
+                  checked={form.values.supportsToolCalls}
+                  onChange={(event) => form.setFieldValue('supportsToolCalls', event.currentTarget.checked)}
+                  size="md"
+                />
+              </Stack>
+            </Paper>
           </Stack>
         </Stepper.Step>
 
         <Stepper.Completed>
-          <Paper withBorder radius="md" p="lg">
+          <Paper withBorder radius="md" p="md" mt="md">
             <Stack gap="md">
               <Group gap="sm">
-                <IconSparkles size={18} />
-                <Title order={4}>{t('review.title')}</Title>
+                <ThemeIcon variant="light" size="lg" radius="md" color="green">
+                  <IconSparkles size={20} />
+                </ThemeIcon>
+                <div>
+                  <Title order={4}>{t('review.title')}</Title>
+                  <Text size="xs" c="dimmed">
+                    {t('review.subtitle')}
+                  </Text>
+                </div>
               </Group>
-              <Text size="sm" c="dimmed">
-                {t('review.subtitle')}
-              </Text>
-              <Grid>
-                <Grid.Col span={{ base: 12, md: 6 }}>
-                  <Box>
-                    <Text fw={600}>{t('review.fields.name')}</Text>
-                    <Text size="sm">{form.values.name}</Text>
-                  </Box>
-                </Grid.Col>
-                <Grid.Col span={{ base: 12, md: 6 }}>
-                  <Box>
-                    <Text fw={600}>{t('review.fields.provider')}</Text>
-                    <Text size="sm">{selectedProvider?.label}</Text>
-                  </Box>
-                </Grid.Col>
-                <Grid.Col span={{ base: 12, md: 6 }}>
-                  <Box>
-                    <Text fw={600}>{t('review.fields.modelId')}</Text>
-                    <Text size="sm">{form.values.modelId}</Text>
-                  </Box>
-                </Grid.Col>
-                <Grid.Col span={{ base: 12, md: 6 }}>
-                  <Box>
-                    <Text fw={600}>{t('review.fields.key')}</Text>
-                    <Text size="sm">{form.values.key || t('review.autoGenerated')}</Text>
-                  </Box>
-                </Grid.Col>
-              </Grid>
-              <Paper withBorder radius="md" p="md">
-                <Text fw={600} size="sm">
+
+              <Paper withBorder radius="md" p="md" bg="var(--mantine-color-gray-0)">
+                <Text fw={600} size="sm" mb="sm">{t('review.fields.modelDetails')}</Text>
+                <Grid>
+                  <Grid.Col span={{ base: 12, md: 6 }}>
+                    <Stack gap={4}>
+                      <Text size="xs" c="dimmed" tt="uppercase">{t('review.fields.name')}</Text>
+                      <Text fw={500}>{form.values.name}</Text>
+                    </Stack>
+                  </Grid.Col>
+                  <Grid.Col span={{ base: 12, md: 6 }}>
+                    <Stack gap={4}>
+                      <Text size="xs" c="dimmed" tt="uppercase">{t('review.fields.provider')}</Text>
+                      <Text fw={500}>{selectedProvider?.label}</Text>
+                    </Stack>
+                  </Grid.Col>
+                  <Grid.Col span={{ base: 12, md: 6 }}>
+                    <Stack gap={4}>
+                      <Text size="xs" c="dimmed" tt="uppercase">{t('review.fields.modelId')}</Text>
+                      <Text fw={500} ff="monospace">{form.values.modelId}</Text>
+                    </Stack>
+                  </Grid.Col>
+                  <Grid.Col span={{ base: 12, md: 6 }}>
+                    <Stack gap={4}>
+                      <Text size="xs" c="dimmed" tt="uppercase">{t('review.fields.key')}</Text>
+                      <Text fw={500} ff="monospace">{form.values.key || t('review.autoGenerated')}</Text>
+                    </Stack>
+                  </Grid.Col>
+                </Grid>
+              </Paper>
+
+              <Paper withBorder radius="md" p="md" bg="var(--mantine-color-gray-0)">
+                <Text fw={600} size="sm" mb="sm">
                   {t('review.fields.pricing')}
                 </Text>
-                <Text size="sm" c="dimmed">
-                  {t('list.pricing.prompt', {
-                    price: form.values.pricing.inputTokenPer1M,
-                    currency: form.values.pricing.currency,
-                  })}
-                </Text>
-                <Text size="sm" c="dimmed">
-                  {t('list.pricing.completion', {
-                    price: form.values.pricing.outputTokenPer1M,
-                    currency: form.values.pricing.currency,
-                  })}
-                </Text>
-                {form.values.pricing.cachedTokenPer1M ? (
-                  <Text size="sm" c="dimmed">
-                    {t('list.pricing.cached', {
-                      price: form.values.pricing.cachedTokenPer1M,
-                      currency: form.values.pricing.currency,
-                    })}
-                  </Text>
-                ) : null}
+                <Stack gap={4}>
+                  <Group justify="space-between">
+                    <Text size="xs" c="dimmed">Input tokens (per 1M):</Text>
+                    <Text fw={500} size="sm">{form.values.pricing.inputTokenPer1M} {form.values.pricing.currency}</Text>
+                  </Group>
+                  <Group justify="space-between">
+                    <Text size="xs" c="dimmed">Output tokens (per 1M):</Text>
+                    <Text fw={500} size="sm">{form.values.pricing.outputTokenPer1M} {form.values.pricing.currency}</Text>
+                  </Group>
+                  {form.values.pricing.cachedTokenPer1M ? (
+                    <Group justify="space-between">
+                      <Text size="xs" c="dimmed">Cached tokens (per 1M):</Text>
+                      <Text fw={500} size="sm">{form.values.pricing.cachedTokenPer1M} {form.values.pricing.currency}</Text>
+                    </Group>
+                  ) : null}
+                </Stack>
               </Paper>
+
+              {(form.values.isMultimodal || form.values.supportsToolCalls) && (
+                <Paper withBorder radius="md" p="md" bg="var(--mantine-color-gray-0)">
+                  <Text fw={600} size="sm" mb="sm">{t('review.fields.capabilities')}</Text>
+                  <Group gap="xs">
+                    {form.values.isMultimodal && (
+                      <Badge variant="light" size="md" color="blue">Multimodal</Badge>
+                    )}
+                    {form.values.supportsToolCalls && (
+                      <Badge variant="light" size="md" color="blue">Tool Calls</Badge>
+                    )}
+                  </Group>
+                </Paper>
+              )}
             </Stack>
           </Paper>
         </Stepper.Completed>
       </Stepper>
 
-      <Group justify="space-between">
+      <Group justify="space-between" mt="md">
         <Button variant="default" onClick={handlePrev} disabled={activeStep === 0}>
           {t('actions.back')}
         </Button>
@@ -566,7 +619,7 @@ export default function NewModelPage() {
             {t('actions.next')}
           </Button>
         ) : (
-          <Button color="teal" onClick={handleSubmit}>
+          <Button color="green" onClick={handleSubmit} leftSection={<IconSparkles size={18} />}>
             {t('actions.createModel')}
           </Button>
         )}

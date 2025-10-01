@@ -48,6 +48,7 @@ export async function POST(request: NextRequest) {
         const toolsUsed = new Set<string>();
 
         // Extract models from events
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         events.forEach((event: any) => {
             if (event?.model) modelsUsed.add(event.model);
             if (event?.modelName) modelsUsed.add(event.modelName);
@@ -100,13 +101,12 @@ export async function POST(request: NextRequest) {
         // Check if session exists
         const existing = await db.findAgentTracingSessionById(payload.sessionId);
 
-        let storedSession;
         if (existing) {
             // Update existing session
-            storedSession = await db.updateAgentTracingSession(payload.sessionId, sessionDoc);
+            await db.updateAgentTracingSession(payload.sessionId, sessionDoc);
         } else {
             // Create new session
-            storedSession = await db.createAgentTracingSession(sessionDoc);
+            await db.createAgentTracingSession(sessionDoc);
         }
 
         // Replace events to keep payload in sync with stored data
@@ -177,10 +177,11 @@ export async function POST(request: NextRequest) {
             eventsStored: events.length
         });
 
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error('Tracing ingest error:', error);
+        const message = error instanceof Error ? error.message : 'Failed to ingest tracing data';
         return NextResponse.json(
-            { error: error.message || 'Failed to ingest tracing data' },
+            { error: message },
             { status: 500 }
         );
     }

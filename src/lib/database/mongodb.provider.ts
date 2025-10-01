@@ -105,7 +105,7 @@ export class MongoDBProvider implements DatabaseProvider {
 
     async findTenantById(id: string): Promise<ITenant | null> {
         const db = this.getMainDb();
-        const tenant = await db.collection<ITenant>('tenants').findOne({ _id: new ObjectId(id) as any });
+        const tenant = await db.collection<ITenant>('tenants').findOne({ _id: new ObjectId(id) });
         if (!tenant) return null;
 
         return {
@@ -116,10 +116,11 @@ export class MongoDBProvider implements DatabaseProvider {
 
     async updateTenant(id: string, data: Partial<ITenant>): Promise<ITenant | null> {
         const db = this.getMainDb();
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
         const { _id, ...updateData } = data;
 
         const result = await db.collection<ITenant>('tenants').findOneAndUpdate(
-            { _id: new ObjectId(id) as any },
+            { _id: new ObjectId(id) },
             {
                 $set: {
                     ...updateData,
@@ -151,7 +152,7 @@ export class MongoDBProvider implements DatabaseProvider {
 
     async findUserById(id: string): Promise<IUser | null> {
         const db = this.getTenantDb();
-        const user = await db.collection<IUser>('users').findOne({ _id: new ObjectId(id) as any });
+        const user = await db.collection<IUser>('users').findOne({ _id: new ObjectId(id) });
         if (!user) return null;
 
         return {
@@ -180,10 +181,11 @@ export class MongoDBProvider implements DatabaseProvider {
 
     async updateUser(id: string, data: Partial<IUser>): Promise<IUser | null> {
         const db = this.getTenantDb();
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
         const { _id, ...updateData } = data;
 
         const result = await db.collection<IUser>('users').findOneAndUpdate(
-            { _id: new ObjectId(id) as any },
+            { _id: new ObjectId(id) },
             {
                 $set: {
                     ...updateData,
@@ -203,7 +205,7 @@ export class MongoDBProvider implements DatabaseProvider {
 
     async deleteUser(id: string): Promise<boolean> {
         const db = this.getTenantDb();
-        const result = await db.collection('users').deleteOne({ _id: new ObjectId(id) as any });
+        const result = await db.collection('users').deleteOne({ _id: new ObjectId(id) });
         return result.deletedCount > 0;
     }
 
@@ -265,7 +267,7 @@ export class MongoDBProvider implements DatabaseProvider {
     async deleteApiToken(id: string, userId: string): Promise<boolean> {
         const db = this.getMainDb();
         const result = await db.collection('api_tokens').deleteOne({
-            _id: new ObjectId(id) as any,
+            _id: new ObjectId(id),
             userId
         });
         return result.deletedCount > 0;
@@ -289,7 +291,7 @@ export class MongoDBProvider implements DatabaseProvider {
             updatedAt: now
         };
 
-        const result = await db.collection('agent_tracing_sessions').insertOne(sessionData as any);
+        const result = await db.collection('agent_tracing_sessions').insertOne(sessionData);
         return {
             ...sessionData,
             _id: result.insertedId.toString()
@@ -329,8 +331,10 @@ export class MongoDBProvider implements DatabaseProvider {
         };
     }
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     async listAgentTracingSessions(filters?: any): Promise<{ sessions: IAgentTracingSession[], total: number }> {
         const db = this.getTenantDb();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const query: any = {};
 
         if (filters?.agentName) {
@@ -375,7 +379,7 @@ export class MongoDBProvider implements DatabaseProvider {
             ...event,
             createdAt: new Date()
         };
-        const result = await db.collection('agent_tracing_events').insertOne(eventData as any);
+        const result = await db.collection('agent_tracing_events').insertOne(eventData);
         return {
             ...eventData,
             _id: result.insertedId.toString()
@@ -419,7 +423,7 @@ export class MongoDBProvider implements DatabaseProvider {
             updatedAt: now,
         };
 
-        const result = await db.collection('models').insertOne(modelDoc as any);
+        const result = await db.collection('models').insertOne(modelDoc);
 
         return {
             ...modelDoc,
@@ -429,9 +433,10 @@ export class MongoDBProvider implements DatabaseProvider {
 
     async updateModel(id: string, data: Partial<IModel>): Promise<IModel | null> {
         const db = this.getTenantDb();
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
         const { _id, pricing, ...rest } = data;
 
-        const updateData: Record<string, any> = {
+        const updateData: Record<string, unknown> = {
             ...rest,
             updatedAt: new Date(),
         };
@@ -446,7 +451,7 @@ export class MongoDBProvider implements DatabaseProvider {
         }
 
         const result = await db.collection<IModel>('models').findOneAndUpdate(
-            { _id: new ObjectId(id) as any },
+            { _id: new ObjectId(id) },
             { $set: updateData },
             { returnDocument: 'after' }
         );
@@ -463,13 +468,13 @@ export class MongoDBProvider implements DatabaseProvider {
 
     async deleteModel(id: string): Promise<boolean> {
         const db = this.getTenantDb();
-        const result = await db.collection('models').deleteOne({ _id: new ObjectId(id) as any });
+        const result = await db.collection('models').deleteOne({ _id: new ObjectId(id) });
         return result.deletedCount === 1;
     }
 
     async listModels(filters?: { category?: ModelCategory; provider?: ModelProviderType }): Promise<IModel[]> {
         const db = this.getTenantDb();
-        const query: Record<string, any> = {};
+        const query: Record<string, string> = {};
 
         if (filters?.category) {
             query.category = filters.category;
@@ -492,7 +497,7 @@ export class MongoDBProvider implements DatabaseProvider {
 
     async findModelById(id: string): Promise<IModel | null> {
         const db = this.getTenantDb();
-        const model = await db.collection<IModel>('models').findOne({ _id: new ObjectId(id) as any });
+        const model = await db.collection<IModel>('models').findOne({ _id: new ObjectId(id) });
         if (!model) {
             return null;
         }
@@ -524,7 +529,7 @@ export class MongoDBProvider implements DatabaseProvider {
             createdAt: now,
         };
 
-        const result = await db.collection('model_usage_logs').insertOne(logDoc as any);
+        const result = await db.collection('model_usage_logs').insertOne(logDoc);
 
         return {
             ...logDoc,
@@ -534,6 +539,7 @@ export class MongoDBProvider implements DatabaseProvider {
 
     async listModelUsageLogs(modelKey: string, options?: { limit?: number; skip?: number; from?: Date; to?: Date; }): Promise<IModelUsageLog[]> {
         const db = this.getTenantDb();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const query: Record<string, any> = { modelKey };
 
         if (options?.from || options?.to) {
@@ -564,6 +570,7 @@ export class MongoDBProvider implements DatabaseProvider {
 
     async aggregateModelUsage(modelKey: string, options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month'; }): Promise<IModelUsageAggregate> {
         const db = this.getTenantDb();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const match: Record<string, any> = { modelKey };
 
         if (options?.from || options?.to) {
@@ -650,6 +657,7 @@ export class MongoDBProvider implements DatabaseProvider {
             ])
             .toArray();
 
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const timeseries = timeseriesDocs.map((doc: any) => ({
             period: doc._id instanceof Date ? doc._id.toISOString() : String(doc._id),
             callCount: doc.callCount ?? 0,

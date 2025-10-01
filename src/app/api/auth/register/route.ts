@@ -77,24 +77,28 @@ export async function POST(request: NextRequest) {
     const hashedPassword = await bcrypt.hash(password, 10);
 
     // Create user as owner in tenant database
+    const tenantIdStr = typeof tenant._id === 'string' ? tenant._id : tenant._id!.toString();
+    
     const user = await db.createUser({
       email,
       password: hashedPassword,
       name,
       licenseId: finalLicenseType,
       features,
-      tenantId: tenant._id!,
+      tenantId: tenantIdStr,
       role: 'owner',
     });
 
+    const userIdStr = typeof user._id === 'string' ? user._id : user._id!.toString();
+    
     // Update tenant with owner ID
-    await db.updateTenant(tenant._id!, { ownerId: user._id! });
+    await db.updateTenant(tenantIdStr, { ownerId: userIdStr });
 
     // Generate JWT token with tenant information
     const token = await TokenManager.generateToken({
-      userId: user._id!,
+      userId: userIdStr,
       email: user.email,
-      tenantId: tenant._id!,
+      tenantId: tenantIdStr,
       tenantSlug: tenant.slug,
       role: user.role!,
       licenseId: user.licenseId,

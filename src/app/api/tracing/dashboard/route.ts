@@ -32,10 +32,10 @@ export async function GET(request: NextRequest) {
     });
 
     return NextResponse.json(overview);
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Dashboard overview error:', error);
     return NextResponse.json(
-      { error: error.message || 'Failed to fetch dashboard data' },
+      { error: error instanceof Error ? error.message : 'Failed to fetch dashboard data' },
       { status: 500 }
     );
   }

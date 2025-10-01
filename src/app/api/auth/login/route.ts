@@ -50,9 +50,9 @@ export async function POST(request: NextRequest) {
 
     // Generate JWT token with tenant and license information
     const token = await TokenManager.generateToken({
-      userId: user._id!,
+      userId: typeof user._id === 'string' ? user._id : user._id!.toString(),
       email: user.email,
-      tenantId: tenant._id!,
+      tenantId: typeof tenant._id === 'string' ? tenant._id : tenant._id!.toString(),
       tenantSlug: tenant.slug,
       role: user.role!,
       licenseId: user.licenseId,

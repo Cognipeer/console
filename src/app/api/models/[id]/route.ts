@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { deleteModel, getModelById, updateModel } from '@/lib/services/models/modelService';
 import { resolveTenantDbName } from '@/lib/utils/tenant';
+import { IModel } from '@/lib/database/provider.interface';
 
 export const runtime = 'nodejs';
 
@@ -19,7 +20,7 @@ function sanitizeSettings(settings: Record<string, unknown>) {
   return sanitized;
 }
 
-function sanitizeModel(model: any) {
+function sanitizeModel(model: IModel) {
   return {
     ...model,
     settings: sanitizeSettings(model.settings || {}),
@@ -49,29 +50,32 @@ function mergeSettings(existing: Record<string, unknown>, incoming: Record<strin
   return merged;
 }
 
-export async function GET(_request: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(_request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
+    const { id } = await params;
     const tenantSlug = _request.headers.get('x-tenant-slug');
     if (!tenantSlug) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
     const { tenantDbName } = await resolveTenantDbName(tenantSlug);
-    const model = await getModelById(tenantDbName, params.id);
+    const model = await getModelById(tenantDbName, id);
 
     if (!model) {
       return NextResponse.json({ error: 'Model not found' }, { status: 404 });
     }
 
     return NextResponse.json({ model: sanitizeModel(model) });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Fetch model error', error);
-    return NextResponse.json({ error: error.message || 'Internal error' }, { status: 500 });
+    const message = error instanceof Error ? error.message : 'Internal error';
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
 
-export async function PUT(request: NextRequest, { params }: { params: { id: string } }) {
+export async function PUT(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
+    const { id } = await params;
     const tenantSlug = request.headers.get('x-tenant-slug');
     const userId = request.headers.get('x-user-id');
 
@@ -80,7 +84,7 @@ export async function PUT(request: NextRequest, { params }: { params: { id: stri
     }
 
     const { tenantDbName } = await resolveTenantDbName(tenantSlug);
-    const existing = await getModelById(tenantDbName, params.id);
+    const existing = await getModelById(tenantDbName, id);
 
     if (!existing) {
       return NextResponse.json({ error: 'Model not found' }, { status: 404 });
@@ -102,36 +106,39 @@ export async function PUT(request: NextRequest, { params }: { params: { id: stri
       updates.settings = mergeSettings(existing.settings || {}, body.settings);
     }
 
-    const updated = await updateModel(tenantDbName, params.id, updates, userId);
+    const updated = await updateModel(tenantDbName, id, updates, userId);
 
     if (!updated) {
       return NextResponse.json({ error: 'Failed to update model' }, { status: 500 });
     }
 
     return NextResponse.json({ model: sanitizeModel(updated) });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Update model error', error);
-    return NextResponse.json({ error: error.message || 'Internal error' }, { status: 500 });
+    const message = error instanceof Error ? error.message : 'Internal error';
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
 
-export async function DELETE(request: NextRequest, { params }: { params: { id: string } }) {
+export async function DELETE(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
+    const { id } = await params;
     const tenantSlug = request.headers.get('x-tenant-slug');
     if (!tenantSlug) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
     const { tenantDbName } = await resolveTenantDbName(tenantSlug);
-    const success = await deleteModel(tenantDbName, params.id);
+    const success = await deleteModel(tenantDbName, id);
 
     if (!success) {
       return NextResponse.json({ error: 'Model not found' }, { status: 404 });
     }
 
     return NextResponse.json({ success: true }, { status: 200 });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Delete model error', error);
-    return NextResponse.json({ error: error.message || 'Internal error' }, { status: 500 });
+    const message = error instanceof Error ? error.message : 'Internal error';
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

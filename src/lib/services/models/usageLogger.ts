@@ -60,7 +60,7 @@ export async function logModelUsage(tenantDbName: string, model: IModel, payload
   await db.createModelUsageLog({
     tenantId: model.tenantId,
     modelKey: model.key,
-    modelId: model._id,
+    modelId: model._id ? (typeof model._id === 'string' ? model._id : model._id.toString()) : undefined,
     requestId: payload.requestId,
     route: payload.route,
     status: payload.status,

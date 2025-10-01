@@ -7,16 +7,15 @@ import { AgentTracingService } from '@/lib/services/agentTracing';
  */
 export async function GET(
   request: NextRequest,
-  { params }: { params: { sessionId: string } }
+  { params }: { params: Promise<{ sessionId: string }> }
 ) {
   try {
+    const { sessionId } = await params;
     const tenantSlug = request.headers.get('x-tenant-slug');
     
     if (!tenantSlug) {
       return NextResponse.json({ error: 'Tenant not found' }, { status: 401 });
     }
-
-    const { sessionId } = params;
     
     const result = await AgentTracingService.getSessionDetail(tenantSlug, sessionId);
 
@@ -25,10 +24,10 @@ export async function GET(
     }
 
     return NextResponse.json(result);
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Session detail error:', error);
     return NextResponse.json(
-      { error: error.message || 'Failed to fetch session detail' },
+      { error: error instanceof Error ? error.message : 'Failed to fetch session detail' },
       { status: 500 }
     );
   }

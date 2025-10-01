@@ -54,9 +54,9 @@ export async function GET(request: NextRequest) {
     }
 
     return NextResponse.json(payload, { status: 200 });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('List models error', error);
-    return NextResponse.json({ error: error.message || 'Internal error' }, { status: 500 });
+    return NextResponse.json({ error: error instanceof Error ? error.message : 'Internal error' }, { status: 500 });
   }
 }
 
@@ -95,8 +95,8 @@ export async function POST(request: NextRequest) {
     });
 
     return NextResponse.json({ model: sanitizeModel(model) }, { status: 201 });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Create model error', error);
-    return NextResponse.json({ error: error.message || 'Internal error' }, { status: 500 });
+    return NextResponse.json({ error: error instanceof Error ? error.message : 'Internal error' }, { status: 500 });
   }
 }

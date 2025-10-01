@@ -27,10 +27,10 @@ export async function GET(request: NextRequest) {
     const result = await AgentTracingService.listSessions(tenantSlug, filters);
 
     return NextResponse.json(result);
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('List sessions error:', error);
     return NextResponse.json(
-      { error: error.message || 'Failed to fetch sessions' },
+      { error: error instanceof Error ? error.message : 'Failed to fetch sessions' },
       { status: 500 }
     );
   }

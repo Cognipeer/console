@@ -3,10 +3,10 @@ import { getDatabase } from '@/lib/database';
 
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { id } = params;
+    const { id } = await params;
     
     // Get tenant and user info from headers
     const tenantSlug = request.headers.get('x-tenant-slug');

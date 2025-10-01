@@ -77,19 +77,20 @@ export async function POST(request: NextRequest) {
     }
 
     return NextResponse.json({ ...result.response, request_id: result.requestId }, { status: 200 });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Chat completion error', error);
 
     try {
       const model = await getModelByKey(tenant.dbName, body.model);
       if (model) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
         await logModelUsage(tenant.dbName, model, {
           requestId: body?.request_id || crypto.randomUUID(),
           route: 'chat.completions',
           status: 'error',
           providerRequest: sanitize({ model: body.model, body }),
-          providerResponse: sanitize({ error: error?.message }),
-          errorMessage: error?.message,
+          providerResponse: sanitize({ error: errorMessage }),
+          errorMessage,
           latencyMs: Date.now() - startedAt,
           usage: {},
         });
@@ -98,6 +99,7 @@ export async function POST(request: NextRequest) {
       console.error('Failed to log chat completion error', logError);
     }
 
-    return NextResponse.json({ error: { message: error?.message || 'Inference error', type: 'server_error' } }, { status: 500 });
+    const errorMessage = error instanceof Error ? error.message : 'Inference error';
+    return NextResponse.json({ error: { message: errorMessage, type: 'server_error' } }, { status: 500 });
   }
 }
