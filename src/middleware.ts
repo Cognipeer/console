@@ -7,7 +7,7 @@ import { LicenseManager } from '@/lib/license/license-manager';
 const PUBLIC_PATHS = ['/login', '/register', '/api/auth/login', '/api/auth/register'];
 
 // Client API paths that use Bearer token authentication instead of cookie
-const CLIENT_API_PATHS = ['/api/client/'];
+const CLIENT_API_PATHS = ['/api/client/', '/api/models/v1/'];
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;

@@ -102,6 +102,89 @@ export interface IAgentTracingEvent {
   createdAt?: Date;
 }
 
+export type ModelCategory = 'llm' | 'embedding';
+
+export type ModelProviderType = 'openai' | 'openai-compatible' | 'bedrock' | 'vertex' | 'together';
+
+export interface IModelPricing {
+  currency?: string;
+  inputTokenPer1M: number;
+  outputTokenPer1M: number;
+  cachedTokenPer1M?: number;
+}
+
+export interface IModel {
+  _id?: string;
+  tenantId: string;
+  name: string;
+  description?: string;
+  key: string;
+  provider: ModelProviderType;
+  category: ModelCategory;
+  modelId: string;
+  isMultimodal?: boolean;
+  supportsToolCalls?: boolean;
+  settings: Record<string, any>;
+  pricing: IModelPricing;
+  metadata?: Record<string, any>;
+  createdBy?: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IModelUsageCostSnapshot {
+  currency: string;
+  inputCost?: number;
+  outputCost?: number;
+  cachedCost?: number;
+  totalCost?: number;
+}
+
+export interface IModelUsageLog {
+  _id?: string;
+  tenantId: string;
+  modelKey: string;
+  modelId?: string;
+  requestId: string;
+  route: string;
+  status: 'success' | 'error';
+  providerRequest: any;
+  providerResponse: any;
+  errorMessage?: string;
+  latencyMs?: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens?: number;
+  totalTokens: number;
+  toolCalls?: number;
+  pricingSnapshot?: IModelPricing & IModelUsageCostSnapshot;
+  createdAt?: Date;
+}
+
+export interface IModelUsageAggregate {
+  modelKey: string;
+  totalCalls: number;
+  successCalls: number;
+  errorCalls: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCachedInputTokens: number;
+  totalTokens: number;
+  totalToolCalls: number;
+  avgLatencyMs: number | null;
+  costSummary?: IModelUsageCostSnapshot;
+  timeseries?: Array<{
+    period: string;
+    callCount: number;
+    inputTokens: number;
+    outputTokens: number;
+    cachedInputTokens: number;
+    totalTokens: number;
+    totalCost?: number;
+  }>;
+}
+
 export interface DatabaseProvider {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
@@ -140,4 +223,17 @@ export interface DatabaseProvider {
   createAgentTracingEvent(event: Omit<IAgentTracingEvent, '_id' | 'createdAt'>): Promise<IAgentTracingEvent>;
   listAgentTracingEvents(sessionId: string): Promise<IAgentTracingEvent[]>;
   deleteAgentTracingEvents(sessionId: string): Promise<number>;
+
+  // Model management (tenant-specific)
+  createModel(model: Omit<IModel, '_id' | 'createdAt' | 'updatedAt'>): Promise<IModel>;
+  updateModel(id: string, data: Partial<IModel>): Promise<IModel | null>;
+  deleteModel(id: string): Promise<boolean>;
+  listModels(filters?: { category?: ModelCategory; provider?: ModelProviderType }): Promise<IModel[]>;
+  findModelById(id: string): Promise<IModel | null>;
+  findModelByKey(key: string): Promise<IModel | null>;
+
+  // Model usage logging (tenant-specific)
+  createModelUsageLog(log: Omit<IModelUsageLog, '_id' | 'createdAt'>): Promise<IModelUsageLog>;
+  listModelUsageLogs(modelKey: string, options?: { limit?: number; skip?: number; from?: Date; to?: Date; }): Promise<IModelUsageLog[]>;
+  aggregateModelUsage(modelKey: string, options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month'; }): Promise<IModelUsageAggregate>;
 }

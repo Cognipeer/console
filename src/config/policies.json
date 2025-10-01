@@ -73,6 +73,22 @@
         "/api/tracing",
         "/api/tracing/*"
       ]
+    },
+    "MODEL_MANAGEMENT": {
+      "name": "Model Management",
+      "description": "Create and manage custom LLM and embedding providers",
+      "endpoints": [
+        "/api/models",
+        "/api/models/*"
+      ]
+    },
+    "MODEL_ANALYTICS": {
+      "name": "Model Analytics",
+      "description": "View request logs, token usage, and cost analytics per model",
+      "endpoints": [
+        "/api/models/*/usage",
+        "/api/models/*/logs"
+      ]
     }
   },
   "licenses": {
@@ -82,7 +98,9 @@
         "USER_MANAGEMENT",
         "LLM_CHAT",
         "API_KEYS",
-        "AGENT_TRACING"
+        "AGENT_TRACING",
+        "MODEL_ANALYTICS",
+        "MODEL_MANAGEMENT"
       ],
       "limits": {
         "requestsPerMonth": 1000,
@@ -94,7 +112,8 @@
       "features": [
         "LLM_CHAT",
         "LLM_EMBEDDINGS",
-        "API_KEYS"
+        "API_KEYS",
+        "MODEL_MANAGEMENT"
       ],
       "limits": {
         "requestsPerMonth": 10000,
@@ -110,7 +129,9 @@
         "VECTOR_STORE",
         "API_KEYS",
         "ANALYTICS",
-        "AGENT_TRACING"
+        "AGENT_TRACING",
+        "MODEL_MANAGEMENT",
+        "MODEL_ANALYTICS"
       ],
       "limits": {
         "requestsPerMonth": 100000,
@@ -128,7 +149,9 @@
         "WORKFLOW_AUTOMATION",
         "ANALYTICS",
         "API_KEYS",
-        "AGENT_TRACING"
+        "AGENT_TRACING",
+        "MODEL_MANAGEMENT",
+        "MODEL_ANALYTICS"
       ],
       "limits": {
         "requestsPerMonth": -1,
@@ -146,7 +169,9 @@
         "WORKFLOW_AUTOMATION",
         "ANALYTICS",
         "API_KEYS",
-        "AGENT_TRACING"
+        "AGENT_TRACING",
+        "MODEL_MANAGEMENT",
+        "MODEL_ANALYTICS"
       ],
       "limits": {
         "requestsPerMonth": -1,

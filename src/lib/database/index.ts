@@ -45,4 +45,17 @@ export async function disconnectDatabase(): Promise<void> {
 
 // Export the provider interface for type safety
 export type { DatabaseProvider } from './provider.interface';
-export type { IUser, ITenant, IApiToken, IAgentTracingSession, IAgentTracingEvent } from './provider.interface';
+export type {
+  IUser,
+  ITenant,
+  IApiToken,
+  IAgentTracingSession,
+  IAgentTracingEvent,
+  IModel,
+  IModelUsageLog,
+  IModelUsageAggregate,
+  ModelCategory,
+  ModelProviderType,
+  IModelPricing,
+  IModelUsageCostSnapshot,
+} from './provider.interface';

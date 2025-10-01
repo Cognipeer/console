@@ -61,10 +61,13 @@ export class LicenseManager {
    */
   private static matchEndpoint(endpoint: string, pattern: string): boolean {
     if (pattern === endpoint) return true;
-    if (pattern.endsWith('/*')) {
-      const basePattern = pattern.slice(0, -2);
-      return endpoint.startsWith(basePattern);
+
+    if (pattern.includes('*')) {
+      const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(`^${escaped.replace(/\\\*/g, '.*')}$`);
+      return regex.test(endpoint);
     }
+
     return false;
   }
 

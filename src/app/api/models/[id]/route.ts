@@ -1,0 +1,137 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { deleteModel, getModelById, updateModel } from '@/lib/services/models/modelService';
+import { resolveTenantDbName } from '@/lib/utils/tenant';
+
+export const runtime = 'nodejs';
+
+const SENSITIVE_FIELDS = new Set(['apiKey', 'secretAccessKey', 'serviceAccountKey', 'sessionToken']);
+const PLACEHOLDER = '••••••••';
+
+function sanitizeSettings(settings: Record<string, unknown>) {
+  const sanitized: Record<string, unknown> = {};
+  Object.entries(settings || {}).forEach(([key, value]) => {
+    if (SENSITIVE_FIELDS.has(key)) {
+      sanitized[key] = value ? PLACEHOLDER : value;
+    } else {
+      sanitized[key] = value;
+    }
+  });
+  return sanitized;
+}
+
+function sanitizeModel(model: any) {
+  return {
+    ...model,
+    settings: sanitizeSettings(model.settings || {}),
+  };
+}
+
+function mergeSettings(existing: Record<string, unknown>, incoming: Record<string, unknown>) {
+  const merged: Record<string, unknown> = { ...existing };
+
+  Object.entries(incoming).forEach(([key, value]) => {
+    if (value === PLACEHOLDER) {
+      return;
+    }
+
+    if (value === null) {
+      delete merged[key];
+      return;
+    }
+
+    if (value === undefined) {
+      return;
+    }
+
+    merged[key] = value;
+  });
+
+  return merged;
+}
+
+export async function GET(_request: NextRequest, { params }: { params: { id: string } }) {
+  try {
+    const tenantSlug = _request.headers.get('x-tenant-slug');
+    if (!tenantSlug) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const { tenantDbName } = await resolveTenantDbName(tenantSlug);
+    const model = await getModelById(tenantDbName, params.id);
+
+    if (!model) {
+      return NextResponse.json({ error: 'Model not found' }, { status: 404 });
+    }
+
+    return NextResponse.json({ model: sanitizeModel(model) });
+  } catch (error: any) {
+    console.error('Fetch model error', error);
+    return NextResponse.json({ error: error.message || 'Internal error' }, { status: 500 });
+  }
+}
+
+export async function PUT(request: NextRequest, { params }: { params: { id: string } }) {
+  try {
+    const tenantSlug = request.headers.get('x-tenant-slug');
+    const userId = request.headers.get('x-user-id');
+
+    if (!tenantSlug || !userId) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const { tenantDbName } = await resolveTenantDbName(tenantSlug);
+    const existing = await getModelById(tenantDbName, params.id);
+
+    if (!existing) {
+      return NextResponse.json({ error: 'Model not found' }, { status: 404 });
+    }
+
+    const body = await request.json();
+    const updates: any = {};
+
+    if (body.name !== undefined) updates.name = body.name;
+    if (body.description !== undefined) updates.description = body.description;
+    if (body.key !== undefined) updates.key = body.key;
+    if (body.modelId !== undefined) updates.modelId = body.modelId;
+    if (body.pricing !== undefined) updates.pricing = body.pricing;
+    if (body.isMultimodal !== undefined) updates.isMultimodal = body.isMultimodal;
+    if (body.supportsToolCalls !== undefined) updates.supportsToolCalls = body.supportsToolCalls;
+    if (body.metadata !== undefined) updates.metadata = body.metadata;
+
+    if (body.settings) {
+      updates.settings = mergeSettings(existing.settings || {}, body.settings);
+    }
+
+    const updated = await updateModel(tenantDbName, params.id, updates, userId);
+
+    if (!updated) {
+      return NextResponse.json({ error: 'Failed to update model' }, { status: 500 });
+    }
+
+    return NextResponse.json({ model: sanitizeModel(updated) });
+  } catch (error: any) {
+    console.error('Update model error', error);
+    return NextResponse.json({ error: error.message || 'Internal error' }, { status: 500 });
+  }
+}
+
+export async function DELETE(request: NextRequest, { params }: { params: { id: string } }) {
+  try {
+    const tenantSlug = request.headers.get('x-tenant-slug');
+    if (!tenantSlug) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const { tenantDbName } = await resolveTenantDbName(tenantSlug);
+    const success = await deleteModel(tenantDbName, params.id);
+
+    if (!success) {
+      return NextResponse.json({ error: 'Model not found' }, { status: 404 });
+    }
+
+    return NextResponse.json({ success: true }, { status: 200 });
+  } catch (error: any) {
+    console.error('Delete model error', error);
+    return NextResponse.json({ error: error.message || 'Internal error' }, { status: 500 });
+  }
+}
