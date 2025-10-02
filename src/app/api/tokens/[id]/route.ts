@@ -3,11 +3,11 @@ import { getDatabase } from '@/lib/database';
 
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
+  { params }: { params: Promise<{ id: string }> },
 ) {
   try {
     const { id } = await params;
-    
+
     // Get tenant and user info from headers
     const tenantSlug = request.headers.get('x-tenant-slug');
     const userId = request.headers.get('x-user-id');
@@ -25,19 +25,19 @@ export async function DELETE(
     if (!deleted) {
       return NextResponse.json(
         { error: 'Token not found or does not belong to you' },
-        { status: 404 }
+        { status: 404 },
       );
     }
 
     return NextResponse.json(
       { message: 'API token deleted successfully' },
-      { status: 200 }
+      { status: 200 },
     );
   } catch (error) {
     console.error('Delete token error:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

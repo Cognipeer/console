@@ -1,5 +1,12 @@
 import slugify from 'slugify';
-import { getDatabase, IModel, IModelUsageAggregate, IModelUsageLog, ModelCategory, ModelProviderType } from '@/lib/database';
+import {
+  getDatabase,
+  IModel,
+  IModelUsageAggregate,
+  IModelUsageLog,
+  ModelCategory,
+  ModelProviderType,
+} from '@/lib/database';
 import { CreateModelInput, UpdateModelInput } from './types';
 import { PROVIDER_DEFINITIONS } from './providerCatalog';
 
@@ -16,7 +23,9 @@ function normalizeKeyCandidate(input: string): string {
   return slugify(fallback, SLUG_OPTIONS);
 }
 
-function ensureCurrency(pricing: CreateModelInput['pricing']): CreateModelInput['pricing'] {
+function ensureCurrency(
+  pricing: CreateModelInput['pricing'],
+): CreateModelInput['pricing'] {
   return {
     currency: pricing.currency || 'USD',
     inputTokenPer1M: pricing.inputTokenPer1M,
@@ -33,13 +42,19 @@ function getProviderDefinition(provider: ModelProviderType) {
   return definition;
 }
 
-export async function listModels(tenantDbName: string, filters?: { category?: ModelCategory; provider?: ModelProviderType; }): Promise<IModel[]> {
+export async function listModels(
+  tenantDbName: string,
+  filters?: { category?: ModelCategory; provider?: ModelProviderType },
+): Promise<IModel[]> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
   return db.listModels(filters);
 }
 
-async function generateUniqueKey(tenantDbName: string, desiredKey: string): Promise<string> {
+async function generateUniqueKey(
+  tenantDbName: string,
+  desiredKey: string,
+): Promise<string> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
 
@@ -59,7 +74,12 @@ async function generateUniqueKey(tenantDbName: string, desiredKey: string): Prom
   throw new Error('Could not generate unique model key');
 }
 
-export async function createModel(tenantDbName: string, tenantId: string, userId: string, payload: CreateModelInput): Promise<IModel> {
+export async function createModel(
+  tenantDbName: string,
+  tenantId: string,
+  userId: string,
+  payload: CreateModelInput,
+): Promise<IModel> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
 
@@ -93,7 +113,12 @@ export async function createModel(tenantDbName: string, tenantId: string, userId
   return created;
 }
 
-export async function updateModel(tenantDbName: string, modelId: string, updates: UpdateModelInput, userId?: string): Promise<IModel | null> {
+export async function updateModel(
+  tenantDbName: string,
+  modelId: string,
+  updates: UpdateModelInput,
+  userId?: string,
+): Promise<IModel | null> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
 
@@ -102,7 +127,9 @@ export async function updateModel(tenantDbName: string, modelId: string, updates
     return null;
   }
 
-  const updatePayload: UpdateModelInput & { updatedBy?: string } = { ...updates };
+  const updatePayload: UpdateModelInput & { updatedBy?: string } = {
+    ...updates,
+  };
   if (updates.pricing) {
     updatePayload.pricing = ensureCurrency(updates.pricing);
   }
@@ -118,31 +145,48 @@ export async function updateModel(tenantDbName: string, modelId: string, updates
   return db.updateModel(modelId, updatePayload as any);
 }
 
-export async function deleteModel(tenantDbName: string, modelId: string): Promise<boolean> {
+export async function deleteModel(
+  tenantDbName: string,
+  modelId: string,
+): Promise<boolean> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
   return db.deleteModel(modelId);
 }
 
-export async function getModelByKey(tenantDbName: string, key: string): Promise<IModel | null> {
+export async function getModelByKey(
+  tenantDbName: string,
+  key: string,
+): Promise<IModel | null> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
   return db.findModelByKey(key);
 }
 
-export async function getModelById(tenantDbName: string, id: string): Promise<IModel | null> {
+export async function getModelById(
+  tenantDbName: string,
+  id: string,
+): Promise<IModel | null> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
   return db.findModelById(id);
 }
 
-export async function listUsageLogs(tenantDbName: string, modelKey: string, options?: { limit?: number; skip?: number; from?: Date; to?: Date; }): Promise<IModelUsageLog[]> {
+export async function listUsageLogs(
+  tenantDbName: string,
+  modelKey: string,
+  options?: { limit?: number; skip?: number; from?: Date; to?: Date },
+): Promise<IModelUsageLog[]> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
   return db.listModelUsageLogs(modelKey, options);
 }
 
-export async function getUsageAggregate(tenantDbName: string, modelKey: string, options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month'; }): Promise<IModelUsageAggregate> {
+export async function getUsageAggregate(
+  tenantDbName: string,
+  modelKey: string,
+  options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month' },
+): Promise<IModelUsageAggregate> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
   return db.aggregateModelUsage(modelKey, options);

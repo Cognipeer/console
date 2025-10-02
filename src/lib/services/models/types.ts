@@ -1,4 +1,9 @@
-import { IModel, IModelPricing, ModelCategory, ModelProviderType } from '@/lib/database';
+import {
+  IModel,
+  IModelPricing,
+  ModelCategory,
+  ModelProviderType,
+} from '@/lib/database';
 
 export type CredentialFieldType = 'text' | 'password' | 'select';
 

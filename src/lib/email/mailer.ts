@@ -35,17 +35,28 @@ class EmailService {
     return this.transporter;
   }
 
-  async loadTemplate(templateName: string, data: Record<string, any>): Promise<EmailTemplate> {
-    const templatePath = path.join(process.cwd(), 'mail-templates', `${templateName}.html`);
-    
+  async loadTemplate(
+    templateName: string,
+    data: Record<string, any>,
+  ): Promise<EmailTemplate> {
+    const templatePath = path.join(
+      process.cwd(),
+      'mail-templates',
+      `${templateName}.html`,
+    );
+
     try {
       const templateContent = await fs.readFile(templatePath, 'utf-8');
       const template = Handlebars.compile(templateContent);
       const html = template(data);
 
       // Extract subject from template (first line should be: <!-- subject: Your Subject -->)
-      const subjectMatch = templateContent.match(/<!--\s*subject:\s*(.+?)\s*-->/i);
-      const subject = subjectMatch ? subjectMatch[1] : 'Notification from CognipeerAI Gateway';
+      const subjectMatch = templateContent.match(
+        /<!--\s*subject:\s*(.+?)\s*-->/i,
+      );
+      const subject = subjectMatch
+        ? subjectMatch[1]
+        : 'Notification from CognipeerAI Gateway';
 
       return { subject, html };
     } catch (error) {
@@ -54,10 +65,14 @@ class EmailService {
     }
   }
 
-  async send(to: string, templateName: string, data: Record<string, any>): Promise<boolean> {
+  async send(
+    to: string,
+    templateName: string,
+    data: Record<string, any>,
+  ): Promise<boolean> {
     try {
       const transporter = await this.getTransporter();
-      
+
       if (!transporter) {
         console.log(`[Email Simulation] Would send ${templateName} to ${to}`);
         return false;
@@ -86,7 +101,7 @@ const emailService = new EmailService();
 export async function sendEmail(
   to: string,
   templateName: string,
-  data: Record<string, any>
+  data: Record<string, any>,
 ): Promise<boolean> {
   return emailService.send(to, templateName, data);
 }

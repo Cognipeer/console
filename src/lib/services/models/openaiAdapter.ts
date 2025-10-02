@@ -1,4 +1,12 @@
-import { AIMessage, AIMessageChunk, BaseMessage, FunctionMessage, HumanMessage, SystemMessage, ToolMessage } from '@langchain/core/messages';
+import {
+  AIMessage,
+  AIMessageChunk,
+  BaseMessage,
+  FunctionMessage,
+  HumanMessage,
+  SystemMessage,
+  ToolMessage,
+} from '@langchain/core/messages';
 import crypto from 'crypto';
 
 type MessageContentPart = Record<string, unknown>;
@@ -53,7 +61,9 @@ export interface ChatTransformOptions {
   stream?: boolean;
 }
 
-function normalizeContent(content: OpenAIMessage['content']): string | MessageContentPart[] {
+function normalizeContent(
+  content: OpenAIMessage['content'],
+): string | MessageContentPart[] {
   if (typeof content === 'string') {
     return content;
   }
@@ -79,10 +89,15 @@ function normalizeContent(content: OpenAIMessage['content']): string | MessageCo
           } as MessageContentPart;
         }
 
-        if (rawImage && typeof rawImage === 'object' && !Array.isArray(rawImage)) {
-          const url = typeof (rawImage as Record<string, unknown>).url === 'string'
-            ? (rawImage as Record<string, unknown>).url
-            : undefined;
+        if (
+          rawImage &&
+          typeof rawImage === 'object' &&
+          !Array.isArray(rawImage)
+        ) {
+          const url =
+            typeof (rawImage as Record<string, unknown>).url === 'string'
+              ? (rawImage as Record<string, unknown>).url
+              : undefined;
 
           if (url) {
             return {
@@ -111,25 +126,33 @@ export function toLangChainMessages(messages: OpenAIMessage[]): BaseMessage[] {
         const assistantContent =
           typeof content === 'string' || Array.isArray(content)
             ? content
-            : (content ? String(content) : '');
-        const additionalToolCalls = sanitizeIncomingToolCalls(message.tool_calls);
+            : content
+              ? String(content)
+              : '';
+        const additionalToolCalls = sanitizeIncomingToolCalls(
+          message.tool_calls,
+        );
         const langChainToolCalls = toLangChainToolCalls(additionalToolCalls);
         return new AIMessage({
           content: assistantContent,
           name: message.name,
-          additional_kwargs: additionalToolCalls ? { tool_calls: additionalToolCalls } : {},
+          additional_kwargs: additionalToolCalls
+            ? { tool_calls: additionalToolCalls }
+            : {},
           tool_calls: langChainToolCalls,
         });
       }
       case 'tool':
         return new ToolMessage({
-          content: typeof content === 'string' ? content : JSON.stringify(content),
+          content:
+            typeof content === 'string' ? content : JSON.stringify(content),
           tool_call_id: message.tool_call_id || message.name || 'tool-call',
         });
       case 'function':
         return new FunctionMessage({
           name: message.name || 'function',
-          content: typeof content === 'string' ? content : JSON.stringify(content),
+          content:
+            typeof content === 'string' ? content : JSON.stringify(content),
         });
       default:
         return new HumanMessage({
@@ -142,8 +165,15 @@ export function toLangChainMessages(messages: OpenAIMessage[]): BaseMessage[] {
 
 function extractUsage(message: AIMessage | AIMessageChunk): UsageMetrics {
   const metadata = message.response_metadata || {};
-  const usageSource = metadata.tokenUsage || metadata.token_usage || metadata.usage_metadata || {};
-  const usage = typeof usageSource === 'object' && usageSource !== null ? usageSource as Record<string, unknown> : {};
+  const usageSource =
+    metadata.tokenUsage ||
+    metadata.token_usage ||
+    metadata.usage_metadata ||
+    {};
+  const usage =
+    typeof usageSource === 'object' && usageSource !== null
+      ? (usageSource as Record<string, unknown>)
+      : {};
 
   const coalesceNumber = (keys: string[]): number | undefined => {
     for (const key of keys) {
@@ -155,13 +185,18 @@ function extractUsage(message: AIMessage | AIMessageChunk): UsageMetrics {
     return undefined;
   };
 
-  const coalesceDetails = (keys: string[]): Record<string, number> | undefined => {
+  const coalesceDetails = (
+    keys: string[],
+  ): Record<string, number> | undefined => {
     for (const key of keys) {
       const value = usage[key];
       if (value && typeof value === 'object' && !Array.isArray(value)) {
         const entries = Object.entries(value as Record<string, unknown>)
           .filter(([, detailValue]) => typeof detailValue === 'number')
-          .map(([detailKey, detailValue]) => [detailKey, detailValue as number]);
+          .map(([detailKey, detailValue]) => [
+            detailKey,
+            detailValue as number,
+          ]);
         if (entries.length) {
           return Object.fromEntries(entries);
         }
@@ -170,11 +205,28 @@ function extractUsage(message: AIMessage | AIMessageChunk): UsageMetrics {
     return undefined;
   };
 
-  const inputTokens = coalesceNumber(['promptTokens', 'prompt_tokens', 'inputTokens', 'input_tokens']);
-  const outputTokens = coalesceNumber(['completionTokens', 'completion_tokens', 'outputTokens', 'output_tokens']);
-  const cachedInputTokens = coalesceNumber(['cachedTokens', 'cached_tokens', 'cachedInputTokens', 'cached_input_tokens', 'cache_read_input_tokens']);
-  const totalTokens = coalesceNumber(['totalTokens', 'total_tokens'])
-    ?? (typeof inputTokens === 'number' && typeof outputTokens === 'number'
+  const inputTokens = coalesceNumber([
+    'promptTokens',
+    'prompt_tokens',
+    'inputTokens',
+    'input_tokens',
+  ]);
+  const outputTokens = coalesceNumber([
+    'completionTokens',
+    'completion_tokens',
+    'outputTokens',
+    'output_tokens',
+  ]);
+  const cachedInputTokens = coalesceNumber([
+    'cachedTokens',
+    'cached_tokens',
+    'cachedInputTokens',
+    'cached_input_tokens',
+    'cache_read_input_tokens',
+  ]);
+  const totalTokens =
+    coalesceNumber(['totalTokens', 'total_tokens']) ??
+    (typeof inputTokens === 'number' && typeof outputTokens === 'number'
       ? inputTokens + outputTokens + (cachedInputTokens || 0)
       : undefined);
 
@@ -202,26 +254,38 @@ function extractUsage(message: AIMessage | AIMessageChunk): UsageMetrics {
   };
 }
 
-export function toOpenAIChatResponse(message: AIMessage, options: ChatTransformOptions) {
+export function toOpenAIChatResponse(
+  message: AIMessage,
+  options: ChatTransformOptions,
+) {
   const usage = extractUsage(message);
   const timestamp = Math.floor(Date.now() / 1000);
-  const additional = (message.additional_kwargs as Record<string, unknown> | undefined) || {};
+  const additional =
+    (message.additional_kwargs as Record<string, unknown> | undefined) || {};
   const annotationsValue = additional['annotations'];
   const annotations = Array.isArray(annotationsValue) ? annotationsValue : [];
   const refusalValue = additional['refusal'];
   const refusal = refusalValue === undefined ? null : refusalValue;
 
   const normalizedContent = Array.isArray(message.content)
-    ? (message.content.length > 0 ? message.content : null)
-    : (typeof message.content === 'string'
-        ? (message.content.length > 0 ? message.content : null)
-        : (message.content ?? null));
+    ? message.content.length > 0
+      ? message.content
+      : null
+    : typeof message.content === 'string'
+      ? message.content.length > 0
+        ? message.content
+        : null
+      : (message.content ?? null);
 
   const usagePayload: Record<string, unknown> = {
     prompt_tokens: usage.inputTokens ?? 0,
     completion_tokens: usage.outputTokens ?? 0,
     cached_tokens: usage.cachedInputTokens ?? 0,
-    total_tokens: usage.totalTokens ?? ((usage.inputTokens ?? 0) + (usage.outputTokens ?? 0) + (usage.cachedInputTokens ?? 0)),
+    total_tokens:
+      usage.totalTokens ??
+      (usage.inputTokens ?? 0) +
+        (usage.outputTokens ?? 0) +
+        (usage.cachedInputTokens ?? 0),
   };
 
   if (usage.promptTokensDetails) {
@@ -232,10 +296,13 @@ export function toOpenAIChatResponse(message: AIMessage, options: ChatTransformO
     usagePayload.completion_tokens_details = usage.completionTokensDetails;
   }
 
-  const fingerprintFromMetadata = metadataFingerprint(message.response_metadata);
+  const fingerprintFromMetadata = metadataFingerprint(
+    message.response_metadata,
+  );
 
-  const systemFingerprint = fingerprintFromMetadata
-    || `fp_${crypto.createHash('sha256').update(`${options.model}`).digest('hex').slice(0, 24)}`;
+  const systemFingerprint =
+    fingerprintFromMetadata ||
+    `fp_${crypto.createHash('sha256').update(`${options.model}`).digest('hex').slice(0, 24)}`;
 
   const messageWithTools = message as AIMessage & { tool_calls?: unknown };
   const normalizedToolCalls = normalizeToolCalls(messageWithTools.tool_calls);
@@ -269,7 +336,10 @@ export function toOpenAIChatResponse(message: AIMessage, options: ChatTransformO
   };
 }
 
-export function toOpenAIStreamChunk(chunk: AIMessageChunk, options: ChatTransformOptions) {
+export function toOpenAIStreamChunk(
+  chunk: AIMessageChunk,
+  options: ChatTransformOptions,
+) {
   const usage = extractUsage(chunk);
   const delta: Record<string, unknown> = {};
 
@@ -331,23 +401,29 @@ function metadataFingerprint(metadata: unknown): string | undefined {
   return typeof fingerprint === 'string' ? fingerprint : undefined;
 }
 
-function normalizeToolCalls(rawToolCalls: unknown): OpenAIToolCall[] | undefined {
+function normalizeToolCalls(
+  rawToolCalls: unknown,
+): OpenAIToolCall[] | undefined {
   if (!Array.isArray(rawToolCalls) || rawToolCalls.length === 0) {
     return undefined;
   }
 
   return rawToolCalls.map((entry, index) => {
-    const call = (entry && typeof entry === 'object') ? (entry as Record<string, unknown>) : {};
+    const call =
+      entry && typeof entry === 'object'
+        ? (entry as Record<string, unknown>)
+        : {};
 
-    const functionPayload = (call.function && typeof call.function === 'object')
-      ? (call.function as Record<string, unknown>)
-      : {};
+    const functionPayload =
+      call.function && typeof call.function === 'object'
+        ? (call.function as Record<string, unknown>)
+        : {};
 
-    const nameCandidate = [
-      functionPayload.name,
-      call.name,
-      call.tool_name,
-    ].find((candidate): candidate is string => typeof candidate === 'string' && candidate.length > 0) || 'tool_call';
+    const nameCandidate =
+      [functionPayload.name, call.name, call.tool_name].find(
+        (candidate): candidate is string =>
+          typeof candidate === 'string' && candidate.length > 0,
+      ) || 'tool_call';
 
     const argumentSource =
       functionPayload.arguments ??
@@ -359,10 +435,10 @@ function normalizeToolCalls(rawToolCalls: unknown): OpenAIToolCall[] | undefined
 
     const argsString = serializeArguments(argumentSource);
 
-    const idCandidate = [
-      call.id,
-      call.tool_call_id,
-    ].find((candidate): candidate is string => typeof candidate === 'string' && candidate.length > 0);
+    const idCandidate = [call.id, call.tool_call_id].find(
+      (candidate): candidate is string =>
+        typeof candidate === 'string' && candidate.length > 0,
+    );
 
     const id = idCandidate || `call_${index}_${crypto.randomUUID()}`;
 
@@ -393,7 +469,9 @@ function serializeArguments(value: unknown): string {
   }
 }
 
-function toLangChainToolCalls(toolCalls: OpenAIToolCall[] | undefined): AIMessage['tool_calls'] | undefined {
+function toLangChainToolCalls(
+  toolCalls: OpenAIToolCall[] | undefined,
+): AIMessage['tool_calls'] | undefined {
   if (!Array.isArray(toolCalls) || toolCalls.length === 0) {
     return undefined;
   }
@@ -426,25 +504,33 @@ function toLangChainToolCalls(toolCalls: OpenAIToolCall[] | undefined): AIMessag
   }) as AIMessage['tool_calls'];
 }
 
-function sanitizeIncomingToolCalls(rawToolCalls: ToolCallPayload[] | undefined): OpenAIToolCall[] | undefined {
+function sanitizeIncomingToolCalls(
+  rawToolCalls: ToolCallPayload[] | undefined,
+): OpenAIToolCall[] | undefined {
   if (!Array.isArray(rawToolCalls) || rawToolCalls.length === 0) {
     return undefined;
   }
 
   return rawToolCalls.map((call, index) => {
     const record = call && typeof call === 'object' ? call : {};
-    const functionPayload = record.function && typeof record.function === 'object'
-      ? (record.function as Record<string, unknown>)
-      : {};
+    const functionPayload =
+      record.function && typeof record.function === 'object'
+        ? (record.function as Record<string, unknown>)
+        : {};
 
     const nameCandidate = [
       functionPayload.name,
       record.name,
       record.tool_name,
-    ].find((candidate): candidate is string => typeof candidate === 'string' && candidate.length > 0);
+    ].find(
+      (candidate): candidate is string =>
+        typeof candidate === 'string' && candidate.length > 0,
+    );
 
     if (!nameCandidate) {
-      throw new Error(`Invalid tool call at index ${index}: missing function name`);
+      throw new Error(
+        `Invalid tool call at index ${index}: missing function name`,
+      );
     }
 
     const argumentSource =
@@ -456,10 +542,10 @@ function sanitizeIncomingToolCalls(rawToolCalls: ToolCallPayload[] | undefined):
       record.parameters ??
       {};
 
-    const idCandidate = [
-      record.id,
-      record.tool_call_id,
-    ].find((candidate): candidate is string => typeof candidate === 'string' && candidate.length > 0);
+    const idCandidate = [record.id, record.tool_call_id].find(
+      (candidate): candidate is string =>
+        typeof candidate === 'string' && candidate.length > 0,
+    );
 
     return {
       id: idCandidate || `call_${index}_${crypto.randomUUID()}`,

@@ -1,7 +1,12 @@
 import crypto from 'crypto';
 import { buildChatModel, buildEmbeddingModel } from './langchainBuilder';
 import { getModelByKey } from './modelService';
-import { toLangChainMessages, toOpenAIChatResponse, toOpenAIStreamChunk, summarizeUsage } from './openaiAdapter';
+import {
+  toLangChainMessages,
+  toOpenAIChatResponse,
+  toOpenAIStreamChunk,
+  summarizeUsage,
+} from './openaiAdapter';
 import { logModelUsage, TokenUsage } from './usageLogger';
 import { IModel } from '@/lib/database';
 
@@ -28,7 +33,14 @@ function sanitizeForLogging(payload: any, maxLength = 20000) {
 
 function buildOverrides(body: any) {
   const overrides: Record<string, unknown> = {};
-  const fields = ['temperature', 'top_p', 'max_tokens', 'presence_penalty', 'frequency_penalty', 'seed'];
+  const fields = [
+    'temperature',
+    'top_p',
+    'max_tokens',
+    'presence_penalty',
+    'frequency_penalty',
+    'seed',
+  ];
 
   fields.forEach((field) => {
     if (body[field] !== undefined) {
@@ -41,7 +53,8 @@ function buildOverrides(body: any) {
   if (body.tool_choice) overrides.tool_choice = body.tool_choice;
   if (body.response_format) overrides.response_format = body.response_format;
   if (body.modality) overrides.modality = body.modality;
-  if (body.max_output_tokens) overrides.max_output_tokens = body.max_output_tokens;
+  if (body.max_output_tokens)
+    overrides.max_output_tokens = body.max_output_tokens;
 
   return overrides;
 }
@@ -84,7 +97,9 @@ export async function handleChatCompletion(params: {
   const overrides = buildOverrides(body);
 
   const chatModel = buildChatModel(model, { streaming: Boolean(stream) });
-  const runnable = Object.keys(overrides).length ? chatModel.bind(overrides) : chatModel;
+  const runnable = Object.keys(overrides).length
+    ? chatModel.bind(overrides)
+    : chatModel;
 
   if (stream) {
     const asyncIterator = await runnable.stream(messages);
@@ -98,7 +113,9 @@ export async function handleChatCompletion(params: {
 
         try {
           for await (const chunk of asyncIterator) {
-            aggregatedChunk = aggregatedChunk ? aggregatedChunk.concat(chunk) : chunk;
+            aggregatedChunk = aggregatedChunk
+              ? aggregatedChunk.concat(chunk)
+              : chunk;
 
             if (chunk.tool_calls) {
               chunk.tool_calls.forEach((call: any) => {
@@ -120,7 +137,9 @@ export async function handleChatCompletion(params: {
               };
             }
 
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify(payload)}\n\n`),
+            );
           }
 
           controller.enqueue(encoder.encode('data: [DONE]\n\n'));
@@ -134,7 +153,9 @@ export async function handleChatCompletion(params: {
               }
             : { toolCalls: toolCalls.length || undefined };
 
-          const providerResponse = aggregatedChunk ? aggregatedChunk : { tool_calls: toolCalls };
+          const providerResponse = aggregatedChunk
+            ? aggregatedChunk
+            : { tool_calls: toolCalls };
 
           await logModelUsage(tenantDbName, model, {
             requestId,
@@ -236,11 +257,12 @@ export async function handleEmbeddingRequest(params: {
   const embeddings = await embedder.embedDocuments(inputs);
   const latencyMs = Date.now() - start;
 
-  const tokenEstimate = typeof body.input_tokens === 'number'
-    ? body.input_tokens
-    : typeof body.inputTokenCount === 'number'
-      ? body.inputTokenCount
-      : 0;
+  const tokenEstimate =
+    typeof body.input_tokens === 'number'
+      ? body.input_tokens
+      : typeof body.inputTokenCount === 'number'
+        ? body.inputTokenCount
+        : 0;
 
   const usage: TokenUsage = {
     inputTokens: tokenEstimate,
@@ -256,7 +278,9 @@ export async function handleEmbeddingRequest(params: {
       model: modelKey,
       input: inputs.slice(0, 5),
     }),
-    providerResponse: sanitizeForLogging({ embeddingsLength: embeddings.length }),
+    providerResponse: sanitizeForLogging({
+      embeddingsLength: embeddings.length,
+    }),
     latencyMs,
     usage,
   });
@@ -264,11 +288,13 @@ export async function handleEmbeddingRequest(params: {
   return {
     response: {
       object: 'list',
-      data: embeddings.map((vector: number[] | Float32Array, index: number) => ({
-        object: 'embedding',
-        index,
-        embedding: Array.from(vector),
-      })),
+      data: embeddings.map(
+        (vector: number[] | Float32Array, index: number) => ({
+          object: 'embedding',
+          index,
+          embedding: Array.from(vector),
+        }),
+      ),
       model: model.modelId,
       usage: {
         prompt_tokens: usage.inputTokens ?? 0,

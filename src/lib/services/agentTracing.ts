@@ -3,7 +3,11 @@
  * Business logic for agent tracing operations
  */
 
-import { getDatabase, IAgentTracingSession, IAgentTracingEvent } from '@/lib/database';
+import {
+  getDatabase,
+  IAgentTracingSession,
+  IAgentTracingEvent,
+} from '@/lib/database';
 import dayjs from 'dayjs';
 
 export interface DashboardOverview {
@@ -15,7 +19,7 @@ export interface DashboardOverview {
       sessionsCount: number;
       totalEvents: number;
       totalTokens: number;
-  totalDurationMs: number;
+      totalDurationMs: number;
       averageTokensPerSession: number;
       averageDurationMs: number;
     };
@@ -58,11 +62,16 @@ export class AgentTracingService {
    */
   static async getDashboardOverview(
     tenantSlug: string,
-    filters?: { from?: string; to?: string; timezone?: string }
+    filters?: { from?: string; to?: string; timezone?: string },
   ): Promise<DashboardOverview> {
     try {
-      console.log('Getting dashboard overview for tenant:', tenantSlug, 'filters:', filters);
-      
+      console.log(
+        'Getting dashboard overview for tenant:',
+        tenantSlug,
+        'filters:',
+        filters,
+      );
+
       const db = await getDatabase();
       await db.switchToTenant(`tenant_${tenantSlug}`);
 
@@ -84,8 +93,11 @@ export class AgentTracingService {
       console.log('Recent sessions count:', recentSessions.length);
 
       // Aggregate analytics
-      const allSessions = await db.listAgentTracingSessions({ ...query, limit: 1000 });
-  const sessions = allSessions.sessions || [];
+      const allSessions = await db.listAgentTracingSessions({
+        ...query,
+        limit: 1000,
+      });
+      const sessions = allSessions.sessions || [];
 
       console.log('Total sessions for analytics:', sessions.length);
 
@@ -121,138 +133,179 @@ export class AgentTracingService {
         };
       }
 
-    // Calculate totals
-    const totals = {
-      sessionsCount: sessions.length,
-      totalEvents: sessions.reduce((sum, s) => sum + (s.totalEvents || 0), 0),
-      totalTokens: sessions.reduce((sum, s) => sum + ((s.totalInputTokens || 0) + (s.totalOutputTokens || 0)), 0),
-      totalDurationMs: sessions.reduce((sum, s) => sum + (s.durationMs || 0), 0),
-      averageTokensPerSession: 0,
-      averageDurationMs: 0,
-    };
+      // Calculate totals
+      const totals = {
+        sessionsCount: sessions.length,
+        totalEvents: sessions.reduce((sum, s) => sum + (s.totalEvents || 0), 0),
+        totalTokens: sessions.reduce(
+          (sum, s) =>
+            sum + ((s.totalInputTokens || 0) + (s.totalOutputTokens || 0)),
+          0,
+        ),
+        totalDurationMs: sessions.reduce(
+          (sum, s) => sum + (s.durationMs || 0),
+          0,
+        ),
+        averageTokensPerSession: 0,
+        averageDurationMs: 0,
+      };
 
-    if (totals.sessionsCount > 0) {
-      totals.averageTokensPerSession = Math.round(totals.totalTokens / totals.sessionsCount);
-      totals.averageDurationMs = Math.round(totals.totalDurationMs / totals.sessionsCount);
-    }
+      if (totals.sessionsCount > 0) {
+        totals.averageTokensPerSession = Math.round(
+          totals.totalTokens / totals.sessionsCount,
+        );
+        totals.averageDurationMs = Math.round(
+          totals.totalDurationMs / totals.sessionsCount,
+        );
+      }
 
-    // Tool analytics
-    const toolMap = new Map<string, { totalCalls: number; errorCalls: number; successCalls: number }>();
-    sessions.forEach(session => {
-      (session.toolsUsed || []).forEach(tool => {
-        if (!toolMap.has(tool)) {
-          toolMap.set(tool, { totalCalls: 0, errorCalls: 0, successCalls: 0 });
+      // Tool analytics
+      const toolMap = new Map<
+        string,
+        { totalCalls: number; errorCalls: number; successCalls: number }
+      >();
+      sessions.forEach((session) => {
+        (session.toolsUsed || []).forEach((tool) => {
+          if (!toolMap.has(tool)) {
+            toolMap.set(tool, {
+              totalCalls: 0,
+              errorCalls: 0,
+              successCalls: 0,
+            });
+          }
+          const toolStats = toolMap.get(tool)!;
+          toolStats.totalCalls++;
+          if (session.status === 'error') {
+            toolStats.errorCalls++;
+          } else {
+            toolStats.successCalls++;
+          }
+        });
+      });
+
+      const toolItems = Array.from(toolMap.entries())
+        .map(([toolName, stats]) => ({
+          toolName,
+          ...stats,
+          errorRate:
+            stats.totalCalls > 0 ? stats.errorCalls / stats.totalCalls : 0,
+        }))
+        .sort((a, b) => b.totalCalls - a.totalCalls);
+
+      const toolTotals = {
+        totalCalls: toolItems.reduce((sum, t) => sum + t.totalCalls, 0),
+        errorCalls: toolItems.reduce((sum, t) => sum + t.errorCalls, 0),
+        successCalls: toolItems.reduce((sum, t) => sum + t.successCalls, 0),
+        errorRate: 0,
+      };
+
+      if (toolTotals.totalCalls > 0) {
+        toolTotals.errorRate = toolTotals.errorCalls / toolTotals.totalCalls;
+      }
+
+      // Status breakdown
+      const statusMap = new Map<string, number>();
+      sessions.forEach((session) => {
+        const status = session.status || 'unknown';
+        statusMap.set(status, (statusMap.get(status) || 0) + 1);
+      });
+
+      const statuses = Array.from(statusMap.entries())
+        .map(([status, count]) => ({
+          status,
+          count,
+        }))
+        .sort((a, b) => b.count - a.count);
+
+      // Model breakdown
+      const modelMap = new Map<string, number>();
+      sessions.forEach((session) => {
+        (session.modelsUsed || []).forEach((model) => {
+          modelMap.set(model, (modelMap.get(model) || 0) + 1);
+        });
+      });
+
+      const models = Array.from(modelMap.entries())
+        .map(([model, sessionsCount]) => ({
+          model,
+          sessionsCount,
+        }))
+        .sort((a, b) => b.sessionsCount - a.sessionsCount);
+
+      // Recent agents
+      const agentMap = new Map<string, any>();
+      sessions.forEach((session) => {
+        const agentName = session.agentName || 'unknown';
+        if (!agentMap.has(agentName)) {
+          agentMap.set(agentName, {
+            name: agentName,
+            label: agentName,
+            latestSessionAt: session.startedAt,
+            sessionsCount: 0,
+          });
         }
-        const toolStats = toolMap.get(tool)!;
-        toolStats.totalCalls++;
-        if (session.status === 'error') {
-          toolStats.errorCalls++;
-        } else {
-          toolStats.successCalls++;
+        const agent = agentMap.get(agentName)!;
+        agent.sessionsCount++;
+        if (session.startedAt && session.startedAt > agent.latestSessionAt) {
+          agent.latestSessionAt = session.startedAt;
         }
       });
-    });
 
-    const toolItems = Array.from(toolMap.entries()).map(([toolName, stats]) => ({
-      toolName,
-      ...stats,
-      errorRate: stats.totalCalls > 0 ? stats.errorCalls / stats.totalCalls : 0,
-    })).sort((a, b) => b.totalCalls - a.totalCalls);
+      const recentAgents = Array.from(agentMap.values())
+        .sort(
+          (a, b) =>
+            new Date(b.latestSessionAt).getTime() -
+            new Date(a.latestSessionAt).getTime(),
+        )
+        .slice(0, 20);
 
-    const toolTotals = {
-      totalCalls: toolItems.reduce((sum, t) => sum + t.totalCalls, 0),
-      errorCalls: toolItems.reduce((sum, t) => sum + t.errorCalls, 0),
-      successCalls: toolItems.reduce((sum, t) => sum + t.successCalls, 0),
-      errorRate: 0,
-    };
-
-    if (toolTotals.totalCalls > 0) {
-      toolTotals.errorRate = toolTotals.errorCalls / toolTotals.totalCalls;
-    }
-
-    // Status breakdown
-    const statusMap = new Map<string, number>();
-    sessions.forEach(session => {
-      const status = session.status || 'unknown';
-      statusMap.set(status, (statusMap.get(status) || 0) + 1);
-    });
-
-    const statuses = Array.from(statusMap.entries()).map(([status, count]) => ({
-      status,
-      count,
-    })).sort((a, b) => b.count - a.count);
-
-    // Model breakdown
-    const modelMap = new Map<string, number>();
-    sessions.forEach(session => {
-      (session.modelsUsed || []).forEach(model => {
-        modelMap.set(model, (modelMap.get(model) || 0) + 1);
+      // Daily trend (last 30 days window)
+      const dailyMap = new Map<
+        string,
+        {
+          sessionsCount: number;
+          totalEvents: number;
+          totalTokens: number;
+          totalDurationMs: number;
+        }
+      >();
+      sessions.forEach((session) => {
+        if (!session.startedAt) {
+          return;
+        }
+        const dateKey = dayjs(session.startedAt).format('YYYY-MM-DD');
+        if (!dailyMap.has(dateKey)) {
+          dailyMap.set(dateKey, {
+            sessionsCount: 0,
+            totalEvents: 0,
+            totalTokens: 0,
+            totalDurationMs: 0,
+          });
+        }
+        const entry = dailyMap.get(dateKey)!;
+        entry.sessionsCount += 1;
+        entry.totalEvents += session.totalEvents || 0;
+        entry.totalTokens +=
+          (session.totalInputTokens || 0) + (session.totalOutputTokens || 0);
+        entry.totalDurationMs += session.durationMs || 0;
       });
-    });
 
-    const models = Array.from(modelMap.entries()).map(([model, sessionsCount]) => ({
-      model,
-      sessionsCount,
-    })).sort((a, b) => b.sessionsCount - a.sessionsCount);
-
-    // Recent agents
-    const agentMap = new Map<string, any>();
-    sessions.forEach(session => {
-      const agentName = session.agentName || 'unknown';
-      if (!agentMap.has(agentName)) {
-        agentMap.set(agentName, {
-          name: agentName,
-          label: agentName,
-          latestSessionAt: session.startedAt,
-          sessionsCount: 0,
-        });
-      }
-      const agent = agentMap.get(agentName)!;
-      agent.sessionsCount++;
-      if (session.startedAt && session.startedAt > agent.latestSessionAt) {
-        agent.latestSessionAt = session.startedAt;
-      }
-    });
-
-    const recentAgents = Array.from(agentMap.values())
-      .sort((a, b) => new Date(b.latestSessionAt).getTime() - new Date(a.latestSessionAt).getTime())
-      .slice(0, 20);
-
-    // Daily trend (last 30 days window)
-    const dailyMap = new Map<string, { sessionsCount: number; totalEvents: number; totalTokens: number; totalDurationMs: number }>();
-    sessions.forEach(session => {
-      if (!session.startedAt) {
-        return;
-      }
-      const dateKey = dayjs(session.startedAt).format('YYYY-MM-DD');
-      if (!dailyMap.has(dateKey)) {
-        dailyMap.set(dateKey, {
-          sessionsCount: 0,
-          totalEvents: 0,
-          totalTokens: 0,
-          totalDurationMs: 0,
-        });
-      }
-      const entry = dailyMap.get(dateKey)!;
-      entry.sessionsCount += 1;
-      entry.totalEvents += session.totalEvents || 0;
-      entry.totalTokens += (session.totalInputTokens || 0) + (session.totalOutputTokens || 0);
-      entry.totalDurationMs += session.durationMs || 0;
-    });
-
-    const daily = Array.from(dailyMap.entries())
-      .sort((a, b) => dayjs(a[0]).valueOf() - dayjs(b[0]).valueOf())
-      .map(([date, stats]) => ({
-        date,
-        sessionsCount: stats.sessionsCount,
-        totalEvents: stats.totalEvents,
-        totalTokens: stats.totalTokens,
-        averageDurationMs: stats.sessionsCount > 0 ? Math.round(stats.totalDurationMs / stats.sessionsCount) : 0,
-      }))
-      .slice(-30);
+      const daily = Array.from(dailyMap.entries())
+        .sort((a, b) => dayjs(a[0]).valueOf() - dayjs(b[0]).valueOf())
+        .map(([date, stats]) => ({
+          date,
+          sessionsCount: stats.sessionsCount,
+          totalEvents: stats.totalEvents,
+          totalTokens: stats.totalTokens,
+          averageDurationMs:
+            stats.sessionsCount > 0
+              ? Math.round(stats.totalDurationMs / stats.sessionsCount)
+              : 0,
+        }))
+        .slice(-30);
 
       return {
-        recentSessions: recentSessions.map(s => ({
+        recentSessions: recentSessions.map((s) => ({
           sessionId: s.sessionId,
           agentName: s.agentName,
           status: s.status,
@@ -300,7 +353,7 @@ export class AgentTracingService {
       to?: string;
       limit?: string;
       skip?: string;
-    }
+    },
   ) {
     const db = await getDatabase();
     await db.switchToTenant(`tenant_${tenantSlug}`);
@@ -315,7 +368,7 @@ export class AgentTracingService {
     });
 
     return {
-      sessions: result.sessions.map(s => ({
+      sessions: result.sessions.map((s) => ({
         sessionId: s.sessionId,
         agentName: s.agentName,
         status: s.status,
@@ -364,7 +417,7 @@ export class AgentTracingService {
         toolsUsed: session.toolsUsed,
         errors: session.errors,
       },
-      events: events.map(e => ({
+      events: events.map((e) => ({
         id: e.id || e._id,
         sequence: e.sequence,
         type: e.type,
@@ -391,7 +444,7 @@ export class AgentTracingService {
   static async getAgentOverview(
     tenantSlug: string,
     agentName: string,
-    filters?: { from?: string; to?: string; timezone?: string }
+    filters?: { from?: string; to?: string; timezone?: string },
   ) {
     const db = await getDatabase();
     await db.switchToTenant(`tenant_${tenantSlug}`);
@@ -402,7 +455,10 @@ export class AgentTracingService {
       query.to = filters.to;
     }
 
-    const { sessions } = await db.listAgentTracingSessions({ ...query, limit: 1000 });
+    const { sessions } = await db.listAgentTracingSessions({
+      ...query,
+      limit: 1000,
+    });
 
     if (sessions.length === 0) {
       return {
@@ -444,23 +500,38 @@ export class AgentTracingService {
 
     const sortedSessions = sessions
       .slice()
-      .sort((a, b) => new Date(b.startedAt || 0).getTime() - new Date(a.startedAt || 0).getTime());
+      .sort(
+        (a, b) =>
+          new Date(b.startedAt || 0).getTime() -
+          new Date(a.startedAt || 0).getTime(),
+      );
 
     const totals = {
       sessionsCount: sessions.length,
       totalEvents: sessions.reduce((sum, s) => sum + (s.totalEvents || 0), 0),
-      totalTokens: sessions.reduce((sum, s) => sum + ((s.totalInputTokens || 0) + (s.totalOutputTokens || 0)), 0),
-      totalDurationMs: sessions.reduce((sum, s) => sum + (s.durationMs || 0), 0),
+      totalTokens: sessions.reduce(
+        (sum, s) =>
+          sum + ((s.totalInputTokens || 0) + (s.totalOutputTokens || 0)),
+        0,
+      ),
+      totalDurationMs: sessions.reduce(
+        (sum, s) => sum + (s.durationMs || 0),
+        0,
+      ),
       averageTokensPerSession: 0,
       averageDurationMs: 0,
     };
 
     if (totals.sessionsCount > 0) {
-      totals.averageTokensPerSession = Math.round(totals.totalTokens / totals.sessionsCount);
-      totals.averageDurationMs = Math.round(totals.totalDurationMs / totals.sessionsCount);
+      totals.averageTokensPerSession = Math.round(
+        totals.totalTokens / totals.sessionsCount,
+      );
+      totals.averageDurationMs = Math.round(
+        totals.totalDurationMs / totals.sessionsCount,
+      );
     }
 
-    const recentSessions = sortedSessions.slice(0, 10).map(s => ({
+    const recentSessions = sortedSessions.slice(0, 10).map((s) => ({
       sessionId: s.sessionId,
       status: s.status,
       startedAt: s.startedAt,
@@ -477,13 +548,15 @@ export class AgentTracingService {
       latestStatus: latestSession?.status || null,
       latestVersion: latestSession?.agentVersion || null,
       latestSessionAt: latestSession?.startedAt || null,
-      versions: Array.from(new Set(sortedSessions.map(s => s.agentVersion).filter(Boolean))),
+      versions: Array.from(
+        new Set(sortedSessions.map((s) => s.agentVersion).filter(Boolean)),
+      ),
       sessionsCount: sessions.length,
     };
 
     // Status breakdown
     const statusMap = new Map<string, number>();
-    sortedSessions.forEach(session => {
+    sortedSessions.forEach((session) => {
       const status = session.status || 'unknown';
       statusMap.set(status, (statusMap.get(status) || 0) + 1);
     });
@@ -493,18 +566,21 @@ export class AgentTracingService {
 
     // Versions breakdown
     const versionMap = new Map<string, number>();
-    sortedSessions.forEach(session => {
+    sortedSessions.forEach((session) => {
       const version = session.agentVersion || 'unknown';
       versionMap.set(version, (versionMap.get(version) || 0) + 1);
     });
     const versions = Array.from(versionMap.entries())
-      .map(([version, sessionsCount]) => ({ version: version === 'unknown' ? null : version, sessionsCount }))
+      .map(([version, sessionsCount]) => ({
+        version: version === 'unknown' ? null : version,
+        sessionsCount,
+      }))
       .sort((a, b) => b.sessionsCount - a.sessionsCount);
 
     // Model usage
     const modelMap = new Map<string, number>();
-    sortedSessions.forEach(session => {
-      (session.modelsUsed || []).forEach(model => {
+    sortedSessions.forEach((session) => {
+      (session.modelsUsed || []).forEach((model) => {
         modelMap.set(model, (modelMap.get(model) || 0) + 1);
       });
     });
@@ -513,9 +589,12 @@ export class AgentTracingService {
       .sort((a, b) => b.sessionsCount - a.sessionsCount);
 
     // Tool analytics
-    const toolMap = new Map<string, { totalCalls: number; errorCalls: number; successCalls: number }>();
-    sortedSessions.forEach(session => {
-      (session.toolsUsed || []).forEach(tool => {
+    const toolMap = new Map<
+      string,
+      { totalCalls: number; errorCalls: number; successCalls: number }
+    >();
+    sortedSessions.forEach((session) => {
+      (session.toolsUsed || []).forEach((tool) => {
         if (!toolMap.has(tool)) {
           toolMap.set(tool, { totalCalls: 0, errorCalls: 0, successCalls: 0 });
         }
@@ -529,11 +608,14 @@ export class AgentTracingService {
       });
     });
 
-    const toolItems = Array.from(toolMap.entries()).map(([toolName, stats]) => ({
-      toolName,
-      ...stats,
-      errorRate: stats.totalCalls > 0 ? stats.errorCalls / stats.totalCalls : 0,
-    })).sort((a, b) => b.totalCalls - a.totalCalls);
+    const toolItems = Array.from(toolMap.entries())
+      .map(([toolName, stats]) => ({
+        toolName,
+        ...stats,
+        errorRate:
+          stats.totalCalls > 0 ? stats.errorCalls / stats.totalCalls : 0,
+      }))
+      .sort((a, b) => b.totalCalls - a.totalCalls);
 
     const toolTotals = {
       totalCalls: toolItems.reduce((sum, t) => sum + t.totalCalls, 0),
@@ -546,8 +628,16 @@ export class AgentTracingService {
     }
 
     // Daily trend
-    const dailyMap = new Map<string, { sessionsCount: number; totalEvents: number; totalTokens: number; totalDurationMs: number }>();
-    sortedSessions.forEach(session => {
+    const dailyMap = new Map<
+      string,
+      {
+        sessionsCount: number;
+        totalEvents: number;
+        totalTokens: number;
+        totalDurationMs: number;
+      }
+    >();
+    sortedSessions.forEach((session) => {
       if (!session.startedAt) {
         return;
       }
@@ -563,7 +653,8 @@ export class AgentTracingService {
       const entry = dailyMap.get(dateKey)!;
       entry.sessionsCount += 1;
       entry.totalEvents += session.totalEvents || 0;
-      entry.totalTokens += (session.totalInputTokens || 0) + (session.totalOutputTokens || 0);
+      entry.totalTokens +=
+        (session.totalInputTokens || 0) + (session.totalOutputTokens || 0);
       entry.totalDurationMs += session.durationMs || 0;
     });
 
@@ -574,7 +665,10 @@ export class AgentTracingService {
         sessionsCount: stats.sessionsCount,
         totalEvents: stats.totalEvents,
         totalTokens: stats.totalTokens,
-        averageDurationMs: stats.sessionsCount > 0 ? Math.round(stats.totalDurationMs / stats.sessionsCount) : 0,
+        averageDurationMs:
+          stats.sessionsCount > 0
+            ? Math.round(stats.totalDurationMs / stats.sessionsCount)
+            : 0,
       }))
       .slice(-30);
 

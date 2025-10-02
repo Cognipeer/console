@@ -8,7 +8,7 @@ import { AgentTracingService } from '@/lib/services/agentTracing';
 export async function GET(request: NextRequest) {
   try {
     const tenantSlug = request.headers.get('x-tenant-slug');
-    
+
     if (!tenantSlug) {
       return NextResponse.json({ error: 'Tenant not found' }, { status: 401 });
     }
@@ -30,8 +30,11 @@ export async function GET(request: NextRequest) {
   } catch (error: unknown) {
     console.error('List sessions error:', error);
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Failed to fetch sessions' },
-      { status: 500 }
+      {
+        error:
+          error instanceof Error ? error.message : 'Failed to fetch sessions',
+      },
+      { status: 500 },
     );
   }
 }

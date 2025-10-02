@@ -14,8 +14,12 @@ export function buildChatModel(model: IModel, options?: BuildChatModelOptions) {
   const settings = model.settings || {};
   const common = {
     model: model.modelId,
-    temperature: typeof settings.temperature === 'number' ? settings.temperature : undefined,
-    maxTokens: typeof settings.maxTokens === 'number' ? settings.maxTokens : undefined,
+    temperature:
+      typeof settings.temperature === 'number'
+        ? settings.temperature
+        : undefined,
+    maxTokens:
+      typeof settings.maxTokens === 'number' ? settings.maxTokens : undefined,
   } as Record<string, unknown>;
 
   switch (model.provider) {
@@ -58,7 +62,7 @@ export function buildChatModel(model: IModel, options?: BuildChatModelOptions) {
         sessionToken: settings.sessionToken,
       };
 
-  return new ChatBedrockConverse({
+      return new ChatBedrockConverse({
         ...common,
         region: settings.region,
         credentials,

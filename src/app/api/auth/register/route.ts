@@ -7,13 +7,14 @@ import { sendEmail } from '@/lib/email/mailer';
 
 export async function POST(request: NextRequest) {
   try {
-    const { email, password, name, companyName, licenseType } = await request.json();
+    const { email, password, name, companyName, licenseType } =
+      await request.json();
 
     // Validation
     if (!email || !password || !name || !companyName) {
       return NextResponse.json(
         { error: 'Email, password, name, and company name are required' },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
@@ -22,7 +23,7 @@ export async function POST(request: NextRequest) {
     if (!emailRegex.test(email)) {
       return NextResponse.json(
         { error: 'Invalid email format' },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
@@ -30,7 +31,7 @@ export async function POST(request: NextRequest) {
     if (password.length < 8) {
       return NextResponse.json(
         { error: 'Password must be at least 8 characters long' },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
@@ -46,8 +47,11 @@ export async function POST(request: NextRequest) {
     const existingTenant = await db.findTenantBySlug(slug);
     if (existingTenant) {
       return NextResponse.json(
-        { error: 'A company with this name already exists. Please choose a different name.' },
-        { status: 409 }
+        {
+          error:
+            'A company with this name already exists. Please choose a different name.',
+        },
+        { status: 409 },
       );
     }
 
@@ -57,7 +61,8 @@ export async function POST(request: NextRequest) {
     // 3. Same email can exist in different tenants
 
     // Determine license type (default to FREE for new registrations)
-    const finalLicenseType: LicenseType = (licenseType as LicenseType) || 'FREE';
+    const finalLicenseType: LicenseType =
+      (licenseType as LicenseType) || 'FREE';
     const features = LicenseManager.getFeaturesForLicense(finalLicenseType);
 
     // Create tenant with dedicated database
@@ -77,8 +82,9 @@ export async function POST(request: NextRequest) {
     const hashedPassword = await bcrypt.hash(password, 10);
 
     // Create user as owner in tenant database
-    const tenantIdStr = typeof tenant._id === 'string' ? tenant._id : tenant._id!.toString();
-    
+    const tenantIdStr =
+      typeof tenant._id === 'string' ? tenant._id : tenant._id!.toString();
+
     const user = await db.createUser({
       email,
       password: hashedPassword,
@@ -89,8 +95,9 @@ export async function POST(request: NextRequest) {
       role: 'owner',
     });
 
-    const userIdStr = typeof user._id === 'string' ? user._id : user._id!.toString();
-    
+    const userIdStr =
+      typeof user._id === 'string' ? user._id : user._id!.toString();
+
     // Update tenant with owner ID
     await db.updateTenant(tenantIdStr, { ownerId: userIdStr });
 
@@ -107,17 +114,15 @@ export async function POST(request: NextRequest) {
     });
 
     // Send welcome email (async, don't wait for it)
-    sendEmail(
+    sendEmail(email, 'welcome', {
+      name,
       email,
-      'welcome',
-      {
-        name,
-        email,
-        companyName,
-        slug,
-        licenseType: finalLicenseType,
-      }
-    ).catch((err: Error) => console.error('Failed to send welcome email:', err));
+      companyName,
+      slug,
+      licenseType: finalLicenseType,
+    }).catch((err: Error) =>
+      console.error('Failed to send welcome email:', err),
+    );
 
     // Create response with cookie
     const response = NextResponse.json(
@@ -137,7 +142,7 @@ export async function POST(request: NextRequest) {
           slug: tenant.slug,
         },
       },
-      { status: 201 }
+      { status: 201 },
     );
 
     // Set HTTP-only cookie
@@ -154,7 +159,7 @@ export async function POST(request: NextRequest) {
     console.error('Registration error:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

@@ -12,7 +12,7 @@ export async function POST(request: NextRequest) {
     if (!email || !password) {
       return NextResponse.json(
         { error: 'Email and password are required' },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
@@ -20,25 +20,27 @@ export async function POST(request: NextRequest) {
 
     const db = await getDatabase();
 
-  let tenant: ITenant | null = null;
-  let user = null;
+    let tenant: ITenant | null = null;
+    let user = null;
 
     if (slug) {
       tenant = await db.findTenantBySlug(slug);
       if (!tenant) {
         return NextResponse.json(
           { error: 'Invalid company identifier' },
-          { status: 401 }
+          { status: 401 },
         );
       }
 
       await db.switchToTenant(tenant.dbName);
-      user = await db.findUserByEmail(normalizedEmail) || await db.findUserByEmail(email);
+      user =
+        (await db.findUserByEmail(normalizedEmail)) ||
+        (await db.findUserByEmail(email));
 
       if (!user) {
         return NextResponse.json(
           { error: 'Invalid email or password' },
-          { status: 401 }
+          { status: 401 },
         );
       }
 
@@ -46,7 +48,7 @@ export async function POST(request: NextRequest) {
       if (!isPasswordValid) {
         return NextResponse.json(
           { error: 'Invalid email or password' },
-          { status: 401 }
+          { status: 401 },
         );
       }
     } else {
@@ -62,13 +64,18 @@ export async function POST(request: NextRequest) {
           }
 
           await db.switchToTenant(candidateTenant.dbName);
-          const candidateUser = await db.findUserByEmail(normalizedEmail) || await db.findUserByEmail(email);
+          const candidateUser =
+            (await db.findUserByEmail(normalizedEmail)) ||
+            (await db.findUserByEmail(email));
 
           if (!candidateUser) {
             continue;
           }
 
-          const isPasswordValid = await bcrypt.compare(password, candidateUser.password);
+          const isPasswordValid = await bcrypt.compare(
+            password,
+            candidateUser.password,
+          );
           if (!isPasswordValid) {
             continue;
           }
@@ -84,9 +91,10 @@ export async function POST(request: NextRequest) {
       if (!tenant || !user) {
         const allTenants = await db.listTenants();
         for (const candidateTenant of allTenants) {
-          const candidateTenantId = typeof candidateTenant._id === 'string'
-            ? candidateTenant._id
-            : candidateTenant._id?.toString();
+          const candidateTenantId =
+            typeof candidateTenant._id === 'string'
+              ? candidateTenant._id
+              : candidateTenant._id?.toString();
 
           if (!candidateTenantId || checkedTenantIds.has(candidateTenantId)) {
             continue;
@@ -94,13 +102,18 @@ export async function POST(request: NextRequest) {
 
           try {
             await db.switchToTenant(candidateTenant.dbName);
-            const candidateUser = await db.findUserByEmail(normalizedEmail) || await db.findUserByEmail(email);
+            const candidateUser =
+              (await db.findUserByEmail(normalizedEmail)) ||
+              (await db.findUserByEmail(email));
 
             if (!candidateUser) {
               continue;
             }
 
-            const isPasswordValid = await bcrypt.compare(password, candidateUser.password);
+            const isPasswordValid = await bcrypt.compare(
+              password,
+              candidateUser.password,
+            );
             if (!isPasswordValid) {
               continue;
             }
@@ -125,7 +138,7 @@ export async function POST(request: NextRequest) {
         if (!tenant || !user) {
           return NextResponse.json(
             { error: 'Invalid email or password' },
-            { status: 401 }
+            { status: 401 },
           );
         }
       }
@@ -135,7 +148,8 @@ export async function POST(request: NextRequest) {
     const token = await TokenManager.generateToken({
       userId: typeof user._id === 'string' ? user._id : user._id!.toString(),
       email: user.email,
-      tenantId: typeof tenant._id === 'string' ? tenant._id : tenant._id!.toString(),
+      tenantId:
+        typeof tenant._id === 'string' ? tenant._id : tenant._id!.toString(),
       tenantSlug: tenant.slug,
       role: user.role!,
       licenseId: user.licenseId,
@@ -161,7 +175,7 @@ export async function POST(request: NextRequest) {
           slug: tenant.slug,
         },
       },
-      { status: 200 }
+      { status: 200 },
     );
 
     // Set HTTP-only cookie
@@ -178,7 +192,7 @@ export async function POST(request: NextRequest) {
     console.error('Login error:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

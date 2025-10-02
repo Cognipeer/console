@@ -6,7 +6,12 @@ import { ModelCategory, ModelProviderType } from '@/lib/database';
 
 export const runtime = 'nodejs';
 
-const SENSITIVE_FIELDS = new Set(['apiKey', 'secretAccessKey', 'serviceAccountKey', 'sessionToken']);
+const SENSITIVE_FIELDS = new Set([
+  'apiKey',
+  'secretAccessKey',
+  'serviceAccountKey',
+  'sessionToken',
+]);
 
 function sanitizeSettings(settings: Record<string, unknown>) {
   const sanitized: Record<string, unknown> = {};
@@ -56,7 +61,10 @@ export async function GET(request: NextRequest) {
     return NextResponse.json(payload, { status: 200 });
   } catch (error: unknown) {
     console.error('List models error', error);
-    return NextResponse.json({ error: error instanceof Error ? error.message : 'Internal error' }, { status: 500 });
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'Internal error' },
+      { status: 500 },
+    );
   }
 }
 
@@ -71,10 +79,24 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json();
-    const required = ['name', 'provider', 'category', 'modelId', 'pricing', 'settings'];
+    const required = [
+      'name',
+      'provider',
+      'category',
+      'modelId',
+      'pricing',
+      'settings',
+    ];
     for (const field of required) {
-      if (body[field] === undefined || body[field] === null || body[field] === '') {
-        return NextResponse.json({ error: `${field} is required` }, { status: 400 });
+      if (
+        body[field] === undefined ||
+        body[field] === null ||
+        body[field] === ''
+      ) {
+        return NextResponse.json(
+          { error: `${field} is required` },
+          { status: 400 },
+        );
       }
     }
 
@@ -97,6 +119,9 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ model: sanitizeModel(model) }, { status: 201 });
   } catch (error: unknown) {
     console.error('Create model error', error);
-    return NextResponse.json({ error: error instanceof Error ? error.message : 'Internal error' }, { status: 500 });
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'Internal error' },
+      { status: 500 },
+    );
   }
 }

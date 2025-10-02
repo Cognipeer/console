@@ -26,9 +26,11 @@ export class TokenManager {
   /**
    * Generate JWT token with license features
    */
-  static async generateToken(payload: Omit<JWTPayload, 'iat' | 'exp'>): Promise<string> {
+  static async generateToken(
+    payload: Omit<JWTPayload, 'iat' | 'exp'>,
+  ): Promise<string> {
     const expiresIn = process.env.JWT_EXPIRES_IN || '7d';
-    
+
     // Convert expiry string to seconds (7d -> 604800)
     const expiryMap: Record<string, number> = {
       '1d': 86400,
@@ -66,10 +68,8 @@ export class TokenManager {
     try {
       const parts = token.split('.');
       if (parts.length !== 3) return null;
-      
-      const payload = JSON.parse(
-        Buffer.from(parts[1], 'base64').toString()
-      );
+
+      const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString());
       return payload as JWTPayload;
     } catch (error) {
       return null;

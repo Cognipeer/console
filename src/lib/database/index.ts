@@ -30,7 +30,9 @@ export async function getDatabase(): Promise<DatabaseProvider> {
  * Get database instance for a specific tenant.
  * This is a convenience function that gets the database and switches to the tenant.
  */
-export async function getTenantDatabase(tenantDbName: string): Promise<DatabaseProvider> {
+export async function getTenantDatabase(
+  tenantDbName: string,
+): Promise<DatabaseProvider> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
   return db;

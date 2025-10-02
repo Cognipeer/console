@@ -22,7 +22,7 @@ export async function GET(request: NextRequest) {
     console.error('List users error:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

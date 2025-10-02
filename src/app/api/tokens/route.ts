@@ -24,7 +24,7 @@ export async function GET(request: NextRequest) {
     console.error('List tokens error:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }
@@ -46,7 +46,7 @@ export async function POST(request: NextRequest) {
     if (!label || label.length < 3) {
       return NextResponse.json(
         { error: 'Label must be at least 3 characters' },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
@@ -72,13 +72,13 @@ export async function POST(request: NextRequest) {
         id: apiToken._id,
         label: apiToken.label,
       },
-      { status: 201 }
+      { status: 201 },
     );
   } catch (error) {
     console.error('Create token error:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

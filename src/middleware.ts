@@ -4,7 +4,12 @@ import { TokenManager } from '@/lib/license/token-manager';
 import { LicenseManager } from '@/lib/license/license-manager';
 
 // Paths that don't require authentication
-const PUBLIC_PATHS = ['/login', '/register', '/api/auth/login', '/api/auth/register'];
+const PUBLIC_PATHS = [
+  '/login',
+  '/register',
+  '/api/auth/login',
+  '/api/auth/register',
+];
 
 // Client API paths that use Bearer token authentication instead of cookie
 const CLIENT_API_PATHS = ['/api/client/', '/api/models/v1/'];
@@ -13,12 +18,12 @@ export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   // Allow public paths
-  if (PUBLIC_PATHS.some(path => pathname.startsWith(path))) {
+  if (PUBLIC_PATHS.some((path) => pathname.startsWith(path))) {
     return NextResponse.next();
   }
 
   // Allow client API paths (they use Bearer token authentication)
-  if (CLIENT_API_PATHS.some(path => pathname.startsWith(path))) {
+  if (CLIENT_API_PATHS.some((path) => pathname.startsWith(path))) {
     return NextResponse.next();
   }
 
@@ -30,7 +35,7 @@ export async function middleware(request: NextRequest) {
     if (pathname.startsWith('/api/')) {
       return NextResponse.json(
         { error: 'Unauthorized', message: 'Authentication required' },
-        { status: 401 }
+        { status: 401 },
       );
     }
     return NextResponse.redirect(new URL('/login', request.url));
@@ -44,10 +49,10 @@ export async function middleware(request: NextRequest) {
     if (pathname.startsWith('/api/')) {
       return NextResponse.json(
         { error: 'Unauthorized', message: 'Invalid or expired token' },
-        { status: 401 }
+        { status: 401 },
       );
     }
-    
+
     const response = NextResponse.redirect(new URL('/login', request.url));
     response.cookies.delete('token');
     return response;
@@ -55,7 +60,10 @@ export async function middleware(request: NextRequest) {
 
   // Check feature access for API routes
   if (pathname.startsWith('/api/')) {
-    const hasAccess = LicenseManager.hasEndpointAccess(payload.licenseType, pathname);
+    const hasAccess = LicenseManager.hasEndpointAccess(
+      payload.licenseType,
+      pathname,
+    );
 
     if (!hasAccess) {
       return NextResponse.json(
@@ -64,7 +72,7 @@ export async function middleware(request: NextRequest) {
           message: 'Your license does not have access to this feature',
           requiredLicense: 'Please upgrade your plan',
         },
-        { status: 403 }
+        { status: 403 },
       );
     }
   }

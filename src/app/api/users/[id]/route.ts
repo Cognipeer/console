@@ -3,11 +3,11 @@ import { getDatabase } from '@/lib/database';
 
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
+  { params }: { params: Promise<{ id: string }> },
 ) {
   try {
     const { id } = await params;
-    
+
     // Get tenant and user info from headers
     const tenantSlug = request.headers.get('x-tenant-slug');
     const userId = request.headers.get('x-user-id');
@@ -21,7 +21,7 @@ export async function DELETE(
     if (userRole !== 'owner' && userRole !== 'admin') {
       return NextResponse.json(
         { error: 'Only owners and admins can delete users' },
-        { status: 403 }
+        { status: 403 },
       );
     }
 
@@ -32,7 +32,7 @@ export async function DELETE(
     if (id === userId) {
       return NextResponse.json(
         { error: 'You cannot delete your own account' },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
@@ -46,7 +46,7 @@ export async function DELETE(
     if (userToDelete.role === 'owner') {
       return NextResponse.json(
         { error: 'Cannot delete the owner account' },
-        { status: 403 }
+        { status: 403 },
       );
     }
 
@@ -54,18 +54,21 @@ export async function DELETE(
     const deleted = await db.deleteUser(id);
 
     if (!deleted) {
-      return NextResponse.json({ error: 'Failed to delete user' }, { status: 500 });
+      return NextResponse.json(
+        { error: 'Failed to delete user' },
+        { status: 500 },
+      );
     }
 
     return NextResponse.json(
       { message: 'User deleted successfully' },
-      { status: 200 }
+      { status: 200 },
     );
   } catch (error) {
     console.error('Delete user error:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

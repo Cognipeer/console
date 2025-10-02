@@ -117,7 +117,12 @@ export interface IAgentTracingEvent {
 
 export type ModelCategory = 'llm' | 'embedding';
 
-export type ModelProviderType = 'openai' | 'openai-compatible' | 'bedrock' | 'vertex' | 'together';
+export type ModelProviderType =
+  | 'openai'
+  | 'openai-compatible'
+  | 'bedrock'
+  | 'vertex'
+  | 'together';
 
 export interface IModelPricing {
   currency?: string;
@@ -201,58 +206,88 @@ export interface IModelUsageAggregate {
 export interface DatabaseProvider {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
-  
+
   // Tenant operations (uses main/shared database)
-  createTenant(tenant: Omit<ITenant, '_id' | 'createdAt' | 'updatedAt'>): Promise<ITenant>;
+  createTenant(
+    tenant: Omit<ITenant, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<ITenant>;
   findTenantBySlug(slug: string): Promise<ITenant | null>;
   findTenantById(id: string): Promise<ITenant | null>;
   listTenants(): Promise<ITenant[]>;
   updateTenant(id: string, data: Partial<ITenant>): Promise<ITenant | null>;
-  
+
   // Switch to tenant-specific database
   switchToTenant(tenantDbName: string): Promise<void>;
-  
+
   // Cross-tenant user directory (uses main/shared database)
   registerUserInDirectory(entry: ITenantUserDirectoryEntry): Promise<void>;
   unregisterUserFromDirectory(email: string, tenantId: string): Promise<void>;
   listTenantsForUser(email: string): Promise<ITenantUserDirectoryEntry[]>;
-  
+
   // User operations (tenant-specific)
   findUserByEmail(email: string): Promise<IUser | null>;
   findUserById(id: string): Promise<IUser | null>;
-  createUser(user: Omit<IUser, '_id' | 'createdAt' | 'updatedAt'>): Promise<IUser>;
+  createUser(
+    user: Omit<IUser, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IUser>;
   updateUser(id: string, data: Partial<IUser>): Promise<IUser | null>;
   deleteUser(id: string): Promise<boolean>;
   listUsers(): Promise<IUser[]>;
-  
+
   // API Token operations (tenant-specific)
-  createApiToken(token: Omit<IApiToken, '_id' | 'createdAt'>): Promise<IApiToken>;
+  createApiToken(
+    token: Omit<IApiToken, '_id' | 'createdAt'>,
+  ): Promise<IApiToken>;
   listApiTokens(userId: string): Promise<IApiToken[]>;
   findApiTokenByToken(token: string): Promise<IApiToken | null>;
   deleteApiToken(id: string, userId: string): Promise<boolean>;
   updateTokenLastUsed(token: string): Promise<void>;
-  
+
   // Agent Tracing Session operations (tenant-specific)
-  createAgentTracingSession(session: Omit<IAgentTracingSession, '_id' | 'createdAt' | 'updatedAt'>): Promise<IAgentTracingSession>;
-  updateAgentTracingSession(sessionId: string, data: Partial<IAgentTracingSession>): Promise<IAgentTracingSession | null>;
-  findAgentTracingSessionById(sessionId: string): Promise<IAgentTracingSession | null>;
-  listAgentTracingSessions(filters?: Record<string, unknown>): Promise<{ sessions: IAgentTracingSession[], total: number }>;
-  
+  createAgentTracingSession(
+    session: Omit<IAgentTracingSession, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IAgentTracingSession>;
+  updateAgentTracingSession(
+    sessionId: string,
+    data: Partial<IAgentTracingSession>,
+  ): Promise<IAgentTracingSession | null>;
+  findAgentTracingSessionById(
+    sessionId: string,
+  ): Promise<IAgentTracingSession | null>;
+  listAgentTracingSessions(
+    filters?: Record<string, unknown>,
+  ): Promise<{ sessions: IAgentTracingSession[]; total: number }>;
+
   // Agent Tracing Event operations (tenant-specific)
-  createAgentTracingEvent(event: Omit<IAgentTracingEvent, '_id' | 'createdAt'>): Promise<IAgentTracingEvent>;
+  createAgentTracingEvent(
+    event: Omit<IAgentTracingEvent, '_id' | 'createdAt'>,
+  ): Promise<IAgentTracingEvent>;
   listAgentTracingEvents(sessionId: string): Promise<IAgentTracingEvent[]>;
   deleteAgentTracingEvents(sessionId: string): Promise<number>;
 
   // Model management (tenant-specific)
-  createModel(model: Omit<IModel, '_id' | 'createdAt' | 'updatedAt'>): Promise<IModel>;
+  createModel(
+    model: Omit<IModel, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IModel>;
   updateModel(id: string, data: Partial<IModel>): Promise<IModel | null>;
   deleteModel(id: string): Promise<boolean>;
-  listModels(filters?: { category?: ModelCategory; provider?: ModelProviderType }): Promise<IModel[]>;
+  listModels(filters?: {
+    category?: ModelCategory;
+    provider?: ModelProviderType;
+  }): Promise<IModel[]>;
   findModelById(id: string): Promise<IModel | null>;
   findModelByKey(key: string): Promise<IModel | null>;
 
   // Model usage logging (tenant-specific)
-  createModelUsageLog(log: Omit<IModelUsageLog, '_id' | 'createdAt'>): Promise<IModelUsageLog>;
-  listModelUsageLogs(modelKey: string, options?: { limit?: number; skip?: number; from?: Date; to?: Date; }): Promise<IModelUsageLog[]>;
-  aggregateModelUsage(modelKey: string, options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month'; }): Promise<IModelUsageAggregate>;
+  createModelUsageLog(
+    log: Omit<IModelUsageLog, '_id' | 'createdAt'>,
+  ): Promise<IModelUsageLog>;
+  listModelUsageLogs(
+    modelKey: string,
+    options?: { limit?: number; skip?: number; from?: Date; to?: Date },
+  ): Promise<IModelUsageLog[]>;
+  aggregateModelUsage(
+    modelKey: string,
+    options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month' },
+  ): Promise<IModelUsageAggregate>;
 }

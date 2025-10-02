@@ -44,7 +44,7 @@ export const en = {
   breadcrumbs: {
     dashboard: 'Dashboard',
     tracing: 'Agent Tracing',
-  models: 'Models',
+    models: 'Models',
     sessions: 'Sessions',
     agents: 'Agents',
     settings: 'Settings',
@@ -168,7 +168,8 @@ export const en = {
       },
       deleteModal: {
         title: 'Delete User',
-        description: 'Are you sure you want to delete {name} ({email})? This action cannot be undone.',
+        description:
+          'Are you sure you want to delete {name} ({email})? This action cannot be undone.',
         cancel: 'Cancel',
         confirm: 'Delete',
       },
@@ -203,7 +204,8 @@ export const en = {
       },
       deleteModal: {
         title: 'Delete API Token',
-        description: 'Are you sure you want to delete the token {label}? Applications using this token will lose access immediately.',
+        description:
+          'Are you sure you want to delete the token {label}? Applications using this token will lose access immediately.',
         cancel: 'Cancel',
         confirm: 'Delete',
       },
@@ -220,7 +222,8 @@ export const en = {
         },
         important: {
           title: 'Important!',
-          message: "This is the only time you'll see this token. Make sure to copy it now!",
+          message:
+            "This is the only time you'll see this token. Make sure to copy it now!",
         },
         display: {
           label: 'Your API Token:',
@@ -230,7 +233,8 @@ export const en = {
           copied: 'Copied!',
         },
         usage: {
-          instructions: 'Use this token in your API requests by adding it to the Authorization header:',
+          instructions:
+            'Use this token in your API requests by adding it to the Authorization header:',
           example: 'Authorization: Bearer your-token',
         },
         actions: {
@@ -378,17 +382,20 @@ export const en = {
   },
   modelWizard: {
     title: 'Register a new model',
-    subtitle: 'Connect provider credentials, configure pricing, and make this model available across your tenant.',
+    subtitle:
+      'Connect provider credentials, configure pricing, and make this model available across your tenant.',
     steps: {
       provider: {
         label: 'Select provider',
-        description: 'Choose which provider and model category you want to configure',
+        description:
+          'Choose which provider and model category you want to configure',
         selectProvider: 'Select your provider',
       },
       credentials: {
         label: 'Credentials',
         description: 'Add the credentials required to access this provider',
-        noCredentials: 'This provider does not require additional credentials. Continue to the next step.',
+        noCredentials:
+          'This provider does not require additional credentials. Continue to the next step.',
       },
       configuration: {
         label: 'Configuration',
@@ -433,11 +440,13 @@ export const en = {
       },
       isMultimodal: {
         label: 'Supports multimodal inputs',
-        description: 'Enable when the provider model accepts images or audio alongside text.',
+        description:
+          'Enable when the provider model accepts images or audio alongside text.',
       },
       supportsToolCalls: {
         label: 'Supports tool calls',
-        description: 'Expose function/tool invocation in OpenAI-compatible APIs when available.',
+        description:
+          'Expose function/tool invocation in OpenAI-compatible APIs when available.',
       },
     },
     review: {
@@ -463,7 +472,8 @@ export const en = {
       errorTitle: 'Something went wrong',
       loadProvidersError: 'Failed to load providers. Please try again later.',
       successTitle: 'Model created',
-      successMessage: 'Your model is now available for use across the workspace.',
+      successMessage:
+        'Your model is now available for use across the workspace.',
       genericError: 'An unexpected error occurred. Please try again.',
       pricingError: 'Pricing values cannot be negative.',
     },
@@ -483,7 +493,8 @@ export const en = {
       refreshedTitle: 'Data refreshed',
       refreshedMessage: 'Latest usage metrics and logs are now visible.',
       errorTitle: 'Unable to load model',
-      errorMessage: 'We could not load the model detail. Please try again shortly.',
+      errorMessage:
+        'We could not load the model detail. Please try again shortly.',
     },
     pricing: {
       title: 'Pricing per 1M tokens',

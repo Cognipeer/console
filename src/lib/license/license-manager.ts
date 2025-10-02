@@ -15,7 +15,12 @@ export interface LicensePolicy {
   };
 }
 
-export type LicenseType = 'FREE' | 'STARTER' | 'PROFESSIONAL' | 'ENTERPRISE' | 'ON_PREMISE';
+export type LicenseType =
+  | 'FREE'
+  | 'STARTER'
+  | 'PROFESSIONAL'
+  | 'ENTERPRISE'
+  | 'ON_PREMISE';
 
 export class LicenseManager {
   private static policies = policies;
@@ -39,11 +44,17 @@ export class LicenseManager {
   /**
    * Check if a license has access to a specific endpoint
    */
-  static hasEndpointAccess(licenseType: LicenseType, endpoint: string): boolean {
+  static hasEndpointAccess(
+    licenseType: LicenseType,
+    endpoint: string,
+  ): boolean {
     const features = this.getFeaturesForLicense(licenseType);
-    
+
     for (const featureKey of features) {
-      const feature = this.policies.features[featureKey as keyof typeof this.policies.features];
+      const feature =
+        this.policies.features[
+          featureKey as keyof typeof this.policies.features
+        ];
       if (!feature) continue;
 
       for (const pattern of feature.endpoints) {
@@ -77,7 +88,10 @@ export class LicenseManager {
   static getFeatureDetails(licenseType: LicenseType): FeaturePolicy[] {
     const featureKeys = this.getFeaturesForLicense(licenseType);
     return featureKeys
-      .map(key => this.policies.features[key as keyof typeof this.policies.features])
+      .map(
+        (key) =>
+          this.policies.features[key as keyof typeof this.policies.features],
+      )
       .filter(Boolean) as FeaturePolicy[];
   }
 

@@ -1,11 +1,20 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { deleteModel, getModelById, updateModel } from '@/lib/services/models/modelService';
+import {
+  deleteModel,
+  getModelById,
+  updateModel,
+} from '@/lib/services/models/modelService';
 import { resolveTenantDbName } from '@/lib/utils/tenant';
 import { IModel } from '@/lib/database/provider.interface';
 
 export const runtime = 'nodejs';
 
-const SENSITIVE_FIELDS = new Set(['apiKey', 'secretAccessKey', 'serviceAccountKey', 'sessionToken']);
+const SENSITIVE_FIELDS = new Set([
+  'apiKey',
+  'secretAccessKey',
+  'serviceAccountKey',
+  'sessionToken',
+]);
 const PLACEHOLDER = '••••••••';
 
 function sanitizeSettings(settings: Record<string, unknown>) {
@@ -27,7 +36,10 @@ function sanitizeModel(model: IModel) {
   };
 }
 
-function mergeSettings(existing: Record<string, unknown>, incoming: Record<string, unknown>) {
+function mergeSettings(
+  existing: Record<string, unknown>,
+  incoming: Record<string, unknown>,
+) {
   const merged: Record<string, unknown> = { ...existing };
 
   Object.entries(incoming).forEach(([key, value]) => {
@@ -50,7 +62,10 @@ function mergeSettings(existing: Record<string, unknown>, incoming: Record<strin
   return merged;
 }
 
-export async function GET(_request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+export async function GET(
+  _request: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+) {
   try {
     const { id } = await params;
     const tenantSlug = _request.headers.get('x-tenant-slug');
@@ -73,7 +88,10 @@ export async function GET(_request: NextRequest, { params }: { params: Promise<{
   }
 }
 
-export async function PUT(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+export async function PUT(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+) {
   try {
     const { id } = await params;
     const tenantSlug = request.headers.get('x-tenant-slug');
@@ -98,8 +116,10 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
     if (body.key !== undefined) updates.key = body.key;
     if (body.modelId !== undefined) updates.modelId = body.modelId;
     if (body.pricing !== undefined) updates.pricing = body.pricing;
-    if (body.isMultimodal !== undefined) updates.isMultimodal = body.isMultimodal;
-    if (body.supportsToolCalls !== undefined) updates.supportsToolCalls = body.supportsToolCalls;
+    if (body.isMultimodal !== undefined)
+      updates.isMultimodal = body.isMultimodal;
+    if (body.supportsToolCalls !== undefined)
+      updates.supportsToolCalls = body.supportsToolCalls;
     if (body.metadata !== undefined) updates.metadata = body.metadata;
 
     if (body.settings) {
@@ -109,7 +129,10 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
     const updated = await updateModel(tenantDbName, id, updates, userId);
 
     if (!updated) {
-      return NextResponse.json({ error: 'Failed to update model' }, { status: 500 });
+      return NextResponse.json(
+        { error: 'Failed to update model' },
+        { status: 500 },
+      );
     }
 
     return NextResponse.json({ model: sanitizeModel(updated) });
@@ -120,7 +143,10 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
   }
 }
 
-export async function DELETE(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+export async function DELETE(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+) {
   try {
     const { id } = await params;
     const tenantSlug = request.headers.get('x-tenant-slug');

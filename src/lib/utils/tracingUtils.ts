@@ -14,16 +14,18 @@ export const formatPercent = (value: number | null | undefined): string => {
 
 export const formatDuration = (ms: number | null | undefined): string => {
   if (!ms) return '—';
-  
+
   if (ms < 1000) return `${ms}ms`;
   if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
   if (ms < 3600000) return `${(ms / 60000).toFixed(1)}m`;
   return `${(ms / 3600000).toFixed(1)}h`;
 };
 
-export const formatRelativeTime = (date: Date | string | null | undefined): string => {
+export const formatRelativeTime = (
+  date: Date | string | null | undefined,
+): string => {
   if (!date) return '—';
-  
+
   const now = new Date();
   const then = new Date(date);
   const diffMs = now.getTime() - then.getTime();
@@ -36,7 +38,7 @@ export const formatRelativeTime = (date: Date | string | null | undefined): stri
   if (diffMin < 60) return `${diffMin}m ago`;
   if (diffHour < 24) return `${diffHour}h ago`;
   if (diffDay < 7) return `${diffDay}d ago`;
-  
+
   return then.toLocaleDateString();
 };
 
@@ -52,7 +54,7 @@ export const humanize = (str: string | undefined): string => {
   if (!str) return '';
   return str
     .split('_')
-    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
     .join(' ');
 };
 

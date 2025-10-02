@@ -21,7 +21,7 @@ export async function POST(request: NextRequest) {
     if (inviterRole !== 'owner' && inviterRole !== 'admin') {
       return NextResponse.json(
         { error: 'Only owners and admins can invite users' },
-        { status: 403 }
+        { status: 403 },
       );
     }
 
@@ -29,7 +29,7 @@ export async function POST(request: NextRequest) {
     if (!name || !email || !role) {
       return NextResponse.json(
         { error: 'Name, email, and role are required' },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
@@ -38,7 +38,7 @@ export async function POST(request: NextRequest) {
     if (!emailRegex.test(email)) {
       return NextResponse.json(
         { error: 'Invalid email format' },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
@@ -46,12 +46,12 @@ export async function POST(request: NextRequest) {
     if (!['user', 'admin'].includes(role)) {
       return NextResponse.json(
         { error: 'Invalid role. Must be user or admin' },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
     const db = await getDatabase();
-    
+
     // Get tenant info
     const tenant = await db.findTenantById(tenantId);
     if (!tenant) {
@@ -66,7 +66,7 @@ export async function POST(request: NextRequest) {
     if (existingUser) {
       return NextResponse.json(
         { error: 'User with this email already exists in your organization' },
-        { status: 409 }
+        { status: 409 },
       );
     }
 
@@ -94,7 +94,9 @@ export async function POST(request: NextRequest) {
       slug: tenant.slug,
       tempPassword,
       inviterName: inviterRole, // You might want to fetch the actual inviter's name
-    }).catch((err: Error) => console.error('Failed to send invitation email:', err));
+    }).catch((err: Error) =>
+      console.error('Failed to send invitation email:', err),
+    );
 
     return NextResponse.json(
       {
@@ -106,13 +108,13 @@ export async function POST(request: NextRequest) {
           role: user.role,
         },
       },
-      { status: 201 }
+      { status: 201 },
     );
   } catch (error) {
     console.error('Invite user error:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }
