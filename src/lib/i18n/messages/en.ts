@@ -50,7 +50,6 @@ export const en = {
     settings: 'Settings',
   },
   validation: {
-    companySlugRequired: 'Company slug is required',
     invalidEmail: 'Invalid email',
     passwordMinLength: 'Password must be at least 8 characters',
     nameMinLength: 'Name must be at least 2 characters',
@@ -66,11 +65,6 @@ export const en = {
       subtitle: 'Sign in to your CognipeerAI Gateway account',
     },
     form: {
-      slug: {
-        label: 'Company Slug',
-        placeholder: 'acme-corporation',
-        description: "Your company's unique identifier",
-      },
       email: {
         label: 'Email',
         placeholder: 'your@email.com',

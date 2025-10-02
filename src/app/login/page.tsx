@@ -29,12 +29,10 @@ export default function LoginPage() {
 
   const form = useForm({
     initialValues: {
-      slug: '',
       email: '',
       password: '',
     },
     validate: {
-      slug: (value) => (value.length >= 2 ? null : tValidation('companySlugRequired')),
       email: (value) => (/^\S+@\S+$/.test(value) ? null : tValidation('invalidEmail')),
       password: (value) => (value.length >= 8 ? null : tValidation('passwordMinLength')), 
     },
@@ -49,7 +47,10 @@ export default function LoginPage() {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(values),
+        body: JSON.stringify({
+          email: values.email.trim().toLowerCase(),
+          password: values.password,
+        }),
       });
 
       const data = await response.json();
@@ -99,14 +100,6 @@ export default function LoginPage() {
         <Paper withBorder shadow="md" p={30} radius="md">
           <form onSubmit={form.onSubmit(handleSubmit)}>
             <Stack gap="md">
-              <TextInput
-                label={t('form.slug.label')}
-                placeholder={t('form.slug.placeholder')}
-                required
-                description={t('form.slug.description')}
-                {...form.getInputProps('slug')}
-              />
-
               <TextInput
                 label={t('form.email.label')}
                 placeholder={t('form.email.placeholder')}

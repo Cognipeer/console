@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import bcrypt from 'bcryptjs';
-import { getDatabase } from '@/lib/database';
+import { getDatabase, ITenant } from '@/lib/database';
 import { TokenManager } from '@/lib/license/token-manager';
 import { LicenseType } from '@/lib/license/license-manager';
 
@@ -9,43 +9,126 @@ export async function POST(request: NextRequest) {
     const { email, password, slug } = await request.json();
 
     // Validation
-    if (!email || !password || !slug) {
+    if (!email || !password) {
       return NextResponse.json(
-        { error: 'Email, password, and company slug are required' },
+        { error: 'Email and password are required' },
         { status: 400 }
       );
     }
 
+    const normalizedEmail = email.trim().toLowerCase();
+
     const db = await getDatabase();
 
-    // Find tenant by slug
-    const tenant = await db.findTenantBySlug(slug);
-    if (!tenant) {
-      return NextResponse.json(
-        { error: 'Invalid company slug' },
-        { status: 401 }
-      );
-    }
+  let tenant: ITenant | null = null;
+  let user = null;
 
-    // Switch to tenant database
-    await db.switchToTenant(tenant.dbName);
+    if (slug) {
+      tenant = await db.findTenantBySlug(slug);
+      if (!tenant) {
+        return NextResponse.json(
+          { error: 'Invalid company identifier' },
+          { status: 401 }
+        );
+      }
 
-    // Find user in tenant database
-    const user = await db.findUserByEmail(email);
-    if (!user) {
-      return NextResponse.json(
-        { error: 'Invalid email or password' },
-        { status: 401 }
-      );
-    }
+      await db.switchToTenant(tenant.dbName);
+      user = await db.findUserByEmail(normalizedEmail) || await db.findUserByEmail(email);
 
-    // Verify password
-    const isPasswordValid = await bcrypt.compare(password, user.password);
-    if (!isPasswordValid) {
-      return NextResponse.json(
-        { error: 'Invalid email or password' },
-        { status: 401 }
-      );
+      if (!user) {
+        return NextResponse.json(
+          { error: 'Invalid email or password' },
+          { status: 401 }
+        );
+      }
+
+      const isPasswordValid = await bcrypt.compare(password, user.password);
+      if (!isPasswordValid) {
+        return NextResponse.json(
+          { error: 'Invalid email or password' },
+          { status: 401 }
+        );
+      }
+    } else {
+      const tenantEntries = await db.listTenantsForUser(normalizedEmail);
+      const checkedTenantIds = new Set<string>();
+
+      for (const entry of tenantEntries) {
+        checkedTenantIds.add(entry.tenantId);
+        try {
+          const candidateTenant = await db.findTenantById(entry.tenantId);
+          if (!candidateTenant) {
+            continue;
+          }
+
+          await db.switchToTenant(candidateTenant.dbName);
+          const candidateUser = await db.findUserByEmail(normalizedEmail) || await db.findUserByEmail(email);
+
+          if (!candidateUser) {
+            continue;
+          }
+
+          const isPasswordValid = await bcrypt.compare(password, candidateUser.password);
+          if (!isPasswordValid) {
+            continue;
+          }
+
+          tenant = candidateTenant;
+          user = candidateUser;
+          break;
+        } catch (err) {
+          console.error('Tenant lookup failed:', err);
+        }
+      }
+
+      if (!tenant || !user) {
+        const allTenants = await db.listTenants();
+        for (const candidateTenant of allTenants) {
+          const candidateTenantId = typeof candidateTenant._id === 'string'
+            ? candidateTenant._id
+            : candidateTenant._id?.toString();
+
+          if (!candidateTenantId || checkedTenantIds.has(candidateTenantId)) {
+            continue;
+          }
+
+          try {
+            await db.switchToTenant(candidateTenant.dbName);
+            const candidateUser = await db.findUserByEmail(normalizedEmail) || await db.findUserByEmail(email);
+
+            if (!candidateUser) {
+              continue;
+            }
+
+            const isPasswordValid = await bcrypt.compare(password, candidateUser.password);
+            if (!isPasswordValid) {
+              continue;
+            }
+
+            tenant = candidateTenant;
+            user = candidateUser;
+
+            await db.registerUserInDirectory({
+              email: candidateUser.email,
+              tenantId: candidateTenantId,
+              tenantSlug: candidateTenant.slug,
+              tenantDbName: candidateTenant.dbName,
+              tenantCompanyName: candidateTenant.companyName,
+            });
+
+            break;
+          } catch (err) {
+            console.error('Tenant fallback lookup failed:', err);
+          }
+        }
+
+        if (!tenant || !user) {
+          return NextResponse.json(
+            { error: 'Invalid email or password' },
+            { status: 401 }
+          );
+        }
+      }
     }
 
     // Generate JWT token with tenant and license information

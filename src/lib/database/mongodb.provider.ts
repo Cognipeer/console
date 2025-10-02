@@ -12,6 +12,7 @@ import {
     IModelUsageLog,
     ModelCategory,
     ModelProviderType,
+    ITenantUserDirectoryEntry,
 } from './provider.interface';
 
 export class MongoDBProvider implements DatabaseProvider {
@@ -20,6 +21,7 @@ export class MongoDBProvider implements DatabaseProvider {
     private tenantDb: Db | null = null; // Current tenant-specific database
     private readonly uri: string;
     private readonly mainDbName: string;
+    private static readonly tenantUserDirectoryCollection = 'tenant_user_directory';
 
     constructor(uri: string, mainDbName: string = 'cgate_main') {
         this.uri = uri;
@@ -66,11 +68,73 @@ export class MongoDBProvider implements DatabaseProvider {
         return this.tenantDb;
     }
 
+    private normalizeEmail(email: string): string {
+        return email.trim().toLowerCase();
+    }
+
     async switchToTenant(tenantDbName: string): Promise<void> {
         if (!this.client) {
             throw new Error('Database client not connected. Call connect() first.');
         }
         this.tenantDb = this.client.db(tenantDbName);
+    }
+
+    // Cross-tenant user directory (use main DB)
+    async registerUserInDirectory(entry: ITenantUserDirectoryEntry): Promise<void> {
+        const db = this.getMainDb();
+        const now = new Date();
+        const normalizedEmail = this.normalizeEmail(entry.email);
+
+        await db.collection(MongoDBProvider.tenantUserDirectoryCollection).updateOne(
+            {
+                email: normalizedEmail,
+                tenantId: entry.tenantId,
+            },
+            {
+                $set: {
+                    email: normalizedEmail,
+                    tenantId: entry.tenantId,
+                    tenantSlug: entry.tenantSlug,
+                    tenantDbName: entry.tenantDbName,
+                    tenantCompanyName: entry.tenantCompanyName,
+                    updatedAt: now,
+                },
+                $setOnInsert: {
+                    createdAt: now,
+                },
+            },
+            { upsert: true }
+        );
+    }
+
+    async unregisterUserFromDirectory(email: string, tenantId: string): Promise<void> {
+        const db = this.getMainDb();
+        const normalizedEmail = this.normalizeEmail(email);
+
+        await db.collection(MongoDBProvider.tenantUserDirectoryCollection).deleteOne({
+            email: normalizedEmail,
+            tenantId,
+        });
+    }
+
+    async listTenantsForUser(email: string): Promise<ITenantUserDirectoryEntry[]> {
+        const db = this.getMainDb();
+        const normalizedEmail = this.normalizeEmail(email);
+
+        const entries = await db
+            .collection<ITenantUserDirectoryEntry>(MongoDBProvider.tenantUserDirectoryCollection)
+            .find({ email: normalizedEmail })
+            .toArray();
+
+        return entries.map((entry) => ({
+            email: entry.email,
+            tenantId: entry.tenantId,
+            tenantSlug: entry.tenantSlug,
+            tenantDbName: entry.tenantDbName,
+            tenantCompanyName: entry.tenantCompanyName,
+            createdAt: entry.createdAt,
+            updatedAt: entry.updatedAt,
+        }));
     }
 
     // Tenant operations (use main DB)
@@ -114,6 +178,16 @@ export class MongoDBProvider implements DatabaseProvider {
         };
     }
 
+    async listTenants(): Promise<ITenant[]> {
+        const db = this.getMainDb();
+        const tenants = await db.collection<ITenant>('tenants').find({}).toArray();
+
+        return tenants.map((tenant) => ({
+            ...tenant,
+            _id: tenant._id?.toString(),
+        }));
+    }
+
     async updateTenant(id: string, data: Partial<ITenant>): Promise<ITenant | null> {
         const db = this.getMainDb();
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -141,7 +215,15 @@ export class MongoDBProvider implements DatabaseProvider {
     // User operations (use tenant DB)
     async findUserByEmail(email: string): Promise<IUser | null> {
         const db = this.getTenantDb();
-        const user = await db.collection<IUser>('users').findOne({ email });
+        const trimmedEmail = email.trim();
+        const normalizedEmail = this.normalizeEmail(email);
+        const user = await db.collection<IUser>('users').findOne({
+            $or: [
+                { emailLower: normalizedEmail },
+                { email: normalizedEmail },
+                { email: trimmedEmail },
+            ],
+        });
         if (!user) return null;
 
         return {
@@ -164,49 +246,123 @@ export class MongoDBProvider implements DatabaseProvider {
     async createUser(userData: Omit<IUser, '_id' | 'createdAt' | 'updatedAt'>): Promise<IUser> {
         const db = this.getTenantDb();
         const now = new Date();
+        const trimmedEmail = userData.email.trim();
+        const normalizedEmail = this.normalizeEmail(trimmedEmail);
 
-        const result = await db.collection('users').insertOne({
+        const userDocument = {
             ...userData,
+            email: trimmedEmail,
+            emailLower: normalizedEmail,
             createdAt: now,
             updatedAt: now,
-        });
+        };
 
-        return {
-            ...userData,
+        const result = await db.collection('users').insertOne(userDocument);
+
+        const createdUser: IUser = {
+            ...userDocument,
             _id: result.insertedId.toString(),
             createdAt: now,
             updatedAt: now,
         };
+
+        try {
+            const tenant = await this.findTenantById(userData.tenantId);
+            if (tenant) {
+                const tenantId = typeof tenant._id === 'string' ? tenant._id : tenant._id?.toString() ?? userData.tenantId;
+                await this.registerUserInDirectory({
+                    email: trimmedEmail,
+                    tenantId,
+                    tenantSlug: tenant.slug,
+                    tenantDbName: tenant.dbName,
+                    tenantCompanyName: tenant.companyName,
+                });
+            }
+        } catch (error) {
+            console.error('Failed to register user in directory:', error);
+        }
+
+        return createdUser;
     }
 
     async updateUser(id: string, data: Partial<IUser>): Promise<IUser | null> {
         const db = this.getTenantDb();
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const objectId = new ObjectId(id);
+        const existingUser = await db.collection<IUser>('users').findOne({ _id: objectId });
+
+        if (!existingUser) {
+            return null;
+        }
+
         const { _id, ...updateData } = data;
+        const payload: Partial<IUser> = { ...updateData };
+
+        if (payload.email) {
+            const trimmedEmail = payload.email.trim();
+            payload.email = trimmedEmail;
+            payload.emailLower = this.normalizeEmail(trimmedEmail);
+        }
+
+        payload.updatedAt = new Date();
 
         const result = await db.collection<IUser>('users').findOneAndUpdate(
-            { _id: new ObjectId(id) },
-            {
-                $set: {
-                    ...updateData,
-                    updatedAt: new Date()
-                }
-            },
+            { _id: objectId },
+            { $set: payload },
             { returnDocument: 'after' }
         );
 
-        if (!result) return null;
+        if (!result) {
+            return null;
+        }
 
-        return {
+        const updatedUser: IUser = {
             ...result,
             _id: result._id?.toString(),
         };
+
+        try {
+            const tenant = await this.findTenantById(updatedUser.tenantId);
+            if (tenant) {
+                const tenantId = typeof tenant._id === 'string' ? tenant._id : tenant._id?.toString() ?? updatedUser.tenantId;
+                if (existingUser.email && existingUser.email !== updatedUser.email) {
+                    await this.unregisterUserFromDirectory(existingUser.email, tenantId);
+                }
+                await this.registerUserInDirectory({
+                    email: updatedUser.email,
+                    tenantId,
+                    tenantSlug: tenant.slug,
+                    tenantDbName: tenant.dbName,
+                    tenantCompanyName: tenant.companyName,
+                });
+            }
+        } catch (error) {
+            console.error('Failed to sync user directory during update:', error);
+        }
+
+        return updatedUser;
     }
 
     async deleteUser(id: string): Promise<boolean> {
         const db = this.getTenantDb();
-        const result = await db.collection('users').deleteOne({ _id: new ObjectId(id) });
-        return result.deletedCount > 0;
+        const objectId = new ObjectId(id);
+        const existingUser = await db.collection<IUser>('users').findOne({ _id: objectId });
+
+        if (!existingUser) {
+            return false;
+        }
+
+        const result = await db.collection('users').deleteOne({ _id: objectId });
+        const deleted = result.deletedCount > 0;
+
+        if (deleted) {
+            try {
+                await this.unregisterUserFromDirectory(existingUser.email, existingUser.tenantId);
+            } catch (error) {
+                console.error('Failed to unregister user from directory:', error);
+            }
+        }
+
+        return deleted;
     }
 
     async listUsers(): Promise<IUser[]> {

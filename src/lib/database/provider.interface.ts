@@ -19,6 +19,7 @@ export interface ITenant {
 export interface IUser {
   _id?: ObjectId | string;
   email: string;
+  emailLower?: string;
   password: string;
   name: string;
   tenantId: string;
@@ -40,6 +41,16 @@ export interface IApiToken {
   lastUsed?: Date;
   createdAt?: Date;
   expiresAt?: Date;
+}
+
+export interface ITenantUserDirectoryEntry {
+  email: string;
+  tenantId: string;
+  tenantSlug: string;
+  tenantDbName: string;
+  tenantCompanyName: string;
+  createdAt?: Date;
+  updatedAt?: Date;
 }
 
 export interface IAgentTracingSession {
@@ -195,10 +206,16 @@ export interface DatabaseProvider {
   createTenant(tenant: Omit<ITenant, '_id' | 'createdAt' | 'updatedAt'>): Promise<ITenant>;
   findTenantBySlug(slug: string): Promise<ITenant | null>;
   findTenantById(id: string): Promise<ITenant | null>;
+  listTenants(): Promise<ITenant[]>;
   updateTenant(id: string, data: Partial<ITenant>): Promise<ITenant | null>;
   
   // Switch to tenant-specific database
   switchToTenant(tenantDbName: string): Promise<void>;
+  
+  // Cross-tenant user directory (uses main/shared database)
+  registerUserInDirectory(entry: ITenantUserDirectoryEntry): Promise<void>;
+  unregisterUserFromDirectory(email: string, tenantId: string): Promise<void>;
+  listTenantsForUser(email: string): Promise<ITenantUserDirectoryEntry[]>;
   
   // User operations (tenant-specific)
   findUserByEmail(email: string): Promise<IUser | null>;

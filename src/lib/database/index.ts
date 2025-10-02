@@ -58,4 +58,5 @@ export type {
   ModelProviderType,
   IModelPricing,
   IModelUsageCostSnapshot,
+  ITenantUserDirectoryEntry,
 } from './provider.interface';
