@@ -51,6 +51,9 @@
 }
 
 .collapseControl {
+  position: absolute;
+  top: 20px;
+  right: -14px;
   background: var(--mantine-color-gray-0);
   border: 1px solid var(--mantine-color-gray-3);
   color: var(--mantine-color-gray-7);
@@ -60,13 +63,17 @@
   align-items: center;
   justify-content: center;
   padding: 0;
-  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease,
+    border-color 120ms ease;
   flex-shrink: 0;
 }
 
 .collapseControl:hover {
   background: var(--mantine-color-gray-1);
   border-color: var(--mantine-color-gray-4);
+  color: var(--mantine-color-gray-7);
 }
 
 :global(body[data-mantine-color-scheme='dark']) .collapseControl {
@@ -85,11 +92,14 @@
   line-height: 1;
   padding: 8px 12px;
   border-radius: var(--mantine-radius-md);
+  border-left: 4px solid transparent;
   text-decoration: none;
   color: var(--text-color);
   font-weight: 500;
   margin-bottom: 4px;
-  transition: background-color 120ms ease, color 120ms ease;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
 }
 
 .menuLink:hover {
@@ -131,10 +141,12 @@
 
 .menuLinkCollapsed {
   height: 36px;
-  padding: 8px;
+  width: 51px;
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 0 !important;
+  border: none !important;
 }
 
 .searchButton {
@@ -151,7 +163,7 @@
 }
 
 .collapsedSearch {
-  width: 36px;
+  width: 51px;
   height: 36px;
   display: flex;
   align-items: center;
@@ -169,6 +181,10 @@
   flex: 1;
   display: flex;
   flex-direction: column;
+}
+
+.navLinks .mantine-ScrollArea-viewport {
+  padding: 0 !important;
 }
 
 .footer {
@@ -191,15 +207,13 @@
 
 .accountButton {
   width: 100%;
-  padding: 8px 10px;
   border-radius: var(--mantine-radius-md);
   display: flex;
   align-items: center;
-  justify-content: center;
   background: transparent;
   cursor: pointer;
-  text-align: left;
   transition: background-color 120ms ease;
+  gap: 10px;
 }
 
 .accountButton:hover {

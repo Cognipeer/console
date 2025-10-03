@@ -17,9 +17,15 @@ import {
   Table,
   ScrollArea,
   Anchor,
+  Title,
 } from '@mantine/core';
 import { DatePickerInput } from '@mantine/dates';
-import { IconCalendar, IconInfoCircle, IconRefresh } from '@tabler/icons-react';
+import {
+  IconCalendar,
+  IconInfoCircle,
+  IconPlug,
+  IconRefresh,
+} from '@tabler/icons-react';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import SessionTable from '@/components/tracing/SessionTable';
@@ -29,6 +35,8 @@ import {
   formatPercent,
   resolveStatusColor,
 } from '@/lib/utils/tracingUtils';
+import Link from 'next/link';
+import { useTranslations } from '@/lib/i18n';
 
 dayjs.extend(relativeTime);
 
@@ -72,10 +80,17 @@ interface DashboardData {
 
 export default function AgentTracingPage() {
   const router = useRouter();
+  const t = useTranslations('tracings');
+  const tNav = useTranslations('navigation');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [dashboardData, setDashboardData] = useState<DashboardData | null>(null);
-  const [dateRange, setDateRange] = useState<[Date | null, Date | null]>([null, null]);
+  const [dashboardData, setDashboardData] = useState<DashboardData | null>(
+    null,
+  );
+  const [dateRange, setDateRange] = useState<[Date | null, Date | null]>([
+    null,
+    null,
+  ]);
 
   const timezone = useMemo(() => {
     try {
@@ -133,7 +148,9 @@ export default function AgentTracingPage() {
 
   const handleShowAllSessions = (agentFilter?: string) => {
     if (agentFilter) {
-      router.push(`/dashboard/tracing/sessions?agent=${encodeURIComponent(agentFilter)}`);
+      router.push(
+        `/dashboard/tracing/sessions?agent=${encodeURIComponent(agentFilter)}`,
+      );
     } else {
       router.push('/dashboard/tracing/sessions');
     }
@@ -172,11 +189,24 @@ export default function AgentTracingPage() {
   const dailyRows = (analytics?.daily || []).slice(-7);
 
   return (
-    <Stack gap="md" p="md">
+    <Stack gap="md">
+      <Group justify="space-between" align="flex-start">
+        <div>
+          <Title order={2}>{tNav('agentTracing')}</Title>
+          <Text size="sm" c="dimmed" mt={4}>
+            {t('list.subtitle')}
+          </Text>
+        </div>
+      </Group>
+
       {/* Info Card */}
       <Card withBorder shadow="sm" p="md">
         <Group align="flex-start" gap="sm">
-          <IconInfoCircle size={20} color="var(--mantine-color-blue-6)" style={{ marginTop: 4 }} />
+          <IconInfoCircle
+            size={20}
+            color="var(--mantine-color-blue-6)"
+            style={{ marginTop: 4 }}
+          />
           <Stack gap={6}>
             <Text fw={600}>Instrument your agents quickly</Text>
             <Text size="sm" c="dimmed">
@@ -184,16 +214,20 @@ export default function AgentTracingPage() {
               <Anchor
                 href="https://www.npmjs.com/package/@cognipeer/agent-sdk"
                 target="_blank"
-                rel="noopener noreferrer"
-              >
+                rel="noopener noreferrer">
                 @cognipeer/agent-sdk
               </Anchor>{' '}
-              to instrument your Node.js agent in minutes. The SDK automatically creates sessions, events, and payload timelines.
+              to instrument your Node.js agent in minutes. The SDK automatically
+              creates sessions, events, and payload timelines.
             </Text>
             <Text size="sm" c="dimmed">
               Prefer HTTP? Generate an API key under{' '}
-              <Anchor href="/dashboard/settings">Settings → API Tokens</Anchor> and POST your agent payloads to{' '}
-              <Text component="span" ff="monospace">/api/client/tracing/sessions</Text> to stream tracing data from any stack.
+              <Anchor href="/dashboard/settings">Settings → API Tokens</Anchor>{' '}
+              and POST your agent payloads to{' '}
+              <Text component="span" ff="monospace">
+                /api/client/tracing/sessions
+              </Text>{' '}
+              to stream tracing data from any stack.
             </Text>
           </Stack>
         </Group>
@@ -205,14 +239,18 @@ export default function AgentTracingPage() {
           <Group justify="space-between" align="flex-start" wrap="wrap">
             <div>
               <Text fw={600}>Workspace Analytics</Text>
-              <Text size="sm" c="dimmed">Usage summaries across all agents</Text>
+              <Text size="sm" c="dimmed">
+                Usage summaries across all agents
+              </Text>
             </div>
             <Group gap="sm" align="flex-end">
               <DatePickerInput
                 type="range"
                 value={dateRange}
                 clearable
-                onChange={(value) => setDateRange(value as [Date | null, Date | null])}
+                onChange={(value) =>
+                  setDateRange(value as [Date | null, Date | null])
+                }
                 label="Date range"
                 w={260}
                 placeholder="Select Date Range"
@@ -224,8 +262,7 @@ export default function AgentTracingPage() {
                 color="blue"
                 onClick={() => fetchDashboard(true)}
                 loading={refreshing}
-                leftSection={<IconRefresh size={16} />}
-              >
+                leftSection={<IconRefresh size={16} />}>
                 Refresh
               </Button>
             </Group>
@@ -234,26 +271,42 @@ export default function AgentTracingPage() {
           {/* Metrics Grid */}
           <SimpleGrid cols={{ base: 1, sm: 2, md: 4 }} spacing="md">
             <Paper withBorder p="md" radius="md">
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Total Sessions</Text>
-              <Text fz={28} fw={700} mt={8}>{formatNumber(totals.sessionsCount)}</Text>
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
+                Total Sessions
+              </Text>
+              <Text fz={28} fw={700} mt={8}>
+                {formatNumber(totals.sessionsCount)}
+              </Text>
             </Paper>
             <Paper withBorder p="md" radius="md">
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Total Tokens</Text>
-              <Text fz={28} fw={700} mt={8}>{formatNumber(totals.totalTokens)}</Text>
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
+                Total Tokens
+              </Text>
+              <Text fz={28} fw={700} mt={8}>
+                {formatNumber(totals.totalTokens)}
+              </Text>
               <Text size="xs" c="dimmed" mt={4}>
                 Avg per session: {formatNumber(totals.averageTokensPerSession)}
               </Text>
             </Paper>
             <Paper withBorder p="md" radius="md">
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Total Events</Text>
-              <Text fz={28} fw={700} mt={8}>{formatNumber(totals.totalEvents)}</Text>
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
+                Total Events
+              </Text>
+              <Text fz={28} fw={700} mt={8}>
+                {formatNumber(totals.totalEvents)}
+              </Text>
               <Text size="xs" c="dimmed" mt={4}>
                 Avg duration: {formatDuration(totals.averageDurationMs)}
               </Text>
             </Paper>
             <Paper withBorder p="md" radius="md">
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Tool Error Rate</Text>
-              <Text fz={28} fw={700} mt={8}>{formatPercent(toolTotals.errorRate)}</Text>
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
+                Tool Error Rate
+              </Text>
+              <Text fz={28} fw={700} mt={8}>
+                {formatPercent(toolTotals.errorRate)}
+              </Text>
               <Text size="xs" c="dimmed" mt={4}>
                 Total calls: {formatNumber(toolTotals.totalCalls)}
               </Text>
@@ -276,13 +329,17 @@ export default function AgentTracingPage() {
                 {dailyRows.length === 0 ? (
                   <Table.Tr>
                     <Table.Td colSpan={4}>
-                      <Center c="dimmed" py="sm">No activity in the selected range.</Center>
+                      <Center c="dimmed" py="sm">
+                        No activity in the selected range.
+                      </Center>
                     </Table.Td>
                   </Table.Tr>
                 ) : (
                   dailyRows.map((row) => (
                     <Table.Tr key={row.date}>
-                      <Table.Td>{dayjs(row.date).format('MMM D, YYYY')}</Table.Td>
+                      <Table.Td>
+                        {dayjs(row.date).format('MMM D, YYYY')}
+                      </Table.Td>
                       <Table.Td>{formatNumber(row.sessionsCount)}</Table.Td>
                       <Table.Td>{formatNumber(row.totalEvents)}</Table.Td>
                       <Table.Td>{formatNumber(row.totalTokens)}</Table.Td>
@@ -296,51 +353,79 @@ export default function AgentTracingPage() {
           {/* Status, Models, Tools Breakdown */}
           <SimpleGrid cols={{ base: 1, md: 3 }} spacing="md">
             <Paper withBorder p="md" radius="md">
-              <Text fw={600} mb="sm">Status Breakdown</Text>
+              <Text fw={600} mb="sm">
+                Status Breakdown
+              </Text>
               <Stack gap={6}>
                 {(analytics?.statuses || []).map((item) => (
                   <Group key={item.status} justify="space-between">
                     <Text size="sm">{item.status || 'Unknown'}</Text>
-                    <Badge size="sm" color="blue">{formatNumber(item.count)}</Badge>
+                    <Badge size="sm" color="blue">
+                      {formatNumber(item.count)}
+                    </Badge>
                   </Group>
                 ))}
                 {(analytics?.statuses || []).length === 0 && (
-                  <Text size="sm" c="dimmed">No status data available.</Text>
+                  <Text size="sm" c="dimmed">
+                    No status data available.
+                  </Text>
                 )}
               </Stack>
             </Paper>
             <Paper withBorder p="md" radius="md">
-              <Text fw={600} mb="sm">Top Models</Text>
+              <Text fw={600} mb="sm">
+                Top Models
+              </Text>
               <Stack gap={6}>
                 {(analytics?.models || []).slice(0, 6).map((item) => (
                   <Group key={item.model} justify="space-between">
-                    <Text size="sm" lineClamp={1}>{item.model}</Text>
-                    <Badge size="sm" color="grape">{formatNumber(item.sessionsCount)}</Badge>
+                    <Text size="sm" lineClamp={1}>
+                      {item.model}
+                    </Text>
+                    <Badge size="sm" color="grape">
+                      {formatNumber(item.sessionsCount)}
+                    </Badge>
                   </Group>
                 ))}
                 {(analytics?.models || []).length === 0 && (
-                  <Text size="sm" c="dimmed">No model usage captured.</Text>
+                  <Text size="sm" c="dimmed">
+                    No model usage captured.
+                  </Text>
                 )}
               </Stack>
             </Paper>
             <Paper withBorder p="md" radius="md">
-              <Text fw={600} mb="sm">Tool Summary</Text>
+              <Text fw={600} mb="sm">
+                Tool Summary
+              </Text>
               <Stack gap={6}>
                 {toolItems.slice(0, 6).map((item) => (
-                  <Group key={item.toolName} justify="space-between" align="center">
+                  <Group
+                    key={item.toolName}
+                    justify="space-between"
+                    align="center">
                     <Stack gap={0}>
-                      <Text size="sm" fw={500}>{item.toolName}</Text>
+                      <Text size="sm" fw={500}>
+                        {item.toolName}
+                      </Text>
                       <Text size="xs" c="dimmed">
-                        {formatNumber(item.totalCalls)} calls · {formatNumber(item.errorCalls)} errors
+                        {formatNumber(item.totalCalls)} calls ·{' '}
+                        {formatNumber(item.errorCalls)} errors
                       </Text>
                     </Stack>
-                    <Badge size="sm" color={item.errorRate && item.errorRate > 0.1 ? 'red' : 'green'}>
+                    <Badge
+                      size="sm"
+                      color={
+                        item.errorRate && item.errorRate > 0.1 ? 'red' : 'green'
+                      }>
                       {formatPercent(item.errorRate)}
                     </Badge>
                   </Group>
                 ))}
                 {toolItems.length === 0 && (
-                  <Text size="sm" c="dimmed">No tool calls recorded.</Text>
+                  <Text size="sm" c="dimmed">
+                    No tool calls recorded.
+                  </Text>
                 )}
               </Stack>
             </Paper>
@@ -364,27 +449,42 @@ export default function AgentTracingPage() {
           </Group>
 
           {recentAgents.length === 0 ? (
-            <Center h={160} c="dimmed">No agents have reported activity yet.</Center>
+            <Center h={160} c="dimmed">
+              No agents have reported activity yet.
+            </Center>
           ) : (
             <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="md">
               {recentAgents.map((item: any) => {
                 const statusColor = resolveStatusColor(item.latestStatus);
                 return (
-                  <Card key={item.name} withBorder shadow="xs" radius="md" p="md">
+                  <Card
+                    key={item.name}
+                    withBorder
+                    shadow="xs"
+                    radius="md"
+                    p="md">
                     <Stack gap={8}>
                       <Group justify="space-between" align="center">
-                        <Text fw={600} lineClamp={1}>{item.label || item.name}</Text>
+                        <Text fw={600} lineClamp={1}>
+                          {item.label || item.name}
+                        </Text>
                         {item.latestStatus && (
-                          <Badge size="sm" color={statusColor}>{item.latestStatus}</Badge>
+                          <Badge size="sm" color={statusColor}>
+                            {item.latestStatus}
+                          </Badge>
                         )}
                       </Group>
-                      <Text size="xs" c="dimmed">{formatNumber(item.sessionsCount)} sessions</Text>
+                      <Text size="xs" c="dimmed">
+                        {formatNumber(item.sessionsCount)} sessions
+                      </Text>
                       {item.latestSessionAt && (
                         <Text size="xs" c="dimmed">
                           Last session {dayjs(item.latestSessionAt).fromNow()}
                         </Text>
                       )}
-                      <Button variant="light" onClick={() => handleAgentClick(item.name)}>
+                      <Button
+                        variant="light"
+                        onClick={() => handleAgentClick(item.name)}>
                         View Agent Details
                       </Button>
                     </Stack>

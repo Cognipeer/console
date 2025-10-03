@@ -30,6 +30,7 @@ import {
   IconSettings,
   IconTimeline,
   IconBrain,
+  IconChevronUp,
 } from '@tabler/icons-react';
 import { ReactNode } from 'react';
 import DashboardBreadcrumbs from './DashboardBreadcrumbs';
@@ -45,7 +46,10 @@ interface DashboardLayoutProps {
   };
 }
 
-export default function DashboardLayout({ children, user }: DashboardLayoutProps) {
+export default function DashboardLayout({
+  children,
+  user,
+}: DashboardLayoutProps) {
   const router = useRouter();
   const [opened, { toggle, close, open }] = useDisclosure(true);
   const pathname = usePathname();
@@ -115,17 +119,18 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
         breakpoint: 'sm',
         collapsed: { mobile: !opened },
       }}
-      padding="md"
-    >
+      padding="md">
       <AppShell.Navbar p="sm" className={classes.navbar} withBorder={false}>
         <Stack gap="md" className={classes.sidebarContent}>
           <Stack gap="xs" className={classes.logoRow}>
             <Group align="center" w="100%">
               <div
                 className={classes.logoInner}
-                data-opened={opened ? 'true' : undefined}
-              >
-                <Link href="/" className={classes.logoLink} aria-label="Cognipeer dashboard">
+                data-opened={opened ? 'true' : undefined}>
+                <Link
+                  href="/dashboard"
+                  className={classes.logoLink}
+                  aria-label="Cognipeer dashboard">
                   {opened ? (
                     <>
                       <Image
@@ -134,7 +139,6 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
                         width={180}
                         height={42}
                         className={classes.logoDark}
-                        priority
                       />
                       <Image
                         src="/images/cognipeer-logo-w.png"
@@ -142,33 +146,37 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
                         width={180}
                         height={42}
                         className={classes.logoLight}
-                        priority
                       />
                     </>
                   ) : (
-                    <></>
-                    // <Image
-                    //   src="/images/cognipeer-icon.png"
-                    //   alt="Cognipeer icon"
-                    //   width={100}
-                    //   height={100}
-                    //   priority
-                    // />
+                    <Image
+                      src="/images/cognipeer-icon.png"
+                      alt="Cognipeer icon"
+                      width={38}
+                      height={38}
+                    />
                   )}
                 </Link>
               </div>
 
-              <Tooltip label={collapseLabel} position="right" withArrow withinPortal>
+              <Tooltip
+                label={collapseLabel}
+                position="right"
+                withArrow
+                withinPortal>
                 <ActionIcon
                   variant="filled"
                   size="sm"
-                  radius="md"
+                  radius="lg"
                   className={classes.collapseControl}
                   visibleFrom="sm"
                   onClick={toggle}
-                  aria-label={collapseLabel}
-                >
-                  {opened ? <IconChevronsLeft size={16} /> : <IconChevronsRight size={16} />}
+                  aria-label={collapseLabel}>
+                  {opened ? (
+                    <IconChevronsLeft size={16} />
+                  ) : (
+                    <IconChevronsRight size={16} />
+                  )}
                 </ActionIcon>
               </Tooltip>
             </Group>
@@ -179,15 +187,16 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
               variant="outline"
               color="gray"
               leftSection={<IconSearch size={16} />}
-              className={classes.searchButton}
-            >
+              className={classes.searchButton}>
               <Group gap={8} justify="space-between">
                 <Text size="sm" fw={500}>
                   Search
                 </Text>
                 <span className={classes.searchShortcut}>
                   <Kbd size="xs">Ctrl</Kbd>
-                  <Text component="span" size="xs">+</Text>
+                  <Text component="span" size="xs">
+                    +
+                  </Text>
                   <Kbd size="xs">K</Kbd>
                 </span>
               </Group>
@@ -199,8 +208,7 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
                 color="gray"
                 size="lg"
                 className={classes.collapsedSearch}
-                aria-label="Search"
-              >
+                aria-label="Search">
                 <IconSearch size={18} />
               </ActionIcon>
             </Tooltip>
@@ -208,75 +216,71 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
 
           <Divider size="xs" />
 
-          <ScrollArea.Autosize mah="100%" className={classes.navLinks} offsetScrollbars>
-            <Stack gap={4}>
-              {navItems.map((item) => {
-                const itemHref = item.href;
-                const isActive = itemHref
-                  ? pathname === itemHref || pathname.startsWith(`${itemHref}/`)
-                  : false;
-                const linkClassName = [
-                  classes.menuLink,
-                  classes.mainLink,
-                  !opened ? classes.menuLinkCollapsed : '',
-                ]
-                  .filter(Boolean)
-                  .join(' ');
+          <Stack gap={4} className={classes.navLinks}>
+            {navItems.map((item) => {
+              const itemHref = item.href;
+              const isActive = itemHref
+                ? pathname === itemHref || pathname.startsWith(`${itemHref}/`)
+                : false;
+              const linkClassName = [
+                classes.menuLink,
+                classes.mainLink,
+                !opened ? classes.menuLinkCollapsed : '',
+              ]
+                .filter(Boolean)
+                .join(' ');
 
-                return (
-                  <Tooltip
-                    key={item.label}
-                    label={item.label}
-                    position="right"
-                    withArrow
-                    disabled={opened}
-                  >
-                    <Link
-                      href={itemHref}
-                      onClick={(event) => {
-                        event.preventDefault();
-                        handleNavClick(itemHref);
-                      }}
-                      data-active={isActive || undefined}
-                      className={linkClassName}
-                    >
-                      <Group gap={10} justify={opened ? 'flex-start' : 'center'}>
-                        <item.icon size={20} />
-                        {opened && <Text size="sm">{item.label}</Text>}
-                      </Group>
-                    </Link>
-                  </Tooltip>
-                );
-              })}
-            </Stack>
-          </ScrollArea.Autosize>
+              return (
+                <Tooltip
+                  key={item.label}
+                  label={item.label}
+                  position="right"
+                  withArrow
+                  disabled={opened}>
+                  <Link
+                    href={itemHref}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      handleNavClick(itemHref);
+                    }}
+                    data-active={isActive || undefined}
+                    className={linkClassName}>
+                    <Group gap={10} justify={opened ? 'flex-start' : 'center'}>
+                      <item.icon size={20} />
+                      {opened && <Text size="sm">{item.label}</Text>}
+                    </Group>
+                  </Link>
+                </Tooltip>
+              );
+            })}
+          </Stack>
 
           <div className={classes.footer}>
             <Menu shadow="md" width={220}>
               <Menu.Target>
-                <UnstyledButton className={classes.accountButton}>
-                  <Group
-                    gap="xs"
-                    justify={opened ? 'flex-start' : 'center'}
-                    wrap="nowrap"
-                  >
-                    <Avatar color="teal" radius="xl">
-                      {defaultUser.name.charAt(0)}
-                    </Avatar>
-                    {opened && (
-                      <>
-                        <div className={classes.accountDetails}>
-                          <Text size="sm" fw={500}>
-                            {defaultUser.name}
-                          </Text>
-                          <Text c="dimmed" size="xs">
-                            {defaultUser.licenseType}
-                          </Text>
-                        </div>
-                        <IconChevronDown size={16} />
-                      </>
-                    )}
-                  </Group>
+                <UnstyledButton
+                  className={classes.accountButton}
+                  style={{
+                    padding: opened ? '8px 10px' : '8px 0',
+                    justifyContent: opened ? 'unset' : 'center',
+                  }}>
+                  <Avatar color="teal" radius="xl">
+                    {defaultUser.name.charAt(0)}
+                  </Avatar>
+
+                  {opened && (
+                    <>
+                      <div className={classes.accountDetails}>
+                        <Text size="sm" fw={500}>
+                          {defaultUser.name}
+                        </Text>
+                        <Text c="dimmed" size="xs">
+                          {defaultUser.licenseType}
+                        </Text>
+                      </div>
+                      <IconChevronUp size={16} />
+                    </>
+                  )}
                 </UnstyledButton>
               </Menu.Target>
 
@@ -284,16 +288,14 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
                 <Menu.Label>{tAccount('menuLabel')}</Menu.Label>
                 <Menu.Item
                   leftSection={<IconSettings size={14} />}
-                  onClick={() => handleNavClick('/dashboard/settings')}
-                >
+                  onClick={() => handleNavClick('/dashboard/settings')}>
                   {tAccount('settings')}
                 </Menu.Item>
                 <Menu.Divider />
                 <Menu.Item
                   color="red"
                   leftSection={<IconLogout size={14} />}
-                  onClick={handleLogout}
-                >
+                  onClick={handleLogout}>
                   {tAccount('logout')}
                 </Menu.Item>
               </Menu.Dropdown>

@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   TextInput,
@@ -14,6 +14,8 @@ import {
   Stack,
   Group,
   Select,
+  Center,
+  Loader,
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
@@ -23,6 +25,7 @@ import { useTranslations } from '@/lib/i18n';
 export default function RegisterPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
+  const [checkingAuth, setCheckingAuth] = useState(true);
   const t = useTranslations('register');
   const tValidation = useTranslations('validation');
   const tNotifications = useTranslations('notifications');
@@ -47,14 +50,43 @@ export default function RegisterPage() {
       licenseType: 'FREE',
     },
     validate: {
-      name: (value) => (value.length >= 2 ? null : tValidation('nameMinLength')),
-      email: (value) => (/^\S+@\S+$/.test(value) ? null : tValidation('invalidEmail')),
-      companyName: (value) => (value.length >= 2 ? null : tValidation('companyNameMinLength')),
-      password: (value) => (value.length >= 8 ? null : tValidation('passwordMinLength')),
+      name: (value) =>
+        value.length >= 2 ? null : tValidation('nameMinLength'),
+      email: (value) =>
+        /^\S+@\S+$/.test(value) ? null : tValidation('invalidEmail'),
+      companyName: (value) =>
+        value.length >= 2 ? null : tValidation('companyNameMinLength'),
+      password: (value) =>
+        value.length >= 8 ? null : tValidation('passwordMinLength'),
       confirmPassword: (value, values) =>
         value === values.password ? null : tValidation('passwordsDoNotMatch'),
     },
   });
+
+  // Check if user is already authenticated
+  useEffect(() => {
+    const checkAuth = async () => {
+      try {
+        // Try to access a protected endpoint to check if user is authenticated
+        const response = await fetch('/api/tokens', {
+          method: 'GET',
+          credentials: 'include', // Include cookies
+        });
+
+        if (response.ok) {
+          // User is authenticated, redirect to dashboard
+          router.push('/dashboard');
+          return;
+        }
+      } catch (error) {
+        router.push('/login');
+      }
+
+      setCheckingAuth(false);
+    };
+
+    checkAuth();
+  }, [router]);
 
   const handleSubmit = async (values: typeof form.values) => {
     setLoading(true);
@@ -103,14 +135,27 @@ export default function RegisterPage() {
     }
   };
 
+  // Show loading state while checking authentication
+  if (checkingAuth) {
+    return (
+      <Center style={{ height: '100vh', width: '100vw' }}>
+        <Loader size="lg" />
+      </Center>
+    );
+  }
+
   return (
-    <Container size={420} my={60}>
-      <Stack gap="lg">
+    <Container
+      size={420}
+      py={50}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        minHeight: '100vh',
+      }}>
+      <Stack gap="lg" w="100%">
         <div style={{ textAlign: 'center' }}>
-          <Title order={1} style={{ fontSize: '2.5rem', marginBottom: '0.5rem' }}>
-            {t('hero.emoji')}
-          </Title>
-          <Title order={2} mb="xs">
+          <Title order={2} mb="xs" c="var(--mantine-color-anchor)">
             {t('hero.title')}
           </Title>
           <Text c="dimmed" size="sm">
@@ -165,11 +210,12 @@ export default function RegisterPage() {
               />
 
               <Button
+                mt="sm"
                 type="submit"
+                size="md"
                 fullWidth
                 loading={loading}
-                leftSection={<IconUserPlus size={18} />}
-              >
+                leftSection={<IconUserPlus size={18} />}>
                 {t('form.submit')}
               </Button>
             </Stack>

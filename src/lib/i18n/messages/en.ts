@@ -574,4 +574,9 @@ export const en = {
       notFound: 'This model could not be found.',
     },
   },
+  tracings: {
+    list: {
+      subtitle: 'Manage agent tracing configurations',
+    },
+  },
 };

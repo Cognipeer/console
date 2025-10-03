@@ -15,7 +15,10 @@ const SEGMENT_KEYS: Record<string, string> = {
   settings: 'settings',
 };
 
-const formatSegment = (segment: string, translate: ReturnType<typeof useTranslations>): string => {
+const formatSegment = (
+  segment: string,
+  translate: ReturnType<typeof useTranslations>,
+): string => {
   const normalized = segment.toLowerCase();
   const translationKey = SEGMENT_KEYS[normalized];
 
@@ -64,9 +67,7 @@ export default function DashboardBreadcrumbs() {
         component={Link}
         href={href}
         size="sm"
-        c="blue"
-        style={{ textTransform: 'none' }}
-      >
+        style={{ textTransform: 'none' }}>
         {label}
       </Anchor>
     );
