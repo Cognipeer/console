@@ -37,11 +37,11 @@ ingress:
     alb.ingress.kubernetes.io/target-type: ip
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
-    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:eu-central-1:339713139704:certificate/3342683a-b01e-4433-aa69-5c4f17694d25
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:eu-central-1:339713139704:certificate/fd8d2d5a-c27c-40ef-ba77-6f06f895c985
     alb.ingress.kubernetes.io/ssl-redirect: "443"
     alb.ingress.kubernetes.io/healthcheck-path: /login
   hosts:
-    - host: app.dev.getcognisense.com
+    - host: app.dev.cgate.cognipeer.com
       paths:
         - path: /
           pathType: Prefix

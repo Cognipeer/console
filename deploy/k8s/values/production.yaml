@@ -41,7 +41,7 @@ ingress:
     alb.ingress.kubernetes.io/ssl-redirect: "443"
     alb.ingress.kubernetes.io/healthcheck-path: /login
   hosts:
-    - host: app.dev.getcognisense.com
+    - host: app.cgate.cognipeer.com
       paths:
         - path: /
           pathType: Prefix
