@@ -57,6 +57,7 @@ livenessProbe:
     port: 3000
   initialDelaySeconds: 5
   periodSeconds: 5
+
 readinessProbe:
   tcpSocket:
     port: 3000
@@ -93,3 +94,4 @@ secrets:
   smtp_port: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/SMTP_PORT
   smtp_secure: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/SMTP_SECURE
   smtp_user: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/SMTP_USER
+  smtp_pass: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/SMTP_PASS
