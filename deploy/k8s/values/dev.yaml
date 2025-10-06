@@ -84,10 +84,12 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 secrets:
-  _aws_region: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/_AWS_REGION 
-  _aws_s3_bucket: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/_AWS_S3_BUCKET
-  model_name: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/MODEL_NAME
+  jwt_expires_in: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/JWT_EXPIRES_IN 
+  jwt_secret: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/JWT_SECRET
+  main_db_name: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/MAIN_DB_NAME
   mongodb_uri: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/MONGODB_URI
-  nextauth_secret: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/NEXTAUTH_SECRET
-  nextauth_url: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/NEXTAUTH_URL
-  openai_api_key: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/OPENAI_API_KEY
+  smtp_from: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/SMTP_FROM
+  smtp_host: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/SMTP_HOST
+  smtp_port: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/SMTP_PORT
+  smtp_secure: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/SMTP_SECURE
+  smtp_user: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/SMTP_USER
