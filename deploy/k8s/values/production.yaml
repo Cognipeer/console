@@ -1,0 +1,93 @@
+replicaCount: 1
+image:
+  repository: 339713139704.dkr.ecr.eu-central-1.amazonaws.com/cognipeer-cgate
+  pullPolicy: Always
+  tag: "dev"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  automount: false
+  annotations: {}
+  name: "cgate"
+
+podLabels: {}
+
+podSecurityContext: {}
+  # fsGroup: 2000
+
+securityContext:
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+service:
+  type: ClusterIP
+  port: 3000
+
+ingress:
+  enabled: true
+  className: "alb"
+  annotations:
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:eu-central-1:339713139704:certificate/3342683a-b01e-4433-aa69-5c4f17694d25
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/healthcheck-path: /login
+  hosts:
+    - host: app.dev.getcognisense.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+livenessProbe:
+  tcpSocket:
+    port: 3000
+  initialDelaySeconds: 5
+  periodSeconds: 5
+readinessProbe:
+  tcpSocket:
+    port: 3000
+  initialDelaySeconds: 5
+  periodSeconds: 5
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 100
+  targetCPUUtilizationPercentage: 80
+
+volumes:
+- configMap:
+    defaultMode: 420
+    name: mongo-ca-bundle
+  name: mongo-ca-volume
+
+volumeMounts:
+- mountPath: /app/global-bundle.pem
+  name: mongo-ca-volume
+  subPath: global-bundle.pem
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+secrets:
+  _aws_region: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/_AWS_REGION 
+  _aws_s3_bucket: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/_AWS_S3_BUCKET
+  model_name: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/MODEL_NAME
+  mongodb_uri: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/MONGODB_URI
+  nextauth_secret: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/NEXTAUTH_SECRET
+  nextauth_url: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/NEXTAUTH_URL
+  openai_api_key: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/OPENAI_API_KEY

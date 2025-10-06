@@ -40,6 +40,14 @@ spec:
           {{- end }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+          {{- range $key, $val := .Values.secrets }}
+            - name: {{ $key | upper }}
+              valueFrom:
+                secretKeyRef:
+                  name: cgate-application-secrets
+                  key: {{$key | upper }}
+          {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.service.port }}

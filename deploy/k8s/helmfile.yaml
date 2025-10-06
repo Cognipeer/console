@@ -1,0 +1,15 @@
+environments:
+  dev:
+    values:
+      - values/dev.yaml
+  production:
+    values:
+      - values/production.yaml
+---
+releases:
+  - name: cgate
+    namespace: cgate-dev
+    createNamespace: true
+    chart: ./cgate
+    values:
+    - ./values/dev.yaml
