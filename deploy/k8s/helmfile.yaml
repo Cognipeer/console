@@ -8,8 +8,8 @@ environments:
 ---
 releases:
   - name: cgate
-    namespace: cgate-dev
+    namespace: cgate-{{.Environment.Name}}
     createNamespace: true
     chart: ./cgate
     values:
-    - ./values/dev.yaml
+    - values/common.yaml.gotmpl
