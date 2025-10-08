@@ -19,6 +19,7 @@ export const en = {
   navigation: {
     models: 'Models',
     agentTracing: 'Agent Tracing',
+    vector: 'Vector Indexes',
     settings: 'Settings',
   },
   notifications: {
@@ -45,6 +46,7 @@ export const en = {
     dashboard: 'Dashboard',
     tracing: 'Agent Tracing',
     models: 'Models',
+  vector: 'Vector Indexes',
     sessions: 'Sessions',
     agents: 'Agents',
     settings: 'Settings',

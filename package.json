@@ -11,7 +11,9 @@
     "check-setup": "node scripts/check-setup.js"
   },
   "dependencies": {
-    "@aws-sdk/client-bedrock-runtime": "^3.684.0",
+  "@aws-sdk/client-bedrock-runtime": "^3.901.0",
+  "@aws-sdk/client-s3vectors": "^3.901.0",
+    "@aws-sdk/client-sts": "^3.901.0",
     "@langchain/aws": "^0.1.12",
     "@langchain/community": "latest",
     "@langchain/google-vertexai": "latest",

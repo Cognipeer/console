@@ -13,6 +13,9 @@ import {
   ModelCategory,
   ModelProviderType,
   ITenantUserDirectoryEntry,
+  IProviderRecord,
+  IVectorIndexRecord,
+  ProviderDomain,
 } from './provider.interface';
 
 export class MongoDBProvider implements DatabaseProvider {
@@ -23,6 +26,8 @@ export class MongoDBProvider implements DatabaseProvider {
   private readonly mainDbName: string;
   private static readonly tenantUserDirectoryCollection =
     'tenant_user_directory';
+  private static readonly providersCollection = 'providers';
+  private static readonly vectorIndexesCollection = 'vector_indexes';
 
   constructor(uri: string, mainDbName: string = 'cgate_main') {
     this.uri = uri;
@@ -949,5 +954,321 @@ export class MongoDBProvider implements DatabaseProvider {
       costSummary,
       timeseries,
     };
+  }
+
+  async createVectorIndex(
+    indexData: Omit<IVectorIndexRecord, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IVectorIndexRecord> {
+    const db = this.getTenantDb();
+    const now = new Date();
+
+    const document: Omit<IVectorIndexRecord, '_id'> & {
+      createdAt: Date;
+      updatedAt: Date;
+    } = {
+      ...indexData,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const result = await db
+      .collection<IVectorIndexRecord>(
+        MongoDBProvider.vectorIndexesCollection,
+      )
+      .insertOne(document as unknown as IVectorIndexRecord);
+
+    return {
+      ...document,
+      _id: result.insertedId.toString(),
+    };
+  }
+
+  async updateVectorIndex(
+    id: string,
+    data: Partial<
+      Omit<IVectorIndexRecord, 'tenantId' | 'providerKey' | 'key'>
+    >,
+  ): Promise<IVectorIndexRecord | null> {
+    const db = this.getTenantDb();
+    const objectId = new ObjectId(id);
+
+    const existing = await db
+      .collection<IVectorIndexRecord>(
+        MongoDBProvider.vectorIndexesCollection,
+      )
+      .findOne({ _id: objectId });
+
+    if (!existing) {
+      return null;
+    }
+
+    const { _id, tenantId, providerKey, key, ...updateData } =
+      data as Partial<IVectorIndexRecord>;
+    const payload: Partial<IVectorIndexRecord> = {
+      ...updateData,
+      updatedAt: new Date(),
+    };
+
+    const result = await db
+      .collection<IVectorIndexRecord>(
+        MongoDBProvider.vectorIndexesCollection,
+      )
+      .findOneAndUpdate(
+        { _id: objectId },
+        { $set: payload },
+        { returnDocument: 'after' },
+      );
+
+    if (!result) {
+      return null;
+    }
+
+    return {
+      ...result,
+      _id: result._id?.toString(),
+    };
+  }
+
+  async deleteVectorIndex(id: string): Promise<boolean> {
+    const db = this.getTenantDb();
+    const result = await db
+      .collection<IVectorIndexRecord>(
+        MongoDBProvider.vectorIndexesCollection,
+      )
+      .deleteOne({ _id: new ObjectId(id) });
+
+    return result.deletedCount > 0;
+  }
+
+  async listVectorIndexes(filters?: {
+    providerKey?: string;
+    search?: string;
+  }): Promise<IVectorIndexRecord[]> {
+    const db = this.getTenantDb();
+    const query: Record<string, unknown> = {};
+
+    if (filters?.providerKey) {
+      query.providerKey = filters.providerKey;
+    }
+
+    if (filters?.search) {
+      const regex = new RegExp(filters.search, 'i');
+      query.$or = [{ key: regex }, { name: regex }];
+    }
+
+    const indexes = await db
+      .collection<IVectorIndexRecord>(
+        MongoDBProvider.vectorIndexesCollection,
+      )
+      .find(query)
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    return indexes.map((index) => ({
+      ...index,
+      _id: index._id?.toString(),
+    }));
+  }
+
+  async findVectorIndexById(id: string): Promise<IVectorIndexRecord | null> {
+    const db = this.getTenantDb();
+    const index = await db
+      .collection<IVectorIndexRecord>(
+        MongoDBProvider.vectorIndexesCollection,
+      )
+      .findOne({ _id: new ObjectId(id) });
+
+    if (!index) {
+      return null;
+    }
+
+    return {
+      ...index,
+      _id: index._id?.toString(),
+    };
+  }
+
+  async findVectorIndexByKey(
+    providerKey: string,
+    key: string,
+  ): Promise<IVectorIndexRecord | null> {
+    const db = this.getTenantDb();
+    const index = await db
+      .collection<IVectorIndexRecord>(
+        MongoDBProvider.vectorIndexesCollection,
+      )
+      .findOne({ providerKey, key });
+
+    if (!index) {
+      return null;
+    }
+
+    return {
+      ...index,
+      _id: index._id?.toString(),
+    };
+  }
+
+  async findVectorIndexByExternalId(
+    providerKey: string,
+    externalId: string,
+  ): Promise<IVectorIndexRecord | null> {
+    const db = this.getTenantDb();
+    const index = await db
+      .collection<IVectorIndexRecord>(
+        MongoDBProvider.vectorIndexesCollection,
+      )
+      .findOne({ providerKey, externalId });
+
+    if (!index) {
+      return null;
+    }
+
+    return {
+      ...index,
+      _id: index._id?.toString(),
+    };
+  }
+
+  async createProvider(
+    provider: Omit<IProviderRecord, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IProviderRecord> {
+    const db = this.getTenantDb();
+    const now = new Date();
+    const document: Omit<IProviderRecord, '_id'> & {
+      createdAt: Date;
+      updatedAt: Date;
+    } = {
+      ...provider,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const result = await db
+      .collection<IProviderRecord>(MongoDBProvider.providersCollection)
+      .insertOne(document as unknown as IProviderRecord);
+
+    return {
+      ...document,
+      _id: result.insertedId.toString(),
+    };
+  }
+
+  async updateProvider(
+    id: string,
+    data: Partial<Omit<IProviderRecord, 'tenantId' | 'key'>>,
+  ): Promise<IProviderRecord | null> {
+    const db = this.getTenantDb();
+    const objectId = new ObjectId(id);
+
+    const existing = await db
+      .collection<IProviderRecord>(MongoDBProvider.providersCollection)
+      .findOne({ _id: objectId });
+
+    if (!existing) {
+      return null;
+    }
+
+    const { _id, tenantId, key, ...updateData } = data as Partial<IProviderRecord>;
+    const payload: Partial<IProviderRecord> = {
+      ...updateData,
+      updatedAt: new Date(),
+    };
+
+    const result = await db
+      .collection<IProviderRecord>(MongoDBProvider.providersCollection)
+      .findOneAndUpdate(
+        { _id: objectId },
+        { $set: payload },
+        { returnDocument: 'after' },
+      );
+
+    if (!result) {
+      return null;
+    }
+
+    return {
+      ...result,
+      _id: result._id?.toString(),
+    };
+  }
+
+  async findProviderById(id: string): Promise<IProviderRecord | null> {
+    const db = this.getTenantDb();
+    const provider = await db
+      .collection<IProviderRecord>(MongoDBProvider.providersCollection)
+      .findOne({ _id: new ObjectId(id) });
+
+    if (!provider) {
+      return null;
+    }
+
+    return {
+      ...provider,
+      _id: provider._id?.toString(),
+    };
+  }
+
+  async findProviderByKey(
+    tenantId: string,
+    key: string,
+  ): Promise<IProviderRecord | null> {
+    const db = this.getTenantDb();
+    const provider = await db
+      .collection<IProviderRecord>(MongoDBProvider.providersCollection)
+      .findOne({ tenantId, key });
+
+    if (!provider) {
+      return null;
+    }
+
+    return {
+      ...provider,
+      _id: provider._id?.toString(),
+    };
+  }
+
+  async listProviders(
+    tenantId: string,
+    filters?: {
+      type?: ProviderDomain;
+      driver?: string;
+      status?: IProviderRecord['status'];
+    },
+  ): Promise<IProviderRecord[]> {
+    const db = this.getTenantDb();
+    const query: Record<string, unknown> = { tenantId };
+
+    if (filters?.type) {
+      query.type = filters.type;
+    }
+
+    if (filters?.driver) {
+      query.driver = filters.driver;
+    }
+
+    if (filters?.status) {
+      query.status = filters.status;
+    }
+
+    const providers = await db
+      .collection<IProviderRecord>(MongoDBProvider.providersCollection)
+      .find(query)
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    return providers.map((provider) => ({
+      ...provider,
+      _id: provider._id?.toString(),
+    }));
+  }
+
+  async deleteProvider(id: string): Promise<boolean> {
+    const db = this.getTenantDb();
+    const result = await db
+      .collection<IProviderRecord>(MongoDBProvider.providersCollection)
+      .deleteOne({ _id: new ObjectId(id) });
+
+    return result.deletedCount > 0;
   }
 }

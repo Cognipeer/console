@@ -5,6 +5,7 @@
  * Checks if all required environment variables and dependencies are configured
  */
 
+/* eslint-disable @typescript-eslint/no-require-imports */
 const fs = require('fs');
 const path = require('path');
 
@@ -73,8 +74,6 @@ function checkEnvFile() {
 
 function checkDependencies() {
   console.log('\n🔍 Checking dependencies...\n');
-  
-  const packageJsonPath = path.join(__dirname, '..', 'package.json');
   const nodeModulesPath = path.join(__dirname, '..', 'node_modules');
   
   if (!fs.existsSync(nodeModulesPath)) {

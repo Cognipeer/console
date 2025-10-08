@@ -131,6 +131,53 @@ export interface IModelPricing {
   cachedTokenPer1M?: number;
 }
 
+export type ProviderDomain =
+  | 'model'
+  | 'embedding'
+  | 'vector'
+  | 'file'
+  | 'datasource';
+
+export interface IProviderRecordStatus {
+  status: 'active' | 'disabled' | 'errored';
+}
+
+export interface IProviderRecord
+  extends Partial<IProviderRecordStatus> {
+  _id?: ObjectId | string;
+  tenantId: string;
+  key: string;
+  type: ProviderDomain;
+  driver: string;
+  label: string;
+  description?: string;
+  status: NonNullable<IProviderRecordStatus['status']>;
+  credentialsEnc: string;
+  settings: Record<string, unknown>;
+  capabilitiesOverride?: string[];
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IVectorIndexRecord {
+  _id?: ObjectId | string;
+  tenantId: string;
+  providerKey: string;
+  key: string;
+  name: string;
+  externalId: string;
+  dimension: number;
+  metric: 'cosine' | 'dot' | 'euclidean';
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
 export interface IModel {
   _id?: ObjectId | string;
   tenantId: string;
@@ -290,4 +337,52 @@ export interface DatabaseProvider {
     modelKey: string,
     options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month' },
   ): Promise<IModelUsageAggregate>;
+
+  // Vector index operations (tenant-specific)
+  createVectorIndex(
+    index: Omit<IVectorIndexRecord, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IVectorIndexRecord>;
+  updateVectorIndex(
+    id: string,
+    data: Partial<
+      Omit<IVectorIndexRecord, 'tenantId' | 'providerKey' | 'key'>
+    >,
+  ): Promise<IVectorIndexRecord | null>;
+  deleteVectorIndex(id: string): Promise<boolean>;
+  listVectorIndexes(filters?: {
+    providerKey?: string;
+    search?: string;
+  }): Promise<IVectorIndexRecord[]>;
+  findVectorIndexById(id: string): Promise<IVectorIndexRecord | null>;
+  findVectorIndexByKey(
+    providerKey: string,
+    key: string,
+  ): Promise<IVectorIndexRecord | null>;
+  findVectorIndexByExternalId(
+    providerKey: string,
+    externalId: string,
+  ): Promise<IVectorIndexRecord | null>;
+
+  // Shared provider registry (tenant-specific)
+  createProvider(
+    provider: Omit<IProviderRecord, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IProviderRecord>;
+  updateProvider(
+    id: string,
+    data: Partial<Omit<IProviderRecord, 'tenantId' | 'key'>>,
+  ): Promise<IProviderRecord | null>;
+  findProviderById(id: string): Promise<IProviderRecord | null>;
+  findProviderByKey(
+    tenantId: string,
+    key: string,
+  ): Promise<IProviderRecord | null>;
+  listProviders(
+    tenantId: string,
+    filters?: {
+      type?: ProviderDomain;
+      driver?: string;
+      status?: IProviderRecord['status'];
+    },
+  ): Promise<IProviderRecord[]>;
+  deleteProvider(id: string): Promise<boolean>;
 }

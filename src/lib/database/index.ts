@@ -61,4 +61,7 @@ export type {
   IModelPricing,
   IModelUsageCostSnapshot,
   ITenantUserDirectoryEntry,
+  ProviderDomain,
+  IProviderRecord,
+  IVectorIndexRecord,
 } from './provider.interface';

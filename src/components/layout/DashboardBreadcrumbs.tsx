@@ -13,6 +13,7 @@ const SEGMENT_KEYS: Record<string, string> = {
   sessions: 'sessions',
   agents: 'agents',
   settings: 'settings',
+  vector: 'vector',
 };
 
 const formatSegment = (

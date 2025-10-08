@@ -44,8 +44,10 @@
       "name": "Vector Store",
       "description": "Store and query vector embeddings",
       "endpoints": [
-        "/api/vectors",
-        "/api/vectors/*"
+        "/api/vector",
+        "/api/vector/*",
+        "/api/client/vector",
+        "/api/client/vector/*"
       ]
     },
     "API_KEYS": {
@@ -66,7 +68,8 @@
         "USER_MANAGEMENT",
         "LLM_CHAT",
         "API_KEYS",
-        "MODEL_MANAGEMENT"
+        "MODEL_MANAGEMENT",
+        "VECTOR_STORE"
       ],
       "limits": {
         "requestsPerMonth": 1000,

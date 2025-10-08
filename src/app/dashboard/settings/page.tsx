@@ -40,6 +40,7 @@ export default function SettingsPage() {
           <Tabs.Panel value="tokens" pt="md">
             <TokenManagement />
           </Tabs.Panel>
+
         </Tabs>
       </Paper>
     </Stack>

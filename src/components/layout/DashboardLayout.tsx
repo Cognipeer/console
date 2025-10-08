@@ -30,6 +30,7 @@ import {
   IconSettings,
   IconTimeline,
   IconBrain,
+  IconVectorBezier,
 } from '@tabler/icons-react';
 import { ReactNode } from 'react';
 import DashboardBreadcrumbs from './DashboardBreadcrumbs';
@@ -84,6 +85,11 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
       label: tNav('models'),
       icon: IconBrain,
       href: '/dashboard/models',
+    },
+    {
+      label: tNav('vector'),
+      icon: IconVectorBezier,
+      href: '/dashboard/vector',
     },
     {
       label: tNav('agentTracing'),
