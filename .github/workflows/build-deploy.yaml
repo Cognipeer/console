@@ -92,8 +92,7 @@ jobs:
       - name: Apply changes
         run: |
           pushd deploy/k8s
-            echo "The environment is ${TAG} "
-            #helmfile sync -e "${steps.vars.outputs.tag}"
+            helmfile sync -e "${TAG}"
           popd
         env:
           TAG: ${{ steps.vars.outputs.tag }}
