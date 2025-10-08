@@ -17,7 +17,7 @@ env:
 
 jobs:
   docker:
-    runs-on: arc-runner
+    runs-on: runner
     steps:
       - name: Checkout
         uses: actions/checkout@v4
