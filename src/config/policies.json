@@ -65,30 +65,6 @@
         "/api/tokens",
         "/api/tokens/*"
       ]
-    },
-    "AGENT_TRACING": {
-      "name": "Agent SDK Tracing",
-      "description": "Monitor and trace agent execution with detailed analytics",
-      "endpoints": [
-        "/api/tracing",
-        "/api/tracing/*"
-      ]
-    },
-    "MODEL_MANAGEMENT": {
-      "name": "Model Management",
-      "description": "Create and manage custom LLM and embedding providers",
-      "endpoints": [
-        "/api/models",
-        "/api/models/*"
-      ]
-    },
-    "MODEL_ANALYTICS": {
-      "name": "Model Analytics",
-      "description": "View request logs, token usage, and cost analytics per model",
-      "endpoints": [
-        "/api/models/*/usage",
-        "/api/models/*/logs"
-      ]
     }
   },
   "licenses": {
@@ -97,10 +73,7 @@
       "features": [
         "USER_MANAGEMENT",
         "LLM_CHAT",
-        "API_KEYS",
-        "AGENT_TRACING",
-        "MODEL_ANALYTICS",
-        "MODEL_MANAGEMENT"
+        "API_KEYS"
       ],
       "limits": {
         "requestsPerMonth": 1000,
@@ -112,8 +85,7 @@
       "features": [
         "LLM_CHAT",
         "LLM_EMBEDDINGS",
-        "API_KEYS",
-        "MODEL_MANAGEMENT"
+        "API_KEYS"
       ],
       "limits": {
         "requestsPerMonth": 10000,
@@ -128,10 +100,7 @@
         "AGENT_ORCHESTRATION",
         "VECTOR_STORE",
         "API_KEYS",
-        "ANALYTICS",
-        "AGENT_TRACING",
-        "MODEL_MANAGEMENT",
-        "MODEL_ANALYTICS"
+        "ANALYTICS"
       ],
       "limits": {
         "requestsPerMonth": 100000,
@@ -148,10 +117,7 @@
         "VECTOR_STORE",
         "WORKFLOW_AUTOMATION",
         "ANALYTICS",
-        "API_KEYS",
-        "AGENT_TRACING",
-        "MODEL_MANAGEMENT",
-        "MODEL_ANALYTICS"
+        "API_KEYS"
       ],
       "limits": {
         "requestsPerMonth": -1,
@@ -168,10 +134,7 @@
         "VECTOR_STORE",
         "WORKFLOW_AUTOMATION",
         "ANALYTICS",
-        "API_KEYS",
-        "AGENT_TRACING",
-        "MODEL_MANAGEMENT",
-        "MODEL_ANALYTICS"
+        "API_KEYS"
       ],
       "limits": {
         "requestsPerMonth": -1,
