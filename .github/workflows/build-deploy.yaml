@@ -3,6 +3,8 @@ name: Cgate Build Artifact
 on:
   push:
     branches:
+    - main
+    - production
     - infra/fix-gh-action
 
 permissions:
@@ -17,7 +19,49 @@ env:
 
 jobs:
   docker:
-    runs-on: self-hosted-runner
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::339713139704:role/GitHubActionsECRPushRole
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set image tag
+        id: vars
+        run: |
+          if [[ "${GITHUB_REF_NAME}" == "main" ]]; then
+            echo "tag=dev" >> $GITHUB_OUTPUT
+          elif [[ "${GITHUB_REF_NAME}" == "production" ]]; then
+            echo "tag=production" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build & Push to ECR
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.vars.outputs.tag }}
+
+  deploy:
+    runs-on: self-hosted-runner-cgate
     steps:
       - name: Checkout
         uses: actions/checkout@v4
