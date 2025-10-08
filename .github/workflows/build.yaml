@@ -5,6 +5,7 @@ on:
     branches:
     - main
     - production
+    - infra/fix-gh-action
 
 permissions:
   id-token: write
@@ -59,4 +60,27 @@ jobs:
             ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
             ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.vars.outputs.tag }}
 
+  deploy:
+    runs-on: self-hosted-runner
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Install Helmfile
+        run: |
+          curl -fsSL -o /tmp/helmfile.tgz \
+            https://github.com/helmfile/helmfile/releases/download/${HELMFILE_VERSION}/helmfile_${HELMFILE_VERSION#v}_linux_amd64.tar.gz
+          sudo tar -C /usr/local/bin -xzf /tmp/helmfile.tgz helmfile
+          helmfile --version
+
+      - name: Apply changes
+        run: |
+          mkdir -p out
+          pushd deploy/k8s
+            helmfile sync -e "${steps.vars.outputs.tag}"
+          popd
