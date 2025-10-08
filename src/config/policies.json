@@ -24,6 +24,14 @@
         "/api/llm/embeddings/*"
       ]
     },
+    "MODEL_MANAGEMENT": {
+      "name": "Model Management",
+      "description": "Manage and deploy AI models",
+      "endpoints": [
+        "/api/models",
+        "/api/models/*"
+      ]
+    },
     "AGENT_ORCHESTRATION": {
       "name": "Agent Orchestration",
       "description": "Create and manage AI agents",
@@ -38,22 +46,6 @@
       "endpoints": [
         "/api/vectors",
         "/api/vectors/*"
-      ]
-    },
-    "WORKFLOW_AUTOMATION": {
-      "name": "Workflow Automation",
-      "description": "Create automated workflows",
-      "endpoints": [
-        "/api/workflows",
-        "/api/workflows/*"
-      ]
-    },
-    "ANALYTICS": {
-      "name": "Analytics & Monitoring",
-      "description": "Access analytics and monitoring features",
-      "endpoints": [
-        "/api/analytics",
-        "/api/analytics/*"
       ]
     },
     "API_KEYS": {
@@ -73,7 +65,8 @@
       "features": [
         "USER_MANAGEMENT",
         "LLM_CHAT",
-        "API_KEYS"
+        "API_KEYS",
+        "MODEL_MANAGEMENT"
       ],
       "limits": {
         "requestsPerMonth": 1000,

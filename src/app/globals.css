@@ -4,8 +4,7 @@
   --max-width: 1100px;
   --border-radius: 12px;
   --foreground-rgb: 0, 0, 0;
-  --background-start-rgb: 214, 219, 220;
-  --background-end-rgb: 255, 255, 255;
+  background-color: var(--mantine-color-gray-0);
   --primary-glow: conic-gradient(
     from 180deg at 50% 50%,
     #16abff33 0deg,
@@ -205,6 +204,7 @@ nextjs-portal {
 
 .mantine-AppShell-navbar {
   border-color: var(--mantine-color-gray-2) !important;
+  background-color: var(--mantine-color-body);
 }
 
 .mantine-SegmentedControl-label {
