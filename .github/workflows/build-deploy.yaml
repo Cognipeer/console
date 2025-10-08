@@ -18,7 +18,7 @@ env:
   HELMFILE_VERSION: v0.162.0
 
 jobs:
-  docker:
+  build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -62,6 +62,7 @@ jobs:
 
   deploy:
     runs-on: self-hosted-runner-cgate
+    needs: build
     steps:
       - name: Checkout
         uses: actions/checkout@v4
