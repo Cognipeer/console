@@ -3,8 +3,6 @@ name: Cgate Build Artifact
 on:
   push:
     branches:
-    - main
-    - production
     - infra/fix-gh-action
 
 permissions:
