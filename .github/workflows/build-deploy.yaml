@@ -81,7 +81,7 @@ jobs:
           else
             echo "tag=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
           fi
-          
+
       - name: Install Helmfile
         run: |
           curl -fsSL -o /tmp/helmfile.tgz \
@@ -92,6 +92,8 @@ jobs:
       - name: Apply changes
         run: |
           pushd deploy/k8s
-            echo "The environment is ${steps.vars.outputs.tag} "
+            echo "The environment is ${TAG} "
             #helmfile sync -e "${steps.vars.outputs.tag}"
           popd
+        env:
+          TAG: ${{ steps.vars.outputs.tag }}
