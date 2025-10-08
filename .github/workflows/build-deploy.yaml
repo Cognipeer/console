@@ -22,12 +22,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Test image
-        id: vars
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Install Helmfile
         run: |
-          hostname -i
-          curl ifconfig.co
-          curl http://checkip.amazonaws.com
+          curl -fsSL -o /tmp/helmfile.tgz \
+            https://github.com/helmfile/helmfile/releases/download/${HELMFILE_VERSION}/helmfile_${HELMFILE_VERSION#v}_linux_amd64.tar.gz
+          sudo tar -C /usr/local/bin -xzf /tmp/helmfile.tgz helmfile
+          helmfile --version
 
-
-
+      - name: Render manifests with Helmfile
+        run: |
+          mkdir -p out
+          pushd deploy/k8s
+            helmfile -e "dev" template
+          popd
