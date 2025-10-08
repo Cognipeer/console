@@ -1,0 +1,35 @@
+name: Cgate Build Artifact
+
+on:
+  push:
+    branches:
+    - main
+    - production
+    - infra/fix-gh-action
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: eu-central-1
+  ECR_REPOSITORY: cognipeer-cgate
+  HELM_VERSION: v3.15.2
+  HELMFILE_VERSION: v0.162.0
+
+jobs:
+  docker:
+    runs-on: self-hosted-runner
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Test image
+        id: vars
+        run: |
+          hostname -i
+          curl ifconfig.co
+          curl http://checkip.amazonaws.com
+
+
+
