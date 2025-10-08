@@ -40,5 +40,6 @@ jobs:
     steps:
       - name: Apply changes
         run: |
-          echo "The environment is ${steps.vars.outputs.tag} "
+          export VAR="${ steps.vars.outputs.tag } "
+          echo "The environment is $VAR"
           #helmfile sync -e "${steps.vars.outputs.tag}"
