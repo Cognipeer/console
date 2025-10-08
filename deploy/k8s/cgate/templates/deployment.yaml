@@ -23,6 +23,7 @@ spec:
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+        checksum/secret-values: {{ toYaml .Values.secrets | sha256sum | trunc 7}}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
