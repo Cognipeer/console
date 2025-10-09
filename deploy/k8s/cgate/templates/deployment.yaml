@@ -11,7 +11,6 @@ spec:
   selector:
     matchLabels:
       {{- include "cgate.selectorLabels" . | nindent 6 }}
-      checksum/secret-values: {{ toYaml .Values.secrets | sha256sum | trunc 7}}
   template:
     metadata:
       {{- with .Values.podAnnotations }}

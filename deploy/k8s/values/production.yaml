@@ -32,20 +32,16 @@ service:
 
 ingress:
   enabled: true
-  className: "alb"
-  annotations:
-    alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.kubernetes.io/scheme: internet-facing
-    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
-    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:eu-central-1:339713139704:certificate/a4086d49-62ab-4f5c-a38e-2a4389394e3c
-    alb.ingress.kubernetes.io/ssl-redirect: "443"
-    alb.ingress.kubernetes.io/healthcheck-path: /login
+  className: "production"
   hosts:
-    - host: app.cgate.cognipeer.com
+    - host: app.cgate.ai
       paths:
         - path: /
           pathType: Prefix
-  tls: []
+  tls:
+  - hosts:
+    - app.cgate.ai
+    secretName: cgate-production-tls
 
 resources:
   requests:
@@ -95,3 +91,7 @@ secrets:
   smtp_secure: ref+awssecrets://cgate-application-credentials-production?region=eu-central-1#/SMTP_SECURE
   smtp_user: ref+awssecrets://cgate-application-credentials-production?region=eu-central-1#/SMTP_USER
   smtp_pass: ref+awssecrets://cgate-application-credentials-production?region=eu-central-1#/SMTP_PASS
+
+tls_secrets:
+  fullchain_pem: ref+awssecrets://production_tls_certificate_chain?region=eu-central-1#/fullchain.pem
+  privatekey_pem: ref+awssecrets://production_tls_certificate_chain?region=eu-central-1#/privkey.pem
