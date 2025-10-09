@@ -184,7 +184,9 @@ export interface IModel {
   name: string;
   description?: string;
   key: string;
-  provider: ModelProviderType;
+  providerKey: string;
+  providerDriver: string;
+  provider?: ModelProviderType; // deprecated; retained for backwards compatibility
   category: ModelCategory;
   modelId: string;
   isMultimodal?: boolean;
@@ -320,7 +322,9 @@ export interface DatabaseProvider {
   deleteModel(id: string): Promise<boolean>;
   listModels(filters?: {
     category?: ModelCategory;
-    provider?: ModelProviderType;
+    provider?: ModelProviderType; // deprecated
+    providerKey?: string;
+    providerDriver?: string;
   }): Promise<IModel[]>;
   findModelById(id: string): Promise<IModel | null>;
   findModelByKey(key: string): Promise<IModel | null>;

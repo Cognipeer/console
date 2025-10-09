@@ -1,5 +1,6 @@
 import crypto from 'crypto';
-import { buildChatModel, buildEmbeddingModel } from './langchainBuilder';
+import type { AIMessage, AIMessageChunk } from '@langchain/core/messages';
+import { IModel } from '@/lib/database';
 import { getModelByKey } from './modelService';
 import {
   toLangChainMessages,
@@ -7,12 +8,102 @@ import {
   toOpenAIStreamChunk,
   summarizeUsage,
 } from './openaiAdapter';
+
 import { logModelUsage, TokenUsage } from './usageLogger';
-import { IModel } from '@/lib/database';
+import { buildModelRuntime } from './runtimeService';
 
 const encoder = new TextEncoder();
 
-function sanitizeForLogging(payload: any, maxLength = 20000) {
+interface ChatRunnable {
+  bind(overrides: Record<string, unknown>): ChatRunnable;
+  invoke(input: unknown): Promise<AIMessage>;
+  stream?(input: unknown): AsyncIterable<AIMessageChunk> | Promise<AsyncIterable<AIMessageChunk>>;
+}
+
+function ensureChatRunnable(value: unknown): ChatRunnable {
+  if (!value || typeof value !== 'object') {
+    throw new Error('Model provider returned an invalid chat runtime.');
+  }
+
+  const candidate = value as Partial<ChatRunnable>;
+  if (typeof candidate.bind !== 'function' || typeof candidate.invoke !== 'function') {
+    throw new Error('Model provider returned an invalid chat runtime.');
+  }
+
+  return candidate as ChatRunnable;
+}
+
+type EmbeddingVector = number[] | Float32Array | { values: number[] };
+
+interface EmbeddingRunnable {
+  embedDocuments(inputs: string[]): Promise<EmbeddingVector[]>;
+}
+
+function ensureEmbeddingRunnable(value: unknown): EmbeddingRunnable {
+  if (!value || typeof value !== 'object') {
+    throw new Error('Model provider returned an invalid embedding runtime.');
+  }
+
+  const candidate = value as Partial<EmbeddingRunnable>;
+  if (typeof candidate.embedDocuments !== 'function') {
+    throw new Error('Model provider returned an invalid embedding runtime.');
+  }
+
+  return candidate as EmbeddingRunnable;
+}
+
+function normalizeEmbeddingVector(vector: EmbeddingVector): number[] {
+  if (Array.isArray(vector)) {
+    return vector;
+  }
+
+  if (vector instanceof Float32Array) {
+    return Array.from(vector);
+  }
+
+  if (
+    vector &&
+    typeof vector === 'object' &&
+    Array.isArray((vector as { values?: unknown }).values)
+  ) {
+    return (vector as { values: number[] }).values;
+  }
+
+  return [];
+}
+
+type ToolCallPayload = {
+  id?: string;
+  type?: string;
+  function?: {
+    name?: string;
+    arguments?: string;
+  };
+};
+
+function getToolCallCount(message: AIMessage): number {
+  const toolCalls = (message as { tool_calls?: unknown }).tool_calls;
+  if (!Array.isArray(toolCalls)) {
+    return 0;
+  }
+
+  return toolCalls.length;
+}
+
+interface ChatCompletionRequestBody extends Record<string, unknown> {
+  messages?: unknown;
+  stream?: unknown;
+  request_id?: string;
+}
+
+interface EmbeddingRequestBody extends Record<string, unknown> {
+  input?: string | string[];
+  request_id?: string;
+  input_tokens?: number;
+  inputTokenCount?: number;
+}
+
+function sanitizeForLogging(payload: unknown, maxLength = 20000) {
   if (payload === null || payload === undefined) {
     return payload;
   }
@@ -31,7 +122,7 @@ function sanitizeForLogging(payload: any, maxLength = 20000) {
   }
 }
 
-function buildOverrides(body: any) {
+function buildOverrides(body: Record<string, unknown>) {
   const overrides: Record<string, unknown> = {};
   const fields = [
     'temperature',
@@ -48,12 +139,13 @@ function buildOverrides(body: any) {
     }
   });
 
-  if (body.stop) overrides.stop = body.stop;
-  if (body.tools) overrides.tools = body.tools;
-  if (body.tool_choice) overrides.tool_choice = body.tool_choice;
-  if (body.response_format) overrides.response_format = body.response_format;
-  if (body.modality) overrides.modality = body.modality;
-  if (body.max_output_tokens)
+  if (body.stop !== undefined) overrides.stop = body.stop;
+  if (body.tools !== undefined) overrides.tools = body.tools;
+  if (body.tool_choice !== undefined) overrides.tool_choice = body.tool_choice;
+  if (body.response_format !== undefined)
+    overrides.response_format = body.response_format;
+  if (body.modality !== undefined) overrides.modality = body.modality;
+  if (body.max_output_tokens !== undefined)
     overrides.max_output_tokens = body.max_output_tokens;
 
   return overrides;
@@ -74,16 +166,19 @@ function ensureEmbeddingModel(model: IModel) {
 export async function handleChatCompletion(params: {
   tenantDbName: string;
   modelKey: string;
-  body: any;
+  body: ChatCompletionRequestBody;
   stream?: boolean;
 }) {
   const { tenantDbName, modelKey, body, stream } = params;
 
-  if (!body?.messages || !Array.isArray(body.messages)) {
+  if (!Array.isArray(body?.messages)) {
     throw new Error('`messages` array is required');
   }
 
-  const requestId = body?.request_id || crypto.randomUUID();
+  const requestId =
+    typeof body.request_id === 'string' && body.request_id.length > 0
+      ? body.request_id
+      : crypto.randomUUID();
   const start = Date.now();
 
   const model = await getModelByKey(tenantDbName, modelKey);
@@ -93,23 +188,43 @@ export async function handleChatCompletion(params: {
 
   ensureLlmModel(model);
 
-  const messages = toLangChainMessages(body.messages);
+  const { runtime } = await buildModelRuntime(
+    tenantDbName,
+    model.tenantId,
+    model.providerKey,
+  );
+
+  if (!runtime.createChatModel) {
+    throw new Error('Model provider does not support chat completions');
+  }
+
+  const messagesInput = body.messages as Parameters<typeof toLangChainMessages>[0];
+  const messages = toLangChainMessages(messagesInput);
   const overrides = buildOverrides(body);
 
-  const chatModel = buildChatModel(model, { streaming: Boolean(stream) });
+  const chatModel = ensureChatRunnable(await runtime.createChatModel({
+    modelId: model.modelId,
+    category: model.category,
+    modelSettings: model.settings,
+    options: { streaming: Boolean(stream) },
+  }));
   const runnable = Object.keys(overrides).length
     ? chatModel.bind(overrides)
     : chatModel;
 
   if (stream) {
+    if (typeof runnable.stream !== 'function') {
+      throw new Error('Model provider does not support streaming responses');
+    }
+
     const asyncIterator = await runnable.stream(messages);
     const startedAt = Date.now();
 
     const readable = new ReadableStream<Uint8Array>({
       async start(controller) {
-        let aggregatedChunk: any = null;
+        let aggregatedChunk: AIMessageChunk | null = null;
         let lastUsage: TokenUsage | undefined;
-        const toolCalls: any[] = [];
+  const toolCalls: ToolCallPayload[] = [];
 
         try {
           for await (const chunk of asyncIterator) {
@@ -117,9 +232,10 @@ export async function handleChatCompletion(params: {
               ? aggregatedChunk.concat(chunk)
               : chunk;
 
-            if (chunk.tool_calls) {
-              chunk.tool_calls.forEach((call: any) => {
-                toolCalls.push(call);
+            const chunkToolCalls = (chunk as { tool_calls?: unknown }).tool_calls;
+            if (Array.isArray(chunkToolCalls)) {
+              chunkToolCalls.forEach((call) => {
+                toolCalls.push(call as ToolCallPayload);
               });
             }
 
@@ -148,9 +264,9 @@ export async function handleChatCompletion(params: {
           const latencyMs = Date.now() - startedAt;
           const usage: TokenUsage = lastUsage
             ? {
-                ...lastUsage,
-                toolCalls: toolCalls.length || undefined,
-              }
+              ...lastUsage,
+              toolCalls: toolCalls.length || undefined,
+            }
             : { toolCalls: toolCalls.length || undefined };
 
           const providerResponse = aggregatedChunk
@@ -171,8 +287,9 @@ export async function handleChatCompletion(params: {
             latencyMs,
             usage,
           });
-        } catch (error: any) {
+        } catch (error: unknown) {
           const latencyMs = Date.now() - startedAt;
+          const errorMessage = error instanceof Error ? error.message : 'Unknown error';
           await logModelUsage(tenantDbName, model, {
             requestId,
             route: 'chat.completions',
@@ -183,8 +300,8 @@ export async function handleChatCompletion(params: {
               overrides,
               stream: true,
             }),
-            providerResponse: sanitizeForLogging({ error: error?.message }),
-            errorMessage: error?.message,
+            providerResponse: sanitizeForLogging({ error: errorMessage }),
+            errorMessage,
             latencyMs,
             usage: {},
           });
@@ -205,9 +322,7 @@ export async function handleChatCompletion(params: {
   });
 
   const usage = summarizeUsage(aiMessage) as TokenUsage;
-  const toolCallCount = Array.isArray((aiMessage as any).tool_calls)
-    ? (aiMessage as any).tool_calls.length
-    : 0;
+  const toolCallCount = getToolCallCount(aiMessage);
   if (toolCallCount) {
     usage.toolCalls = toolCallCount;
   }
@@ -233,7 +348,7 @@ export async function handleChatCompletion(params: {
 export async function handleEmbeddingRequest(params: {
   tenantDbName: string;
   modelKey: string;
-  body: any;
+  body: EmbeddingRequestBody;
 }) {
   const { tenantDbName, modelKey, body } = params;
 
@@ -251,8 +366,29 @@ export async function handleEmbeddingRequest(params: {
 
   ensureEmbeddingModel(model);
 
-  const embedder = buildEmbeddingModel(model);
-  const inputs = Array.isArray(body.input) ? body.input : [body.input];
+  const { runtime } = await buildModelRuntime(
+    tenantDbName,
+    model.tenantId,
+    model.providerKey,
+  );
+
+  if (!runtime.createEmbeddingModel) {
+    throw new Error('Model provider does not support embeddings');
+  }
+
+  const embedder = ensureEmbeddingRunnable(await runtime.createEmbeddingModel({
+    modelId: model.modelId,
+    category: model.category,
+    modelSettings: model.settings,
+  }));
+  const rawInput = body.input;
+  const inputsArray = Array.isArray(rawInput) ? rawInput : [rawInput];
+  const inputs = inputsArray.map((value) => {
+    if (typeof value !== 'string') {
+      throw new Error('`input` must be a string or an array of strings');
+    }
+    return value;
+  });
 
   const embeddings = await embedder.embedDocuments(inputs);
   const latencyMs = Date.now() - start;
@@ -288,13 +424,11 @@ export async function handleEmbeddingRequest(params: {
   return {
     response: {
       object: 'list',
-      data: embeddings.map(
-        (vector: number[] | Float32Array, index: number) => ({
-          object: 'embedding',
-          index,
-          embedding: Array.from(vector),
-        }),
-      ),
+      data: embeddings.map((vector, index) => ({
+        object: 'embedding',
+        index,
+        embedding: normalizeEmbeddingVector(vector),
+      })),
       model: model.modelId,
       usage: {
         prompt_tokens: usage.inputTokens ?? 0,

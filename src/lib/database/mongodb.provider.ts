@@ -653,6 +653,7 @@ export class MongoDBProvider implements DatabaseProvider {
 
     const modelDoc = {
       ...model,
+      provider: model.provider ?? (model.providerDriver as ModelProviderType | undefined),
       pricing,
       createdAt: now,
       updatedAt: now,
@@ -685,6 +686,10 @@ export class MongoDBProvider implements DatabaseProvider {
       };
     }
 
+    if (rest.providerDriver !== undefined && rest.provider === undefined) {
+      updateData.provider = rest.providerDriver as ModelProviderType;
+    }
+
     const result = await db
       .collection<IModel>('models')
       .findOneAndUpdate(
@@ -714,9 +719,11 @@ export class MongoDBProvider implements DatabaseProvider {
   async listModels(filters?: {
     category?: ModelCategory;
     provider?: ModelProviderType;
+    providerKey?: string;
+    providerDriver?: string;
   }): Promise<IModel[]> {
     const db = this.getTenantDb();
-    const query: Record<string, string> = {};
+    const query: Record<string, unknown> = {};
 
     if (filters?.category) {
       query.category = filters.category;
@@ -724,6 +731,14 @@ export class MongoDBProvider implements DatabaseProvider {
 
     if (filters?.provider) {
       query.provider = filters.provider;
+    }
+
+    if (filters?.providerKey) {
+      query.providerKey = filters.providerKey;
+    }
+
+    if (filters?.providerDriver) {
+      query.providerDriver = filters.providerDriver;
     }
 
     const models = await db

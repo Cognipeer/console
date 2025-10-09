@@ -10,7 +10,6 @@ import {
   Textarea,
   Select,
   Switch,
-  Group,
 } from '@mantine/core';
 import type { UseFormReturnType } from '@mantine/form';
 import type { ProviderFormSchema, ProviderFormField } from '@/lib/providers';
@@ -34,12 +33,13 @@ function renderField(
     description: field.description,
     withAsterisk: field.required,
     disabled,
+    style: { width: '100%' },
     ...form.getInputProps(field.name),
   } as const;
 
   switch (field.type) {
     case 'password':
-      return <PasswordInput {...commonProps} />;
+      return <PasswordInput {...commonProps}/>;
     case 'number':
       return <NumberInput {...commonProps} />;
     case 'textarea':
@@ -95,11 +95,7 @@ export function ProviderFormRenderer({ schema, form, disabled }: ProviderFormRen
             </div>
           )}
           <Stack gap="sm">
-            {section.fields.map((field) => (
-              <Group key={field.name} align="flex-start">
-                {renderField(field, form, disabled)}
-              </Group>
-            ))}
+            {section.fields.map((field) => renderField(field, form, disabled))}
           </Stack>
         </Stack>
       ))}

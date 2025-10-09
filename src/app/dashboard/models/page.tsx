@@ -7,7 +7,6 @@ import {
   ActionIcon,
   Badge,
   Button,
-  Card,
   Center,
   Group,
   Loader,
@@ -23,6 +22,9 @@ import {
 } from '@mantine/core';
 import { IconChartBar, IconEdit, IconEye, IconPlug, IconPlus, IconRefresh, IconTool } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import type { ModelProviderView } from '@/lib/services/models/types';
+import CreateModelModal from '@/components/models/CreateModelModal';
+import type { IModel } from '@/lib/database';
 
 interface ModelPricing {
   currency?: string;
@@ -36,7 +38,9 @@ interface ModelDto {
   name: string;
   description?: string;
   key: string;
-  provider: string;
+  provider?: string; // deprecated legacy field
+  providerKey: string;
+  providerDriver: string;
   category: 'llm' | 'embedding';
   modelId: string;
   isMultimodal?: boolean;
@@ -47,17 +51,11 @@ interface ModelDto {
   updatedAt?: string;
 }
 
-interface ProviderDefinitionDto {
-  id: string;
-  label: string;
-  description: string;
-  categories: Array<'llm' | 'embedding'>;
-}
-
 export default function ModelsPage() {
   const [models, setModels] = useState<ModelDto[]>([]);
-  const [providers, setProviders] = useState<ProviderDefinitionDto[]>([]);
+  const [providers, setProviders] = useState<ModelProviderView[]>([]);
   const [loading, setLoading] = useState(true);
+  const [createModalOpen, setCreateModalOpen] = useState(false);
   const t = useTranslations('models');
   const tNav = useTranslations('navigation');
   const router = useRouter();
@@ -70,8 +68,8 @@ export default function ModelsPage() {
         throw new Error('Failed to load models');
       }
       const data = await response.json();
-      setModels(data.models ?? []);
-      setProviders(data.providers ?? []);
+      setModels((data.models ?? []) as ModelDto[]);
+      setProviders((data.providers ?? []) as ModelProviderView[]);
     } catch (error) {
       console.error('Failed to load models', error);
     } finally {
@@ -83,8 +81,60 @@ export default function ModelsPage() {
     loadModels();
   }, []);
 
+  const openCreateModal = () => {
+    setCreateModalOpen(true);
+  };
+
+  const handleProviderCreated = (provider: ModelProviderView) => {
+    setProviders((current) => {
+      const filtered = current.filter((existing) => existing.key !== provider.key);
+      const next = [...filtered, provider];
+      next.sort((a, b) => a.label.localeCompare(b.label));
+      return next;
+    });
+  };
+
+  const handleModelCreated = ({ model, provider }: { model: IModel; provider: ModelProviderView }) => {
+    const normalized: ModelDto = {
+      _id: String(model._id ?? crypto.randomUUID()),
+      name: model.name,
+      description: model.description,
+      key: model.key,
+      provider: model.provider,
+      providerKey: model.providerKey,
+      providerDriver: model.providerDriver,
+      category: model.category,
+      modelId: model.modelId,
+      isMultimodal: model.isMultimodal,
+      supportsToolCalls: model.supportsToolCalls,
+      pricing: model.pricing as ModelPricing,
+      settings: model.settings ?? {},
+      createdAt: model.createdAt ? String(model.createdAt) : undefined,
+      updatedAt: model.updatedAt ? String(model.updatedAt) : undefined,
+    };
+
+    setModels((current) => {
+      const filtered = current.filter((existing) => existing._id !== normalized._id);
+      return [normalized, ...filtered];
+    });
+    setProviders((current) => {
+      if (current.some((existing) => existing.key === provider.key)) {
+        return current;
+      }
+      return [...current, provider];
+    });
+    loadModels();
+  };
+
   const llmModels = useMemo(() => models.filter((model) => model.category === 'llm'), [models]);
   const embeddingModels = useMemo(() => models.filter((model) => model.category === 'embedding'), [models]);
+  const providerLookup = useMemo(() => {
+    const map = new Map<string, ModelProviderView>();
+    providers.forEach((provider) => {
+      map.set(provider.key, provider);
+    });
+    return map;
+  }, [providers]);
 
   const renderPricing = (pricing: ModelPricing) => {
     const currency = pricing.currency || 'USD';
@@ -130,7 +180,7 @@ export default function ModelsPage() {
                     <Text size="sm" c="dimmed">
                       {t('list.empty')}
                     </Text>
-                    <Button component={Link} href="/dashboard/models/new" leftSection={<IconPlus size={16} />} variant="light">
+                    <Button onClick={openCreateModal} leftSection={<IconPlus size={16} />} variant="light">
                       {t('actions.create')}
                     </Button>
                   </Stack>
@@ -161,7 +211,7 @@ export default function ModelsPage() {
               </Table.Td>
               <Table.Td>
                 <Badge color="gray" variant="light" size="sm">
-                  {providers.find((provider) => provider.id === model.provider)?.label || model.provider}
+                  {providerLookup.get(model.providerKey)?.label || model.provider || model.providerKey}
                 </Badge>
               </Table.Td>
               <Table.Td>
@@ -247,7 +297,7 @@ export default function ModelsPage() {
           <Button variant="light" leftSection={<IconRefresh size={16} />} onClick={loadModels}>
             {t('actions.refresh')}
           </Button>
-          <Button component={Link} href="/dashboard/models/new" leftSection={<IconPlug size={16} />}>
+          <Button onClick={openCreateModal} leftSection={<IconPlug size={16} />}>
             {t('actions.create')}
           </Button>
         </Group>
@@ -319,6 +369,14 @@ export default function ModelsPage() {
           {renderModelTable(embeddingModels)}
         </Stack>
       </Stack>
+
+      <CreateModelModal
+        opened={createModalOpen}
+        onClose={() => setCreateModalOpen(false)}
+        providers={providers}
+        onProviderCreated={handleProviderCreated}
+        onCreated={handleModelCreated}
+      />
     </Stack>
   );
 }

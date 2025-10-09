@@ -33,22 +33,22 @@ export interface UpdateVectorIndexRequest {
   updatedBy: string;
 }
 
-export interface VectorUpsertRequest {
+interface VectorIndexLocator {
   providerKey: string;
-  indexKey: string;
+  indexKey?: string;
+  indexExternalId?: string;
+}
+
+export interface VectorUpsertRequest extends VectorIndexLocator {
   vectors: VectorUpsertItem[];
   updatedBy?: string;
 }
 
-export interface VectorQueryRequest {
-  providerKey: string;
-  indexKey: string;
+export interface VectorQueryRequest extends VectorIndexLocator {
   query: VectorQueryInput;
 }
 
-export interface VectorDeleteRequest {
-  providerKey: string;
-  indexKey: string;
+export interface VectorDeleteRequest extends VectorIndexLocator {
   ids: string[];
   updatedBy?: string;
 }

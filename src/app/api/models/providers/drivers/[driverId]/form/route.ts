@@ -17,7 +17,7 @@ export async function GET(
   const { driverId } = await context.params;
     const schema = providerRegistry.getFormSchema(driverId);
     const descriptor = providerRegistry
-      .listDescriptors('vector')
+      .listDescriptors('model')
       .find((item) => item.id === driverId);
 
     return NextResponse.json(
@@ -29,7 +29,7 @@ export async function GET(
       { status: 200 },
     );
   } catch (error) {
-    console.error('Get vector provider driver form error', error);
+    console.error('Get model provider driver form error', error);
     return NextResponse.json(
       {
         error:

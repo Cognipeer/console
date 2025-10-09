@@ -1,48 +1,15 @@
-import {
-  IModel,
-  IModelPricing,
-  ModelCategory,
-  ModelProviderType,
-} from '@/lib/database';
-
-export type CredentialFieldType = 'text' | 'password' | 'select';
-
-export interface ProviderCredentialField {
-  name: string;
-  label: string;
-  type: CredentialFieldType;
-  required: boolean;
-  placeholder?: string;
-  description?: string;
-  options?: Array<{ label: string; value: string }>;
-}
-
-export interface ProviderModelOption {
-  value: string;
-  label: string;
-  capabilities?: {
-    multimodal?: boolean;
-    toolCalls?: boolean;
-  };
-}
-
-export interface ProviderDefinition {
-  id: ModelProviderType;
-  label: string;
-  description: string;
-  categories: ModelCategory[];
-  credentialFields: ProviderCredentialField[];
-  defaultPricingCurrency: string;
-  modelIdHint?: string;
-  supportsCustomBaseUrl?: boolean;
-  options?: ProviderModelOption[];
-}
+import type { IModel, IModelPricing, ModelCategory } from '@/lib/database';
+import type { ProviderCapabilityFlags } from '@/lib/providers';
+import type {
+  CreateProviderConfigInput,
+  ProviderConfigView,
+} from '@/lib/services/providers/providerService';
 
 export interface CreateModelInput {
   name: string;
   description?: string;
   key?: string;
-  provider: ModelProviderType;
+  providerKey: string;
   category: ModelCategory;
   modelId: string;
   pricing: IModelPricing;
@@ -56,6 +23,9 @@ export interface UpdateModelInput {
   name?: string;
   description?: string;
   key?: string;
+  category?: ModelCategory;
+  providerKey?: string;
+  providerDriver?: string;
   modelId?: string;
   pricing?: IModelPricing;
   settings?: Record<string, unknown>;
@@ -79,4 +49,33 @@ export interface ModelInvocationResult {
     totalTokens?: number;
   };
   latencyMs?: number;
+}
+
+export type ModelProviderView = ProviderConfigView & {
+  driverCapabilities?: ProviderCapabilityFlags;
+};
+
+export type CreateModelProviderInput = Omit<CreateProviderConfigInput, 'type'>;
+
+export type ProviderCredentialFieldType = 'text' | 'password' | 'select';
+
+export interface ProviderCredentialField {
+  name: string;
+  label: string;
+  type: ProviderCredentialFieldType;
+  required?: boolean;
+  placeholder?: string;
+  description?: string;
+  options?: { label: string; value: string }[];
+}
+
+export interface ProviderDefinition {
+  id: string;
+  label: string;
+  description: string;
+  categories: ModelCategory[];
+  credentialFields: ProviderCredentialField[];
+  defaultPricingCurrency: string;
+  supportsCustomBaseUrl?: boolean;
+  modelIdHint?: string;
 }

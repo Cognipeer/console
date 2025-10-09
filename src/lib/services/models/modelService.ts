@@ -5,10 +5,21 @@ import {
   IModelUsageAggregate,
   IModelUsageLog,
   ModelCategory,
-  ModelProviderType,
 } from '@/lib/database';
-import { CreateModelInput, UpdateModelInput } from './types';
-import { PROVIDER_DEFINITIONS } from './providerCatalog';
+import { providerRegistry } from '@/lib/providers';
+import {
+  createProviderConfig,
+  getProviderConfigByKey,
+  listProviderConfigs,
+  type ProviderConfigView,
+  type ProviderStatus,
+} from '@/lib/services/providers/providerService';
+import type {
+  CreateModelInput,
+  UpdateModelInput,
+  ModelProviderView,
+  CreateModelProviderInput,
+} from './types';
 
 const SLUG_OPTIONS = {
   lower: true,
@@ -17,6 +28,65 @@ const SLUG_OPTIONS = {
 };
 
 const MAX_KEY_ATTEMPTS = 50;
+const MODEL_CATEGORY_CAPABILITY_KEY = 'model.categories';
+
+function attachDriverCapabilities(provider: ProviderConfigView): ModelProviderView {
+  try {
+    const contract = providerRegistry.getContract(provider.driver);
+    return {
+      ...provider,
+      driverCapabilities: contract.capabilities,
+    };
+  } catch (error) {
+    console.warn(
+      'Model provider contract missing for driver',
+      provider.driver,
+      error instanceof Error ? error.message : error,
+    );
+  }
+
+  return { ...provider };
+}
+
+async function requireModelProvider(
+  tenantDbName: string,
+  tenantId: string,
+  providerKey: string,
+): Promise<ModelProviderView> {
+  const provider = await getProviderConfigByKey(tenantDbName, tenantId, providerKey);
+
+  if (!provider) {
+    throw new Error('Model provider configuration not found.');
+  }
+
+  if (provider.type !== 'model') {
+    throw new Error('Provider is not configured for model operations.');
+  }
+
+  return attachDriverCapabilities(provider);
+}
+
+function ensureProviderSupportsCategory(
+  provider: ModelProviderView,
+  category: ModelCategory,
+) {
+  const rawCategories = provider.driverCapabilities?.[MODEL_CATEGORY_CAPABILITY_KEY];
+  if (!Array.isArray(rawCategories)) {
+    return;
+  }
+
+  const categories = rawCategories.filter((value): value is ModelCategory =>
+    value === 'llm' || value === 'embedding',
+  );
+
+  if (categories.length === 0) {
+    return;
+  }
+
+  if (!categories.includes(category)) {
+    throw new Error('Selected provider does not support requested category');
+  }
+}
 
 function normalizeKeyCandidate(input: string): string {
   const fallback = input?.trim().length ? input.trim() : 'model';
@@ -34,17 +104,9 @@ function ensureCurrency(
   };
 }
 
-function getProviderDefinition(provider: ModelProviderType) {
-  const definition = PROVIDER_DEFINITIONS.find((item) => item.id === provider);
-  if (!definition) {
-    throw new Error(`Unsupported provider: ${provider}`);
-  }
-  return definition;
-}
-
 export async function listModels(
   tenantDbName: string,
-  filters?: { category?: ModelCategory; provider?: ModelProviderType },
+  filters?: { category?: ModelCategory; providerKey?: string; providerDriver?: string },
 ): Promise<IModel[]> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
@@ -83,11 +145,13 @@ export async function createModel(
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
 
-  const providerDefinition = getProviderDefinition(payload.provider);
+  const provider = await requireModelProvider(
+    tenantDbName,
+    tenantId,
+    payload.providerKey,
+  );
 
-  if (!providerDefinition.categories.includes(payload.category)) {
-    throw new Error('Selected provider does not support requested category');
-  }
+  ensureProviderSupportsCategory(provider, payload.category);
 
   const keyCandidate = payload.key || payload.name;
   const key = await generateUniqueKey(tenantDbName, keyCandidate);
@@ -97,13 +161,16 @@ export async function createModel(
     name: payload.name,
     description: payload.description,
     key,
-    provider: payload.provider,
+    providerKey: provider.key,
+    providerDriver: provider.driver,
     category: payload.category,
     modelId: payload.modelId,
     pricing: ensureCurrency(payload.pricing),
     settings: payload.settings,
     isMultimodal: payload.isMultimodal ?? false,
-    supportsToolCalls: payload.supportsToolCalls ?? false,
+    supportsToolCalls:
+      payload.supportsToolCalls ??
+      Boolean(provider.driverCapabilities?.['model.supports.tool_calls']),
     metadata: payload.metadata || {},
     createdBy: userId,
     updatedBy: userId,
@@ -136,6 +203,22 @@ export async function updateModel(
 
   if (updates.key && updates.key !== existing.key) {
     updatePayload.key = await generateUniqueKey(tenantDbName, updates.key);
+  }
+
+  if (updates.providerKey && updates.providerKey !== existing.providerKey) {
+    const provider = await requireModelProvider(
+      tenantDbName,
+      existing.tenantId,
+      updates.providerKey,
+    );
+
+    ensureProviderSupportsCategory(provider, updates.category ?? existing.category);
+
+    updatePayload.providerKey = provider.key;
+    updatePayload.providerDriver = provider.driver;
+    updatePayload.supportsToolCalls =
+      updates.supportsToolCalls ??
+      Boolean(provider.driverCapabilities?.['model.supports.tool_calls']);
   }
 
   if (userId) {
@@ -192,6 +275,35 @@ export async function getUsageAggregate(
   return db.aggregateModelUsage(modelKey, options);
 }
 
-export function getProviderDefinitions() {
-  return PROVIDER_DEFINITIONS;
+export async function listModelProviders(
+  tenantDbName: string,
+  tenantId: string,
+  filters?: {
+    status?: ProviderStatus;
+    driver?: string;
+  },
+): Promise<ModelProviderView[]> {
+  const providers = await listProviderConfigs(tenantDbName, tenantId, {
+    type: 'model',
+    ...(filters ?? {}),
+  });
+
+  return providers.map((provider) => attachDriverCapabilities(provider));
+}
+
+export async function createModelProvider(
+  tenantDbName: string,
+  tenantId: string,
+  payload: CreateModelProviderInput,
+): Promise<ModelProviderView> {
+  const provider = await createProviderConfig(tenantDbName, tenantId, {
+    ...payload,
+    type: 'model',
+  });
+
+  return attachDriverCapabilities(provider);
+}
+
+export function listModelDriverDescriptors() {
+  return providerRegistry.listDescriptors('model');
 }

@@ -123,6 +123,94 @@ import { sendEmail } from '@/lib/email/mailer';
 await sendEmail(email, 'welcome', { name, companyName, slug, licenseType });
 ```
 
+## Provider Architecture
+
+### Contract Model
+
+- Contracts live in `src/lib/providers/contracts` and must conform to the `ProviderContract` shape defined in `src/lib/providers/types.ts`.
+- Each contract declares its `id`, semantic `version`, supported `domains` (for example, `vector`, `model`), a `display` configuration, optional `capabilities`, a `form` schema, and a `createRuntime` factory that returns a domain-specific runtime.
+- Contracts are aggregated in `CORE_PROVIDER_CONTRACTS` (`src/lib/providers/contracts/index.ts`) and auto-registered by the `ProviderRegistry` on first use.
+
+### Provider Registry & Domains
+
+- `ProviderRegistry` (`src/lib/providers/registry.ts`) manages contract registration, descriptor listings, and runtime creation.
+- Domain-specific runtime contracts live under `src/lib/providers/domains/*`:
+  - `vector.ts` defines the `VectorProviderRuntime` interface (index CRUD, vector upsert/query/delete).
+  - `model.ts` defines chat/embedding runtime capabilities and capability flags.
+- Use `providerRegistry.listDescriptors(domain)` to expose drivers to the UI, and `providerRegistry.createRuntime(contractId, context)` to obtain a runtime for execution.
+
+### Form Schemas & UI Rendering
+
+- The modal UI renders credential/settings forms from the contract schema via `ProviderFormRenderer` (see `src/components/providers`).
+- Form field definitions (`ProviderFormSection` + `ProviderFormField`) support types like `text`, `password`, `select`, `switch`, etc., and can scope fields to `credentials`, `settings`, or `metadata`.
+- Keep labels, placeholders, and descriptions meaningful; the renderer auto-expands fields to the modal width.
+
+### Provider Configuration Lifecycle
+
+1. Provider descriptors are surfaced to tenants via helpers such as `listVectorDrivers` (vector drivers use `providerRegistry.listDescriptors('vector')`).
+2. Creating a configuration persists provider metadata/credentials with `createProviderConfig` (vector-specific wrappers reside in `src/lib/services/vector/vectorService.ts`).
+3. When executing runtime operations, call `loadProviderRuntimeData` to hydrate stored credentials/settings and then `providerRegistry.createRuntime` with a context that includes tenant identifiers, provider key, credentials, settings, metadata, and a scoped logger.
+4. Always guard runtime usage with helpers like `ensureVectorProvider` to validate provider type/status before making remote calls.
+
+### Adding or Updating Providers
+
+1. Create a new contract file under `src/lib/providers/contracts` or extend the domain-specific aggregations (for example, `MODEL_PROVIDER_CONTRACTS`).
+2. Export the contract through `CORE_PROVIDER_CONTRACTS` so it auto-registers.
+3. Declare the appropriate domain(s) and implement the runtime factory. Reuse shared utility loggers for consistent diagnostics.
+4. Update the provider form schema to collect any additional credentials/settings. Validate with the UI to ensure the new fields render correctly.
+5. If the provider unlocks new capabilities, extend `capabilities` so the UI and services can conditionally enable features.
+
+## Vector & Model Runtime Services
+
+### Vector Workflow (`src/lib/services/vector/vectorService.ts`)
+
+- Provides tenant-scoped helpers to list available drivers, create provider configs, and manage vector indexes.
+- Uses slug helpers to derive unique index keys (`generateUniqueIndexKey`) and validates vector dimensionality before upserts.
+- `buildRuntimeContext` resolves provider credentials, ensures the provider is active, and instantiates the `VectorProviderRuntime`.
+- CRUD helpers (`createVectorIndex`, `listVectorIndexes`, `updateVectorIndex`, `deleteVectorIndex`, `upsertVectors`, `queryVectors`, etc.) wrap runtime calls with database bookkeeping and metadata merging.
+- All functions require the tenant DB name and tenant ID. Derive these from `requireApiToken` in API routes or tenant context in server actions.
+
+### Model Inference (`src/lib/services/models/inferenceService.ts`)
+
+- `handleChatCompletion` and `handleEmbeddingRequest` provide OpenAI-compatible responses for chat and embedding workloads.
+- Both helpers resolve model metadata with `getModelByKey`, validate model category (LLM vs embedding), and build a provider runtime via `buildModelRuntime`.
+- Chat completions support streaming. Responses are converted to OpenAI wire formats via adapters (`toOpenAIChatResponse`, `toOpenAIStreamChunk`).
+- Usage data is sanitized (`sanitizeForLogging`) and persisted through `logModelUsage`, capturing request payloads, latency, token usage, and tool call metadata.
+- When extending inference features (new overrides, modalities, or tool behaviors), update `buildOverrides` and ensure usage logging continues to serialize safely.
+
+## Client-Facing API (`src/app/api/client/v1`)
+
+### Placement & Authentication Policy
+
+- **All** endpoints consumable via customer API tokens must live under `src/app/api/client/v1`. This keeps the external surface versioned and discoverable.
+- Use the shared `requireApiToken` helper (`src/lib/services/apiTokenAuth.ts`) at the top of each handler. It validates the `Authorization: Bearer <token>` header, resolves tenant context, switches to the tenant database, and surfaces the token record.
+- Return structured errors with `NextResponse.json({ error: message }, { status })`. Wrap low-level failures with descriptive logs while avoiding credential leakage.
+
+### Existing Endpoints
+
+| Route | Method | Description |
+| --- | --- | --- |
+| `/api/client/v1/chat/completions` | `POST` | OpenAI-compatible chat completions with optional streaming (`handleChatCompletion`). |
+| `/api/client/v1/embeddings` | `POST` | OpenAI-compatible embeddings (`handleEmbeddingRequest`). |
+| `/api/client/v1/vector/providers` | `GET` | List tenant vector providers with optional status/driver filters. |
+| `/api/client/v1/vector/providers` | `POST` | Create a vector provider configuration for the tenant. |
+| `/api/client/v1/vector/providers/:providerKey/indexes` | `GET` | List indexes for a provider (metadata normalized via `serializeIndex`). |
+| `/api/client/v1/vector/providers/:providerKey/indexes` | `POST` | Create or reuse a vector index; deduplicates by normalized name. |
+| `/api/client/v1/vector/providers/:providerKey/indexes/:externalId` | `GET` | Fetch index metadata alongside provider capabilities. |
+| `/api/client/v1/vector/providers/:providerKey/indexes/:externalId` | `PATCH` | Update index name/metadata. |
+| `/api/client/v1/vector/providers/:providerKey/indexes/:externalId` | `DELETE` | Delete an index and detach remote resources. |
+
+- When adding new routes, keep the folder structure RESTful (`/client/v1/<domain>/<resource>/route.ts`). Expose only tenant-scoped data and sanitize logs via `sanitize` helpers as shown in existing handlers.
+- Default `export const runtime = 'nodejs';` for streaming support and consistency.
+- Use `ApiTokenAuthError` for standardized error responses from `requireApiToken`.
+
+### Request & Response Guidelines
+
+- Validate all required fields with clear 400 responses before invoking services.
+- Sanitize provider responses (e.g., trim large payloads) before logging with `logModelUsage` to protect sensitive data.
+- Include `request_id` in responses to help users correlate requests with usage logs. Reuse client-provided IDs when available.
+- Wrap runtime operations in `try/catch` and log errors with scoped messages (`console.error('[scope]', error)`), mirroring patterns in chat/embedding routes.
+
 ## Project Structure
 
 ```
@@ -171,6 +259,7 @@ src/
 const db = await getDatabase();
 // Use db.* methods
 ```
+5. **Expose customer APIs under `/api/client/v1`** – if an endpoint is reachable with API tokens, place it in this namespace and use `requireApiToken` for authentication.
 
 ### Adding New Database Methods
 
@@ -284,6 +373,7 @@ Required variables (see `.env.example`):
 1. Create file in `src/app/api/[feature]/route.ts`
 2. Add endpoint pattern to relevant feature in `policies.json`
 3. Middleware will automatically enforce access control
+4. If the endpoint must be reachable via API tokens, place it under `src/app/api/client/v1` and follow the client API guidelines above.
 
 ### Customizing UI Theme
 
@@ -354,5 +444,5 @@ Create users with different `licenseType` values and verify feature access.
 
 ---
 
-**Last Updated**: September 30, 2025
+**Last Updated**: October 9, 2025
 **Version**: 1.0.0

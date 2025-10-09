@@ -240,6 +240,38 @@ async function requireVectorIndexRecord(
   return record;
 }
 
+async function requireVectorIndexRecordByExternalId(
+  db: DatabaseProvider,
+  providerKey: string,
+  externalId: string,
+): Promise<VectorIndexRecord> {
+  const record = await db.findVectorIndexByExternalId(providerKey, externalId);
+  if (!record) {
+    throw new Error('Vector index metadata not found.');
+  }
+  return record;
+}
+
+async function resolveVectorIndexRecord(
+  db: DatabaseProvider,
+  providerKey: string,
+  identifiers: { indexKey?: string; indexExternalId?: string },
+): Promise<VectorIndexRecord> {
+  if (identifiers.indexKey) {
+    return requireVectorIndexRecord(db, providerKey, identifiers.indexKey);
+  }
+
+  if (identifiers.indexExternalId) {
+    return requireVectorIndexRecordByExternalId(
+      db,
+      providerKey,
+      identifiers.indexExternalId,
+    );
+  }
+
+  throw new Error('Vector index identifier is required.');
+}
+
 export async function listVectorDrivers() {
   return providerRegistry.listDescriptors('vector');
 }
@@ -443,11 +475,7 @@ export async function upsertVectors(
   );
 
   const db = await withTenantDb(tenantDbName);
-  const index = await requireVectorIndexRecord(
-    db,
-    request.providerKey,
-    request.indexKey,
-  );
+  const index = await resolveVectorIndexRecord(db, request.providerKey, request);
 
   validateVectors(index, request.vectors);
 
@@ -470,11 +498,7 @@ export async function deleteVectors(
   );
 
   const db = await withTenantDb(tenantDbName);
-  const index = await requireVectorIndexRecord(
-    db,
-    request.providerKey,
-    request.indexKey,
-  );
+  const index = await resolveVectorIndexRecord(db, request.providerKey, request);
 
   await runtime.deleteVectors(toRuntimeHandle(index), request.ids);
 }
@@ -491,11 +515,7 @@ export async function queryVectorIndex(
   );
 
   const db = await withTenantDb(tenantDbName);
-  const index = await requireVectorIndexRecord(
-    db,
-    request.providerKey,
-    request.indexKey,
-  );
+  const index = await resolveVectorIndexRecord(db, request.providerKey, request);
 
   const result: VectorQueryResult = await runtime.queryVectors(
     toRuntimeHandle(index),
