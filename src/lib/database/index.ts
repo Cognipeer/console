@@ -64,4 +64,7 @@ export type {
   ProviderDomain,
   IProviderRecord,
   IVectorIndexRecord,
+  IFileBucketRecord,
+  IFileRecord,
+  FileMarkdownStatus,
 } from './provider.interface';

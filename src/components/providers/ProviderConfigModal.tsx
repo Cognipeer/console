@@ -164,7 +164,8 @@ export default function ProviderConfigModal({
       driver: provider?.driver ?? drivers[0]?.id ?? '',
       status: provider?.status !== 'disabled',
     });
-  }, [opened, provider, drivers, form]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [opened, provider, drivers]);
 
   useEffect(() => {
     if (!opened || !selectedDriver) {
@@ -227,7 +228,8 @@ export default function ProviderConfigModal({
       ...current,
       ...fieldValues,
     }));
-  }, [schema, provider, mode, form]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [schema, provider, mode]);
 
   const handleSubmit = async (values: FormValues) => {
     if (!selectedDriver) {

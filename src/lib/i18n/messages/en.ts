@@ -20,6 +20,7 @@ export const en = {
     models: 'Models',
     agentTracing: 'Agent Tracing',
     vector: 'Vector Indexes',
+    files: 'Files',
     settings: 'Settings',
   },
   notifications: {
@@ -46,7 +47,8 @@ export const en = {
     dashboard: 'Dashboard',
     tracing: 'Agent Tracing',
     models: 'Models',
-  vector: 'Vector Indexes',
+    vector: 'Vector Indexes',
+    files: 'Files',
     sessions: 'Sessions',
     agents: 'Agents',
     settings: 'Settings',

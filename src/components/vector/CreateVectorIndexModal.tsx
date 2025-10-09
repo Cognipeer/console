@@ -89,7 +89,8 @@ export default function CreateVectorIndexModal({
 		if (!currentKey || !hasCurrentProvider) {
 			setFieldValue('providerKey', providers[0].key);
 		}
-	}, [providers, formValues.providerKey, setFieldValue]);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [providers, formValues.providerKey]);
 
 	useEffect(() => {
 		if (!opened) {
@@ -102,7 +103,8 @@ export default function CreateVectorIndexModal({
 		} else {
 			wasOpenedRef.current = true;
 		}
-	}, [opened, providers, reset, setFieldValue]);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [opened, providers]);
 
 	const providerOptions = useMemo(
 		() =>
@@ -135,7 +137,8 @@ export default function CreateVectorIndexModal({
 					setFieldValue('metric', allowedMetrics[0]);
 				}
 			}
-		}, [allowedMetrics, formValues.metric, setFieldValue]);
+			// eslint-disable-next-line react-hooks/exhaustive-deps
+		}, [allowedMetrics, formValues.metric]);
 
 	const handleProviderCreated = (provider: VectorProviderView) => {
 		setAvailableProviders((current) => {
@@ -215,77 +218,85 @@ export default function CreateVectorIndexModal({
 			<Modal opened={opened} onClose={onClose} title="Create Vector Index" size="lg">
 				<form onSubmit={handleSubmit}>
 					<Stack gap="lg">
-						<Stack gap="xs">
-							<Group justify="space-between" align="center">
-								<Text fw={500}>Select provider</Text>
+						<Text size="sm" c="dimmed">
+							Vector indexes store embeddings for semantic search and similarity matching. Each index is backed by a vector database provider.
+						</Text>
+
+						<Stack gap="sm">
+							<Group align="flex-end" gap="xs">
+								<Select
+									label="Provider"
+									placeholder="Select a vector provider"
+									data={providerOptions}
+									value={formValues.providerKey}
+									onChange={(value) => {
+										const nextKey = value ?? '';
+										setFieldValue('providerKey', nextKey);
+										const nextProvider = availableProviders.find((item) => item.key === nextKey);
+										const capability = resolveAllowedMetrics(nextProvider);
+										if (capability && capability.length > 0) {
+											const currentMetric = formValues.metric;
+											setFieldValue('metric', capability.includes(currentMetric) ? currentMetric : capability[0]);
+										}
+									}}
+									searchable
+									withAsterisk
+									style={{ flex: 1 }}
+								/>
 								<Button
-									size="xs"
+									variant="light"
 									leftSection={<IconCirclePlus size={14} />}
 									onClick={() => setProviderModalOpen(true)}
 								>
-									New provider
+									Provider
 								</Button>
 							</Group>
-							{availableProviders.length === 0 ? (
-								<Card withBorder padding="md">
-									<Stack gap="xs">
-										<Text size="sm" c="dimmed">
-											No vector providers configured yet. Add a provider to continue.
-										</Text>
-										<Button
-											size="sm"
-											variant="light"
-											leftSection={<IconCirclePlus size={14} />}
-											onClick={() => setProviderModalOpen(true)}
-										>
-											Add provider
-										</Button>
-									</Stack>
-								</Card>
-							) : (
-								<>
-									<Select
-										placeholder="Select a vector provider"
-										data={providerOptions}
-										value={formValues.providerKey}
-										onChange={(value) => {
-											const nextKey = value ?? '';
-											setFieldValue('providerKey', nextKey);
-											const nextProvider = availableProviders.find((item) => item.key === nextKey);
-																	  const capability = resolveAllowedMetrics(nextProvider);
-																	if (capability && capability.length > 0) {
-												const currentMetric = formValues.metric;
-												setFieldValue('metric', capability.includes(currentMetric) ? currentMetric : capability[0]);
-											}
-										}}
-										required
-									/>
-									{selectedProvider && (
-										<Card withBorder radius="md" padding="md">
-											<Stack gap={4}>
-												<Group gap="xs">
-													<Text fw={600}>{selectedProvider.label}</Text>
-													<Badge color={selectedProvider.status === 'active' ? 'green' : 'yellow'}>
-														{selectedProvider.status}
-													</Badge>
-												</Group>
-												{selectedProvider.description && (
-													<Text size="sm" c="dimmed">
-														{selectedProvider.description}
-													</Text>
-												)}
-												<Text size="xs" c="dimmed">
-													Driver: {selectedProvider.driver}
-												</Text>
-												<Text size="xs" c="dimmed">
-													Key: {selectedProvider.key}
-												</Text>
-											</Stack>
-										</Card>
-									)}
-								</>
-							)}
+							<Text size="xs" c="dimmed">
+								Need a new vector provider? Add one without leaving this flow.
+							</Text>
 						</Stack>
+
+						{availableProviders.length === 0 ? (
+							<Card withBorder padding="md">
+								<Stack gap="xs">
+									<Text size="sm" c="dimmed">
+										No vector providers configured yet. Add a provider to continue.
+									</Text>
+									<Button
+										size="sm"
+										variant="light"
+										leftSection={<IconCirclePlus size={14} />}
+										onClick={() => setProviderModalOpen(true)}
+									>
+										Add provider
+									</Button>
+								</Stack>
+							</Card>
+						) : null}
+
+						{selectedProvider && (
+							<Card withBorder radius="md" padding="md">
+								<Stack gap={4}>
+									<Group gap="xs">
+										<Text fw={600}>{selectedProvider.label}</Text>
+										<Badge color={selectedProvider.status === 'active' ? 'green' : 'yellow'}>
+											{selectedProvider.status}
+										</Badge>
+									</Group>
+									{selectedProvider.description && (
+										<Text size="sm" c="dimmed">
+											{selectedProvider.description}
+										</Text>
+									)}
+									<Text size="xs" c="dimmed">
+										Driver: {selectedProvider.driver}
+									</Text>
+									<Text size="xs" c="dimmed">
+										Key: {selectedProvider.key}
+									</Text>
+								</Stack>
+							</Card>
+						)}
 
 						<Stack gap="md">
 							<Text fw={500}>Index configuration</Text>

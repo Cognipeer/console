@@ -31,6 +31,7 @@ import {
   IconTimeline,
   IconBrain,
   IconVectorBezier,
+  IconFolder,
 } from '@tabler/icons-react';
 import { ReactNode } from 'react';
 import DashboardBreadcrumbs from './DashboardBreadcrumbs';
@@ -90,6 +91,11 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
       label: tNav('vector'),
       icon: IconVectorBezier,
       href: '/dashboard/vector',
+    },
+    {
+      label: tNav('files'),
+      icon: IconFolder,
+      href: '/dashboard/files',
     },
     {
       label: tNav('agentTracing'),

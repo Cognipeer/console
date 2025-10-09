@@ -156,7 +156,8 @@ export default function CreateModelModal({
     if (!currentKey || !hasCurrentProvider) {
       setFieldValue('providerKey', providers[0].key);
     }
-  }, [providers, formValues.providerKey, setFieldValue]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [providers, formValues.providerKey]);
 
   useEffect(() => {
     if (!opened) {
@@ -169,7 +170,8 @@ export default function CreateModelModal({
     } else {
       wasOpenedRef.current = true;
     }
-  }, [opened, providers, reset, setFieldValue]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [opened, providers]);
 
   const providerOptions = useMemo(
     () =>
@@ -210,12 +212,12 @@ export default function CreateModelModal({
     if (formValues.isMultimodal !== multimodal) {
       setFieldValue('isMultimodal', multimodal);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     selectedProvider,
     formValues.category,
     formValues.supportsToolCalls,
     formValues.isMultimodal,
-    setFieldValue,
   ]);
 
   const handleProviderCreated = (provider: ModelProviderView) => {
@@ -307,74 +309,82 @@ export default function CreateModelModal({
       <Modal opened={opened} onClose={onClose} title="Create Model" size="lg">
         <form onSubmit={handleSubmit}>
           <Stack gap="lg">
-            <Stack gap="xs">
-              <Group justify="space-between" align="center">
-                <Text fw={500}>Select provider</Text>
+            <Text size="sm" c="dimmed">
+              Models define the AI capabilities available to your applications. Each model is backed by a provider that handles the actual inference.
+            </Text>
+
+            <Stack gap="sm">
+              <Group align="flex-end" gap="xs">
+                <Select
+                  label="Provider"
+                  placeholder="Select a model provider"
+                  data={providerOptions}
+                  value={formValues.providerKey}
+                  onChange={(value) => {
+                    const nextKey = value ?? '';
+                    setFieldValue('providerKey', nextKey);
+                  }}
+                  searchable
+                  withAsterisk
+                  style={{ flex: 1 }}
+                />
                 <Button
-                  size="xs"
+                  variant="light"
                   leftSection={<IconCirclePlus size={14} />}
                   onClick={() => setProviderModalOpen(true)}
                 >
-                  New provider
+                  Provider
                 </Button>
               </Group>
-              {availableProviders.length === 0 ? (
-                <Card withBorder padding="md">
-                  <Stack gap="xs">
-                    <Text size="sm" c="dimmed">
-                      No model providers configured yet. Add a provider to continue.
-                    </Text>
-                    <Button
-                      size="sm"
-                      variant="light"
-                      leftSection={<IconCirclePlus size={14} />}
-                      onClick={() => setProviderModalOpen(true)}
-                    >
-                      Add provider
-                    </Button>
-                  </Stack>
-                </Card>
-              ) : (
-                <>
-                  <Select
-                    placeholder="Select a model provider"
-                    data={providerOptions}
-                    value={formValues.providerKey}
-                    onChange={(value) => {
-                      const nextKey = value ?? '';
-                      setFieldValue('providerKey', nextKey);
-                    }}
-                    required
-                  />
-                  {selectedProvider && (
-                    <Card withBorder radius="md" padding="md">
-                      <Stack gap={6}>
-                        <Group gap="xs">
-                          <Text fw={600}>{selectedProvider.label}</Text>
-                          <Badge
-                            color={selectedProvider.status === 'active' ? 'green' : 'yellow'}
-                            size="sm"
-                          >
-                            {selectedProvider.status}
-                          </Badge>
-                        </Group>
-                        {selectedProvider.description && (
-                          <Text size="sm" c="dimmed">
-                            {selectedProvider.description}
-                          </Text>
-                        )}
-                        <Text size="xs" c="dimmed">
-                          Driver: {selectedProvider.driver}
-                        </Text>
-                        <Text size="xs" c="dimmed">
-                          Key: {selectedProvider.key}
-                        </Text>
-                      </Stack>
-                    </Card>
-                  )}
-                </>
-              )}
+              <Text size="xs" c="dimmed">
+                Need a new model provider? Add one without leaving this flow.
+              </Text>
             </Stack>
+
+            {availableProviders.length === 0 ? (
+              <Card withBorder padding="md">
+                <Stack gap="xs">
+                  <Text size="sm" c="dimmed">
+                    No model providers configured yet. Add a provider to continue.
+                  </Text>
+                  <Button
+                    size="sm"
+                    variant="light"
+                    leftSection={<IconCirclePlus size={14} />}
+                    onClick={() => setProviderModalOpen(true)}
+                  >
+                    Add provider
+                  </Button>
+                </Stack>
+              </Card>
+            ) : null}
+
+            {selectedProvider && (
+              <Card withBorder radius="md" padding="md">
+                <Stack gap={6}>
+                  <Group gap="xs">
+                    <Text fw={600}>{selectedProvider.label}</Text>
+                    <Badge
+                      color={selectedProvider.status === 'active' ? 'green' : 'yellow'}
+                      size="sm"
+                    >
+                      {selectedProvider.status}
+                    </Badge>
+                  </Group>
+                  {selectedProvider.description && (
+                    <Text size="sm" c="dimmed">
+                      {selectedProvider.description}
+                    </Text>
+                  )}
+                  <Text size="xs" c="dimmed">
+                    Driver: {selectedProvider.driver}
+                  </Text>
+                  <Text size="xs" c="dimmed">
+                    Key: {selectedProvider.key}
+                  </Text>
+                </Stack>
+              </Card>
+            )}
 
             <Stack gap="md">
               <Text fw={500}>Model configuration</Text>

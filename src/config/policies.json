@@ -59,6 +59,16 @@
         "/api/tokens",
         "/api/tokens/*"
       ]
+    },
+    "FILES": {
+      "name": "File Management",
+      "description": "Upload and manage files",
+      "endpoints": [
+        "/api/files",
+        "/api/files/*",
+        "/api/providers",
+        "/api/providers/*"
+      ]
     }
   },
   "licenses": {
@@ -69,7 +79,8 @@
         "LLM_CHAT",
         "API_KEYS",
         "MODEL_MANAGEMENT",
-        "VECTOR_STORE"
+        "VECTOR_STORE",
+        "FILES"
       ],
       "limits": {
         "requestsPerMonth": 1000,

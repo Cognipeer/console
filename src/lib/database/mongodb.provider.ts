@@ -15,6 +15,8 @@ import {
   ITenantUserDirectoryEntry,
   IProviderRecord,
   IVectorIndexRecord,
+  IFileRecord,
+  IFileBucketRecord,
   ProviderDomain,
 } from './provider.interface';
 
@@ -28,6 +30,8 @@ export class MongoDBProvider implements DatabaseProvider {
     'tenant_user_directory';
   private static readonly providersCollection = 'providers';
   private static readonly vectorIndexesCollection = 'vector_indexes';
+  private static readonly fileBucketsCollection = 'file_buckets';
+  private static readonly filesCollection = 'files';
 
   constructor(uri: string, mainDbName: string = 'cgate_main') {
     this.uri = uri;
@@ -1143,6 +1147,288 @@ export class MongoDBProvider implements DatabaseProvider {
       ...index,
       _id: index._id?.toString(),
     };
+  }
+
+  async createFileRecord(
+    record: Omit<IFileRecord, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IFileRecord> {
+    const db = this.getTenantDb();
+    const now = new Date();
+    const document: Omit<IFileRecord, '_id'> & {
+      createdAt: Date;
+      updatedAt: Date;
+    } = {
+      ...record,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const result = await db
+      .collection<IFileRecord>(MongoDBProvider.filesCollection)
+      .insertOne(document as unknown as IFileRecord);
+
+    return {
+      ...document,
+      _id: result.insertedId.toString(),
+    };
+  }
+
+  async updateFileRecord(
+    id: string,
+    data: Partial<
+      Omit<IFileRecord, 'tenantId' | 'providerKey' | 'bucketKey' | 'key' | 'createdBy'>
+    >,
+  ): Promise<IFileRecord | null> {
+    const db = this.getTenantDb();
+    const objectId = new ObjectId(id);
+
+    const existing = await db
+      .collection<IFileRecord>(MongoDBProvider.filesCollection)
+      .findOne({ _id: objectId });
+
+    if (!existing) {
+      return null;
+    }
+
+    const { _id, tenantId, providerKey, bucketKey, key, createdBy, ...updateData } =
+      data as Partial<IFileRecord>;
+    const payload: Partial<IFileRecord> = {
+      ...updateData,
+      updatedAt: new Date(),
+    };
+
+    const result = await db
+      .collection<IFileRecord>(MongoDBProvider.filesCollection)
+      .findOneAndUpdate(
+        { _id: objectId },
+        { $set: payload },
+        { returnDocument: 'after' },
+      );
+
+    if (!result) {
+      return null;
+    }
+
+    return {
+      ...result,
+      _id: result._id?.toString(),
+    } as IFileRecord;
+  }
+
+  async deleteFileRecord(id: string): Promise<boolean> {
+    const db = this.getTenantDb();
+    const result = await db
+      .collection<IFileRecord>(MongoDBProvider.filesCollection)
+      .deleteOne({ _id: new ObjectId(id) });
+
+    return result.deletedCount > 0;
+  }
+
+  async findFileRecordById(id: string): Promise<IFileRecord | null> {
+    const db = this.getTenantDb();
+    const record = await db
+      .collection<IFileRecord>(MongoDBProvider.filesCollection)
+      .findOne({ _id: new ObjectId(id) });
+
+    if (!record) {
+      return null;
+    }
+
+    return {
+      ...record,
+      _id: record._id?.toString(),
+    };
+  }
+
+  async findFileRecordByKey(
+    providerKey: string,
+    bucketKey: string,
+    key: string,
+  ): Promise<IFileRecord | null> {
+    const db = this.getTenantDb();
+    const record = await db
+      .collection<IFileRecord>(MongoDBProvider.filesCollection)
+      .findOne({ providerKey, bucketKey, key });
+
+    if (!record) {
+      return null;
+    }
+
+    return {
+      ...record,
+      _id: record._id?.toString(),
+    };
+  }
+
+  async listFileRecords(filters: {
+    providerKey: string;
+    bucketKey: string;
+    search?: string;
+    limit?: number;
+    cursor?: string;
+  }): Promise<{ items: IFileRecord[]; nextCursor?: string }> {
+    const db = this.getTenantDb();
+    const query: Record<string, unknown> = {
+      providerKey: filters.providerKey,
+      bucketKey: filters.bucketKey,
+    };
+
+    if (filters.search) {
+      const regex = new RegExp(filters.search, 'i');
+      query.$or = [{ key: regex }, { name: regex }];
+    }
+
+    if (filters.cursor) {
+      try {
+        query._id = { $gt: new ObjectId(filters.cursor) };
+      } catch (error) {
+        console.warn('Invalid cursor provided for listFileRecords:', filters.cursor, error);
+      }
+    }
+
+    const limit = Math.min(filters.limit ?? 50, 200);
+
+    const documents = await db
+      .collection<IFileRecord>(MongoDBProvider.filesCollection)
+      .find(query)
+      .sort({ _id: 1 })
+      .limit(limit + 1)
+      .toArray();
+
+    const items = documents.slice(0, limit).map((record) => ({
+      ...record,
+      _id: record._id?.toString(),
+    }));
+
+    const next = documents.length > limit ? documents[limit] : undefined;
+    const nextCursor = next?._id ? next._id.toString() : undefined;
+
+    return {
+      items,
+      nextCursor,
+    };
+  }
+
+  async createFileBucket(
+    bucket: Omit<IFileBucketRecord, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IFileBucketRecord> {
+    const db = this.getTenantDb();
+    const now = new Date();
+    const document: Omit<IFileBucketRecord, '_id'> & {
+      createdAt: Date;
+      updatedAt: Date;
+    } = {
+      ...bucket,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const result = await db
+      .collection<IFileBucketRecord>(MongoDBProvider.fileBucketsCollection)
+      .insertOne(document as unknown as IFileBucketRecord);
+
+    return {
+      ...document,
+      _id: result.insertedId.toString(),
+    };
+  }
+
+  async updateFileBucket(
+    id: string,
+    data: Partial<Omit<IFileBucketRecord, 'tenantId' | 'key' | 'providerKey'>>,
+  ): Promise<IFileBucketRecord | null> {
+    const db = this.getTenantDb();
+    const objectId = new ObjectId(id);
+
+    const existing = await db
+      .collection<IFileBucketRecord>(MongoDBProvider.fileBucketsCollection)
+      .findOne({ _id: objectId });
+
+    if (!existing) {
+      return null;
+    }
+
+    const { _id, tenantId, key, providerKey, ...updateData } =
+      data as Partial<IFileBucketRecord>;
+    const payload: Partial<IFileBucketRecord> = {
+      ...updateData,
+      updatedAt: new Date(),
+    };
+
+    const result = await db
+      .collection<IFileBucketRecord>(MongoDBProvider.fileBucketsCollection)
+      .findOneAndUpdate(
+        { _id: objectId },
+        { $set: payload },
+        { returnDocument: 'after' },
+      );
+
+    if (!result) {
+      return null;
+    }
+
+    return {
+      ...result,
+      _id: result._id?.toString(),
+    };
+  }
+
+  async deleteFileBucket(id: string): Promise<boolean> {
+    const db = this.getTenantDb();
+    const result = await db
+      .collection<IFileBucketRecord>(MongoDBProvider.fileBucketsCollection)
+      .deleteOne({ _id: new ObjectId(id) });
+
+    return result.deletedCount > 0;
+  }
+
+  async findFileBucketById(id: string): Promise<IFileBucketRecord | null> {
+    const db = this.getTenantDb();
+    const record = await db
+      .collection<IFileBucketRecord>(MongoDBProvider.fileBucketsCollection)
+      .findOne({ _id: new ObjectId(id) });
+
+    if (!record) {
+      return null;
+    }
+
+    return {
+      ...record,
+      _id: record._id?.toString(),
+    };
+  }
+
+  async findFileBucketByKey(
+    tenantId: string,
+    key: string,
+  ): Promise<IFileBucketRecord | null> {
+    const db = this.getTenantDb();
+    const record = await db
+      .collection<IFileBucketRecord>(MongoDBProvider.fileBucketsCollection)
+      .findOne({ tenantId, key });
+
+    if (!record) {
+      return null;
+    }
+
+    return {
+      ...record,
+      _id: record._id?.toString(),
+    };
+  }
+
+  async listFileBuckets(tenantId: string): Promise<IFileBucketRecord[]> {
+    const db = this.getTenantDb();
+    const records = await db
+      .collection<IFileBucketRecord>(MongoDBProvider.fileBucketsCollection)
+      .find({ tenantId })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    return records.map((record) => ({
+      ...record,
+      _id: record._id?.toString(),
+    }));
   }
 
   async createProvider(

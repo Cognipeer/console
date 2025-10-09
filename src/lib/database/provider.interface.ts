@@ -178,6 +178,47 @@ export interface IVectorIndexRecord {
   updatedAt?: Date;
 }
 
+export type FileMarkdownStatus = 'pending' | 'succeeded' | 'failed' | 'skipped';
+
+export interface IFileBucketRecord {
+  _id?: ObjectId | string;
+  tenantId: string;
+  key: string;
+  name: string;
+  providerKey: string;
+  description?: string;
+  status: 'active' | 'disabled';
+  prefix?: string;
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IFileRecord {
+  _id?: ObjectId | string;
+  tenantId: string;
+  providerKey: string;
+  bucketKey: string;
+  key: string;
+  name: string;
+  size: number;
+  contentType?: string;
+  checksum?: string;
+  etag?: string;
+  metadata?: Record<string, unknown>;
+  markdownKey?: string;
+  markdownStatus: FileMarkdownStatus;
+  markdownError?: string;
+  markdownSize?: number;
+  markdownContentType?: string;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
 export interface IModel {
   _id?: ObjectId | string;
   tenantId: string;
@@ -366,6 +407,45 @@ export interface DatabaseProvider {
     providerKey: string,
     externalId: string,
   ): Promise<IVectorIndexRecord | null>;
+
+  // File object operations (tenant-specific)
+  createFileRecord(
+    record: Omit<IFileRecord, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IFileRecord>;
+  updateFileRecord(
+    id: string,
+    data: Partial<Omit<IFileRecord, 'tenantId' | 'providerKey' | 'key' | 'createdBy'>>,
+  ): Promise<IFileRecord | null>;
+  deleteFileRecord(id: string): Promise<boolean>;
+  findFileRecordById(id: string): Promise<IFileRecord | null>;
+  findFileRecordByKey(
+    providerKey: string,
+    bucketKey: string,
+    key: string,
+  ): Promise<IFileRecord | null>;
+  listFileRecords(filters: {
+    providerKey: string;
+    bucketKey: string;
+    search?: string;
+    limit?: number;
+    cursor?: string;
+  }): Promise<{ items: IFileRecord[]; nextCursor?: string }>;
+
+  // File bucket operations (tenant-specific)
+  createFileBucket(
+    bucket: Omit<IFileBucketRecord, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IFileBucketRecord>;
+  updateFileBucket(
+    id: string,
+    data: Partial<Omit<IFileBucketRecord, 'tenantId' | 'key' | 'providerKey'>>,
+  ): Promise<IFileBucketRecord | null>;
+  deleteFileBucket(id: string): Promise<boolean>;
+  findFileBucketById(id: string): Promise<IFileBucketRecord | null>;
+  findFileBucketByKey(
+    tenantId: string,
+    key: string,
+  ): Promise<IFileBucketRecord | null>;
+  listFileBuckets(tenantId: string): Promise<IFileBucketRecord[]>;
 
   // Shared provider registry (tenant-specific)
   createProvider(

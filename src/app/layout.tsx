@@ -7,8 +7,9 @@ import "mantine-datatable/styles.css";
 import "./globals.css";
 import { ColorSchemeScript, MantineProvider } from "@mantine/core";
 import { Notifications } from "@mantine/notifications";
-import { theme } from "@/theme/theme";
+import { ReactQueryProvider } from "@/components/providers/ReactQueryProvider";
 import { I18nProvider } from "@/lib/i18n";
+import { theme } from "@/theme/theme";
 
 const lexend = Lexend_Deca({
   variable: "--font-lexend",
@@ -35,8 +36,10 @@ export default function RootLayout({
       <body className={lexend.variable}>
         <MantineProvider theme={theme} defaultColorScheme="light">
           <I18nProvider locale="en">
-            <Notifications position="top-right" />
-            {children}
+            <ReactQueryProvider>
+              <Notifications position="top-right" />
+              {children}
+            </ReactQueryProvider>
           </I18nProvider>
         </MantineProvider>
       </body>
