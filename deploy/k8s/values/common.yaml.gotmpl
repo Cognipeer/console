@@ -3,6 +3,7 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
+environment: {{.Environment.Name}}
 image:
   repository: {{.Environment.Values.image.repository}}
   pullPolicy: Always
@@ -83,3 +84,6 @@ secrets:
   smtp_secure: {{.Environment.Values.secrets.smtp_secure}}
   smtp_user: {{.Environment.Values.secrets.smtp_user}}
   smtp_pass: {{.Environment.Values.secrets.smtp_pass}}
+tls_secrets:
+  fullchain_pem:  {{.Environment.Values.tls_secrets.fullchain_pem}}
+  privatekey_pem:  {{.Environment.Values.tls_secrets.privatekey_pem}}

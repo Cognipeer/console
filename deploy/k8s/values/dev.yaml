@@ -4,6 +4,8 @@ image:
   pullPolicy: Always
   tag: "dev"
 
+environment: "dev"
+
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
@@ -32,21 +34,16 @@ service:
 
 ingress:
   enabled: true
-  className: "alb"
-  annotations:
-    alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.kubernetes.io/scheme: internet-facing
-    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
-    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:eu-central-1:339713139704:certificate/fd8d2d5a-c27c-40ef-ba77-6f06f895c985
-    alb.ingress.kubernetes.io/ssl-redirect: "443"
-    alb.ingress.kubernetes.io/healthcheck-path: /login
+  className: "dev"
   hosts:
-    - host: app.dev.cgate.cognipeer.com
+    - host: app.dev.cgate.ai
       paths:
         - path: /
           pathType: Prefix
-  tls: []
-
+  tls:
+  - hosts:
+    - app.dev.cgate.ai
+    secretName: cgate-dev-tls
 resources:
   requests:
     cpu: 100m
@@ -95,3 +92,7 @@ secrets:
   smtp_secure: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/SMTP_SECURE
   smtp_user: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/SMTP_USER
   smtp_pass: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/SMTP_PASS
+
+tls_secrets:
+  fullchain_pem: ref+awssecrets://dev_tls_certificate_chain?region=eu-central-1#/fullchain.pem
+  privatekey_pem: ref+awssecrets://dev_tls_certificate_chain?region=eu-central-1#/privkey.pem
