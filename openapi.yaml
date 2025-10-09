@@ -1,0 +1,1364 @@
+openapi: 3.0.3
+info:
+  title: CognipeerAI Gateway Client API
+  version: 1.0.0
+  description: |
+    Multi-tenant SaaS platform for AI and Agentic services providing LLM services, 
+    agent orchestration, vector stores, workflow automation, and analytics.
+    
+    ## Authentication
+    All endpoints require Bearer token authentication using API tokens.
+    Include the token in the Authorization header: `Authorization: Bearer <token>`
+    
+    ## Base URL
+    Production: `https://api.cognipeer.com/api/client/v1`
+    Development: `http://localhost:3000/api/client/v1`
+    
+  contact:
+    name: CognipeerAI Support
+    url: https://cognipeer.com
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://api.cognipeer.com/api/client/v1
+    description: Production server
+  - url: http://localhost:3000/api/client/v1
+    description: Development server
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Chat
+    description: OpenAI-compatible chat completions with streaming support
+  - name: Embeddings
+    description: OpenAI-compatible text embeddings
+  - name: Vector Providers
+    description: Manage vector database providers
+  - name: Vector Indexes
+    description: Manage vector indexes and operations
+  - name: Files
+    description: File storage and management
+  - name: Tracing
+    description: Agent tracing and observability
+
+paths:
+  /chat/completions:
+    post:
+      tags:
+        - Chat
+      summary: Create chat completion
+      description: |
+        OpenAI-compatible chat completion endpoint with optional streaming support.
+        Supports function/tool calling and all standard OpenAI parameters.
+      operationId: createChatCompletion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatCompletionRequest'
+            examples:
+              basic:
+                summary: Basic chat completion
+                value:
+                  model: "gpt-4"
+                  messages:
+                    - role: "system"
+                      content: "You are a helpful assistant."
+                    - role: "user"
+                      content: "Hello!"
+              streaming:
+                summary: Streaming completion
+                value:
+                  model: "gpt-4"
+                  messages:
+                    - role: "user"
+                      content: "Tell me a story"
+                  stream: true
+      responses:
+        '200':
+          description: Successful completion
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatCompletionResponse'
+            text/event-stream:
+              schema:
+                type: string
+                description: Server-sent events for streaming responses
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /embeddings:
+    post:
+      tags:
+        - Embeddings
+      summary: Create embeddings
+      description: |
+        OpenAI-compatible embeddings endpoint. 
+        Converts text into vector representations.
+      operationId: createEmbeddings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmbeddingRequest'
+            example:
+              model: "text-embedding-3-small"
+              input: "The quick brown fox jumps over the lazy dog"
+      responses:
+        '200':
+          description: Successful embedding
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmbeddingResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /vector/providers:
+    get:
+      tags:
+        - Vector Providers
+      summary: List vector providers
+      description: |
+        List all vector database providers configured for the tenant.
+        Supports filtering by status and driver type.
+      operationId: listVectorProviders
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, inactive, error]
+          description: Filter by provider status
+        - name: driver
+          in: query
+          schema:
+            type: string
+          description: Filter by driver name (e.g., pinecone, chroma)
+      responses:
+        '200':
+          description: List of providers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  providers:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/VectorProvider'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    post:
+      tags:
+        - Vector Providers
+      summary: Create vector provider
+      description: Create a new vector database provider configuration
+      operationId: createVectorProvider
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateVectorProviderRequest'
+            example:
+              key: "my-pinecone-1"
+              driver: "pinecone"
+              label: "Production Pinecone"
+              description: "Main production vector store"
+              status: "active"
+              credentials:
+                apiKey: "pc-xxxx"
+                environment: "us-east-1"
+              settings: {}
+              metadata:
+                region: "us-east"
+      responses:
+        '201':
+          description: Provider created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  provider:
+                    $ref: '#/components/schemas/VectorProvider'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /vector/providers/{providerKey}/indexes:
+    get:
+      tags:
+        - Vector Indexes
+      summary: List vector indexes
+      description: List all indexes for a specific vector provider
+      operationId: listVectorIndexes
+      parameters:
+        - $ref: '#/components/parameters/ProviderKey'
+      responses:
+        '200':
+          description: List of indexes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  indexes:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/VectorIndex'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    post:
+      tags:
+        - Vector Indexes
+      summary: Create vector index
+      description: |
+        Create a new vector index. If an index with the same name exists, 
+        it will be returned instead (idempotent).
+      operationId: createVectorIndex
+      parameters:
+        - $ref: '#/components/parameters/ProviderKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateVectorIndexRequest'
+            example:
+              name: "products"
+              dimension: 1536
+              metric: "cosine"
+              metadata:
+                description: "Product embeddings"
+      responses:
+        '200':
+          description: Existing index returned (reused)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  index:
+                    $ref: '#/components/schemas/VectorIndex'
+                  reused:
+                    type: boolean
+                    example: true
+        '201':
+          description: New index created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  index:
+                    $ref: '#/components/schemas/VectorIndex'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /vector/providers/{providerKey}/indexes/{externalId}:
+    get:
+      tags:
+        - Vector Indexes
+      summary: Get vector index
+      description: Retrieve details of a specific vector index
+      operationId: getVectorIndex
+      parameters:
+        - $ref: '#/components/parameters/ProviderKey'
+        - $ref: '#/components/parameters/ExternalId'
+      responses:
+        '200':
+          description: Index details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  index:
+                    $ref: '#/components/schemas/VectorIndex'
+                  provider:
+                    $ref: '#/components/schemas/VectorProvider'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    patch:
+      tags:
+        - Vector Indexes
+      summary: Update vector index
+      description: Update index name and/or metadata
+      operationId: updateVectorIndex
+      parameters:
+        - $ref: '#/components/parameters/ProviderKey'
+        - $ref: '#/components/parameters/ExternalId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateVectorIndexRequest'
+            example:
+              name: "products-v2"
+              metadata:
+                version: "2.0"
+      responses:
+        '200':
+          description: Index updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  index:
+                    $ref: '#/components/schemas/VectorIndex'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    delete:
+      tags:
+        - Vector Indexes
+      summary: Delete vector index
+      description: Delete a vector index and all its data
+      operationId: deleteVectorIndex
+      parameters:
+        - $ref: '#/components/parameters/ProviderKey'
+        - $ref: '#/components/parameters/ExternalId'
+      responses:
+        '200':
+          description: Index deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /vector/providers/{providerKey}/indexes/{externalId}/upsert:
+    post:
+      tags:
+        - Vector Indexes
+      summary: Upsert vectors
+      description: Insert or update vectors in the index
+      operationId: upsertVectors
+      parameters:
+        - $ref: '#/components/parameters/ProviderKey'
+        - $ref: '#/components/parameters/ExternalId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpsertVectorsRequest'
+            example:
+              vectors:
+                - id: "vec1"
+                  values: [0.1, 0.2, 0.3]
+                  metadata:
+                    text: "Hello world"
+                - id: "vec2"
+                  values: [0.4, 0.5, 0.6]
+                  metadata:
+                    text: "Goodbye world"
+      responses:
+        '200':
+          description: Vectors upserted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /vector/providers/{providerKey}/indexes/{externalId}/query:
+    post:
+      tags:
+        - Vector Indexes
+      summary: Query vectors
+      description: Search for similar vectors in the index
+      operationId: queryVectors
+      parameters:
+        - $ref: '#/components/parameters/ProviderKey'
+        - $ref: '#/components/parameters/ExternalId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QueryVectorsRequest'
+            example:
+              query:
+                vector: [0.1, 0.2, 0.3]
+                topK: 10
+                filter:
+                  category: "electronics"
+      responses:
+        '200':
+          description: Query results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueryVectorsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /vector/providers/{providerKey}/indexes/{externalId}/vectors:
+    delete:
+      tags:
+        - Vector Indexes
+      summary: Delete vectors
+      description: Delete specific vectors by ID from the index
+      operationId: deleteVectors
+      parameters:
+        - $ref: '#/components/parameters/ProviderKey'
+        - $ref: '#/components/parameters/ExternalId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - ids
+              properties:
+                ids:
+                  type: array
+                  items:
+                    type: string
+                  description: Array of vector IDs to delete
+            example:
+              ids: ["vec1", "vec2", "vec3"]
+      responses:
+        '200':
+          description: Vectors deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /files/buckets:
+    get:
+      tags:
+        - Files
+      summary: List file buckets
+      description: List all file storage buckets for the tenant
+      operationId: listFileBuckets
+      responses:
+        '200':
+          description: List of buckets
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  buckets:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/FileBucket'
+                  count:
+                    type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /files/buckets/{bucketKey}:
+    get:
+      tags:
+        - Files
+      summary: Get file bucket
+      description: Get details of a specific file bucket
+      operationId: getFileBucket
+      parameters:
+        - name: bucketKey
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Unique bucket identifier
+      responses:
+        '200':
+          description: Bucket details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  bucket:
+                    $ref: '#/components/schemas/FileBucket'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /files/buckets/{bucketKey}/objects:
+    get:
+      tags:
+        - Files
+      summary: List files in bucket
+      description: List all files in a specific bucket with pagination
+      operationId: listFiles
+      parameters:
+        - name: bucketKey
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: search
+          in: query
+          schema:
+            type: string
+          description: Search term to filter files
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+          description: Maximum number of files to return
+        - name: cursor
+          in: query
+          schema:
+            type: string
+          description: Pagination cursor for next page
+      responses:
+        '200':
+          description: List of files
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  files:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/FileObject'
+                  count:
+                    type: integer
+                  nextCursor:
+                    type: string
+                    nullable: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    post:
+      tags:
+        - Files
+      summary: Upload file
+      description: |
+        Upload a file to the bucket. 
+        Supports base64 encoding and optional markdown conversion.
+      operationId: uploadFile
+      parameters:
+        - name: bucketKey
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UploadFileRequest'
+            example:
+              fileName: "document.pdf"
+              contentType: "application/pdf"
+              data: "data:application/pdf;base64,JVBERi0xLjQK..."
+              metadata:
+                category: "reports"
+              convertToMarkdown: true
+      responses:
+        '201':
+          description: File uploaded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  file:
+                    $ref: '#/components/schemas/FileObject'
+                  message:
+                    type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /tracing/sessions:
+    post:
+      tags:
+        - Tracing
+      summary: Ingest tracing session
+      description: |
+        Ingest agent tracing session data from SDK or HTTP client.
+        Used for observability and monitoring of agent executions.
+      operationId: ingestTracingSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TracingSessionRequest'
+            example:
+              sessionId: "sess_123"
+              agent:
+                name: "CustomerSupport"
+                version: "1.0.0"
+                model: "gpt-4"
+              status: "completed"
+              startedAt: "2025-10-09T10:00:00Z"
+              endedAt: "2025-10-09T10:02:30Z"
+              durationMs: 150000
+              summary:
+                totalInputTokens: 1000
+                totalOutputTokens: 500
+                totalCachedInputTokens: 100
+              events:
+                - id: "evt_1"
+                  type: "llm_call"
+                  timestamp: "2025-10-09T10:00:01Z"
+                  model: "gpt-4"
+                  inputTokens: 100
+                  outputTokens: 50
+      responses:
+        '200':
+          description: Session ingested
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  sessionId:
+                    type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: API token for authentication
+
+  parameters:
+    ProviderKey:
+      name: providerKey
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Unique provider identifier
+
+    ExternalId:
+      name: externalId
+      in: path
+      required: true
+      schema:
+        type: string
+      description: External index identifier
+
+  schemas:
+    ChatCompletionRequest:
+      type: object
+      required:
+        - model
+        - messages
+      properties:
+        model:
+          type: string
+          description: Model identifier (e.g., gpt-4, gpt-3.5-turbo)
+          example: "gpt-4"
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChatMessage'
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 2
+          default: 1
+        top_p:
+          type: number
+          minimum: 0
+          maximum: 1
+          default: 1
+        max_tokens:
+          type: integer
+          minimum: 1
+        stream:
+          type: boolean
+          default: false
+          description: Enable streaming responses
+        stop:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+        presence_penalty:
+          type: number
+          minimum: -2
+          maximum: 2
+          default: 0
+        frequency_penalty:
+          type: number
+          minimum: -2
+          maximum: 2
+          default: 0
+        user:
+          type: string
+        request_id:
+          type: string
+          description: Optional request identifier for tracking
+        tools:
+          type: array
+          items:
+            $ref: '#/components/schemas/Tool'
+        tool_choice:
+          oneOf:
+            - type: string
+              enum: [none, auto]
+            - type: object
+
+    ChatMessage:
+      type: object
+      required:
+        - role
+        - content
+      properties:
+        role:
+          type: string
+          enum: [system, user, assistant, tool]
+        content:
+          type: string
+        name:
+          type: string
+        tool_calls:
+          type: array
+          items:
+            $ref: '#/components/schemas/ToolCall'
+        tool_call_id:
+          type: string
+
+    Tool:
+      type: object
+      required:
+        - type
+        - function
+      properties:
+        type:
+          type: string
+          enum: [function]
+        function:
+          type: object
+          required:
+            - name
+          properties:
+            name:
+              type: string
+            description:
+              type: string
+            parameters:
+              type: object
+
+    ToolCall:
+      type: object
+      required:
+        - id
+        - type
+        - function
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [function]
+        function:
+          type: object
+          properties:
+            name:
+              type: string
+            arguments:
+              type: string
+
+    ChatCompletionResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          example: "chat.completion"
+        created:
+          type: integer
+        model:
+          type: string
+        choices:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChatChoice'
+        usage:
+          $ref: '#/components/schemas/Usage'
+        request_id:
+          type: string
+
+    ChatChoice:
+      type: object
+      properties:
+        index:
+          type: integer
+        message:
+          $ref: '#/components/schemas/ChatMessage'
+        finish_reason:
+          type: string
+          enum: [stop, length, tool_calls, content_filter]
+
+    Usage:
+      type: object
+      properties:
+        prompt_tokens:
+          type: integer
+        completion_tokens:
+          type: integer
+        total_tokens:
+          type: integer
+        cached_tokens:
+          type: integer
+
+    EmbeddingRequest:
+      type: object
+      required:
+        - model
+        - input
+      properties:
+        model:
+          type: string
+          description: Embedding model identifier
+          example: "text-embedding-3-small"
+        input:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+        encoding_format:
+          type: string
+          enum: [float, base64]
+          default: float
+        user:
+          type: string
+        request_id:
+          type: string
+
+    EmbeddingResponse:
+      type: object
+      properties:
+        object:
+          type: string
+          example: "list"
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Embedding'
+        model:
+          type: string
+        usage:
+          $ref: '#/components/schemas/Usage'
+        request_id:
+          type: string
+
+    Embedding:
+      type: object
+      properties:
+        object:
+          type: string
+          example: "embedding"
+        index:
+          type: integer
+        embedding:
+          type: array
+          items:
+            type: number
+
+    VectorProvider:
+      type: object
+      properties:
+        _id:
+          type: string
+        key:
+          type: string
+        driver:
+          type: string
+          example: "pinecone"
+        label:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+          enum: [active, inactive, error]
+        credentials:
+          type: object
+          description: Provider-specific credentials (encrypted)
+        settings:
+          type: object
+        metadata:
+          type: object
+        capabilities:
+          type: object
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CreateVectorProviderRequest:
+      type: object
+      required:
+        - key
+        - driver
+        - label
+        - credentials
+      properties:
+        key:
+          type: string
+          pattern: '^[a-z0-9-]+$'
+        driver:
+          type: string
+        label:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+          enum: [active, inactive]
+          default: active
+        credentials:
+          type: object
+        settings:
+          type: object
+        capabilitiesOverride:
+          type: object
+        metadata:
+          type: object
+
+    VectorIndex:
+      type: object
+      properties:
+        _id:
+          type: string
+        key:
+          type: string
+        indexId:
+          type: string
+        name:
+          type: string
+        dimension:
+          type: integer
+        metric:
+          type: string
+          enum: [cosine, euclidean, dotproduct]
+        providerKey:
+          type: string
+        metadata:
+          type: object
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CreateVectorIndexRequest:
+      type: object
+      required:
+        - name
+        - dimension
+      properties:
+        name:
+          type: string
+        dimension:
+          type: integer
+          minimum: 1
+        metric:
+          type: string
+          enum: [cosine, euclidean, dotproduct]
+          default: cosine
+        metadata:
+          type: object
+
+    UpdateVectorIndexRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        metadata:
+          type: object
+
+    UpsertVectorsRequest:
+      type: object
+      required:
+        - vectors
+      properties:
+        vectors:
+          type: array
+          items:
+            type: object
+            required:
+              - id
+              - values
+            properties:
+              id:
+                type: string
+              values:
+                type: array
+                items:
+                  type: number
+              metadata:
+                type: object
+
+    QueryVectorsRequest:
+      type: object
+      required:
+        - query
+      properties:
+        query:
+          type: object
+          required:
+            - vector
+          properties:
+            vector:
+              type: array
+              items:
+                type: number
+            topK:
+              type: integer
+              minimum: 1
+              default: 5
+            filter:
+              type: object
+              description: Provider-specific filter criteria
+
+    QueryVectorsResponse:
+      type: object
+      properties:
+        result:
+          type: object
+          properties:
+            matches:
+              type: array
+              items:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  score:
+                    type: number
+                  values:
+                    type: array
+                    items:
+                      type: number
+                  metadata:
+                    type: object
+
+    FileBucket:
+      type: object
+      properties:
+        _id:
+          type: string
+        key:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        provider:
+          type: string
+        status:
+          type: string
+        metadata:
+          type: object
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    FileObject:
+      type: object
+      properties:
+        _id:
+          type: string
+        key:
+          type: string
+        bucketKey:
+          type: string
+        fileName:
+          type: string
+        contentType:
+          type: string
+        size:
+          type: integer
+        metadata:
+          type: object
+        markdownContent:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    UploadFileRequest:
+      type: object
+      required:
+        - fileName
+        - data
+      properties:
+        fileName:
+          type: string
+        contentType:
+          type: string
+        data:
+          type: string
+          description: Base64 encoded data or data URL (data:mime;base64,...)
+        metadata:
+          type: object
+        convertToMarkdown:
+          type: boolean
+          default: false
+        keyHint:
+          type: string
+          description: Optional custom key for the file
+
+    TracingSessionRequest:
+      type: object
+      required:
+        - sessionId
+      properties:
+        sessionId:
+          type: string
+        agent:
+          type: object
+          properties:
+            name:
+              type: string
+            version:
+              type: string
+            model:
+              type: string
+        config:
+          type: object
+        summary:
+          type: object
+          properties:
+            totalInputTokens:
+              type: integer
+            totalOutputTokens:
+              type: integer
+            totalCachedInputTokens:
+              type: integer
+            totalBytesIn:
+              type: integer
+            totalBytesOut:
+              type: integer
+            eventCounts:
+              type: object
+        status:
+          type: string
+        startedAt:
+          type: string
+          format: date-time
+        endedAt:
+          type: string
+          format: date-time
+        durationMs:
+          type: integer
+        errors:
+          type: array
+          items:
+            type: object
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/TracingEvent'
+
+    TracingEvent:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+        label:
+          type: string
+        sequence:
+          type: integer
+        timestamp:
+          type: string
+          format: date-time
+        status:
+          type: string
+        model:
+          type: string
+        modelName:
+          type: string
+        toolName:
+          type: string
+        inputTokens:
+          type: integer
+        outputTokens:
+          type: integer
+        cachedInputTokens:
+          type: integer
+        actor:
+          type: object
+        sections:
+          type: array
+          items:
+            type: object
+        metadata:
+          type: object
+        usage:
+          type: object
+
+    Error:
+      type: object
+      properties:
+        error:
+          oneOf:
+            - type: string
+            - type: object
+              properties:
+                message:
+                  type: string
+                type:
+                  type: string
+                  enum: [invalid_request_error, server_error]
+
+  responses:
+    BadRequest:
+      description: Bad request - Invalid input
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    Unauthorized:
+      description: Unauthorized - Invalid or missing API token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "Invalid API token"
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "Not found"
+
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              message: "Internal server error"
+              type: "server_error"

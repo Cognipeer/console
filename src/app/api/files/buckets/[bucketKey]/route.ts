@@ -4,7 +4,7 @@ import { deleteFileBucket, getFileBucket } from '@/lib/services/files';
 
 export const runtime = 'nodejs';
 
-export async function GET(request: NextRequest, context: { params: { bucketKey: string } }) {
+export async function GET(request: NextRequest, context: { params: Promise<{ bucketKey: string }> }) {
   try {
     const tenantSlug = request.headers.get('x-tenant-slug');
     const tenantId = request.headers.get('x-tenant-id');
@@ -13,7 +13,7 @@ export async function GET(request: NextRequest, context: { params: { bucketKey: 
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const { bucketKey } = context.params;
+    const { bucketKey } = await context.params;
     const { tenantDbName } = await resolveTenantDbName(tenantSlug);
     const bucket = await getFileBucket(tenantDbName, tenantId, bucketKey);
 
@@ -32,7 +32,7 @@ export async function GET(request: NextRequest, context: { params: { bucketKey: 
   }
 }
 
-export async function DELETE(request: NextRequest, context: { params: { bucketKey: string } }) {
+export async function DELETE(request: NextRequest, context: { params: Promise<{ bucketKey: string }> }) {
   try {
     const tenantSlug = request.headers.get('x-tenant-slug');
     const tenantId = request.headers.get('x-tenant-id');
@@ -43,7 +43,7 @@ export async function DELETE(request: NextRequest, context: { params: { bucketKe
 
     const { searchParams } = new URL(request.url);
     const force = searchParams.get('force') === 'true';
-    const { bucketKey } = context.params;
+    const { bucketKey } = await context.params;
     const { tenantDbName } = await resolveTenantDbName(tenantSlug);
 
     const deleted = await deleteFileBucket(tenantDbName, tenantId, bucketKey, { force });
