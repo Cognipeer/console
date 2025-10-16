@@ -5,6 +5,7 @@ on:
     branches:
     - main
     - production
+    - k8s/release-rollout
 
 permissions:
   id-token: write
