@@ -96,7 +96,7 @@ jobs:
       - name: Apply changes
         run: |
           pushd deploy/k8s
-            #helmfile sync -e "${TAG}"
+            helmfile sync -e "${TAG}" --wait
             kubectl rollout restart -n cgate-${TAG} deployment/cgate
           popd
         env:
