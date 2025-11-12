@@ -56,7 +56,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           tags: |
-            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:dev-${{ github.sha }}
             ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.vars.outputs.tag }}
 
   deploy:
