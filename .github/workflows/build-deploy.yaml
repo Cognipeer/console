@@ -79,7 +79,7 @@ jobs:
           elif [[ "${GITHUB_REF_NAME}" == "production" ]]; then
             echo "tag=production" >> $GITHUB_OUTPUT
           else
-            echo "tag=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+            echo "tag=dev-${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
           fi
 
       - name: Install Helmfile
