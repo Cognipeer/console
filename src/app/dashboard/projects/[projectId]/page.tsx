@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { use, useEffect, useMemo, useState } from 'react';
 import { Button, Group, Paper, Stack, Tabs, Text, ThemeIcon, Title } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconRefresh, IconUsers } from '@tabler/icons-react';
@@ -15,8 +15,8 @@ type Project = {
   key: string;
 };
 
-export default function ProjectDetailPage({ params }: { params: { projectId: string } }) {
-  const projectId = params.projectId;
+export default function ProjectDetailPage({ params }: { params: Promise<{ projectId: string }> }) {
+  const { projectId } = use(params);
   const [activeTab, setActiveTab] = useState<string | null>('users');
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | undefined>(undefined);

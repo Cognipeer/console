@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { use, useEffect, useMemo, useState } from 'react';
 import { Button, Group, Paper, Stack, Tabs, Text, ThemeIcon, Title } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconRefresh, IconUsers } from '@tabler/icons-react';
@@ -18,9 +18,9 @@ type Project = {
 export default function TenantProjectSettingsPage({
   params,
 }: {
-  params: { projectId: string };
+  params: Promise<{ projectId: string }>;
 }) {
-  const projectId = params.projectId;
+  const { projectId } = use(params);
   const [activeTab, setActiveTab] = useState<string | null>('users');
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
