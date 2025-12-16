@@ -1,7 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState, use as usePromise } from 'react';
-import { useRouter } from 'next/navigation';
+import { useCallback, useEffect, useMemo, useState, use as usePromise } from 'react';
 import {
     Stack,
     Group,
@@ -20,8 +19,10 @@ import {
     CopyButton,
     ActionIcon,
     Tooltip,
+    ThemeIcon,
+    Title,
 } from '@mantine/core';
-import { IconArrowLeft, IconInfoCircle, IconCopy } from '@tabler/icons-react';
+import { IconBook, IconInfoCircle, IconCopy, IconRefresh, IconTimeline } from '@tabler/icons-react';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import {
@@ -31,6 +32,7 @@ import {
     resolveStatusColor,
     humanize,
 } from '@/lib/utils/tracingUtils';
+import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 
 const formatActor = (actor: unknown): string => {
     if (!actor) return 'agent';
@@ -269,38 +271,44 @@ const SectionCard = ({ section, index }: { section: SectionEntry; index: number 
 };
 
 export default function SessionDetailPage({ params }: { params: Promise<{ sessionId: string }> }) {
-    const router = useRouter();
     const { sessionId } = usePromise(params);
+    const { openDocs } = useDocsDrawer();
 
     const [loading, setLoading] = useState(true);
+    const [refreshing, setRefreshing] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [detail, setDetail] = useState<SessionDetailResponse | null>(null);
 
-    useEffect(() => {
-        const fetchDetail = async () => {
-            try {
+    const fetchDetail = useCallback(async (isRefresh = false) => {
+        try {
+            if (isRefresh) {
+                setRefreshing(true);
+            } else {
                 setLoading(true);
-                setError(null);
-
-                const response = await fetch(`/api/tracing/sessions/${sessionId}`);
-
-                if (!response.ok) {
-                    const errorData = await response.json();
-                    throw new Error(errorData.error || 'Failed to fetch session detail');
-                }
-
-                const data: SessionDetailResponse = await response.json();
-                setDetail(data);
-            } catch (error) {
-                console.error('Failed to load session detail:', error);
-                setError(error instanceof Error ? error.message : 'Unable to load session');
-            } finally {
-                setLoading(false);
             }
-        };
+            setError(null);
 
-        fetchDetail();
+            const response = await fetch(`/api/tracing/sessions/${sessionId}`);
+
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.error || 'Failed to fetch session detail');
+            }
+
+            const data: SessionDetailResponse = await response.json();
+            setDetail(data);
+        } catch (error) {
+            console.error('Failed to load session detail:', error);
+            setError(error instanceof Error ? error.message : 'Unable to load session');
+        } finally {
+            setLoading(false);
+            setRefreshing(false);
+        }
     }, [sessionId]);
+
+    useEffect(() => {
+        void fetchDetail(false);
+    }, [fetchDetail]);
 
         const tokenStats = useMemo(() => {
             const summary = detail?.session?.summary;
@@ -398,27 +406,62 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
 
     return (
         <Stack gap="xl">
-            <Group justify="space-between" align="flex-start">
-                <Stack gap={4}>
-                    <Group gap="xs">
-                        <Badge size="sm" color={resolveStatusColor(session.status)}>
-                            {session.status || 'unknown'}
-                        </Badge>
-                        <Text size="sm" c="dimmed">
-                            Started {formatRelativeTime(session.startedAt)}
-                        </Text>
+            <Paper
+                p="xl"
+                radius="lg"
+                withBorder
+                style={{
+                    background:
+                        'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
+                    borderColor: 'var(--mantine-color-teal-2)',
+                }}
+            >
+                <Group justify="space-between" align="flex-start">
+                    <Group gap="md" align="flex-start">
+                        <ThemeIcon
+                            size={50}
+                            radius="xl"
+                            variant="gradient"
+                            gradient={{ from: 'teal', to: 'cyan', deg: 135 }}
+                        >
+                            <IconTimeline size={26} />
+                        </ThemeIcon>
+                        <div>
+                            <Group gap="xs">
+                                <Badge size="sm" color={resolveStatusColor(session.status)}>
+                                    {session.status || 'unknown'}
+                                </Badge>
+                                <Text size="sm" c="dimmed">
+                                    Started {formatRelativeTime(session.startedAt)}
+                                </Text>
+                            </Group>
+                            <Title order={2}>
+                                Session {session.sessionId.substring(0, 12)}...
+                            </Title>
+                            <Text size="sm" c="dimmed" mt={4}>
+                                Agent {session.agentName || 'Unknown'} · Version {session.agentVersion || '—'}
+                            </Text>
+                        </div>
                     </Group>
-                    <Text size="xl" fw={700}>
-                        Session {session.sessionId.substring(0, 12)}...
-                    </Text>
-                    <Text size="sm" c="dimmed">
-                        Agent {session.agentName || 'Unknown'} · Version {session.agentVersion || '—'}
-                    </Text>
-                </Stack>
-                <Button leftSection={<IconArrowLeft size={16} />} variant="light" onClick={() => router.back()}>
-                    Back to sessions
-                </Button>
-            </Group>
+                    <Group gap="xs">
+                        <Button
+                            onClick={() => openDocs('api-tracing')}
+                            variant="light"
+                            leftSection={<IconBook size={16} />}
+                        >
+                            Docs
+                        </Button>
+                        <Button
+                            leftSection={<IconRefresh size={16} />}
+                            variant="light"
+                            onClick={() => void fetchDetail(true)}
+                            loading={refreshing}
+                        >
+                            Refresh
+                        </Button>
+                    </Group>
+                </Group>
+            </Paper>
 
 
 

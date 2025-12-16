@@ -219,3 +219,83 @@ nextjs-portal {
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
   border-color: var(--mantine-color-gray-4) !important;
 }
+
+/* Modern hover effects for cards and interactive elements */
+.hover-lift {
+  transition: all 0.2s ease;
+}
+
+.hover-lift:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 25px rgba(0, 0, 0, 0.1);
+}
+
+.hover-glow {
+  transition: all 0.2s ease;
+}
+
+.hover-glow:hover {
+  box-shadow: 0 0 20px rgba(var(--mantine-primary-color-rgb), 0.2);
+}
+
+/* Gradient text utility */
+.gradient-text {
+  background: linear-gradient(135deg, var(--mantine-primary-color-6), var(--mantine-color-cyan-6));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Smooth page transitions */
+.page-transition {
+  animation: fadeIn 0.3s ease-out;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Better table row hover */
+.mantine-Table-tr:hover {
+  background-color: var(--mantine-color-gray-0) !important;
+}
+
+html[data-mantine-color-scheme='dark'] .mantine-Table-tr:hover {
+  background-color: var(--mantine-color-dark-6) !important;
+}
+
+/* Card interactive states */
+.interactive-card {
+  cursor: pointer;
+  transition: all 0.2s ease;
+  border: 1px solid var(--mantine-color-gray-2);
+}
+
+.interactive-card:hover {
+  border-color: var(--mantine-primary-color-4);
+  background-color: var(--mantine-primary-color-0);
+}
+
+/* Stat card accent line */
+.stat-card-accent {
+  position: relative;
+  overflow: hidden;
+}
+
+.stat-card-accent::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: linear-gradient(180deg, var(--mantine-primary-color-6), var(--mantine-color-cyan-6));
+  border-radius: var(--mantine-radius-md) 0 0 var(--mantine-radius-md);
+}

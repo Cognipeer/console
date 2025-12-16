@@ -34,9 +34,19 @@ function formatDate(value?: Date | string | null) {
 
 type FileBucketManagerProps = {
   onBucketClick?: (bucket: FileBucketView) => void;
+  showHeader?: boolean;
+  showCreateButton?: boolean;
+  showRefreshButton?: boolean;
+  onCreateBucketRequest?: () => void;
 };
 
-export default function FileBucketManager({ onBucketClick }: FileBucketManagerProps) {
+export default function FileBucketManager({
+  onBucketClick,
+  showHeader = true,
+  showCreateButton = true,
+  showRefreshButton = true,
+  onCreateBucketRequest,
+}: FileBucketManagerProps) {
   const [modalOpen, setModalOpen] = useState(false);
   const queryClient = useQueryClient();
 
@@ -141,36 +151,52 @@ export default function FileBucketManager({ onBucketClick }: FileBucketManagerPr
   const rows = buckets;
   const bucketCount = rows.length;
 
+  const requestCreateBucket = () => {
+    if (onCreateBucketRequest) {
+      onCreateBucketRequest();
+      return;
+    }
+
+    setModalOpen(true);
+  };
+
   return (
     <Stack gap="md">
-      <Group justify="space-between" align="flex-start">
-        <Stack gap={4}>
-          <Group gap="xs" align="center">
-            <Text fw={600}>Buckets</Text>
-            <Badge size="sm" color="gray" variant="light">
-              {bucketCount}
-            </Badge>
+      {showHeader ? (
+        <Group justify="space-between" align="flex-start">
+          <Stack gap={4}>
+            <Group gap="xs" align="center">
+              <Text fw={600}>Buckets</Text>
+              <Badge size="sm" color="gray" variant="light">
+                {bucketCount}
+              </Badge>
+            </Group>
+            <Text size="sm" c="dimmed">
+              Organize files by bucket and route them to the appropriate storage provider.
+            </Text>
+          </Stack>
+          <Group gap="xs">
+            {showRefreshButton ? (
+              <Tooltip label="Refresh">
+                <ActionIcon
+                  variant="subtle"
+                  onClick={() => void bucketsQuery.refetch()}
+                  disabled={isRefetching}
+                  aria-label="Refresh buckets"
+                >
+                  {isRefetching ? <Loader size="xs" /> : <IconRefresh size={16} />}
+                </ActionIcon>
+              </Tooltip>
+            ) : null}
+
+            {showCreateButton ? (
+              <Button onClick={requestCreateBucket} leftSection={<IconPlus size={16} />}>
+                Create bucket
+              </Button>
+            ) : null}
           </Group>
-          <Text size="sm" c="dimmed">
-            Organize files by bucket and route them to the appropriate storage provider.
-          </Text>
-        </Stack>
-        <Group gap="xs">
-          <Tooltip label="Refresh">
-            <ActionIcon
-              variant="subtle"
-              onClick={() => void bucketsQuery.refetch()}
-              disabled={isRefetching}
-              aria-label="Refresh buckets"
-            >
-              {isRefetching ? <Loader size="xs" /> : <IconRefresh size={16} />}
-            </ActionIcon>
-          </Tooltip>
-          <Button onClick={() => setModalOpen(true)} leftSection={<IconPlus size={16} />}>
-            Create bucket
-          </Button>
         </Group>
-      </Group>
+      ) : null}
 
       <Paper withBorder radius="md" shadow="sm">
         {isPending ? (
@@ -183,9 +209,11 @@ export default function FileBucketManager({ onBucketClick }: FileBucketManagerPr
               <Text size="sm" c="dimmed">
                 No buckets yet. Create one to start managing files.
               </Text>
-              <Button onClick={() => setModalOpen(true)} leftSection={<IconPlus size={16} />}>
-                Create bucket
-              </Button>
+              {showCreateButton ? (
+                <Button onClick={requestCreateBucket} leftSection={<IconPlus size={16} />}>
+                  Create bucket
+                </Button>
+              ) : null}
             </Stack>
           </Center>
         ) : (

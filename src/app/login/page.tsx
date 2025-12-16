@@ -115,38 +115,39 @@ export default function LoginPage() {
   // Show loading state while checking authentication
   if (checkingAuth) {
     return (
-      <Center style={{ height: '100vh', width: '100vw' }}>
-        <Loader size="lg" />
+      <Center style={{ height: '100vh', width: '100vw', background: 'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-blue-0) 100%)' }}>
+        <Loader size="lg" color="teal" />
       </Center>
     );
   }
 
   return (
     <Container
-      size={420}
-      py={20}
+      size={440}
+      py={40}
       style={{
         display: 'flex',
         alignItems: 'center',
         minHeight: '100vh',
       }}>
-      <Stack gap="lg" w="100%">
+      <Stack gap="xl" w="100%">
         <div style={{ textAlign: 'center' }}>
-          <Title order={2} mb="xs" c="var(--mantine-color-anchor)">
+          <Title order={1} mb="sm" fw={700} style={{ fontSize: '2rem' }}>
             {t('hero.title')}
           </Title>
-          <Text c="dimmed" size="sm">
+          <Text c="dimmed" size="md">
             {t('hero.subtitle')}
           </Text>
         </div>
 
-        <Paper withBorder shadow="md" p={30} radius="md">
+        <Paper withBorder shadow="lg" p={36} radius="lg" style={{ background: 'white' }}>
           <form onSubmit={form.onSubmit(handleSubmit)}>
-            <Stack gap="md">
+            <Stack gap="lg">
               <TextInput
                 label={t('form.email.label')}
                 placeholder={t('form.email.placeholder')}
                 required
+                size="md"
                 {...form.getInputProps('email')}
               />
 
@@ -154,16 +155,19 @@ export default function LoginPage() {
                 label={t('form.password.label')}
                 placeholder={t('form.password.placeholder')}
                 required
+                size="md"
                 {...form.getInputProps('password')}
               />
 
               <Button
                 mt="sm"
                 type="submit"
-                size="md"
+                size="lg"
                 fullWidth
                 loading={loading}
-                leftSection={<IconLogin size={18} />}>
+                leftSection={<IconLogin size={20} />}
+                variant="gradient"
+                gradient={{ from: 'teal', to: 'cyan', deg: 90 }}>
                 {t('form.submit')}
               </Button>
             </Stack>
@@ -173,7 +177,7 @@ export default function LoginPage() {
         <Group justify="center">
           <Text size="sm" c="dimmed">
             {t('footer.cta')}{' '}
-            <Anchor href="/register" size="sm">
+            <Anchor href="/register" size="sm" fw={600}>
               {t('footer.link')}
             </Anchor>
           </Text>

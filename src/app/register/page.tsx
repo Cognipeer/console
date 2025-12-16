@@ -138,38 +138,39 @@ export default function RegisterPage() {
   // Show loading state while checking authentication
   if (checkingAuth) {
     return (
-      <Center style={{ height: '100vh', width: '100vw' }}>
-        <Loader size="lg" />
+      <Center style={{ height: '100vh', width: '100vw', background: 'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-blue-0) 100%)' }}>
+        <Loader size="lg" color="teal" />
       </Center>
     );
   }
 
   return (
     <Container
-      size={420}
-      py={50}
+      size={480}
+      py={40}
       style={{
         display: 'flex',
         alignItems: 'center',
         minHeight: '100vh',
       }}>
-      <Stack gap="lg" w="100%">
+      <Stack gap="xl" w="100%">
         <div style={{ textAlign: 'center' }}>
-          <Title order={2} mb="xs" c="var(--mantine-color-anchor)">
+          <Title order={1} mb="sm" fw={700} style={{ fontSize: '2rem' }}>
             {t('hero.title')}
           </Title>
-          <Text c="dimmed" size="sm">
+          <Text c="dimmed" size="md">
             {t('hero.subtitle')}
           </Text>
         </div>
 
-        <Paper withBorder shadow="md" p={30} radius="md">
+        <Paper withBorder shadow="lg" p={36} radius="lg" style={{ background: 'white' }}>
           <form onSubmit={form.onSubmit(handleSubmit)}>
             <Stack gap="md">
               <TextInput
                 label={t('form.name.label')}
                 placeholder={t('form.name.placeholder')}
                 required
+                size="md"
                 {...form.getInputProps('name')}
               />
 
@@ -177,6 +178,7 @@ export default function RegisterPage() {
                 label={t('form.email.label')}
                 placeholder={t('form.email.placeholder')}
                 required
+                size="md"
                 {...form.getInputProps('email')}
               />
 
@@ -184,6 +186,7 @@ export default function RegisterPage() {
                 label={t('form.companyName.label')}
                 placeholder={t('form.companyName.placeholder')}
                 required
+                size="md"
                 description={t('form.companyName.description')}
                 {...form.getInputProps('companyName')}
               />
@@ -192,6 +195,7 @@ export default function RegisterPage() {
                 label={t('form.password.label')}
                 placeholder={t('form.password.placeholder')}
                 required
+                size="md"
                 {...form.getInputProps('password')}
               />
 
@@ -199,6 +203,7 @@ export default function RegisterPage() {
                 label={t('form.confirmPassword.label')}
                 placeholder={t('form.confirmPassword.placeholder')}
                 required
+                size="md"
                 {...form.getInputProps('confirmPassword')}
               />
 
@@ -206,16 +211,19 @@ export default function RegisterPage() {
                 label={t('form.license.label')}
                 placeholder={t('form.license.placeholder')}
                 data={licenseOptions}
+                size="md"
                 {...form.getInputProps('licenseType')}
               />
 
               <Button
-                mt="sm"
+                mt="md"
                 type="submit"
-                size="md"
+                size="lg"
                 fullWidth
                 loading={loading}
-                leftSection={<IconUserPlus size={18} />}>
+                leftSection={<IconUserPlus size={20} />}
+                variant="gradient"
+                gradient={{ from: 'teal', to: 'cyan', deg: 90 }}>
                 {t('form.submit')}
               </Button>
             </Stack>
@@ -225,7 +233,7 @@ export default function RegisterPage() {
         <Group justify="center">
           <Text size="sm" c="dimmed">
             {t('footer.cta')}{' '}
-            <Anchor href="/login" size="sm">
+            <Anchor href="/login" size="sm" fw={600}>
               {t('footer.link')}
             </Anchor>
           </Text>

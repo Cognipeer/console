@@ -7,7 +7,6 @@ import {
   Anchor,
   Badge,
   Button,
-  Card,
   Center,
   Divider,
   Grid,
@@ -22,9 +21,10 @@ import {
   Title,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { IconArrowLeft, IconChartBar, IconRefresh, IconTool } from '@tabler/icons-react';
+import { IconArrowLeft, IconBook, IconBrain, IconChartBar, IconRefresh, IconTool } from '@tabler/icons-react';
 import { IconEye, IconPlug, IconSettings, IconCurrencyDollar, IconTimeline } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 
 interface ModelPricing {
   currency?: string;
@@ -107,6 +107,7 @@ interface ProviderDefinitionDto {
 export default function ModelDetailPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
+  const { openDocs } = useDocsDrawer();
   const t = useTranslations('modelDetail');
   const tModels = useTranslations('models');
   const [model, setModel] = useState<ModelDetailDto | null>(null);
@@ -248,54 +249,82 @@ export default function ModelDetailPage() {
 
   return (
     <Stack gap="lg">
-      <Group justify="space-between" align="flex-start">
-        <Stack gap={4}>
-          <Group gap={8}>
-            <Button
-              variant="subtle"
-              size="compact-sm"
-              leftSection={<IconArrowLeft size={14} />}
-              onClick={() => router.push('/dashboard/models')}
+      <Paper
+        p="xl"
+        radius="lg"
+        withBorder
+        style={{
+          background:
+            'linear-gradient(135deg, var(--mantine-color-blue-0) 0%, var(--mantine-color-violet-0) 100%)',
+          borderColor: 'var(--mantine-color-blue-2)',
+        }}
+      >
+        <Group justify="space-between" align="flex-start">
+          <Group gap="md" align="flex-start">
+            <ThemeIcon
+              size={50}
+              radius="xl"
+              variant="gradient"
+              gradient={{ from: 'blue', to: 'violet', deg: 135 }}
             >
-              {t('actions.backToList')}
+              <IconBrain size={26} />
+            </ThemeIcon>
+            <div>
+              <Group gap={8} align="center">
+                <Title order={2}>{model.name}</Title>
+                <Badge color={model.category === 'llm' ? 'indigo' : 'teal'} variant="light">
+                  {model.category === 'llm' ? tModels('list.badges.llm') : tModels('list.badges.embedding')}
+                </Badge>
+              </Group>
+              <Group gap={8} mt={6}>
+                <Badge color="grape" variant="light">
+                  {providerLabel}
+                </Badge>
+                <Badge variant="light" color="gray">
+                  {model.modelId}
+                </Badge>
+              </Group>
+              {model.description ? (
+                <Text size="sm" c="dimmed" mt={6}>
+                  {model.description}
+                </Text>
+              ) : (
+                <Text size="sm" c="dimmed" mt={6}>
+                  View model configuration, capabilities, and usage.
+                </Text>
+              )}
+            </div>
+          </Group>
+          <Group gap="xs">
+            <Button
+              onClick={() => openDocs('api-client')}
+              variant="light"
+              leftSection={<IconBook size={16} />}
+            >
+              Docs
             </Button>
-            <Badge color={model.category === 'llm' ? 'indigo' : 'teal'} variant="light">
-              {model.category === 'llm' ? tModels('list.badges.llm') : tModels('list.badges.embedding')}
-            </Badge>
+            <Button
+              variant="light"
+              leftSection={<IconRefresh size={16} />}
+              loading={refreshing}
+              onClick={() => fetchDetail(true)}
+            >
+              {t('actions.refresh')}
+            </Button>
+            <Button
+              component={Link}
+              href={`/dashboard/models/${model._id}/edit`}
+              leftSection={<IconSettings size={16} />}
+            >
+              {t('actions.edit')}
+            </Button>
           </Group>
-          <Title order={2}>{model.name}</Title>
-          <Group gap={8}>
-            <Badge color="grape" variant="light">
-              {providerLabel}
-            </Badge>
-            <Badge variant="light" color="gray">
-              {model.modelId}
-            </Badge>
-          </Group>
-          {model.description ? (
-            <Text size="sm" c="dimmed">
-              {model.description}
-            </Text>
-          ) : null}
-        </Stack>
-        <Group gap="xs">
-          <Button
-            variant="light"
-            leftSection={<IconRefresh size={16} />}
-            loading={refreshing}
-            onClick={() => fetchDetail(true)}
-          >
-            {t('actions.refresh')}
-          </Button>
-          <Button component={Link} href={`/dashboard/models/${model._id}/edit`} leftSection={<IconSettings size={16} />}>
-            {t('actions.edit')}
-          </Button>
         </Group>
-      </Group>
+      </Paper>
 
       <Grid>
         <Grid.Col span={{ base: 12, md: 6 }}>
-          <Card withBorder radius="md" padding="md">
+          <Paper withBorder radius="lg" p="lg">
             <Stack gap={12}>
               <Group gap={8}>
                 <ThemeIcon variant="light" color="indigo" radius="md">
@@ -323,18 +352,18 @@ export default function ModelDetailPage() {
                 ) : null}
               </Group>
             </Stack>
-          </Card>
+          </Paper>
         </Grid.Col>
         <Grid.Col span={{ base: 12, md: 6 }}>
-          <Card withBorder radius="md" padding="md">
+          <Paper withBorder radius="lg" p="lg">
             {renderPricing(model.pricing)}
-          </Card>
+          </Paper>
         </Grid.Col>
       </Grid>
 
       <Grid>
         <Grid.Col span={{ base: 12, md: 8 }}>
-          <Card withBorder radius="md" padding="md">
+          <Paper withBorder radius="lg" p="lg">
             <Group gap={8} mb="sm">
               <ThemeIcon variant="light" color="blue" radius="md">
                 <IconTimeline size={16} />
@@ -428,10 +457,10 @@ export default function ModelDetailPage() {
                 </Text>
               </Center>
             )}
-          </Card>
+          </Paper>
         </Grid.Col>
         <Grid.Col span={{ base: 12, md: 4 }}>
-          <Card withBorder radius="md" padding="md">
+          <Paper withBorder radius="lg" p="lg">
             <Group gap={8} mb="sm">
               <ThemeIcon variant="light" color="grape" radius="md">
                 <IconPlug size={16} />
@@ -454,11 +483,11 @@ export default function ModelDetailPage() {
                 </Text>
               )}
             </Stack>
-          </Card>
+          </Paper>
         </Grid.Col>
       </Grid>
 
-      <Card withBorder radius="md" padding="md">
+      <Paper withBorder radius="lg" p="lg">
         <Group gap={8} mb="sm">
           <ThemeIcon variant="light" color="teal" radius="md">
             <IconTimeline size={16} />
@@ -513,7 +542,7 @@ export default function ModelDetailPage() {
         <Anchor size="xs" mt="sm" onClick={() => router.push(`/dashboard/models/${model._id}/edit`)}>
           {t('logs.viewAndEdit')}
         </Anchor>
-      </Card>
+      </Paper>
     </Stack>
   );
 }
@@ -525,13 +554,13 @@ interface StatCardProps {
 
 function StatCard({ label, value }: StatCardProps) {
   return (
-    <Card withBorder radius="md" padding="md">
+    <Paper withBorder radius="lg" p="md">
       <Stack gap={4}>
         <Text size="xs" c="dimmed">
           {label}
         </Text>
         <Text fw={600}>{value}</Text>
       </Stack>
-    </Card>
+    </Paper>
   );
 }

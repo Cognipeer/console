@@ -18,6 +18,10 @@ import {
   ScrollArea,
   Anchor,
   Title,
+  ThemeIcon,
+  Box,
+  Progress,
+  RingProgress,
 } from '@mantine/core';
 import { DatePickerInput } from '@mantine/dates';
 import {
@@ -25,6 +29,15 @@ import {
   IconInfoCircle,
   IconPlug,
   IconRefresh,
+  IconActivity,
+  IconCpu,
+  IconMessage,
+  IconAlertTriangle,
+  IconRobot,
+  IconChartBar,
+  IconBook,
+  IconExternalLink,
+  IconArrowUpRight,
 } from '@tabler/icons-react';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
@@ -35,7 +48,7 @@ import {
   formatPercent,
   resolveStatusColor,
 } from '@/lib/utils/tracingUtils';
-import Link from 'next/link';
+import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 import { useTranslations } from '@/lib/i18n';
 
 dayjs.extend(relativeTime);
@@ -80,6 +93,7 @@ interface DashboardData {
 
 export default function AgentTracingPage() {
   const router = useRouter();
+  const { openDocs } = useDocsDrawer();
   const t = useTranslations('tracings');
   const tNav = useTranslations('navigation');
   const [loading, setLoading] = useState(true);
@@ -163,7 +177,7 @@ export default function AgentTracingPage() {
   if (loading) {
     return (
       <Center h={400}>
-        <Loader size="lg" />
+        <Loader size="lg" color="teal" />
       </Center>
     );
   }
@@ -189,330 +203,441 @@ export default function AgentTracingPage() {
   const dailyRows = (analytics?.daily || []).slice(-7);
 
   return (
-    <Stack gap="md">
-      <Group justify="space-between" align="flex-start">
-        <div>
-          <Title order={2}>{tNav('agentTracing')}</Title>
-          <Text size="sm" c="dimmed" mt={4}>
-            {t('list.subtitle')}
-          </Text>
-        </div>
-      </Group>
-
-      {/* Info Card */}
-      <Card withBorder shadow="sm" p="md">
-        <Group align="flex-start" gap="sm">
-          <IconInfoCircle
-            size={20}
-            color="var(--mantine-color-blue-6)"
-            style={{ marginTop: 4 }}
-          />
-          <Stack gap={6}>
-            <Text fw={600}>Instrument your agents quickly</Text>
-            <Text size="sm" c="dimmed">
-              Install{' '}
-              <Anchor
-                href="https://www.npmjs.com/package/@cognipeer/agent-sdk"
-                target="_blank"
-                rel="noopener noreferrer">
-                @cognipeer/agent-sdk
-              </Anchor>{' '}
-              to instrument your Node.js agent in minutes. The SDK automatically
-              creates sessions, events, and payload timelines.
-            </Text>
-            <Text size="sm" c="dimmed">
-              Prefer HTTP? Generate an API key under{' '}
-              <Anchor href="/dashboard/settings">Settings → API Tokens</Anchor>{' '}
-              and POST your agent payloads to{' '}
-              <Text component="span" ff="monospace">
-                /api/client/tracing/sessions
-              </Text>{' '}
-              to stream tracing data from any stack.
-            </Text>
-          </Stack>
-        </Group>
-      </Card>
-
-      {/* Analytics Card */}
-      <Card withBorder shadow="sm" p="md">
-        <Stack gap="md">
-          <Group justify="space-between" align="flex-start" wrap="wrap">
+    <Stack gap="lg">
+      {/* Header */}
+      <Paper
+        p="xl"
+        radius="lg"
+        withBorder
+        style={{
+          background: 'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
+          borderColor: 'var(--mantine-color-teal-2)',
+        }}>
+        <Group justify="space-between" align="flex-start">
+          <Group gap="md">
+            <ThemeIcon
+              size={50}
+              radius="xl"
+              variant="gradient"
+              gradient={{ from: 'teal', to: 'cyan', deg: 135 }}>
+              <IconActivity size={26} />
+            </ThemeIcon>
             <div>
-              <Text fw={600}>Workspace Analytics</Text>
-              <Text size="sm" c="dimmed">
-                Usage summaries across all agents
+              <Title order={2}>{tNav('agentTracing')}</Title>
+              <Text size="sm" c="dimmed" mt={4}>
+                {t('list.subtitle')}
               </Text>
             </div>
-            <Group gap="sm" align="flex-end">
-              <DatePickerInput
-                type="range"
-                value={dateRange}
-                clearable
-                onChange={(value) =>
-                  setDateRange(value as [Date | null, Date | null])
-                }
-                label="Date range"
-                w={260}
-                placeholder="Select Date Range"
-                valueFormat="MMM D, YYYY"
-                leftSection={<IconCalendar size={16} stroke={1.5} />}
-              />
-              <Button
-                variant="light"
-                color="blue"
-                onClick={() => fetchDashboard(true)}
-                loading={refreshing}
-                leftSection={<IconRefresh size={16} />}>
-                Refresh
-              </Button>
-            </Group>
           </Group>
+          <Group gap="sm">
+            <Button
+              onClick={() => openDocs('api-tracing')}
+              variant="light"
+              leftSection={<IconBook size={16} />}
+            >
+              Docs
+            </Button>
+            <DatePickerInput
+              type="range"
+              value={dateRange}
+              clearable
+              onChange={(value) =>
+                setDateRange(value as [Date | null, Date | null])
+              }
+              w={260}
+              placeholder="Select Date Range"
+              valueFormat="MMM D, YYYY"
+              leftSection={<IconCalendar size={16} stroke={1.5} />}
+              radius="md"
+            />
+            <Button
+              variant="light"
+              onClick={() => fetchDashboard(true)}
+              loading={refreshing}
+              leftSection={<IconRefresh size={16} />}>
+              Refresh
+            </Button>
+          </Group>
+        </Group>
+      </Paper>
 
-          {/* Metrics Grid */}
-          <SimpleGrid cols={{ base: 1, sm: 2, md: 4 }} spacing="md">
-            <Paper withBorder p="md" radius="md">
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
+      {/* Stats Cards */}
+      <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>
+        <Paper withBorder radius="lg" p="lg">
+          <Group justify="space-between">
+            <Stack gap={4}>
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
                 Total Sessions
               </Text>
-              <Text fz={28} fw={700} mt={8}>
+              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }}>
                 {formatNumber(totals.sessionsCount)}
               </Text>
-            </Paper>
-            <Paper withBorder p="md" radius="md">
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
-                Total Tokens
-              </Text>
-              <Text fz={28} fw={700} mt={8}>
-                {formatNumber(totals.totalTokens)}
-              </Text>
-              <Text size="xs" c="dimmed" mt={4}>
-                Avg per session: {formatNumber(totals.averageTokensPerSession)}
-              </Text>
-            </Paper>
-            <Paper withBorder p="md" radius="md">
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
-                Total Events
-              </Text>
-              <Text fz={28} fw={700} mt={8}>
-                {formatNumber(totals.totalEvents)}
-              </Text>
-              <Text size="xs" c="dimmed" mt={4}>
-                Avg duration: {formatDuration(totals.averageDurationMs)}
-              </Text>
-            </Paper>
-            <Paper withBorder p="md" radius="md">
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
-                Tool Error Rate
-              </Text>
-              <Text fz={28} fw={700} mt={8}>
-                {formatPercent(toolTotals.errorRate)}
-              </Text>
-              <Text size="xs" c="dimmed" mt={4}>
-                Total calls: {formatNumber(toolTotals.totalCalls)}
-              </Text>
-            </Paper>
-          </SimpleGrid>
-
-          {/* Daily Trend */}
-          <Divider label="Recent trend (last 7 days)" labelPosition="center" />
-          <ScrollArea>
-            <Table striped highlightOnHover withColumnBorders>
-              <Table.Thead>
-                <Table.Tr>
-                  <Table.Th>Date</Table.Th>
-                  <Table.Th>Sessions</Table.Th>
-                  <Table.Th>Events</Table.Th>
-                  <Table.Th>Tokens</Table.Th>
-                </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {dailyRows.length === 0 ? (
-                  <Table.Tr>
-                    <Table.Td colSpan={4}>
-                      <Center c="dimmed" py="sm">
-                        No activity in the selected range.
-                      </Center>
-                    </Table.Td>
-                  </Table.Tr>
-                ) : (
-                  dailyRows.map((row) => (
-                    <Table.Tr key={row.date}>
-                      <Table.Td>
-                        {dayjs(row.date).format('MMM D, YYYY')}
-                      </Table.Td>
-                      <Table.Td>{formatNumber(row.sessionsCount)}</Table.Td>
-                      <Table.Td>{formatNumber(row.totalEvents)}</Table.Td>
-                      <Table.Td>{formatNumber(row.totalTokens)}</Table.Td>
-                    </Table.Tr>
-                  ))
-                )}
-              </Table.Tbody>
-            </Table>
-          </ScrollArea>
-
-          {/* Status, Models, Tools Breakdown */}
-          <SimpleGrid cols={{ base: 1, md: 3 }} spacing="md">
-            <Paper withBorder p="md" radius="md">
-              <Text fw={600} mb="sm">
-                Status Breakdown
-              </Text>
-              <Stack gap={6}>
-                {(analytics?.statuses || []).map((item) => (
-                  <Group key={item.status} justify="space-between">
-                    <Text size="sm">{item.status || 'Unknown'}</Text>
-                    <Badge size="sm" color="blue">
-                      {formatNumber(item.count)}
-                    </Badge>
-                  </Group>
-                ))}
-                {(analytics?.statuses || []).length === 0 && (
-                  <Text size="sm" c="dimmed">
-                    No status data available.
-                  </Text>
-                )}
-              </Stack>
-            </Paper>
-            <Paper withBorder p="md" radius="md">
-              <Text fw={600} mb="sm">
-                Top Models
-              </Text>
-              <Stack gap={6}>
-                {(analytics?.models || []).slice(0, 6).map((item) => (
-                  <Group key={item.model} justify="space-between">
-                    <Text size="sm" lineClamp={1}>
-                      {item.model}
-                    </Text>
-                    <Badge size="sm" color="grape">
-                      {formatNumber(item.sessionsCount)}
-                    </Badge>
-                  </Group>
-                ))}
-                {(analytics?.models || []).length === 0 && (
-                  <Text size="sm" c="dimmed">
-                    No model usage captured.
-                  </Text>
-                )}
-              </Stack>
-            </Paper>
-            <Paper withBorder p="md" radius="md">
-              <Text fw={600} mb="sm">
-                Tool Summary
-              </Text>
-              <Stack gap={6}>
-                {toolItems.slice(0, 6).map((item) => (
-                  <Group
-                    key={item.toolName}
-                    justify="space-between"
-                    align="center">
-                    <Stack gap={0}>
-                      <Text size="sm" fw={500}>
-                        {item.toolName}
-                      </Text>
-                      <Text size="xs" c="dimmed">
-                        {formatNumber(item.totalCalls)} calls ·{' '}
-                        {formatNumber(item.errorCalls)} errors
-                      </Text>
-                    </Stack>
-                    <Badge
-                      size="sm"
-                      color={
-                        item.errorRate && item.errorRate > 0.1 ? 'red' : 'green'
-                      }>
-                      {formatPercent(item.errorRate)}
-                    </Badge>
-                  </Group>
-                ))}
-                {toolItems.length === 0 && (
-                  <Text size="sm" c="dimmed">
-                    No tool calls recorded.
-                  </Text>
-                )}
-              </Stack>
-            </Paper>
-          </SimpleGrid>
-        </Stack>
-      </Card>
-
-      {/* Recent Agents */}
-      <Card withBorder shadow="sm" p="md">
-        <Stack gap="md">
-          <Group justify="space-between" align="center">
-            <Stack gap={0}>
-              <Text fw={600}>Recently Active Agents</Text>
-              <Text size="sm" c="dimmed">
-                Showing up to {recentAgents.length} agents by recent activity
+              <Text size="xs" c="dimmed">
+                Active agents: {formatNumber(recentAgentsTotal)}
               </Text>
             </Stack>
-            <Text size="xs" c="dimmed">
-              Total tracked: {formatNumber(recentAgentsTotal)}
-            </Text>
+            <ThemeIcon size={48} radius="xl" variant="light" color="teal">
+              <IconActivity size={24} />
+            </ThemeIcon>
           </Group>
+        </Paper>
+        <Paper withBorder radius="lg" p="lg">
+          <Group justify="space-between">
+            <Stack gap={4}>
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
+                Total Tokens
+              </Text>
+              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="blue">
+                {formatNumber(totals.totalTokens)}
+              </Text>
+              <Text size="xs" c="dimmed">
+                Avg: {formatNumber(totals.averageTokensPerSession)}/session
+              </Text>
+            </Stack>
+            <ThemeIcon size={48} radius="xl" variant="light" color="blue">
+              <IconCpu size={24} />
+            </ThemeIcon>
+          </Group>
+        </Paper>
+        <Paper withBorder radius="lg" p="lg">
+          <Group justify="space-between">
+            <Stack gap={4}>
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
+                Total Events
+              </Text>
+              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="violet">
+                {formatNumber(totals.totalEvents)}
+              </Text>
+              <Text size="xs" c="dimmed">
+                Avg duration: {formatDuration(totals.averageDurationMs)}
+              </Text>
+            </Stack>
+            <ThemeIcon size={48} radius="xl" variant="light" color="violet">
+              <IconMessage size={24} />
+            </ThemeIcon>
+          </Group>
+        </Paper>
+        <Paper withBorder radius="lg" p="lg">
+          <Group justify="space-between">
+            <Stack gap={4}>
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
+                Tool Error Rate
+              </Text>
+              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c={toolTotals.errorRate > 0.1 ? 'red' : 'green'}>
+                {formatPercent(toolTotals.errorRate)}
+              </Text>
+              <Text size="xs" c="dimmed">
+                {formatNumber(toolTotals.totalCalls)} total calls
+              </Text>
+            </Stack>
+            <ThemeIcon size={48} radius="xl" variant="light" color={toolTotals.errorRate > 0.1 ? 'red' : 'green'}>
+              <IconAlertTriangle size={24} />
+            </ThemeIcon>
+          </Group>
+        </Paper>
+      </SimpleGrid>
 
-          {recentAgents.length === 0 ? (
-            <Center h={160} c="dimmed">
-              No agents have reported activity yet.
-            </Center>
-          ) : (
-            <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="md">
-              {recentAgents.map((item: any) => {
-                const statusColor = resolveStatusColor(item.latestStatus);
-                return (
-                  <Card
-                    key={item.name}
-                    withBorder
-                    shadow="xs"
-                    radius="md"
-                    p="md">
-                    <Stack gap={8}>
-                      <Group justify="space-between" align="center">
+      <Paper withBorder radius="lg" p="lg">
+        <Group justify="space-between" align="flex-start" wrap="wrap">
+          <div>
+            <Text fw={600}>Documentation</Text>
+            <Text size="sm" c="dimmed" mt={4}>
+              SDK references for tracing and observability.
+            </Text>
+          </div>
+          <Group gap="xs">
+            <Button
+              onClick={() => openDocs('api-tracing')}
+              variant="light"
+              leftSection={<IconArrowUpRight size={16} />}
+            >
+              Tracing API
+            </Button>
+            <Button
+              onClick={() => openDocs('examples-tracing')}
+              variant="subtle"
+              leftSection={<IconArrowUpRight size={16} />}
+            >
+              Examples
+            </Button>
+          </Group>
+        </Group>
+      </Paper>
+
+      {/* Quick Start Info Card */}
+      <Paper withBorder radius="lg" p="lg" style={{ background: 'var(--mantine-color-blue-0)', borderColor: 'var(--mantine-color-blue-2)' }}>
+        <Group align="flex-start" gap="md">
+          <ThemeIcon size={40} radius="md" variant="light" color="blue">
+            <IconInfoCircle size={20} />
+          </ThemeIcon>
+          <Stack gap={6} style={{ flex: 1 }}>
+            <Text fw={600}>Instrument your agents</Text>
+            <Text size="sm" c="dimmed">
+              Generate an API key under{' '}
+              <Anchor href="/dashboard/settings">Settings → API Tokens</Anchor>{' '}
+              and POST your agent payloads to{' '}
+              <Text component="span" ff="monospace" style={{ backgroundColor: 'var(--mantine-color-gray-1)', padding: '2px 6px', borderRadius: 4 }}>
+                /api/client/tracing/sessions
+              </Text>
+              {' '}to stream tracing data from any stack.
+            </Text>
+            <Text size="sm" c="dimmed">
+              Check out our{' '}
+              <Anchor component="button" onClick={() => openDocs('examples-tracing')}>
+                LangChain/LangGraph integration examples
+              </Anchor>
+              {' '}for quick setup.
+            </Text>
+          </Stack>
+          <Button 
+            variant="light" 
+            color="blue" 
+            onClick={() => openDocs('examples-tracing')}
+            rightSection={<IconBook size={14} />}>
+            View Examples
+          </Button>
+        </Group>
+      </Paper>
+
+      {/* Analytics Section */}
+      <Paper p="lg" radius="lg" withBorder>
+        <Group justify="space-between" mb="lg">
+          <div>
+            <Text fw={600} size="lg">Workspace Analytics</Text>
+            <Text size="sm" c="dimmed">Usage summaries across all agents</Text>
+          </div>
+        </Group>
+
+        {/* Daily Trend */}
+        <Text fw={600} size="sm" mb="sm">Recent Trend (Last 7 Days)</Text>
+        <Box mb="lg" style={{ borderRadius: 'var(--mantine-radius-md)', overflow: 'hidden' }}>
+          <Table verticalSpacing="sm" horizontalSpacing="md" highlightOnHover>
+            <Table.Thead style={{ backgroundColor: 'var(--mantine-color-gray-0)' }}>
+              <Table.Tr>
+                <Table.Th style={{ fontWeight: 600 }}>Date</Table.Th>
+                <Table.Th style={{ fontWeight: 600 }}>Sessions</Table.Th>
+                <Table.Th style={{ fontWeight: 600 }}>Events</Table.Th>
+                <Table.Th style={{ fontWeight: 600 }}>Tokens</Table.Th>
+              </Table.Tr>
+            </Table.Thead>
+            <Table.Tbody>
+              {dailyRows.length === 0 ? (
+                <Table.Tr>
+                  <Table.Td colSpan={4}>
+                    <Center c="dimmed" py="lg">
+                      No activity in the selected range.
+                    </Center>
+                  </Table.Td>
+                </Table.Tr>
+              ) : (
+                dailyRows.map((row) => (
+                  <Table.Tr key={row.date}>
+                    <Table.Td>
+                      <Text size="sm" fw={500}>{dayjs(row.date).format('MMM D, YYYY')}</Text>
+                    </Table.Td>
+                    <Table.Td>
+                      <Badge variant="light" color="teal" size="md">{formatNumber(row.sessionsCount)}</Badge>
+                    </Table.Td>
+                    <Table.Td>
+                      <Badge variant="light" color="violet" size="md">{formatNumber(row.totalEvents)}</Badge>
+                    </Table.Td>
+                    <Table.Td>
+                      <Badge variant="light" color="blue" size="md">{formatNumber(row.totalTokens)}</Badge>
+                    </Table.Td>
+                  </Table.Tr>
+                ))
+              )}
+            </Table.Tbody>
+          </Table>
+        </Box>
+
+        {/* Status, Models, Tools Breakdown */}
+        <SimpleGrid cols={{ base: 1, md: 3 }} spacing="md">
+          <Paper withBorder p="md" radius="lg">
+            <Group gap="sm" mb="md">
+              <ThemeIcon size={32} radius="md" variant="light" color="blue">
+                <IconChartBar size={16} />
+              </ThemeIcon>
+              <Text fw={600}>Status Breakdown</Text>
+            </Group>
+            <Stack gap={8}>
+              {(analytics?.statuses || []).map((item) => (
+                <Group key={item.status} justify="space-between">
+                  <Text size="sm">{item.status || 'Unknown'}</Text>
+                  <Badge size="sm" variant="light" color={resolveStatusColor(item.status)}>
+                    {formatNumber(item.count)}
+                  </Badge>
+                </Group>
+              ))}
+              {(analytics?.statuses || []).length === 0 && (
+                <Text size="sm" c="dimmed">
+                  No status data available.
+                </Text>
+              )}
+            </Stack>
+          </Paper>
+          <Paper withBorder p="md" radius="lg">
+            <Group gap="sm" mb="md">
+              <ThemeIcon size={32} radius="md" variant="light" color="grape">
+                <IconCpu size={16} />
+              </ThemeIcon>
+              <Text fw={600}>Top Models</Text>
+            </Group>
+            <Stack gap={8}>
+              {(analytics?.models || []).slice(0, 6).map((item) => (
+                <Group key={item.model} justify="space-between">
+                  <Text size="sm" lineClamp={1}>
+                    {item.model}
+                  </Text>
+                  <Badge size="sm" variant="light" color="grape">
+                    {formatNumber(item.sessionsCount)}
+                  </Badge>
+                </Group>
+              ))}
+              {(analytics?.models || []).length === 0 && (
+                <Text size="sm" c="dimmed">
+                  No model usage captured.
+                </Text>
+              )}
+            </Stack>
+          </Paper>
+          <Paper withBorder p="md" radius="lg">
+            <Group gap="sm" mb="md">
+              <ThemeIcon size={32} radius="md" variant="light" color="orange">
+                <IconPlug size={16} />
+              </ThemeIcon>
+              <Text fw={600}>Tool Summary</Text>
+            </Group>
+            <Stack gap={8}>
+              {toolItems.slice(0, 6).map((item) => (
+                <Group
+                  key={item.toolName}
+                  justify="space-between"
+                  align="center">
+                  <Stack gap={0}>
+                    <Text size="sm" fw={500}>
+                      {item.toolName}
+                    </Text>
+                    <Text size="xs" c="dimmed">
+                      {formatNumber(item.totalCalls)} calls ·{' '}
+                      {formatNumber(item.errorCalls)} errors
+                    </Text>
+                  </Stack>
+                  <Badge
+                    size="sm"
+                    variant="light"
+                    color={item.errorRate && item.errorRate > 0.1 ? 'red' : 'green'}>
+                    {formatPercent(item.errorRate)}
+                  </Badge>
+                </Group>
+              ))}
+              {toolItems.length === 0 && (
+                <Text size="sm" c="dimmed">
+                  No tool calls recorded.
+                </Text>
+              )}
+            </Stack>
+          </Paper>
+        </SimpleGrid>
+      </Paper>
+
+      {/* Recent Agents */}
+      <Paper p="lg" radius="lg" withBorder>
+        <Group justify="space-between" align="center" mb="md">
+          <div>
+            <Group gap="sm">
+              <ThemeIcon size={32} radius="md" variant="light" color="teal">
+                <IconRobot size={18} />
+              </ThemeIcon>
+              <div>
+                <Text fw={600} size="lg">Recently Active Agents</Text>
+                <Text size="sm" c="dimmed">
+                  Showing up to {recentAgents.length} agents by recent activity
+                </Text>
+              </div>
+            </Group>
+          </div>
+          <Badge size="lg" variant="light" color="teal">
+            {formatNumber(recentAgentsTotal)} total
+          </Badge>
+        </Group>
+
+        {recentAgents.length === 0 ? (
+          <Center py="xl">
+            <Stack gap="md" align="center">
+              <ThemeIcon size={60} radius="xl" variant="light" color="gray">
+                <IconRobot size={30} />
+              </ThemeIcon>
+              <Text size="sm" c="dimmed">No agents have reported activity yet.</Text>
+            </Stack>
+          </Center>
+        ) : (
+          <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="md">
+            {recentAgents.map((item: any) => {
+              const statusColor = resolveStatusColor(item.latestStatus);
+              return (
+                <Paper
+                  key={item.name}
+                  withBorder
+                  radius="lg"
+                  p="md"
+                  style={{ cursor: 'pointer', transition: 'all 0.2s ease' }}
+                  onClick={() => handleAgentClick(item.name)}>
+                  <Stack gap={8}>
+                    <Group justify="space-between" align="center">
+                      <Group gap="sm">
+                        <ThemeIcon size={32} radius="md" variant="light" color="teal">
+                          <IconRobot size={16} />
+                        </ThemeIcon>
                         <Text fw={600} lineClamp={1}>
                           {item.label || item.name}
                         </Text>
-                        {item.latestStatus && (
-                          <Badge size="sm" color={statusColor}>
-                            {item.latestStatus}
-                          </Badge>
-                        )}
                       </Group>
+                      {item.latestStatus && (
+                        <Badge size="sm" variant="light" color={statusColor}>
+                          {item.latestStatus}
+                        </Badge>
+                      )}
+                    </Group>
+                    <Group gap="lg">
                       <Text size="xs" c="dimmed">
-                        {formatNumber(item.sessionsCount)} sessions
+                        <Text component="span" fw={500} c="dark">{formatNumber(item.sessionsCount)}</Text> sessions
                       </Text>
                       {item.latestSessionAt && (
                         <Text size="xs" c="dimmed">
-                          Last session {dayjs(item.latestSessionAt).fromNow()}
+                          Last: {dayjs(item.latestSessionAt).fromNow()}
                         </Text>
                       )}
-                      <Button
-                        variant="light"
-                        onClick={() => handleAgentClick(item.name)}>
-                        View Agent Details
-                      </Button>
-                    </Stack>
-                  </Card>
-                );
-              })}
-            </SimpleGrid>
-          )}
-        </Stack>
-      </Card>
+                    </Group>
+                  </Stack>
+                </Paper>
+              );
+            })}
+          </SimpleGrid>
+        )}
+      </Paper>
 
       {/* Recent Sessions */}
-      <Card withBorder shadow="sm" p="md">
-        <Stack gap="md">
-          <Group justify="space-between" align="center">
-            <Text fw={600}>Recent Sessions</Text>
-            <Button variant="light" onClick={() => handleShowAllSessions()}>
-              Show All Sessions
-            </Button>
-          </Group>
+      <Paper p="lg" radius="lg" withBorder>
+        <Group justify="space-between" align="center" mb="md">
+          <div>
+            <Text fw={600} size="lg">Recent Sessions</Text>
+            <Text size="sm" c="dimmed">Latest agent execution sessions</Text>
+          </div>
+          <Button 
+            variant="light" 
+            onClick={() => handleShowAllSessions()}
+            rightSection={<IconArrowUpRight size={14} />}>
+            Show All Sessions
+          </Button>
+        </Group>
 
-          <SessionTable
-            sessions={recentSessions}
-            onRowClick={(sessionId) => handleRowClick(sessionId)}
-            loading={loading}
-          />
-        </Stack>
-      </Card>
+        <SessionTable
+          sessions={recentSessions}
+          onRowClick={(sessionId) => handleRowClick(sessionId)}
+          loading={loading}
+        />
+      </Paper>
     </Stack>
   );
 }

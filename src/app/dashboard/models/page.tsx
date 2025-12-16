@@ -19,9 +19,15 @@ import {
   ThemeIcon,
   Title,
   Tooltip,
+  Box,
+  Transition,
+  Skeleton,
+  Divider,
+  Progress,
 } from '@mantine/core';
-import { IconChartBar, IconEdit, IconEye, IconPlug, IconPlus, IconRefresh, IconTool } from '@tabler/icons-react';
+import { IconChartBar, IconEdit, IconEye, IconPlug, IconPlus, IconRefresh, IconTool, IconSparkles, IconBrain, IconCpu, IconCurrencyDollar, IconBook, IconArrowUpRight } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 import type { ModelProviderView } from '@/lib/services/models/types';
 import CreateModelModal from '@/components/models/CreateModelModal';
 import type { IModel } from '@/lib/database';
@@ -59,6 +65,7 @@ export default function ModelsPage() {
   const t = useTranslations('models');
   const tNav = useTranslations('navigation');
   const router = useRouter();
+  const { openDocs } = useDocsDrawer();
 
   const loadModels = async () => {
     setLoading(true);
@@ -147,32 +154,39 @@ export default function ModelsPage() {
     );
   };
 
-  const renderModelTable = (records: ModelDto[]) => (
-    <Paper withBorder radius="md" p="md">
-      <Table highlightOnHover>
-        <Table.Thead>
+  const renderModelTable = (records: ModelDto[], category: 'llm' | 'embedding') => (
+    <Paper withBorder radius="lg" style={{ overflow: 'hidden' }}>
+      <Table highlightOnHover verticalSpacing="md" horizontalSpacing="md">
+        <Table.Thead style={{ backgroundColor: 'var(--mantine-color-gray-0)' }}>
           <Table.Tr>
-            <Table.Th>{t('list.columns.name')}</Table.Th>
-            <Table.Th>{t('list.columns.provider')}</Table.Th>
-            <Table.Th>{t('list.columns.key')}</Table.Th>
-            <Table.Th>{t('list.columns.modelId')}</Table.Th>
-            <Table.Th>{t('list.columns.capabilities')}</Table.Th>
-            <Table.Th>{t('list.columns.pricing')}</Table.Th>
-            <Table.Th style={{ width: 80 }}>
-              <Center>{t('list.columns.actions')}</Center>
+            <Table.Th style={{ fontWeight: 600 }}>{t('list.columns.name')}</Table.Th>
+            <Table.Th style={{ fontWeight: 600 }}>{t('list.columns.provider')}</Table.Th>
+            <Table.Th style={{ fontWeight: 600 }}>{t('list.columns.modelId')}</Table.Th>
+            <Table.Th style={{ fontWeight: 600 }}>{t('list.columns.capabilities')}</Table.Th>
+            <Table.Th style={{ fontWeight: 600 }}>{t('list.columns.pricing')}</Table.Th>
+            <Table.Th style={{ width: 80, textAlign: 'center', fontWeight: 600 }}>
+              {t('list.columns.actions')}
             </Table.Th>
           </Table.Tr>
         </Table.Thead>
         <Table.Tbody>
           {records.length === 0 && !loading ? (
             <Table.Tr>
-              <Table.Td colSpan={7}>
-                <Center py="lg">
-                  <Stack gap="xs" align="center">
-                    <Text size="sm" c="dimmed">
-                      {t('list.empty')}
-                    </Text>
-                    <Button onClick={openCreateModal} leftSection={<IconPlus size={16} />} variant="light">
+              <Table.Td colSpan={6}>
+                <Center py="xl">
+                  <Stack gap="md" align="center">
+                    <ThemeIcon size={60} radius="xl" variant="light" color={category === 'llm' ? 'blue' : 'violet'}>
+                      {category === 'llm' ? <IconBrain size={30} /> : <IconCpu size={30} />}
+                    </ThemeIcon>
+                    <Stack gap={4} align="center">
+                      <Text size="sm" fw={500}>
+                        {t('list.empty')}
+                      </Text>
+                      <Text size="xs" c="dimmed">
+                        Add your first {category === 'llm' ? 'LLM' : 'embedding'} model to get started
+                      </Text>
+                    </Stack>
+                    <Button onClick={openCreateModal} leftSection={<IconPlus size={16} />} variant="light" color={category === 'llm' ? 'blue' : 'violet'}>
                       {t('actions.create')}
                     </Button>
                   </Stack>
@@ -184,60 +198,70 @@ export default function ModelsPage() {
             <Table.Tr
               key={model._id}
               onClick={() => router.push(`/dashboard/models/${model._id}`)}
-              style={{ cursor: 'pointer' }}
+              style={{ cursor: 'pointer', transition: 'background-color 0.15s ease' }}
             >
               <Table.Td>
-                <Stack gap={4}>
-                  <Group gap={6}>
-                    <Text fw={500} size="sm">{model.name}</Text>
-                    <Badge variant="light" color={model.category === 'llm' ? 'blue' : 'gray'} size="sm">
-                      {model.category === 'llm' ? t('list.badges.llm') : t('list.badges.embedding')}
-                    </Badge>
-                  </Group>
-                  {model.description ? (
-                    <Text size="xs" c="dimmed" lineClamp={1}>
-                      {model.description}
-                    </Text>
-                  ) : null}
-                </Stack>
+                <Group gap="sm">
+                  <ThemeIcon size={36} radius="md" variant="light" color={model.category === 'llm' ? 'blue' : 'violet'}>
+                    {model.category === 'llm' ? <IconBrain size={18} /> : <IconCpu size={18} />}
+                  </ThemeIcon>
+                  <Stack gap={2}>
+                    <Text fw={600} size="sm">{model.name}</Text>
+                    {model.description ? (
+                      <Text size="xs" c="dimmed" lineClamp={1} style={{ maxWidth: 200 }}>
+                        {model.description}
+                      </Text>
+                    ) : (
+                      <Text size="xs" c="dimmed" ff="monospace">{model.key}</Text>
+                    )}
+                  </Stack>
+                </Group>
               </Table.Td>
               <Table.Td>
-                <Badge color="gray" variant="light" size="sm">
+                <Badge 
+                  color="gray" 
+                  variant="light" 
+                  size="sm"
+                  leftSection={<IconPlug size={10} />}
+                >
                   {providerLookup.get(model.providerKey)?.label || model.provider || model.providerKey}
                 </Badge>
               </Table.Td>
               <Table.Td>
-                <Text size="xs" c="dimmed" ff="monospace">{model.key}</Text>
+                <Text size="xs" c="dimmed" ff="monospace" style={{ backgroundColor: 'var(--mantine-color-gray-0)', padding: '4px 8px', borderRadius: 4, display: 'inline-block' }}>
+                  {model.modelId}
+                </Text>
               </Table.Td>
               <Table.Td>
-                <Text size="xs" c="dimmed">{model.modelId}</Text>
-              </Table.Td>
-              <Table.Td>
-                <Group gap={4}>
+                <Group gap={6}>
                   {model.isMultimodal ? (
-                    <Tooltip label={t('list.capabilities.multimodal')}>
-                      <ThemeIcon size={20} radius="md" variant="light" color="gray">
+                    <Tooltip label={t('list.capabilities.multimodal')} withArrow>
+                      <ThemeIcon size={24} radius="md" variant="light" color="teal">
                         <IconEye size={12} />
                       </ThemeIcon>
                     </Tooltip>
                   ) : null}
                   {model.supportsToolCalls ? (
-                    <Tooltip label={t('list.capabilities.tools')}>
-                      <ThemeIcon size={20} radius="md" variant="light" color="gray">
+                    <Tooltip label={t('list.capabilities.tools')} withArrow>
+                      <ThemeIcon size={24} radius="md" variant="light" color="orange">
                         <IconTool size={12} />
                       </ThemeIcon>
                     </Tooltip>
                   ) : null}
+                  {!model.isMultimodal && !model.supportsToolCalls && (
+                    <Text size="xs" c="dimmed">—</Text>
+                  )}
                 </Group>
               </Table.Td>
               <Table.Td>{renderPricing(model.pricing)}</Table.Td>
               <Table.Td>
                 <Center>
-                  <Menu withinPortal position="bottom-end">
+                  <Menu withinPortal position="bottom-end" withArrow>
                     <Menu.Target>
                       <ActionIcon
                         variant="subtle"
                         color="gray"
+                        radius="md"
                         onClick={(event) => {
                           event.stopPropagation();
                         }}
@@ -269,97 +293,193 @@ export default function ModelsPage() {
         </Table.Tbody>
       </Table>
       {loading ? (
-        <Center py="md">
-          <Loader size="sm" />
+        <Center py="lg">
+          <Loader size="sm" color="teal" />
         </Center>
       ) : null}
     </Paper>
   );
 
   return (
-    <Stack gap="md">
-      <Group justify="space-between" align="flex-start">
-        <div>
-          <Title order={2}>{tNav('models')}</Title>
-          <Text size="sm" c="dimmed" mt={4}>
-            {t('list.subtitle')}
-          </Text>
-        </div>
-        <Group gap="xs">
-          <Button variant="light" leftSection={<IconRefresh size={16} />} onClick={loadModels}>
-            {t('actions.refresh')}
-          </Button>
-          <Button onClick={openCreateModal} leftSection={<IconPlug size={16} />}>
-            {t('actions.create')}
-          </Button>
+    <Stack gap="lg">
+      {/* Header */}
+      <Paper
+        p="xl"
+        radius="lg"
+        withBorder
+        style={{
+          background: 'linear-gradient(135deg, var(--mantine-color-blue-0) 0%, var(--mantine-color-violet-0) 100%)',
+          borderColor: 'var(--mantine-color-blue-2)',
+        }}>
+        <Group justify="space-between" align="flex-start">
+          <Group gap="md">
+            <ThemeIcon
+              size={50}
+              radius="xl"
+              variant="gradient"
+              gradient={{ from: 'blue', to: 'violet', deg: 135 }}>
+              <IconBrain size={26} />
+            </ThemeIcon>
+            <div>
+              <Title order={2}>{tNav('models')}</Title>
+              <Text size="sm" c="dimmed" mt={4}>
+                {t('list.subtitle')}
+              </Text>
+            </div>
+          </Group>
+          <Group gap="xs">
+            <Button
+              variant="light"
+              leftSection={<IconBook size={16} />}
+              onClick={() => openDocs('api-client')}
+            >
+              Docs
+            </Button>
+            <Button
+              variant="light"
+              leftSection={<IconRefresh size={16} />}
+              onClick={loadModels}
+              loading={loading}
+            >
+              {t('actions.refresh')}
+            </Button>
+            <Button 
+              onClick={openCreateModal} 
+              leftSection={<IconPlus size={16} />}
+              variant="gradient"
+              gradient={{ from: 'blue', to: 'violet', deg: 90 }}>
+              {t('actions.create')}
+            </Button>
+          </Group>
         </Group>
-      </Group>
+      </Paper>
 
-      <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }} spacing="sm">
-        <Paper withBorder radius="md" p="md">
-          <Stack gap={4}>
-            <Text size="xs" c="dimmed" tt="uppercase" fw={500}>
-              {t('metrics.totalModels')}
-            </Text>
-            <Text fw={600} size="xl">
-              {models.length}
-            </Text>
-          </Stack>
+      {/* Stats Cards */}
+      <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>
+        <Paper withBorder radius="lg" p="lg" style={{ transition: 'all 0.2s ease' }}>
+          <Group justify="space-between">
+            <Stack gap={4}>
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
+                {t('metrics.totalModels')}
+              </Text>
+              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }}>
+                {models.length}
+              </Text>
+            </Stack>
+            <ThemeIcon size={48} radius="xl" variant="light" color="gray">
+              <IconSparkles size={24} />
+            </ThemeIcon>
+          </Group>
         </Paper>
-        <Paper withBorder radius="md" p="md">
-          <Stack gap={4}>
-            <Text size="xs" c="dimmed" tt="uppercase" fw={500}>
-              {t('metrics.llmModels')}
-            </Text>
-            <Text fw={600} size="xl">
-              {llmModels.length}
-            </Text>
-          </Stack>
+        <Paper withBorder radius="lg" p="lg" style={{ transition: 'all 0.2s ease' }}>
+          <Group justify="space-between">
+            <Stack gap={4}>
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
+                {t('metrics.llmModels')}
+              </Text>
+              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="blue">
+                {llmModels.length}
+              </Text>
+            </Stack>
+            <ThemeIcon size={48} radius="xl" variant="light" color="blue">
+              <IconBrain size={24} />
+            </ThemeIcon>
+          </Group>
         </Paper>
-        <Paper withBorder radius="md" p="md">
-          <Stack gap={4}>
-            <Text size="xs" c="dimmed" tt="uppercase" fw={500}>
-              {t('metrics.embeddingModels')}
-            </Text>
-            <Text fw={600} size="xl">
-              {embeddingModels.length}
-            </Text>
-          </Stack>
+        <Paper withBorder radius="lg" p="lg" style={{ transition: 'all 0.2s ease' }}>
+          <Group justify="space-between">
+            <Stack gap={4}>
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
+                {t('metrics.embeddingModels')}
+              </Text>
+              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="violet">
+                {embeddingModels.length}
+              </Text>
+            </Stack>
+            <ThemeIcon size={48} radius="xl" variant="light" color="violet">
+              <IconCpu size={24} />
+            </ThemeIcon>
+          </Group>
         </Paper>
-        <Paper withBorder radius="md" p="md">
-          <Stack gap={4}>
-            <Text size="xs" c="dimmed" tt="uppercase" fw={500}>
-              {t('metrics.providers')}
-            </Text>
-            <Text fw={600} size="xl">
-              {providers.length}
-            </Text>
-          </Stack>
+        <Paper withBorder radius="lg" p="lg" style={{ transition: 'all 0.2s ease' }}>
+          <Group justify="space-between">
+            <Stack gap={4}>
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
+                {t('metrics.providers')}
+              </Text>
+              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="teal">
+                {providers.length}
+              </Text>
+            </Stack>
+            <ThemeIcon size={48} radius="xl" variant="light" color="teal">
+              <IconPlug size={24} />
+            </ThemeIcon>
+          </Group>
         </Paper>
       </SimpleGrid>
 
-      <Stack gap="md">
-        <Stack gap="sm">
-          <Group gap="xs" align="center">
-            <ThemeIcon variant="light" color="gray" radius="md" size="sm">
-              <IconChartBar size={16} />
-            </ThemeIcon>
-            <Text fw={600} size="md">{t('list.sections.llm')}</Text>
-            <Badge variant="light" color="gray" size="sm">{llmModels.length}</Badge>
+      <Paper withBorder radius="lg" p="lg">
+        <Group justify="space-between" align="flex-start" wrap="wrap">
+          <div>
+            <Text fw={600}>Documentation</Text>
+            <Text size="sm" c="dimmed" mt={4}>
+              SDK references for chat and embeddings.
+            </Text>
+          </div>
+          <Group gap="xs">
+            <Button
+              variant="light"
+              leftSection={<IconArrowUpRight size={16} />}
+              onClick={() => openDocs('api-chat')}
+            >
+              Chat API
+            </Button>
+            <Button
+              variant="light"
+              leftSection={<IconArrowUpRight size={16} />}
+              onClick={() => openDocs('api-embeddings')}
+            >
+              Embeddings API
+            </Button>
+            <Button
+              variant="subtle"
+              leftSection={<IconArrowUpRight size={16} />}
+              onClick={() => openDocs('examples-chat')}
+            >
+              Examples
+            </Button>
           </Group>
-          {renderModelTable(llmModels)}
-        </Stack>
+        </Group>
+      </Paper>
 
-        <Stack gap="sm">
-          <Group gap="xs" align="center">
-            <ThemeIcon variant="light" color="gray" radius="md" size="sm">
-              <IconPlug size={16} />
+      <Stack gap="lg">
+        <Paper p="lg" radius="lg" withBorder>
+          <Group gap="sm" mb="md">
+            <ThemeIcon variant="gradient" gradient={{ from: 'blue', to: 'cyan', deg: 90 }} radius="md" size="lg">
+              <IconBrain size={20} />
             </ThemeIcon>
-            <Text fw={600} size="md">{t('list.sections.embedding')}</Text>
-            <Badge variant="light" color="gray" size="sm">{embeddingModels.length}</Badge>
+            <div>
+              <Text fw={600} size="md">{t('list.sections.llm')}</Text>
+              <Text size="xs" c="dimmed">Large Language Models for chat and completion</Text>
+            </div>
+            <Badge variant="filled" color="blue" size="lg" ml="auto">{llmModels.length}</Badge>
           </Group>
-          {renderModelTable(embeddingModels)}
-        </Stack>
+          {renderModelTable(llmModels, 'llm')}
+        </Paper>
+
+        <Paper p="lg" radius="lg" withBorder>
+          <Group gap="sm" mb="md">
+            <ThemeIcon variant="gradient" gradient={{ from: 'violet', to: 'grape', deg: 90 }} radius="md" size="lg">
+              <IconCpu size={20} />
+            </ThemeIcon>
+            <div>
+              <Text fw={600} size="md">{t('list.sections.embedding')}</Text>
+              <Text size="xs" c="dimmed">Embedding models for vector representations</Text>
+            </div>
+            <Badge variant="filled" color="violet" size="lg" ml="auto">{embeddingModels.length}</Badge>
+          </Group>
+          {renderModelTable(embeddingModels, 'embedding')}
+        </Paper>
       </Stack>
 
       <CreateModelModal

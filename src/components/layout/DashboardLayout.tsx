@@ -11,7 +11,6 @@ import {
   Button,
   Divider,
   Group,
-  Kbd,
   Menu,
   ScrollArea,
   Stack,
@@ -25,19 +24,24 @@ import {
   IconChevronDown,
   IconChevronsLeft,
   IconChevronsRight,
+  IconExternalLink,
+  IconLayoutDashboard,
   IconLogout,
-  IconSearch,
   IconSettings,
   IconTimeline,
   IconBrain,
   IconVectorBezier,
   IconFolder,
+  IconBook,
+  IconX,
 } from '@tabler/icons-react';
-import { ReactNode } from 'react';
+import { ReactNode, useMemo, useState } from 'react';
 import DashboardBreadcrumbs from './DashboardBreadcrumbs';
 import { useTranslations } from '@/lib/i18n';
 import classes from './DashboardLayout.module.css';
 import ProjectSelector from '@/components/projects/ProjectSelector';
+import { DocsDrawerProvider } from '@/components/docs/DocsDrawerContext';
+import { DEFAULT_SDK_DOC, resolveSdkDoc, type SdkDocId } from '@/lib/docs/sdkDocs';
 
 interface DashboardLayoutProps {
   children: ReactNode;
@@ -52,12 +56,21 @@ interface DashboardLayoutProps {
 export default function DashboardLayout({ children, user }: DashboardLayoutProps) {
   const router = useRouter();
   const [opened, { toggle, close, open }] = useDisclosure(true);
+  const [docsOpened, docsControls] = useDisclosure(false);
+  const [docsDocId, setDocsDocId] = useState<SdkDocId>(DEFAULT_SDK_DOC);
   const pathname = usePathname();
   const t = useTranslations('layout');
   const tNav = useTranslations('navigation');
   const tNotifications = useTranslations('notifications');
   const tAccount = useTranslations('account');
   const isMobile = useMediaQuery('(max-width: 48em)');
+
+  const activeDoc = useMemo(() => resolveSdkDoc(docsDocId), [docsDocId]);
+
+  const openDocs = (docId?: SdkDocId) => {
+    setDocsDocId(docId ?? DEFAULT_SDK_DOC);
+    docsControls.open();
+  };
 
   const handleLogout = async () => {
     try {
@@ -88,6 +101,11 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
 
   const navItems = [
     {
+      label: tNav('dashboard'),
+      icon: IconLayoutDashboard,
+      href: '/dashboard',
+    },
+    {
       label: tNav('models'),
       icon: IconBrain,
       href: '/dashboard/models',
@@ -107,7 +125,6 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
       icon: IconTimeline,
       href: '/dashboard/tracing',
     },
-    ,
     ...(!isTenantAdmin
       ? [
         {
@@ -128,8 +145,23 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
       : []),
   ];
 
+  const activeNavHref = navItems
+    .map((item) => item.href)
+    .filter((href): href is string => typeof href === 'string' && href.length > 0)
+    .filter((href) => pathname === href || pathname.startsWith(`${href}/`))
+    .sort((a, b) => b.length - a.length)[0];
+
   const handleNavClick = (href?: string) => {
     if (!href) return;
+
+    if (href === '/dashboard/docs') {
+      openDocs(DEFAULT_SDK_DOC);
+      if (isMobile) {
+        close();
+      }
+      return;
+    }
+
     router.push(href);
     if (isMobile) {
       close();
@@ -140,16 +172,22 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
   const collapseLabel = opened ? 'Collapse sidebar' : 'Expand sidebar';
 
   return (
-    <AppShell
-      navbar={{
-        width: navbarWidth,
-        breakpoint: 'sm',
-        collapsed: { mobile: !opened },
-      }}
-      padding="md"
-    >
-      <AppShell.Navbar p="sm" className={classes.navbar} withBorder={false}>
-        <Stack gap="md" className={classes.sidebarContent}>
+    <DocsDrawerProvider value={{ openDocs }}>
+      <AppShell
+        navbar={{
+          width: navbarWidth,
+          breakpoint: 'sm',
+          collapsed: { mobile: !opened },
+        }}
+        aside={{
+          width: 560,
+          breakpoint: 'md',
+          collapsed: { desktop: !docsOpened, mobile: !docsOpened },
+        }}
+        padding="md"
+      >
+        <AppShell.Navbar p="sm" className={classes.navbar} withBorder={false}>
+          <Stack gap="md" className={classes.sidebarContent}>
           <Stack gap="xs" className={classes.logoRow}>
             <Group align="center" w="100%">
               <div
@@ -205,38 +243,6 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
             </Group>
           </Stack>
 
-          {opened ? (
-            <Button
-              variant="outline"
-              color="gray"
-              leftSection={<IconSearch size={16} />}
-              className={classes.searchButton}
-            >
-              <Group gap={8} justify="space-between">
-                <Text size="sm" fw={500}>
-                  Search
-                </Text>
-                <span className={classes.searchShortcut}>
-                  <Kbd size="xs">Ctrl</Kbd>
-                  <Text component="span" size="xs">+</Text>
-                  <Kbd size="xs">K</Kbd>
-                </span>
-              </Group>
-            </Button>
-          ) : (
-            <Tooltip label="Search" position="right" withArrow>
-              <ActionIcon
-                variant="outline"
-                color="gray"
-                size="lg"
-                className={classes.collapsedSearch}
-                aria-label="Search"
-              >
-                <IconSearch size={18} />
-              </ActionIcon>
-            </Tooltip>
-          )}
-
           <Divider size="xs" />
 
           {opened ? (
@@ -250,9 +256,7 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
             <Stack gap={4}>
               {navItems.map((item) => {
                 const itemHref = item.href;
-                const isActive = itemHref
-                  ? pathname === itemHref || pathname.startsWith(`${itemHref}/`)
-                  : false;
+                const isActive = itemHref ? itemHref === activeNavHref : false;
                 const linkClassName = [
                   classes.menuLink,
                   classes.mainLink,
@@ -290,6 +294,20 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
           </ScrollArea.Autosize>
 
           <div className={classes.footer}>
+            <Tooltip label={tNav('docs')} position="right" withArrow disabled={opened}>
+              <UnstyledButton
+                className={classes.menuLink}
+                onClick={() => openDocs(DEFAULT_SDK_DOC)}
+              >
+                <Group gap={10} justify={opened ? 'flex-start' : 'center'}>
+                  <IconBook size={20} />
+                  {opened && <Text size="sm">{tNav('docs')}</Text>}
+                </Group>
+              </UnstyledButton>
+            </Tooltip>
+
+            <Divider my="xs" />
+
             <Menu shadow="md" width={220}>
               <Menu.Target>
                 <UnstyledButton className={classes.accountButton}>
@@ -337,26 +355,68 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
               </Menu.Dropdown>
             </Menu>
           </div>
-        </Stack>
-      </AppShell.Navbar>
+          </Stack>
+        </AppShell.Navbar>
 
-      <AppShell.Main>
-        <Stack gap="md">
-          <Group gap="sm" align="center" justify="space-between">
-            <Group gap="sm" align="center">
-              <Burger
-                opened={opened}
-                onClick={() => (opened ? close() : open())}
-                hiddenFrom="sm"
-                size="sm"
-                aria-label={opened ? 'Close sidebar' : 'Open sidebar'}
-              />
-              <DashboardBreadcrumbs />
+        <AppShell.Main>
+          <Stack gap="md">
+            <Group gap="sm" align="center" justify="space-between">
+              <Group gap="sm" align="center">
+                <Burger
+                  opened={opened}
+                  onClick={() => (opened ? close() : open())}
+                  hiddenFrom="sm"
+                  size="sm"
+                  aria-label={opened ? 'Close sidebar' : 'Open sidebar'}
+                />
+                <DashboardBreadcrumbs />
+              </Group>
             </Group>
-          </Group>
-          {children}
-        </Stack>
-      </AppShell.Main>
-    </AppShell>
+            {children}
+          </Stack>
+        </AppShell.Main>
+
+        <AppShell.Aside p="md" withBorder>
+          <Stack gap="md" h="100%" style={{ minHeight: 0 }}>
+            <Group justify="space-between" align="center" wrap="nowrap">
+              <div style={{ minWidth: 0 }}>
+                <Text fw={600}>Documentation</Text>
+                <Text size="sm" c="dimmed" mt={4} lineClamp={1}>
+                  {activeDoc.title}
+                </Text>
+              </div>
+              <Group gap="xs" wrap="nowrap">
+                <Button
+                  component={Link}
+                  href={activeDoc.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  variant="light"
+                  leftSection={<IconExternalLink size={16} />}
+                >
+                  Open
+                </Button>
+                <ActionIcon
+                  variant="light"
+                  aria-label="Close documentation"
+                  onClick={docsControls.close}
+                >
+                  <IconX size={16} />
+                </ActionIcon>
+              </Group>
+            </Group>
+
+            <div style={{ flex: 1, minHeight: 0 }}>
+              <iframe
+                title={activeDoc.title}
+                src={activeDoc.url}
+                style={{ width: '100%', height: '100%', border: 0, borderRadius: 12 }}
+                sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+              />
+            </div>
+          </Stack>
+        </AppShell.Aside>
+      </AppShell>
+    </DocsDrawerProvider>
   );
 }

@@ -1,8 +1,9 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { Paper, Stack, Tabs, Text, Title } from '@mantine/core';
+import { Paper, Stack, Tabs, Text, Title, Group, ThemeIcon, Center, Loader } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { IconFolder, IconUsers, IconPlug, IconKey } from '@tabler/icons-react';
 import ProjectMembersManager from '@/components/projects/ProjectMembersManager';
 import ProjectProvidersManager from '@/components/projects/ProjectProvidersManager';
 import TokenManagement from '@/components/settings/TokenManagement';
@@ -63,40 +64,83 @@ export default function ProjectSettingsPage() {
   }, []);
 
   return (
-    <Stack gap="md">
-      <div>
-        <Title order={2}>{currentProject?.name ?? 'Settings'}</Title>
-        <Text size="sm" c="dimmed" mt={4}>
-          Project settings and access control.
-        </Text>
-      </div>
+    <Stack gap="lg">
+      {/* Header */}
+      <Paper
+        p="xl"
+        radius="lg"
+        withBorder
+        style={{
+          background: 'linear-gradient(135deg, var(--mantine-color-blue-0) 0%, var(--mantine-color-cyan-0) 100%)',
+          borderColor: 'var(--mantine-color-blue-2)',
+        }}>
+        <Group gap="md">
+          <ThemeIcon
+            size={50}
+            radius="xl"
+            variant="gradient"
+            gradient={{ from: 'blue', to: 'cyan', deg: 135 }}>
+            <IconFolder size={26} />
+          </ThemeIcon>
+          <div>
+            <Title order={2}>{currentProject?.name ?? 'Project Settings'}</Title>
+            <Text size="sm" c="dimmed" mt={4}>
+              Project settings and access control.
+            </Text>
+          </div>
+        </Group>
+      </Paper>
 
-      <Paper shadow="sm" radius="md" withBorder>
+      <Paper radius="lg" withBorder style={{ overflow: 'hidden' }}>
         {!activeProjectId ? (
-          <Text size="sm" c="dimmed" p="md">
-            {loading
-              ? 'Loading…'
-              : projects.length
-                ? 'Select an active project to continue.'
-                : 'No projects available.'}
-          </Text>
+          <Center py="xl">
+            {loading ? (
+              <Loader size="md" color="teal" />
+            ) : (
+              <Stack gap="sm" align="center">
+                <ThemeIcon size={60} radius="xl" variant="light" color="gray">
+                  <IconFolder size={30} />
+                </ThemeIcon>
+                <Text size="sm" c="dimmed">
+                  {projects.length
+                    ? 'Select an active project to continue.'
+                    : 'No projects available.'}
+                </Text>
+              </Stack>
+            )}
+          </Center>
         ) : (
-          <Tabs value={activeTab} onChange={setActiveTab}>
-            <Tabs.List>
-              <Tabs.Tab value="users">Users</Tabs.Tab>
-              <Tabs.Tab value="providers">Providers</Tabs.Tab>
-              <Tabs.Tab value="tokens">Tokens</Tabs.Tab>
+          <Tabs value={activeTab} onChange={setActiveTab} variant="default">
+            <Tabs.List style={{ borderBottom: '1px solid var(--mantine-color-gray-2)', padding: '0 16px' }}>
+              <Tabs.Tab 
+                value="users" 
+                leftSection={<IconUsers size={16} />}
+                style={{ padding: '16px 20px' }}>
+                Users
+              </Tabs.Tab>
+              <Tabs.Tab 
+                value="providers" 
+                leftSection={<IconPlug size={16} />}
+                style={{ padding: '16px 20px' }}>
+                Providers
+              </Tabs.Tab>
+              <Tabs.Tab 
+                value="tokens" 
+                leftSection={<IconKey size={16} />}
+                style={{ padding: '16px 20px' }}>
+                Tokens
+              </Tabs.Tab>
             </Tabs.List>
 
-            <Tabs.Panel value="users" pt="md">
+            <Tabs.Panel value="users" p="lg">
               <ProjectMembersManager projectId={String(activeProjectId)} readOnly={membersReadOnly} />
             </Tabs.Panel>
 
-            <Tabs.Panel value="providers" pt="md">
+            <Tabs.Panel value="providers" p="lg">
               <ProjectProvidersManager projectId={String(activeProjectId)} />
             </Tabs.Panel>
 
-            <Tabs.Panel value="tokens" pt="md">
+            <Tabs.Panel value="tokens" p="lg">
               <TokenManagement />
             </Tabs.Panel>
           </Tabs>

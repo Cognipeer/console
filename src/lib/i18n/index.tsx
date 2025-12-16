@@ -53,11 +53,15 @@ export function I18nProvider({ locale = 'en', children }: { locale?: Locale; chi
 export function useTranslations(namespace?: string) {
   const { locale } = useContext(I18nContext);
 
-  return (key: string, values?: TranslationValues) => {
-    const fullKey = namespace ? `${namespace}.${key}` : key;
-    const message = resolveMessage(locale, fullKey) ?? fullKey;
-    return interpolate(message, values);
-  };
+  return useMemo(
+    () =>
+      (key: string, values?: TranslationValues) => {
+        const fullKey = namespace ? `${namespace}.${key}` : key;
+        const message = resolveMessage(locale, fullKey) ?? fullKey;
+        return interpolate(message, values);
+      },
+    [locale, namespace],
+  );
 }
 
 export function useLocale() {

@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
-  ActionIcon,
   Badge,
   Button,
   Center,
@@ -13,12 +12,13 @@ import {
   Stack,
   Text,
   Title,
-  Tooltip,
+  ThemeIcon,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { IconArrowLeft, IconRefresh } from '@tabler/icons-react';
+import { IconArrowLeft, IconRefresh, IconBook, IconFolder } from '@tabler/icons-react';
 import FileObjectManager from '@/components/files/FileObjectManager';
 import type { FileBucketView } from '@/lib/services/files';
+import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 
 function safeString(value: unknown): string | undefined {
   if (typeof value === 'string') {
@@ -31,6 +31,7 @@ function safeString(value: unknown): string | undefined {
 export default function FileBucketDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const { openDocs } = useDocsDrawer();
   const bucketKeyParam = params.bucketKey;
   const bucketKey = useMemo(
     () => (Array.isArray(bucketKeyParam) ? bucketKeyParam[0] : bucketKeyParam) ?? '',
@@ -41,7 +42,7 @@ export default function FileBucketDetailPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
-  const loadBucket = useCallback(async () => {
+  const loadBucket = useCallback(async (isRefresh = false) => {
     if (!bucketKey) {
       setBucket(null);
       setLoading(false);
@@ -49,7 +50,11 @@ export default function FileBucketDetailPage() {
       return;
     }
 
-    setRefreshing(true);
+    if (isRefresh) {
+      setRefreshing(true);
+    } else {
+      setLoading(true);
+    }
     try {
       const response = await fetch(`/api/files/buckets/${encodeURIComponent(bucketKey)}`, {
         cache: 'no-store',
@@ -86,7 +91,7 @@ export default function FileBucketDetailPage() {
   }, [bucketKey, router]);
 
   useEffect(() => {
-    void loadBucket();
+    void loadBucket(false);
   }, [loadBucket]);
 
   if (loading) {
@@ -114,35 +119,58 @@ export default function FileBucketDetailPage() {
   const providerDriver = safeString(bucket.provider?.driver);
 
   return (
-    <Stack gap="md">
-      <Group justify="space-between" align="flex-start">
-        <Group gap="xs" align="flex-start">
-          <ActionIcon variant="light" onClick={() => router.push('/dashboard/files')}>
-            <IconArrowLeft size={16} />
-          </ActionIcon>
-          <Stack gap={4}>
-            <Group gap={8} align="center">
-              <Title order={2}>{bucket.name}</Title>
-              <Badge color={bucket.status === 'active' ? 'green' : 'yellow'}>{bucket.status}</Badge>
-            </Group>
-            <Text size="sm" c="dimmed">
-              Bucket key: {bucket.key}
-            </Text>
-          </Stack>
+    <Stack gap="lg">
+      <Paper
+        p="xl"
+        radius="lg"
+        withBorder
+        style={{
+          background:
+            'linear-gradient(135deg, var(--mantine-color-cyan-0) 0%, var(--mantine-color-teal-0) 100%)',
+          borderColor: 'var(--mantine-color-cyan-2)',
+        }}
+      >
+        <Group justify="space-between" align="flex-start">
+          <Group gap="md" align="flex-start">
+            <ThemeIcon
+              size={50}
+              radius="xl"
+              variant="gradient"
+              gradient={{ from: 'cyan', to: 'teal', deg: 135 }}
+            >
+              <IconFolder size={26} />
+            </ThemeIcon>
+            <div>
+              <Group gap={8} align="center">
+                <Title order={2}>{bucket.name}</Title>
+                <Badge color={bucket.status === 'active' ? 'green' : 'yellow'}>{bucket.status}</Badge>
+              </Group>
+              <Text size="sm" c="dimmed" mt={4}>
+                Bucket key: {bucket.key}
+              </Text>
+            </div>
+          </Group>
+          <Group gap="xs">
+            <Button
+              onClick={() => openDocs('api-files')}
+              variant="light"
+              leftSection={<IconBook size={16} />}
+            >
+              Docs
+            </Button>
+            <Button
+              variant="light"
+              leftSection={<IconRefresh size={16} />}
+              onClick={() => void loadBucket(true)}
+              loading={refreshing}
+            >
+              Refresh
+            </Button>
+          </Group>
         </Group>
-        <Tooltip label="Refresh">
-          <ActionIcon
-            variant="subtle"
-            onClick={() => void loadBucket()}
-            disabled={refreshing}
-            aria-label="Refresh bucket"
-          >
-            {refreshing ? <Loader size="xs" /> : <IconRefresh size={16} />}
-          </ActionIcon>
-        </Tooltip>
-      </Group>
+      </Paper>
 
-      <Paper withBorder radius="md" shadow="sm" p="md">
+      <Paper withBorder radius="lg" p="lg">
         <Stack gap="sm">
           {safeString(bucket.description) ? (
             <Text size="sm">{bucket.description}</Text>

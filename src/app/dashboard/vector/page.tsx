@@ -14,11 +14,17 @@ import {
   Table,
   Text,
   Tooltip,
+  Title,
+  ThemeIcon,
+  SimpleGrid,
+  Box,
+  Transition,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { IconEye, IconPlus, IconRefresh, IconTrash } from '@tabler/icons-react';
+import { IconEye, IconPlus, IconRefresh, IconTrash, IconDatabase, IconServer, IconArrowRight, IconSparkles, IconBook, IconArrowUpRight } from '@tabler/icons-react';
 import type { VectorIndexRecord, VectorProviderView } from '@/lib/services/vector';
 import CreateVectorIndexModal from '@/components/vector/CreateVectorIndexModal';
+import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 
 interface VectorIndexRow {
   provider: VectorProviderView;
@@ -53,14 +59,19 @@ function resolveProviderHandle(metadata?: Record<string, unknown>): string | und
 
 export default function VectorIndexPage() {
   const router = useRouter();
+  const { openDocs } = useDocsDrawer();
   const [providers, setProviders] = useState<VectorProviderView[]>([]);
   const [indexesByProvider, setIndexesByProvider] = useState<Record<string, VectorIndexRecord[]>>({});
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [createModalOpen, setCreateModalOpen] = useState(false);
 
-  const loadProvidersAndIndexes = useCallback(async () => {
-    setRefreshing(true);
+  const loadProvidersAndIndexes = useCallback(async (isRefresh = false) => {
+    if (isRefresh) {
+      setRefreshing(true);
+    } else {
+      setLoading(true);
+    }
     try {
       const providerResponse = await fetch('/api/vector/providers', { cache: 'no-store' });
       if (!providerResponse.ok) {
@@ -116,7 +127,7 @@ export default function VectorIndexPage() {
   }, []);
 
   useEffect(() => {
-    void loadProvidersAndIndexes();
+    void loadProvidersAndIndexes(false);
   }, [loadProvidersAndIndexes]);
 
   const rows = useMemo<VectorIndexRow[]>(() => {
@@ -169,151 +180,281 @@ export default function VectorIndexPage() {
   };
 
   return (
-    <Stack gap="md">
-      <Group justify="space-between" align="flex-start">
-        <div>
-          <Text fw={600} size="xl">
-            Vector Indexes
-          </Text>
-          <Text size="sm" c="dimmed">
-            Manage vector indexes across providers, inspect recent items, and launch queries.
-          </Text>
-        </div>
-        <Group gap="xs">
-          <Tooltip label="Refresh">
-            <ActionIcon
-              variant="subtle"
-              onClick={() => void loadProvidersAndIndexes()}
+    <Stack gap="lg">
+      {/* Header */}
+      <Paper
+        p="xl"
+        radius="lg"
+        withBorder
+        style={{
+          background: 'linear-gradient(135deg, var(--mantine-color-violet-0) 0%, var(--mantine-color-grape-0) 100%)',
+          borderColor: 'var(--mantine-color-violet-2)',
+        }}>
+        <Group justify="space-between" align="flex-start">
+          <Group gap="md">
+            <ThemeIcon
+              size={50}
+              radius="xl"
+              variant="gradient"
+              gradient={{ from: 'violet', to: 'grape', deg: 135 }}>
+              <IconDatabase size={26} />
+            </ThemeIcon>
+            <div>
+              <Title order={2}>Vector Indexes</Title>
+              <Text size="sm" c="dimmed" mt={4}>
+                Manage vector indexes across providers, inspect recent items, and launch queries.
+              </Text>
+            </div>
+          </Group>
+          <Group gap="xs">
+            <Button
+              onClick={() => openDocs('api-vectors')}
+              variant="light"
+              leftSection={<IconBook size={16} />}
+            >
+              Docs
+            </Button>
+            <Button
+              variant="light"
+              leftSection={<IconRefresh size={16} />}
+              onClick={() => void loadProvidersAndIndexes(true)}
+              loading={loading || refreshing}
               disabled={refreshing}
             >
-              {refreshing ? <Loader size="xs" /> : <IconRefresh size={16} />}
-            </ActionIcon>
-          </Tooltip>
-          <Button leftSection={<IconPlus size={16} />} onClick={() => setCreateModalOpen(true)}>
-            Create Index
-          </Button>
+              Refresh
+            </Button>
+            <Button 
+              leftSection={<IconPlus size={16} />} 
+              onClick={() => setCreateModalOpen(true)}
+              variant="gradient"
+              gradient={{ from: 'violet', to: 'grape', deg: 90 }}>
+              Create Index
+            </Button>
+          </Group>
         </Group>
-      </Group>
+      </Paper>
 
-      <Paper radius="md" shadow="sm" withBorder>
+      {/* Stats Cards */}
+      <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }}>
+        <Paper withBorder radius="lg" p="lg">
+          <Group justify="space-between">
+            <Stack gap={4}>
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
+                Total Indexes
+              </Text>
+              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }}>
+                {rows.length}
+              </Text>
+            </Stack>
+            <ThemeIcon size={48} radius="xl" variant="light" color="violet">
+              <IconDatabase size={24} />
+            </ThemeIcon>
+          </Group>
+        </Paper>
+        <Paper withBorder radius="lg" p="lg">
+          <Group justify="space-between">
+            <Stack gap={4}>
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
+                Providers
+              </Text>
+              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="teal">
+                {providers.length}
+              </Text>
+            </Stack>
+            <ThemeIcon size={48} radius="xl" variant="light" color="teal">
+              <IconServer size={24} />
+            </ThemeIcon>
+          </Group>
+        </Paper>
+        <Paper withBorder radius="lg" p="lg">
+          <Group justify="space-between">
+            <Stack gap={4}>
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
+                Active Providers
+              </Text>
+              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="green">
+                {providers.filter(p => p.status === 'active').length}
+              </Text>
+            </Stack>
+            <ThemeIcon size={48} radius="xl" variant="light" color="green">
+              <IconSparkles size={24} />
+            </ThemeIcon>
+          </Group>
+        </Paper>
+      </SimpleGrid>
+
+      <Paper withBorder radius="lg" p="lg">
+        <Group justify="space-between" align="flex-start" wrap="wrap">
+          <div>
+            <Text fw={600}>Documentation</Text>
+            <Text size="sm" c="dimmed" mt={4}>
+              SDK references for vector providers, indexes, and RAG.
+            </Text>
+          </div>
+          <Group gap="xs">
+            <Button
+              onClick={() => openDocs('api-vectors')}
+              variant="light"
+              leftSection={<IconArrowUpRight size={16} />}
+            >
+              Vectors API
+            </Button>
+            <Button
+              onClick={() => openDocs('examples-rag')}
+              variant="subtle"
+              leftSection={<IconArrowUpRight size={16} />}
+            >
+              RAG example
+            </Button>
+          </Group>
+        </Group>
+      </Paper>
+
+      {/* Indexes Table */}
+      <Paper p="lg" radius="lg" withBorder>
+        <Group justify="space-between" mb="md">
+          <div>
+            <Text fw={600} size="lg">All Indexes</Text>
+            <Text size="sm" c="dimmed">Click on any row to view details and run queries</Text>
+          </div>
+        </Group>
+        
         {loading ? (
-          <Center py="lg">
-            <Loader size="sm" />
+          <Center py="xl">
+            <Loader size="md" color="violet" />
           </Center>
         ) : rows.length === 0 ? (
           <Center py="xl">
-            <Stack gap="sm" align="center">
-              <Text size="sm" c="dimmed">
-                {providers.length === 0
-                  ? 'No vector providers configured yet. Add a provider to get started.'
-                  : 'No indexes created yet. Use the Create Index button to add one.'}
-              </Text>
-              <Button leftSection={<IconPlus size={16} />} onClick={() => setCreateModalOpen(true)}>
+            <Stack gap="md" align="center">
+              <ThemeIcon size={80} radius="xl" variant="light" color="violet">
+                <IconDatabase size={40} />
+              </ThemeIcon>
+              <Stack gap={4} align="center">
+                <Text size="lg" fw={500}>
+                  {providers.length === 0 ? 'No Vector Providers' : 'No Indexes Yet'}
+                </Text>
+                <Text size="sm" c="dimmed" ta="center" maw={400}>
+                  {providers.length === 0
+                    ? 'Configure a vector provider first to start creating indexes.'
+                    : 'Create your first vector index to store and query embeddings.'}
+                </Text>
+              </Stack>
+              <Button 
+                leftSection={<IconPlus size={16} />} 
+                onClick={() => setCreateModalOpen(true)}
+                variant="gradient"
+                gradient={{ from: 'violet', to: 'grape', deg: 90 }}>
                 Create Index
               </Button>
             </Stack>
           </Center>
         ) : (
-          <Table striped verticalSpacing="sm" highlightOnHover>
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>Index</Table.Th>
-                <Table.Th>Provider</Table.Th>
-                <Table.Th>Dimension</Table.Th>
-                <Table.Th>Metric</Table.Th>
-                <Table.Th>Created</Table.Th>
-                <Table.Th>Last Updated</Table.Th>
-                <Table.Th></Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {rows.map(({ provider, index }) => {
-                const providerHandle = resolveProviderHandle(index.metadata);
-                const navigateToDetail = () =>
-                  router.push(`/dashboard/vector/${provider.key}/${index.key}`);
+          <Box style={{ overflow: 'hidden', borderRadius: 'var(--mantine-radius-md)' }}>
+            <Table verticalSpacing="md" horizontalSpacing="md" highlightOnHover>
+              <Table.Thead style={{ backgroundColor: 'var(--mantine-color-gray-0)' }}>
+                <Table.Tr>
+                  <Table.Th style={{ fontWeight: 600 }}>Index</Table.Th>
+                  <Table.Th style={{ fontWeight: 600 }}>Provider</Table.Th>
+                  <Table.Th style={{ fontWeight: 600, textAlign: 'center' }}>Dimension</Table.Th>
+                  <Table.Th style={{ fontWeight: 600 }}>Metric</Table.Th>
+                  <Table.Th style={{ fontWeight: 600 }}>Created</Table.Th>
+                  <Table.Th style={{ fontWeight: 600, textAlign: 'center' }}>Actions</Table.Th>
+                </Table.Tr>
+              </Table.Thead>
+              <Table.Tbody>
+                {rows.map(({ provider, index }) => {
+                  const providerHandle = resolveProviderHandle(index.metadata);
+                  const navigateToDetail = () =>
+                    router.push(`/dashboard/vector/${provider.key}/${index.key}`);
 
-                return (
-                  <Table.Tr
-                    key={`${provider.key}-${index.key}`}
-                    onClick={navigateToDetail}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter' || event.key === ' ') {
-                        event.preventDefault();
-                        navigateToDetail();
-                      }
-                    }}
-                    tabIndex={0}
-                    style={{ cursor: 'pointer' }}
-                  >
-                    <Table.Td>
-                      <Stack gap={4}>
-                        <Text fw={600}>{index.name}</Text>
-                        <Stack gap={2}>
-                          <Text size="xs" c="dimmed">
-                            Index key: {index.key}
-                          </Text>
-                          <Text size="xs" c="dimmed">
-                            External ID: {index.externalId}
-                          </Text>
-                          {providerHandle ? (
-                            <Text size="xs" c="dimmed">
-                              Handle: {providerHandle}
+                  return (
+                    <Table.Tr
+                      key={`${provider.key}-${index.key}`}
+                      onClick={navigateToDetail}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault();
+                          navigateToDetail();
+                        }
+                      }}
+                      tabIndex={0}
+                      style={{ cursor: 'pointer', transition: 'background-color 0.15s ease' }}
+                    >
+                      <Table.Td>
+                        <Group gap="sm">
+                          <ThemeIcon size={40} radius="md" variant="light" color="violet">
+                            <IconDatabase size={20} />
+                          </ThemeIcon>
+                          <Stack gap={2}>
+                            <Text fw={600} size="sm">{index.name}</Text>
+                            <Text size="xs" c="dimmed" ff="monospace">
+                              {index.key}
                             </Text>
-                          ) : null}
-                        </Stack>
-                      </Stack>
-                    </Table.Td>
-                    <Table.Td>
-                      <Stack gap={2}>
-                        <Group gap="xs">
-                          <Text size="sm" fw={500}>
+                          </Stack>
+                        </Group>
+                      </Table.Td>
+                      <Table.Td>
+                        <Group gap={6}>
+                          <Badge 
+                            variant="light" 
+                            color={provider.status === 'active' ? 'teal' : 'yellow'} 
+                            size="sm"
+                            leftSection={<IconServer size={10} />}>
                             {provider.label}
-                          </Text>
-                          <Badge color={provider.status === 'active' ? 'green' : 'yellow'} size="sm">
-                            {provider.status}
                           </Badge>
                         </Group>
-                        <Text size="xs" c="dimmed">
-                          Driver: {provider.driver}
-                        </Text>
-                      </Stack>
-                    </Table.Td>
-                    <Table.Td>{index.dimension}</Table.Td>
-                    <Table.Td>{index.metric}</Table.Td>
-                    <Table.Td>{formatDate(index.createdAt)}</Table.Td>
-                    <Table.Td>{formatDate(index.updatedAt)}</Table.Td>
-                    <Table.Td>
-                      <Group gap="xs">
-                        <Tooltip label="View details">
-                          <ActionIcon
-                            variant="subtle"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              navigateToDetail();
-                            }}
-                          >
-                            <IconEye size={16} />
-                          </ActionIcon>
-                        </Tooltip>
-                        <Tooltip label="Delete index">
-                          <ActionIcon
-                            variant="subtle"
-                            color="red"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              void handleDeleteIndex(provider, index);
-                            }}
-                          >
-                            <IconTrash size={16} />
-                          </ActionIcon>
-                        </Tooltip>
-                      </Group>
-                    </Table.Td>
-                  </Table.Tr>
-                );
-              })}
-            </Table.Tbody>
-          </Table>
+                      </Table.Td>
+                      <Table.Td>
+                        <Center>
+                          <Badge variant="filled" color="violet" size="md" radius="sm">
+                            {index.dimension}
+                          </Badge>
+                        </Center>
+                      </Table.Td>
+                      <Table.Td>
+                        <Badge variant="light" color="gray" size="sm">
+                          {index.metric}
+                        </Badge>
+                      </Table.Td>
+                      <Table.Td>
+                        <Text size="xs" c="dimmed">{formatDate(index.createdAt)}</Text>
+                      </Table.Td>
+                      <Table.Td>
+                        <Group gap="xs" justify="center">
+                          <Tooltip label="View details" withArrow>
+                            <ActionIcon
+                              variant="light"
+                              color="violet"
+                              radius="md"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                navigateToDetail();
+                              }}
+                            >
+                              <IconArrowRight size={16} />
+                            </ActionIcon>
+                          </Tooltip>
+                          <Tooltip label="Delete index" withArrow>
+                            <ActionIcon
+                              variant="light"
+                              color="red"
+                              radius="md"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                void handleDeleteIndex(provider, index);
+                              }}
+                            >
+                              <IconTrash size={16} />
+                            </ActionIcon>
+                          </Tooltip>
+                        </Group>
+                      </Table.Td>
+                    </Table.Tr>
+                  );
+                })}
+              </Table.Tbody>
+            </Table>
+          </Box>
         )}
       </Paper>
 

@@ -13,13 +13,16 @@ import {
   Paper,
   Badge,
   Pagination,
+  ThemeIcon,
+  Title,
 } from '@mantine/core';
 import { DatePickerInput } from '@mantine/dates';
-import { IconRefresh, IconSearch, IconCalendar, IconAdjustments } from '@tabler/icons-react';
+import { IconBook, IconRefresh, IconSearch, IconCalendar, IconAdjustments } from '@tabler/icons-react';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import SessionTable from '@/components/tracing/SessionTable';
 import { formatNumber } from '@/lib/utils/tracingUtils';
+import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 
 interface SessionRecord {
   sessionId: string;
@@ -43,6 +46,7 @@ const DEFAULT_PAGE_SIZE = 25;
 
 export default function TracingSessionsPage() {
   const router = useRouter();
+  const { openDocs } = useDocsDrawer();
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [totalSessions, setTotalSessions] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -138,24 +142,52 @@ export default function TracingSessionsPage() {
 
   return (
     <Stack gap="lg">
-      <Group justify="space-between" align="flex-end">
-        <Stack gap={4}>
-          <Text size="xl" fw={700}>
-            Session Explorer
-          </Text>
-          <Text size="sm" c="dimmed">
-            Inspect recent agent sessions, filter by agent or status, and drill into the execution timeline.
-          </Text>
-        </Stack>
-        <Button
-          leftSection={<IconRefresh size={16} />}
-          variant="light"
-          onClick={handleRefresh}
-          loading={refreshing}
-        >
-          Refresh
-        </Button>
-      </Group>
+      <Paper
+        p="xl"
+        radius="lg"
+        withBorder
+        style={{
+          background:
+            'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
+          borderColor: 'var(--mantine-color-teal-2)',
+        }}
+      >
+        <Group justify="space-between" align="flex-start">
+          <Group gap="md">
+            <ThemeIcon
+              size={50}
+              radius="xl"
+              variant="gradient"
+              gradient={{ from: 'teal', to: 'cyan', deg: 135 }}
+            >
+              <IconAdjustments size={26} />
+            </ThemeIcon>
+            <div>
+              <Title order={2}>Session Explorer</Title>
+              <Text size="sm" c="dimmed" mt={4}>
+                Inspect recent agent sessions, filter by agent or status, and drill into the execution timeline.
+              </Text>
+            </div>
+          </Group>
+          <Group gap="xs">
+            <Button
+              onClick={() => openDocs('api-tracing')}
+              variant="light"
+              leftSection={<IconBook size={16} />}
+            >
+              Docs
+            </Button>
+            <Button
+              leftSection={<IconRefresh size={16} />}
+              variant="light"
+              onClick={handleRefresh}
+              loading={refreshing || loading}
+            >
+              Refresh
+            </Button>
+          </Group>
+        </Group>
+      </Paper>
 
       <Card withBorder shadow="sm" p="md">
         <Stack gap="md">

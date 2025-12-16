@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
-  ActionIcon,
   Badge,
   Button,
   Center,
@@ -16,23 +15,23 @@ import {
   Text,
   TextInput,
   Textarea,
-  Tooltip,
+  ThemeIcon,
+  Title,
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import {
   IconArrowLeft,
+  IconBook,
+  IconDatabase,
   IconDeviceFloppy,
   IconRefresh,
   IconTrash,
 } from '@tabler/icons-react';
-import type {
-  VectorIndexRecord,
-  VectorQueryResponse,
-  VectorProviderView,
-} from '@/lib/services/vector';
+import type { VectorIndexRecord, VectorQueryResponse, VectorProviderView } from '@/lib/services/vector';
 import EditVectorIndexModal from '@/components/vector/EditVectorIndexModal';
 import UpsertVectorItemModal from '@/components/vector/UpsertVectorItemModal';
+import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 
 function formatDate(value?: string | Date) {
   if (!value) return '—';
@@ -86,6 +85,7 @@ function resolveBucketName(metadata?: Record<string, unknown>): string | undefin
 export default function VectorIndexDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const { openDocs } = useDocsDrawer();
   const providerKeyParam = params.providerKey;
   const indexKeyParam = params.externalId;
   const providerKey = Array.isArray(providerKeyParam) ? providerKeyParam[0] : providerKeyParam;
@@ -124,7 +124,7 @@ export default function VectorIndexDetailPage() {
     },
   });
 
-  const loadIndex = useCallback(async () => {
+  const loadIndex = useCallback(async (isRefresh = false) => {
     if (!providerKey || !indexKey) {
       setIndex(null);
       setProvider(null);
@@ -133,7 +133,11 @@ export default function VectorIndexDetailPage() {
       return;
     }
 
-    setRefreshing(true);
+    if (isRefresh) {
+      setRefreshing(true);
+    } else {
+      setLoading(true);
+    }
     try {
       const response = await fetch(
         `/api/vector/indexes/${encodeURIComponent(indexKey)}?providerKey=${encodeURIComponent(providerKey)}`,
@@ -164,7 +168,7 @@ export default function VectorIndexDetailPage() {
   }, [providerKey, indexKey, router]);
 
   useEffect(() => {
-    void loadIndex();
+    void loadIndex(false);
   }, [loadIndex]);
 
   const handleDelete = async () => {
@@ -391,47 +395,67 @@ export default function VectorIndexDetailPage() {
 
   return (
     <Stack gap="lg">
-      <Group justify="space-between" align="center">
-        <Group gap="xs">
-          <ActionIcon variant="light" onClick={() => router.push('/dashboard/vector')}>
-            <IconArrowLeft size={16} />
-          </ActionIcon>
-          <div>
-            <Group gap="xs">
-              <Text fw={600} size="xl">
-                {index.name}
-              </Text>
-              <Badge>{index.metric}</Badge>
-            </Group>
-            <Text size="sm" c="dimmed">
-              Provider {provider.label} • Driver {provider.driver}
-            </Text>
-          </div>
-        </Group>
-        <Group gap="xs">
-          <Tooltip label="Refresh">
-            <ActionIcon
-              variant="subtle"
-              onClick={() => void loadIndex()}
-              disabled={refreshing}
+      <Paper
+        p="xl"
+        radius="lg"
+        withBorder
+        style={{
+          background:
+            'linear-gradient(135deg, var(--mantine-color-violet-0) 0%, var(--mantine-color-grape-0) 100%)',
+          borderColor: 'var(--mantine-color-violet-2)',
+        }}
+      >
+        <Group justify="space-between" align="flex-start">
+          <Group gap="md" align="flex-start">
+            <ThemeIcon
+              size={50}
+              radius="xl"
+              variant="gradient"
+              gradient={{ from: 'violet', to: 'grape', deg: 135 }}
             >
-              {refreshing ? <Loader size="xs" /> : <IconRefresh size={16} />}
-            </ActionIcon>
-          </Tooltip>
-          <Button
-            variant="light"
-            leftSection={<IconDeviceFloppy size={16} />}
-            onClick={() => setEditModalOpen(true)}
-          >
-            Edit details
-          </Button>
-          <Button color="red" leftSection={<IconTrash size={16} />} onClick={() => void handleDelete()}>
-            Delete
-          </Button>
+              <IconDatabase size={26} />
+            </ThemeIcon>
+            <div>
+              <Group gap="xs" align="center">
+                <Title order={2}>{index.name}</Title>
+                <Badge>{index.metric}</Badge>
+              </Group>
+              <Text size="sm" c="dimmed" mt={4}>
+                Provider {provider.label} • Driver {provider.driver}
+              </Text>
+            </div>
+          </Group>
+          <Group gap="xs">
+            <Button
+              onClick={() => openDocs('api-vectors')}
+              variant="light"
+              leftSection={<IconBook size={16} />}
+            >
+              Docs
+            </Button>
+            <Button
+              variant="light"
+              leftSection={<IconRefresh size={16} />}
+              onClick={() => void loadIndex(true)}
+              loading={refreshing}
+            >
+              Refresh
+            </Button>
+            <Button
+              variant="light"
+              leftSection={<IconDeviceFloppy size={16} />}
+              onClick={() => setEditModalOpen(true)}
+            >
+              Edit details
+            </Button>
+            <Button color="red" leftSection={<IconTrash size={16} />} onClick={() => void handleDelete()}>
+              Delete
+            </Button>
+          </Group>
         </Group>
-      </Group>
+      </Paper>
 
-      <Paper withBorder radius="md" shadow="sm" p="md">
+      <Paper withBorder radius="lg" p="lg">
         <Stack gap="sm">
           <Text size="sm" c="dimmed">
             Index key: {index.key}
@@ -478,7 +502,7 @@ export default function VectorIndexDetailPage() {
       </Paper>
 
       <Group align="flex-start" grow>
-        <Paper withBorder radius="md" shadow="sm" p="md" style={{ flex: 1 }}>
+        <Paper withBorder radius="lg" p="lg" style={{ flex: 1 }}>
           <Stack gap="md">
             <Stack gap="xs">
               <Text fw={600}>Manage vectors</Text>
@@ -534,7 +558,7 @@ export default function VectorIndexDetailPage() {
           </Stack>
         </Paper>
 
-        <Paper withBorder radius="md" shadow="sm" p="md" style={{ flex: 1 }}>
+        <Paper withBorder radius="lg" p="lg" style={{ flex: 1 }}>
           <Stack gap="md">
             <Text fw={600}>Run similarity query</Text>
             <form onSubmit={handleQuery}>

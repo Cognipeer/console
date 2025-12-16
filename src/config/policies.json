@@ -8,6 +8,14 @@
         "/api/users/*"
       ]
     },
+    "DASHBOARD": {
+      "name": "Dashboard",
+      "description": "Access to dashboard endpoints",
+      "endpoints": [
+        "/api/dashboard",
+        "/api/dashboard/*"
+      ]
+    },
     "PROJECT_MANAGEMENT": {
       "name": "Project Management",
       "description": "Create and manage projects",
@@ -107,7 +115,8 @@
         "MODEL_MANAGEMENT",
         "VECTOR_STORE",
         "FILES",
-        "QUOTA_MANAGEMENT"
+        "QUOTA_MANAGEMENT",
+        "DASHBOARD"
       ],
       "limits": {
         "requestsPerMonth": 1000,

@@ -18,12 +18,14 @@ import {
   Text,
   TextInput,
   Textarea,
+  ThemeIcon,
   Title,
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
-import { IconArrowLeft, IconDeviceFloppy, IconRefresh } from '@tabler/icons-react';
+import { IconArrowLeft, IconBook, IconBrain, IconDeviceFloppy, IconRefresh } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 
 interface ProviderField {
   name: string;
@@ -95,6 +97,7 @@ interface FormValues {
 export default function EditModelPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
+  const { openDocs } = useDocsDrawer();
   const t = useTranslations('modelEdit');
   const tWizard = useTranslations('modelWizard');
   const [loading, setLoading] = useState(true);
@@ -282,42 +285,61 @@ export default function EditModelPage() {
 
   return (
     <Stack gap="lg">
-      <Group justify="space-between" align="flex-start">
-        <div>
-          <Button
-            variant="subtle"
-            size="compact-sm"
-            leftSection={<IconArrowLeft size={14} />}
-            onClick={() => router.push(`/dashboard/models/${model._id}`)}
-          >
-            {t('actions.backToDetail')}
-          </Button>
-          <Title order={2} mt="sm">
-            {t('title', { name: model.name })}
-          </Title>
-          <Text size="sm" c="dimmed">
-            {t('subtitle')}
-          </Text>
-        </div>
-        <Group gap="xs">
-          <Button
-            variant="light"
-            leftSection={<IconRefresh size={16} />}
-            loading={refreshing}
-            onClick={() => loadModel(false)}
-          >
-            {t('actions.reload')}
-          </Button>
-          <Button
-            type="submit"
-            form="model-edit-form"
-            leftSection={<IconDeviceFloppy size={16} />}
-            loading={saving}
-          >
-            {t('actions.save')}
-          </Button>
+      <Paper
+        p="xl"
+        radius="lg"
+        withBorder
+        style={{
+          background:
+            'linear-gradient(135deg, var(--mantine-color-blue-0) 0%, var(--mantine-color-violet-0) 100%)',
+          borderColor: 'var(--mantine-color-blue-2)',
+        }}
+      >
+        <Group justify="space-between" align="flex-start">
+          <Group gap="md" align="flex-start">
+            <ThemeIcon
+              size={50}
+              radius="xl"
+              variant="gradient"
+              gradient={{ from: 'blue', to: 'violet', deg: 135 }}
+            >
+              <IconBrain size={26} />
+            </ThemeIcon>
+            <div>
+              <Title order={2}>{t('title', { name: model.name })}</Title>
+              <Text size="sm" c="dimmed" mt={4}>
+                {t('subtitle')}
+              </Text>
+            </div>
+          </Group>
+
+          <Group gap="xs">
+            <Button
+              onClick={() => openDocs('api-client')}
+              variant="light"
+              leftSection={<IconBook size={16} />}
+            >
+              Docs
+            </Button>
+            <Button
+              variant="light"
+              leftSection={<IconRefresh size={16} />}
+              loading={refreshing || loading}
+              onClick={() => loadModel(false)}
+            >
+              {t('actions.reload')}
+            </Button>
+            <Button
+              type="submit"
+              form="model-edit-form"
+              leftSection={<IconDeviceFloppy size={16} />}
+              loading={saving}
+            >
+              {t('actions.save')}
+            </Button>
+          </Group>
         </Group>
-      </Group>
+      </Paper>
 
       <Card withBorder radius="md" padding="lg">
         <form id="model-edit-form" onSubmit={form.onSubmit(handleSubmit)}>

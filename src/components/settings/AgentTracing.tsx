@@ -15,6 +15,7 @@ import {
   Button,
   TextInput,
   Select,
+  Anchor,
 } from '@mantine/core';
 import { DatePickerInput } from '@mantine/dates';
 import { IconInfoCircle, IconRefresh, IconCalendar } from '@tabler/icons-react';
@@ -24,10 +25,12 @@ import {
   formatPercent,
   formatDuration,
 } from '@/lib/utils/tracingUtils';
+import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 
 interface AgentTracingProps {}
 
 export default function AgentTracing({}: AgentTracingProps) {
+  const { openDocs } = useDocsDrawer();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dateRange, setDateRange] = useState<[Date | null, Date | null]>([null, null]);
@@ -104,18 +107,16 @@ export default function AgentTracing({}: AgentTracingProps) {
         <Group align="flex-start" gap="sm">
           <IconInfoCircle size={20} color="var(--mantine-color-blue-6)" style={{ marginTop: 4 }} />
           <Stack gap={6}>
-            <Text fw={600}>Instrument your agents quickly</Text>
+            <Text fw={600}>Instrument your agents</Text>
             <Text size="sm" c="dimmed">
-              Install{' '}
-              <Text component="a" href="https://www.npmjs.com/package/@cognipeer/agent-sdk" target="_blank" c="blue" style={{ textDecoration: 'none' }}>
-                @cognipeer/agent-sdk
-              </Text>
-              {' '}to instrument your Node.js agent in minutes. The SDK automatically creates sessions, events, and payload timelines.
-            </Text>
-            <Text size="sm" c="dimmed">
-              Prefer HTTP? Generate an API key under API Tokens and POST your agent payloads to{' '}
-              <Text component="span" ff="monospace">/v1/client/tracing/sessions</Text>
+              Generate an API key under API Tokens and POST your agent payloads to{' '}
+              <Text component="span" ff="monospace">/api/client/tracing/sessions</Text>
               {' '}to stream tracing data from any stack.
+              {' '}See our{' '}
+              <Anchor component="button" onClick={() => openDocs('examples-tracing')}>
+                LangChain/LangGraph integration examples
+              </Anchor>
+              {' '}for quick setup.
             </Text>
           </Stack>
         </Group>

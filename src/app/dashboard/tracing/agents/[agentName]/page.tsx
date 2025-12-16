@@ -17,14 +17,18 @@ import {
   Stack,
   Table,
   Text,
+  ThemeIcon,
+  Title,
 } from '@mantine/core';
 import { DatePickerInput } from '@mantine/dates';
 import {
   IconAlertCircle,
-  IconArrowLeft,
   IconArrowUpRight,
+  IconBook,
   IconCalendar,
   IconInfoCircle,
+  IconRefresh,
+  IconTimeline,
 } from '@tabler/icons-react';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
@@ -36,6 +40,7 @@ import {
   humanize,
   resolveStatusColor,
 } from '@/lib/utils/tracingUtils';
+import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 
 dayjs.extend(relativeTime);
 
@@ -97,6 +102,7 @@ interface AgentOverviewResponse {
 export default function AgentTracingAgentPage() {
   const params = useParams<{ agentName: string }>();
   const router = useRouter();
+  const { openDocs } = useDocsDrawer();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -163,10 +169,6 @@ export default function AgentTracingAgentPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentName, rangeParams.from, rangeParams.to, timezone]);
 
-  const handleBack = () => {
-    router.push('/dashboard/tracing');
-  };
-
   const handleShowAllSessions = () => {
     router.push(`/dashboard/tracing/sessions?agent=${encodeURIComponent(agentName)}`);
   };
@@ -206,15 +208,65 @@ export default function AgentTracingAgentPage() {
   const dailyRows = analytics?.daily || [];
 
   return (
-    <Stack gap="md" p="md">
-      <Button
-        variant="subtle"
-        leftSection={<IconArrowLeft size={16} />}
-        onClick={handleBack}
-        w="fit-content"
+    <Stack gap="lg">
+      <Paper
+        p="xl"
+        radius="lg"
+        withBorder
+        style={{
+          background:
+            'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
+          borderColor: 'var(--mantine-color-teal-2)',
+        }}
       >
-        Back to overview
-      </Button>
+        <Group justify="space-between" align="flex-start">
+          <Group gap="md" align="flex-start">
+            <ThemeIcon
+              size={50}
+              radius="xl"
+              variant="gradient"
+              gradient={{ from: 'teal', to: 'cyan', deg: 135 }}
+            >
+              <IconTimeline size={26} />
+            </ThemeIcon>
+            <div>
+              <Title order={2}>{agent?.label ?? agentName}</Title>
+              <Text size="sm" c="dimmed" mt={4}>
+                Agent overview, recent sessions, and tool/model analytics.
+              </Text>
+            </div>
+          </Group>
+
+          <Group gap="sm">
+            <Button
+              onClick={() => openDocs('api-tracing')}
+              variant="light"
+              leftSection={<IconBook size={16} />}
+            >
+              Docs
+            </Button>
+            <DatePickerInput
+              type="range"
+              value={dateRange}
+              clearable
+              onChange={(value) => setDateRange(value as [Date | null, Date | null])}
+              w={260}
+              placeholder="Select Date Range"
+              valueFormat="MMM D, YYYY"
+              leftSection={<IconCalendar size={16} stroke={1.5} />}
+              radius="md"
+            />
+            <Button
+              variant="light"
+              leftSection={<IconRefresh size={16} />}
+              onClick={() => fetchOverview(true)}
+              loading={refreshing}
+            >
+              Refresh
+            </Button>
+          </Group>
+        </Group>
+      </Paper>
 
       {error && (
         <Alert icon={<IconAlertCircle size={16} />} color="red" variant="light">
@@ -250,27 +302,6 @@ export default function AgentTracingAgentPage() {
                 Total sessions tracked: {formatNumber(agent?.sessionsCount || 0)}
               </Text>
             </Stack>
-            <Group gap="sm" align="flex-end">
-              <DatePickerInput
-                type="range"
-                value={dateRange}
-                clearable
-                onChange={(value) => setDateRange(value as [Date | null, Date | null])}
-                label="Date range"
-                w={260}
-                placeholder="Select Date Range"
-                valueFormat="MMM D, YYYY"
-                leftSection={<IconCalendar size={16} stroke={1.5} />}
-              />
-              <Button
-                variant="light"
-                color="blue"
-                onClick={() => fetchOverview(true)}
-                loading={refreshing}
-              >
-                Refresh
-              </Button>
-            </Group>
           </Group>
         </Stack>
       </Card>
@@ -564,19 +595,17 @@ export default function AgentTracingAgentPage() {
 
       <Card withBorder shadow="sm" p="md">
         <Text size="sm" c="dimmed">
-          Need to instrument another agent? Check out the{' '}
-          <Anchor
-            href="https://www.npmjs.com/package/@cognipeer/agent-sdk"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            @cognipeer/agent-sdk
-          </Anchor>{' '}
-          package and the tracing ingestion endpoint at{' '}
+          Need to instrument another agent? Use the tracing ingestion endpoint at{' '}
           <Text component="span" ff="monospace">
             /api/client/tracing/sessions
           </Text>
-          .
+          {' '}with your API token from{' '}
+          <Anchor href="/dashboard/settings">Settings → API Tokens</Anchor>.
+          {' '}See our{' '}
+          <Anchor component="button" onClick={() => openDocs('examples-tracing')}>
+            LangChain/LangGraph integration examples
+          </Anchor>
+          {' '}for quick setup.
         </Text>
       </Card>
     </Stack>
