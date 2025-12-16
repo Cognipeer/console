@@ -37,6 +37,7 @@ import { ReactNode } from 'react';
 import DashboardBreadcrumbs from './DashboardBreadcrumbs';
 import { useTranslations } from '@/lib/i18n';
 import classes from './DashboardLayout.module.css';
+import ProjectSelector from '@/components/projects/ProjectSelector';
 
 interface DashboardLayoutProps {
   children: ReactNode;
@@ -44,6 +45,7 @@ interface DashboardLayoutProps {
     name: string;
     email: string;
     licenseType: string;
+    role?: 'owner' | 'admin' | 'project_admin' | 'user';
   };
 }
 
@@ -79,7 +81,10 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
     name: t('defaultUser.name'),
     email: t('defaultUser.email'),
     licenseType: t('defaultUser.license'),
+    role: 'user' as const,
   };
+
+  const isTenantAdmin = defaultUser.role === 'owner' || defaultUser.role === 'admin';
 
   const navItems = [
     {
@@ -102,11 +107,25 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
       icon: IconTimeline,
       href: '/dashboard/tracing',
     },
-    {
-      label: tNav('settings'),
-      icon: IconSettings,
-      href: '/dashboard/settings',
-    },
+    ,
+    ...(!isTenantAdmin
+      ? [
+        {
+          label: tNav('settings'),
+          icon: IconSettings,
+          href: '/dashboard/settings',
+        }
+      ]
+      : []),
+    ...(isTenantAdmin
+      ? [
+        {
+          label: tNav('tenantSettings'),
+          icon: IconSettings,
+          href: '/dashboard/tenant-settings',
+        },
+      ]
+      : []),
   ];
 
   const handleNavClick = (href?: string) => {
@@ -220,6 +239,13 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
 
           <Divider size="xs" />
 
+          {opened ? (
+            <>
+              <ProjectSelector />
+              <Divider size="xs" />
+            </>
+          ) : null}
+
           <ScrollArea.Autosize mah="100%" className={classes.navLinks} offsetScrollbars>
             <Stack gap={4}>
               {navItems.map((item) => {
@@ -316,15 +342,17 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
 
       <AppShell.Main>
         <Stack gap="md">
-          <Group gap="sm" align="center">
-            <Burger
-              opened={opened}
-              onClick={() => (opened ? close() : open())}
-              hiddenFrom="sm"
-              size="sm"
-              aria-label={opened ? 'Close sidebar' : 'Open sidebar'}
-            />
-            <DashboardBreadcrumbs />
+          <Group gap="sm" align="center" justify="space-between">
+            <Group gap="sm" align="center">
+              <Burger
+                opened={opened}
+                onClick={() => (opened ? close() : open())}
+                hiddenFrom="sm"
+                size="sm"
+                aria-label={opened ? 'Close sidebar' : 'Open sidebar'}
+              />
+              <DashboardBreadcrumbs />
+            </Group>
           </Group>
           {children}
         </Stack>

@@ -12,10 +12,11 @@ interface User {
   _id: string;
   name: string;
   email: string;
-  role: 'owner' | 'admin' | 'user';
+  role: 'owner' | 'admin' | 'project_admin' | 'user';
   createdAt: string;
   invitedBy?: string;
   invitedAt?: string;
+  inviteAcceptedAt?: string;
 }
 
 export default function UserManagement() {
@@ -93,6 +94,8 @@ export default function UserManagement() {
         return 'blue';
       case 'admin':
         return 'grape';
+      case 'project_admin':
+        return 'cyan';
       default:
         return 'gray';
     }
@@ -156,7 +159,7 @@ export default function UserManagement() {
             accessor: 'invitedBy',
             title: t('table.status'),
             render: (user) =>
-              user.invitedBy ? (
+              user.invitedBy && !user.inviteAcceptedAt ? (
                 <Tooltip label={t('status.invitedAt', { date: new Date(user.invitedAt!).toLocaleDateString() })}>
                   <Badge color="orange" variant="light" leftSection={<IconMail size={12} />}>
                     {t('status.invited')}

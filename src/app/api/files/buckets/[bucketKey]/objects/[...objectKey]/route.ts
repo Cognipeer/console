@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { resolveTenantDbName } from '@/lib/utils/tenant';
 import { deleteFile, downloadFile, getFileRecord } from '@/lib/services/files';
+import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
 
 export const runtime = 'nodejs';
 
@@ -21,12 +21,19 @@ function normalizeObjectKey(segments: string[] | undefined): string | null {
 
 export async function GET(request: NextRequest, context: RouteContext) {
   try {
-    const tenantSlug = request.headers.get('x-tenant-slug');
+    const tenantDbName = request.headers.get('x-tenant-db-name');
     const tenantId = request.headers.get('x-tenant-id');
+    const userId = request.headers.get('x-user-id');
 
-    if (!tenantSlug || !tenantId) {
+    if (!tenantDbName || !tenantId || !userId) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
+
+    const projectContext = await requireProjectContext(request, {
+      tenantDbName,
+      tenantId,
+      userId,
+    });
 
     const { bucketKey, objectKey } = await context.params;
     const key = normalizeObjectKey(objectKey);
@@ -38,11 +45,16 @@ export async function GET(request: NextRequest, context: RouteContext) {
     const downloadParam = searchParams.get('download');
     const variantParam = searchParams.get('variant');
 
-    const { tenantDbName } = await resolveTenantDbName(tenantSlug);
-
     if (downloadParam) {
       const variant = downloadParam === 'markdown' || variantParam === 'markdown' ? 'markdown' : 'original';
-      const result = await downloadFile(tenantDbName, tenantId, bucketKey, key, { variant });
+      const result = await downloadFile(
+        tenantDbName,
+        tenantId,
+        projectContext.projectId,
+        bucketKey,
+        key,
+        { variant },
+      );
 
       const buffer = result.data as unknown as Uint8Array;
       const arrayBuffer = buffer.buffer.slice(
@@ -66,12 +78,21 @@ export async function GET(request: NextRequest, context: RouteContext) {
       });
     }
 
-    const record = await getFileRecord(tenantDbName, tenantId, bucketKey, key);
+    const record = await getFileRecord(
+      tenantDbName,
+      tenantId,
+      projectContext.projectId,
+      bucketKey,
+      key,
+    );
 
     return NextResponse.json({ record });
   } catch (error) {
     console.error('Get file record error', error);
     const message = error instanceof Error ? error.message : 'Internal server error';
+    if (error instanceof ProjectContextError) {
+      return NextResponse.json({ error: error.message }, { status: error.status });
+    }
     if (message === 'Markdown conversion not available for this file.') {
       return NextResponse.json({ error: message }, { status: 409 });
     }
@@ -84,13 +105,19 @@ export async function GET(request: NextRequest, context: RouteContext) {
 
 export async function DELETE(request: NextRequest, context: RouteContext) {
   try {
-    const tenantSlug = request.headers.get('x-tenant-slug');
+    const tenantDbName = request.headers.get('x-tenant-db-name');
     const tenantId = request.headers.get('x-tenant-id');
     const userId = request.headers.get('x-user-id');
 
-    if (!tenantSlug || !tenantId || !userId) {
+    if (!tenantDbName || !tenantId || !userId) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
+
+    const projectContext = await requireProjectContext(request, {
+      tenantDbName,
+      tenantId,
+      userId,
+    });
 
     const { bucketKey, objectKey } = await context.params;
     const key = normalizeObjectKey(objectKey);
@@ -98,8 +125,14 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
       return NextResponse.json({ error: 'Object key is required' }, { status: 400 });
     }
 
-    const { tenantDbName } = await resolveTenantDbName(tenantSlug);
-    const deleted = await deleteFile(tenantDbName, tenantId, bucketKey, key, userId);
+    const deleted = await deleteFile(
+      tenantDbName,
+      tenantId,
+      projectContext.projectId,
+      bucketKey,
+      key,
+      userId,
+    );
 
     if (!deleted) {
       return NextResponse.json({ error: 'File not found' }, { status: 404 });
@@ -109,6 +142,9 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
   } catch (error) {
     console.error('Delete file error', error);
     const message = error instanceof Error ? error.message : 'Internal server error';
+    if (error instanceof ProjectContextError) {
+      return NextResponse.json({ error: error.message }, { status: error.status });
+    }
     if (message === 'File record not found.') {
       return NextResponse.json({ error: 'File not found' }, { status: 404 });
     }

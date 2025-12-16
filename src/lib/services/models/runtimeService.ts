@@ -24,10 +24,11 @@ export async function buildModelRuntime(
   tenantDbName: string,
   tenantId: string,
   providerKey: string,
+  projectId?: string,
 ): Promise<ModelRuntimeContext> {
   const { record, credentials } = await loadProviderRuntimeData(
     tenantDbName,
-    { tenantId, key: providerKey },
+    { tenantId, key: providerKey, projectId },
   );
 
   if (record.type !== 'model') {
@@ -40,6 +41,7 @@ export async function buildModelRuntime(
     record.driver,
     {
       tenantId,
+      projectId,
       providerKey: record.key,
       credentials,
       settings: record.settings ?? {},

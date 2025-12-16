@@ -5,6 +5,8 @@ import {
   listVectorIndexes,
   type VectorIndexRecord,
 } from '@/lib/services/vector';
+import type { LicenseType } from '@/lib/license/license-manager';
+import { checkRateLimit, checkResourceQuota } from '@/lib/quota/quotaGuard';
 
 export const runtime = 'nodejs';
 
@@ -37,9 +39,14 @@ function serializeIndex(index: VectorIndexRecord) {
 export async function GET(request: NextRequest, context: RouteContext) {
   try {
     const { providerKey } = await context.params;
-    const { tenantId, tenantDbName } = await requireApiToken(request);
+    const { tenantId, tenantDbName, projectId } = await requireApiToken(request);
 
-    const indexes = await listVectorIndexes(tenantDbName, tenantId, providerKey);
+    const indexes = await listVectorIndexes(
+      tenantDbName,
+      tenantId,
+      projectId,
+      providerKey,
+    );
 
     return NextResponse.json(
       { indexes: indexes.map(serializeIndex) },
@@ -81,6 +88,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
     const existingIndexes = await listVectorIndexes(
       auth.tenantDbName,
       auth.tenantId,
+      auth.projectId,
       providerKey,
     );
 
@@ -96,14 +104,62 @@ export async function POST(request: NextRequest, context: RouteContext) {
       );
     }
 
-    const index = await createVectorIndex(auth.tenantDbName, auth.tenantId, {
+    const rateLimitResult = await checkRateLimit(
+      {
+        tenantDbName: auth.tenantDbName,
+        tenantId: auth.tenantId,
+        projectId: auth.projectId,
+        licenseType: auth.tenant.licenseType as LicenseType,
+        userId: auth.tokenRecord.userId,
+        tokenId: auth.tokenRecord._id?.toString() ?? auth.token,
+        domain: 'vector',
+        providerKey,
+      },
+      { requests: 1 },
+    );
+
+    if (!rateLimitResult.allowed) {
+      return NextResponse.json(
+        { error: rateLimitResult.reason || 'Rate limit exceeded' },
+        { status: 429 },
+      );
+    }
+
+    const resourceCheck = await checkResourceQuota(
+      {
+        tenantDbName: auth.tenantDbName,
+        tenantId: auth.tenantId,
+        projectId: auth.projectId,
+        licenseType: auth.tenant.licenseType as LicenseType,
+        userId: auth.tokenRecord.userId,
+        tokenId: auth.tokenRecord._id?.toString() ?? auth.token,
+        domain: 'vector',
+        providerKey,
+      },
+      'vectorIndexes',
+      existingIndexes.length,
+    );
+
+    if (!resourceCheck.allowed) {
+      return NextResponse.json(
+        { error: resourceCheck.reason || 'Vector index quota exceeded' },
+        { status: 429 },
+      );
+    }
+
+    const index = await createVectorIndex(
+      auth.tenantDbName,
+      auth.tenantId,
+      auth.projectId,
+      {
       providerKey,
       name: body.name,
       dimension: dimensionValue,
       metric: body.metric,
       metadata: body.metadata,
       createdBy: auth.tokenRecord.userId,
-    });
+      },
+    );
 
     return NextResponse.json({ index: serializeIndex(index) }, { status: 201 });
   } catch (error) {

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { resolveTenantDbName } from '@/lib/utils/tenant';
 import { queryVectorIndex } from '@/lib/services/vector';
+import { ProjectContextError, requireProjectContext } from '@/lib/services/projects/projectContext';
 
 export const runtime = 'nodejs';
 
@@ -27,11 +27,27 @@ interface RouteContext {
 export async function POST(request: NextRequest, context: RouteContext) {
   try {
     const { externalId } = await context.params;
-    const tenantSlug = request.headers.get('x-tenant-slug');
+    const tenantDbName = request.headers.get('x-tenant-db-name');
     const tenantId = request.headers.get('x-tenant-id');
+    const userId = request.headers.get('x-user-id');
 
-    if (!tenantSlug || !tenantId) {
+    if (!tenantDbName || !tenantId || !userId) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    let projectId: string;
+    try {
+      const projectContext = await requireProjectContext(request, {
+        tenantDbName,
+        tenantId,
+        userId,
+      });
+      projectId = projectContext.projectId;
+    } catch (error) {
+      if (error instanceof ProjectContextError) {
+        return NextResponse.json({ error: error.message }, { status: error.status });
+      }
+      throw error;
     }
 
     const providerKey = requireProviderKey(request.url);
@@ -59,8 +75,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
       );
     }
 
-    const { tenantDbName } = await resolveTenantDbName(tenantSlug);
-    const result = await queryVectorIndex(tenantDbName, tenantId, {
+    const result = await queryVectorIndex(tenantDbName, tenantId, projectId, {
       providerKey,
       indexExternalId: externalId,
       query: {

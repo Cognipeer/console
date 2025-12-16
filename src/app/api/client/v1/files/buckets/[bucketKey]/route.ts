@@ -13,7 +13,7 @@ export async function GET(
   { params }: { params: Promise<{ bucketKey: string }> },
 ) {
   try {
-    const { tenantDbName, tenantId } = await requireApiToken(request);
+    const { tenantDbName, tenantId, projectId } = await requireApiToken(request);
     const { bucketKey } = await params;
 
     if (!bucketKey) {
@@ -23,7 +23,7 @@ export async function GET(
       );
     }
 
-    const bucket = await getFileBucket(tenantDbName, tenantId, bucketKey);
+    const bucket = await getFileBucket(tenantDbName, tenantId, projectId, bucketKey);
 
     if (!bucket) {
       return NextResponse.json(

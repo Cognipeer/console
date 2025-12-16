@@ -50,6 +50,7 @@ export type { DatabaseProvider } from './provider.interface';
 export type {
   IUser,
   ITenant,
+  IProject,
   IApiToken,
   IAgentTracingSession,
   IAgentTracingEvent,
@@ -67,4 +68,5 @@ export type {
   IFileBucketRecord,
   IFileRecord,
   FileMarkdownStatus,
+  IQuotaPolicy,
 } from './provider.interface';

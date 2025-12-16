@@ -94,11 +94,12 @@ async function buildRuntimeContext(
   tenantDbName: string,
   tenantId: string,
   providerKey: string,
+  projectId?: string,
 ): Promise<{ runtime: VectorProviderRuntime; record: IProviderRecord }> {
   try {
     const { record, credentials } = await loadProviderRuntimeData(
       tenantDbName,
-      { tenantId, key: providerKey },
+      { tenantId, key: providerKey, projectId },
     );
 
     ensureVectorProvider(record);
@@ -128,6 +129,7 @@ async function buildRuntimeContext(
 async function generateUniqueIndexKey(
   db: DatabaseProvider,
   providerKey: string,
+  projectId: string,
   desiredKey: string | undefined,
 ): Promise<string> {
   const base = normalizeKeyCandidate(desiredKey);
@@ -135,7 +137,11 @@ async function generateUniqueIndexKey(
   let candidate = base;
 
   while (attempt < MAX_KEY_ATTEMPTS) {
-    const existing = await db.findVectorIndexByKey(providerKey, candidate);
+    const existing = await db.findVectorIndexByKey(
+      providerKey,
+      candidate,
+      projectId,
+    );
     if (!existing) {
       return candidate;
     }
@@ -232,8 +238,9 @@ async function requireVectorIndexRecord(
   db: DatabaseProvider,
   providerKey: string,
   key: string,
+  projectId: string,
 ): Promise<VectorIndexRecord> {
-  const record = await db.findVectorIndexByKey(providerKey, key);
+  const record = await db.findVectorIndexByKey(providerKey, key, projectId);
   if (!record) {
     throw new Error('Vector index record not found.');
   }
@@ -244,8 +251,13 @@ async function requireVectorIndexRecordByExternalId(
   db: DatabaseProvider,
   providerKey: string,
   externalId: string,
+  projectId: string,
 ): Promise<VectorIndexRecord> {
-  const record = await db.findVectorIndexByExternalId(providerKey, externalId);
+  const record = await db.findVectorIndexByExternalId(
+    providerKey,
+    externalId,
+    projectId,
+  );
   if (!record) {
     throw new Error('Vector index metadata not found.');
   }
@@ -256,9 +268,10 @@ async function resolveVectorIndexRecord(
   db: DatabaseProvider,
   providerKey: string,
   identifiers: { indexKey?: string; indexExternalId?: string },
+  projectId: string,
 ): Promise<VectorIndexRecord> {
   if (identifiers.indexKey) {
-    return requireVectorIndexRecord(db, providerKey, identifiers.indexKey);
+    return requireVectorIndexRecord(db, providerKey, identifiers.indexKey, projectId);
   }
 
   if (identifiers.indexExternalId) {
@@ -266,6 +279,7 @@ async function resolveVectorIndexRecord(
       db,
       providerKey,
       identifiers.indexExternalId,
+      projectId,
     );
   }
 
@@ -283,11 +297,13 @@ type CreateVectorProviderInput = Omit<CreateProviderConfigInput, 'type'>;
 export async function listVectorProviders(
   tenantDbName: string,
   tenantId: string,
+  projectId: string,
   filters?: VectorProviderFilters,
 ): Promise<VectorProviderView[]> {
   const providers = await listProviderConfigs(tenantDbName, tenantId, {
     ...(filters ?? {}),
     type: 'vector',
+    projectId,
   });
   return providers.map((provider) => attachDriverCapabilities(provider));
 }
@@ -295,11 +311,13 @@ export async function listVectorProviders(
 export async function createVectorProvider(
   tenantDbName: string,
   tenantId: string,
+  projectId: string,
   payload: CreateVectorProviderInput,
 ): Promise<VectorProviderView> {
   const provider = await createProviderConfig(tenantDbName, tenantId, {
     ...payload,
     type: 'vector',
+    projectId,
   });
   return attachDriverCapabilities(provider);
 }
@@ -307,18 +325,21 @@ export async function createVectorProvider(
 export async function createVectorIndex(
   tenantDbName: string,
   tenantId: string,
+  projectId: string,
   request: CreateVectorIndexRequest,
 ): Promise<VectorIndexRecord> {
   const { runtime } = await buildRuntimeContext(
     tenantDbName,
     tenantId,
     request.providerKey,
+    projectId,
   );
 
   const db = await withTenantDb(tenantDbName);
   const key = await generateUniqueIndexKey(
     db,
     request.providerKey,
+    projectId,
     request.key ?? request.name,
   );
 
@@ -333,6 +354,7 @@ export async function createVectorIndex(
 
   const created = await db.createVectorIndex({
     tenantId,
+    projectId,
     providerKey: request.providerKey,
     key,
     name: handle.name,
@@ -350,12 +372,14 @@ export async function createVectorIndex(
 export async function listVectorIndexes(
   tenantDbName: string,
   tenantId: string,
+  projectId: string,
   providerKey: string,
 ): Promise<VectorIndexRecord[]> {
   const provider = await getProviderConfigByKey(
     tenantDbName,
     tenantId,
     providerKey,
+    projectId,
   );
 
   if (!provider) {
@@ -363,12 +387,13 @@ export async function listVectorIndexes(
   }
 
   const db = await withTenantDb(tenantDbName);
-  return db.listVectorIndexes({ providerKey });
+  return db.listVectorIndexes({ providerKey, projectId });
 }
 
 export async function getVectorIndex(
   tenantDbName: string,
   tenantId: string,
+  projectId: string,
   providerKey: string,
   key: string,
 ): Promise<{ index: VectorIndexRecord; provider: VectorProviderView }> {
@@ -376,6 +401,7 @@ export async function getVectorIndex(
     tenantDbName,
     tenantId,
     providerKey,
+    projectId,
   );
 
   if (!provider) {
@@ -383,7 +409,7 @@ export async function getVectorIndex(
   }
 
   const db = await withTenantDb(tenantDbName);
-  const index = await requireVectorIndexRecord(db, providerKey, key);
+  const index = await requireVectorIndexRecord(db, providerKey, key, projectId);
 
   return {
     index,
@@ -394,6 +420,7 @@ export async function getVectorIndex(
 export async function updateVectorIndex(
   tenantDbName: string,
   tenantId: string,
+  projectId: string,
   providerKey: string,
   key: string,
   updates: UpdateVectorIndexRequest,
@@ -402,6 +429,7 @@ export async function updateVectorIndex(
     tenantDbName,
     tenantId,
     providerKey,
+    projectId,
   );
 
   if (!provider) {
@@ -409,7 +437,7 @@ export async function updateVectorIndex(
   }
 
   const db = await withTenantDb(tenantDbName);
-  const existing = await requireVectorIndexRecord(db, providerKey, key);
+  const existing = await requireVectorIndexRecord(db, providerKey, key, projectId);
 
   const payload: Partial<IVectorIndexRecord> = {
     updatedBy: updates.updatedBy,
@@ -438,6 +466,7 @@ export async function updateVectorIndex(
 export async function deleteVectorIndex(
   tenantDbName: string,
   tenantId: string,
+  projectId: string,
   providerKey: string,
   key: string,
   _options?: { updatedBy?: string },
@@ -446,10 +475,11 @@ export async function deleteVectorIndex(
     tenantDbName,
     tenantId,
     providerKey,
+    projectId,
   );
 
   const db = await withTenantDb(tenantDbName);
-  const index = await requireVectorIndexRecord(db, providerKey, key);
+  const index = await requireVectorIndexRecord(db, providerKey, key, projectId);
 
   try {
     await runtime.deleteIndex({ externalId: index.externalId });
@@ -466,16 +496,23 @@ export async function deleteVectorIndex(
 export async function upsertVectors(
   tenantDbName: string,
   tenantId: string,
+  projectId: string,
   request: VectorUpsertRequest,
 ): Promise<void> {
   const { runtime } = await buildRuntimeContext(
     tenantDbName,
     tenantId,
     request.providerKey,
+    projectId,
   );
 
   const db = await withTenantDb(tenantDbName);
-  const index = await resolveVectorIndexRecord(db, request.providerKey, request);
+  const index = await resolveVectorIndexRecord(
+    db,
+    request.providerKey,
+    request,
+    projectId,
+  );
 
   validateVectors(index, request.vectors);
 
@@ -485,6 +522,7 @@ export async function upsertVectors(
 export async function deleteVectors(
   tenantDbName: string,
   tenantId: string,
+  projectId: string,
   request: VectorDeleteRequest,
 ): Promise<void> {
   if (!Array.isArray(request.ids) || request.ids.length === 0) {
@@ -495,10 +533,16 @@ export async function deleteVectors(
     tenantDbName,
     tenantId,
     request.providerKey,
+    projectId,
   );
 
   const db = await withTenantDb(tenantDbName);
-  const index = await resolveVectorIndexRecord(db, request.providerKey, request);
+  const index = await resolveVectorIndexRecord(
+    db,
+    request.providerKey,
+    request,
+    projectId,
+  );
 
   await runtime.deleteVectors(toRuntimeHandle(index), request.ids);
 }
@@ -506,16 +550,23 @@ export async function deleteVectors(
 export async function queryVectorIndex(
   tenantDbName: string,
   tenantId: string,
+  projectId: string,
   request: VectorQueryRequest,
 ): Promise<VectorQueryResponse> {
   const { runtime } = await buildRuntimeContext(
     tenantDbName,
     tenantId,
     request.providerKey,
+    projectId,
   );
 
   const db = await withTenantDb(tenantDbName);
-  const index = await resolveVectorIndexRecord(db, request.providerKey, request);
+  const index = await resolveVectorIndexRecord(
+    db,
+    request.providerKey,
+    request,
+    projectId,
+  );
 
   const result: VectorQueryResult = await runtime.queryVectors(
     toRuntimeHandle(index),

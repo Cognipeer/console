@@ -4,6 +4,7 @@ import {
   IUser,
   IApiToken,
   ITenant,
+  IProject,
   IAgentTracingSession,
   IAgentTracingEvent,
   IModel,
@@ -18,6 +19,7 @@ import {
   IFileRecord,
   IFileBucketRecord,
   ProviderDomain,
+  IQuotaPolicy,
 } from './provider.interface';
 
 export class MongoDBProvider implements DatabaseProvider {
@@ -32,6 +34,10 @@ export class MongoDBProvider implements DatabaseProvider {
   private static readonly vectorIndexesCollection = 'vector_indexes';
   private static readonly fileBucketsCollection = 'file_buckets';
   private static readonly filesCollection = 'files';
+  private static readonly quotaPoliciesCollection = 'quota_policies';
+  private static readonly rateLimitsCollection = 'rate_limits';
+  private static readonly projectsCollection = 'projects';
+  private static readonly vectorCountersCollection = 'vector_counters';
 
   constructor(uri: string, mainDbName: string = 'cgate_main') {
     this.uri = uri;
@@ -428,6 +434,231 @@ export class MongoDBProvider implements DatabaseProvider {
     }));
   }
 
+  // Project operations (tenant database)
+  async createProject(
+    project: Omit<IProject, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IProject> {
+    const db = this.getTenantDb();
+    const now = new Date();
+
+    const payload = {
+      ...project,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const result = await db
+      .collection<IProject>(MongoDBProvider.projectsCollection)
+      .insertOne(payload);
+
+    return {
+      ...payload,
+      _id: result.insertedId.toString(),
+    };
+  }
+
+  async updateProject(
+    id: string,
+    data: Partial<Omit<IProject, 'tenantId' | 'key'>>,
+  ): Promise<IProject | null> {
+    const db = this.getTenantDb();
+    const hasObjectId = ObjectId.isValid(id);
+    const filter = hasObjectId
+      ? { _id: new ObjectId(id) }
+      : { _id: id as any };
+
+    const result = await db
+      .collection<IProject>(MongoDBProvider.projectsCollection)
+      .findOneAndUpdate(
+        filter as any,
+        { $set: { ...data, updatedAt: new Date() } },
+        { returnDocument: 'after' },
+      );
+
+    if (!result) return null;
+
+    return {
+      ...result,
+      _id: (result as any)._id?.toString(),
+    } as IProject;
+  }
+
+  async deleteProject(id: string): Promise<boolean> {
+    const db = this.getTenantDb();
+    const hasObjectId = ObjectId.isValid(id);
+    const filter = hasObjectId
+      ? { _id: new ObjectId(id) }
+      : { _id: id as any };
+
+    const result = await db
+      .collection<IProject>(MongoDBProvider.projectsCollection)
+      .deleteOne(filter as any);
+
+    return result.deletedCount > 0;
+  }
+
+  async findProjectById(id: string): Promise<IProject | null> {
+    const db = this.getTenantDb();
+    const hasObjectId = ObjectId.isValid(id);
+    const filter = hasObjectId
+      ? { _id: new ObjectId(id) }
+      : { _id: id as any };
+
+    const project = await db
+      .collection<IProject>(MongoDBProvider.projectsCollection)
+      .findOne(filter as any);
+
+    if (!project) return null;
+    return { ...project, _id: project._id?.toString() };
+  }
+
+  async findProjectByKey(tenantId: string, key: string): Promise<IProject | null> {
+    const db = this.getTenantDb();
+    const project = await db
+      .collection<IProject>(MongoDBProvider.projectsCollection)
+      .findOne({ tenantId, key } as any);
+    if (!project) return null;
+    return { ...project, _id: project._id?.toString() };
+  }
+
+  async listProjects(tenantId: string): Promise<IProject[]> {
+    const db = this.getTenantDb();
+    const projects = await db
+      .collection<IProject>(MongoDBProvider.projectsCollection)
+      .find({ tenantId } as any)
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    return projects.map((project) => ({
+      ...project,
+      _id: project._id?.toString(),
+    }));
+  }
+
+  async assignProjectIdToLegacyRecords(tenantId: string, projectId: string): Promise<void> {
+    const db = this.getTenantDb();
+    const collections = [
+      MongoDBProvider.providersCollection,
+      'models',
+      MongoDBProvider.vectorIndexesCollection,
+      MongoDBProvider.fileBucketsCollection,
+      MongoDBProvider.filesCollection,
+      MongoDBProvider.quotaPoliciesCollection,
+      'agent_tracing_sessions',
+      'agent_tracing_events',
+      'model_usage_logs',
+    ];
+
+    await Promise.all(
+      collections.map(async (collectionName) => {
+        try {
+          await db.collection(collectionName).updateMany(
+            { tenantId, projectId: { $exists: false } },
+            { $set: { projectId } },
+          );
+        } catch (error) {
+          console.warn('[projects] Legacy migration skipped for', collectionName, error);
+        }
+      }),
+    );
+  }
+
+  // Quota policies (tenant database)
+  async createQuotaPolicy(
+    policy: Omit<IQuotaPolicy, '_id'>,
+  ): Promise<IQuotaPolicy> {
+    const db = this.getTenantDb();
+    const now = new Date();
+    const payload = {
+      ...policy,
+      createdAt: policy.createdAt ?? now,
+      updatedAt: policy.updatedAt ?? now,
+    };
+
+    const result = await db
+      .collection<IQuotaPolicy>(MongoDBProvider.quotaPoliciesCollection)
+      .insertOne(payload);
+
+    return {
+      ...payload,
+      _id: result.insertedId.toString(),
+    };
+  }
+
+  async listQuotaPolicies(tenantId: string, projectId?: string): Promise<IQuotaPolicy[]> {
+    const db = this.getTenantDb();
+    const tenantFilter = ObjectId.isValid(tenantId)
+      ? { $or: [{ tenantId }, { tenantId: new ObjectId(tenantId) }] }
+      : { tenantId };
+    const projectFilter = projectId ? { projectId } : {};
+    const policies = await db
+      .collection<IQuotaPolicy>(MongoDBProvider.quotaPoliciesCollection)
+      .find({ ...(tenantFilter as any), ...(projectFilter as any) })
+      .sort({ priority: -1, createdAt: -1 })
+      .toArray();
+
+    return policies.map((policy) => ({
+      ...policy,
+      _id: policy._id?.toString(),
+    }));
+  }
+
+  async updateQuotaPolicy(
+    id: string,
+    tenantId: string,
+    data: Partial<IQuotaPolicy>,
+    projectId?: string,
+  ): Promise<IQuotaPolicy | null> {
+    const db = this.getTenantDb();
+    const hasObjectId = ObjectId.isValid(id);
+    const tenantFilter = ObjectId.isValid(tenantId)
+      ? { $or: [{ tenantId }, { tenantId: new ObjectId(tenantId) }] }
+      : { tenantId };
+    const idFilter = hasObjectId
+      ? { $or: [{ _id: new ObjectId(id) }, { _id: id }] }
+      : { _id: id };
+    const projectFilter = projectId ? { projectId } : {};
+    const filter = { $and: [tenantFilter, idFilter, projectFilter] } as any;
+    const updateData = {
+      ...data,
+      updatedAt: new Date(),
+    };
+
+    const result = await db
+      .collection<IQuotaPolicy>(MongoDBProvider.quotaPoliciesCollection)
+      .findOneAndUpdate(
+        filter,
+        { $set: updateData },
+        { returnDocument: 'after' },
+      );
+
+    if (!result) return null;
+
+    return {
+      ...result,
+      _id: result._id?.toString(),
+    } as IQuotaPolicy;
+  }
+
+  async deleteQuotaPolicy(id: string, tenantId: string, projectId?: string): Promise<boolean> {
+    const db = this.getTenantDb();
+    const hasObjectId = ObjectId.isValid(id);
+    const tenantFilter = ObjectId.isValid(tenantId)
+      ? { $or: [{ tenantId }, { tenantId: new ObjectId(tenantId) }] }
+      : { tenantId };
+    const idFilter = hasObjectId
+      ? { $or: [{ _id: new ObjectId(id) }, { _id: id }] }
+      : { _id: id };
+    const projectFilter = projectId ? { projectId } : {};
+    const filter = { $and: [tenantFilter, idFilter, projectFilter] } as any;
+
+    const result = await db
+      .collection<IQuotaPolicy>(MongoDBProvider.quotaPoliciesCollection)
+      .deleteOne(filter);
+
+    return result.deletedCount > 0;
+  }
+
   // API Token operations (use main DB because tokens need to be accessible before tenant resolution)
   async createApiToken(
     tokenData: Omit<IApiToken, '_id' | 'createdAt'>,
@@ -461,6 +692,34 @@ export class MongoDBProvider implements DatabaseProvider {
     }));
   }
 
+  async listTenantApiTokens(tenantId: string): Promise<IApiToken[]> {
+    const db = this.getMainDb();
+    const tokens = await db
+      .collection<IApiToken>('api_tokens')
+      .find({ tenantId })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    return tokens.map((token: IApiToken) => ({
+      ...token,
+      _id: token._id?.toString(),
+    }));
+  }
+
+  async listProjectApiTokens(tenantId: string, projectId: string): Promise<IApiToken[]> {
+    const db = this.getMainDb();
+    const tokens = await db
+      .collection<IApiToken>('api_tokens')
+      .find({ tenantId, projectId })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    return tokens.map((token: IApiToken) => ({
+      ...token,
+      _id: token._id?.toString(),
+    }));
+  }
+
   async findApiTokenByToken(token: string): Promise<IApiToken | null> {
     // API tokens are stored in main database because we don't know the tenant yet
     const db = this.getMainDb();
@@ -480,6 +739,25 @@ export class MongoDBProvider implements DatabaseProvider {
     const result = await db.collection('api_tokens').deleteOne({
       _id: new ObjectId(id),
       userId,
+    });
+    return result.deletedCount > 0;
+  }
+
+  async deleteTenantApiToken(id: string, tenantId: string): Promise<boolean> {
+    const db = this.getMainDb();
+    const result = await db.collection('api_tokens').deleteOne({
+      _id: new ObjectId(id),
+      tenantId,
+    });
+    return result.deletedCount > 0;
+  }
+
+  async deleteProjectApiToken(id: string, tenantId: string, projectId: string): Promise<boolean> {
+    const db = this.getMainDb();
+    const result = await db.collection('api_tokens').deleteOne({
+      _id: new ObjectId(id),
+      tenantId,
+      projectId,
     });
     return result.deletedCount > 0;
   }
@@ -512,9 +790,108 @@ export class MongoDBProvider implements DatabaseProvider {
     };
   }
 
+  async countAgentTracingDistinctAgents(projectId?: string): Promise<number> {
+    const db = this.getTenantDb();
+    const match: Record<string, unknown> = {
+      agentName: { $type: 'string', $ne: '' },
+    };
+
+    if (projectId) {
+      match.projectId = projectId;
+    }
+
+    const result = await db
+      .collection('agent_tracing_sessions')
+      .aggregate([{ $match: match }, { $group: { _id: '$agentName' } }, { $count: 'count' }])
+      .toArray();
+
+    const count = (result[0] as { count?: number } | undefined)?.count;
+    return typeof count === 'number' ? count : 0;
+  }
+
+  async agentTracingAgentExists(agentName: string, projectId?: string): Promise<boolean> {
+    const db = this.getTenantDb();
+    const trimmed = agentName.trim();
+    if (!trimmed) {
+      return false;
+    }
+
+    const existing = await db
+      .collection('agent_tracing_sessions')
+      .findOne(projectId ? { projectId, agentName: trimmed } : { agentName: trimmed }, {
+        projection: { _id: 1 },
+      });
+
+    return Boolean(existing);
+  }
+
+  async cleanupAgentTracingRetention(options: {
+    projectId?: string;
+    olderThan: Date;
+    batchSize?: number;
+  }): Promise<{ sessionsDeleted: number; eventsDeleted: number }> {
+    const db = this.getTenantDb();
+
+    const batchSize = Math.max(1, Math.min(options.batchSize ?? 500, 2000));
+    const cutoff = options.olderThan;
+
+    const sessionQuery: Record<string, unknown> = {
+      $or: [
+        { startedAt: { $lt: cutoff } },
+        { startedAt: { $exists: false }, createdAt: { $lt: cutoff } },
+      ],
+    };
+    if (options.projectId) {
+      sessionQuery.projectId = options.projectId;
+    }
+
+    let sessionsDeleted = 0;
+    let eventsDeleted = 0;
+
+    // Iterate in batches to avoid pulling too many session ids into memory.
+    while (true) {
+      const sessions = await db
+        .collection<IAgentTracingSession>('agent_tracing_sessions')
+        .find(sessionQuery, { projection: { sessionId: 1 } })
+        .limit(batchSize)
+        .toArray();
+
+      const sessionIds = sessions
+        .map((s) => s.sessionId)
+        .filter((value): value is string => typeof value === 'string' && value.length > 0);
+
+      if (sessionIds.length === 0) {
+        break;
+      }
+
+      const eventQuery: Record<string, unknown> = { sessionId: { $in: sessionIds } };
+      if (options.projectId) {
+        eventQuery.projectId = options.projectId;
+      }
+
+      const eventResult = await db
+        .collection('agent_tracing_events')
+        .deleteMany(eventQuery);
+      eventsDeleted += eventResult.deletedCount ?? 0;
+
+      const sessionDeleteQuery: Record<string, unknown> = { sessionId: { $in: sessionIds } };
+      if (options.projectId) {
+        sessionDeleteQuery.projectId = options.projectId;
+      }
+
+      const sessionResult = await db
+        .collection('agent_tracing_sessions')
+        .deleteMany(sessionDeleteQuery);
+      sessionsDeleted += sessionResult.deletedCount ?? 0;
+    }
+
+    return { sessionsDeleted, eventsDeleted };
+  }
+
   async updateAgentTracingSession(
     sessionId: string,
     data: Partial<IAgentTracingSession>,
+    projectId?: string,
   ): Promise<IAgentTracingSession | null> {
     const db = this.getTenantDb();
     const updateData = {
@@ -522,10 +899,12 @@ export class MongoDBProvider implements DatabaseProvider {
       updatedAt: new Date(),
     };
 
+    const filter = projectId ? { sessionId, projectId } : { sessionId };
+
     const result = await db
       .collection('agent_tracing_sessions')
       .findOneAndUpdate(
-        { sessionId },
+        filter,
         { $set: updateData },
         { returnDocument: 'after' },
       );
@@ -540,11 +919,12 @@ export class MongoDBProvider implements DatabaseProvider {
 
   async findAgentTracingSessionById(
     sessionId: string,
+    projectId?: string,
   ): Promise<IAgentTracingSession | null> {
     const db = this.getTenantDb();
     const session = await db
       .collection<IAgentTracingSession>('agent_tracing_sessions')
-      .findOne({ sessionId });
+      .findOne(projectId ? { sessionId, projectId } : { sessionId });
 
     if (!session) return null;
 
@@ -557,10 +937,15 @@ export class MongoDBProvider implements DatabaseProvider {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async listAgentTracingSessions(
     filters?: any,
+    projectId?: string,
   ): Promise<{ sessions: IAgentTracingSession[]; total: number }> {
     const db = this.getTenantDb();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const query: any = {};
+
+    if (projectId) {
+      query.projectId = projectId;
+    }
 
     if (filters?.agentName) {
       query.agentName = { $regex: filters.agentName, $options: 'i' };
@@ -620,11 +1005,12 @@ export class MongoDBProvider implements DatabaseProvider {
 
   async listAgentTracingEvents(
     sessionId: string,
+    projectId?: string,
   ): Promise<IAgentTracingEvent[]> {
     const db = this.getTenantDb();
     const events = await db
       .collection<IAgentTracingEvent>('agent_tracing_events')
-      .find({ sessionId })
+      .find(projectId ? { sessionId, projectId } : { sessionId })
       .sort({ sequence: 1, timestamp: 1 })
       .toArray();
 
@@ -634,11 +1020,11 @@ export class MongoDBProvider implements DatabaseProvider {
     }));
   }
 
-  async deleteAgentTracingEvents(sessionId: string): Promise<number> {
+  async deleteAgentTracingEvents(sessionId: string, projectId?: string): Promise<number> {
     const db = this.getTenantDb();
     const result = await db
       .collection('agent_tracing_events')
-      .deleteMany({ sessionId });
+      .deleteMany(projectId ? { sessionId, projectId } : { sessionId });
     return result.deletedCount ?? 0;
   }
 
@@ -721,6 +1107,7 @@ export class MongoDBProvider implements DatabaseProvider {
   }
 
   async listModels(filters?: {
+    projectId?: string;
     category?: ModelCategory;
     provider?: ModelProviderType;
     providerKey?: string;
@@ -728,6 +1115,10 @@ export class MongoDBProvider implements DatabaseProvider {
   }): Promise<IModel[]> {
     const db = this.getTenantDb();
     const query: Record<string, unknown> = {};
+
+    if (filters?.projectId) {
+      query.projectId = filters.projectId;
+    }
 
     if (filters?.category) {
       query.category = filters.category;
@@ -757,11 +1148,15 @@ export class MongoDBProvider implements DatabaseProvider {
     }));
   }
 
-  async findModelById(id: string): Promise<IModel | null> {
+  async findModelById(id: string, projectId?: string): Promise<IModel | null> {
     const db = this.getTenantDb();
+    const query: Record<string, unknown> = { _id: new ObjectId(id) };
+    if (projectId) {
+      query.projectId = projectId;
+    }
     const model = await db
       .collection<IModel>('models')
-      .findOne({ _id: new ObjectId(id) });
+      .findOne(query);
     if (!model) {
       return null;
     }
@@ -772,9 +1167,13 @@ export class MongoDBProvider implements DatabaseProvider {
     } as IModel;
   }
 
-  async findModelByKey(key: string): Promise<IModel | null> {
+  async findModelByKey(key: string, projectId?: string): Promise<IModel | null> {
     const db = this.getTenantDb();
-    const model = await db.collection<IModel>('models').findOne({ key });
+    const query: Record<string, unknown> = { key };
+    if (projectId) {
+      query.projectId = projectId;
+    }
+    const model = await db.collection<IModel>('models').findOne(query);
     if (!model) {
       return null;
     }
@@ -806,10 +1205,15 @@ export class MongoDBProvider implements DatabaseProvider {
   async listModelUsageLogs(
     modelKey: string,
     options?: { limit?: number; skip?: number; from?: Date; to?: Date },
+    projectId?: string,
   ): Promise<IModelUsageLog[]> {
     const db = this.getTenantDb();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const query: Record<string, any> = { modelKey };
+
+    if (projectId) {
+      query.projectId = projectId;
+    }
 
     if (options?.from || options?.to) {
       query.createdAt = {};
@@ -841,10 +1245,15 @@ export class MongoDBProvider implements DatabaseProvider {
   async aggregateModelUsage(
     modelKey: string,
     options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month' },
+    projectId?: string,
   ): Promise<IModelUsageAggregate> {
     const db = this.getTenantDb();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const match: Record<string, any> = { modelKey };
+
+    if (projectId) {
+      match.projectId = projectId;
+    }
 
     if (options?.from || options?.to) {
       match.createdAt = {};
@@ -1061,10 +1470,15 @@ export class MongoDBProvider implements DatabaseProvider {
 
   async listVectorIndexes(filters?: {
     providerKey?: string;
+    projectId?: string;
     search?: string;
   }): Promise<IVectorIndexRecord[]> {
     const db = this.getTenantDb();
     const query: Record<string, unknown> = {};
+
+    if (filters?.projectId) {
+      query.projectId = filters.projectId;
+    }
 
     if (filters?.providerKey) {
       query.providerKey = filters.providerKey;
@@ -1110,13 +1524,14 @@ export class MongoDBProvider implements DatabaseProvider {
   async findVectorIndexByKey(
     providerKey: string,
     key: string,
+    projectId?: string,
   ): Promise<IVectorIndexRecord | null> {
     const db = this.getTenantDb();
     const index = await db
       .collection<IVectorIndexRecord>(
         MongoDBProvider.vectorIndexesCollection,
       )
-      .findOne({ providerKey, key });
+      .findOne({ providerKey, key, ...(projectId ? { projectId } : {}) } as any);
 
     if (!index) {
       return null;
@@ -1131,13 +1546,14 @@ export class MongoDBProvider implements DatabaseProvider {
   async findVectorIndexByExternalId(
     providerKey: string,
     externalId: string,
+    projectId?: string,
   ): Promise<IVectorIndexRecord | null> {
     const db = this.getTenantDb();
     const index = await db
       .collection<IVectorIndexRecord>(
         MongoDBProvider.vectorIndexesCollection,
       )
-      .findOne({ providerKey, externalId });
+      .findOne({ providerKey, externalId, ...(projectId ? { projectId } : {}) } as any);
 
     if (!index) {
       return null;
@@ -1244,11 +1660,12 @@ export class MongoDBProvider implements DatabaseProvider {
     providerKey: string,
     bucketKey: string,
     key: string,
+    projectId?: string,
   ): Promise<IFileRecord | null> {
     const db = this.getTenantDb();
     const record = await db
       .collection<IFileRecord>(MongoDBProvider.filesCollection)
-      .findOne({ providerKey, bucketKey, key });
+      .findOne(projectId ? { providerKey, bucketKey, key, projectId } : { providerKey, bucketKey, key });
 
     if (!record) {
       return null;
@@ -1263,6 +1680,7 @@ export class MongoDBProvider implements DatabaseProvider {
   async listFileRecords(filters: {
     providerKey: string;
     bucketKey: string;
+    projectId?: string;
     search?: string;
     limit?: number;
     cursor?: string;
@@ -1272,6 +1690,10 @@ export class MongoDBProvider implements DatabaseProvider {
       providerKey: filters.providerKey,
       bucketKey: filters.bucketKey,
     };
+
+    if (filters.projectId) {
+      query.projectId = filters.projectId;
+    }
 
     if (filters.search) {
       const regex = new RegExp(filters.search, 'i');
@@ -1307,6 +1729,95 @@ export class MongoDBProvider implements DatabaseProvider {
       items,
       nextCursor,
     };
+  }
+
+  async countFileRecords(filters?: { projectId?: string }): Promise<number> {
+    const db = this.getTenantDb();
+    const query: Record<string, unknown> = {};
+    if (filters?.projectId) {
+      query.projectId = filters.projectId;
+    }
+
+    return db
+      .collection<IFileRecord>(MongoDBProvider.filesCollection)
+      .countDocuments(query);
+  }
+
+  async sumFileRecordBytes(filters?: { projectId?: string }): Promise<number> {
+    const db = this.getTenantDb();
+    const match: Record<string, unknown> = {};
+    if (filters?.projectId) {
+      match.projectId = filters.projectId;
+    }
+
+    const result = await db
+      .collection<IFileRecord>(MongoDBProvider.filesCollection)
+      .aggregate([
+        { $match: match },
+        {
+          $group: {
+            _id: null,
+            total: {
+              $sum: {
+                $add: [
+                  { $ifNull: ['$size', 0] },
+                  { $ifNull: ['$markdownSize', 0] },
+                ],
+              },
+            },
+          },
+        },
+      ])
+      .toArray();
+
+    const total = (result[0] as { total?: number } | undefined)?.total;
+    return typeof total === 'number' ? total : 0;
+  }
+
+  async getProjectVectorCountApprox(projectId: string): Promise<number> {
+    const db = this.getTenantDb();
+    const doc = await db
+      .collection(MongoDBProvider.vectorCountersCollection)
+      .findOne({ projectId }, { projection: { count: 1 } });
+
+    const count = (doc as { count?: number } | null)?.count;
+    return typeof count === 'number' ? count : 0;
+  }
+
+  async incrementProjectVectorCountApprox(projectId: string, delta: number): Promise<number> {
+    const db = this.getTenantDb();
+    const now = new Date();
+    const safeDelta = Number.isFinite(delta) ? Math.trunc(delta) : 0;
+
+    const result = await db
+      .collection(MongoDBProvider.vectorCountersCollection)
+      .findOneAndUpdate(
+        { projectId },
+        [
+          {
+            $set: {
+              projectId,
+              updatedAt: now,
+              createdAt: { $ifNull: ['$createdAt', now] },
+              count: {
+                $max: [
+                  0,
+                  {
+                    $add: [
+                      { $ifNull: ['$count', 0] },
+                      safeDelta,
+                    ],
+                  },
+                ],
+              },
+            },
+          },
+        ],
+        { upsert: true, returnDocument: 'after' },
+      );
+
+    const count = (result as { count?: number } | null)?.count;
+    return typeof count === 'number' ? count : 0;
   }
 
   async createFileBucket(
@@ -1401,11 +1912,16 @@ export class MongoDBProvider implements DatabaseProvider {
   async findFileBucketByKey(
     tenantId: string,
     key: string,
+    projectId?: string,
   ): Promise<IFileBucketRecord | null> {
     const db = this.getTenantDb();
+    const query: Record<string, unknown> = { tenantId, key };
+    if (projectId) {
+      query.projectId = projectId;
+    }
     const record = await db
       .collection<IFileBucketRecord>(MongoDBProvider.fileBucketsCollection)
-      .findOne({ tenantId, key });
+      .findOne(query);
 
     if (!record) {
       return null;
@@ -1417,11 +1933,15 @@ export class MongoDBProvider implements DatabaseProvider {
     };
   }
 
-  async listFileBuckets(tenantId: string): Promise<IFileBucketRecord[]> {
+  async listFileBuckets(tenantId: string, projectId?: string): Promise<IFileBucketRecord[]> {
     const db = this.getTenantDb();
+    const query: Record<string, unknown> = { tenantId };
+    if (projectId) {
+      query.projectId = projectId;
+    }
     const records = await db
       .collection<IFileBucketRecord>(MongoDBProvider.fileBucketsCollection)
-      .find({ tenantId })
+      .find(query)
       .sort({ createdAt: -1 })
       .toArray();
 
@@ -1513,11 +2033,18 @@ export class MongoDBProvider implements DatabaseProvider {
   async findProviderByKey(
     tenantId: string,
     key: string,
+    projectId?: string,
   ): Promise<IProviderRecord | null> {
     const db = this.getTenantDb();
+    const query: Record<string, unknown> = { tenantId, key };
+    if (projectId) {
+      // Treat projectId as an assignment filter.
+      // Supports legacy single-project providers (projectId) and multi-assigned providers (projectIds).
+      query.$or = [{ projectId }, { projectIds: projectId }];
+    }
     const provider = await db
       .collection<IProviderRecord>(MongoDBProvider.providersCollection)
-      .findOne({ tenantId, key });
+      .findOne(query as any);
 
     if (!provider) {
       return null;
@@ -1535,10 +2062,15 @@ export class MongoDBProvider implements DatabaseProvider {
       type?: ProviderDomain;
       driver?: string;
       status?: IProviderRecord['status'];
+      projectId?: string;
     },
   ): Promise<IProviderRecord[]> {
     const db = this.getTenantDb();
     const query: Record<string, unknown> = { tenantId };
+
+    if (filters?.projectId) {
+      query.$or = [{ projectId: filters.projectId }, { projectIds: filters.projectId }];
+    }
 
     if (filters?.type) {
       query.type = filters.type;
@@ -1571,5 +2103,58 @@ export class MongoDBProvider implements DatabaseProvider {
       .deleteOne({ _id: new ObjectId(id) });
 
     return result.deletedCount > 0;
+  }
+
+  async incrementRateLimit(
+    key: string,
+    windowSeconds: number,
+    amount: number = 1,
+  ): Promise<{ count: number; resetAt: Date }> {
+    const db = this.getTenantDb();
+    const now = new Date();
+    const resetAt = new Date(now.getTime() + windowSeconds * 1000);
+
+    // Use pipeline update for atomic check-and-set
+    const result = await db.collection(MongoDBProvider.rateLimitsCollection).findOneAndUpdate(
+      { _id: key as any },
+      [
+        {
+          $set: {
+            isExpired: { $lt: ['$resetAt', now] },
+          },
+        },
+        {
+          $set: {
+            count: {
+              $cond: {
+                if: { $or: [{ $eq: ['$isExpired', true] }, { $not: ['$resetAt'] }] },
+                then: amount,
+                else: { $add: ['$count', amount] },
+              },
+            },
+            resetAt: {
+              $cond: {
+                if: { $or: [{ $eq: ['$isExpired', true] }, { $not: ['$resetAt'] }] },
+                then: resetAt,
+                else: '$resetAt',
+              },
+            },
+          },
+        },
+        {
+          $unset: 'isExpired',
+        },
+      ],
+      { upsert: true, returnDocument: 'after' },
+    );
+
+    if (!result) {
+      throw new Error('Failed to increment rate limit');
+    }
+
+    return {
+      count: result.count,
+      resetAt: result.resetAt,
+    };
   }
 }

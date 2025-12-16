@@ -15,9 +15,7 @@ import {
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
-import { IconCirclePlus } from '@tabler/icons-react';
 import type { ModelProviderView } from '@/lib/services/models/types';
-import ModelProviderModal from './ModelProviderModal';
 import type { IModel } from '@/lib/database';
 
 const DEFAULT_PRICING = {
@@ -44,7 +42,6 @@ type CreateModelModalProps = {
   opened: boolean;
   onClose: () => void;
   providers: ModelProviderView[];
-  onProviderCreated?: (provider: ModelProviderView) => void;
   onCreated: (options: { model: IModel; provider: ModelProviderView }) => void;
 };
 
@@ -99,11 +96,9 @@ export default function CreateModelModal({
   opened,
   onClose,
   providers,
-  onProviderCreated,
   onCreated,
 }: CreateModelModalProps) {
   const [availableProviders, setAvailableProviders] = useState<ModelProviderView[]>(providers);
-  const [providerModalOpen, setProviderModalOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const wasOpenedRef = useRef(false);
 
@@ -220,17 +215,6 @@ export default function CreateModelModal({
     formValues.isMultimodal,
   ]);
 
-  const handleProviderCreated = (provider: ModelProviderView) => {
-    setAvailableProviders((current) => {
-      const next = [...current.filter((item) => item.key !== provider.key), provider];
-      next.sort((a, b) => a.label.localeCompare(b.label));
-      return next;
-    });
-
-    setFieldValue('providerKey', provider.key);
-    onProviderCreated?.(provider);
-  };
-
   const handleSubmit = form.onSubmit(async (values) => {
     if (!values.providerKey) {
       form.validateField('providerKey');
@@ -328,16 +312,9 @@ export default function CreateModelModal({
                   withAsterisk
                   style={{ flex: 1 }}
                 />
-                <Button
-                  variant="light"
-                  leftSection={<IconCirclePlus size={14} />}
-                  onClick={() => setProviderModalOpen(true)}
-                >
-                  Provider
-                </Button>
               </Group>
               <Text size="xs" c="dimmed">
-                Need a new model provider? Add one without leaving this flow.
+                Need a new model provider? Ask a tenant admin to add one in Tenant Settings.
               </Text>
             </Stack>
 
@@ -345,16 +322,8 @@ export default function CreateModelModal({
               <Card withBorder padding="md">
                 <Stack gap="xs">
                   <Text size="sm" c="dimmed">
-                    No model providers configured yet. Add a provider to continue.
+                    No model providers configured yet. Ask a tenant admin to add one in Tenant Settings.
                   </Text>
-                  <Button
-                    size="sm"
-                    variant="light"
-                    leftSection={<IconCirclePlus size={14} />}
-                    onClick={() => setProviderModalOpen(true)}
-                  >
-                    Add provider
-                  </Button>
                 </Stack>
               </Card>
             ) : null}
@@ -485,12 +454,6 @@ export default function CreateModelModal({
           </Stack>
         </form>
       </Modal>
-
-      <ModelProviderModal
-        opened={providerModalOpen}
-        onClose={() => setProviderModalOpen(false)}
-        onCreated={handleProviderCreated}
-      />
     </>
   );
 }

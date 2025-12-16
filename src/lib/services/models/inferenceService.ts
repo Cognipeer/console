@@ -166,10 +166,11 @@ function ensureEmbeddingModel(model: IModel) {
 export async function handleChatCompletion(params: {
   tenantDbName: string;
   modelKey: string;
+  projectId: string;
   body: ChatCompletionRequestBody;
   stream?: boolean;
 }) {
-  const { tenantDbName, modelKey, body, stream } = params;
+  const { tenantDbName, modelKey, projectId, body, stream } = params;
 
   if (!Array.isArray(body?.messages)) {
     throw new Error('`messages` array is required');
@@ -181,7 +182,7 @@ export async function handleChatCompletion(params: {
       : crypto.randomUUID();
   const start = Date.now();
 
-  const model = await getModelByKey(tenantDbName, modelKey);
+  const model = await getModelByKey(tenantDbName, modelKey, projectId);
   if (!model) {
     throw new Error(`Model with key ${modelKey} not found`);
   }
@@ -192,6 +193,7 @@ export async function handleChatCompletion(params: {
     tenantDbName,
     model.tenantId,
     model.providerKey,
+    projectId,
   );
 
   if (!runtime.createChatModel) {
@@ -348,9 +350,10 @@ export async function handleChatCompletion(params: {
 export async function handleEmbeddingRequest(params: {
   tenantDbName: string;
   modelKey: string;
+  projectId: string;
   body: EmbeddingRequestBody;
 }) {
-  const { tenantDbName, modelKey, body } = params;
+  const { tenantDbName, modelKey, projectId, body } = params;
 
   if (!body?.input) {
     throw new Error('`input` is required');
@@ -359,7 +362,7 @@ export async function handleEmbeddingRequest(params: {
   const requestId = body?.request_id || crypto.randomUUID();
   const start = Date.now();
 
-  const model = await getModelByKey(tenantDbName, modelKey);
+  const model = await getModelByKey(tenantDbName, modelKey, projectId);
   if (!model) {
     throw new Error(`Model with key ${modelKey} not found`);
   }
@@ -370,6 +373,7 @@ export async function handleEmbeddingRequest(params: {
     tenantDbName,
     model.tenantId,
     model.providerKey,
+    projectId,
   );
 
   if (!runtime.createEmbeddingModel) {

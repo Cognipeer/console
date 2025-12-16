@@ -61,19 +61,20 @@ export class AgentTracingService {
    * Get dashboard overview with analytics
    */
   static async getDashboardOverview(
-    tenantSlug: string,
+    tenantDbName: string,
+    projectId: string,
     filters?: { from?: string; to?: string; timezone?: string },
   ): Promise<DashboardOverview> {
     try {
       console.log(
         'Getting dashboard overview for tenant:',
-        tenantSlug,
+        tenantDbName,
         'filters:',
         filters,
       );
 
       const db = await getDatabase();
-      await db.switchToTenant(`tenant_${tenantSlug}`);
+      await db.switchToTenant(tenantDbName);
 
       const query: any = {};
       if (filters?.from || filters?.to) {
@@ -88,7 +89,7 @@ export class AgentTracingService {
         ...query,
         limit: 10,
         skip: 0,
-      });
+      }, projectId);
 
       console.log('Recent sessions count:', recentSessions.length);
 
@@ -96,7 +97,7 @@ export class AgentTracingService {
       const allSessions = await db.listAgentTracingSessions({
         ...query,
         limit: 1000,
-      });
+      }, projectId);
       const sessions = allSessions.sessions || [];
 
       console.log('Total sessions for analytics:', sessions.length);
@@ -344,7 +345,8 @@ export class AgentTracingService {
    * List sessions with filters
    */
   static async listSessions(
-    tenantSlug: string,
+    tenantDbName: string,
+    projectId: string,
     filters?: {
       query?: string;
       agent?: string;
@@ -356,7 +358,7 @@ export class AgentTracingService {
     },
   ) {
     const db = await getDatabase();
-    await db.switchToTenant(`tenant_${tenantSlug}`);
+    await db.switchToTenant(tenantDbName);
 
     const result = await db.listAgentTracingSessions({
       agentName: filters?.agent,
@@ -365,7 +367,7 @@ export class AgentTracingService {
       to: filters?.to,
       limit: filters?.limit || '50',
       skip: filters?.skip || '0',
-    });
+    }, projectId);
 
     return {
       sessions: result.sessions.map((s) => ({
@@ -388,16 +390,16 @@ export class AgentTracingService {
   /**
    * Get session detail with events
    */
-  static async getSessionDetail(tenantSlug: string, sessionId: string) {
+  static async getSessionDetail(tenantDbName: string, projectId: string, sessionId: string) {
     const db = await getDatabase();
-    await db.switchToTenant(`tenant_${tenantSlug}`);
+    await db.switchToTenant(tenantDbName);
 
-    const session = await db.findAgentTracingSessionById(sessionId);
+    const session = await db.findAgentTracingSessionById(sessionId, projectId);
     if (!session) {
       return null;
     }
 
-    const events = await db.listAgentTracingEvents(sessionId);
+    const events = await db.listAgentTracingEvents(sessionId, projectId);
 
     return {
       session: {
@@ -442,12 +444,13 @@ export class AgentTracingService {
    * Get agent overview with analytics
    */
   static async getAgentOverview(
-    tenantSlug: string,
+    tenantDbName: string,
+    projectId: string,
     agentName: string,
     filters?: { from?: string; to?: string; timezone?: string },
   ) {
     const db = await getDatabase();
-    await db.switchToTenant(`tenant_${tenantSlug}`);
+    await db.switchToTenant(tenantDbName);
 
     const query: any = { agentName };
     if (filters?.from || filters?.to) {
@@ -458,7 +461,7 @@ export class AgentTracingService {
     const { sessions } = await db.listAgentTracingSessions({
       ...query,
       limit: 1000,
-    });
+    }, projectId);
 
     if (sessions.length === 0) {
       return {

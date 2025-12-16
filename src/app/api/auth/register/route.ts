@@ -4,6 +4,7 @@ import { getDatabase } from '@/lib/database';
 import { TokenManager } from '@/lib/license/token-manager';
 import { LicenseManager, LicenseType } from '@/lib/license/license-manager';
 import { sendEmail } from '@/lib/email/mailer';
+import { ensureDefaultProject } from '@/lib/services/projects/projectService';
 
 export async function POST(request: NextRequest) {
   try {
@@ -98,6 +99,12 @@ export async function POST(request: NextRequest) {
     const userIdStr =
       typeof user._id === 'string' ? user._id : user._id!.toString();
 
+    const defaultProject = await ensureDefaultProject(dbName, tenantIdStr, userIdStr);
+    const defaultProjectId =
+      typeof defaultProject._id === 'string'
+        ? defaultProject._id
+        : defaultProject._id?.toString();
+
     // Update tenant with owner ID
     await db.updateTenant(tenantIdStr, { ownerId: userIdStr });
 
@@ -107,6 +114,7 @@ export async function POST(request: NextRequest) {
       email: user.email,
       tenantId: tenantIdStr,
       tenantSlug: tenant.slug,
+      tenantDbName: tenant.dbName,
       role: user.role!,
       licenseId: user.licenseId,
       licenseType: finalLicenseType,
@@ -153,6 +161,16 @@ export async function POST(request: NextRequest) {
       maxAge: 60 * 60 * 24 * 7, // 7 days
       path: '/',
     });
+
+    if (defaultProjectId) {
+      response.cookies.set('active_project_id', defaultProjectId, {
+        httpOnly: false,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'lax',
+        maxAge: 60 * 60 * 24 * 30,
+        path: '/',
+      });
+    }
 
     return response;
   } catch (error) {

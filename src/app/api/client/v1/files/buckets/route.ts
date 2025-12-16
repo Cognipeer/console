@@ -10,9 +10,9 @@ export const runtime = 'nodejs';
  */
 export async function GET(request: NextRequest) {
   try {
-    const { tenantDbName, tenantId } = await requireApiToken(request);
+    const { tenantDbName, tenantId, projectId } = await requireApiToken(request);
 
-    const buckets = await listFileBuckets(tenantDbName, tenantId);
+    const buckets = await listFileBuckets(tenantDbName, tenantId, projectId);
 
     return NextResponse.json({
       buckets,

@@ -8,6 +8,7 @@ import { decryptObject, encryptObject } from '@/lib/utils/crypto';
 export type ProviderStatus = IProviderRecord['status'];
 
 export interface CreateProviderConfigInput {
+  projectId?: string;
   key: string;
   type: ProviderDomain;
   driver: string;
@@ -22,6 +23,7 @@ export interface CreateProviderConfigInput {
 }
 
 export interface UpdateProviderConfigInput {
+  projectIds?: string[];
   label?: string;
   description?: string;
   status?: ProviderStatus;
@@ -58,6 +60,7 @@ export async function createProviderConfig(
 ): Promise<ProviderConfigView> {
   const db = await withTenantDb(tenantDbName);
 
+  // Provider keys are tenant-level; project assignment is handled via projectIds.
   const existing = await db.findProviderByKey(tenantId, payload.key);
   if (existing) {
     throw new Error(`Provider with key "${payload.key}" already exists.`);
@@ -65,6 +68,7 @@ export async function createProviderConfig(
 
   const record = await db.createProvider({
     tenantId,
+    projectIds: payload.projectId ? [payload.projectId] : undefined,
     key: payload.key,
     type: payload.type,
     driver: payload.driver,
@@ -89,6 +93,10 @@ export async function updateProviderConfig(
 ): Promise<ProviderConfigView | null> {
   const db = await withTenantDb(tenantDbName);
   const updates: Partial<IProviderRecord> = {};
+
+  if (payload.projectIds !== undefined) {
+    updates.projectIds = payload.projectIds;
+  }
 
   if (payload.label !== undefined) {
     updates.label = payload.label;
@@ -133,6 +141,7 @@ export async function listProviderConfigs(
     type?: ProviderDomain;
     driver?: string;
     status?: ProviderStatus;
+    projectId?: string;
   },
 ): Promise<ProviderConfigView[]> {
   const db = await withTenantDb(tenantDbName);
@@ -153,9 +162,10 @@ export async function getProviderConfigByKey(
   tenantDbName: string,
   tenantId: string,
   key: string,
+  projectId?: string,
 ): Promise<ProviderConfigView | null> {
   const db = await withTenantDb(tenantDbName);
-  const record = await db.findProviderByKey(tenantId, key);
+  const record = await db.findProviderByKey(tenantId, key, projectId);
   return record ? sanitize(record) : null;
 }
 
@@ -174,7 +184,12 @@ export interface ProviderRuntimeData<TCredentials = Record<string, unknown>> {
 
 export async function loadProviderRuntimeData<TCredentials = Record<string, unknown>>(
   tenantDbName: string,
-  providerIdOrKey: { id?: string; key?: string; tenantId: string },
+  providerIdOrKey: {
+    id?: string;
+    key?: string;
+    tenantId: string;
+    projectId?: string;
+  },
 ): Promise<ProviderRuntimeData<TCredentials>> {
   const db = await withTenantDb(tenantDbName);
   let record: IProviderRecord | null = null;
@@ -185,6 +200,7 @@ export async function loadProviderRuntimeData<TCredentials = Record<string, unkn
     record = await db.findProviderByKey(
       providerIdOrKey.tenantId,
       providerIdOrKey.key,
+      providerIdOrKey.projectId,
     );
   }
 

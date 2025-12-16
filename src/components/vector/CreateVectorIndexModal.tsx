@@ -16,7 +16,6 @@ import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { IconCirclePlus } from '@tabler/icons-react';
 import type { VectorIndexRecord, VectorProviderView } from '@/lib/services/vector';
-import VectorProviderModal from './VectorProviderModal';
 
 const DEFAULT_METRIC_OPTIONS = [
 	{ value: 'cosine', label: 'Cosine' },
@@ -36,7 +35,6 @@ interface CreateVectorIndexModalProps {
 	opened: boolean;
 	onClose: () => void;
 	providers: VectorProviderView[];
-	onProviderCreated?: (provider: VectorProviderView) => void;
 	onCreated: (options: { index: VectorIndexRecord; provider: VectorProviderView }) => void;
 }
 
@@ -52,11 +50,9 @@ export default function CreateVectorIndexModal({
 	opened,
 	onClose,
 	providers,
-	onProviderCreated,
 	onCreated,
 }: CreateVectorIndexModalProps) {
 	const [availableProviders, setAvailableProviders] = useState<VectorProviderView[]>(providers);
-	const [providerModalOpen, setProviderModalOpen] = useState(false);
 	const [submitting, setSubmitting] = useState(false);
 	const wasOpenedRef = useRef(false);
 
@@ -139,23 +135,6 @@ export default function CreateVectorIndexModal({
 			}
 			// eslint-disable-next-line react-hooks/exhaustive-deps
 		}, [allowedMetrics, formValues.metric]);
-
-	const handleProviderCreated = (provider: VectorProviderView) => {
-		setAvailableProviders((current) => {
-			const next = [...current.filter((item) => item.key !== provider.key), provider];
-			next.sort((a, b) => a.label.localeCompare(b.label));
-			return next;
-		});
-
-		setFieldValue('providerKey', provider.key);
-			const capability = resolveAllowedMetrics(provider);
-			if (capability && capability.length > 0) {
-			const currentMetric = formValues.metric;
-			setFieldValue('metric', capability.includes(currentMetric) ? currentMetric : capability[0]);
-		}
-
-		onProviderCreated?.(provider);
-	};
 
 	const handleSubmit = form.onSubmit(async (values) => {
 		if (!values.providerKey) {
@@ -243,16 +222,9 @@ export default function CreateVectorIndexModal({
 									withAsterisk
 									style={{ flex: 1 }}
 								/>
-								<Button
-									variant="light"
-									leftSection={<IconCirclePlus size={14} />}
-									onClick={() => setProviderModalOpen(true)}
-								>
-									Provider
-								</Button>
 							</Group>
 							<Text size="xs" c="dimmed">
-								Need a new vector provider? Add one without leaving this flow.
+								Need a new vector provider? Ask a tenant admin to add one in Tenant Settings.
 							</Text>
 						</Stack>
 
@@ -260,16 +232,8 @@ export default function CreateVectorIndexModal({
 							<Card withBorder padding="md">
 								<Stack gap="xs">
 									<Text size="sm" c="dimmed">
-										No vector providers configured yet. Add a provider to continue.
+										No vector providers configured yet. Ask a tenant admin to add one in Tenant Settings.
 									</Text>
-									<Button
-										size="sm"
-										variant="light"
-										leftSection={<IconCirclePlus size={14} />}
-										onClick={() => setProviderModalOpen(true)}
-									>
-										Add provider
-									</Button>
 								</Stack>
 							</Card>
 						) : null}
@@ -338,12 +302,6 @@ export default function CreateVectorIndexModal({
 					</Stack>
 				</form>
 			</Modal>
-
-			<VectorProviderModal
-				opened={providerModalOpen}
-				onClose={() => setProviderModalOpen(false)}
-				onCreated={handleProviderCreated}
-			/>
 		</>
 	);
 }

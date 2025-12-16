@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { resolveTenantDbName } from '@/lib/utils/tenant';
 import {
   deleteProviderConfig,
   getProviderConfigById,
   updateProviderConfig,
   type UpdateProviderConfigInput,
 } from '@/lib/services/providers/providerService';
+import { ProjectContextError, requireProjectContext } from '@/lib/services/projects/projectContext';
 
 export const runtime = 'nodejs';
 
@@ -26,6 +26,13 @@ function sanitizeUpdatePayload(body: unknown): UpdateProviderConfigInput {
 
   if (typeof record.label === 'string') {
     payload.label = record.label;
+  }
+
+  if (
+    Array.isArray(record.projectIds) &&
+    record.projectIds.every((item) => typeof item === 'string')
+  ) {
+    payload.projectIds = record.projectIds as string[];
   }
 
   if (typeof record.description === 'string' || record.description === null) {
@@ -65,17 +72,53 @@ function sanitizeUpdatePayload(body: unknown): UpdateProviderConfigInput {
 export async function GET(request: NextRequest, context: RouteContext) {
   try {
     const { id } = await context.params;
-    const tenantSlug = request.headers.get('x-tenant-slug');
+    const tenantDbName = request.headers.get('x-tenant-db-name');
     const tenantId = request.headers.get('x-tenant-id');
+    const userId = request.headers.get('x-user-id');
+    const userRole = request.headers.get('x-user-role');
 
-    if (!tenantSlug || !tenantId) {
+    if (!tenantDbName || !tenantId || !userId || !userRole) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const { tenantDbName } = await resolveTenantDbName(tenantSlug);
+    const { searchParams } = new URL(request.url);
+    const scope = searchParams.get('scope');
+    if (scope === 'tenant') {
+      if (userRole !== 'owner' && userRole !== 'admin') {
+        return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+      }
+
+      const provider = await getProviderConfigById(tenantDbName, id);
+      if (!provider || provider.tenantId !== tenantId) {
+        return NextResponse.json({ error: 'Not found' }, { status: 404 });
+      }
+      return NextResponse.json({ provider }, { status: 200 });
+    }
+
+    let projectId: string;
+    try {
+      const projectContext = await requireProjectContext(request, {
+        tenantDbName,
+        tenantId,
+        userId,
+      });
+      projectId = projectContext.projectId;
+    } catch (error) {
+      if (error instanceof ProjectContextError) {
+        return NextResponse.json({ error: error.message }, { status: error.status });
+      }
+      throw error;
+    }
+
     const provider = await getProviderConfigById(tenantDbName, id);
 
-    if (!provider || provider.tenantId !== tenantId) {
+    const assigned =
+      provider &&
+      (String(provider.projectId) === String(projectId) ||
+        (Array.isArray(provider.projectIds) &&
+          provider.projectIds.map(String).includes(String(projectId))));
+
+    if (!provider || provider.tenantId !== tenantId || !assigned) {
       return NextResponse.json({ error: 'Not found' }, { status: 404 });
     }
 
@@ -92,18 +135,63 @@ export async function GET(request: NextRequest, context: RouteContext) {
 export async function PATCH(request: NextRequest, context: RouteContext) {
   try {
     const { id } = await context.params;
-    const tenantSlug = request.headers.get('x-tenant-slug');
+    const tenantDbName = request.headers.get('x-tenant-db-name');
     const tenantId = request.headers.get('x-tenant-id');
     const userId = request.headers.get('x-user-id');
+    const userRole = request.headers.get('x-user-role');
 
-    if (!tenantSlug || !tenantId || !userId) {
+    if (!tenantDbName || !tenantId || !userId || !userRole) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const { tenantDbName } = await resolveTenantDbName(tenantSlug);
+    const { searchParams } = new URL(request.url);
+    const scope = searchParams.get('scope');
+    if (scope === 'tenant') {
+      if (userRole !== 'owner' && userRole !== 'admin') {
+        return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+      }
+
+      const existing = await getProviderConfigById(tenantDbName, id);
+      if (!existing || existing.tenantId !== tenantId) {
+        return NextResponse.json({ error: 'Not found' }, { status: 404 });
+      }
+
+      const body = await request.json();
+      const payload = sanitizeUpdatePayload(body);
+      payload.updatedBy = userId;
+
+      const updated = await updateProviderConfig(tenantDbName, id, payload);
+      if (!updated) {
+        return NextResponse.json({ error: 'Not found' }, { status: 404 });
+      }
+
+      return NextResponse.json({ provider: updated }, { status: 200 });
+    }
+
+    let projectId: string;
+    try {
+      const projectContext = await requireProjectContext(request, {
+        tenantDbName,
+        tenantId,
+        userId,
+      });
+      projectId = projectContext.projectId;
+    } catch (error) {
+      if (error instanceof ProjectContextError) {
+        return NextResponse.json({ error: error.message }, { status: error.status });
+      }
+      throw error;
+    }
+
     const existing = await getProviderConfigById(tenantDbName, id);
 
-    if (!existing || existing.tenantId !== tenantId) {
+    const assigned =
+      existing &&
+      (String(existing.projectId) === String(projectId) ||
+        (Array.isArray(existing.projectIds) &&
+          existing.projectIds.map(String).includes(String(projectId))));
+
+    if (!existing || existing.tenantId !== tenantId || !assigned) {
       return NextResponse.json({ error: 'Not found' }, { status: 404 });
     }
 
@@ -130,17 +218,59 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
 export async function DELETE(request: NextRequest, context: RouteContext) {
   try {
     const { id } = await context.params;
-    const tenantSlug = request.headers.get('x-tenant-slug');
+    const tenantDbName = request.headers.get('x-tenant-db-name');
     const tenantId = request.headers.get('x-tenant-id');
+    const userId = request.headers.get('x-user-id');
+    const userRole = request.headers.get('x-user-role');
 
-    if (!tenantSlug || !tenantId) {
+    if (!tenantDbName || !tenantId || !userId || !userRole) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const { tenantDbName } = await resolveTenantDbName(tenantSlug);
+    const { searchParams } = new URL(request.url);
+    const scope = searchParams.get('scope');
+    if (scope === 'tenant') {
+      if (userRole !== 'owner' && userRole !== 'admin') {
+        return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+      }
+
+      const existing = await getProviderConfigById(tenantDbName, id);
+      if (!existing || existing.tenantId !== tenantId) {
+        return NextResponse.json({ error: 'Not found' }, { status: 404 });
+      }
+
+      const deleted = await deleteProviderConfig(tenantDbName, id);
+      if (!deleted) {
+        return NextResponse.json({ error: 'Not found' }, { status: 404 });
+      }
+
+      return NextResponse.json({ success: true }, { status: 200 });
+    }
+
+    let projectId: string;
+    try {
+      const projectContext = await requireProjectContext(request, {
+        tenantDbName,
+        tenantId,
+        userId,
+      });
+      projectId = projectContext.projectId;
+    } catch (error) {
+      if (error instanceof ProjectContextError) {
+        return NextResponse.json({ error: error.message }, { status: error.status });
+      }
+      throw error;
+    }
+
     const existing = await getProviderConfigById(tenantDbName, id);
 
-    if (!existing || existing.tenantId !== tenantId) {
+    const assigned =
+      existing &&
+      (String(existing.projectId) === String(projectId) ||
+        (Array.isArray(existing.projectIds) &&
+          existing.projectIds.map(String).includes(String(projectId))));
+
+    if (!existing || existing.tenantId !== tenantId || !assigned) {
       return NextResponse.json({ error: 'Not found' }, { status: 404 });
     }
 

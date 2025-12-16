@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { resolveTenantDbName } from '@/lib/utils/tenant';
 import {
   createProviderConfig,
   listProviderConfigs,
@@ -7,6 +6,7 @@ import {
   type ProviderStatus,
 } from '@/lib/services/providers/providerService';
 import type { ProviderDomain } from '@/lib/database';
+import { ProjectContextError, requireProjectContext } from '@/lib/services/projects/projectContext';
 
 export const runtime = 'nodejs';
 
@@ -20,23 +20,55 @@ function parseStatus(value: string | null): ProviderStatus | undefined {
 
 export async function GET(request: NextRequest) {
   try {
-    const tenantSlug = request.headers.get('x-tenant-slug');
+    const tenantDbName = request.headers.get('x-tenant-db-name');
     const tenantId = request.headers.get('x-tenant-id');
+    const userId = request.headers.get('x-user-id');
+    const userRole = request.headers.get('x-user-role');
 
-    if (!tenantSlug || !tenantId) {
+    if (!tenantDbName || !tenantId || !userId || !userRole) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
     const { searchParams } = new URL(request.url);
+    const scope = searchParams.get('scope');
     const type = searchParams.get('type') as ProviderDomain | null;
     const driver = searchParams.get('driver');
     const status = parseStatus(searchParams.get('status'));
 
-    const { tenantDbName } = await resolveTenantDbName(tenantSlug);
+    if (scope === 'tenant') {
+      if (userRole !== 'owner' && userRole !== 'admin') {
+        return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+      }
+
+      const providers = await listProviderConfigs(tenantDbName, tenantId, {
+        type: type ?? undefined,
+        driver: driver ?? undefined,
+        status,
+      });
+
+      return NextResponse.json({ providers }, { status: 200 });
+    }
+
+    let projectId: string;
+    try {
+      const projectContext = await requireProjectContext(request, {
+        tenantDbName,
+        tenantId,
+        userId,
+      });
+      projectId = projectContext.projectId;
+    } catch (error) {
+      if (error instanceof ProjectContextError) {
+        return NextResponse.json({ error: error.message }, { status: error.status });
+      }
+      throw error;
+    }
+
     const providers = await listProviderConfigs(tenantDbName, tenantId, {
       type: type ?? undefined,
       driver: driver ?? undefined,
       status,
+      projectId,
     });
 
     return NextResponse.json({ providers }, { status: 200 });
@@ -60,20 +92,66 @@ function validateCreatePayload(body: any): asserts body is CreateProviderConfigI
 
 export async function POST(request: NextRequest) {
   try {
-    const tenantSlug = request.headers.get('x-tenant-slug');
+    const tenantDbName = request.headers.get('x-tenant-db-name');
     const tenantId = request.headers.get('x-tenant-id');
     const userId = request.headers.get('x-user-id');
+    const userRole = request.headers.get('x-user-role');
 
-    if (!tenantSlug || !tenantId || !userId) {
+    if (!tenantDbName || !tenantId || !userId || !userRole) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    if (userRole !== 'owner' && userRole !== 'admin') {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
+    const { searchParams } = new URL(request.url);
+    const scope = searchParams.get('scope');
+
+    // Tenant-scoped provider creation (no automatic project assignment)
+    if (scope === 'tenant') {
+      const body = await request.json();
+      body.createdBy = userId;
+      validateCreatePayload(body);
+
+      const provider = await createProviderConfig(tenantDbName, tenantId, {
+        key: body.key,
+        type: body.type,
+        driver: body.driver,
+        label: body.label,
+        description: body.description,
+        status: body.status,
+        credentials: body.credentials,
+        settings: body.settings,
+        capabilitiesOverride: body.capabilitiesOverride,
+        metadata: body.metadata,
+        createdBy: userId,
+      });
+
+      return NextResponse.json({ provider }, { status: 201 });
+    }
+
+    let projectId: string;
+    try {
+      const projectContext = await requireProjectContext(request, {
+        tenantDbName,
+        tenantId,
+        userId,
+      });
+      projectId = projectContext.projectId;
+    } catch (error) {
+      if (error instanceof ProjectContextError) {
+        return NextResponse.json({ error: error.message }, { status: error.status });
+      }
+      throw error;
     }
 
     const body = await request.json();
     body.createdBy = userId;
     validateCreatePayload(body);
 
-    const { tenantDbName } = await resolveTenantDbName(tenantSlug);
     const provider = await createProviderConfig(tenantDbName, tenantId, {
+      projectId,
       key: body.key,
       type: body.type,
       driver: body.driver,

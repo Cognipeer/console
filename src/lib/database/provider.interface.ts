@@ -4,6 +4,12 @@
  */
 
 import { ObjectId } from 'mongodb';
+import type {
+  QuotaDomain,
+  QuotaLimits,
+  QuotaPolicy,
+  QuotaScope,
+} from '@/lib/quota/types';
 
 export interface ITenant {
   _id?: ObjectId | string;
@@ -16,6 +22,18 @@ export interface ITenant {
   updatedAt?: Date;
 }
 
+export interface IProject {
+  _id?: ObjectId | string;
+  tenantId: string;
+  key: string;
+  name: string;
+  description?: string;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
 export interface IUser {
   _id?: ObjectId | string;
   email: string;
@@ -23,11 +41,14 @@ export interface IUser {
   password: string;
   name: string;
   tenantId: string;
-  role: 'owner' | 'admin' | 'user';
+  role: 'owner' | 'admin' | 'project_admin' | 'user';
+  projectIds?: string[];
   licenseId: string;
   features?: string[];
   invitedBy?: string;
   invitedAt?: Date;
+  inviteAcceptedAt?: Date;
+  mustChangePassword?: boolean;
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -36,6 +57,7 @@ export interface IApiToken {
   _id?: ObjectId | string;
   userId: string;
   tenantId: string;
+  projectId?: string;
   label: string;
   token: string;
   lastUsed?: Date;
@@ -57,6 +79,7 @@ export interface IAgentTracingSession {
   _id?: ObjectId | string;
   sessionId: string;
   tenantId: string;
+  projectId?: string;
   agent?: Record<string, unknown>;
   agentName?: string;
   agentVersion?: string;
@@ -87,6 +110,7 @@ export interface IAgentTracingEvent {
   _id?: ObjectId | string;
   sessionId: string;
   tenantId: string;
+  projectId?: string;
   id?: string;
   type?: string;
   label?: string;
@@ -146,6 +170,8 @@ export interface IProviderRecord
   extends Partial<IProviderRecordStatus> {
   _id?: ObjectId | string;
   tenantId: string;
+  projectId?: string;
+  projectIds?: string[];
   key: string;
   type: ProviderDomain;
   driver: string;
@@ -165,6 +191,7 @@ export interface IProviderRecord
 export interface IVectorIndexRecord {
   _id?: ObjectId | string;
   tenantId: string;
+  projectId?: string;
   providerKey: string;
   key: string;
   name: string;
@@ -183,6 +210,7 @@ export type FileMarkdownStatus = 'pending' | 'succeeded' | 'failed' | 'skipped';
 export interface IFileBucketRecord {
   _id?: ObjectId | string;
   tenantId: string;
+  projectId?: string;
   key: string;
   name: string;
   providerKey: string;
@@ -199,6 +227,7 @@ export interface IFileBucketRecord {
 export interface IFileRecord {
   _id?: ObjectId | string;
   tenantId: string;
+  projectId?: string;
   providerKey: string;
   bucketKey: string;
   key: string;
@@ -222,6 +251,7 @@ export interface IFileRecord {
 export interface IModel {
   _id?: ObjectId | string;
   tenantId: string;
+  projectId?: string;
   name: string;
   description?: string;
   key: string;
@@ -252,6 +282,7 @@ export interface IModelUsageCostSnapshot {
 export interface IModelUsageLog {
   _id?: ObjectId | string;
   tenantId: string;
+  projectId?: string;
   modelKey: string;
   modelId?: string;
   requestId: string;
@@ -293,6 +324,17 @@ export interface IModelUsageAggregate {
   }>;
 }
 
+export interface IQuotaPolicy
+  extends Omit<QuotaPolicy, '_id' | 'createdAt' | 'updatedAt'> {
+  _id?: ObjectId | string;
+  createdAt?: Date;
+  updatedAt?: Date;
+  projectId?: string;
+  scope: QuotaScope;
+  domain: QuotaDomain;
+  limits: QuotaLimits;
+}
+
 export interface DatabaseProvider {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
@@ -324,36 +366,85 @@ export interface DatabaseProvider {
   deleteUser(id: string): Promise<boolean>;
   listUsers(): Promise<IUser[]>;
 
+  // Project operations (tenant-specific)
+  createProject(
+    project: Omit<IProject, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IProject>;
+  updateProject(
+    id: string,
+    data: Partial<Omit<IProject, 'tenantId' | 'key'>>,
+  ): Promise<IProject | null>;
+  deleteProject(id: string): Promise<boolean>;
+  findProjectById(id: string): Promise<IProject | null>;
+  findProjectByKey(tenantId: string, key: string): Promise<IProject | null>;
+  listProjects(tenantId: string): Promise<IProject[]>;
+
+  // One-time / best-effort migration helper
+  assignProjectIdToLegacyRecords(tenantId: string, projectId: string): Promise<void>;
+
+  // Quota policies (tenant-specific)
+  createQuotaPolicy(
+    policy: Omit<IQuotaPolicy, '_id'>,
+  ): Promise<IQuotaPolicy>;
+  listQuotaPolicies(tenantId: string, projectId?: string): Promise<IQuotaPolicy[]>;
+  updateQuotaPolicy(
+    id: string,
+    tenantId: string,
+    data: Partial<IQuotaPolicy>,
+    projectId?: string,
+  ): Promise<IQuotaPolicy | null>;
+  deleteQuotaPolicy(id: string, tenantId: string, projectId?: string): Promise<boolean>;
+
   // API Token operations (tenant-specific)
   createApiToken(
     token: Omit<IApiToken, '_id' | 'createdAt'>,
   ): Promise<IApiToken>;
   listApiTokens(userId: string): Promise<IApiToken[]>;
+  listTenantApiTokens(tenantId: string): Promise<IApiToken[]>;
+  listProjectApiTokens(tenantId: string, projectId: string): Promise<IApiToken[]>;
   findApiTokenByToken(token: string): Promise<IApiToken | null>;
   deleteApiToken(id: string, userId: string): Promise<boolean>;
+  deleteTenantApiToken(id: string, tenantId: string): Promise<boolean>;
+  deleteProjectApiToken(id: string, tenantId: string, projectId: string): Promise<boolean>;
   updateTokenLastUsed(token: string): Promise<void>;
 
   // Agent Tracing Session operations (tenant-specific)
   createAgentTracingSession(
     session: Omit<IAgentTracingSession, '_id' | 'createdAt' | 'updatedAt'>,
   ): Promise<IAgentTracingSession>;
+  countAgentTracingDistinctAgents(projectId?: string): Promise<number>;
+  agentTracingAgentExists(agentName: string, projectId?: string): Promise<boolean>;
+  cleanupAgentTracingRetention(options: {
+    projectId?: string;
+    olderThan: Date;
+    batchSize?: number;
+  }): Promise<{ sessionsDeleted: number; eventsDeleted: number }>;
   updateAgentTracingSession(
     sessionId: string,
     data: Partial<IAgentTracingSession>,
+    projectId?: string,
   ): Promise<IAgentTracingSession | null>;
   findAgentTracingSessionById(
     sessionId: string,
+    projectId?: string,
   ): Promise<IAgentTracingSession | null>;
   listAgentTracingSessions(
     filters?: Record<string, unknown>,
+    projectId?: string,
   ): Promise<{ sessions: IAgentTracingSession[]; total: number }>;
 
   // Agent Tracing Event operations (tenant-specific)
   createAgentTracingEvent(
     event: Omit<IAgentTracingEvent, '_id' | 'createdAt'>,
   ): Promise<IAgentTracingEvent>;
-  listAgentTracingEvents(sessionId: string): Promise<IAgentTracingEvent[]>;
-  deleteAgentTracingEvents(sessionId: string): Promise<number>;
+  listAgentTracingEvents(
+    sessionId: string,
+    projectId?: string,
+  ): Promise<IAgentTracingEvent[]>;
+  deleteAgentTracingEvents(
+    sessionId: string,
+    projectId?: string,
+  ): Promise<number>;
 
   // Model management (tenant-specific)
   createModel(
@@ -362,13 +453,14 @@ export interface DatabaseProvider {
   updateModel(id: string, data: Partial<IModel>): Promise<IModel | null>;
   deleteModel(id: string): Promise<boolean>;
   listModels(filters?: {
+    projectId?: string;
     category?: ModelCategory;
     provider?: ModelProviderType; // deprecated
     providerKey?: string;
     providerDriver?: string;
   }): Promise<IModel[]>;
-  findModelById(id: string): Promise<IModel | null>;
-  findModelByKey(key: string): Promise<IModel | null>;
+  findModelById(id: string, projectId?: string): Promise<IModel | null>;
+  findModelByKey(key: string, projectId?: string): Promise<IModel | null>;
 
   // Model usage logging (tenant-specific)
   createModelUsageLog(
@@ -377,10 +469,12 @@ export interface DatabaseProvider {
   listModelUsageLogs(
     modelKey: string,
     options?: { limit?: number; skip?: number; from?: Date; to?: Date },
+    projectId?: string,
   ): Promise<IModelUsageLog[]>;
   aggregateModelUsage(
     modelKey: string,
     options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month' },
+    projectId?: string,
   ): Promise<IModelUsageAggregate>;
 
   // Vector index operations (tenant-specific)
@@ -396,16 +490,19 @@ export interface DatabaseProvider {
   deleteVectorIndex(id: string): Promise<boolean>;
   listVectorIndexes(filters?: {
     providerKey?: string;
+    projectId?: string;
     search?: string;
   }): Promise<IVectorIndexRecord[]>;
   findVectorIndexById(id: string): Promise<IVectorIndexRecord | null>;
   findVectorIndexByKey(
     providerKey: string,
     key: string,
+    projectId?: string,
   ): Promise<IVectorIndexRecord | null>;
   findVectorIndexByExternalId(
     providerKey: string,
     externalId: string,
+    projectId?: string,
   ): Promise<IVectorIndexRecord | null>;
 
   // File object operations (tenant-specific)
@@ -422,14 +519,25 @@ export interface DatabaseProvider {
     providerKey: string,
     bucketKey: string,
     key: string,
+    projectId?: string,
   ): Promise<IFileRecord | null>;
   listFileRecords(filters: {
     providerKey: string;
     bucketKey: string;
+    projectId?: string;
     search?: string;
     limit?: number;
     cursor?: string;
   }): Promise<{ items: IFileRecord[]; nextCursor?: string }>;
+
+  countFileRecords(filters?: {
+    projectId?: string;
+  }): Promise<number>;
+
+  sumFileRecordBytes(filters?: { projectId?: string }): Promise<number>;
+
+  getProjectVectorCountApprox(projectId: string): Promise<number>;
+  incrementProjectVectorCountApprox(projectId: string, delta: number): Promise<number>;
 
   // File bucket operations (tenant-specific)
   createFileBucket(
@@ -444,8 +552,9 @@ export interface DatabaseProvider {
   findFileBucketByKey(
     tenantId: string,
     key: string,
+    projectId?: string,
   ): Promise<IFileBucketRecord | null>;
-  listFileBuckets(tenantId: string): Promise<IFileBucketRecord[]>;
+  listFileBuckets(tenantId: string, projectId?: string): Promise<IFileBucketRecord[]>;
 
   // Shared provider registry (tenant-specific)
   createProvider(
@@ -459,6 +568,7 @@ export interface DatabaseProvider {
   findProviderByKey(
     tenantId: string,
     key: string,
+    projectId?: string,
   ): Promise<IProviderRecord | null>;
   listProviders(
     tenantId: string,
@@ -466,7 +576,15 @@ export interface DatabaseProvider {
       type?: ProviderDomain;
       driver?: string;
       status?: IProviderRecord['status'];
+      projectId?: string;
     },
   ): Promise<IProviderRecord[]>;
   deleteProvider(id: string): Promise<boolean>;
+
+  // Rate limiting
+  incrementRateLimit(
+    key: string,
+    windowSeconds: number,
+    amount: number,
+  ): Promise<{ count: number; resetAt: Date }>;
 }

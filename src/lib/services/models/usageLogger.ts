@@ -69,6 +69,7 @@ export async function logModelUsage(
 
   await db.createModelUsageLog({
     tenantId: model.tenantId,
+    projectId: model.projectId,
     modelKey: model.key,
     modelId: model._id
       ? typeof model._id === 'string'

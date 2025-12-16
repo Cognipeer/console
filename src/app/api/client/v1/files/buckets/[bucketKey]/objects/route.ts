@@ -1,8 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getDatabase } from '@/lib/database';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { uploadFile, listFiles } from '@/lib/services/files';
+import { checkPerRequestLimits, checkRateLimit, checkResourceQuota } from '@/lib/quota/quotaGuard';
+import type { LicenseType } from '@/lib/license/license-manager';
 
 export const runtime = 'nodejs';
+
+function estimateBase64Bytes(input: unknown): number | undefined {
+  if (typeof input !== 'string') return undefined;
+  const base64 = input.includes('base64,') ? input.split('base64,').pop() ?? '' : input;
+  if (!base64) return 0;
+
+  const normalized = base64.replace(/\s/g, '');
+  const paddingMatch = normalized.match(/=+$/);
+  const padding = paddingMatch ? paddingMatch[0].length : 0;
+  const bytes = Math.floor((normalized.length * 3) / 4) - padding;
+  return bytes > 0 ? bytes : 0;
+}
 
 /**
  * POST /api/client/v1/files/buckets/:bucketKey/objects
@@ -23,7 +38,8 @@ export async function POST(
   { params }: { params: Promise<{ bucketKey: string }> },
 ) {
   try {
-    const { tenantDbName, tenantId, user } = await requireApiToken(request);
+    const { tenantDbName, tenantId, tenant, token, tokenRecord, user, projectId } =
+      await requireApiToken(request);
     const { bucketKey } = await params;
 
     if (!bucketKey) {
@@ -57,9 +73,76 @@ export async function POST(
       );
     }
 
+    const tokenId = tokenRecord._id?.toString() ?? token;
+    const estimatedFileBytes = estimateBase64Bytes(data);
+    const quotaContext = {
+      tenantDbName,
+      tenantId,
+      projectId,
+      licenseType: tenant.licenseType as LicenseType,
+      userId: user?._id?.toString(),
+      tokenId,
+      domain: 'file' as const,
+      resourceKey: bucketKey,
+    };
+
+    const quotaResult = await checkPerRequestLimits(quotaContext, {
+      fileSize: estimatedFileBytes,
+      filesPerRequest: 1,
+    });
+
+    if (!quotaResult.allowed) {
+      return NextResponse.json(
+        { error: quotaResult.reason || 'Quota exceeded' },
+        { status: 429 },
+      );
+    }
+
+    const rateLimitResult = await checkRateLimit(quotaContext, {
+      requests: 1,
+      files: 1,
+      storageBytes: estimatedFileBytes ?? 0,
+    });
+
+    if (!rateLimitResult.allowed) {
+      return NextResponse.json(
+        { error: rateLimitResult.reason || 'Rate limit exceeded' },
+        { status: 429 },
+      );
+    }
+
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+    const currentFilesTotal = await db.countFileRecords({ projectId });
+    const resourceCheck = await checkResourceQuota(
+      quotaContext,
+      'filesTotal',
+      currentFilesTotal,
+    );
+
+    if (!resourceCheck.allowed) {
+      return NextResponse.json(
+        { error: resourceCheck.reason || 'File quota exceeded' },
+        { status: 429 },
+      );
+    }
+
+    const storageLimit = quotaResult.effectiveLimits.quotas?.maxStorageBytes;
+    if (storageLimit !== undefined && storageLimit !== -1) {
+      const currentBytes = await db.sumFileRecordBytes({ projectId });
+      const projected = currentBytes + (estimatedFileBytes ?? 0);
+
+      if (projected > storageLimit) {
+        return NextResponse.json(
+          { error: `storageBytes limit exceeded (${projected}/${storageLimit})` },
+          { status: 429 },
+        );
+      }
+    }
+
     const createdBy = user?._id?.toString() ?? 'api';
 
-    const result = await uploadFile(tenantDbName, tenantId, {
+    const result = await uploadFile(tenantDbName, tenantId, projectId, {
       bucketKey,
       fileName,
       contentType,
@@ -106,7 +189,7 @@ export async function GET(
   { params }: { params: Promise<{ bucketKey: string }> },
 ) {
   try {
-    const { tenantDbName, tenantId } = await requireApiToken(request);
+    const { tenantDbName, tenantId, projectId } = await requireApiToken(request);
     const { bucketKey } = await params;
 
     if (!bucketKey) {
@@ -121,7 +204,7 @@ export async function GET(
     const limit = parseInt(searchParams.get('limit') ?? '50', 10);
     const cursor = searchParams.get('cursor') ?? undefined;
 
-    const result = await listFiles(tenantDbName, tenantId, {
+    const result = await listFiles(tenantDbName, tenantId, projectId, {
       bucketKey,
       search,
       limit,

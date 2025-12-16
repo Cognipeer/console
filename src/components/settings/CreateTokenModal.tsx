@@ -11,9 +11,10 @@ interface CreateTokenModalProps {
   opened: boolean;
   onClose: () => void;
   onSuccess: () => void;
+  createUrl?: string;
 }
 
-export default function CreateTokenModal({ opened, onClose, onSuccess }: CreateTokenModalProps) {
+export default function CreateTokenModal({ opened, onClose, onSuccess, createUrl = '/api/tokens' }: CreateTokenModalProps) {
   const [createdToken, setCreatedToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const t = useTranslations('settings.tokenManagement.createModal');
@@ -33,7 +34,7 @@ export default function CreateTokenModal({ opened, onClose, onSuccess }: CreateT
   const handleSubmit = async (values: typeof form.values) => {
     setLoading(true);
     try {
-      const response = await fetch('/api/tokens', {
+      const response = await fetch(createUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

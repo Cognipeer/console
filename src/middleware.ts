@@ -77,17 +77,32 @@ export async function middleware(request: NextRequest) {
     }
   }
 
-  // Add user and tenant info to headers for API routes
-  const response = NextResponse.next();
-  response.headers.set('x-user-id', payload.userId);
-  response.headers.set('x-user-email', payload.email);
-  response.headers.set('x-user-role', payload.role);
-  response.headers.set('x-tenant-id', payload.tenantId);
-  response.headers.set('x-tenant-slug', payload.tenantSlug);
-  response.headers.set('x-license-type', payload.licenseType);
-  response.headers.set('x-features', JSON.stringify(payload.features));
+  // Add user and tenant info to downstream request headers
+  const requestHeaders = new Headers(request.headers);
+  const tenantDbName =
+    payload.tenantDbName ||
+    (payload.tenantSlug ? `tenant_${payload.tenantSlug}` : undefined);
 
-  return response;
+  if (!tenantDbName) {
+    return NextResponse.json(
+      { error: 'Unauthorized', message: 'Tenant context is missing' },
+      { status: 401 },
+    );
+  }
+
+  requestHeaders.set('x-user-id', payload.userId);
+  requestHeaders.set('x-user-email', payload.email);
+  requestHeaders.set('x-user-role', payload.role);
+  requestHeaders.set('x-tenant-id', payload.tenantId);
+  requestHeaders.set('x-tenant-db-name', tenantDbName);
+  requestHeaders.set('x-license-type', payload.licenseType);
+  requestHeaders.set('x-features', JSON.stringify(payload.features));
+
+  return NextResponse.next({
+    request: {
+      headers: requestHeaders,
+    },
+  });
 }
 
 export const config = {

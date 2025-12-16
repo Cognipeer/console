@@ -56,11 +56,12 @@ export async function GET(request: NextRequest, context: RouteContext) {
   try {
     const { providerKey, externalId } = await context.params;
     const indexKey = externalId;
-    const { tenantDbName, tenantId } = await requireApiToken(request);
+    const { tenantDbName, tenantId, projectId } = await requireApiToken(request);
 
     const { index, provider } = await getVectorIndex(
       tenantDbName,
       tenantId,
+      projectId,
       providerKey,
       indexKey,
     );
@@ -105,6 +106,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
     const index = await updateVectorIndex(
       auth.tenantDbName,
       auth.tenantId,
+      auth.projectId,
       providerKey,
       indexKey,
       {
@@ -129,6 +131,7 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
     await deleteVectorIndex(
       auth.tenantDbName,
       auth.tenantId,
+      auth.projectId,
       providerKey,
       indexKey,
       { updatedBy: auth.tokenRecord.userId },

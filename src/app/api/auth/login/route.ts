@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import { getDatabase, ITenant } from '@/lib/database';
 import { TokenManager } from '@/lib/license/token-manager';
 import { LicenseType } from '@/lib/license/license-manager';
+import { ensureDefaultProject } from '@/lib/services/projects/projectService';
 
 export async function POST(request: NextRequest) {
   try {
@@ -145,22 +146,55 @@ export async function POST(request: NextRequest) {
     }
 
     // Generate JWT token with tenant and license information
+    const tenantIdStr =
+      typeof tenant._id === 'string' ? tenant._id : tenant._id!.toString();
+    const userIdStr = typeof user._id === 'string' ? user._id : user._id!.toString();
+
+    const defaultProject = await ensureDefaultProject(tenant.dbName, tenantIdStr, userIdStr);
+    const defaultProjectId =
+      typeof defaultProject._id === 'string'
+        ? defaultProject._id
+        : defaultProject._id?.toString();
+
+    let activeProjectId = request.cookies.get('active_project_id')?.value;
+
+    if (user.role === 'user' || user.role === 'project_admin') {
+      // Non-admin users must only access explicitly assigned projects.
+      const allowed = (user.projectIds ?? []).map(String);
+      if (!activeProjectId || !allowed.includes(activeProjectId)) {
+        activeProjectId = allowed[0];
+      }
+    } else if (!activeProjectId && defaultProjectId) {
+      activeProjectId = defaultProjectId;
+    }
+
     const token = await TokenManager.generateToken({
-      userId: typeof user._id === 'string' ? user._id : user._id!.toString(),
+      userId: userIdStr,
       email: user.email,
-      tenantId:
-        typeof tenant._id === 'string' ? tenant._id : tenant._id!.toString(),
+      tenantId: tenantIdStr,
       tenantSlug: tenant.slug,
+      tenantDbName: tenant.dbName,
       role: user.role!,
       licenseId: user.licenseId,
       licenseType: user.licenseId as LicenseType,
       features: user.features || [],
     });
 
+    // Mark invitation as accepted after the first successful login.
+    if (user.invitedBy && !user.inviteAcceptedAt) {
+      try {
+        await db.updateUser(userIdStr, { inviteAcceptedAt: new Date() });
+        user.inviteAcceptedAt = new Date();
+      } catch (err) {
+        console.error('Failed to mark invite accepted:', err);
+      }
+    }
+
     // Create response
     const response = NextResponse.json(
       {
         message: 'Login successful',
+        mustChangePassword: Boolean(user.mustChangePassword),
         user: {
           id: user._id,
           email: user.email,
@@ -186,6 +220,25 @@ export async function POST(request: NextRequest) {
       maxAge: 60 * 60 * 24 * 7, // 7 days
       path: '/',
     });
+
+    if (activeProjectId) {
+      response.cookies.set('active_project_id', activeProjectId, {
+        httpOnly: false,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'lax',
+        maxAge: 60 * 60 * 24 * 30,
+        path: '/',
+      });
+    } else {
+      // Clear any previous active project cookie (e.g. switching accounts).
+      response.cookies.set('active_project_id', '', {
+        httpOnly: false,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'lax',
+        maxAge: 0,
+        path: '/',
+      });
+    }
 
     return response;
   } catch (error) {

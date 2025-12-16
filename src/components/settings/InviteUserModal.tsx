@@ -93,6 +93,7 @@ export default function InviteUserModal({ opened, onClose, onSuccess }: InviteUs
             leftSection={<IconShieldCheck size={16} />}
             data={[
               { value: 'user', label: t('form.role.options.user') },
+              { value: 'project_admin', label: 'Project Admin' },
               { value: 'admin', label: t('form.role.options.admin') },
             ]}
             {...form.getInputProps('role')}

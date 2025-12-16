@@ -1,19 +1,37 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { resolveTenantDbName } from '@/lib/utils/tenant';
 import {
   createVectorIndex,
   listVectorIndexes,
 } from '@/lib/services/vector';
+import { ProjectContextError, requireProjectContext } from '@/lib/services/projects/projectContext';
+import type { LicenseType } from '@/lib/license/license-manager';
+import { checkRateLimit, checkResourceQuota } from '@/lib/quota/quotaGuard';
 
 export const runtime = 'nodejs';
 
 export async function GET(request: NextRequest) {
   try {
-    const tenantSlug = request.headers.get('x-tenant-slug');
+    const tenantDbName = request.headers.get('x-tenant-db-name');
     const tenantId = request.headers.get('x-tenant-id');
+    const userId = request.headers.get('x-user-id');
 
-    if (!tenantSlug || !tenantId) {
+    if (!tenantDbName || !tenantId || !userId) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    let projectId: string;
+    try {
+      const projectContext = await requireProjectContext(request, {
+        tenantDbName,
+        tenantId,
+        userId,
+      });
+      projectId = projectContext.projectId;
+    } catch (error) {
+      if (error instanceof ProjectContextError) {
+        return NextResponse.json({ error: error.message }, { status: error.status });
+      }
+      throw error;
     }
 
     const { searchParams } = new URL(request.url);
@@ -26,8 +44,12 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const { tenantDbName } = await resolveTenantDbName(tenantSlug);
-    const indexes = await listVectorIndexes(tenantDbName, tenantId, providerKey);
+    const indexes = await listVectorIndexes(
+      tenantDbName,
+      tenantId,
+      projectId,
+      providerKey,
+    );
 
     return NextResponse.json({ indexes }, { status: 200 });
   } catch (error) {
@@ -41,12 +63,28 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const tenantSlug = request.headers.get('x-tenant-slug');
+    const tenantDbName = request.headers.get('x-tenant-db-name');
     const tenantId = request.headers.get('x-tenant-id');
     const userId = request.headers.get('x-user-id');
+    const licenseType = request.headers.get('x-license-type') as LicenseType | null;
 
-    if (!tenantSlug || !tenantId || !userId) {
+    if (!tenantDbName || !tenantId || !userId || !licenseType) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    let projectId: string;
+    try {
+      const projectContext = await requireProjectContext(request, {
+        tenantDbName,
+        tenantId,
+        userId,
+      });
+      projectId = projectContext.projectId;
+    } catch (error) {
+      if (error instanceof ProjectContextError) {
+        return NextResponse.json({ error: error.message }, { status: error.status });
+      }
+      throw error;
     }
 
     const body = await request.json();
@@ -72,11 +110,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { tenantDbName } = await resolveTenantDbName(tenantSlug);
-
     const existingIndexes = await listVectorIndexes(
       tenantDbName,
       tenantId,
+      projectId,
       body.providerKey,
     );
 
@@ -89,7 +126,47 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ index: matchingIndex, reused: true }, { status: 200 });
     }
 
-    const index = await createVectorIndex(tenantDbName, tenantId, {
+    const rateLimitResult = await checkRateLimit(
+      {
+        tenantDbName,
+        tenantId,
+        projectId,
+        licenseType,
+        userId,
+        domain: 'vector',
+        providerKey: body.providerKey,
+      },
+      { requests: 1 },
+    );
+    if (!rateLimitResult.allowed) {
+      return NextResponse.json(
+        { error: rateLimitResult.reason || 'Rate limit exceeded' },
+        { status: 429 },
+      );
+    }
+
+    const resourceCheck = await checkResourceQuota(
+      {
+        tenantDbName,
+        tenantId,
+        projectId,
+        licenseType,
+        userId,
+        domain: 'vector',
+        providerKey: body.providerKey,
+      },
+      'vectorIndexes',
+      existingIndexes.length,
+    );
+
+    if (!resourceCheck.allowed) {
+      return NextResponse.json(
+        { error: resourceCheck.reason || 'Vector index quota exceeded' },
+        { status: 429 },
+      );
+    }
+
+    const index = await createVectorIndex(tenantDbName, tenantId, projectId, {
       providerKey: body.providerKey,
       name: body.name,
       dimension: dimensionValue,

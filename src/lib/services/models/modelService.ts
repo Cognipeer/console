@@ -52,8 +52,14 @@ async function requireModelProvider(
   tenantDbName: string,
   tenantId: string,
   providerKey: string,
+  projectId?: string,
 ): Promise<ModelProviderView> {
-  const provider = await getProviderConfigByKey(tenantDbName, tenantId, providerKey);
+  const provider = await getProviderConfigByKey(
+    tenantDbName,
+    tenantId,
+    providerKey,
+    projectId,
+  );
 
   if (!provider) {
     throw new Error('Model provider configuration not found.');
@@ -106,15 +112,17 @@ function ensureCurrency(
 
 export async function listModels(
   tenantDbName: string,
+  projectId: string,
   filters?: { category?: ModelCategory; providerKey?: string; providerDriver?: string },
 ): Promise<IModel[]> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
-  return db.listModels(filters);
+  return db.listModels({ ...filters, projectId });
 }
 
 async function generateUniqueKey(
   tenantDbName: string,
+  projectId: string,
   desiredKey: string,
 ): Promise<string> {
   const db = await getDatabase();
@@ -125,7 +133,7 @@ async function generateUniqueKey(
   let candidate = base;
 
   while (attempt < MAX_KEY_ATTEMPTS) {
-    const existing = await db.findModelByKey(candidate);
+    const existing = await db.findModelByKey(candidate, projectId);
     if (!existing) {
       return candidate;
     }
@@ -139,6 +147,7 @@ async function generateUniqueKey(
 export async function createModel(
   tenantDbName: string,
   tenantId: string,
+  projectId: string,
   userId: string,
   payload: CreateModelInput,
 ): Promise<IModel> {
@@ -149,15 +158,17 @@ export async function createModel(
     tenantDbName,
     tenantId,
     payload.providerKey,
+    projectId,
   );
 
   ensureProviderSupportsCategory(provider, payload.category);
 
   const keyCandidate = payload.key || payload.name;
-  const key = await generateUniqueKey(tenantDbName, keyCandidate);
+  const key = await generateUniqueKey(tenantDbName, projectId, keyCandidate);
 
   const newModel: Omit<IModel, '_id' | 'createdAt' | 'updatedAt'> = {
     tenantId,
+    projectId,
     name: payload.name,
     description: payload.description,
     key,
@@ -182,6 +193,7 @@ export async function createModel(
 
 export async function updateModel(
   tenantDbName: string,
+  projectId: string,
   modelId: string,
   updates: UpdateModelInput,
   userId?: string,
@@ -189,7 +201,7 @@ export async function updateModel(
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
 
-  const existing = await db.findModelById(modelId);
+  const existing = await db.findModelById(modelId, projectId);
   if (!existing) {
     return null;
   }
@@ -202,7 +214,7 @@ export async function updateModel(
   }
 
   if (updates.key && updates.key !== existing.key) {
-    updatePayload.key = await generateUniqueKey(tenantDbName, updates.key);
+    updatePayload.key = await generateUniqueKey(tenantDbName, projectId, updates.key);
   }
 
   if (updates.providerKey && updates.providerKey !== existing.providerKey) {
@@ -210,6 +222,7 @@ export async function updateModel(
       tenantDbName,
       existing.tenantId,
       updates.providerKey,
+      projectId,
     );
 
     ensureProviderSupportsCategory(provider, updates.category ?? existing.category);
@@ -230,54 +243,64 @@ export async function updateModel(
 
 export async function deleteModel(
   tenantDbName: string,
+  projectId: string,
   modelId: string,
 ): Promise<boolean> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
+  const existing = await db.findModelById(modelId, projectId);
+  if (!existing) {
+    return false;
+  }
   return db.deleteModel(modelId);
 }
 
 export async function getModelByKey(
   tenantDbName: string,
   key: string,
+  projectId: string,
 ): Promise<IModel | null> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
-  return db.findModelByKey(key);
+  return db.findModelByKey(key, projectId);
 }
 
 export async function getModelById(
   tenantDbName: string,
   id: string,
+  projectId: string,
 ): Promise<IModel | null> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
-  return db.findModelById(id);
+  return db.findModelById(id, projectId);
 }
 
 export async function listUsageLogs(
   tenantDbName: string,
   modelKey: string,
+  projectId: string,
   options?: { limit?: number; skip?: number; from?: Date; to?: Date },
 ): Promise<IModelUsageLog[]> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
-  return db.listModelUsageLogs(modelKey, options);
+  return db.listModelUsageLogs(modelKey, options, projectId);
 }
 
 export async function getUsageAggregate(
   tenantDbName: string,
   modelKey: string,
+  projectId: string,
   options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month' },
 ): Promise<IModelUsageAggregate> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
-  return db.aggregateModelUsage(modelKey, options);
+  return db.aggregateModelUsage(modelKey, options, projectId);
 }
 
 export async function listModelProviders(
   tenantDbName: string,
   tenantId: string,
+  projectId: string,
   filters?: {
     status?: ProviderStatus;
     driver?: string;
@@ -285,6 +308,7 @@ export async function listModelProviders(
 ): Promise<ModelProviderView[]> {
   const providers = await listProviderConfigs(tenantDbName, tenantId, {
     type: 'model',
+    projectId,
     ...(filters ?? {}),
   });
 
@@ -294,11 +318,13 @@ export async function listModelProviders(
 export async function createModelProvider(
   tenantDbName: string,
   tenantId: string,
+  projectId: string,
   payload: CreateModelProviderInput,
 ): Promise<ModelProviderView> {
   const provider = await createProviderConfig(tenantDbName, tenantId, {
     ...payload,
     type: 'model',
+    projectId,
   });
 
   return attachDriverCapabilities(provider);

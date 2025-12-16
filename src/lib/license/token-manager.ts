@@ -6,7 +6,8 @@ export interface JWTPayload {
   email: string;
   tenantId: string;
   tenantSlug: string;
-  role: 'owner' | 'admin' | 'user';
+  tenantDbName: string;
+  role: 'owner' | 'admin' | 'project_admin' | 'user';
   licenseId: string;
   licenseType: LicenseType;
   features: string[];

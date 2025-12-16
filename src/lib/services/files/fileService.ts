@@ -155,6 +155,7 @@ function ensureFileBucketActive(bucket: IFileBucketRecord) {
 async function requireBucketContext(
     tenantDbName: string,
     tenantId: string,
+    projectId: string,
     bucketKey: string,
 ): Promise<{
     bucket: IFileBucketRecord;
@@ -162,7 +163,7 @@ async function requireBucketContext(
     runtime: FileProviderRuntime;
 }> {
     const db = await withTenantDb(tenantDbName);
-    const bucket = await db.findFileBucketByKey(tenantId, bucketKey);
+    const bucket = await db.findFileBucketByKey(tenantId, bucketKey, projectId);
 
     if (!bucket) {
         throw new Error('File bucket not found.');
@@ -174,6 +175,7 @@ async function requireBucketContext(
         tenantDbName,
         tenantId,
         bucket.providerKey,
+        projectId,
     );
 
     return {
@@ -197,12 +199,14 @@ async function buildRuntimeContext(
     tenantDbName: string,
     tenantId: string,
     providerKey: string,
+    projectId: string,
 ): Promise<{ runtime: FileProviderRuntime; record: IProviderRecord }> {
     const { record, credentials } = await loadProviderRuntimeData(
         tenantDbName,
         {
             tenantId,
             key: providerKey,
+            projectId,
         },
     );
 
@@ -214,6 +218,7 @@ async function buildRuntimeContext(
         record.driver,
         {
             tenantId,
+            projectId,
             providerKey: record.key,
             credentials,
             settings: record.settings ?? {},
@@ -324,11 +329,13 @@ type CreateFileProviderInput = Omit<CreateProviderConfigInput, 'type'>;
 export async function listFileProviders(
     tenantDbName: string,
     tenantId: string,
+    projectId: string,
     filters?: FileProviderFilters,
 ): Promise<FileProviderView[]> {
     const providers = await listProviderConfigs(tenantDbName, tenantId, {
         ...(filters ?? {}),
         type: 'file',
+        projectId,
     });
     return providers.map((provider) => attachDriverCapabilities(provider));
 }
@@ -336,11 +343,13 @@ export async function listFileProviders(
 export async function createFileProvider(
     tenantDbName: string,
     tenantId: string,
+    projectId: string,
     payload: CreateFileProviderInput,
 ): Promise<FileProviderView> {
     const provider = await createProviderConfig(tenantDbName, tenantId, {
         ...payload,
         type: 'file',
+        projectId,
     });
     return attachDriverCapabilities(provider);
 }
@@ -348,11 +357,12 @@ export async function createFileProvider(
 export async function listFileBuckets(
     tenantDbName: string,
     tenantId: string,
+    projectId: string,
 ): Promise<FileBucketView[]> {
     const db = await withTenantDb(tenantDbName);
     const [buckets, providers] = await Promise.all([
-        db.listFileBuckets(tenantId),
-        listProviderConfigs(tenantDbName, tenantId, { type: 'file' }),
+        db.listFileBuckets(tenantId, projectId),
+        listProviderConfigs(tenantDbName, tenantId, { type: 'file', projectId }),
     ]);
 
     const providerMap = new Map<string, FileProviderView>(
@@ -369,11 +379,12 @@ export async function listFileBuckets(
 export async function createFileBucket(
     tenantDbName: string,
     tenantId: string,
+    projectId: string,
     payload: CreateFileBucketInput,
 ): Promise<FileBucketView> {
     const db = await withTenantDb(tenantDbName);
 
-    const existing = await db.findFileBucketByKey(tenantId, payload.key);
+    const existing = await db.findFileBucketByKey(tenantId, payload.key, projectId);
     if (existing) {
         throw new Error(`Bucket with key "${payload.key}" already exists.`);
     }
@@ -382,6 +393,7 @@ export async function createFileBucket(
         tenantDbName,
         tenantId,
         payload.providerKey,
+        projectId,
     );
 
     if (!provider) {
@@ -396,6 +408,7 @@ export async function createFileBucket(
 
     const record = await db.createFileBucket({
         tenantId,
+        projectId,
         key: payload.key,
         name: payload.name,
         providerKey: payload.providerKey,
@@ -415,10 +428,11 @@ export async function createFileBucket(
 export async function getFileBucket(
     tenantDbName: string,
     tenantId: string,
+    projectId: string,
     bucketKey: string,
 ): Promise<FileBucketView> {
     const db = await withTenantDb(tenantDbName);
-    const record = await db.findFileBucketByKey(tenantId, bucketKey);
+    const record = await db.findFileBucketByKey(tenantId, bucketKey, projectId);
 
     if (!record) {
         throw new Error('File bucket not found.');
@@ -428,6 +442,7 @@ export async function getFileBucket(
         tenantDbName,
         tenantId,
         record.providerKey,
+        projectId,
     );
 
     const view = serializeFileBucket(record);
@@ -437,11 +452,12 @@ export async function getFileBucket(
 export async function deleteFileBucket(
     tenantDbName: string,
     tenantId: string,
+    projectId: string,
     bucketKey: string,
     options?: DeleteFileBucketOptions,
 ): Promise<boolean> {
     const db = await withTenantDb(tenantDbName);
-    const record = await db.findFileBucketByKey(tenantId, bucketKey);
+    const record = await db.findFileBucketByKey(tenantId, bucketKey, projectId);
 
     if (!record) {
         return false;
@@ -451,6 +467,7 @@ export async function deleteFileBucket(
         const { items } = await db.listFileRecords({
             providerKey: record.providerKey,
             bucketKey: record.key,
+            projectId,
             limit: 1,
         });
 
@@ -470,11 +487,13 @@ export async function deleteFileBucket(
 export async function listFiles(
     tenantDbName: string,
     tenantId: string,
+    projectId: string,
     request: ListFilesRequest,
 ): Promise<ListFilesResponse> {
     const { bucket } = await requireBucketContext(
         tenantDbName,
         tenantId,
+        projectId,
         request.bucketKey,
     );
 
@@ -486,6 +505,7 @@ export async function listFiles(
     const { items, nextCursor } = await db.listFileRecords({
         providerKey: bucket.providerKey,
         bucketKey: bucket.key,
+        projectId,
         search: request.search,
         limit: request.limit,
         cursor: request.cursor,
@@ -500,6 +520,7 @@ export async function listFiles(
 async function persistRecord(
     db: DatabaseProvider,
     tenantId: string,
+    projectId: string,
     providerKey: string,
     bucketKey: string,
     relativeKey: string,
@@ -510,6 +531,7 @@ async function persistRecord(
 ): Promise<FileRecordView> {
     const created = await db.createFileRecord({
         tenantId,
+        projectId,
         providerKey,
         bucketKey,
         key: relativeKey,
@@ -589,11 +611,13 @@ async function applyMarkdownConversion(
 export async function uploadFile(
     tenantDbName: string,
     tenantId: string,
+    projectId: string,
     request: UploadFileRequest,
 ): Promise<UploadFileResponse> {
     const { bucket, runtime } = await requireBucketContext(
         tenantDbName,
         tenantId,
+        projectId,
         request.bucketKey,
     );
 
@@ -641,6 +665,7 @@ export async function uploadFile(
     const record = await persistRecord(
         db,
         tenantId,
+        projectId,
         bucket.providerKey,
         bucket.key,
         storedRelativeKey,
@@ -684,6 +709,7 @@ export async function uploadFile(
 async function requireFileRecord(
     tenantDbName: string,
     tenantId: string,
+    projectId: string,
     bucketKey: string,
     key: string,
 ): Promise<{
@@ -695,6 +721,7 @@ async function requireFileRecord(
     const { bucket, provider, runtime } = await requireBucketContext(
         tenantDbName,
         tenantId,
+        projectId,
         bucketKey,
     );
 
@@ -703,6 +730,7 @@ async function requireFileRecord(
         bucket.providerKey,
         bucket.key,
         key,
+        projectId,
     );
 
     if (!record) {
@@ -720,6 +748,7 @@ async function requireFileRecord(
 export async function downloadFile(
     tenantDbName: string,
     tenantId: string,
+    projectId: string,
     bucketKey: string,
     key: string,
     options?: DownloadFileOptions,
@@ -727,6 +756,7 @@ export async function downloadFile(
     const { bucket, runtime, record } = await requireFileRecord(
         tenantDbName,
         tenantId,
+        projectId,
         bucketKey,
         key,
     );
@@ -759,6 +789,7 @@ export async function downloadFile(
 export async function deleteFile(
     tenantDbName: string,
     tenantId: string,
+    projectId: string,
     bucketKey: string,
     key: string,
     deletedBy: string,
@@ -766,6 +797,7 @@ export async function deleteFile(
     const { bucket, runtime, record } = await requireFileRecord(
         tenantDbName,
         tenantId,
+        projectId,
         bucketKey,
         key,
     );
@@ -795,12 +827,14 @@ export async function deleteFile(
 export async function getFileRecord(
     tenantDbName: string,
     tenantId: string,
+    projectId: string,
     bucketKey: string,
     key: string,
 ): Promise<FileRecordView> {
     const { record } = await requireFileRecord(
         tenantDbName,
         tenantId,
+        projectId,
         bucketKey,
         key,
     );

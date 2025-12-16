@@ -11,28 +11,45 @@ import { useTranslations } from '@/lib/i18n';
 interface ApiToken {
   _id: string;
   label: string;
-  token: string;
+  token?: string;
+  userId?: string;
+  canDelete?: boolean;
   lastUsed?: string;
   createdAt: string;
 }
 
-export default function TokenManagement() {
+export default function TokenManagement({ projectId }: { projectId?: string }) {
   const [tokens, setTokens] = useState<ApiToken[]>([]);
   const [loading, setLoading] = useState(true);
   const [createModalOpened, setCreateModalOpened] = useState(false);
   const [deleteModalOpened, setDeleteModalOpened] = useState(false);
   const [tokenToDelete, setTokenToDelete] = useState<ApiToken | null>(null);
+  const [forbidden, setForbidden] = useState(false);
   const t = useTranslations('settings.tokenManagement');
   const tNotifications = useTranslations('notifications');
   const tCommon = useTranslations('common');
 
+  const listUrl = projectId
+    ? `/api/projects/${encodeURIComponent(projectId)}/tokens`
+    : '/api/tokens';
+  const deleteUrl = (id: string) =>
+    projectId
+      ? `/api/projects/${encodeURIComponent(projectId)}/tokens/${encodeURIComponent(id)}`
+      : `/api/tokens/${encodeURIComponent(id)}`;
+
   const fetchTokens = async () => {
     setLoading(true);
     try {
-      const response = await fetch('/api/tokens');
+      const response = await fetch(listUrl);
+      if (response.status === 403) {
+        setForbidden(true);
+        setTokens([]);
+        return;
+      }
       if (!response.ok) {
         throw new Error(t('errors.fetch'));
       }
+      setForbidden(false);
       const data = await response.json();
       setTokens(data.tokens || []);
     } catch (error) {
@@ -48,7 +65,7 @@ export default function TokenManagement() {
 
   useEffect(() => {
     fetchTokens();
-  }, []);
+  }, [listUrl]);
 
   const handleDeleteToken = (token: ApiToken) => {
     setTokenToDelete(token);
@@ -59,9 +76,7 @@ export default function TokenManagement() {
     if (!tokenToDelete) return;
 
     try {
-      const response = await fetch(`/api/tokens/${tokenToDelete._id}`, {
-        method: 'DELETE',
-      });
+      const response = await fetch(deleteUrl(tokenToDelete._id), { method: 'DELETE' });
 
       if (!response.ok) {
         throw new Error(t('errors.delete'));
@@ -92,6 +107,12 @@ export default function TokenManagement() {
 
   return (
     <Box p="md">
+      {forbidden ? (
+        <Text size="sm" c="dimmed">
+          {tCommon('forbidden')}
+        </Text>
+      ) : (
+        <>
       <Group justify="space-between" mb="md">
         <div>
           <Text size="lg" fw={600}>
@@ -125,7 +146,7 @@ export default function TokenManagement() {
                   {token.label}
                 </Text>
                 <Text size="xs" c="dimmed" ff="monospace">
-                  {maskToken(token.token)}
+                  {token.token ? maskToken(token.token) : t('table.hidden')}
                 </Text>
               </div>
             ),
@@ -147,26 +168,30 @@ export default function TokenManagement() {
             textAlign: 'right',
             render: (token) => (
               <Group gap="xs" justify="flex-end">
-                <CopyButton value={token.token}>
-                  {({ copied, copy }) => (
-                    <Tooltip label={copied ? t('copy.copied') : t('copy.copyToken')}>
-                      <ActionIcon
-                        color={copied ? 'teal' : 'gray'}
-                        variant="subtle"
-                        onClick={copy}
-                      >
-                        {copied ? <IconCheck size={16} /> : <IconCopy size={16} />}
-                      </ActionIcon>
-                    </Tooltip>
-                  )}
-                </CopyButton>
-                <ActionIcon
-                  color="red"
-                  variant="subtle"
-                  onClick={() => handleDeleteToken(token)}
-                >
-                  <IconTrash size={16} />
-                </ActionIcon>
+                {token.token ? (
+                  <CopyButton value={token.token}>
+                    {({ copied, copy }) => (
+                      <Tooltip label={copied ? t('copy.copied') : t('copy.copyToken')}>
+                        <ActionIcon
+                          color={copied ? 'teal' : 'gray'}
+                          variant="subtle"
+                          onClick={copy}
+                        >
+                          {copied ? <IconCheck size={16} /> : <IconCopy size={16} />}
+                        </ActionIcon>
+                      </Tooltip>
+                    )}
+                  </CopyButton>
+                ) : null}
+                {token.canDelete === false ? null : (
+                  <ActionIcon
+                    color="red"
+                    variant="subtle"
+                    onClick={() => handleDeleteToken(token)}
+                  >
+                    <IconTrash size={16} />
+                  </ActionIcon>
+                )}
               </Group>
             ),
           },
@@ -180,6 +205,7 @@ export default function TokenManagement() {
         opened={createModalOpened}
         onClose={() => setCreateModalOpened(false)}
         onSuccess={fetchTokens}
+        createUrl={listUrl}
       />
 
       <Modal
@@ -211,6 +237,8 @@ export default function TokenManagement() {
           </Button>
         </Group>
       </Modal>
+        </>
+      )}
     </Box>
   );
 }

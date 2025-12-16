@@ -168,14 +168,6 @@ export default function VectorIndexPage() {
   router.push(`/dashboard/vector/${provider.key}/${index.key}`);
   };
 
-  const handleProviderCreated = (provider: VectorProviderView) => {
-    setProviders((current) => {
-      const next = [...current.filter((item) => item.key !== provider.key), provider];
-      next.sort((a, b) => a.label.localeCompare(b.label));
-      return next;
-    });
-  };
-
   return (
     <Stack gap="md">
       <Group justify="space-between" align="flex-start">
@@ -329,7 +321,6 @@ export default function VectorIndexPage() {
         opened={createModalOpen}
         onClose={() => setCreateModalOpen(false)}
         providers={providers}
-        onProviderCreated={handleProviderCreated}
         onCreated={handleIndexCreated}
       />
     </Stack>

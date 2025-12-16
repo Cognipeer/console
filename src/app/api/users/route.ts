@@ -4,15 +4,19 @@ import { getDatabase } from '@/lib/database';
 export async function GET(request: NextRequest) {
   try {
     // Get tenant info from headers (injected by middleware)
-    const tenantSlug = request.headers.get('x-tenant-slug');
-    const userId = request.headers.get('x-user-id');
+    const tenantDbName = request.headers.get('x-tenant-db-name');
+    const userRole = request.headers.get('x-user-role');
 
-    if (!tenantSlug) {
+    if (!tenantDbName || !userRole) {
       return NextResponse.json({ error: 'Tenant not found' }, { status: 400 });
     }
 
+    if (userRole !== 'owner' && userRole !== 'admin') {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
     const db = await getDatabase();
-    await db.switchToTenant(`tenant_${tenantSlug}`);
+    await db.switchToTenant(tenantDbName);
 
     // Get all users in the tenant
     const users = await db.listUsers();

@@ -9,11 +9,11 @@ export async function DELETE(
     const { id } = await params;
 
     // Get tenant and user info from headers
-    const tenantSlug = request.headers.get('x-tenant-slug');
+    const tenantDbName = request.headers.get('x-tenant-db-name');
     const userId = request.headers.get('x-user-id');
     const userRole = request.headers.get('x-user-role');
 
-    if (!tenantSlug) {
+    if (!tenantDbName) {
       return NextResponse.json({ error: 'Tenant not found' }, { status: 400 });
     }
 
@@ -26,7 +26,7 @@ export async function DELETE(
     }
 
     const db = await getDatabase();
-    await db.switchToTenant(`tenant_${tenantSlug}`);
+    await db.switchToTenant(tenantDbName);
 
     // Check if user is trying to delete themselves
     if (id === userId) {

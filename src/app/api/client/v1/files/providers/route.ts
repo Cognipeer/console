@@ -19,12 +19,12 @@ function handleError(error: unknown, scope: string) {
 
 export async function GET(request: NextRequest) {
   try {
-    const { tenantId, tenantDbName } = await requireApiToken(request);
+    const { tenantId, tenantDbName, projectId } = await requireApiToken(request);
     const { searchParams } = new URL(request.url);
     const statusParam = searchParams.get('status');
     const driver = searchParams.get('driver') ?? undefined;
 
-    const providers = await listFileProviders(tenantDbName, tenantId, {
+    const providers = await listFileProviders(tenantDbName, tenantId, projectId, {
       status: statusParam as ProviderStatus | undefined,
       driver,
     });
@@ -50,7 +50,11 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const provider = await createFileProvider(context.tenantDbName, context.tenantId, {
+    const provider = await createFileProvider(
+      context.tenantDbName,
+      context.tenantId,
+      context.projectId,
+      {
       key: body.key,
       driver: body.driver,
       label: body.label,
@@ -61,7 +65,8 @@ export async function POST(request: NextRequest) {
       capabilitiesOverride: body.capabilitiesOverride,
       metadata: body.metadata,
       createdBy: context.tokenRecord.userId,
-    });
+      },
+    );
 
     return NextResponse.json({ provider }, { status: 201 });
   } catch (error) {

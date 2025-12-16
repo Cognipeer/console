@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { AgentTracingService } from '@/lib/services/agentTracing';
+import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
 
 /**
  * GET /api/tracing/agents/:agentName/overview
@@ -11,11 +12,19 @@ export async function GET(
 ) {
   try {
     const { agentName } = await params;
-    const tenantSlug = request.headers.get('x-tenant-slug');
+    const tenantDbName = request.headers.get('x-tenant-db-name');
+    const tenantId = request.headers.get('x-tenant-id');
+    const userId = request.headers.get('x-user-id');
     
-    if (!tenantSlug) {
+    if (!tenantDbName || !tenantId || !userId) {
       return NextResponse.json({ error: 'Tenant not found' }, { status: 401 });
     }
+
+    const projectContext = await requireProjectContext(request, {
+      tenantDbName,
+      tenantId,
+      userId,
+    });
     const searchParams = request.nextUrl.searchParams;
     
     const filters = {
@@ -25,7 +34,8 @@ export async function GET(
     };
 
     const result = await AgentTracingService.getAgentOverview(
-      tenantSlug,
+      tenantDbName,
+      projectContext.projectId,
       decodeURIComponent(agentName),
       filters
     );
@@ -33,6 +43,9 @@ export async function GET(
     return NextResponse.json(result);
   } catch (error: unknown) {
     console.error('Agent overview error:', error);
+    if (error instanceof ProjectContextError) {
+      return NextResponse.json({ error: error.message }, { status: error.status });
+    }
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Failed to fetch agent overview' },
       { status: 500 }

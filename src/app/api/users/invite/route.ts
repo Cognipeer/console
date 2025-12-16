@@ -2,18 +2,21 @@ import { NextRequest, NextResponse } from 'next/server';
 import bcrypt from 'bcryptjs';
 import { getDatabase } from '@/lib/database';
 import { sendEmail } from '@/lib/email/mailer';
+import { ensureDefaultProject } from '@/lib/services/projects/projectService';
+import { checkResourceQuota } from '@/lib/quota/quotaGuard';
+import type { LicenseType } from '@/lib/license/license-manager';
 
 export async function POST(request: NextRequest) {
   try {
-    const { name, email, role } = await request.json();
+    const { name, email, role, projectId } = await request.json();
 
     // Get tenant and user info from headers
-    const tenantSlug = request.headers.get('x-tenant-slug');
+    const tenantDbName = request.headers.get('x-tenant-db-name');
     const tenantId = request.headers.get('x-tenant-id');
     const inviterId = request.headers.get('x-user-id');
     const inviterRole = request.headers.get('x-user-role');
 
-    if (!tenantSlug || !tenantId) {
+    if (!tenantDbName || !tenantId) {
       return NextResponse.json({ error: 'Tenant not found' }, { status: 400 });
     }
 
@@ -43,9 +46,9 @@ export async function POST(request: NextRequest) {
     }
 
     // Role validation
-    if (!['user', 'admin'].includes(role)) {
+    if (!['user', 'admin', 'project_admin'].includes(role)) {
       return NextResponse.json(
-        { error: 'Invalid role. Must be user or admin' },
+        { error: 'Invalid role. Must be user, project_admin, or admin' },
         { status: 400 },
       );
     }
@@ -59,7 +62,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Switch to tenant database
-    await db.switchToTenant(`tenant_${tenantSlug}`);
+    await db.switchToTenant(tenantDbName);
 
     // Check if user already exists
     const existingUser = await db.findUserByEmail(email);
@@ -74,17 +77,63 @@ export async function POST(request: NextRequest) {
     const tempPassword = Math.random().toString(36).slice(-12);
     const hashedPassword = await bcrypt.hash(tempPassword, 10);
 
+    const defaultProject = await ensureDefaultProject(
+      tenantDbName,
+      tenantId,
+      inviterId || tenantId,
+    );
+    const defaultProjectId = defaultProject._id
+      ? String(defaultProject._id)
+      : undefined;
+    if (!defaultProjectId) {
+      return NextResponse.json(
+        { error: 'Project context is missing' },
+        { status: 400 },
+      );
+    }
+
+    const existingUsers = await db.listUsers();
+    const userQuotaCheck = await checkResourceQuota(
+      {
+        tenantDbName,
+        tenantId,
+        projectId: defaultProjectId,
+        licenseType: tenant.licenseType as LicenseType,
+        userId: inviterId ?? undefined,
+        domain: 'global',
+      },
+      'users',
+      existingUsers.length,
+    );
+
+    if (!userQuotaCheck.allowed) {
+      return NextResponse.json(
+        { error: userQuotaCheck.reason || 'User quota exceeded' },
+        { status: 429 },
+      );
+    }
+
+    let initialProjectIds: string[] | undefined;
+    if (role === 'user' || role === 'project_admin') {
+      // Only assign a project when explicitly provided.
+      if (projectId && typeof projectId === 'string') {
+        initialProjectIds = [projectId];
+      }
+    }
+
     // Create user with invited status
     const user = await db.createUser({
       email,
       password: hashedPassword,
       name,
       tenantId,
-      role: role as 'user' | 'admin',
+      role: role as 'user' | 'admin' | 'project_admin',
+      projectIds: initialProjectIds,
       licenseId: tenant.licenseType,
       features: [], // Will inherit from tenant
       invitedBy: inviterId!,
       invitedAt: new Date(),
+      mustChangePassword: true,
     });
 
     // Send invitation email

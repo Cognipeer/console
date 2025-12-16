@@ -18,7 +18,7 @@ export async function GET(
   { params }: { params: Promise<{ bucketKey: string; objectKey: string }> },
 ) {
   try {
-    const { tenantDbName, tenantId } = await requireApiToken(request);
+    const { tenantDbName, tenantId, projectId } = await requireApiToken(request);
     const { bucketKey, objectKey } = await params;
 
     if (!bucketKey || !objectKey) {
@@ -41,6 +41,7 @@ export async function GET(
     const result = await downloadFile(
       tenantDbName,
       tenantId,
+      projectId,
       bucketKey,
       objectKey,
       { variant },

@@ -1,24 +1,39 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { resolveTenantDbName } from '@/lib/utils/tenant';
 import { createFileBucket, listFileBuckets } from '@/lib/services/files';
+import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
+import type { LicenseType } from '@/lib/license/license-manager';
+import { checkResourceQuota } from '@/lib/quota/quotaGuard';
 
 export const runtime = 'nodejs';
 
 export async function GET(request: NextRequest) {
   try {
-    const tenantSlug = request.headers.get('x-tenant-slug');
+    const tenantDbName = request.headers.get('x-tenant-db-name');
     const tenantId = request.headers.get('x-tenant-id');
+    const userId = request.headers.get('x-user-id');
 
-    if (!tenantSlug || !tenantId) {
+    if (!tenantDbName || !tenantId || !userId) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const { tenantDbName } = await resolveTenantDbName(tenantSlug);
-    const buckets = await listFileBuckets(tenantDbName, tenantId);
+    const projectContext = await requireProjectContext(request, {
+      tenantDbName,
+      tenantId,
+      userId,
+    });
+
+    const buckets = await listFileBuckets(
+      tenantDbName,
+      tenantId,
+      projectContext.projectId,
+    );
 
     return NextResponse.json({ buckets }, { status: 200 });
   } catch (error) {
     console.error('List file buckets error', error);
+    if (error instanceof ProjectContextError) {
+      return NextResponse.json({ error: error.message }, { status: error.status });
+    }
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 },
@@ -28,13 +43,20 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const tenantSlug = request.headers.get('x-tenant-slug');
+    const tenantDbName = request.headers.get('x-tenant-db-name');
     const tenantId = request.headers.get('x-tenant-id');
     const userId = request.headers.get('x-user-id');
+    const licenseType = request.headers.get('x-license-type') as LicenseType | null;
 
-    if (!tenantSlug || !tenantId || !userId) {
+    if (!tenantDbName || !tenantId || !userId || !licenseType) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
+
+    const projectContext = await requireProjectContext(request, {
+      tenantDbName,
+      tenantId,
+      userId,
+    });
 
     const body = await request.json();
     const requiredFields = ['key', 'name', 'providerKey'];
@@ -48,8 +70,38 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const { tenantDbName } = await resolveTenantDbName(tenantSlug);
-    const bucket = await createFileBucket(tenantDbName, tenantId, {
+    const existingBuckets = await listFileBuckets(
+      tenantDbName,
+      tenantId,
+      projectContext.projectId,
+    );
+
+    const quotaCheck = await checkResourceQuota(
+      {
+        tenantDbName,
+        tenantId,
+        projectId: projectContext.projectId,
+        licenseType,
+        userId,
+        domain: 'file',
+        providerKey: body.providerKey,
+      },
+      'fileBuckets',
+      existingBuckets.length,
+    );
+
+    if (!quotaCheck.allowed) {
+      return NextResponse.json(
+        { error: quotaCheck.reason || 'File bucket quota exceeded' },
+        { status: 429 },
+      );
+    }
+
+    const bucket = await createFileBucket(
+      tenantDbName,
+      tenantId,
+      projectContext.projectId,
+      {
       key: body.key,
       name: body.name,
       providerKey: body.providerKey,
@@ -58,11 +110,15 @@ export async function POST(request: NextRequest) {
       metadata: body.metadata,
       status: body.status,
       createdBy: userId,
-    });
+      },
+    );
 
     return NextResponse.json({ bucket }, { status: 201 });
   } catch (error) {
     console.error('Create file bucket error', error);
+    if (error instanceof ProjectContextError) {
+      return NextResponse.json({ error: error.message }, { status: error.status });
+    }
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal server error' },
       { status: 500 },

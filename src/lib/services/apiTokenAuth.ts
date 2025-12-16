@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server';
 import { getDatabase } from '@/lib/database';
-import { resolveTenantDbName } from '@/lib/utils/tenant';
 import type { ITenant, IUser, IApiToken } from '@/lib/database';
+import { ensureDefaultProject } from '@/lib/services/projects/projectService';
 
 export class ApiTokenAuthError extends Error {
   status: number;
@@ -20,6 +20,7 @@ export interface ApiTokenContext {
   tenantId: string;
   tenantSlug: string;
   tenantDbName: string;
+  projectId: string;
   user: IUser | null;
 }
 
@@ -51,8 +52,18 @@ export async function requireApiToken(request: NextRequest): Promise<ApiTokenCon
     throw new ApiTokenAuthError('Tenant not found for token', 404);
   }
 
-  const { tenantDbName } = await resolveTenantDbName(tenant.slug);
-  await db.switchToTenant(tenantDbName);
+  await db.switchToTenant(tenant.dbName);
+
+  const defaultProject = await ensureDefaultProject(
+    tenant.dbName,
+    tokenRecord.tenantId,
+    tokenRecord.userId,
+  );
+  const defaultProjectId = defaultProject._id ? String(defaultProject._id) : undefined;
+  const projectId = tokenRecord.projectId || defaultProjectId;
+  if (!projectId) {
+    throw new ApiTokenAuthError('Token project context is missing', 400);
+  }
 
   let user: IUser | null = null;
   try {
@@ -67,7 +78,8 @@ export async function requireApiToken(request: NextRequest): Promise<ApiTokenCon
     tenant,
     tenantId: tokenRecord.tenantId,
     tenantSlug: tenant.slug,
-    tenantDbName,
+    tenantDbName: tenant.dbName,
+    projectId,
     user,
   };
 }

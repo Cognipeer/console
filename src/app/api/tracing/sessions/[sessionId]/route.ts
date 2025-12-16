@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { AgentTracingService } from '@/lib/services/agentTracing';
+import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
 
 /**
  * GET /api/tracing/sessions/:sessionId
@@ -11,13 +12,25 @@ export async function GET(
 ) {
   try {
     const { sessionId } = await params;
-    const tenantSlug = request.headers.get('x-tenant-slug');
+    const tenantDbName = request.headers.get('x-tenant-db-name');
+    const tenantId = request.headers.get('x-tenant-id');
+    const userId = request.headers.get('x-user-id');
     
-    if (!tenantSlug) {
+    if (!tenantDbName || !tenantId || !userId) {
       return NextResponse.json({ error: 'Tenant not found' }, { status: 401 });
     }
+
+    const projectContext = await requireProjectContext(request, {
+      tenantDbName,
+      tenantId,
+      userId,
+    });
     
-    const result = await AgentTracingService.getSessionDetail(tenantSlug, sessionId);
+    const result = await AgentTracingService.getSessionDetail(
+      tenantDbName,
+      projectContext.projectId,
+      sessionId,
+    );
 
     if (!result) {
       return NextResponse.json({ error: 'Session not found' }, { status: 404 });
@@ -26,6 +39,9 @@ export async function GET(
     return NextResponse.json(result);
   } catch (error: unknown) {
     console.error('Session detail error:', error);
+    if (error instanceof ProjectContextError) {
+      return NextResponse.json({ error: error.message }, { status: error.status });
+    }
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Failed to fetch session detail' },
       { status: 500 }

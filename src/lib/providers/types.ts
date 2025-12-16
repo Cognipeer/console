@@ -55,6 +55,7 @@ export interface ProviderDisplayConfig {
 export interface ProviderContext<TCredentials = Record<string, unknown>, TSettings = Record<string, unknown>> {
   tenantId: string;
   tenantSlug?: string;
+  projectId?: string;
   providerKey: string;
   credentials: TCredentials;
   settings: TSettings;

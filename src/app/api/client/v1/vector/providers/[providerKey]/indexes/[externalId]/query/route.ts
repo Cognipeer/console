@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { queryVectorIndex } from '@/lib/services/vector';
+import { checkPerRequestLimits, checkRateLimit } from '@/lib/quota/quotaGuard';
+import type { LicenseType } from '@/lib/license/license-manager';
 
 export const runtime = 'nodejs';
 
@@ -10,7 +12,6 @@ interface RouteContext {
     externalId: string;
   }>;
 }
-
 function isNotFoundError(error: unknown): boolean {
   if (!(error instanceof Error)) {
     return false;
@@ -60,15 +61,73 @@ export async function POST(request: NextRequest, context: RouteContext) {
       );
     }
 
-    const result = await queryVectorIndex(auth.tenantDbName, auth.tenantId, {
-      providerKey,
-      indexKey,
-      query: {
-        topK,
-        vector: body.query.vector,
-        filter: body.query.filter,
+    const tokenId = auth.tokenRecord._id?.toString() ?? auth.token;
+    const vectorDimensions = Array.isArray(body.query?.vector)
+      ? body.query.vector.length
+      : undefined;
+    const quotaResult = await checkPerRequestLimits(
+      {
+        tenantDbName: auth.tenantDbName,
+        tenantId: auth.tenantId,
+        projectId: auth.projectId,
+        licenseType: auth.tenant.licenseType as LicenseType,
+        userId: auth.tokenRecord.userId,
+        tokenId,
+        domain: 'vector',
+        providerKey,
+        resourceKey: indexKey,
       },
-    });
+      {
+        queryResults: topK,
+        vectorDimensions,
+      },
+    );
+
+    if (!quotaResult.allowed) {
+      return NextResponse.json(
+        { error: quotaResult.reason || 'Quota exceeded' },
+        { status: 429 },
+      );
+    }
+
+    const rateLimitResult = await checkRateLimit(
+      {
+        tenantDbName: auth.tenantDbName,
+        tenantId: auth.tenantId,
+        projectId: auth.projectId,
+        licenseType: auth.tenant.licenseType as LicenseType,
+        userId: auth.tokenRecord.userId,
+        tokenId,
+        domain: 'vector',
+        providerKey,
+        resourceKey: indexKey,
+      },
+      {
+        requests: 1,
+      },
+    );
+
+    if (!rateLimitResult.allowed) {
+      return NextResponse.json(
+        { error: rateLimitResult.reason || 'Rate limit exceeded' },
+        { status: 429 },
+      );
+    }
+
+    const result = await queryVectorIndex(
+      auth.tenantDbName,
+      auth.tenantId,
+      auth.projectId,
+      {
+        providerKey,
+        indexKey,
+        query: {
+          topK,
+          vector: body.query.vector,
+          filter: body.query.filter,
+        },
+      },
+    );
 
     return NextResponse.json({ result }, { status: 200 });
   } catch (error) {

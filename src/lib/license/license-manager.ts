@@ -30,6 +30,7 @@ export class LicenseManager {
    */
   static getFeaturesForLicense(licenseType: LicenseType): string[] {
     const license = this.policies.licenses[licenseType];
+    
     return license?.features || [];
   }
 
@@ -53,10 +54,10 @@ export class LicenseManager {
     for (const featureKey of features) {
       const feature =
         this.policies.features[
-          featureKey as keyof typeof this.policies.features
+        featureKey as keyof typeof this.policies.features
         ];
       if (!feature) continue;
-
+      
       for (const pattern of feature.endpoints) {
         if (this.matchEndpoint(endpoint, pattern)) {
           return true;

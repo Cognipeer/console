@@ -1,0 +1,26 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { getPlanDefaults } from '@/lib/services/quota/quotaService';
+import type { LicenseType } from '@/lib/license/license-manager';
+
+export const runtime = 'nodejs';
+
+export async function GET(request: NextRequest) {
+  try {
+    const licenseTypeHeader = request.headers.get('x-license-type');
+
+    if (!licenseTypeHeader) {
+      return NextResponse.json(
+        { error: 'License type not found on request' },
+        { status: 400 },
+      );
+    }
+
+    const licenseType = licenseTypeHeader as LicenseType;
+    const defaults = await getPlanDefaults(licenseType);
+
+    return NextResponse.json({ licenseType, defaults }, { status: 200 });
+  } catch (error) {
+    console.error('Get quota defaults error:', error);
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  }
+}

@@ -85,14 +85,6 @@ export default function ModelsPage() {
     setCreateModalOpen(true);
   };
 
-  const handleProviderCreated = (provider: ModelProviderView) => {
-    setProviders((current) => {
-      const filtered = current.filter((existing) => existing.key !== provider.key);
-      const next = [...filtered, provider];
-      next.sort((a, b) => a.label.localeCompare(b.label));
-      return next;
-    });
-  };
 
   const handleModelCreated = ({ model, provider }: { model: IModel; provider: ModelProviderView }) => {
     const normalized: ModelDto = {
@@ -374,7 +366,6 @@ export default function ModelsPage() {
         opened={createModalOpen}
         onClose={() => setCreateModalOpen(false)}
         providers={providers}
-        onProviderCreated={handleProviderCreated}
         onCreated={handleModelCreated}
       />
     </Stack>

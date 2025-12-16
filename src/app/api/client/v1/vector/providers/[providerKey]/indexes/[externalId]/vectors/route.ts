@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { deleteVectors } from '@/lib/services/vector';
+import { getDatabase } from '@/lib/database';
+import { checkRateLimit } from '@/lib/quota/quotaGuard';
+import type { LicenseType } from '@/lib/license/license-manager';
 
 export const runtime = 'nodejs';
 
@@ -56,12 +59,41 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
       );
     }
 
-    await deleteVectors(auth.tenantDbName, auth.tenantId, {
+    const tokenId = auth.tokenRecord._id?.toString() ?? auth.token;
+    const quotaContext = {
+      tenantDbName: auth.tenantDbName,
+      tenantId: auth.tenantId,
+      projectId: auth.projectId,
+      licenseType: auth.tenant.licenseType as LicenseType,
+      userId: auth.tokenRecord.userId,
+      tokenId,
+      domain: 'vector' as const,
+      providerKey,
+      resourceKey: indexKey,
+    };
+
+    const rateLimitResult = await checkRateLimit(quotaContext, {
+      requests: 1,
+      vectors: ids.length,
+    });
+
+    if (!rateLimitResult.allowed) {
+      return NextResponse.json(
+        { error: rateLimitResult.reason || 'Rate limit exceeded' },
+        { status: 429 },
+      );
+    }
+
+    await deleteVectors(auth.tenantDbName, auth.tenantId, auth.projectId, {
       providerKey,
       indexKey,
       ids,
       updatedBy: auth.tokenRecord.userId,
     });
+
+    const db = await getDatabase();
+    await db.switchToTenant(auth.tenantDbName);
+    await db.incrementProjectVectorCountApprox(auth.projectId, -ids.length);
 
     return NextResponse.json({ success: true }, { status: 200 });
   } catch (error) {

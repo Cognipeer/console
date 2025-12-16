@@ -12,16 +12,10 @@ import {
   Text,
   TextInput,
   Textarea,
-  Tooltip,
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
-import { IconPlus } from '@tabler/icons-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import ProviderConfigModal, {
-  type ProviderConfigModalSubmitPayload,
-} from '@/components/providers/ProviderConfigModal';
-import type { ProviderDescriptor } from '@/lib/providers';
 import type { FileBucketView, FileProviderView } from '@/lib/services/files';
 import { ApiError, apiRequest } from '@/lib/api/client';
 
@@ -45,7 +39,6 @@ export default function CreateFileBucketModal({
   onClose,
   onCreated,
 }: CreateFileBucketModalProps) {
-  const [providerModalOpen, setProviderModalOpen] = useState(false);
   const queryClient = useQueryClient();
 
   const providersQuery = useQuery<FileProviderView[], ApiError>({
@@ -55,19 +48,6 @@ export default function CreateFileBucketModal({
         '/api/files/providers',
       );
       return response.providers ?? [];
-    },
-    enabled: opened,
-    refetchOnMount: 'always',
-  });
-
-
-  const providerDriversQuery = useQuery<ProviderDescriptor[], ApiError>({
-    queryKey: ['provider-drivers', 'file'],
-    queryFn: async () => {
-      const response = await apiRequest<{ drivers?: ProviderDescriptor[] }>(
-        '/api/files/providers/drivers',
-      );
-      return response.drivers ?? [];
     },
     enabled: opened,
     refetchOnMount: 'always',
@@ -108,9 +88,6 @@ export default function CreateFileBucketModal({
     [providersQuery.data],
   );
   const providersLoading = providersQuery.isPending || providersQuery.isRefetching;
-  const providerDrivers = providerDriversQuery.data ?? [];
-  const providerDriversLoading =
-    providerDriversQuery.isPending || providerDriversQuery.isRefetching;
 
   useEffect(() => {
     if (!providersQuery.isError) {
@@ -125,20 +102,6 @@ export default function CreateFileBucketModal({
       message,
     });
   }, [providersQuery.isError, providersQuery.error]);
-
-  useEffect(() => {
-    if (!providerDriversQuery.isError) {
-      return;
-    }
-
-    const error = providerDriversQuery.error;
-    const message = error instanceof Error ? error.message : 'Unexpected error';
-    notifications.show({
-      color: 'red',
-      title: 'Unable to load provider drivers',
-      message,
-    });
-  }, [providerDriversQuery.isError, providerDriversQuery.error]);
 
   useEffect(() => {
     if (!opened) {
@@ -195,32 +158,6 @@ export default function CreateFileBucketModal({
     },
   });
 
-  const createProviderMutation = useMutation({
-    mutationFn: async ({
-      driver,
-      values,
-    }: ProviderConfigModalSubmitPayload) => {
-      const payload: Record<string, unknown> = {
-        key: values.base.key,
-        label: values.base.label,
-        description: values.base.description,
-        driver,
-        type: 'file',
-        status: values.base.status,
-        credentials: values.credentials,
-        settings: values.settings,
-        metadata: values.metadata,
-      };
-
-      await apiRequest('/api/files/providers', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      });
-
-      return values.base;
-    },
-  });
-
   const handleSubmit = async (values: FormValues) => {
     try {
       const bucket = await createBucketMutation.mutateAsync(values);
@@ -246,29 +183,6 @@ export default function CreateFileBucketModal({
         title: 'Unable to create bucket',
         message,
       });
-    }
-  };
-
-  const handleProviderModalSubmit = async ({
-    driver,
-    values,
-  }: ProviderConfigModalSubmitPayload) => {
-    if (createProviderMutation.isPending) {
-      return;
-    }
-    try {
-      const base = await createProviderMutation.mutateAsync({ driver, values });
-      notifications.show({
-        color: 'green',
-        title: 'Provider created',
-        message: `${values.base.label} is now available.`,
-      });
-      await queryClient.invalidateQueries({ queryKey: ['providers', 'file'] });
-      form.setFieldValue('providerKey', base.key);
-      setProviderModalOpen(false);
-    } catch (error) {
-      console.error(error);
-      throw error;
     }
   };
 
@@ -304,18 +218,9 @@ export default function CreateFileBucketModal({
                   withAsterisk
                   style={{ flex: 1 }}
                 />
-                <Tooltip label="Add provider">
-                  <Button
-                    variant="light"
-                    leftSection={<IconPlus size={14} />}
-                    onClick={() => setProviderModalOpen(true)}
-                  >
-                    Provider
-                  </Button>
-                </Tooltip>
               </Group>
               <Text size="xs" c="dimmed">
-                Need a new storage provider? Add one without leaving this flow.
+                Need a new storage provider? Ask a tenant admin to add one in Tenant Settings.
               </Text>
             </Stack>
 
@@ -368,27 +273,6 @@ export default function CreateFileBucketModal({
           </Stack>
         </form>
       </Modal>
-
-      <ProviderConfigModal
-        opened={providerModalOpen}
-        onClose={() => setProviderModalOpen(false)}
-        mode="create"
-        drivers={providerDrivers}
-        driversLoading={providerDriversLoading}
-        onSubmit={async (options) => {
-          try {
-            await handleProviderModalSubmit(options);
-            setProviderModalOpen(false);
-          } catch (error) {
-            console.error(error);
-            notifications.show({
-              color: 'red',
-              title: 'Unable to create provider',
-              message: error instanceof Error ? error.message : 'Unexpected error',
-            });
-          }
-        }}
-      />
     </>
   );
 }

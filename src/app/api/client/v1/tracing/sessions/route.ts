@@ -1,81 +1,101 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDatabase } from '@/lib/database';
+import type { LicenseType } from '@/lib/license/license-manager';
+import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
+import { checkPerRequestLimits, checkRateLimit, checkResourceQuota } from '@/lib/quota/quotaGuard';
 
-/**
- * POST /api/client/tracing/sessions
- * Ingest agent tracing session data from SDK or HTTP client
- * Requires API token authentication
- */
+export const runtime = 'nodejs';
+
 export async function POST(request: NextRequest) {
     try {
-        // Get API token from header
-        const authHeader = request.headers.get('authorization');
-        if (!authHeader?.startsWith('Bearer ')) {
-            return NextResponse.json({ error: 'Missing or invalid authorization header' }, { status: 401 });
-        }
-
-        const token = authHeader.substring(7);
-
-        // Validate token and get tenant
+        const auth = await requireApiToken(request);
         const db = await getDatabase();
-        const apiToken = await db.findApiTokenByToken(token);
+        await db.switchToTenant(auth.tenantDbName);
 
-        if (!apiToken) {
-            return NextResponse.json({ error: 'Invalid API token' }, { status: 401 });
-        }
-
-        // Update token last used
-        await db.updateTokenLastUsed(token);
-
-        // Parse request body
         const payload = await request.json();
 
         if (!payload?.sessionId) {
             return NextResponse.json({ error: 'sessionId is required' }, { status: 400 });
         }
 
-        // Switch to tenant database
-        const tenant = await db.findTenantById(apiToken.tenantId);
-        if (!tenant) {
-            return NextResponse.json({ error: 'Tenant not found' }, { status: 404 });
+        const events = Array.isArray(payload.events) ? payload.events : [];
+        const durationMs =
+            typeof payload.durationMs === 'number'
+                ? payload.durationMs
+                : payload.startedAt && payload.endedAt
+                    ? new Date(payload.endedAt).getTime() - new Date(payload.startedAt).getTime()
+                    : undefined;
+
+        const tokenId = auth.tokenRecord._id?.toString() ?? auth.token;
+        const resourceKey = payload?.agent?.name || payload.sessionId;
+        const quotaContext = {
+            tenantDbName: auth.tenantDbName,
+            tenantId: auth.tenantId,
+            projectId: auth.projectId,
+            licenseType: auth.tenant.licenseType as LicenseType,
+            userId: auth.tokenRecord.userId,
+            tokenId,
+            domain: 'tracing' as const,
+            resourceKey,
+        };
+
+        const quotaResult = await checkPerRequestLimits(quotaContext, {
+            eventsPerSession: events.length,
+            sessionDurationMs: durationMs,
+        });
+
+        if (!quotaResult.allowed) {
+            return NextResponse.json(
+                { error: quotaResult.reason || 'Quota exceeded' },
+                { status: 429 },
+            );
         }
 
-        await db.switchToTenant(tenant.dbName);
+        const rateLimitResult = await checkRateLimit(quotaContext, { requests: 1 });
+        if (!rateLimitResult.allowed) {
+            return NextResponse.json(
+                { error: rateLimitResult.reason || 'Rate limit exceeded' },
+                { status: 429 },
+            );
+        }
 
-        // Extract models and tools
-        const events = payload.events || [];
+        const retentionDays = quotaResult.effectiveLimits.quotas?.maxTracingRetentionDays;
+        if (retentionDays !== undefined && retentionDays !== -1 && retentionDays >= 0) {
+            const cutoff = new Date(Date.now() - retentionDays * 86400 * 1000);
+            await db.cleanupAgentTracingRetention({
+                projectId: auth.projectId,
+                olderThan: cutoff,
+            });
+        }
+
         const modelsUsed = new Set<string>();
         const toolsUsed = new Set<string>();
 
-        // Extract models from events
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         events.forEach((event: any) => {
             if (event?.model) modelsUsed.add(event.model);
             if (event?.modelName) modelsUsed.add(event.modelName);
             if (event?.metadata?.modelName) modelsUsed.add(event.metadata.modelName);
 
-            // Extract tool names
             if (event?.toolName) toolsUsed.add(event.toolName);
             if (event?.actor?.scope === 'tool' && event?.actor?.name) {
                 toolsUsed.add(event.actor.name);
             }
         });
 
-        // Add agent model if present
         if (payload?.agent?.model) {
             modelsUsed.add(payload.agent.model);
         }
 
-        // Calculate totals
         const totalEvents = events.length;
         const totalInputTokens = payload.summary?.totalInputTokens || 0;
-    const totalOutputTokens = payload.summary?.totalOutputTokens || 0;
-    const totalCachedInputTokens = payload.summary?.totalCachedInputTokens || 0;
+        const totalOutputTokens = payload.summary?.totalOutputTokens || 0;
+        const totalCachedInputTokens = payload.summary?.totalCachedInputTokens || 0;
 
-        // Prepare session document
         const sessionDoc = {
             sessionId: payload.sessionId,
-            tenantId: apiToken.tenantId,
+            tenantId: auth.tenantId,
+            projectId: auth.projectId,
             agent: payload.agent || {},
             agentName: payload.agent?.name || null,
             agentVersion: payload.agent?.version || null,
@@ -98,19 +118,48 @@ export async function POST(request: NextRequest) {
             totalBytesOut: payload.summary?.totalBytesOut || null,
         };
 
-        // Check if session exists
-        const existing = await db.findAgentTracingSessionById(payload.sessionId);
+        const existing = await db.findAgentTracingSessionById(
+            payload.sessionId,
+            auth.projectId,
+        );
+
+        const agentName = typeof payload?.agent?.name === 'string' ? payload.agent.name.trim() : '';
+        const maxAgents = quotaResult.effectiveLimits.quotas?.maxAgents;
+        if (maxAgents !== undefined && maxAgents !== -1 && agentName) {
+            const alreadyExists = await db.agentTracingAgentExists(agentName, auth.projectId);
+            if (!alreadyExists) {
+                const currentAgents = await db.countAgentTracingDistinctAgents(auth.projectId);
+                if (currentAgents >= maxAgents) {
+                    return NextResponse.json(
+                        { error: `agents limit reached (${currentAgents}/${maxAgents})` },
+                        { status: 429 },
+                    );
+                }
+            }
+        }
+
+        if (!existing) {
+            const { total } = await db.listAgentTracingSessions({}, auth.projectId);
+            const resourceCheck = await checkResourceQuota(
+                quotaContext,
+                'tracingSessions',
+                total,
+            );
+            if (!resourceCheck.allowed) {
+                return NextResponse.json(
+                    { error: resourceCheck.reason || 'Tracing session quota exceeded' },
+                    { status: 429 },
+                );
+            }
+        }
 
         if (existing) {
-            // Update existing session
-            await db.updateAgentTracingSession(payload.sessionId, sessionDoc);
+            await db.updateAgentTracingSession(payload.sessionId, sessionDoc, auth.projectId);
         } else {
-            // Create new session
             await db.createAgentTracingSession(sessionDoc);
         }
 
-        // Replace events to keep payload in sync with stored data
-        await db.deleteAgentTracingEvents(payload.sessionId);
+        await db.deleteAgentTracingEvents(payload.sessionId, auth.projectId);
 
         if (events.length > 0) {
             for (const event of events) {
@@ -122,26 +171,24 @@ export async function POST(request: NextRequest) {
 
                 const usage = event?.usage || event?.metadata?.usage || {};
 
-                const inputTokens = event?.inputTokens
-                    ?? usage?.inputTokens
-                    ?? usage?.input_tokens
-                    ?? null;
+                const inputTokens =
+                    event?.inputTokens ?? usage?.inputTokens ?? usage?.input_tokens ?? null;
 
-                const outputTokens = event?.outputTokens
-                    ?? usage?.outputTokens
-                    ?? usage?.output_tokens
-                    ?? null;
+                const outputTokens =
+                    event?.outputTokens ?? usage?.outputTokens ?? usage?.output_tokens ?? null;
 
-                const cachedInputTokens = event?.cachedInputTokens
-                    ?? usage?.cachedInputTokens
-                    ?? usage?.cached_input_tokens
-                    ?? usage?.cacheReadInputTokens
-                    ?? usage?.cache_read_input_tokens
-                    ?? null;
+                const cachedInputTokens =
+                    event?.cachedInputTokens ??
+                    usage?.cachedInputTokens ??
+                    usage?.cached_input_tokens ??
+                    usage?.cacheReadInputTokens ??
+                    usage?.cache_read_input_tokens ??
+                    null;
 
                 await db.createAgentTracingEvent({
                     sessionId: payload.sessionId,
-                    tenantId: apiToken.tenantId,
+                    tenantId: auth.tenantId,
+                    projectId: auth.projectId,
                     id: event.id || null,
                     type: event.type || null,
                     label: event.label || null,
@@ -157,7 +204,9 @@ export async function POST(request: NextRequest) {
                     durationMs: event.durationMs || null,
                     actorName: event.actor?.name || null,
                     actorRole: event.actor?.role || event.actor?.scope || null,
-                    toolName: event.toolName || (event.actor?.scope === 'tool' ? event.actor?.name : null),
+                    toolName:
+                        event.toolName ||
+                        (event.actor?.scope === 'tool' ? event.actor?.name : null),
                     toolExecutionId: event.toolExecutionId || null,
                     inputTokens,
                     outputTokens,
@@ -174,15 +223,17 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({
             success: true,
             sessionId: payload.sessionId,
-            eventsStored: events.length
+            eventsStored: events.length,
         });
-
     } catch (error: unknown) {
         console.error('Tracing ingest error:', error);
-        const message = error instanceof Error ? error.message : 'Failed to ingest tracing data';
-        return NextResponse.json(
-            { error: message },
-            { status: 500 }
-        );
+
+        if (error instanceof ApiTokenAuthError) {
+            return NextResponse.json({ error: error.message }, { status: error.status });
+        }
+
+        const message =
+            error instanceof Error ? error.message : 'Failed to ingest tracing data';
+        return NextResponse.json({ error: message }, { status: 500 });
     }
 }

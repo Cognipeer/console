@@ -4,8 +4,8 @@ import {
   getModelById,
   updateModel,
 } from '@/lib/services/models/modelService';
-import { resolveTenantDbName } from '@/lib/utils/tenant';
 import { IModel } from '@/lib/database/provider.interface';
+import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
 
 export const runtime = 'nodejs';
 
@@ -68,13 +68,24 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const tenantSlug = _request.headers.get('x-tenant-slug');
-    if (!tenantSlug) {
+    const tenantDbName = _request.headers.get('x-tenant-db-name');
+    const tenantId = _request.headers.get('x-tenant-id');
+    const userId = _request.headers.get('x-user-id');
+    if (!tenantDbName) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const { tenantDbName } = await resolveTenantDbName(tenantSlug);
-    const model = await getModelById(tenantDbName, id);
+    if (!tenantId || !userId) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const projectContext = await requireProjectContext(_request, {
+      tenantDbName,
+      tenantId,
+      userId,
+    });
+
+    const model = await getModelById(tenantDbName, id, projectContext.projectId);
 
     if (!model) {
       return NextResponse.json({ error: 'Model not found' }, { status: 404 });
@@ -83,6 +94,12 @@ export async function GET(
     return NextResponse.json({ model: sanitizeModel(model) });
   } catch (error: unknown) {
     console.error('Fetch model error', error);
+    if (error instanceof ProjectContextError) {
+      return NextResponse.json(
+        { error: error.message },
+        { status: error.status },
+      );
+    }
     const message = error instanceof Error ? error.message : 'Internal error';
     return NextResponse.json({ error: message }, { status: 500 });
   }
@@ -94,15 +111,21 @@ export async function PUT(
 ) {
   try {
     const { id } = await params;
-    const tenantSlug = request.headers.get('x-tenant-slug');
+    const tenantDbName = request.headers.get('x-tenant-db-name');
+    const tenantId = request.headers.get('x-tenant-id');
     const userId = request.headers.get('x-user-id');
 
-    if (!tenantSlug || !userId) {
+    if (!tenantDbName || !tenantId || !userId) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const { tenantDbName } = await resolveTenantDbName(tenantSlug);
-    const existing = await getModelById(tenantDbName, id);
+    const projectContext = await requireProjectContext(request, {
+      tenantDbName,
+      tenantId,
+      userId,
+    });
+
+    const existing = await getModelById(tenantDbName, id, projectContext.projectId);
 
     if (!existing) {
       return NextResponse.json({ error: 'Model not found' }, { status: 404 });
@@ -126,7 +149,13 @@ export async function PUT(
       updates.settings = mergeSettings(existing.settings || {}, body.settings);
     }
 
-    const updated = await updateModel(tenantDbName, id, updates, userId);
+    const updated = await updateModel(
+      tenantDbName,
+      projectContext.projectId,
+      id,
+      updates,
+      userId,
+    );
 
     if (!updated) {
       return NextResponse.json(
@@ -138,6 +167,12 @@ export async function PUT(
     return NextResponse.json({ model: sanitizeModel(updated) });
   } catch (error: unknown) {
     console.error('Update model error', error);
+    if (error instanceof ProjectContextError) {
+      return NextResponse.json(
+        { error: error.message },
+        { status: error.status },
+      );
+    }
     const message = error instanceof Error ? error.message : 'Internal error';
     return NextResponse.json({ error: message }, { status: 500 });
   }
@@ -149,13 +184,24 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params;
-    const tenantSlug = request.headers.get('x-tenant-slug');
-    if (!tenantSlug) {
+    const tenantDbName = request.headers.get('x-tenant-db-name');
+    const tenantId = request.headers.get('x-tenant-id');
+    const userId = request.headers.get('x-user-id');
+    if (!tenantDbName) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const { tenantDbName } = await resolveTenantDbName(tenantSlug);
-    const success = await deleteModel(tenantDbName, id);
+    if (!tenantId || !userId) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const projectContext = await requireProjectContext(request, {
+      tenantDbName,
+      tenantId,
+      userId,
+    });
+
+    const success = await deleteModel(tenantDbName, projectContext.projectId, id);
 
     if (!success) {
       return NextResponse.json({ error: 'Model not found' }, { status: 404 });
@@ -164,6 +210,12 @@ export async function DELETE(
     return NextResponse.json({ success: true }, { status: 200 });
   } catch (error: unknown) {
     console.error('Delete model error', error);
+    if (error instanceof ProjectContextError) {
+      return NextResponse.json(
+        { error: error.message },
+        { status: error.status },
+      );
+    }
     const message = error instanceof Error ? error.message : 'Internal error';
     return NextResponse.json({ error: message }, { status: 500 });
   }

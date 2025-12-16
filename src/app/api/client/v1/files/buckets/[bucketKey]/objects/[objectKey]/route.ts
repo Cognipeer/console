@@ -13,7 +13,7 @@ export async function GET(
   { params }: { params: Promise<{ bucketKey: string; objectKey: string }> },
 ) {
   try {
-    const { tenantDbName, tenantId } = await requireApiToken(request);
+    const { tenantDbName, tenantId, projectId } = await requireApiToken(request);
     const { bucketKey, objectKey } = await params;
 
     if (!bucketKey || !objectKey) {
@@ -23,7 +23,7 @@ export async function GET(
       );
     }
 
-    const file = await getFileRecord(tenantDbName, tenantId, bucketKey, objectKey);
+    const file = await getFileRecord(tenantDbName, tenantId, projectId, bucketKey, objectKey);
 
     if (!file) {
       return NextResponse.json(
@@ -60,7 +60,7 @@ export async function DELETE(
   { params }: { params: Promise<{ bucketKey: string; objectKey: string }> },
 ) {
   try {
-    const { tenantDbName, tenantId } = await requireApiToken(request);
+    const { tenantDbName, tenantId, projectId, user } = await requireApiToken(request);
     const { bucketKey, objectKey } = await params;
 
     if (!bucketKey || !objectKey) {
@@ -70,10 +70,9 @@ export async function DELETE(
       );
     }
 
-    const { user } = await requireApiToken(request);
     const deletedBy = user?._id?.toString() ?? 'api';
 
-    await deleteFile(tenantDbName, tenantId, bucketKey, objectKey, deletedBy);
+    await deleteFile(tenantDbName, tenantId, projectId, bucketKey, objectKey, deletedBy);
 
     return NextResponse.json({
       message: 'File deleted successfully',

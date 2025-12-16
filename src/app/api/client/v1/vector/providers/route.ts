@@ -22,12 +22,12 @@ function handleError(error: unknown, scope: string) {
 
 export async function GET(request: NextRequest) {
   try {
-    const { tenantId, tenantDbName } = await requireApiToken(request);
+    const { tenantId, tenantDbName, projectId } = await requireApiToken(request);
     const { searchParams } = new URL(request.url);
     const statusParam = searchParams.get('status');
     const driver = searchParams.get('driver') ?? undefined;
 
-    const providers = await listVectorProviders(tenantDbName, tenantId, {
+    const providers = await listVectorProviders(tenantDbName, tenantId, projectId, {
       status: statusParam as ProviderStatus | undefined,
       driver: driver ?? undefined,
     });
@@ -53,7 +53,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const provider = await createVectorProvider(context.tenantDbName, context.tenantId, {
+    const provider = await createVectorProvider(context.tenantDbName, context.tenantId, context.projectId, {
       key: body.key,
       driver: body.driver,
       label: body.label,

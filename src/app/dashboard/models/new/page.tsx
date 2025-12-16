@@ -1,3 +1,11 @@
+import { redirect } from 'next/navigation';
+
+export default function NewModelRedirect() {
+  redirect('/dashboard/models');
+}
+
+/*
+
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -627,3 +635,5 @@ export default function NewModelPage() {
     </Stack>
   );
 }
+
+*/

@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { resolveTenantDbName } from '@/lib/utils/tenant';
 import { listFiles, uploadFile } from '@/lib/services/files';
+import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
+import { getDatabase } from '@/lib/database';
+import type { LicenseType } from '@/lib/license/license-manager';
+import { checkPerRequestLimits, checkRateLimit, checkResourceQuota } from '@/lib/quota/quotaGuard';
 
 export const runtime = 'nodejs';
 
@@ -21,14 +24,33 @@ function parseLimit(value: string | null): number | undefined {
   return Math.min(parsed, 200);
 }
 
+function estimateBase64Bytes(input: unknown): number | undefined {
+  if (typeof input !== 'string') return undefined;
+  const base64 = input.includes('base64,') ? input.split('base64,').pop() ?? '' : input;
+  if (!base64) return 0;
+
+  const normalized = base64.replace(/\s/g, '');
+  const paddingMatch = normalized.match(/=+$/);
+  const padding = paddingMatch ? paddingMatch[0].length : 0;
+  const bytes = Math.floor((normalized.length * 3) / 4) - padding;
+  return bytes > 0 ? bytes : 0;
+}
+
 export async function GET(request: NextRequest, context: RouteContext) {
   try {
-    const tenantSlug = request.headers.get('x-tenant-slug');
+    const tenantDbName = request.headers.get('x-tenant-db-name');
     const tenantId = request.headers.get('x-tenant-id');
+    const userId = request.headers.get('x-user-id');
 
-    if (!tenantSlug || !tenantId) {
+    if (!tenantDbName || !tenantId || !userId) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
+
+    const projectContext = await requireProjectContext(request, {
+      tenantDbName,
+      tenantId,
+      userId,
+    });
 
     const { bucketKey } = await context.params;
     const { searchParams } = new URL(request.url);
@@ -37,8 +59,7 @@ export async function GET(request: NextRequest, context: RouteContext) {
     const cursor = searchParams.get('cursor') ?? undefined;
     const search = searchParams.get('search') ?? undefined;
 
-    const { tenantDbName } = await resolveTenantDbName(tenantSlug);
-    const result = await listFiles(tenantDbName, tenantId, {
+    const scoped = await listFiles(tenantDbName, tenantId, projectContext.projectId, {
       bucketKey,
       limit,
       cursor,
@@ -46,12 +67,15 @@ export async function GET(request: NextRequest, context: RouteContext) {
     });
 
     return NextResponse.json({
-      items: result.items,
-      nextCursor: result.nextCursor,
+      items: scoped.items,
+      nextCursor: scoped.nextCursor,
     });
   } catch (error) {
     console.error('List file objects error', error);
     const message = error instanceof Error ? error.message : 'Internal server error';
+    if (error instanceof ProjectContextError) {
+      return NextResponse.json({ error: error.message }, { status: error.status });
+    }
     if (message === 'File bucket not found.') {
       return NextResponse.json({ error: 'Bucket not found' }, { status: 404 });
     }
@@ -61,13 +85,20 @@ export async function GET(request: NextRequest, context: RouteContext) {
 
 export async function POST(request: NextRequest, context: RouteContext) {
   try {
-    const tenantSlug = request.headers.get('x-tenant-slug');
+    const tenantDbName = request.headers.get('x-tenant-db-name');
     const tenantId = request.headers.get('x-tenant-id');
     const userId = request.headers.get('x-user-id');
+    const licenseType = request.headers.get('x-license-type') as LicenseType | null;
 
-    if (!tenantSlug || !tenantId || !userId) {
+    if (!tenantDbName || !tenantId || !userId || !licenseType) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
+
+    const projectContext = await requireProjectContext(request, {
+      tenantDbName,
+      tenantId,
+      userId,
+    });
 
     const { bucketKey } = await context.params;
     const body = await request.json();
@@ -79,8 +110,70 @@ export async function POST(request: NextRequest, context: RouteContext) {
       return NextResponse.json({ error: 'data is required' }, { status: 400 });
     }
 
-    const { tenantDbName } = await resolveTenantDbName(tenantSlug);
-    const result = await uploadFile(tenantDbName, tenantId, {
+    const quotaContext = {
+      tenantDbName,
+      tenantId,
+      projectId: projectContext.projectId,
+      licenseType,
+      userId,
+      domain: 'file' as const,
+      providerKey: body.providerKey ?? undefined,
+      resourceKey: bucketKey,
+    };
+
+    const estimatedFileBytes = estimateBase64Bytes(body.data) ?? 0;
+    const quotaResult = await checkPerRequestLimits(quotaContext, {
+      fileSize: estimatedFileBytes,
+      filesPerRequest: 1,
+    });
+    if (!quotaResult.allowed) {
+      return NextResponse.json(
+        { error: quotaResult.reason || 'Quota exceeded' },
+        { status: 429 },
+      );
+    }
+
+    const rateLimitResult = await checkRateLimit(quotaContext, {
+      requests: 1,
+      files: 1,
+      storageBytes: estimatedFileBytes,
+    });
+    if (!rateLimitResult.allowed) {
+      return NextResponse.json(
+        { error: rateLimitResult.reason || 'Rate limit exceeded' },
+        { status: 429 },
+      );
+    }
+
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+    const currentFilesTotal = await db.countFileRecords({ projectId: projectContext.projectId });
+    const resourceCheck = await checkResourceQuota(
+      quotaContext,
+      'filesTotal',
+      currentFilesTotal,
+    );
+
+    if (!resourceCheck.allowed) {
+      return NextResponse.json(
+        { error: resourceCheck.reason || 'File quota exceeded' },
+        { status: 429 },
+      );
+    }
+
+    const storageLimit = quotaResult.effectiveLimits.quotas?.maxStorageBytes;
+    if (storageLimit !== undefined && storageLimit !== -1) {
+      const currentBytes = await db.sumFileRecordBytes({ projectId: projectContext.projectId });
+      const projected = currentBytes + estimatedFileBytes;
+      if (projected > storageLimit) {
+        return NextResponse.json(
+          { error: `storageBytes limit exceeded (${projected}/${storageLimit})` },
+          { status: 429 },
+        );
+      }
+    }
+
+    const result = await uploadFile(tenantDbName, tenantId, projectContext.projectId, {
       bucketKey,
       providerKey: body.providerKey ?? undefined,
       fileName: body.fileName,
@@ -96,6 +189,9 @@ export async function POST(request: NextRequest, context: RouteContext) {
   } catch (error) {
     console.error('Upload file error', error);
     const message = error instanceof Error ? error.message : 'Internal server error';
+    if (error instanceof ProjectContextError) {
+      return NextResponse.json({ error: error.message }, { status: error.status });
+    }
     if (message === 'File bucket not found.' || message === 'File bucket is not active.') {
       return NextResponse.json({ error: message }, { status: 404 });
     }

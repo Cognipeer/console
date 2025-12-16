@@ -47,15 +47,15 @@ export default function LoginPage() {
   useEffect(() => {
     const checkAuth = async () => {
       try {
-        // Try to access a protected endpoint to check if user is authenticated
-        const response = await fetch('/api/tokens', {
+        const response = await fetch('/api/auth/session', {
           method: 'GET',
-          credentials: 'include', // Include cookies
+          credentials: 'include',
+          cache: 'no-store',
         });
 
         if (response.ok) {
-          // User is authenticated, redirect to dashboard
-          router.push('/dashboard');
+          const data = (await response.json()) as { mustChangePassword?: boolean };
+          router.push(data.mustChangePassword ? '/change-password' : '/dashboard');
           return;
         }
       } catch (error) {
@@ -100,7 +100,7 @@ export default function LoginPage() {
         color: 'green',
       });
 
-      router.push('/dashboard');
+      router.push(data.mustChangePassword ? '/change-password' : '/dashboard');
     } catch (error) {
       notifications.show({
         title: tNotifications('errorTitle'),
