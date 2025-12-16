@@ -4,11 +4,12 @@ import { IconExternalLink, IconBook } from '@tabler/icons-react';
 import { resolveSdkDoc } from '@/lib/docs/sdkDocs';
 
 type DocsPageProps = {
-  searchParams?: { doc?: string };
+  searchParams?: Promise<{ doc?: string }>;
 };
 
-export default function DashboardDocsPage({ searchParams }: DocsPageProps) {
-  const doc = resolveSdkDoc(searchParams?.doc);
+export default async function DashboardDocsPage({ searchParams }: DocsPageProps) {
+  const resolvedParams = await searchParams;
+  const doc = resolveSdkDoc(resolvedParams?.doc);
 
   return (
     <Stack gap="lg">
