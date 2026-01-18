@@ -25,9 +25,8 @@ import {
   Divider,
   Progress,
 } from '@mantine/core';
-import { IconChartBar, IconEdit, IconEye, IconPlug, IconPlus, IconRefresh, IconTool, IconSparkles, IconBrain, IconCpu, IconCurrencyDollar, IconBook, IconArrowUpRight } from '@tabler/icons-react';
+import { IconChartBar, IconEdit, IconEye, IconPlug, IconPlus, IconRefresh, IconTool, IconSparkles, IconBrain, IconCpu, IconCurrencyDollar } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
-import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 import type { ModelProviderView } from '@/lib/services/models/types';
 import CreateModelModal from '@/components/models/CreateModelModal';
 import type { IModel } from '@/lib/database';
@@ -65,7 +64,6 @@ export default function ModelsPage() {
   const t = useTranslations('models');
   const tNav = useTranslations('navigation');
   const router = useRouter();
-  const { openDocs } = useDocsDrawer();
 
   const loadModels = async () => {
     setLoading(true);
@@ -328,19 +326,7 @@ export default function ModelsPage() {
             </div>
           </Group>
           <Group gap="xs">
-            <Button
-              variant="light"
-              leftSection={<IconBook size={16} />}
-              onClick={() => openDocs('api-client')}
-            >
-              Docs
-            </Button>
-            <Button
-              variant="light"
-              leftSection={<IconRefresh size={16} />}
-              onClick={loadModels}
-              loading={loading}
-            >
+            <Button variant="light" leftSection={<IconRefresh size={16} />} onClick={loadModels}>
               {t('actions.refresh')}
             </Button>
             <Button 
@@ -417,40 +403,6 @@ export default function ModelsPage() {
           </Group>
         </Paper>
       </SimpleGrid>
-
-      <Paper withBorder radius="lg" p="lg">
-        <Group justify="space-between" align="flex-start" wrap="wrap">
-          <div>
-            <Text fw={600}>Documentation</Text>
-            <Text size="sm" c="dimmed" mt={4}>
-              SDK references for chat and embeddings.
-            </Text>
-          </div>
-          <Group gap="xs">
-            <Button
-              variant="light"
-              leftSection={<IconArrowUpRight size={16} />}
-              onClick={() => openDocs('api-chat')}
-            >
-              Chat API
-            </Button>
-            <Button
-              variant="light"
-              leftSection={<IconArrowUpRight size={16} />}
-              onClick={() => openDocs('api-embeddings')}
-            >
-              Embeddings API
-            </Button>
-            <Button
-              variant="subtle"
-              leftSection={<IconArrowUpRight size={16} />}
-              onClick={() => openDocs('examples-chat')}
-            >
-              Examples
-            </Button>
-          </Group>
-        </Group>
-      </Paper>
 
       <Stack gap="lg">
         <Paper p="lg" radius="lg" withBorder>

@@ -21,10 +21,9 @@ import {
   Transition,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { IconEye, IconPlus, IconRefresh, IconTrash, IconDatabase, IconServer, IconArrowRight, IconSparkles, IconBook, IconArrowUpRight } from '@tabler/icons-react';
+import { IconEye, IconPlus, IconRefresh, IconTrash, IconDatabase, IconServer, IconChartDots3, IconArrowRight, IconSparkles } from '@tabler/icons-react';
 import type { VectorIndexRecord, VectorProviderView } from '@/lib/services/vector';
 import CreateVectorIndexModal from '@/components/vector/CreateVectorIndexModal';
-import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 
 interface VectorIndexRow {
   provider: VectorProviderView;
@@ -59,19 +58,14 @@ function resolveProviderHandle(metadata?: Record<string, unknown>): string | und
 
 export default function VectorIndexPage() {
   const router = useRouter();
-  const { openDocs } = useDocsDrawer();
   const [providers, setProviders] = useState<VectorProviderView[]>([]);
   const [indexesByProvider, setIndexesByProvider] = useState<Record<string, VectorIndexRecord[]>>({});
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [createModalOpen, setCreateModalOpen] = useState(false);
 
-  const loadProvidersAndIndexes = useCallback(async (isRefresh = false) => {
-    if (isRefresh) {
-      setRefreshing(true);
-    } else {
-      setLoading(true);
-    }
+  const loadProvidersAndIndexes = useCallback(async () => {
+    setRefreshing(true);
     try {
       const providerResponse = await fetch('/api/vector/providers', { cache: 'no-store' });
       if (!providerResponse.ok) {
@@ -127,7 +121,7 @@ export default function VectorIndexPage() {
   }, []);
 
   useEffect(() => {
-    void loadProvidersAndIndexes(false);
+    void loadProvidersAndIndexes();
   }, [loadProvidersAndIndexes]);
 
   const rows = useMemo<VectorIndexRow[]>(() => {
@@ -179,6 +173,10 @@ export default function VectorIndexPage() {
   router.push(`/dashboard/vector/${provider.key}/${index.key}`);
   };
 
+  const totalDimensions = useMemo(() => {
+    return rows.reduce((sum, row) => sum + (row.index.dimension || 0), 0);
+  }, [rows]);
+
   return (
     <Stack gap="lg">
       {/* Header */}
@@ -207,20 +205,11 @@ export default function VectorIndexPage() {
             </div>
           </Group>
           <Group gap="xs">
-            <Button
-              onClick={() => openDocs('api-vectors')}
-              variant="light"
-              leftSection={<IconBook size={16} />}
-            >
-              Docs
-            </Button>
-            <Button
-              variant="light"
-              leftSection={<IconRefresh size={16} />}
-              onClick={() => void loadProvidersAndIndexes(true)}
-              loading={loading || refreshing}
-              disabled={refreshing}
-            >
+            <Button 
+              variant="light" 
+              leftSection={refreshing ? <Loader size={14} /> : <IconRefresh size={16} />}
+              onClick={() => void loadProvidersAndIndexes()}
+              disabled={refreshing}>
               Refresh
             </Button>
             <Button 
@@ -235,7 +224,7 @@ export default function VectorIndexPage() {
       </Paper>
 
       {/* Stats Cards */}
-      <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }}>
+      <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>
         <Paper withBorder radius="lg" p="lg">
           <Group justify="space-between">
             <Stack gap={4}>
@@ -281,34 +270,22 @@ export default function VectorIndexPage() {
             </ThemeIcon>
           </Group>
         </Paper>
-      </SimpleGrid>
-
-      <Paper withBorder radius="lg" p="lg">
-        <Group justify="space-between" align="flex-start" wrap="wrap">
-          <div>
-            <Text fw={600}>Documentation</Text>
-            <Text size="sm" c="dimmed" mt={4}>
-              SDK references for vector providers, indexes, and RAG.
-            </Text>
-          </div>
-          <Group gap="xs">
-            <Button
-              onClick={() => openDocs('api-vectors')}
-              variant="light"
-              leftSection={<IconArrowUpRight size={16} />}
-            >
-              Vectors API
-            </Button>
-            <Button
-              onClick={() => openDocs('examples-rag')}
-              variant="subtle"
-              leftSection={<IconArrowUpRight size={16} />}
-            >
-              RAG example
-            </Button>
+        <Paper withBorder radius="lg" p="lg">
+          <Group justify="space-between">
+            <Stack gap={4}>
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
+                Avg. Dimensions
+              </Text>
+              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="orange">
+                {rows.length > 0 ? Math.round(totalDimensions / rows.length) : 0}
+              </Text>
+            </Stack>
+            <ThemeIcon size={48} radius="xl" variant="light" color="orange">
+              <IconChartDots3 size={24} />
+            </ThemeIcon>
           </Group>
-        </Group>
-      </Paper>
+        </Paper>
+      </SimpleGrid>
 
       {/* Indexes Table */}
       <Paper p="lg" radius="lg" withBorder>

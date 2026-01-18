@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, type ComponentType } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Button,
@@ -17,9 +17,9 @@ import {
   ThemeIcon,
   Progress,
   Transition,
+  RingProgress,
   Skeleton,
   Divider,
-  Alert,
 } from '@mantine/core';
 import {
   IconRobot,
@@ -30,20 +30,17 @@ import {
   IconArrowDownRight,
   IconSparkles,
   IconKey,
+  IconSettings,
   IconChevronRight,
   IconCode,
+  IconFileText,
   IconChartBar,
   IconRocket,
   IconBook,
   IconExternalLink,
-  IconAlertCircle,
-  IconVectorBezier,
 } from '@tabler/icons-react';
 import { DataTable } from 'mantine-datatable';
-import { useQuery } from '@tanstack/react-query';
 import { useTranslations } from '@/lib/i18n';
-import type { SdkDocId } from '@/lib/docs/sdkDocs';
-import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 
 interface User {
   name: string;
@@ -52,203 +49,175 @@ interface User {
   features: string[];
 }
 
-interface DashboardStats {
-  models: {
-    total: number;
-    llm: number;
-    embedding: number;
-  };
-  vectors: {
-    providers: number;
-    indexes: number;
-  };
-  tracing: {
-    totalSessions: number;
-    totalTokens: number;
-    activeSessions: number;
-  };
-  apiCalls: {
-    total: number;
-    trend: number;
-  };
-}
-
-interface RecentActivity {
-  id: string;
-  type: 'chat' | 'embedding' | 'vector' | 'agent';
-  service: string;
-  endpoint: string;
-  status: 'success' | 'error';
-  timestamp: string;
-  details?: string;
-}
-
-interface DashboardData {
-  stats: DashboardStats;
-  recentActivity: RecentActivity[];
-  recentSessions: any[];
-  daily: Array<{
-    date: string;
-    sessionsCount: number;
-    totalTokens: number;
-  }>;
-  user?: {
-    email: string;
-    licenseType: string;
-  };
-}
-
 export default function DashboardPage() {
   const router = useRouter();
-  const { openDocs } = useDocsDrawer();
+  const [user, setUser] = useState<User | null>(null);
+  const [mounted, setMounted] = useState(false);
   const t = useTranslations('dashboard');
   const tCommon = useTranslations('common');
 
-  // Fetch dashboard data using React Query - automatically refreshes when project changes
-  const { data: dashboardData, isLoading: loading, error: queryError, refetch } = useQuery<DashboardData>({
-    queryKey: ['dashboard'],
-    queryFn: async () => {
-      const response = await fetch('/api/dashboard');
-      if (!response.ok) {
-        throw new Error('Failed to fetch dashboard data');
+  useEffect(() => {
+    setMounted(true);
+    const checkAuth = async () => {
+      try {
+        const mockUser: User = {
+          name: t('mockUser.name'),
+          email: t('mockUser.email'),
+          licenseType: t('mockUser.licenseType'),
+          features: [
+            t('mockUser.features.llmChat'),
+            t('mockUser.features.agentOrchestration'),
+            t('mockUser.features.analytics'),
+          ],
+        };
+        setUser(mockUser);
+      } catch (error) {
+        router.push('/login');
       }
-      return response.json();
-    },
-    refetchOnMount: 'always',
-    staleTime: 30000, // 30 seconds
-  });
+    };
 
-  const error = queryError instanceof Error ? queryError.message : queryError ? 'Unknown error' : null;
+    checkAuth();
+  }, [router]);
 
-  // Build user object from API response or translations
-  const user: User = useMemo(() => ({
-    name: dashboardData?.user?.email?.split('@')[0] || t('mockUser.name'),
-    email: dashboardData?.user?.email || t('mockUser.email'),
-    licenseType: dashboardData?.user?.licenseType || t('mockUser.licenseType'),
-    features: [
-      t('mockUser.features.llmChat'),
-      t('mockUser.features.agentOrchestration'),
-      t('mockUser.features.analytics'),
-    ],
-  }), [dashboardData?.user, t]);
-
-  const formatNumber = (num: number): string => {
-    if (num >= 1000000) return `${(num / 1000000).toFixed(1)}M`;
-    if (num >= 1000) return `${(num / 1000).toFixed(1)}K`;
-    return num.toString();
-  };
-
-  const stats = useMemo(() => {
-    const data = dashboardData?.stats;
-    return [
+  const stats = useMemo(
+    () => [
       {
         title: t('stats.apiRequests'),
-        value: data ? formatNumber(data.apiCalls.total) : '—',
+        value: '12,453',
         icon: IconActivity,
         color: 'teal',
-        trend: data && data.apiCalls.trend !== 0 ? `${data.apiCalls.trend > 0 ? '+' : ''}${data.apiCalls.trend}%` : null,
-        trendUp: data ? data.apiCalls.trend > 0 : null,
-        description: t('stats.vsLastWeek'),
+        trend: '+12.5%',
+        trendUp: true,
+        description: 'vs. last month',
       },
       {
         title: t('stats.activeAgents'),
-        value: data ? data.tracing.activeSessions.toString() : '—',
+        value: '8',
         icon: IconRobot,
         color: 'blue',
-        trend: data ? `${data.tracing.totalSessions} total` : null,
-        trendUp: null,
-        description: t('stats.agentsRunning'),
+        trend: '+2',
+        trendUp: true,
+        description: 'agents running',
       },
       {
         title: t('stats.vectorStores'),
-        value: data ? data.vectors.indexes.toString() : '—',
-        icon: IconVectorBezier,
-        color: 'violet',
-        trend: data ? `${data.vectors.providers} providers` : null,
-        trendUp: null,
-        description: t('stats.totalIndexes'),
-      },
-      {
-        title: t('stats.llmModels'),
-        value: data ? data.models.total.toString() : '—',
-        icon: IconBrain,
-        color: 'orange',
-        trend: data ? `${data.models.llm} LLM, ${data.models.embedding} emb.` : null,
-        trendUp: null,
-        description: t('stats.configuredModels'),
-      },
-    ];
-  }, [dashboardData, t]);
-
-  const quickActions = useMemo(
-    () => [
-      {
-        title: t('quickActions.configureModels'),
-        description: t('quickActions.configureModelsDesc'),
-        icon: IconBrain,
-        color: 'blue',
-        href: '/dashboard/models',
-      },
-      {
-        title: t('quickActions.vectorIndexes'),
-        description: t('quickActions.vectorIndexesDesc'),
+        value: '3',
         icon: IconDatabase,
         color: 'violet',
-        href: '/dashboard/vector',
+        trend: '2.4GB',
+        trendUp: null,
+        description: 'total storage',
       },
       {
-        title: t('quickActions.agentTracing'),
-        description: t('quickActions.agentTracingDesc'),
-        icon: IconChartBar,
-        color: 'teal',
-        href: '/dashboard/tracing',
-      },
-      {
-        title: t('quickActions.apiTokens'),
-        description: t('quickActions.apiTokensDesc'),
-        icon: IconKey,
+        title: t('stats.llmCalls'),
+        value: '8,921',
+        icon: IconBrain,
         color: 'orange',
-        href: '/dashboard/settings',
+        trend: '+8.2%',
+        trendUp: true,
+        description: 'vs. last month',
       },
     ],
     [t],
   );
 
-  const recentActivity = useMemo(() => {
-    if (!dashboardData?.recentActivity?.length) {
-      return [];
-    }
-    return dashboardData.recentActivity.map((activity) => ({
-      id: activity.id,
-      service: activity.service,
-      endpoint: activity.endpoint,
-      status: activity.status === 'error' ? tCommon('status.error') : tCommon('status.success'),
-      timestamp: new Date(activity.timestamp).toLocaleString(),
-    }));
-  }, [dashboardData, tCommon]);
+  const quickActions = useMemo(
+    () => [
+      {
+        title: 'Configure Models',
+        description: 'Add or manage LLM providers',
+        icon: IconBrain,
+        color: 'blue',
+        href: '/dashboard/models',
+      },
+      {
+        title: 'Vector Indexes',
+        description: 'Create and query vector stores',
+        icon: IconDatabase,
+        color: 'violet',
+        href: '/dashboard/vector',
+      },
+      {
+        title: 'Agent Tracing',
+        description: 'Monitor agent sessions',
+        icon: IconChartBar,
+        color: 'teal',
+        href: '/dashboard/tracing',
+      },
+      {
+        title: 'API Tokens',
+        description: 'Manage access credentials',
+        icon: IconKey,
+        color: 'orange',
+        href: '/dashboard/settings',
+      },
+    ],
+    [],
+  );
 
-  const resources: Array<{
-    title: string;
-    description: string;
-    icon: ComponentType<{ size?: number }>;
-    docId?: SdkDocId;
-    href?: string;
-  }> = [
+  const recentActivity = useMemo(
+    () => [
+      {
+        id: 1,
+        service: t('recentActivity.items.llmChat.service'),
+        endpoint: '/api/llm/chat',
+        status: tCommon('status.success'),
+        timestamp: t('recentActivity.items.llmChat.timestamp'),
+      },
+      {
+        id: 2,
+        service: t('recentActivity.items.agentRun.service'),
+        endpoint: '/api/agents/execute',
+        status: tCommon('status.success'),
+        timestamp: t('recentActivity.items.agentRun.timestamp'),
+      },
+      {
+        id: 3,
+        service: t('recentActivity.items.vectorQuery.service'),
+        endpoint: '/api/vectors/search',
+        status: tCommon('status.success'),
+        timestamp: t('recentActivity.items.vectorQuery.timestamp'),
+      },
+      {
+        id: 4,
+        service: t('recentActivity.items.embeddings.service'),
+        endpoint: '/api/llm/embeddings',
+        status: tCommon('status.success'),
+        timestamp: t('recentActivity.items.embeddings.timestamp'),
+      },
+      {
+        id: 5,
+        service: t('recentActivity.items.analytics.service'),
+        endpoint: '/api/analytics/report',
+        status: tCommon('status.success'),
+        timestamp: t('recentActivity.items.analytics.timestamp'),
+      },
+    ],
+    [t, tCommon],
+  );
+
+  const resources = [
     {
-      title: t('resources.apiDocs'),
-      description: t('resources.apiDocsDesc'),
+      title: 'API Documentation',
+      description: 'Learn how to integrate with our APIs',
       icon: IconBook,
-      docId: 'api-client',
+      href: '#',
     },
     {
-      title: t('resources.sdkExamples'),
-      description: t('resources.sdkExamplesDesc'),
+      title: 'SDK Examples',
+      description: 'Code samples for quick start',
       icon: IconCode,
-      docId: 'examples-chat',
+      href: '#',
+    },
+    {
+      title: 'Agent SDK',
+      description: 'Instrument your agents',
+      icon: IconRocket,
+      href: 'https://www.npmjs.com/package/@cognipeer/agent-sdk',
     },
   ];
 
-  if (loading) {
+  if (!user) {
     return (
       <Stack gap="lg">
         <Skeleton height={100} radius="md" />
@@ -257,18 +226,6 @@ export default function DashboardPage() {
             <Skeleton key={i} height={120} radius="md" />
           ))}
         </SimpleGrid>
-        <Skeleton height={200} radius="md" />
-      </Stack>
-    );
-  }
-
-  if (error) {
-    return (
-      <Stack gap="lg">
-        <Alert icon={<IconAlertCircle size={16} />} title={t('error.title')} color="red">
-          {error}
-        </Alert>
-        <Button onClick={() => refetch()}>{t('error.retry')}</Button>
       </Stack>
     );
   }
@@ -276,21 +233,19 @@ export default function DashboardPage() {
   return (
     <Stack gap="lg">
       {/* Welcome Hero Section */}
-      <Transition mounted transition="fade" duration={400}>
+      <Transition mounted={mounted} transition="fade" duration={400}>
         {(styles) => (
           <Paper
-            style={{
-              ...styles,
-              background:
-                'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-blue-0) 100%)',
-              borderColor: 'var(--mantine-color-teal-2)',
-              position: 'relative',
-              overflow: 'hidden',
-            }}
+            style={styles}
             p="xl"
             radius="lg"
             withBorder
-          >
+            sx={(theme) => ({
+              background: `linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-blue-0) 100%)`,
+              borderColor: 'var(--mantine-color-teal-2)',
+              position: 'relative',
+              overflow: 'hidden',
+            })}>
             <Box
               style={{
                 position: 'absolute',
@@ -354,7 +309,7 @@ export default function DashboardPage() {
         {stats.map((stat, index) => (
           <Transition
             key={stat.title}
-            mounted
+            mounted={mounted}
             transition="slide-up"
             duration={400}
             timingFunction="ease"
@@ -365,7 +320,14 @@ export default function DashboardPage() {
                 padding="lg"
                 radius="lg"
                 withBorder
-                className="hover-lift">
+                className="hover-lift"
+                sx={{
+                  transition: 'all 0.2s ease',
+                  '&:hover': {
+                    transform: 'translateY(-2px)',
+                    boxShadow: 'var(--mantine-shadow-md)',
+                  },
+                }}>
                 <Group justify="space-between" align="flex-start">
                   <Stack gap={4}>
                     <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
@@ -414,8 +376,8 @@ export default function DashboardPage() {
       <Paper p="lg" radius="lg" withBorder>
         <Group justify="space-between" mb="md">
           <div>
-            <Text fw={600} size="lg">{t('quickActions.title')}</Text>
-            <Text size="sm" c="dimmed">{t('quickActions.subtitle')}</Text>
+            <Text fw={600} size="lg">Quick Actions</Text>
+            <Text size="sm" c="dimmed">Jump to common tasks</Text>
           </div>
         </Group>
         <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>
@@ -427,7 +389,13 @@ export default function DashboardPage() {
               withBorder
               onClick={() => router.push(action.href)}
               style={{ cursor: 'pointer', transition: 'all 0.2s ease' }}
-              className="hover-lift">
+              className="hover-lift"
+              sx={{
+                '&:hover': {
+                  borderColor: `var(--mantine-color-${action.color}-4)`,
+                  backgroundColor: `var(--mantine-color-${action.color}-0)`,
+                },
+              }}>
               <Group gap="sm">
                 <ThemeIcon size={40} radius="md" variant="light" color={action.color}>
                   <action.icon size={20} />
@@ -454,21 +422,16 @@ export default function DashboardPage() {
             <Group justify="space-between" mb="md">
               <div>
                 <Text fw={600} size="lg">{t('recentActivity.title')}</Text>
-                <Text size="sm" c="dimmed">{t('recentActivity.subtitle')}</Text>
+                <Text size="sm" c="dimmed">Latest API calls and events</Text>
               </div>
               <Button
                 variant="subtle"
                 size="xs"
                 rightSection={<IconChevronRight size={14} />}
                 onClick={() => router.push('/dashboard/tracing')}>
-                {t('recentActivity.viewAll')}
+                View All
               </Button>
             </Group>
-            {recentActivity.length === 0 ? (
-              <Text c="dimmed" ta="center" py="xl">
-                {t('recentActivity.empty')}
-              </Text>
-            ) : (
             <DataTable
               columns={[
                 {
@@ -526,72 +489,59 @@ export default function DashboardPage() {
                 },
               })}
             />
-            )}
           </Paper>
         </Grid.Col>
 
         {/* Right Column */}
         <Grid.Col span={{ base: 12, lg: 4 }}>
           <Stack gap="lg">
-            {/* Usage Summary Card */}
+            {/* Plan Card */}
             <Paper p="lg" radius="lg" withBorder>
               <Group justify="space-between" mb="md">
-                <Text fw={600} size="lg">{t('usage.title')}</Text>
-                <Badge variant="light" color="teal" size="sm">{t('usage.active')}</Badge>
+                <Text fw={600} size="lg">{t('plan.title')}</Text>
+                <Badge variant="light" color="teal" size="sm">Active</Badge>
               </Group>
               <Stack gap="md">
                 <Box>
                   <Group justify="space-between" mb={8}>
-                    <Text size="sm" c="dimmed">{t('usage.totalTokens')}</Text>
-                    <Text size="sm" fw={500}>
-                      {dashboardData?.stats.tracing.totalTokens 
-                        ? formatNumber(dashboardData.stats.tracing.totalTokens) 
-                        : '0'}
-                    </Text>
+                    <Text size="sm" c="dimmed">API Usage</Text>
+                    <Text size="sm" fw={500}>75%</Text>
                   </Group>
-                  <Progress 
-                    value={Math.min((dashboardData?.stats.tracing.totalTokens || 0) / 10000, 100)} 
-                    color="teal" 
-                    radius="xl" 
-                    size="sm" 
-                  />
+                  <Progress value={75} color="teal" radius="xl" size="sm" />
                 </Box>
                 
                 <Divider />
                 
                 <div>
                   <Text size="sm" c="dimmed" mb="xs">
-                    {t('usage.summary')}
+                    {t('plan.featuresLabel')}
                   </Text>
-                  <Stack gap={4}>
-                    <Group justify="space-between">
-                      <Text size="xs">{t('usage.totalSessions')}</Text>
-                      <Text size="xs" fw={500}>{dashboardData?.stats.tracing.totalSessions || 0}</Text>
-                    </Group>
-                    <Group justify="space-between">
-                      <Text size="xs">{t('usage.modelsConfigured')}</Text>
-                      <Text size="xs" fw={500}>{dashboardData?.stats.models.total || 0}</Text>
-                    </Group>
-                    <Group justify="space-between">
-                      <Text size="xs">{t('usage.vectorIndexes')}</Text>
-                      <Text size="xs" fw={500}>{dashboardData?.stats.vectors.indexes || 0}</Text>
-                    </Group>
-                  </Stack>
+                  <Group gap={6}>
+                    {user.features.slice(0, 3).map((feature) => (
+                      <Badge key={feature} variant="dot" color="teal" size="sm">
+                        {feature.replace(/_/g, ' ')}
+                      </Badge>
+                    ))}
+                    {user.features.length > 3 && (
+                      <Badge variant="light" color="gray" size="sm">
+                        +{user.features.length - 3}
+                      </Badge>
+                    )}
+                  </Group>
                 </div>
 
                 <Button
                   variant="light"
                   fullWidth
-                  rightSection={<IconChevronRight size={16} />}
-                  onClick={() => router.push('/dashboard/settings')}>
-                  {t('usage.viewDetails')}
+                  rightSection={<IconArrowUpRight size={16} />}>
+                  {t('plan.upgradeCta')}
                 </Button>
               </Stack>
             </Paper>
 
             {/* Resources */}
             <Paper p="lg" radius="lg" withBorder>
-              <Text fw={600} size="lg" mb="md">{t('resources.title')}</Text>
+              <Text fw={600} size="lg" mb="md">Resources</Text>
               <Stack gap="xs">
                 {resources.map((resource) => (
                   <Paper
@@ -600,20 +550,7 @@ export default function DashboardPage() {
                     radius="md"
                     withBorder
                     style={{ cursor: 'pointer', transition: 'all 0.2s ease' }}
-                    onClick={() => {
-                      if (resource.docId) {
-                        openDocs(resource.docId);
-                        return;
-                      }
-                      if (!resource.href) {
-                        return;
-                      }
-                      if (resource.href.startsWith('http')) {
-                        window.open(resource.href, '_blank');
-                        return;
-                      }
-                      router.push(resource.href);
-                    }}>
+                    onClick={() => resource.href.startsWith('http') ? window.open(resource.href, '_blank') : router.push(resource.href)}>
                     <Group gap="sm">
                       <ThemeIcon size={32} radius="md" variant="light" color="gray">
                         <resource.icon size={16} />

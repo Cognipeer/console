@@ -48,7 +48,7 @@ import {
   formatPercent,
   resolveStatusColor,
 } from '@/lib/utils/tracingUtils';
-import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
+import Link from 'next/link';
 import { useTranslations } from '@/lib/i18n';
 
 dayjs.extend(relativeTime);
@@ -93,7 +93,6 @@ interface DashboardData {
 
 export default function AgentTracingPage() {
   const router = useRouter();
-  const { openDocs } = useDocsDrawer();
   const t = useTranslations('tracings');
   const tNav = useTranslations('navigation');
   const [loading, setLoading] = useState(true);
@@ -230,13 +229,6 @@ export default function AgentTracingPage() {
             </div>
           </Group>
           <Group gap="sm">
-            <Button
-              onClick={() => openDocs('api-tracing')}
-              variant="light"
-              leftSection={<IconBook size={16} />}
-            >
-              Docs
-            </Button>
             <DatePickerInput
               type="range"
               value={dateRange}
@@ -337,33 +329,6 @@ export default function AgentTracingPage() {
         </Paper>
       </SimpleGrid>
 
-      <Paper withBorder radius="lg" p="lg">
-        <Group justify="space-between" align="flex-start" wrap="wrap">
-          <div>
-            <Text fw={600}>Documentation</Text>
-            <Text size="sm" c="dimmed" mt={4}>
-              SDK references for tracing and observability.
-            </Text>
-          </div>
-          <Group gap="xs">
-            <Button
-              onClick={() => openDocs('api-tracing')}
-              variant="light"
-              leftSection={<IconArrowUpRight size={16} />}
-            >
-              Tracing API
-            </Button>
-            <Button
-              onClick={() => openDocs('examples-tracing')}
-              variant="subtle"
-              leftSection={<IconArrowUpRight size={16} />}
-            >
-              Examples
-            </Button>
-          </Group>
-        </Group>
-      </Paper>
-
       {/* Quick Start Info Card */}
       <Paper withBorder radius="lg" p="lg" style={{ background: 'var(--mantine-color-blue-0)', borderColor: 'var(--mantine-color-blue-2)' }}>
         <Group align="flex-start" gap="md">
@@ -371,30 +336,35 @@ export default function AgentTracingPage() {
             <IconInfoCircle size={20} />
           </ThemeIcon>
           <Stack gap={6} style={{ flex: 1 }}>
-            <Text fw={600}>Instrument your agents</Text>
+            <Text fw={600}>Instrument your agents quickly</Text>
             <Text size="sm" c="dimmed">
-              Generate an API key under{' '}
+              Install{' '}
+              <Anchor
+                href="https://www.npmjs.com/package/@cognipeer/agent-sdk"
+                target="_blank"
+                rel="noopener noreferrer">
+                @cognipeer/agent-sdk
+              </Anchor>{' '}
+              to instrument your Node.js agent in minutes. The SDK automatically
+              creates sessions, events, and payload timelines.
+            </Text>
+            <Text size="sm" c="dimmed">
+              Prefer HTTP? Generate an API key under{' '}
               <Anchor href="/dashboard/settings">Settings → API Tokens</Anchor>{' '}
               and POST your agent payloads to{' '}
               <Text component="span" ff="monospace" style={{ backgroundColor: 'var(--mantine-color-gray-1)', padding: '2px 6px', borderRadius: 4 }}>
                 /api/client/tracing/sessions
               </Text>
-              {' '}to stream tracing data from any stack.
-            </Text>
-            <Text size="sm" c="dimmed">
-              Check out our{' '}
-              <Anchor component="button" onClick={() => openDocs('examples-tracing')}>
-                LangChain/LangGraph integration examples
-              </Anchor>
-              {' '}for quick setup.
             </Text>
           </Stack>
           <Button 
             variant="light" 
             color="blue" 
-            onClick={() => openDocs('examples-tracing')}
-            rightSection={<IconBook size={14} />}>
-            View Examples
+            component="a" 
+            href="https://www.npmjs.com/package/@cognipeer/agent-sdk" 
+            target="_blank"
+            rightSection={<IconExternalLink size={14} />}>
+            View SDK
           </Button>
         </Group>
       </Paper>

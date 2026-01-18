@@ -1,19 +1,16 @@
 'use client';
 
 import { useState } from 'react';
-import { Button, Tabs, Paper, Stack, Title, Text, Group, ThemeIcon } from '@mantine/core';
-import { IconUsers, IconFolder, IconPlug, IconSettings, IconBook } from '@tabler/icons-react';
+import { Tabs, Paper, Stack, Title, Text, Group, ThemeIcon, Badge } from '@mantine/core';
+import { IconUsers, IconFolder, IconPlug, IconSettings } from '@tabler/icons-react';
 import UserManagement from '@/components/settings/UserManagement';
 import ProjectsManagement from '@/components/settings/ProjectsManagement';
 import TenantProviders from '@/components/settings/TenantProviders';
 import { useTranslations } from '@/lib/i18n';
-import { getModuleDocId } from '@/lib/docs/sdkDocs';
-import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 
 export default function TenantSettingsPage() {
   const [activeTab, setActiveTab] = useState<string | null>('users');
   const t = useTranslations('settings');
-  const { openDocs } = useDocsDrawer();
 
   return (
     <Stack gap="lg">
@@ -26,32 +23,20 @@ export default function TenantSettingsPage() {
           background: 'linear-gradient(135deg, var(--mantine-color-gray-0) 0%, var(--mantine-color-teal-0) 100%)',
           borderColor: 'var(--mantine-color-gray-2)',
         }}>
-        <Group justify="space-between" align="flex-start">
-          <Group gap="md">
-            <ThemeIcon
-              size={50}
-              radius="xl"
-              variant="gradient"
-              gradient={{ from: 'gray.6', to: 'teal', deg: 135 }}>
-              <IconSettings size={26} />
-            </ThemeIcon>
-            <div>
-              <Title order={2}>{t('title')}</Title>
-              <Text size="sm" c="dimmed" mt={4}>
-                {t('subtitle')}
-              </Text>
-            </div>
-          </Group>
-
-          <Group gap="sm">
-            <Button
-              onClick={() => openDocs(getModuleDocId('tenant-settings'))}
-              variant="light"
-              leftSection={<IconBook size={16} />}
-            >
-              Docs
-            </Button>
-          </Group>
+        <Group gap="md">
+          <ThemeIcon
+            size={50}
+            radius="xl"
+            variant="gradient"
+            gradient={{ from: 'gray.6', to: 'teal', deg: 135 }}>
+            <IconSettings size={26} />
+          </ThemeIcon>
+          <div>
+            <Title order={2}>{t('title')}</Title>
+            <Text size="sm" c="dimmed" mt={4}>
+              {t('subtitle')}
+            </Text>
+          </div>
         </Group>
       </Paper>
 
