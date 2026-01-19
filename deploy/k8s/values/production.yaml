@@ -34,13 +34,13 @@ ingress:
   enabled: true
   className: "production"
   hosts:
-    - host: app.cgate.ai
+    - host: console.cognipeer.com
       paths:
         - path: /
           pathType: Prefix
   tls:
   - hosts:
-    - app.cgate.ai
+    - console.cognipeer.com
     secretName: cgate-production-tls
 
 resources:
@@ -93,5 +93,5 @@ secrets:
   smtp_pass: ref+awssecrets://cgate-application-credentials-production?region=eu-central-1#/SMTP_PASS
 
 tls_secrets:
-  fullchain_pem: ref+awssecrets://production_tls_certificate_chain?region=eu-central-1#/fullchain.pem
-  privatekey_pem: ref+awssecrets://production_tls_certificate_chain?region=eu-central-1#/privkey.pem
+  fullchain_pem: ref+awssecrets://cgate-production-tls?region=eu-central-1#/fullchain.pem
+  privatekey_pem: ref+awssecrets://cgate-production-tls?region=eu-central-1#/privkey.pem
