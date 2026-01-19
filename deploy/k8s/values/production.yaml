@@ -34,13 +34,13 @@ ingress:
   enabled: true
   className: "production"
   hosts:
-    - host: app.cgate.ai
+    - host: console.cognipeer.com
       paths:
         - path: /
           pathType: Prefix
   tls:
   - hosts:
-    - app.cgate.ai
+    - console.cognipeer.com
     secretName: cgate-production-tls
 
 resources:
