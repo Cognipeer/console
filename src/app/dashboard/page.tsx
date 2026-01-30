@@ -236,16 +236,18 @@ export default function DashboardPage() {
       <Transition mounted={mounted} transition="fade" duration={400}>
         {(styles) => (
           <Paper
-            style={styles}
-            p="xl"
-            radius="lg"
-            withBorder
-            sx={(theme) => ({
-              background: `linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-blue-0) 100%)`,
+            style={{
+              ...styles,
+              background:
+                'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-blue-0) 100%)',
               borderColor: 'var(--mantine-color-teal-2)',
               position: 'relative',
               overflow: 'hidden',
-            })}>
+            }}
+            p="xl"
+            radius="lg"
+            withBorder
+          >
             <Box
               style={{
                 position: 'absolute',

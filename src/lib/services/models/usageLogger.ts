@@ -51,8 +51,8 @@ export async function logModelUsage(
     requestId: string;
     route: string;
     status: 'success' | 'error';
-    providerRequest: any;
-    providerResponse: any;
+    providerRequest: unknown;
+    providerResponse: unknown;
     errorMessage?: string;
     latencyMs?: number;
     usage: TokenUsage;

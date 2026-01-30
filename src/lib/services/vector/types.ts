@@ -1,8 +1,4 @@
-import type {
-  IProviderRecord,
-  IVectorIndexRecord,
-  ProviderDomain,
-} from '@/lib/database';
+import type { IVectorIndexRecord, ProviderDomain } from '@/lib/database';
 import type { ProviderCapabilityFlags } from '@/lib/providers';
 import type { ProviderConfigView } from '@/lib/services/providers/providerService';
 import type {

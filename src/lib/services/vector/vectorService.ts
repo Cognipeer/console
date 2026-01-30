@@ -471,6 +471,7 @@ export async function deleteVectorIndex(
   key: string,
   _options?: { updatedBy?: string },
 ): Promise<void> {
+  void _options;
   const { runtime } = await buildRuntimeContext(
     tenantDbName,
     tenantId,

@@ -36,12 +36,12 @@ export interface UpdateModelInput {
 
 export interface InvokeModelOptions {
   mode: 'chat' | 'embedding';
-  payload: any;
+  payload: unknown;
 }
 
 export interface ModelInvocationResult {
   model: IModel;
-  response: any;
+  response: unknown;
   usage?: {
     inputTokens?: number;
     outputTokens?: number;
