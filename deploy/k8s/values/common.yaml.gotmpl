@@ -87,3 +87,19 @@ secrets:
 tls_secrets:
   fullchain_pem:  {{.Environment.Values.tls_secrets.fullchain_pem}}
   privatekey_pem:  {{.Environment.Values.tls_secrets.privatekey_pem}}
+
+
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+    - labelSelector:
+        matchExpressions:
+        - key: app.kubernetes.io/name
+          operator: In
+          values:
+          - cgate
+        - key: app.kubernetes.io/instance
+          operator: In
+          values:
+          - "cgate"
+      topologyKey: kubernetes.io/hostname
