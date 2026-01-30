@@ -10,6 +10,13 @@ export interface TokenUsage {
   toolCalls?: number;
 }
 
+function toRecord(value: unknown): Record<string, unknown> {
+  if (value && typeof value === 'object') {
+    return value as Record<string, unknown>;
+  }
+  return { value };
+}
+
 export interface UsageCostResult {
   currency: string;
   inputCost: number;
@@ -51,8 +58,8 @@ export async function logModelUsage(
     requestId: string;
     route: string;
     status: 'success' | 'error';
-    providerRequest: any;
-    providerResponse: any;
+    providerRequest: unknown;
+    providerResponse: unknown;
     errorMessage?: string;
     latencyMs?: number;
     usage: TokenUsage;
@@ -79,8 +86,8 @@ export async function logModelUsage(
     requestId: payload.requestId,
     route: payload.route,
     status: payload.status,
-    providerRequest: payload.providerRequest,
-    providerResponse: payload.providerResponse,
+    providerRequest: toRecord(payload.providerRequest),
+    providerResponse: toRecord(payload.providerResponse),
     errorMessage: payload.errorMessage,
     latencyMs: payload.latencyMs,
     inputTokens: usage.inputTokens ?? 0,

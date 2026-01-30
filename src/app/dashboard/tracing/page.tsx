@@ -1,9 +1,8 @@
 'use client';
 
-import { useEffect, useState, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
-  Card,
   Stack,
   Group,
   Text,
@@ -13,15 +12,11 @@ import {
   Loader,
   Center,
   Badge,
-  Divider,
   Table,
-  ScrollArea,
   Anchor,
   Title,
   ThemeIcon,
   Box,
-  Progress,
-  RingProgress,
 } from '@mantine/core';
 import { DatePickerInput } from '@mantine/dates';
 import {
@@ -35,7 +30,6 @@ import {
   IconAlertTriangle,
   IconRobot,
   IconChartBar,
-  IconBook,
   IconExternalLink,
   IconArrowUpRight,
 } from '@tabler/icons-react';
@@ -48,48 +42,15 @@ import {
   formatPercent,
   resolveStatusColor,
 } from '@/lib/utils/tracingUtils';
-import Link from 'next/link';
 import { useTranslations } from '@/lib/i18n';
+import type { AgentTracingAgentSummary, DashboardOverview } from '@/lib/services/agentTracing';
 
 dayjs.extend(relativeTime);
 
-interface DashboardData {
-  recentSessions: any[];
-  recentAgents: any[];
-  recentAgentsTotal: number;
-  analytics: {
-    totals: {
-      sessionsCount: number;
-      totalTokens: number;
-      totalEvents: number;
-      averageTokensPerSession: number;
-      averageDurationMs: number;
-      totalDurationMs: number;
-    };
-    tools: {
-      totals: {
-        totalCalls: number;
-        errorCalls: number;
-        errorRate: number;
-      };
-      items: Array<{
-        toolName: string;
-        totalCalls: number;
-        errorCalls: number;
-        errorRate: number;
-      }>;
-    };
-    statuses: Array<{ status: string; count: number }>;
-    models: Array<{ model: string; sessionsCount: number }>;
-    versions: Array<{ version: string; sessionsCount: number }>;
-    daily: Array<{
-      date: string;
-      sessionsCount: number;
-      totalEvents: number;
-      totalTokens: number;
-    }>;
-  };
-}
+type RecentAgentItem = AgentTracingAgentSummary & { latestStatus?: string };
+type DashboardData = Omit<DashboardOverview, 'recentAgents'> & {
+  recentAgents: RecentAgentItem[];
+};
 
 export default function AgentTracingPage() {
   const router = useRouter();
@@ -121,7 +82,7 @@ export default function AgentTracingPage() {
     };
   }, [dateRange]);
 
-  const fetchDashboard = async (isRefresh = false) => {
+  const fetchDashboard = useCallback(async (isRefresh = false) => {
     try {
       if (isRefresh) setRefreshing(true);
       else setLoading(true);
@@ -139,8 +100,7 @@ export default function AgentTracingPage() {
         throw new Error(errorData.error || 'Failed to fetch dashboard data');
       }
 
-      const data = await response.json();
-      console.log('Dashboard data:', data);
+      const data = (await response.json()) as DashboardData;
       setDashboardData(data);
     } catch (error) {
       console.error('Error fetching dashboard:', error);
@@ -148,11 +108,11 @@ export default function AgentTracingPage() {
       setLoading(false);
       setRefreshing(false);
     }
-  };
+  }, [rangeParams.from, rangeParams.to, timezone]);
 
   useEffect(() => {
-    fetchDashboard();
-  }, [rangeParams.from, rangeParams.to, timezone]);
+    void fetchDashboard();
+  }, [fetchDashboard]);
 
   const handleRowClick = (sessionId: string) => {
     if (!sessionId) return;
@@ -543,7 +503,7 @@ export default function AgentTracingPage() {
           </Center>
         ) : (
           <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="md">
-            {recentAgents.map((item: any) => {
+            {recentAgents.map((item) => {
               const statusColor = resolveStatusColor(item.latestStatus);
               return (
                 <Paper

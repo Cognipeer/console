@@ -5,10 +5,10 @@ import { LocalFileProviderContract } from './localFile.contract';
 import { AwsS3FileProviderContract } from './awsS3Files.contract';
 import { MODEL_PROVIDER_CONTRACTS } from './modelContracts';
 
-export const CORE_PROVIDER_CONTRACTS: LooseProviderContract[] = [
+export const CORE_PROVIDER_CONTRACTS = [
   DummyVectorProviderContract,
   AwsS3VectorsProviderContract,
   LocalFileProviderContract,
   AwsS3FileProviderContract,
   ...MODEL_PROVIDER_CONTRACTS,
-];
+] as unknown as LooseProviderContract[];

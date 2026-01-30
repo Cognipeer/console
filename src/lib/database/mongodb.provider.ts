@@ -1,4 +1,4 @@
-import { MongoClient, Db, ObjectId } from 'mongodb';
+import { MongoClient, Db, ObjectId, type Filter } from 'mongodb';
 import {
   DatabaseProvider,
   IUser,
@@ -226,8 +226,8 @@ export class MongoDBProvider implements DatabaseProvider {
     data: Partial<ITenant>,
   ): Promise<ITenant | null> {
     const db = this.getMainDb();
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const { _id, ...updateData } = data;
+    const updateData = { ...data };
+    delete updateData._id;
 
     const result = await db.collection<ITenant>('tenants').findOneAndUpdate(
       { _id: new ObjectId(id) },
@@ -339,8 +339,8 @@ export class MongoDBProvider implements DatabaseProvider {
       return null;
     }
 
-    const { _id, ...updateData } = data;
-    const payload: Partial<IUser> = { ...updateData };
+    const payload: Partial<IUser> = { ...data };
+    delete payload._id;
 
     if (payload.email) {
       const trimmedEmail = payload.email.trim();
@@ -463,36 +463,37 @@ export class MongoDBProvider implements DatabaseProvider {
   ): Promise<IProject | null> {
     const db = this.getTenantDb();
     const hasObjectId = ObjectId.isValid(id);
-    const filter = hasObjectId
+    const filter: Filter<IProject> = hasObjectId
       ? { _id: new ObjectId(id) }
-      : { _id: id as any };
+      : { _id: id };
 
     const result = await db
       .collection<IProject>(MongoDBProvider.projectsCollection)
       .findOneAndUpdate(
-        filter as any,
+        filter,
         { $set: { ...data, updatedAt: new Date() } },
         { returnDocument: 'after' },
       );
 
     if (!result) return null;
 
+    const updated = result as IProject;
     return {
-      ...result,
-      _id: (result as any)._id?.toString(),
+      ...updated,
+      _id: updated._id?.toString(),
     } as IProject;
   }
 
   async deleteProject(id: string): Promise<boolean> {
     const db = this.getTenantDb();
     const hasObjectId = ObjectId.isValid(id);
-    const filter = hasObjectId
+    const filter: Filter<IProject> = hasObjectId
       ? { _id: new ObjectId(id) }
-      : { _id: id as any };
+      : { _id: id };
 
     const result = await db
       .collection<IProject>(MongoDBProvider.projectsCollection)
-      .deleteOne(filter as any);
+      .deleteOne(filter);
 
     return result.deletedCount > 0;
   }
@@ -500,13 +501,13 @@ export class MongoDBProvider implements DatabaseProvider {
   async findProjectById(id: string): Promise<IProject | null> {
     const db = this.getTenantDb();
     const hasObjectId = ObjectId.isValid(id);
-    const filter = hasObjectId
+    const filter: Filter<IProject> = hasObjectId
       ? { _id: new ObjectId(id) }
-      : { _id: id as any };
+      : { _id: id };
 
     const project = await db
       .collection<IProject>(MongoDBProvider.projectsCollection)
-      .findOne(filter as any);
+      .findOne(filter);
 
     if (!project) return null;
     return { ...project, _id: project._id?.toString() };
@@ -516,7 +517,7 @@ export class MongoDBProvider implements DatabaseProvider {
     const db = this.getTenantDb();
     const project = await db
       .collection<IProject>(MongoDBProvider.projectsCollection)
-      .findOne({ tenantId, key } as any);
+      .findOne({ tenantId, key } as Filter<IProject>);
     if (!project) return null;
     return { ...project, _id: project._id?.toString() };
   }
@@ -525,7 +526,7 @@ export class MongoDBProvider implements DatabaseProvider {
     const db = this.getTenantDb();
     const projects = await db
       .collection<IProject>(MongoDBProvider.projectsCollection)
-      .find({ tenantId } as any)
+      .find({ tenantId } as Filter<IProject>)
       .sort({ createdAt: -1 })
       .toArray();
 
@@ -591,9 +592,13 @@ export class MongoDBProvider implements DatabaseProvider {
       ? { $or: [{ tenantId }, { tenantId: new ObjectId(tenantId) }] }
       : { tenantId };
     const projectFilter = projectId ? { projectId } : {};
+    const query: Filter<IQuotaPolicy> = {
+      ...(tenantFilter as Record<string, unknown>),
+      ...(projectFilter as Record<string, unknown>),
+    };
     const policies = await db
       .collection<IQuotaPolicy>(MongoDBProvider.quotaPoliciesCollection)
-      .find({ ...(tenantFilter as any), ...(projectFilter as any) })
+      .find(query)
       .sort({ priority: -1, createdAt: -1 })
       .toArray();
 
@@ -618,7 +623,7 @@ export class MongoDBProvider implements DatabaseProvider {
       ? { $or: [{ _id: new ObjectId(id) }, { _id: id }] }
       : { _id: id };
     const projectFilter = projectId ? { projectId } : {};
-    const filter = { $and: [tenantFilter, idFilter, projectFilter] } as any;
+    const filter = { $and: [tenantFilter, idFilter, projectFilter] } as Filter<IQuotaPolicy>;
     const updateData = {
       ...data,
       updatedAt: new Date(),
@@ -650,7 +655,7 @@ export class MongoDBProvider implements DatabaseProvider {
       ? { $or: [{ _id: new ObjectId(id) }, { _id: id }] }
       : { _id: id };
     const projectFilter = projectId ? { projectId } : {};
-    const filter = { $and: [tenantFilter, idFilter, projectFilter] } as any;
+    const filter = { $and: [tenantFilter, idFilter, projectFilter] } as Filter<IQuotaPolicy>;
 
     const result = await db
       .collection<IQuotaPolicy>(MongoDBProvider.quotaPoliciesCollection)
@@ -934,14 +939,12 @@ export class MongoDBProvider implements DatabaseProvider {
     };
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async listAgentTracingSessions(
-    filters?: any,
+    filters?: Record<string, unknown>,
     projectId?: string,
   ): Promise<{ sessions: IAgentTracingSession[]; total: number }> {
     const db = this.getTenantDb();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const query: any = {};
+    const query: Record<string, unknown> = {};
 
     if (projectId) {
       query.projectId = projectId;
@@ -956,13 +959,14 @@ export class MongoDBProvider implements DatabaseProvider {
     }
 
     if (filters?.from || filters?.to) {
-      query.startedAt = {};
-      if (filters.from) query.startedAt.$gte = new Date(filters.from);
-      if (filters.to) query.startedAt.$lte = new Date(filters.to);
+      const startedAt: { $gte?: Date; $lte?: Date } = {};
+      if (typeof filters.from === 'string') startedAt.$gte = new Date(filters.from);
+      if (typeof filters.to === 'string') startedAt.$lte = new Date(filters.to);
+      query.startedAt = startedAt;
     }
 
-    const limit = parseInt(filters?.limit || '50');
-    const skip = parseInt(filters?.skip || '0');
+    const limit = parseInt(String(filters?.limit ?? '50'));
+    const skip = parseInt(String(filters?.skip ?? '0'));
 
     const sessions = await db
       .collection<IAgentTracingSession>('agent_tracing_sessions')
@@ -1059,14 +1063,13 @@ export class MongoDBProvider implements DatabaseProvider {
 
   async updateModel(id: string, data: Partial<IModel>): Promise<IModel | null> {
     const db = this.getTenantDb();
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const { _id, pricing, ...rest } = data;
-
     const updateData: Record<string, unknown> = {
-      ...rest,
+      ...data,
       updatedAt: new Date(),
     };
+    delete updateData._id;
 
+    const pricing = data.pricing;
     if (pricing) {
       updateData.pricing = {
         currency: pricing.currency || 'USD',
@@ -1076,8 +1079,8 @@ export class MongoDBProvider implements DatabaseProvider {
       };
     }
 
-    if (rest.providerDriver !== undefined && rest.provider === undefined) {
-      updateData.provider = rest.providerDriver as ModelProviderType;
+    if (data.providerDriver !== undefined && data.provider === undefined) {
+      updateData.provider = data.providerDriver as ModelProviderType;
     }
 
     const result = await db
@@ -1208,8 +1211,11 @@ export class MongoDBProvider implements DatabaseProvider {
     projectId?: string,
   ): Promise<IModelUsageLog[]> {
     const db = this.getTenantDb();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const query: Record<string, any> = { modelKey };
+    const query: {
+      modelKey: string;
+      projectId?: string;
+      createdAt?: { $gte?: Date; $lte?: Date };
+    } = { modelKey };
 
     if (projectId) {
       query.projectId = projectId;
@@ -1248,8 +1254,11 @@ export class MongoDBProvider implements DatabaseProvider {
     projectId?: string,
   ): Promise<IModelUsageAggregate> {
     const db = this.getTenantDb();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const match: Record<string, any> = { modelKey };
+    const match: {
+      modelKey: string;
+      projectId?: string;
+      createdAt?: { $gte?: Date; $lte?: Date };
+    } = { modelKey };
 
     if (projectId) {
       match.projectId = projectId;
@@ -1347,16 +1356,19 @@ export class MongoDBProvider implements DatabaseProvider {
       ])
       .toArray();
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const timeseries = timeseriesDocs.map((doc: any) => ({
-      period: doc._id instanceof Date ? doc._id.toISOString() : String(doc._id),
-      callCount: doc.callCount ?? 0,
-      inputTokens: doc.inputTokens ?? 0,
-      outputTokens: doc.outputTokens ?? 0,
-      cachedInputTokens: doc.cachedInputTokens ?? 0,
-      totalTokens: doc.totalTokens ?? 0,
-      totalCost: doc.totalCost ?? 0,
-    }));
+    const timeseries = timeseriesDocs.map((doc) => {
+      const record = doc as Record<string, unknown>;
+      const periodValue = record._id;
+      return {
+        period: periodValue instanceof Date ? periodValue.toISOString() : String(periodValue),
+        callCount: Number(record.callCount ?? 0),
+        inputTokens: Number(record.inputTokens ?? 0),
+        outputTokens: Number(record.outputTokens ?? 0),
+        cachedInputTokens: Number(record.cachedInputTokens ?? 0),
+        totalTokens: Number(record.totalTokens ?? 0),
+        totalCost: Number(record.totalCost ?? 0),
+      };
+    });
 
     const costSummary: IModelUsageCostSnapshot | undefined = totalsDoc.totalCost
       ? {
@@ -1430,12 +1442,14 @@ export class MongoDBProvider implements DatabaseProvider {
       return null;
     }
 
-    const { _id, tenantId, providerKey, key, ...updateData } =
-      data as Partial<IVectorIndexRecord>;
     const payload: Partial<IVectorIndexRecord> = {
-      ...updateData,
+      ...(data as Partial<IVectorIndexRecord>),
       updatedAt: new Date(),
     };
+    delete payload._id;
+    delete payload.tenantId;
+    delete payload.providerKey;
+    delete payload.key;
 
     const result = await db
       .collection<IVectorIndexRecord>(
@@ -1531,7 +1545,7 @@ export class MongoDBProvider implements DatabaseProvider {
       .collection<IVectorIndexRecord>(
         MongoDBProvider.vectorIndexesCollection,
       )
-      .findOne({ providerKey, key, ...(projectId ? { projectId } : {}) } as any);
+        .findOne({ providerKey, key, ...(projectId ? { projectId } : {}) } as Filter<IVectorIndexRecord>);
 
     if (!index) {
       return null;
@@ -1553,7 +1567,7 @@ export class MongoDBProvider implements DatabaseProvider {
       .collection<IVectorIndexRecord>(
         MongoDBProvider.vectorIndexesCollection,
       )
-      .findOne({ providerKey, externalId, ...(projectId ? { projectId } : {}) } as any);
+        .findOne({ providerKey, externalId, ...(projectId ? { projectId } : {}) } as Filter<IVectorIndexRecord>);
 
     if (!index) {
       return null;
@@ -1606,12 +1620,16 @@ export class MongoDBProvider implements DatabaseProvider {
       return null;
     }
 
-    const { _id, tenantId, providerKey, bucketKey, key, createdBy, ...updateData } =
-      data as Partial<IFileRecord>;
     const payload: Partial<IFileRecord> = {
-      ...updateData,
+      ...(data as Partial<IFileRecord>),
       updatedAt: new Date(),
     };
+    delete payload._id;
+    delete payload.tenantId;
+    delete payload.providerKey;
+    delete payload.bucketKey;
+    delete payload.key;
+    delete payload.createdBy;
 
     const result = await db
       .collection<IFileRecord>(MongoDBProvider.filesCollection)
@@ -1859,12 +1877,14 @@ export class MongoDBProvider implements DatabaseProvider {
       return null;
     }
 
-    const { _id, tenantId, key, providerKey, ...updateData } =
-      data as Partial<IFileBucketRecord>;
     const payload: Partial<IFileBucketRecord> = {
-      ...updateData,
+      ...(data as Partial<IFileBucketRecord>),
       updatedAt: new Date(),
     };
+    delete payload._id;
+    delete payload.tenantId;
+    delete payload.key;
+    delete payload.providerKey;
 
     const result = await db
       .collection<IFileBucketRecord>(MongoDBProvider.fileBucketsCollection)
@@ -1990,11 +2010,13 @@ export class MongoDBProvider implements DatabaseProvider {
       return null;
     }
 
-    const { _id, tenantId, key, ...updateData } = data as Partial<IProviderRecord>;
     const payload: Partial<IProviderRecord> = {
-      ...updateData,
+      ...(data as Partial<IProviderRecord>),
       updatedAt: new Date(),
     };
+    delete payload._id;
+    delete payload.tenantId;
+    delete payload.key;
 
     const result = await db
       .collection<IProviderRecord>(MongoDBProvider.providersCollection)
@@ -2044,7 +2066,7 @@ export class MongoDBProvider implements DatabaseProvider {
     }
     const provider = await db
       .collection<IProviderRecord>(MongoDBProvider.providersCollection)
-      .findOne(query as any);
+      .findOne(query as Filter<IProviderRecord>);
 
     if (!provider) {
       return null;
@@ -2110,43 +2132,52 @@ export class MongoDBProvider implements DatabaseProvider {
     windowSeconds: number,
     amount: number = 1,
   ): Promise<{ count: number; resetAt: Date }> {
+    type RateLimitRecord = {
+      _id: string;
+      count: number;
+      resetAt: Date;
+      isExpired?: boolean;
+    };
+
     const db = this.getTenantDb();
     const now = new Date();
     const resetAt = new Date(now.getTime() + windowSeconds * 1000);
 
     // Use pipeline update for atomic check-and-set
-    const result = await db.collection(MongoDBProvider.rateLimitsCollection).findOneAndUpdate(
-      { _id: key as any },
-      [
-        {
-          $set: {
-            isExpired: { $lt: ['$resetAt', now] },
-          },
-        },
-        {
-          $set: {
-            count: {
-              $cond: {
-                if: { $or: [{ $eq: ['$isExpired', true] }, { $not: ['$resetAt'] }] },
-                then: amount,
-                else: { $add: ['$count', amount] },
-              },
-            },
-            resetAt: {
-              $cond: {
-                if: { $or: [{ $eq: ['$isExpired', true] }, { $not: ['$resetAt'] }] },
-                then: resetAt,
-                else: '$resetAt',
-              },
+    const result = await db
+      .collection<RateLimitRecord>(MongoDBProvider.rateLimitsCollection)
+      .findOneAndUpdate(
+        { _id: key } as Filter<RateLimitRecord>,
+        [
+          {
+            $set: {
+              isExpired: { $lt: ['$resetAt', now] },
             },
           },
-        },
-        {
-          $unset: 'isExpired',
-        },
-      ],
-      { upsert: true, returnDocument: 'after' },
-    );
+          {
+            $set: {
+              count: {
+                $cond: {
+                  if: { $or: [{ $eq: ['$isExpired', true] }, { $not: ['$resetAt'] }] },
+                  then: amount,
+                  else: { $add: ['$count', amount] },
+                },
+              },
+              resetAt: {
+                $cond: {
+                  if: { $or: [{ $eq: ['$isExpired', true] }, { $not: ['$resetAt'] }] },
+                  then: resetAt,
+                  else: '$resetAt',
+                },
+              },
+            },
+          },
+          {
+            $unset: 'isExpired',
+          },
+        ],
+        { upsert: true, returnDocument: 'after' },
+      );
 
     if (!result) {
       throw new Error('Failed to increment rate limit');

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Box, Button, Group, Modal, Select, Stack, Text } from '@mantine/core';
 import { DataTable } from 'mantine-datatable';
 import { notifications } from '@mantine/notifications';
@@ -32,7 +32,7 @@ export default function ProjectProvidersManager({ projectId }: { projectId: stri
   const [addOpen, setAddOpen] = useState(false);
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(null);
 
-  const fetchProviders = async () => {
+  const fetchProviders = useCallback(async () => {
     setLoading(true);
     try {
       const resTenant = await fetch('/api/providers?scope=tenant', { cache: 'no-store' });
@@ -57,12 +57,11 @@ export default function ProjectProvidersManager({ projectId }: { projectId: stri
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
-    fetchProviders();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId]);
+    void fetchProviders();
+  }, [fetchProviders, projectId]);
 
   const rows = useMemo(() => providers ?? [], [providers]);
 

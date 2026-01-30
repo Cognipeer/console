@@ -238,7 +238,7 @@ export async function updateModel(
     updatePayload.updatedBy = userId;
   }
 
-  return db.updateModel(modelId, updatePayload as any);
+  return db.updateModel(modelId, updatePayload as Partial<IModel>);
 }
 
 export async function deleteModel(

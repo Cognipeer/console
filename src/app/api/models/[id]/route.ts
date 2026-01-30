@@ -5,6 +5,7 @@ import {
   updateModel,
 } from '@/lib/services/models/modelService';
 import { IModel } from '@/lib/database/provider.interface';
+import type { UpdateModelInput } from '@/lib/services/models/types';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
 
 export const runtime = 'nodejs';
@@ -131,8 +132,8 @@ export async function PUT(
       return NextResponse.json({ error: 'Model not found' }, { status: 404 });
     }
 
-    const body = await request.json();
-    const updates: any = {};
+    const body = (await request.json()) as Partial<UpdateModelInput> & Record<string, unknown>;
+      const updates: Partial<UpdateModelInput> = {};
 
     if (body.name !== undefined) updates.name = body.name;
     if (body.description !== undefined) updates.description = body.description;
@@ -145,8 +146,8 @@ export async function PUT(
       updates.supportsToolCalls = body.supportsToolCalls;
     if (body.metadata !== undefined) updates.metadata = body.metadata;
 
-    if (body.settings) {
-      updates.settings = mergeSettings(existing.settings || {}, body.settings);
+      if (body.settings && typeof body.settings === 'object') {
+        updates.settings = mergeSettings(existing.settings || {}, body.settings as Record<string, unknown>);
     }
 
     const updated = await updateModel(

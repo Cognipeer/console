@@ -17,7 +17,6 @@ import {
   ThemeIcon,
   Progress,
   Transition,
-  RingProgress,
   Skeleton,
   Divider,
 } from '@mantine/core';
@@ -30,10 +29,8 @@ import {
   IconArrowDownRight,
   IconSparkles,
   IconKey,
-  IconSettings,
   IconChevronRight,
   IconCode,
-  IconFileText,
   IconChartBar,
   IconRocket,
   IconBook,
@@ -71,13 +68,13 @@ export default function DashboardPage() {
           ],
         };
         setUser(mockUser);
-      } catch (error) {
+      } catch {
         router.push('/login');
       }
     };
 
     checkAuth();
-  }, [router]);
+  }, [router, t]);
 
   const stats = useMemo(
     () => [
@@ -236,16 +233,18 @@ export default function DashboardPage() {
       <Transition mounted={mounted} transition="fade" duration={400}>
         {(styles) => (
           <Paper
-            style={styles}
-            p="xl"
-            radius="lg"
-            withBorder
-            sx={(theme) => ({
-              background: `linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-blue-0) 100%)`,
+            style={{
+              ...styles,
+              background:
+                'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-blue-0) 100%)',
               borderColor: 'var(--mantine-color-teal-2)',
               position: 'relative',
               overflow: 'hidden',
-            })}>
+            }}
+            p="xl"
+            radius="lg"
+            withBorder
+          >
             <Box
               style={{
                 position: 'absolute',
@@ -321,13 +320,7 @@ export default function DashboardPage() {
                 radius="lg"
                 withBorder
                 className="hover-lift"
-                sx={{
-                  transition: 'all 0.2s ease',
-                  '&:hover': {
-                    transform: 'translateY(-2px)',
-                    boxShadow: 'var(--mantine-shadow-md)',
-                  },
-                }}>
+              >
                 <Group justify="space-between" align="flex-start">
                   <Stack gap={4}>
                     <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
@@ -390,12 +383,7 @@ export default function DashboardPage() {
               onClick={() => router.push(action.href)}
               style={{ cursor: 'pointer', transition: 'all 0.2s ease' }}
               className="hover-lift"
-              sx={{
-                '&:hover': {
-                  borderColor: `var(--mantine-color-${action.color}-4)`,
-                  backgroundColor: `var(--mantine-color-${action.color}-0)`,
-                },
-              }}>
+            >
               <Group gap="sm">
                 <ThemeIcon size={40} radius="md" variant="light" color={action.color}>
                   <action.icon size={20} />

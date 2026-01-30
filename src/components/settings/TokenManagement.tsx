@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { Button, Group, Text, ActionIcon, Box, Code, Modal, CopyButton, Tooltip } from '@mantine/core';
+import { useCallback, useEffect, useState } from 'react';
+import { Button, Group, Text, ActionIcon, Box, Modal, CopyButton, Tooltip } from '@mantine/core';
 import { DataTable } from 'mantine-datatable';
 import { IconKey, IconTrash, IconCopy, IconCheck } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
@@ -37,7 +37,7 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
       ? `/api/projects/${encodeURIComponent(projectId)}/tokens/${encodeURIComponent(id)}`
       : `/api/tokens/${encodeURIComponent(id)}`;
 
-  const fetchTokens = async () => {
+  const fetchTokens = useCallback(async () => {
     setLoading(true);
     try {
       const response = await fetch(listUrl);
@@ -52,7 +52,7 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
       setForbidden(false);
       const data = await response.json();
       setTokens(data.tokens || []);
-    } catch (error) {
+    } catch {
       notifications.show({
         title: tNotifications('errorTitle'),
         message: t('errors.load'),
@@ -61,11 +61,11 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
     } finally {
       setLoading(false);
     }
-  };
+  }, [listUrl, t, tNotifications]);
 
   useEffect(() => {
-    fetchTokens();
-  }, [listUrl]);
+    void fetchTokens();
+  }, [fetchTokens]);
 
   const handleDeleteToken = (token: ApiToken) => {
     setTokenToDelete(token);
@@ -91,7 +91,7 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
       fetchTokens();
       setDeleteModalOpened(false);
       setTokenToDelete(null);
-    } catch (error) {
+    } catch {
       notifications.show({
         title: tNotifications('errorTitle'),
         message: t('errors.delete'),

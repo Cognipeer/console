@@ -81,7 +81,14 @@ export async function GET(request: NextRequest) {
   }
 }
 
-function validateCreatePayload(body: any): asserts body is CreateProviderConfigInput {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function validateCreatePayload(body: unknown): asserts body is CreateProviderConfigInput {
+  if (!isRecord(body)) {
+    throw new Error('Invalid payload');
+  }
   const requiredFields = ['key', 'type', 'driver', 'label', 'credentials', 'createdBy'];
   for (const field of requiredFields) {
     if (body[field] === undefined || body[field] === null || body[field] === '') {

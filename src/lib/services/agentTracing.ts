@@ -3,16 +3,39 @@
  * Business logic for agent tracing operations
  */
 
-import {
-  getDatabase,
-  IAgentTracingSession,
-  IAgentTracingEvent,
-} from '@/lib/database';
+import { getDatabase } from '@/lib/database';
 import dayjs from 'dayjs';
 
+type SessionListQuery = Record<string, unknown> & {
+  startedAt?: {
+    $gte?: Date;
+    $lte?: Date;
+  };
+  agentName?: string;
+  from?: string;
+  to?: string;
+};
+
+export interface AgentTracingSessionSummary {
+  sessionId: string;
+  agentName?: string;
+  status?: string;
+  startedAt?: Date;
+  durationMs?: number;
+  totalEvents?: number;
+  totalTokens: number;
+}
+
+export interface AgentTracingAgentSummary {
+  name: string;
+  label: string;
+  latestSessionAt?: Date;
+  sessionsCount: number;
+}
+
 export interface DashboardOverview {
-  recentSessions: any[];
-  recentAgents: any[];
+  recentSessions: AgentTracingSessionSummary[];
+  recentAgents: AgentTracingAgentSummary[];
   recentAgentsTotal: number;
   analytics: {
     totals: {
@@ -76,7 +99,7 @@ export class AgentTracingService {
       const db = await getDatabase();
       await db.switchToTenant(tenantDbName);
 
-      const query: any = {};
+      const query: SessionListQuery = {};
       if (filters?.from || filters?.to) {
         query.startedAt = {};
         if (filters.from) query.startedAt.$gte = new Date(filters.from);
@@ -234,7 +257,7 @@ export class AgentTracingService {
         .sort((a, b) => b.sessionsCount - a.sessionsCount);
 
       // Recent agents
-      const agentMap = new Map<string, any>();
+      const agentMap = new Map<string, AgentTracingAgentSummary>();
       sessions.forEach((session) => {
         const agentName = session.agentName || 'unknown';
         if (!agentMap.has(agentName)) {
@@ -247,17 +270,16 @@ export class AgentTracingService {
         }
         const agent = agentMap.get(agentName)!;
         agent.sessionsCount++;
-        if (session.startedAt && session.startedAt > agent.latestSessionAt) {
+        if (!agent.latestSessionAt) {
+          agent.latestSessionAt = session.startedAt;
+        } else if (session.startedAt && session.startedAt > agent.latestSessionAt) {
           agent.latestSessionAt = session.startedAt;
         }
       });
 
+      const toTime = (value?: Date) => (value ? value.getTime() : 0);
       const recentAgents = Array.from(agentMap.values())
-        .sort(
-          (a, b) =>
-            new Date(b.latestSessionAt).getTime() -
-            new Date(a.latestSessionAt).getTime(),
-        )
+        .sort((a, b) => toTime(b.latestSessionAt) - toTime(a.latestSessionAt))
         .slice(0, 20);
 
       // Daily trend (last 30 days window)
@@ -390,7 +412,11 @@ export class AgentTracingService {
   /**
    * Get session detail with events
    */
-  static async getSessionDetail(tenantDbName: string, projectId: string, sessionId: string) {
+  static async getSessionDetail(
+    tenantDbName: string,
+    projectId: string,
+    sessionId: string,
+  ) {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
 
@@ -452,7 +478,7 @@ export class AgentTracingService {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
 
-    const query: any = { agentName };
+    const query: SessionListQuery = { agentName };
     if (filters?.from || filters?.to) {
       query.from = filters.from;
       query.to = filters.to;

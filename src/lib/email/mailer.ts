@@ -37,7 +37,7 @@ class EmailService {
 
   async loadTemplate(
     templateName: string,
-    data: Record<string, any>,
+    data: Record<string, unknown>,
   ): Promise<EmailTemplate> {
     const templatePath = path.join(
       process.cwd(),
@@ -68,7 +68,7 @@ class EmailService {
   async send(
     to: string,
     templateName: string,
-    data: Record<string, any>,
+    data: Record<string, unknown>,
   ): Promise<boolean> {
     try {
       const transporter = await this.getTransporter();
@@ -101,7 +101,7 @@ const emailService = new EmailService();
 export async function sendEmail(
   to: string,
   templateName: string,
-  data: Record<string, any>,
+  data: Record<string, unknown>,
 ): Promise<boolean> {
   return emailService.send(to, templateName, data);
 }

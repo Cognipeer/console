@@ -9,6 +9,22 @@ import { checkBudget, checkPerRequestLimits, checkRateLimit } from '@/lib/quota/
 
 export const runtime = 'nodejs';
 
+type MessageContentPart = string | { text?: string };
+
+type ChatMessage = {
+  content?: string | MessageContentPart[];
+};
+
+type ChatCompletionRequest = {
+  model?: string;
+  messages?: unknown;
+  max_completion_tokens?: number;
+  max_tokens?: number;
+  stream?: boolean;
+  request_id?: string;
+  [key: string]: unknown;
+};
+
 function unauthorized(message = 'Invalid API token') {
   return NextResponse.json({ error: { message, type: 'invalid_request_error' } }, { status: 401 });
 }
@@ -30,7 +46,7 @@ function extractMessageText(messages: unknown): string {
   if (!Array.isArray(messages)) return '';
   const parts: string[] = [];
 
-  for (const msg of messages as any[]) {
+  for (const msg of messages as ChatMessage[]) {
     const content = msg?.content;
     if (typeof content === 'string') {
       parts.push(content);
@@ -52,7 +68,7 @@ function extractMessageText(messages: unknown): string {
   return parts.join('\n');
 }
 
-function sanitize(value: any, max = 20000) {
+function sanitize(value: unknown, max = 20000) {
   if (value === null || value === undefined) return value;
   try {
     const str = JSON.stringify(value);
@@ -77,16 +93,19 @@ export async function POST(request: NextRequest) {
     return unauthorized();
   }
 
-  let body: any;
+  let body: ChatCompletionRequest;
   try {
-    body = await request.json();
+    const parsed = await request.json();
+    body = parsed && typeof parsed === 'object' ? (parsed as ChatCompletionRequest) : {};
   } catch {
     return NextResponse.json({ error: { message: 'Invalid JSON body', type: 'invalid_request_error' } }, { status: 400 });
   }
 
-  if (!body?.model) {
+  if (!body?.model || typeof body.model !== 'string') {
     return NextResponse.json({ error: { message: '`model` is required', type: 'invalid_request_error' } }, { status: 400 });
   }
+
+  const modelKey = body.model;
 
   try {
     const requestedOutputTokens =
@@ -111,7 +130,7 @@ export async function POST(request: NextRequest) {
       userId: auth.tokenRecord.userId,
       tokenId,
       domain: 'llm' as const,
-      resourceKey: body.model,
+      resourceKey: modelKey,
     };
 
     const quotaResult = await checkPerRequestLimits(
@@ -158,13 +177,13 @@ export async function POST(request: NextRequest) {
     userId: auth.tokenRecord.userId,
     tokenId,
     domain: 'llm' as const,
-    resourceKey: body.model,
+    resourceKey: modelKey,
   };
 
   try {
     const result = await handleChatCompletion({
       tenantDbName: auth.tenantDbName,
-      modelKey: body.model,
+      modelKey: modelKey,
       projectId: auth.projectId,
       body,
       stream: Boolean(body.stream),
@@ -183,7 +202,7 @@ export async function POST(request: NextRequest) {
 
     // Fire-and-forget budget usage update when we have non-streaming usage.
     if (result.usage) {
-      getModelByKey(auth.tenantDbName, body.model, auth.projectId)
+      getModelByKey(auth.tenantDbName, modelKey, auth.projectId)
         .then((model) => {
           if (!model) return;
           const cost = calculateCost(model.pricing, result.usage);
@@ -212,11 +231,11 @@ export async function POST(request: NextRequest) {
     console.error('Chat completion error', error);
 
     try {
-      const model = await getModelByKey(auth.tenantDbName, body.model, auth.projectId);
+      const model = await getModelByKey(auth.tenantDbName, modelKey, auth.projectId);
       if (model) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
         await logModelUsage(auth.tenantDbName, model, {
-          requestId: body?.request_id || crypto.randomUUID(),
+          requestId: typeof body?.request_id === 'string' ? body.request_id : crypto.randomUUID(),
           route: 'chat.completions',
           status: 'error',
           providerRequest: sanitize({ model: body.model, body }),

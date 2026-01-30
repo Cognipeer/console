@@ -29,12 +29,6 @@ interface AwsS3FileSettings {
   usePathStyleEndpoint?: boolean;
 }
 
-const SLUG_OPTIONS = {
-  lower: true,
-  strict: true,
-  trim: true,
-};
-
 function ensure(value: string | undefined, message: string): string {
   if (!value || value.trim().length === 0) {
     throw new Error(message);

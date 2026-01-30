@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState } from 'react';
 import { Select, TextInput, Loader } from '@mantine/core';
 import type { QuotaScope } from '@/lib/quota/types';
 import { useTranslations } from '@/lib/i18n';
@@ -28,7 +28,6 @@ export function ScopeIdSelector({
   scope,
   value,
   onChange,
-  resourceType,
   resourceOptions = [],
   disabled = false,
 }: ScopeIdSelectorProps) {

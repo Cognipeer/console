@@ -4,6 +4,7 @@
  */
 
 import { getDatabase } from '@/lib/database';
+import type { AgentTracingSessionSummary } from '@/lib/services/agentTracing';
 import { AgentTracingService } from '@/lib/services/agentTracing';
 import { listModels } from '@/lib/services/models/modelService';
 import { listVectorProviders, listVectorIndexes } from '@/lib/services/vector/vectorService';
@@ -42,7 +43,7 @@ export interface RecentActivity {
 export interface DashboardData {
   stats: DashboardStats;
   recentActivity: RecentActivity[];
-  recentSessions: any[];
+  recentSessions: AgentTracingSessionSummary[];
   daily: Array<{
     date: string;
     sessionsCount: number;
@@ -70,8 +71,8 @@ export async function getDashboardData(
     try {
       const indexes = await listVectorIndexes(tenantDbName, tenantId, provider.key, projectId);
       totalIndexes += indexes.length;
-    } catch (e) {
-      // Provider may not be accessible
+    } catch (error) {
+      console.warn('Failed to list vector indexes for provider', provider.key, error);
     }
   }
 
@@ -89,20 +90,19 @@ export async function getDashboardData(
 
   // Get active sessions (sessions with status 'running')
   const activeSessions = tracingOverview.recentSessions.filter(
-    (s: any) => s.status === 'running',
+    (s) => s.status === 'running',
   ).length;
 
   // Build recent activity from tracing sessions
   const recentActivity: RecentActivity[] = tracingOverview.recentSessions
     .slice(0, 10)
-    .map((session: any) => ({
-      id: session._id?.toString() || session.sessionId,
+    .map((session) => ({
+      id: session.sessionId,
       type: 'agent' as const,
       service: session.agentName || 'Agent',
       endpoint: `/api/tracing/sessions/${session.sessionId}`,
       status: session.status === 'error' ? 'error' : 'success',
-      timestamp: new Date(session.startedAt),
-      details: session.modelsUsed?.join(', '),
+      timestamp: session.startedAt ? new Date(session.startedAt) : new Date(),
     }));
 
   // Calculate API calls trend

@@ -47,7 +47,7 @@ export default function LoginPage() {
   useEffect(() => {
     const checkAuth = async () => {
       try {
-        const response = await fetch('/api/auth/session', {
+          const response = await fetch('/api/auth/session', {
           method: 'GET',
           credentials: 'include',
           cache: 'no-store',
@@ -58,8 +58,8 @@ export default function LoginPage() {
           router.push(data.mustChangePassword ? '/change-password' : '/dashboard');
           return;
         }
-      } catch (error) {
-        setCheckingAuth(false);
+        } catch {
+          setCheckingAuth(false);
       } finally {
         setCheckingAuth(false);
       }
@@ -101,7 +101,7 @@ export default function LoginPage() {
       });
 
       router.push(data.mustChangePassword ? '/change-password' : '/dashboard');
-    } catch (error) {
+    } catch {
       notifications.show({
         title: tNotifications('errorTitle'),
         message: tNotifications('loginGenericError'),

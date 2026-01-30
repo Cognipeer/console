@@ -78,7 +78,7 @@ export default function RegisterPage() {
           router.push('/dashboard');
           return;
         }
-      } catch (error) {
+      } catch {
         router.push('/login');
       }
 
@@ -124,7 +124,7 @@ export default function RegisterPage() {
       });
 
       router.push('/dashboard');
-    } catch (error) {
+    } catch {
       notifications.show({
         title: tNotifications('errorTitle'),
         message: tNotifications('registrationGenericError'),

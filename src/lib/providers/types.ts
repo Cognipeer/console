@@ -88,4 +88,4 @@ export interface ProviderDescriptor {
   capabilities?: ProviderCapabilityFlags;
 }
 
-export type LooseProviderContract = ProviderContract<any, any, any>;
+export type LooseProviderContract = ProviderContract<unknown, unknown, unknown>;
