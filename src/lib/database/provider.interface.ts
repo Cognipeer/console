@@ -262,9 +262,9 @@ export interface IModel {
   modelId: string;
   isMultimodal?: boolean;
   supportsToolCalls?: boolean;
-  settings: Record<string, any>;
+  settings: Record<string, unknown>;
   pricing: IModelPricing;
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
   createdBy?: string;
   updatedBy?: string;
   createdAt?: Date;

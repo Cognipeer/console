@@ -19,13 +19,8 @@ import {
   ThemeIcon,
   Title,
   Tooltip,
-  Box,
-  Transition,
-  Skeleton,
-  Divider,
-  Progress,
 } from '@mantine/core';
-import { IconChartBar, IconEdit, IconEye, IconPlug, IconPlus, IconRefresh, IconTool, IconSparkles, IconBrain, IconCpu, IconCurrencyDollar } from '@tabler/icons-react';
+import { IconChartBar, IconEdit, IconEye, IconPlug, IconPlus, IconRefresh, IconTool, IconSparkles, IconBrain, IconCpu } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import type { ModelProviderView } from '@/lib/services/models/types';
 import CreateModelModal from '@/components/models/CreateModelModal';

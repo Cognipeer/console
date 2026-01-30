@@ -54,10 +54,10 @@ export default function CreateTokenModal({ opened, onClose, onSuccess, createUrl
         message: t('messages.createSuccess'),
         color: 'green',
       });
-    } catch (error: any) {
+    } catch (error: unknown) {
       notifications.show({
         title: tNotifications('errorTitle'),
-        message: error.message || t('errors.create'),
+        message: error instanceof Error ? error.message : t('errors.create'),
         color: 'red',
       });
     } finally {

@@ -9,6 +9,13 @@ import { checkBudget, checkPerRequestLimits, checkRateLimit } from '@/lib/quota/
 
 export const runtime = 'nodejs';
 
+type EmbeddingRequest = {
+  model?: string;
+  input?: string | string[];
+  request_id?: string;
+  [key: string]: unknown;
+};
+
 function unauthorized(message = 'Invalid API token') {
   return NextResponse.json({ error: { message, type: 'invalid_request_error' } }, { status: 401 });
 }
@@ -36,7 +43,7 @@ function extractEmbeddingInputText(input: unknown): string {
   return JSON.stringify(input);
 }
 
-function sanitize(value: any, max = 20000) {
+function sanitize(value: unknown, max = 20000) {
   if (value === null || value === undefined) return value;
   try {
     const str = JSON.stringify(value);
@@ -61,16 +68,30 @@ export async function POST(request: NextRequest) {
     return unauthorized();
   }
 
-  let body: any;
+  let body: EmbeddingRequest;
   try {
-    body = await request.json();
+    const parsed = await request.json();
+    body = parsed && typeof parsed === 'object' ? (parsed as EmbeddingRequest) : {};
   } catch {
     return NextResponse.json({ error: { message: 'Invalid JSON body', type: 'invalid_request_error' } }, { status: 400 });
   }
 
-  if (!body?.model) {
+  if (!body?.model || typeof body.model !== 'string') {
     return NextResponse.json({ error: { message: '`model` is required', type: 'invalid_request_error' } }, { status: 400 });
   }
+
+  if (
+    body.input !== undefined &&
+    typeof body.input !== 'string' &&
+    !(Array.isArray(body.input) && body.input.every((item) => typeof item === 'string'))
+  ) {
+    return NextResponse.json(
+      { error: { message: '`input` must be a string or array of strings', type: 'invalid_request_error' } },
+      { status: 400 },
+    );
+  }
+
+  const modelKey = body.model;
 
   try {
     const estimatedInputTokens = estimateTokens(extractEmbeddingInputText(body.input));
@@ -83,7 +104,7 @@ export async function POST(request: NextRequest) {
       userId: auth.tokenRecord.userId,
       tokenId,
       domain: 'embedding' as const,
-      resourceKey: body.model,
+      resourceKey: modelKey,
     };
 
     const quotaResult = await checkPerRequestLimits(quotaContext, {
@@ -118,7 +139,7 @@ export async function POST(request: NextRequest) {
   try {
     const result = await handleEmbeddingRequest({
       tenantDbName: auth.tenantDbName,
-      modelKey: body.model,
+      modelKey: modelKey,
       projectId: auth.projectId,
       body,
     });
@@ -134,11 +155,11 @@ export async function POST(request: NextRequest) {
         userId: auth.tokenRecord.userId,
         tokenId,
         domain: 'embedding' as const,
-        resourceKey: body.model,
+        resourceKey: modelKey,
       };
 
       const estimatedInputTokens = estimateTokens(extractEmbeddingInputText(body.input));
-      const model = await getModelByKey(auth.tenantDbName, body.model, auth.projectId);
+      const model = await getModelByKey(auth.tenantDbName, modelKey, auth.projectId);
       if (model) {
         const cost = calculateCost(model.pricing, {
           inputTokens: estimatedInputTokens,
@@ -160,11 +181,11 @@ export async function POST(request: NextRequest) {
     console.error('Embedding error', error);
 
     try {
-      const model = await getModelByKey(auth.tenantDbName, body.model, auth.projectId);
+      const model = await getModelByKey(auth.tenantDbName, modelKey, auth.projectId);
       if (model) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
         await logModelUsage(auth.tenantDbName, model, {
-          requestId: body?.request_id || crypto.randomUUID(),
+          requestId: typeof body?.request_id === 'string' ? body.request_id : crypto.randomUUID(),
           route: 'embeddings',
           status: 'error',
           providerRequest: sanitize({ model: body.model, body }),

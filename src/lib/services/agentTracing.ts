@@ -270,17 +270,16 @@ export class AgentTracingService {
         }
         const agent = agentMap.get(agentName)!;
         agent.sessionsCount++;
-        if (session.startedAt && session.startedAt > agent.latestSessionAt) {
+        if (!agent.latestSessionAt) {
+          agent.latestSessionAt = session.startedAt;
+        } else if (session.startedAt && session.startedAt > agent.latestSessionAt) {
           agent.latestSessionAt = session.startedAt;
         }
       });
 
+      const toTime = (value?: Date) => (value ? value.getTime() : 0);
       const recentAgents = Array.from(agentMap.values())
-        .sort(
-          (a, b) =>
-            new Date(b.latestSessionAt).getTime() -
-            new Date(a.latestSessionAt).getTime(),
-        )
+        .sort((a, b) => toTime(b.latestSessionAt) - toTime(a.latestSessionAt))
         .slice(0, 20);
 
       // Daily trend (last 30 days window)

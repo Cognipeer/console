@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, useEffect } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Stack,
   Card,
@@ -26,19 +26,18 @@ import {
   formatDuration,
 } from '@/lib/utils/tracingUtils';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
+import type { DashboardOverview } from '@/lib/services/agentTracing';
 
-interface AgentTracingProps {}
-
-export default function AgentTracing({}: AgentTracingProps) {
+export default function AgentTracing() {
   const { openDocs } = useDocsDrawer();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dateRange, setDateRange] = useState<[Date | null, Date | null]>([null, null]);
   const [agentFilter, setAgentFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
-  const [dashboardData, setDashboardData] = useState<any>(null);
+  const [dashboardData, setDashboardData] = useState<DashboardOverview | null>(null);
 
-  const fetchDashboard = async () => {
+  const fetchDashboard = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
@@ -54,18 +53,19 @@ export default function AgentTracing({}: AgentTracingProps) {
       }
 
       const data = await response.json();
-      setDashboardData(data);
-    } catch (err: any) {
-      setError(err.message || 'An error occurred');
+      setDashboardData(data as DashboardOverview);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'An error occurred';
+      setError(message);
       console.error('Dashboard fetch error:', err);
     } finally {
       setLoading(false);
     }
-  };
+  }, [dateRange]);
 
   useEffect(() => {
-    fetchDashboard();
-  }, []);
+    void fetchDashboard();
+  }, [fetchDashboard]);
 
   const handleRefresh = () => {
     fetchDashboard();
@@ -89,8 +89,20 @@ export default function AgentTracing({}: AgentTracingProps) {
     return sessions;
   }, [dashboardData, agentFilter, statusFilter]);
 
-  const totals = dashboardData?.analytics?.totals || {};
-  const toolTotals = dashboardData?.analytics?.tools?.totals || {};
+  const totals = dashboardData?.analytics?.totals ?? {
+    sessionsCount: 0,
+    totalEvents: 0,
+    totalTokens: 0,
+    totalDurationMs: 0,
+    averageTokensPerSession: 0,
+    averageDurationMs: 0,
+  };
+  const toolTotals = dashboardData?.analytics?.tools?.totals ?? {
+    totalCalls: 0,
+    errorCalls: 0,
+    successCalls: 0,
+    errorRate: 0,
+  };
 
   if (error) {
     return (
@@ -248,7 +260,7 @@ export default function AgentTracing({}: AgentTracingProps) {
                   </Text>
                 </Group>
                 <SimpleGrid cols={{ base: 1, sm: 2, md: 3 }} spacing="sm">
-                  {dashboardData.recentAgents.slice(0, 6).map((agent: any) => (
+                  {dashboardData.recentAgents.slice(0, 6).map((agent) => (
                     <Paper key={agent.name} withBorder p="sm" radius="md">
                       <Text size="sm" fw={500} lineClamp={1}>
                         {agent.label || agent.name}

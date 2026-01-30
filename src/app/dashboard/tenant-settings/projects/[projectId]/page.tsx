@@ -1,6 +1,6 @@
 'use client';
 
-import { use, useEffect, useMemo, useState } from 'react';
+import { use, useCallback, useEffect, useMemo, useState } from 'react';
 import { Button, Group, Paper, Stack, Tabs, Text, ThemeIcon, Title } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconRefresh, IconUsers } from '@tabler/icons-react';
@@ -29,7 +29,7 @@ export default function TenantProjectSettingsPage({
     return projects.find((p) => String(p._id) === String(projectId));
   }, [projects, projectId]);
 
-  const fetchProjects = async () => {
+  const fetchProjects = useCallback(async () => {
     setLoading(true);
     try {
       const res = await fetch('/api/projects', { cache: 'no-store' });
@@ -45,12 +45,11 @@ export default function TenantProjectSettingsPage({
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     void fetchProjects();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId]);
+  }, [fetchProjects, projectId]);
 
   return (
     <Stack gap="md">

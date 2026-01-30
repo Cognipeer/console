@@ -97,13 +97,12 @@ export async function getDashboardData(
   const recentActivity: RecentActivity[] = tracingOverview.recentSessions
     .slice(0, 10)
     .map((session) => ({
-      id: session._id?.toString() || session.sessionId,
+      id: session.sessionId,
       type: 'agent' as const,
       service: session.agentName || 'Agent',
       endpoint: `/api/tracing/sessions/${session.sessionId}`,
       status: session.status === 'error' ? 'error' : 'success',
-      timestamp: new Date(session.startedAt),
-      details: session.modelsUsed?.join(', '),
+      timestamp: session.startedAt ? new Date(session.startedAt) : new Date(),
     }));
 
   // Calculate API calls trend

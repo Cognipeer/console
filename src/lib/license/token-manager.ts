@@ -40,7 +40,7 @@ export class TokenManager {
     };
     const expirySeconds = expiryMap[expiresIn] || 604800;
 
-    const token = await new SignJWT(payload as any)
+    const token = await new SignJWT(payload as Record<string, unknown>)
       .setProtectedHeader({ alg: 'HS256' })
       .setIssuedAt()
       .setExpirationTime(Math.floor(Date.now() / 1000) + expirySeconds)
@@ -72,7 +72,7 @@ export class TokenManager {
 
       const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString());
       return payload as JWTPayload;
-    } catch (error) {
+    } catch {
       return null;
     }
   }
@@ -93,7 +93,11 @@ export class TokenManager {
     const payload = await this.verifyToken(oldToken);
     if (!payload) return null;
 
-    const { iat, exp, ...tokenData } = payload;
-    return this.generateToken(tokenData);
+    const tokenData: Omit<JWTPayload, 'iat' | 'exp'> & Record<string, unknown> = {
+      ...payload,
+    };
+    delete tokenData.iat;
+    delete tokenData.exp;
+    return this.generateToken(tokenData as Omit<JWTPayload, 'iat' | 'exp'>);
   }
 }

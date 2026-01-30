@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { Tabs, Paper, Stack, Title, Text, Group, ThemeIcon, Badge } from '@mantine/core';
+import { Tabs, Paper, Stack, Title, Text, Group, ThemeIcon } from '@mantine/core';
 import { IconUsers, IconFolder, IconPlug, IconSettings } from '@tabler/icons-react';
 import UserManagement from '@/components/settings/UserManagement';
 import ProjectsManagement from '@/components/settings/ProjectsManagement';

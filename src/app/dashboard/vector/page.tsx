@@ -18,10 +18,9 @@ import {
   ThemeIcon,
   SimpleGrid,
   Box,
-  Transition,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { IconEye, IconPlus, IconRefresh, IconTrash, IconDatabase, IconServer, IconChartDots3, IconArrowRight, IconSparkles } from '@tabler/icons-react';
+import { IconPlus, IconRefresh, IconTrash, IconDatabase, IconServer, IconChartDots3, IconArrowRight, IconSparkles } from '@tabler/icons-react';
 import type { VectorIndexRecord, VectorProviderView } from '@/lib/services/vector';
 import CreateVectorIndexModal from '@/components/vector/CreateVectorIndexModal';
 
@@ -37,24 +36,6 @@ function formatDate(value?: string | Date) {
   return date.toLocaleString();
 }
 
-function resolveProviderHandle(metadata?: Record<string, unknown>): string | undefined {
-  if (!metadata) {
-    return undefined;
-  }
-
-  const candidates = ['providerExternalId', 'indexArn', 'externalId', 'arn'];
-  for (const key of candidates) {
-    const value = metadata[key];
-    if (typeof value === 'string') {
-      const trimmed = value.trim();
-      if (trimmed.length > 0) {
-        return trimmed;
-      }
-    }
-  }
-
-  return undefined;
-}
 
 export default function VectorIndexPage() {
   const router = useRouter();
@@ -340,7 +321,6 @@ export default function VectorIndexPage() {
               </Table.Thead>
               <Table.Tbody>
                 {rows.map(({ provider, index }) => {
-                  const providerHandle = resolveProviderHandle(index.metadata);
                   const navigateToDetail = () =>
                     router.push(`/dashboard/vector/${provider.key}/${index.key}`);
 

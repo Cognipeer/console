@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
   Alert,
@@ -134,12 +134,12 @@ export default function AgentTracingAgentPage() {
     };
   }, [dateRange]);
 
-  const fetchOverview = async (isRefresh = false) => {
+  const fetchOverview = useCallback(async (isRefresh = false) => {
     if (!agentName) return;
 
     try {
       if (isRefresh) setRefreshing(true);
-      setLoading(!data || !isRefresh);
+      setLoading(true);
       setError(null);
 
       const params = new URLSearchParams();
@@ -155,19 +155,19 @@ export default function AgentTracingAgentPage() {
 
       const payload = await response.json();
       setData(payload);
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Agent overview fetch error:', err);
-      setError(err.message || 'Failed to fetch agent overview');
+      const message = err instanceof Error ? err.message : 'Failed to fetch agent overview';
+      setError(message);
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  };
+  }, [agentName, rangeParams.from, rangeParams.to, timezone]);
 
   useEffect(() => {
-    fetchOverview();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agentName, rangeParams.from, rangeParams.to, timezone]);
+    void fetchOverview();
+  }, [fetchOverview]);
 
   const handleShowAllSessions = () => {
     router.push(`/dashboard/tracing/sessions?agent=${encodeURIComponent(agentName)}`);

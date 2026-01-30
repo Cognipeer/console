@@ -4,7 +4,7 @@ import {
   listModels,
   listModelProviders,
 } from '@/lib/services/models/modelService';
-import { ModelCategory } from '@/lib/database';
+import { ModelCategory, type IModel } from '@/lib/database';
 import { checkResourceQuota, type QuotaContext } from '@/lib/quota';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
@@ -30,7 +30,7 @@ function sanitizeSettings(settings: Record<string, unknown>) {
   return sanitized;
 }
 
-function sanitizeModel(model: any) {
+function sanitizeModel(model: IModel) {
   return {
     ...model,
     settings: sanitizeSettings(model.settings || {}),

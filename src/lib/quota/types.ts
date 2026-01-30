@@ -125,4 +125,4 @@ export interface QuotaPolicy {
   updatedAt?: Date | string;
 }
 
-export interface QuotaPolicyInput extends Omit<QuotaPolicy, '_id' | 'tenantId' | 'createdAt' | 'updatedAt'> {}
+export type QuotaPolicyInput = Omit<QuotaPolicy, '_id' | 'tenantId' | 'createdAt' | 'updatedAt'>;

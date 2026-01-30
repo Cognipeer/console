@@ -16,7 +16,6 @@ export default function InviteUserModal({ opened, onClose, onSuccess }: InviteUs
   const t = useTranslations('settings.inviteModal');
   const tValidation = useTranslations('validation');
   const tNotifications = useTranslations('notifications');
-  const tSettings = useTranslations('settings');
 
   const form = useForm({
     initialValues: {
@@ -56,10 +55,10 @@ export default function InviteUserModal({ opened, onClose, onSuccess }: InviteUs
       form.reset();
       onClose();
       onSuccess();
-    } catch (error: any) {
+    } catch (error: unknown) {
       notifications.show({
         title: tNotifications('errorTitle'),
-        message: error.message || t('errors.invite'),
+        message: error instanceof Error ? error.message : t('errors.invite'),
         color: 'red',
       });
     }

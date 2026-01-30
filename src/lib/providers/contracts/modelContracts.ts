@@ -470,10 +470,10 @@ export const VertexModelProviderContract: ProviderContract<ModelProviderRuntime,
   },
 };
 
-export const MODEL_PROVIDER_CONTRACTS: ProviderContract<ModelProviderRuntime, any, any>[] = [
+export const MODEL_PROVIDER_CONTRACTS = [
   OpenAiModelProviderContract,
   OpenAiCompatibleModelProviderContract,
   TogetherModelProviderContract,
   BedrockModelProviderContract,
   VertexModelProviderContract,
-];
+] as unknown as ProviderContract<ModelProviderRuntime, unknown, unknown>[];

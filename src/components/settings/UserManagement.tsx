@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Button, Group, Text, Badge, ActionIcon, Tooltip, Box, Modal } from '@mantine/core';
 import { DataTable } from 'mantine-datatable';
 import { IconUserPlus, IconTrash, IconMail } from '@tabler/icons-react';
@@ -29,7 +29,7 @@ export default function UserManagement() {
   const tNotifications = useTranslations('notifications');
   const tCommon = useTranslations('common');
 
-  const fetchUsers = async () => {
+  const fetchUsers = useCallback(async () => {
     setLoading(true);
     try {
       const response = await fetch('/api/users');
@@ -38,7 +38,7 @@ export default function UserManagement() {
       }
       const data = await response.json();
       setUsers(data.users || []);
-    } catch (error) {
+    } catch {
       notifications.show({
         title: tNotifications('errorTitle'),
         message: t('errors.load'),
@@ -47,11 +47,11 @@ export default function UserManagement() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [t, tNotifications]);
 
   useEffect(() => {
-    fetchUsers();
-  }, []);
+    void fetchUsers();
+  }, [fetchUsers]);
 
   const handleDeleteUser = (user: User) => {
     setUserToDelete(user);
@@ -79,7 +79,7 @@ export default function UserManagement() {
       fetchUsers();
       setDeleteModalOpened(false);
       setUserToDelete(null);
-    } catch (error) {
+    } catch {
       notifications.show({
         title: tNotifications('errorTitle'),
         message: t('errors.delete'),

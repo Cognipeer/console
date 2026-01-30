@@ -1,13 +1,11 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { Center, Loader } from '@mantine/core';
 
 export default function Home() {
   const router = useRouter();
-  const [checkingAuth, setCheckingAuth] = useState(true);
-
   // Check if user is already authenticated
   useEffect(() => {
     const checkAuth = async () => {
@@ -23,7 +21,7 @@ export default function Home() {
           router.push('/dashboard');
           return;
         }
-      } catch (error) {
+      } catch {
         router.push('/dashboard');
       } finally {
         router.push('/dashboard');
@@ -33,14 +31,9 @@ export default function Home() {
     checkAuth();
   }, [router]);
 
-  // Show loading state while checking authentication
-  if (checkingAuth) {
-    return (
-      <Center style={{ height: '100vh', width: '100vw' }}>
-        <Loader size="lg" />
-      </Center>
-    );
-  }
-
-  return null;
+  return (
+    <Center style={{ height: '100vh', width: '100vw' }}>
+      <Loader size="lg" />
+    </Center>
+  );
 }

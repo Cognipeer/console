@@ -1,6 +1,6 @@
 'use client';
 
-import { Group, Stack, Text, Title, Paper, ThemeIcon, SimpleGrid, Badge, Box } from '@mantine/core';
+import { Group, Stack, Text, Title, Paper, ThemeIcon, SimpleGrid } from '@mantine/core';
 import { IconFolder, IconCloud, IconFiles, IconUpload } from '@tabler/icons-react';
 import { useRouter } from 'next/navigation';
 import FileBucketManager from '@/components/files/FileBucketManager';
