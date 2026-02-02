@@ -19,6 +19,7 @@ export const en = {
   navigation: {
     dashboard: 'Dashboard',
     models: 'Models',
+    prompts: 'Prompts',
     agentTracing: 'Agent Tracing',
     vector: 'Vector Indexes',
     files: 'Files',
@@ -52,6 +53,7 @@ export const en = {
     tracing: 'Agent Tracing',
     models: 'Models',
     vector: 'Vector Indexes',
+    prompts: 'Prompts',
     files: 'Files',
     sessions: 'Sessions',
     agents: 'Agents',

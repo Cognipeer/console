@@ -18,6 +18,7 @@ import {
   IVectorIndexRecord,
   IFileRecord,
   IFileBucketRecord,
+  IPrompt,
   ProviderDomain,
   IQuotaPolicy,
 } from './provider.interface';
@@ -34,6 +35,7 @@ export class MongoDBProvider implements DatabaseProvider {
   private static readonly vectorIndexesCollection = 'vector_indexes';
   private static readonly fileBucketsCollection = 'file_buckets';
   private static readonly filesCollection = 'files';
+  private static readonly promptsCollection = 'prompts';
   private static readonly quotaPoliciesCollection = 'quota_policies';
   private static readonly rateLimitsCollection = 'rate_limits';
   private static readonly projectsCollection = 'projects';
@@ -1961,6 +1963,155 @@ export class MongoDBProvider implements DatabaseProvider {
     }
     const records = await db
       .collection<IFileBucketRecord>(MongoDBProvider.fileBucketsCollection)
+      .find(query)
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    return records.map((record) => ({
+      ...record,
+      _id: record._id?.toString(),
+    }));
+  }
+
+  async createPrompt(
+    prompt: Omit<IPrompt, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IPrompt> {
+    const db = this.getTenantDb();
+    const now = new Date();
+    const document: Omit<IPrompt, '_id'> & {
+      createdAt: Date;
+      updatedAt: Date;
+    } = {
+      ...prompt,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const result = await db
+      .collection<IPrompt>(MongoDBProvider.promptsCollection)
+      .insertOne(document as unknown as IPrompt);
+
+    return {
+      ...document,
+      _id: result.insertedId.toString(),
+    };
+  }
+
+  async updatePrompt(
+    id: string,
+    data: Partial<Omit<IPrompt, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IPrompt | null> {
+    const db = this.getTenantDb();
+    const objectId = new ObjectId(id);
+
+    const existing = await db
+      .collection<IPrompt>(MongoDBProvider.promptsCollection)
+      .findOne({ _id: objectId });
+
+    if (!existing) {
+      return null;
+    }
+
+    const payload: Partial<IPrompt> = {
+      ...(data as Partial<IPrompt>),
+      updatedAt: new Date(),
+    };
+    delete payload._id;
+    delete payload.tenantId;
+    delete payload.key;
+    delete payload.createdBy;
+
+    const result = await db
+      .collection<IPrompt>(MongoDBProvider.promptsCollection)
+      .findOneAndUpdate(
+        { _id: objectId },
+        { $set: payload },
+        { returnDocument: 'after' },
+      );
+
+    if (!result) {
+      return null;
+    }
+
+    return {
+      ...result,
+      _id: result._id?.toString(),
+    };
+  }
+
+  async deletePrompt(id: string): Promise<boolean> {
+    const db = this.getTenantDb();
+    const result = await db
+      .collection<IPrompt>(MongoDBProvider.promptsCollection)
+      .deleteOne({ _id: new ObjectId(id) });
+
+    return result.deletedCount > 0;
+  }
+
+  async findPromptById(id: string, projectId?: string): Promise<IPrompt | null> {
+    const db = this.getTenantDb();
+    const query: Record<string, unknown> = { _id: new ObjectId(id) };
+    if (projectId) {
+      query.projectId = projectId;
+    }
+    const record = await db
+      .collection<IPrompt>(MongoDBProvider.promptsCollection)
+      .findOne(query);
+
+    if (!record) {
+      return null;
+    }
+
+    return {
+      ...record,
+      _id: record._id?.toString(),
+    };
+  }
+
+  async findPromptByKey(
+    key: string,
+    projectId?: string,
+  ): Promise<IPrompt | null> {
+    const db = this.getTenantDb();
+    const query: Record<string, unknown> = { key };
+    if (projectId) {
+      query.projectId = projectId;
+    }
+    const record = await db
+      .collection<IPrompt>(MongoDBProvider.promptsCollection)
+      .findOne(query);
+
+    if (!record) {
+      return null;
+    }
+
+    return {
+      ...record,
+      _id: record._id?.toString(),
+    };
+  }
+
+  async listPrompts(filters?: {
+    projectId?: string;
+    search?: string;
+  }): Promise<IPrompt[]> {
+    const db = this.getTenantDb();
+    const query: Record<string, unknown> = {};
+
+    if (filters?.projectId) {
+      query.projectId = filters.projectId;
+    }
+
+    if (filters?.search) {
+      query.$or = [
+        { name: { $regex: filters.search, $options: 'i' } },
+        { key: { $regex: filters.search, $options: 'i' } },
+        { description: { $regex: filters.search, $options: 'i' } },
+      ];
+    }
+
+    const records = await db
+      .collection<IPrompt>(MongoDBProvider.promptsCollection)
       .find(query)
       .sort({ createdAt: -1 })
       .toArray();
