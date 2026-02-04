@@ -15,6 +15,7 @@ const SEGMENT_KEYS: Record<string, string> = {
   settings: 'settings',
   'tenant-settings': 'tenant-settings',
   vector: 'vector',
+  prompts: 'prompts',
   projects: 'projects',
 };
 

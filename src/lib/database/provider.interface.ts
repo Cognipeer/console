@@ -248,6 +248,21 @@ export interface IFileRecord {
   updatedAt?: Date;
 }
 
+export interface IPrompt {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name: string;
+  description?: string;
+  template: string;
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
 export interface IModel {
   _id?: ObjectId | string;
   tenantId: string;
@@ -555,6 +570,25 @@ export interface DatabaseProvider {
     projectId?: string,
   ): Promise<IFileBucketRecord | null>;
   listFileBuckets(tenantId: string, projectId?: string): Promise<IFileBucketRecord[]>;
+
+  // Prompt operations (tenant-specific)
+  createPrompt(
+    prompt: Omit<IPrompt, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IPrompt>;
+  updatePrompt(
+    id: string,
+    data: Partial<Omit<IPrompt, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IPrompt | null>;
+  deletePrompt(id: string): Promise<boolean>;
+  findPromptById(id: string, projectId?: string): Promise<IPrompt | null>;
+  findPromptByKey(
+    key: string,
+    projectId?: string,
+  ): Promise<IPrompt | null>;
+  listPrompts(filters?: {
+    projectId?: string;
+    search?: string;
+  }): Promise<IPrompt[]>;
 
   // Shared provider registry (tenant-specific)
   createProvider(

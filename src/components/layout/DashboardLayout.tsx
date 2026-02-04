@@ -30,6 +30,7 @@ import {
   IconSettings,
   IconTimeline,
   IconBrain,
+  IconSparkles,
   IconVectorBezier,
   IconFolder,
   IconBook,
@@ -109,6 +110,11 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
       label: tNav('models'),
       icon: IconBrain,
       href: '/dashboard/models',
+    },
+    {
+      label: tNav('prompts'),
+      icon: IconSparkles,
+      href: '/dashboard/prompts',
     },
     {
       label: tNav('vector'),
