@@ -19,6 +19,15 @@ podLabels: {}
 podSecurityContext: {}
   # fsGroup: 2000
 
+securityContext:
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: false
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
 service:
   type: ClusterIP
   port: 3000

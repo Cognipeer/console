@@ -67,8 +67,6 @@ export type {
   IVectorIndexRecord,
   IFileBucketRecord,
   IFileRecord,
-  IPrompt,
-  IPromptVersion,
   FileMarkdownStatus,
   IQuotaPolicy,
 } from './provider.interface';
