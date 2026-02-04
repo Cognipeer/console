@@ -1,4 +1,4 @@
-replicaCount: 1
+replicaCount: {{.Environment.Values.replicaCount}}
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
@@ -24,9 +24,11 @@ securityContext:
   capabilities:
     drop:
     - ALL
-  readOnlyRootFilesystem: true
-  runAsNonRoot: true
-  runAsUser: 1000
+  readOnlyRootFilesystem: false
+  runAsUser: 1001
+  runAsGroup: 1001
+  fsGroup: 1001
+
 service:
   type: ClusterIP
   port: 3000
