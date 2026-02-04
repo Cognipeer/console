@@ -6,6 +6,113 @@
   height: 100%;
 }
 
+.header {
+  background-color: var(--mantine-color-body);
+  border-bottom: 1px solid var(--mantine-color-gray-3);
+}
+
+:global(body[data-mantine-color-scheme='dark']) .header {
+  background-color: var(--mantine-color-dark-8);
+  border-bottom: 1px solid var(--mantine-color-dark-4);
+}
+
+.headerLogo {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+  flex-shrink: 0;
+}
+
+.servicesMenu {
+  width: 520px;
+  max-width: 90vw;
+}
+
+.servicesMenuMobile {
+  width: 280px;
+}
+
+.servicesGrid {
+  padding: 12px;
+}
+
+.servicesCard {
+  border-radius: var(--mantine-radius-md);
+  padding: 10px;
+  transition: background-color 120ms ease;
+  cursor: pointer;
+}
+
+.servicesCard:hover {
+  background-color: var(--mantine-color-gray-0);
+}
+
+:global(body[data-mantine-color-scheme='dark']) .servicesCard:hover {
+  background-color: var(--mantine-color-dark-5);
+}
+
+.accountButton {
+  border-radius: var(--mantine-radius-md);
+  padding: 4px 8px;
+  transition: background-color 120ms ease;
+}
+
+.accountButton:hover {
+  background-color: var(--mantine-color-gray-0);
+}
+
+:global(body[data-mantine-color-scheme='dark']) .accountButton:hover {
+  background-color: var(--mantine-color-dark-5);
+}
+
+.accountDetails {
+  display: none;
+}
+
+@media (min-width: 62em) {
+  .accountDetails {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+}
+
+.searchButton {
+  background-color: var(--mantine-color-gray-0);
+  border: 1px solid var(--mantine-color-gray-3);
+  border-radius: var(--mantine-radius-md);
+  padding: 8px 12px;
+  transition: background-color 120ms ease, border-color 120ms ease;
+  cursor: pointer;
+}
+
+.searchButton:hover {
+  background-color: var(--mantine-color-gray-1);
+  border-color: var(--mantine-color-gray-4);
+}
+
+:global(body[data-mantine-color-scheme='dark']) .searchButton {
+  background-color: var(--mantine-color-dark-6);
+  border-color: var(--mantine-color-dark-4);
+}
+
+:global(body[data-mantine-color-scheme='dark']) .searchButton:hover {
+  background-color: var(--mantine-color-dark-5);
+  border-color: var(--mantine-color-dark-3);
+}
+
+.searchShortcut {
+  font-family: monospace;
+  background-color: var(--mantine-color-gray-1);
+  padding: 2px 6px;
+  border-radius: var(--mantine-radius-sm);
+  font-size: 11px;
+}
+
+:global(body[data-mantine-color-scheme='dark']) .searchShortcut {
+  background-color: var(--mantine-color-dark-5);
+}
+
 :global(body[data-mantine-color-scheme='dark']) .navbar {
   background-color: var(--mantine-color-dark-8);
   border-right: 1px solid var(--mantine-color-dark-4);
@@ -203,30 +310,4 @@
   text-transform: uppercase;
   font-size: 11px;
   letter-spacing: 0.08em;
-}
-
-.accountButton {
-  width: 100%;
-  border-radius: var(--mantine-radius-md);
-  display: flex;
-  align-items: center;
-  background: transparent;
-  cursor: pointer;
-  transition: background-color 120ms ease;
-  gap: 10px;
-}
-
-.accountButton:hover {
-  background: var(--mantine-color-gray-0);
-}
-
-:global(body[data-mantine-color-scheme='dark']) .accountButton:hover {
-  background: var(--mantine-color-dark-5);
-}
-
-.accountDetails {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  flex: 1;
 }

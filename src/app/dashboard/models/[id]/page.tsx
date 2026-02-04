@@ -4,27 +4,34 @@ import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import {
+  ActionIcon,
   Anchor,
   Badge,
   Button,
   Center,
+  Code,
   Divider,
   Grid,
   Group,
   Loader,
+  Modal,
   Paper,
   ScrollArea,
   Stack,
   Table,
+  Tabs,
   Text,
   ThemeIcon,
   Title,
+  Tooltip,
 } from '@mantine/core';
+import { useDisclosure } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
-import { IconArrowLeft, IconBook, IconBrain, IconChartBar, IconRefresh, IconTool } from '@tabler/icons-react';
+import { IconArrowLeft, IconBook, IconBrain, IconChartBar, IconRefresh, IconTool, IconFileSearch } from '@tabler/icons-react';
 import { IconEye, IconPlug, IconSettings, IconCurrencyDollar, IconTimeline } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
+import { Playground } from '@/components/playground';
 
 interface ModelPricing {
   currency?: string;
@@ -85,6 +92,7 @@ interface UsageAggregateDto {
 
 interface UsageLogDto {
   _id?: string;
+  requestId?: string;
   route: string;
   status: 'success' | 'error';
   latencyMs?: number;
@@ -94,6 +102,8 @@ interface UsageLogDto {
   totalTokens: number;
   errorMessage?: string;
   toolCalls?: number;
+  providerRequest?: Record<string, unknown>;
+  providerResponse?: Record<string, unknown>;
   createdAt?: string;
 }
 
@@ -116,6 +126,8 @@ export default function ModelDetailPage() {
   const [providers, setProviders] = useState<ProviderDefinitionDto[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [selectedLog, setSelectedLog] = useState<UsageLogDto | null>(null);
+  const [logModalOpened, { open: openLogModal, close: closeLogModal }] = useDisclosure(false);
 
   const modelId = params?.id;
 
@@ -255,8 +267,8 @@ export default function ModelDetailPage() {
         withBorder
         style={{
           background:
-            'linear-gradient(135deg, var(--mantine-color-blue-0) 0%, var(--mantine-color-violet-0) 100%)',
-          borderColor: 'var(--mantine-color-blue-2)',
+            'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
+          borderColor: 'var(--mantine-color-teal-2)',
         }}
       >
         <Group justify="space-between" align="flex-start">
@@ -265,7 +277,7 @@ export default function ModelDetailPage() {
               size={50}
               radius="xl"
               variant="gradient"
-              gradient={{ from: 'blue', to: 'violet', deg: 135 }}
+              gradient={{ from: 'teal', to: 'cyan', deg: 135 }}
             >
               <IconBrain size={26} />
             </ThemeIcon>
@@ -503,6 +515,7 @@ export default function ModelDetailPage() {
                 <Table.Th>{t('logs.status')}</Table.Th>
                 <Table.Th>{t('logs.latency')}</Table.Th>
                 <Table.Th>{t('logs.tokens')}</Table.Th>
+                <Table.Th w={60}>{t('logs.details')}</Table.Th>
               </Table.Tr>
             </Table.Thead>
             <Table.Tbody>
@@ -523,11 +536,26 @@ export default function ModelDetailPage() {
                         output: log.outputTokens.toLocaleString(),
                       })}
                     </Table.Td>
+                    <Table.Td>
+                      <Tooltip label={t('logs.viewDetails')}>
+                        <ActionIcon
+                          variant="subtle"
+                          color="blue"
+                          size="sm"
+                          onClick={() => {
+                            setSelectedLog(log);
+                            openLogModal();
+                          }}
+                        >
+                          <IconFileSearch size={16} />
+                        </ActionIcon>
+                      </Tooltip>
+                    </Table.Td>
                   </Table.Tr>
                 ))
               ) : (
                 <Table.Tr>
-                  <Table.Td colSpan={5}>
+                  <Table.Td colSpan={6}>
                     <Center py="md">
                       <Text size="sm" c="dimmed">
                         {t('logs.empty')}
@@ -543,6 +571,113 @@ export default function ModelDetailPage() {
           {t('logs.viewAndEdit')}
         </Anchor>
       </Paper>
+
+      {/* Playground - only for LLM models */}
+      {model.category === 'llm' && (
+        <Playground
+          initialModelKey={model.key}
+          hideModelSelector
+          chatHeight={450}
+        />
+      )}
+
+      {/* Request Details Modal */}
+      <Modal
+        opened={logModalOpened}
+        onClose={closeLogModal}
+        title={t('logs.modal.title')}
+        size="xl"
+      >
+        {selectedLog && (
+          <Stack gap="md">
+            {/* Summary info */}
+            <Paper withBorder radius="md" p="sm">
+              <Stack gap="xs">
+                <Group gap="xs" wrap="wrap">
+                  <Badge color={selectedLog.status === 'success' ? 'teal' : 'red'} variant="light">
+                    {selectedLog.status === 'success' ? t('logs.success') : t('logs.error')}
+                  </Badge>
+                  {selectedLog.latencyMs && (
+                    <Badge variant="light" color="blue">
+                      {Math.round(selectedLog.latencyMs)} ms
+                    </Badge>
+                  )}
+                  {selectedLog.toolCalls !== undefined && selectedLog.toolCalls > 0 && (
+                    <Badge variant="light" color="orange" leftSection={<IconTool size={12} />}>
+                      {t('logs.modal.toolCalls', { count: selectedLog.toolCalls })}
+                    </Badge>
+                  )}
+                </Group>
+                <Text size="sm">
+                  <strong>{t('logs.modal.requestId')}:</strong>{' '}
+                  <code>{selectedLog.requestId || '—'}</code>
+                </Text>
+                <Text size="sm">
+                  <strong>{t('logs.route')}:</strong> {selectedLog.route}
+                </Text>
+                <Text size="sm">
+                  <strong>{t('logs.timestamp')}:</strong>{' '}
+                  {selectedLog.createdAt ? new Date(selectedLog.createdAt).toLocaleString() : '—'}
+                </Text>
+                <Text size="sm">
+                  <strong>{t('logs.modal.tokens')}:</strong>{' '}
+                  {t('logs.modal.tokenBreakdown', {
+                    input: selectedLog.inputTokens.toLocaleString(),
+                    output: selectedLog.outputTokens.toLocaleString(),
+                    cached: (selectedLog.cachedInputTokens || 0).toLocaleString(),
+                    total: selectedLog.totalTokens.toLocaleString(),
+                  })}
+                </Text>
+                {selectedLog.errorMessage && (
+                  <Text size="sm" c="red">
+                    <strong>{t('logs.modal.error')}:</strong> {selectedLog.errorMessage}
+                  </Text>
+                )}
+              </Stack>
+            </Paper>
+
+            {/* Request / Response tabs */}
+            <Tabs defaultValue="request">
+              <Tabs.List>
+                <Tabs.Tab value="request">{t('logs.modal.request')}</Tabs.Tab>
+                <Tabs.Tab value="response">{t('logs.modal.response')}</Tabs.Tab>
+              </Tabs.List>
+
+              <Tabs.Panel value="request" pt="sm">
+                <ScrollArea h={400} type="auto">
+                  {selectedLog.providerRequest ? (
+                    <Code block style={{ whiteSpace: 'pre-wrap' }}>
+                      {JSON.stringify(selectedLog.providerRequest, null, 2)}
+                    </Code>
+                  ) : (
+                    <Center py="md">
+                      <Text size="sm" c="dimmed">
+                        {t('logs.modal.noRequest')}
+                      </Text>
+                    </Center>
+                  )}
+                </ScrollArea>
+              </Tabs.Panel>
+
+              <Tabs.Panel value="response" pt="sm">
+                <ScrollArea h={400} type="auto">
+                  {selectedLog.providerResponse ? (
+                    <Code block style={{ whiteSpace: 'pre-wrap' }}>
+                      {JSON.stringify(selectedLog.providerResponse, null, 2)}
+                    </Code>
+                  ) : (
+                    <Center py="md">
+                      <Text size="sm" c="dimmed">
+                        {t('logs.modal.noResponse')}
+                      </Text>
+                    </Center>
+                  )}
+                </ScrollArea>
+              </Tabs.Panel>
+            </Tabs>
+          </Stack>
+        )}
+      </Modal>
     </Stack>
   );
 }

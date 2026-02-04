@@ -401,8 +401,8 @@ export default function VectorIndexDetailPage() {
         withBorder
         style={{
           background:
-            'linear-gradient(135deg, var(--mantine-color-violet-0) 0%, var(--mantine-color-grape-0) 100%)',
-          borderColor: 'var(--mantine-color-violet-2)',
+            'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
+          borderColor: 'var(--mantine-color-teal-2)',
         }}
       >
         <Group justify="space-between" align="flex-start">
@@ -411,7 +411,7 @@ export default function VectorIndexDetailPage() {
               size={50}
               radius="xl"
               variant="gradient"
-              gradient={{ from: 'violet', to: 'grape', deg: 135 }}
+              gradient={{ from: 'teal', to: 'cyan', deg: 135 }}
             >
               <IconDatabase size={26} />
             </ThemeIcon>

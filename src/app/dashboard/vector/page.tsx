@@ -166,8 +166,8 @@ export default function VectorIndexPage() {
         radius="lg"
         withBorder
         style={{
-          background: 'linear-gradient(135deg, var(--mantine-color-violet-0) 0%, var(--mantine-color-grape-0) 100%)',
-          borderColor: 'var(--mantine-color-violet-2)',
+          background: 'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
+          borderColor: 'var(--mantine-color-teal-2)',
         }}>
         <Group justify="space-between" align="flex-start">
           <Group gap="md">
@@ -175,7 +175,7 @@ export default function VectorIndexPage() {
               size={50}
               radius="xl"
               variant="gradient"
-              gradient={{ from: 'violet', to: 'grape', deg: 135 }}>
+              gradient={{ from: 'teal', to: 'cyan', deg: 135 }}>
               <IconDatabase size={26} />
             </ThemeIcon>
             <div>
@@ -197,7 +197,7 @@ export default function VectorIndexPage() {
               leftSection={<IconPlus size={16} />} 
               onClick={() => setCreateModalOpen(true)}
               variant="gradient"
-              gradient={{ from: 'violet', to: 'grape', deg: 90 }}>
+              gradient={{ from: 'teal', to: 'cyan', deg: 90 }}>
               Create Index
             </Button>
           </Group>
@@ -216,7 +216,7 @@ export default function VectorIndexPage() {
                 {rows.length}
               </Text>
             </Stack>
-            <ThemeIcon size={48} radius="xl" variant="light" color="violet">
+            <ThemeIcon size={48} radius="xl" variant="light" color="teal">
               <IconDatabase size={24} />
             </ThemeIcon>
           </Group>
@@ -284,7 +284,7 @@ export default function VectorIndexPage() {
         ) : rows.length === 0 ? (
           <Center py="xl">
             <Stack gap="md" align="center">
-              <ThemeIcon size={80} radius="xl" variant="light" color="violet">
+              <ThemeIcon size={80} radius="xl" variant="light" color="teal">
                 <IconDatabase size={40} />
               </ThemeIcon>
               <Stack gap={4} align="center">
@@ -301,7 +301,7 @@ export default function VectorIndexPage() {
                 leftSection={<IconPlus size={16} />} 
                 onClick={() => setCreateModalOpen(true)}
                 variant="gradient"
-                gradient={{ from: 'violet', to: 'grape', deg: 90 }}>
+                gradient={{ from: 'teal', to: 'cyan', deg: 90 }}>
                 Create Index
               </Button>
             </Stack>
@@ -339,7 +339,7 @@ export default function VectorIndexPage() {
                     >
                       <Table.Td>
                         <Group gap="sm">
-                          <ThemeIcon size={40} radius="md" variant="light" color="violet">
+                          <ThemeIcon size={40} radius="md" variant="light" color="teal">
                             <IconDatabase size={20} />
                           </ThemeIcon>
                           <Stack gap={2}>
@@ -363,7 +363,7 @@ export default function VectorIndexPage() {
                       </Table.Td>
                       <Table.Td>
                         <Center>
-                          <Badge variant="filled" color="violet" size="md" radius="sm">
+                          <Badge variant="filled" color="teal" size="md" radius="sm">
                             {index.dimension}
                           </Badge>
                         </Center>

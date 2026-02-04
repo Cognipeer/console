@@ -10,8 +10,8 @@ interface DashboardRouteLayoutProps {
 
 export default async function DashboardRouteLayout({ children }: DashboardRouteLayoutProps) {
   const h = await headers();
-  const email = h.get('x-user-email') ?? 'user@example.com';
-  const licenseType = h.get('x-license-type') ?? 'FREE';
+  const email = h.get('x-user-email') ?? '';
+  const licenseType = h.get('x-license-type') ?? '—';
   const role = (h.get('x-user-role') ?? 'user') as
     | 'owner'
     | 'admin'
@@ -41,7 +41,7 @@ export default async function DashboardRouteLayout({ children }: DashboardRouteL
   return (
     <DashboardLayout
       user={{
-        name: email.split('@')[0] || 'User',
+        name: email ? email.split('@')[0] : 'Account',
         email,
         licenseType,
         role,

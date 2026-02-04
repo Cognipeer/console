@@ -11,21 +11,35 @@ export const en = {
   layout: {
     brandTitle: '🚀 CognipeerAI Gateway',
     defaultUser: {
-      name: 'User',
-      email: 'user@example.com',
-      license: 'FREE',
+      name: 'Account',
+      email: '',
+      license: '—',
     },
   },
   navigation: {
     dashboard: 'Dashboard',
+    dashboardOverview: 'Dashboard',
+    services: 'Services',
+    servicesLabel: 'All services',
+    globalSearchPlaceholder: 'Search across services, docs, and data',
+    servicesHome: 'Services Home',
+    servicesHomeDescription: 'Browse every available module',
     models: 'Models',
+    modelsDescription: 'Configure LLM providers and models',
     prompts: 'Prompts',
+    promptsDescription: 'Manage reusable prompts',
     agentTracing: 'Agent Tracing',
+    agentTracingDescription: 'Monitor sessions and runs',
     vector: 'Vector Indexes',
+    vectorDescription: 'Vector stores and embeddings',
     files: 'Files',
+    filesDescription: 'Buckets and storage integrations',
     settings: 'Settings',
+    settingsDescription: 'API tokens and access controls',
     tenantSettings: 'Tenant Settings',
+    tenantSettingsDescription: 'Users, projects, and providers',
     projects: 'Projects',
+    projectsDescription: 'Project context and access',
     docs: 'Docs',
   },
   notifications: {
@@ -50,6 +64,7 @@ export const en = {
   },
   breadcrumbs: {
     dashboard: 'Dashboard',
+    overview: 'Overview',
     tracing: 'Agent Tracing',
     models: 'Models',
     vector: 'Vector Indexes',
@@ -140,7 +155,7 @@ export const en = {
   },
   settings: {
     title: 'Tenant Settings',
-    subtitle: 'Manage tenant members, projects, and configuration',
+    subtitle: 'Manage members, projects, and provider configuration in one place.',
     tabs: {
       users: 'User Management',
       tokens: 'API Tokens',
@@ -555,102 +570,83 @@ export const en = {
     },
   },
   dashboard: {
-    mockUser: {
-      name: 'Demo User',
-      email: 'demo@example.com',
-      licenseType: 'PROFESSIONAL',
-      features: {
-        llmChat: 'LLM_CHAT',
-        agentOrchestration: 'AGENT_ORCHESTRATION',
-        analytics: 'ANALYTICS',
+    landing: {
+      title: 'Services',
+      subtitle: 'Browse all available modules and jump directly into a workspace.',
+      searchPlaceholder: 'Search services, features, or keywords',
+      results: '{count} services',
+      empty: 'No services match your search yet.',
+    },
+    filters: {
+      all: 'All',
+      build: 'Build',
+      data: 'Data',
+      operate: 'Operate',
+      admin: 'Admin',
+    },
+    modules: {
+      models: {
+        title: 'Models',
+        description: 'Configure LLM providers, models, and pricing controls.',
+      },
+      prompts: {
+        title: 'Prompts',
+        description: 'Organize prompt templates and reusable system instructions.',
+      },
+      vector: {
+        title: 'Vector Indexes',
+        description: 'Create, inspect, and query tenant vector stores.',
+      },
+      files: {
+        title: 'Files',
+        description: 'Manage file buckets and storage integrations.',
+      },
+      tracing: {
+        title: 'Agent Tracing',
+        description: 'Monitor sessions, runs, and observability signals.',
+      },
+      projects: {
+        title: 'Projects',
+        description: 'Switch between projects and manage access contexts.',
+      },
+      settings: {
+        title: 'Settings',
+        description: 'Manage users, providers, and API tokens.',
       },
     },
-    hero: {
-      title: 'Welcome back, {name}! 👋',
-      subtitle: "Here's what's happening with your AI services today.",
-    },
+  },
+  dashboardOverview: {
+    title: 'Dashboard Overview',
+    subtitle: 'Operational highlights across your workspace.',
     stats: {
       apiRequests: 'API Requests',
-      activeAgents: 'Active Sessions',
-      vectorStores: 'Vector Indexes',
-      llmModels: 'Models',
-      vsLastWeek: 'vs. last week',
-      agentsRunning: 'sessions running',
-      totalIndexes: 'total indexes',
-      configuredModels: 'configured',
-    },
-    quickActions: {
-      title: 'Quick Actions',
-      subtitle: 'Jump to common tasks',
-      configureModels: 'Configure Models',
-      configureModelsDesc: 'Add or manage LLM providers',
+      activeSessions: 'Active Sessions',
       vectorIndexes: 'Vector Indexes',
-      vectorIndexesDesc: 'Create and query vector stores',
-      agentTracing: 'Agent Tracing',
-      agentTracingDesc: 'Monitor agent sessions',
-      apiTokens: 'API Tokens',
-      apiTokensDesc: 'Manage access credentials',
+      models: 'Models',
     },
-    recentActivity: {
+    activity: {
       title: 'Recent Activity',
-      subtitle: 'Latest API calls and events',
       viewAll: 'View All',
-      empty: 'No recent activity. Start using the API to see activity here.',
+      empty: 'No recent activity yet.',
       table: {
         service: 'Service',
         endpoint: 'Endpoint',
         status: 'Status',
         time: 'Time',
       },
-      items: {
-        llmChat: {
-          service: 'LLM Chat',
-          timestamp: '2 min ago',
-        },
-        agentRun: {
-          service: 'Agent Run',
-          timestamp: '5 min ago',
-        },
-        vectorQuery: {
-          service: 'Vector Query',
-          timestamp: '12 min ago',
-        },
-        embeddings: {
-          service: 'Embeddings',
-          timestamp: '18 min ago',
-        },
-        analytics: {
-          service: 'Analytics',
-          timestamp: '25 min ago',
-        },
-      },
     },
-    usage: {
-      title: 'Usage Summary',
-      active: 'Active',
-      totalTokens: 'Total Tokens (30d)',
-      summary: 'Summary',
-      totalSessions: 'Total Sessions',
-      modelsConfigured: 'Models Configured',
-      vectorIndexes: 'Vector Indexes',
-      viewDetails: 'View Details',
+    plan: {
+      title: 'Plan Summary',
+      status: 'Active',
+      usage: 'API Usage',
+      features: 'Active Features',
     },
     resources: {
       title: 'Resources',
-      apiDocs: 'API Documentation',
-      apiDocsDesc: 'Learn how to integrate with our APIs',
-      sdkExamples: 'SDK Examples',
-      sdkExamplesDesc: 'Code samples for quick start',
-    },
-    error: {
-      title: 'Failed to load dashboard',
-      retry: 'Retry',
-    },
-    plan: {
-      title: 'Your Plan',
-      licenseLabel: 'License Type',
-      featuresLabel: 'Active Features',
-      upgradeCta: 'Upgrade Plan',
+      docs: 'API Documentation',
+      docsDesc: 'Reference the API surface and examples',
+      sdk: 'Agent SDK',
+      sdkDesc: 'Instrument agents with the SDK',
     },
   },
   models: {
@@ -800,6 +796,35 @@ export const en = {
       modelId: 'Provider model ID is required.',
     },
   },
+  playground: {
+    title: 'Playground',
+    form: {
+      modelLabel: 'Model',
+      modelPlaceholder: 'Select a model',
+      systemPromptLabel: 'System Prompt',
+      systemPromptPlaceholder: 'Enter instructions for the assistant...',
+      inputPlaceholder: 'Type your message and press Enter...',
+    },
+    actions: {
+      send: 'Send',
+      stop: 'Stop',
+      clear: 'Clear conversation',
+      refreshModels: 'Refresh models',
+    },
+    emptyState: {
+      title: 'Start a conversation',
+      subtitle: 'Send a message to begin chatting with the model',
+    },
+    info: {
+      usingModel: 'Using model',
+    },
+    errors: {
+      loadModelsTitle: 'Failed to load models',
+      loadModelsMessage: 'Could not fetch available models. Please try again.',
+      chatTitle: 'Chat error',
+      chatMessage: 'Something went wrong while processing your message.',
+    },
+  },
   modelDetail: {
     actions: {
       backToList: 'Back to models',
@@ -854,11 +879,25 @@ export const en = {
       status: 'Status',
       latency: 'Latency',
       tokens: 'Tokens',
+      details: 'Details',
       success: 'Success',
       error: 'Error',
       empty: 'No requests have been logged yet.',
       tokenSummary: 'In: {input} • Out: {output}',
       viewAndEdit: 'Need to adjust credentials? Jump to the edit page.',
+      viewDetails: 'View request details',
+      modal: {
+        title: 'Request Details',
+        requestId: 'Request ID',
+        tokens: 'Token usage',
+        tokenBreakdown: 'Input: {input} • Output: {output} • Cached: {cached} • Total: {total}',
+        toolCalls: '{count} tool calls',
+        error: 'Error',
+        request: 'Request',
+        response: 'Response',
+        noRequest: 'Request data not available.',
+        noResponse: 'Response data not available.',
+      },
     },
     settings: {
       empty: 'No provider settings have been configured.',
@@ -889,6 +928,52 @@ export const en = {
     },
     errors: {
       notFound: 'This model could not be found.',
+    },
+  },
+  promptDetail: {
+    actions: {
+      backToList: 'Back to prompts',
+      refresh: 'Refresh',
+      edit: 'Edit prompt',
+      versionHistory: 'Version history',
+    },
+    notifications: {
+      refreshedTitle: 'Data refreshed',
+      refreshedMessage: 'Latest prompt data is now visible.',
+      errorTitle: 'Unable to load prompt',
+      errorMessage: 'We could not load the prompt detail. Please try again shortly.',
+    },
+    sections: {
+      template: 'Template',
+      variables: 'Variables',
+      preview: 'Live Preview',
+      renderedOutput: 'Rendered Output',
+      info: 'Prompt Info',
+      recentVersions: 'Recent Versions',
+      playground: 'Test with Playground',
+      playgroundChat: 'Chat Playground',
+    },
+    form: {
+      previewDataLabel: 'Preview Data (JSON)',
+      previewDataDescription: 'Provide sample data to preview the rendered template',
+    },
+    fields: {
+      key: 'Key',
+      version: 'Current version',
+      createdAt: 'Created at',
+      updatedAt: 'Last updated',
+    },
+    versions: {
+      version: 'Version',
+      createdAt: 'Created',
+      preview: 'Template preview',
+      empty: 'No version history available.',
+    },
+    playground: {
+      description: 'Test your prompt with different models. The rendered template will be used as the system prompt.',
+    },
+    errors: {
+      notFound: 'This prompt could not be found.',
     },
   },
   tracings: {

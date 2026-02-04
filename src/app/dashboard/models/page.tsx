@@ -301,8 +301,8 @@ export default function ModelsPage() {
         radius="lg"
         withBorder
         style={{
-          background: 'linear-gradient(135deg, var(--mantine-color-blue-0) 0%, var(--mantine-color-violet-0) 100%)',
-          borderColor: 'var(--mantine-color-blue-2)',
+          background: 'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
+          borderColor: 'var(--mantine-color-teal-2)',
         }}>
         <Group justify="space-between" align="flex-start">
           <Group gap="md">
@@ -310,7 +310,7 @@ export default function ModelsPage() {
               size={50}
               radius="xl"
               variant="gradient"
-              gradient={{ from: 'blue', to: 'violet', deg: 135 }}>
+              gradient={{ from: 'teal', to: 'cyan', deg: 135 }}>
               <IconBrain size={26} />
             </ThemeIcon>
             <div>
@@ -328,7 +328,7 @@ export default function ModelsPage() {
               onClick={openCreateModal} 
               leftSection={<IconPlus size={16} />}
               variant="gradient"
-              gradient={{ from: 'blue', to: 'violet', deg: 90 }}>
+              gradient={{ from: 'teal', to: 'cyan', deg: 90 }}>
               {t('actions.create')}
             </Button>
           </Group>
@@ -358,11 +358,11 @@ export default function ModelsPage() {
               <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
                 {t('metrics.llmModels')}
               </Text>
-              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="blue">
+              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="teal">
                 {llmModels.length}
               </Text>
             </Stack>
-            <ThemeIcon size={48} radius="xl" variant="light" color="blue">
+            <ThemeIcon size={48} radius="xl" variant="light" color="teal">
               <IconBrain size={24} />
             </ThemeIcon>
           </Group>
@@ -373,11 +373,11 @@ export default function ModelsPage() {
               <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
                 {t('metrics.embeddingModels')}
               </Text>
-              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="violet">
+              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="cyan">
                 {embeddingModels.length}
               </Text>
             </Stack>
-            <ThemeIcon size={48} radius="xl" variant="light" color="violet">
+            <ThemeIcon size={48} radius="xl" variant="light" color="cyan">
               <IconCpu size={24} />
             </ThemeIcon>
           </Group>
@@ -402,28 +402,28 @@ export default function ModelsPage() {
       <Stack gap="lg">
         <Paper p="lg" radius="lg" withBorder>
           <Group gap="sm" mb="md">
-            <ThemeIcon variant="gradient" gradient={{ from: 'blue', to: 'cyan', deg: 90 }} radius="md" size="lg">
+            <ThemeIcon variant="gradient" gradient={{ from: 'teal', to: 'cyan', deg: 90 }} radius="md" size="lg">
               <IconBrain size={20} />
             </ThemeIcon>
             <div>
               <Text fw={600} size="md">{t('list.sections.llm')}</Text>
               <Text size="xs" c="dimmed">Large Language Models for chat and completion</Text>
             </div>
-            <Badge variant="filled" color="blue" size="lg" ml="auto">{llmModels.length}</Badge>
+            <Badge variant="filled" color="teal" size="lg" ml="auto">{llmModels.length}</Badge>
           </Group>
           {renderModelTable(llmModels, 'llm')}
         </Paper>
 
         <Paper p="lg" radius="lg" withBorder>
           <Group gap="sm" mb="md">
-            <ThemeIcon variant="gradient" gradient={{ from: 'violet', to: 'grape', deg: 90 }} radius="md" size="lg">
+            <ThemeIcon variant="gradient" gradient={{ from: 'teal', to: 'cyan', deg: 90 }} radius="md" size="lg">
               <IconCpu size={20} />
             </ThemeIcon>
             <div>
               <Text fw={600} size="md">{t('list.sections.embedding')}</Text>
               <Text size="xs" c="dimmed">Embedding models for vector representations</Text>
             </div>
-            <Badge variant="filled" color="violet" size="lg" ml="auto">{embeddingModels.length}</Badge>
+            <Badge variant="filled" color="teal" size="lg" ml="auto">{embeddingModels.length}</Badge>
           </Group>
           {renderModelTable(embeddingModels, 'embedding')}
         </Paper>

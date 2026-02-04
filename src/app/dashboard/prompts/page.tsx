@@ -1,8 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import {
-  ActionIcon,
   Badge,
   Button,
   Center,
@@ -15,22 +15,16 @@ import {
   TextInput,
   Title,
   ThemeIcon,
-  Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
-  IconEdit,
   IconPlus,
   IconRefresh,
-  IconTrash,
   IconSparkles,
   IconSearch,
-  IconCopy,
-  IconHistory,
 } from '@tabler/icons-react';
 import PromptEditorModal from '@/components/prompts/PromptEditorModal';
-import PromptVersionHistoryModal from '@/components/prompts/PromptVersionHistoryModal';
-import type { PromptView, PromptVersionView } from '@/lib/services/prompts';
+import type { PromptView } from '@/lib/services/prompts';
 import { useTranslations } from '@/lib/i18n';
 
 function formatDate(value?: string | Date) {
@@ -42,14 +36,12 @@ function formatDate(value?: string | Date) {
 
 export default function PromptsPage() {
   const tNav = useTranslations('navigation');
+  const router = useRouter();
   const [prompts, setPrompts] = useState<PromptView[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
-  const [activePrompt, setActivePrompt] = useState<PromptView | null>(null);
   const [search, setSearch] = useState('');
-  const [versionHistoryOpen, setVersionHistoryOpen] = useState(false);
-  const [versionHistoryPrompt, setVersionHistoryPrompt] = useState<PromptView | null>(null);
 
   const loadPrompts = useCallback(async () => {
     setRefreshing(true);
@@ -79,35 +71,14 @@ export default function PromptsPage() {
     void loadPrompts();
   }, [loadPrompts]);
 
-  const handleDelete = async (prompt: PromptView) => {
-    const confirmed = window.confirm(`Delete prompt "${prompt.name}"? This cannot be undone.`);
-    if (!confirmed) return;
-
-    try {
-      const response = await fetch(`/api/prompts/${prompt.id}`, { method: 'DELETE' });
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({ error: 'Failed to delete prompt' }));
-        throw new Error(error.error ?? 'Failed to delete prompt');
-      }
-      setPrompts((current) => current.filter((item) => item.id !== prompt.id));
-      notifications.show({
-        title: 'Prompt deleted',
-        message: `${prompt.name} was removed.`,
-        color: 'teal',
-      });
-    } catch (error) {
-      notifications.show({
-        title: 'Unable to delete prompt',
-        message: error instanceof Error ? error.message : 'Unexpected error',
-        color: 'red',
-      });
-    }
-  };
-
   const rows = useMemo(
     () =>
       prompts.map((prompt) => (
-        <Table.Tr key={prompt.id}>
+        <Table.Tr
+          key={prompt.id}
+          onClick={() => router.push(`/dashboard/prompts/${prompt.id}`)}
+          style={{ cursor: 'pointer', transition: 'background-color 0.15s ease' }}
+        >
           <Table.Td>
             <Stack gap={2}>
               <Text fw={600}>{prompt.name}</Text>
@@ -131,61 +102,10 @@ export default function PromptsPage() {
             </Badge>
           </Table.Td>
           <Table.Td>{formatDate(prompt.updatedAt ?? prompt.createdAt)}</Table.Td>
-          <Table.Td>
-            <Group gap="xs">
-              <Tooltip label="Copy key">
-                <ActionIcon
-                  variant="subtle"
-                  onClick={() => {
-                    navigator.clipboard.writeText(prompt.key).catch(() => null);
-                    notifications.show({
-                      title: 'Copied',
-                      message: 'Prompt key copied to clipboard.',
-                      color: 'teal',
-                    });
-                  }}
-                >
-                  <IconCopy size={16} />
-                </ActionIcon>
-              </Tooltip>
-              <Tooltip label="Version history">
-                <ActionIcon
-                  variant="subtle"
-                  onClick={() => {
-                    setVersionHistoryPrompt(prompt);
-                    setVersionHistoryOpen(true);
-                  }}
-                >
-                  <IconHistory size={16} />
-                </ActionIcon>
-              </Tooltip>
-              <Tooltip label="Edit">
-                <ActionIcon
-                  variant="subtle"
-                  onClick={() => {
-                    setActivePrompt(prompt);
-                    setEditorOpen(true);
-                  }}
-                >
-                  <IconEdit size={16} />
-                </ActionIcon>
-              </Tooltip>
-              <Tooltip label="Delete">
-                <ActionIcon
-                  variant="subtle"
-                  color="red"
-                  onClick={() => handleDelete(prompt)}
-                >
-                  <IconTrash size={16} />
-                </ActionIcon>
-              </Tooltip>
-            </Group>
-          </Table.Td>
         </Table.Tr>
       )),
-    [prompts],
+    [prompts, router],
   );
-
 
   const handleSaved = (prompt: PromptView) => {
     setPrompts((current) => {
@@ -197,10 +117,6 @@ export default function PromptsPage() {
     });
   };
 
-  const handleVersionRestored = () => {
-    void loadPrompts();
-  };
-
   return (
     <Stack gap="lg">
       <Paper
@@ -208,8 +124,8 @@ export default function PromptsPage() {
         radius="lg"
         withBorder
         style={{
-          background: 'linear-gradient(135deg, var(--mantine-color-indigo-0) 0%, var(--mantine-color-blue-0) 100%)',
-          borderColor: 'var(--mantine-color-indigo-2)',
+          background: 'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
+          borderColor: 'var(--mantine-color-teal-2)',
         }}
       >
         <Group justify="space-between" align="flex-start">
@@ -218,7 +134,7 @@ export default function PromptsPage() {
               size={50}
               radius="xl"
               variant="gradient"
-              gradient={{ from: 'indigo', to: 'blue', deg: 135 }}
+              gradient={{ from: 'teal', to: 'cyan', deg: 135 }}
             >
               <IconSparkles size={26} />
             </ThemeIcon>
@@ -240,12 +156,9 @@ export default function PromptsPage() {
             </Button>
             <Button
               leftSection={<IconPlus size={16} />}
-              onClick={() => {
-                setActivePrompt(null);
-                setEditorOpen(true);
-              }}
+              onClick={() => setEditorOpen(true)}
               variant="gradient"
-              gradient={{ from: 'indigo', to: 'blue', deg: 90 }}
+              gradient={{ from: 'teal', to: 'cyan', deg: 90 }}
             >
               New prompt
             </Button>
@@ -283,7 +196,6 @@ export default function PromptsPage() {
                 <Table.Th>Key</Table.Th>
                 <Table.Th>Version</Table.Th>
                 <Table.Th>Updated</Table.Th>
-                <Table.Th>Actions</Table.Th>
               </Table.Tr>
             </Table.Thead>
             <Table.Tbody>{rows}</Table.Tbody>
@@ -294,15 +206,8 @@ export default function PromptsPage() {
       <PromptEditorModal
         opened={editorOpen}
         onClose={() => setEditorOpen(false)}
-        prompt={activePrompt}
+        prompt={null}
         onSaved={handleSaved}
-      />
-
-      <PromptVersionHistoryModal
-        opened={versionHistoryOpen}
-        onClose={() => setVersionHistoryOpen(false)}
-        prompt={versionHistoryPrompt}
-        onVersionRestored={handleVersionRestored}
       />
     </Stack>
   );

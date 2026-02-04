@@ -15,8 +15,8 @@ export default async function DashboardDocsPage({ searchParams }: DocsPageProps)
     <Stack gap="lg">
       <Paper withBorder radius="lg" p="xl" style={{
         background:
-          'linear-gradient(135deg, var(--mantine-color-gray-0) 0%, var(--mantine-color-teal-0) 100%)',
-        borderColor: 'var(--mantine-color-gray-2)',
+          'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
+        borderColor: 'var(--mantine-color-teal-2)',
       }}>
         <Group justify="space-between" align="flex-start">
           <div>

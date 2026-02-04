@@ -8,6 +8,7 @@ import { useTranslations } from '@/lib/i18n';
 
 const SEGMENT_KEYS: Record<string, string> = {
   dashboard: 'dashboard',
+  overview: 'overview',
   tracing: 'tracing',
   models: 'models',
   sessions: 'sessions',

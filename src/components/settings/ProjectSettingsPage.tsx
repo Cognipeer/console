@@ -1,9 +1,9 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { Paper, Stack, Tabs, Text, Title, Group, ThemeIcon, Center, Loader } from '@mantine/core';
+import { Paper, Stack, Text, Title, Group, ThemeIcon, Center, Loader } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { IconFolder, IconUsers, IconPlug, IconKey } from '@tabler/icons-react';
+import { IconFolder } from '@tabler/icons-react';
 import ProjectMembersManager from '@/components/projects/ProjectMembersManager';
 import ProjectProvidersManager from '@/components/projects/ProjectProvidersManager';
 import TokenManagement from '@/components/settings/TokenManagement';
@@ -15,7 +15,6 @@ type Project = {
 };
 
 export default function ProjectSettingsPage() {
-  const [activeTab, setActiveTab] = useState<string | null>('users');
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | undefined>(undefined);
   const [loading, setLoading] = useState(true);
@@ -71,15 +70,15 @@ export default function ProjectSettingsPage() {
         radius="lg"
         withBorder
         style={{
-          background: 'linear-gradient(135deg, var(--mantine-color-blue-0) 0%, var(--mantine-color-cyan-0) 100%)',
-          borderColor: 'var(--mantine-color-blue-2)',
+          background: 'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
+          borderColor: 'var(--mantine-color-teal-2)',
         }}>
         <Group gap="md">
           <ThemeIcon
             size={50}
             radius="xl"
             variant="gradient"
-            gradient={{ from: 'blue', to: 'cyan', deg: 135 }}>
+            gradient={{ from: 'teal', to: 'cyan', deg: 135 }}>
             <IconFolder size={26} />
           </ThemeIcon>
           <div>
@@ -91,8 +90,8 @@ export default function ProjectSettingsPage() {
         </Group>
       </Paper>
 
-      <Paper radius="lg" withBorder style={{ overflow: 'hidden' }}>
-        {!activeProjectId ? (
+      {!activeProjectId ? (
+        <Paper radius="lg" withBorder>
           <Center py="xl">
             {loading ? (
               <Loader size="md" color="teal" />
@@ -109,43 +108,22 @@ export default function ProjectSettingsPage() {
               </Stack>
             )}
           </Center>
-        ) : (
-          <Tabs value={activeTab} onChange={setActiveTab} variant="default">
-            <Tabs.List style={{ borderBottom: '1px solid var(--mantine-color-gray-2)', padding: '0 16px' }}>
-              <Tabs.Tab 
-                value="users" 
-                leftSection={<IconUsers size={16} />}
-                style={{ padding: '16px 20px' }}>
-                Users
-              </Tabs.Tab>
-              <Tabs.Tab 
-                value="providers" 
-                leftSection={<IconPlug size={16} />}
-                style={{ padding: '16px 20px' }}>
-                Providers
-              </Tabs.Tab>
-              <Tabs.Tab 
-                value="tokens" 
-                leftSection={<IconKey size={16} />}
-                style={{ padding: '16px 20px' }}>
-                Tokens
-              </Tabs.Tab>
-            </Tabs.List>
+        </Paper>
+      ) : (
+        <>
+          <Paper radius="lg" withBorder p={0} style={{ overflow: 'hidden' }}>
+            <ProjectMembersManager projectId={String(activeProjectId)} readOnly={membersReadOnly} />
+          </Paper>
 
-            <Tabs.Panel value="users" p="lg">
-              <ProjectMembersManager projectId={String(activeProjectId)} readOnly={membersReadOnly} />
-            </Tabs.Panel>
+          <Paper radius="lg" withBorder p={0} style={{ overflow: 'hidden' }}>
+            <ProjectProvidersManager projectId={String(activeProjectId)} />
+          </Paper>
 
-            <Tabs.Panel value="providers" p="lg">
-              <ProjectProvidersManager projectId={String(activeProjectId)} />
-            </Tabs.Panel>
-
-            <Tabs.Panel value="tokens" p="lg">
-              <TokenManagement />
-            </Tabs.Panel>
-          </Tabs>
-        )}
-      </Paper>
+          <Paper radius="lg" withBorder p={0} style={{ overflow: 'hidden' }}>
+            <TokenManagement />
+          </Paper>
+        </>
+      )}
     </Stack>
   );
 }

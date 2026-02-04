@@ -74,7 +74,7 @@ export default function ProjectSelector() {
   return (
     <Group gap="xs" wrap="nowrap">
       <Select
-        w={220}
+        w={{ base: 140, sm: 220 }}
         data={options}
         value={active ?? null}
         onChange={handleChange}

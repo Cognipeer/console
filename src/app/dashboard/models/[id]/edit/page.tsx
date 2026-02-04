@@ -291,8 +291,8 @@ export default function EditModelPage() {
         withBorder
         style={{
           background:
-            'linear-gradient(135deg, var(--mantine-color-blue-0) 0%, var(--mantine-color-violet-0) 100%)',
-          borderColor: 'var(--mantine-color-blue-2)',
+            'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
+          borderColor: 'var(--mantine-color-teal-2)',
         }}
       >
         <Group justify="space-between" align="flex-start">
@@ -301,7 +301,7 @@ export default function EditModelPage() {
               size={50}
               radius="xl"
               variant="gradient"
-              gradient={{ from: 'blue', to: 'violet', deg: 135 }}
+              gradient={{ from: 'teal', to: 'cyan', deg: 135 }}
             >
               <IconBrain size={26} />
             </ThemeIcon>

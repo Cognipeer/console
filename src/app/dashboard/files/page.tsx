@@ -16,8 +16,8 @@ export default function FilesDashboardPage() {
         radius="lg"
         withBorder
         style={{
-          background: 'linear-gradient(135deg, var(--mantine-color-cyan-0) 0%, var(--mantine-color-teal-0) 100%)',
-          borderColor: 'var(--mantine-color-cyan-2)',
+          background: 'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
+          borderColor: 'var(--mantine-color-teal-2)',
         }}>
         <Group justify="space-between" align="flex-start">
           <Group gap="md">
@@ -25,7 +25,7 @@ export default function FilesDashboardPage() {
               size={50}
               radius="xl"
               variant="gradient"
-              gradient={{ from: 'cyan', to: 'teal', deg: 135 }}>
+              gradient={{ from: 'teal', to: 'cyan', deg: 135 }}>
               <IconFolder size={26} />
             </ThemeIcon>
             <div>
@@ -64,7 +64,7 @@ export default function FilesDashboardPage() {
         </Paper>
         <Paper withBorder radius="lg" p="lg">
           <Group gap="sm">
-            <ThemeIcon size={40} radius="md" variant="light" color="blue">
+            <ThemeIcon size={40} radius="md" variant="light" color="teal">
               <IconUpload size={20} />
             </ThemeIcon>
             <Stack gap={2}>

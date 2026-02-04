@@ -103,7 +103,8 @@ export default function PromptEditorModal({
     }
     const nextKey = generateKeyFromName(form.values.name);
     form.setFieldValue('key', nextKey);
-  }, [form.values.name, keyTouched, prompt, form]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.values.name, keyTouched, prompt]);
 
   const variables = useMemo(
     () => extractTemplateVariables(form.values.template),

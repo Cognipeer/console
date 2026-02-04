@@ -126,8 +126,8 @@ export default function FileBucketDetailPage() {
         withBorder
         style={{
           background:
-            'linear-gradient(135deg, var(--mantine-color-cyan-0) 0%, var(--mantine-color-teal-0) 100%)',
-          borderColor: 'var(--mantine-color-cyan-2)',
+            'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
+          borderColor: 'var(--mantine-color-teal-2)',
         }}
       >
         <Group justify="space-between" align="flex-start">
@@ -136,7 +136,7 @@ export default function FileBucketDetailPage() {
               size={50}
               radius="xl"
               variant="gradient"
-              gradient={{ from: 'cyan', to: 'teal', deg: 135 }}
+              gradient={{ from: 'teal', to: 'cyan', deg: 135 }}
             >
               <IconFolder size={26} />
             </ThemeIcon>

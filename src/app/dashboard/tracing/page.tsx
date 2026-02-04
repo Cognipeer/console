@@ -239,14 +239,14 @@ export default function AgentTracingPage() {
               <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
                 Total Tokens
               </Text>
-              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="blue">
+              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="teal">
                 {formatNumber(totals.totalTokens)}
               </Text>
               <Text size="xs" c="dimmed">
                 Avg: {formatNumber(totals.averageTokensPerSession)}/session
               </Text>
             </Stack>
-            <ThemeIcon size={48} radius="xl" variant="light" color="blue">
+            <ThemeIcon size={48} radius="xl" variant="light" color="teal">
               <IconCpu size={24} />
             </ThemeIcon>
           </Group>
@@ -257,14 +257,14 @@ export default function AgentTracingPage() {
               <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
                 Total Events
               </Text>
-              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="violet">
+              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="cyan">
                 {formatNumber(totals.totalEvents)}
               </Text>
               <Text size="xs" c="dimmed">
                 Avg duration: {formatDuration(totals.averageDurationMs)}
               </Text>
             </Stack>
-            <ThemeIcon size={48} radius="xl" variant="light" color="violet">
+            <ThemeIcon size={48} radius="xl" variant="light" color="cyan">
               <IconMessage size={24} />
             </ThemeIcon>
           </Group>
@@ -290,9 +290,9 @@ export default function AgentTracingPage() {
       </SimpleGrid>
 
       {/* Quick Start Info Card */}
-      <Paper withBorder radius="lg" p="lg" style={{ background: 'var(--mantine-color-blue-0)', borderColor: 'var(--mantine-color-blue-2)' }}>
+      <Paper withBorder radius="lg" p="lg" style={{ background: 'var(--mantine-color-teal-0)', borderColor: 'var(--mantine-color-teal-2)' }}>
         <Group align="flex-start" gap="md">
-          <ThemeIcon size={40} radius="md" variant="light" color="blue">
+          <ThemeIcon size={40} radius="md" variant="light" color="teal">
             <IconInfoCircle size={20} />
           </ThemeIcon>
           <Stack gap={6} style={{ flex: 1 }}>
@@ -385,7 +385,7 @@ export default function AgentTracingPage() {
         <SimpleGrid cols={{ base: 1, md: 3 }} spacing="md">
           <Paper withBorder p="md" radius="lg">
             <Group gap="sm" mb="md">
-              <ThemeIcon size={32} radius="md" variant="light" color="blue">
+              <ThemeIcon size={32} radius="md" variant="light" color="teal">
                 <IconChartBar size={16} />
               </ThemeIcon>
               <Text fw={600}>Status Breakdown</Text>
@@ -408,7 +408,7 @@ export default function AgentTracingPage() {
           </Paper>
           <Paper withBorder p="md" radius="lg">
             <Group gap="sm" mb="md">
-              <ThemeIcon size={32} radius="md" variant="light" color="grape">
+              <ThemeIcon size={32} radius="md" variant="light" color="teal">
                 <IconCpu size={16} />
               </ThemeIcon>
               <Text fw={600}>Top Models</Text>

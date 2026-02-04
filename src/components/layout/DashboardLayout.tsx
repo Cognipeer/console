@@ -7,26 +7,26 @@ import {
   ActionIcon,
   AppShell,
   Avatar,
-  Burger,
   Button,
   Divider,
   Group,
   Menu,
-  ScrollArea,
+  SimpleGrid,
   Stack,
   Text,
+  TextInput,
+  ThemeIcon,
   Tooltip,
   UnstyledButton,
 } from '@mantine/core';
-import { useDisclosure, useMediaQuery } from '@mantine/hooks';
+import { useDisclosure } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
 import {
   IconChevronDown,
-  IconChevronsLeft,
-  IconChevronsRight,
   IconExternalLink,
   IconLayoutDashboard,
   IconLogout,
+  IconSearch,
   IconSettings,
   IconTimeline,
   IconBrain,
@@ -38,6 +38,7 @@ import {
 } from '@tabler/icons-react';
 import { ReactNode, useMemo, useState } from 'react';
 import DashboardBreadcrumbs from './DashboardBreadcrumbs';
+import { GlobalSearch, openGlobalSearch } from './GlobalSearch';
 import { useTranslations } from '@/lib/i18n';
 import classes from './DashboardLayout.module.css';
 import ProjectSelector from '@/components/projects/ProjectSelector';
@@ -56,7 +57,6 @@ interface DashboardLayoutProps {
 
 export default function DashboardLayout({ children, user }: DashboardLayoutProps) {
   const router = useRouter();
-  const [opened, { toggle, close, open }] = useDisclosure(true);
   const [docsOpened, docsControls] = useDisclosure(false);
   const [docsDocId, setDocsDocId] = useState<SdkDocId>(DEFAULT_SDK_DOC);
   const pathname = usePathname();
@@ -64,7 +64,6 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
   const tNav = useTranslations('navigation');
   const tNotifications = useTranslations('notifications');
   const tAccount = useTranslations('account');
-  const isMobile = useMediaQuery('(max-width: 48em)');
 
   const activeDoc = useMemo(() => resolveSdkDoc(docsDocId), [docsDocId]);
 
@@ -100,62 +99,70 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
 
   const isTenantAdmin = defaultUser.role === 'owner' || defaultUser.role === 'admin';
 
-  const navItems = [
+  const serviceItems = [
     {
-      label: tNav('dashboard'),
+      label: tNav('servicesHome'),
+      description: tNav('servicesHomeDescription'),
       icon: IconLayoutDashboard,
       href: '/dashboard',
     },
     {
       label: tNav('models'),
+      description: tNav('modelsDescription'),
       icon: IconBrain,
       href: '/dashboard/models',
     },
     {
       label: tNav('prompts'),
+      description: tNav('promptsDescription'),
       icon: IconSparkles,
       href: '/dashboard/prompts',
     },
     {
       label: tNav('vector'),
+      description: tNav('vectorDescription'),
       icon: IconVectorBezier,
       href: '/dashboard/vector',
     },
     {
       label: tNav('files'),
+      description: tNav('filesDescription'),
       icon: IconFolder,
       href: '/dashboard/files',
     },
     {
       label: tNav('agentTracing'),
+      description: tNav('agentTracingDescription'),
       icon: IconTimeline,
       href: '/dashboard/tracing',
     },
+    {
+      label: tNav('projects'),
+      description: tNav('projectsDescription'),
+      icon: IconLayoutDashboard,
+      href: '/dashboard/projects',
+    },
     ...(!isTenantAdmin
       ? [
-        {
-          label: tNav('settings'),
-          icon: IconSettings,
-          href: '/dashboard/settings',
-        }
-      ]
+          {
+            label: tNav('settings'),
+            description: tNav('settingsDescription'),
+            icon: IconSettings,
+            href: '/dashboard/settings',
+          },
+        ]
       : []),
     ...(isTenantAdmin
       ? [
-        {
-          label: tNav('tenantSettings'),
-          icon: IconSettings,
-          href: '/dashboard/tenant-settings',
-        },
-      ]
+          {
+            label: tNav('tenantSettings'),
+            description: tNav('tenantSettingsDescription'),
+            icon: IconSettings,
+            href: '/dashboard/tenant-settings',
+          },
+        ]
       : []),
   ];
-
-  const activeNavHref = navItems
-    .map((item) => item.href)
-    .filter((href): href is string => typeof href === 'string' && href.length > 0)
-    .filter((href) => pathname === href || pathname.startsWith(`${href}/`))
-    .sort((a, b) => b.length - a.length)[0];
 
   const handleNavClick = (href?: string) => {
     if (!href) return;
@@ -169,22 +176,13 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
     }
 
     router.push(href);
-    if (isMobile) {
-      close();
-    }
   };
-
-  const navbarWidth = opened ? 240 : 76;
-  const collapseLabel = opened ? 'Collapse sidebar' : 'Expand sidebar';
 
   return (
     <DocsDrawerProvider value={{ openDocs }}>
+      <GlobalSearch isTenantAdmin={isTenantAdmin} />
       <AppShell
-        navbar={{
-          width: navbarWidth,
-          breakpoint: 'sm',
-          collapsed: { mobile: !opened },
-        }}
+        header={{ height: 68 }}
         aside={{
           width: 560,
           breakpoint: 'md',
@@ -192,189 +190,222 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
         }}
         padding="md"
       >
-        <AppShell.Navbar p="sm" className={classes.navbar} withBorder={false}>
-          <Stack gap="md" className={classes.sidebarContent}>
-          <Stack gap="xs" className={classes.logoRow}>
-            <Group align="center" w="100%">
-              <div
-                className={classes.logoInner}
-                data-opened={opened ? 'true' : undefined}
-              >
-                <Link href="/" className={classes.logoLink} aria-label="Cognipeer dashboard">
-                  {opened ? (
-                    <>
-                      <Image
-                        src="/images/cognipeer-logo-d.png"
-                        alt="Cognipeer logo"
-                        width={180}
-                        height={42}
-                        className={classes.logoDark}
-                        priority
-                      />
-                      <Image
-                        src="/images/cognipeer-logo-w.png"
-                        alt="Cognipeer logo"
-                        width={180}
-                        height={42}
-                        className={classes.logoLight}
-                        priority
-                      />
-                    </>
-                  ) : (
-                    <></>
-                    // <Image
-                    //   src="/images/cognipeer-icon.png"
-                    //   alt="Cognipeer icon"
-                    //   width={100}
-                    //   height={100}
-                    //   priority
-                    // />
-                  )}
-                </Link>
-              </div>
+        <AppShell.Header className={classes.header}>
+          <Group h="100%" px="md" justify="space-between" wrap="nowrap">
+            {/* Left: Logo + Navigation */}
+            <Group gap="md" wrap="nowrap">
+              <Link href="/" className={classes.headerLogo} aria-label="Cognipeer dashboard">
+                <Image
+                  src="/images/cognipeer-logo-d.png"
+                  alt="Cognipeer logo"
+                  width={140}
+                  height={32}
+                  className={classes.logoDark}
+                  priority
+                />
+                <Image
+                  src="/images/cognipeer-logo-w.png"
+                  alt="Cognipeer logo"
+                  width={140}
+                  height={32}
+                  className={classes.logoLight}
+                  priority
+                />
+              </Link>
 
-              <Tooltip label={collapseLabel} position="right" withArrow withinPortal>
-                <ActionIcon
-                  variant="filled"
+              <Divider orientation="vertical" visibleFrom="sm" />
+
+              <Group gap="xs" visibleFrom="sm">
+                <Button
+                  variant={pathname?.startsWith('/dashboard/overview') ? 'filled' : 'subtle'}
                   size="sm"
-                  radius="md"
-                  className={classes.collapseControl}
-                  visibleFrom="sm"
-                  onClick={toggle}
-                  aria-label={collapseLabel}
+                  leftSection={<IconLayoutDashboard size={16} />}
+                  onClick={() => handleNavClick('/dashboard/overview')}
                 >
-                  {opened ? <IconChevronsLeft size={16} /> : <IconChevronsRight size={16} />}
-                </ActionIcon>
-              </Tooltip>
-            </Group>
-          </Stack>
+                  {tNav('dashboardOverview')}
+                </Button>
 
-          <Divider size="xs" />
-
-          {opened ? (
-            <>
-              <ProjectSelector />
-              <Divider size="xs" />
-            </>
-          ) : null}
-
-          <ScrollArea.Autosize mah="100%" className={classes.navLinks} offsetScrollbars>
-            <Stack gap={4}>
-              {navItems.map((item) => {
-                const itemHref = item.href;
-                const isActive = itemHref ? itemHref === activeNavHref : false;
-                const linkClassName = [
-                  classes.menuLink,
-                  classes.mainLink,
-                  !opened ? classes.menuLinkCollapsed : '',
-                ]
-                  .filter(Boolean)
-                  .join(' ');
-
-                return (
-                  <Tooltip
-                    key={item.label}
-                    label={item.label}
-                    position="right"
-                    withArrow
-                    disabled={opened}
-                  >
-                    <Link
-                      href={itemHref}
-                      onClick={(event) => {
-                        event.preventDefault();
-                        handleNavClick(itemHref);
-                      }}
-                      data-active={isActive || undefined}
-                      className={linkClassName}
+                <Menu position="bottom-start" withinPortal shadow="md">
+                  <Menu.Target>
+                    <Button
+                      variant="subtle"
+                      size="sm"
+                      rightSection={<IconChevronDown size={14} />}
                     >
-                      <Group gap={10} justify={opened ? 'flex-start' : 'center'}>
-                        <item.icon size={20} />
-                        {opened && <Text size="sm">{item.label}</Text>}
-                      </Group>
-                    </Link>
-                  </Tooltip>
-                );
-              })}
-            </Stack>
-          </ScrollArea.Autosize>
+                      {tNav('services')}
+                    </Button>
+                  </Menu.Target>
+                  <Menu.Dropdown className={classes.servicesMenu}>
+                    <div className={classes.servicesGrid}>
+                      <Text size="xs" c="dimmed" tt="uppercase" fw={600} mb={8}>
+                        {tNav('servicesLabel')}
+                      </Text>
+                      <SimpleGrid cols={2} spacing="xs">
+                        {serviceItems.map((item) => (
+                          <UnstyledButton
+                            key={item.href}
+                            className={classes.servicesCard}
+                            onClick={() => handleNavClick(item.href)}
+                          >
+                            <Group gap="sm" align="flex-start" wrap="nowrap">
+                              <ThemeIcon size={34} radius="md" variant="light" color="teal">
+                                <item.icon size={18} />
+                              </ThemeIcon>
+                              <div>
+                                <Text fw={600} size="sm">
+                                  {item.label}
+                                </Text>
+                                <Text size="xs" c="dimmed" lineClamp={2}>
+                                  {item.description}
+                                </Text>
+                              </div>
+                            </Group>
+                          </UnstyledButton>
+                        ))}
+                      </SimpleGrid>
+                    </div>
+                  </Menu.Dropdown>
+                </Menu>
+              </Group>
 
-          <div className={classes.footer}>
-            <Tooltip label={tNav('docs')} position="right" withArrow disabled={opened}>
-              <UnstyledButton
-                className={classes.menuLink}
-                onClick={() => openDocs(DEFAULT_SDK_DOC)}
+              {/* Mobile menu */}
+              <Group gap="xs" hiddenFrom="sm">
+                <ActionIcon
+                  variant={pathname?.startsWith('/dashboard/overview') ? 'filled' : 'light'}
+                  radius="md"
+                  onClick={() => handleNavClick('/dashboard/overview')}
+                  aria-label={tNav('dashboardOverview')}
+                >
+                  <IconLayoutDashboard size={18} />
+                </ActionIcon>
+
+                <Menu position="bottom-start" withinPortal shadow="md">
+                  <Menu.Target>
+                    <ActionIcon variant="light" radius="md" aria-label={tNav('services')}>
+                      <IconFolder size={18} />
+                    </ActionIcon>
+                  </Menu.Target>
+                  <Menu.Dropdown className={classes.servicesMenuMobile}>
+                    <div className={classes.servicesGrid}>
+                      <Text size="xs" c="dimmed" tt="uppercase" fw={600} mb={8}>
+                        {tNav('servicesLabel')}
+                      </Text>
+                      <Stack gap="xs">
+                        {serviceItems.map((item) => (
+                          <UnstyledButton
+                            key={item.href}
+                            className={classes.servicesCard}
+                            onClick={() => handleNavClick(item.href)}
+                          >
+                            <Group gap="sm" wrap="nowrap">
+                              <ThemeIcon size={32} radius="md" variant="light" color="teal">
+                                <item.icon size={16} />
+                              </ThemeIcon>
+                              <Text fw={500} size="sm">
+                                {item.label}
+                              </Text>
+                            </Group>
+                          </UnstyledButton>
+                        ))}
+                      </Stack>
+                    </div>
+                  </Menu.Dropdown>
+                </Menu>
+              </Group>
+            </Group>
+
+            {/* Center: Search */}
+            <UnstyledButton
+              visibleFrom="md"
+              onClick={openGlobalSearch}
+              className={classes.searchButton}
+              style={{ flex: 1, maxWidth: 400 }}
+            >
+              <Group gap="xs" wrap="nowrap">
+                <IconSearch size={16} color="var(--mantine-color-dimmed)" />
+                <Text size="sm" c="dimmed">
+                  {tNav('globalSearchPlaceholder')}
+                </Text>
+                <Text size="xs" c="dimmed" ml="auto" className={classes.searchShortcut}>
+                  ⌘K
+                </Text>
+              </Group>
+            </UnstyledButton>
+
+            {/* Mobile Search */}
+            <Tooltip label={tNav('globalSearchPlaceholder')} withArrow hiddenFrom="md">
+              <ActionIcon
+                hiddenFrom="md"
+                variant="light"
+                radius="md"
+                onClick={openGlobalSearch}
+                aria-label={tNav('globalSearchPlaceholder')}
               >
-                <Group gap={10} justify={opened ? 'flex-start' : 'center'}>
-                  <IconBook size={20} />
-                  {opened && <Text size="sm">{tNav('docs')}</Text>}
-                </Group>
-              </UnstyledButton>
+                <IconSearch size={18} />
+              </ActionIcon>
             </Tooltip>
 
-            <Divider my="xs" />
+            {/* Right: Project, Docs, Account */}
+            <Group gap="sm" wrap="nowrap">
+              <ProjectSelector />
 
-            <Menu shadow="md" width={220}>
-              <Menu.Target>
-                <UnstyledButton className={classes.accountButton}>
-                  <Group
-                    gap="xs"
-                    justify={opened ? 'flex-start' : 'center'}
-                    wrap="nowrap"
+              <Tooltip label={tNav('docs')} withArrow>
+                <ActionIcon
+                  variant="light"
+                  radius="md"
+                  onClick={() => openDocs(DEFAULT_SDK_DOC)}
+                  aria-label={tNav('docs')}
+                >
+                  <IconBook size={18} />
+                </ActionIcon>
+              </Tooltip>
+
+              <Menu shadow="md" width={220} position="bottom-end">
+                <Menu.Target>
+                  <UnstyledButton className={classes.accountButton}>
+                    <Group gap="xs" wrap="nowrap">
+                      <Avatar color="teal" radius="xl" size="sm">
+                        {defaultUser.name.charAt(0)}
+                      </Avatar>
+                      <div className={classes.accountDetails}>
+                        <Text size="sm" fw={500} lineClamp={1}>
+                          {defaultUser.name}
+                        </Text>
+                        <Text c="dimmed" size="xs">
+                          {defaultUser.licenseType}
+                        </Text>
+                      </div>
+                      <IconChevronDown size={14} />
+                    </Group>
+                  </UnstyledButton>
+                </Menu.Target>
+
+                <Menu.Dropdown>
+                  <Menu.Label>{tAccount('menuLabel')}</Menu.Label>
+                  <Menu.Item
+                    leftSection={<IconSettings size={14} />}
+                    onClick={() => handleNavClick('/dashboard/settings')}
                   >
-                    <Avatar color="teal" radius="xl">
-                      {defaultUser.name.charAt(0)}
-                    </Avatar>
-                    {opened && (
-                      <>
-                        <div className={classes.accountDetails}>
-                          <Text size="sm" fw={500}>
-                            {defaultUser.name}
-                          </Text>
-                          <Text c="dimmed" size="xs">
-                            {defaultUser.licenseType}
-                          </Text>
-                        </div>
-                        <IconChevronDown size={16} />
-                      </>
-                    )}
-                  </Group>
-                </UnstyledButton>
-              </Menu.Target>
-
-              <Menu.Dropdown>
-                <Menu.Label>{tAccount('menuLabel')}</Menu.Label>
-                <Menu.Item
-                  leftSection={<IconSettings size={14} />}
-                  onClick={() => handleNavClick('/dashboard/settings')}
-                >
-                  {tAccount('settings')}
-                </Menu.Item>
-                <Menu.Divider />
-                <Menu.Item
-                  color="red"
-                  leftSection={<IconLogout size={14} />}
-                  onClick={handleLogout}
-                >
-                  {tAccount('logout')}
-                </Menu.Item>
-              </Menu.Dropdown>
-            </Menu>
-          </div>
-          </Stack>
-        </AppShell.Navbar>
+                    {tAccount('settings')}
+                  </Menu.Item>
+                  <Menu.Divider />
+                  <Menu.Item
+                    color="red"
+                    leftSection={<IconLogout size={14} />}
+                    onClick={handleLogout}
+                  >
+                    {tAccount('logout')}
+                  </Menu.Item>
+                </Menu.Dropdown>
+              </Menu>
+            </Group>
+          </Group>
+        </AppShell.Header>
 
         <AppShell.Main>
           <Stack gap="md">
             <Group gap="sm" align="center" justify="space-between">
               <Group gap="sm" align="center">
-                <Burger
-                  opened={opened}
-                  onClick={() => (opened ? close() : open())}
-                  hiddenFrom="sm"
-                  size="sm"
-                  aria-label={opened ? 'Close sidebar' : 'Open sidebar'}
-                />
                 <DashboardBreadcrumbs />
               </Group>
             </Group>

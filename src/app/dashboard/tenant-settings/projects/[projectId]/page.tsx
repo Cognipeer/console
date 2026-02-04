@@ -59,8 +59,8 @@ export default function TenantProjectSettingsPage({
         withBorder
         style={{
           background:
-            'linear-gradient(135deg, var(--mantine-color-cyan-0) 0%, var(--mantine-color-blue-0) 100%)',
-          borderColor: 'var(--mantine-color-cyan-2)',
+            'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
+          borderColor: 'var(--mantine-color-teal-2)',
         }}
       >
         <Group justify="space-between" align="flex-start">
@@ -69,7 +69,7 @@ export default function TenantProjectSettingsPage({
               size={50}
               radius="xl"
               variant="gradient"
-              gradient={{ from: 'cyan', to: 'blue', deg: 135 }}
+              gradient={{ from: 'teal', to: 'cyan', deg: 135 }}
             >
               <IconUsers size={26} />
             </ThemeIcon>
