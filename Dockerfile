@@ -21,6 +21,7 @@ ENV PORT=3000
 RUN adduser -D -u 1001 -h /home/nextjs nextjs
 
 COPY --from=builder /app/ ./
+RUN chown -R nextjs:nextjs .
 EXPOSE 3000
 USER nextjs
 CMD ["npm", "run", "start"]

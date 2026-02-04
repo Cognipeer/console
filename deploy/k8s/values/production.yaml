@@ -23,9 +23,11 @@ securityContext:
   capabilities:
     drop:
     - ALL
-  readOnlyRootFilesystem: true
-  runAsNonRoot: true
+  readOnlyRootFilesystem: false
   runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
 service:
   type: ClusterIP
   port: 3000
