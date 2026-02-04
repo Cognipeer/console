@@ -28,12 +28,22 @@ export async function POST(
       return NextResponse.json({ error: 'Prompt key is required' }, { status: 400 });
     }
 
-    const prompt = await getPromptByKey(tenantDbName, projectId, key);
+    const body = await request.json().catch(() => ({}));
+    
+    // Check for optional version in body or query
+    const { searchParams } = new URL(request.url);
+    const versionParam = searchParams.get('version') || body?.version;
+    const version = versionParam ? parseInt(String(versionParam), 10) : undefined;
+
+    if (versionParam && (Number.isNaN(version) || version === undefined || version < 1)) {
+      return NextResponse.json({ error: 'Invalid version number' }, { status: 400 });
+    }
+
+    const prompt = await getPromptByKey(tenantDbName, projectId, key, version);
     if (!prompt) {
       return NextResponse.json({ error: 'Prompt not found' }, { status: 404 });
     }
 
-    const body = await request.json().catch(() => ({}));
     const data = body?.data && typeof body.data === 'object' ? body.data : body?.variables;
 
     const rendered = renderPromptTemplate(prompt.template, data ?? {});
@@ -44,6 +54,7 @@ export async function POST(
           key: prompt.key,
           name: prompt.name,
           description: prompt.description,
+          version: prompt.currentVersion,
         },
         rendered,
       },

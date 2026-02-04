@@ -19,6 +19,7 @@ import {
   IFileRecord,
   IFileBucketRecord,
   IPrompt,
+  IPromptVersion,
   ProviderDomain,
   IQuotaPolicy,
 } from './provider.interface';
@@ -36,6 +37,7 @@ export class MongoDBProvider implements DatabaseProvider {
   private static readonly fileBucketsCollection = 'file_buckets';
   private static readonly filesCollection = 'files';
   private static readonly promptsCollection = 'prompts';
+  private static readonly promptVersionsCollection = 'prompt_versions';
   private static readonly quotaPoliciesCollection = 'quota_policies';
   private static readonly rateLimitsCollection = 'rate_limits';
   private static readonly projectsCollection = 'projects';
@@ -1974,7 +1976,7 @@ export class MongoDBProvider implements DatabaseProvider {
   }
 
   async createPrompt(
-    prompt: Omit<IPrompt, '_id' | 'createdAt' | 'updatedAt'>,
+    prompt: Omit<IPrompt, '_id' | 'createdAt' | 'updatedAt' | 'currentVersion' | 'latestVersionId'>,
   ): Promise<IPrompt> {
     const db = this.getTenantDb();
     const now = new Date();
@@ -1983,6 +1985,7 @@ export class MongoDBProvider implements DatabaseProvider {
       updatedAt: Date;
     } = {
       ...prompt,
+      currentVersion: 1,
       createdAt: now,
       updatedAt: now,
     };
@@ -2120,6 +2123,108 @@ export class MongoDBProvider implements DatabaseProvider {
       ...record,
       _id: record._id?.toString(),
     }));
+  }
+
+  // Prompt Version Operations
+
+  async createPromptVersion(
+    version: Omit<IPromptVersion, '_id' | 'createdAt'>,
+  ): Promise<IPromptVersion> {
+    const db = this.getTenantDb();
+    const now = new Date();
+    const document: Omit<IPromptVersion, '_id'> & { createdAt: Date } = {
+      ...version,
+      createdAt: now,
+    };
+
+    const result = await db
+      .collection<IPromptVersion>(MongoDBProvider.promptVersionsCollection)
+      .insertOne(document as unknown as IPromptVersion);
+
+    return {
+      ...document,
+      _id: result.insertedId.toString(),
+    };
+  }
+
+  async findPromptVersionById(id: string): Promise<IPromptVersion | null> {
+    const db = this.getTenantDb();
+    const record = await db
+      .collection<IPromptVersion>(MongoDBProvider.promptVersionsCollection)
+      .findOne({ _id: new ObjectId(id) });
+
+    if (!record) {
+      return null;
+    }
+
+    return {
+      ...record,
+      _id: record._id?.toString(),
+    };
+  }
+
+  async findPromptVersionByNumber(
+    promptId: string,
+    version: number,
+  ): Promise<IPromptVersion | null> {
+    const db = this.getTenantDb();
+    const record = await db
+      .collection<IPromptVersion>(MongoDBProvider.promptVersionsCollection)
+      .findOne({ promptId, version });
+
+    if (!record) {
+      return null;
+    }
+
+    return {
+      ...record,
+      _id: record._id?.toString(),
+    };
+  }
+
+  async listPromptVersions(promptId: string): Promise<IPromptVersion[]> {
+    const db = this.getTenantDb();
+    const records = await db
+      .collection<IPromptVersion>(MongoDBProvider.promptVersionsCollection)
+      .find({ promptId })
+      .sort({ version: -1 })
+      .toArray();
+
+    return records.map((record) => ({
+      ...record,
+      _id: record._id?.toString(),
+    }));
+  }
+
+  async setPromptLatestVersion(
+    promptId: string,
+    versionId: string,
+  ): Promise<boolean> {
+    const db = this.getTenantDb();
+
+    // First, set all versions for this prompt to isLatest: false
+    await db
+      .collection<IPromptVersion>(MongoDBProvider.promptVersionsCollection)
+      .updateMany({ promptId }, { $set: { isLatest: false } });
+
+    // Then, set the specified version to isLatest: true
+    const result = await db
+      .collection<IPromptVersion>(MongoDBProvider.promptVersionsCollection)
+      .updateOne(
+        { _id: new ObjectId(versionId), promptId },
+        { $set: { isLatest: true } },
+      );
+
+    return result.modifiedCount > 0;
+  }
+
+  async deletePromptVersions(promptId: string): Promise<boolean> {
+    const db = this.getTenantDb();
+    const result = await db
+      .collection<IPromptVersion>(MongoDBProvider.promptVersionsCollection)
+      .deleteMany({ promptId });
+
+    return result.deletedCount > 0;
   }
 
   async createProvider(

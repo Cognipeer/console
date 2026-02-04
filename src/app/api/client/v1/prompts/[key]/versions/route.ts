@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
-import { getPromptByKey } from '@/lib/services/prompts';
+import { getPromptByKey, listPromptVersions } from '@/lib/services/prompts';
 
 export const runtime = 'nodejs';
 
@@ -28,22 +28,30 @@ export async function GET(
       return NextResponse.json({ error: 'Prompt key is required' }, { status: 400 });
     }
 
-    // Check for optional version query parameter
-    const { searchParams } = new URL(request.url);
-    const versionParam = searchParams.get('version');
-    const version = versionParam ? parseInt(versionParam, 10) : undefined;
-
-    if (versionParam && (Number.isNaN(version) || version === undefined || version < 1)) {
-      return NextResponse.json({ error: 'Invalid version number' }, { status: 400 });
-    }
-
-    const prompt = await getPromptByKey(tenantDbName, projectId, key, version);
+    // First, get the prompt to find its ID
+    const prompt = await getPromptByKey(tenantDbName, projectId, key);
     if (!prompt) {
       return NextResponse.json({ error: 'Prompt not found' }, { status: 404 });
     }
 
-    return NextResponse.json({ prompt }, { status: 200 });
+    const versions = await listPromptVersions(tenantDbName, projectId, prompt.id);
+
+    return NextResponse.json({ 
+      prompt: {
+        key: prompt.key,
+        name: prompt.name,
+      },
+      versions: versions.map(v => ({
+        id: v.id,
+        version: v.version,
+        name: v.name,
+        description: v.description,
+        isLatest: v.isLatest,
+        createdAt: v.createdAt,
+        createdBy: v.createdBy,
+      })),
+    }, { status: 200 });
   } catch (error) {
-    return handleError(error, 'Client get prompt');
+    return handleError(error, 'Client list prompt versions');
   }
 }

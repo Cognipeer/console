@@ -1,6 +1,10 @@
-import type { IPrompt } from '@/lib/database';
+import type { IPrompt, IPromptVersion } from '@/lib/database';
 
 export interface PromptView extends Omit<IPrompt, '_id'> {
+  id: string;
+}
+
+export interface PromptVersionView extends Omit<IPromptVersion, '_id'> {
   id: string;
 }
 

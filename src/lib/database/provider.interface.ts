@@ -257,10 +257,27 @@ export interface IPrompt {
   description?: string;
   template: string;
   metadata?: Record<string, unknown>;
+  currentVersion: number;
+  latestVersionId?: string;
   createdBy: string;
   updatedBy?: string;
   createdAt?: Date;
   updatedAt?: Date;
+}
+
+export interface IPromptVersion {
+  _id?: ObjectId | string;
+  promptId: string;
+  tenantId: string;
+  projectId?: string;
+  version: number;
+  name: string;
+  description?: string;
+  template: string;
+  metadata?: Record<string, unknown>;
+  isLatest: boolean;
+  createdBy: string;
+  createdAt?: Date;
 }
 
 export interface IModel {
@@ -573,7 +590,7 @@ export interface DatabaseProvider {
 
   // Prompt operations (tenant-specific)
   createPrompt(
-    prompt: Omit<IPrompt, '_id' | 'createdAt' | 'updatedAt'>,
+    prompt: Omit<IPrompt, '_id' | 'createdAt' | 'updatedAt' | 'currentVersion' | 'latestVersionId'>,
   ): Promise<IPrompt>;
   updatePrompt(
     id: string,
@@ -589,6 +606,16 @@ export interface DatabaseProvider {
     projectId?: string;
     search?: string;
   }): Promise<IPrompt[]>;
+
+  // Prompt version operations (tenant-specific)
+  createPromptVersion(
+    version: Omit<IPromptVersion, '_id' | 'createdAt'>,
+  ): Promise<IPromptVersion>;
+  findPromptVersionById(id: string): Promise<IPromptVersion | null>;
+  findPromptVersionByNumber(promptId: string, version: number): Promise<IPromptVersion | null>;
+  listPromptVersions(promptId: string): Promise<IPromptVersion[]>;
+  setPromptLatestVersion(promptId: string, versionId: string): Promise<boolean>;
+  deletePromptVersions(promptId: string): Promise<boolean>;
 
   // Shared provider registry (tenant-specific)
   createProvider(

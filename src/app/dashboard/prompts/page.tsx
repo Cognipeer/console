@@ -15,6 +15,7 @@ import {
   TextInput,
   Title,
   ThemeIcon,
+  Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
@@ -25,9 +26,11 @@ import {
   IconSparkles,
   IconSearch,
   IconCopy,
+  IconHistory,
 } from '@tabler/icons-react';
 import PromptEditorModal from '@/components/prompts/PromptEditorModal';
-import type { PromptView } from '@/lib/services/prompts';
+import PromptVersionHistoryModal from '@/components/prompts/PromptVersionHistoryModal';
+import type { PromptView, PromptVersionView } from '@/lib/services/prompts';
 import { useTranslations } from '@/lib/i18n';
 
 function formatDate(value?: string | Date) {
@@ -45,6 +48,8 @@ export default function PromptsPage() {
   const [editorOpen, setEditorOpen] = useState(false);
   const [activePrompt, setActivePrompt] = useState<PromptView | null>(null);
   const [search, setSearch] = useState('');
+  const [versionHistoryOpen, setVersionHistoryOpen] = useState(false);
+  const [versionHistoryPrompt, setVersionHistoryPrompt] = useState<PromptView | null>(null);
 
   const loadPrompts = useCallback(async () => {
     setRefreshing(true);
@@ -120,38 +125,60 @@ export default function PromptsPage() {
               {prompt.key}
             </Badge>
           </Table.Td>
+          <Table.Td>
+            <Badge variant="outline" color="gray" size="sm">
+              v{prompt.currentVersion ?? 1}
+            </Badge>
+          </Table.Td>
           <Table.Td>{formatDate(prompt.updatedAt ?? prompt.createdAt)}</Table.Td>
           <Table.Td>
             <Group gap="xs">
-              <ActionIcon
-                variant="subtle"
-                onClick={() => {
-                  navigator.clipboard.writeText(prompt.key).catch(() => null);
-                  notifications.show({
-                    title: 'Copied',
-                    message: 'Prompt key copied to clipboard.',
-                    color: 'teal',
-                  });
-                }}
-              >
-                <IconCopy size={16} />
-              </ActionIcon>
-              <ActionIcon
-                variant="subtle"
-                onClick={() => {
-                  setActivePrompt(prompt);
-                  setEditorOpen(true);
-                }}
-              >
-                <IconEdit size={16} />
-              </ActionIcon>
-              <ActionIcon
-                variant="subtle"
-                color="red"
-                onClick={() => handleDelete(prompt)}
-              >
-                <IconTrash size={16} />
-              </ActionIcon>
+              <Tooltip label="Copy key">
+                <ActionIcon
+                  variant="subtle"
+                  onClick={() => {
+                    navigator.clipboard.writeText(prompt.key).catch(() => null);
+                    notifications.show({
+                      title: 'Copied',
+                      message: 'Prompt key copied to clipboard.',
+                      color: 'teal',
+                    });
+                  }}
+                >
+                  <IconCopy size={16} />
+                </ActionIcon>
+              </Tooltip>
+              <Tooltip label="Version history">
+                <ActionIcon
+                  variant="subtle"
+                  onClick={() => {
+                    setVersionHistoryPrompt(prompt);
+                    setVersionHistoryOpen(true);
+                  }}
+                >
+                  <IconHistory size={16} />
+                </ActionIcon>
+              </Tooltip>
+              <Tooltip label="Edit">
+                <ActionIcon
+                  variant="subtle"
+                  onClick={() => {
+                    setActivePrompt(prompt);
+                    setEditorOpen(true);
+                  }}
+                >
+                  <IconEdit size={16} />
+                </ActionIcon>
+              </Tooltip>
+              <Tooltip label="Delete">
+                <ActionIcon
+                  variant="subtle"
+                  color="red"
+                  onClick={() => handleDelete(prompt)}
+                >
+                  <IconTrash size={16} />
+                </ActionIcon>
+              </Tooltip>
             </Group>
           </Table.Td>
         </Table.Tr>
@@ -168,6 +195,10 @@ export default function PromptsPage() {
       }
       return [prompt, ...current];
     });
+  };
+
+  const handleVersionRestored = () => {
+    void loadPrompts();
   };
 
   return (
@@ -250,6 +281,7 @@ export default function PromptsPage() {
               <Table.Tr>
                 <Table.Th>Prompt</Table.Th>
                 <Table.Th>Key</Table.Th>
+                <Table.Th>Version</Table.Th>
                 <Table.Th>Updated</Table.Th>
                 <Table.Th>Actions</Table.Th>
               </Table.Tr>
@@ -264,6 +296,13 @@ export default function PromptsPage() {
         onClose={() => setEditorOpen(false)}
         prompt={activePrompt}
         onSaved={handleSaved}
+      />
+
+      <PromptVersionHistoryModal
+        opened={versionHistoryOpen}
+        onClose={() => setVersionHistoryOpen(false)}
+        prompt={versionHistoryPrompt}
+        onVersionRestored={handleVersionRestored}
       />
     </Stack>
   );

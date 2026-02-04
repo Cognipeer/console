@@ -148,6 +148,19 @@ function buildOverrides(body: Record<string, unknown>) {
   if (body.max_output_tokens !== undefined)
     overrides.max_output_tokens = body.max_output_tokens;
 
+  // Reasoning model support (o1, o3, o4-mini, etc.)
+  // max_completion_tokens is required for reasoning models instead of max_tokens
+  if (body.max_completion_tokens !== undefined)
+    overrides.max_completion_tokens = body.max_completion_tokens;
+
+  // reasoning parameter: { effort: "low" | "medium" | "high", summary?: "auto" | "concise" }
+  if (body.reasoning !== undefined) overrides.reasoning = body.reasoning;
+
+  // Legacy reasoning_effort parameter (deprecated but still supported)
+  // Will be mapped to reasoning.effort by LangChain
+  if (body.reasoning_effort !== undefined)
+    overrides.reasoning_effort = body.reasoning_effort;
+
   return overrides;
 }
 

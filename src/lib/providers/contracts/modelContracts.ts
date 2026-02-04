@@ -50,6 +50,11 @@ interface VertexSettings {
 interface ModelSettingsOverrides {
   temperature?: number;
   maxTokens?: number;
+  maxCompletionTokens?: number;
+  reasoning?: {
+    effort?: 'low' | 'medium' | 'high';
+    summary?: 'auto' | 'concise';
+  };
 }
 
 function resolveOverrides(overrides?: Record<string, unknown>): ModelSettingsOverrides {
@@ -61,6 +66,14 @@ function resolveOverrides(overrides?: Record<string, unknown>): ModelSettingsOve
 
   if (overrides && typeof overrides.maxTokens === 'number') {
     result.maxTokens = overrides.maxTokens;
+  }
+
+  if (overrides && typeof overrides.maxCompletionTokens === 'number') {
+    result.maxCompletionTokens = overrides.maxCompletionTokens;
+  }
+
+  if (overrides && overrides.reasoning && typeof overrides.reasoning === 'object') {
+    result.reasoning = overrides.reasoning as ModelSettingsOverrides['reasoning'];
   }
 
   return result;
@@ -97,6 +110,7 @@ export const OpenAiModelProviderContract: ProviderContract<ModelProviderRuntime,
     'model.categories': ['llm', 'embedding'],
     'model.supports.tool_calls': true,
     'model.supports.streaming': true,
+    'model.supports.reasoning': true,
   },
   form: {
     sections: [
@@ -140,7 +154,10 @@ export const OpenAiModelProviderContract: ProviderContract<ModelProviderRuntime,
             ? { organization: settings.organization }
             : undefined,
           temperature: overrides.temperature,
+          // Use maxCompletionTokens for reasoning models (o1, o3, etc.), fallback to maxTokens
+          maxCompletionTokens: overrides.maxCompletionTokens,
           maxTokens: overrides.maxTokens,
+          reasoning: overrides.reasoning,
           streaming: config.options?.streaming ?? false,
         });
       },
@@ -170,6 +187,7 @@ export const OpenAiCompatibleModelProviderContract: ProviderContract<ModelProvid
     'model.categories': ['llm', 'embedding'],
     'model.supports.tool_calls': true,
     'model.supports.streaming': true,
+    'model.supports.reasoning': true,
   },
   form: {
     sections: [
@@ -224,7 +242,10 @@ export const OpenAiCompatibleModelProviderContract: ProviderContract<ModelProvid
             organization: settings.organization,
           },
           temperature: overrides.temperature,
+          // Use maxCompletionTokens for reasoning models (o1, o3, etc.), fallback to maxTokens
+          maxCompletionTokens: overrides.maxCompletionTokens,
           maxTokens: overrides.maxTokens,
+          reasoning: overrides.reasoning,
           streaming: config.options?.streaming ?? false,
         });
       },
