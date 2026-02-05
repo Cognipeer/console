@@ -70,6 +70,7 @@ export async function PATCH(
       description: body.description,
       template: body.template,
       metadata: body.metadata,
+      versionComment: body.versionComment ?? body.comment,
       updatedBy: userId,
     });
 

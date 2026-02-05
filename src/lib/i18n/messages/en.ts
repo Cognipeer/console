@@ -934,6 +934,11 @@ export const en = {
       edit: 'Edit prompt',
       versionHistory: 'Version history',
     },
+    tabs: {
+      template: 'Template & Preview',
+      versions: 'Version History',
+      playground: 'Playground',
+    },
     notifications: {
       refreshedTitle: 'Data refreshed',
       refreshedMessage: 'Latest prompt data is now visible.',
@@ -954,6 +959,43 @@ export const en = {
       previewDataLabel: 'Preview Data (JSON)',
       previewDataDescription: 'Provide sample data to preview the rendered template',
     },
+    editor: {
+      titleEdit: 'Edit prompt',
+      titleCreate: 'Create prompt',
+      fields: {
+        name: 'Name',
+        key: 'Key',
+        description: 'Description',
+        template: 'Template',
+        versionComment: 'Version comment',
+      },
+      placeholders: {
+        name: 'Enter a prompt name',
+        key: 'Auto-generate from name',
+        description: 'Optional summary for this prompt',
+        template: 'Write your prompt template',
+        versionComment: 'Summarize what changed in this version',
+      },
+      descriptions: {
+        key: 'If left blank, a unique key will be generated automatically.',
+        versionComment: 'Visible in version history to explain changes.',
+      },
+      actions: {
+        cancel: 'Cancel',
+        save: 'Save changes',
+        create: 'Create prompt',
+      },
+      validation: {
+        name: 'Name is required',
+        template: 'Template is required',
+      },
+      notifications: {
+        savedTitle: 'Prompt saved',
+        savedMessage: 'Your changes have been stored successfully.',
+        errorTitle: 'Unable to save prompt',
+        errorMessage: 'Please review the form and try again.',
+      },
+    },
     fields: {
       key: 'Key',
       version: 'Current version',
@@ -964,10 +1006,22 @@ export const en = {
       version: 'Version',
       createdAt: 'Created',
       preview: 'Template preview',
+      comment: 'Comment',
+      template: 'Template',
       empty: 'No version history available.',
     },
     playground: {
       description: 'Test your prompt with different models. The rendered template will be used as the system prompt.',
+    },
+    comments: {
+      title: 'Comments',
+      placeholder: 'Add a comment about this prompt...',
+      add: 'Add Comment',
+      empty: 'No comments yet. Be the first to add one!',
+      addedTitle: 'Comment added',
+      addedMessage: 'Your comment has been saved.',
+      errorTitle: 'Failed to add comment',
+      errorMessage: 'Could not save your comment. Please try again.',
     },
     errors: {
       notFound: 'This prompt could not be found.',

@@ -76,6 +76,7 @@ export async function POST(request: NextRequest) {
         description: body.description,
         template: body.template,
         metadata: body.metadata,
+        versionComment: body.versionComment ?? body.comment,
       },
     );
 

@@ -46,6 +46,7 @@ export async function GET(
         version: v.version,
         name: v.name,
         description: v.description,
+        comment: v.comment,
         isLatest: v.isLatest,
         createdAt: v.createdAt,
         createdBy: v.createdBy,

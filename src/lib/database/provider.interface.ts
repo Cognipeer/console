@@ -34,6 +34,53 @@ export interface IProject {
   updatedAt?: Date;
 }
 
+export interface IPrompt {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name: string;
+  description?: string;
+  template: string;
+  metadata?: Record<string, unknown>;
+  currentVersionId?: string;
+  currentVersion?: number;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IPromptVersion {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  promptId: string;
+  version: number;
+  name: string;
+  description?: string;
+  template: string;
+  metadata?: Record<string, unknown>;
+  comment?: string;
+  isLatest?: boolean;
+  createdBy: string;
+  createdAt?: Date;
+}
+
+export interface IPromptComment {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  promptId: string;
+  versionId?: string; // If null, comment is on the prompt itself
+  version?: number; // Denormalized for easy display
+  content: string;
+  createdBy: string;
+  createdByName?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
 export interface IUser {
   _id?: ObjectId | string;
   email: string;
@@ -246,6 +293,37 @@ export interface IFileRecord {
   updatedBy?: string;
   createdAt?: Date;
   updatedAt?: Date;
+}
+
+export interface IPrompt {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name: string;
+  description?: string;
+  template: string;
+  metadata?: Record<string, unknown>;
+  currentVersion?: number;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IPromptVersion {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  promptId: string;
+  version: number;
+  name: string;
+  description?: string;
+  template: string;
+  metadata?: Record<string, unknown>;
+  comment?: string;
+  createdBy: string;
+  createdAt?: Date;
 }
 
 export interface IModel {
@@ -461,6 +539,45 @@ export interface DatabaseProvider {
   }): Promise<IModel[]>;
   findModelById(id: string, projectId?: string): Promise<IModel | null>;
   findModelByKey(key: string, projectId?: string): Promise<IModel | null>;
+
+  // Prompt management (tenant-specific)
+  createPrompt(
+    prompt: Omit<IPrompt, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IPrompt>;
+  updatePrompt(id: string, data: Partial<IPrompt>): Promise<IPrompt | null>;
+  deletePrompt(id: string): Promise<boolean>;
+  listPrompts(filters?: { projectId?: string; search?: string }): Promise<IPrompt[]>;
+  findPromptById(id: string, projectId?: string): Promise<IPrompt | null>;
+  findPromptByKey(key: string, projectId?: string): Promise<IPrompt | null>;
+
+  createPromptVersion(
+    version: Omit<IPromptVersion, '_id' | 'createdAt'>,
+  ): Promise<IPromptVersion>;
+  listPromptVersions(
+    promptId: string,
+    projectId?: string,
+  ): Promise<IPromptVersion[]>;
+  findPromptVersionById(
+    id: string,
+    promptId?: string,
+    projectId?: string,
+  ): Promise<IPromptVersion | null>;
+  deletePromptVersions(promptId: string, projectId?: string): Promise<number>;
+
+  // Prompt comments (tenant-specific)
+  createPromptComment(
+    comment: Omit<IPromptComment, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IPromptComment>;
+  listPromptComments(
+    promptId: string,
+    options?: { versionId?: string; projectId?: string },
+  ): Promise<IPromptComment[]>;
+  updatePromptComment(
+    id: string,
+    data: Partial<Pick<IPromptComment, 'content'>>,
+  ): Promise<IPromptComment | null>;
+  deletePromptComment(id: string): Promise<boolean>;
+  deletePromptCommentsByPromptId(promptId: string): Promise<number>;
 
   // Model usage logging (tenant-specific)
   createModelUsageLog(

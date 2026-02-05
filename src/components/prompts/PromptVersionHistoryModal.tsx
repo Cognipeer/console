@@ -167,6 +167,11 @@ export default function PromptVersionHistoryModal({
                     <Text size="xs" c="dimmed">
                       {formatDate(version.createdAt)}
                     </Text>
+                    {version.comment && (
+                      <Text size="xs" c="dimmed" lineClamp={1} mt={2}>
+                        {version.comment}
+                      </Text>
+                    )}
                   </Paper>
                 ))}
               </Stack>
@@ -210,6 +215,13 @@ export default function PromptVersionHistoryModal({
                   <div>
                     <Text size="sm" fw={500} mb={4}>Description</Text>
                     <Text size="sm" c="dimmed">{selectedVersion.description}</Text>
+                  </div>
+                )}
+
+                {selectedVersion.comment && (
+                  <div>
+                    <Text size="sm" fw={500} mb={4}>Comment</Text>
+                    <Text size="sm" c="dimmed">{selectedVersion.comment}</Text>
                   </div>
                 )}
 
