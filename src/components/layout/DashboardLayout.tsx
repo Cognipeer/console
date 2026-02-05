@@ -19,7 +19,7 @@ import {
   Tooltip,
   UnstyledButton,
 } from '@mantine/core';
-import { useDisclosure } from '@mantine/hooks';
+import { useDisclosure, useMediaQuery } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
 import {
   IconChevronDown,
@@ -59,6 +59,7 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
   const router = useRouter();
   const [docsOpened, docsControls] = useDisclosure(false);
   const [docsDocId, setDocsDocId] = useState<SdkDocId>(DEFAULT_SDK_DOC);
+  const isMobile = useMediaQuery('(max-width: 48em)');
   const pathname = usePathname();
   const t = useTranslations('layout');
   const tNav = useTranslations('navigation');
