@@ -15,9 +15,8 @@ import {
   Text,
   TextInput,
   Textarea,
-  ThemeIcon,
-  Title,
 } from '@mantine/core';
+import PageHeader from '@/components/layout/PageHeader';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import {
@@ -394,48 +393,26 @@ export default function VectorIndexDetailPage() {
   }
 
   return (
-    <Stack gap="lg">
-      <Paper
-        p="xl"
-        radius="lg"
-        withBorder
-        style={{
-          background:
-            'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
-          borderColor: 'var(--mantine-color-teal-2)',
-        }}
-      >
-        <Group justify="space-between" align="flex-start">
-          <Group gap="md" align="flex-start">
-            <ThemeIcon
-              size={50}
-              radius="xl"
-              variant="gradient"
-              gradient={{ from: 'teal', to: 'cyan', deg: 135 }}
-            >
-              <IconDatabase size={26} />
-            </ThemeIcon>
-            <div>
-              <Group gap="xs" align="center">
-                <Title order={2}>{index.name}</Title>
-                <Badge>{index.metric}</Badge>
-              </Group>
-              <Text size="sm" c="dimmed" mt={4}>
-                Provider {provider.label} • Driver {provider.driver}
-              </Text>
-            </div>
-          </Group>
-          <Group gap="xs">
+    <Stack gap="md">
+      <PageHeader
+        icon={<IconDatabase size={18} />}
+        title={index.name}
+        subtitle={`Provider ${provider.label} • Driver ${provider.driver}`}
+        actions={
+          <>
+            <Badge>{index.metric}</Badge>
             <Button
               onClick={() => openDocs('api-vectors')}
               variant="light"
-              leftSection={<IconBook size={16} />}
+              size="xs"
+              leftSection={<IconBook size={14} />}
             >
               Docs
             </Button>
             <Button
               variant="light"
-              leftSection={<IconRefresh size={16} />}
+              size="xs"
+              leftSection={<IconRefresh size={14} />}
               onClick={() => void loadIndex(true)}
               loading={refreshing}
             >
@@ -443,17 +420,18 @@ export default function VectorIndexDetailPage() {
             </Button>
             <Button
               variant="light"
-              leftSection={<IconDeviceFloppy size={16} />}
+              size="xs"
+              leftSection={<IconDeviceFloppy size={14} />}
               onClick={() => setEditModalOpen(true)}
             >
               Edit details
             </Button>
-            <Button color="red" leftSection={<IconTrash size={16} />} onClick={() => void handleDelete()}>
+            <Button color="red" size="xs" leftSection={<IconTrash size={14} />} onClick={() => void handleDelete()}>
               Delete
             </Button>
-          </Group>
-        </Group>
-      </Paper>
+          </>
+        }
+      />
 
       <Paper withBorder radius="lg" p="lg">
         <Stack gap="sm">

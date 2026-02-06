@@ -1,7 +1,8 @@
 import Link from 'next/link';
-import { Button, Group, Paper, Stack, Text, Title } from '@mantine/core';
+import { Button, Paper, Stack } from '@mantine/core';
 import { IconExternalLink, IconBook } from '@tabler/icons-react';
 import { resolveSdkDoc } from '@/lib/docs/sdkDocs';
+import PageHeader from '@/components/layout/PageHeader';
 
 type DocsPageProps = {
   searchParams?: Promise<{ doc?: string }>;
@@ -12,35 +13,25 @@ export default async function DashboardDocsPage({ searchParams }: DocsPageProps)
   const doc = resolveSdkDoc(resolvedParams?.doc);
 
   return (
-    <Stack gap="lg">
-      <Paper withBorder radius="lg" p="xl" style={{
-        background:
-          'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
-        borderColor: 'var(--mantine-color-teal-2)',
-      }}>
-        <Group justify="space-between" align="flex-start">
-          <div>
-            <Group gap="sm" align="center">
-              <IconBook size={18} />
-              <Title order={2}>Documentation</Title>
-            </Group>
-            <Text size="sm" c="dimmed" mt={6}>
-              {doc.title}
-            </Text>
-          </div>
-
+    <Stack gap="md">
+      <PageHeader
+        icon={<IconBook size={18} />}
+        title="Documentation"
+        subtitle={doc.title}
+        actions={
           <Button
             component={Link}
             href={doc.url}
             target="_blank"
             rel="noreferrer"
             variant="light"
-            leftSection={<IconExternalLink size={16} />}
+            size="xs"
+            leftSection={<IconExternalLink size={14} />}
           >
             Open in new tab
           </Button>
-        </Group>
-      </Paper>
+        }
+      />
 
       <Paper withBorder radius="lg" p={0} style={{ overflow: 'hidden' }}>
         <iframe

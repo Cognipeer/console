@@ -1,7 +1,8 @@
 'use client';
 
 import { use, useEffect, useMemo, useState } from 'react';
-import { Button, Group, Paper, Stack, Tabs, Text, ThemeIcon, Title } from '@mantine/core';
+import { Button, Paper, Stack, Tabs, Text } from '@mantine/core';
+import PageHeader from '@/components/layout/PageHeader';
 import { notifications } from '@mantine/notifications';
 import { IconRefresh, IconUsers } from '@tabler/icons-react';
 import ProjectMembersManager from '@/components/projects/ProjectMembersManager';
@@ -82,44 +83,22 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ projec
 
   return (
     <Stack gap="md">
-      <Paper
-        p="xl"
-        radius="lg"
-        withBorder
-        style={{
-          background:
-            'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
-          borderColor: 'var(--mantine-color-teal-2)',
-        }}
-      >
-        <Group justify="space-between" align="flex-start">
-          <Group gap="md">
-            <ThemeIcon
-              size={50}
-              radius="xl"
-              variant="gradient"
-              gradient={{ from: 'teal', to: 'cyan', deg: 135 }}
-            >
-              <IconUsers size={26} />
-            </ThemeIcon>
-            <div>
-              <Title order={2}>{currentProject?.name ?? 'Project'}</Title>
-              <Text size="sm" c="dimmed" mt={4}>
-                Project settings and access control.
-              </Text>
-            </div>
-          </Group>
-
+      <PageHeader
+        icon={<IconUsers size={18} />}
+        title={currentProject?.name ?? 'Project'}
+        subtitle="Project settings and access control."
+        actions={
           <Button
             variant="light"
-            leftSection={<IconRefresh size={16} />}
+            size="xs"
+            leftSection={<IconRefresh size={14} />}
             onClick={() => void fetchProjects()}
             loading={loading}
           >
             Refresh
           </Button>
-        </Group>
-      </Paper>
+        }
+      />
 
       <Paper shadow="sm" radius="md" withBorder>
         <Tabs value={activeTab} onChange={setActiveTab}>

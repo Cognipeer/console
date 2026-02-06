@@ -14,11 +14,11 @@ import {
   Table,
   Text,
   Tooltip,
-  Title,
   ThemeIcon,
   SimpleGrid,
   Box,
 } from '@mantine/core';
+import PageHeader from '@/components/layout/PageHeader';
 import { notifications } from '@mantine/notifications';
 import { IconPlus, IconRefresh, IconTrash, IconDatabase, IconServer, IconChartDots3, IconArrowRight, IconSparkles } from '@tabler/icons-react';
 import type { VectorIndexRecord, VectorProviderView } from '@/lib/services/vector';
@@ -159,50 +159,33 @@ export default function VectorIndexPage() {
   }, [rows]);
 
   return (
-    <Stack gap="lg">
+    <Stack gap="md">
       {/* Header */}
-      <Paper
-        p="xl"
-        radius="lg"
-        withBorder
-        style={{
-          background: 'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
-          borderColor: 'var(--mantine-color-teal-2)',
-        }}>
-        <Group justify="space-between" align="flex-start">
-          <Group gap="md">
-            <ThemeIcon
-              size={50}
-              radius="xl"
-              variant="gradient"
-              gradient={{ from: 'teal', to: 'cyan', deg: 135 }}>
-              <IconDatabase size={26} />
-            </ThemeIcon>
-            <div>
-              <Title order={2}>Vector Indexes</Title>
-              <Text size="sm" c="dimmed" mt={4}>
-                Manage vector indexes across providers, inspect recent items, and launch queries.
-              </Text>
-            </div>
-          </Group>
-          <Group gap="xs">
-            <Button 
-              variant="light" 
-              leftSection={refreshing ? <Loader size={14} /> : <IconRefresh size={16} />}
+      <PageHeader
+        icon={<IconDatabase size={18} />}
+        title="Vector Indexes"
+        subtitle="Manage vector indexes across providers, inspect recent items, and launch queries."
+        actions={
+          <>
+            <Button
+              variant="light"
+              size="xs"
+              leftSection={refreshing ? <Loader size={12} /> : <IconRefresh size={14} />}
               onClick={() => void loadProvidersAndIndexes()}
-              disabled={refreshing}>
+              disabled={refreshing}
+            >
               Refresh
             </Button>
-            <Button 
-              leftSection={<IconPlus size={16} />} 
+            <Button
+              size="xs"
+              leftSection={<IconPlus size={14} />}
               onClick={() => setCreateModalOpen(true)}
-              variant="gradient"
-              gradient={{ from: 'teal', to: 'cyan', deg: 90 }}>
+            >
               Create Index
             </Button>
-          </Group>
-        </Group>
-      </Paper>
+          </>
+        }
+      />
 
       {/* Stats Cards */}
       <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>

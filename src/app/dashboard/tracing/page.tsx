@@ -21,7 +21,6 @@ import {
 import { DatePickerInput } from '@mantine/dates';
 import {
   IconCalendar,
-  IconInfoCircle,
   IconPlug,
   IconRefresh,
   IconActivity,
@@ -36,6 +35,8 @@ import {
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import SessionTable from '@/components/tracing/SessionTable';
+import PageHeader from '@/components/layout/PageHeader';
+import CollapsibleInfo from '@/components/layout/CollapsibleInfo';
 import {
   formatNumber,
   formatDuration,
@@ -162,33 +163,14 @@ export default function AgentTracingPage() {
   const dailyRows = (analytics?.daily || []).slice(-7);
 
   return (
-    <Stack gap="lg">
+    <Stack gap="md">
       {/* Header */}
-      <Paper
-        p="xl"
-        radius="lg"
-        withBorder
-        style={{
-          background: 'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
-          borderColor: 'var(--mantine-color-teal-2)',
-        }}>
-        <Group justify="space-between" align="flex-start">
-          <Group gap="md">
-            <ThemeIcon
-              size={50}
-              radius="xl"
-              variant="gradient"
-              gradient={{ from: 'teal', to: 'cyan', deg: 135 }}>
-              <IconActivity size={26} />
-            </ThemeIcon>
-            <div>
-              <Title order={2}>{tNav('agentTracing')}</Title>
-              <Text size="sm" c="dimmed" mt={4}>
-                {t('list.subtitle')}
-              </Text>
-            </div>
-          </Group>
-          <Group gap="sm">
+      <PageHeader
+        icon={<IconActivity size={18} />}
+        title={tNav('agentTracing')}
+        subtitle={t('list.subtitle')}
+        actions={
+          <>
             <DatePickerInput
               type="range"
               value={dateRange}
@@ -196,22 +178,24 @@ export default function AgentTracingPage() {
               onChange={(value) =>
                 setDateRange(value as [Date | null, Date | null])
               }
-              w={260}
+              w={220}
+              size="xs"
               placeholder="Select Date Range"
               valueFormat="MMM D, YYYY"
-              leftSection={<IconCalendar size={16} stroke={1.5} />}
-              radius="md"
+              leftSection={<IconCalendar size={14} stroke={1.5} />}
+              radius="sm"
             />
             <Button
               variant="light"
+              size="xs"
               onClick={() => fetchDashboard(true)}
               loading={refreshing}
-              leftSection={<IconRefresh size={16} />}>
+              leftSection={<IconRefresh size={14} />}>
               Refresh
             </Button>
-          </Group>
-        </Group>
-      </Paper>
+          </>
+        }
+      />
 
       {/* Stats Cards */}
       <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>
@@ -290,44 +274,46 @@ export default function AgentTracingPage() {
       </SimpleGrid>
 
       {/* Quick Start Info Card */}
-      <Paper withBorder radius="lg" p="lg" style={{ background: 'var(--mantine-color-teal-0)', borderColor: 'var(--mantine-color-teal-2)' }}>
-        <Group align="flex-start" gap="md">
-          <ThemeIcon size={40} radius="md" variant="light" color="teal">
-            <IconInfoCircle size={20} />
-          </ThemeIcon>
-          <Stack gap={6} style={{ flex: 1 }}>
-            <Text fw={600}>Instrument your agents quickly</Text>
-            <Text size="sm" c="dimmed">
-              Install{' '}
-              <Anchor
-                href="https://www.npmjs.com/package/@cognipeer/agent-sdk"
-                target="_blank"
-                rel="noopener noreferrer">
-                @cognipeer/agent-sdk
-              </Anchor>{' '}
-              to instrument your Node.js agent in minutes. The SDK automatically
-              creates sessions, events, and payload timelines.
-            </Text>
-            <Text size="sm" c="dimmed">
-              Prefer HTTP? Generate an API key under{' '}
-              <Anchor href="/dashboard/settings">Settings → API Tokens</Anchor>{' '}
-              and POST your agent payloads to{' '}
-              <Text component="span" ff="monospace" style={{ backgroundColor: 'var(--mantine-color-gray-1)', padding: '2px 6px', borderRadius: 4 }}>
-                /api/client/tracing/sessions
-              </Text>
-            </Text>
-          </Stack>
-          <Button 
-            variant="light" 
-            color="blue" 
-            component="a" 
-            href="https://www.npmjs.com/package/@cognipeer/agent-sdk" 
+      <CollapsibleInfo
+        title="Instrument your agents quickly"
+        action={
+          <Button
+            variant="light"
+            color="teal"
+            size="xs"
+            component="a"
+            href="https://www.npmjs.com/package/@cognipeer/agent-sdk"
             target="_blank"
-            rightSection={<IconExternalLink size={14} />}>
+            rightSection={<IconExternalLink size={12} />}
+          >
             View SDK
           </Button>
-        </Group>
-      </Paper>
+        }
+      >
+        <Stack gap={4}>
+          <Text size="xs" c="dimmed">
+            Install{' '}
+            <Anchor
+              href="https://www.npmjs.com/package/@cognipeer/agent-sdk"
+              target="_blank"
+              rel="noopener noreferrer"
+              size="xs"
+            >
+              @cognipeer/agent-sdk
+            </Anchor>{' '}
+            to instrument your Node.js agent in minutes. The SDK automatically
+            creates sessions, events, and payload timelines.
+          </Text>
+          <Text size="xs" c="dimmed">
+            Prefer HTTP? Generate an API key under{' '}
+            <Anchor href="/dashboard/settings" size="xs">Settings → API Tokens</Anchor>{' '}
+            and POST your agent payloads to{' '}
+            <Text component="span" ff="monospace" size="xs" style={{ backgroundColor: 'var(--mantine-color-gray-1)', padding: '1px 4px', borderRadius: 3 }}>
+              /api/client/tracing/sessions
+            </Text>
+          </Text>
+        </Stack>
+      </CollapsibleInfo>
 
       {/* Analytics Section */}
       <Paper p="lg" radius="lg" withBorder>
@@ -393,10 +379,10 @@ export default function AgentTracingPage() {
             <Stack gap={8}>
               {(analytics?.statuses || []).map((item) => (
                 <Group key={item.status} justify="space-between">
-                  <Text size="sm">{item.status || 'Unknown'}</Text>
-                  <Badge size="sm" variant="light" color={resolveStatusColor(item.status)}>
-                    {formatNumber(item.count)}
+                  <Badge size="sm" variant="light" radius="xl" color={resolveStatusColor(item.status)}>
+                    {(item.status || 'Unknown').toUpperCase()}
                   </Badge>
+                  <Text size="sm" fw={500}>{formatNumber(item.count)}</Text>
                 </Group>
               ))}
               {(analytics?.statuses || []).length === 0 && (
@@ -524,8 +510,8 @@ export default function AgentTracingPage() {
                         </Text>
                       </Group>
                       {item.latestStatus && (
-                        <Badge size="sm" variant="light" color={statusColor}>
-                          {item.latestStatus}
+                        <Badge size="sm" variant="light" radius="xl" color={statusColor}>
+                          {item.latestStatus.toUpperCase()}
                         </Badge>
                       )}
                     </Group>

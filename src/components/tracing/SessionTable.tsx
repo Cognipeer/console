@@ -76,8 +76,8 @@ export default function SessionTable({ sessions, onRowClick, loading }: SessionT
               </Tooltip>
             </Table.Td>
             <Table.Td>
-              <Badge size="xs" color={resolveStatusColor(session.status)}>
-                {session.status || 'unknown'}
+              <Badge size="xs" variant="light" radius="xl" color={resolveStatusColor(session.status)}>
+                {(session.status || 'unknown').toUpperCase()}
               </Badge>
             </Table.Td>
             <Table.Td>

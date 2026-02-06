@@ -11,9 +11,8 @@ import {
   Paper,
   Stack,
   Text,
-  Title,
-  ThemeIcon,
 } from '@mantine/core';
+import PageHeader from '@/components/layout/PageHeader';
 import { notifications } from '@mantine/notifications';
 import { IconArrowLeft, IconRefresh, IconBook, IconFolder } from '@tabler/icons-react';
 import FileObjectManager from '@/components/files/FileObjectManager';
@@ -119,56 +118,34 @@ export default function FileBucketDetailPage() {
   const providerDriver = safeString(bucket.provider?.driver);
 
   return (
-    <Stack gap="lg">
-      <Paper
-        p="xl"
-        radius="lg"
-        withBorder
-        style={{
-          background:
-            'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
-          borderColor: 'var(--mantine-color-teal-2)',
-        }}
-      >
-        <Group justify="space-between" align="flex-start">
-          <Group gap="md" align="flex-start">
-            <ThemeIcon
-              size={50}
-              radius="xl"
-              variant="gradient"
-              gradient={{ from: 'teal', to: 'cyan', deg: 135 }}
-            >
-              <IconFolder size={26} />
-            </ThemeIcon>
-            <div>
-              <Group gap={8} align="center">
-                <Title order={2}>{bucket.name}</Title>
-                <Badge color={bucket.status === 'active' ? 'green' : 'yellow'}>{bucket.status}</Badge>
-              </Group>
-              <Text size="sm" c="dimmed" mt={4}>
-                Bucket key: {bucket.key}
-              </Text>
-            </div>
-          </Group>
-          <Group gap="xs">
+    <Stack gap="md">
+      <PageHeader
+        icon={<IconFolder size={18} />}
+        title={bucket.name}
+        subtitle={`Bucket key: ${bucket.key}`}
+        actions={
+          <>
+            <Badge color={bucket.status === 'active' ? 'green' : 'yellow'}>{bucket.status}</Badge>
             <Button
               onClick={() => openDocs('api-files')}
               variant="light"
-              leftSection={<IconBook size={16} />}
+              size="xs"
+              leftSection={<IconBook size={14} />}
             >
               Docs
             </Button>
             <Button
               variant="light"
-              leftSection={<IconRefresh size={16} />}
+              size="xs"
+              leftSection={<IconRefresh size={14} />}
               onClick={() => void loadBucket(true)}
               loading={refreshing}
             >
               Refresh
             </Button>
-          </Group>
-        </Group>
-      </Paper>
+          </>
+        }
+      />
 
       <Paper withBorder radius="lg" p="lg">
         <Stack gap="sm">

@@ -22,9 +22,9 @@ import {
   Tabs,
   Text,
   ThemeIcon,
-  Title,
   Tooltip,
 } from '@mantine/core';
+import PageHeader from '@/components/layout/PageHeader';
 import { useDisclosure } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
 import { IconArrowLeft, IconBook, IconBrain, IconChartBar, IconRefresh, IconTool, IconFileSearch } from '@tabler/icons-react';
@@ -260,64 +260,31 @@ export default function ModelDetailPage() {
   }
 
   return (
-    <Stack gap="lg">
-      <Paper
-        p="xl"
-        radius="lg"
-        withBorder
-        style={{
-          background:
-            'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
-          borderColor: 'var(--mantine-color-teal-2)',
-        }}
-      >
-        <Group justify="space-between" align="flex-start">
-          <Group gap="md" align="flex-start">
-            <ThemeIcon
-              size={50}
-              radius="xl"
-              variant="gradient"
-              gradient={{ from: 'teal', to: 'cyan', deg: 135 }}
-            >
-              <IconBrain size={26} />
-            </ThemeIcon>
-            <div>
-              <Group gap={8} align="center">
-                <Title order={2}>{model.name}</Title>
-                <Badge color={model.category === 'llm' ? 'indigo' : 'teal'} variant="light">
-                  {model.category === 'llm' ? tModels('list.badges.llm') : tModels('list.badges.embedding')}
-                </Badge>
-              </Group>
-              <Group gap={8} mt={6}>
-                <Badge color="grape" variant="light">
-                  {providerLabel}
-                </Badge>
-                <Badge variant="light" color="gray">
-                  {model.modelId}
-                </Badge>
-              </Group>
-              {model.description ? (
-                <Text size="sm" c="dimmed" mt={6}>
-                  {model.description}
-                </Text>
-              ) : (
-                <Text size="sm" c="dimmed" mt={6}>
-                  View model configuration, capabilities, and usage.
-                </Text>
-              )}
-            </div>
-          </Group>
-          <Group gap="xs">
+    <Stack gap="md">
+      <PageHeader
+        icon={<IconBrain size={18} />}
+        title={model.name}
+        subtitle={model.description || 'View model configuration, capabilities, and usage.'}
+        actions={
+          <>
+            <Badge color={model.category === 'llm' ? 'indigo' : 'teal'} variant="light">
+              {model.category === 'llm' ? tModels('list.badges.llm') : tModels('list.badges.embedding')}
+            </Badge>
+            <Badge color="grape" variant="light">
+              {providerLabel}
+            </Badge>
             <Button
               onClick={() => openDocs('api-client')}
               variant="light"
-              leftSection={<IconBook size={16} />}
+              size="xs"
+              leftSection={<IconBook size={14} />}
             >
               Docs
             </Button>
             <Button
               variant="light"
-              leftSection={<IconRefresh size={16} />}
+              size="xs"
+              leftSection={<IconRefresh size={14} />}
               loading={refreshing}
               onClick={() => fetchDetail(true)}
             >
@@ -326,13 +293,14 @@ export default function ModelDetailPage() {
             <Button
               component={Link}
               href={`/dashboard/models/${model._id}/edit`}
-              leftSection={<IconSettings size={16} />}
+              size="xs"
+              leftSection={<IconSettings size={14} />}
             >
               {t('actions.edit')}
             </Button>
-          </Group>
-        </Group>
-      </Paper>
+          </>
+        }
+      />
 
       <Grid>
         <Grid.Col span={{ base: 12, md: 6 }}>

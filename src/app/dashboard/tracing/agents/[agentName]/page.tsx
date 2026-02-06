@@ -33,6 +33,7 @@ import {
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import SessionTable from '@/components/tracing/SessionTable';
+import PageHeader from '@/components/layout/PageHeader';
 import {
   formatNumber,
   formatDuration,
@@ -208,40 +209,18 @@ export default function AgentTracingAgentPage() {
   const dailyRows = analytics?.daily || [];
 
   return (
-    <Stack gap="lg">
-      <Paper
-        p="xl"
-        radius="lg"
-        withBorder
-        style={{
-          background:
-            'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
-          borderColor: 'var(--mantine-color-teal-2)',
-        }}
-      >
-        <Group justify="space-between" align="flex-start">
-          <Group gap="md" align="flex-start">
-            <ThemeIcon
-              size={50}
-              radius="xl"
-              variant="gradient"
-              gradient={{ from: 'teal', to: 'cyan', deg: 135 }}
-            >
-              <IconTimeline size={26} />
-            </ThemeIcon>
-            <div>
-              <Title order={2}>{agent?.label ?? agentName}</Title>
-              <Text size="sm" c="dimmed" mt={4}>
-                Agent overview, recent sessions, and tool/model analytics.
-              </Text>
-            </div>
-          </Group>
-
-          <Group gap="sm">
+    <Stack gap="md">
+      <PageHeader
+        icon={<IconTimeline size={18} />}
+        title={agent?.label ?? agentName}
+        subtitle="Agent overview, recent sessions, and tool/model analytics."
+        actions={
+          <>
             <Button
               onClick={() => openDocs('api-tracing')}
               variant="light"
-              leftSection={<IconBook size={16} />}
+              size="xs"
+              leftSection={<IconBook size={14} />}
             >
               Docs
             </Button>
@@ -250,23 +229,25 @@ export default function AgentTracingAgentPage() {
               value={dateRange}
               clearable
               onChange={(value) => setDateRange(value as [Date | null, Date | null])}
-              w={260}
+              w={220}
+              size="xs"
               placeholder="Select Date Range"
               valueFormat="MMM D, YYYY"
-              leftSection={<IconCalendar size={16} stroke={1.5} />}
-              radius="md"
+              leftSection={<IconCalendar size={14} stroke={1.5} />}
+              radius="sm"
             />
             <Button
               variant="light"
-              leftSection={<IconRefresh size={16} />}
+              size="xs"
+              leftSection={<IconRefresh size={14} />}
               onClick={() => fetchOverview(true)}
               loading={refreshing}
             >
               Refresh
             </Button>
-          </Group>
-        </Group>
-      </Paper>
+          </>
+        }
+      />
 
       {error && (
         <Alert icon={<IconAlertCircle size={16} />} color="red" variant="light">
@@ -283,8 +264,8 @@ export default function AgentTracingAgentPage() {
               </Text>
               <Group gap="xs" align="center">
                 {agent?.latestStatus && (
-                  <Badge color={resolveStatusColor(agent.latestStatus)} size="sm">
-                    {humanize(agent.latestStatus)}
+                  <Badge variant="light" radius="xl" color={resolveStatusColor(agent.latestStatus)} size="sm">
+                    {agent.latestStatus.toUpperCase()}
                   </Badge>
                 )}
                 {agent?.latestVersion && (

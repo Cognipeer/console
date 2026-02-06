@@ -17,9 +17,9 @@ import {
   Table,
   Text,
   ThemeIcon,
-  Title,
   Tooltip,
 } from '@mantine/core';
+import PageHeader from '@/components/layout/PageHeader';
 import { IconChartBar, IconEdit, IconEye, IconPlug, IconPlus, IconRefresh, IconTool, IconSparkles, IconBrain, IconCpu } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import type { ModelProviderView } from '@/lib/services/models/types';
@@ -294,46 +294,27 @@ export default function ModelsPage() {
   );
 
   return (
-    <Stack gap="lg">
+    <Stack gap="md">
       {/* Header */}
-      <Paper
-        p="xl"
-        radius="lg"
-        withBorder
-        style={{
-          background: 'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
-          borderColor: 'var(--mantine-color-teal-2)',
-        }}>
-        <Group justify="space-between" align="flex-start">
-          <Group gap="md">
-            <ThemeIcon
-              size={50}
-              radius="xl"
-              variant="gradient"
-              gradient={{ from: 'teal', to: 'cyan', deg: 135 }}>
-              <IconBrain size={26} />
-            </ThemeIcon>
-            <div>
-              <Title order={2}>{tNav('models')}</Title>
-              <Text size="sm" c="dimmed" mt={4}>
-                {t('list.subtitle')}
-              </Text>
-            </div>
-          </Group>
-          <Group gap="xs">
-            <Button variant="light" leftSection={<IconRefresh size={16} />} onClick={loadModels}>
+      <PageHeader
+        icon={<IconBrain size={18} />}
+        title={tNav('models')}
+        subtitle={t('list.subtitle')}
+        actions={
+          <>
+            <Button variant="light" size="xs" leftSection={<IconRefresh size={14} />} onClick={loadModels}>
               {t('actions.refresh')}
             </Button>
-            <Button 
-              onClick={openCreateModal} 
-              leftSection={<IconPlus size={16} />}
-              variant="gradient"
-              gradient={{ from: 'teal', to: 'cyan', deg: 90 }}>
+            <Button
+              onClick={openCreateModal}
+              size="xs"
+              leftSection={<IconPlus size={14} />}
+            >
               {t('actions.create')}
             </Button>
-          </Group>
-        </Group>
-      </Paper>
+          </>
+        }
+      />
 
       {/* Stats Cards */}
       <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>

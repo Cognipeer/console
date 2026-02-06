@@ -24,9 +24,9 @@ import {
   Text,
   Textarea,
   ThemeIcon,
-  Title,
   Tooltip,
 } from '@mantine/core';
+import PageHeader from '@/components/layout/PageHeader';
 import { notifications } from '@mantine/notifications';
 import {
   IconArrowLeft,
@@ -260,81 +260,53 @@ export default function PromptDetailPage() {
   }
 
   return (
-    <Stack gap="lg">
+    <Stack gap="md">
       {/* Header */}
-      <Paper
-        p="xl"
-        radius="lg"
-        withBorder
-        style={{
-          background:
-            'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
-          borderColor: 'var(--mantine-color-teal-2)',
-        }}
-      >
-        <Group justify="space-between" align="flex-start">
-          <Group gap="md" align="flex-start">
-            <ThemeIcon
-              size={50}
-              radius="xl"
-              variant="gradient"
-              gradient={{ from: 'teal', to: 'cyan', deg: 135 }}
-            >
-              <IconSparkles size={26} />
-            </ThemeIcon>
-            <div>
-              <Group gap={8} align="center">
-                <Title order={2}>{prompt.name}</Title>
-                <Badge variant="outline" color="gray" size="sm">
-                  v{prompt.currentVersion ?? 1}
-                </Badge>
-              </Group>
-              <Group gap={8} mt={6}>
-                <Badge color="blue" variant="light">
-                  {prompt.key}
-                </Badge>
-                <CopyButton value={prompt.key}>
-                  {({ copied, copy }) => (
-                    <Tooltip label={copied ? 'Copied!' : 'Copy key'}>
-                      <ActionIcon size="sm" variant="subtle" onClick={copy}>
-                        {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
-                      </ActionIcon>
-                    </Tooltip>
-                  )}
-                </CopyButton>
-              </Group>
-              {prompt.description && (
-                <Text size="sm" c="dimmed" mt={6}>
-                  {prompt.description}
-                </Text>
+      <PageHeader
+        icon={<IconSparkles size={18} />}
+        title={prompt.name}
+        subtitle={prompt.description || `Key: ${prompt.key}`}
+        actions={
+          <>
+            <Badge variant="outline" color="gray" size="sm">
+              v{prompt.currentVersion ?? 1}
+            </Badge>
+            <CopyButton value={prompt.key}>
+              {({ copied, copy }) => (
+                <Tooltip label={copied ? 'Copied!' : 'Copy key'}>
+                  <ActionIcon size="sm" variant="subtle" onClick={copy}>
+                    {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
+                  </ActionIcon>
+                </Tooltip>
               )}
-            </div>
-          </Group>
-          <Group gap="xs">
+            </CopyButton>
             <Button
               variant="light"
-              leftSection={<IconHistory size={16} />}
+              size="xs"
+              leftSection={<IconHistory size={14} />}
               onClick={() => setVersionHistoryOpen(true)}
             >
               {t('actions.versionHistory')}
             </Button>
             <Button
               variant="light"
-              leftSection={<IconRefresh size={16} />}
+              size="xs"
+              leftSection={<IconRefresh size={14} />}
               loading={refreshing}
               onClick={() => fetchDetail(true)}
             >
               {t('actions.refresh')}
             </Button>
             <Button
-              leftSection={<IconEdit size={16} />}
+              size="xs"
+              leftSection={<IconEdit size={14} />}
               onClick={() => setEditorOpen(true)}
             >
               {t('actions.edit')}
             </Button>
-          </Group>
-        </Group>
-      </Paper>
+          </>
+        }
+      />
 
       {/* Info Bar */}
       <Paper withBorder radius="md" p="sm">

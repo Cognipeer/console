@@ -18,9 +18,9 @@ import {
   Text,
   TextInput,
   Textarea,
-  ThemeIcon,
   Title,
 } from '@mantine/core';
+import PageHeader from '@/components/layout/PageHeader';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { IconArrowLeft, IconBook, IconBrain, IconDeviceFloppy, IconRefresh } from '@tabler/icons-react';
@@ -284,46 +284,25 @@ export default function EditModelPage() {
   }
 
   return (
-    <Stack gap="lg">
-      <Paper
-        p="xl"
-        radius="lg"
-        withBorder
-        style={{
-          background:
-            'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
-          borderColor: 'var(--mantine-color-teal-2)',
-        }}
-      >
-        <Group justify="space-between" align="flex-start">
-          <Group gap="md" align="flex-start">
-            <ThemeIcon
-              size={50}
-              radius="xl"
-              variant="gradient"
-              gradient={{ from: 'teal', to: 'cyan', deg: 135 }}
-            >
-              <IconBrain size={26} />
-            </ThemeIcon>
-            <div>
-              <Title order={2}>{t('title', { name: model.name })}</Title>
-              <Text size="sm" c="dimmed" mt={4}>
-                {t('subtitle')}
-              </Text>
-            </div>
-          </Group>
-
-          <Group gap="xs">
+    <Stack gap="md">
+      <PageHeader
+        icon={<IconBrain size={18} />}
+        title={t('title', { name: model.name })}
+        subtitle={t('subtitle')}
+        actions={
+          <>
             <Button
               onClick={() => openDocs('api-client')}
               variant="light"
-              leftSection={<IconBook size={16} />}
+              size="xs"
+              leftSection={<IconBook size={14} />}
             >
               Docs
             </Button>
             <Button
               variant="light"
-              leftSection={<IconRefresh size={16} />}
+              size="xs"
+              leftSection={<IconRefresh size={14} />}
               loading={refreshing || loading}
               onClick={() => loadModel(false)}
             >
@@ -332,14 +311,15 @@ export default function EditModelPage() {
             <Button
               type="submit"
               form="model-edit-form"
-              leftSection={<IconDeviceFloppy size={16} />}
+              size="xs"
+              leftSection={<IconDeviceFloppy size={14} />}
               loading={saving}
             >
               {t('actions.save')}
             </Button>
-          </Group>
-        </Group>
-      </Paper>
+          </>
+        }
+      />
 
       <Card withBorder radius="md" padding="lg">
         <form id="model-edit-form" onSubmit={form.onSubmit(handleSubmit)}>

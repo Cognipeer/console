@@ -44,10 +44,21 @@ export const formatRelativeTime = (
 
 export const resolveStatusColor = (status: string | undefined): string => {
   if (!status) return 'gray';
-  if (status === 'success') return 'green';
-  if (status === 'error') return 'red';
-  if (status === 'running') return 'blue';
-  return 'yellow';
+  const normalized = status.toLowerCase();
+  if (normalized === 'success' || normalized === 'completed') return 'teal';
+  if (normalized === 'error' || normalized === 'failed') return 'red';
+  if (normalized === 'running' || normalized === 'in_progress' || normalized === 'pending') return 'blue';
+  return 'gray';
+};
+
+export const formatToolName = (name: string | undefined): string => {
+  if (!name) return '';
+  // Convert SNAKE_CASE or snake_case to Title Case
+  return name
+    .toLowerCase()
+    .split('_')
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
 };
 
 export const humanize = (str: string | undefined): string => {

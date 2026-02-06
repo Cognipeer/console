@@ -21,6 +21,7 @@ import { IconBook, IconRefresh, IconSearch, IconCalendar, IconAdjustments } from
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import SessionTable from '@/components/tracing/SessionTable';
+import PageHeader from '@/components/layout/PageHeader';
 import { formatNumber } from '@/lib/utils/tracingUtils';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 
@@ -141,53 +142,33 @@ export default function TracingSessionsPage() {
   }, [agentFilter, dateRange, query, statusFilter]);
 
   return (
-    <Stack gap="lg">
-      <Paper
-        p="xl"
-        radius="lg"
-        withBorder
-        style={{
-          background:
-            'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
-          borderColor: 'var(--mantine-color-teal-2)',
-        }}
-      >
-        <Group justify="space-between" align="flex-start">
-          <Group gap="md">
-            <ThemeIcon
-              size={50}
-              radius="xl"
-              variant="gradient"
-              gradient={{ from: 'teal', to: 'cyan', deg: 135 }}
-            >
-              <IconAdjustments size={26} />
-            </ThemeIcon>
-            <div>
-              <Title order={2}>Session Explorer</Title>
-              <Text size="sm" c="dimmed" mt={4}>
-                Inspect recent agent sessions, filter by agent or status, and drill into the execution timeline.
-              </Text>
-            </div>
-          </Group>
-          <Group gap="xs">
+    <Stack gap="md">
+      <PageHeader
+        icon={<IconAdjustments size={18} />}
+        title="Session Explorer"
+        subtitle="Inspect recent agent sessions, filter by agent or status, and drill into the execution timeline."
+        actions={
+          <>
             <Button
               onClick={() => openDocs('api-tracing')}
               variant="light"
-              leftSection={<IconBook size={16} />}
+              size="xs"
+              leftSection={<IconBook size={14} />}
             >
               Docs
             </Button>
             <Button
-              leftSection={<IconRefresh size={16} />}
+              leftSection={<IconRefresh size={14} />}
               variant="light"
+              size="xs"
               onClick={handleRefresh}
               loading={refreshing || loading}
             >
               Refresh
             </Button>
-          </Group>
-        </Group>
-      </Paper>
+          </>
+        }
+      />
 
       <Card withBorder shadow="sm" p="md">
         <Stack gap="md">

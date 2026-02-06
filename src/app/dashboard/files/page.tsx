@@ -1,42 +1,22 @@
 'use client';
 
-import { Group, Stack, Text, Title, Paper, ThemeIcon, SimpleGrid } from '@mantine/core';
+import { Group, Stack, Text, Paper, ThemeIcon, SimpleGrid } from '@mantine/core';
 import { IconFolder, IconCloud, IconFiles, IconUpload } from '@tabler/icons-react';
 import { useRouter } from 'next/navigation';
 import FileBucketManager from '@/components/files/FileBucketManager';
+import PageHeader from '@/components/layout/PageHeader';
 
 export default function FilesDashboardPage() {
   const router = useRouter();
 
   return (
-    <Stack gap="lg">
+    <Stack gap="md">
       {/* Header */}
-      <Paper
-        p="xl"
-        radius="lg"
-        withBorder
-        style={{
-          background: 'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
-          borderColor: 'var(--mantine-color-teal-2)',
-        }}>
-        <Group justify="space-between" align="flex-start">
-          <Group gap="md">
-            <ThemeIcon
-              size={50}
-              radius="xl"
-              variant="gradient"
-              gradient={{ from: 'teal', to: 'cyan', deg: 135 }}>
-              <IconFolder size={26} />
-            </ThemeIcon>
-            <div>
-              <Title order={2}>File Buckets</Title>
-              <Text size="sm" c="dimmed" mt={4}>
-                View and manage storage buckets connected to your tenant.
-              </Text>
-            </div>
-          </Group>
-        </Group>
-      </Paper>
+      <PageHeader
+        icon={<IconFolder size={18} />}
+        title="File Buckets"
+        subtitle="View and manage storage buckets connected to your tenant."
+      />
 
       {/* Info Cards */}
       <SimpleGrid cols={{ base: 1, sm: 3 }}>

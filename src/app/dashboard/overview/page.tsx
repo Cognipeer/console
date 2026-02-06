@@ -15,8 +15,8 @@ import {
   Stack,
   Text,
   ThemeIcon,
-  Title,
 } from '@mantine/core';
+import PageHeader from '@/components/layout/PageHeader';
 import {
   IconActivity,
   IconArrowUpRight,
@@ -88,25 +88,12 @@ export default function DashboardOverviewPage() {
   ];
 
   return (
-    <Stack gap="lg">
-      <Paper 
-        p="xl" 
-        radius="lg" 
-        withBorder
-        style={{
-          background: 'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
-          borderColor: 'var(--mantine-color-teal-2)',
-        }}
-      >
-        <Group justify="space-between" align="flex-start">
-          <div>
-            <Title order={2}>{t('title')}</Title>
-            <Text size="sm" c="dimmed" mt={6}>
-              {t('subtitle')}
-            </Text>
-          </div>
-        </Group>
-      </Paper>
+    <Stack gap="md">
+      <PageHeader
+        icon={<IconActivity size={18} />}
+        title={t('title')}
+        subtitle={t('subtitle')}
+      />
 
       <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>
         {stats.map((stat) => (

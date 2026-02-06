@@ -23,6 +23,7 @@ import {
     Title,
 } from '@mantine/core';
 import { IconBook, IconInfoCircle, IconCopy, IconRefresh, IconTimeline } from '@tabler/icons-react';
+import PageHeader from '@/components/layout/PageHeader';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import {
@@ -31,27 +32,52 @@ import {
     formatRelativeTime,
     resolveStatusColor,
     humanize,
+    formatToolName,
 } from '@/lib/utils/tracingUtils';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 
 const formatActor = (actor: unknown): string => {
-    if (!actor) return 'agent';
-    if (typeof actor === 'string') return actor;
+    if (!actor) return '';
+    if (typeof actor === 'string') {
+        // Format snake_case to Title Case
+        if (actor.includes('_')) {
+            return actor
+                .toLowerCase()
+                .split('_')
+                .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+                .join(' ');
+        }
+        return actor;
+    }
     if (typeof actor === 'object') {
         const record = actor as Record<string, unknown>;
+
+        // Check for empty object
+        if (Object.keys(record).length === 0) return '';
+
         const parts = [record.scope, record.name, record.role, record.version]
-            .map((value) => (typeof value === 'string' && value.trim() !== '' ? value : null))
+            .map((value) => {
+                if (typeof value === 'string' && value.trim() !== '') {
+                    // Format snake_case values
+                    if (value.includes('_')) {
+                        return value
+                            .toLowerCase()
+                            .split('_')
+                            .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+                            .join(' ');
+                    }
+                    return value;
+                }
+                return null;
+            })
             .filter((value): value is string => value !== null);
 
         if (parts.length > 0) {
             return parts.join(' · ');
         }
 
-        try {
-            return JSON.stringify(actor);
-        } catch {
-            return 'agent';
-        }
+        // Don't show JSON for empty-ish objects
+        return '';
     }
 
     return String(actor);
@@ -310,19 +336,19 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
         void fetchDetail(false);
     }, [fetchDetail]);
 
-        const tokenStats = useMemo(() => {
-            const summary = detail?.session?.summary;
+    const tokenStats = useMemo(() => {
+        const summary = detail?.session?.summary;
 
-            const input = summary?.totalInputTokens ?? detail?.session?.totalInputTokens ?? 0;
-            const output = summary?.totalOutputTokens ?? detail?.session?.totalOutputTokens ?? 0;
-            const cached = summary?.totalCachedInputTokens ?? detail?.session?.totalCachedInputTokens ?? 0;
+        const input = summary?.totalInputTokens ?? detail?.session?.totalInputTokens ?? 0;
+        const output = summary?.totalOutputTokens ?? detail?.session?.totalOutputTokens ?? 0;
+        const cached = summary?.totalCachedInputTokens ?? detail?.session?.totalCachedInputTokens ?? 0;
 
-                return {
-                    input,
-                    output,
-                    cached,
-                };
-        }, [detail]);
+        return {
+            input,
+            output,
+            cached,
+        };
+    }, [detail]);
 
     const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
 
@@ -353,30 +379,30 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
         return sortedEvents.find((event) => event.id === selectedEventId) ?? null;
     }, [sortedEvents, selectedEventId]);
 
-        const eventTokenStats = useMemo(() => {
-            if (!selectedEvent) {
-                return {
-                    isAiCall: false,
-                    hasData: false,
-                    input: null as number | null,
-                    output: null as number | null,
-                    cached: null as number | null,
-                };
-            }
-
-            const input = typeof selectedEvent.inputTokens === 'number' ? selectedEvent.inputTokens : null;
-            const output = typeof selectedEvent.outputTokens === 'number' ? selectedEvent.outputTokens : null;
-            const cached = typeof selectedEvent.cachedInputTokens === 'number' ? selectedEvent.cachedInputTokens : null;
-            const hasData = [input, output, cached].some((value) => value !== null);
-
+    const eventTokenStats = useMemo(() => {
+        if (!selectedEvent) {
             return {
-                isAiCall: selectedEvent.type === 'ai_call',
-                hasData,
-                input,
-                output,
-                cached,
+                isAiCall: false,
+                hasData: false,
+                input: null as number | null,
+                output: null as number | null,
+                cached: null as number | null,
             };
-        }, [selectedEvent]);
+        }
+
+        const input = typeof selectedEvent.inputTokens === 'number' ? selectedEvent.inputTokens : null;
+        const output = typeof selectedEvent.outputTokens === 'number' ? selectedEvent.outputTokens : null;
+        const cached = typeof selectedEvent.cachedInputTokens === 'number' ? selectedEvent.cachedInputTokens : null;
+        const hasData = [input, output, cached].some((value) => value !== null);
+
+        return {
+            isAiCall: selectedEvent.type === 'ai_call',
+            hasData,
+            input,
+            output,
+            cached,
+        };
+    }, [selectedEvent]);
 
     if (loading) {
         return (
@@ -405,67 +431,37 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
     const { session } = detail;
 
     return (
-        <Stack gap="xl">
-            <Paper
-                p="xl"
-                radius="lg"
-                withBorder
-                style={{
-                    background:
-                        'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
-                    borderColor: 'var(--mantine-color-teal-2)',
-                }}
-            >
-                <Group justify="space-between" align="flex-start">
-                    <Group gap="md" align="flex-start">
-                        <ThemeIcon
-                            size={50}
-                            radius="xl"
-                            variant="gradient"
-                            gradient={{ from: 'teal', to: 'cyan', deg: 135 }}
-                        >
-                            <IconTimeline size={26} />
-                        </ThemeIcon>
-                        <div>
-                            <Group gap="xs">
-                                <Badge size="sm" color={resolveStatusColor(session.status)}>
-                                    {session.status || 'unknown'}
-                                </Badge>
-                                <Text size="sm" c="dimmed">
-                                    Started {formatRelativeTime(session.startedAt)}
-                                </Text>
-                            </Group>
-                            <Title order={2}>
-                                Session {session.sessionId.substring(0, 12)}...
-                            </Title>
-                            <Text size="sm" c="dimmed" mt={4}>
-                                Agent {session.agentName || 'Unknown'} · Version {session.agentVersion || '—'}
-                            </Text>
-                        </div>
-                    </Group>
-                    <Group gap="xs">
+        <Stack gap="md">
+            <PageHeader
+                icon={<IconTimeline size={18} />}
+                title={`Session ${session.sessionId.substring(0, 12)}...`}
+                subtitle={`Agent ${session.agentName || 'Unknown'} · Version ${session.agentVersion || '—'} · Started ${formatRelativeTime(session.startedAt)}`}
+                actions={
+                    <>
+                        <Badge size="sm" variant="filled" radius="xl" color={resolveStatusColor(session.status)}>
+                            {(session.status || 'unknown').toUpperCase()}
+                        </Badge>
                         <Button
                             onClick={() => openDocs('api-tracing')}
                             variant="light"
-                            leftSection={<IconBook size={16} />}
+                            size="xs"
+                            leftSection={<IconBook size={14} />}
                         >
                             Docs
                         </Button>
                         <Button
-                            leftSection={<IconRefresh size={16} />}
+                            leftSection={<IconRefresh size={14} />}
                             variant="light"
+                            size="xs"
                             onClick={() => void fetchDetail(true)}
                             loading={refreshing}
                         >
                             Refresh
                         </Button>
-                    </Group>
-                </Group>
-            </Paper>
-
-
-
-            <Grid gutter="md">
+                    </>
+                }
+            />
+            <Grid gutter="md" style={{ minHeight: 'calc(100vh - 320px)' }}>
                 <Grid.Col span={{ base: 12, xl: 3 }}>
                     <Stack gap="md">
                         <Card withBorder p="md">
@@ -507,48 +503,48 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
                                     </Text>
                                     <Text size="sm">{session.agentVersion || '—'}</Text>
                                 </Group>
-                                                <Group justify="space-between">
-                                                    <Text size="sm" c="dimmed">
-                                                        Duration
-                                                    </Text>
-                                                    <Text size="sm">{formatDuration(session.durationMs)}</Text>
-                                                </Group>
-                                                <Group justify="space-between">
-                                                    <Text size="sm" c="dimmed">
-                                                        Events
-                                                    </Text>
-                                                    <Text size="sm">{formatNumber(session.totalEvents)}</Text>
-                                                </Group>
-                                                                {session.modelsUsed && session.modelsUsed.length > 0 && (
-                                                                    <Stack gap={2}>
-                                                                        <Text size="sm" c="dimmed">
-                                                                            Models used
-                                                                        </Text>
-                                                                        <Text size="sm">{session.modelsUsed.join(', ')}</Text>
-                                                                    </Stack>
-                                                                )}
+                                <Group justify="space-between">
+                                    <Text size="sm" c="dimmed">
+                                        Duration
+                                    </Text>
+                                    <Text size="sm">{formatDuration(session.durationMs)}</Text>
+                                </Group>
+                                <Group justify="space-between">
+                                    <Text size="sm" c="dimmed">
+                                        Events
+                                    </Text>
+                                    <Text size="sm">{formatNumber(session.totalEvents)}</Text>
+                                </Group>
+                                {session.modelsUsed && session.modelsUsed.length > 0 && (
+                                    <Stack gap={2}>
+                                        <Text size="sm" c="dimmed">
+                                            Models used
+                                        </Text>
+                                        <Text size="sm">{session.modelsUsed.join(', ')}</Text>
+                                    </Stack>
+                                )}
                             </Stack>
                         </Card>
-                                        <Stack>
+                        <Stack>
                             <Card withBorder p="md">
-                                                <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
-                                                    Input
+                                <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
+                                    Input
                                 </Text>
                                 <Text size="lg" fw={700} mt={4}>
                                     {formatNumber(tokenStats.input)}
                                 </Text>
                             </Card>
                             <Card withBorder p="md">
-                                                <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
-                                                    Output
+                                <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
+                                    Output
                                 </Text>
                                 <Text size="lg" fw={700} mt={4}>
                                     {formatNumber(tokenStats.output)}
                                 </Text>
                             </Card>
                             <Card withBorder p="md">
-                                                <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
-                                                    Cache
+                                <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
+                                    Cache
                                 </Text>
                                 <Text size="lg" fw={700} mt={4}>
                                     {formatNumber(tokenStats.cached)}
@@ -572,7 +568,7 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
                                     <Text c="dimmed">No events recorded for this session.</Text>
                                 </Center>
                             ) : (
-                                <ScrollArea h={520} type="auto" offsetScrollbars>
+                                <ScrollArea style={{ flex: 1 }} type="auto" offsetScrollbars>
                                     <Stack gap="sm">
                                         {sortedEvents.map((event: TracingEvent) => {
                                             const isSelected = event.id === selectedEventId;
@@ -593,36 +589,35 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
                                                         <Group justify="space-between" align="flex-start">
                                                             <Stack gap={2} style={{ flex: 1 }}>
                                                                 <Text size="sm" fw={600} lineClamp={1}>
-                                                                    {event.label || humanize(event.type) || 'Event'}
+                                                                    {event.label ? humanize(event.label) : humanize(event.type) || 'Event'}
                                                                 </Text>
                                                                 <Text size="xs" c="dimmed">
                                                                     #{event.sequence ?? '—'} · {event.timestamp ? dayjs(event.timestamp).format('MMM D, YYYY HH:mm:ss') : '—'}
                                                                 </Text>
                                                             </Stack>
-                                                            <Badge size="xs" color={resolveStatusColor(event.status)}>
-                                                                {event.status || 'unknown'}
-                                                            </Badge>
-                                                        </Group>
-                                                        <Group gap="xs">
-                                                            {event.durationMs !== undefined && (
-                                                                <Badge size="xs" variant="outline" color="grape">
-                                                                    {formatDuration(event.durationMs)}
+                                                            {event.status && (
+                                                                <Badge size="xs" variant="light" radius="xl" color={resolveStatusColor(event.status)}>
+                                                                    {event.status.toUpperCase()}
                                                                 </Badge>
                                                             )}
+                                                        </Group>
+                                                        <Group gap="xs">
                                                             {event.toolName && (
                                                                 <Badge size="xs" variant="light" color="violet">
-                                                                    {event.toolName}
+                                                                    {formatToolName(event.toolName)}
                                                                 </Badge>
                                                             )}
                                                             {(event.inputTokens || event.outputTokens) && (
-                                                                <Badge size="xs" variant="light" color="blue">
+                                                                <Badge size="xs" variant="light" color="gray">
                                                                     {formatNumber((event.inputTokens || 0) + (event.outputTokens || 0))} tokens
                                                                 </Badge>
                                                             )}
                                                         </Group>
-                                                        <Text size="xs" c="dimmed">
-                                                            {event.timestamp ? formatRelativeTime(event.timestamp) : '—'} · {formatActor(event.actor)}
-                                                        </Text>
+                                                        {(formatRelativeTime(event.timestamp) !== '—' || formatActor(event.actor)) && (
+                                                            <Text size="xs" c="dimmed">
+                                                                {formatRelativeTime(event.timestamp)}{formatActor(event.actor) ? ` · ${formatActor(event.actor)}` : ''}
+                                                            </Text>
+                                                        )}
                                                     </Stack>
                                                 </Paper>
                                             );
@@ -639,133 +634,140 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
                         <Stack gap="md" h="100%">
                             <Text fw={600}>Event detail</Text>
                             {selectedEvent ? (
-                                <Stack gap="md">
-                                    <Stack gap={4}>
-                                        <Text size="lg" fw={600}>
-                                            {selectedEvent.label || humanize(selectedEvent.type) || 'Event'}
-                                        </Text>
-                                        <Group gap="xs">
-                                            <Badge size="xs" color={resolveStatusColor(selectedEvent.status)}>
-                                                {selectedEvent.status || 'unknown'}
-                                            </Badge>
-                                            {selectedEvent.sequence !== undefined && (
-                                                <Badge size="xs" variant="light" color="gray">
-                                                    #{selectedEvent.sequence}
-                                                </Badge>
+                                <ScrollArea style={{ flex: 1 }} type="auto" offsetScrollbars>
+                                    <Stack gap="md">
+                                        <Stack gap={4}>
+                                            <Text size="lg" fw={600}>
+                                                {selectedEvent.label ? humanize(selectedEvent.label) : humanize(selectedEvent.type) || 'Event'}
+                                            </Text>
+                                            <Group gap="xs">
+                                                {selectedEvent.status && (
+                                                    <Badge size="sm" variant="light" radius="xl" color={resolveStatusColor(selectedEvent.status)}>
+                                                        {selectedEvent.status.toUpperCase()}
+                                                    </Badge>
+                                                )}
+                                                <Text size="xs" c="dimmed">#{selectedEvent.sequence ?? '—'}</Text>
+                                            </Group>
+                                            <Text size="sm" c="dimmed">
+                                                {selectedEvent.timestamp ? dayjs(selectedEvent.timestamp).format('MMM D, YYYY HH:mm:ss') : '—'} · {formatRelativeTime(selectedEvent.timestamp)}
+                                            </Text>
+                                            {formatActor(selectedEvent.actor) && (
+                                                <Text size="sm" c="dimmed">
+                                                    Actor: {formatActor(selectedEvent.actor)}
+                                                </Text>
+                                            )}
+                                        </Stack>
+
+                                        <Stack gap={6}>
+                                            {selectedEvent.toolName && (
+                                                <Group gap="xs">
+                                                    <Text size="sm" c="dimmed">Tool:</Text>
+                                                    <Badge size="sm" variant="light" color="violet">
+                                                        {formatToolName(selectedEvent.toolName)}
+                                                    </Badge>
+                                                </Group>
+                                            )}
+                                            {selectedEvent.model && (
+                                                <Group gap="xs">
+                                                    <Text size="sm" c="dimmed">Model:</Text>
+                                                    <Badge size="sm" variant="light" color="cyan">{selectedEvent.model}</Badge>
+                                                </Group>
                                             )}
                                             {selectedEvent.durationMs !== undefined && (
-                                                <Badge size="xs" variant="outline" color="grape">
-                                                    {formatDuration(selectedEvent.durationMs)}
-                                                </Badge>
+                                                <Group gap="xs">
+                                                    <Text size="sm" c="dimmed">Duration:</Text>
+                                                    <Text size="sm" fw={500}>{formatDuration(selectedEvent.durationMs)}</Text>
+                                                </Group>
                                             )}
-                                        </Group>
-                                        <Text size="sm" c="dimmed">
-                                            {selectedEvent.timestamp ? dayjs(selectedEvent.timestamp).format('MMM D, YYYY HH:mm:ss') : '—'} · {formatRelativeTime(selectedEvent.timestamp)}
-                                        </Text>
-                                        <Text size="sm">
-                                            Actor: <Text component="span" fw={500}>{formatActor(selectedEvent.actor)}</Text>
-                                        </Text>
-                                    </Stack>
-
-                                    <Stack gap={6}>
-                                        {selectedEvent.toolName && (
-                                            <Text size="sm">
-                                                Tool: <Text component="span" fw={500}>{selectedEvent.toolName}</Text>
-                                            </Text>
-                                        )}
-                                        {selectedEvent.model && (
-                                            <Text size="sm">
-                                                Model: <Text component="span" fw={500}>{selectedEvent.model}</Text>
-                                            </Text>
-                                        )}
-                                                            {eventTokenStats.isAiCall && eventTokenStats.hasData ? (
-                                                                <SimpleGrid cols={{ base: 1, sm: 3 }} spacing="sm">
-                                                                    <Card withBorder p="sm">
-                                                                                            <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
-                                                                                                Input
-                                                                        </Text>
-                                                                        <Text size="md" fw={600} mt={4}>
-                                                                            {typeof eventTokenStats.input === 'number'
-                                                                                ? formatNumber(eventTokenStats.input)
-                                                                                : '—'}
-                                                                        </Text>
-                                                                    </Card>
-                                                                    <Card withBorder p="sm">
-                                                                                            <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
-                                                                                                Output
-                                                                        </Text>
-                                                                        <Text size="md" fw={600} mt={4}>
-                                                                            {typeof eventTokenStats.output === 'number'
-                                                                                ? formatNumber(eventTokenStats.output)
-                                                                                : '—'}
-                                                                        </Text>
-                                                                    </Card>
-                                                                    <Card withBorder p="sm">
-                                                                                            <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
-                                                                                                Cache
-                                                                        </Text>
-                                                                        <Text size="md" fw={600} mt={4}>
-                                                                            {typeof eventTokenStats.cached === 'number'
-                                                                                ? formatNumber(eventTokenStats.cached)
-                                                                                : '—'}
-                                                                        </Text>
-                                                                    </Card>
-                                                                </SimpleGrid>
-                                                            ) : (selectedEvent.inputTokens || selectedEvent.outputTokens) ? (
-                                                                <Group gap="xs">
-                                                                    {selectedEvent.inputTokens ? (
-                                                                        <Badge size="xs" variant="light" color="blue">
-                                                                            {formatNumber(selectedEvent.inputTokens)} in
-                                                                        </Badge>
-                                                                    ) : null}
-                                                                    {selectedEvent.outputTokens ? (
-                                                                        <Badge size="xs" variant="light" color="indigo">
-                                                                            {formatNumber(selectedEvent.outputTokens)} out
-                                                                        </Badge>
-                                                                    ) : null}
-                                                                </Group>
-                                                            ) : null}
-                                        {selectedEvent.error?.message && (
-                                            <Alert icon={<IconInfoCircle size={14} />} color="red" variant="light">
-                                                {selectedEvent.error.message}
-                                            </Alert>
-                                        )}
-                                    </Stack>
-
-                                    {selectedEvent.metadata && Object.keys(selectedEvent.metadata).length > 0 && (
-                                        <Stack gap={6}>
-                                            <Text size="sm" fw={600}>
-                                                Metadata
-                                            </Text>
-                                            <Paper withBorder p="sm">
-                                                <Code block>{JSON.stringify(selectedEvent.metadata, null, 2)}</Code>
-                                            </Paper>
+                                            {eventTokenStats.isAiCall && eventTokenStats.hasData ? (
+                                                <SimpleGrid cols={{ base: 1, sm: 3 }} spacing="sm">
+                                                    <Card withBorder p="sm">
+                                                        <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
+                                                            Input
+                                                        </Text>
+                                                        <Text size="md" fw={600} mt={4}>
+                                                            {typeof eventTokenStats.input === 'number'
+                                                                ? formatNumber(eventTokenStats.input)
+                                                                : '—'}
+                                                        </Text>
+                                                    </Card>
+                                                    <Card withBorder p="sm">
+                                                        <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
+                                                            Output
+                                                        </Text>
+                                                        <Text size="md" fw={600} mt={4}>
+                                                            {typeof eventTokenStats.output === 'number'
+                                                                ? formatNumber(eventTokenStats.output)
+                                                                : '—'}
+                                                        </Text>
+                                                    </Card>
+                                                    <Card withBorder p="sm">
+                                                        <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
+                                                            Cache
+                                                        </Text>
+                                                        <Text size="md" fw={600} mt={4}>
+                                                            {typeof eventTokenStats.cached === 'number'
+                                                                ? formatNumber(eventTokenStats.cached)
+                                                                : '—'}
+                                                        </Text>
+                                                    </Card>
+                                                </SimpleGrid>
+                                            ) : (selectedEvent.inputTokens || selectedEvent.outputTokens) ? (
+                                                <Group gap="xs">
+                                                    {selectedEvent.inputTokens ? (
+                                                        <Badge size="xs" variant="light" color="blue">
+                                                            {formatNumber(selectedEvent.inputTokens)} in
+                                                        </Badge>
+                                                    ) : null}
+                                                    {selectedEvent.outputTokens ? (
+                                                        <Badge size="xs" variant="light" color="indigo">
+                                                            {formatNumber(selectedEvent.outputTokens)} out
+                                                        </Badge>
+                                                    ) : null}
+                                                </Group>
+                                            ) : null}
+                                            {selectedEvent.error?.message && (
+                                                <Alert icon={<IconInfoCircle size={14} />} color="red" variant="light">
+                                                    {selectedEvent.error.message}
+                                                </Alert>
+                                            )}
                                         </Stack>
-                                    )}
 
-                                    <Stack gap="sm">
-                                        <Text size="sm" fw={600}>
-                                            Sections
-                                        </Text>
-                                        {selectedEvent.sections && selectedEvent.sections.length > 0 ? (
-                                            <Stack gap="sm">
-                                                {selectedEvent.sections.map((section, index) => {
-                                                    const key =
-                                                        (typeof section.id === 'string' && section.id.length > 0 && `id-${section.id}`) ||
-                                                        (typeof section.label === 'string' && section.label.length > 0 && `label-${section.label}-${index}`) ||
-                                                        (typeof section.title === 'string' && section.title.length > 0 && `title-${section.title}-${index}`) ||
-                                                        `section-${index}`;
-
-                                                    return <SectionCard key={key} section={section} index={index} />;
-                                                })}
+                                        {selectedEvent.metadata && Object.keys(selectedEvent.metadata).length > 0 && (
+                                            <Stack gap={6}>
+                                                <Text size="sm" fw={600}>
+                                                    Metadata
+                                                </Text>
+                                                <Paper withBorder p="sm">
+                                                    <Code block>{JSON.stringify(selectedEvent.metadata, null, 2)}</Code>
+                                                </Paper>
                                             </Stack>
-                                        ) : (
-                                            <Text size="sm" c="dimmed">
-                                                No structured sections for this event.
-                                            </Text>
                                         )}
+
+                                        <Stack gap="sm">
+                                            <Text size="sm" fw={600}>
+                                                Sections
+                                            </Text>
+                                            {selectedEvent.sections && selectedEvent.sections.length > 0 ? (
+                                                <Stack gap="sm">
+                                                    {selectedEvent.sections.map((section, index) => {
+                                                        const key =
+                                                            (typeof section.id === 'string' && section.id.length > 0 && `id-${section.id}`) ||
+                                                            (typeof section.label === 'string' && section.label.length > 0 && `label-${section.label}-${index}`) ||
+                                                            (typeof section.title === 'string' && section.title.length > 0 && `title-${section.title}-${index}`) ||
+                                                            `section-${index}`;
+
+                                                        return <SectionCard key={key} section={section} index={index} />;
+                                                    })}
+                                                </Stack>
+                                            ) : (
+                                                <Text size="sm" c="dimmed">
+                                                    No structured sections for this event.
+                                                </Text>
+                                            )}
+                                        </Stack>
                                     </Stack>
-                                </Stack>
+                                </ScrollArea>
                             ) : (
                                 <Center h={200}>
                                     <Text c="dimmed">Select an event to see details.</Text>

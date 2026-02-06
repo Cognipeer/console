@@ -13,8 +13,8 @@ import {
   Text,
   TextInput,
   ThemeIcon,
-  Title,
 } from '@mantine/core';
+import PageHeader from '@/components/layout/PageHeader';
 import {
   IconBrain,
   IconChevronRight,
@@ -145,43 +145,30 @@ export default function DashboardPage() {
     categoryOptions.find((option) => option.value === value)?.label ?? value;
 
   return (
-    <Stack gap="lg">
-      <Paper
-        p="xl"
-        radius="lg"
-        withBorder
-        style={{
-          background:
-            'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)',
-          borderColor: 'var(--mantine-color-teal-2)',
-        }}
-      >
-        <Stack gap="md">
-          <Group justify="space-between" align="flex-start" wrap="wrap">
-            <div>
-              <Title order={2}>{t('landing.title')}</Title>
-              <Text size="sm" c="dimmed" mt={6}>
-                {t('landing.subtitle')}
-              </Text>
-            </div>
-          </Group>
-
-          <Group gap="md" align="center" wrap="wrap">
+    <Stack gap="md">
+      <PageHeader
+        icon={<IconLayoutGrid size={18} />}
+        title={t('landing.title')}
+        subtitle={t('landing.subtitle')}
+        actions={
+          <Group gap="sm" align="center" wrap="wrap">
             <TextInput
               value={query}
               onChange={(event) => setQuery(event.currentTarget.value)}
               placeholder={t('landing.searchPlaceholder')}
-              leftSection={<IconSearch size={16} />}
-              style={{ flex: 1, minWidth: 260 }}
+              leftSection={<IconSearch size={14} />}
+              size="xs"
+              style={{ minWidth: 200 }}
             />
             <SegmentedControl
               data={categoryOptions}
               value={category}
+              size="xs"
               onChange={(value) => setCategory(value as ModuleCategory)}
             />
           </Group>
-        </Stack>
-      </Paper>
+        }
+      />
 
       <Group justify="space-between" align="center">
         <Text size="sm" c="dimmed">
