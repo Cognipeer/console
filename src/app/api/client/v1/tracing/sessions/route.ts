@@ -6,8 +6,22 @@ import { checkPerRequestLimits, checkRateLimit, checkResourceQuota } from '@/lib
 
 export const runtime = 'nodejs';
 
+/** Max request body size in bytes. Default 10 MB, configurable via TRACING_MAX_BODY_SIZE_MB */
+const MAX_BODY_SIZE_BYTES = (
+    parseInt(process.env.TRACING_MAX_BODY_SIZE_MB || '10', 10) || 10
+) * 1024 * 1024;
+
 export async function POST(request: NextRequest) {
     try {
+        // Check content-length before parsing body
+        const contentLength = parseInt(request.headers.get('content-length') || '0', 10);
+        if (contentLength > MAX_BODY_SIZE_BYTES) {
+            return NextResponse.json(
+                { error: `Payload too large. Max allowed: ${MAX_BODY_SIZE_BYTES} bytes (${Math.round(MAX_BODY_SIZE_BYTES / 1024 / 1024)}MB). Configure via TRACING_MAX_BODY_SIZE_MB env variable.` },
+                { status: 413 },
+            );
+        }
+
         const auth = await requireApiToken(request);
         const db = await getDatabase();
         await db.switchToTenant(auth.tenantDbName);
