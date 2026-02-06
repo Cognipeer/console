@@ -336,6 +336,18 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
         void fetchDetail(false);
     }, [fetchDetail]);
 
+    useEffect(() => {
+        if (detail?.session?.status !== 'in_progress') {
+            return;
+        }
+
+        const interval = setInterval(() => {
+            void fetchDetail(true);
+        }, 5000);
+
+        return () => clearInterval(interval);
+    }, [detail?.session?.status, fetchDetail]);
+
     const tokenStats = useMemo(() => {
         const summary = detail?.session?.summary;
 
