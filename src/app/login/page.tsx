@@ -115,7 +115,7 @@ export default function LoginPage() {
   // Show loading state while checking authentication
   if (checkingAuth) {
     return (
-      <Center style={{ height: '100vh', width: '100vw', background: 'linear-gradient(135deg, var(--mantine-color-teal-0) 0%, var(--mantine-color-cyan-0) 100%)' }}>
+      <Center style={{ height: '100vh', width: '100vw', background: 'var(--mantine-color-gray-0)' }}>
         <Loader size="lg" color="teal" />
       </Center>
     );
@@ -140,7 +140,7 @@ export default function LoginPage() {
           </Text>
         </div>
 
-        <Paper withBorder shadow="lg" p={36} radius="lg" style={{ background: 'white' }}>
+        <Paper withBorder shadow="lg" p={36} radius="lg" style={{ background: 'var(--mantine-color-gray-0)' }}>
           <form onSubmit={form.onSubmit(handleSubmit)}>
             <Stack gap="lg">
               <TextInput

@@ -71,15 +71,15 @@ export default function ProjectSettingsPage() {
         radius="lg"
         withBorder
         style={{
-          background: 'linear-gradient(135deg, var(--mantine-color-blue-0) 0%, var(--mantine-color-cyan-0) 100%)',
-          borderColor: 'var(--mantine-color-blue-2)',
+          background: 'var(--mantine-color-gray-0)',
+          borderColor: 'var(--mantine-color-gray-2)',
         }}>
         <Group gap="md">
           <ThemeIcon
             size={50}
             radius="xl"
-            variant="gradient"
-            gradient={{ from: 'blue', to: 'cyan', deg: 135 }}>
+            variant="light"
+            color="gray">
             <IconFolder size={26} />
           </ThemeIcon>
           <div>

@@ -593,8 +593,8 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
                                                     onClick={() => setSelectedEventId(event.id)}
                                                     style={{
                                                         cursor: 'pointer',
-                                                        borderColor: isSelected ? 'var(--mantine-color-blue-5)' : undefined,
-                                                        backgroundColor: isSelected ? 'var(--mantine-color-blue-0)' : undefined,
+                                                        borderColor: isSelected ? 'var(--mantine-color-gray-4)' : undefined,
+                                                        backgroundColor: isSelected ? 'var(--mantine-color-gray-0)' : undefined,
                                                     }}
                                                 >
                                                     <Stack gap={6}>

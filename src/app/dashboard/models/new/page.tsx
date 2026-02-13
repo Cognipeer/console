@@ -320,16 +320,16 @@ export default function NewModelPage() {
                       onClick={() => handleProviderSelect(provider.id)}
                       style={{
                         borderWidth: provider.id === form.values.provider ? 2 : 1,
-                        borderColor: provider.id === form.values.provider ? 'var(--mantine-color-blue-6)' : undefined,
+                        borderColor: provider.id === form.values.provider ? 'var(--mantine-color-gray-5)' : undefined,
                         cursor: 'pointer',
                         transition: 'all 0.2s ease',
-                        backgroundColor: provider.id === form.values.provider ? 'var(--mantine-color-blue-0)' : undefined,
+                        backgroundColor: provider.id === form.values.provider ? 'var(--mantine-color-gray-0)' : undefined,
                       }}
                       className="hover:shadow-md"
                     >
                       <Stack gap={8}>
                         <Group gap={8}>
-                          <ThemeIcon variant="light" size="md" radius="md" color={provider.id === form.values.provider ? 'blue' : 'gray'}>
+                          <ThemeIcon variant="light" size="md" radius="md" color="gray">
                             <IconPlug size={18} />
                           </ThemeIcon>
                           <Text fw={600} size="sm">{provider.label}</Text>
