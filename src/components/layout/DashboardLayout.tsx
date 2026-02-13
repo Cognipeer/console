@@ -243,7 +243,7 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
                             onClick={() => handleNavClick(item.href)}
                           >
                             <Group gap="sm" align="flex-start" wrap="nowrap">
-                              <ThemeIcon size={34} radius="md" variant="light" color="teal">
+                              <ThemeIcon size={34} radius="md" variant="light" color="gray">
                                 <item.icon size={18} />
                               </ThemeIcon>
                               <div>
@@ -293,7 +293,7 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
                             onClick={() => handleNavClick(item.href)}
                           >
                             <Group gap="sm" wrap="nowrap">
-                              <ThemeIcon size={32} radius="md" variant="light" color="teal">
+                              <ThemeIcon size={32} radius="md" variant="light" color="gray">
                                 <item.icon size={16} />
                               </ThemeIcon>
                               <Text fw={500} size="sm">
@@ -359,7 +359,7 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
                 <Menu.Target>
                   <UnstyledButton className={classes.accountButton}>
                     <Group gap="xs" wrap="nowrap">
-                      <Avatar color="teal" radius="xl" size="sm">
+                      <Avatar color="gray" radius="xl" size="sm">
                         {defaultUser.name.charAt(0)}
                       </Avatar>
                       <div className={classes.accountDetails}>

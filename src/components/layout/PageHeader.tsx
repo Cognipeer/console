@@ -24,8 +24,8 @@ export default function PageHeader({
       radius="md"
       withBorder
       style={{
-        background: `linear-gradient(135deg, var(--mantine-color-${iconColor}-0) 0%, var(--mantine-color-${iconColor}-0) 100%)`,
-        borderColor: `var(--mantine-color-${iconColor}-1)`,
+        background: 'var(--mantine-color-gray-0)',
+        borderColor: 'var(--mantine-color-gray-2)',
       }}
     >
       <Group justify="space-between" align="center">

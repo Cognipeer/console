@@ -28,8 +28,8 @@ export default function CollapsibleInfo({
       radius="md"
       p="xs"
       style={{
-        background: `var(--mantine-color-${color}-0)`,
-        borderColor: `var(--mantine-color-${color}-1)`,
+        background: 'var(--mantine-color-gray-0)',
+        borderColor: 'var(--mantine-color-gray-2)',
       }}
     >
       <Group justify="space-between" align="center">

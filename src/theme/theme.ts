@@ -1,16 +1,16 @@
 import { createTheme, MantineColorsTuple, MantineThemeOverride } from '@mantine/core';
 
 const tealPalette: MantineColorsTuple = [
-  '#b0fff6',
-  '#a7fcf5',
-  '#82eedf',
-  '#07e3d0',
-  '#01dac7',
-  '#03c2b1',
-  '#00b5a5',
-  '#009689',
-  '#007c70',
-  '#005d52',
+  '#e6fbfa',
+  '#c9f3f1',
+  '#9ee9e5',
+  '#70ded8',
+  '#48d1ca',
+  '#27c3bb',
+  '#16b3ab',
+  '#109d95',
+  '#0d8680',
+  '#0a706b',
 ];
 
 const sharedFontStack = 'var(--font-lexend), "Lexend Deca", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
