@@ -57,6 +57,7 @@ interface AgentOverviewResponse {
   };
   recentSessions: Array<{
     sessionId: string;
+    threadId?: string;
     status: string;
     startedAt: string;
     durationMs: number | null;
@@ -176,6 +177,10 @@ export default function AgentTracingAgentPage() {
 
   const handleSessionClick = (sessionId: string) => {
     router.push(`/dashboard/tracing/sessions/${encodeURIComponent(sessionId)}`);
+  };
+
+  const handleThreadClick = (threadId: string) => {
+    router.push(`/dashboard/tracing/threads/${encodeURIComponent(threadId)}`);
   };
 
   if (loading && !data) {
@@ -561,6 +566,7 @@ export default function AgentTracingAgentPage() {
           <SessionTable
             sessions={(data?.recentSessions || []).map((session) => ({
               sessionId: session.sessionId,
+              threadId: session.threadId,
               agentName,
               status: session.status,
               startedAt: session.startedAt,
@@ -569,6 +575,7 @@ export default function AgentTracingAgentPage() {
               totalTokens: session.totalTokens ?? undefined,
             }))}
             onRowClick={handleSessionClick}
+            onThreadClick={handleThreadClick}
             loading={loading && !data}
           />
         </Stack>

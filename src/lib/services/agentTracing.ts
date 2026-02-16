@@ -668,6 +668,7 @@ export class AgentTracingService {
 
     const recentSessions = sortedSessions.slice(0, 10).map((s) => ({
       sessionId: s.sessionId,
+      threadId: s.threadId,
       status: s.status,
       startedAt: s.startedAt,
       durationMs: s.durationMs,

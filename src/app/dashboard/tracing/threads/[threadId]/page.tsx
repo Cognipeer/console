@@ -149,14 +149,19 @@ export default function ThreadDetailPage({
         title="Thread Detail"
         subtitle={`Thread ${threadId.substring(0, 16)}${threadId.length > 16 ? '...' : ''}`}
         actions={
-          <Button
-            leftSection={<IconArrowLeft size={14} />}
-            variant="light"
-            size="xs"
-            onClick={() => router.push('/dashboard/tracing/threads')}
-          >
-            Back to Threads
-          </Button>
+          <>
+            <Badge size="sm" variant="filled" radius="xl" color={resolveStatusColor(thread.status)}>
+              {thread.status.toUpperCase()}
+            </Badge>
+            <Button
+              leftSection={<IconArrowLeft size={14} />}
+              variant="light"
+              size="xs"
+              onClick={() => router.push('/dashboard/tracing/threads')}
+            >
+              Back to Threads
+            </Button>
+          </>
         }
       />
 
@@ -203,7 +208,7 @@ export default function ThreadDetailPage({
               <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Agents</Text>
               <Group gap={4}>
                 {thread.agents.map((agent) => (
-                  <Badge key={agent} size="sm" variant="outline" color="blue">
+                  <Badge key={agent} size="sm" variant="light" color="blue">
                     {agent}
                   </Badge>
                 ))}
@@ -246,7 +251,7 @@ export default function ThreadDetailPage({
                 <Group gap={4}>
                   <Text size="xs" c="dimmed">Models:</Text>
                   {thread.modelsUsed.slice(0, 3).map((m) => (
-                    <Badge key={m} size="xs" variant="light" color="grape">{m}</Badge>
+                    <Badge key={m} size="xs" variant="light" color="cyan">{m}</Badge>
                   ))}
                   {thread.modelsUsed.length > 3 && (
                     <Text size="xs" c="dimmed">+{thread.modelsUsed.length - 3}</Text>
@@ -257,7 +262,7 @@ export default function ThreadDetailPage({
                 <Group gap={4}>
                   <Text size="xs" c="dimmed">Tools:</Text>
                   {thread.toolsUsed.slice(0, 3).map((t) => (
-                    <Badge key={t} size="xs" variant="light" color="teal">{t}</Badge>
+                    <Badge key={t} size="xs" variant="light" color="violet">{t}</Badge>
                   ))}
                   {thread.toolsUsed.length > 3 && (
                     <Text size="xs" c="dimmed">+{thread.toolsUsed.length - 3}</Text>
@@ -303,7 +308,7 @@ export default function ThreadDetailPage({
                       {session.agentName || 'Unknown Agent'}
                     </Text>
                     {session.agentVersion && (
-                      <Badge size="xs" variant="outline" color="gray">
+                      <Badge size="xs" variant="light" color="gray">
                         v{session.agentVersion}
                       </Badge>
                     )}
@@ -342,7 +347,7 @@ export default function ThreadDetailPage({
                       <Group gap={4}>
                         <IconBrain size={12} color="gray" />
                         {session.modelsUsed.map((m) => (
-                          <Badge key={m} size="xs" variant="light" color="grape">{m}</Badge>
+                          <Badge key={m} size="xs" variant="light" color="cyan">{m}</Badge>
                         ))}
                       </Group>
                     )}
@@ -351,7 +356,7 @@ export default function ThreadDetailPage({
                       <Group gap={4}>
                         <IconTool size={12} color="gray" />
                         {session.toolsUsed.map((t) => (
-                          <Badge key={t} size="xs" variant="light" color="teal">{t}</Badge>
+                          <Badge key={t} size="xs" variant="light" color="violet">{t}</Badge>
                         ))}
                       </Group>
                     )}

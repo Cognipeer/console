@@ -43,6 +43,7 @@ export class MongoDBProvider implements DatabaseProvider {
   private static readonly rateLimitsCollection = 'rate_limits';
   private static readonly projectsCollection = 'projects';
   private static readonly vectorCountersCollection = 'vector_counters';
+  private static readonly agentTracingThreadsCollection = 'agent_tracing_threads';
 
   constructor(uri: string, mainDbName: string = 'cgate_main') {
     this.uri = uri;
@@ -95,6 +96,224 @@ export class MongoDBProvider implements DatabaseProvider {
 
   private escapeRegex(value: string): string {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  private buildProjectScopeFilter(projectId?: string): Record<string, unknown> {
+    if (typeof projectId === 'string' && projectId.trim().length > 0) {
+      return { projectId: projectId.trim() };
+    }
+
+    return {
+      $or: [{ projectId: { $exists: false } }, { projectId: null }],
+    };
+  }
+
+  private normalizeThreadId(value: unknown): string | undefined {
+    if (typeof value !== 'string') {
+      return undefined;
+    }
+
+    const normalized = value.trim();
+    return normalized.length > 0 ? normalized : undefined;
+  }
+
+  private normalizeStringArray(value: unknown): string[] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+
+    const flattened = value.flatMap((item) => (Array.isArray(item) ? item : [item]));
+
+    return [...new Set(
+      flattened
+        .filter((item): item is string => typeof item === 'string')
+        .map((item) => item.trim())
+        .filter(Boolean),
+    )];
+  }
+
+  private async syncAgentTracingThread(threadId: string, projectId?: string): Promise<void> {
+    const db = this.getTenantDb();
+    const normalizedThreadId = this.normalizeThreadId(threadId);
+    if (!normalizedThreadId) {
+      return;
+    }
+
+    const sessionMatch: Record<string, unknown> = {
+      threadId: normalizedThreadId,
+      ...this.buildProjectScopeFilter(projectId),
+    };
+
+    const threadFilter: Record<string, unknown> = {
+      threadId: normalizedThreadId,
+      ...this.buildProjectScopeFilter(projectId),
+    };
+
+    const [summary] = await db
+      .collection<IAgentTracingSession>('agent_tracing_sessions')
+      .aggregate([
+        { $match: sessionMatch },
+        { $sort: { startedAt: 1, createdAt: 1 } },
+        {
+          $group: {
+            _id: '$threadId',
+            tenantId: { $first: '$tenantId' },
+            projectId: { $first: '$projectId' },
+            sessionsCount: { $sum: 1 },
+            agents: { $addToSet: '$agentName' },
+            statuses: { $addToSet: '$status' },
+            startedAt: { $min: '$startedAt' },
+            endedAt: { $max: '$endedAt' },
+            totalEvents: { $sum: { $ifNull: ['$totalEvents', 0] } },
+            totalInputTokens: { $sum: { $ifNull: ['$totalInputTokens', 0] } },
+            totalOutputTokens: { $sum: { $ifNull: ['$totalOutputTokens', 0] } },
+            totalDurationMs: { $sum: { $ifNull: ['$durationMs', 0] } },
+            latestStatus: { $last: '$status' },
+            modelsUsed: { $addToSet: '$modelsUsed' },
+            toolsUsed: { $addToSet: '$toolsUsed' },
+          },
+        },
+      ])
+      .toArray();
+
+    if (!summary) {
+      await db
+        .collection(MongoDBProvider.agentTracingThreadsCollection)
+        .deleteOne(threadFilter);
+      return;
+    }
+
+    const statuses = this.normalizeStringArray(summary.statuses);
+    const latestStatus =
+      (typeof summary.latestStatus === 'string' && summary.latestStatus.trim()) ||
+      statuses[statuses.length - 1] ||
+      'unknown';
+    const now = new Date();
+
+    await db
+      .collection(MongoDBProvider.agentTracingThreadsCollection)
+      .updateOne(
+        threadFilter,
+        {
+          $set: {
+            threadId: normalizedThreadId,
+            tenantId: summary.tenantId,
+            projectId:
+              typeof summary.projectId === 'string' && summary.projectId.trim()
+                ? summary.projectId
+                : undefined,
+            sessionsCount: Number(summary.sessionsCount || 0),
+            agents: this.normalizeStringArray(summary.agents),
+            statuses,
+            latestStatus,
+            startedAt: summary.startedAt,
+            endedAt: summary.endedAt,
+            totalEvents: Number(summary.totalEvents || 0),
+            totalInputTokens: Number(summary.totalInputTokens || 0),
+            totalOutputTokens: Number(summary.totalOutputTokens || 0),
+            totalDurationMs: Number(summary.totalDurationMs || 0),
+            modelsUsed: this.normalizeStringArray(summary.modelsUsed),
+            toolsUsed: this.normalizeStringArray(summary.toolsUsed),
+            updatedAt: now,
+          },
+          $setOnInsert: {
+            createdAt: now,
+          },
+        },
+        { upsert: true },
+      );
+  }
+
+  private async backfillAgentTracingThreads(projectId?: string): Promise<void> {
+    const db = this.getTenantDb();
+
+    const match: Record<string, unknown> = {
+      threadId: { $type: 'string', $ne: '' },
+      ...this.buildProjectScopeFilter(projectId),
+    };
+
+    const threadIds = await db
+      .collection<IAgentTracingSession>('agent_tracing_sessions')
+      .aggregate([
+        { $match: match },
+        { $group: { _id: '$threadId' } },
+        { $project: { _id: 0, threadId: '$_id' } },
+      ])
+      .toArray();
+
+    for (const item of threadIds) {
+      if (typeof item.threadId === 'string' && item.threadId.trim()) {
+        await this.syncAgentTracingThread(item.threadId, projectId);
+      }
+    }
+  }
+
+  private async listAgentTracingThreadsFromCollection(
+    filters?: Record<string, unknown>,
+    projectId?: string,
+  ): Promise<{ threads: Array<Record<string, unknown>>; total: number }> {
+    const db = this.getTenantDb();
+    const match: Record<string, unknown> = {
+      ...this.buildProjectScopeFilter(projectId),
+    };
+
+    const normalizedAgentName =
+      typeof filters?.agentName === 'string' ? filters.agentName.trim() : '';
+    if (normalizedAgentName) {
+      match.agents = {
+        $elemMatch: {
+          $regex: this.escapeRegex(normalizedAgentName),
+          $options: 'i',
+        },
+      };
+    }
+
+    if (typeof filters?.status === 'string' && filters.status.trim()) {
+      match.latestStatus = filters.status;
+    }
+
+    if (filters?.from || filters?.to) {
+      const startedAt: { $gte?: Date; $lte?: Date } = {};
+      if (typeof filters?.from === 'string') startedAt.$gte = new Date(filters.from);
+      if (typeof filters?.to === 'string') startedAt.$lte = new Date(filters.to);
+      match.startedAt = startedAt;
+    }
+
+    const limit = parseInt(String(filters?.limit ?? '50'));
+    const skip = parseInt(String(filters?.skip ?? '0'));
+
+    const [threads, total] = await Promise.all([
+      db
+        .collection(MongoDBProvider.agentTracingThreadsCollection)
+        .find(match)
+        .sort({ startedAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .toArray(),
+      db
+        .collection(MongoDBProvider.agentTracingThreadsCollection)
+        .countDocuments(match),
+    ]);
+
+    return {
+      threads: threads.map((thread) => ({
+        threadId: thread.threadId as string,
+        sessionsCount: Number(thread.sessionsCount || 0),
+        agents: this.normalizeStringArray(thread.agents),
+        statuses: this.normalizeStringArray(thread.statuses),
+        latestStatus:
+          (typeof thread.latestStatus === 'string' && thread.latestStatus) ||
+          'unknown',
+        startedAt: thread.startedAt as Date,
+        endedAt: thread.endedAt as Date,
+        totalEvents: Number(thread.totalEvents || 0),
+        totalInputTokens: Number(thread.totalInputTokens || 0),
+        totalOutputTokens: Number(thread.totalOutputTokens || 0),
+        totalDurationMs: Number(thread.totalDurationMs || 0),
+        modelsUsed: this.normalizeStringArray(thread.modelsUsed),
+      })),
+      total,
+    };
   }
 
   async switchToTenant(tenantDbName: string): Promise<void> {
@@ -557,6 +776,7 @@ export class MongoDBProvider implements DatabaseProvider {
       MongoDBProvider.promptVersionsCollection,
       MongoDBProvider.quotaPoliciesCollection,
       'agent_tracing_sessions',
+      MongoDBProvider.agentTracingThreadsCollection,
       'agent_tracing_events',
       'model_usage_logs',
     ];
@@ -1132,8 +1352,10 @@ export class MongoDBProvider implements DatabaseProvider {
   ): Promise<IAgentTracingSession> {
     const db = this.getTenantDb();
     const now = new Date();
+    const normalizedThreadId = this.normalizeThreadId(session.threadId);
     const sessionData = {
       ...session,
+      threadId: normalizedThreadId,
       createdAt: now,
       updatedAt: now,
     };
@@ -1141,6 +1363,11 @@ export class MongoDBProvider implements DatabaseProvider {
     const result = await db
       .collection('agent_tracing_sessions')
       .insertOne(sessionData);
+
+    if (normalizedThreadId) {
+      await this.syncAgentTracingThread(normalizedThreadId, sessionData.projectId);
+    }
+
     return {
       ...sessionData,
       _id: result.insertedId.toString(),
@@ -1209,9 +1436,28 @@ export class MongoDBProvider implements DatabaseProvider {
     while (true) {
       const sessions = await db
         .collection<IAgentTracingSession>('agent_tracing_sessions')
-        .find(sessionQuery, { projection: { sessionId: 1 } })
+        .find(sessionQuery, { projection: { sessionId: 1, threadId: 1, projectId: 1 } })
         .limit(batchSize)
         .toArray();
+
+      const affectedThreads = new Map<string, { threadId: string; projectId?: string }>();
+      sessions.forEach((session) => {
+        const normalizedThreadId = this.normalizeThreadId(session.threadId);
+        if (!normalizedThreadId) {
+          return;
+        }
+
+        const normalizedProjectId =
+          typeof session.projectId === 'string' && session.projectId.trim().length > 0
+            ? session.projectId.trim()
+            : undefined;
+        const key = `${normalizedThreadId}::${normalizedProjectId || '__legacy__'}`;
+
+        affectedThreads.set(key, {
+          threadId: normalizedThreadId,
+          projectId: normalizedProjectId,
+        });
+      });
 
       const sessionIds = sessions
         .map((s) => s.sessionId)
@@ -1240,6 +1486,13 @@ export class MongoDBProvider implements DatabaseProvider {
         .collection('agent_tracing_sessions')
         .deleteMany(sessionDeleteQuery);
       sessionsDeleted += sessionResult.deletedCount ?? 0;
+
+      for (const affectedThread of affectedThreads.values()) {
+        await this.syncAgentTracingThread(
+          affectedThread.threadId,
+          affectedThread.projectId,
+        );
+      }
     }
 
     return { sessionsDeleted, eventsDeleted };
@@ -1251,15 +1504,23 @@ export class MongoDBProvider implements DatabaseProvider {
     projectId?: string,
   ): Promise<IAgentTracingSession | null> {
     const db = this.getTenantDb();
+    const collection = db.collection<IAgentTracingSession>('agent_tracing_sessions');
+    const filter = projectId ? { sessionId, projectId } : { sessionId };
+
+    const previousSession = await collection.findOne(filter, {
+      projection: { threadId: 1, projectId: 1 },
+    });
+
     const updateData = {
       ...data,
       updatedAt: new Date(),
     };
 
-    const filter = projectId ? { sessionId, projectId } : { sessionId };
+    if ('threadId' in updateData) {
+      updateData.threadId = this.normalizeThreadId(updateData.threadId);
+    }
 
-    const result = await db
-      .collection('agent_tracing_sessions')
+    const result = await collection
       .findOneAndUpdate(
         filter,
         { $set: updateData },
@@ -1268,10 +1529,34 @@ export class MongoDBProvider implements DatabaseProvider {
 
     if (!result) return null;
 
-    return {
+    const updatedSession = {
       ...result,
       _id: result._id.toString(),
     } as IAgentTracingSession;
+
+    const previousThreadId = this.normalizeThreadId(previousSession?.threadId);
+    const previousProjectId =
+      typeof previousSession?.projectId === 'string' && previousSession.projectId.trim().length > 0
+        ? previousSession.projectId.trim()
+        : undefined;
+    const updatedThreadId = this.normalizeThreadId(updatedSession.threadId);
+    const updatedProjectId =
+      typeof updatedSession.projectId === 'string' && updatedSession.projectId.trim().length > 0
+        ? updatedSession.projectId.trim()
+        : projectId;
+
+    if (updatedThreadId) {
+      await this.syncAgentTracingThread(updatedThreadId, updatedProjectId);
+    }
+
+    if (
+      previousThreadId &&
+      (previousThreadId !== updatedThreadId || previousProjectId !== updatedProjectId)
+    ) {
+      await this.syncAgentTracingThread(previousThreadId, previousProjectId);
+    }
+
+    return updatedSession;
   }
 
   async findAgentTracingSessionById(
@@ -1352,88 +1637,28 @@ export class MongoDBProvider implements DatabaseProvider {
     filters?: Record<string, unknown>,
     projectId?: string,
   ): Promise<{ threads: Array<Record<string, unknown>>; total: number }> {
+    let result = await this.listAgentTracingThreadsFromCollection(filters, projectId);
+
+    if (result.total > 0) {
+      return result;
+    }
+
     const db = this.getTenantDb();
-    const match: Record<string, unknown> = {
+    const sessionMatch: Record<string, unknown> = {
       threadId: { $type: 'string', $ne: '' },
+      ...this.buildProjectScopeFilter(projectId),
     };
 
-    if (projectId) {
-      match.projectId = projectId;
-    }
-
-    if (filters?.agentName) {
-      match.agentName = { $regex: filters.agentName, $options: 'i' };
-    }
-
-    if (filters?.status) {
-      match.status = filters.status;
-    }
-
-    if (filters?.from || filters?.to) {
-      const startedAt: { $gte?: Date; $lte?: Date } = {};
-      if (typeof filters?.from === 'string') startedAt.$gte = new Date(filters.from);
-      if (typeof filters?.to === 'string') startedAt.$lte = new Date(filters.to);
-      match.startedAt = startedAt;
-    }
-
-    const limit = parseInt(String(filters?.limit ?? '50'));
-    const skip = parseInt(String(filters?.skip ?? '0'));
-
-    const pipeline = [
-      { $match: match },
-      {
-        $group: {
-          _id: '$threadId',
-          sessionsCount: { $sum: 1 },
-          agents: { $addToSet: '$agentName' },
-          statuses: { $addToSet: '$status' },
-          startedAt: { $min: '$startedAt' },
-          endedAt: { $max: '$endedAt' },
-          totalEvents: { $sum: { $ifNull: ['$totalEvents', 0] } },
-          totalInputTokens: { $sum: { $ifNull: ['$totalInputTokens', 0] } },
-          totalOutputTokens: { $sum: { $ifNull: ['$totalOutputTokens', 0] } },
-          totalDurationMs: { $sum: { $ifNull: ['$durationMs', 0] } },
-          latestStatus: { $last: '$status' },
-          modelsUsed: { $addToSet: '$modelsUsed' },
-        },
-      },
-      { $sort: { startedAt: -1 as const } },
-      {
-        $facet: {
-          threads: [{ $skip: skip }, { $limit: limit }],
-          totalCount: [{ $count: 'count' }],
-        },
-      },
-    ];
-
-    const result = await db
+    const hasThreadedSessions = await db
       .collection('agent_tracing_sessions')
-      .aggregate(pipeline)
-      .toArray();
+      .countDocuments(sessionMatch, { limit: 1 });
 
-    const facet = result[0] as {
-      threads?: Array<Record<string, unknown>>;
-      totalCount?: Array<{ count: number }>;
-    } | undefined;
+    if (hasThreadedSessions > 0) {
+      await this.backfillAgentTracingThreads(projectId);
+      result = await this.listAgentTracingThreadsFromCollection(filters, projectId);
+    }
 
-    const threads = (facet?.threads || []).map((t) => ({
-      threadId: t._id as string,
-      sessionsCount: t.sessionsCount as number,
-      agents: (t.agents as string[]).filter(Boolean),
-      statuses: t.statuses as string[],
-      latestStatus: t.latestStatus as string,
-      startedAt: t.startedAt as Date,
-      endedAt: t.endedAt as Date,
-      totalEvents: t.totalEvents as number,
-      totalInputTokens: t.totalInputTokens as number,
-      totalOutputTokens: t.totalOutputTokens as number,
-      totalDurationMs: t.totalDurationMs as number,
-      modelsUsed: [...new Set((t.modelsUsed as string[][]).flat().filter(Boolean))],
-    }));
-
-    const total = (facet?.totalCount as Array<{ count: number }> | undefined)?.[0]?.count ?? 0;
-
-    return { threads, total };
+    return result;
   }
 
   // Agent Tracing Event operations
