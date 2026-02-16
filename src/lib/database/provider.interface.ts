@@ -511,6 +511,10 @@ export interface DatabaseProvider {
     filters?: Record<string, unknown>,
     projectId?: string,
   ): Promise<{ sessions: IAgentTracingSession[]; total: number }>;
+  listAgentTracingThreads(
+    filters?: Record<string, unknown>,
+    projectId?: string,
+  ): Promise<{ threads: Array<Record<string, unknown>>; total: number }>;
 
   // Agent Tracing Event operations (tenant-specific)
   createAgentTracingEvent(
