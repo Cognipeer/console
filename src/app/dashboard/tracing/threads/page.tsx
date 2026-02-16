@@ -286,7 +286,7 @@ export default function TracingThreadsPage() {
                     <Table.Td>
                       <Group gap={4}>
                         {thread.agents.slice(0, 3).map((agent) => (
-                          <Badge key={agent} size="xs" variant="outline" color="blue">
+                          <Badge key={agent} size="xs" variant="light" color="gray">
                             {agent}
                           </Badge>
                         ))}
