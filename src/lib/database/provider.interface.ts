@@ -125,6 +125,7 @@ export interface ITenantUserDirectoryEntry {
 export interface IAgentTracingSession {
   _id?: ObjectId | string;
   sessionId: string;
+  threadId?: string;
   tenantId: string;
   projectId?: string;
   agent?: Record<string, unknown>;

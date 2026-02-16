@@ -13,64 +13,72 @@ import {
   Paper,
   Badge,
   Pagination,
-  ThemeIcon,
-  Title,
+  Table,
+  Tooltip,
+  Box,
 } from '@mantine/core';
 import { DatePickerInput } from '@mantine/dates';
-import { IconBook, IconRefresh, IconSearch, IconCalendar, IconAdjustments } from '@tabler/icons-react';
+import {
+  IconRefresh,
+  IconSearch,
+  IconCalendar,
+  IconAdjustments,
+  IconBook,
+  IconTimeline,
+} from '@tabler/icons-react';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
-import SessionTable from '@/components/tracing/SessionTable';
 import PageHeader from '@/components/layout/PageHeader';
-import { formatNumber } from '@/lib/utils/tracingUtils';
+import { formatDuration, formatNumber, formatRelativeTime, resolveStatusColor } from '@/lib/utils/tracingUtils';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
-
-interface SessionRecord {
-  sessionId: string;
-  threadId?: string;
-  agentName?: string;
-  status?: string;
-  startedAt?: string;
-  endedAt?: string;
-  durationMs?: number;
-  totalEvents?: number;
-  totalTokens?: number;
-}
-
-interface SessionsResponse {
-  sessions: SessionRecord[];
-  total: number;
-}
 
 dayjs.extend(relativeTime);
 
+interface ThreadRecord {
+  threadId: string;
+  sessionsCount: number;
+  agents: string[];
+  statuses: string[];
+  latestStatus: string;
+  startedAt: string;
+  endedAt?: string;
+  totalEvents: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalDurationMs: number;
+  modelsUsed: string[];
+}
+
+interface ThreadsResponse {
+  threads: ThreadRecord[];
+  total: number;
+}
+
 const DEFAULT_PAGE_SIZE = 25;
 
-export default function TracingSessionsPage() {
+export default function TracingThreadsPage() {
   const router = useRouter();
   const { openDocs } = useDocsDrawer();
-  const [sessions, setSessions] = useState<SessionRecord[]>([]);
-  const [totalSessions, setTotalSessions] = useState(0);
+  const [threads, setThreads] = useState<ThreadRecord[]>([]);
+  const [totalThreads, setTotalThreads] = useState(0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
-  const [query, setQuery] = useState('');
   const [agentFilter, setAgentFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
   const [dateRange, setDateRange] = useState<[Date | null, Date | null]>([null, null]);
 
   const pagination = useMemo(() => {
-    const totalPages = Math.max(1, Math.ceil(totalSessions / pageSize));
+    const totalPages = Math.max(1, Math.ceil(totalThreads / pageSize));
     return { totalPages };
-  }, [totalSessions, pageSize]);
+  }, [totalThreads, pageSize]);
 
   const buildQueryParams = useCallback(() => {
     const params = new URLSearchParams();
     params.set('limit', pageSize.toString());
     params.set('skip', ((page - 1) * pageSize).toString());
 
-    if (query) params.set('query', query.trim());
     if (agentFilter) params.set('agent', agentFilter.trim());
     if (statusFilter) params.set('status', statusFilter);
 
@@ -79,28 +87,28 @@ export default function TracingSessionsPage() {
     if (to) params.set('to', dayjs(to).endOf('day').toISOString());
 
     return params;
-  }, [agentFilter, dateRange, page, pageSize, query, statusFilter]);
+  }, [agentFilter, dateRange, page, pageSize, statusFilter]);
 
-  const fetchSessions = useCallback(async (isRefresh = false) => {
+  const fetchThreads = useCallback(async (isRefresh = false) => {
     try {
       if (isRefresh) setRefreshing(true);
       else setLoading(true);
 
       const params = buildQueryParams();
-      const response = await fetch(`/api/tracing/sessions?${params.toString()}`);
+      const response = await fetch(`/api/tracing/threads?${params.toString()}`);
 
       if (!response.ok) {
         const errorData = await response.json();
-        throw new Error(errorData.error || 'Failed to fetch sessions');
+        throw new Error(errorData.error || 'Failed to fetch threads');
       }
 
-  const data: SessionsResponse = await response.json();
-      setSessions(data.sessions || []);
-      setTotalSessions(data.total || 0);
+      const data: ThreadsResponse = await response.json();
+      setThreads(data.threads || []);
+      setTotalThreads(data.total || 0);
     } catch (error) {
-      console.error('Failed to load sessions:', error);
-      setSessions([]);
-      setTotalSessions(0);
+      console.error('Failed to load threads:', error);
+      setThreads([]);
+      setTotalThreads(0);
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -108,25 +116,11 @@ export default function TracingSessionsPage() {
   }, [buildQueryParams]);
 
   useEffect(() => {
-    fetchSessions();
-  }, [fetchSessions]);
+    fetchThreads();
+  }, [fetchThreads]);
 
   const handleRefresh = () => {
-    fetchSessions(true);
-  };
-
-  const handlePageChange = (nextPage: number) => {
-    setPage(nextPage);
-  };
-
-  const handlePageSizeChange = (value: string | null) => {
-    const size = value ? parseInt(value, 10) : DEFAULT_PAGE_SIZE;
-    setPageSize(size);
-    setPage(1);
-  };
-
-  const handleSessionClick = (sessionId: string) => {
-    router.push(`/dashboard/tracing/sessions/${sessionId}`);
+    fetchThreads(true);
   };
 
   const handleThreadClick = (threadId: string) => {
@@ -135,7 +129,6 @@ export default function TracingSessionsPage() {
 
   const appliedFilters = useMemo(() => {
     const filters: { label: string; value: string }[] = [];
-    if (query) filters.push({ label: 'Search', value: query });
     if (agentFilter) filters.push({ label: 'Agent', value: agentFilter });
     if (statusFilter) filters.push({ label: 'Status', value: statusFilter });
     if (dateRange[0] || dateRange[1]) {
@@ -144,14 +137,14 @@ export default function TracingSessionsPage() {
       filters.push({ label: 'Date Range', value: `${start} → ${end}` });
     }
     return filters;
-  }, [agentFilter, dateRange, query, statusFilter]);
+  }, [agentFilter, dateRange, statusFilter]);
 
   return (
     <Stack gap="md">
       <PageHeader
-        icon={<IconAdjustments size={18} />}
-        title="Session Explorer"
-        subtitle="Inspect recent agent sessions, filter by agent or status, and drill into the execution timeline."
+        icon={<IconTimeline size={18} />}
+        title="Thread Explorer"
+        subtitle="View threads that group multiple agent sessions together. Each thread represents a single end-to-end workflow."
         actions={
           <>
             <Button
@@ -179,25 +172,15 @@ export default function TracingSessionsPage() {
         <Stack gap="md">
           <Group gap="md" wrap="wrap">
             <TextInput
-              label="Search"
-              placeholder="Search session ID or agent"
-              leftSection={<IconSearch size={16} />}
-              value={query}
-              onChange={(event) => {
-                setQuery(event.currentTarget.value);
-                setPage(1);
-              }}
-              style={{ minWidth: 220 }}
-            />
-            <TextInput
               label="Agent"
-              placeholder="Agent name"
+              placeholder="Filter by agent name"
+              leftSection={<IconSearch size={16} />}
               value={agentFilter}
               onChange={(event) => {
                 setAgentFilter(event.currentTarget.value);
                 setPage(1);
               }}
-              style={{ minWidth: 200 }}
+              style={{ minWidth: 220 }}
             />
             <Select
               label="Status"
@@ -205,7 +188,7 @@ export default function TracingSessionsPage() {
               data={[
                 { value: 'success', label: 'Success' },
                 { value: 'error', label: 'Error' },
-                { value: 'running', label: 'Running' },
+                { value: 'in_progress', label: 'In Progress' },
               ]}
               value={statusFilter}
               onChange={(value) => {
@@ -232,7 +215,10 @@ export default function TracingSessionsPage() {
               label="Page size"
               data={['25', '50', '100'].map((value) => ({ value, label: `${value} rows` }))}
               value={pageSize.toString()}
-              onChange={handlePageSizeChange}
+              onChange={(value) => {
+                setPageSize(value ? parseInt(value, 10) : DEFAULT_PAGE_SIZE);
+                setPage(1);
+              }}
               leftSection={<IconAdjustments size={16} />}
               style={{ minWidth: 140 }}
             />
@@ -253,18 +239,94 @@ export default function TracingSessionsPage() {
       <Paper withBorder shadow="sm" p="md">
         <Stack gap="md">
           <Group justify="space-between" align="center">
-            <Text fw={600}>Sessions</Text>
+            <Text fw={600}>Threads</Text>
             <Badge size="sm" variant="light">
-              {formatNumber(totalSessions)} total
+              {formatNumber(totalThreads)} total
             </Badge>
           </Group>
-          <SessionTable sessions={sessions} loading={loading} onRowClick={handleSessionClick} onThreadClick={handleThreadClick} />
+
+          {loading ? (
+            <Box p="xl" style={{ textAlign: 'center' }}>
+              <Text c="dimmed">Loading threads...</Text>
+            </Box>
+          ) : threads.length === 0 ? (
+            <Box p="xl" style={{ textAlign: 'center' }}>
+              <Text c="dimmed">No threads found. Threads are created when sessions include a threadId.</Text>
+            </Box>
+          ) : (
+            <Table striped highlightOnHover>
+              <Table.Thead>
+                <Table.Tr>
+                  <Table.Th>Thread ID</Table.Th>
+                  <Table.Th>Agents</Table.Th>
+                  <Table.Th>Sessions</Table.Th>
+                  <Table.Th>Status</Table.Th>
+                  <Table.Th>Started</Table.Th>
+                  <Table.Th>Duration</Table.Th>
+                  <Table.Th>Events</Table.Th>
+                  <Table.Th>Tokens</Table.Th>
+                </Table.Tr>
+              </Table.Thead>
+              <Table.Tbody>
+                {threads.map((thread) => (
+                  <Table.Tr
+                    key={thread.threadId}
+                    onClick={() => handleThreadClick(thread.threadId)}
+                    style={{ cursor: 'pointer' }}
+                  >
+                    <Table.Td>
+                      <Tooltip label={thread.threadId}>
+                        <Text size="xs" c="dimmed" style={{ fontFamily: 'monospace' }} lineClamp={1}>
+                          {thread.threadId.length > 16
+                            ? `${thread.threadId.substring(0, 16)}...`
+                            : thread.threadId}
+                        </Text>
+                      </Tooltip>
+                    </Table.Td>
+                    <Table.Td>
+                      <Group gap={4}>
+                        {thread.agents.slice(0, 3).map((agent) => (
+                          <Badge key={agent} size="xs" variant="outline" color="blue">
+                            {agent}
+                          </Badge>
+                        ))}
+                        {thread.agents.length > 3 && (
+                          <Text size="xs" c="dimmed">+{thread.agents.length - 3}</Text>
+                        )}
+                      </Group>
+                    </Table.Td>
+                    <Table.Td>
+                      <Text size="sm">{thread.sessionsCount}</Text>
+                    </Table.Td>
+                    <Table.Td>
+                      <Badge size="xs" variant="light" radius="xl" color={resolveStatusColor(thread.latestStatus)}>
+                        {(thread.latestStatus || 'unknown').toUpperCase()}
+                      </Badge>
+                    </Table.Td>
+                    <Table.Td>
+                      <Text size="sm">{formatRelativeTime(thread.startedAt)}</Text>
+                    </Table.Td>
+                    <Table.Td>
+                      <Text size="sm">{formatDuration(thread.totalDurationMs)}</Text>
+                    </Table.Td>
+                    <Table.Td>
+                      <Text size="sm">{formatNumber(thread.totalEvents)}</Text>
+                    </Table.Td>
+                    <Table.Td>
+                      <Text size="sm">{formatNumber(thread.totalInputTokens + thread.totalOutputTokens)}</Text>
+                    </Table.Td>
+                  </Table.Tr>
+                ))}
+              </Table.Tbody>
+            </Table>
+          )}
+
           {pagination.totalPages > 1 && (
             <Group justify="space-between" align="center">
               <Text size="sm" c="dimmed">
                 Page {page} of {pagination.totalPages}
               </Text>
-              <Pagination total={pagination.totalPages} value={page} onChange={handlePageChange} />
+              <Pagination total={pagination.totalPages} value={page} onChange={setPage} />
             </Group>
           )}
         </Stack>

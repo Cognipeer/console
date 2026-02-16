@@ -540,17 +540,26 @@ export default function AgentTracingPage() {
             <Text fw={600} size="lg">Recent Sessions</Text>
             <Text size="sm" c="dimmed">Latest agent execution sessions</Text>
           </div>
-          <Button 
-            variant="light" 
-            onClick={() => handleShowAllSessions()}
-            rightSection={<IconArrowUpRight size={14} />}>
-            Show All Sessions
-          </Button>
+          <Group gap="xs">
+            <Button
+              variant="light"
+              onClick={() => router.push('/dashboard/tracing/threads')}
+              rightSection={<IconArrowUpRight size={14} />}>
+              Browse Threads
+            </Button>
+            <Button 
+              variant="light" 
+              onClick={() => handleShowAllSessions()}
+              rightSection={<IconArrowUpRight size={14} />}>
+              Show All Sessions
+            </Button>
+          </Group>
         </Group>
 
         <SessionTable
           sessions={recentSessions}
           onRowClick={(sessionId) => handleRowClick(sessionId)}
+          onThreadClick={(threadId) => router.push(`/dashboard/tracing/threads/${threadId}`)}
           loading={loading}
         />
       </Paper>

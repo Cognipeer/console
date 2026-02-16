@@ -81,6 +81,110 @@ export interface DashboardOverview {
 
 export class AgentTracingService {
   /**
+   * List threads (grouped sessions by threadId)
+   */
+  static async listThreads(
+    tenantDbName: string,
+    projectId: string,
+    filters?: {
+      agent?: string;
+      status?: string;
+      from?: string;
+      to?: string;
+      limit?: string;
+      skip?: string;
+    },
+  ) {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+
+    const result = await db.listAgentTracingThreads({
+      agentName: filters?.agent,
+      status: filters?.status,
+      from: filters?.from,
+      to: filters?.to,
+      limit: filters?.limit || '50',
+      skip: filters?.skip || '0',
+    }, projectId);
+
+    return result;
+  }
+
+  /**
+   * Get thread detail - all sessions belonging to a threadId, with aggregated stats
+   */
+  static async getThreadDetail(
+    tenantDbName: string,
+    projectId: string,
+    threadId: string,
+  ) {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+
+    const { sessions } = await db.listAgentTracingSessions({
+      threadId,
+      limit: 1000,
+    }, projectId);
+
+    if (sessions.length === 0) {
+      return null;
+    }
+
+    const sorted = sessions
+      .slice()
+      .sort(
+        (a, b) =>
+          new Date(a.startedAt || 0).getTime() -
+          new Date(b.startedAt || 0).getTime(),
+      );
+
+    const agents = [...new Set(sorted.map((s) => s.agentName).filter(Boolean))] as string[];
+    const statuses = sorted.map((s) => s.status || 'unknown');
+    const hasError = statuses.includes('error');
+    const allDone = statuses.every((s) => s === 'success' || s === 'error' || s === 'completed');
+    const overallStatus = hasError ? 'error' : allDone ? 'success' : 'in_progress';
+
+    const totalInputTokens = sorted.reduce((sum, s) => sum + (s.totalInputTokens || 0), 0);
+    const totalOutputTokens = sorted.reduce((sum, s) => sum + (s.totalOutputTokens || 0), 0);
+    const totalCachedInputTokens = sorted.reduce((sum, s) => sum + (s.totalCachedInputTokens || 0), 0);
+    const totalEvents = sorted.reduce((sum, s) => sum + (s.totalEvents || 0), 0);
+    const totalDurationMs = sorted.reduce((sum, s) => sum + (s.durationMs || 0), 0);
+    const modelsUsed = [...new Set(sorted.flatMap((s) => s.modelsUsed || []))];
+    const toolsUsed = [...new Set(sorted.flatMap((s) => s.toolsUsed || []))];
+
+    return {
+      threadId,
+      status: overallStatus,
+      agents,
+      sessionsCount: sorted.length,
+      startedAt: sorted[0]?.startedAt,
+      endedAt: sorted[sorted.length - 1]?.endedAt,
+      totalDurationMs,
+      totalEvents,
+      totalInputTokens,
+      totalOutputTokens,
+      totalCachedInputTokens,
+      modelsUsed,
+      toolsUsed,
+      sessions: sorted.map((s) => ({
+        sessionId: s.sessionId,
+        agentName: s.agentName,
+        agentVersion: s.agentVersion,
+        status: s.status,
+        startedAt: s.startedAt,
+        endedAt: s.endedAt,
+        durationMs: s.durationMs,
+        totalEvents: s.totalEvents,
+        totalTokens: (s.totalInputTokens || 0) + (s.totalOutputTokens || 0),
+        totalInputTokens: s.totalInputTokens,
+        totalOutputTokens: s.totalOutputTokens,
+        modelsUsed: s.modelsUsed,
+        toolsUsed: s.toolsUsed,
+      })),
+    };
+  }
+
+  /**
    * Get dashboard overview with analytics
    */
   static async getDashboardOverview(
@@ -394,6 +498,7 @@ export class AgentTracingService {
     return {
       sessions: result.sessions.map((s) => ({
         sessionId: s.sessionId,
+        threadId: s.threadId,
         agentName: s.agentName,
         status: s.status,
         startedAt: s.startedAt,
@@ -430,6 +535,7 @@ export class AgentTracingService {
     return {
       session: {
         sessionId: session.sessionId,
+        threadId: session.threadId,
         agentName: session.agentName,
         agentVersion: session.agentVersion,
         status: session.status,

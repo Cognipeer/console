@@ -1031,5 +1031,15 @@ export const en = {
     list: {
       subtitle: 'Manage agent tracing configurations',
     },
+    threads: {
+      title: 'Thread Explorer',
+      subtitle: 'View threads that group multiple agent sessions together.',
+      noThreads: 'No threads found. Threads are created when sessions include a threadId.',
+      browseThreads: 'Browse Threads',
+      threadDetail: 'Thread Detail',
+      sessionTimeline: 'Session Timeline',
+      viewDetails: 'View Details',
+      backToThreads: 'Back to Threads',
+    },
   },
 };

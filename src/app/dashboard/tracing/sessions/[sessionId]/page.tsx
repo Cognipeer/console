@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState, use as usePromise } from 'react';
+import { useRouter } from 'next/navigation';
 import {
     Stack,
     Group,
@@ -115,6 +116,7 @@ type SectionEntry = {
 interface SessionDetailResponse {
     session: {
         sessionId: string;
+        threadId?: string;
         agentName?: string;
         agentVersion?: string;
         status?: string;
@@ -298,6 +300,7 @@ const SectionCard = ({ section, index }: { section: SectionEntry; index: number 
 
 export default function SessionDetailPage({ params }: { params: Promise<{ sessionId: string }> }) {
     const { sessionId } = usePromise(params);
+    const router = useRouter();
     const { openDocs } = useDocsDrawer();
 
     const [loading, setLoading] = useState(true);
@@ -487,6 +490,21 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
                                     </Text>
                                     <Code>{session.sessionId}</Code>
                                 </Group>
+                                {session.threadId && (
+                                    <Group justify="space-between">
+                                        <Text size="sm" c="dimmed">
+                                            Thread
+                                        </Text>
+                                        <Text
+                                            size="sm"
+                                            c="blue"
+                                            style={{ cursor: 'pointer', fontFamily: 'monospace' }}
+                                            onClick={() => router.push(`/dashboard/tracing/threads/${session.threadId}`)}
+                                        >
+                                            {session.threadId.substring(0, 16)}...
+                                        </Text>
+                                    </Group>
+                                )}
                                 <Group justify="space-between">
                                     <Text size="sm" c="dimmed">
                                         Started

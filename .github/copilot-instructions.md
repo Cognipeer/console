@@ -199,6 +199,10 @@ await sendEmail(email, 'welcome', { name, companyName, slug, licenseType });
 | `/api/client/v1/vector/providers/:providerKey/indexes/:externalId` | `GET` | Fetch index metadata alongside provider capabilities. |
 | `/api/client/v1/vector/providers/:providerKey/indexes/:externalId` | `PATCH` | Update index name/metadata. |
 | `/api/client/v1/vector/providers/:providerKey/indexes/:externalId` | `DELETE` | Delete an index and detach remote resources. |
+| `/api/client/v1/tracing/sessions` | `POST` | Ingest agent tracing session data (batch mode). Supports optional `threadId` for cross-agent correlation. |
+| `/api/client/v1/tracing/sessions/stream/:sessionId/start` | `POST` | Start a streaming tracing session. Supports optional `threadId`. |
+| `/api/client/v1/tracing/sessions/stream/:sessionId/event` | `POST` | Send a streaming tracing event. |
+| `/api/client/v1/tracing/sessions/stream/:sessionId/end` | `POST` | End a streaming tracing session. |
 
 - When adding new routes, keep the folder structure RESTful (`/client/v1/<domain>/<resource>/route.ts`). Expose only tenant-scoped data and sanitize logs via `sanitize` helpers as shown in existing handlers.
 - Default `export const runtime = 'nodejs';` for streaming support and consistency.
@@ -217,14 +221,20 @@ await sendEmail(email, 'welcome', { name, companyName, slug, licenseType });
 src/
 ├── app/
 │   ├── api/
-│   │   └── auth/           # Authentication endpoints (tenant-aware)
+│   │   ├── auth/           # Authentication endpoints (tenant-aware)
+│   │   ├── client/v1/      # Client-facing API (API-token auth)
+│   │   │   ├── tracing/    # Tracing ingest (batch & streaming)
+│   │   │   └── ...         # chat, embeddings, vector, files
+│   │   └── tracing/        # Dashboard tracing APIs (threads, sessions)
 │   ├── dashboard/          # Protected dashboard
+│   │   └── tracing/        # Tracing UI (sessions, threads)
 │   ├── login/              # Login page (requires slug)
 │   ├── register/           # Registration page (creates tenant)
 │   └── layout.tsx          # Root layout with Mantine providers
 ├── lib/
 │   ├── database/           # Multi-tenant database abstraction layer
 │   ├── license/            # License and JWT management
+│   ├── services/           # Business logic (agentTracing, vector, models…)
 │   └── email/              # Email service
 ├── config/
 │   └── policies.json       # Feature policies and licenses

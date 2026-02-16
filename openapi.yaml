@@ -678,6 +678,7 @@ paths:
               $ref: '#/components/schemas/TracingSessionRequest'
             example:
               sessionId: "sess_123"
+              threadId: "thread_order-workflow-42"
               agent:
                 name: "CustomerSupport"
                 version: "1.0.0"
@@ -711,6 +712,155 @@ paths:
                     type: string
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /tracing/threads:
+    get:
+      tags:
+        - Tracing
+      summary: List tracing threads
+      description: |
+        List tracing threads – logical groupings of sessions that share
+        the same threadId.  Supports filtering, pagination, and sorting.
+      operationId: listTracingThreads
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: search
+          in: query
+          schema:
+            type: string
+          description: Search by threadId or agent name
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [success, error, running]
+        - name: sortBy
+          in: query
+          schema:
+            type: string
+            enum: [lastActivity, sessionCount]
+            default: lastActivity
+        - name: sortOrder
+          in: query
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+      responses:
+        '200':
+          description: Thread list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  threads:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        threadId:
+                          type: string
+                        sessionCount:
+                          type: integer
+                        agents:
+                          type: array
+                          items:
+                            type: string
+                        statuses:
+                          type: array
+                          items:
+                            type: string
+                        firstSeen:
+                          type: string
+                          format: date-time
+                        lastActivity:
+                          type: string
+                          format: date-time
+                        totalDurationMs:
+                          type: number
+                        totalInputTokens:
+                          type: number
+                        totalOutputTokens:
+                          type: number
+                  pagination:
+                    type: object
+                    properties:
+                      page:
+                        type: integer
+                      limit:
+                        type: integer
+                      total:
+                        type: integer
+                      totalPages:
+                        type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /tracing/threads/{threadId}:
+    get:
+      tags:
+        - Tracing
+      summary: Get thread detail
+      description: |
+        Retrieve full detail for a specific thread, including all sessions
+        that belong to it, sorted chronologically.
+      operationId: getTracingThreadDetail
+      parameters:
+        - name: threadId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Thread detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  threadId:
+                    type: string
+                  sessions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TracingSessionRequest'
+                  sessionCount:
+                    type: integer
+                  agents:
+                    type: array
+                    items:
+                      type: string
+                  firstSeen:
+                    type: string
+                    format: date-time
+                  lastActivity:
+                    type: string
+                    format: date-time
+                  totalDurationMs:
+                    type: number
+                  totalInputTokens:
+                    type: number
+                  totalOutputTokens:
+                    type: number
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -1228,6 +1378,12 @@ components:
       properties:
         sessionId:
           type: string
+        threadId:
+          type: string
+          description: |
+            Optional thread identifier that groups multiple sessions
+            (potentially from different agents) into a single logical
+            workflow or conversation thread.
         agent:
           type: object
           properties:

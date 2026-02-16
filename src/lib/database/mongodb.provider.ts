@@ -1310,6 +1310,10 @@ export class MongoDBProvider implements DatabaseProvider {
       query.status = filters.status;
     }
 
+    if (filters?.threadId) {
+      query.threadId = filters.threadId;
+    }
+
     if (filters?.from || filters?.to) {
       const startedAt: { $gte?: Date; $lte?: Date } = {};
       if (typeof filters.from === 'string') startedAt.$gte = new Date(filters.from);
@@ -1339,6 +1343,97 @@ export class MongoDBProvider implements DatabaseProvider {
       })),
       total,
     };
+  }
+
+  /**
+   * List threads (distinct threadId values) with aggregated session info.
+   */
+  async listAgentTracingThreads(
+    filters?: Record<string, unknown>,
+    projectId?: string,
+  ): Promise<{ threads: Array<Record<string, unknown>>; total: number }> {
+    const db = this.getTenantDb();
+    const match: Record<string, unknown> = {
+      threadId: { $type: 'string', $ne: '' },
+    };
+
+    if (projectId) {
+      match.projectId = projectId;
+    }
+
+    if (filters?.agentName) {
+      match.agentName = { $regex: filters.agentName, $options: 'i' };
+    }
+
+    if (filters?.status) {
+      match.status = filters.status;
+    }
+
+    if (filters?.from || filters?.to) {
+      const startedAt: { $gte?: Date; $lte?: Date } = {};
+      if (typeof filters?.from === 'string') startedAt.$gte = new Date(filters.from);
+      if (typeof filters?.to === 'string') startedAt.$lte = new Date(filters.to);
+      match.startedAt = startedAt;
+    }
+
+    const limit = parseInt(String(filters?.limit ?? '50'));
+    const skip = parseInt(String(filters?.skip ?? '0'));
+
+    const pipeline = [
+      { $match: match },
+      {
+        $group: {
+          _id: '$threadId',
+          sessionsCount: { $sum: 1 },
+          agents: { $addToSet: '$agentName' },
+          statuses: { $addToSet: '$status' },
+          startedAt: { $min: '$startedAt' },
+          endedAt: { $max: '$endedAt' },
+          totalEvents: { $sum: { $ifNull: ['$totalEvents', 0] } },
+          totalInputTokens: { $sum: { $ifNull: ['$totalInputTokens', 0] } },
+          totalOutputTokens: { $sum: { $ifNull: ['$totalOutputTokens', 0] } },
+          totalDurationMs: { $sum: { $ifNull: ['$durationMs', 0] } },
+          latestStatus: { $last: '$status' },
+          modelsUsed: { $addToSet: '$modelsUsed' },
+        },
+      },
+      { $sort: { startedAt: -1 as const } },
+      {
+        $facet: {
+          threads: [{ $skip: skip }, { $limit: limit }],
+          totalCount: [{ $count: 'count' }],
+        },
+      },
+    ];
+
+    const result = await db
+      .collection('agent_tracing_sessions')
+      .aggregate(pipeline)
+      .toArray();
+
+    const facet = result[0] as {
+      threads?: Array<Record<string, unknown>>;
+      totalCount?: Array<{ count: number }>;
+    } | undefined;
+
+    const threads = (facet?.threads || []).map((t) => ({
+      threadId: t._id as string,
+      sessionsCount: t.sessionsCount as number,
+      agents: (t.agents as string[]).filter(Boolean),
+      statuses: t.statuses as string[],
+      latestStatus: t.latestStatus as string,
+      startedAt: t.startedAt as Date,
+      endedAt: t.endedAt as Date,
+      totalEvents: t.totalEvents as number,
+      totalInputTokens: t.totalInputTokens as number,
+      totalOutputTokens: t.totalOutputTokens as number,
+      totalDurationMs: t.totalDurationMs as number,
+      modelsUsed: [...new Set((t.modelsUsed as string[][]).flat().filter(Boolean))],
+    }));
+
+    const total = (facet?.totalCount as Array<{ count: number }> | undefined)?.[0]?.count ?? 0;
+
+    return { threads, total };
   }
 
   // Agent Tracing Event operations

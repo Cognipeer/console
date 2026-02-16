@@ -78,6 +78,7 @@ export async function POST(
 
         const sessionDoc = {
             sessionId,
+            threadId: typeof payload.threadId === 'string' && payload.threadId.trim() ? payload.threadId.trim() : undefined,
             tenantId: auth.tenantId,
             projectId: auth.projectId,
             agent: payload.agent || {},
