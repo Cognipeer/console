@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { InferenceMonitoringService } from '@/lib/services/inferenceMonitoring';
+import { sanitizeServer, isValidBaseUrl } from '@/lib/services/inferenceMonitoring/utils';
 
 interface RouteParams {
   params: Promise<{ serverKey: string }>;
@@ -28,7 +29,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       return NextResponse.json({ error: 'Server not found' }, { status: 404 });
     }
 
-    return NextResponse.json({ server });
+    return NextResponse.json({ server: sanitizeServer(server) });
   } catch (error) {
     console.error('[inference-monitoring] get server error:', error);
     return NextResponse.json(
@@ -53,11 +54,38 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
     }
 
     const body = await request.json();
+    const { name, baseUrl, apiKey, pollIntervalSeconds, status } = body;
+
+    // Validate baseUrl if provided
+    if (baseUrl !== undefined && typeof baseUrl === 'string' && !isValidBaseUrl(baseUrl)) {
+      return NextResponse.json(
+        { error: 'Invalid base URL. Must be a valid HTTP/HTTPS URL.' },
+        { status: 400 },
+      );
+    }
+
+    // Validate status if provided
+    if (status !== undefined && !['active', 'disabled'].includes(status)) {
+      return NextResponse.json(
+        { error: 'Invalid status. Must be "active" or "disabled".' },
+        { status: 400 },
+      );
+    }
+
+    const update: Record<string, unknown> = {};
+    if (name !== undefined && typeof name === 'string') update.name = name.slice(0, 200);
+    if (baseUrl !== undefined && typeof baseUrl === 'string') update.baseUrl = baseUrl;
+    if (apiKey !== undefined) update.apiKey = apiKey ? String(apiKey) : undefined;
+    if (pollIntervalSeconds !== undefined) {
+      update.pollIntervalSeconds = Math.max(10, Math.min(3600, Number(pollIntervalSeconds) || 60));
+    }
+    if (status !== undefined) update.status = status;
+
     const server = await InferenceMonitoringService.updateServer(
       tenantDbName,
       tenantId,
       serverKey,
-      body,
+      update as Parameters<typeof InferenceMonitoringService.updateServer>[3],
       userId,
     );
 
@@ -65,7 +93,7 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
       return NextResponse.json({ error: 'Server not found' }, { status: 404 });
     }
 
-    return NextResponse.json({ server });
+    return NextResponse.json({ server: sanitizeServer(server) });
   } catch (error) {
     console.error('[inference-monitoring] update server error:', error);
     return NextResponse.json(

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { InferenceMonitoringService } from '@/lib/services/inferenceMonitoring';
+import { sanitizeServer, isValidBaseUrl } from '@/lib/services/inferenceMonitoring/utils';
 
 /**
  * GET /api/inference-monitoring/servers
@@ -15,7 +16,7 @@ export async function GET(request: NextRequest) {
     }
 
     const servers = await InferenceMonitoringService.listServers(tenantDbName, tenantId);
-    return NextResponse.json({ servers });
+    return NextResponse.json({ servers: servers.map(sanitizeServer) });
   } catch (error) {
     console.error('[inference-monitoring] list servers error:', error);
     return NextResponse.json(
@@ -42,7 +43,7 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const { name, type, baseUrl, apiKey, pollIntervalSeconds } = body;
 
-    if (!name || !type || !baseUrl) {
+    if (!name || typeof name !== 'string' || !type || !baseUrl || typeof baseUrl !== 'string') {
       return NextResponse.json(
         { error: 'name, type, and baseUrl are required' },
         { status: 400 },
@@ -56,14 +57,27 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    if (!isValidBaseUrl(baseUrl)) {
+      return NextResponse.json(
+        { error: 'Invalid base URL. Must be a valid HTTP/HTTPS URL.' },
+        { status: 400 },
+      );
+    }
+
     const server = await InferenceMonitoringService.createServer(
       tenantDbName,
       tenantId,
-      { name, type, baseUrl, apiKey, pollIntervalSeconds },
+      {
+        name: String(name).slice(0, 200),
+        type,
+        baseUrl,
+        apiKey: apiKey ? String(apiKey) : undefined,
+        pollIntervalSeconds: Math.max(10, Math.min(3600, Number(pollIntervalSeconds) || 60)),
+      },
       userId,
     );
 
-    return NextResponse.json({ server }, { status: 201 });
+    return NextResponse.json({ server: sanitizeServer(server) }, { status: 201 });
   } catch (error) {
     console.error('[inference-monitoring] create server error:', error);
     return NextResponse.json(

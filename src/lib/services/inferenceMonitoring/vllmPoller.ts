@@ -74,7 +74,11 @@ function extractRunningModels(raw: Record<string, number>): string[] {
 export async function pollVllmServer(
   server: IInferenceServer,
 ): Promise<VllmMetricsSnapshot> {
-  const url = new URL('/metrics', server.baseUrl).toString();
+  const parsed = new URL('/metrics', server.baseUrl);
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    throw new Error('Only HTTP/HTTPS URLs are supported for polling');
+  }
+  const url = parsed.toString();
 
   const headers: Record<string, string> = { Accept: 'text/plain' };
   if (server.apiKey) {
