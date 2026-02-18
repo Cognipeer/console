@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { InferenceMonitoringService } from '@/lib/services/inferenceMonitoring';
-import { sanitizeServer, isValidBaseUrl } from '@/lib/services/inferenceMonitoring/utils';
+import { sanitizeServer, normalizeBaseUrl } from '@/lib/services/inferenceMonitoring/utils';
 
 /**
  * GET /api/inference-monitoring/servers
@@ -50,14 +50,16 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (type !== 'vllm') {
+    const SUPPORTED_TYPES = ['vllm', 'llamacpp'];
+    if (!SUPPORTED_TYPES.includes(type)) {
       return NextResponse.json(
-        { error: 'Only "vllm" server type is currently supported' },
+        { error: `Unsupported server type. Supported types: ${SUPPORTED_TYPES.join(', ')}` },
         { status: 400 },
       );
     }
 
-    if (!isValidBaseUrl(baseUrl)) {
+    const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
+    if (!normalizedBaseUrl) {
       return NextResponse.json(
         { error: 'Invalid base URL. Must be a valid HTTP/HTTPS URL.' },
         { status: 400 },
@@ -70,7 +72,7 @@ export async function POST(request: NextRequest) {
       {
         name: String(name).slice(0, 200),
         type,
-        baseUrl,
+        baseUrl: normalizedBaseUrl,
         apiKey: apiKey ? String(apiKey) : undefined,
         pollIntervalSeconds: Math.max(10, Math.min(3600, Number(pollIntervalSeconds) || 60)),
       },

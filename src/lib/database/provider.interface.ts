@@ -429,7 +429,7 @@ export interface IQuotaPolicy
   limits: QuotaLimits;
 }
 
-export type InferenceServerType = 'vllm';
+export type InferenceServerType = 'vllm' | 'llamacpp';
 
 export interface IInferenceServer {
   _id?: ObjectId | string;

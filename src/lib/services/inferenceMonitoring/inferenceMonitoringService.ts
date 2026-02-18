@@ -1,6 +1,7 @@
 import { getTenantDatabase } from '@/lib/database';
 import type { IInferenceServer, IInferenceServerMetrics } from '@/lib/database';
 import { pollVllmServer, snapshotToMetrics } from './vllmPoller';
+import { pollLlamaCppServer } from './llamacppPoller';
 import slugify from 'slugify';
 
 function generateServerKey(name: string): string {
@@ -108,7 +109,10 @@ export class InferenceMonitoringService {
     if (!server) throw new Error('Server not found');
 
     try {
-      const snapshot = await pollVllmServer(server);
+      const snapshot =
+        server.type === 'llamacpp'
+          ? await pollLlamaCppServer(server)
+          : await pollVllmServer(server);
       const metricsData = snapshotToMetrics(tenantId, serverKey, snapshot);
       const metrics = await db.createInferenceServerMetrics(metricsData);
 

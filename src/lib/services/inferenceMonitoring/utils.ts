@@ -12,24 +12,35 @@ export function sanitizeServer(
 }
 
 /**
- * Validate that a base URL is a proper HTTP/HTTPS URL and not an internal/private address.
+ * Normalize and validate an inference server base URL.
+ * Accepts values without scheme (e.g. localhost:8000) by defaulting to http://.
  */
-export function isValidBaseUrl(url: string): boolean {
+export function normalizeBaseUrl(url: string): string | null {
   try {
-    const parsed = new URL(url);
-    if (!['http:', 'https:'].includes(parsed.protocol)) return false;
+    const trimmed = String(url).trim();
+    if (!trimmed) return null;
+
+    const hasScheme = /^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(trimmed);
+    const parsed = new URL(hasScheme ? trimmed : `http://${trimmed}`);
+
+    if (!['http:', 'https:'].includes(parsed.protocol)) return null;
     const hostname = parsed.hostname.toLowerCase();
-    // Block metadata, loopback, and link-local
+
+    // Block wildcard/listen and link-local addresses.
     if (
-      hostname === 'localhost' ||
       hostname === '0.0.0.0' ||
-      hostname.startsWith('169.254.') ||
-      hostname === '[::1]'
+      hostname === '[::]' ||
+      hostname.startsWith('169.254.')
     ) {
-      return false;
+      return null;
     }
-    return true;
+
+    return parsed.toString();
   } catch {
-    return false;
+    return null;
   }
+}
+
+export function isValidBaseUrl(url: string): boolean {
+  return normalizeBaseUrl(url) !== null;
 }

@@ -166,6 +166,17 @@ export default function InferenceServerDetailPage() {
     void load();
   }, [fetchServer, fetchMetrics]);
 
+  // Silent background refresh: use the server's poll interval (min 15 s) so
+  // the UI stays in sync with the scheduler without hammering the API.
+  useEffect(() => {
+    const intervalMs = Math.max(15, server?.pollIntervalSeconds ?? 30) * 1000;
+    const id = setInterval(
+      () => void Promise.all([fetchServer(), fetchMetrics()]),
+      intervalMs,
+    );
+    return () => clearInterval(id);
+  }, [server?.pollIntervalSeconds, fetchServer, fetchMetrics]);
+
   const handlePoll = async () => {
     setPolling(true);
     try {

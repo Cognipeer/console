@@ -83,7 +83,7 @@ export default function InferenceMonitoringPage() {
   const form = useForm({
     initialValues: {
       name: '',
-      type: 'vllm',
+      type: 'llamacpp',
       baseUrl: '',
       apiKey: '',
       pollIntervalSeconds: 60,
@@ -122,6 +122,12 @@ export default function InferenceMonitoringPage() {
 
   useEffect(() => {
     void fetchServers();
+  }, [fetchServers]);
+
+  // Silent background refresh every 30 s so status / lastPolledAt stays current.
+  useEffect(() => {
+    const id = setInterval(() => void fetchServers(true), 30_000);
+    return () => clearInterval(id);
   }, [fetchServers]);
 
   const handleCreate = async (values: typeof form.values) => {
@@ -284,7 +290,10 @@ export default function InferenceMonitoringPage() {
             />
             <Select
               label={t('serverType')}
-              data={[{ value: 'vllm', label: 'vLLM' }]}
+              data={[
+                { value: 'vllm', label: 'vLLM' },
+                { value: 'llamacpp', label: 'llama.cpp' },
+              ]}
               required
               {...form.getInputProps('type')}
             />
