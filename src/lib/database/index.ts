@@ -72,4 +72,7 @@ export type {
   IPromptVersion,
   IPromptComment,
   IQuotaPolicy,
+  InferenceServerType,
+  IInferenceServer,
+  IInferenceServerMetrics,
 } from './provider.interface';

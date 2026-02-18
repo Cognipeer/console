@@ -111,6 +111,14 @@
         "/api/quota",
         "/api/quota/*"
       ]
+    },
+    "INFERENCE_MONITORING": {
+      "name": "Inference Monitoring",
+      "description": "Monitor inference servers and view performance metrics",
+      "endpoints": [
+        "/api/inference-monitoring",
+        "/api/inference-monitoring/*"
+      ]
     }
   },
   "licenses": {
@@ -127,6 +135,7 @@
         "VECTOR_STORE",
         "FILES",
         "QUOTA_MANAGEMENT",
+        "INFERENCE_MONITORING",
         "DASHBOARD"
       ],
       "limits": {
@@ -142,7 +151,8 @@
         "AGENT_TRACING",
         "API_KEYS",
         "PROMPTS",
-        "QUOTA_MANAGEMENT"
+        "QUOTA_MANAGEMENT",
+        "INFERENCE_MONITORING"
       ],
       "limits": {
         "requestsPerMonth": 10000,
@@ -160,7 +170,8 @@
         "API_KEYS",
         "PROMPTS",
         "ANALYTICS",
-        "QUOTA_MANAGEMENT"
+        "QUOTA_MANAGEMENT",
+        "INFERENCE_MONITORING"
       ],
       "limits": {
         "requestsPerMonth": 100000,
@@ -180,7 +191,8 @@
         "ANALYTICS",
         "API_KEYS",
         "PROMPTS",
-        "QUOTA_MANAGEMENT"
+        "QUOTA_MANAGEMENT",
+        "INFERENCE_MONITORING"
       ],
       "limits": {
         "requestsPerMonth": -1,
@@ -200,7 +212,8 @@
         "ANALYTICS",
         "API_KEYS",
         "PROMPTS",
-        "QUOTA_MANAGEMENT"
+        "QUOTA_MANAGEMENT",
+        "INFERENCE_MONITORING"
       ],
       "limits": {
         "requestsPerMonth": -1,

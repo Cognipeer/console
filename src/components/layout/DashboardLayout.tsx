@@ -35,6 +35,7 @@ import {
   IconFolder,
   IconBook,
   IconX,
+  IconServerBolt,
 } from '@tabler/icons-react';
 import { ReactNode, useMemo, useState } from 'react';
 import DashboardBreadcrumbs from './DashboardBreadcrumbs';
@@ -130,6 +131,12 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
       description: tNav('agentTracingDescription'),
       icon: IconTimeline,
       href: '/dashboard/tracing',
+    },
+    {
+      label: tNav('inferenceMonitoring'),
+      description: tNav('inferenceMonitoringDescription'),
+      icon: IconServerBolt,
+      href: '/dashboard/inference-monitoring',
     },
     {
       label: tNav('projects'),

@@ -18,6 +18,8 @@ const SEGMENT_KEYS: Record<string, string> = {
   vector: 'vector',
   prompts: 'prompts',
   projects: 'projects',
+  'inference-monitoring': 'inference-monitoring',
+  servers: 'servers',
 };
 
 const formatSegment = (
