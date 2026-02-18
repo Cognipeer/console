@@ -11,6 +11,7 @@ import {
 
 import { logModelUsage, TokenUsage } from './usageLogger';
 import { buildModelRuntime } from './runtimeService';
+import { isSemanticCacheEnabled, lookupCache, storeInCache } from './semanticCacheService';
 
 const encoder = new TextEncoder();
 
@@ -178,12 +179,13 @@ function ensureEmbeddingModel(model: IModel) {
 
 export async function handleChatCompletion(params: {
   tenantDbName: string;
+  tenantId?: string;
   modelKey: string;
   projectId: string;
   body: ChatCompletionRequestBody;
   stream?: boolean;
 }) {
-  const { tenantDbName, modelKey, projectId, body, stream } = params;
+  const { tenantDbName, tenantId, modelKey, projectId, body, stream } = params;
 
   if (!Array.isArray(body?.messages)) {
     throw new Error('`messages` array is required');
@@ -201,6 +203,49 @@ export async function handleChatCompletion(params: {
   }
 
   ensureLlmModel(model);
+
+  // Semantic cache: check for cached response before calling the model
+  const cacheEnabled = !stream && tenantId && isSemanticCacheEnabled(model);
+  if (cacheEnabled && model.semanticCache) {
+    try {
+      const cacheResult = await lookupCache({
+        tenantDbName,
+        tenantId,
+        projectId,
+        config: model.semanticCache,
+        messages: body.messages as unknown[],
+      });
+
+      if (cacheResult.hit && cacheResult.response) {
+        const latencyMs = Date.now() - start;
+
+        await logModelUsage(tenantDbName, model, {
+          requestId,
+          route: 'chat.completions',
+          status: 'success',
+          providerRequest: sanitizeForLogging({
+            model: modelKey,
+            messages: body.messages,
+            stream: false,
+          }),
+          providerResponse: sanitizeForLogging(cacheResult.response),
+          latencyMs,
+          usage: {},
+          cacheHit: true,
+        });
+
+        return {
+          response: cacheResult.response,
+          usage: {} as TokenUsage,
+          latencyMs,
+          requestId,
+          cacheHit: true,
+        };
+      }
+    } catch (cacheError) {
+      console.warn('[semantic-cache] Cache lookup error, proceeding with model', cacheError);
+    }
+  }
 
   const { runtime } = await buildModelRuntime(
     tenantDbName,
@@ -355,9 +400,24 @@ export async function handleChatCompletion(params: {
     providerResponse: sanitizeForLogging(response),
     latencyMs,
     usage,
+    cacheHit: false,
   });
 
-  return { response, usage, latencyMs, requestId };
+  // Semantic cache: store the response for future lookups
+  if (cacheEnabled && tenantId && model.semanticCache) {
+    storeInCache({
+      tenantDbName,
+      tenantId,
+      projectId,
+      config: model.semanticCache,
+      messages: body.messages as unknown[],
+      response: response as Record<string, unknown>,
+    }).catch((err) =>
+      console.warn('[semantic-cache] Failed to store response in cache', err),
+    );
+  }
+
+  return { response, usage, latencyMs, requestId, cacheHit: false };
 }
 
 export async function handleEmbeddingRequest(params: {

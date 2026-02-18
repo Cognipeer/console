@@ -327,6 +327,16 @@ export interface IPromptVersion {
   createdAt?: Date;
 }
 
+export interface ISemanticCacheConfig {
+  enabled: boolean;
+  vectorProviderKey: string;
+  vectorIndexKey: string;
+  embeddingModelKey: string;
+  similarityThreshold: number;
+  ttlSeconds: number;
+  maxCacheSize?: number;
+}
+
 export interface IModel {
   _id?: ObjectId | string;
   tenantId: string;
@@ -343,6 +353,7 @@ export interface IModel {
   supportsToolCalls?: boolean;
   settings: Record<string, unknown>;
   pricing: IModelPricing;
+  semanticCache?: ISemanticCacheConfig;
   metadata?: Record<string, unknown>;
   createdBy?: string;
   updatedBy?: string;
@@ -376,6 +387,7 @@ export interface IModelUsageLog {
   cachedInputTokens?: number;
   totalTokens: number;
   toolCalls?: number;
+  cacheHit?: boolean;
   pricingSnapshot?: IModelPricing & IModelUsageCostSnapshot;
   createdAt?: Date;
 }
@@ -390,6 +402,8 @@ export interface IModelUsageAggregate {
   totalCachedInputTokens: number;
   totalTokens: number;
   totalToolCalls: number;
+  cacheHits: number;
+  cacheMisses: number;
   avgLatencyMs: number | null;
   costSummary?: IModelUsageCostSnapshot;
   timeseries?: Array<{
@@ -400,6 +414,7 @@ export interface IModelUsageAggregate {
     cachedInputTokens: number;
     totalTokens: number;
     totalCost?: number;
+    cacheHits?: number;
   }>;
 }
 

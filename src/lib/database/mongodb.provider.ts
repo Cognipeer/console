@@ -1971,6 +1971,20 @@ export class MongoDBProvider implements DatabaseProvider {
             },
             totalTokens: { $sum: { $ifNull: ['$totalTokens', 0] } },
             totalToolCalls: { $sum: { $ifNull: ['$toolCalls', 0] } },
+            cacheHits: {
+              $sum: {
+                $cond: [{ $eq: ['$cacheHit', true] }, 1, 0],
+              },
+            },
+            cacheMisses: {
+              $sum: {
+                $cond: [
+                  { $and: [{ $eq: ['$status', 'success'] }, { $ne: ['$cacheHit', true] }] },
+                  1,
+                  0,
+                ],
+              },
+            },
             avgLatencyMs: { $avg: '$latencyMs' },
             totalCost: { $sum: { $ifNull: ['$pricingSnapshot.totalCost', 0] } },
             currency: { $first: '$pricingSnapshot.currency' },
@@ -1995,6 +2009,8 @@ export class MongoDBProvider implements DatabaseProvider {
       totalCachedInputTokens: 0,
       totalTokens: 0,
       totalToolCalls: 0,
+      cacheHits: 0,
+      cacheMisses: 0,
       avgLatencyMs: null,
       totalCost: 0,
       currency: 'USD',
@@ -2022,6 +2038,11 @@ export class MongoDBProvider implements DatabaseProvider {
             cachedInputTokens: { $sum: { $ifNull: ['$cachedInputTokens', 0] } },
             totalTokens: { $sum: { $ifNull: ['$totalTokens', 0] } },
             totalCost: { $sum: { $ifNull: ['$pricingSnapshot.totalCost', 0] } },
+            cacheHits: {
+              $sum: {
+                $cond: [{ $eq: ['$cacheHit', true] }, 1, 0],
+              },
+            },
           },
         },
         { $sort: { _id: 1 } },
@@ -2039,6 +2060,7 @@ export class MongoDBProvider implements DatabaseProvider {
         cachedInputTokens: Number(record.cachedInputTokens ?? 0),
         totalTokens: Number(record.totalTokens ?? 0),
         totalCost: Number(record.totalCost ?? 0),
+        cacheHits: Number(record.cacheHits ?? 0),
       };
     });
 
@@ -2062,6 +2084,8 @@ export class MongoDBProvider implements DatabaseProvider {
       totalCachedInputTokens: totalsDoc.totalCachedInputTokens ?? 0,
       totalTokens: totalsDoc.totalTokens ?? 0,
       totalToolCalls: totalsDoc.totalToolCalls ?? 0,
+      cacheHits: totalsDoc.cacheHits ?? 0,
+      cacheMisses: totalsDoc.cacheMisses ?? 0,
       avgLatencyMs: totalsDoc.avgLatencyMs ?? null,
       costSummary,
       timeseries,

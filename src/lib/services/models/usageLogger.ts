@@ -63,6 +63,7 @@ export async function logModelUsage(
     errorMessage?: string;
     latencyMs?: number;
     usage: TokenUsage;
+    cacheHit?: boolean;
   },
 ) {
   const db = await getDatabase();
@@ -99,6 +100,7 @@ export async function logModelUsage(
         (usage.outputTokens ?? 0) +
         (usage.cachedInputTokens ?? 0),
     toolCalls: usage.toolCalls ?? 0,
+    cacheHit: payload.cacheHit,
     pricingSnapshot,
   });
 }
