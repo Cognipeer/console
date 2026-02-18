@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import {
@@ -14,7 +14,9 @@ import {
   NumberInput,
   Paper,
   Select,
+  Slider,
   Stack,
+  Switch,
   Text,
   TextInput,
   Textarea,
@@ -54,6 +56,16 @@ interface ModelPricing {
   cachedTokenPer1M?: number;
 }
 
+interface SemanticCacheConfig {
+  enabled: boolean;
+  vectorProviderKey: string;
+  vectorIndexKey: string;
+  embeddingModelKey: string;
+  similarityThreshold: number;
+  ttlSeconds: number;
+  maxCacheSize?: number;
+}
+
 interface ModelDetailDto {
   _id: string;
   name: string;
@@ -66,6 +78,7 @@ interface ModelDetailDto {
   supportsToolCalls?: boolean;
   pricing: ModelPricing;
   settings: Record<string, string>;
+  semanticCache?: SemanticCacheConfig;
   metadata?: Record<string, unknown>;
 }
 
@@ -92,6 +105,27 @@ interface FormValues {
   settings: Record<string, string>;
   isMultimodal: boolean;
   supportsToolCalls: boolean;
+  semanticCacheEnabled: boolean;
+  semanticCacheVectorProviderKey: string;
+  semanticCacheVectorIndexKey: string;
+  semanticCacheEmbeddingModelKey: string;
+  semanticCacheSimilarityThreshold: number;
+  semanticCacheTtlSeconds: number;
+}
+
+interface VectorProviderOption {
+  key: string;
+  label: string;
+}
+
+interface VectorIndexOption {
+  key: string;
+  name: string;
+}
+
+interface EmbeddingModelOption {
+  key: string;
+  name: string;
 }
 
 export default function EditModelPage() {
@@ -105,6 +139,9 @@ export default function EditModelPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [model, setModel] = useState<ModelDetailDto | null>(null);
   const [providers, setProviders] = useState<ProviderDefinitionDto[]>([]);
+  const [vectorProviders, setVectorProviders] = useState<VectorProviderOption[]>([]);
+  const [vectorIndexes, setVectorIndexes] = useState<VectorIndexOption[]>([]);
+  const [embeddingModels, setEmbeddingModels] = useState<EmbeddingModelOption[]>([]);
 
   const form = useForm<FormValues>({
     initialValues: {
@@ -121,6 +158,12 @@ export default function EditModelPage() {
       settings: {},
       isMultimodal: false,
       supportsToolCalls: false,
+      semanticCacheEnabled: false,
+      semanticCacheVectorProviderKey: '',
+      semanticCacheVectorIndexKey: '',
+      semanticCacheEmbeddingModelKey: '',
+      semanticCacheSimilarityThreshold: 0.92,
+      semanticCacheTtlSeconds: 3600,
     },
     validate: {
       name: (value) => (!value ? tWizard('validation.name') : null),
@@ -133,15 +176,38 @@ export default function EditModelPage() {
     [providers, model],
   );
 
+  const loadVectorIndexes = useCallback(async (providerKey: string) => {
+    if (!providerKey) {
+      setVectorIndexes([]);
+      return;
+    }
+    try {
+      const res = await fetch(`/api/vector/indexes?providerKey=${encodeURIComponent(providerKey)}`);
+      if (res.ok) {
+        const data = await res.json();
+        setVectorIndexes(
+          (data.indexes ?? []).map((idx: { key: string; name: string }) => ({
+            key: idx.key,
+            name: idx.name,
+          })),
+        );
+      }
+    } catch {
+      setVectorIndexes([]);
+    }
+  }, []);
+
   const loadModel = async (silenceNotification = false) => {
     const modelId = params?.id;
     if (!modelId) return;
 
     setRefreshing(!loading);
     try {
-      const [modelResponse, providerResponse] = await Promise.all([
+      const [modelResponse, providerResponse, vectorProviderResponse, embeddingModelsResponse] = await Promise.all([
         fetch(`/api/models/${modelId}`),
         fetch('/api/models/providers'),
+        fetch('/api/vector/providers'),
+        fetch('/api/models?category=embedding'),
       ]);
 
       if (!modelResponse.ok) {
@@ -157,6 +223,8 @@ export default function EditModelPage() {
         return acc;
       }, {});
 
+      const cache = nextModel.semanticCache;
+
       form.setValues({
         name: nextModel.name,
         description: nextModel.description,
@@ -171,11 +239,42 @@ export default function EditModelPage() {
         settings,
         isMultimodal: Boolean(nextModel.isMultimodal),
         supportsToolCalls: Boolean(nextModel.supportsToolCalls),
+        semanticCacheEnabled: Boolean(cache?.enabled),
+        semanticCacheVectorProviderKey: cache?.vectorProviderKey || '',
+        semanticCacheVectorIndexKey: cache?.vectorIndexKey || '',
+        semanticCacheEmbeddingModelKey: cache?.embeddingModelKey || '',
+        semanticCacheSimilarityThreshold: cache?.similarityThreshold ?? 0.92,
+        semanticCacheTtlSeconds: cache?.ttlSeconds ?? 3600,
       });
 
       if (providerResponse.ok) {
         const providerData = await providerResponse.json();
         setProviders(providerData.providers ?? []);
+      }
+
+      if (vectorProviderResponse.ok) {
+        const vpData = await vectorProviderResponse.json();
+        setVectorProviders(
+          (vpData.providers ?? []).map((p: { key: string; label: string }) => ({
+            key: p.key,
+            label: p.label,
+          })),
+        );
+      }
+
+      if (embeddingModelsResponse.ok) {
+        const emData = await embeddingModelsResponse.json();
+        setEmbeddingModels(
+          (emData.models ?? []).map((m: { key: string; name: string }) => ({
+            key: m.key,
+            name: m.name,
+          })),
+        );
+      }
+
+      // Load vector indexes for current provider if set
+      if (cache?.vectorProviderKey) {
+        await loadVectorIndexes(cache.vectorProviderKey);
       }
 
       if (!silenceNotification) {
@@ -235,6 +334,14 @@ export default function EditModelPage() {
           settings: values.settings,
           isMultimodal: values.isMultimodal,
           supportsToolCalls: values.supportsToolCalls,
+          semanticCache: {
+            enabled: values.semanticCacheEnabled,
+            vectorProviderKey: values.semanticCacheVectorProviderKey,
+            vectorIndexKey: values.semanticCacheVectorIndexKey,
+            embeddingModelKey: values.semanticCacheEmbeddingModelKey,
+            similarityThreshold: values.semanticCacheSimilarityThreshold,
+            ttlSeconds: values.semanticCacheTtlSeconds,
+          },
         }),
       });
 
@@ -455,6 +562,106 @@ export default function EditModelPage() {
                 </Stack>
               </Card>
             ) : null}
+
+            {/* Semantic Cache section - only for LLM models */}
+            {model.category === 'llm' && (
+              <Card withBorder radius="md" padding="md">
+                <Stack gap="sm">
+                  <Title order={4}>{t('sections.semanticCache')}</Title>
+                  <Text size="sm" c="dimmed">{t('semanticCache.description')}</Text>
+                  <Switch
+                    label={t('semanticCache.enabled')}
+                    checked={form.values.semanticCacheEnabled}
+                    onChange={(event) => form.setFieldValue('semanticCacheEnabled', event.currentTarget.checked)}
+                  />
+                  {form.values.semanticCacheEnabled && (
+                    <Stack gap="sm">
+                      <Grid>
+                        <Grid.Col span={{ base: 12, md: 6 }}>
+                          {vectorProviders.length > 0 ? (
+                            <Select
+                              label={t('semanticCache.vectorProviderKey')}
+                              placeholder={t('semanticCache.vectorProviderKeyPlaceholder')}
+                              data={vectorProviders.map((p) => ({ value: p.key, label: p.label }))}
+                              value={form.values.semanticCacheVectorProviderKey}
+                              onChange={(val) => {
+                                form.setFieldValue('semanticCacheVectorProviderKey', val || '');
+                                form.setFieldValue('semanticCacheVectorIndexKey', '');
+                                if (val) {
+                                  loadVectorIndexes(val);
+                                } else {
+                                  setVectorIndexes([]);
+                                }
+                              }}
+                            />
+                          ) : (
+                            <Text size="sm" c="dimmed">{t('semanticCache.noVectorProviders')}</Text>
+                          )}
+                        </Grid.Col>
+                        <Grid.Col span={{ base: 12, md: 6 }}>
+                          {form.values.semanticCacheVectorProviderKey ? (
+                            vectorIndexes.length > 0 ? (
+                              <Select
+                                label={t('semanticCache.vectorIndexKey')}
+                                placeholder={t('semanticCache.vectorIndexKeyPlaceholder')}
+                                data={vectorIndexes.map((idx) => ({ value: idx.key, label: idx.name }))}
+                                value={form.values.semanticCacheVectorIndexKey}
+                                onChange={(val) => form.setFieldValue('semanticCacheVectorIndexKey', val || '')}
+                              />
+                            ) : (
+                              <Text size="sm" c="dimmed">{t('semanticCache.noVectorIndexes')}</Text>
+                            )
+                          ) : null}
+                        </Grid.Col>
+                      </Grid>
+                      <Grid>
+                        <Grid.Col span={{ base: 12, md: 6 }}>
+                          {embeddingModels.length > 0 ? (
+                            <Select
+                              label={t('semanticCache.embeddingModelKey')}
+                              placeholder={t('semanticCache.embeddingModelKeyPlaceholder')}
+                              data={embeddingModels.map((m) => ({ value: m.key, label: m.name }))}
+                              value={form.values.semanticCacheEmbeddingModelKey}
+                              onChange={(val) => form.setFieldValue('semanticCacheEmbeddingModelKey', val || '')}
+                            />
+                          ) : (
+                            <Text size="sm" c="dimmed">{t('semanticCache.noEmbeddingModels')}</Text>
+                          )}
+                        </Grid.Col>
+                      </Grid>
+                      <Grid>
+                        <Grid.Col span={{ base: 12, md: 6 }}>
+                          <Text size="sm" fw={500} mb={4}>{t('semanticCache.similarityThreshold')}</Text>
+                          <Slider
+                            min={0.5}
+                            max={1}
+                            step={0.01}
+                            marks={[
+                              { value: 0.5, label: '0.5' },
+                              { value: 0.75, label: '0.75' },
+                              { value: 0.9, label: '0.9' },
+                              { value: 1, label: '1.0' },
+                            ]}
+                            value={form.values.semanticCacheSimilarityThreshold}
+                            onChange={(val) => form.setFieldValue('semanticCacheSimilarityThreshold', val)}
+                          />
+                          <Text size="xs" c="dimmed" mt={4}>{t('semanticCache.similarityThresholdDescription')}</Text>
+                        </Grid.Col>
+                        <Grid.Col span={{ base: 12, md: 6 }}>
+                          <NumberInput
+                            label={t('semanticCache.ttlSeconds')}
+                            description={t('semanticCache.ttlSecondsDescription')}
+                            min={0}
+                            value={form.values.semanticCacheTtlSeconds}
+                            onChange={(val) => form.setFieldValue('semanticCacheTtlSeconds', Number(val) || 0)}
+                          />
+                        </Grid.Col>
+                      </Grid>
+                    </Stack>
+                  )}
+                </Stack>
+              </Card>
+            )}
 
             <Group justify="flex-end">
               <Button type="submit" loading={saving} leftSection={<IconDeviceFloppy size={16} />}>
