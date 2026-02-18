@@ -25,6 +25,7 @@ import {
   IconSparkles,
   IconTimeline,
   IconVectorBezier,
+  IconServerBolt,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 
@@ -92,6 +93,15 @@ export default function DashboardPage() {
         icon: IconTimeline,
         category: 'operate',
         tags: ['observability', 'sessions'],
+      },
+      {
+        id: 'inference-monitoring',
+        title: t('modules.inferenceMonitoring.title'),
+        description: t('modules.inferenceMonitoring.description'),
+        href: '/dashboard/inference-monitoring',
+        icon: IconServerBolt,
+        category: 'operate',
+        tags: ['vllm', 'gpu', 'inference', 'monitoring'],
       },
       {
         id: 'projects',
