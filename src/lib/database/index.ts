@@ -61,6 +61,7 @@ export type {
   ModelProviderType,
   IModelPricing,
   IModelUsageCostSnapshot,
+  ISemanticCacheConfig,
   ITenantUserDirectoryEntry,
   ProviderDomain,
   IProviderRecord,

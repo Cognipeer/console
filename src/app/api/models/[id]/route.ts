@@ -144,6 +144,7 @@ export async function PUT(
       updates.isMultimodal = body.isMultimodal;
     if (body.supportsToolCalls !== undefined)
       updates.supportsToolCalls = body.supportsToolCalls;
+    if (body.semanticCache !== undefined) updates.semanticCache = body.semanticCache;
     if (body.metadata !== undefined) updates.metadata = body.metadata;
 
       if (body.settings && typeof body.settings === 'object') {

@@ -40,6 +40,15 @@ interface ModelPricing {
   cachedTokenPer1M?: number;
 }
 
+interface SemanticCacheConfigDto {
+  enabled: boolean;
+  vectorProviderKey: string;
+  vectorIndexKey: string;
+  embeddingModelKey: string;
+  similarityThreshold: number;
+  ttlSeconds: number;
+}
+
 interface ModelDetailDto {
   _id: string;
   name: string;
@@ -52,6 +61,7 @@ interface ModelDetailDto {
   supportsToolCalls?: boolean;
   pricing: ModelPricing;
   settings: Record<string, string>;
+  semanticCache?: SemanticCacheConfigDto;
   metadata?: Record<string, unknown>;
   createdAt?: string;
   updatedAt?: string;
@@ -85,6 +95,8 @@ interface UsageAggregateDto {
   totalCachedInputTokens: number;
   totalTokens: number;
   totalToolCalls: number;
+  cacheHits: number;
+  cacheMisses: number;
   avgLatencyMs: number | null;
   costSummary?: CostSummary;
   timeseries?: UsageTimeseriesEntry[];
@@ -102,6 +114,7 @@ interface UsageLogDto {
   totalTokens: number;
   errorMessage?: string;
   toolCalls?: number;
+  cacheHit?: boolean;
   providerRequest?: Record<string, unknown>;
   providerResponse?: Record<string, unknown>;
   createdAt?: string;
@@ -330,6 +343,11 @@ export default function ModelDetailPage() {
                     {tModels('list.capabilities.tools')}
                   </Badge>
                 ) : null}
+                {model.semanticCache?.enabled ? (
+                  <Badge variant="light" color="cyan">
+                    {t('sections.semanticCache')}
+                  </Badge>
+                ) : null}
               </Group>
             </Stack>
           </Paper>
@@ -371,6 +389,23 @@ export default function ModelDetailPage() {
                       value={usage.avgLatencyMs ? `${Math.round(usage.avgLatencyMs)} ms` : '—'}
                     />
                   </Grid.Col>
+                  {(usage.cacheHits > 0 || usage.cacheMisses > 0) && (
+                    <>
+                      <Grid.Col span={{ base: 12, sm: 6, md: 3 }}>
+                        <StatCard label={t('stats.cacheHits')} value={usage.cacheHits.toLocaleString()} />
+                      </Grid.Col>
+                      <Grid.Col span={{ base: 12, sm: 6, md: 3 }}>
+                        <StatCard
+                          label={t('stats.cacheHitRate')}
+                          value={
+                            usage.totalCalls > 0
+                              ? `${Math.round((usage.cacheHits / usage.totalCalls) * 100)}%`
+                              : '—'
+                          }
+                        />
+                      </Grid.Col>
+                    </>
+                  )}
                 </Grid>
                 {usage.costSummary ? (
                   <Paper withBorder radius="md" p="sm">
@@ -493,9 +528,21 @@ export default function ModelDetailPage() {
                     <Table.Td>{log.createdAt ? new Date(log.createdAt).toLocaleString() : '—'}</Table.Td>
                     <Table.Td>{log.route}</Table.Td>
                     <Table.Td>
-                      <Badge color={log.status === 'success' ? 'teal' : 'red'} variant="light">
-                        {log.status === 'success' ? t('logs.success') : t('logs.error')}
-                      </Badge>
+                      <Group gap={4}>
+                        <Badge color={log.status === 'success' ? 'teal' : 'red'} variant="light">
+                          {log.status === 'success' ? t('logs.success') : t('logs.error')}
+                        </Badge>
+                        {log.cacheHit === true && (
+                          <Badge color="cyan" variant="light" size="xs">
+                            {t('logs.cacheHit')}
+                          </Badge>
+                        )}
+                        {log.cacheHit === false && log.status === 'success' && (
+                          <Badge color="gray" variant="light" size="xs">
+                            {t('logs.cacheMiss')}
+                          </Badge>
+                        )}
+                      </Group>
                     </Table.Td>
                     <Table.Td>{log.latencyMs ? `${Math.round(log.latencyMs)} ms` : '—'}</Table.Td>
                     <Table.Td>
@@ -573,6 +620,16 @@ export default function ModelDetailPage() {
                   {selectedLog.toolCalls !== undefined && selectedLog.toolCalls > 0 && (
                     <Badge variant="light" color="orange" leftSection={<IconTool size={12} />}>
                       {t('logs.modal.toolCalls', { count: selectedLog.toolCalls })}
+                    </Badge>
+                  )}
+                  {selectedLog.cacheHit === true && (
+                    <Badge variant="light" color="cyan">
+                      {t('logs.cacheHit')}
+                    </Badge>
+                  )}
+                  {selectedLog.cacheHit === false && selectedLog.status === 'success' && (
+                    <Badge variant="light" color="gray">
+                      {t('logs.cacheMiss')}
                     </Badge>
                   )}
                 </Group>

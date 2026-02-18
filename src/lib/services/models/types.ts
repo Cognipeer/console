@@ -1,4 +1,4 @@
-import type { IModel, IModelPricing, ModelCategory } from '@/lib/database';
+import type { IModel, IModelPricing, ISemanticCacheConfig, ModelCategory } from '@/lib/database';
 import type { ProviderCapabilityFlags } from '@/lib/providers';
 import type {
   CreateProviderConfigInput,
@@ -16,6 +16,7 @@ export interface CreateModelInput {
   settings: Record<string, unknown>;
   isMultimodal?: boolean;
   supportsToolCalls?: boolean;
+  semanticCache?: ISemanticCacheConfig;
   metadata?: Record<string, unknown>;
 }
 
@@ -31,6 +32,7 @@ export interface UpdateModelInput {
   settings?: Record<string, unknown>;
   isMultimodal?: boolean;
   supportsToolCalls?: boolean;
+  semanticCache?: ISemanticCacheConfig;
   metadata?: Record<string, unknown>;
 }
 

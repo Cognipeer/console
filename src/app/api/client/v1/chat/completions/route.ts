@@ -183,6 +183,7 @@ export async function POST(request: NextRequest) {
   try {
     const result = await handleChatCompletion({
       tenantDbName: auth.tenantDbName,
+      tenantId: auth.tenantId,
       modelKey: modelKey,
       projectId: auth.projectId,
       body,
