@@ -414,6 +414,47 @@ export interface IQuotaPolicy
   limits: QuotaLimits;
 }
 
+export type InferenceServerType = 'vllm';
+
+export interface IInferenceServer {
+  _id?: ObjectId | string;
+  tenantId: string;
+  key: string;
+  name: string;
+  type: InferenceServerType;
+  baseUrl: string;
+  apiKey?: string;
+  pollIntervalSeconds: number;
+  status: 'active' | 'disabled' | 'errored';
+  lastPolledAt?: Date;
+  lastError?: string;
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IInferenceServerMetrics {
+  _id?: ObjectId | string;
+  tenantId: string;
+  serverKey: string;
+  timestamp: Date;
+  numRequestsRunning?: number;
+  numRequestsWaiting?: number;
+  gpuCacheUsagePercent?: number;
+  cpuCacheUsagePercent?: number;
+  promptTokensThroughput?: number;
+  generationTokensThroughput?: number;
+  timeToFirstTokenSeconds?: number;
+  timePerOutputTokenSeconds?: number;
+  e2eRequestLatencySeconds?: number;
+  requestsPerSecond?: number;
+  runningModels?: string[];
+  raw?: Record<string, unknown>;
+  createdAt?: Date;
+}
+
 export interface DatabaseProvider {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
@@ -702,6 +743,29 @@ export interface DatabaseProvider {
     },
   ): Promise<IProviderRecord[]>;
   deleteProvider(id: string): Promise<boolean>;
+
+  // Inference server operations (tenant-specific)
+  createInferenceServer(
+    server: Omit<IInferenceServer, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IInferenceServer>;
+  updateInferenceServer(
+    id: string,
+    data: Partial<Omit<IInferenceServer, 'tenantId' | 'key'>>,
+  ): Promise<IInferenceServer | null>;
+  deleteInferenceServer(id: string): Promise<boolean>;
+  findInferenceServerById(id: string): Promise<IInferenceServer | null>;
+  findInferenceServerByKey(tenantId: string, key: string): Promise<IInferenceServer | null>;
+  listInferenceServers(tenantId: string): Promise<IInferenceServer[]>;
+
+  // Inference server metrics (tenant-specific)
+  createInferenceServerMetrics(
+    metrics: Omit<IInferenceServerMetrics, '_id' | 'createdAt'>,
+  ): Promise<IInferenceServerMetrics>;
+  listInferenceServerMetrics(
+    serverKey: string,
+    options?: { from?: Date; to?: Date; limit?: number },
+  ): Promise<IInferenceServerMetrics[]>;
+  deleteInferenceServerMetrics(serverKey: string): Promise<number>;
 
   // Rate limiting
   incrementRateLimit(

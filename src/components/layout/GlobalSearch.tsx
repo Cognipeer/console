@@ -11,6 +11,7 @@ import {
   IconSparkles,
   IconTimeline,
   IconVectorBezier,
+  IconServerBolt,
 } from '@tabler/icons-react';
 import { Spotlight, spotlight, SpotlightActionData } from '@mantine/spotlight';
 import { useTranslations } from '@/lib/i18n';
@@ -73,6 +74,14 @@ export function GlobalSearch({ isTenantAdmin = false }: GlobalSearchProps) {
         onClick: () => router.push('/dashboard/tracing'),
         leftSection: <IconTimeline size={20} stroke={1.5} />,
         keywords: ['trace', 'agent', 'log', 'debug'],
+      },
+      {
+        id: 'inference-monitoring',
+        label: tNav('inferenceMonitoring'),
+        description: tNav('inferenceMonitoringDescription'),
+        onClick: () => router.push('/dashboard/inference-monitoring'),
+        leftSection: <IconServerBolt size={20} stroke={1.5} />,
+        keywords: ['inference', 'monitoring', 'vllm', 'server', 'gpu'],
       },
       {
         id: 'projects',

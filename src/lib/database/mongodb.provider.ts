@@ -23,6 +23,8 @@ import {
   IPromptComment,
   ProviderDomain,
   IQuotaPolicy,
+  IInferenceServer,
+  IInferenceServerMetrics,
 } from './provider.interface';
 
 export class MongoDBProvider implements DatabaseProvider {
@@ -44,6 +46,8 @@ export class MongoDBProvider implements DatabaseProvider {
   private static readonly projectsCollection = 'projects';
   private static readonly vectorCountersCollection = 'vector_counters';
   private static readonly agentTracingThreadsCollection = 'agent_tracing_threads';
+  private static readonly inferenceServersCollection = 'inference_servers';
+  private static readonly inferenceServerMetricsCollection = 'inference_server_metrics';
 
   constructor(uri: string, mainDbName: string = 'cgate_main') {
     this.uri = uri;
@@ -2859,5 +2863,113 @@ export class MongoDBProvider implements DatabaseProvider {
       count: result.count,
       resetAt: result.resetAt,
     };
+  }
+
+  // ── Inference Server operations ────────────────────────────────────────
+
+  async createInferenceServer(
+    server: Omit<IInferenceServer, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IInferenceServer> {
+    const db = this.getTenantDb();
+    const now = new Date();
+    const doc = { ...server, createdAt: now, updatedAt: now };
+    const result = await db
+      .collection(MongoDBProvider.inferenceServersCollection)
+      .insertOne(doc);
+    return { ...doc, _id: result.insertedId };
+  }
+
+  async updateInferenceServer(
+    id: string,
+    data: Partial<Omit<IInferenceServer, 'tenantId' | 'key'>>,
+  ): Promise<IInferenceServer | null> {
+    const db = this.getTenantDb();
+    const result = await db
+      .collection(MongoDBProvider.inferenceServersCollection)
+      .findOneAndUpdate(
+        { _id: new ObjectId(id) },
+        { $set: { ...data, updatedAt: new Date() } },
+        { returnDocument: 'after' },
+      );
+    return result as unknown as IInferenceServer | null;
+  }
+
+  async deleteInferenceServer(id: string): Promise<boolean> {
+    const db = this.getTenantDb();
+    const result = await db
+      .collection(MongoDBProvider.inferenceServersCollection)
+      .deleteOne({ _id: new ObjectId(id) });
+    return result.deletedCount > 0;
+  }
+
+  async findInferenceServerById(id: string): Promise<IInferenceServer | null> {
+    const db = this.getTenantDb();
+    const doc = await db
+      .collection(MongoDBProvider.inferenceServersCollection)
+      .findOne({ _id: new ObjectId(id) });
+    return doc as unknown as IInferenceServer | null;
+  }
+
+  async findInferenceServerByKey(
+    tenantId: string,
+    key: string,
+  ): Promise<IInferenceServer | null> {
+    const db = this.getTenantDb();
+    const doc = await db
+      .collection(MongoDBProvider.inferenceServersCollection)
+      .findOne({ tenantId, key });
+    return doc as unknown as IInferenceServer | null;
+  }
+
+  async listInferenceServers(tenantId: string): Promise<IInferenceServer[]> {
+    const db = this.getTenantDb();
+    const docs = await db
+      .collection(MongoDBProvider.inferenceServersCollection)
+      .find({ tenantId })
+      .sort({ createdAt: -1 })
+      .toArray();
+    return docs as unknown as IInferenceServer[];
+  }
+
+  // ── Inference Server Metrics operations ────────────────────────────────
+
+  async createInferenceServerMetrics(
+    metrics: Omit<IInferenceServerMetrics, '_id' | 'createdAt'>,
+  ): Promise<IInferenceServerMetrics> {
+    const db = this.getTenantDb();
+    const doc = { ...metrics, createdAt: new Date() };
+    const result = await db
+      .collection(MongoDBProvider.inferenceServerMetricsCollection)
+      .insertOne(doc);
+    return { ...doc, _id: result.insertedId };
+  }
+
+  async listInferenceServerMetrics(
+    serverKey: string,
+    options?: { from?: Date; to?: Date; limit?: number },
+  ): Promise<IInferenceServerMetrics[]> {
+    const db = this.getTenantDb();
+    const filter: Record<string, unknown> = { serverKey };
+    if (options?.from || options?.to) {
+      const tsFilter: Record<string, Date> = {};
+      if (options.from) tsFilter.$gte = options.from;
+      if (options.to) tsFilter.$lte = options.to;
+      filter.timestamp = tsFilter;
+    }
+    const cursor = db
+      .collection(MongoDBProvider.inferenceServerMetricsCollection)
+      .find(filter)
+      .sort({ timestamp: -1 });
+    if (options?.limit) cursor.limit(options.limit);
+    const docs = await cursor.toArray();
+    return docs as unknown as IInferenceServerMetrics[];
+  }
+
+  async deleteInferenceServerMetrics(serverKey: string): Promise<number> {
+    const db = this.getTenantDb();
+    const result = await db
+      .collection(MongoDBProvider.inferenceServerMetricsCollection)
+      .deleteMany({ serverKey });
+    return result.deletedCount;
   }
 }
