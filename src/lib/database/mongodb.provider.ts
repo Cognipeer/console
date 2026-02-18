@@ -263,6 +263,16 @@ export class MongoDBProvider implements DatabaseProvider {
 
     const normalizedAgentName =
       typeof filters?.agentName === 'string' ? filters.agentName.trim() : '';
+    const normalizedThreadId =
+      typeof filters?.threadId === 'string' ? filters.threadId.trim() : '';
+
+    if (normalizedThreadId) {
+      match.threadId = {
+        $regex: this.escapeRegex(normalizedThreadId),
+        $options: 'i',
+      };
+    }
+
     if (normalizedAgentName) {
       match.agents = {
         $elemMatch: {
@@ -1652,6 +1662,13 @@ export class MongoDBProvider implements DatabaseProvider {
       threadId: { $type: 'string', $ne: '' },
       ...this.buildProjectScopeFilter(projectId),
     };
+
+    if (typeof filters?.threadId === 'string' && filters.threadId.trim()) {
+      sessionMatch.threadId = {
+        $regex: this.escapeRegex(filters.threadId.trim()),
+        $options: 'i',
+      };
+    }
 
     const hasThreadedSessions = await db
       .collection('agent_tracing_sessions')

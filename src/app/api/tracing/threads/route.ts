@@ -24,6 +24,7 @@ export async function GET(request: NextRequest) {
 
     const searchParams = request.nextUrl.searchParams;
     const filters = {
+      threadId: searchParams.get('threadId') || undefined,
       agent: searchParams.get('agent') || undefined,
       status: searchParams.get('status') || undefined,
       from: searchParams.get('from') || undefined,

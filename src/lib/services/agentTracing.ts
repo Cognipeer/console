@@ -87,6 +87,7 @@ export class AgentTracingService {
     tenantDbName: string,
     projectId: string,
     filters?: {
+      threadId?: string;
       agent?: string;
       status?: string;
       from?: string;
@@ -99,6 +100,7 @@ export class AgentTracingService {
     await db.switchToTenant(tenantDbName);
 
     const result = await db.listAgentTracingThreads({
+      threadId: filters?.threadId,
       agentName: filters?.agent,
       status: filters?.status,
       from: filters?.from,

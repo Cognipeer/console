@@ -65,6 +65,7 @@ export default function TracingThreadsPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  const [threadIdFilter, setThreadIdFilter] = useState('');
   const [agentFilter, setAgentFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
   const [dateRange, setDateRange] = useState<[Date | null, Date | null]>([null, null]);
@@ -79,6 +80,7 @@ export default function TracingThreadsPage() {
     params.set('limit', pageSize.toString());
     params.set('skip', ((page - 1) * pageSize).toString());
 
+    if (threadIdFilter) params.set('threadId', threadIdFilter.trim());
     if (agentFilter) params.set('agent', agentFilter.trim());
     if (statusFilter) params.set('status', statusFilter);
 
@@ -87,7 +89,7 @@ export default function TracingThreadsPage() {
     if (to) params.set('to', dayjs(to).endOf('day').toISOString());
 
     return params;
-  }, [agentFilter, dateRange, page, pageSize, statusFilter]);
+  }, [threadIdFilter, agentFilter, dateRange, page, pageSize, statusFilter]);
 
   const fetchThreads = useCallback(async (isRefresh = false) => {
     try {
@@ -129,6 +131,7 @@ export default function TracingThreadsPage() {
 
   const appliedFilters = useMemo(() => {
     const filters: { label: string; value: string }[] = [];
+    if (threadIdFilter) filters.push({ label: 'Thread ID', value: threadIdFilter });
     if (agentFilter) filters.push({ label: 'Agent', value: agentFilter });
     if (statusFilter) filters.push({ label: 'Status', value: statusFilter });
     if (dateRange[0] || dateRange[1]) {
@@ -137,7 +140,7 @@ export default function TracingThreadsPage() {
       filters.push({ label: 'Date Range', value: `${start} → ${end}` });
     }
     return filters;
-  }, [agentFilter, dateRange, statusFilter]);
+  }, [threadIdFilter, agentFilter, dateRange, statusFilter]);
 
   return (
     <Stack gap="md">
@@ -171,6 +174,17 @@ export default function TracingThreadsPage() {
       <Card withBorder shadow="sm" p="md">
         <Stack gap="md">
           <Group gap="md" wrap="wrap">
+            <TextInput
+              label="Thread ID"
+              placeholder="Search by thread ID"
+              leftSection={<IconSearch size={16} />}
+              value={threadIdFilter}
+              onChange={(event) => {
+                setThreadIdFilter(event.currentTarget.value);
+                setPage(1);
+              }}
+              style={{ minWidth: 260 }}
+            />
             <TextInput
               label="Agent"
               placeholder="Filter by agent name"
