@@ -197,7 +197,7 @@ export const AwsS3FileProviderContract: ProviderContract<
             name: 'prefix',
             label: 'Bucket prefix',
             type: 'text',
-            placeholder: 'cgate/files',
+            placeholder: 'cognipeer-console/files',
             description: 'Optional prefix prepended to all stored objects.',
             scope: 'settings',
           },

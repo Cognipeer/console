@@ -37,6 +37,9 @@ import {
   IconX,
   IconServerBolt,
   IconShield,
+  IconBell,
+  IconBulb,
+  IconBook2,
 } from '@tabler/icons-react';
 import { ReactNode, useMemo, useState } from 'react';
 import DashboardBreadcrumbs from './DashboardBreadcrumbs';
@@ -122,10 +125,22 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
       href: '/dashboard/vector',
     },
     {
+      label: tNav('memory'),
+      description: tNav('memoryDescription'),
+      icon: IconBulb,
+      href: '/dashboard/memory',
+    },
+    {
       label: tNav('files'),
       description: tNav('filesDescription'),
       icon: IconFolder,
       href: '/dashboard/files',
+    },
+    {
+      label: tNav('rag'),
+      description: tNav('ragDescription'),
+      icon: IconBook2,
+      href: '/dashboard/rag',
     },
     {
       label: tNav('agentTracing'),
@@ -144,6 +159,12 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
       description: tNav('guardrailsDescription'),
       icon: IconShield,
       href: '/dashboard/guardrails',
+    },
+    {
+      label: tNav('alerts'),
+      description: tNav('alertsDescription'),
+      icon: IconBell,
+      href: '/dashboard/alerts',
     },
     {
       label: tNav('projects'),

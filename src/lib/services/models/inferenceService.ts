@@ -120,6 +120,14 @@ interface ChatCompletionRequestBody extends Record<string, unknown> {
   messages?: unknown;
   stream?: unknown;
   request_id?: string;
+  /** Optional memory configuration for context-aware recall */
+  memory?: {
+    storeKey: string;
+    topK?: number;
+    scope?: string;
+    scopeId?: string;
+    maxTokens?: number;
+  };
 }
 
 interface EmbeddingRequestBody extends Record<string, unknown> {
@@ -264,7 +272,7 @@ export async function handleChatCompletion(params: {
         tenantDbName,
         tenantId: tenantId ?? model.tenantId,
         projectId,
-        key: model.inputGuardrailKey,
+        guardrailKey: model.inputGuardrailKey,
         text: inputText,
       });
       if (!guardResult.passed && guardResult.action === 'block') {
@@ -272,7 +280,7 @@ export async function handleChatCompletion(params: {
           guardrailKey: model.inputGuardrailKey,
           action: guardResult.action,
           findings: guardResult.findings,
-          message: guardResult.message,
+          message: guardResult.findings[0]?.message ?? null,
         });
       }
     }
@@ -333,6 +341,38 @@ export async function handleChatCompletion(params: {
   }
 
   const messagesInput = body.messages as Parameters<typeof toLangChainMessages>[0];
+
+  // ── Memory recall ──────────────────────────────────────────────────────
+  if (body.memory?.storeKey && tenantId) {
+    try {
+      const { recallForChat } = await import('@/lib/services/memory/memoryService');
+      const lastUserMsg = [...(messagesInput as Array<{ role: string; content?: string }>)]
+        .reverse()
+        .find((m) => m.role === 'user');
+      const query = typeof lastUserMsg?.content === 'string' ? lastUserMsg.content : '';
+      if (query) {
+        const recall = await recallForChat(
+          tenantDbName, tenantId, projectId, body.memory.storeKey,
+          {
+            query,
+            topK: body.memory.topK,
+            scope: body.memory.scope as 'user' | 'agent' | 'session' | 'global' | undefined,
+            scopeId: body.memory.scopeId,
+            maxTokens: body.memory.maxTokens,
+          },
+        );
+        if (recall.context) {
+          (messagesInput as Array<{ role: string; content: string }>).unshift({
+            role: 'system',
+            content: `[Memory Context]\n${recall.context}`,
+          });
+        }
+      }
+    } catch (memErr) {
+      console.warn('[memory] Recall failed, proceeding without memory context:', memErr);
+    }
+  }
+
   const messages = toLangChainMessages(messagesInput);
   const overrides = buildOverrides(body);
 
@@ -463,7 +503,7 @@ export async function handleChatCompletion(params: {
         tenantDbName,
         tenantId: tenantId ?? model.tenantId,
         projectId,
-        key: model.outputGuardrailKey,
+        guardrailKey: model.outputGuardrailKey,
         text: outputText,
       });
       if (!guardResult.passed && guardResult.action === 'block') {
@@ -471,7 +511,7 @@ export async function handleChatCompletion(params: {
           guardrailKey: model.outputGuardrailKey,
           action: guardResult.action,
           findings: guardResult.findings,
-          message: guardResult.message,
+          message: guardResult.findings[0]?.message ?? null,
         });
       }
     }

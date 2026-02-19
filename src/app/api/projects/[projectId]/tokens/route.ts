@@ -131,7 +131,7 @@ export async function POST(
 
     const db = await getDatabase();
 
-    const token = `cgate_${crypto.randomBytes(32).toString('hex')}`;
+    const token = `cpeer_${crypto.randomBytes(32).toString('hex')}`;
 
     const apiToken = await db.createApiToken({
       userId: ctx.userId,

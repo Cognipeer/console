@@ -477,7 +477,7 @@ export default function InferenceServerDetailPage() {
           <div>
             <Text fw={600} size="lg">{t('serverDetail.metrics')} History</Text>
             <Text size="sm" c="dimmed">
-              {metrics.length} data points{rangeParams.from ? ' in selected range' : ''}
+              {metrics.length} data points{dateFilter.period === 'custom' ? ' in selected range' : ''}
             </Text>
           </div>
           <Button

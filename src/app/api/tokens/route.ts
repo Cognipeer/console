@@ -127,7 +127,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Generate a secure random token
-    const token = `cgate_${crypto.randomBytes(32).toString('hex')}`;
+    const token = `cpeer_${crypto.randomBytes(32).toString('hex')}`;
 
     // Create token in database
     const apiToken = await db.createApiToken({

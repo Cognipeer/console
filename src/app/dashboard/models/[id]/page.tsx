@@ -44,6 +44,7 @@ import {
   IconCode,
   IconCopy,
   IconPlayerPlay,
+  IconTrash,
   IconX,
   IconDatabase,
 } from '@tabler/icons-react';
@@ -179,6 +180,7 @@ export default function ModelDetailPage() {
   const [providers, setProviders] = useState<ProviderDefinitionDto[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [selectedLog, setSelectedLog] = useState<UsageLogDto | null>(null);
   const [logModalOpened, { open: openLogModal, close: closeLogModal }] = useDisclosure(false);
   const [dateFilter, setDateFilter] = useState(defaultDashboardDateFilter);
@@ -299,6 +301,45 @@ export default function ModelDetailPage() {
     }));
   }, [usage]);
 
+  const handleDelete = async () => {
+    if (!model || deleting) return;
+
+    const confirmed = window.confirm(t('actions.deleteConfirm'));
+    if (!confirmed) return;
+
+    setDeleting(true);
+    try {
+      const response = await fetch(`/api/models/${model._id}`, {
+        method: 'DELETE',
+      });
+
+      if (!response.ok) {
+        const error = await response
+          .json()
+          .catch(() => ({ error: t('notifications.deleteErrorMessage') }));
+        throw new Error(error.error ?? t('notifications.deleteErrorMessage'));
+      }
+
+      notifications.show({
+        title: t('notifications.deleteSuccessTitle'),
+        message: t('notifications.deleteSuccessMessage'),
+        color: 'teal',
+      });
+      router.push('/dashboard/models');
+    } catch (error) {
+      notifications.show({
+        title: t('notifications.deleteErrorTitle'),
+        message:
+          error instanceof Error
+            ? error.message
+            : t('notifications.deleteErrorMessage'),
+        color: 'red',
+      });
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   if (loading) {
     return (
       <Center py="xl">
@@ -320,7 +361,7 @@ export default function ModelDetailPage() {
     );
   }
 
-  const curlChat = `curl -X POST https://your-cgate-host/api/client/v1/chat/completions \\
+  const curlChat = `curl -X POST https://your-cognipeer-host/api/client/v1/chat/completions \\
   -H "Authorization: Bearer YOUR_API_TOKEN" \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -333,7 +374,7 @@ export default function ModelDetailPage() {
     "max_tokens": 512
   }'`;
 
-  const curlStream = `curl -X POST https://your-cgate-host/api/client/v1/chat/completions \\
+  const curlStream = `curl -X POST https://your-cognipeer-host/api/client/v1/chat/completions \\
   -H "Authorization: Bearer YOUR_API_TOKEN" \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -342,7 +383,7 @@ export default function ModelDetailPage() {
     "stream": true
   }'`;
 
-  const curlEmbed = `curl -X POST https://your-cgate-host/api/client/v1/embeddings \\
+  const curlEmbed = `curl -X POST https://your-cognipeer-host/api/client/v1/embeddings \\
   -H "Authorization: Bearer YOUR_API_TOKEN" \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -350,11 +391,11 @@ export default function ModelDetailPage() {
     "input": "The quick brown fox jumps over the lazy dog"
   }'`;
 
-  const sdkChat = `import CgateClient from '@cognipeer/cgate-sdk';
+  const sdkChat = `import CognipeerClient from '@cognipeer/console-sdk';
 
-const client = new CgateClient({
+const client = new CognipeerClient({
   apiKey: 'YOUR_API_TOKEN',
-  baseUrl: 'https://your-cgate-host',
+  baseUrl: 'https://your-cognipeer-host',
 });
 
 // Non-streaming
@@ -369,11 +410,11 @@ const response = await client.chat.completions({
 
 console.log(response.choices[0].message.content);`;
 
-  const sdkStream = `import CgateClient from '@cognipeer/cgate-sdk';
+  const sdkStream = `import CognipeerClient from '@cognipeer/console-sdk';
 
-const client = new CgateClient({
+const client = new CognipeerClient({
   apiKey: 'YOUR_API_TOKEN',
-  baseUrl: 'https://your-cgate-host',
+  baseUrl: 'https://your-cognipeer-host',
 });
 
 // Streaming
@@ -386,11 +427,11 @@ for await (const chunk of stream) {
   process.stdout.write(chunk.choices[0]?.delta?.content ?? '');
 }`;
 
-  const sdkEmbed = `import CgateClient from '@cognipeer/cgate-sdk';
+  const sdkEmbed = `import CognipeerClient from '@cognipeer/console-sdk';
 
-const client = new CgateClient({
+const client = new CognipeerClient({
   apiKey: 'YOUR_API_TOKEN',
-  baseUrl: 'https://your-cgate-host',
+  baseUrl: 'https://your-cognipeer-host',
 });
 
 const response = await client.embeddings.create({
@@ -403,7 +444,7 @@ console.log(response.data[0].embedding);`;
   const pythonChat = `import httpx
 
 response = httpx.post(
-    "https://your-cgate-host/api/client/v1/chat/completions",
+    "https://your-cognipeer-host/api/client/v1/chat/completions",
     headers={"Authorization": "Bearer YOUR_API_TOKEN"},
     json={
         "model": "${model.key}",
@@ -421,7 +462,7 @@ print(data["choices"][0]["message"]["content"])`;
   const pythonEmbed = `import httpx
 
 response = httpx.post(
-    "https://your-cgate-host/api/client/v1/embeddings",
+    "https://your-cognipeer-host/api/client/v1/embeddings",
     headers={"Authorization": "Bearer YOUR_API_TOKEN"},
     json={
         "model": "${model.key}",
@@ -436,7 +477,7 @@ print(data["data"][0]["embedding"][:5])  # first 5 dims`;
 
 client = OpenAI(
     api_key="YOUR_API_TOKEN",
-    base_url="https://your-cgate-host/api/client/v1",
+    base_url="https://your-cognipeer-host/api/client/v1",
 )
 
 response = client.chat.completions.create(
@@ -495,6 +536,16 @@ print(response.choices[0].message.content)`;
               leftSection={<IconSettings size={14} />}
             >
               {t('actions.edit')}
+            </Button>
+            <Button
+              variant="light"
+              color="red"
+              size="xs"
+              leftSection={<IconTrash size={14} />}
+              loading={deleting}
+              onClick={() => void handleDelete()}
+            >
+              {t('actions.delete')}
             </Button>
           </>
         }

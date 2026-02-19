@@ -14,5 +14,10 @@ export async function register() {
       '@/lib/services/inferenceMonitoring/pollScheduler'
     );
     startPollScheduler();
+
+    const { startAlertScheduler } = await import(
+      '@/lib/services/alerts/alertScheduler'
+    );
+    startAlertScheduler();
   }
 }

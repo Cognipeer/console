@@ -7,9 +7,9 @@ environments:
       - values/production.yaml
 ---
 releases:
-  - name: cgate
-    namespace: cgate-{{.Environment.Name}}
+  - name: cognipeer-console
+    namespace: cognipeer-console-{{.Environment.Name}}
     createNamespace: true
-    chart: ./cgate
+    chart: ./cognipeer-console
     values:
     - values/common.yaml.gotmpl

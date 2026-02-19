@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Mustache from 'mustache';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
-import { getPromptByKey } from '@/lib/services/prompts';
+import { resolvePromptForEnvironment, type PromptEnvironment } from '@/lib/services/prompts';
 
 export const runtime = 'nodejs';
 
@@ -24,13 +24,33 @@ export async function POST(
 	try {
 		const { tenantDbName, projectId } = await requireApiToken(request);
 		const { key } = await params;
+		const { searchParams } = new URL(request.url);
+		const rawEnvironment = searchParams.get('environment');
+		const environment = rawEnvironment as PromptEnvironment | null;
+		const versionParam = searchParams.get('version');
+		const version = versionParam !== null ? Number.parseInt(versionParam, 10) : undefined;
 
 		if (!key) {
 			return NextResponse.json({ error: 'Prompt key is required' }, { status: 400 });
 		}
 
-		const prompt = await getPromptByKey(tenantDbName, projectId, key);
-		if (!prompt) {
+		if (environment && !['dev', 'staging', 'prod'].includes(environment)) {
+			return NextResponse.json({ error: 'Invalid environment' }, { status: 400 });
+		}
+
+		if (versionParam !== null && (!Number.isFinite(version) || (version as number) <= 0)) {
+			return NextResponse.json({ error: 'Invalid version' }, { status: 400 });
+		}
+
+		const resolved = await resolvePromptForEnvironment(
+			tenantDbName,
+			projectId,
+			key,
+			environment ?? undefined,
+			version,
+		);
+
+		if (!resolved) {
 			return NextResponse.json({ error: 'Prompt not found' }, { status: 404 });
 		}
 
@@ -41,14 +61,15 @@ export async function POST(
 
 		const data = rawData && typeof rawData === 'object' ? rawData : {};
 
-		const rendered = Mustache.render(prompt.template, data as Record<string, unknown>);
+		const rendered = Mustache.render(resolved.prompt.template, data as Record<string, unknown>);
 
 		return NextResponse.json({
 			rendered,
 			prompt: {
-				key: prompt.key,
-				name: prompt.name,
-				version: prompt.currentVersion ?? 1,
+				key: resolved.prompt.key,
+				name: resolved.prompt.name,
+				version: resolved.prompt.currentVersion ?? 1,
+				environment: environment ?? null,
 			},
 		}, { status: 200 });
 	} catch (error) {

@@ -21,9 +21,10 @@ import {
   ThemeIcon,
   Tooltip,
 } from '@mantine/core';
+import { notifications } from '@mantine/notifications';
 import PageHeader from '@/components/layout/PageHeader';
 import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
-import { IconActivity, IconAlertTriangle, IconChartBar, IconEdit, IconEye, IconPlug, IconPlus, IconRefresh, IconTool, IconSparkles, IconBrain, IconCpu, IconTimeline, IconCoins, IconBolt, IconShield } from '@tabler/icons-react';
+import { IconActivity, IconAlertTriangle, IconChartBar, IconEdit, IconEye, IconPlug, IconPlus, IconRefresh, IconTool, IconSparkles, IconBrain, IconCpu, IconTimeline, IconCoins, IconBolt, IconShield, IconTrash } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import type { ModelProviderView } from '@/lib/services/models/types';
 import CreateModelModal from '@/components/models/CreateModelModal';
@@ -126,6 +127,7 @@ export default function ModelsPage() {
   const [dashboardLoading, setDashboardLoading] = useState(true);
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [guardrailModel, setGuardrailModel] = useState<ModelDto | null>(null);
+  const [deletingModelId, setDeletingModelId] = useState<string | null>(null);
   const [dateFilter, setDateFilter] = useState(defaultDashboardDateFilter);
   const t = useTranslations('models');
   const tNav = useTranslations('navigation');
@@ -233,6 +235,45 @@ export default function ModelsPage() {
         ) : null}
       </Stack>
     );
+  };
+
+  const handleDeleteModel = async (model: ModelDto) => {
+    const confirmed = window.confirm(t('actions.deleteConfirm'));
+    if (!confirmed) return;
+
+    setDeletingModelId(model._id);
+    try {
+      const response = await fetch(`/api/models/${model._id}`, {
+        method: 'DELETE',
+      });
+
+      if (!response.ok) {
+        const error = await response
+          .json()
+          .catch(() => ({ error: 'Failed to delete model' }));
+        throw new Error(error.error ?? 'Failed to delete model');
+      }
+
+      setModels((current) => current.filter((item) => item._id !== model._id));
+      await loadDashboard();
+
+      notifications.show({
+        color: 'green',
+        title: t('actions.delete'),
+        message: t('actions.deleteSuccess'),
+      });
+    } catch (error) {
+      notifications.show({
+        color: 'red',
+        title: t('actions.deleteFailedTitle'),
+        message:
+          error instanceof Error
+            ? error.message
+            : t('actions.deleteFailedMessage'),
+      });
+    } finally {
+      setDeletingModelId(null);
+    }
   };
 
   const renderModelTable = (records: ModelDto[], category: 'llm' | 'embedding') => (
@@ -374,6 +415,17 @@ export default function ModelsPage() {
                         }}
                       >
                         Guardrail Settings
+                      </Menu.Item>
+                      <Menu.Item
+                        color="red"
+                        leftSection={<IconTrash size={14} />}
+                        disabled={deletingModelId === model._id}
+                        onClick={(e: React.MouseEvent) => {
+                          e.stopPropagation();
+                          void handleDeleteModel(model);
+                        }}
+                      >
+                        {t('actions.delete')}
                       </Menu.Item>
                     </Menu.Dropdown>
                   </Menu>

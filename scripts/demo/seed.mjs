@@ -128,7 +128,7 @@ const SEED_META_COLL   = '__seed_metadata__';
 // ── MongoDB connection ─────────────────────────────────────────────────────────
 
 const MONGODB_URI  = process.env.MONGODB_URI;
-const MAIN_DB_NAME = process.env.MAIN_DB_NAME || 'cgate_main';
+const MAIN_DB_NAME = process.env.MAIN_DB_NAME || 'console_main';
 
 if (!MONGODB_URI) {
   console.error('❌  MONGODB_URI is not set. Create .env.local with MONGODB_URI=...');

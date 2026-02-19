@@ -1,8 +1,8 @@
-# CognipeerAI Gateway - Development Guidelines
+# Cognipeer Console - Development Guidelines
 
 ## Project Overview
 
-CognipeerAI Gateway is a **multi-tenant SaaS platform** for AI and Agentic services that can operate both as SaaS and on-premise. The platform provides LLM services, agent orchestration, vector stores, workflow automation, and analytics with complete data isolation per company.
+Cognipeer Console is a **multi-tenant SaaS platform** for AI and Agentic services that can operate both as SaaS and on-premise. The platform provides LLM services, agent orchestration, vector stores, workflow automation, and analytics with complete data isolation per company.
 
 ## Architecture
 
@@ -25,7 +25,7 @@ CognipeerAI Gateway is a **multi-tenant SaaS platform** for AI and Agentic servi
 **Database Structure**:
 ```
 MongoDB Server
-├── cgate_main (Main/Shared)
+├── console_main (Main/Shared)
 │   └── tenants collection
 ├── tenant_{slug} (Per Company)
 │   ├── users

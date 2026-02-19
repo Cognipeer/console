@@ -129,6 +129,34 @@
         "/api/client/v1/guardrails",
         "/api/client/v1/guardrails/*"
       ]
+    },
+    "ALERTS": {
+      "name": "Alerts & Notifications",
+      "description": "Threshold-based alerts for quality, cost, and latency metrics",
+      "endpoints": [
+        "/api/alerts",
+        "/api/alerts/*"
+      ]
+    },
+    "MEMORY": {
+      "name": "Memory",
+      "description": "Persistent memory stores with vector-backed semantic search",
+      "endpoints": [
+        "/api/memory",
+        "/api/memory/*",
+        "/api/client/v1/memory",
+        "/api/client/v1/memory/*"
+      ]
+    },
+    "RAG_PIPELINE": {
+      "name": "RAG Pipeline",
+      "description": "Document ingestion, chunking, embedding, and retrieval-augmented generation",
+      "endpoints": [
+        "/api/rag",
+        "/api/rag/*",
+        "/api/client/v1/rag",
+        "/api/client/v1/rag/*"
+      ]
     }
   },
   "licenses": {
@@ -147,6 +175,9 @@
         "QUOTA_MANAGEMENT",
         "INFERENCE_MONITORING",
         "GUARDRAILS",
+        "ALERTS",
+        "MEMORY",
+        "RAG_PIPELINE",
         "DASHBOARD"
       ],
       "limits": {
@@ -163,7 +194,10 @@
         "API_KEYS",
         "PROMPTS",
         "QUOTA_MANAGEMENT",
-        "INFERENCE_MONITORING"
+        "INFERENCE_MONITORING",
+        "ALERTS",
+        "MEMORY",
+        "RAG_PIPELINE"
       ],
       "limits": {
         "requestsPerMonth": 10000,
@@ -183,7 +217,10 @@
         "ANALYTICS",
         "QUOTA_MANAGEMENT",
         "INFERENCE_MONITORING",
-        "GUARDRAILS"
+        "GUARDRAILS",
+        "ALERTS",
+        "MEMORY",
+        "RAG_PIPELINE"
       ],
       "limits": {
         "requestsPerMonth": 100000,
@@ -209,6 +246,9 @@
         "QUOTA_MANAGEMENT",
         "INFERENCE_MONITORING",
         "GUARDRAILS",
+        "ALERTS",
+        "MEMORY",
+        "RAG_PIPELINE",
         "DASHBOARD"
       ],
       "limits": {
@@ -235,6 +275,9 @@
         "QUOTA_MANAGEMENT",
         "INFERENCE_MONITORING",
         "GUARDRAILS",
+        "ALERTS",
+        "MEMORY",
+        "RAG_PIPELINE",
         "DASHBOARD"
       ],
       "limits": {

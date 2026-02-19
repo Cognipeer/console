@@ -278,10 +278,6 @@ export default function GuardrailDetailPage() {
         }
       />
 
-      <Group justify="flex-end" mt="sm">
-        <DashboardDateFilter value={dateFilter} onChange={setDateFilter} />
-      </Group>
-
       <Tabs value={activeTab} onChange={(v) => setActiveTab(v ?? 'dashboard')} mt="md">
         <Tabs.List mb="md">
           <Tabs.Tab value="dashboard" leftSection={<IconChartBar size={14} />}>
@@ -304,6 +300,10 @@ export default function GuardrailDetailPage() {
         {/* ── Dashboard tab ── */}
         <Tabs.Panel value="dashboard">
           <Stack gap="md">
+            <Group justify="flex-end">
+              <DashboardDateFilter value={dateFilter} onChange={setDateFilter} />
+            </Group>
+
             <SimpleGrid cols={{ base: 1, md: 2 }} spacing="md">
               <Paper withBorder radius="md" p="md">
                 <Text fw={600} mb="sm">Overview</Text>
@@ -497,7 +497,7 @@ export default function GuardrailDetailPage() {
               </Text>
               <Box style={{ position: 'relative' }}>
                 <CopyButton
-                  value={`curl -X POST https://your-cgate-host/api/client/v1/guardrails/evaluate \\
+                  value={`curl -X POST https://your-cognipeer-host/api/client/v1/guardrails/evaluate \\
   -H "Authorization: Bearer YOUR_API_TOKEN" \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -522,7 +522,7 @@ export default function GuardrailDetailPage() {
                   )}
                 </CopyButton>
                 <Code block fz="xs">
-{`curl -X POST https://your-cgate-host/api/client/v1/guardrails/evaluate \\
+{`curl -X POST https://your-cognipeer-host/api/client/v1/guardrails/evaluate \\
   -H "Authorization: Bearer YOUR_API_TOKEN" \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -558,11 +558,11 @@ export default function GuardrailDetailPage() {
             <Paper withBorder radius="md" p="md">
               <Text fw={600} mb="xs">JavaScript SDK Example (ESM)</Text>
               <Code block fz="xs">
-{`import { CGateClient } from '@cognipeer/cgate-sdk';
+{`import { CognipeerClient } from '@cognipeer/console-sdk';
 
-const client = new CGateClient({
-  apiKey: process.env.CGATE_API_TOKEN,
-  baseURL: 'https://your-cgate-host',
+const client = new CognipeerClient({
+  apiKey: process.env.COGNIPEER_API_TOKEN,
+  baseURL: 'https://your-cognipeer-host',
 });
 
 const result = await client.guardrails.evaluate({
@@ -582,11 +582,11 @@ if (!result.passed) {
             <Paper withBorder radius="md" p="md">
               <Text fw={600} mb="xs">JavaScript SDK Example (CommonJS)</Text>
               <Code block fz="xs">
-{`const { CGateClient } = require('@cognipeer/cgate-sdk');
+{`const { CognipeerClient } = require('@cognipeer/console-sdk');
 
-const client = new CGateClient({
-  apiKey: process.env.CGATE_API_TOKEN,
-  baseURL: 'https://your-cgate-host',
+const client = new CognipeerClient({
+  apiKey: process.env.COGNIPEER_API_TOKEN,
+  baseURL: 'https://your-cognipeer-host',
 });
 
 async function runGuardrailCheck(userMessage) {
@@ -613,7 +613,7 @@ runGuardrailCheck('Hello, my SSN is 123-45-6789').catch(console.error);`}
 {`import httpx
 
 response = httpx.post(
-    "https://your-cgate-host/api/client/v1/guardrails/evaluate",
+    "https://your-cognipeer-host/api/client/v1/guardrails/evaluate",
     headers={"Authorization": "Bearer YOUR_API_TOKEN"},
     json={
         "guardrail_key": "${guardrail.key}",

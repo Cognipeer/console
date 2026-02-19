@@ -508,7 +508,7 @@ export default function VectorIndexDetailPage() {
 
   /* ── Usage code snippets ── */
   const curlUpsert = [
-    `curl -X POST https://your-cgate-host/api/client/v1/vector/providers/${providerKey}/indexes/${indexKey}/upsert \\`,
+    `curl -X POST https://your-cognipeer-host/api/client/v1/vector/providers/${providerKey}/indexes/${indexKey}/upsert \\`,
     `  -H "Authorization: Bearer YOUR_API_TOKEN" \\`,
     `  -H "Content-Type: application/json" \\`,
     `  -d '{`,
@@ -523,7 +523,7 @@ export default function VectorIndexDetailPage() {
   ].join('\n');
 
   const curlQuery = [
-    `curl -X POST https://your-cgate-host/api/client/v1/vector/providers/${providerKey}/indexes/${indexKey}/query \\`,
+    `curl -X POST https://your-cognipeer-host/api/client/v1/vector/providers/${providerKey}/indexes/${indexKey}/query \\`,
     `  -H "Authorization: Bearer YOUR_API_TOKEN" \\`,
     `  -H "Content-Type: application/json" \\`,
     `  -d '{`,
@@ -536,11 +536,11 @@ export default function VectorIndexDetailPage() {
   ].join('\n');
 
   const sdkUpsert = [
-    `import CgateClient from '@cognipeer/cgate-sdk';`,
+    `import CognipeerClient from '@cognipeer/console-sdk';`,
     ``,
-    `const client = new CgateClient({`,
+    `const client = new CognipeerClient({`,
     `  apiKey: 'YOUR_API_TOKEN',`,
-    `  baseUrl: 'https://your-cgate-host',`,
+    `  baseUrl: 'https://your-cognipeer-host',`,
     `});`,
     ``,
     `await client.vectors.upsert('${providerKey}', '${indexKey}', {`,
@@ -555,11 +555,11 @@ export default function VectorIndexDetailPage() {
   ].join('\n');
 
   const sdkQuery = [
-    `import CgateClient from '@cognipeer/cgate-sdk';`,
+    `import CognipeerClient from '@cognipeer/console-sdk';`,
     ``,
-    `const client = new CgateClient({`,
+    `const client = new CognipeerClient({`,
     `  apiKey: 'YOUR_API_TOKEN',`,
-    `  baseUrl: 'https://your-cgate-host',`,
+    `  baseUrl: 'https://your-cognipeer-host',`,
     `});`,
     ``,
     `const result = await client.vectors.query('${providerKey}', '${indexKey}', {`,
@@ -623,10 +623,6 @@ export default function VectorIndexDetailPage() {
         }
       />
 
-      <Group justify="flex-end">
-        <DashboardDateFilter value={dateFilter} onChange={setDateFilter} />
-      </Group>
-
       <Tabs defaultValue="overview" keepMounted={false}>
         <Tabs.List mb="md">
           <Tabs.Tab value="overview" leftSection={<IconDatabase size={14} />}>Overview</Tabs.Tab>
@@ -638,6 +634,10 @@ export default function VectorIndexDetailPage() {
         {/* ════════════════ Overview Tab ════════════════ */}
         <Tabs.Panel value="overview">
           <Stack gap="md">
+            <Group justify="flex-end">
+              <DashboardDateFilter value={dateFilter} onChange={setDateFilter} />
+            </Group>
+
             <SimpleGrid cols={{ base: 1, sm: 2, lg: 6 }}>
               <Paper withBorder radius="lg" p="lg">
                 <Group justify="space-between" wrap="nowrap" align="flex-start">

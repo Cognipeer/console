@@ -31,6 +31,7 @@ import PageHeader from '@/components/layout/PageHeader';
 import { notifications } from '@mantine/notifications';
 import {
   IconArrowLeft,
+  IconBraces,
   IconCalendar,
   IconCheck,
   IconCode,
@@ -42,6 +43,7 @@ import {
   IconRefresh,
   IconSend,
   IconSparkles,
+  IconTerminal,
   IconTemplate,
   IconTrash,
   IconVariable,
@@ -149,6 +151,21 @@ export default function PromptDetailPage() {
     if (!prompt?.template) return [];
     return extractTemplateVariables(prompt.template);
   }, [prompt?.template]);
+
+  const usageExamples = useMemo(() => {
+    const apiBase = typeof window !== 'undefined' ? window.location.origin : 'https://api.cognipeer.com';
+    const key = prompt?.key ?? 'your-prompt-key';
+
+    const sdk = `import { CognipeerClient } from '@cognipeer/console-sdk';\n\nconst client = new CognipeerClient({\n  apiKey: process.env.COGNIPEER_API_KEY!,\n  baseURL: '${apiBase}',\n});\n\nconst rendered = await client.prompts.render('${key}', {\n  environment: 'prod',\n  data: { name: 'World' },\n});\n\nawait client.prompts.deploy('${key}', {\n  action: 'promote',\n  environment: 'staging',\n  versionId: '${versions[0]?.id ?? 'version_id'}',\n});\n\nawait client.prompts.deploy('${key}', {\n  action: 'activate',\n  environment: 'staging',\n});`;
+
+    const curlRender = `curl -X POST '${apiBase}/api/client/v1/prompts/${key}/render?environment=prod' \\\n+  -H 'Authorization: Bearer <API_TOKEN>' \\\n+  -H 'Content-Type: application/json' \\\n+  -d '{\n+    "data": { "name": "World" }\n+  }'`;
+
+    const curlDeploy = `curl -X POST '${apiBase}/api/client/v1/prompts/${key}/deployments' \\\n+  -H 'Authorization: Bearer <API_TOKEN>' \\\n+  -H 'Content-Type: application/json' \\\n+  -d '{\n+    "action": "promote",\n+    "environment": "staging",\n+    "versionId": "${versions[0]?.id ?? 'version_id'}"\n+  }'`;
+
+    const curlCompare = `curl '${apiBase}/api/client/v1/prompts/${key}/compare?fromVersionId=${versions[1]?.id ?? 'version_id_a'}&toVersionId=${versions[0]?.id ?? 'version_id_b'}' \\\n+  -H 'Authorization: Bearer <API_TOKEN>'`;
+
+    return { sdk, curlRender, curlDeploy, curlCompare };
+  }, [prompt?.key, versions]);
 
   // Render preview
   const previewResult = useMemo(() => {
@@ -398,6 +415,9 @@ export default function PromptDetailPage() {
           <Tabs.Tab value="playground" leftSection={<IconPlayerPlay style={{ width: rem(16), height: rem(16) }} />}>
             {t('tabs.playground')}
           </Tabs.Tab>
+          <Tabs.Tab value="usage" leftSection={<IconTerminal style={{ width: rem(16), height: rem(16) }} />}>
+            {t('tabs.usage')}
+          </Tabs.Tab>
         </Tabs.List>
 
         {/* Template & Preview Tab */}
@@ -622,6 +642,56 @@ export default function PromptDetailPage() {
             title={t('sections.playgroundChat')}
             chatHeight={500}
           />
+        </Tabs.Panel>
+
+        <Tabs.Panel value="usage" pt="md">
+          <Stack gap="md">
+            <Paper withBorder radius="lg" p="lg">
+              <Group gap={8} mb="sm">
+                <ThemeIcon variant="light" color="teal" radius="md">
+                  <IconBraces size={16} />
+                </ThemeIcon>
+                <Text fw={600}>{t('sections.usageSdk')}</Text>
+              </Group>
+              <Text size="sm" c="dimmed" mb="sm">
+                {t('sections.usageSdkDescription')}
+              </Text>
+              <ScrollArea type="auto">
+                <Code block style={{ whiteSpace: 'pre', minWidth: 640 }}>
+                  {usageExamples.sdk}
+                </Code>
+              </ScrollArea>
+            </Paper>
+
+            <Paper withBorder radius="lg" p="lg">
+              <Group gap={8} mb="sm">
+                <ThemeIcon variant="light" color="indigo" radius="md">
+                  <IconTerminal size={16} />
+                </ThemeIcon>
+                <Text fw={600}>{t('sections.usageCurl')}</Text>
+              </Group>
+              <Stack gap="sm">
+                <div>
+                  <Text size="sm" fw={500} mb={4}>{t('sections.usageRender')}</Text>
+                  <ScrollArea type="auto">
+                    <Code block style={{ whiteSpace: 'pre', minWidth: 640 }}>{usageExamples.curlRender}</Code>
+                  </ScrollArea>
+                </div>
+                <div>
+                  <Text size="sm" fw={500} mb={4}>{t('sections.usageDeploy')}</Text>
+                  <ScrollArea type="auto">
+                    <Code block style={{ whiteSpace: 'pre', minWidth: 640 }}>{usageExamples.curlDeploy}</Code>
+                  </ScrollArea>
+                </div>
+                <div>
+                  <Text size="sm" fw={500} mb={4}>{t('sections.usageCompare')}</Text>
+                  <ScrollArea type="auto">
+                    <Code block style={{ whiteSpace: 'pre', minWidth: 640 }}>{usageExamples.curlCompare}</Code>
+                  </ScrollArea>
+                </div>
+              </Stack>
+            </Paper>
+          </Stack>
         </Tabs.Panel>
       </Tabs>
 

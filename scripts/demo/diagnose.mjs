@@ -19,7 +19,7 @@ for (const f of envFiles) {
 const client = new MongoClient(process.env.MONGODB_URI);
 await client.connect();
 
-const mainDb  = client.db('cgate_main');
+const mainDb  = client.db('console_main');
 const tenantDb = client.db('tenant_demo');
 
 const tenant  = await mainDb.collection('tenants').findOne({ slug: 'demo' });

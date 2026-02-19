@@ -523,6 +523,9 @@ export const AwsS3VectorsProviderContract: ProviderContract<
                     dataType: 'float32',
                     dimension: input.dimension,
                     distanceMetric: metric,
+                    metadataConfiguration: {
+                        nonFilterableMetadataKeys: ['_content'],
+                    },
                 });
                 await client.send(command);
 
@@ -678,7 +681,7 @@ export const AwsS3VectorsProviderContract: ProviderContract<
 
                     return vectorInput;
                 });
-                console.log(bucketInput, source);
+
                 await client.send(
                     new PutVectorsCommand({
                         indexArn: source.indexArn,

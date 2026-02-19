@@ -23,7 +23,7 @@ export type ModuleDocTarget =
   | 'settings'
   | 'tenant-settings';
 
-const SDK_DOCS_BASE_URL = 'https://cognipeer.github.io/cgate-sdk';
+const SDK_DOCS_BASE_URL = 'https://cognipeer.github.io/console-sdk';
 
 const DOCS: Record<SdkDocId, { title: string; url: string }> = {
   'getting-started': {

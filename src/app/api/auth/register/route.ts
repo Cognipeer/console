@@ -19,25 +19,26 @@ export async function POST(request: NextRequest) {
       );
     }
 
-  // Block registration with demo account identifiers
-  const DEMO_EMAIL = process.env.DEMO_EMAIL || 'demo@cognipeer.ai';
-  const DEMO_SLUG  = 'demo';
-  if (email.trim().toLowerCase() === DEMO_EMAIL) {
-    return NextResponse.json(
-      { error: 'This email address is reserved for the demo account.' },
-      { status: 409 },
-    );
-  }
-  const candidateSlug = companyName
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-  if (candidateSlug === DEMO_SLUG) {
-    return NextResponse.json(
-      { error: 'This company name is reserved. Please choose a different name.' },
-      { status: 409 },
-    );
-  }
+    // Block registration with demo account identifiers
+    const DEMO_EMAIL = process.env.DEMO_EMAIL || 'demo@cognipeer.ai';
+    const DEMO_SLUG = 'demo';
+    if (email.trim().toLowerCase() === DEMO_EMAIL) {
+      return NextResponse.json(
+        { error: 'This email address is reserved for the demo account.' },
+        { status: 409 },
+      );
+    }
+
+    const candidateSlug = companyName
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+    if (candidateSlug === DEMO_SLUG) {
+      return NextResponse.json(
+        {
+          error: 'This company name is reserved. Please choose a different name.',
+        },
+        { status: 409 },
       );
     }
 

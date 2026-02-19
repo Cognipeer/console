@@ -79,7 +79,6 @@ export default function AgentTracingPage() {
       if (isRefresh) setRefreshing(true);
       else setLoading(true);
 
-      const params = new URLSearchParams();
       const params = buildDashboardDateSearchParams(dateFilter);
       params.append('timezone', timezone);
 

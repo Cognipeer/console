@@ -162,10 +162,10 @@ function OverviewTab({ bucket }: { bucket: FileBucketView }) {
 // ── Usage Tab ─────────────────────────────────────────────────────────────────
 
 function UsageTab({ bucket }: { bucket: FileBucketView }) {
-  const curlListFiles = `curl -X GET "https://your-cgate-host/api/client/v1/files/buckets/${bucket.key}/objects?limit=50" \\
+  const curlListFiles = `curl -X GET "https://your-cognipeer-host/api/client/v1/files/buckets/${bucket.key}/objects?limit=50" \\
   -H "Authorization: Bearer YOUR_API_TOKEN"`;
 
-  const curlUpload = `curl -X POST "https://your-cgate-host/api/client/v1/files/buckets/${bucket.key}/objects" \\
+  const curlUpload = `curl -X POST "https://your-cognipeer-host/api/client/v1/files/buckets/${bucket.key}/objects" \\
   -H "Authorization: Bearer YOUR_API_TOKEN" \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -176,15 +176,15 @@ function UsageTab({ bucket }: { bucket: FileBucketView }) {
     "bucketKey": "${bucket.key}"
   }'`;
 
-  const curlListBuckets = `curl -X GET "https://your-cgate-host/api/client/v1/files/buckets" \\
+  const curlListBuckets = `curl -X GET "https://your-cognipeer-host/api/client/v1/files/buckets" \\
   -H "Authorization: Bearer YOUR_API_TOKEN"`;
 
-  const sdkTypeScript = `import { CognipeerClient } from '@cognipeer/cgate-sdk';
+  const sdkTypeScript = `import { CognipeerClient } from '@cognipeer/console-sdk';
 import { readFileSync } from 'fs';
 
 const client = new CognipeerClient({
   apiKey: 'YOUR_API_TOKEN',
-  baseURL: 'https://your-cgate-host',
+  baseURL: 'https://your-cognipeer-host',
 });
 
 // List all buckets
@@ -210,7 +210,7 @@ console.log(\`Uploaded: \${file.key} (\${file.size} bytes)\`);`;
 
   const sdkPython = `import httpx, base64
 
-BASE_URL = "https://your-cgate-host"
+BASE_URL = "https://your-cognipeer-host"
 API_TOKEN = "YOUR_API_TOKEN"
 headers = {"Authorization": f"Bearer {API_TOKEN}"}
 
@@ -339,10 +339,10 @@ print(f"Uploaded: {file['key']} ({file['size']} bytes)")`;
       <Paper withBorder radius="md" p="md">
         <Group justify="space-between" mb="xs">
           <Text fw={600}>TypeScript / Node.js SDK</Text>
-          <Badge size="sm" variant="light" color="blue">@cognipeer/cgate-sdk</Badge>
+          <Badge size="sm" variant="light" color="blue">@cognipeer/console-sdk</Badge>
         </Group>
         <Text size="xs" c="dimmed" mb="sm">
-          Install: <Code fz="xs">npm install @cognipeer/cgate-sdk</Code>
+          Install: <Code fz="xs">npm install @cognipeer/console-sdk</Code>
         </Text>
         <Box style={{ position: 'relative' }}>
           <CopyButton value={sdkTypeScript} timeout={2000}>

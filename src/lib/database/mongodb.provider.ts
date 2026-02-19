@@ -27,6 +27,19 @@ import {
   IInferenceServerMetrics,
   IGuardrail,
   GuardrailType,
+  IAlertRule,
+  IAlertEvent,
+  AlertEventStatus,
+  IRagModule,
+  IRagDocument,
+  IRagChunk,
+  IRagQueryLog,
+  RagDocumentStatus,
+  IMemoryStore,
+  IMemoryItem,
+  MemoryScope,
+  MemoryStoreStatus,
+  MemoryItemStatus,
 } from './provider.interface';
 
 export class MongoDBProvider implements DatabaseProvider {
@@ -51,8 +64,16 @@ export class MongoDBProvider implements DatabaseProvider {
   private static readonly inferenceServersCollection = 'inference_servers';
   private static readonly inferenceServerMetricsCollection = 'inference_server_metrics';
   private static readonly guardrailsCollection = 'guardrails';
+  private static readonly alertRulesCollection = 'alert_rules';
+  private static readonly alertEventsCollection = 'alert_events';
+  private static readonly ragModulesCollection = 'rag_modules';
+  private static readonly ragDocumentsCollection = 'rag_documents';
+  private static readonly ragChunksCollection = 'rag_chunks';
+  private static readonly ragQueryLogsCollection = 'rag_query_logs';
+  private static readonly memoryStoresCollection = 'memory_stores';
+  private static readonly memoryItemsCollection = 'memory_items';
 
-  constructor(uri: string, mainDbName: string = 'cgate_main') {
+  constructor(uri: string, mainDbName: string = 'console_main') {
     this.uri = uri;
     this.mainDbName = mainDbName;
   }
@@ -3208,5 +3229,609 @@ export class MongoDBProvider implements DatabaseProvider {
       findingsBySeverity,
       timeseries,
     };
+  }
+
+  // ── Alert rule operations ────────────────────────────────────────────────
+
+  async createAlertRule(
+    rule: Omit<IAlertRule, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IAlertRule> {
+    const db = this.getTenantDb();
+    const now = new Date();
+    const doc = { ...rule, createdAt: now, updatedAt: now };
+    const result = await db
+      .collection(MongoDBProvider.alertRulesCollection)
+      .insertOne(doc);
+    return { ...doc, _id: result.insertedId.toString() };
+  }
+
+  async updateAlertRule(
+    id: string,
+    data: Partial<Omit<IAlertRule, 'tenantId' | 'createdBy'>>,
+  ): Promise<IAlertRule | null> {
+    const db = this.getTenantDb();
+    const updateData: Record<string, unknown> = { ...data, updatedAt: new Date() };
+    delete updateData._id;
+    const result = await db
+      .collection<IAlertRule>(MongoDBProvider.alertRulesCollection)
+      .findOneAndUpdate(
+        { _id: new ObjectId(id) },
+        { $set: updateData },
+        { returnDocument: 'after' },
+      );
+    if (!result) return null;
+    return { ...result, _id: result._id?.toString() } as IAlertRule;
+  }
+
+  async deleteAlertRule(id: string): Promise<boolean> {
+    const db = this.getTenantDb();
+    const result = await db
+      .collection(MongoDBProvider.alertRulesCollection)
+      .deleteOne({ _id: new ObjectId(id) });
+    return result.deletedCount === 1;
+  }
+
+  async findAlertRuleById(id: string): Promise<IAlertRule | null> {
+    const db = this.getTenantDb();
+    const doc = await db
+      .collection(MongoDBProvider.alertRulesCollection)
+      .findOne({ _id: new ObjectId(id) });
+    return doc as unknown as IAlertRule | null;
+  }
+
+  async listAlertRules(
+    tenantId: string,
+    filters?: { projectId?: string; enabled?: boolean },
+  ): Promise<IAlertRule[]> {
+    const db = this.getTenantDb();
+    const filter: Record<string, unknown> = { tenantId };
+    if (filters?.projectId !== undefined) filter.projectId = filters.projectId;
+    if (filters?.enabled !== undefined) filter.enabled = filters.enabled;
+    const docs = await db
+      .collection(MongoDBProvider.alertRulesCollection)
+      .find(filter)
+      .sort({ createdAt: -1 })
+      .toArray();
+    return docs as unknown as IAlertRule[];
+  }
+
+  // ── Alert event (history) operations ─────────────────────────────────────
+
+  async createAlertEvent(
+    event: Omit<IAlertEvent, '_id'>,
+  ): Promise<IAlertEvent> {
+    const db = this.getTenantDb();
+    const doc = { ...event };
+    const result = await db
+      .collection(MongoDBProvider.alertEventsCollection)
+      .insertOne(doc);
+    return { ...doc, _id: result.insertedId.toString() };
+  }
+
+  async listAlertEvents(
+    tenantId: string,
+    options?: {
+      projectId?: string;
+      ruleId?: string;
+      status?: AlertEventStatus;
+      limit?: number;
+      skip?: number;
+    },
+  ): Promise<IAlertEvent[]> {
+    const db = this.getTenantDb();
+    const filter: Record<string, unknown> = { tenantId };
+    if (options?.projectId) filter.projectId = options.projectId;
+    if (options?.ruleId) filter.ruleId = options.ruleId;
+    if (options?.status) filter.status = options.status;
+    const docs = await db
+      .collection(MongoDBProvider.alertEventsCollection)
+      .find(filter)
+      .sort({ firedAt: -1 })
+      .skip(options?.skip ?? 0)
+      .limit(options?.limit ?? 50)
+      .toArray();
+    return docs as unknown as IAlertEvent[];
+  }
+
+  async updateAlertEvent(
+    id: string,
+    data: Partial<IAlertEvent>,
+  ): Promise<IAlertEvent | null> {
+    const db = this.getTenantDb();
+    const updateData: Record<string, unknown> = { ...data };
+    delete updateData._id;
+    const result = await db
+      .collection<IAlertEvent>(MongoDBProvider.alertEventsCollection)
+      .findOneAndUpdate(
+        { _id: new ObjectId(id) },
+        { $set: updateData },
+        { returnDocument: 'after' },
+      );
+    if (!result) return null;
+    return { ...result, _id: result._id?.toString() } as IAlertEvent;
+  }
+
+  async countActiveAlerts(
+    tenantId: string,
+    projectId?: string,
+  ): Promise<number> {
+    const db = this.getTenantDb();
+    const filter: Record<string, unknown> = { tenantId, status: 'fired' };
+    if (projectId) filter.projectId = projectId;
+    return db
+      .collection(MongoDBProvider.alertEventsCollection)
+      .countDocuments(filter);
+  }
+
+  // ── RAG Module operations ──────────────────────────────────────────────
+
+  async createRagModule(
+    ragModule: Omit<IRagModule, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IRagModule> {
+    const db = this.getTenantDb();
+    const now = new Date();
+    const doc = { ...ragModule, createdAt: now, updatedAt: now };
+    const result = await db
+      .collection(MongoDBProvider.ragModulesCollection)
+      .insertOne(doc);
+    return { ...doc, _id: result.insertedId.toString() } as IRagModule;
+  }
+
+  async updateRagModule(
+    id: string,
+    data: Partial<Omit<IRagModule, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IRagModule | null> {
+    const db = this.getTenantDb();
+    const updateData: Record<string, unknown> = { ...data, updatedAt: new Date() };
+    delete updateData._id;
+    const result = await db
+      .collection<IRagModule>(MongoDBProvider.ragModulesCollection)
+      .findOneAndUpdate(
+        { _id: new ObjectId(id) },
+        { $set: updateData },
+        { returnDocument: 'after' },
+      );
+    if (!result) return null;
+    return { ...result, _id: result._id?.toString() } as IRagModule;
+  }
+
+  async deleteRagModule(id: string): Promise<boolean> {
+    const db = this.getTenantDb();
+    const result = await db
+      .collection(MongoDBProvider.ragModulesCollection)
+      .deleteOne({ _id: new ObjectId(id) });
+    return result.deletedCount > 0;
+  }
+
+  async findRagModuleById(id: string): Promise<IRagModule | null> {
+    const db = this.getTenantDb();
+    const doc = await db
+      .collection<IRagModule>(MongoDBProvider.ragModulesCollection)
+      .findOne({ _id: new ObjectId(id) });
+    if (!doc) return null;
+    return { ...doc, _id: doc._id?.toString() } as IRagModule;
+  }
+
+  async findRagModuleByKey(key: string, projectId?: string): Promise<IRagModule | null> {
+    const db = this.getTenantDb();
+    const filter: Record<string, unknown> = {
+      key,
+      ...this.buildProjectScopeFilter(projectId),
+    };
+    const doc = await db
+      .collection<IRagModule>(MongoDBProvider.ragModulesCollection)
+      .findOne(filter as Filter<IRagModule>);
+    if (!doc) return null;
+    return { ...doc, _id: doc._id?.toString() } as IRagModule;
+  }
+
+  async listRagModules(filters?: {
+    projectId?: string;
+    status?: IRagModule['status'];
+    search?: string;
+  }): Promise<IRagModule[]> {
+    const db = this.getTenantDb();
+    const query: Record<string, unknown> = {
+      ...this.buildProjectScopeFilter(filters?.projectId),
+    };
+    if (filters?.status) query.status = filters.status;
+    if (filters?.search) {
+      query.$or = [
+        { name: { $regex: this.escapeRegex(filters.search), $options: 'i' } },
+        { key: { $regex: this.escapeRegex(filters.search), $options: 'i' } },
+      ];
+    }
+    const docs = await db
+      .collection<IRagModule>(MongoDBProvider.ragModulesCollection)
+      .find(query as Filter<IRagModule>)
+      .sort({ createdAt: -1 })
+      .toArray();
+    return docs.map((d) => ({ ...d, _id: d._id?.toString() }) as IRagModule);
+  }
+
+  // ── RAG Document operations ────────────────────────────────────────────
+
+  async createRagDocument(
+    doc: Omit<IRagDocument, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IRagDocument> {
+    const db = this.getTenantDb();
+    const now = new Date();
+    const record = { ...doc, createdAt: now, updatedAt: now };
+    const result = await db
+      .collection(MongoDBProvider.ragDocumentsCollection)
+      .insertOne(record);
+    return { ...record, _id: result.insertedId.toString() } as IRagDocument;
+  }
+
+  async updateRagDocument(
+    id: string,
+    data: Partial<Omit<IRagDocument, 'tenantId' | 'ragModuleKey' | 'createdBy'>>,
+  ): Promise<IRagDocument | null> {
+    const db = this.getTenantDb();
+    const updateData: Record<string, unknown> = { ...data, updatedAt: new Date() };
+    delete updateData._id;
+    const result = await db
+      .collection<IRagDocument>(MongoDBProvider.ragDocumentsCollection)
+      .findOneAndUpdate(
+        { _id: new ObjectId(id) },
+        { $set: updateData },
+        { returnDocument: 'after' },
+      );
+    if (!result) return null;
+    return { ...result, _id: result._id?.toString() } as IRagDocument;
+  }
+
+  async deleteRagDocument(id: string): Promise<boolean> {
+    const db = this.getTenantDb();
+    const result = await db
+      .collection(MongoDBProvider.ragDocumentsCollection)
+      .deleteOne({ _id: new ObjectId(id) });
+    return result.deletedCount > 0;
+  }
+
+  async findRagDocumentById(id: string): Promise<IRagDocument | null> {
+    const db = this.getTenantDb();
+    const doc = await db
+      .collection<IRagDocument>(MongoDBProvider.ragDocumentsCollection)
+      .findOne({ _id: new ObjectId(id) });
+    if (!doc) return null;
+    return { ...doc, _id: doc._id?.toString() } as IRagDocument;
+  }
+
+  async listRagDocuments(
+    ragModuleKey: string,
+    filters?: { projectId?: string; status?: RagDocumentStatus; search?: string },
+  ): Promise<IRagDocument[]> {
+    const db = this.getTenantDb();
+    const query: Record<string, unknown> = {
+      ragModuleKey,
+      ...this.buildProjectScopeFilter(filters?.projectId),
+    };
+    if (filters?.status) query.status = filters.status;
+    if (filters?.search) {
+      query.fileName = { $regex: this.escapeRegex(filters.search), $options: 'i' };
+    }
+    const docs = await db
+      .collection<IRagDocument>(MongoDBProvider.ragDocumentsCollection)
+      .find(query as Filter<IRagDocument>)
+      .sort({ createdAt: -1 })
+      .toArray();
+    return docs.map((d) => ({ ...d, _id: d._id?.toString() }) as IRagDocument);
+  }
+
+  async countRagDocuments(ragModuleKey: string, projectId?: string): Promise<number> {
+    const db = this.getTenantDb();
+    const query: Record<string, unknown> = {
+      ragModuleKey,
+      ...this.buildProjectScopeFilter(projectId),
+    };
+    return db
+      .collection(MongoDBProvider.ragDocumentsCollection)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .countDocuments(query as any);
+  }
+
+  // ── RAG Chunk operations ───────────────────────────────────────────────
+
+  async bulkInsertRagChunks(
+    chunks: Omit<IRagChunk, '_id' | 'createdAt'>[],
+  ): Promise<void> {
+    if (chunks.length === 0) return;
+    const db = this.getTenantDb();
+    const now = new Date();
+    const records = chunks.map((c) => ({ ...c, createdAt: now }));
+    await db
+      .collection(MongoDBProvider.ragChunksCollection)
+      .insertMany(records);
+  }
+
+  async findRagChunksByVectorIds(vectorIds: string[]): Promise<IRagChunk[]> {
+    if (vectorIds.length === 0) return [];
+    const db = this.getTenantDb();
+    const docs = await db
+      .collection<IRagChunk>(MongoDBProvider.ragChunksCollection)
+      .find({ vectorId: { $in: vectorIds } })
+      .toArray();
+    return docs.map((d) => ({ ...d, _id: d._id?.toString() }) as IRagChunk);
+  }
+
+  async findRagChunksByDocumentId(documentId: string): Promise<IRagChunk[]> {
+    const db = this.getTenantDb();
+    const docs = await db
+      .collection<IRagChunk>(MongoDBProvider.ragChunksCollection)
+      .find({ documentId })
+      .sort({ chunkIndex: 1 })
+      .toArray();
+    return docs.map((d) => ({ ...d, _id: d._id?.toString() }) as IRagChunk);
+  }
+
+  async deleteRagChunksByDocumentId(documentId: string): Promise<number> {
+    const db = this.getTenantDb();
+    const result = await db
+      .collection(MongoDBProvider.ragChunksCollection)
+      .deleteMany({ documentId });
+    return result.deletedCount;
+  }
+
+  // ── RAG Query Log operations ───────────────────────────────────────────
+
+  async createRagQueryLog(
+    log: Omit<IRagQueryLog, '_id' | 'createdAt'>,
+  ): Promise<IRagQueryLog> {
+    const db = this.getTenantDb();
+    const now = new Date();
+    const record = { ...log, createdAt: now };
+    const result = await db
+      .collection(MongoDBProvider.ragQueryLogsCollection)
+      .insertOne(record);
+    return { ...record, _id: result.insertedId.toString() } as IRagQueryLog;
+  }
+
+  async listRagQueryLogs(
+    ragModuleKey: string,
+    options?: { limit?: number; skip?: number; from?: Date; to?: Date },
+  ): Promise<IRagQueryLog[]> {
+    const db = this.getTenantDb();
+    const query: Record<string, unknown> = { ragModuleKey };
+    if (options?.from || options?.to) {
+      const dateFilter: Record<string, Date> = {};
+      if (options.from) dateFilter.$gte = options.from;
+      if (options.to) dateFilter.$lte = options.to;
+      query.createdAt = dateFilter;
+    }
+    const cursor = db
+      .collection<IRagQueryLog>(MongoDBProvider.ragQueryLogsCollection)
+      .find(query as Filter<IRagQueryLog>)
+      .sort({ createdAt: -1 });
+    if (options?.skip) cursor.skip(options.skip);
+    cursor.limit(options?.limit ?? 50);
+    const docs = await cursor.toArray();
+    return docs.map((d) => ({ ...d, _id: d._id?.toString() }) as IRagQueryLog);
+  }
+
+  // ── Memory Store operations ────────────────────────────────────────────
+
+  async createMemoryStore(
+    store: Omit<IMemoryStore, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IMemoryStore> {
+    const db = this.getTenantDb();
+    const now = new Date();
+    const record = { ...store, createdAt: now, updatedAt: now };
+    const result = await db
+      .collection(MongoDBProvider.memoryStoresCollection)
+      .insertOne(record);
+    return { ...record, _id: result.insertedId.toString() } as IMemoryStore;
+  }
+
+  async updateMemoryStore(
+    id: string,
+    data: Partial<Omit<IMemoryStore, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IMemoryStore | null> {
+    const db = this.getTenantDb();
+    const result = await db
+      .collection(MongoDBProvider.memoryStoresCollection)
+      .findOneAndUpdate(
+        { _id: new ObjectId(id) },
+        { $set: { ...data, updatedAt: new Date() } },
+        { returnDocument: 'after' },
+      );
+    if (!result) return null;
+    return { ...result, _id: result._id?.toString() } as unknown as IMemoryStore;
+  }
+
+  async deleteMemoryStore(id: string): Promise<boolean> {
+    const db = this.getTenantDb();
+    const result = await db
+      .collection(MongoDBProvider.memoryStoresCollection)
+      .deleteOne({ _id: new ObjectId(id) });
+    return result.deletedCount === 1;
+  }
+
+  async findMemoryStoreById(id: string): Promise<IMemoryStore | null> {
+    const db = this.getTenantDb();
+    const doc = await db
+      .collection<IMemoryStore>(MongoDBProvider.memoryStoresCollection)
+      .findOne({ _id: new ObjectId(id) } as Filter<IMemoryStore>);
+    if (!doc) return null;
+    return { ...doc, _id: doc._id?.toString() } as IMemoryStore;
+  }
+
+  async findMemoryStoreByKey(key: string, projectId?: string): Promise<IMemoryStore | null> {
+    const db = this.getTenantDb();
+    const query: Record<string, unknown> = { key };
+    if (projectId) query.projectId = projectId;
+    const doc = await db
+      .collection<IMemoryStore>(MongoDBProvider.memoryStoresCollection)
+      .findOne(query as Filter<IMemoryStore>);
+    if (!doc) return null;
+    return { ...doc, _id: doc._id?.toString() } as IMemoryStore;
+  }
+
+  async listMemoryStores(filters?: {
+    projectId?: string;
+    status?: MemoryStoreStatus;
+    search?: string;
+  }): Promise<IMemoryStore[]> {
+    const db = this.getTenantDb();
+    const query: Record<string, unknown> = {};
+    if (filters?.projectId) query.projectId = filters.projectId;
+    if (filters?.status) query.status = filters.status;
+    if (filters?.search) {
+      query.$or = [
+        { name: { $regex: filters.search, $options: 'i' } },
+        { key: { $regex: filters.search, $options: 'i' } },
+      ];
+    }
+    const docs = await db
+      .collection<IMemoryStore>(MongoDBProvider.memoryStoresCollection)
+      .find(query as Filter<IMemoryStore>)
+      .sort({ createdAt: -1 })
+      .toArray();
+    return docs.map((d) => ({ ...d, _id: d._id?.toString() }) as IMemoryStore);
+  }
+
+  async countMemoryStores(projectId?: string): Promise<number> {
+    const db = this.getTenantDb();
+    const query: Record<string, unknown> = {};
+    if (projectId) query.projectId = projectId;
+    return db
+      .collection(MongoDBProvider.memoryStoresCollection)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .countDocuments(query as any);
+  }
+
+  // ── Memory Item operations ─────────────────────────────────────────────
+
+  async createMemoryItem(
+    item: Omit<IMemoryItem, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IMemoryItem> {
+    const db = this.getTenantDb();
+    const now = new Date();
+    const record = { ...item, createdAt: now, updatedAt: now };
+    const result = await db
+      .collection(MongoDBProvider.memoryItemsCollection)
+      .insertOne(record);
+    return { ...record, _id: result.insertedId.toString() } as IMemoryItem;
+  }
+
+  async updateMemoryItem(
+    id: string,
+    data: Partial<Omit<IMemoryItem, 'tenantId' | 'storeKey'>>,
+  ): Promise<IMemoryItem | null> {
+    const db = this.getTenantDb();
+    const result = await db
+      .collection(MongoDBProvider.memoryItemsCollection)
+      .findOneAndUpdate(
+        { _id: new ObjectId(id) },
+        { $set: { ...data, updatedAt: new Date() } },
+        { returnDocument: 'after' },
+      );
+    if (!result) return null;
+    return { ...result, _id: result._id?.toString() } as unknown as IMemoryItem;
+  }
+
+  async deleteMemoryItem(id: string): Promise<boolean> {
+    const db = this.getTenantDb();
+    const result = await db
+      .collection(MongoDBProvider.memoryItemsCollection)
+      .deleteOne({ _id: new ObjectId(id) });
+    return result.deletedCount === 1;
+  }
+
+  async deleteMemoryItems(
+    storeKey: string,
+    filter?: { scope?: MemoryScope; scopeId?: string; tags?: string[]; before?: Date },
+  ): Promise<number> {
+    const db = this.getTenantDb();
+    const query: Record<string, unknown> = { storeKey };
+    if (filter?.scope) query.scope = filter.scope;
+    if (filter?.scopeId) query.scopeId = filter.scopeId;
+    if (filter?.tags?.length) query.tags = { $in: filter.tags };
+    if (filter?.before) query.createdAt = { $lt: filter.before };
+    const result = await db
+      .collection(MongoDBProvider.memoryItemsCollection)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .deleteMany(query as any);
+    return result.deletedCount;
+  }
+
+  async findMemoryItemById(id: string): Promise<IMemoryItem | null> {
+    const db = this.getTenantDb();
+    const doc = await db
+      .collection<IMemoryItem>(MongoDBProvider.memoryItemsCollection)
+      .findOne({ _id: new ObjectId(id) } as Filter<IMemoryItem>);
+    if (!doc) return null;
+    return { ...doc, _id: doc._id?.toString() } as IMemoryItem;
+  }
+
+  async findMemoryItemByHash(storeKey: string, contentHash: string): Promise<IMemoryItem | null> {
+    const db = this.getTenantDb();
+    const doc = await db
+      .collection<IMemoryItem>(MongoDBProvider.memoryItemsCollection)
+      .findOne({ storeKey, contentHash } as Filter<IMemoryItem>);
+    if (!doc) return null;
+    return { ...doc, _id: doc._id?.toString() } as IMemoryItem;
+  }
+
+  async listMemoryItems(
+    storeKey: string,
+    filters?: {
+      projectId?: string;
+      scope?: MemoryScope;
+      scopeId?: string;
+      tags?: string[];
+      status?: MemoryItemStatus;
+      search?: string;
+      limit?: number;
+      skip?: number;
+    },
+  ): Promise<{ items: IMemoryItem[]; total: number }> {
+    const db = this.getTenantDb();
+    const query: Record<string, unknown> = { storeKey };
+    if (filters?.projectId) query.projectId = filters.projectId;
+    if (filters?.scope) query.scope = filters.scope;
+    if (filters?.scopeId) query.scopeId = filters.scopeId;
+    if (filters?.status) query.status = filters.status;
+    if (filters?.tags?.length) query.tags = { $in: filters.tags };
+    if (filters?.search) {
+      query.content = { $regex: filters.search, $options: 'i' };
+    }
+    const col = db.collection<IMemoryItem>(MongoDBProvider.memoryItemsCollection);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const total = await col.countDocuments(query as any);
+    const cursor = col
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .find(query as any)
+      .sort({ createdAt: -1 });
+    if (filters?.skip) cursor.skip(filters.skip);
+    cursor.limit(filters?.limit ?? 50);
+    const docs = await cursor.toArray();
+    return {
+      items: docs.map((d) => ({ ...d, _id: d._id?.toString() }) as IMemoryItem),
+      total,
+    };
+  }
+
+  async countMemoryItems(storeKey: string, projectId?: string): Promise<number> {
+    const db = this.getTenantDb();
+    const query: Record<string, unknown> = { storeKey };
+    if (projectId) query.projectId = projectId;
+    return db
+      .collection(MongoDBProvider.memoryItemsCollection)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .countDocuments(query as any);
+  }
+
+  async incrementMemoryAccess(id: string): Promise<void> {
+    const db = this.getTenantDb();
+    await db
+      .collection(MongoDBProvider.memoryItemsCollection)
+      .updateOne(
+        { _id: new ObjectId(id) },
+        {
+          $inc: { accessCount: 1 },
+          $set: { lastAccessedAt: new Date() },
+        },
+      );
   }
 }

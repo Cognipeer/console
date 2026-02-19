@@ -13,7 +13,7 @@ export async function getDatabase(): Promise<DatabaseProvider> {
   }
 
   const mongoUri = process.env.MONGODB_URI;
-  const mainDbName = process.env.MAIN_DB_NAME || 'cgate_main';
+  const mainDbName = process.env.MAIN_DB_NAME || 'console_main';
 
   if (!mongoUri) {
     throw new Error('MONGODB_URI environment variable is not set');
@@ -86,4 +86,26 @@ export type {
   IGuardrailPromptShieldPolicy,
   IGuardrailEvaluationLog,
   IGuardrailEvalAggregate,
+  IAlertRule,
+  IAlertEvent,
+  AlertMetric,
+  AlertModule,
+  AlertConditionOperator,
+  IAlertCondition,
+  IAlertChannel,
+  AlertEventStatus,
+  IRagModule,
+  IRagDocument,
+  IRagChunk,
+  IRagQueryLog,
+  RagChunkStrategy,
+  IRagChunkConfig,
+  RagDocumentStatus,
+  IMemoryStore,
+  IMemoryStoreConfig,
+  IMemoryItem,
+  MemoryScope,
+  MemorySource,
+  MemoryStoreStatus,
+  MemoryItemStatus,
 } from './provider.interface';

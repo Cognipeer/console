@@ -36,6 +36,34 @@ export interface IProject {
   updatedAt?: Date;
 }
 
+export type PromptEnvironment = 'dev' | 'staging' | 'prod';
+
+export type PromptDeploymentAction = 'promote' | 'plan' | 'activate' | 'rollback';
+
+export interface IPromptDeploymentState {
+  environment: PromptEnvironment;
+  versionId: string;
+  version: number;
+  rolloutStatus: 'planned' | 'active';
+  rolloutStrategy: 'manual';
+  rollbackVersionId?: string;
+  rollbackVersion?: number;
+  note?: string;
+  updatedBy?: string;
+  updatedAt?: Date;
+}
+
+export interface IPromptDeploymentEvent {
+  id: string;
+  environment: PromptEnvironment;
+  action: PromptDeploymentAction;
+  versionId: string;
+  version: number;
+  note?: string;
+  createdBy?: string;
+  createdAt?: Date;
+}
+
 export interface IPrompt {
   _id?: ObjectId | string;
   tenantId: string;
@@ -47,6 +75,8 @@ export interface IPrompt {
   metadata?: Record<string, unknown>;
   currentVersionId?: string;
   currentVersion?: number;
+  deployments?: Partial<Record<PromptEnvironment, IPromptDeploymentState>>;
+  deploymentHistory?: IPromptDeploymentEvent[];
   createdBy: string;
   updatedBy?: string;
   createdAt?: Date;
@@ -308,6 +338,8 @@ export interface IPrompt {
   template: string;
   metadata?: Record<string, unknown>;
   currentVersion?: number;
+  deployments?: Partial<Record<PromptEnvironment, IPromptDeploymentState>>;
+  deploymentHistory?: IPromptDeploymentEvent[];
   createdBy: string;
   updatedBy?: string;
   createdAt?: Date;
@@ -525,6 +557,174 @@ export interface IInferenceServerMetrics {
   runningModels?: string[];
   raw?: Record<string, unknown>;
   createdAt?: Date;
+}
+
+// ── RAG Module types ────────────────────────────────────────────────────
+
+export type RagChunkStrategy = 'recursive_character' | 'token';
+
+export interface IRagChunkConfig {
+  strategy: RagChunkStrategy;
+  /** Common */
+  chunkSize: number;
+  chunkOverlap: number;
+  /** recursive_character specific */
+  separators?: string[];
+  /** token specific */
+  encoding?: string;
+}
+
+export type RagDocumentStatus = 'pending' | 'processing' | 'indexed' | 'failed';
+
+export interface IRagModule {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name: string;
+  description?: string;
+  embeddingModelKey: string;
+  vectorProviderKey: string;
+  vectorIndexKey: string;
+  fileBucketKey?: string;
+  fileProviderKey?: string;
+  chunkConfig: IRagChunkConfig;
+  status: 'active' | 'disabled';
+  totalDocuments?: number;
+  totalChunks?: number;
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IRagDocument {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  ragModuleKey: string;
+  fileKey?: string;
+  fileName: string;
+  contentType?: string;
+  size?: number;
+  status: RagDocumentStatus;
+  chunkCount?: number;
+  errorMessage?: string;
+  lastIndexedAt?: Date;
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IRagChunk {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  ragModuleKey: string;
+  documentId: string;
+  chunkIndex: number;
+  vectorId: string;
+  content: string;
+  metadata?: Record<string, unknown>;
+  createdAt?: Date;
+}
+
+export interface IRagQueryLog {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  ragModuleKey: string;
+  query: string;
+  topK: number;
+  matchCount: number;
+  latencyMs?: number;
+  metadata?: Record<string, unknown>;
+  createdAt?: Date;
+}
+
+// ── Alert types ─────────────────────────────────────────────────────────
+
+export type AlertModule = 'models' | 'inference' | 'guardrails' | 'rag';
+
+export type AlertMetric =
+  // models
+  | 'error_rate'
+  | 'avg_latency_ms'
+  | 'p95_latency_ms'
+  | 'total_cost'
+  | 'total_requests'
+  // inference
+  | 'gpu_cache_usage'
+  | 'request_queue_depth'
+  // guardrails
+  | 'guardrail_fail_rate'
+  | 'guardrail_avg_latency_ms'
+  | 'guardrail_total_evaluations'
+  // rag
+  | 'rag_avg_latency_ms'
+  | 'rag_total_queries'
+  | 'rag_failed_documents';
+
+export type AlertConditionOperator = 'gt' | 'lt' | 'gte' | 'lte' | 'eq';
+
+export interface IAlertCondition {
+  operator: AlertConditionOperator;
+  threshold: number;
+}
+
+export type IAlertChannel =
+  | { type: 'email'; recipients: string[] };
+
+export type AlertEventStatus = 'fired' | 'resolved' | 'acknowledged';
+
+export interface IAlertRule {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId: string;
+  name: string;
+  description?: string;
+  module: AlertModule;
+  enabled: boolean;
+  metric: AlertMetric;
+  condition: IAlertCondition;
+  windowMinutes: number;
+  cooldownMinutes: number;
+  scope?: {
+    modelKey?: string;
+    serverKey?: string;
+    guardrailKey?: string;
+    ragModuleKey?: string;
+  };
+  channels: IAlertChannel[];
+  lastTriggeredAt?: Date;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IAlertEvent {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId: string;
+  ruleId: string;
+  ruleName: string;
+  metric: AlertMetric;
+  threshold: number;
+  actualValue: number;
+  status: AlertEventStatus;
+  channels: Array<{
+    type: string;
+    target: string;
+    success: boolean;
+    error?: string;
+  }>;
+  firedAt: Date;
+  resolvedAt?: Date;
+  metadata?: Record<string, unknown>;
 }
 
 export interface DatabaseProvider {
@@ -873,6 +1073,201 @@ export interface DatabaseProvider {
     guardrailId: string,
     options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month' },
   ): Promise<IGuardrailEvalAggregate>;
+
+  // ── Alert rule operations (tenant-specific) ──
+  createAlertRule(
+    rule: Omit<IAlertRule, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IAlertRule>;
+  updateAlertRule(
+    id: string,
+    data: Partial<Omit<IAlertRule, 'tenantId' | 'createdBy'>>,
+  ): Promise<IAlertRule | null>;
+  deleteAlertRule(id: string): Promise<boolean>;
+  findAlertRuleById(id: string): Promise<IAlertRule | null>;
+  listAlertRules(
+    tenantId: string,
+    filters?: { projectId?: string; enabled?: boolean },
+  ): Promise<IAlertRule[]>;
+
+  // ── Alert event (history) operations (tenant-specific) ──
+  createAlertEvent(
+    event: Omit<IAlertEvent, '_id'>,
+  ): Promise<IAlertEvent>;
+  listAlertEvents(
+    tenantId: string,
+    options?: {
+      projectId?: string;
+      ruleId?: string;
+      status?: AlertEventStatus;
+      limit?: number;
+      skip?: number;
+    },
+  ): Promise<IAlertEvent[]>;
+  updateAlertEvent(
+    id: string,
+    data: Partial<IAlertEvent>,
+  ): Promise<IAlertEvent | null>;
+  countActiveAlerts(tenantId: string, projectId?: string): Promise<number>;
+
+  // ── RAG Module operations (tenant-specific) ──
+  createRagModule(
+    ragModule: Omit<IRagModule, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IRagModule>;
+  updateRagModule(
+    id: string,
+    data: Partial<Omit<IRagModule, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IRagModule | null>;
+  deleteRagModule(id: string): Promise<boolean>;
+  findRagModuleById(id: string): Promise<IRagModule | null>;
+  findRagModuleByKey(key: string, projectId?: string): Promise<IRagModule | null>;
+  listRagModules(filters?: {
+    projectId?: string;
+    status?: IRagModule['status'];
+    search?: string;
+  }): Promise<IRagModule[]>;
+
+  // ── RAG Document operations (tenant-specific) ──
+  createRagDocument(
+    doc: Omit<IRagDocument, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IRagDocument>;
+  updateRagDocument(
+    id: string,
+    data: Partial<Omit<IRagDocument, 'tenantId' | 'ragModuleKey' | 'createdBy'>>,
+  ): Promise<IRagDocument | null>;
+  deleteRagDocument(id: string): Promise<boolean>;
+  findRagDocumentById(id: string): Promise<IRagDocument | null>;
+  listRagDocuments(
+    ragModuleKey: string,
+    filters?: { projectId?: string; status?: RagDocumentStatus; search?: string },
+  ): Promise<IRagDocument[]>;
+  countRagDocuments(ragModuleKey: string, projectId?: string): Promise<number>;
+
+  // ── RAG Chunk operations (tenant-specific) ──
+  bulkInsertRagChunks(
+    chunks: Omit<IRagChunk, '_id' | 'createdAt'>[],
+  ): Promise<void>;
+  findRagChunksByVectorIds(vectorIds: string[]): Promise<IRagChunk[]>;
+  findRagChunksByDocumentId(documentId: string): Promise<IRagChunk[]>;
+  deleteRagChunksByDocumentId(documentId: string): Promise<number>;
+
+  // ── RAG Query Log operations (tenant-specific) ──
+  createRagQueryLog(
+    log: Omit<IRagQueryLog, '_id' | 'createdAt'>,
+  ): Promise<IRagQueryLog>;
+  listRagQueryLogs(
+    ragModuleKey: string,
+    options?: { limit?: number; skip?: number; from?: Date; to?: Date },
+  ): Promise<IRagQueryLog[]>;
+
+  // ── Memory Store operations (tenant-specific) ──
+  createMemoryStore(
+    store: Omit<IMemoryStore, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IMemoryStore>;
+  updateMemoryStore(
+    id: string,
+    data: Partial<Omit<IMemoryStore, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IMemoryStore | null>;
+  deleteMemoryStore(id: string): Promise<boolean>;
+  findMemoryStoreById(id: string): Promise<IMemoryStore | null>;
+  findMemoryStoreByKey(key: string, projectId?: string): Promise<IMemoryStore | null>;
+  listMemoryStores(filters?: {
+    projectId?: string;
+    status?: MemoryStoreStatus;
+    search?: string;
+  }): Promise<IMemoryStore[]>;
+  countMemoryStores(projectId?: string): Promise<number>;
+
+  // ── Memory Item operations (tenant-specific) ──
+  createMemoryItem(
+    item: Omit<IMemoryItem, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IMemoryItem>;
+  updateMemoryItem(
+    id: string,
+    data: Partial<Omit<IMemoryItem, 'tenantId' | 'storeKey'>>,
+  ): Promise<IMemoryItem | null>;
+  deleteMemoryItem(id: string): Promise<boolean>;
+  deleteMemoryItems(
+    storeKey: string,
+    filter?: { scope?: MemoryScope; scopeId?: string; tags?: string[]; before?: Date },
+  ): Promise<number>;
+  findMemoryItemById(id: string): Promise<IMemoryItem | null>;
+  findMemoryItemByHash(storeKey: string, contentHash: string): Promise<IMemoryItem | null>;
+  listMemoryItems(
+    storeKey: string,
+    filters?: {
+      projectId?: string;
+      scope?: MemoryScope;
+      scopeId?: string;
+      tags?: string[];
+      status?: MemoryItemStatus;
+      search?: string;
+      limit?: number;
+      skip?: number;
+    },
+  ): Promise<{ items: IMemoryItem[]; total: number }>;
+  countMemoryItems(storeKey: string, projectId?: string): Promise<number>;
+  incrementMemoryAccess(id: string): Promise<void>;
+}
+
+// ── Memory types ─────────────────────────────────────────────────────────
+
+export type MemoryScope = 'user' | 'agent' | 'session' | 'global';
+export type MemorySource = 'chat' | 'api' | 'agent' | 'manual';
+export type MemoryStoreStatus = 'active' | 'inactive' | 'error';
+export type MemoryItemStatus = 'active' | 'archived' | 'expired';
+
+export interface IMemoryStoreConfig {
+  embeddingDimension: number;
+  metric: 'cosine' | 'euclidean' | 'dotproduct';
+  defaultScope: MemoryScope;
+  deduplication: boolean;
+  autoSummarize: boolean;
+  maxMemories?: number;
+  ttlDays?: number;
+}
+
+export interface IMemoryStore {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId: string;
+  key: string;
+  name: string;
+  description?: string;
+  vectorProviderKey: string;
+  vectorIndexKey: string;
+  embeddingModelKey: string;
+  config: IMemoryStoreConfig;
+  status: MemoryStoreStatus;
+  memoryCount: number;
+  lastActivityAt?: Date;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IMemoryItem {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId: string;
+  storeKey: string;
+  content: string;
+  contentHash: string;
+  summary?: string;
+  scope: MemoryScope;
+  scopeId?: string;
+  metadata: Record<string, unknown>;
+  tags: string[];
+  source?: MemorySource;
+  importance: number;
+  accessCount: number;
+  lastAccessedAt?: Date;
+  embeddingVersion: string;
+  vectorId: string;
+  expiresAt?: Date;
+  status: MemoryItemStatus;
+  createdAt?: Date;
+  updatedAt?: Date;
 }
 
 export interface IGuardrailEvaluationLog {

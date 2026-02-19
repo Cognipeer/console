@@ -1,12 +1,14 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { Box, Button, Group, Modal, Select, Stack, Text } from '@mantine/core';
+import { ActionIcon, Box, Button, Group, Modal, Select, Stack, Text, Tooltip } from '@mantine/core';
 import { DataTable } from 'mantine-datatable';
 import { notifications } from '@mantine/notifications';
 import type { ProviderDomain } from '@/lib/database';
 import type { ProviderDescriptor } from '@/lib/providers';
+import type { ProviderConfigView } from '@/lib/services/providers/providerService';
 import ProviderConfigModal from '@/components/providers/ProviderConfigModal';
+import { IconEdit } from '@tabler/icons-react';
 
 type Provider = {
   _id: string;
@@ -29,6 +31,7 @@ export default function TenantProviders() {
   const [configOpen, setConfigOpen] = useState(false);
   const [drivers, setDrivers] = useState<ProviderDescriptor[]>([]);
   const [driversLoading, setDriversLoading] = useState(false);
+  const [editingProvider, setEditingProvider] = useState<ProviderConfigView | null>(null);
 
   const fetchProviders = async () => {
     setLoading(true);
@@ -76,6 +79,32 @@ export default function TenantProviders() {
       setDrivers([]);
     } finally {
       setDriversLoading(false);
+    }
+  };
+
+  const openEditModal = async (providerId: string) => {
+    try {
+      const detailRes = await fetch(`/api/providers/${encodeURIComponent(providerId)}?scope=tenant`, {
+        cache: 'no-store',
+      });
+      if (!detailRes.ok) {
+        const body = await detailRes.json().catch(() => null);
+        throw new Error(body?.error || 'Failed to load provider details');
+      }
+
+      const detailData = (await detailRes.json()) as { provider?: ProviderConfigView };
+      const provider = detailData.provider;
+      if (!provider) {
+        throw new Error('Provider not found');
+      }
+
+      await loadDrivers(provider.type as ProviderDomain);
+      setSelectedDomain(provider.type as ProviderDomain);
+      setEditingProvider(provider);
+      setConfigOpen(true);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to open provider editor';
+      notifications.show({ title: 'Providers', message, color: 'red' });
     }
   };
 
@@ -136,6 +165,26 @@ export default function TenantProviders() {
               return <Text size="sm">{count}</Text>;
             },
           },
+          {
+            accessor: 'actions',
+            title: 'Actions',
+            textAlign: 'right',
+            render: (p) => (
+              <Group justify="flex-end" gap="xs">
+                <Tooltip label="Edit provider">
+                  <ActionIcon
+                    variant="subtle"
+                    color="gray"
+                    onClick={() => {
+                      void openEditModal(p._id);
+                    }}
+                  >
+                    <IconEdit size={14} />
+                  </ActionIcon>
+                </Tooltip>
+              </Group>
+            ),
+          },
         ]}
       />
 
@@ -185,51 +234,89 @@ export default function TenantProviders() {
           setConfigOpen(false);
           setSelectedDomain(null);
           setDrivers([]);
+          setEditingProvider(null);
         }}
-        mode="create"
+        mode={editingProvider ? 'edit' : 'create'}
+        provider={editingProvider ?? undefined}
         drivers={drivers}
         driversLoading={driversLoading}
         onSubmit={async (options) => {
-          if (!selectedDomain) {
+          if (editingProvider) {
+            const updatePayload: Record<string, unknown> = {
+              label: options.values.base.label,
+              description: options.values.base.description,
+              status: options.values.base.status,
+              settings: options.values.settings,
+              metadata: options.values.metadata,
+            };
+
+            if (Object.keys(options.values.credentials).length > 0) {
+              updatePayload.credentials = options.values.credentials;
+            }
+
+            const res = await fetch(
+              `/api/providers/${encodeURIComponent(String(editingProvider._id))}?scope=tenant`,
+              {
+                method: 'PATCH',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify(updatePayload),
+              },
+            );
+
+            const body = await res.json().catch(() => null);
+            if (!res.ok) {
+              throw new Error(body?.error || 'Failed to update provider');
+            }
+
             notifications.show({
               title: 'Providers',
-              message: 'Provider domain is missing.',
-              color: 'red',
+              message: 'Provider updated',
+              color: 'green',
             });
-            return;
+          } else {
+            if (!selectedDomain) {
+              notifications.show({
+                title: 'Providers',
+                message: 'Provider domain is missing.',
+                color: 'red',
+              });
+              return;
+            }
+
+            const payload: Record<string, unknown> = {
+              key: options.values.base.key,
+              label: options.values.base.label,
+              description: options.values.base.description,
+              driver: options.driver,
+              type: selectedDomain,
+              status: options.values.base.status,
+              credentials: options.values.credentials,
+              settings: options.values.settings,
+              metadata: options.values.metadata,
+            };
+
+            const res = await fetch('/api/providers?scope=tenant', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify(payload),
+            });
+
+            const body = await res.json().catch(() => null);
+            if (!res.ok) {
+              throw new Error(body?.error || 'Failed to create provider');
+            }
+
+            notifications.show({
+              title: 'Providers',
+              message: 'Provider created',
+              color: 'green',
+            });
           }
 
-          const payload: Record<string, unknown> = {
-            key: options.values.base.key,
-            label: options.values.base.label,
-            description: options.values.base.description,
-            driver: options.driver,
-            type: selectedDomain,
-            status: options.values.base.status,
-            credentials: options.values.credentials,
-            settings: options.values.settings,
-            metadata: options.values.metadata,
-          };
-
-          const res = await fetch('/api/providers?scope=tenant', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(payload),
-          });
-
-          const body = await res.json().catch(() => null);
-          if (!res.ok) {
-            throw new Error(body?.error || 'Failed to create provider');
-          }
-
-          notifications.show({
-            title: 'Providers',
-            message: 'Provider created',
-            color: 'green',
-          });
           setConfigOpen(false);
           setSelectedDomain(null);
           setDrivers([]);
+          setEditingProvider(null);
           await fetchProviders();
         }}
       />

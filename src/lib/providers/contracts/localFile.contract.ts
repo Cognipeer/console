@@ -220,7 +220,7 @@ export const LocalFileProviderContract: ProviderContract<
             label: 'Base directory',
             type: 'text',
             required: true,
-            placeholder: '/var/lib/cgate/files',
+            placeholder: '/var/lib/cognipeer-console/files',
             description:
               'Absolute directory path used to store files for this provider.',
             scope: 'settings',
