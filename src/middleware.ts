@@ -12,7 +12,7 @@ const PUBLIC_PATHS = [
 ];
 
 // Client API paths that use Bearer token authentication instead of cookie
-const CLIENT_API_PATHS = ['/api/client/', '/api/models/v1/'];
+const CLIENT_API_PATHS = ['/api/client/', '/api/models/v1/', '/api/metrics'];
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
