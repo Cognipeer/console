@@ -1,4 +1,4 @@
-name: Cognipeer Console Build Artifact
+name: Cgate Build Artifact
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
 
 env:
   AWS_REGION: eu-central-1
-  ECR_REPOSITORY: cognipeer-console
+  ECR_REPOSITORY: cognipeer-cgate
   HELM_VERSION: v3.15.2
   HELMFILE_VERSION: v0.162.0
 
@@ -59,7 +59,7 @@ jobs:
             ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.vars.outputs.tag }}
 
   deploy:
-    runs-on: self-hosted-runner-cognipeer-console
+    runs-on: self-hosted-runner-cgate
     needs: build
     steps:
       - name: Checkout
@@ -96,7 +96,7 @@ jobs:
         run: |
           pushd deploy/k8s
             helmfile sync -e "${TAG}" --wait
-            kubectl rollout restart -n cognipeer-console-${TAG} deployment/cognipeer-console
+            kubectl rollout restart -n cgate-${TAG} deployment/cgate
           popd
         env:
           TAG: ${{ steps.vars.outputs.tag }}
