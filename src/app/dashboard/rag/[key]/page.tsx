@@ -478,9 +478,9 @@ export default function RagModuleDetailPage() {
   ].join('\n');
 
   const sdkIngest = [
-    `import CognipeerClient from '@cognipeer/console-sdk';`,
+    `import ConsoleClient from '@cognipeer/console-sdk';`,
     ``,
-    `const client = new CognipeerClient({`,
+    `const client = new ConsoleClient({`,
     `  apiKey: 'YOUR_API_TOKEN',`,
     `  baseUrl: 'https://your-cognipeer-host',`,
     `});`,

@@ -536,9 +536,9 @@ export default function VectorIndexDetailPage() {
   ].join('\n');
 
   const sdkUpsert = [
-    `import CognipeerClient from '@cognipeer/console-sdk';`,
+    `import ConsoleClient from '@cognipeer/console-sdk';`,
     ``,
-    `const client = new CognipeerClient({`,
+    `const client = new ConsoleClient({`,
     `  apiKey: 'YOUR_API_TOKEN',`,
     `  baseUrl: 'https://your-cognipeer-host',`,
     `});`,
@@ -555,9 +555,9 @@ export default function VectorIndexDetailPage() {
   ].join('\n');
 
   const sdkQuery = [
-    `import CognipeerClient from '@cognipeer/console-sdk';`,
+    `import ConsoleClient from '@cognipeer/console-sdk';`,
     ``,
-    `const client = new CognipeerClient({`,
+    `const client = new ConsoleClient({`,
     `  apiKey: 'YOUR_API_TOKEN',`,
     `  baseUrl: 'https://your-cognipeer-host',`,
     `});`,

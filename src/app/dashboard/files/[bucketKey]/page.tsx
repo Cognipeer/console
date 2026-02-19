@@ -179,10 +179,10 @@ function UsageTab({ bucket }: { bucket: FileBucketView }) {
   const curlListBuckets = `curl -X GET "https://your-cognipeer-host/api/client/v1/files/buckets" \\
   -H "Authorization: Bearer YOUR_API_TOKEN"`;
 
-  const sdkTypeScript = `import { CognipeerClient } from '@cognipeer/console-sdk';
+  const sdkTypeScript = `import { ConsoleClient } from '@cognipeer/console-sdk';
 import { readFileSync } from 'fs';
 
-const client = new CognipeerClient({
+const client = new ConsoleClient({
   apiKey: 'YOUR_API_TOKEN',
   baseURL: 'https://your-cognipeer-host',
 });

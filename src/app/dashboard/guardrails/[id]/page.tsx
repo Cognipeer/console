@@ -558,9 +558,9 @@ export default function GuardrailDetailPage() {
             <Paper withBorder radius="md" p="md">
               <Text fw={600} mb="xs">JavaScript SDK Example (ESM)</Text>
               <Code block fz="xs">
-{`import { CognipeerClient } from '@cognipeer/console-sdk';
+{`import { ConsoleClient } from '@cognipeer/console-sdk';
 
-const client = new CognipeerClient({
+const client = new ConsoleClient({
   apiKey: process.env.COGNIPEER_API_TOKEN,
   baseURL: 'https://your-cognipeer-host',
 });
@@ -582,9 +582,9 @@ if (!result.passed) {
             <Paper withBorder radius="md" p="md">
               <Text fw={600} mb="xs">JavaScript SDK Example (CommonJS)</Text>
               <Code block fz="xs">
-{`const { CognipeerClient } = require('@cognipeer/console-sdk');
+{`const { ConsoleClient } = require('@cognipeer/console-sdk');
 
-const client = new CognipeerClient({
+const client = new ConsoleClient({
   apiKey: process.env.COGNIPEER_API_TOKEN,
   baseURL: 'https://your-cognipeer-host',
 });

@@ -391,9 +391,9 @@ export default function ModelDetailPage() {
     "input": "The quick brown fox jumps over the lazy dog"
   }'`;
 
-  const sdkChat = `import CognipeerClient from '@cognipeer/console-sdk';
+  const sdkChat = `import ConsoleClient from '@cognipeer/console-sdk';
 
-const client = new CognipeerClient({
+const client = new ConsoleClient({
   apiKey: 'YOUR_API_TOKEN',
   baseUrl: 'https://your-cognipeer-host',
 });
@@ -410,9 +410,9 @@ const response = await client.chat.completions({
 
 console.log(response.choices[0].message.content);`;
 
-  const sdkStream = `import CognipeerClient from '@cognipeer/console-sdk';
+  const sdkStream = `import ConsoleClient from '@cognipeer/console-sdk';
 
-const client = new CognipeerClient({
+const client = new ConsoleClient({
   apiKey: 'YOUR_API_TOKEN',
   baseUrl: 'https://your-cognipeer-host',
 });
@@ -427,9 +427,9 @@ for await (const chunk of stream) {
   process.stdout.write(chunk.choices[0]?.delta?.content ?? '');
 }`;
 
-  const sdkEmbed = `import CognipeerClient from '@cognipeer/console-sdk';
+  const sdkEmbed = `import ConsoleClient from '@cognipeer/console-sdk';
 
-const client = new CognipeerClient({
+const client = new ConsoleClient({
   apiKey: 'YOUR_API_TOKEN',
   baseUrl: 'https://your-cognipeer-host',
 });

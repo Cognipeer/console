@@ -156,7 +156,7 @@ export default function PromptDetailPage() {
     const apiBase = typeof window !== 'undefined' ? window.location.origin : 'https://api.cognipeer.com';
     const key = prompt?.key ?? 'your-prompt-key';
 
-    const sdk = `import { CognipeerClient } from '@cognipeer/console-sdk';\n\nconst client = new CognipeerClient({\n  apiKey: process.env.COGNIPEER_API_KEY!,\n  baseURL: '${apiBase}',\n});\n\nconst rendered = await client.prompts.render('${key}', {\n  environment: 'prod',\n  data: { name: 'World' },\n});\n\nawait client.prompts.deploy('${key}', {\n  action: 'promote',\n  environment: 'staging',\n  versionId: '${versions[0]?.id ?? 'version_id'}',\n});\n\nawait client.prompts.deploy('${key}', {\n  action: 'activate',\n  environment: 'staging',\n});`;
+    const sdk = `import { ConsoleClient } from '@cognipeer/console-sdk';\n\nconst client = new ConsoleClient({\n  apiKey: process.env.COGNIPEER_API_KEY!,\n  baseURL: '${apiBase}',\n});\n\nconst rendered = await client.prompts.render('${key}', {\n  environment: 'prod',\n  data: { name: 'World' },\n});\n\nawait client.prompts.deploy('${key}', {\n  action: 'promote',\n  environment: 'staging',\n  versionId: '${versions[0]?.id ?? 'version_id'}',\n});\n\nawait client.prompts.deploy('${key}', {\n  action: 'activate',\n  environment: 'staging',\n});`;
 
     const curlRender = `curl -X POST '${apiBase}/api/client/v1/prompts/${key}/render?environment=prod' \\\n+  -H 'Authorization: Bearer <API_TOKEN>' \\\n+  -H 'Content-Type: application/json' \\\n+  -d '{\n+    "data": { "name": "World" }\n+  }'`;
 
