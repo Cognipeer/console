@@ -65,7 +65,7 @@ export async function collectPrometheusMetrics(
   try {
     const projects = await db.listProjects(tenantId);
     families.push({
-      name: 'cgate_projects_total',
+      name: 'console_projects_total',
       help: 'Total number of projects for this tenant.',
       type: 'gauge',
       samples: [{ value: projects.length }],
@@ -82,7 +82,7 @@ export async function collectPrometheusMetrics(
       byRole[u.role] = (byRole[u.role] ?? 0) + 1;
     }
     families.push({
-      name: 'cgate_users_total',
+      name: 'console_users_total',
       help: 'Total number of users per role.',
       type: 'gauge',
       samples: Object.entries(byRole).map(([role, count]) => ({
@@ -98,7 +98,7 @@ export async function collectPrometheusMetrics(
   try {
     const tokens = await db.listTenantApiTokens(tenantId);
     families.push({
-      name: 'cgate_api_tokens_total',
+      name: 'console_api_tokens_total',
       help: 'Total number of API tokens for this tenant.',
       type: 'gauge',
       samples: [{ value: tokens.length }],
@@ -115,7 +115,7 @@ export async function collectPrometheusMetrics(
       byCat[m.category] = (byCat[m.category] ?? 0) + 1;
     }
     families.push({
-      name: 'cgate_models_total',
+      name: 'console_models_total',
       help: 'Total number of configured models per category.',
       type: 'gauge',
       samples: Object.entries(byCat).map(([category, count]) => ({
@@ -176,7 +176,7 @@ export async function collectPrometheusMetrics(
 
     if (requestSamples.length > 0) {
       families.push({
-        name: 'cgate_model_requests_total',
+        name: 'console_model_requests_total',
         help: 'Total number of model API requests in the last 30 days per model.',
         type: 'counter',
         samples: requestSamples,
@@ -184,7 +184,7 @@ export async function collectPrometheusMetrics(
     }
     if (inputTokenSamples.length > 0) {
       families.push({
-        name: 'cgate_model_input_tokens_total',
+        name: 'console_model_input_tokens_total',
         help: 'Total input tokens consumed in the last 30 days per model.',
         type: 'counter',
         samples: inputTokenSamples,
@@ -192,7 +192,7 @@ export async function collectPrometheusMetrics(
     }
     if (outputTokenSamples.length > 0) {
       families.push({
-        name: 'cgate_model_output_tokens_total',
+        name: 'console_model_output_tokens_total',
         help: 'Total output tokens generated in the last 30 days per model.',
         type: 'counter',
         samples: outputTokenSamples,
@@ -200,7 +200,7 @@ export async function collectPrometheusMetrics(
     }
     if (cachedTokenSamples.length > 0) {
       families.push({
-        name: 'cgate_model_cached_tokens_total',
+        name: 'console_model_cached_tokens_total',
         help: 'Total cached input tokens in the last 30 days per model.',
         type: 'counter',
         samples: cachedTokenSamples,
@@ -208,7 +208,7 @@ export async function collectPrometheusMetrics(
     }
     if (latencySamples.length > 0) {
       families.push({
-        name: 'cgate_model_avg_latency_seconds',
+        name: 'console_model_avg_latency_seconds',
         help: 'Average model request latency in seconds over the last 30 days.',
         type: 'gauge',
         samples: latencySamples,
@@ -216,7 +216,7 @@ export async function collectPrometheusMetrics(
     }
     if (costSamples.length > 0) {
       families.push({
-        name: 'cgate_model_cost_total',
+        name: 'console_model_cost_total',
         help: 'Total estimated cost in the last 30 days per model.',
         type: 'counter',
         samples: costSamples,
@@ -224,7 +224,7 @@ export async function collectPrometheusMetrics(
     }
     if (errorSamples.length > 0) {
       families.push({
-        name: 'cgate_model_errors_total',
+        name: 'console_model_errors_total',
         help: 'Total number of failed model requests in the last 30 days per model.',
         type: 'counter',
         samples: errorSamples,
@@ -244,7 +244,7 @@ export async function collectPrometheusMetrics(
       byTypeStatus[k] = (byTypeStatus[k] ?? 0) + 1;
     }
     families.push({
-      name: 'cgate_providers_total',
+      name: 'console_providers_total',
       help: 'Total number of configured providers per type and status.',
       type: 'gauge',
       samples: Object.entries(byTypeStatus).map(([k, count]) => {
@@ -260,7 +260,7 @@ export async function collectPrometheusMetrics(
   try {
     const indexes = await db.listVectorIndexes();
     families.push({
-      name: 'cgate_vector_indexes_total',
+      name: 'console_vector_indexes_total',
       help: 'Total number of vector indexes per provider.',
       type: 'gauge',
       samples: (() => {
@@ -286,13 +286,13 @@ export async function collectPrometheusMetrics(
     ]);
     families.push(
       {
-        name: 'cgate_files_total',
+        name: 'console_files_total',
         help: 'Total number of file records stored.',
         type: 'gauge',
         samples: [{ value: fileCount }],
       },
       {
-        name: 'cgate_files_bytes_total',
+        name: 'console_files_bytes_total',
         help: 'Total bytes of files stored.',
         type: 'gauge',
         samples: [{ value: fileBytes }],
@@ -320,7 +320,7 @@ export async function collectPrometheusMetrics(
     }
     families.push(
       {
-        name: 'cgate_tracing_sessions_total',
+        name: 'console_tracing_sessions_total',
         help: 'Total number of agent tracing sessions per status.',
         type: 'gauge',
         samples: Object.entries(byStatus).map(([status, count]) => ({
@@ -329,19 +329,19 @@ export async function collectPrometheusMetrics(
         })),
       },
       {
-        name: 'cgate_tracing_agents_total',
+        name: 'console_tracing_agents_total',
         help: 'Total number of distinct traced agents.',
         type: 'gauge',
         samples: [{ value: distinctAgents }],
       },
       {
-        name: 'cgate_tracing_input_tokens_total',
+        name: 'console_tracing_input_tokens_total',
         help: 'Total input tokens across all traced sessions.',
         type: 'counter',
         samples: [{ value: totalInputTokens }],
       },
       {
-        name: 'cgate_tracing_output_tokens_total',
+        name: 'console_tracing_output_tokens_total',
         help: 'Total output tokens across all traced sessions.',
         type: 'counter',
         samples: [{ value: totalOutputTokens }],
@@ -360,7 +360,7 @@ export async function collectPrometheusMetrics(
       byEnabledType[k] = (byEnabledType[k] ?? 0) + 1;
     }
     families.push({
-      name: 'cgate_guardrails_total',
+      name: 'console_guardrails_total',
       help: 'Total number of guardrails per type and enabled state.',
       type: 'gauge',
       samples: Object.entries(byEnabledType).map(([k, count]) => {
@@ -389,19 +389,19 @@ export async function collectPrometheusMetrics(
     if (evalTotalSamples.length > 0) {
       families.push(
         {
-          name: 'cgate_guardrail_evaluations_total',
+          name: 'console_guardrail_evaluations_total',
           help: 'Total guardrail evaluations in the last 30 days per guardrail.',
           type: 'counter',
           samples: evalTotalSamples,
         },
         {
-          name: 'cgate_guardrail_evaluations_passed_total',
+          name: 'console_guardrail_evaluations_passed_total',
           help: 'Guardrail evaluations that passed in the last 30 days per guardrail.',
           type: 'counter',
           samples: evalPassedSamples,
         },
         {
-          name: 'cgate_guardrail_evaluations_failed_total',
+          name: 'console_guardrail_evaluations_failed_total',
           help: 'Guardrail evaluations that failed in the last 30 days per guardrail.',
           type: 'counter',
           samples: evalFailedSamples,
@@ -420,7 +420,7 @@ export async function collectPrometheusMetrics(
       byStatus[s.status] = (byStatus[s.status] ?? 0) + 1;
     }
     families.push({
-      name: 'cgate_inference_servers_total',
+      name: 'console_inference_servers_total',
       help: 'Total number of inference servers per status.',
       type: 'gauge',
       samples: Object.entries(byStatus).map(([status, count]) => ({
@@ -468,7 +468,7 @@ export async function collectPrometheusMetrics(
 
     if (gpuSamples.length > 0) {
       families.push({
-        name: 'cgate_inference_server_gpu_cache_usage_ratio',
+        name: 'console_inference_server_gpu_cache_usage_ratio',
         help: 'GPU KV-cache usage ratio (0–1) per inference server (latest poll).',
         type: 'gauge',
         samples: gpuSamples,
@@ -476,7 +476,7 @@ export async function collectPrometheusMetrics(
     }
     if (cpuSamples.length > 0) {
       families.push({
-        name: 'cgate_inference_server_cpu_cache_usage_ratio',
+        name: 'console_inference_server_cpu_cache_usage_ratio',
         help: 'CPU KV-cache usage ratio (0–1) per inference server (latest poll).',
         type: 'gauge',
         samples: cpuSamples,
@@ -484,7 +484,7 @@ export async function collectPrometheusMetrics(
     }
     if (runningReqSamples.length > 0) {
       families.push({
-        name: 'cgate_inference_server_running_requests',
+        name: 'console_inference_server_running_requests',
         help: 'Number of requests currently running per inference server (latest poll).',
         type: 'gauge',
         samples: runningReqSamples,
@@ -492,7 +492,7 @@ export async function collectPrometheusMetrics(
     }
     if (waitingReqSamples.length > 0) {
       families.push({
-        name: 'cgate_inference_server_waiting_requests',
+        name: 'console_inference_server_waiting_requests',
         help: 'Number of requests currently waiting per inference server (latest poll).',
         type: 'gauge',
         samples: waitingReqSamples,
@@ -500,7 +500,7 @@ export async function collectPrometheusMetrics(
     }
     if (promptThroughputSamples.length > 0) {
       families.push({
-        name: 'cgate_inference_server_prompt_tokens_throughput',
+        name: 'console_inference_server_prompt_tokens_throughput',
         help: 'Prompt token throughput (tokens/s) per inference server (latest poll).',
         type: 'gauge',
         samples: promptThroughputSamples,
@@ -508,7 +508,7 @@ export async function collectPrometheusMetrics(
     }
     if (genThroughputSamples.length > 0) {
       families.push({
-        name: 'cgate_inference_server_generation_tokens_throughput',
+        name: 'console_inference_server_generation_tokens_throughput',
         help: 'Generation token throughput (tokens/s) per inference server (latest poll).',
         type: 'gauge',
         samples: genThroughputSamples,
@@ -526,7 +526,7 @@ export async function collectPrometheusMetrics(
       byStatus[m.status] = (byStatus[m.status] ?? 0) + 1;
     }
     families.push({
-      name: 'cgate_rag_modules_total',
+      name: 'console_rag_modules_total',
       help: 'Total number of RAG modules per status.',
       type: 'gauge',
       samples: Object.entries(byStatus).map(([status, count]) => ({
@@ -551,7 +551,7 @@ export async function collectPrometheusMetrics(
     }
     if (docSamples.length > 0) {
       families.push({
-        name: 'cgate_rag_documents_total',
+        name: 'console_rag_documents_total',
         help: 'Total number of documents per RAG module.',
         type: 'gauge',
         samples: docSamples,
@@ -559,7 +559,7 @@ export async function collectPrometheusMetrics(
     }
     if (chunkSamples.length > 0) {
       families.push({
-        name: 'cgate_rag_chunks_total',
+        name: 'console_rag_chunks_total',
         help: 'Total number of indexed chunks per RAG module.',
         type: 'gauge',
         samples: chunkSamples,
@@ -578,7 +578,7 @@ export async function collectPrometheusMetrics(
       byStatus[s.status] = (byStatus[s.status] ?? 0) + 1;
     }
     families.push({
-      name: 'cgate_memory_stores_total',
+      name: 'console_memory_stores_total',
       help: 'Total number of memory stores per status.',
       type: 'gauge',
       samples: Object.entries(byStatus).map(([status, count]) => ({
@@ -599,14 +599,14 @@ export async function collectPrometheusMetrics(
     }
     if (itemSamples.length > 0) {
       families.push({
-        name: 'cgate_memory_items_total',
+        name: 'console_memory_items_total',
         help: 'Total number of memory items per store.',
         type: 'gauge',
         samples: itemSamples,
       });
     }
     families.push({
-      name: 'cgate_memory_items_all_total',
+      name: 'console_memory_items_all_total',
       help: 'Total number of memory items across all stores.',
       type: 'gauge',
       samples: [{ value: totalItems }],
@@ -628,7 +628,7 @@ export async function collectPrometheusMetrics(
     }
     families.push(
       {
-        name: 'cgate_alert_rules_total',
+        name: 'console_alert_rules_total',
         help: 'Total number of alert rules per enabled state.',
         type: 'gauge',
         samples: Object.entries(byEnabled).map(([enabled, count]) => ({
@@ -637,7 +637,7 @@ export async function collectPrometheusMetrics(
         })),
       },
       {
-        name: 'cgate_active_alerts_total',
+        name: 'console_active_alerts_total',
         help: 'Total number of currently active (fired, unresolved) alert events.',
         type: 'gauge',
         samples: [{ value: activeAlerts }],
@@ -651,7 +651,7 @@ export async function collectPrometheusMetrics(
   try {
     const prompts = await db.listPrompts();
     families.push({
-      name: 'cgate_prompts_total',
+      name: 'console_prompts_total',
       help: 'Total number of prompt templates.',
       type: 'gauge',
       samples: [{ value: prompts.length }],
