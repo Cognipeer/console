@@ -1,7 +1,7 @@
 {{/*
 Expand the name of the chart.
 */}}
-{{- define "cognipeer-console.name" -}}
+{{- define "cgate.name" -}}
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
@@ -10,7 +10,7 @@ Create a default fully qualified app name.
 We truncate at 63 chars because some Kubernetes name fields are limited to this (by the DNS naming spec).
 If release name contains chart name it will be used as a full name.
 */}}
-{{- define "cognipeer-console.fullname" -}}
+{{- define "cgate.fullname" -}}
 {{- if .Values.fullnameOverride }}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
 {{- else }}
@@ -26,16 +26,16 @@ If release name contains chart name it will be used as a full name.
 {{/*
 Create chart name and version as used by the chart label.
 */}}
-{{- define "cognipeer-console.chart" -}}
+{{- define "cgate.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
 Common labels
 */}}
-{{- define "cognipeer-console.labels" -}}
-helm.sh/chart: {{ include "cognipeer-console.chart" . }}
-{{ include "cognipeer-console.selectorLabels" . }}
+{{- define "cgate.labels" -}}
+helm.sh/chart: {{ include "cgate.chart" . }}
+{{ include "cgate.selectorLabels" . }}
 {{- if .Chart.AppVersion }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
@@ -45,17 +45,17 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{/*
 Selector labels
 */}}
-{{- define "cognipeer-console.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "cognipeer-console.name" . }}
+{{- define "cgate.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "cgate.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
 Create the name of the service account to use
 */}}
-{{- define "cognipeer-console.serviceAccountName" -}}
+{{- define "cgate.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create }}
-{{- default (include "cognipeer-console.fullname" .) .Values.serviceAccount.name }}
+{{- default (include "cgate.fullname" .) .Values.serviceAccount.name }}
 {{- else }}
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
