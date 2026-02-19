@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getModelById, getUsageAggregate } from '@/lib/services/models/modelService';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
+import { parseDashboardDateFilterFromSearchParams } from '@/lib/utils/dashboardDateFilter';
 
 export const runtime = 'nodejs';
 
@@ -31,8 +32,9 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     }
 
     const { searchParams } = new URL(request.url);
-    const from = searchParams.get('from');
-    const to = searchParams.get('to');
+    const parsedFilter = parseDashboardDateFilterFromSearchParams(searchParams);
+    const from = searchParams.get('from') || parsedFilter.from?.toISOString();
+    const to = searchParams.get('to') || parsedFilter.to?.toISOString();
     const groupBy = (searchParams.get('groupBy') || 'day') as 'hour' | 'day' | 'month';
 
     const aggregate = await getUsageAggregate(

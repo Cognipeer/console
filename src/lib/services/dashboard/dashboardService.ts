@@ -8,6 +8,7 @@ import type { AgentTracingSessionSummary } from '@/lib/services/agentTracing';
 import { AgentTracingService } from '@/lib/services/agentTracing';
 import { listModels } from '@/lib/services/models/modelService';
 import { listVectorProviders, listVectorIndexes } from '@/lib/services/vector/vectorService';
+import { isDateInDashboardRange } from '@/lib/utils/dashboardDateFilter';
 
 export interface DashboardStats {
   models: {
@@ -51,40 +52,54 @@ export interface DashboardData {
   }>;
 }
 
+interface DashboardDateFilterInput {
+  from?: Date;
+  to?: Date;
+}
+
 export async function getDashboardData(
   tenantDbName: string,
   tenantId: string,
   projectId: string,
+  dateFilter?: DashboardDateFilterInput,
 ): Promise<DashboardData> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
+  const filter = {
+    from: dateFilter?.from,
+    to: dateFilter?.to,
+  };
 
   // Fetch models
   const models = await listModels(tenantDbName, projectId, {});
-  const llmModels = models.filter((m) => m.category === 'llm');
-  const embeddingModels = models.filter((m) => m.category === 'embedding');
+  const filteredModels = models.filter((model) =>
+    isDateInDashboardRange(model.createdAt, filter),
+  );
+  const llmModels = filteredModels.filter((m) => m.category === 'llm');
+  const embeddingModels = filteredModels.filter((m) => m.category === 'embedding');
 
   // Fetch vector providers and indexes
   const vectorProviders = await listVectorProviders(tenantDbName, tenantId, projectId, {});
+  const filteredProviders = vectorProviders.filter((provider) =>
+    isDateInDashboardRange(provider.createdAt, filter),
+  );
   let totalIndexes = 0;
   for (const provider of vectorProviders) {
     try {
       const indexes = await listVectorIndexes(tenantDbName, tenantId, provider.key, projectId);
-      totalIndexes += indexes.length;
+      totalIndexes += indexes.filter((index) => isDateInDashboardRange(index.createdAt, filter)).length;
     } catch (error) {
       console.warn('Failed to list vector indexes for provider', provider.key, error);
     }
   }
 
   // Fetch tracing analytics
-  const now = new Date();
-  const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
   const tracingOverview = await AgentTracingService.getDashboardOverview(
     tenantDbName,
     projectId,
     {
-      from: thirtyDaysAgo.toISOString(),
-      to: now.toISOString(),
+      from: filter.from?.toISOString(),
+      to: filter.to?.toISOString(),
     },
   );
 
@@ -119,12 +134,12 @@ export async function getDashboardData(
   return {
     stats: {
       models: {
-        total: models.length,
+        total: filteredModels.length,
         llm: llmModels.length,
         embedding: embeddingModels.length,
       },
       vectors: {
-        providers: vectorProviders.length,
+        providers: filteredProviders.length,
         indexes: totalIndexes,
       },
       tracing: {

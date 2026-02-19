@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
-import { handleChatCompletion } from '@/lib/services/models/inferenceService';
+import { handleChatCompletion, GuardrailBlockError } from '@/lib/services/models/inferenceService';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { logModelUsage } from '@/lib/services/models/usageLogger';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
@@ -132,6 +132,18 @@ export async function POST(request: NextRequest) {
     );
   } catch (error: unknown) {
     console.error('[playground/chat] Error:', error);
+
+    if (error instanceof GuardrailBlockError) {
+      return NextResponse.json(
+        {
+          error: error.message,
+          guardrail_key: error.guardrailKey,
+          action: error.action,
+          findings: error.findings,
+        },
+        { status: 400 },
+      );
+    }
 
     // Log error for analytics
     try {

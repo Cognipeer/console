@@ -23,7 +23,7 @@ import {
     ThemeIcon,
     Title,
 } from '@mantine/core';
-import { IconBook, IconInfoCircle, IconCopy, IconRefresh, IconTimeline } from '@tabler/icons-react';
+import { IconArrowLeft, IconBook, IconInfoCircle, IconCopy, IconRefresh, IconTimeline } from '@tabler/icons-react';
 import PageHeader from '@/components/layout/PageHeader';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
@@ -456,6 +456,14 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
                         <Badge size="sm" variant="filled" radius="xl" color={resolveStatusColor(session.status)}>
                             {(session.status || 'unknown').toUpperCase()}
                         </Badge>
+                        <Button
+                            leftSection={<IconArrowLeft size={14} />}
+                            variant="default"
+                            size="xs"
+                            onClick={() => router.push('/dashboard/tracing/sessions')}
+                        >
+                            Back
+                        </Button>
                         <Button
                             onClick={() => openDocs('api-tracing')}
                             variant="light"

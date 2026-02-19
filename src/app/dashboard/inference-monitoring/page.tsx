@@ -11,6 +11,7 @@ import {
   Modal,
   NumberInput,
   Paper,
+  Progress,
   Select,
   SimpleGrid,
   Stack,
@@ -29,11 +30,18 @@ import {
   IconAlertTriangle,
   IconCheck,
   IconBan,
+  IconCpu,
+  IconChartBar,
 } from '@tabler/icons-react';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import PageHeader from '@/components/layout/PageHeader';
+import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
 import { useTranslations } from '@/lib/i18n';
+import {
+  buildDashboardDateSearchParams,
+  defaultDashboardDateFilter,
+} from '@/lib/utils/dashboardDateFilter';
 
 dayjs.extend(relativeTime);
 
@@ -48,6 +56,40 @@ interface InferenceServer {
   lastPolledAt?: string;
   lastError?: string;
   createdAt: string;
+}
+
+interface LatestMetrics {
+  gpuCacheUsagePercent?: number;
+  numRequestsRunning?: number;
+  numRequestsWaiting?: number;
+  promptTokensThroughput?: number;
+  generationTokensThroughput?: number;
+  requestsPerSecond?: number;
+  runningModels?: string[];
+  timestamp?: string;
+}
+
+interface InferenceDashboardData {
+  overview: {
+    totalServers: number;
+    activeServers: number;
+    erroredServers: number;
+    disabledServers: number;
+    avgGpuCacheUsage: number | null;
+    totalRunningRequests: number;
+    totalWaitingRequests: number;
+    runningModelsCount: number;
+  };
+  typeBreakdown: Array<{ type: string; count: number }>;
+  servers: Array<{
+    key: string;
+    name: string;
+    type: string;
+    status: string;
+    lastPolledAt?: string;
+    lastError?: string;
+    latestMetrics: LatestMetrics | null;
+  }>;
 }
 
 function statusColor(status: string): string {
@@ -79,6 +121,22 @@ export default function InferenceMonitoringPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [addOpened, addHandlers] = useDisclosure(false);
   const [creating, setCreating] = useState(false);
+  const [dashboardData, setDashboardData] = useState<InferenceDashboardData | null>(null);
+  const [dashboardLoading, setDashboardLoading] = useState(true);
+  const [dateFilter, setDateFilter] = useState(defaultDashboardDateFilter);
+
+  const loadDashboard = useCallback(async () => {
+    setDashboardLoading(true);
+    try {
+      const params = buildDashboardDateSearchParams(dateFilter);
+      const res = await fetch(`/api/inference-monitoring/dashboard?${params.toString()}`, { cache: 'no-store' });
+      if (res.ok) setDashboardData(await res.json() as InferenceDashboardData);
+    } catch (err) {
+      console.error('Failed to load inference dashboard', err);
+    } finally {
+      setDashboardLoading(false);
+    }
+  }, [dateFilter]);
 
   const form = useForm({
     initialValues: {
@@ -122,13 +180,14 @@ export default function InferenceMonitoringPage() {
 
   useEffect(() => {
     void fetchServers();
-  }, [fetchServers]);
+    void loadDashboard();
+  }, [fetchServers, loadDashboard]);
 
   // Silent background refresh every 30 s so status / lastPolledAt stays current.
   useEffect(() => {
-    const id = setInterval(() => void fetchServers(true), 30_000);
+    const id = setInterval(() => { void fetchServers(true); void loadDashboard(); }, 30_000);
     return () => clearInterval(id);
-  }, [fetchServers]);
+  }, [fetchServers, loadDashboard]);
 
   const handleCreate = async (values: typeof form.values) => {
     try {
@@ -171,6 +230,18 @@ export default function InferenceMonitoringPage() {
     );
   }
 
+  const healthyRate = servers.length > 0
+    ? (servers.filter((s) => s.status === 'active').length / servers.length) * 100
+    : 0;
+
+  const stalePollers = servers.filter((server) => {
+    if (!server.lastPolledAt || server.status !== 'active') return false;
+    const lastPolledAt = new Date(server.lastPolledAt).getTime();
+    if (Number.isNaN(lastPolledAt)) return false;
+    const maxAgeMs = Math.max(server.pollIntervalSeconds, 10) * 2 * 1000;
+    return Date.now() - lastPolledAt > maxAgeMs;
+  }).length;
+
   return (
     <Stack gap="md">
       <PageHeader
@@ -179,6 +250,7 @@ export default function InferenceMonitoringPage() {
         subtitle={t('subtitle')}
         actions={
           <>
+            <DashboardDateFilter value={dateFilter} onChange={setDateFilter} />
             <Button
               variant="light"
               size="xs"
@@ -198,6 +270,193 @@ export default function InferenceMonitoringPage() {
           </>
         }
       />
+
+      {/* Stats Overview */}
+      <SimpleGrid cols={{ base: 2, sm: 4 }}>
+        <Paper withBorder radius="lg" p="lg">
+          <Group justify="space-between">
+            <Stack gap={4}>
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>Total Servers</Text>
+              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }}>{dashboardData?.overview.totalServers ?? servers.length}</Text>
+            </Stack>
+            <ThemeIcon size={48} radius="xl" variant="light" color="gray"><IconServerBolt size={24} /></ThemeIcon>
+          </Group>
+        </Paper>
+        <Paper withBorder radius="lg" p="lg">
+          <Group justify="space-between">
+            <Stack gap={4}>
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>Active</Text>
+              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="teal">{dashboardData?.overview.activeServers ?? servers.filter((s) => s.status === 'active').length}</Text>
+            </Stack>
+            <ThemeIcon size={48} radius="xl" variant="light" color="teal"><IconCheck size={24} /></ThemeIcon>
+          </Group>
+        </Paper>
+        <Paper withBorder radius="lg" p="lg">
+          <Group justify="space-between">
+            <Stack gap={4}>
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>Errored</Text>
+              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c={(dashboardData?.overview.erroredServers ?? servers.filter((s) => s.status === 'errored').length) > 0 ? 'red' : 'dimmed'}>{dashboardData?.overview.erroredServers ?? servers.filter((s) => s.status === 'errored').length}</Text>
+            </Stack>
+            <ThemeIcon size={48} radius="xl" variant="light" color={(dashboardData?.overview.erroredServers ?? servers.filter((s) => s.status === 'errored').length) > 0 ? 'red' : 'gray'}><IconAlertTriangle size={24} /></ThemeIcon>
+          </Group>
+        </Paper>
+        <Paper withBorder radius="lg" p="lg">
+          <Group justify="space-between">
+            <Stack gap={4}>
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>Queue Backlog</Text>
+              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c={(dashboardData?.overview.totalWaitingRequests ?? 0) > 0 ? 'orange' : 'teal'}>{dashboardData?.overview.totalWaitingRequests ?? 0}</Text>
+            </Stack>
+            <ThemeIcon size={48} radius="xl" variant="light" color={(dashboardData?.overview.totalWaitingRequests ?? 0) > 0 ? 'orange' : 'teal'}><IconActivity size={24} /></ThemeIcon>
+          </Group>
+        </Paper>
+      </SimpleGrid>
+
+      {/* Analytics Panel */}
+      {servers.length > 0 && (
+        <Paper p="lg" radius="lg" withBorder>
+          <Group justify="space-between" mb="lg">
+            <Group gap="sm">
+              <ThemeIcon size={32} radius="md" variant="light" color="teal">
+                <IconChartBar size={16} />
+              </ThemeIcon>
+              <div>
+                <Text fw={600} size="lg">Server Health Overview</Text>
+                <Text size="sm" c="dimmed">Live metrics snapshot from active servers</Text>
+              </div>
+            </Group>
+            <Group gap="xs">
+              <Badge variant="light" color={healthyRate >= 95 ? 'teal' : healthyRate >= 80 ? 'orange' : 'red'}>
+                Healthy {healthyRate.toFixed(0)}%
+              </Badge>
+              <Badge variant="light" color={stalePollers > 0 ? 'orange' : 'teal'}>
+                Stale pollers {stalePollers}
+              </Badge>
+            </Group>
+            <Button variant="subtle" size="xs" leftSection={<IconRefresh size={14} />}
+              loading={dashboardLoading} onClick={() => void loadDashboard()}>
+              Refresh
+            </Button>
+          </Group>
+
+          {dashboardLoading && !dashboardData ? (
+            <Center py="xl"><Loader size="sm" color="teal" /></Center>
+          ) : (
+            <Stack gap="md">
+              {/* GPU Cache Aggregate */}
+              {dashboardData?.overview.avgGpuCacheUsage !== null && dashboardData?.overview.avgGpuCacheUsage !== undefined && (
+                <Paper withBorder p="md" radius="md">
+                  <Group justify="space-between" mb="xs">
+                    <Group gap="sm">
+                      <ThemeIcon size={28} radius="md" variant="light" color="violet">
+                        <IconCpu size={14} />
+                      </ThemeIcon>
+                      <Text fw={600} size="sm">Avg GPU Cache Usage</Text>
+                    </Group>
+                    <Text fw={700} size="sm" c={dashboardData.overview.avgGpuCacheUsage > 0.8 ? 'red' : 'teal'}>
+                      {(dashboardData.overview.avgGpuCacheUsage * 100).toFixed(1)}%
+                    </Text>
+                  </Group>
+                  <Progress
+                    value={dashboardData.overview.avgGpuCacheUsage * 100}
+                    color={dashboardData.overview.avgGpuCacheUsage > 0.8 ? 'red' : dashboardData.overview.avgGpuCacheUsage > 0.5 ? 'orange' : 'teal'}
+                    size="md"
+                    radius="xl"
+                  />
+                </Paper>
+              )}
+
+              <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="md">
+                {(dashboardData?.servers ?? []).map((srv) => {
+                  const gpuPct = srv.latestMetrics?.gpuCacheUsagePercent;
+                  const runningModels = srv.latestMetrics?.runningModels ?? [];
+
+                  return (
+                    <Paper
+                      key={srv.key}
+                      withBorder
+                      radius="md"
+                      p="md"
+                      style={{ cursor: 'pointer' }}
+                      onClick={() => router.push(`/dashboard/inference-monitoring/${encodeURIComponent(srv.key)}`)}
+                    >
+                      <Stack gap="sm">
+                        <Group justify="space-between" align="flex-start">
+                          <Group gap="sm" align="flex-start">
+                            <ThemeIcon size={30} radius="md" variant="light" color={statusColor(srv.status)}>
+                              {srv.status === 'active' ? <IconCheck size={14} /> : srv.status === 'errored' ? <IconAlertTriangle size={14} /> : <IconBan size={14} />}
+                            </ThemeIcon>
+                            <div>
+                              <Text size="sm" fw={600} lineClamp={1}>{srv.name}</Text>
+                              <Group gap="xs" mt={4}>
+                                <Badge size="xs" variant="light" color="gray">{srv.type.toUpperCase()}</Badge>
+                                <Badge size="xs" variant="light" radius="xl" color={statusColor(srv.status)}>{srv.status.toUpperCase()}</Badge>
+                              </Group>
+                            </div>
+                          </Group>
+                          <Text size="xs" c="dimmed">{srv.lastPolledAt ? dayjs(srv.lastPolledAt).fromNow() : '—'}</Text>
+                        </Group>
+
+                        {gpuPct !== undefined ? (
+                          <Stack gap={6}>
+                            <Group justify="space-between">
+                              <Text size="xs" c="dimmed">GPU Cache</Text>
+                              <Text size="xs" fw={600}>{(gpuPct * 100).toFixed(1)}%</Text>
+                            </Group>
+                            <Progress
+                              value={gpuPct * 100}
+                              size="sm"
+                              radius="xl"
+                              color={gpuPct > 0.8 ? 'red' : gpuPct > 0.5 ? 'orange' : 'teal'}
+                            />
+                          </Stack>
+                        ) : (
+                          <Text size="xs" c="dimmed">GPU cache metric unavailable</Text>
+                        )}
+
+                        <Group gap="xs" wrap="wrap">
+                          <Badge size="sm" variant="light" color="cyan">
+                            Running: {srv.latestMetrics?.numRequestsRunning ?? '—'}
+                          </Badge>
+                          <Badge size="sm" variant="light" color="orange">
+                            Waiting: {srv.latestMetrics?.numRequestsWaiting ?? '—'}
+                          </Badge>
+                          <Badge size="sm" variant="light" color="blue">
+                            RPS: {srv.latestMetrics?.requestsPerSecond !== undefined ? srv.latestMetrics.requestsPerSecond.toFixed(2) : '—'}
+                          </Badge>
+                        </Group>
+
+                        <Group gap="xs" wrap="wrap">
+                          <Badge size="xs" variant="light" color="teal">
+                            Prompt: {srv.latestMetrics?.promptTokensThroughput !== undefined ? srv.latestMetrics.promptTokensThroughput.toFixed(1) : '—'}/s
+                          </Badge>
+                          <Badge size="xs" variant="light" color="grape">
+                            Gen: {srv.latestMetrics?.generationTokensThroughput !== undefined ? srv.latestMetrics.generationTokensThroughput.toFixed(1) : '—'}/s
+                          </Badge>
+                        </Group>
+
+                        {runningModels.length > 0 && (
+                          <Group gap="xs" wrap="wrap">
+                            {runningModels.slice(0, 2).map((modelName) => (
+                              <Badge key={modelName} size="xs" variant="light" color="teal">{modelName}</Badge>
+                            ))}
+                            {runningModels.length > 2 && (
+                              <Badge size="xs" variant="light" color="gray">+{runningModels.length - 2} more</Badge>
+                            )}
+                          </Group>
+                        )}
+
+                        {srv.lastError && (
+                          <Text size="xs" c="red" lineClamp={2}>{srv.lastError}</Text>
+                        )}
+                      </Stack>
+                    </Paper>
+                  );
+                })}
+              </SimpleGrid>
+            </Stack>
+          )}
+        </Paper>
+      )}
 
       {servers.length === 0 ? (
         <Paper p="xl" radius="lg" withBorder>

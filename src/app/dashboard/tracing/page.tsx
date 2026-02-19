@@ -14,13 +14,10 @@ import {
   Badge,
   Table,
   Anchor,
-  Title,
   ThemeIcon,
   Box,
 } from '@mantine/core';
-import { DatePickerInput } from '@mantine/dates';
 import {
-  IconCalendar,
   IconPlug,
   IconRefresh,
   IconActivity,
@@ -36,7 +33,12 @@ import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import SessionTable from '@/components/tracing/SessionTable';
 import PageHeader from '@/components/layout/PageHeader';
+import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
 import CollapsibleInfo from '@/components/layout/CollapsibleInfo';
+import {
+  buildDashboardDateSearchParams,
+  defaultDashboardDateFilter,
+} from '@/lib/utils/dashboardDateFilter';
 import {
   formatNumber,
   formatDuration,
@@ -62,10 +64,7 @@ export default function AgentTracingPage() {
   const [dashboardData, setDashboardData] = useState<DashboardData | null>(
     null,
   );
-  const [dateRange, setDateRange] = useState<[Date | null, Date | null]>([
-    null,
-    null,
-  ]);
+  const [dateFilter, setDateFilter] = useState(defaultDashboardDateFilter);
 
   const timezone = useMemo(() => {
     try {
@@ -75,22 +74,13 @@ export default function AgentTracingPage() {
     }
   }, []);
 
-  const rangeParams = useMemo(() => {
-    const [start, end] = dateRange || [];
-    return {
-      from: start ? dayjs(start).startOf('day').toISOString() : undefined,
-      to: end ? dayjs(end).endOf('day').toISOString() : undefined,
-    };
-  }, [dateRange]);
-
   const fetchDashboard = useCallback(async (isRefresh = false) => {
     try {
       if (isRefresh) setRefreshing(true);
       else setLoading(true);
 
       const params = new URLSearchParams();
-      if (rangeParams.from) params.append('from', rangeParams.from);
-      if (rangeParams.to) params.append('to', rangeParams.to);
+      const params = buildDashboardDateSearchParams(dateFilter);
       params.append('timezone', timezone);
 
       const response = await fetch(`/api/tracing/dashboard?${params}`);
@@ -109,7 +99,7 @@ export default function AgentTracingPage() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [rangeParams.from, rangeParams.to, timezone]);
+  }, [dateFilter, timezone]);
 
   useEffect(() => {
     void fetchDashboard();
@@ -171,20 +161,7 @@ export default function AgentTracingPage() {
         subtitle={t('list.subtitle')}
         actions={
           <>
-            <DatePickerInput
-              type="range"
-              value={dateRange}
-              clearable
-              onChange={(value) =>
-                setDateRange(value as [Date | null, Date | null])
-              }
-              w={220}
-              size="xs"
-              placeholder="Select Date Range"
-              valueFormat="MMM D, YYYY"
-              leftSection={<IconCalendar size={14} stroke={1.5} />}
-              radius="sm"
-            />
+            <DashboardDateFilter value={dateFilter} onChange={setDateFilter} />
             <Button
               variant="light"
               size="xs"

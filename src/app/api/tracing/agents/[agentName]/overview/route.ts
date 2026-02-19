@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { AgentTracingService } from '@/lib/services/agentTracing';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
+import { parseDashboardDateFilterFromSearchParams } from '@/lib/utils/dashboardDateFilter';
 
 /**
  * GET /api/tracing/agents/:agentName/overview
@@ -26,10 +27,11 @@ export async function GET(
       userId,
     });
     const searchParams = request.nextUrl.searchParams;
+    const parsedFilter = parseDashboardDateFilterFromSearchParams(searchParams);
     
     const filters = {
-      from: searchParams.get('from') || undefined,
-      to: searchParams.get('to') || undefined,
+      from: searchParams.get('from') || parsedFilter.from?.toISOString(),
+      to: searchParams.get('to') || parsedFilter.to?.toISOString(),
       timezone: searchParams.get('timezone') || undefined,
     };
 

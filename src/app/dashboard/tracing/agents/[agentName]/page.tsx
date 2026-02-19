@@ -17,15 +17,12 @@ import {
   Stack,
   Table,
   Text,
-  ThemeIcon,
-  Title,
 } from '@mantine/core';
-import { DatePickerInput } from '@mantine/dates';
 import {
   IconAlertCircle,
+  IconArrowLeft,
   IconArrowUpRight,
   IconBook,
-  IconCalendar,
   IconInfoCircle,
   IconRefresh,
   IconTimeline,
@@ -34,6 +31,11 @@ import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import SessionTable from '@/components/tracing/SessionTable';
 import PageHeader from '@/components/layout/PageHeader';
+import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
+import {
+  buildDashboardDateSearchParams,
+  defaultDashboardDateFilter,
+} from '@/lib/utils/dashboardDateFilter';
 import {
   formatNumber,
   formatDuration,
@@ -109,7 +111,7 @@ export default function AgentTracingAgentPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<AgentOverviewResponse | null>(null);
-  const [dateRange, setDateRange] = useState<[Date | null, Date | null]>([null, null]);
+  const [dateFilter, setDateFilter] = useState(defaultDashboardDateFilter);
 
   const agentName = useMemo(() => {
     const value = params?.agentName ?? '';
@@ -128,14 +130,6 @@ export default function AgentTracingAgentPage() {
     }
   }, []);
 
-  const rangeParams = useMemo(() => {
-    const [start, end] = dateRange || [];
-    return {
-      from: start ? dayjs(start).startOf('day').toISOString() : undefined,
-      to: end ? dayjs(end).endOf('day').toISOString() : undefined,
-    };
-  }, [dateRange]);
-
   const fetchOverview = useCallback(async (isRefresh = false) => {
     if (!agentName) return;
 
@@ -144,9 +138,7 @@ export default function AgentTracingAgentPage() {
       setLoading(true);
       setError(null);
 
-      const params = new URLSearchParams();
-      if (rangeParams.from) params.append('from', rangeParams.from);
-      if (rangeParams.to) params.append('to', rangeParams.to);
+      const params = buildDashboardDateSearchParams(dateFilter);
       params.append('timezone', timezone);
 
       const response = await fetch(`/api/tracing/agents/${encodeURIComponent(agentName)}/overview?${params}`);
@@ -165,7 +157,7 @@ export default function AgentTracingAgentPage() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [agentName, rangeParams.from, rangeParams.to, timezone]);
+  }, [agentName, dateFilter, timezone]);
 
   useEffect(() => {
     void fetchOverview();
@@ -222,6 +214,14 @@ export default function AgentTracingAgentPage() {
         actions={
           <>
             <Button
+              variant="default"
+              size="xs"
+              leftSection={<IconArrowLeft size={14} />}
+              onClick={() => router.push('/dashboard/tracing/agents')}
+            >
+              Back
+            </Button>
+            <Button
               onClick={() => openDocs('api-tracing')}
               variant="light"
               size="xs"
@@ -229,18 +229,6 @@ export default function AgentTracingAgentPage() {
             >
               Docs
             </Button>
-            <DatePickerInput
-              type="range"
-              value={dateRange}
-              clearable
-              onChange={(value) => setDateRange(value as [Date | null, Date | null])}
-              w={220}
-              size="xs"
-              placeholder="Select Date Range"
-              valueFormat="MMM D, YYYY"
-              leftSection={<IconCalendar size={14} stroke={1.5} />}
-              radius="sm"
-            />
             <Button
               variant="light"
               size="xs"
@@ -253,6 +241,10 @@ export default function AgentTracingAgentPage() {
           </>
         }
       />
+
+      <Group justify="flex-end">
+        <DashboardDateFilter value={dateFilter} onChange={setDateFilter} />
+      </Group>
 
       {error && (
         <Alert icon={<IconAlertCircle size={16} />} color="red" variant="light">

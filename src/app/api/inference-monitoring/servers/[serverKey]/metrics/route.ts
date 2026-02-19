@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { InferenceMonitoringService } from '@/lib/services/inferenceMonitoring';
+import { parseDashboardDateFilterFromSearchParams } from '@/lib/utils/dashboardDateFilter';
 
 interface RouteParams {
   params: Promise<{ serverKey: string }>;
@@ -30,8 +31,9 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     }
 
     const searchParams = request.nextUrl.searchParams;
-    const from = searchParams.get('from') || undefined;
-    const to = searchParams.get('to') || undefined;
+    const parsedFilter = parseDashboardDateFilterFromSearchParams(searchParams);
+    const from = searchParams.get('from') || parsedFilter.from?.toISOString();
+    const to = searchParams.get('to') || parsedFilter.to?.toISOString();
     const limit = searchParams.get('limit')
       ? parseInt(searchParams.get('limit')!, 10)
       : 500;

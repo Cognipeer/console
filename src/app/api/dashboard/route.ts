@@ -4,6 +4,7 @@ import {
   requireProjectContext,
   ProjectContextError,
 } from '@/lib/services/projects/projectContext';
+import { parseDashboardDateFilterFromSearchParams } from '@/lib/utils/dashboardDateFilter';
 
 export const runtime = 'nodejs';
 
@@ -29,10 +30,18 @@ export async function GET(request: NextRequest) {
       userId,
     });
 
+    const filter = parseDashboardDateFilterFromSearchParams(
+      request.nextUrl.searchParams,
+    );
+
     const data = await getDashboardData(
       tenantDbName,
       tenantId,
       projectContext.projectId,
+      {
+        from: filter.from,
+        to: filter.to,
+      },
     );
 
     return NextResponse.json({

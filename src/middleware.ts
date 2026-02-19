@@ -94,6 +94,7 @@ export async function middleware(request: NextRequest) {
   requestHeaders.set('x-user-email', payload.email);
   requestHeaders.set('x-user-role', payload.role);
   requestHeaders.set('x-tenant-id', payload.tenantId);
+  requestHeaders.set('x-tenant-slug', payload.tenantSlug);
   requestHeaders.set('x-tenant-db-name', tenantDbName);
   requestHeaders.set('x-license-type', payload.licenseType);
   requestHeaders.set('x-features', JSON.stringify(payload.features));

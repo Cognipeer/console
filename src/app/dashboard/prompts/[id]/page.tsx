@@ -18,6 +18,7 @@ import {
   Paper,
   rem,
   ScrollArea,
+  SimpleGrid,
   Stack,
   Table,
   Tabs,
@@ -30,6 +31,7 @@ import PageHeader from '@/components/layout/PageHeader';
 import { notifications } from '@mantine/notifications';
 import {
   IconArrowLeft,
+  IconCalendar,
   IconCheck,
   IconCode,
   IconCopy,
@@ -268,9 +270,17 @@ export default function PromptDetailPage() {
         subtitle={prompt.description || `Key: ${prompt.key}`}
         actions={
           <>
-            <Badge variant="outline" color="gray" size="sm">
+            <Badge variant="light" color="gray" size="sm">
               v{prompt.currentVersion ?? 1}
             </Badge>
+            <Button
+              variant="default"
+              size="xs"
+              leftSection={<IconArrowLeft size={14} />}
+              onClick={() => router.push('/dashboard/prompts')}
+            >
+              Back
+            </Button>
             <CopyButton value={prompt.key}>
               {({ copied, copy }) => (
                 <Tooltip label={copied ? 'Copied!' : 'Copy key'}>
@@ -308,6 +318,48 @@ export default function PromptDetailPage() {
         }
       />
 
+      {/* Stats Overview */}
+      <SimpleGrid cols={{ base: 2, sm: 4 }}>
+        <Paper withBorder radius="lg" p="lg">
+          <Group justify="space-between">
+            <Stack gap={4}>
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>Version</Text>
+              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }}>v{prompt.currentVersion ?? 1}</Text>
+            </Stack>
+            <ThemeIcon size={48} radius="xl" variant="light" color="indigo"><IconHistory size={24} /></ThemeIcon>
+          </Group>
+        </Paper>
+        <Paper withBorder radius="lg" p="lg">
+          <Group justify="space-between">
+            <Stack gap={4}>
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>Variables</Text>
+              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="violet">
+                {extractTemplateVariables(prompt.template).length}
+              </Text>
+            </Stack>
+            <ThemeIcon size={48} radius="xl" variant="light" color="violet"><IconVariable size={24} /></ThemeIcon>
+          </Group>
+        </Paper>
+        <Paper withBorder radius="lg" p="lg">
+          <Group justify="space-between">
+            <Stack gap={4}>
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>Template Size</Text>
+              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="teal">{prompt.template.length}</Text>
+            </Stack>
+            <ThemeIcon size={48} radius="xl" variant="light" color="teal"><IconCode size={24} /></ThemeIcon>
+          </Group>
+        </Paper>
+        <Paper withBorder radius="lg" p="lg">
+          <Group justify="space-between">
+            <Stack gap={4}>
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>Last Updated</Text>
+              <Text fw={600} size="sm" style={{ paddingTop: '0.4rem' }}>{formatDate(prompt.updatedAt)}</Text>
+            </Stack>
+            <ThemeIcon size={48} radius="xl" variant="light" color="orange"><IconCalendar size={24} /></ThemeIcon>
+          </Group>
+        </Paper>
+      </SimpleGrid>
+
       {/* Info Bar */}
       <Paper withBorder radius="md" p="sm">
         <Group justify="space-between" wrap="wrap">
@@ -318,7 +370,7 @@ export default function PromptDetailPage() {
             </Group>
             <Group gap={4}>
               <Text size="sm" c="dimmed">{t('fields.version')}:</Text>
-              <Badge variant="outline" size="sm">v{prompt.currentVersion ?? 1}</Badge>
+              <Badge variant="light" size="sm">v{prompt.currentVersion ?? 1}</Badge>
             </Group>
           </Group>
           <Group gap="lg">
@@ -519,7 +571,7 @@ export default function PromptDetailPage() {
                               {formatDate(comment.createdAt)}
                             </Text>
                             {comment.version && (
-                              <Badge variant="outline" size="xs">v{comment.version}</Badge>
+                              <Badge variant="light" size="xs">v{comment.version}</Badge>
                             )}
                           </Group>
                           <Text size="sm">{comment.content}</Text>

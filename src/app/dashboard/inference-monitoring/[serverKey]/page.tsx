@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
   Badge,
@@ -13,12 +13,10 @@ import {
   Paper,
   SimpleGrid,
   Stack,
-  Table,
   Text,
   TextInput,
   ThemeIcon,
 } from '@mantine/core';
-import { DatePickerInput } from '@mantine/dates';
 import { useForm } from '@mantine/form';
 import { useDisclosure } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
@@ -26,7 +24,6 @@ import {
   IconActivity,
   IconAlertTriangle,
   IconArrowLeft,
-  IconCalendar,
   IconEdit,
   IconRefresh,
   IconServerBolt,
@@ -35,7 +32,12 @@ import {
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import PageHeader from '@/components/layout/PageHeader';
+import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
 import { useTranslations } from '@/lib/i18n';
+import {
+  buildDashboardDateSearchParams,
+  defaultDashboardDateFilter,
+} from '@/lib/utils/dashboardDateFilter';
 
 dayjs.extend(relativeTime);
 
@@ -101,7 +103,7 @@ export default function InferenceServerDetailPage() {
   const [editOpened, editHandlers] = useDisclosure(false);
   const [deleteOpened, deleteHandlers] = useDisclosure(false);
   const [saving, setSaving] = useState(false);
-  const [dateRange, setDateRange] = useState<[Date | null, Date | null]>([null, null]);
+  const [dateFilter, setDateFilter] = useState(defaultDashboardDateFilter);
 
   const editForm = useForm({
     initialValues: {
@@ -118,14 +120,6 @@ export default function InferenceServerDetailPage() {
     },
   });
 
-  const rangeParams = useMemo(() => {
-    const [start, end] = dateRange || [];
-    return {
-      from: start ? dayjs(start).startOf('day').toISOString() : undefined,
-      to: end ? dayjs(end).endOf('day').toISOString() : undefined,
-    };
-  }, [dateRange]);
-
   const fetchServer = useCallback(async () => {
     try {
       const res = await fetch(`/api/inference-monitoring/servers/${encodeURIComponent(serverKey)}`);
@@ -140,9 +134,7 @@ export default function InferenceServerDetailPage() {
 
   const fetchMetrics = useCallback(async () => {
     try {
-      const params = new URLSearchParams();
-      if (rangeParams.from) params.append('from', rangeParams.from);
-      if (rangeParams.to) params.append('to', rangeParams.to);
+      const params = buildDashboardDateSearchParams(dateFilter);
       params.append('limit', '500');
 
       const res = await fetch(
@@ -155,7 +147,7 @@ export default function InferenceServerDetailPage() {
     } catch (err) {
       console.error('Failed to fetch metrics:', err);
     }
-  }, [serverKey, rangeParams.from, rangeParams.to]);
+  }, [serverKey, dateFilter]);
 
   useEffect(() => {
     const load = async () => {
@@ -301,18 +293,6 @@ export default function InferenceServerDetailPage() {
         subtitle={`${server.type.toUpperCase()} · ${server.baseUrl}`}
         actions={
           <>
-            <DatePickerInput
-              type="range"
-              value={dateRange}
-              clearable
-              onChange={(v) => setDateRange(v as [Date | null, Date | null])}
-              w={220}
-              size="xs"
-              placeholder="Select Date Range"
-              valueFormat="MMM D, YYYY"
-              leftSection={<IconCalendar size={14} stroke={1.5} />}
-              radius="sm"
-            />
             <Button
               variant="light"
               size="xs"
@@ -349,6 +329,10 @@ export default function InferenceServerDetailPage() {
           </>
         }
       />
+
+      <Group justify="flex-end">
+        <DashboardDateFilter value={dateFilter} onChange={setDateFilter} />
+      </Group>
 
       {/* Server Status */}
       <Paper p="lg" radius="lg" withBorder>
@@ -487,7 +471,7 @@ export default function InferenceServerDetailPage() {
         </Paper>
       )}
 
-      {/* Metrics History Table */}
+      {/* Metrics History Cards */}
       <Paper p="lg" radius="lg" withBorder>
         <Group justify="space-between" mb="md">
           <div>
@@ -511,44 +495,58 @@ export default function InferenceServerDetailPage() {
             <Text size="sm" c="dimmed">{t('serverDetail.noMetrics')}</Text>
           </Center>
         ) : (
-          <Table verticalSpacing="sm" horizontalSpacing="md" highlightOnHover striped>
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>Timestamp</Table.Th>
-                <Table.Th>Running</Table.Th>
-                <Table.Th>Waiting</Table.Th>
-                <Table.Th>GPU Cache</Table.Th>
-                <Table.Th>Prompt tok/s</Table.Th>
-                <Table.Th>Gen tok/s</Table.Th>
-                <Table.Th>TTFT (s)</Table.Th>
-                <Table.Th>E2E Lat (s)</Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {metrics.map((m) => (
-                <Table.Tr key={m._id}>
-                  <Table.Td>
-                    <Text size="sm">{dayjs(m.timestamp).format('MMM D HH:mm:ss')}</Text>
-                  </Table.Td>
-                  <Table.Td>
-                    <Badge size="sm" variant="light" color="teal">
-                      {fmtNum(m.numRequestsRunning, 0)}
-                    </Badge>
-                  </Table.Td>
-                  <Table.Td>
-                    <Badge size="sm" variant="light" color="orange">
-                      {fmtNum(m.numRequestsWaiting, 0)}
-                    </Badge>
-                  </Table.Td>
-                  <Table.Td>{fmtPct(m.gpuCacheUsagePercent)}</Table.Td>
-                  <Table.Td>{fmtNum(m.promptTokensThroughput)}</Table.Td>
-                  <Table.Td>{fmtNum(m.generationTokensThroughput)}</Table.Td>
-                  <Table.Td>{fmtNum(m.timeToFirstTokenSeconds, 3)}</Table.Td>
-                  <Table.Td>{fmtNum(m.e2eRequestLatencySeconds)}</Table.Td>
-                </Table.Tr>
+          <Stack gap="sm">
+            <Text size="xs" c="dimmed">
+              Showing latest {Math.min(metrics.length, 24)} snapshots
+            </Text>
+            <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="sm">
+              {metrics.slice(0, 24).map((m) => (
+                <Paper key={m._id} withBorder radius="md" p="md">
+                  <Stack gap="xs">
+                    <Group justify="space-between">
+                      <Text size="sm" fw={600}>{dayjs(m.timestamp).format('MMM D HH:mm:ss')}</Text>
+                      <Badge size="xs" variant="light" color="gray">
+                        {dayjs(m.timestamp).fromNow()}
+                      </Badge>
+                    </Group>
+
+                    <Group gap="xs" wrap="wrap">
+                      <Badge size="sm" variant="light" color="teal">
+                        Running: {fmtNum(m.numRequestsRunning, 0)}
+                      </Badge>
+                      <Badge size="sm" variant="light" color="orange">
+                        Waiting: {fmtNum(m.numRequestsWaiting, 0)}
+                      </Badge>
+                    </Group>
+
+                    <Group justify="space-between">
+                      <Text size="xs" c="dimmed">GPU Cache</Text>
+                      <Text size="xs" fw={600}>{fmtPct(m.gpuCacheUsagePercent)}</Text>
+                    </Group>
+
+                    <SimpleGrid cols={2} spacing="xs">
+                      <Paper withBorder radius="sm" p="xs">
+                        <Text size="xs" c="dimmed">Prompt tok/s</Text>
+                        <Text size="sm" fw={600}>{fmtNum(m.promptTokensThroughput)}</Text>
+                      </Paper>
+                      <Paper withBorder radius="sm" p="xs">
+                        <Text size="xs" c="dimmed">Gen tok/s</Text>
+                        <Text size="sm" fw={600}>{fmtNum(m.generationTokensThroughput)}</Text>
+                      </Paper>
+                      <Paper withBorder radius="sm" p="xs">
+                        <Text size="xs" c="dimmed">TTFT (s)</Text>
+                        <Text size="sm" fw={600}>{fmtNum(m.timeToFirstTokenSeconds, 3)}</Text>
+                      </Paper>
+                      <Paper withBorder radius="sm" p="xs">
+                        <Text size="xs" c="dimmed">E2E Lat (s)</Text>
+                        <Text size="sm" fw={600}>{fmtNum(m.e2eRequestLatencySeconds)}</Text>
+                      </Paper>
+                    </SimpleGrid>
+                  </Stack>
+                </Paper>
               ))}
-            </Table.Tbody>
-          </Table>
+            </SimpleGrid>
+          </Stack>
         )}
       </Paper>
 

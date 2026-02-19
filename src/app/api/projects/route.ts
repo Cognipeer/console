@@ -4,6 +4,7 @@ import {
     ensureDefaultProject,
     generateUniqueProjectKey,
     listAccessibleProjects,
+    DEFAULT_PROJECT_KEY,
 } from '@/lib/services/projects/projectService';
 
 export const runtime = 'nodejs';
@@ -13,12 +14,13 @@ function ensureTenantContext(request: NextRequest) {
     const tenantId = request.headers.get('x-tenant-id');
     const userId = request.headers.get('x-user-id');
     const userRole = request.headers.get('x-user-role');
+    const tenantSlug = request.headers.get('x-tenant-slug');
 
     if (!tenantDbName || !tenantId || !userId || !userRole) {
         return { error: { message: 'Unauthorized' } } as const;
     }
 
-    return { tenantDbName, tenantId, userId, userRole } as const;
+    return { tenantDbName, tenantId, userId, userRole, tenantSlug } as const;
 }
 
 export async function GET(request: NextRequest) {
@@ -47,11 +49,25 @@ export async function GET(request: NextRequest) {
         const cookieIsValid =
             activeCookie && projects.some((p) => String(p._id) === String(activeCookie));
 
-        const activeProjectId = cookieIsValid
-            ? activeCookie
-            : projects[0]?._id
-                ? String(projects[0]._id)
-                : undefined;
+        // For the demo tenant: if the cookie points to the 'default' placeholder but
+        // real enterprise projects exist, silently redirect to the first non-default one.
+        // This never fires for regular tenants who may deliberately use their default project.
+        const isDemo = ctx.tenantSlug === 'demo';
+        const cookieProject = cookieIsValid
+            ? projects.find((p) => String(p._id) === String(activeCookie))
+            : undefined;
+        const hasNonDefaultProjects = projects.some((p) => p.key !== DEFAULT_PROJECT_KEY);
+        const cookieIsDefault = isDemo && cookieProject?.key === DEFAULT_PROJECT_KEY && hasNonDefaultProjects;
+
+        const preferredProject = cookieIsValid && !cookieIsDefault
+            ? projects.find((p) => String(p._id) === String(activeCookie))
+            : isDemo
+                ? (projects.find((p) => p.key !== DEFAULT_PROJECT_KEY) ?? projects[0])
+                : projects[0];
+
+        const activeProjectId = preferredProject?._id
+            ? String(preferredProject._id)
+            : undefined;
 
         const response = NextResponse.json(
             {
@@ -61,14 +77,24 @@ export async function GET(request: NextRequest) {
             { status: 200 },
         );
 
-        if (activeCookie && !cookieIsValid) {
-            response.cookies.set('active_project_id', '', {
-                httpOnly: false,
-                secure: process.env.NODE_ENV === 'production',
-                sameSite: 'lax',
-                maxAge: 0,
-                path: '/',
-            });
+        if ((activeCookie && !cookieIsValid) || cookieIsDefault) {
+            if (activeProjectId) {
+                response.cookies.set('active_project_id', activeProjectId, {
+                    httpOnly: false,
+                    secure: process.env.NODE_ENV === 'production',
+                    sameSite: 'lax',
+                    maxAge: 60 * 60 * 24 * 30,
+                    path: '/',
+                });
+            } else {
+                response.cookies.set('active_project_id', '', {
+                    httpOnly: false,
+                    secure: process.env.NODE_ENV === 'production',
+                    sameSite: 'lax',
+                    maxAge: 0,
+                    path: '/',
+                });
+            }
         }
 
         return response;

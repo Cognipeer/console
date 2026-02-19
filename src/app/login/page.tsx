@@ -15,11 +15,16 @@ import {
   Group,
   Center,
   Loader,
+  Alert,
+  Badge,
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
-import { IconLogin } from '@tabler/icons-react';
+import { IconLogin, IconSparkles } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+
+const DEMO_EMAIL    = 'demo@cognipeer.ai';
+const DEMO_PASSWORD = 'Demo1234!';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -42,6 +47,10 @@ export default function LoginPage() {
         value.length >= 8 ? null : tValidation('passwordMinLength'),
     },
   });
+
+  const fillDemoCredentials = () => {
+    form.setValues({ email: DEMO_EMAIL, password: DEMO_PASSWORD });
+  };
 
   // Check if user is already authenticated
   useEffect(() => {
@@ -139,6 +148,36 @@ export default function LoginPage() {
             {t('hero.subtitle')}
           </Text>
         </div>
+
+        {/* ── Demo account banner ───────────────────────────────────────── */}
+        <Alert
+          icon={<IconSparkles size={18} />}
+          color="teal"
+          radius="lg"
+          style={{ border: '1px solid var(--mantine-color-teal-3)' }}
+        >
+          <Group justify="space-between" align="center" wrap="nowrap">
+            <Stack gap={2}>
+              <Group gap={6}>
+                <Text size="sm" fw={600}>Try the Demo</Text>
+                <Badge size="xs" color="teal" variant="filled">Enterprise</Badge>
+              </Group>
+              <Text size="xs" c="dimmed">
+                Full-featured demo with 5 enterprise AI projects and rich data.
+              </Text>
+            </Stack>
+            <Button
+              size="xs"
+              variant="light"
+              color="teal"
+              leftSection={<IconLogin size={14} />}
+              onClick={fillDemoCredentials}
+              style={{ flexShrink: 0 }}
+            >
+              Fill in
+            </Button>
+          </Group>
+        </Alert>
 
         <Paper withBorder shadow="lg" p={36} radius="lg" style={{ background: 'var(--mantine-color-gray-0)' }}>
           <form onSubmit={form.onSubmit(handleSubmit)}>

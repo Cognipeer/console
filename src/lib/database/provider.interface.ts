@@ -18,6 +18,8 @@ export interface ITenant {
   dbName: string;
   licenseType: string;
   ownerId?: string;
+  /** Marks this tenant as the read-only demo tenant. */
+  isDemo?: boolean;
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -354,6 +356,8 @@ export interface IModel {
   settings: Record<string, unknown>;
   pricing: IModelPricing;
   semanticCache?: ISemanticCacheConfig;
+  inputGuardrailKey?: string;
+  outputGuardrailKey?: string;
   metadata?: Record<string, unknown>;
   createdBy?: string;
   updatedBy?: string;
@@ -443,6 +447,59 @@ export interface IInferenceServer {
   status: 'active' | 'disabled' | 'errored';
   lastPolledAt?: Date;
   lastError?: string;
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+// ── Guardrail types ────────────────────────────────────────────────────────
+
+export type GuardrailType = 'preset' | 'custom';
+export type GuardrailAction = 'block' | 'warn' | 'flag';
+export type GuardrailTarget = 'input' | 'output' | 'both';
+
+export interface IGuardrailPiiPolicy {
+  enabled: boolean;
+  action: GuardrailAction;
+  categories: Record<string, boolean>;
+}
+
+export interface IGuardrailModerationPolicy {
+  enabled: boolean;
+  modelKey?: string;
+  categories: Record<string, boolean>;
+}
+
+export interface IGuardrailPromptShieldPolicy {
+  enabled: boolean;
+  modelKey?: string;
+  sensitivity: 'low' | 'balanced' | 'high';
+}
+
+export interface IGuardrailPresetPolicy {
+  pii?: IGuardrailPiiPolicy;
+  moderation?: IGuardrailModerationPolicy;
+  promptShield?: IGuardrailPromptShieldPolicy;
+}
+
+export interface IGuardrail {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name: string;
+  description?: string;
+  type: GuardrailType;
+  target: GuardrailTarget;
+  action: GuardrailAction;
+  enabled: boolean;
+  modelKey?: string;
+  // For preset guardrails
+  policy?: IGuardrailPresetPolicy;
+  // For custom prompt guardrails
+  customPrompt?: string;
   metadata?: Record<string, unknown>;
   createdBy: string;
   updatedBy?: string;
@@ -788,4 +845,77 @@ export interface DatabaseProvider {
     windowSeconds: number,
     amount: number,
   ): Promise<{ count: number; resetAt: Date }>;
+
+  // Guardrail operations (tenant-specific)
+  createGuardrail(
+    guardrail: Omit<IGuardrail, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IGuardrail>;
+  updateGuardrail(
+    id: string,
+    data: Partial<Omit<IGuardrail, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IGuardrail | null>;
+  deleteGuardrail(id: string): Promise<boolean>;
+  findGuardrailById(id: string): Promise<IGuardrail | null>;
+  findGuardrailByKey(key: string, projectId?: string): Promise<IGuardrail | null>;
+  listGuardrails(filters?: {
+    projectId?: string;
+    type?: GuardrailType;
+    enabled?: boolean;
+    search?: string;
+  }): Promise<IGuardrail[]>;
+
+  // ── Guardrail evaluation logs ──
+  listGuardrailEvaluationLogs(
+    guardrailId: string,
+    options?: { limit?: number; skip?: number; from?: Date; to?: Date; passed?: boolean },
+  ): Promise<IGuardrailEvaluationLog[]>;
+  aggregateGuardrailEvaluations(
+    guardrailId: string,
+    options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month' },
+  ): Promise<IGuardrailEvalAggregate>;
+}
+
+export interface IGuardrailEvaluationLog {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  guardrailId: string;
+  guardrailKey: string;
+  guardrailName: string;
+  guardrailType: GuardrailType;
+  target: GuardrailTarget;
+  action: GuardrailAction;
+  passed: boolean;
+  findings: Array<{
+    type: string;
+    category: string;
+    severity: 'low' | 'medium' | 'high';
+    message: string;
+    action: string;
+    block: boolean;
+    value?: string;
+  }>;
+  inputText?: string;
+  latencyMs?: number;
+  source?: string;
+  requestId?: string;
+  message?: string | null;
+  createdAt?: Date;
+}
+
+export interface IGuardrailEvalAggregate {
+  guardrailId: string;
+  totalEvaluations: number;
+  passedCount: number;
+  failedCount: number;
+  passRate: number;
+  avgLatencyMs: number | null;
+  findingsByType: Record<string, number>;
+  findingsBySeverity: Record<string, number>;
+  timeseries?: Array<{
+    period: string;
+    total: number;
+    passed: number;
+    failed: number;
+  }>;
 }

@@ -22,6 +22,7 @@ import {
   IconLayoutGrid,
   IconSearch,
   IconSettings,
+  IconShield,
   IconSparkles,
   IconTimeline,
   IconVectorBezier,
@@ -102,6 +103,15 @@ export default function DashboardPage() {
         icon: IconServerBolt,
         category: 'operate',
         tags: ['vllm', 'gpu', 'inference', 'monitoring'],
+      },
+      {
+        id: 'guardrails',
+        title: t('modules.guardrails.title'),
+        description: t('modules.guardrails.description'),
+        href: '/dashboard/guardrails',
+        icon: IconShield,
+        category: 'operate',
+        tags: ['safety', 'pii', 'moderation', 'prompt injection'],
       },
       {
         id: 'projects',

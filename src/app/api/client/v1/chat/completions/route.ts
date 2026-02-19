@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
-import { handleChatCompletion } from '@/lib/services/models/inferenceService';
+import { handleChatCompletion, GuardrailBlockError } from '@/lib/services/models/inferenceService';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { calculateCost, logModelUsage } from '@/lib/services/models/usageLogger';
 import { checkBudget, checkPerRequestLimits, checkRateLimit } from '@/lib/quota/quotaGuard';
@@ -230,6 +230,22 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ ...result.response, request_id: result.requestId }, { status: 200 });
   } catch (error: unknown) {
     console.error('Chat completion error', error);
+
+    // Guardrail block — return 400 with details
+    if (error instanceof GuardrailBlockError) {
+      return NextResponse.json(
+        {
+          error: {
+            message: error.message,
+            type: 'guardrail_block',
+            guardrail_key: error.guardrailKey,
+            action: error.action,
+            findings: error.findings,
+          },
+        },
+        { status: 400 },
+      );
+    }
 
     try {
       const model = await getModelByKey(auth.tenantDbName, modelKey, auth.projectId);

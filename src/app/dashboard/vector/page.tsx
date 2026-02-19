@@ -10,6 +10,7 @@ import {
   Group,
   Loader,
   Paper,
+  Progress,
   Stack,
   Table,
   Text,
@@ -19,10 +20,38 @@ import {
   Box,
 } from '@mantine/core';
 import PageHeader from '@/components/layout/PageHeader';
+import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
 import { notifications } from '@mantine/notifications';
-import { IconPlus, IconRefresh, IconTrash, IconDatabase, IconServer, IconChartDots3, IconArrowRight, IconSparkles } from '@tabler/icons-react';
+import { IconPlus, IconRefresh, IconTrash, IconDatabase, IconServer, IconChartDots3, IconArrowRight, IconSparkles, IconChartBar, IconGitBranch } from '@tabler/icons-react';
 import type { VectorIndexRecord, VectorProviderView } from '@/lib/services/vector';
 import CreateVectorIndexModal from '@/components/vector/CreateVectorIndexModal';
+import {
+  buildDashboardDateSearchParams,
+  defaultDashboardDateFilter,
+} from '@/lib/utils/dashboardDateFilter';
+
+interface VectorDashboardData {
+  overview: {
+    totalProviders: number;
+    activeProviders: number;
+    disabledProviders: number;
+    erroredProviders: number;
+    totalIndexes: number;
+  };
+  providerBreakdown: Array<{ key: string; label: string; driver: string; status: string; indexCount: number }>;
+  dimensionDistribution: Array<{ dimension: number; count: number }>;
+  metricDistribution: Array<{ metric: string; count: number }>;
+  recentIndexes: Array<{ key: string; name: string; providerKey: string; dimension: number; metric: string; createdAt?: string }>;
+}
+
+function statusColor(status: string): string {
+  switch (status) {
+    case 'active': return 'teal';
+    case 'disabled': return 'gray';
+    case 'errored': return 'red';
+    default: return 'gray';
+  }
+}
 
 interface VectorIndexRow {
   provider: VectorProviderView;
@@ -44,6 +73,24 @@ export default function VectorIndexPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [dashboardData, setDashboardData] = useState<VectorDashboardData | null>(null);
+  const [dashboardLoading, setDashboardLoading] = useState(true);
+  const [dateFilter, setDateFilter] = useState(defaultDashboardDateFilter);
+
+  const loadDashboard = useCallback(async () => {
+    setDashboardLoading(true);
+    try {
+      const params = buildDashboardDateSearchParams(dateFilter);
+      const res = await fetch(`/api/vector/dashboard?${params.toString()}`, { cache: 'no-store' });
+      if (res.ok) {
+        setDashboardData(await res.json() as VectorDashboardData);
+      }
+    } catch (err) {
+      console.error('Failed to load vector dashboard', err);
+    } finally {
+      setDashboardLoading(false);
+    }
+  }, [dateFilter]);
 
   const loadProvidersAndIndexes = useCallback(async () => {
     setRefreshing(true);
@@ -103,7 +150,8 @@ export default function VectorIndexPage() {
 
   useEffect(() => {
     void loadProvidersAndIndexes();
-  }, [loadProvidersAndIndexes]);
+    void loadDashboard();
+  }, [loadProvidersAndIndexes, loadDashboard]);
 
   const rows = useMemo<VectorIndexRow[]>(() => {
     return providers.flatMap((provider) => {
@@ -154,10 +202,6 @@ export default function VectorIndexPage() {
   router.push(`/dashboard/vector/${provider.key}/${index.key}`);
   };
 
-  const totalDimensions = useMemo(() => {
-    return rows.reduce((sum, row) => sum + (row.index.dimension || 0), 0);
-  }, [rows]);
-
   return (
     <Stack gap="md">
       {/* Header */}
@@ -167,6 +211,7 @@ export default function VectorIndexPage() {
         subtitle="Manage vector indexes across providers, inspect recent items, and launch queries."
         actions={
           <>
+            <DashboardDateFilter value={dateFilter} onChange={setDateFilter} />
             <Button
               variant="light"
               size="xs"
@@ -196,7 +241,7 @@ export default function VectorIndexPage() {
                 Total Indexes
               </Text>
               <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }}>
-                {rows.length}
+                {dashboardData?.overview.totalIndexes ?? rows.length}
               </Text>
             </Stack>
             <ThemeIcon size={48} radius="xl" variant="light" color="teal">
@@ -211,7 +256,7 @@ export default function VectorIndexPage() {
                 Providers
               </Text>
               <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="teal">
-                {providers.length}
+                {dashboardData?.overview.totalProviders ?? providers.length}
               </Text>
             </Stack>
             <ThemeIcon size={48} radius="xl" variant="light" color="teal">
@@ -226,7 +271,7 @@ export default function VectorIndexPage() {
                 Active Providers
               </Text>
               <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="green">
-                {providers.filter(p => p.status === 'active').length}
+                {dashboardData?.overview.activeProviders ?? providers.filter((p) => p.status === 'active').length}
               </Text>
             </Stack>
             <ThemeIcon size={48} radius="xl" variant="light" color="green">
@@ -238,18 +283,147 @@ export default function VectorIndexPage() {
           <Group justify="space-between">
             <Stack gap={4}>
               <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
-                Avg. Dimensions
+                Errored Providers
               </Text>
-              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="orange">
-                {rows.length > 0 ? Math.round(totalDimensions / rows.length) : 0}
+              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c={(dashboardData?.overview.erroredProviders ?? 0) > 0 ? 'red' : 'teal'}>
+                {dashboardData?.overview.erroredProviders ?? providers.filter((p) => p.status === 'errored').length}
               </Text>
             </Stack>
-            <ThemeIcon size={48} radius="xl" variant="light" color="orange">
+            <ThemeIcon size={48} radius="xl" variant="light" color={(dashboardData?.overview.erroredProviders ?? 0) > 0 ? 'red' : 'teal'}>
               <IconChartDots3 size={24} />
             </ThemeIcon>
           </Group>
         </Paper>
       </SimpleGrid>
+
+      {/* Vector Analytics Dashboard */}
+      <Paper p="lg" radius="lg" withBorder>
+        <Group justify="space-between" mb="lg">
+          <Group gap="sm">
+            <ThemeIcon size={32} radius="md" variant="light" color="teal">
+              <IconChartBar size={16} />
+            </ThemeIcon>
+            <div>
+              <Text fw={600} size="lg">Vector Analytics</Text>
+              <Text size="sm" c="dimmed">Provider health and index distribution</Text>
+            </div>
+          </Group>
+          <Button variant="subtle" size="xs" leftSection={<IconRefresh size={14} />}
+            loading={dashboardLoading} onClick={() => void loadDashboard()}>
+            Refresh
+          </Button>
+        </Group>
+
+        {dashboardLoading && !dashboardData ? (
+          <Center py="xl"><Loader size="sm" color="teal" /></Center>
+        ) : (
+          <SimpleGrid cols={{ base: 1, md: 3 }} spacing="md">
+            {/* Provider Breakdown */}
+            <Paper withBorder p="md" radius="md">
+              <Group gap="sm" mb="md">
+                <ThemeIcon size={28} radius="md" variant="light" color="teal">
+                  <IconServer size={14} />
+                </ThemeIcon>
+                <Text fw={600} size="sm">Provider Breakdown</Text>
+              </Group>
+              <Stack gap={8}>
+                {(dashboardData?.providerBreakdown ?? []).length === 0 ? (
+                  <Text size="sm" c="dimmed">No providers configured</Text>
+                ) : (
+                  (dashboardData?.providerBreakdown ?? []).map((item) => {
+                    const maxCount = Math.max(...(dashboardData?.providerBreakdown ?? []).map((p) => p.indexCount), 1);
+                    return (
+                      <Stack gap={4} key={item.key}>
+                        <Group justify="space-between">
+                          <Group gap={6}>
+                            <Badge size="xs" variant="light" radius="xl"
+                              color={statusColor(item.status)}>
+                              {item.status.toUpperCase()}
+                            </Badge>
+                            <Text size="xs" fw={500} lineClamp={1}>{item.label}</Text>
+                          </Group>
+                          <Badge size="xs" variant="light" color="teal">{item.indexCount} idx</Badge>
+                        </Group>
+                        <Progress value={(item.indexCount / maxCount) * 100} size="xs" color="teal" radius="xl" />
+                      </Stack>
+                    );
+                  })
+                )}
+              </Stack>
+            </Paper>
+
+            {/* Dimension Distribution */}
+            <Paper withBorder p="md" radius="md">
+              <Group gap="sm" mb="md">
+                <ThemeIcon size={28} radius="md" variant="light" color="violet">
+                  <IconChartDots3 size={14} />
+                </ThemeIcon>
+                <Text fw={600} size="sm">Dimension Distribution</Text>
+              </Group>
+              <Stack gap={8}>
+                {(dashboardData?.dimensionDistribution ?? []).length === 0 ? (
+                  <Text size="sm" c="dimmed">No indexes yet</Text>
+                ) : (
+                  (dashboardData?.dimensionDistribution ?? []).map((item) => (
+                    <Group key={item.dimension} justify="space-between">
+                      <Text size="sm" ff="monospace">{item.dimension}d</Text>
+                      <Group gap={6}>
+                        <Badge size="sm" variant="light" color="violet">{item.count}</Badge>
+                        <Text size="xs" c="dimmed">index{item.count !== 1 ? 'es' : ''}</Text>
+                      </Group>
+                    </Group>
+                  ))
+                )}
+              </Stack>
+            </Paper>
+
+            {/* Metric Distribution + Recent Indexes */}
+            <Stack gap="md">
+              <Paper withBorder p="md" radius="md">
+                <Group gap="sm" mb="md">
+                  <ThemeIcon size={28} radius="md" variant="light" color="orange">
+                    <IconGitBranch size={14} />
+                  </ThemeIcon>
+                  <Text fw={600} size="sm">Similarity Metrics</Text>
+                </Group>
+                <Stack gap={8}>
+                  {(dashboardData?.metricDistribution ?? []).length === 0 ? (
+                    <Text size="sm" c="dimmed">No data</Text>
+                  ) : (
+                    (dashboardData?.metricDistribution ?? []).map((item) => (
+                      <Group key={item.metric} justify="space-between">
+                        <Badge size="sm" variant="light" color="orange">{item.metric}</Badge>
+                        <Text size="sm" fw={500}>{item.count}</Text>
+                      </Group>
+                    ))
+                  )}
+                </Stack>
+              </Paper>
+
+              <Paper withBorder p="md" radius="md">
+                <Group gap="sm" mb="md">
+                  <ThemeIcon size={28} radius="md" variant="light" color="cyan">
+                    <IconSparkles size={14} />
+                  </ThemeIcon>
+                  <Text fw={600} size="sm">Recently Created</Text>
+                </Group>
+                <Stack gap={6}>
+                  {(dashboardData?.recentIndexes ?? []).length === 0 ? (
+                    <Text size="sm" c="dimmed">No indexes yet</Text>
+                  ) : (
+                    (dashboardData?.recentIndexes ?? []).slice(0, 4).map((idx) => (
+                      <Group key={idx.key} justify="space-between">
+                        <Text size="xs" fw={500} lineClamp={1}>{idx.name}</Text>
+                        <Badge size="xs" variant="dot" color="teal">{idx.dimension}d</Badge>
+                      </Group>
+                    ))
+                  )}
+                </Stack>
+              </Paper>
+            </Stack>
+          </SimpleGrid>
+        )}
+      </Paper>
 
       {/* Indexes Table */}
       <Paper p="lg" radius="lg" withBorder>

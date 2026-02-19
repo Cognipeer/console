@@ -119,6 +119,16 @@
         "/api/inference-monitoring",
         "/api/inference-monitoring/*"
       ]
+    },
+    "GUARDRAILS": {
+      "name": "Guardrails",
+      "description": "Create and manage content safety guardrails",
+      "endpoints": [
+        "/api/guardrails",
+        "/api/guardrails/*",
+        "/api/client/v1/guardrails",
+        "/api/client/v1/guardrails/*"
+      ]
     }
   },
   "licenses": {
@@ -136,6 +146,7 @@
         "FILES",
         "QUOTA_MANAGEMENT",
         "INFERENCE_MONITORING",
+        "GUARDRAILS",
         "DASHBOARD"
       ],
       "limits": {
@@ -171,7 +182,8 @@
         "PROMPTS",
         "ANALYTICS",
         "QUOTA_MANAGEMENT",
-        "INFERENCE_MONITORING"
+        "INFERENCE_MONITORING",
+        "GUARDRAILS"
       ],
       "limits": {
         "requestsPerMonth": 100000,
@@ -182,17 +194,22 @@
       "name": "Enterprise Plan",
       "features": [
         "USER_MANAGEMENT",
+        "PROJECT_MANAGEMENT",
         "LLM_CHAT",
         "LLM_EMBEDDINGS",
         "AGENT_ORCHESTRATION",
         "AGENT_TRACING",
+        "MODEL_MANAGEMENT",
         "VECTOR_STORE",
+        "FILES",
         "WORKFLOW_AUTOMATION",
         "ANALYTICS",
         "API_KEYS",
         "PROMPTS",
         "QUOTA_MANAGEMENT",
-        "INFERENCE_MONITORING"
+        "INFERENCE_MONITORING",
+        "GUARDRAILS",
+        "DASHBOARD"
       ],
       "limits": {
         "requestsPerMonth": -1,
@@ -203,17 +220,22 @@
       "name": "On-Premise",
       "features": [
         "USER_MANAGEMENT",
+        "PROJECT_MANAGEMENT",
         "LLM_CHAT",
         "LLM_EMBEDDINGS",
         "AGENT_ORCHESTRATION",
         "AGENT_TRACING",
+        "MODEL_MANAGEMENT",
         "VECTOR_STORE",
+        "FILES",
         "WORKFLOW_AUTOMATION",
         "ANALYTICS",
         "API_KEYS",
         "PROMPTS",
         "QUOTA_MANAGEMENT",
-        "INFERENCE_MONITORING"
+        "INFERENCE_MONITORING",
+        "GUARDRAILS",
+        "DASHBOARD"
       ],
       "limits": {
         "requestsPerMonth": -1,

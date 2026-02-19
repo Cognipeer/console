@@ -25,6 +25,7 @@ export const en = {
     servicesHome: 'Services Home',
     servicesHomeDescription: 'Browse every available module',
     models: 'Models',
+    modelsDescription: 'Providers and pricing',
     agentTracing: 'Agent Tracing',
     agentTracingDescription: 'Monitor sessions and runs',
     vector: 'Vector Indexes',
@@ -40,6 +41,8 @@ export const en = {
     docs: 'Docs',
     inferenceMonitoring: 'Inference Monitoring',
     inferenceMonitoringDescription: 'Monitor vLLM and inference servers',
+    guardrails: 'Guardrails',
+    guardrailsDescription: 'Safety policies for AI services',
   },
   notifications: {
     logoutSuccessTitle: 'Logged Out',
@@ -77,6 +80,7 @@ export const en = {
     docs: 'Docs',
     'inference-monitoring': 'Inference Monitoring',
     servers: 'Servers',
+    guardrails: 'Guardrails',
   },
   validation: {
     invalidEmail: 'Invalid email',
@@ -617,6 +621,10 @@ export const en = {
       inferenceMonitoring: {
         title: 'Inference Monitoring',
         description: 'Monitor inference server health and performance.',
+      },
+      guardrails: {
+        title: 'Guardrails',
+        description: 'Define safety policies against PII, harmful content, and prompt injection.',
       },
     },
   },

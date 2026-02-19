@@ -18,6 +18,7 @@ import {
   ThemeIcon,
 } from '@mantine/core';
 import PageHeader from '@/components/layout/PageHeader';
+import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
 import {
   IconActivity,
   IconArrowUpRight,
@@ -30,6 +31,10 @@ import {
 } from '@tabler/icons-react';
 import { DataTable } from 'mantine-datatable';
 import { useTranslations } from '@/lib/i18n';
+import {
+  buildDashboardDateSearchParams,
+  defaultDashboardDateFilter,
+} from '@/lib/utils/dashboardDateFilter';
 
 interface DashboardStats {
   models: { total: number; llm: number; embedding: number };
@@ -58,11 +63,13 @@ export default function DashboardOverviewPage() {
   const t = useTranslations('dashboardOverview');
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [dateFilter, setDateFilter] = useState(defaultDashboardDateFilter);
 
   const fetchDashboard = useCallback(async () => {
     try {
       setLoading(true);
-      const res = await fetch('/api/dashboard', { cache: 'no-store' });
+      const params = buildDashboardDateSearchParams(dateFilter);
+      const res = await fetch(`/api/dashboard?${params.toString()}`, { cache: 'no-store' });
       if (res.ok) {
         const json = await res.json();
         setData(json);
@@ -72,7 +79,7 @@ export default function DashboardOverviewPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [dateFilter]);
 
   useEffect(() => {
     fetchDashboard();
@@ -143,6 +150,12 @@ export default function DashboardOverviewPage() {
         icon={<IconActivity size={18} />}
         title={t('title')}
         subtitle={t('subtitle')}
+        actions={
+          <DashboardDateFilter
+            value={dateFilter}
+            onChange={setDateFilter}
+          />
+        }
       />
 
       {loading ? (

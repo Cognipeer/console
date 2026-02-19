@@ -92,7 +92,7 @@ export function QuotaPolicyCard({ policy, onEdit, onDelete, showDomain = true, c
                 </Badge>
               </Tooltip>
               {showDomain && (
-                <Badge variant="outline" size="xs" color="grape">
+                <Badge variant="light" size="xs" color="grape">
                   {tDomains(domain)}
                 </Badge>
               )}

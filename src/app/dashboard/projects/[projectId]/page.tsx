@@ -4,7 +4,8 @@ import { use, useEffect, useMemo, useState } from 'react';
 import { Button, Paper, Stack, Tabs, Text } from '@mantine/core';
 import PageHeader from '@/components/layout/PageHeader';
 import { notifications } from '@mantine/notifications';
-import { IconRefresh, IconUsers } from '@tabler/icons-react';
+import { IconArrowLeft, IconRefresh, IconUsers } from '@tabler/icons-react';
+import { useRouter } from 'next/navigation';
 import ProjectMembersManager from '@/components/projects/ProjectMembersManager';
 import ProjectProvidersManager from '@/components/projects/ProjectProvidersManager';
 import TokenManagement from '@/components/settings/TokenManagement';
@@ -18,6 +19,7 @@ type Project = {
 
 export default function ProjectDetailPage({ params }: { params: Promise<{ projectId: string }> }) {
   const { projectId } = use(params);
+  const router = useRouter();
   const [activeTab, setActiveTab] = useState<string | null>('users');
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | undefined>(undefined);
@@ -88,15 +90,25 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ projec
         title={currentProject?.name ?? 'Project'}
         subtitle="Project settings and access control."
         actions={
-          <Button
-            variant="light"
-            size="xs"
-            leftSection={<IconRefresh size={14} />}
-            onClick={() => void fetchProjects()}
-            loading={loading}
-          >
-            Refresh
-          </Button>
+          <>
+            <Button
+              variant="default"
+              size="xs"
+              leftSection={<IconArrowLeft size={14} />}
+              onClick={() => router.push('/dashboard/projects')}
+            >
+              Back
+            </Button>
+            <Button
+              variant="light"
+              size="xs"
+              leftSection={<IconRefresh size={14} />}
+              onClick={() => void fetchProjects()}
+              loading={loading}
+            >
+              Refresh
+            </Button>
+          </>
         }
       />
 

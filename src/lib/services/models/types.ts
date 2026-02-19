@@ -33,6 +33,8 @@ export interface UpdateModelInput {
   isMultimodal?: boolean;
   supportsToolCalls?: boolean;
   semanticCache?: ISemanticCacheConfig;
+  inputGuardrailKey?: string;
+  outputGuardrailKey?: string;
   metadata?: Record<string, unknown>;
 }
 

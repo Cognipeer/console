@@ -3,7 +3,7 @@ import bcrypt from 'bcryptjs';
 import { getDatabase, ITenant } from '@/lib/database';
 import { TokenManager } from '@/lib/license/token-manager';
 import { LicenseType } from '@/lib/license/license-manager';
-import { ensureDefaultProject } from '@/lib/services/projects/projectService';
+import { ensureDefaultProject, DEFAULT_PROJECT_KEY } from '@/lib/services/projects/projectService';
 
 export async function POST(request: NextRequest) {
   try {
@@ -164,8 +164,17 @@ export async function POST(request: NextRequest) {
       if (!activeProjectId || !allowed.includes(activeProjectId)) {
         activeProjectId = allowed[0];
       }
-    } else if (!activeProjectId && defaultProjectId) {
-      activeProjectId = defaultProjectId;
+    } else if (!activeProjectId) {
+      // Admin / owner: prefer the first non-default project if one exists.
+      // This ensures demo and multi-project tenants land on a meaningful project
+      // rather than the auto-created "default" placeholder.
+      const allProjects = await db.listProjects(tenantIdStr);
+      const preferred = allProjects.find(
+        (p) => p.key !== DEFAULT_PROJECT_KEY && String(p._id) !== defaultProjectId,
+      );
+      activeProjectId = preferred
+        ? (typeof preferred._id === 'string' ? preferred._id : preferred._id?.toString())
+        : defaultProjectId;
     }
 
     const token = await TokenManager.generateToken({
@@ -194,7 +203,9 @@ export async function POST(request: NextRequest) {
     const response = NextResponse.json(
       {
         message: 'Login successful',
-        mustChangePassword: Boolean(user.mustChangePassword),
+        // Demo accounts should never force a password change
+        mustChangePassword: tenant.isDemo ? false : Boolean(user.mustChangePassword),
+        isDemo: Boolean(tenant.isDemo),
         user: {
           id: user._id,
           email: user.email,
@@ -207,6 +218,7 @@ export async function POST(request: NextRequest) {
           id: tenant._id,
           companyName: tenant.companyName,
           slug: tenant.slug,
+          isDemo: Boolean(tenant.isDemo),
         },
       },
       { status: 200 },

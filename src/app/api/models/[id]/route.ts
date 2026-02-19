@@ -145,6 +145,8 @@ export async function PUT(
     if (body.supportsToolCalls !== undefined)
       updates.supportsToolCalls = body.supportsToolCalls;
     if (body.semanticCache !== undefined) updates.semanticCache = body.semanticCache;
+    if (body.inputGuardrailKey !== undefined) updates.inputGuardrailKey = (body.inputGuardrailKey as string) || undefined;
+    if (body.outputGuardrailKey !== undefined) updates.outputGuardrailKey = (body.outputGuardrailKey as string) || undefined;
     if (body.metadata !== undefined) updates.metadata = body.metadata;
 
       if (body.settings && typeof body.settings === 'object') {

@@ -9,9 +9,18 @@ export async function POST(request: NextRequest) {
     const tenantDbName = request.headers.get('x-tenant-db-name');
     const tenantId = request.headers.get('x-tenant-id');
     const userId = request.headers.get('x-user-id');
+    const tenantSlug = request.headers.get('x-tenant-slug');
 
     if (!tenantDbName || !tenantId || !userId) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    // Demo account is read-only — password changes are not allowed
+    if (tenantSlug === 'demo') {
+      return NextResponse.json(
+        { error: 'Password changes are not allowed for the demo account.' },
+        { status: 403 },
+      );
     }
 
     const body = (await request.json()) as { currentPassword?: string; newPassword?: string };

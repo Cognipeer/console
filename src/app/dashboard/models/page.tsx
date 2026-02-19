@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
@@ -8,10 +8,12 @@ import {
   Badge,
   Button,
   Center,
+  Divider,
   Group,
   Loader,
   Menu,
   Paper,
+  Progress,
   SimpleGrid,
   Stack,
   Table,
@@ -20,11 +22,76 @@ import {
   Tooltip,
 } from '@mantine/core';
 import PageHeader from '@/components/layout/PageHeader';
-import { IconChartBar, IconEdit, IconEye, IconPlug, IconPlus, IconRefresh, IconTool, IconSparkles, IconBrain, IconCpu } from '@tabler/icons-react';
+import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
+import { IconActivity, IconAlertTriangle, IconChartBar, IconEdit, IconEye, IconPlug, IconPlus, IconRefresh, IconTool, IconSparkles, IconBrain, IconCpu, IconTimeline, IconCoins, IconBolt, IconShield } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import type { ModelProviderView } from '@/lib/services/models/types';
 import CreateModelModal from '@/components/models/CreateModelModal';
+import ModelGuardrailModal from '@/components/models/ModelGuardrailModal';
 import type { IModel } from '@/lib/database';
+import dayjs from 'dayjs';
+import {
+  buildDashboardDateSearchParams,
+  defaultDashboardDateFilter,
+} from '@/lib/utils/dashboardDateFilter';
+
+interface ModelsDashboardOverview {
+  totalModels: number;
+  llmCount: number;
+  embeddingCount: number;
+  providerCount: number;
+  totalCalls: number;
+  successCalls: number;
+  errorCalls: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalTokens: number;
+  totalToolCalls: number;
+  cacheHits: number;
+  cacheHitRate: number;
+  avgLatencyMs: number | null;
+  totalCost: number;
+  currency: string;
+  errorRate: number;
+}
+
+interface ModelTopEntry {
+  key: string;
+  name: string;
+  category: 'llm' | 'embedding';
+  callCount: number;
+  totalTokens: number;
+  totalCost: number;
+  errorRate: number;
+  avgLatencyMs: number | null;
+}
+
+interface DailyEntry {
+  period: string;
+  callCount: number;
+  totalTokens: number;
+}
+
+interface ModelsDashboardData {
+  overview: ModelsDashboardOverview;
+  topModels: ModelTopEntry[];
+  daily: DailyEntry[];
+}
+
+function fmtNum(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
+}
+
+function fmtPct(rate: number): string {
+  return `${(rate * 100).toFixed(1)}%`;
+}
+
+function fmtCost(cost: number, currency = 'USD'): string {
+  if (cost === 0) return '—';
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency, minimumFractionDigits: 4, maximumFractionDigits: 4 }).format(cost);
+}
 
 interface ModelPricing {
   currency?: string;
@@ -55,7 +122,11 @@ export default function ModelsPage() {
   const [models, setModels] = useState<ModelDto[]>([]);
   const [providers, setProviders] = useState<ModelProviderView[]>([]);
   const [loading, setLoading] = useState(true);
+  const [dashboardData, setDashboardData] = useState<ModelsDashboardData | null>(null);
+  const [dashboardLoading, setDashboardLoading] = useState(true);
   const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [guardrailModel, setGuardrailModel] = useState<ModelDto | null>(null);
+  const [dateFilter, setDateFilter] = useState(defaultDashboardDateFilter);
   const t = useTranslations('models');
   const tNav = useTranslations('navigation');
   const router = useRouter();
@@ -77,9 +148,26 @@ export default function ModelsPage() {
     }
   };
 
+  const loadDashboard = useCallback(async () => {
+    setDashboardLoading(true);
+    try {
+      const params = buildDashboardDateSearchParams(dateFilter);
+      const res = await fetch(`/api/models/dashboard?${params.toString()}`, { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json() as ModelsDashboardData;
+        setDashboardData(data);
+      }
+    } catch (err) {
+      console.error('Failed to load models dashboard', err);
+    } finally {
+      setDashboardLoading(false);
+    }
+  }, [dateFilter]);
+
   useEffect(() => {
-    loadModels();
-  }, []);
+    void loadModels();
+    void loadDashboard();
+  }, [loadDashboard]);
 
   const openCreateModal = () => {
     setCreateModalOpen(true);
@@ -277,6 +365,16 @@ export default function ModelsPage() {
                       >
                         {t('actions.edit')}
                       </Menu.Item>
+                      <Menu.Divider />
+                      <Menu.Item
+                        leftSection={<IconShield size={14} />}
+                        onClick={(e: React.MouseEvent) => {
+                          e.stopPropagation();
+                          setGuardrailModel(model);
+                        }}
+                      >
+                        Guardrail Settings
+                      </Menu.Item>
                     </Menu.Dropdown>
                   </Menu>
                 </Center>
@@ -302,7 +400,16 @@ export default function ModelsPage() {
         subtitle={t('list.subtitle')}
         actions={
           <>
-            <Button variant="light" size="xs" leftSection={<IconRefresh size={14} />} onClick={loadModels}>
+            <DashboardDateFilter value={dateFilter} onChange={setDateFilter} />
+            <Button
+              variant="light"
+              size="xs"
+              leftSection={<IconRefresh size={14} />}
+              onClick={() => {
+                void loadModels();
+                void loadDashboard();
+              }}
+            >
               {t('actions.refresh')}
             </Button>
             <Button
@@ -325,7 +432,7 @@ export default function ModelsPage() {
                 {t('metrics.totalModels')}
               </Text>
               <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }}>
-                {models.length}
+                {dashboardData?.overview.totalModels ?? models.length}
               </Text>
             </Stack>
             <ThemeIcon size={48} radius="xl" variant="light" color="gray">
@@ -340,7 +447,7 @@ export default function ModelsPage() {
                 {t('metrics.llmModels')}
               </Text>
               <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="teal">
-                {llmModels.length}
+                {dashboardData?.overview.llmCount ?? llmModels.length}
               </Text>
             </Stack>
             <ThemeIcon size={48} radius="xl" variant="light" color="teal">
@@ -355,7 +462,7 @@ export default function ModelsPage() {
                 {t('metrics.embeddingModels')}
               </Text>
               <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="cyan">
-                {embeddingModels.length}
+                {dashboardData?.overview.embeddingCount ?? embeddingModels.length}
               </Text>
             </Stack>
             <ThemeIcon size={48} radius="xl" variant="light" color="cyan">
@@ -370,7 +477,7 @@ export default function ModelsPage() {
                 {t('metrics.providers')}
               </Text>
               <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="teal">
-                {providers.length}
+                {dashboardData?.overview.providerCount ?? providers.length}
               </Text>
             </Stack>
             <ThemeIcon size={48} radius="xl" variant="light" color="teal">
@@ -379,6 +486,208 @@ export default function ModelsPage() {
           </Group>
         </Paper>
       </SimpleGrid>
+
+      {/* Usage Analytics Dashboard */}
+      <Paper p="lg" radius="lg" withBorder>
+        <Group justify="space-between" mb="lg">
+          <div>
+            <Group gap="sm">
+              <ThemeIcon size={32} radius="md" variant="light" color="teal">
+                <IconActivity size={16} />
+              </ThemeIcon>
+              <div>
+                <Text fw={600} size="lg">Usage Analytics</Text>
+                <Text size="sm" c="dimmed">Aggregate usage across all models</Text>
+              </div>
+            </Group>
+          </div>
+          <Button
+            variant="subtle"
+            size="xs"
+            leftSection={<IconRefresh size={14} />}
+            loading={dashboardLoading}
+            onClick={() => void loadDashboard()}
+          >
+            Refresh
+          </Button>
+        </Group>
+
+        {dashboardLoading && !dashboardData ? (
+          <Center py="xl">
+            <Loader size="sm" color="teal" />
+          </Center>
+        ) : (
+          <Stack gap="md">
+            {/* Usage stat cards */}
+            <SimpleGrid cols={{ base: 2, sm: 4 }}>
+              <Paper withBorder radius="md" p="md">
+                <Group gap="sm">
+                  <ThemeIcon size={36} radius="md" variant="light" color="blue">
+                    <IconActivity size={18} />
+                  </ThemeIcon>
+                  <Stack gap={2}>
+                    <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.4px' }}>Total Calls</Text>
+                    <Text fw={700} size="lg">{fmtNum(dashboardData?.overview.totalCalls ?? 0)}</Text>
+                    <Text size="xs" c={((dashboardData?.overview.errorRate ?? 0) > 0.05) ? 'red' : 'dimmed'}>
+                      {fmtPct(dashboardData?.overview.errorRate ?? 0)} error rate
+                    </Text>
+                  </Stack>
+                </Group>
+              </Paper>
+              <Paper withBorder radius="md" p="md">
+                <Group gap="sm">
+                  <ThemeIcon size={36} radius="md" variant="light" color="violet">
+                    <IconCpu size={18} />
+                  </ThemeIcon>
+                  <Stack gap={2}>
+                    <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.4px' }}>Total Tokens</Text>
+                    <Text fw={700} size="lg">{fmtNum(dashboardData?.overview.totalTokens ?? 0)}</Text>
+                    <Text size="xs" c="dimmed">
+                      in: {fmtNum(dashboardData?.overview.totalInputTokens ?? 0)} / out: {fmtNum(dashboardData?.overview.totalOutputTokens ?? 0)}
+                    </Text>
+                  </Stack>
+                </Group>
+              </Paper>
+              <Paper withBorder radius="md" p="md">
+                <Group gap="sm">
+                  <ThemeIcon size={36} radius="md" variant="light" color="teal">
+                    <IconBolt size={18} />
+                  </ThemeIcon>
+                  <Stack gap={2}>
+                    <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.4px' }}>Avg Latency</Text>
+                    <Text fw={700} size="lg">
+                      {dashboardData?.overview.avgLatencyMs != null
+                        ? `${dashboardData.overview.avgLatencyMs}ms`
+                        : '—'}
+                    </Text>
+                    <Text size="xs" c="dimmed">
+                      {fmtNum(dashboardData?.overview.cacheHits ?? 0)} cache hits ({fmtPct(dashboardData?.overview.cacheHitRate ?? 0)})
+                    </Text>
+                  </Stack>
+                </Group>
+              </Paper>
+              <Paper withBorder radius="md" p="md">
+                <Group gap="sm">
+                  <ThemeIcon size={36} radius="md" variant="light" color="orange">
+                    <IconCoins size={18} />
+                  </ThemeIcon>
+                  <Stack gap={2}>
+                    <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.4px' }}>Total Cost</Text>
+                    <Text fw={700} size="lg">{fmtCost(dashboardData?.overview.totalCost ?? 0, dashboardData?.overview.currency)}</Text>
+                    <Text size="xs" c="dimmed">
+                      {fmtNum(dashboardData?.overview.totalToolCalls ?? 0)} tool calls
+                    </Text>
+                  </Stack>
+                </Group>
+              </Paper>
+            </SimpleGrid>
+
+            <SimpleGrid cols={{ base: 1, md: 2 }} spacing="md">
+              {/* Top Models by Usage */}
+              <Paper withBorder radius="md" p="md">
+                <Group gap="sm" mb="sm">
+                  <ThemeIcon size={28} radius="md" variant="light" color="teal">
+                    <IconChartBar size={14} />
+                  </ThemeIcon>
+                  <Text fw={600} size="sm">Top Models by Calls</Text>
+                </Group>
+                {(dashboardData?.topModels ?? []).length === 0 ? (
+                  <Text size="sm" c="dimmed" ta="center" py="md">No usage data yet</Text>
+                ) : (
+                  <Stack gap={8}>
+                    {(dashboardData?.topModels ?? []).map((item) => {
+                      const maxCalls = Math.max(...(dashboardData?.topModels ?? []).map((m) => m.callCount), 1);
+                      const pct = (item.callCount / maxCalls) * 100;
+                      return (
+                        <Stack gap={4} key={item.key}>
+                          <Group justify="space-between">
+                            <Group gap={6}>
+                              <ThemeIcon size={20} radius="sm" variant="light" color={item.category === 'llm' ? 'blue' : 'violet'}>
+                                {item.category === 'llm' ? <IconBrain size={10} /> : <IconCpu size={10} />}
+                              </ThemeIcon>
+                              <Text size="xs" fw={500} lineClamp={1}>{item.name}</Text>
+                            </Group>
+                            <Badge size="xs" variant="light" color="teal">{fmtNum(item.callCount)} calls</Badge>
+                          </Group>
+                          <Progress value={pct} size="xs" color="teal" radius="xl" />
+                        </Stack>
+                      );
+                    })}
+                  </Stack>
+                )}
+              </Paper>
+
+              {/* Daily Trend */}
+              <Paper withBorder radius="md" p="md">
+                <Group gap="sm" mb="sm">
+                  <ThemeIcon size={28} radius="md" variant="light" color="blue">
+                    <IconTimeline size={14} />
+                  </ThemeIcon>
+                  <Text fw={600} size="sm">Recent Trend (Last 14 Days)</Text>
+                </Group>
+                {(dashboardData?.daily ?? []).length === 0 ? (
+                  <Text size="sm" c="dimmed" ta="center" py="md">No activity recorded</Text>
+                ) : (
+                  <Table verticalSpacing="xs" horizontalSpacing="sm">
+                    <Table.Thead style={{ backgroundColor: 'var(--mantine-color-gray-0)' }}>
+                      <Table.Tr>
+                        <Table.Th style={{ fontWeight: 600, fontSize: '0.75rem' }}>Date</Table.Th>
+                        <Table.Th style={{ fontWeight: 600, fontSize: '0.75rem' }}>Calls</Table.Th>
+                        <Table.Th style={{ fontWeight: 600, fontSize: '0.75rem' }}>Tokens</Table.Th>
+                      </Table.Tr>
+                    </Table.Thead>
+                    <Table.Tbody>
+                      {(dashboardData?.daily ?? []).slice(-7).reverse().map((row) => (
+                        <Table.Tr key={row.period}>
+                          <Table.Td>
+                            <Text size="xs">{dayjs(row.period).format('MMM D')}</Text>
+                          </Table.Td>
+                          <Table.Td>
+                            <Badge size="xs" variant="light" color="teal">{fmtNum(row.callCount)}</Badge>
+                          </Table.Td>
+                          <Table.Td>
+                            <Badge size="xs" variant="light" color="blue">{fmtNum(row.totalTokens)}</Badge>
+                          </Table.Td>
+                        </Table.Tr>
+                      ))}
+                    </Table.Tbody>
+                  </Table>
+                )}
+              </Paper>
+            </SimpleGrid>
+
+            {/* Error Rate Info */}
+            {(dashboardData?.overview.errorRate ?? 0) > 0 && (
+              <Paper withBorder radius="md" p="md">
+                <Group gap="sm" mb="xs">
+                  <ThemeIcon size={28} radius="md" variant="light" color={(dashboardData?.overview.errorRate ?? 0) > 0.1 ? 'red' : 'orange'}>
+                    <IconAlertTriangle size={14} />
+                  </ThemeIcon>
+                  <Text fw={600} size="sm">Error Breakdown</Text>
+                </Group>
+                <Group gap="xl">
+                  <Stack gap={2}>
+                    <Text size="xs" c="dimmed">Success</Text>
+                    <Text fw={600} c="teal">{fmtNum(dashboardData?.overview.successCalls ?? 0)}</Text>
+                  </Stack>
+                  <Divider orientation="vertical" />
+                  <Stack gap={2}>
+                    <Text size="xs" c="dimmed">Error</Text>
+                    <Text fw={600} c="red">{fmtNum(dashboardData?.overview.errorCalls ?? 0)}</Text>
+                  </Stack>
+                  <Divider orientation="vertical" />
+                  <Stack gap={2}>
+                    <Text size="xs" c="dimmed">Error Rate</Text>
+                    <Text fw={600} c={(dashboardData?.overview.errorRate ?? 0) > 0.1 ? 'red' : 'orange'}>
+                      {fmtPct(dashboardData?.overview.errorRate ?? 0)}
+                    </Text>
+                  </Stack>
+                </Group>
+              </Paper>
+            )}
+          </Stack>
+        )}
+      </Paper>
 
       <Stack gap="lg">
         <Paper p="lg" radius="lg" withBorder>
@@ -416,6 +725,20 @@ export default function ModelsPage() {
         providers={providers}
         onCreated={handleModelCreated}
       />
+
+      {guardrailModel && (
+        <ModelGuardrailModal
+          opened={guardrailModel !== null}
+          modelId={guardrailModel._id}
+          modelName={guardrailModel.name}
+          initialInputGuardrailKey={(guardrailModel as ModelDto & { inputGuardrailKey?: string }).inputGuardrailKey}
+          initialOutputGuardrailKey={(guardrailModel as ModelDto & { outputGuardrailKey?: string }).outputGuardrailKey}
+          onClose={() => setGuardrailModel(null)}
+          onSaved={() => {
+            void loadModels();
+          }}
+        />
+      )}
     </Stack>
   );
 }

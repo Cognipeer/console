@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getModelById, listUsageLogs } from '@/lib/services/models/modelService';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
+import { parseDashboardDateFilterFromSearchParams } from '@/lib/utils/dashboardDateFilter';
 
 export const runtime = 'nodejs';
 
@@ -33,10 +34,11 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     }
 
     const { searchParams } = new URL(request.url);
+    const parsedFilter = parseDashboardDateFilterFromSearchParams(searchParams);
     const limit = Math.min(parseInt(searchParams.get('limit') || '50', 10), MAX_LIMIT);
     const skip = parseInt(searchParams.get('skip') || '0', 10);
-    const from = searchParams.get('from');
-    const to = searchParams.get('to');
+    const from = searchParams.get('from') || parsedFilter.from?.toISOString();
+    const to = searchParams.get('to') || parsedFilter.to?.toISOString();
 
     const logs = await listUsageLogs(
       tenantDbName,

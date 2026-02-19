@@ -9,6 +9,7 @@ import "./globals.css";
 import { ColorSchemeScript, MantineProvider } from "@mantine/core";
 import { Notifications } from "@mantine/notifications";
 import { ReactQueryProvider } from "@/components/providers/ReactQueryProvider";
+import LicenseErrorHandler from "@/components/providers/LicenseErrorHandler";
 import { I18nProvider } from "@/lib/i18n";
 import { theme } from "@/theme/theme";
 
@@ -39,6 +40,7 @@ export default function RootLayout({
           <I18nProvider locale="en">
             <ReactQueryProvider>
               <Notifications position="top-right" />
+              <LicenseErrorHandler />
               {children}
             </ReactQueryProvider>
           </I18nProvider>

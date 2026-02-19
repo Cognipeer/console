@@ -8,7 +8,10 @@
     "start": "next start",
     "lint": "eslint",
     "format": "prettier --log-level warn --no-error-on-unmatched-pattern --write ./src/{,*/**/,*/**/**/,*/**/**/**/}*.{js,jsx,ts}",
-    "check-setup": "node scripts/check-setup.js"
+    "check-setup": "node scripts/check-setup.js",
+    "seed:demo": "node --env-file=.env.local scripts/demo/seed.mjs",
+    "seed:demo:reset": "node --env-file=.env.local scripts/demo/seed.mjs --reset",
+    "seed:demo:status": "node --env-file=.env.local scripts/demo/seed.mjs --status"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.901.0",
@@ -21,6 +24,7 @@
     "@langchain/community": "latest",
     "@langchain/google-vertexai": "latest",
     "@langchain/openai": "latest",
+    "@mantine/charts": "^8.3.2",
     "@mantine/core": "^8.3.2",
     "@mantine/dates": "^8.3.2",
     "@mantine/form": "^8.3.2",
@@ -45,6 +49,7 @@
     "postcss-simple-vars": "^7.0.1",
     "react": "19.1.0",
     "react-dom": "19.1.0",
+    "recharts": "^3.7.0",
     "slugify": "^1.6.6"
   },
   "devDependencies": {

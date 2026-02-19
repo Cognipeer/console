@@ -19,12 +19,25 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Email validation
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
-      return NextResponse.json(
-        { error: 'Invalid email format' },
-        { status: 400 },
+  // Block registration with demo account identifiers
+  const DEMO_EMAIL = process.env.DEMO_EMAIL || 'demo@cognipeer.ai';
+  const DEMO_SLUG  = 'demo';
+  if (email.trim().toLowerCase() === DEMO_EMAIL) {
+    return NextResponse.json(
+      { error: 'This email address is reserved for the demo account.' },
+      { status: 409 },
+    );
+  }
+  const candidateSlug = companyName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  if (candidateSlug === DEMO_SLUG) {
+    return NextResponse.json(
+      { error: 'This company name is reserved. Please choose a different name.' },
+      { status: 409 },
+    );
+  }
       );
     }
 
