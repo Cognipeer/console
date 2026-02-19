@@ -26,6 +26,8 @@ export const en = {
     servicesHomeDescription: 'Browse every available module',
     models: 'Models',
     modelsDescription: 'Providers and pricing',
+    prompts: 'Prompts',
+    promptsDescription: 'Templates and reusable instructions',
     agentTracing: 'Agent Tracing',
     agentTracingDescription: 'Monitor sessions and runs',
     vector: 'Vector Indexes',
@@ -635,6 +637,18 @@ export const en = {
       guardrails: {
         title: 'Guardrails',
         description: 'Define safety policies against PII, harmful content, and prompt injection.',
+      },
+      memory: {
+        title: 'Memory',
+        description: 'Manage memory stores with semantic search and retrieval.',
+      },
+      rag: {
+        title: 'RAG',
+        description: 'Build retrieval modules for documents and knowledge bases.',
+      },
+      alerts: {
+        title: 'Alerts',
+        description: 'Set thresholds and monitor incidents across AI services.',
       },
     },
   },

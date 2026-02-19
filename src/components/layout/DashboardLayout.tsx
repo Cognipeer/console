@@ -119,6 +119,12 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
       href: '/dashboard/models',
     },
     {
+      label: tNav('prompts'),
+      description: tNav('promptsDescription'),
+      icon: IconSparkles,
+      href: '/dashboard/prompts',
+    },
+    {
       label: tNav('vector'),
       description: tNav('vectorDescription'),
       icon: IconVectorBezier,

@@ -27,6 +27,9 @@ import {
   IconTimeline,
   IconVectorBezier,
   IconServerBolt,
+  IconBulb,
+  IconBook2,
+  IconBell,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 
@@ -87,6 +90,24 @@ export default function DashboardPage() {
         tags: ['storage', 'uploads'],
       },
       {
+        id: 'memory',
+        title: t('modules.memory.title'),
+        description: t('modules.memory.description'),
+        href: '/dashboard/memory',
+        icon: IconBulb,
+        category: 'data',
+        tags: ['semantic', 'memory', 'stores'],
+      },
+      {
+        id: 'rag',
+        title: t('modules.rag.title'),
+        description: t('modules.rag.description'),
+        href: '/dashboard/rag',
+        icon: IconBook2,
+        category: 'data',
+        tags: ['knowledge', 'retrieval', 'documents'],
+      },
+      {
         id: 'tracing',
         title: t('modules.tracing.title'),
         description: t('modules.tracing.description'),
@@ -112,6 +133,15 @@ export default function DashboardPage() {
         icon: IconShield,
         category: 'operate',
         tags: ['safety', 'pii', 'moderation', 'prompt injection'],
+      },
+      {
+        id: 'alerts',
+        title: t('modules.alerts.title'),
+        description: t('modules.alerts.description'),
+        href: '/dashboard/alerts',
+        icon: IconBell,
+        category: 'operate',
+        tags: ['thresholds', 'notifications', 'incidents'],
       },
       {
         id: 'projects',
