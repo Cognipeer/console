@@ -1,16 +1,16 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "cognipeer-console.fullname" . }}
+  name: {{ include "cgate.fullname" . }}
   labels:
-    {{- include "cognipeer-console.labels" . | nindent 4 }}
+    {{- include "cgate.labels" . | nindent 4 }}
 spec:
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
   {{- end }}
   selector:
     matchLabels:
-      {{- include "cognipeer-console.selectorLabels" . | nindent 6 }}
+      {{- include "cgate.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       {{- with .Values.podAnnotations }}
@@ -18,7 +18,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       labels:
-        {{- include "cognipeer-console.labels" . | nindent 8 }}
+        {{- include "cgate.labels" . | nindent 8 }}
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -28,7 +28,7 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      serviceAccountName: {{ include "cognipeer-console.serviceAccountName" . }}
+      serviceAccountName: {{ include "cgate.serviceAccountName" . }}
       {{- with .Values.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
@@ -46,7 +46,7 @@ spec:
             - name: {{ $key | upper }}
               valueFrom:
                 secretKeyRef:
-                  name: cognipeer-console-application-secrets
+                  name: cgate-application-secrets
                   key: {{$key | upper }}
           {{- end }}
           ports:
