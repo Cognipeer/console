@@ -148,6 +148,7 @@ export async function PUT(
     if (body.inputGuardrailKey !== undefined) updates.inputGuardrailKey = (body.inputGuardrailKey as string) || undefined;
     if (body.outputGuardrailKey !== undefined) updates.outputGuardrailKey = (body.outputGuardrailKey as string) || undefined;
     if (body.metadata !== undefined) updates.metadata = body.metadata;
+    if (body.providerKey !== undefined) updates.providerKey = body.providerKey as string;
 
       if (body.settings && typeof body.settings === 'object') {
         updates.settings = mergeSettings(existing.settings || {}, body.settings as Record<string, unknown>);

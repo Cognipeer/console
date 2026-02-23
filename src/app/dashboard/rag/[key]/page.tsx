@@ -39,6 +39,7 @@ import {
   IconCode,
   IconCopy,
   IconDatabase,
+  IconEdit,
   IconFileText,
   IconPlayerPlay,
   IconRefresh,
@@ -48,6 +49,7 @@ import {
   IconActivity,
   IconFileUpload,
 } from '@tabler/icons-react';
+import EditRagModuleModal from '@/components/rag/EditRagModuleModal';
 
 /* ── Types ─────────────────────────────────────────────────────────────── */
 
@@ -200,6 +202,8 @@ export default function RagModuleDetailPage() {
   const [ingestContent, setIngestContent] = useState('');
   const [ingestMode, setIngestMode] = useState<string>('file');
   const [ingestFile, setIngestFile] = useState<File | null>(null);
+
+  const [editModalOpen, setEditModalOpen] = useState(false);
 
   /* playground */
   const [queryResult, setQueryResult] = useState<RagQueryResult | null>(null);
@@ -563,6 +567,14 @@ export default function RagModuleDetailPage() {
               onClick={() => router.push('/dashboard/rag')}
             >
               Back
+            </Button>
+            <Button
+              variant="light"
+              size="xs"
+              leftSection={<IconEdit size={14} />}
+              onClick={() => setEditModalOpen(true)}
+            >
+              Edit
             </Button>
             <Button
               variant="light"
@@ -1124,6 +1136,16 @@ export default function RagModuleDetailPage() {
           </Stack>
         </Tabs.Panel>
       </Tabs>
+
+      <EditRagModuleModal
+        opened={editModalOpen}
+        onClose={() => setEditModalOpen(false)}
+        module={mod}
+        onUpdated={(updated) => {
+          setMod(updated as unknown as RagModuleView);
+          setEditModalOpen(false);
+        }}
+      />
     </Stack>
   );
 }

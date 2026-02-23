@@ -49,6 +49,12 @@ interface ProviderDefinitionDto {
   modelIdHint?: string;
 }
 
+interface ModelProviderOption {
+  key: string;
+  label: string;
+  status: string;
+}
+
 interface ModelPricing {
   currency?: string;
   inputTokenPer1M: number;
@@ -72,6 +78,7 @@ interface ModelDetailDto {
   description?: string;
   key: string;
   provider: string;
+  providerKey: string;
   category: 'llm' | 'embedding';
   modelId: string;
   isMultimodal?: boolean;
@@ -95,6 +102,7 @@ interface FormValues {
   name: string;
   description?: string;
   key: string;
+  providerKey: string;
   modelId: string;
   pricing: {
     currency: string;
@@ -139,6 +147,7 @@ export default function EditModelPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [model, setModel] = useState<ModelDetailDto | null>(null);
   const [providers, setProviders] = useState<ProviderDefinitionDto[]>([]);
+  const [modelProviders, setModelProviders] = useState<ModelProviderOption[]>([]);
   const [vectorProviders, setVectorProviders] = useState<VectorProviderOption[]>([]);
   const [vectorIndexes, setVectorIndexes] = useState<VectorIndexOption[]>([]);
   const [embeddingModels, setEmbeddingModels] = useState<EmbeddingModelOption[]>([]);
@@ -148,6 +157,7 @@ export default function EditModelPage() {
       name: '',
       description: '',
       key: '',
+      providerKey: '',
       modelId: '',
       pricing: {
         currency: 'USD',
@@ -229,6 +239,7 @@ export default function EditModelPage() {
         name: nextModel.name,
         description: nextModel.description,
         key: nextModel.key,
+        providerKey: nextModel.providerKey || '',
         modelId: nextModel.modelId,
         pricing: {
           currency: nextModel.pricing.currency || 'USD',
@@ -249,7 +260,15 @@ export default function EditModelPage() {
 
       if (providerResponse.ok) {
         const providerData = await providerResponse.json();
-        setProviders(providerData.providers ?? []);
+        const rawProviders = providerData.providers ?? [];
+        setProviders(rawProviders);
+        setModelProviders(
+          rawProviders.map((p: Record<string, string>) => ({
+            key: p.key,
+            label: p.label || p.key,
+            status: p.status || 'active',
+          }))
+        );
       }
 
       if (vectorProviderResponse.ok) {
@@ -329,6 +348,7 @@ export default function EditModelPage() {
           name: values.name,
           description: values.description,
           key: values.key,
+          providerKey: values.providerKey || undefined,
           modelId: values.modelId,
           pricing: values.pricing,
           settings: values.settings,
@@ -462,6 +482,25 @@ export default function EditModelPage() {
                   minRows={2}
                   {...form.getInputProps('description')}
                 />
+              </Grid.Col>
+              <Grid.Col span={12}>
+                {modelProviders.length > 0 ? (
+                  <Select
+                    label="Provider"
+                    description="The provider that handles inference for this model."
+                    data={modelProviders.map((p) => ({
+                      value: p.key,
+                      label: p.label,
+                      disabled: p.status === 'disabled',
+                    }))}
+                    value={form.values.providerKey}
+                    onChange={(val) => form.setFieldValue('providerKey', val || '')}
+                    searchable
+                    withAsterisk
+                  />
+                ) : (
+                  <Text size="sm" c="dimmed">No model providers configured.</Text>
+                )}
               </Grid.Col>
               <Grid.Col span={{ base: 12, md: 6 }}>
                 <TextInput

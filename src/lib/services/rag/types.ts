@@ -30,6 +30,9 @@ export interface CreateRagModuleRequest {
 export interface UpdateRagModuleRequest {
   name?: string;
   description?: string;
+  embeddingModelKey?: string;
+  vectorProviderKey?: string;
+  vectorIndexKey?: string;
   chunkConfig?: IRagChunkConfig;
   status?: 'active' | 'disabled';
   metadata?: Record<string, unknown>;

@@ -146,20 +146,27 @@ export default function CreateModelModal({
       return;
     }
 
-    const currentKey = formValues.providerKey;
+    // Only correct the selection if the current key is no longer valid in the new list.
+    // Read current value via form.getValues() so this effect does NOT depend on
+    // formValues.providerKey — avoids re-triggering every time user picks a provider.
+    const currentKey = form.getValues().providerKey;
     const hasCurrentProvider = providers.some((provider) => provider.key === currentKey);
     if (!currentKey || !hasCurrentProvider) {
       setFieldValue('providerKey', providers[0].key);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [providers, formValues.providerKey]);
+  }, [providers]);
 
   useEffect(() => {
     if (!opened) {
       if (wasOpenedRef.current) {
         reset();
-        setAvailableProviders(providers);
-        setFieldValue('providerKey', providers[0]?.key ?? '');
+        // After reset, initialValues.providerKey may be stale (set at mount time when
+        // providers might have been empty). Force-set to current first provider.
+        const firstKey = providers[0]?.key ?? '';
+        if (firstKey) {
+          setFieldValue('providerKey', firstKey);
+        }
         wasOpenedRef.current = false;
       }
     } else {

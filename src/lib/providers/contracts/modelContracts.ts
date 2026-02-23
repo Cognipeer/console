@@ -1,8 +1,7 @@
 import { ChatOpenAI, OpenAIEmbeddings } from '@langchain/openai';
 import { ChatTogetherAI } from '@langchain/community/chat_models/togetherai';
 import { TogetherAIEmbeddings } from '@langchain/community/embeddings/togetherai';
-import { ChatBedrockConverse } from '@langchain/aws';
-import { BedrockEmbeddings } from '@langchain/community/embeddings/bedrock';
+import { ChatBedrockConverse, BedrockEmbeddings } from '@langchain/aws';
 import { VertexAI, VertexAIEmbeddings } from '@langchain/google-vertexai';
 import type { ProviderContract } from '../types';
 import type { ModelProviderRuntime } from '../domains/model';

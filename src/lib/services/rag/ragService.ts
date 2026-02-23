@@ -225,6 +225,9 @@ export async function updateRagModule(
   const updates: Record<string, unknown> = {};
   if (request.name !== undefined) updates.name = request.name;
   if (request.description !== undefined) updates.description = request.description;
+  if (request.embeddingModelKey !== undefined) updates.embeddingModelKey = request.embeddingModelKey;
+  if (request.vectorProviderKey !== undefined) updates.vectorProviderKey = request.vectorProviderKey;
+  if (request.vectorIndexKey !== undefined) updates.vectorIndexKey = request.vectorIndexKey;
   if (request.chunkConfig !== undefined) updates.chunkConfig = request.chunkConfig;
   if (request.status !== undefined) updates.status = request.status;
   if (request.metadata !== undefined) updates.metadata = request.metadata;
