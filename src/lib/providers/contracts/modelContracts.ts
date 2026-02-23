@@ -101,7 +101,7 @@ function parseServiceAccountKey(raw?: string) {
 export const OpenAiModelProviderContract: ProviderContract<ModelProviderRuntime, OpenAiCredentials, OpenAiSettings> = {
   id: 'openai',
   version: '1.0.0',
-  domains: ['model'],
+  domains: ['model', 'embedding'],
   display: {
     label: 'OpenAI',
     description: 'Official OpenAI platform supporting GPT and embedding models.',
@@ -178,7 +178,7 @@ export const OpenAiModelProviderContract: ProviderContract<ModelProviderRuntime,
 export const OpenAiCompatibleModelProviderContract: ProviderContract<ModelProviderRuntime, OpenAiCompatibleCredentials, OpenAiCompatibleSettings> = {
   id: 'openai-compatible',
   version: '1.0.0',
-  domains: ['model'],
+  domains: ['model', 'embedding'],
   display: {
     label: 'OpenAI-Compatible',
     description: 'Any API that follows the OpenAI REST schema (Mistral, Groq, etc.).',
@@ -267,7 +267,7 @@ export const OpenAiCompatibleModelProviderContract: ProviderContract<ModelProvid
 export const TogetherModelProviderContract: ProviderContract<ModelProviderRuntime, TogetherCredentials, Record<string, never>> = {
   id: 'together',
   version: '1.0.0',
-  domains: ['model'],
+  domains: ['model', 'embedding'],
   display: {
     label: 'Together AI',
     description: 'Together AI APIs for hosted open models with tool calling support.',
@@ -320,7 +320,7 @@ export const TogetherModelProviderContract: ProviderContract<ModelProviderRuntim
 export const BedrockModelProviderContract: ProviderContract<ModelProviderRuntime, BedrockCredentials, BedrockSettings> = {
   id: 'bedrock',
   version: '1.0.0',
-  domains: ['model'],
+  domains: ['model', 'embedding'],
   display: {
     label: 'Amazon Bedrock',
     description: 'Bedrock Converse API supporting Anthropic, AI21, and other models.',
@@ -414,7 +414,7 @@ export const BedrockModelProviderContract: ProviderContract<ModelProviderRuntime
 export const VertexModelProviderContract: ProviderContract<ModelProviderRuntime, VertexCredentials, VertexSettings> = {
   id: 'vertex',
   version: '1.0.0',
-  domains: ['model'],
+  domains: ['model', 'embedding'],
   display: {
     label: 'Google Vertex AI',
     description: 'Vertex AI generative and embedding models using service accounts.',
