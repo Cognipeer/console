@@ -34,7 +34,7 @@ export async function POST(
       const document = await ingestFile(
         ctx.tenantDbName,
         ctx.tenantId,
-        ctx.projectId,
+        undefined, // tenant-wide module lookup; key is unique per tenant
         {
           ragModuleKey: key,
           fileName,
@@ -58,7 +58,7 @@ export async function POST(
     const document = await ingestDocument(
       ctx.tenantDbName,
       ctx.tenantId,
-      ctx.projectId,
+      undefined, // tenant-wide module lookup; key is unique per tenant
       {
         ragModuleKey: key,
         fileName,

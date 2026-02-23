@@ -3414,10 +3414,13 @@ export class MongoDBProvider implements DatabaseProvider {
 
   async findRagModuleByKey(key: string, projectId?: string): Promise<IRagModule | null> {
     const db = this.getTenantDb();
-    const filter: Record<string, unknown> = {
-      key,
-      ...this.buildProjectScopeFilter(projectId),
-    };
+    // When projectId is provided, scope the lookup to that project.
+    // When undefined, find by key alone (tenant-wide) — used by client API where
+    // the token authenticates the tenant, not a specific project.
+    const filter: Record<string, unknown> = { key };
+    if (projectId !== undefined) {
+      Object.assign(filter, this.buildProjectScopeFilter(projectId));
+    }
     const doc = await db
       .collection<IRagModule>(MongoDBProvider.ragModulesCollection)
       .findOne(filter as Filter<IRagModule>);
@@ -3431,9 +3434,12 @@ export class MongoDBProvider implements DatabaseProvider {
     search?: string;
   }): Promise<IRagModule[]> {
     const db = this.getTenantDb();
-    const query: Record<string, unknown> = {
-      ...this.buildProjectScopeFilter(filters?.projectId),
-    };
+    // When projectId is provided, scope to that project.
+    // When undefined, list all modules in the tenant (used by client API).
+    const query: Record<string, unknown> = {};
+    if (filters?.projectId !== undefined) {
+      Object.assign(query, this.buildProjectScopeFilter(filters.projectId));
+    }
     if (filters?.status) query.status = filters.status;
     if (filters?.search) {
       query.$or = [
@@ -3503,10 +3509,12 @@ export class MongoDBProvider implements DatabaseProvider {
     filters?: { projectId?: string; status?: RagDocumentStatus; search?: string },
   ): Promise<IRagDocument[]> {
     const db = this.getTenantDb();
-    const query: Record<string, unknown> = {
-      ragModuleKey,
-      ...this.buildProjectScopeFilter(filters?.projectId),
-    };
+    // When projectId is provided, scope to that project.
+    // When undefined, list all documents for this module (tenant-wide for client API).
+    const query: Record<string, unknown> = { ragModuleKey };
+    if (filters?.projectId !== undefined) {
+      Object.assign(query, this.buildProjectScopeFilter(filters.projectId));
+    }
     if (filters?.status) query.status = filters.status;
     if (filters?.search) {
       query.fileName = { $regex: this.escapeRegex(filters.search), $options: 'i' };

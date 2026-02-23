@@ -11,7 +11,7 @@ import { listRagModules } from '@/lib/services/rag/ragService';
 export async function GET(request: NextRequest) {
   try {
     const ctx = await requireApiToken(request);
-    const modules = await listRagModules(ctx.tenantDbName, { projectId: ctx.projectId });
+    const modules = await listRagModules(ctx.tenantDbName, {}); // tenant-wide; token auth validates tenant
     return NextResponse.json({ modules });
   } catch (error) {
     if (error instanceof ApiTokenAuthError) {

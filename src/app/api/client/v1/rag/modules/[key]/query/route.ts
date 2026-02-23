@@ -22,10 +22,12 @@ export async function POST(
       return NextResponse.json({ error: 'query is required' }, { status: 400 });
     }
 
+    // Pass undefined for projectId so the module is resolved tenant-wide by key.
+    // The key is unique within a tenant; client tokens authenticate at tenant level.
     const result = await queryRag(
       ctx.tenantDbName,
       ctx.tenantId,
-      ctx.projectId,
+      undefined,
       {
         ragModuleKey: key,
         query,

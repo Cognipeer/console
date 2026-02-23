@@ -19,7 +19,7 @@ export async function DELETE(
     await deleteRagDocument(
       ctx.tenantDbName,
       ctx.tenantId,
-      ctx.projectId,
+      undefined, // tenant-wide module lookup
       {
         ragModuleKey: key,
         documentId,
@@ -75,7 +75,7 @@ export async function POST(
     const document = await reingestDocument(
       ctx.tenantDbName,
       ctx.tenantId,
-      ctx.projectId,
+      undefined, // tenant-wide module lookup
       {
         ragModuleKey: key,
         documentId,

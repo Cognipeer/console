@@ -15,7 +15,8 @@ export async function GET(
   try {
     const ctx = await requireApiToken(request);
     const { key } = await params;
-    const ragModule = await getRagModule(ctx.tenantDbName, key, ctx.projectId);
+    // Tenant-wide lookup — key is unique per tenant; token auth validates tenant access
+    const ragModule = await getRagModule(ctx.tenantDbName, key);
 
     if (!ragModule) {
       return NextResponse.json({ error: 'RAG module not found' }, { status: 404 });
@@ -46,7 +47,8 @@ export async function DELETE(
     const ctx = await requireApiToken(request);
     const { key } = await params;
 
-    const ragModule = await getRagModule(ctx.tenantDbName, key, ctx.projectId);
+    // Tenant-wide lookup — key is unique per tenant; token auth validates tenant access
+    const ragModule = await getRagModule(ctx.tenantDbName, key);
     if (!ragModule) {
       return NextResponse.json({ error: 'RAG module not found' }, { status: 404 });
     }

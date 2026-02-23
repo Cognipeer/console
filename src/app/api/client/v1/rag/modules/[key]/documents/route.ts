@@ -16,9 +16,8 @@ export async function GET(
     const ctx = await requireApiToken(request);
     const { key } = await params;
 
-    const documents = await listRagDocuments(ctx.tenantDbName, key, {
-      projectId: ctx.projectId,
-    });
+    // Tenant-wide listing — token auth validates tenant access
+    const documents = await listRagDocuments(ctx.tenantDbName, key, {});
 
     return NextResponse.json({ documents });
   } catch (error) {
