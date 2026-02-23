@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import {
+  ActionIcon,
   Box,
   Button,
   Group,
@@ -11,8 +12,10 @@ import {
   Stack,
   Text,
   TextInput,
+  Tooltip,
 } from '@mantine/core';
 import { DataTable } from 'mantine-datatable';
+import { IconTrash } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 
 type Member = {
@@ -257,6 +260,7 @@ export default function ProjectMembersManager(
         borderRadius="sm"
         striped
         highlightOnHover
+        idAccessor="_id"
         records={rows}
         fetching={loading}
         minHeight={200}
@@ -322,15 +326,16 @@ export default function ProjectMembersManager(
                 render: (m) => (
                   <Group gap="xs" justify="flex-end">
                     {m.role === 'owner' || m.role === 'admin' ? null : (
-                      <Button
-                        size="xs"
-                        color="red"
-                        variant="light"
-                        onClick={() => handleRemove(m)}
-                        loading={submitting}
-                      >
-                        Remove
-                      </Button>
+                      <Tooltip label="Remove">
+                        <ActionIcon
+                          color="red"
+                          variant="subtle"
+                          loading={submitting}
+                          onClick={() => handleRemove(m)}
+                        >
+                          <IconTrash size={16} />
+                        </ActionIcon>
+                      </Tooltip>
                     )}
                   </Group>
                 ),
@@ -347,6 +352,7 @@ export default function ProjectMembersManager(
           }}
           title="Invite user to project"
           size="md"
+          centered
         >
           <Stack gap="sm">
             <TextInput
@@ -371,7 +377,7 @@ export default function ProjectMembersManager(
                 { value: 'admin', label: 'Tenant Admin' },
               ]}
             />
-            <Group justify="flex-end">
+            <Group justify="flex-end" gap="sm">
               <Button variant="default" onClick={() => setInviteOpened(false)} disabled={submitting}>
                 Cancel
               </Button>

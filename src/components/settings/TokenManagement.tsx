@@ -135,6 +135,7 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
         borderRadius="sm"
         striped
         highlightOnHover
+        idAccessor="_id"
         records={tokens}
         columns={[
           {
@@ -184,13 +185,15 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
                   </CopyButton>
                 ) : null}
                 {token.canDelete === false ? null : (
-                  <ActionIcon
-                    color="red"
-                    variant="subtle"
-                    onClick={() => handleDeleteToken(token)}
-                  >
-                    <IconTrash size={16} />
-                  </ActionIcon>
+                  <Tooltip label={t('actions.delete')}>
+                    <ActionIcon
+                      color="red"
+                      variant="subtle"
+                      onClick={() => handleDeleteToken(token)}
+                    >
+                      <IconTrash size={16} />
+                    </ActionIcon>
+                  </Tooltip>
                 )}
               </Group>
             ),

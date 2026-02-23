@@ -1,8 +1,9 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Box, Button, Group, Modal, Select, Stack, Text } from '@mantine/core';
+import { ActionIcon, Box, Button, Group, Modal, Select, Stack, Text, Tooltip } from '@mantine/core';
 import { DataTable } from 'mantine-datatable';
+import { IconTrash } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 
 type Provider = {
@@ -117,36 +118,34 @@ export default function ProjectProvidersManager({ projectId }: { projectId: stri
 
   return (
     <Box p="md">
-      <Stack gap={4} mb="md">
-        <Group justify="space-between" align="flex-start">
-          <div>
-            <Text size="lg" fw={600}>Providers</Text>
-            <Text size="sm" c="dimmed">
-              {tenantScope
-                ? 'Manage which tenant providers are available to this project.'
-                : 'Showing providers assigned to this project.'}
-            </Text>
-          </div>
-
-          {tenantScope && (
-            <Button
-              onClick={() => {
-                setSelectedProviderId(null);
-                setAddOpen(true);
-              }}
-              disabled={submitting || unassignedProviders.length === 0}
-            >
-              Add provider
-            </Button>
-          )}
-        </Group>
-      </Stack>
+      <Group justify="space-between" mb="md">
+        <div>
+          <Text size="lg" fw={600}>Providers</Text>
+          <Text size="sm" c="dimmed">
+            {tenantScope
+              ? 'Manage which tenant providers are available to this project.'
+              : 'Showing providers assigned to this project.'}
+          </Text>
+        </div>
+        {tenantScope && (
+          <Button
+            onClick={() => {
+              setSelectedProviderId(null);
+              setAddOpen(true);
+            }}
+            disabled={submitting || unassignedProviders.length === 0}
+          >
+            Add provider
+          </Button>
+        )}
+      </Group>
 
       <DataTable
         withTableBorder
         borderRadius="sm"
         striped
         highlightOnHover
+        idAccessor="_id"
         records={tenantScope ? assignedProviders : rows}
         fetching={loading}
         minHeight={200}
@@ -173,15 +172,16 @@ export default function ProjectProvidersManager({ projectId }: { projectId: stri
                   textAlign: 'right' as const,
                   render: (p: Provider) => (
                     <Group justify="flex-end">
-                      <Button
-                        variant="light"
-                        color="red"
-                        size="xs"
-                        disabled={submitting}
-                        onClick={() => setAssignment(p, false)}
-                      >
-                        Remove
-                      </Button>
+                      <Tooltip label="Remove">
+                        <ActionIcon
+                          color="red"
+                          variant="subtle"
+                          loading={submitting}
+                          onClick={() => setAssignment(p, false)}
+                        >
+                          <IconTrash size={16} />
+                        </ActionIcon>
+                      </Tooltip>
                     </Group>
                   ),
                 },
@@ -209,9 +209,13 @@ export default function ProjectProvidersManager({ projectId }: { projectId: stri
             searchable
             disabled={unassignedProviders.length === 0}
           />
-          <Group justify="flex-end">
+          <Group justify="flex-end" gap="sm">
+            <Button variant="default" onClick={() => setAddOpen(false)} disabled={submitting}>
+              Cancel
+            </Button>
             <Button
-              disabled={!selectedProviderId || submitting}
+              loading={submitting}
+              disabled={!selectedProviderId}
               onClick={async () => {
                 const provider = unassignedProviders.find((p) => p._id === selectedProviderId);
                 if (!provider) return;

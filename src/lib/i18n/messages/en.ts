@@ -229,6 +229,7 @@ export const en = {
       },
       actions: {
         create: 'Create Token',
+        delete: 'Delete token',
       },
       table: {
         label: 'Label',
