@@ -164,6 +164,13 @@ export default function AgentTracingPage() {
             <Button
               variant="light"
               size="xs"
+              onClick={() => router.push('/dashboard/tracing/evals')}
+              leftSection={<IconChartBar size={14} />}>
+              Evals
+            </Button>
+            <Button
+              variant="light"
+              size="xs"
               onClick={() => fetchDashboard(true)}
               loading={refreshing}
               leftSection={<IconRefresh size={14} />}>
