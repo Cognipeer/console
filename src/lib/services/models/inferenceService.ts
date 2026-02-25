@@ -12,33 +12,8 @@ import {
 import { logModelUsage, TokenUsage } from './usageLogger';
 import { buildModelRuntime } from './runtimeService';
 import { isSemanticCacheEnabled, lookupCache, storeInCache } from './semanticCacheService';
-import { evaluateGuardrail } from '../guardrail/guardrailService';
-import type { GuardrailFinding } from '../guardrail/types';
 
 const encoder = new TextEncoder();
-
-// ── Guardrail block error ─────────────────────────────────────────────────
-
-export class GuardrailBlockError extends Error {
-  readonly guardrailKey: string;
-  readonly action: string;
-  readonly findings: GuardrailFinding[];
-  readonly guardrailMessage: string | null;
-
-  constructor(opts: {
-    guardrailKey: string;
-    action: string;
-    findings: GuardrailFinding[];
-    message: string | null;
-  }) {
-    super(opts.message ?? `Content blocked by guardrail "${opts.guardrailKey}"`);
-    this.name = 'GuardrailBlockError';
-    this.guardrailKey = opts.guardrailKey;
-    this.action = opts.action;
-    this.findings = opts.findings;
-    this.guardrailMessage = opts.message;
-  }
-}
 
 interface ChatRunnable {
   bind(overrides: Record<string, unknown>): ChatRunnable;
@@ -120,14 +95,6 @@ interface ChatCompletionRequestBody extends Record<string, unknown> {
   messages?: unknown;
   stream?: unknown;
   request_id?: string;
-  /** Optional memory configuration for context-aware recall */
-  memory?: {
-    storeKey: string;
-    topK?: number;
-    scope?: string;
-    scopeId?: string;
-    maxTokens?: number;
-  };
 }
 
 interface EmbeddingRequestBody extends Record<string, unknown> {
@@ -210,33 +177,6 @@ function ensureEmbeddingModel(model: IModel) {
   }
 }
 
-type OpenAIMessage = { role?: string; content?: string | { type?: string; text?: string }[] };
-
-function extractMessagesText(messages: unknown): string {
-  if (!Array.isArray(messages)) return '';
-  const parts: string[] = [];
-  for (const msg of messages as OpenAIMessage[]) {
-    const content = msg?.content;
-    if (typeof content === 'string') {
-      parts.push(content);
-    } else if (Array.isArray(content)) {
-      for (const part of content) {
-        if (part?.type === 'text' && typeof part.text === 'string') {
-          parts.push(part.text);
-        }
-      }
-    }
-  }
-  return parts.join('\n');
-}
-
-type OpenAIResponse = { choices?: { message?: { content?: string } }[] };
-
-function extractResponseText(response: unknown): string {
-  const r = response as OpenAIResponse;
-  return r?.choices?.[0]?.message?.content ?? '';
-}
-
 export async function handleChatCompletion(params: {
   tenantDbName: string;
   tenantId?: string;
@@ -263,28 +203,6 @@ export async function handleChatCompletion(params: {
   }
 
   ensureLlmModel(model);
-
-  // ── Input guardrail ─────────────────────────────────────────────────────
-  if (model.inputGuardrailKey) {
-    const inputText = extractMessagesText(body.messages);
-    if (inputText) {
-      const guardResult = await evaluateGuardrail({
-        tenantDbName,
-        tenantId: tenantId ?? model.tenantId,
-        projectId,
-        guardrailKey: model.inputGuardrailKey,
-        text: inputText,
-      });
-      if (!guardResult.passed && guardResult.action === 'block') {
-        throw new GuardrailBlockError({
-          guardrailKey: model.inputGuardrailKey,
-          action: guardResult.action,
-          findings: guardResult.findings,
-          message: guardResult.findings[0]?.message ?? null,
-        });
-      }
-    }
-  }
 
   // Semantic cache: check for cached response before calling the model
   const cacheEnabled = !stream && tenantId && isSemanticCacheEnabled(model);
@@ -341,38 +259,6 @@ export async function handleChatCompletion(params: {
   }
 
   const messagesInput = body.messages as Parameters<typeof toLangChainMessages>[0];
-
-  // ── Memory recall ──────────────────────────────────────────────────────
-  if (body.memory?.storeKey && tenantId) {
-    try {
-      const { recallForChat } = await import('@/lib/services/memory/memoryService');
-      const lastUserMsg = [...(messagesInput as Array<{ role: string; content?: string }>)]
-        .reverse()
-        .find((m) => m.role === 'user');
-      const query = typeof lastUserMsg?.content === 'string' ? lastUserMsg.content : '';
-      if (query) {
-        const recall = await recallForChat(
-          tenantDbName, tenantId, projectId, body.memory.storeKey,
-          {
-            query,
-            topK: body.memory.topK,
-            scope: body.memory.scope as 'user' | 'agent' | 'session' | 'global' | undefined,
-            scopeId: body.memory.scopeId,
-            maxTokens: body.memory.maxTokens,
-          },
-        );
-        if (recall.context) {
-          (messagesInput as Array<{ role: string; content: string }>).unshift({
-            role: 'system',
-            content: `[Memory Context]\n${recall.context}`,
-          });
-        }
-      }
-    } catch (memErr) {
-      console.warn('[memory] Recall failed, proceeding without memory context:', memErr);
-    }
-  }
-
   const messages = toLangChainMessages(messagesInput);
   const overrides = buildOverrides(body);
 
@@ -494,28 +380,6 @@ export async function handleChatCompletion(params: {
     model: model.modelId,
     stream: false,
   });
-
-  // ── Output guardrail ────────────────────────────────────────────────────
-  if (model.outputGuardrailKey) {
-    const outputText = extractResponseText(response);
-    if (outputText) {
-      const guardResult = await evaluateGuardrail({
-        tenantDbName,
-        tenantId: tenantId ?? model.tenantId,
-        projectId,
-        guardrailKey: model.outputGuardrailKey,
-        text: outputText,
-      });
-      if (!guardResult.passed && guardResult.action === 'block') {
-        throw new GuardrailBlockError({
-          guardrailKey: model.outputGuardrailKey,
-          action: guardResult.action,
-          findings: guardResult.findings,
-          message: guardResult.findings[0]?.message ?? null,
-        });
-      }
-    }
-  }
 
   const usage = summarizeUsage(aiMessage) as TokenUsage;
   const toolCallCount = getToolCallCount(aiMessage);
