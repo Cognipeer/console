@@ -85,7 +85,7 @@ secrets:
   smtp_secure: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/SMTP_SECURE
   smtp_user: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/SMTP_USER
   smtp_pass: ref+awssecrets://cgate-application-credentials-dev?region=eu-central-1#/SMTP_PASS
-
+  db_provider: "mongodb"
 tls_secrets:
   fullchain_pem: ref+awssecrets://dev_tls_certificate_chain?region=eu-central-1#/fullchain.pem
   privatekey_pem: ref+awssecrets://dev_tls_certificate_chain?region=eu-central-1#/privkey.pem
