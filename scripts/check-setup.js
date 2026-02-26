@@ -10,7 +10,6 @@ const fs = require('fs');
 const path = require('path');
 
 const REQUIRED_ENV_VARS = [
-  'MONGODB_URI',
   'JWT_SECRET',
 ];
 
@@ -19,6 +18,7 @@ const OPTIONAL_ENV_VARS = [
   'SMTP_PORT',
   'SMTP_USER',
   'SMTP_PASS',
+  'MONGODB_URI',
 ];
 
 function checkEnvFile() {
@@ -87,12 +87,10 @@ function checkDependencies() {
   return true;
 }
 
-function checkMongoDB() {
-  console.log('\n🔍 MongoDB Connection:');
-  console.log('ℹ️  Make sure MongoDB is running:');
-  console.log('   - Local: mongod --dbpath ~/data/db');
-  console.log('   - Service: brew services start mongodb-community');
-  console.log('   - Atlas: Check your connection string in .env.local\n');
+function checkDatabase() {
+  console.log('\n🔍 Database Configuration:');
+  console.log('ℹ️  Default: SQLite (zero-dependency, works out of the box)');
+  console.log('   To use MongoDB instead, set DB_PROVIDER=mongodb and MONGODB_URI in .env.local\n');
 }
 
 function printNextSteps(envOk, depsOk) {
@@ -108,8 +106,8 @@ function printNextSteps(envOk, depsOk) {
   if (!envOk) {
     console.log('2. Configure environment:');
     console.log('   - Copy .env.example to .env.local');
-    console.log('   - Update MONGODB_URI with your MongoDB connection string');
-    console.log('   - Change JWT_SECRET to a random secret key');
+    console.log('   - Set JWT_SECRET to a strong random key (min 32 chars)');
+    console.log('   - (Optional) Set DB_PROVIDER=mongodb and MONGODB_URI for MongoDB');
     console.log('   - (Optional) Configure SMTP settings for emails\n');
   }
   
@@ -131,7 +129,7 @@ function main() {
   
   const depsOk = checkDependencies();
   const envOk = checkEnvFile();
-  checkMongoDB();
+  checkDatabase();
   
   printNextSteps(envOk, depsOk);
 }

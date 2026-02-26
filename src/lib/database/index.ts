@@ -11,8 +11,35 @@ const log = createLogger('database');
 let dbProvider: DatabaseProvider | null = null;
 
 /**
- * Get database instance. For multi-tenant operations, call switchToTenant() after getting the instance.
- * The main database is used by default (for tenant management).
+ * Get (or lazily initialise) the global database provider instance.
+ *
+ * ## Concurrency model
+ *
+ * The gateway uses a **singleton provider** pattern:
+ * - A single `DatabaseProvider` instance is created on first call and reused
+ *   for the lifetime of the process.
+ * - For tenant-scoped operations (users, tokens, projects, etc.) callers must
+ *   invoke `switchToTenant(tenantDbName)` **before** issuing queries. The
+ *   switch is synchronous and sets the provider's active database context.
+ *
+ * ### Important caveats
+ *
+ * 1. **Request isolation** – Because Next.js processes requests concurrently
+ *    within a single Node.js process, two requests that call `switchToTenant`
+ *    with different tenants could interleave. This is safe because each
+ *    `switchToTenant` call only sets the *current* database reference and all
+ *    subsequent operations stay on that reference until the next switch.
+ *    Always pair `getDatabase() → switchToTenant() → queries` without yielding
+ *    control between the switch and the queries wherever possible.
+ *
+ * 2. **Singleton lifecycle** – The provider is torn down by the registered
+ *    shutdown handler (`registerShutdownHandler`). Tests should call
+ *    `disconnectDatabase()` in their teardown to release resources.
+ *
+ * 3. **Provider selection** – Determined by `DB_PROVIDER` env var (`sqlite` or
+ *    `mongodb`). SQLite is the default for self-hosted / on-prem setups.
+ *
+ * @returns The shared `DatabaseProvider` instance.
  */
 export async function getDatabase(): Promise<DatabaseProvider> {
   if (dbProvider) {

@@ -8,14 +8,35 @@ import { applyCors, handleCorsPreflightIfNeeded } from '@/lib/core/cors';
 const PUBLIC_PATHS = [
   '/login',
   '/register',
+  '/forgot-password',
+  '/reset-password',
   '/api/auth/login',
   '/api/auth/register',
+  '/api/auth/forgot-password',
+  '/api/auth/reset-password',
   '/api/health/live',
   '/api/health/ready',
 ];
 
 // Client API paths that use Bearer token authentication instead of cookie
 const CLIENT_API_PATHS = ['/api/client/', '/api/models/v1/', '/api/metrics'];
+
+/** Inject common security headers into every response. */
+function applySecurityHeaders(response: NextResponse): void {
+  response.headers.set('X-Content-Type-Options', 'nosniff');
+  response.headers.set('X-Frame-Options', 'DENY');
+  response.headers.set('X-XSS-Protection', '1; mode=block');
+  response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  response.headers.set(
+    'Permissions-Policy',
+    'camera=(), microphone=(), geolocation=()',
+  );
+  // HSTS – only effective over HTTPS; max-age = 1 year
+  response.headers.set(
+    'Strict-Transport-Security',
+    'max-age=31536000; includeSubDomains',
+  );
+}
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
@@ -28,11 +49,22 @@ export async function middleware(request: NextRequest) {
 
   // Allow public paths
   if (PUBLIC_PATHS.some((path) => pathname.startsWith(path))) {
-    return NextResponse.next();
+    const response = NextResponse.next();
+    applySecurityHeaders(response);
+    return response;
   }
 
   // Allow client API paths (they use Bearer token authentication)
   if (CLIENT_API_PATHS.some((path) => pathname.startsWith(path))) {
+    // Defense-in-depth: reject requests without a Bearer token early
+    const authHeader = request.headers.get('authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return NextResponse.json(
+        { error: 'Unauthorized', message: 'Missing or invalid Authorization header. Use: Bearer <token>' },
+        { status: 401 },
+      );
+    }
+
     const response = NextResponse.next({
       request: {
         headers: new Headers([
@@ -42,6 +74,7 @@ export async function middleware(request: NextRequest) {
       },
     });
     applyCors(request, response);
+    applySecurityHeaders(response);
     return response;
   }
 
@@ -118,11 +151,13 @@ export async function middleware(request: NextRequest) {
   requestHeaders.set('x-features', JSON.stringify(payload.features));
   requestHeaders.set('x-request-id', crypto.randomUUID());
 
-  return NextResponse.next({
+  const response = NextResponse.next({
     request: {
       headers: requestHeaders,
     },
   });
+  applySecurityHeaders(response);
+  return response;
 }
 
 export const config = {

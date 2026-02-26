@@ -6,11 +6,35 @@ import { LicenseType } from '@/lib/license/license-manager';
 import { ensureDefaultProject, DEFAULT_PROJECT_KEY } from '@/lib/services/projects/projectService';
 import { createLogger } from '@/lib/core/logger';
 import { getConfig } from '@/lib/core/config';
+import { checkRateLimit, LOGIN_RATE_LIMIT } from '@/lib/services/auth/rateLimiter';
 
 const logger = createLogger('auth');
 
+function getClientIp(request: NextRequest): string {
+  return request.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
+    || request.headers.get('x-real-ip')
+    || 'unknown';
+}
+
 export async function POST(request: NextRequest) {
   try {
+    // ── Rate limiting ──
+    const clientIp = getClientIp(request);
+    const rl = checkRateLimit(`login:${clientIp}`, LOGIN_RATE_LIMIT);
+    if (!rl.allowed) {
+      return NextResponse.json(
+        { error: 'Too many login attempts. Please try again later.' },
+        {
+          status: 429,
+          headers: {
+            'Retry-After': String(rl.retryAfterSeconds),
+            'X-RateLimit-Remaining': '0',
+            'X-RateLimit-Reset': rl.resetAt.toISOString(),
+          },
+        },
+      );
+    }
+
     const { email, password, slug } = await request.json();
 
     // Validation

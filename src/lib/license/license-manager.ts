@@ -22,33 +22,66 @@ export type LicenseType =
   | 'ENTERPRISE'
   | 'ON_PREMISE';
 
+/**
+ * Compiled regex cache for endpoint patterns – avoids re-compiling on every request.
+ */
+const endpointRegexCache = new Map<string, RegExp>();
+
+function getEndpointRegex(pattern: string): RegExp {
+  let regex = endpointRegexCache.get(pattern);
+  if (!regex) {
+    const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    regex = new RegExp(`^${escaped.replace(/\\\*/g, '.*')}$`);
+    endpointRegexCache.set(pattern, regex);
+  }
+  return regex;
+}
+
 export class LicenseManager {
   private static policies = policies;
 
   /**
-   * Get features for a specific license type
+   * On-premise / self-hosted deployments get unrestricted access by default.
+   * Override with ENFORCE_LICENSE=true to enable license checks even on-prem.
+   */
+  private static get isUnrestricted(): boolean {
+    const licenseMode = process.env.ENFORCE_LICENSE?.toLowerCase();
+    // When not explicitly enforced, on-prem has no restrictions
+    return licenseMode !== 'true';
+  }
+
+  /**
+   * Get features for a specific license type.
+   * On-prem: returns ALL features when unrestricted.
    */
   static getFeaturesForLicense(licenseType: LicenseType): string[] {
+    if (this.isUnrestricted) {
+      return Object.keys(this.policies.features);
+    }
     const license = this.policies.licenses[licenseType];
-    
     return license?.features || [];
   }
 
   /**
-   * Check if a license has access to a specific feature
+   * Check if a license has access to a specific feature.
+   * On-prem: always true when unrestricted.
    */
   static hasFeature(licenseType: LicenseType, featureKey: string): boolean {
+    if (this.isUnrestricted) return true;
     const features = this.getFeaturesForLicense(licenseType);
     return features.includes(featureKey);
   }
 
   /**
-   * Check if a license has access to a specific endpoint
+   * Check if a license has access to a specific endpoint.
+   * On-prem: always true when unrestricted.
    */
   static hasEndpointAccess(
     licenseType: LicenseType,
     endpoint: string,
   ): boolean {
+    if (this.isUnrestricted) return true;
+
     const features = this.getFeaturesForLicense(licenseType);
 
     for (const featureKey of features) {
@@ -57,7 +90,7 @@ export class LicenseManager {
         featureKey as keyof typeof this.policies.features
         ];
       if (!feature) continue;
-      
+
       for (const pattern of feature.endpoints) {
         if (this.matchEndpoint(endpoint, pattern)) {
           return true;
@@ -69,22 +102,20 @@ export class LicenseManager {
   }
 
   /**
-   * Match endpoint with wildcard pattern
+   * Match endpoint with wildcard pattern (uses cached regex).
    */
   private static matchEndpoint(endpoint: string, pattern: string): boolean {
     if (pattern === endpoint) return true;
 
     if (pattern.includes('*')) {
-      const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const regex = new RegExp(`^${escaped.replace(/\\\*/g, '.*')}$`);
-      return regex.test(endpoint);
+      return getEndpointRegex(pattern).test(endpoint);
     }
 
     return false;
   }
 
   /**
-   * Get all feature details for a license
+   * Get all feature details for a license.
    */
   static getFeatureDetails(licenseType: LicenseType): FeaturePolicy[] {
     const featureKeys = this.getFeaturesForLicense(licenseType);
@@ -97,9 +128,13 @@ export class LicenseManager {
   }
 
   /**
-   * Get license limits
+   * Get license limits.
+   * On-prem: returns unlimited when unrestricted.
    */
   static getLimits(licenseType: LicenseType) {
+    if (this.isUnrestricted) {
+      return { requestsPerMonth: Infinity, maxAgents: Infinity };
+    }
     const license = this.policies.licenses[licenseType];
     return license?.limits || { requestsPerMonth: 0, maxAgents: 0 };
   }

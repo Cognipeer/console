@@ -1,0 +1,59 @@
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - DB_PROVIDER=sqlite
+      - MAIN_DB_NAME=cgate_main
+      - SQLITE_DATA_DIR=/app/data/sqlite
+      - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env.local or environment}
+      - CACHE_PROVIDER=memory
+      - RATE_LIMIT_PROVIDER=memory
+    volumes:
+      - app-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health/live"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  # ── Optional: MongoDB (uncomment to use MongoDB instead of SQLite) ──
+  # Requires: DB_PROVIDER=mongodb and MONGODB_URI=mongodb://mongo:27017
+  #
+  # mongo:
+  #   image: mongo:7
+  #   ports:
+  #     - "27017:27017"
+  #   volumes:
+  #     - mongo-data:/data/db
+  #   restart: unless-stopped
+  #   healthcheck:
+  #     test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+  #     interval: 30s
+  #     timeout: 5s
+  #     retries: 3
+
+  # ── Optional: Redis (uncomment for redis cache/rate-limiting) ──
+  # Requires: CACHE_PROVIDER=redis and REDIS_URL=redis://redis:6379
+  #
+  # redis:
+  #   image: redis:7-alpine
+  #   ports:
+  #     - "6379:6379"
+  #   volumes:
+  #     - redis-data:/data
+  #   restart: unless-stopped
+  #   healthcheck:
+  #     test: ["CMD", "redis-cli", "ping"]
+  #     interval: 30s
+  #     timeout: 5s
+  #     retries: 3
+
+volumes:
+  app-data:
+  # mongo-data:
+  # redis-data:

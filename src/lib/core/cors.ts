@@ -35,7 +35,7 @@ function isOriginAllowed(origin: string): boolean {
   if (!cfg.cors.enabled) return false;
 
   // If no specific origins configured, allow all (wildcard mode)
-  if (cfg.cors.allowedOrigins.length === 0) return true;
+  if (cfg.cors.allowedOrigins.length === 0) return false;
 
   return cfg.cors.allowedOrigins.some((allowed) => {
     // Support wildcard subdomains: *.example.com

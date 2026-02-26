@@ -3,7 +3,7 @@
  * This abstraction allows switching between different database providers (MongoDB, PostgreSQL, etc.)
  */
 
-import { ObjectId } from 'mongodb';
+import type { ObjectId } from 'mongodb';
 import type {
   QuotaDomain,
   QuotaLimits,
@@ -326,39 +326,6 @@ export interface IFileRecord {
   updatedBy?: string;
   createdAt?: Date;
   updatedAt?: Date;
-}
-
-export interface IPrompt {
-  _id?: ObjectId | string;
-  tenantId: string;
-  projectId?: string;
-  key: string;
-  name: string;
-  description?: string;
-  template: string;
-  metadata?: Record<string, unknown>;
-  currentVersion?: number;
-  deployments?: Partial<Record<PromptEnvironment, IPromptDeploymentState>>;
-  deploymentHistory?: IPromptDeploymentEvent[];
-  createdBy: string;
-  updatedBy?: string;
-  createdAt?: Date;
-  updatedAt?: Date;
-}
-
-export interface IPromptVersion {
-  _id?: ObjectId | string;
-  tenantId: string;
-  projectId?: string;
-  promptId: string;
-  version: number;
-  name: string;
-  description?: string;
-  template: string;
-  metadata?: Record<string, unknown>;
-  comment?: string;
-  createdBy: string;
-  createdAt?: Date;
 }
 
 export interface ISemanticCacheConfig {

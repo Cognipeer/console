@@ -7,11 +7,36 @@ import { sendEmail } from '@/lib/email/mailer';
 import { ensureDefaultProject } from '@/lib/services/projects/projectService';
 import { createLogger } from '@/lib/core/logger';
 import { getConfig } from '@/lib/core/config';
+import { checkRateLimit, REGISTER_RATE_LIMIT } from '@/lib/services/auth/rateLimiter';
+import { validatePassword, BCRYPT_ROUNDS } from '@/lib/services/auth/passwordPolicy';
 
 const logger = createLogger('auth');
 
+function getClientIp(request: NextRequest): string {
+  return request.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
+    || request.headers.get('x-real-ip')
+    || 'unknown';
+}
+
 export async function POST(request: NextRequest) {
   try {
+    // ── Rate limiting ──
+    const clientIp = getClientIp(request);
+    const rl = checkRateLimit(`register:${clientIp}`, REGISTER_RATE_LIMIT);
+    if (!rl.allowed) {
+      return NextResponse.json(
+        { error: 'Too many registration attempts. Please try again later.' },
+        {
+          status: 429,
+          headers: {
+            'Retry-After': String(rl.retryAfterSeconds),
+            'X-RateLimit-Remaining': '0',
+            'X-RateLimit-Reset': rl.resetAt.toISOString(),
+          },
+        },
+      );
+    }
+
     const { email, password, name, companyName, licenseType } =
       await request.json();
 
@@ -47,9 +72,10 @@ export async function POST(request: NextRequest) {
     }
 
     // Password strength validation
-    if (password.length < 8) {
+    const pwResult = validatePassword(password);
+    if (!pwResult.valid) {
       return NextResponse.json(
-        { error: 'Password must be at least 8 characters long' },
+        { error: pwResult.errors.join('. ') },
         { status: 400 },
       );
     }
@@ -98,7 +124,7 @@ export async function POST(request: NextRequest) {
     await db.switchToTenant(dbName);
 
     // Hash password
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const hashedPassword = await bcrypt.hash(password, BCRYPT_ROUNDS);
 
     // Create user as owner in tenant database
     const tenantIdStr =

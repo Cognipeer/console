@@ -18,6 +18,7 @@ FROM node:20-alpine AS runner
 WORKDIR /app
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
+ENV NODE_ENV=production
 # Create non-root user
 RUN adduser -D -u 1001 -h /home/nextjs nextjs
 
@@ -29,7 +30,8 @@ COPY --from=builder /app/public ./public
 # Copy mail templates (needed at runtime)
 COPY --from=builder /app/mail-templates ./mail-templates
 
-RUN chown -R nextjs:nextjs .
+RUN mkdir -p /app/data && chown -R nextjs:nextjs .
+VOLUME ["/app/data"]
 EXPOSE 3000
 USER nextjs
 

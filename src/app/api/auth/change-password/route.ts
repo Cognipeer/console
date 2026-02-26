@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import bcrypt from 'bcryptjs';
 import { getDatabase } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
+import { validatePassword, BCRYPT_ROUNDS } from '@/lib/services/auth/passwordPolicy';
 
 const logger = createLogger('auth');
 
@@ -34,9 +35,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (typeof body.newPassword !== 'string' || body.newPassword.length < 8) {
+    const pwResult = validatePassword(body.newPassword);
+    if (!pwResult.valid) {
       return NextResponse.json(
-        { error: 'Password must be at least 8 characters' },
+        { error: pwResult.errors.join('. ') },
         { status: 400 },
       );
     }
@@ -54,7 +56,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Invalid current password' }, { status: 401 });
     }
 
-    const hashed = await bcrypt.hash(body.newPassword, 10);
+    const hashed = await bcrypt.hash(body.newPassword, BCRYPT_ROUNDS);
     const updated = await db.updateUser(userId, {
       password: hashed,
       mustChangePassword: false,

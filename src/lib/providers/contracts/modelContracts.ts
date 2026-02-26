@@ -468,21 +468,22 @@ export const VertexModelProviderContract: ProviderContract<ModelProviderRuntime,
     const runtime: ModelProviderRuntime = {
       createChatModel: (config) => {
         const overrides = resolveOverrides(config.modelSettings);
+        // `project` is accepted at runtime but not in the published types
         return new VertexAI({
           model: config.modelId,
-          project: projectId,
           location,
           authOptions,
           temperature: overrides.temperature,
           maxOutputTokens: overrides.maxTokens,
+          ...({ project: projectId } as Record<string, unknown>),
         });
       },
       createEmbeddingModel: (config) =>
         new VertexAIEmbeddings({
           model: config.modelId,
-          project: projectId,
           location,
           authOptions,
+          ...({ project: projectId } as Record<string, unknown>),
         }),
     };
 

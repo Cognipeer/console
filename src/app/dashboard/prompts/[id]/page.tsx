@@ -153,7 +153,7 @@ export default function PromptDetailPage() {
   }, [prompt?.template]);
 
   const usageExamples = useMemo(() => {
-    const apiBase = typeof window !== 'undefined' ? window.location.origin : 'https://api.cognipeer.com';
+    const apiBase = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000';
     const key = prompt?.key ?? 'your-prompt-key';
 
     const sdk = `import { ConsoleClient } from '@cognipeer/console-sdk';\n\nconst client = new ConsoleClient({\n  apiKey: process.env.COGNIPEER_API_KEY!,\n  baseURL: '${apiBase}',\n});\n\nconst rendered = await client.prompts.render('${key}', {\n  environment: 'prod',\n  data: { name: 'World' },\n});\n\nawait client.prompts.deploy('${key}', {\n  action: 'promote',\n  environment: 'staging',\n  versionId: '${versions[0]?.id ?? 'version_id'}',\n});\n\nawait client.prompts.deploy('${key}', {\n  action: 'activate',\n  environment: 'staging',\n});`;

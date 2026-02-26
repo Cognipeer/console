@@ -16,13 +16,12 @@ info:
     
   contact:
     name: CognipeerAI Support
-    url: https://cognipeer.com
+    url: https://github.com/Cognipeer/cgate
   license:
-    name: Proprietary
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
 
 servers:
-  - url: https://api.cognipeer.com/api/client/v1
-    description: Production server
   - url: http://localhost:3000/api/client/v1
     description: Development server
 
@@ -42,6 +41,16 @@ tags:
     description: File storage and management
   - name: Tracing
     description: Agent tracing and observability
+  - name: Prompts
+    description: Prompt template management and rendering
+  - name: Guardrails
+    description: Content safety and policy evaluation
+  - name: Memory
+    description: Persistent memory stores for agents
+  - name: RAG
+    description: Retrieval-Augmented Generation modules
+  - name: Health
+    description: Liveness and readiness probes
 
 paths:
   /chat/completions:
@@ -867,6 +876,497 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
+
+  # ── Prompts ────────────────────────────────────────────────────────
+
+  /prompts:
+    get:
+      tags: [Prompts]
+      summary: List prompts
+      parameters:
+        - name: search
+          in: query
+          schema:
+            type: string
+          description: Filter prompts by name/key
+      responses:
+        '200':
+          description: List of prompts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  prompts:
+                    type: array
+                    items:
+                      type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /prompts/{key}:
+    get:
+      tags: [Prompts]
+      summary: Get a prompt by key
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: environment
+          in: query
+          schema:
+            type: string
+            enum: [dev, staging, prod]
+        - name: version
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        '200':
+          description: Prompt with resolved version
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  prompt:
+                    type: object
+                  resolvedVersion:
+                    type: object
+                    nullable: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /prompts/{key}/render:
+    post:
+      tags: [Prompts]
+      summary: Render a prompt template with variables
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: environment
+          in: query
+          schema:
+            type: string
+            enum: [dev, staging, prod]
+        - name: version
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                data:
+                  type: object
+                  description: Template variables to interpolate
+      responses:
+        '200':
+          description: Rendered prompt
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rendered:
+                    type: string
+                  prompt:
+                    type: object
+                    properties:
+                      key:
+                        type: string
+                      name:
+                        type: string
+                      version:
+                        type: integer
+                      environment:
+                        type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ── Guardrails ─────────────────────────────────────────────────────
+
+  /guardrails/evaluate:
+    post:
+      tags: [Guardrails]
+      summary: Evaluate text against a guardrail policy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [guardrail_key, text]
+              properties:
+                guardrail_key:
+                  type: string
+                  description: Unique key of the guardrail to evaluate
+                text:
+                  type: string
+                  description: Text content to evaluate
+                target:
+                  type: string
+                  enum: [input, output, both]
+                  default: both
+      responses:
+        '200':
+          description: Evaluation result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  passed:
+                    type: boolean
+                  guardrail_key:
+                    type: string
+                  guardrail_name:
+                    type: string
+                  action:
+                    type: string
+                  findings:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        category:
+                          type: string
+                        message:
+                          type: string
+                        block:
+                          type: boolean
+                  message:
+                    type: string
+                    nullable: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ── Memory ─────────────────────────────────────────────────────────
+
+  /memory/stores:
+    get:
+      tags: [Memory]
+      summary: List memory stores
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, inactive, error]
+        - name: search
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of memory stores
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  stores:
+                    type: array
+                    items:
+                      type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Memory]
+      summary: Create a memory store
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, vectorProviderKey, embeddingModelKey]
+              properties:
+                name:
+                  type: string
+                vectorProviderKey:
+                  type: string
+                embeddingModelKey:
+                  type: string
+                description:
+                  type: string
+                config:
+                  type: object
+      responses:
+        '201':
+          description: Created memory store
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  store:
+                    type: object
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /memory/stores/{storeKey}/recall:
+    post:
+      tags: [Memory]
+      summary: Recall memories for chat context
+      parameters:
+        - name: storeKey
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query:
+                  type: string
+                top_k:
+                  type: integer
+                  default: 5
+                max_tokens:
+                  type: integer
+                  default: 2000
+                scope:
+                  type: string
+                scope_id:
+                  type: string
+      responses:
+        '200':
+          description: Recalled memories
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /memory/stores/{storeKey}/search:
+    post:
+      tags: [Memory]
+      summary: Search memories by similarity
+      parameters:
+        - name: storeKey
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query:
+                  type: string
+                top_k:
+                  type: integer
+                  default: 10
+                min_score:
+                  type: number
+                scope:
+                  type: string
+                scope_id:
+                  type: string
+                tags:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ── RAG ────────────────────────────────────────────────────────────
+
+  /rag/modules:
+    get:
+      tags: [RAG]
+      summary: List RAG modules
+      responses:
+        '200':
+          description: List of RAG modules
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  modules:
+                    type: array
+                    items:
+                      type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /rag/modules/{key}/query:
+    post:
+      tags: [RAG]
+      summary: Query a RAG module
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query:
+                  type: string
+                topK:
+                  type: integer
+                filter:
+                  type: object
+      responses:
+        '200':
+          description: Query results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    type: object
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /rag/modules/{key}/ingest:
+    post:
+      tags: [RAG]
+      summary: Ingest a document into a RAG module
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fileName]
+              properties:
+                fileName:
+                  type: string
+                content:
+                  type: string
+                  description: Raw text content (mutually exclusive with data)
+                data:
+                  type: string
+                  description: Base64-encoded file content (mutually exclusive with content)
+                contentType:
+                  type: string
+                metadata:
+                  type: object
+      responses:
+        '201':
+          description: Ingested document
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  document:
+                    type: object
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ── Health ─────────────────────────────────────────────────────────
+
+  /health/live:
+    get:
+      tags: [Health]
+      summary: Liveness probe
+      security: []
+      responses:
+        '200':
+          description: Service is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /health/ready:
+    get:
+      tags: [Health]
+      summary: Readiness probe
+      security: []
+      responses:
+        '200':
+          description: Service is ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  components:
+                    type: object
+        '503':
+          description: Service is not ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: degraded
+                  components:
+                    type: object
 
 components:
   securitySchemes:
