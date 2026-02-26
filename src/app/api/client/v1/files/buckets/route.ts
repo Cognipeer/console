@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { listFileBuckets } from '@/lib/services/files';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('client-file-buckets');
 
 export const runtime = 'nodejs';
 
@@ -19,7 +22,7 @@ export async function GET(request: NextRequest) {
       count: buckets.length,
     });
   } catch (error) {
-    console.error('[client-api:files:buckets:list]', error);
+    logger.error('List buckets error', { error });
 
     if (error instanceof ApiTokenAuthError) {
       return NextResponse.json(

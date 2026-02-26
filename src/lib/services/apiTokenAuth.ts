@@ -1,6 +1,12 @@
 import { NextRequest } from 'next/server';
+import { createHash } from 'crypto';
 import { getDatabase } from '@/lib/database';
+import { createLogger } from '@/lib/core/logger';
+import { getCache } from '@/lib/core/cache';
+import { fireAndForget } from '@/lib/core/asyncTask';
 import type { ITenant, IUser, IApiToken } from '@/lib/database';
+
+const logger = createLogger('api-token-auth');
 import { ensureDefaultProject } from '@/lib/services/projects/projectService';
 
 export class ApiTokenAuthError extends Error {
@@ -38,19 +44,47 @@ export async function requireApiToken(request: NextRequest): Promise<ApiTokenCon
   }
 
   const db = await getDatabase();
-  const tokenRecord = await db.findApiTokenByToken(token);
 
-  if (!tokenRecord) {
-    throw new ApiTokenAuthError('Invalid API token');
+  // Cache tokenRecord + tenant to avoid 2 DB lookups per request
+  const tokenHash = createHash('sha256').update(token).digest('hex').substring(0, 16);
+  const cacheKey = `api-auth:${tokenHash}`;
+
+  interface CachedAuth { tokenRecord: IApiToken; tenant: ITenant }
+  let cached: CachedAuth | undefined;
+  try {
+    const cache = await getCache();
+    cached = await cache.get<CachedAuth>(cacheKey);
+  } catch { /* cache miss — continue to DB */ }
+
+  let tokenRecord: IApiToken | null;
+  let tenant: ITenant | null;
+
+  if (cached) {
+    tokenRecord = cached.tokenRecord;
+    tenant = cached.tenant;
+  } else {
+    tokenRecord = await db.findApiTokenByToken(token);
+    if (!tokenRecord) {
+      throw new ApiTokenAuthError('Invalid API token');
+    }
+
+    tenant = await db.findTenantById(tokenRecord.tenantId);
+    if (!tenant) {
+      throw new ApiTokenAuthError('Tenant not found for token', 404);
+    }
+
+    try {
+      const cache = await getCache();
+      await cache.set(cacheKey, { tokenRecord, tenant }, 60);
+    } catch { /* best-effort cache write */ }
   }
 
-  await db.updateTokenLastUsed(token);
-
-  const tenant = await db.findTenantById(tokenRecord.tenantId);
-
-  if (!tenant) {
-    throw new ApiTokenAuthError('Tenant not found for token', 404);
-  }
+  // Non-critical last-used timestamp update — fire and forget
+  fireAndForget('token-last-used', async () => {
+    const bgDb = await getDatabase();
+    await bgDb.switchToTenant(tenant.dbName);
+    await bgDb.updateTokenLastUsed(token);
+  });
 
   await db.switchToTenant(tenant.dbName);
 
@@ -69,7 +103,7 @@ export async function requireApiToken(request: NextRequest): Promise<ApiTokenCon
   try {
     user = await db.findUserById(tokenRecord.userId);
   } catch (error) {
-    console.warn('Unable to resolve user for API token', error);
+    logger.warn('Unable to resolve user for API token', { error });
   }
 
   return {

@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { updateMemoryItem, deleteMemoryItem, getMemoryItem } from '@/lib/services/memory/memoryService';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('client-memory');
 
 export const runtime = 'nodejs';
 
@@ -21,7 +24,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     if (error instanceof ApiTokenAuthError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
-    console.error('[memory:item:get]', error);
+    logger.error('Get memory item error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal server error' },
       { status: 500 },
@@ -61,7 +64,7 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
     if (error instanceof ApiTokenAuthError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
-    console.error('[memory:item:update]', error);
+    logger.error('Update memory item error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal server error' },
       { status: 500 },
@@ -82,7 +85,7 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
     if (error instanceof ApiTokenAuthError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
-    console.error('[memory:item:delete]', error);
+    logger.error('Delete memory item error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal server error' },
       { status: 500 },

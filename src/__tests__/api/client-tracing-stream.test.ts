@@ -32,9 +32,12 @@ vi.mock('@/lib/quota/quotaGuard', () => ({
   checkResourceQuota: vi.fn().mockResolvedValue({ allowed: true }),
 }));
 
+vi.mock('@/lib/core/lifecycle', () => ({ isShuttingDown: vi.fn().mockReturnValue(false) }));
+
 import { POST as startPOST } from '@/app/api/client/v1/tracing/sessions/stream/[sessionId]/start/route';
 import { POST as eventsPOST } from '@/app/api/client/v1/tracing/sessions/stream/[sessionId]/events/route';
 import { POST as endPOST } from '@/app/api/client/v1/tracing/sessions/stream/[sessionId]/end/route';
+import { drainPendingTasks } from '@/lib/core/asyncTask';
 
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 
@@ -105,6 +108,7 @@ describe('POST /api/client/v1/tracing/sessions/stream/[sessionId]/start', () => 
     const body = await res.json();
     expect(body.sessionId).toBe('sess-abc');
     expect(body.status).toBe('in_progress');
+    await drainPendingTasks();
     expect(mockDb.createAgentTracingSession).toHaveBeenCalled();
   });
 
@@ -116,6 +120,7 @@ describe('POST /api/client/v1/tracing/sessions/stream/[sessionId]/start', () => 
       sessionParams,
     );
     expect(res.status).toBe(200);
+    await drainPendingTasks();
     expect(mockDb.updateAgentTracingSession).toHaveBeenCalled();
     expect(mockDb.createAgentTracingSession).not.toHaveBeenCalled();
   });
@@ -159,6 +164,7 @@ describe('POST /api/client/v1/tracing/sessions/stream/[sessionId]/events', () =>
     const body = await res.json();
     expect(body.sessionId).toBe('sess-abc');
     expect(body.totalEvents).toBe(3); // 2 existing + 1
+    await drainPendingTasks();
     expect(mockDb.createAgentTracingEvent).toHaveBeenCalled();
     expect(mockDb.updateAgentTracingSession).toHaveBeenCalled();
   });
@@ -226,6 +232,7 @@ describe('POST /api/client/v1/tracing/sessions/stream/[sessionId]/end', () => {
     const body = await res.json();
     expect(body.sessionId).toBe('sess-abc');
     expect(body.status).toBe('success');
+    await drainPendingTasks();
     expect(mockDb.updateAgentTracingSession).toHaveBeenCalled();
   });
 

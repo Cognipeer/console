@@ -4,6 +4,10 @@ import { handleChatCompletion, GuardrailBlockError } from '@/lib/services/models
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { logModelUsage } from '@/lib/services/models/usageLogger';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
+import { createLogger } from '@/lib/core/logger';
+import { withRequestContext } from '@/lib/api/withRequestContext';
+
+const logger = createLogger('playground-chat');
 
 export const runtime = 'nodejs';
 
@@ -39,7 +43,7 @@ function sanitize(value: unknown, max = 20000) {
  * Internal endpoint for playground chat completions.
  * Uses session cookie auth instead of API token.
  */
-export async function POST(request: NextRequest) {
+const _POST = async (request: NextRequest) => {
   const startedAt = Date.now();
 
   // Get tenant info from middleware-injected headers
@@ -131,7 +135,7 @@ export async function POST(request: NextRequest) {
       { status: 200 }
     );
   } catch (error: unknown) {
-    console.error('[playground/chat] Error:', error);
+    logger.error('Error', { error });
 
     if (error instanceof GuardrailBlockError) {
       return NextResponse.json(
@@ -162,10 +166,12 @@ export async function POST(request: NextRequest) {
         });
       }
     } catch (logError) {
-      console.error('[playground/chat] Failed to log error:', logError);
+      logger.error('Failed to log error', { error: logError });
     }
 
     const errorMessage = error instanceof Error ? error.message : 'Chat completion failed';
     return NextResponse.json({ error: errorMessage }, { status: 500 });
   }
-}
+};
+
+export const POST = withRequestContext(_POST);

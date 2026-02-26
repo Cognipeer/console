@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDatabase } from '@/lib/database';
 import { ensureDefaultProject, listAccessibleProjects } from '@/lib/services/projects/projectService';
+import { getConfig } from '@/lib/core/config';
+import { createLogger } from '@/lib/core/logger';
 
 export const runtime = 'nodejs';
+
+const logger = createLogger('projects');
 
 function ensureTenantContext(request: NextRequest) {
   const tenantDbName = request.headers.get('x-tenant-db-name');
@@ -50,7 +54,7 @@ export async function POST(request: NextRequest) {
     const response = NextResponse.json({ success: true }, { status: 200 });
     response.cookies.set('active_project_id', body.projectId, {
       httpOnly: false,
-      secure: process.env.NODE_ENV === 'production',
+      secure: getConfig().nodeEnv === 'production',
       sameSite: 'lax',
       maxAge: 60 * 60 * 24 * 30,
       path: '/',
@@ -58,7 +62,7 @@ export async function POST(request: NextRequest) {
 
     return response;
   } catch (error) {
-    console.error('Set active project error:', error);
+    logger.error('Set active project error', { error });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

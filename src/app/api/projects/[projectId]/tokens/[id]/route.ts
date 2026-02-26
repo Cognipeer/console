@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDatabase } from '@/lib/database';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('project-tokens');
 
 export const runtime = 'nodejs';
 
@@ -65,7 +68,7 @@ export async function DELETE(
 
     return NextResponse.json({ message: 'API token deleted successfully' }, { status: 200 });
   } catch (error) {
-    console.error('Delete project token error:', error);
+    logger.error('Delete project token error', { error });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

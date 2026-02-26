@@ -3,6 +3,10 @@ export const runtime = 'nodejs';
 import { NextRequest, NextResponse } from 'next/server';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { ingestDocument, ingestFile } from '@/lib/services/rag/ragService';
+import { createLogger } from '@/lib/core/logger';
+import { withRequestContext } from '@/lib/api/withRequestContext';
+
+const logger = createLogger('client-rag');
 
 /**
  * POST /api/client/v1/rag/modules/:key/ingest
@@ -11,10 +15,10 @@ import { ingestDocument, ingestFile } from '@/lib/services/rag/ragService';
  * 1. Text mode:  { fileName, content }
  * 2. File mode:  { fileName, data }  (base64 or data-URL encoded file)
  */
-export async function POST(
+const _POST = async (
   request: NextRequest,
   { params }: { params: Promise<{ key: string }> },
-) {
+) => {
   try {
     const ctx = await requireApiToken(request);
     const { key } = await params;
@@ -74,13 +78,15 @@ export async function POST(
     if (error instanceof ApiTokenAuthError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
-    console.error('[client/rag/ingest]', error);
+    logger.error('RAG ingest error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal error' },
       { status: 500 },
     );
   }
-}
+};
+
+export const POST = withRequestContext(_POST);
 
 /** Decode base64 or data URL to Buffer */
 function decodeFileData(payload: string): Buffer {

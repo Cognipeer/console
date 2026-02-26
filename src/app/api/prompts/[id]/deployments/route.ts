@@ -8,6 +8,9 @@ import {
   type PromptEnvironment,
 } from '@/lib/services/prompts';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('prompt-deployments');
 
 export const runtime = 'nodejs';
 
@@ -43,7 +46,7 @@ export async function GET(
 
     return NextResponse.json(deployments, { status: 200 });
   } catch (error: unknown) {
-    console.error('List prompt deployments error', error);
+    logger.error('List prompt deployments error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
@@ -135,7 +138,7 @@ export async function POST(
 
     return NextResponse.json({ prompt, deployments }, { status: 200 });
   } catch (error: unknown) {
-    console.error('Mutate prompt deployment error', error);
+    logger.error('Mutate prompt deployment error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }

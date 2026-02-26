@@ -6,6 +6,10 @@ import { handleChatCompletion, GuardrailBlockError } from '@/lib/services/models
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { calculateCost, logModelUsage } from '@/lib/services/models/usageLogger';
 import { checkBudget, checkPerRequestLimits, checkRateLimit } from '@/lib/quota/quotaGuard';
+import { createLogger } from '@/lib/core/logger';
+import { withRequestContext } from '@/lib/api/withRequestContext';
+
+const logger = createLogger('client-chat');
 
 export const runtime = 'nodejs';
 
@@ -79,7 +83,7 @@ function sanitize(value: unknown, max = 20000) {
   }
 }
 
-export async function POST(request: NextRequest) {
+const _POST = async (request: NextRequest) => {
   const startedAt = Date.now();
 
   let auth: Awaited<ReturnType<typeof requireApiToken>>;
@@ -89,7 +93,7 @@ export async function POST(request: NextRequest) {
     if (error instanceof ApiTokenAuthError) {
       return unauthorized(error.message);
     }
-    console.error('Chat auth error', error);
+    logger.error('Chat auth error', { error });
     return unauthorized();
   }
 
@@ -160,7 +164,7 @@ export async function POST(request: NextRequest) {
       return quotaExceeded(budgetResult.reason || 'Budget exceeded');
     }
   } catch (error) {
-    console.error('Quota check error', error);
+    logger.error('Quota check error', { error });
     return NextResponse.json(
       { error: { message: 'Quota check failed', type: 'server_error' } },
       { status: 500 },
@@ -197,7 +201,7 @@ export async function POST(request: NextRequest) {
     if (actualOutputTokens > 0) {
       // Fire and forget - don't block response
       checkRateLimit(quotaContext, { tokens: actualOutputTokens }).catch(err => 
-        console.error('Failed to update rate limit usage:', err)
+        logger.error('Failed to update rate limit usage', { error: err })
       );
     }
 
@@ -212,7 +216,7 @@ export async function POST(request: NextRequest) {
           }
           return checkBudget(quotaContext, { usd: cost.totalCost });
         })
-        .catch((err) => console.error('Failed to update budget usage:', err));
+        .catch((err) => logger.error('Failed to update budget usage', { error: err }));
     }
 
     if (result.stream) {
@@ -229,7 +233,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ ...result.response, request_id: result.requestId }, { status: 200 });
   } catch (error: unknown) {
-    console.error('Chat completion error', error);
+    logger.error('Chat completion error', { error });
 
     // Guardrail block — return 400 with details
     if (error instanceof GuardrailBlockError) {
@@ -263,10 +267,12 @@ export async function POST(request: NextRequest) {
         });
       }
     } catch (logError) {
-      console.error('Failed to log chat completion error', logError);
+      logger.error('Failed to log chat completion error', { error: logError });
     }
 
     const errorMessage = error instanceof Error ? error.message : 'Inference error';
     return NextResponse.json({ error: { message: errorMessage, type: 'server_error' } }, { status: 500 });
   }
-}
+};
+
+export const POST = withRequestContext(_POST);

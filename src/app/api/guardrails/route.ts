@@ -9,6 +9,9 @@ import {
 } from '@/lib/services/guardrail';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
 import type { GuardrailType, GuardrailAction, GuardrailTarget } from '@/lib/database';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('guardrails');
 
 export const runtime = 'nodejs';
 
@@ -57,7 +60,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json(payload, { status: 200 });
   } catch (error: unknown) {
-    console.error('[guardrails] List error', error);
+    logger.error('List error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
@@ -124,7 +127,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ guardrail }, { status: 201 });
   } catch (error: unknown) {
-    console.error('[guardrails] Create error', error);
+    logger.error('Create error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }

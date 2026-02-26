@@ -1,4 +1,6 @@
 import slugify from 'slugify';
+import { createLogger } from '@/lib/core/logger';
+import { getCache } from '@/lib/core/cache';
 import {
   getDatabase,
   IModel,
@@ -21,6 +23,8 @@ import type {
   CreateModelProviderInput,
 } from './types';
 
+const logger = createLogger('model-service');
+
 const SLUG_OPTIONS = {
   lower: true,
   strict: true,
@@ -38,11 +42,10 @@ function attachDriverCapabilities(provider: ProviderConfigView): ModelProviderVi
       driverCapabilities: contract.capabilities,
     };
   } catch (error) {
-    console.warn(
-      'Model provider contract missing for driver',
-      provider.driver,
-      error instanceof Error ? error.message : error,
-    );
+    logger.warn('Model provider contract missing for driver', {
+      driver: provider.driver,
+      error: error instanceof Error ? error.message : error,
+    });
   }
 
   return { ...provider };
@@ -260,9 +263,23 @@ export async function getModelByKey(
   key: string,
   projectId: string,
 ): Promise<IModel | null> {
+  const cacheKey = `model-meta:${tenantDbName}:${projectId}:${key}`;
+  try {
+    const cache = await getCache();
+    const cached = await cache.get<IModel>(cacheKey);
+    if (cached) return cached;
+  } catch { /* cache miss / unavailable — fall through to DB */ }
+
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
-  return db.findModelByKey(key, projectId);
+  const model = await db.findModelByKey(key, projectId);
+  if (model) {
+    try {
+      const cache = await getCache();
+      await cache.set(cacheKey, model, 120);
+    } catch { /* best-effort cache write */ }
+  }
+  return model;
 }
 
 export async function getModelById(

@@ -3,6 +3,9 @@ import {
   listRagModules,
   createRagModule,
 } from '@/lib/services/rag/ragService';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('rag-modules');
 
 export async function GET(request: NextRequest) {
   const tenantDbName = request.headers.get('x-tenant-db-name');
@@ -18,7 +21,7 @@ export async function GET(request: NextRequest) {
     const modules = await listRagModules(tenantDbName, { projectId, status, search });
     return NextResponse.json({ modules });
   } catch (error) {
-    console.error('[rag] list error', error);
+    logger.error('List error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal error' },
       { status: 500 },
@@ -62,7 +65,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ module: ragModule }, { status: 201 });
   } catch (error) {
-    console.error('[rag] create error', error);
+    logger.error('Create error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal error' },
       { status: 500 },

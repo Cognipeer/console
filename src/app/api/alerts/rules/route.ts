@@ -5,6 +5,9 @@ import {
   ProjectContextError,
 } from '@/lib/services/projects/projectContext';
 import type { AlertMetric, AlertModule } from '@/lib/database';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('alert-rules');
 
 export const runtime = 'nodejs';
 
@@ -46,7 +49,7 @@ export async function GET(request: NextRequest) {
       { status: 200 },
     );
   } catch (error: unknown) {
-    console.error('[alerts] List rules error', error);
+    logger.error('List rules error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
@@ -131,7 +134,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ rule }, { status: 201 });
   } catch (error: unknown) {
-    console.error('[alerts] Create rule error', error);
+    logger.error('Create rule error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }

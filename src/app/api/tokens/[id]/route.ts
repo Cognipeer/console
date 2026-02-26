@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDatabase } from '@/lib/database';
 import { ProjectContextError, requireProjectContext } from '@/lib/services/projects/projectContext';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('tokens');
 
 export async function DELETE(
   request: NextRequest,
@@ -65,7 +68,7 @@ export async function DELETE(
       { status: 200 },
     );
   } catch (error) {
-    console.error('Delete token error:', error);
+    logger.error('Delete token error', { error });
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 },

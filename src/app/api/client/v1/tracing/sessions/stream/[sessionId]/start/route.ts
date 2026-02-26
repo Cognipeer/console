@@ -3,6 +3,11 @@ import { getDatabase } from '@/lib/database';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { checkRateLimit, checkResourceQuota } from '@/lib/quota/quotaGuard';
+import { createLogger } from '@/lib/core/logger';
+import { fireAndForget } from '@/lib/core/asyncTask';
+import { withRequestContext } from '@/lib/api/withRequestContext';
+
+const logger = createLogger('client-tracing');
 
 export const runtime = 'nodejs';
 
@@ -12,10 +17,10 @@ export const runtime = 'nodejs';
  * Start a streaming tracing session. Creates the session record with in_progress status.
  * Events will be sent separately via the /events endpoint.
  */
-export async function POST(
+const _POST = async (
     request: NextRequest,
     { params }: { params: Promise<{ sessionId: string }> }
-) {
+) => {
     try {
         const { sessionId } = await params;
         const auth = await requireApiToken(request);
@@ -111,12 +116,16 @@ export async function POST(
             totalBytesOut: undefined,
         };
 
-        if (existing) {
-            // Session already started, update it
-            await db.updateAgentTracingSession(sessionId, sessionDoc, auth.projectId);
-        } else {
-            await db.createAgentTracingSession(sessionDoc);
-        }
+        // Fire-and-forget: persist session in background
+        fireAndForget('tracing-stream-start', async () => {
+            const bgDb = await getDatabase();
+            await bgDb.switchToTenant(auth.tenantDbName);
+            if (existing) {
+                await bgDb.updateAgentTracingSession(sessionId, sessionDoc, auth.projectId);
+            } else {
+                await bgDb.createAgentTracingSession(sessionDoc);
+            }
+        });
 
         return NextResponse.json({
             success: true,
@@ -124,7 +133,7 @@ export async function POST(
             status: 'in_progress',
         });
     } catch (error: unknown) {
-        console.error('Tracing session start error:', error);
+        logger.error('Tracing session start error', { error });
 
         if (error instanceof ApiTokenAuthError) {
             return NextResponse.json({ error: error.message }, { status: error.status });
@@ -134,4 +143,6 @@ export async function POST(
             error instanceof Error ? error.message : 'Failed to start tracing session';
         return NextResponse.json({ error: message }, { status: 500 });
     }
-}
+};
+
+export const POST = withRequestContext(_POST);

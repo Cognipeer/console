@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDatabase } from '@/lib/database';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('auth');
 
 export const runtime = 'nodejs';
 
@@ -34,7 +37,7 @@ export async function GET(request: NextRequest) {
       { status: 200 },
     );
   } catch (error) {
-    console.error('Session endpoint error:', error);
+    logger.error('Session endpoint error', { error });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

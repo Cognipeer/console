@@ -3,6 +3,9 @@ import {
   createPromptComment,
   listPromptComments,
 } from '@/lib/services/prompts';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('prompt-comments');
 
 export async function GET(
   request: NextRequest,
@@ -30,7 +33,7 @@ export async function GET(
     );
     return NextResponse.json({ comments });
   } catch (error) {
-    console.error('[API] Error listing prompt comments:', error);
+    logger.error('Error listing prompt comments', { error });
     return NextResponse.json(
       { error: 'Failed to list comments' },
       { status: 500 },
@@ -79,7 +82,7 @@ export async function POST(
 
     return NextResponse.json({ comment }, { status: 201 });
   } catch (error) {
-    console.error('[API] Error creating prompt comment:', error);
+    logger.error('Error creating prompt comment', { error });
     return NextResponse.json(
       { error: 'Failed to create comment' },
       { status: 500 },

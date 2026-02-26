@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { AlertService } from '@/lib/services/alerts';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('alert-rules');
 
 export const runtime = 'nodejs';
 
@@ -28,7 +31,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
 
     return NextResponse.json({ rule }, { status: 200 });
   } catch (error: unknown) {
-    console.error('[alerts] Get rule error', error);
+    logger.error('Get rule error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal error' },
       { status: 500 },
@@ -62,7 +65,7 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
 
     return NextResponse.json({ rule }, { status: 200 });
   } catch (error: unknown) {
-    console.error('[alerts] Update rule error', error);
+    logger.error('Update rule error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal error' },
       { status: 500 },
@@ -91,7 +94,7 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
 
     return NextResponse.json({ success: true }, { status: 200 });
   } catch (error: unknown) {
-    console.error('[alerts] Delete rule error', error);
+    logger.error('Delete rule error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal error' },
       { status: 500 },
@@ -134,7 +137,7 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
 
     return NextResponse.json({ rule }, { status: 200 });
   } catch (error: unknown) {
-    console.error('[alerts] Toggle rule error', error);
+    logger.error('Toggle rule error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal error' },
       { status: 500 },

@@ -6,6 +6,9 @@ import {
 import { ProjectContextError, requireProjectContext } from '@/lib/services/projects/projectContext';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { checkRateLimit, checkResourceQuota } from '@/lib/quota/quotaGuard';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('vector-indexes');
 
 export const runtime = 'nodejs';
 
@@ -53,7 +56,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ indexes }, { status: 200 });
   } catch (error) {
-    console.error('List vector indexes error', error);
+    logger.error('List vector indexes error', { error });
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 },
@@ -177,7 +180,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ index }, { status: 201 });
   } catch (error) {
-    console.error('Create vector index error', error);
+    logger.error('Create vector index error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal server error' },
       { status: 500 },

@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { AgentTracingService } from '@/lib/services/agentTracing';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('tracing-threads');
 
 /**
  * GET /api/tracing/threads
@@ -41,7 +44,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json(result);
   } catch (error: unknown) {
-    console.error('List threads error:', error);
+    logger.error('List threads error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }

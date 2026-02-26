@@ -1,5 +1,8 @@
 import crypto from 'crypto';
+import { createLogger } from '@/lib/core/logger';
 import type { IModel, ISemanticCacheConfig } from '@/lib/database';
+
+const logger = createLogger('semantic-cache');
 import { handleEmbeddingRequest } from './inferenceService';
 import {
   queryVectorIndex,
@@ -126,7 +129,7 @@ export async function lookupCache(params: {
 
     return { hit: false };
   } catch (error) {
-    console.warn('[semantic-cache] Cache lookup failed, proceeding without cache', error);
+    logger.warn('Cache lookup failed, proceeding without cache', { error });
     return { hit: false };
   }
 }
@@ -173,7 +176,7 @@ export async function storeInCache(params: {
       ],
     });
   } catch (error) {
-    console.warn('[semantic-cache] Failed to store cache entry', error);
+    logger.warn('Failed to store cache entry', { error });
   }
 }
 

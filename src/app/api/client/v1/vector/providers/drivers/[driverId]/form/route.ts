@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { providerRegistry } from '@/lib/providers';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('client-vector');
 
 export const runtime = 'nodejs';
 
@@ -15,7 +18,7 @@ function handleError(error: unknown) {
     return NextResponse.json({ error: error.message }, { status: error.status });
   }
 
-  console.error('Client get vector provider driver form error', error);
+  logger.error('Get vector provider driver form error', { error });
   return NextResponse.json(
     { error: error instanceof Error ? error.message : 'Failed to load form schema' },
     { status: 404 },

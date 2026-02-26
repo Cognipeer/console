@@ -5,6 +5,9 @@ import {
   ProjectContextError,
 } from '@/lib/services/projects/projectContext';
 import { parseDashboardDateFilterFromSearchParams } from '@/lib/utils/dashboardDateFilter';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('dashboard-data');
 
 export const runtime = 'nodejs';
 
@@ -52,7 +55,7 @@ export async function GET(request: NextRequest) {
       },
     });
   } catch (error: unknown) {
-    console.error('Dashboard data error:', error);
+    logger.error('Dashboard data error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }

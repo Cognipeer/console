@@ -5,7 +5,10 @@
  */
 
 import type { AlertMetric } from '@/lib/database';
+import { createLogger } from '@/lib/core/logger';
 import type { IMetricCollector, MetricQuery, MetricResult } from './types';
+
+const logger = createLogger('alert-metrics');
 import { ModelUsageCollector } from './modelUsageCollector';
 import { InferenceServerCollector } from './inferenceServerCollector';
 import { GuardrailCollector } from './guardrailCollector';
@@ -24,7 +27,7 @@ export function getCollectorForMetric(metric: AlertMetric): IMetricCollector | u
 export async function collectMetric(query: MetricQuery): Promise<MetricResult> {
   const collector = getCollectorForMetric(query.metric);
   if (!collector) {
-    console.warn(`[alerts] No collector for metric "${query.metric}"`);
+    logger.warn(`No collector for metric "${query.metric}"`);
     return { value: 0, sampleCount: 0 };
   }
   return collector.collect(query);

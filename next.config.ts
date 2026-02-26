@@ -6,6 +6,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const nextConfig: NextConfig = {
+  output: 'standalone',
+  serverExternalPackages: ['ioredis', 'winston', 'async_hooks'],
   turbopack: {
     root: __dirname,
   },

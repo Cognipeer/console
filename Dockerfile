@@ -17,11 +17,23 @@ RUN npx next build
 FROM node:20-alpine AS runner
 WORKDIR /app
 ENV PORT=3000
+ENV HOSTNAME="0.0.0.0"
 # Create non-root user
 RUN adduser -D -u 1001 -h /home/nextjs nextjs
 
-COPY --from=builder /app/ ./
+# Copy standalone output (includes server.js + minimal node_modules)
+COPY --from=builder /app/.next/standalone ./
+# Copy static assets
+COPY --from=builder /app/.next/static ./.next/static
+COPY --from=builder /app/public ./public
+# Copy mail templates (needed at runtime)
+COPY --from=builder /app/mail-templates ./mail-templates
+
 RUN chown -R nextjs:nextjs .
 EXPOSE 3000
 USER nextjs
-CMD ["npm", "run", "start"]
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -q --spider http://localhost:3000/api/health/live || exit 1
+
+CMD ["node", "server.js"]

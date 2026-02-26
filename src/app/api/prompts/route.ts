@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createPrompt, listPrompts } from '@/lib/services/prompts';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('prompts');
 
 export const runtime = 'nodejs';
 
@@ -29,7 +32,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ prompts }, { status: 200 });
   } catch (error: unknown) {
-    console.error('List prompts error', error);
+    logger.error('List prompts error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
@@ -82,7 +85,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ prompt }, { status: 201 });
   } catch (error: unknown) {
-    console.error('Create prompt error', error);
+    logger.error('Create prompt error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }

@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { queryVectorIndex } from '@/lib/services/vector';
 import { ProjectContextError, requireProjectContext } from '@/lib/services/projects/projectContext';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('vector-query');
 
 export const runtime = 'nodejs';
 
@@ -87,7 +90,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
     return NextResponse.json({ result }, { status: 200 });
   } catch (error) {
-    console.error('Query vector index error', error);
+    logger.error('Query vector index error', { error });
     if (isNotFoundError(error)) {
       return NextResponse.json({ error: 'Not found' }, { status: 404 });
     }

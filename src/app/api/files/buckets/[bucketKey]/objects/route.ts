@@ -4,6 +4,9 @@ import { requireProjectContext, ProjectContextError } from '@/lib/services/proje
 import { getDatabase } from '@/lib/database';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { checkPerRequestLimits, checkRateLimit, checkResourceQuota } from '@/lib/quota/quotaGuard';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('file-objects');
 
 export const runtime = 'nodejs';
 
@@ -71,7 +74,7 @@ export async function GET(request: NextRequest, context: RouteContext) {
       nextCursor: scoped.nextCursor,
     });
   } catch (error) {
-    console.error('List file objects error', error);
+    logger.error('List file objects error', { error });
     const message = error instanceof Error ? error.message : 'Internal server error';
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
@@ -187,7 +190,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
     return NextResponse.json({ record: result.record }, { status: 201 });
   } catch (error) {
-    console.error('Upload file error', error);
+    logger.error('Upload file error', { error });
     const message = error instanceof Error ? error.message : 'Internal server error';
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });

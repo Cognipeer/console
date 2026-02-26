@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import bcrypt from 'bcryptjs';
 import { getDatabase } from '@/lib/database';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('auth');
 
 export const runtime = 'nodejs';
 
@@ -64,7 +67,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ success: true }, { status: 200 });
   } catch (error) {
-    console.error('Change password error:', error);
+    logger.error('Change password error', { error });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

@@ -1,12 +1,13 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
+import { getConfig } from '@/lib/core/config';
 
 const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 12; // 96 bits for GCM
 const AUTH_TAG_LENGTH = 16;
 
 function resolveSecret(): Buffer {
-  const secret =
-    process.env.PROVIDER_ENCRYPTION_SECRET || process.env.JWT_SECRET;
+  const cfg = getConfig();
+  const secret = cfg.auth.providerEncryptionSecret;
 
   if (!secret) {
     throw new Error(

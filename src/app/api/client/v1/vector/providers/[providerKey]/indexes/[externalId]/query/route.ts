@@ -3,6 +3,10 @@ import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth'
 import { queryVectorIndex } from '@/lib/services/vector';
 import { checkPerRequestLimits, checkRateLimit } from '@/lib/quota/quotaGuard';
 import type { LicenseType } from '@/lib/license/license-manager';
+import { createLogger } from '@/lib/core/logger';
+import { withRequestContext } from '@/lib/api/withRequestContext';
+
+const logger = createLogger('client-vector-query');
 
 export const runtime = 'nodejs';
 
@@ -32,14 +36,14 @@ function handleError(error: unknown, scope: string) {
     return NextResponse.json({ error: 'Not found' }, { status: 404 });
   }
 
-  console.error(`${scope} error`, error);
+  logger.error(`${scope} error`, { error });
   return NextResponse.json(
     { error: error instanceof Error ? error.message : 'Internal server error' },
     { status: 500 },
   );
 }
 
-export async function POST(request: NextRequest, context: RouteContext) {
+const _POST = async (request: NextRequest, context: RouteContext) => {
   try {
     const { providerKey, externalId } = await context.params;
     const indexKey = externalId;
@@ -133,4 +137,6 @@ export async function POST(request: NextRequest, context: RouteContext) {
   } catch (error) {
     return handleError(error, 'Client query vector index');
   }
-}
+};
+
+export const POST = withRequestContext(_POST);

@@ -3,7 +3,10 @@
  * Provides the environment variables that application code reads at module load time.
  */
 
-// Required by src/lib/database/index.ts
+// Database provider — default to mongodb for existing tests
+process.env.DB_PROVIDER = process.env.DB_PROVIDER || 'mongodb';
+
+// Required by src/lib/database/index.ts (when DB_PROVIDER=mongodb)
 process.env.MONGODB_URI = 'mongodb://localhost:27017';
 process.env.MAIN_DB_NAME = 'test_console_main';
 

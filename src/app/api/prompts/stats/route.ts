@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { listPrompts } from '@/lib/services/prompts';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
 import { getDatabase } from '@/lib/database';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('prompts-stats');
 
 export const runtime = 'nodejs';
 
@@ -73,7 +76,7 @@ export async function GET(request: NextRequest) {
       versionDistribution,
     });
   } catch (error: unknown) {
-    console.error('[prompts/stats] error', error);
+    logger.error('Stats error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }

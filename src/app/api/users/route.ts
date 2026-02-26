@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDatabase } from '@/lib/database';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('users');
 
 export async function GET(request: NextRequest) {
   try {
@@ -23,7 +26,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ users }, { status: 200 });
   } catch (error) {
-    console.error('List users error:', error);
+    logger.error('List users error', { error });
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 },

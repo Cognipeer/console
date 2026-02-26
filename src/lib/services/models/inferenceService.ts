@@ -1,5 +1,10 @@
 import crypto from 'crypto';
+import { createLogger } from '@/lib/core/logger';
+import { withResilience } from '@/lib/core/resilience';
+import { fireAndForget } from '@/lib/core/asyncTask';
 import type { AIMessage, AIMessageChunk } from '@langchain/core/messages';
+
+const logger = createLogger('inference');
 import { IModel } from '@/lib/database';
 import { getModelByKey } from './modelService';
 import {
@@ -14,6 +19,26 @@ import { buildModelRuntime } from './runtimeService';
 import { isSemanticCacheEnabled, lookupCache, storeInCache } from './semanticCacheService';
 
 const encoder = new TextEncoder();
+
+// ── Guardrail block error ────────────────────────────────────────────────
+export class GuardrailBlockError extends Error {
+  readonly guardrailKey: string;
+  readonly action: string;
+  readonly findings: unknown[];
+
+  constructor(
+    message: string,
+    guardrailKey: string,
+    action: string,
+    findings: unknown[] = [],
+  ) {
+    super(message);
+    this.name = 'GuardrailBlockError';
+    this.guardrailKey = guardrailKey;
+    this.action = action;
+    this.findings = findings;
+  }
+}
 
 interface ChatRunnable {
   bind(overrides: Record<string, unknown>): ChatRunnable;
@@ -219,20 +244,22 @@ export async function handleChatCompletion(params: {
       if (cacheResult.hit && cacheResult.response) {
         const latencyMs = Date.now() - start;
 
-        await logModelUsage(tenantDbName, model, {
-          requestId,
-          route: 'chat.completions',
-          status: 'success',
-          providerRequest: sanitizeForLogging({
-            model: modelKey,
-            messages: body.messages,
-            stream: false,
+        fireAndForget('log-cache-hit', () =>
+          logModelUsage(tenantDbName, model, {
+            requestId,
+            route: 'chat.completions',
+            status: 'success',
+            providerRequest: sanitizeForLogging({
+              model: modelKey,
+              messages: body.messages,
+              stream: false,
+            }),
+            providerResponse: sanitizeForLogging(cacheResult.response),
+            latencyMs,
+            usage: {},
+            cacheHit: true,
           }),
-          providerResponse: sanitizeForLogging(cacheResult.response),
-          latencyMs,
-          usage: {},
-          cacheHit: true,
-        });
+        );
 
         return {
           response: cacheResult.response,
@@ -243,7 +270,7 @@ export async function handleChatCompletion(params: {
         };
       }
     } catch (cacheError) {
-      console.warn('[semantic-cache] Cache lookup error, proceeding with model', cacheError);
+      logger.warn('Cache lookup error, proceeding with model', { error: cacheError });
     }
   }
 
@@ -277,7 +304,10 @@ export async function handleChatCompletion(params: {
       throw new Error('Model provider does not support streaming responses');
     }
 
-    const asyncIterator = await runnable.stream(messages);
+    const asyncIterator = await withResilience(
+      () => runnable.stream!(messages) as Promise<AsyncIterable<AIMessageChunk>>,
+      { key: `chat-stream:${model.providerKey}` },
+    );
     const startedAt = Date.now();
 
     const readable = new ReadableStream<Uint8Array>({
@@ -333,38 +363,42 @@ export async function handleChatCompletion(params: {
             ? aggregatedChunk
             : { tool_calls: toolCalls };
 
-          await logModelUsage(tenantDbName, model, {
-            requestId,
-            route: 'chat.completions',
-            status: 'success',
-            providerRequest: sanitizeForLogging({
-              model: modelKey,
-              messages: body.messages,
-              overrides,
-              stream: true,
+          fireAndForget('log-stream-usage', () =>
+            logModelUsage(tenantDbName, model, {
+              requestId,
+              route: 'chat.completions',
+              status: 'success',
+              providerRequest: sanitizeForLogging({
+                model: modelKey,
+                messages: body.messages,
+                overrides,
+                stream: true,
+              }),
+              providerResponse: sanitizeForLogging(providerResponse),
+              latencyMs,
+              usage,
             }),
-            providerResponse: sanitizeForLogging(providerResponse),
-            latencyMs,
-            usage,
-          });
+          );
         } catch (error: unknown) {
           const latencyMs = Date.now() - startedAt;
           const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-          await logModelUsage(tenantDbName, model, {
-            requestId,
-            route: 'chat.completions',
-            status: 'error',
-            providerRequest: sanitizeForLogging({
-              model: modelKey,
-              messages: body.messages,
-              overrides,
-              stream: true,
+          fireAndForget('log-stream-error', () =>
+            logModelUsage(tenantDbName, model, {
+              requestId,
+              route: 'chat.completions',
+              status: 'error',
+              providerRequest: sanitizeForLogging({
+                model: modelKey,
+                messages: body.messages,
+                overrides,
+                stream: true,
+              }),
+              providerResponse: sanitizeForLogging({ error: errorMessage }),
+              errorMessage,
+              latencyMs,
+              usage: {},
             }),
-            providerResponse: sanitizeForLogging({ error: errorMessage }),
-            errorMessage,
-            latencyMs,
-            usage: {},
-          });
+          );
 
           controller.error(error);
         }
@@ -374,7 +408,10 @@ export async function handleChatCompletion(params: {
     return { stream: readable, requestId };
   }
 
-  const aiMessage = await runnable.invoke(messages);
+  const aiMessage = await withResilience(
+    () => runnable.invoke(messages),
+    { key: `chat:${model.providerKey}` },
+  );
   const latencyMs = Date.now() - start;
   const response = toOpenAIChatResponse(aiMessage, {
     model: model.modelId,
@@ -387,21 +424,23 @@ export async function handleChatCompletion(params: {
     usage.toolCalls = toolCallCount;
   }
 
-  await logModelUsage(tenantDbName, model, {
-    requestId,
-    route: 'chat.completions',
-    status: 'success',
-    providerRequest: sanitizeForLogging({
-      model: modelKey,
-      messages: body.messages,
-      overrides,
-      stream: false,
+  fireAndForget('log-chat-usage', () =>
+    logModelUsage(tenantDbName, model, {
+      requestId,
+      route: 'chat.completions',
+      status: 'success',
+      providerRequest: sanitizeForLogging({
+        model: modelKey,
+        messages: body.messages,
+        overrides,
+        stream: false,
+      }),
+      providerResponse: sanitizeForLogging(response),
+      latencyMs,
+      usage,
+      cacheHit: false,
     }),
-    providerResponse: sanitizeForLogging(response),
-    latencyMs,
-    usage,
-    cacheHit: false,
-  });
+  );
 
   // Semantic cache: store the response for future lookups
   if (cacheEnabled && tenantId && model.semanticCache) {
@@ -413,7 +452,7 @@ export async function handleChatCompletion(params: {
       messages: body.messages as unknown[],
       response: response as Record<string, unknown>,
     }).catch((err) =>
-      console.warn('[semantic-cache] Failed to store response in cache', err),
+      logger.warn('Failed to store response in cache', { error: err }),
     );
   }
 
@@ -467,7 +506,10 @@ export async function handleEmbeddingRequest(params: {
     return value;
   });
 
-  const embeddings = await embedder.embedDocuments(inputs);
+  const embeddings = await withResilience(
+    () => embedder.embedDocuments(inputs),
+    { key: `embedding:${model.providerKey}` },
+  );
   const latencyMs = Date.now() - start;
 
   const tokenEstimate =
@@ -483,20 +525,22 @@ export async function handleEmbeddingRequest(params: {
     totalTokens: tokenEstimate,
   };
 
-  await logModelUsage(tenantDbName, model, {
-    requestId,
-    route: 'embeddings',
-    status: 'success',
-    providerRequest: sanitizeForLogging({
-      model: modelKey,
-      input: inputs.slice(0, 5),
+  fireAndForget('log-embedding-usage', () =>
+    logModelUsage(tenantDbName, model, {
+      requestId,
+      route: 'embeddings',
+      status: 'success',
+      providerRequest: sanitizeForLogging({
+        model: modelKey,
+        input: inputs.slice(0, 5),
+      }),
+      providerResponse: sanitizeForLogging({
+        embeddingsLength: embeddings.length,
+      }),
+      latencyMs,
+      usage,
     }),
-    providerResponse: sanitizeForLogging({
-      embeddingsLength: embeddings.length,
-    }),
-    latencyMs,
-    usage,
-  });
+  );
 
   return {
     response: {

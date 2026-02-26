@@ -1,20 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { MongoClient } from 'mongodb';
 import { ProjectContextError, requireProjectContext } from '@/lib/services/projects/projectContext';
 import { parseDashboardDateFilterFromSearchParams } from '@/lib/utils/dashboardDateFilter';
+import { getDatabase } from '@/lib/database';
+import { MongoDBProvider } from '@/lib/database/mongodb.provider';
+import { createLogger } from '@/lib/core/logger';
 
 export const runtime = 'nodejs';
 
+const log = createLogger('vector-stats');
+
 interface RouteContext {
   params: Promise<{ externalId: string }>;
-}
-
-let _sharedClient: MongoClient | null = null;
-async function getMongoClient(): Promise<MongoClient> {
-  if (_sharedClient) return _sharedClient;
-  _sharedClient = new MongoClient(process.env.MONGODB_URI as string);
-  await _sharedClient.connect();
-  return _sharedClient;
 }
 
 export async function GET(request: NextRequest, context: RouteContext) {
@@ -59,7 +55,11 @@ export async function GET(request: NextRequest, context: RouteContext) {
       ? Math.min(Math.max(computedDays, 1), 365)
       : (daysParam ? Math.min(Math.max(parseInt(daysParam, 10) || 30, 7), 90) : 30);
 
-    const client = await getMongoClient();
+    const dbProvider = await getDatabase() as MongoDBProvider;
+    const client = dbProvider.getClient();
+    if (!client) {
+      return NextResponse.json({ error: 'Database not available' }, { status: 503 });
+    }
     const db = client.db(tenantDbName);
 
     const indexQuery: Record<string, unknown> = { externalId };
@@ -147,7 +147,7 @@ export async function GET(request: NextRequest, context: RouteContext) {
       days,
     });
   } catch (error) {
-    console.error('[vector stats]', error);
+    log.error('Vector stats error', { error });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

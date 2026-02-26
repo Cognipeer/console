@@ -4,6 +4,9 @@ import { deleteVectors } from '@/lib/services/vector';
 import { getDatabase } from '@/lib/database';
 import { checkRateLimit } from '@/lib/quota/quotaGuard';
 import type { LicenseType } from '@/lib/license/license-manager';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('client-vector-vectors');
 
 export const runtime = 'nodejs';
 
@@ -34,7 +37,7 @@ function handleError(error: unknown, scope: string) {
     return NextResponse.json({ error: 'Not found' }, { status: 404 });
   }
 
-  console.error(`${scope} error`, error);
+  logger.error(`${scope} error`, { error });
   return NextResponse.json(
     { error: error instanceof Error ? error.message : 'Internal server error' },
     { status: 500 },

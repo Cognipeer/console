@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { AlertService } from '@/lib/services/alerts';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('alert-history');
 
 export const runtime = 'nodejs';
 
@@ -28,7 +31,7 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
 
     return NextResponse.json({ event }, { status: 200 });
   } catch (error: unknown) {
-    console.error('[alerts] Acknowledge event error', error);
+    logger.error('Acknowledge event error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal error' },
       { status: 500 },

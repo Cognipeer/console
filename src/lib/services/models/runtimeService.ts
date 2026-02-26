@@ -4,16 +4,8 @@ import {
 } from '@/lib/providers';
 import { loadProviderRuntimeData } from '@/lib/services/providers/providerService';
 import type { IProviderRecord } from '@/lib/database';
-
-function createLogger(providerKey: string) {
-  const scope = `[model:${providerKey}]`;
-  return {
-    debug: (...args: unknown[]) => console.debug(scope, ...args),
-    info: (...args: unknown[]) => console.info(scope, ...args),
-    warn: (...args: unknown[]) => console.warn(scope, ...args),
-    error: (...args: unknown[]) => console.error(scope, ...args),
-  };
-}
+import { createLogger } from '@/lib/core/logger';
+import { runtimePool, hashCredentials } from '@/lib/core/runtimePool';
 
 export interface ModelRuntimeContext {
   runtime: ModelProviderRuntime;
@@ -35,18 +27,26 @@ export async function buildModelRuntime(
     throw new Error('Provider configuration is not a model provider.');
   }
 
-  const logger = createLogger(record.key);
+  const cacheKey = `model:${tenantId}:${record.key}`;
+  const credHash = hashCredentials(credentials);
 
-  const runtime = await providerRegistry.createRuntime<ModelProviderRuntime>(
-    record.driver,
-    {
-      tenantId,
-      projectId,
-      providerKey: record.key,
-      credentials,
-      settings: record.settings ?? {},
-      metadata: record.metadata ?? {},
-      logger,
+  const runtime = await runtimePool.getOrCreate<ModelProviderRuntime>(
+    cacheKey,
+    credHash,
+    async () => {
+      const providerLog = createLogger(`model:${record.key}`);
+      return providerRegistry.createRuntime<ModelProviderRuntime>(
+        record.driver,
+        {
+          tenantId,
+          projectId,
+          providerKey: record.key,
+          credentials,
+          settings: record.settings ?? {},
+          metadata: record.metadata ?? {},
+          logger: providerLog,
+        },
+      );
     },
   );
 

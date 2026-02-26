@@ -26,7 +26,18 @@ This document defines the general development rules for `cognipeer-console` (gat
 - `src/lib/services/*`: domain services
   - `vector/`, `models/`, `inferenceMonitoring/`, `guardrail/`, `files/`, `projects/`, etc.
 
-### Core infrastructure
+### Core infrastructure (`src/lib/core/`)
+- `config.ts`: central configuration via `ConfigSource` abstraction — ENV today, swappable to DB/UI later
+- `logger.ts`: Winston structured logger with per-request context injection (requestId, tenantId)
+- `requestContext.ts`: `AsyncLocalStorage` per-request context propagation
+- `cache/`: provider-based cache (`none` | `memory` | `redis`) — no silent fallback
+- `resilience.ts`: retry with exponential back-off + per-key circuit breaker
+- `lifecycle.ts`: graceful shutdown (SIGTERM/SIGINT) with ordered handler teardown
+- `cors.ts`: configurable CORS for `/api/client/*` endpoints
+- `health.ts`: health-check registry feeding `/api/health/live` and `/api/health/ready`
+- `runtimePool.ts`: LRU cache for LangChain SDK client instances (TTL + credential-hash invalidation)
+
+### Other shared infrastructure
 - `src/lib/database/*`: database abstraction (do not import MongoDB directly in app code)
 - `src/lib/providers/*`: provider contract/registry/runtime
 - `src/lib/license/*`: license and feature access logic
@@ -55,6 +66,42 @@ This document defines the general development rules for `cognipeer-console` (gat
 5. **Log sanitization**
    - Never log secrets, tokens, credentials, or raw provider payloads.
    - Use sanitize helpers whenever available.
+
+## 3.1) Core Infrastructure Rules (Mandatory)
+
+1. **Configuration — always use `getConfig()`**
+   - Never read `process.env` directly in application code.
+   - Import `getConfig` from `@/lib/core` and read typed values.
+   - Exception: `src/instrumentation.ts` bootstrap guard (`NEXT_RUNTIME`) runs before config is ready.
+
+2. **Logging — always use `createLogger(scope)`**
+   - Never use `console.log`, `console.error`, `console.warn` in server-side code (`src/lib/`, `src/app/api/`).
+   - Create a scoped logger at file/module level: `const logger = createLogger('module-name');`
+   - Use `logger.info()`, `logger.warn()`, `logger.error()`, `logger.debug()`.
+   - Request context (requestId, tenantId) is auto-injected when `runWithRequestContext` is active.
+   - **Client components** (`'use client'` in `src/components/`, `src/app/dashboard/`) run in the browser — `console.error` is acceptable there since Winston is Node.js-only.
+
+3. **Cache — provider-based, no fallback**
+   - Access via `getCache()` from `@/lib/core`.
+   - Provider is selected by `CACHE_PROVIDER` env var (`none` | `memory` | `redis`).
+   - No silent fallback: if `redis` is configured and unavailable, operations fail explicitly.
+
+4. **Resilience — wrap external calls**
+   - Use `withResilience(key, fn)` for provider/external API calls.
+   - Config via `GATEWAY_RETRY_*` and `GATEWAY_CIRCUIT_BREAKER_*` env vars.
+   - Non-retryable status codes (400, 401, 403, 404) fail immediately.
+
+5. **Runtime pool — cache SDK clients**
+   - Use `runtimePool.getOrCreate()` for LangChain provider SDK instances.
+   - Invalidate via `runtimePool.invalidate()` when credentials change.
+
+6. **Health checks — register contributors**
+   - Use `registerHealthCheck(name, fn)` from `@/lib/core` for new subsystems.
+   - Routes: `/api/health/live` (always 200), `/api/health/ready` (503 if any component is `down`).
+
+7. **Lifecycle — register shutdown handlers**
+   - Use `registerShutdownHandler(name, fn)` for cleanup on SIGTERM/SIGINT.
+   - Check `isShuttingDown()` to decline new work during shutdown.
 
 ## 4) API Design Rules
 
@@ -146,6 +193,8 @@ Note: fixing unrelated legacy issues is not required, but they should be reporte
 - [ ] `policies.json` feature-endpoint mapping is up to date
 - [ ] UI follows theme/component language
 - [ ] Loading/error/empty states are handled
+- [ ] No `process.env` in application code — use `getConfig()`
+- [ ] No `console.*` in server code (`src/lib/`, `src/app/api/`) — use `createLogger()`
 - [ ] No sensitive data in logs
 - [ ] Lint/build (and relevant tests) pass
 

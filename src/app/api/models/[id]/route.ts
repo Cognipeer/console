@@ -7,6 +7,9 @@ import {
 import { IModel } from '@/lib/database/provider.interface';
 import type { UpdateModelInput } from '@/lib/services/models/types';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('models');
 
 export const runtime = 'nodejs';
 
@@ -94,7 +97,7 @@ export async function GET(
 
     return NextResponse.json({ model: sanitizeModel(model) });
   } catch (error: unknown) {
-    console.error('Fetch model error', error);
+    logger.error('Fetch model error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json(
         { error: error.message },
@@ -171,7 +174,7 @@ export async function PUT(
 
     return NextResponse.json({ model: sanitizeModel(updated) });
   } catch (error: unknown) {
-    console.error('Update model error', error);
+    logger.error('Update model error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json(
         { error: error.message },
@@ -214,7 +217,7 @@ export async function DELETE(
 
     return NextResponse.json({ success: true }, { status: 200 });
   } catch (error: unknown) {
-    console.error('Delete model error', error);
+    logger.error('Delete model error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json(
         { error: error.message },

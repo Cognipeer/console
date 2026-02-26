@@ -1,5 +1,9 @@
 import type { IGuardrailModerationPolicy, IGuardrailPromptShieldPolicy, GuardrailAction } from '@/lib/database';
 import { getDatabase } from '@/lib/database';
+import { createLogger } from '@/lib/core/logger';
+import { withResilience } from '@/lib/core/resilience';
+
+const logger = createLogger('guardrail-evaluator');
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
 import type { GuardrailFinding } from './types';
 import { MODERATION_CATEGORIES, PROMPT_SHIELD_ISSUES } from './types';
@@ -52,10 +56,13 @@ async function callLlm(ctx: LlmCallContext, systemPrompt: string, userPrompt: st
     options: {},
   }) as EvaluationModel;
 
-  const response = await chatModel.invoke([
-    { _getType: () => 'system', content: systemPrompt },
-    { _getType: () => 'human', content: userPrompt },
-  ]);
+  const response = await withResilience(
+    () => chatModel.invoke([
+      { _getType: () => 'system', content: systemPrompt },
+      { _getType: () => 'human', content: userPrompt },
+    ]),
+    { key: `guardrail:${ctx.modelKey}` },
+  );
 
   const content = (response as { content?: unknown })?.content;
   if (typeof content === 'string') return content;
@@ -136,7 +143,7 @@ export async function runModerationCheck(
       block: globalAction === 'block',
     }));
   } catch (err) {
-    console.error('[guardrail:moderation]', err);
+    logger.error('Moderation check failed', { error: err });
     return [];
   }
 }
@@ -204,7 +211,7 @@ export async function runPromptShieldCheck(
       block: globalAction === 'block',
     }));
   } catch (err) {
-    console.error('[guardrail:prompt-shield]', err);
+    logger.error('Prompt shield check failed', { error: err });
     return [];
   }
 }
@@ -251,7 +258,7 @@ export async function runCustomPromptCheck(
       },
     ];
   } catch (err) {
-    console.error('[guardrail:custom]', err);
+    logger.error('Custom prompt check failed', { error: err });
     return [];
   }
 }

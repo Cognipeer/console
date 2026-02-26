@@ -32,6 +32,8 @@ vi.mock('@/lib/quota/quotaGuard', () => ({
   checkResourceQuota: vi.fn().mockResolvedValue({ allowed: true, effectiveLimits: { quotas: {}, perRequest: {} } }),
 }));
 
+vi.mock('@/lib/core/lifecycle', () => ({ isShuttingDown: vi.fn().mockReturnValue(false) }));
+
 const QUOTA_PASS = { allowed: true, effectiveLimits: { quotas: {}, perRequest: {} } };
 const QUOTA_FAIL = { allowed: false, reason: 'Quota exceeded', effectiveLimits: { quotas: {}, perRequest: {} } };
 
@@ -39,6 +41,7 @@ import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth'
 import { getDatabase } from '@/lib/database';
 import { checkPerRequestLimits, checkRateLimit, checkResourceQuota } from '@/lib/quota/quotaGuard';
 import { createMockDb } from '../helpers/db.mock';
+import { drainPendingTasks } from '@/lib/core/asyncTask';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -173,6 +176,7 @@ describe('POST /api/client/v1/tracing/sessions', () => {
       agent: { name: 'my-agent', model: 'gpt-4o' },
     });
     await POST(req);
+    await drainPendingTasks();
 
     expect(db.createAgentTracingSession).toHaveBeenCalledTimes(1);
     const call = db.createAgentTracingSession.mock.calls[0][0];
@@ -187,6 +191,7 @@ describe('POST /api/client/v1/tracing/sessions', () => {
 
     const req = buildRequest({ sessionId: 'sess-existing', status: 'completed' });
     await POST(req);
+    await drainPendingTasks();
 
     expect(db.updateAgentTracingSession).toHaveBeenCalledTimes(1);
     expect(db.createAgentTracingSession).not.toHaveBeenCalled();
@@ -202,6 +207,7 @@ describe('POST /api/client/v1/tracing/sessions', () => {
 
     const req = buildRequest({ sessionId: 'sess-events', status: 'completed', events });
     const res = await POST(req);
+    await drainPendingTasks();
 
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -218,6 +224,7 @@ describe('POST /api/client/v1/tracing/sessions', () => {
     ];
     const req = buildRequest({ sessionId: 'sess-models', status: 'completed', events });
     await POST(req);
+    await drainPendingTasks();
 
     const sessionCall = db.createAgentTracingSession.mock.calls[0][0];
     expect(sessionCall.modelsUsed).toContain('claude-3-5-sonnet');
@@ -232,6 +239,7 @@ describe('POST /api/client/v1/tracing/sessions', () => {
     ];
     const req = buildRequest({ sessionId: 'sess-tools', status: 'completed', events });
     await POST(req);
+    await drainPendingTasks();
 
     const sessionCall = db.createAgentTracingSession.mock.calls[0][0];
     expect(sessionCall.toolsUsed).toContain('wikipedia');
@@ -246,18 +254,22 @@ describe('POST /api/client/v1/tracing/sessions', () => {
       threadId: '  thread-abc  ', // leading/trailing spaces should be trimmed
     });
     await POST(req);
+    await drainPendingTasks();
 
     const sessionCall = db.createAgentTracingSession.mock.calls[0][0];
     expect(sessionCall.threadId).toBe('thread-abc');
   });
 
-  it('returns 500 on unexpected DB error', async () => {
+  it('returns 200 even when async DB write fails (fire-and-forget)', async () => {
     const { POST } = await import('@/app/api/client/v1/tracing/sessions/route');
     db.createAgentTracingSession.mockRejectedValue(new Error('DB connection lost'));
 
     const req = buildRequest({ sessionId: 'sess-err', status: 'completed' });
     const res = await POST(req);
 
-    expect(res.status).toBe(500);
+    // Response is returned before the async DB write, so status is 200
+    expect(res.status).toBe(200);
+    // The error is logged internally by fireAndForget but does not propagate
+    await drainPendingTasks();
   });
 });

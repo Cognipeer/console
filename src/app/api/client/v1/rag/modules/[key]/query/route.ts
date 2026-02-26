@@ -3,15 +3,19 @@ export const runtime = 'nodejs';
 import { NextRequest, NextResponse } from 'next/server';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { queryRag } from '@/lib/services/rag/ragService';
+import { createLogger } from '@/lib/core/logger';
+import { withRequestContext } from '@/lib/api/withRequestContext';
+
+const logger = createLogger('client-rag');
 
 /**
  * POST /api/client/v1/rag/modules/:key/query
  * Query a RAG module
  */
-export async function POST(
+const _POST = async (
   request: NextRequest,
   { params }: { params: Promise<{ key: string }> },
-) {
+) => {
   try {
     const ctx = await requireApiToken(request);
     const { key } = await params;
@@ -41,10 +45,12 @@ export async function POST(
     if (error instanceof ApiTokenAuthError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
-    console.error('[client/rag/query]', error);
+    logger.error('RAG query error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal error' },
       { status: 500 },
     );
   }
-}
+};
+
+export const POST = withRequestContext(_POST);

@@ -1,5 +1,8 @@
 import { getDatabase, type IQuotaPolicy } from '@/lib/database';
+import { createLogger } from '@/lib/core/logger';
 import type { LicenseType } from '@/lib/license/license-manager';
+
+const logger = createLogger('quota-guard');
 import { getPlanQuotaLimits } from '@/lib/quota/planLimits';
 import type {
   QuotaDomain,
@@ -382,7 +385,7 @@ export async function checkRateLimit(
         );
       }
     } catch (error) {
-      console.error('Rate limit check failed:', error);
+      logger.error('Rate limit check failed', { error });
     }
   };
 
@@ -549,7 +552,7 @@ export async function checkBudget(
         }
       }
     } catch (error) {
-      console.error('Budget check failed:', error);
+      logger.error('Budget check failed', { error });
     }
   };
 

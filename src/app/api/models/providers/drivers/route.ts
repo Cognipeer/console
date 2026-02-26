@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { providerRegistry } from '@/lib/providers';
 import type { ProviderDomain } from '@/lib/database';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('model-drivers');
 
 export const runtime = 'nodejs';
 
@@ -12,7 +15,7 @@ export async function GET(request: NextRequest) {
     const drivers = providerRegistry.listDescriptors(domain);
     return NextResponse.json({ drivers }, { status: 200 });
   } catch (error) {
-    console.error('List model provider drivers error', error);
+    logger.error('List model provider drivers error', { error });
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 },

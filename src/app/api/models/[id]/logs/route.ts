@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getModelById, listUsageLogs } from '@/lib/services/models/modelService';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
 import { parseDashboardDateFilterFromSearchParams } from '@/lib/utils/dashboardDateFilter';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('model-logs');
 
 export const runtime = 'nodejs';
 
@@ -54,7 +57,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 
     return NextResponse.json({ logs });
   } catch (error: unknown) {
-    console.error('Fetch model logs error', error);
+    logger.error('Fetch model logs error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }

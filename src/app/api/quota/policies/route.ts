@@ -4,6 +4,9 @@ import {
   listQuotaPolicies,
 } from '@/lib/services/quota/quotaService';
 import type { QuotaPolicyInput, QuotaDomain, QuotaScope } from '@/lib/quota/types';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('quota-policies');
 
 export const runtime = 'nodejs';
 
@@ -49,7 +52,7 @@ export async function GET(request: NextRequest) {
     
     return NextResponse.json({ policies }, { status: 200 });
   } catch (error) {
-    console.error('List quota policies error:', error);
+    logger.error('List quota policies error', { error });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
@@ -99,7 +102,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ policy }, { status: 201 });
   } catch (error) {
-    console.error('Create quota policy error:', error);
+    logger.error('Create quota policy error', { error });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

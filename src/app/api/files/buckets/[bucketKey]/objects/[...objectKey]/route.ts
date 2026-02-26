@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { deleteFile, downloadFile, getFileRecord } from '@/lib/services/files';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('file-objects');
 
 export const runtime = 'nodejs';
 
@@ -88,7 +91,7 @@ export async function GET(request: NextRequest, context: RouteContext) {
 
     return NextResponse.json({ record });
   } catch (error) {
-    console.error('Get file record error', error);
+    logger.error('Get file record error', { error });
     const message = error instanceof Error ? error.message : 'Internal server error';
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
@@ -140,7 +143,7 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
 
     return NextResponse.json({ success: true }, { status: 200 });
   } catch (error) {
-    console.error('Delete file error', error);
+    logger.error('Delete file error', { error });
     const message = error instanceof Error ? error.message : 'Internal server error';
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });

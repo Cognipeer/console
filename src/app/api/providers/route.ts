@@ -7,6 +7,9 @@ import {
 } from '@/lib/services/providers/providerService';
 import type { ProviderDomain } from '@/lib/database';
 import { ProjectContextError, requireProjectContext } from '@/lib/services/projects/projectContext';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('providers');
 
 export const runtime = 'nodejs';
 
@@ -73,7 +76,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ providers }, { status: 200 });
   } catch (error) {
-    console.error('List providers error', error);
+    logger.error('List providers error', { error });
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 },
@@ -178,11 +181,11 @@ export async function POST(request: NextRequest) {
       if (error.message.includes('already exists')) {
         return NextResponse.json({ error: error.message }, { status: 409 });
       }
-      console.error('Create provider error', error.message);
+      logger.error('Create provider error', { error: error.message });
       return NextResponse.json({ error: error.message }, { status: 400 });
     }
 
-    console.error('Create provider error', error);
+    logger.error('Create provider error', { error });
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 },

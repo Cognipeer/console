@@ -4,6 +4,9 @@
  */
 
 import { getDatabase } from '@/lib/database';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('dashboard');
 import type { AgentTracingSessionSummary } from '@/lib/services/agentTracing';
 import { AgentTracingService } from '@/lib/services/agentTracing';
 import { listModels } from '@/lib/services/models/modelService';
@@ -89,7 +92,7 @@ export async function getDashboardData(
       const indexes = await listVectorIndexes(tenantDbName, tenantId, provider.key, projectId);
       totalIndexes += indexes.filter((index) => isDateInDashboardRange(index.createdAt, filter)).length;
     } catch (error) {
-      console.warn('Failed to list vector indexes for provider', provider.key, error);
+      logger.warn('Failed to list vector indexes for provider', { providerKey: provider.key, error });
     }
   }
 

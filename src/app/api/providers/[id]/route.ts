@@ -6,6 +6,9 @@ import {
   type UpdateProviderConfigInput,
 } from '@/lib/services/providers/providerService';
 import { ProjectContextError, requireProjectContext } from '@/lib/services/projects/projectContext';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('providers');
 
 export const runtime = 'nodejs';
 
@@ -124,7 +127,7 @@ export async function GET(request: NextRequest, context: RouteContext) {
 
     return NextResponse.json({ provider }, { status: 200 });
   } catch (error) {
-    console.error('Get provider config error', error);
+    logger.error('Get provider config error', { error });
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 },
@@ -207,7 +210,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
 
     return NextResponse.json({ provider: updated }, { status: 200 });
   } catch (error) {
-    console.error('Update provider config error', error);
+    logger.error('Update provider config error', { error });
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 },
@@ -282,7 +285,7 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
 
     return NextResponse.json({ success: true }, { status: 200 });
   } catch (error) {
-    console.error('Delete provider config error', error);
+    logger.error('Delete provider config error', { error });
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 },

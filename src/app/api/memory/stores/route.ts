@@ -4,8 +4,11 @@ import {
   listMemoryStores,
 } from '@/lib/services/memory/memoryService';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
+import { createLogger } from '@/lib/core/logger';
 
 import type { MemoryStoreStatus } from '@/lib/database';
+
+const logger = createLogger('memory-stores');
 
 export const runtime = 'nodejs';
 
@@ -42,7 +45,7 @@ export async function GET(request: NextRequest) {
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
-    console.error('[dashboard:memory:stores:list]', error);
+    logger.error('List memory stores error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal server error' },
       { status: 500 },
@@ -95,7 +98,7 @@ export async function POST(request: NextRequest) {
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
-    console.error('[dashboard:memory:stores:create]', error);
+    logger.error('Create memory store error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal server error' },
       { status: 500 },

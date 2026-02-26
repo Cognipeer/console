@@ -8,6 +8,9 @@ import { ModelCategory, type IModel } from '@/lib/database';
 import { checkResourceQuota, type QuotaContext } from '@/lib/quota';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('models');
 
 export const runtime = 'nodejs';
 
@@ -83,7 +86,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json(payload, { status: 200 });
   } catch (error: unknown) {
-    console.error('List models error', error);
+    logger.error('List models error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json(
         { error: error.message },
@@ -169,7 +172,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ model: sanitizeModel(model) }, { status: 201 });
   } catch (error: unknown) {
-    console.error('Create model error', error);
+    logger.error('Create model error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json(
         { error: error.message },

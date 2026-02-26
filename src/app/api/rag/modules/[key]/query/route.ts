@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { queryRag } from '@/lib/services/rag/ragService';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('rag-query');
 
 export async function POST(
   request: NextRequest,
@@ -30,7 +33,7 @@ export async function POST(
 
     return NextResponse.json({ result });
   } catch (error) {
-    console.error('[rag] query error', error);
+    logger.error('Query error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal error' },
       { status: 500 },

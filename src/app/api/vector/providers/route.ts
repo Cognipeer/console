@@ -5,6 +5,9 @@ import {
 } from '@/lib/services/vector';
 import type { ProviderStatus } from '@/lib/services/providers/providerService';
 import { ProjectContextError, requireProjectContext } from '@/lib/services/projects/projectContext';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('vector-providers');
 
 export const runtime = 'nodejs';
 
@@ -44,7 +47,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ providers }, { status: 200 });
   } catch (error) {
-    console.error('List vector providers error', error);
+    logger.error('List vector providers error', { error });
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 },
@@ -104,7 +107,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ provider }, { status: 201 });
   } catch (error) {
-    console.error('Create vector provider error', error);
+    logger.error('Create vector provider error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal server error' },
       { status: 500 },

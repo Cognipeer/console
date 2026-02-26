@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { deletePromptComment } from '@/lib/services/prompts';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('prompt-comments');
 
 export async function DELETE(
   request: NextRequest,
@@ -27,7 +30,7 @@ export async function DELETE(
 
     return NextResponse.json({ success: true });
   } catch (error) {
-    console.error('[API] Error deleting prompt comment:', error);
+    logger.error('Error deleting prompt comment', { error });
     return NextResponse.json(
       { error: 'Failed to delete comment' },
       { status: 500 },

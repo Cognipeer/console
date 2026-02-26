@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { InferenceMonitoringService } from '@/lib/services/inferenceMonitoring';
 import { sanitizeServer, normalizeBaseUrl } from '@/lib/services/inferenceMonitoring/utils';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('inference-monitoring');
 
 interface RouteParams {
   params: Promise<{ serverKey: string }>;
@@ -31,7 +34,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
 
     return NextResponse.json({ server: sanitizeServer(server) });
   } catch (error) {
-    console.error('[inference-monitoring] get server error:', error);
+    logger.error('Get server error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Failed to get server' },
       { status: 500 },
@@ -100,7 +103,7 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
 
     return NextResponse.json({ server: sanitizeServer(server) });
   } catch (error) {
-    console.error('[inference-monitoring] update server error:', error);
+    logger.error('Update server error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Failed to update server' },
       { status: 500 },
@@ -133,7 +136,7 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
 
     return NextResponse.json({ success: true });
   } catch (error) {
-    console.error('[inference-monitoring] delete server error:', error);
+    logger.error('Delete server error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Failed to delete server' },
       { status: 500 },

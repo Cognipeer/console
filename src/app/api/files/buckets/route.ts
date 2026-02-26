@@ -3,6 +3,9 @@ import { createFileBucket, listFileBuckets } from '@/lib/services/files';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { checkResourceQuota } from '@/lib/quota/quotaGuard';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('file-buckets');
 
 export const runtime = 'nodejs';
 
@@ -30,7 +33,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ buckets }, { status: 200 });
   } catch (error) {
-    console.error('List file buckets error', error);
+    logger.error('List file buckets error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
@@ -115,7 +118,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ bucket }, { status: 201 });
   } catch (error) {
-    console.error('Create file bucket error', error);
+    logger.error('Create file bucket error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }

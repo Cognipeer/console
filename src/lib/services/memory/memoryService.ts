@@ -13,6 +13,7 @@ import {
   createVectorIndex,
 } from '@/lib/services/vector/vectorService';
 import { handleEmbeddingRequest } from '@/lib/services/models/inferenceService';
+import { createLogger } from '@/lib/core/logger';
 import type {
   CreateMemoryStoreRequest,
   UpdateMemoryStoreRequest,
@@ -25,6 +26,8 @@ import type {
   MemoryRecallResponse,
   MemoryStoreView,
 } from './types';
+
+const logger = createLogger('memory');
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -197,7 +200,7 @@ export async function deleteMemoryStore(
       store.vectorIndexKey,
     );
   } catch (err) {
-    console.warn('[memory] Failed to delete backing vector index:', err);
+    logger.warn('Failed to delete backing vector index', { error: err });
   }
 
   await db.deleteMemoryStore(getRecordId(store));
@@ -313,7 +316,7 @@ export async function addMemoryBatch(
       await addMemory(tenantDbName, tenantId, projectId, storeKey, mem);
       added++;
     } catch (err) {
-      console.error('[memory:batch] Failed to add memory:', err);
+      logger.error('Failed to add memory in batch', { error: err });
     }
   }
   return { added, duplicates };
@@ -418,7 +421,7 @@ export async function deleteMemoryItem(
         ids: [item.vectorId],
       });
     } catch (err) {
-      console.warn('[memory] Failed to remove vector:', err);
+      logger.warn('Failed to remove vector', { error: err });
     }
     await db.updateMemoryStore(getRecordId(store), {
       memoryCount: Math.max((store.memoryCount ?? 1) - 1, 0),

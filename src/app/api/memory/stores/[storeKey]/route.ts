@@ -5,6 +5,9 @@ import {
   deleteMemoryStore,
 } from '@/lib/services/memory/memoryService';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('memory-stores');
 
 export const runtime = 'nodejs';
 
@@ -42,7 +45,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
-    console.error('[dashboard:memory:store:get]', error);
+    logger.error('Get memory store error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal server error' },
       { status: 500 },
@@ -82,7 +85,7 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
-    console.error('[dashboard:memory:store:update]', error);
+    logger.error('Update memory store error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal server error' },
       { status: 500 },
@@ -120,7 +123,7 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
-    console.error('[dashboard:memory:store:delete]', error);
+    logger.error('Delete memory store error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal server error' },
       { status: 500 },

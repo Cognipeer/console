@@ -1,5 +1,12 @@
 import { DatabaseProvider } from './provider.interface';
 import { MongoDBProvider } from './mongodb.provider';
+import { SQLiteProvider } from './sqlite.provider';
+import { getConfig } from '@/lib/core/config';
+import { createLogger } from '@/lib/core/logger';
+import { registerShutdownHandler } from '@/lib/core/lifecycle';
+import { registerHealthCheck } from '@/lib/core/health';
+
+const log = createLogger('database');
 
 let dbProvider: DatabaseProvider | null = null;
 
@@ -12,16 +19,61 @@ export async function getDatabase(): Promise<DatabaseProvider> {
     return dbProvider;
   }
 
-  const mongoUri = process.env.MONGODB_URI;
-  const mainDbName = process.env.MAIN_DB_NAME || 'console_main';
+  const cfg = getConfig();
 
-  if (!mongoUri) {
-    throw new Error('MONGODB_URI environment variable is not set');
+  if (cfg.database.provider === 'sqlite') {
+    // ── SQLite provider ──────────────────────────────────────────────
+    const provider = new SQLiteProvider(cfg.database.dataDir, cfg.database.mainDbName);
+    await provider.connect();
+    dbProvider = provider;
+    log.info('SQLite connected successfully', { dataDir: cfg.database.dataDir });
+
+    // Register health check
+    registerHealthCheck('sqlite', async () => {
+      try {
+        // Simple liveness check – run a trivial query
+        const mainDb = (provider as SQLiteProvider).getMainDbHandle();
+        if (!mainDb) return { status: 'down', message: 'No database handle' };
+        mainDb.prepare('SELECT 1').get();
+        return { status: 'ok' };
+      } catch (error) {
+        return { status: 'down', message: error instanceof Error ? error.message : String(error) };
+      }
+    });
+  } else {
+    // ── MongoDB provider (default) ───────────────────────────────────
+    if (!cfg.database.uri) {
+      throw new Error('MONGODB_URI environment variable is not set');
+    }
+
+    const provider = new MongoDBProvider(cfg.database.uri, cfg.database.mainDbName, {
+      minPoolSize: cfg.database.minPoolSize,
+      maxPoolSize: cfg.database.maxPoolSize,
+      connectTimeoutMS: cfg.database.connectTimeoutMs,
+      socketTimeoutMS: cfg.database.socketTimeoutMs,
+      serverSelectionTimeoutMS: cfg.database.serverSelectionTimeoutMs,
+    });
+    await provider.connect();
+    dbProvider = provider;
+    log.info('MongoDB connected successfully');
+
+    // Register health check
+    registerHealthCheck('mongodb', async () => {
+      try {
+        const client = (provider as MongoDBProvider).getClient();
+        if (!client) return { status: 'down', message: 'No client' };
+        await client.db('admin').command({ ping: 1 });
+        return { status: 'ok' };
+      } catch (error) {
+        return { status: 'down', message: error instanceof Error ? error.message : String(error) };
+      }
+    });
   }
 
-  // Initialize MongoDB provider with main database
-  dbProvider = new MongoDBProvider(mongoUri, mainDbName);
-  await dbProvider.connect();
+  // Register shutdown handler
+  registerShutdownHandler('database', async () => {
+    await disconnectDatabase();
+  });
 
   return dbProvider;
 }
@@ -42,6 +94,7 @@ export async function disconnectDatabase(): Promise<void> {
   if (dbProvider) {
     await dbProvider.disconnect();
     dbProvider = null;
+    log.info('Database disconnected');
   }
 }
 

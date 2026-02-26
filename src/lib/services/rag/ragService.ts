@@ -6,7 +6,10 @@
  */
 
 import crypto from 'crypto';
+import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
+
+const logger = createLogger('rag');
 import type { IRagModule, IRagQueryLog, IRagChunk } from '@/lib/database';
 import { convertToMarkdown } from '@cognipeer/to-markdown';
 import { handleEmbeddingRequest } from '@/lib/services/models/inferenceService';
@@ -388,7 +391,7 @@ export async function ingestDocument(
     try {
       await db.bulkInsertRagChunks(chunkRecords as IRagChunk[]);
     } catch (chunkErr) {
-      console.warn('[rag] Failed to persist chunk content to MongoDB', chunkErr);
+      logger.warn('Failed to persist chunk content to MongoDB', { error: chunkErr });
     }
 
     // 4. Update document and module stats
@@ -556,7 +559,7 @@ export async function queryRag(
       const storedChunks = await db.findRagChunksByVectorIds(vectorIds);
       chunkContentMap = new Map(storedChunks.map((c) => [c.vectorId, c.content]));
     } catch (err) {
-      console.warn('[rag] Failed to hydrate chunk content from MongoDB', err);
+      logger.warn('Failed to hydrate chunk content from MongoDB', { error: err });
     }
   }
 
@@ -583,7 +586,7 @@ export async function queryRag(
       latencyMs,
     });
   } catch (err) {
-    console.warn('[rag] Failed to log query', err);
+    logger.warn('Failed to log query', { error: err });
   }
 
   return {
@@ -626,7 +629,7 @@ export async function deleteRagDocument(
         ids,
       });
     } catch (err) {
-      console.warn('[rag] Failed to delete vectors for document', err);
+      logger.warn('Failed to delete vectors for document', { error: err });
     }
   }
 
@@ -634,7 +637,7 @@ export async function deleteRagDocument(
   try {
     await db.deleteRagChunksByDocumentId(request.documentId);
   } catch (err) {
-    console.warn('[rag] Failed to delete MongoDB chunks for document', err);
+    logger.warn('Failed to delete MongoDB chunks for document', { error: err });
   }
 
   // Update module stats
@@ -722,7 +725,7 @@ export async function reingestDocument(
         ids,
       });
     } catch (err) {
-      console.warn('[rag] reingest: failed to delete old vectors', err);
+      logger.warn('Reingest: failed to delete old vectors', { error: err });
     }
   }
 
@@ -730,7 +733,7 @@ export async function reingestDocument(
   try {
     await db.deleteRagChunksByDocumentId(request.documentId);
   } catch (err) {
-    console.warn('[rag] reingest: failed to delete old MongoDB chunks', err);
+    logger.warn('Reingest: failed to delete old MongoDB chunks', { error: err });
   }
 
   // Mark document as processing
@@ -805,7 +808,7 @@ export async function reingestDocument(
     try {
       await db.bulkInsertRagChunks(chunkRecords as IRagChunk[]);
     } catch (chunkErr) {
-      console.warn('[rag] reingest: Failed to persist chunks to MongoDB', chunkErr);
+      logger.warn('Reingest: Failed to persist chunks to MongoDB', { error: chunkErr });
     }
 
     // 6. Update document and module stats

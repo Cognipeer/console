@@ -4,6 +4,9 @@ import {
   ingestDocument,
   ingestFile,
 } from '@/lib/services/rag/ragService';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('rag-documents');
 
 export async function GET(
   request: NextRequest,
@@ -22,7 +25,7 @@ export async function GET(
     const documents = await listRagDocuments(tenantDbName, key, { projectId, search });
     return NextResponse.json({ documents });
   } catch (error) {
-    console.error('[rag] list documents error', error);
+    logger.error('List documents error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal error' },
       { status: 500 },
@@ -94,7 +97,7 @@ export async function POST(
 
     return NextResponse.json({ document }, { status: 201 });
   } catch (error) {
-    console.error('[rag] ingest error', error);
+    logger.error('Ingest error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal error' },
       { status: 500 },

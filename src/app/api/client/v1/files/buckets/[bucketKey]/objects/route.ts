@@ -4,6 +4,10 @@ import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth'
 import { uploadFile, listFiles } from '@/lib/services/files';
 import { checkPerRequestLimits, checkRateLimit, checkResourceQuota } from '@/lib/quota/quotaGuard';
 import type { LicenseType } from '@/lib/license/license-manager';
+import { createLogger } from '@/lib/core/logger';
+import { withRequestContext } from '@/lib/api/withRequestContext';
+
+const logger = createLogger('client-file-objects');
 
 export const runtime = 'nodejs';
 
@@ -33,10 +37,10 @@ function estimateBase64Bytes(input: unknown): number | undefined {
  *   "keyHint": "optional-custom-key"
  * }
  */
-export async function POST(
+const _POST = async (
   request: NextRequest,
   { params }: { params: Promise<{ bucketKey: string }> },
-) {
+) => {
   try {
     const { tenantDbName, tenantId, tenant, token, tokenRecord, user, projectId } =
       await requireApiToken(request);
@@ -158,7 +162,7 @@ export async function POST(
       message: 'File uploaded successfully',
     }, { status: 201 });
   } catch (error) {
-    console.error('[client-api:files:upload]', error);
+    logger.error('Upload file error', { error });
 
     if (error instanceof ApiTokenAuthError) {
       return NextResponse.json(
@@ -173,7 +177,9 @@ export async function POST(
       { status: 500 },
     );
   }
-}
+};
+
+export const POST = withRequestContext(_POST);
 
 /**
  * GET /api/client/v1/files/buckets/:bucketKey/objects
@@ -184,10 +190,10 @@ export async function POST(
  * - limit: number (optional, default 50)
  * - cursor: string (optional, for pagination)
  */
-export async function GET(
+const _GET = async (
   request: NextRequest,
   { params }: { params: Promise<{ bucketKey: string }> },
-) {
+) => {
   try {
     const { tenantDbName, tenantId, projectId } = await requireApiToken(request);
     const { bucketKey } = await params;
@@ -217,7 +223,7 @@ export async function GET(
       nextCursor: result.nextCursor,
     });
   } catch (error) {
-    console.error('[client-api:files:list]', error);
+    logger.error('List files error', { error });
 
     if (error instanceof ApiTokenAuthError) {
       return NextResponse.json(
@@ -232,4 +238,6 @@ export async function GET(
       { status: 500 },
     );
   }
-}
+};
+
+export const GET = withRequestContext(_GET);

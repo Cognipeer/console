@@ -6,6 +6,10 @@ import { handleEmbeddingRequest } from '@/lib/services/models/inferenceService';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { calculateCost, logModelUsage } from '@/lib/services/models/usageLogger';
 import { checkBudget, checkPerRequestLimits, checkRateLimit } from '@/lib/quota/quotaGuard';
+import { createLogger } from '@/lib/core/logger';
+import { withRequestContext } from '@/lib/api/withRequestContext';
+
+const logger = createLogger('client-embeddings');
 
 export const runtime = 'nodejs';
 
@@ -54,7 +58,7 @@ function sanitize(value: unknown, max = 20000) {
   }
 }
 
-export async function POST(request: NextRequest) {
+const _POST = async (request: NextRequest) => {
   const startedAt = Date.now();
 
   let auth: Awaited<ReturnType<typeof requireApiToken>>;
@@ -64,7 +68,7 @@ export async function POST(request: NextRequest) {
     if (error instanceof ApiTokenAuthError) {
       return unauthorized(error.message);
     }
-    console.error('Embeddings auth error', error);
+    logger.error('Embeddings auth error', { error });
     return unauthorized();
   }
 
@@ -129,7 +133,7 @@ export async function POST(request: NextRequest) {
       return quotaExceeded(budgetResult.reason || 'Budget exceeded');
     }
   } catch (error) {
-    console.error('Quota check error', error);
+    logger.error('Quota check error', { error });
     return NextResponse.json(
       { error: { message: 'Quota check failed', type: 'server_error' } },
       { status: 500 },
@@ -168,17 +172,17 @@ export async function POST(request: NextRequest) {
         });
         if (cost.currency === 'USD' && Number.isFinite(cost.totalCost) && cost.totalCost > 0) {
           checkBudget(quotaContext, { usd: cost.totalCost }).catch((err) =>
-            console.error('Failed to update budget usage:', err),
+            logger.error('Failed to update budget usage', { error: err }),
           );
         }
       }
     } catch (budgetError) {
-      console.error('Embedding budget update error', budgetError);
+      logger.error('Embedding budget update error', { error: budgetError });
     }
 
     return NextResponse.json({ ...result.response, request_id: result.requestId }, { status: 200 });
   } catch (error: unknown) {
-    console.error('Embedding error', error);
+    logger.error('Embedding error', { error });
 
     try {
       const model = await getModelByKey(auth.tenantDbName, modelKey, auth.projectId);
@@ -196,10 +200,12 @@ export async function POST(request: NextRequest) {
         });
       }
     } catch (logError) {
-      console.error('Failed to log embedding error', logError);
+      logger.error('Failed to log embedding error', { error: logError });
     }
 
     const errorMessage = error instanceof Error ? error.message : 'Inference error';
     return NextResponse.json({ error: { message: errorMessage, type: 'server_error' } }, { status: 500 });
   }
-}
+};
+
+export const POST = withRequestContext(_POST);

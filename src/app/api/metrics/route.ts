@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { collectPrometheusMetrics } from '@/lib/services/metrics/prometheusExporter';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('metrics');
 
 export const runtime = 'nodejs';
 
@@ -29,7 +32,7 @@ export async function GET(request: NextRequest) {
     if (error instanceof ApiTokenAuthError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
-    console.error('[metrics] collection error:', error);
+    logger.error('Collection error', { error });
     return NextResponse.json(
       { error: 'Failed to collect metrics' },
       { status: 500 },

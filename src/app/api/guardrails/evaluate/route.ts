@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { evaluateGuardrail } from '@/lib/services/guardrail';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('guardrails-evaluate');
 
 export const runtime = 'nodejs';
 
@@ -51,7 +54,7 @@ export async function POST(request: NextRequest) {
       message: result.passed ? null : buildUserMessage(result.findings),
     });
   } catch (error: unknown) {
-    console.error('[guardrails/evaluate]', error);
+    logger.error('Evaluate error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }

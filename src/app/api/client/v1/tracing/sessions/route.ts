@@ -3,21 +3,26 @@ import { getDatabase } from '@/lib/database';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { checkPerRequestLimits, checkRateLimit, checkResourceQuota } from '@/lib/quota/quotaGuard';
+import { getConfig } from '@/lib/core/config';
+import { createLogger } from '@/lib/core/logger';
+import { fireAndForget } from '@/lib/core/asyncTask';
+import { withRequestContext } from '@/lib/api/withRequestContext';
 
 export const runtime = 'nodejs';
 
-/** Max request body size in bytes. Default 10 MB, configurable via TRACING_MAX_BODY_SIZE_MB */
-const MAX_BODY_SIZE_BYTES = (
-    parseInt(process.env.TRACING_MAX_BODY_SIZE_MB || '10', 10) || 10
-) * 1024 * 1024;
+const logger = createLogger('client-tracing');
 
-export async function POST(request: NextRequest) {
+/** Max request body size in bytes. Configurable via TRACING_MAX_BODY_SIZE_MB */
+const getMaxBodySizeBytes = () => getConfig().limits.tracingMaxBodySizeMb * 1024 * 1024;
+
+const _POST = async (request: NextRequest) => {
     try {
         // Check content-length before parsing body
+        const maxBodySize = getMaxBodySizeBytes();
         const contentLength = parseInt(request.headers.get('content-length') || '0', 10);
-        if (contentLength > MAX_BODY_SIZE_BYTES) {
+        if (contentLength > maxBodySize) {
             return NextResponse.json(
-                { error: `Payload too large. Max allowed: ${MAX_BODY_SIZE_BYTES} bytes (${Math.round(MAX_BODY_SIZE_BYTES / 1024 / 1024)}MB). Configure via TRACING_MAX_BODY_SIZE_MB env variable.` },
+                { error: `Payload too large. Max allowed: ${maxBodySize} bytes (${Math.round(maxBodySize / 1024 / 1024)}MB). Configure via TRACING_MAX_BODY_SIZE_MB env variable.` },
                 { status: 413 },
             );
         }
@@ -73,15 +78,7 @@ export async function POST(request: NextRequest) {
             );
         }
 
-        const retentionDays = quotaResult.effectiveLimits.quotas?.maxTracingRetentionDays;
-        if (retentionDays !== undefined && retentionDays !== -1 && retentionDays >= 0) {
-            const cutoff = new Date(Date.now() - retentionDays * 86400 * 1000);
-            await db.cleanupAgentTracingRetention({
-                projectId: auth.projectId,
-                olderThan: cutoff,
-            });
-        }
-
+        // ── Synchronous pre-checks (model/tool extraction, session doc, quota) ──
         const modelsUsed = new Set<string>();
         const toolsUsed = new Set<string>();
 
@@ -168,72 +165,90 @@ export async function POST(request: NextRequest) {
             }
         }
 
-        if (existing) {
-            await db.updateAgentTracingSession(payload.sessionId, sessionDoc, auth.projectId);
-        } else {
-            await db.createAgentTracingSession(sessionDoc);
-        }
+        // ── Async DB writes (fire-and-forget) ────────────────────────────
+        // All validation passed — persist session & events in the background
+        // so the client gets an immediate response.
+        fireAndForget('tracing-ingest', async () => {
+            const bgDb = await getDatabase();
+            await bgDb.switchToTenant(auth.tenantDbName);
 
-        await db.deleteAgentTracingEvents(payload.sessionId, auth.projectId);
-
-        if (events.length > 0) {
-            for (const event of events) {
-                const sections = Array.isArray(event?.sections)
-                    ? event.sections
-                    : Array.isArray(event?.data?.sections)
-                        ? event.data.sections
-                        : [];
-
-                const usage = event?.usage || event?.metadata?.usage || {};
-
-                const inputTokens =
-                    event?.inputTokens ?? usage?.inputTokens ?? usage?.input_tokens ?? null;
-
-                const outputTokens =
-                    event?.outputTokens ?? usage?.outputTokens ?? usage?.output_tokens ?? null;
-
-                const cachedInputTokens =
-                    event?.cachedInputTokens ??
-                    usage?.cachedInputTokens ??
-                    usage?.cached_input_tokens ??
-                    usage?.cacheReadInputTokens ??
-                    usage?.cache_read_input_tokens ??
-                    null;
-
-                await db.createAgentTracingEvent({
-                    sessionId: payload.sessionId,
-                    tenantId: auth.tenantId,
+            // Retention cleanup
+            const retentionDays = quotaResult.effectiveLimits.quotas?.maxTracingRetentionDays;
+            if (retentionDays !== undefined && retentionDays !== -1 && retentionDays >= 0) {
+                const cutoff = new Date(Date.now() - retentionDays * 86400 * 1000);
+                await bgDb.cleanupAgentTracingRetention({
                     projectId: auth.projectId,
-                    id: event.id || null,
-                    type: event.type || null,
-                    label: event.label || null,
-                    sequence: event.sequence || 0,
-                    timestamp: event.timestamp ? new Date(event.timestamp) : new Date(),
-                    status: event.status || null,
-                    actor: event.actor || {},
-                    metadata: event.metadata || {},
-                    sections,
-                    modelNames: event.modelNames || [],
-                    model: event.model || null,
-                    error: event.error || null,
-                    durationMs: event.durationMs || null,
-                    actorName: event.actor?.name || null,
-                    actorRole: event.actor?.role || event.actor?.scope || null,
-                    toolName:
-                        event.toolName ||
-                        (event.actor?.scope === 'tool' ? event.actor?.name : null),
-                    toolExecutionId: event.toolExecutionId || null,
-                    inputTokens,
-                    outputTokens,
-                    cachedInputTokens,
-                    totalTokens: event.totalTokens || null,
-                    bytesIn: event.bytesIn || null,
-                    bytesOut: event.bytesOut || null,
-                    requestBytes: event.requestBytes || null,
-                    responseBytes: event.responseBytes || null,
+                    olderThan: cutoff,
                 });
             }
-        }
+
+            if (existing) {
+                await bgDb.updateAgentTracingSession(payload.sessionId, sessionDoc, auth.projectId);
+            } else {
+                await bgDb.createAgentTracingSession(sessionDoc);
+            }
+
+            await bgDb.deleteAgentTracingEvents(payload.sessionId, auth.projectId);
+
+            if (events.length > 0) {
+                for (const event of events) {
+                    const sections = Array.isArray(event?.sections)
+                        ? event.sections
+                        : Array.isArray(event?.data?.sections)
+                            ? event.data.sections
+                            : [];
+
+                    const usage = event?.usage || event?.metadata?.usage || {};
+
+                    const inputTokens =
+                        event?.inputTokens ?? usage?.inputTokens ?? usage?.input_tokens ?? null;
+
+                    const outputTokens =
+                        event?.outputTokens ?? usage?.outputTokens ?? usage?.output_tokens ?? null;
+
+                    const cachedInputTokens =
+                        event?.cachedInputTokens ??
+                        usage?.cachedInputTokens ??
+                        usage?.cached_input_tokens ??
+                        usage?.cacheReadInputTokens ??
+                        usage?.cache_read_input_tokens ??
+                        null;
+
+                    await bgDb.createAgentTracingEvent({
+                        sessionId: payload.sessionId,
+                        tenantId: auth.tenantId,
+                        projectId: auth.projectId,
+                        id: event.id || null,
+                        type: event.type || null,
+                        label: event.label || null,
+                        sequence: event.sequence || 0,
+                        timestamp: event.timestamp ? new Date(event.timestamp) : new Date(),
+                        status: event.status || null,
+                        actor: event.actor || {},
+                        metadata: event.metadata || {},
+                        sections,
+                        modelNames: event.modelNames || [],
+                        model: event.model || null,
+                        error: event.error || null,
+                        durationMs: event.durationMs || null,
+                        actorName: event.actor?.name || null,
+                        actorRole: event.actor?.role || event.actor?.scope || null,
+                        toolName:
+                            event.toolName ||
+                            (event.actor?.scope === 'tool' ? event.actor?.name : null),
+                        toolExecutionId: event.toolExecutionId || null,
+                        inputTokens,
+                        outputTokens,
+                        cachedInputTokens,
+                        totalTokens: event.totalTokens || null,
+                        bytesIn: event.bytesIn || null,
+                        bytesOut: event.bytesOut || null,
+                        requestBytes: event.requestBytes || null,
+                        responseBytes: event.responseBytes || null,
+                    });
+                }
+            }
+        });
 
         return NextResponse.json({
             success: true,
@@ -241,7 +256,7 @@ export async function POST(request: NextRequest) {
             eventsStored: events.length,
         });
     } catch (error: unknown) {
-        console.error('Tracing ingest error:', error);
+        logger.error('Tracing ingest error', { error });
 
         if (error instanceof ApiTokenAuthError) {
             return NextResponse.json({ error: error.message }, { status: error.status });
@@ -251,4 +266,6 @@ export async function POST(request: NextRequest) {
             error instanceof Error ? error.message : 'Failed to ingest tracing data';
         return NextResponse.json({ error: message }, { status: 500 });
     }
-}
+};
+
+export const POST = withRequestContext(_POST);

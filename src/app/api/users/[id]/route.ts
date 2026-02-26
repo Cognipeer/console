@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDatabase } from '@/lib/database';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('users');
 
 export async function DELETE(
   request: NextRequest,
@@ -65,7 +68,7 @@ export async function DELETE(
       { status: 200 },
     );
   } catch (error) {
-    console.error('Delete user error:', error);
+    logger.error('Delete user error', { error });
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 },

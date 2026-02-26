@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { InferenceMonitoringService } from '@/lib/services/inferenceMonitoring';
 import { parseDashboardDateFilterFromSearchParams } from '@/lib/utils/dashboardDateFilter';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('inference-monitoring');
 
 interface RouteParams {
   params: Promise<{ serverKey: string }>;
@@ -46,7 +49,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
 
     return NextResponse.json({ metrics });
   } catch (error) {
-    console.error('[inference-monitoring] get metrics error:', error);
+    logger.error('Get metrics error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Failed to get metrics' },
       { status: 500 },

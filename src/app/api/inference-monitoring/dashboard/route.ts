@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { InferenceMonitoringService } from '@/lib/services/inferenceMonitoring';
 import { parseDashboardDateFilterFromSearchParams } from '@/lib/utils/dashboardDateFilter';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('inference-monitoring-dashboard');
 
 export const runtime = 'nodejs';
 
@@ -127,7 +130,7 @@ export async function GET(request: NextRequest) {
       servers: scopedServers,
     });
   } catch (error: unknown) {
-    console.error('[inference-monitoring/dashboard] error', error);
+    logger.error('Dashboard error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal error' },
       { status: 500 },

@@ -2,6 +2,10 @@ import nodemailer from 'nodemailer';
 import Handlebars from 'handlebars';
 import fs from 'fs/promises';
 import path from 'path';
+import { getConfig } from '@/lib/core/config';
+import { createLogger } from '@/lib/core/logger';
+
+const log = createLogger('email');
 
 export interface EmailTemplate {
   subject: string;
@@ -16,22 +20,23 @@ class EmailService {
       return this.transporter;
     }
 
-    const config = {
-      host: process.env.SMTP_HOST || 'smtp.gmail.com',
-      port: parseInt(process.env.SMTP_PORT || '587'),
-      secure: process.env.SMTP_SECURE === 'true',
+    const cfg = getConfig();
+    const smtpConfig = {
+      host: cfg.smtp.host,
+      port: cfg.smtp.port,
+      secure: cfg.smtp.secure,
       auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS,
+        user: cfg.smtp.user,
+        pass: cfg.smtp.pass,
       },
     };
 
-    if (!config.auth.user || !config.auth.pass) {
-      console.warn('SMTP credentials not configured. Emails will not be sent.');
+    if (!smtpConfig.auth.user || !smtpConfig.auth.pass) {
+      log.warn('SMTP credentials not configured. Emails will not be sent.');
       return null;
     }
 
-    this.transporter = nodemailer.createTransport(config);
+    this.transporter = nodemailer.createTransport(smtpConfig);
     return this.transporter;
   }
 
@@ -60,7 +65,7 @@ class EmailService {
 
       return { subject, html };
     } catch (error) {
-      console.error(`Failed to load email template ${templateName}:`, error);
+      log.error(`Failed to load email template ${templateName}`, { error });
       throw new Error(`Email template ${templateName} not found`);
     }
   }
@@ -74,23 +79,24 @@ class EmailService {
       const transporter = await this.getTransporter();
 
       if (!transporter) {
-        console.log(`[Email Simulation] Would send ${templateName} to ${to}`);
+        log.info(`Email simulation: would send ${templateName} to ${to}`);
         return false;
       }
 
       const { subject, html } = await this.loadTemplate(templateName, data);
+      const cfg = getConfig();
 
       await transporter.sendMail({
-        from: process.env.SMTP_FROM || process.env.SMTP_USER,
+        from: cfg.smtp.from,
         to,
         subject,
         html,
       });
 
-      console.log(`✅ Email sent successfully to ${to}`);
+      log.info(`Email sent to ${to}`, { template: templateName });
       return true;
     } catch (error) {
-      console.error('Failed to send email:', error);
+      log.error('Failed to send email', { error, to, template: templateName });
       return false;
     }
   }

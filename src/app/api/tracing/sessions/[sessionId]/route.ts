@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { AgentTracingService } from '@/lib/services/agentTracing';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('tracing-sessions');
 
 /**
  * GET /api/tracing/sessions/:sessionId
@@ -38,7 +41,7 @@ export async function GET(
 
     return NextResponse.json(result);
   } catch (error: unknown) {
-    console.error('Session detail error:', error);
+    logger.error('Session detail error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }

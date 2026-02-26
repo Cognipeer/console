@@ -4,8 +4,11 @@ import {
   searchMemories,
 } from '@/lib/services/memory/memoryService';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
+import { createLogger } from '@/lib/core/logger';
 
 import type { MemoryScope } from '@/lib/database';
+
+const logger = createLogger('memory-items');
 
 export const runtime = 'nodejs';
 
@@ -74,7 +77,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
-    console.error('[dashboard:memory:memories:list]', error);
+    logger.error('List memories error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal server error' },
       { status: 500 },

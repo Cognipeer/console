@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { InferenceMonitoringService } from '@/lib/services/inferenceMonitoring';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('inference-monitoring');
 
 interface RouteParams {
   params: Promise<{ serverKey: string }>;
@@ -27,7 +30,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
 
     return NextResponse.json({ metrics });
   } catch (error) {
-    console.error('[inference-monitoring] poll error:', error);
+    logger.error('Poll error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Failed to poll server' },
       { status: 500 },

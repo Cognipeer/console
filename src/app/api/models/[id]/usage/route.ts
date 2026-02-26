@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getModelById, getUsageAggregate } from '@/lib/services/models/modelService';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
 import { parseDashboardDateFilterFromSearchParams } from '@/lib/utils/dashboardDateFilter';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('model-usage');
 
 export const runtime = 'nodejs';
 
@@ -50,7 +53,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 
     return NextResponse.json({ usage: aggregate });
   } catch (error: unknown) {
-    console.error('Fetch model usage error', error);
+    logger.error('Fetch model usage error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }

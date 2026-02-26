@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { AgentTracingService } from '@/lib/services/agentTracing';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
 import { parseDashboardDateFilterFromSearchParams } from '@/lib/utils/dashboardDateFilter';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('tracing-agents');
 
 /**
  * GET /api/tracing/agents/:agentName/overview
@@ -44,7 +47,7 @@ export async function GET(
 
     return NextResponse.json(result);
   } catch (error: unknown) {
-    console.error('Agent overview error:', error);
+    logger.error('Agent overview error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }

@@ -4,6 +4,9 @@ import { ProjectContextError, requireProjectContext } from '@/lib/services/proje
 import { getDatabase } from '@/lib/database';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { checkRateLimit } from '@/lib/quota/quotaGuard';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('vector-vectors');
 
 export const runtime = 'nodejs';
 
@@ -119,7 +122,7 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
 
     return NextResponse.json({ success: true }, { status: 200 });
   } catch (error) {
-    console.error('Delete vector items error', error);
+    logger.error('Delete vector items error', { error });
     if (isNotFoundError(error)) {
       return NextResponse.json({ error: 'Not found' }, { status: 404 });
     }

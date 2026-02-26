@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { AgentTracingService } from '@/lib/services/agentTracing';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
 import { parseDashboardDateFilterFromSearchParams } from '@/lib/utils/dashboardDateFilter';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('tracing-dashboard');
 
 /**
  * GET /api/tracing/dashboard
@@ -13,14 +16,14 @@ export async function GET(request: NextRequest) {
     const tenantId = request.headers.get('x-tenant-id');
     const userId = request.headers.get('x-user-id');
 
-    console.log('Dashboard request headers:', {
+    logger.debug('Dashboard request headers', {
       tenantDbName,
       userId: request.headers.get('x-user-id'),
       licenseType: request.headers.get('x-license-type'),
     });
 
     if (!tenantDbName || !tenantId || !userId) {
-      console.error('No tenant db name found in headers');
+      logger.error('No tenant db name found in headers');
       return NextResponse.json({ error: 'Tenant not found' }, { status: 401 });
     }
 
@@ -48,7 +51,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json(overview);
   } catch (error: unknown) {
-    console.error('Dashboard overview error:', error);
+    logger.error('Dashboard overview error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }

@@ -4,6 +4,10 @@ import { getDatabase, ITenant } from '@/lib/database';
 import { TokenManager } from '@/lib/license/token-manager';
 import { LicenseType } from '@/lib/license/license-manager';
 import { ensureDefaultProject, DEFAULT_PROJECT_KEY } from '@/lib/services/projects/projectService';
+import { createLogger } from '@/lib/core/logger';
+import { getConfig } from '@/lib/core/config';
+
+const logger = createLogger('auth');
 
 export async function POST(request: NextRequest) {
   try {
@@ -85,7 +89,7 @@ export async function POST(request: NextRequest) {
           user = candidateUser;
           break;
         } catch (err) {
-          console.error('Tenant lookup failed:', err);
+          logger.error('Tenant lookup failed', { error: err });
         }
       }
 
@@ -132,7 +136,7 @@ export async function POST(request: NextRequest) {
 
             break;
           } catch (err) {
-            console.error('Tenant fallback lookup failed:', err);
+            logger.error('Tenant fallback lookup failed', { error: err });
           }
         }
 
@@ -195,7 +199,7 @@ export async function POST(request: NextRequest) {
         await db.updateUser(userIdStr, { inviteAcceptedAt: new Date() });
         user.inviteAcceptedAt = new Date();
       } catch (err) {
-        console.error('Failed to mark invite accepted:', err);
+        logger.error('Failed to mark invite accepted', { error: err });
       }
     }
 
@@ -224,10 +228,11 @@ export async function POST(request: NextRequest) {
       { status: 200 },
     );
 
+    const isProduction = getConfig().nodeEnv === 'production';
     // Set HTTP-only cookie
     response.cookies.set('token', token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
+      secure: isProduction,
       sameSite: 'lax',
       maxAge: 60 * 60 * 24 * 7, // 7 days
       path: '/',
@@ -236,7 +241,7 @@ export async function POST(request: NextRequest) {
     if (activeProjectId) {
       response.cookies.set('active_project_id', activeProjectId, {
         httpOnly: false,
-        secure: process.env.NODE_ENV === 'production',
+        secure: isProduction,
         sameSite: 'lax',
         maxAge: 60 * 60 * 24 * 30,
         path: '/',
@@ -245,7 +250,7 @@ export async function POST(request: NextRequest) {
       // Clear any previous active project cookie (e.g. switching accounts).
       response.cookies.set('active_project_id', '', {
         httpOnly: false,
-        secure: process.env.NODE_ENV === 'production',
+        secure: isProduction,
         sameSite: 'lax',
         maxAge: 0,
         path: '/',
@@ -254,7 +259,7 @@ export async function POST(request: NextRequest) {
 
     return response;
   } catch (error) {
-    console.error('Login error:', error);
+    logger.error('Login error', { error });
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 },

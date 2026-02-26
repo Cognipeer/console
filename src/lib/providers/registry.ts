@@ -1,6 +1,9 @@
 import type { ProviderDomain } from '@/lib/database';
+import { createLogger } from '@/lib/core/logger';
 import type { LooseProviderContract, ProviderContract, ProviderDescriptor } from './types';
 import { CORE_PROVIDER_CONTRACTS } from './contracts';
+
+const logger = createLogger('provider-registry');
 
 class ProviderRegistry {
   private contracts = new Map<string, LooseProviderContract>();
@@ -22,9 +25,7 @@ class ProviderRegistry {
     if (this.contracts.has(contract.id)) {
       const existing = this.contracts.get(contract.id);
       if (existing?.version !== contract.version) {
-        console.warn(
-          `Provider contract with id "${contract.id}" already registered (version ${existing?.version}). Skipping new version ${contract.version}.`,
-        );
+        logger.warn(`Provider contract with id "${contract.id}" already registered (version ${existing?.version}). Skipping new version ${contract.version}.`);
       }
       return;
     }

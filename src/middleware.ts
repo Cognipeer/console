@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { TokenManager } from '@/lib/license/token-manager';
 import { LicenseManager } from '@/lib/license/license-manager';
+import { applyCors, handleCorsPreflightIfNeeded } from '@/lib/core/cors';
 
 // Paths that don't require authentication
 const PUBLIC_PATHS = [
@@ -9,6 +10,8 @@ const PUBLIC_PATHS = [
   '/register',
   '/api/auth/login',
   '/api/auth/register',
+  '/api/health/live',
+  '/api/health/ready',
 ];
 
 // Client API paths that use Bearer token authentication instead of cookie
@@ -17,6 +20,12 @@ const CLIENT_API_PATHS = ['/api/client/', '/api/models/v1/', '/api/metrics'];
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
+  // CORS preflight handling for client API paths
+  if (CLIENT_API_PATHS.some((path) => pathname.startsWith(path))) {
+    const preflightResponse = handleCorsPreflightIfNeeded(request);
+    if (preflightResponse) return preflightResponse;
+  }
+
   // Allow public paths
   if (PUBLIC_PATHS.some((path) => pathname.startsWith(path))) {
     return NextResponse.next();
@@ -24,7 +33,16 @@ export async function middleware(request: NextRequest) {
 
   // Allow client API paths (they use Bearer token authentication)
   if (CLIENT_API_PATHS.some((path) => pathname.startsWith(path))) {
-    return NextResponse.next();
+    const response = NextResponse.next({
+      request: {
+        headers: new Headers([
+          ...Array.from(request.headers.entries()),
+          ['x-request-id', crypto.randomUUID()],
+        ]),
+      },
+    });
+    applyCors(request, response);
+    return response;
   }
 
   // Get token from cookie
@@ -98,6 +116,7 @@ export async function middleware(request: NextRequest) {
   requestHeaders.set('x-tenant-db-name', tenantDbName);
   requestHeaders.set('x-license-type', payload.licenseType);
   requestHeaders.set('x-features', JSON.stringify(payload.features));
+  requestHeaders.set('x-request-id', crypto.randomUUID());
 
   return NextResponse.next({
     request: {

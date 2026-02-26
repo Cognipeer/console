@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { comparePromptVersions } from '@/lib/services/prompts';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('prompt-compare');
 
 export const runtime = 'nodejs';
 
@@ -46,7 +49,7 @@ export async function GET(
 
     return NextResponse.json({ comparison }, { status: 200 });
   } catch (error: unknown) {
-    console.error('Compare prompt versions error', error);
+    logger.error('Compare prompt versions error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }

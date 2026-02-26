@@ -4,6 +4,9 @@ import {
   updateRagModule,
   deleteRagModule as deleteRagModuleService,
 } from '@/lib/services/rag/ragService';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('rag-modules');
 
 export async function GET(
   request: NextRequest,
@@ -23,7 +26,7 @@ export async function GET(
     }
     return NextResponse.json({ module: ragModule });
   } catch (error) {
-    console.error('[rag] get error', error);
+    logger.error('Get error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal error' },
       { status: 500 },
@@ -57,7 +60,7 @@ export async function PATCH(
 
     return NextResponse.json({ module: updated });
   } catch (error) {
-    console.error('[rag] update error', error);
+    logger.error('Update error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal error' },
       { status: 500 },
@@ -85,7 +88,7 @@ export async function DELETE(
     await deleteRagModuleService(tenantDbName, String(ragModule._id));
     return NextResponse.json({ success: true });
   } catch (error) {
-    console.error('[rag] delete error', error);
+    logger.error('Delete error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal error' },
       { status: 500 },

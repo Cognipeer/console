@@ -5,6 +5,9 @@ import {
   ProjectContextError,
 } from '@/lib/services/projects/projectContext';
 import type { AlertEventStatus } from '@/lib/database';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('alert-history');
 
 export const runtime = 'nodejs';
 
@@ -49,7 +52,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ events, activeCount }, { status: 200 });
   } catch (error: unknown) {
-    console.error('[alerts] List history error', error);
+    logger.error('List history error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }

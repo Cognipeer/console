@@ -5,6 +5,9 @@ import {
   updateVectorIndex,
 } from '@/lib/services/vector';
 import { ProjectContextError, requireProjectContext } from '@/lib/services/projects/projectContext';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('vector-indexes');
 
 export const runtime = 'nodejs';
 
@@ -75,7 +78,7 @@ export async function GET(request: NextRequest, context: RouteContext) {
 
     return NextResponse.json({ index, provider }, { status: 200 });
   } catch (error) {
-    console.error('Get vector index error', error);
+    logger.error('Get vector index error', { error });
     if (isNotFoundError(error)) {
       return NextResponse.json({ error: 'Not found' }, { status: 404 });
     }
@@ -157,7 +160,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
 
     return NextResponse.json({ index }, { status: 200 });
   } catch (error) {
-    console.error('Update vector index error', error);
+    logger.error('Update vector index error', { error });
     if (isNotFoundError(error)) {
       return NextResponse.json({ error: 'Not found' }, { status: 404 });
     }
@@ -213,7 +216,7 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
 
     return NextResponse.json({ success: true }, { status: 200 });
   } catch (error) {
-    console.error('Delete vector index error', error);
+    logger.error('Delete vector index error', { error });
     if (isNotFoundError(error)) {
       return NextResponse.json({ error: 'Not found' }, { status: 404 });
     }

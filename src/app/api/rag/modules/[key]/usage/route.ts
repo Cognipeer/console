@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { listRagQueryLogs } from '@/lib/services/rag/ragService';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('rag-usage');
 
 export async function GET(
   request: NextRequest,
@@ -20,7 +23,7 @@ export async function GET(
     const logs = await listRagQueryLogs(tenantDbName, key, { limit, from, to });
     return NextResponse.json({ logs });
   } catch (error) {
-    console.error('[rag] query logs error', error);
+    logger.error('Query logs error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal error' },
       { status: 500 },

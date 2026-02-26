@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { getDatabase, type DatabaseProvider, type FileMarkdownStatus, type IFileBucketRecord, type IFileRecord, type IProviderRecord } from '@/lib/database';
+import { createLogger } from '@/lib/core/logger';
+import { runtimePool, hashCredentials } from '@/lib/core/runtimePool';
+import { withResilience } from '@/lib/core/resilience';
 import {
     providerRegistry,
     type FileProviderRuntime,
@@ -48,14 +51,10 @@ interface DeleteFileBucketOptions {
     force?: boolean;
 }
 
-function createLogger(scope: string) {
-    const prefix = `[files:${scope}]`;
-    return {
-        debug: (...args: unknown[]) => console.debug(prefix, ...args),
-        info: (...args: unknown[]) => console.info(prefix, ...args),
-        warn: (...args: unknown[]) => console.warn(prefix, ...args),
-        error: (...args: unknown[]) => console.error(prefix, ...args),
-    };
+const logger = createLogger('files');
+
+function createProviderLogger(scope: string) {
+    return createLogger(`files:${scope}`);
 }
 
 async function withTenantDb(tenantDbName: string): Promise<DatabaseProvider> {
@@ -72,11 +71,10 @@ function attachDriverCapabilities(provider: ProviderConfigView): FileProviderVie
             driverCapabilities: contract.capabilities as ProviderCapabilityFlags | undefined,
         } satisfies FileProviderView;
     } catch (error) {
-        console.warn(
-            'File provider contract missing for driver',
-            provider.driver,
-            error instanceof Error ? error.message : error,
-        );
+        logger.warn('File provider contract missing for driver', {
+            driver: provider.driver,
+            error: error instanceof Error ? error.message : error,
+        });
     }
 
     return { ...provider };
@@ -212,18 +210,26 @@ async function buildRuntimeContext(
 
     ensureFileProvider(record);
 
-    const logger = createLogger(`${record.key}`);
+    const cacheKey = `file:${tenantId}:${record.key}`;
+    const credHash = hashCredentials(credentials);
 
-    const runtime = await providerRegistry.createRuntime<FileProviderRuntime>(
-        record.driver,
-        {
-            tenantId,
-            projectId,
-            providerKey: record.key,
-            credentials,
-            settings: record.settings ?? {},
-            metadata: record.metadata ?? {},
-            logger,
+    const runtime = await runtimePool.getOrCreate<FileProviderRuntime>(
+        cacheKey,
+        credHash,
+        async () => {
+            const providerLog = createProviderLogger(record.key);
+            return providerRegistry.createRuntime<FileProviderRuntime>(
+                record.driver,
+                {
+                    tenantId,
+                    projectId,
+                    providerKey: record.key,
+                    credentials,
+                    settings: record.settings ?? {},
+                    metadata: record.metadata ?? {},
+                    logger: providerLog,
+                },
+            );
         },
     );
 
@@ -271,7 +277,7 @@ function decodeData(payload: Buffer | string): Buffer {
     try {
         return Buffer.from(trimmed, 'base64');
     } catch (error) {
-        console.warn('Failed to decode base64 payload, falling back to utf-8 buffer', error);
+        logger.warn('Failed to decode base64 payload, falling back to utf-8 buffer', { error });
         return Buffer.from(trimmed, 'utf8');
     }
 }
@@ -576,16 +582,19 @@ async function applyMarkdownConversion(
             relativeMarkdownKey,
         );
 
-        const upload = await runtime.uploadFile({
-            key: providerMarkdownKey,
-            name: `${normalizeFileName(request.fileName)}.md`,
-            contentType: 'text/markdown',
-            data: markdownBuffer,
-            metadata: {
-                sourceKey: record.key,
-                converter: '@cognipeer/to-markdown',
-            },
-        });
+        const upload = await withResilience(
+            () => runtime.uploadFile({
+                key: providerMarkdownKey,
+                name: `${normalizeFileName(request.fileName)}.md`,
+                contentType: 'text/markdown',
+                data: markdownBuffer,
+                metadata: {
+                    sourceKey: record.key,
+                    converter: '@cognipeer/to-markdown',
+                },
+            }),
+            { key: `file-upload:${bucket.providerKey}` },
+        );
 
         const handle = upload.handle;
         const storedRelativeKey = stripBucketPrefix(
@@ -600,7 +609,7 @@ async function applyMarkdownConversion(
             markdownContentType: handle.contentType ?? 'text/markdown',
         } satisfies UpdateFileConversionPayload;
     } catch (error) {
-        console.error('Markdown conversion failed', error);
+        logger.error('Markdown conversion failed', { error });
         return {
             markdownStatus: 'failed',
             markdownError: truncateError(error),
@@ -639,13 +648,16 @@ export async function uploadFile(
         chosenRelativeKey,
     );
 
-    const upload = await runtime.uploadFile({
-        key: providerObjectKey,
-        name: fileName,
-        contentType: request.contentType,
-        data: fileBuffer,
-        metadata: request.metadata,
-    });
+    const upload = await withResilience(
+        () => runtime.uploadFile({
+            key: providerObjectKey,
+            name: fileName,
+            contentType: request.contentType,
+            data: fileBuffer,
+            metadata: request.metadata,
+        }),
+        { key: `file-upload:${bucket.providerKey}` },
+    );
 
     const storedRelativeKey = stripBucketPrefix(
         bucket,
@@ -771,7 +783,10 @@ export async function downloadFile(
         })()
         : composeProviderObjectKey(bucket, record.key);
 
-    const result = await runtime.downloadFile(providerObjectKey);
+    const result = await withResilience(
+        () => runtime.downloadFile(providerObjectKey),
+        { key: `file-download:${bucket.providerKey}` },
+    );
     const fileName = variant === 'markdown'
         ? deriveMarkdownKey(record.name)
         : record.name;
@@ -802,8 +817,11 @@ export async function deleteFile(
         key,
     );
 
-    await runtime.deleteFile(
-        composeProviderObjectKey(bucket, record.key),
+    await withResilience(
+        () => runtime.deleteFile(
+            composeProviderObjectKey(bucket, record.key),
+        ),
+        { key: `file-delete:${bucket.providerKey}` },
     );
 
     if (record.markdownKey) {
@@ -812,7 +830,7 @@ export async function deleteFile(
                 composeProviderObjectKey(bucket, record.markdownKey),
             );
         } catch (error) {
-            console.warn('Failed to delete markdown file', record.markdownKey, error);
+            logger.warn('Failed to delete markdown file', { key: record.markdownKey, error });
         }
     }
 

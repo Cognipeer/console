@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { recallForChat } from '@/lib/services/memory/memoryService';
 import type { MemoryRecallRequest } from '@/lib/services/memory/types';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('client-memory');
 
 export const runtime = 'nodejs';
 
@@ -41,7 +44,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     if (error instanceof ApiTokenAuthError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
-    console.error('[memory:recall]', error);
+    logger.error('Memory recall error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal server error' },
       { status: 500 },

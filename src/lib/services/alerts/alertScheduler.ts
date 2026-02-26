@@ -9,7 +9,10 @@
  */
 
 import { getDatabase } from '@/lib/database';
+import { createLogger } from '@/lib/core/logger';
 import { evaluateTenantAlerts } from './alertEvaluator';
+
+const logger = createLogger('alert-scheduler');
 
 const ALERT_CHECK_INTERVAL_MS = 60_000; // 60 seconds
 
@@ -36,22 +39,18 @@ async function runOnce(): Promise<void> {
         });
 
         if (firedCount > 0) {
-          console.log(
-            `[alert-scheduler] Tenant ${tenant.slug}: ${firedCount} alert(s) fired`,
-          );
+          logger.info(`Tenant ${tenant.slug}: ${firedCount} alert(s) fired`);
         }
       } catch (err) {
-        console.error(
-          `[alert-scheduler] Error evaluating alerts for tenant ${tenant.slug}:`,
-          err instanceof Error ? err.message : err,
-        );
+        logger.error(`Error evaluating alerts for tenant ${tenant.slug}`, {
+          error: err instanceof Error ? err.message : err,
+        });
       }
     }
   } catch (err) {
-    console.error(
-      '[alert-scheduler] Fatal error during run:',
-      err instanceof Error ? err.message : err,
-    );
+    logger.error('Fatal error during run', {
+      error: err instanceof Error ? err.message : err,
+    });
   } finally {
     running = false;
   }
@@ -63,9 +62,7 @@ async function runOnce(): Promise<void> {
  */
 export function startAlertScheduler(): void {
   if (schedulerTimer !== null) return;
-  console.log(
-    `[alert-scheduler] Started (check interval: ${ALERT_CHECK_INTERVAL_MS / 1000}s)`,
-  );
+  logger.info(`Started (check interval: ${ALERT_CHECK_INTERVAL_MS / 1000}s)`);
 
   // Wait a few seconds after startup to let other services initialize.
   setTimeout(() => {
@@ -88,6 +85,6 @@ export function stopAlertScheduler(): void {
   if (schedulerTimer !== null) {
     clearInterval(schedulerTimer);
     schedulerTimer = null;
-    console.log('[alert-scheduler] Stopped');
+    logger.info('Stopped');
   }
 }

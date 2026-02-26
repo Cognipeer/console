@@ -3,6 +3,9 @@ export const runtime = 'nodejs';
 import { NextRequest, NextResponse } from 'next/server';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { deleteRagDocument, reingestDocument } from '@/lib/services/rag/ragService';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('client-rag');
 
 /**
  * DELETE /api/client/v1/rag/modules/:key/documents/:documentId
@@ -31,7 +34,7 @@ export async function DELETE(
     if (error instanceof ApiTokenAuthError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
-    console.error('[client/rag/delete-doc]', error);
+    logger.error('Delete RAG document error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal error' },
       { status: 500 },
@@ -93,7 +96,7 @@ export async function POST(
     if (error instanceof ApiTokenAuthError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
-    console.error('[client/rag/reingest]', error);
+    logger.error('Reingest RAG document error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal error' },
       { status: 500 },

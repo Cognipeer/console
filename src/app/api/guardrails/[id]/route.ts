@@ -6,6 +6,9 @@ import {
 } from '@/lib/services/guardrail';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
 import type { GuardrailAction, GuardrailTarget } from '@/lib/database';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('guardrails');
 
 export const runtime = 'nodejs';
 
@@ -31,7 +34,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
 
     return NextResponse.json({ guardrail }, { status: 200 });
   } catch (error: unknown) {
-    console.error('[guardrails] Get error', error);
+    logger.error('Get error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal error' },
       { status: 500 },
@@ -81,7 +84,7 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
 
     return NextResponse.json({ guardrail }, { status: 200 });
   } catch (error: unknown) {
-    console.error('[guardrails] Update error', error);
+    logger.error('Update error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
@@ -110,7 +113,7 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
 
     return NextResponse.json({ success: true }, { status: 200 });
   } catch (error: unknown) {
-    console.error('[guardrails] Delete error', error);
+    logger.error('Delete error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal error' },
       { status: 500 },

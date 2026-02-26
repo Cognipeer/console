@@ -9,6 +9,9 @@ import {
   rollbackPromptDeployment,
   type PromptEnvironment,
 } from '@/lib/services/prompts';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('client-prompts');
 
 export const runtime = 'nodejs';
 
@@ -17,7 +20,7 @@ function handleError(error: unknown, scope: string) {
     return NextResponse.json({ error: error.message }, { status: error.status });
   }
 
-  console.error(`${scope} error`, error);
+  logger.error(`${scope} error`, { error });
   return NextResponse.json(
     { error: error instanceof Error ? error.message : 'Internal server error' },
     { status: 500 },

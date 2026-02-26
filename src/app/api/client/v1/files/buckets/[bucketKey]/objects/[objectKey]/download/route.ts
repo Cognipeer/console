@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { downloadFile } from '@/lib/services/files';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('client-file-download');
 
 export const runtime = 'nodejs';
 
@@ -65,7 +68,7 @@ export async function GET(
       try {
         headers.set('X-File-Metadata', JSON.stringify(result.metadata));
       } catch (error) {
-        console.warn('[client-api:files:download] Failed to serialize metadata', error);
+        logger.warn('Failed to serialize metadata', { error });
       }
     }
 
@@ -77,7 +80,7 @@ export async function GET(
       headers,
     });
   } catch (error) {
-    console.error('[client-api:files:download]', error);
+    logger.error('Download file error', { error });
 
     if (error instanceof ApiTokenAuthError) {
       return NextResponse.json(

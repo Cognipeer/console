@@ -6,6 +6,10 @@
  */
 
 import { getTenantDatabase } from '@/lib/database';
+import { getConfig } from '@/lib/core/config';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('alert-evaluator');
 import type { IAlertEvent, AlertConditionOperator } from '@/lib/database';
 import { collectMetric } from './metrics';
 import { getChannel } from './channels';
@@ -128,7 +132,7 @@ export async function evaluateTenantAlerts(
         tenantSlug: ctx.tenantSlug,
         companyName: ctx.companyName,
         projectName,
-        dashboardUrl: `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/dashboard/alerts`,
+        dashboardUrl: `${getConfig().app.url}/dashboard/alerts`,
       };
 
       const allResults: DispatchResult[] = [];
@@ -159,14 +163,11 @@ export async function evaluateTenantAlerts(
 
       firedCount++;
 
-      console.log(
-        `[alert-evaluator] FIRED: "${rule.name}" (${rule.metric} = ${metricResult.value.toFixed(2)}, threshold ${rule.condition.operator} ${rule.condition.threshold}) for tenant ${ctx.tenantSlug}`,
-      );
+      logger.info(`FIRED: "${rule.name}" (${rule.metric} = ${metricResult.value.toFixed(2)}, threshold ${rule.condition.operator} ${rule.condition.threshold}) for tenant ${ctx.tenantSlug}`);
     } catch (err) {
-      console.error(
-        `[alert-evaluator] Error evaluating rule "${rule.name}" for tenant ${ctx.tenantSlug}:`,
-        err instanceof Error ? err.message : err,
-      );
+      logger.error(`Error evaluating rule "${rule.name}" for tenant ${ctx.tenantSlug}`, {
+        error: err instanceof Error ? err.message : err,
+      });
     }
   }
 

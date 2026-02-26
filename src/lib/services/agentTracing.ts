@@ -4,7 +4,10 @@
  */
 
 import { getDatabase } from '@/lib/database';
+import { createLogger } from '@/lib/core/logger';
 import dayjs from 'dayjs';
+
+const logger = createLogger('agent-tracing');
 
 type SessionListQuery = Record<string, unknown> & {
   startedAt?: {
@@ -195,12 +198,7 @@ export class AgentTracingService {
     filters?: { from?: string; to?: string; timezone?: string },
   ): Promise<DashboardOverview> {
     try {
-      console.log(
-        'Getting dashboard overview for tenant:',
-        tenantDbName,
-        'filters:',
-        filters,
-      );
+      logger.debug('Getting dashboard overview', { tenantDbName, filters });
 
       const db = await getDatabase();
       await db.switchToTenant(tenantDbName);
@@ -212,7 +210,7 @@ export class AgentTracingService {
         if (filters.to) query.startedAt.$lte = new Date(filters.to);
       }
 
-      console.log('Fetching recent sessions...');
+      logger.debug('Fetching recent sessions...');
       // Get recent sessions
       const { sessions: recentSessions } = await db.listAgentTracingSessions({
         ...query,
@@ -220,7 +218,7 @@ export class AgentTracingService {
         skip: 0,
       }, projectId);
 
-      console.log('Recent sessions count:', recentSessions.length);
+      logger.debug('Recent sessions count', { count: recentSessions.length });
 
       // Aggregate analytics
       const allSessions = await db.listAgentTracingSessions({
@@ -229,11 +227,11 @@ export class AgentTracingService {
       }, projectId);
       const sessions = allSessions.sessions || [];
 
-      console.log('Total sessions for analytics:', sessions.length);
+      logger.debug('Total sessions for analytics', { count: sessions.length });
 
       // If no sessions, return empty analytics
       if (sessions.length === 0) {
-        console.log('No sessions found, returning empty analytics');
+        logger.debug('No sessions found, returning empty analytics');
         return {
           recentSessions: [],
           recentAgents: [],
@@ -464,7 +462,7 @@ export class AgentTracingService {
         },
       };
     } catch (error) {
-      console.error('Error in getDashboardOverview:', error);
+      logger.error('Error in getDashboardOverview', { error });
       throw error;
     }
   }

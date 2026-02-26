@@ -5,6 +5,9 @@ import {
 } from '@/lib/services/files';
 import type { ProviderStatus } from '@/lib/services/providers/providerService';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('file-providers');
 
 export const runtime = 'nodejs';
 
@@ -40,7 +43,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ providers }, { status: 200 });
   } catch (error) {
-    console.error('List file providers error', error);
+    logger.error('List file providers error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
@@ -99,7 +102,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ provider }, { status: 201 });
   } catch (error) {
-    console.error('Create file provider error', error);
+    logger.error('Create file provider error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }

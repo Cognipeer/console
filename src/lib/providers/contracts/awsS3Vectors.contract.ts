@@ -336,7 +336,6 @@ async function fetchIndexHandle(
     source: IndexSource,
     bucketContext: Pick<RuntimeContext, 'bucketInput' | 'bucketMetadata'>,
 ): Promise<VectorIndexHandle> {
-    console.log(bucketContext.bucketInput)
     const response = await client.send(
         new GetIndexCommand({
             indexName: source.indexName,

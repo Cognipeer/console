@@ -5,6 +5,9 @@ import {
   type IProviderRecord,
   type IVectorIndexRecord,
 } from '@/lib/database';
+import { createLogger } from '@/lib/core/logger';
+import { runtimePool, hashCredentials } from '@/lib/core/runtimePool';
+import { withResilience } from '@/lib/core/resilience';
 import {
   providerRegistry,
   type VectorProviderRuntime,
@@ -60,11 +63,10 @@ function attachDriverCapabilities(provider: ProviderConfigView): VectorProviderV
       driverCapabilities: contract.capabilities,
     };
   } catch (error) {
-    console.warn(
-      'Vector provider contract missing for driver',
-      provider.driver,
-      error instanceof Error ? error.message : error,
-    );
+    logger.warn('Vector provider contract missing for driver', {
+      driver: provider.driver,
+      error: error instanceof Error ? error.message : error,
+    });
   }
 
   return { ...provider };
@@ -80,14 +82,10 @@ function ensureVectorProvider(record: IProviderRecord): void {
   }
 }
 
-function createLogger(providerKey: string) {
-  const scope = `[vector:${providerKey}]`;
-  return {
-    debug: (...args: unknown[]) => console.debug(scope, ...args),
-    info: (...args: unknown[]) => console.info(scope, ...args),
-    warn: (...args: unknown[]) => console.warn(scope, ...args),
-    error: (...args: unknown[]) => console.error(scope, ...args),
-  };
+const logger = createLogger('vector');
+
+function createProviderLogger(providerKey: string) {
+  return createLogger(`vector:${providerKey}`);
 }
 
 async function buildRuntimeContext(
@@ -104,16 +102,25 @@ async function buildRuntimeContext(
 
     ensureVectorProvider(record);
 
-    const logger = createLogger(record.key);
-    const runtime = await providerRegistry.createRuntime<VectorProviderRuntime>(
-      record.driver,
-      {
-        tenantId,
-        providerKey: record.key,
-        credentials,
-        settings: record.settings ?? {},
-        metadata: record.metadata ?? {},
-        logger,
+    const cacheKey = `vector:${tenantId}:${record.key}`;
+    const credHash = hashCredentials(credentials);
+
+    const runtime = await runtimePool.getOrCreate<VectorProviderRuntime>(
+      cacheKey,
+      credHash,
+      async () => {
+        const providerLog = createProviderLogger(record.key);
+        return providerRegistry.createRuntime<VectorProviderRuntime>(
+          record.driver,
+          {
+            tenantId,
+            providerKey: record.key,
+            credentials,
+            settings: record.settings ?? {},
+            metadata: record.metadata ?? {},
+            logger: providerLog,
+          },
+        );
       },
     );
 
@@ -343,12 +350,15 @@ export async function createVectorIndex(
     request.key ?? request.name,
   );
 
-  const handle = await runtime.createIndex({
-    name: request.name,
-    dimension: request.dimension,
-    metric: request.metric,
-    metadata: request.metadata,
-  });
+  const handle = await withResilience(
+    () => runtime.createIndex({
+      name: request.name,
+      dimension: request.dimension,
+      metric: request.metric,
+      metadata: request.metadata,
+    }),
+    { key: `vector-create:${request.providerKey}` },
+  );
 
   const metadata = composeMetadataForCreate(handle.metadata, request.metadata);
 
@@ -483,12 +493,12 @@ export async function deleteVectorIndex(
   const index = await requireVectorIndexRecord(db, providerKey, key, projectId);
 
   try {
-    await runtime.deleteIndex({ externalId: index.externalId });
-  } catch (error) {
-    console.warn(
-      'Failed to delete remote vector index. Continuing with local cleanup.',
-      error,
+    await withResilience(
+      () => runtime.deleteIndex({ externalId: index.externalId }),
+      { key: `vector-delete:${providerKey}` },
     );
+  } catch (error) {
+    logger.warn('Failed to delete remote vector index. Continuing with local cleanup.', { error });
   }
 
   await db.deleteVectorIndex(getRecordId(index));
@@ -517,7 +527,10 @@ export async function upsertVectors(
 
   validateVectors(index, request.vectors);
 
-  await runtime.upsertVectors(toRuntimeHandle(index), request.vectors);
+  await withResilience(
+    () => runtime.upsertVectors(toRuntimeHandle(index), request.vectors),
+    { key: `vector-upsert:${request.providerKey}` },
+  );
 }
 
 export async function deleteVectors(
@@ -545,7 +558,10 @@ export async function deleteVectors(
     projectId,
   );
 
-  await runtime.deleteVectors(toRuntimeHandle(index), request.ids);
+  await withResilience(
+    () => runtime.deleteVectors(toRuntimeHandle(index), request.ids),
+    { key: `vector-delete-vectors:${request.providerKey}` },
+  );
 }
 
 export async function queryVectorIndex(
@@ -569,9 +585,12 @@ export async function queryVectorIndex(
     projectId,
   );
 
-  const result: VectorQueryResult = await runtime.queryVectors(
-    toRuntimeHandle(index),
-    request.query,
+  const result: VectorQueryResult = await withResilience(
+    () => runtime.queryVectors(
+      toRuntimeHandle(index),
+      request.query,
+    ),
+    { key: `vector-query:${request.providerKey}` },
   );
 
   return result;

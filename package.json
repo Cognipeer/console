@@ -15,7 +15,10 @@
     "check-setup": "node scripts/check-setup.js",
     "seed:demo": "node --env-file=.env.local scripts/demo/seed.mjs",
     "seed:demo:reset": "node --env-file=.env.local scripts/demo/seed.mjs --reset",
-    "seed:demo:status": "node --env-file=.env.local scripts/demo/seed.mjs --status"
+    "seed:demo:status": "node --env-file=.env.local scripts/demo/seed.mjs --status",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.901.0",
@@ -39,8 +42,10 @@
     "@tanstack/react-query": "^5.90.2",
     "@tanstack/react-query-devtools": "^5.90.2",
     "bcryptjs": "^3.0.2",
+    "better-sqlite3": "^11.10.0",
     "dayjs": "^1.11.18",
     "handlebars": "^4.7.8",
+    "ioredis": "^5.9.3",
     "jose": "^6.1.0",
     "langchain": "latest",
     "mantine-datatable": "^8.2.0",
@@ -54,12 +59,15 @@
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "recharts": "^3.7.0",
-    "slugify": "^1.6.6"
+    "slugify": "^1.6.6",
+    "winston": "^3.19.0"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",
     "@tailwindcss/postcss": "^4",
     "@types/bcryptjs": "^2.4.6",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/ioredis": "^4.28.10",
     "@types/mustache": "^4.2.6",
     "@types/node": "^20",
     "@types/nodemailer": "^7.0.2",
@@ -76,6 +84,7 @@
     "tailwindcss": "^4",
     "typescript": "^5",
     "vite-tsconfig-paths": "^6.1.1",
+    "vitepress": "^1.6.4",
     "vitest": "^4.0.18"
   }
 }

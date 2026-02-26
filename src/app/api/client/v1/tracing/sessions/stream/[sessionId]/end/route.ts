@@ -3,6 +3,11 @@ import { getDatabase } from '@/lib/database';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { checkRateLimit } from '@/lib/quota/quotaGuard';
+import { createLogger } from '@/lib/core/logger';
+import { fireAndForget } from '@/lib/core/asyncTask';
+import { withRequestContext } from '@/lib/api/withRequestContext';
+
+const logger = createLogger('client-tracing');
 
 export const runtime = 'nodejs';
 
@@ -12,10 +17,10 @@ export const runtime = 'nodejs';
  * End a streaming tracing session. Updates the session with final status,
  * summary, and errors.
  */
-export async function POST(
+const _POST = async (
     request: NextRequest,
     { params }: { params: Promise<{ sessionId: string }> }
-) {
+) => {
     try {
         const { sessionId } = await params;
         const auth = await requireApiToken(request);
@@ -79,18 +84,23 @@ export async function POST(
         const payloadErrors = payload.errors || [];
         const mergedErrors = [...existingErrors, ...payloadErrors];
 
-        await db.updateAgentTracingSession(sessionId, {
-            status,
-            endedAt,
-            durationMs,
-            summary: mergedSummary,
-            errors: mergedErrors,
-            totalInputTokens: mergedSummary.totalInputTokens,
-            totalOutputTokens: mergedSummary.totalOutputTokens,
-            totalCachedInputTokens: mergedSummary.totalCachedInputTokens,
-            totalBytesIn: mergedSummary.totalBytesIn,
-            totalBytesOut: mergedSummary.totalBytesOut,
-        }, auth.projectId);
+        // Fire-and-forget: persist final session state in background
+        fireAndForget('tracing-stream-end', async () => {
+            const bgDb = await getDatabase();
+            await bgDb.switchToTenant(auth.tenantDbName);
+            await bgDb.updateAgentTracingSession(sessionId, {
+                status,
+                endedAt,
+                durationMs,
+                summary: mergedSummary,
+                errors: mergedErrors,
+                totalInputTokens: mergedSummary.totalInputTokens,
+                totalOutputTokens: mergedSummary.totalOutputTokens,
+                totalCachedInputTokens: mergedSummary.totalCachedInputTokens,
+                totalBytesIn: mergedSummary.totalBytesIn,
+                totalBytesOut: mergedSummary.totalBytesOut,
+            }, auth.projectId);
+        });
 
         return NextResponse.json({
             success: true,
@@ -100,7 +110,7 @@ export async function POST(
             totalEvents: session.totalEvents || 0,
         });
     } catch (error: unknown) {
-        console.error('Tracing session end error:', error);
+        logger.error('Tracing session end error', { error });
 
         if (error instanceof ApiTokenAuthError) {
             return NextResponse.json({ error: error.message }, { status: error.status });
@@ -110,4 +120,6 @@ export async function POST(
             error instanceof Error ? error.message : 'Failed to end tracing session';
         return NextResponse.json({ error: message }, { status: 500 });
     }
-}
+};
+
+export const POST = withRequestContext(_POST);

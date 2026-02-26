@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getPlanDefaults } from '@/lib/services/quota/quotaService';
 import type { LicenseType } from '@/lib/license/license-manager';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('quota');
 
 export const runtime = 'nodejs';
 
@@ -20,7 +23,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ licenseType, defaults }, { status: 200 });
   } catch (error) {
-    console.error('Get quota defaults error:', error);
+    logger.error('Get quota defaults error', { error });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

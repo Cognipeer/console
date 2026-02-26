@@ -13,7 +13,10 @@
  */
 
 import { getDatabase, getTenantDatabase } from '@/lib/database';
+import { createLogger } from '@/lib/core/logger';
 import { InferenceMonitoringService } from './inferenceMonitoringService';
+
+const logger = createLogger('poll-scheduler');
 
 const CHECK_INTERVAL_MS = 30_000; // how often to scan for due servers
 
@@ -54,23 +57,21 @@ async function runOnce(): Promise<void> {
           dueServers.map((server) =>
             InferenceMonitoringService.pollServer(tenant.dbName, tenantId, server.key).catch(
               (err) => {
-                console.error(
-                  `[poll-scheduler] Error polling ${tenant.slug}/${server.key}:`,
-                  err instanceof Error ? err.message : err,
-                );
+                logger.error(`Error polling ${tenant.slug}/${server.key}`, {
+                  error: err instanceof Error ? err.message : err,
+                });
               },
             ),
           ),
         );
       } catch (err) {
-        console.error(
-          `[poll-scheduler] Error processing tenant ${tenant.slug}:`,
-          err instanceof Error ? err.message : err,
-        );
+        logger.error(`Error processing tenant ${tenant.slug}`, {
+          error: err instanceof Error ? err.message : err,
+        });
       }
     }
   } catch (err) {
-    console.error('[poll-scheduler] Fatal error during run:', err instanceof Error ? err.message : err);
+    logger.error('Fatal error during run', { error: err instanceof Error ? err.message : err });
   } finally {
     running = false;
   }
@@ -82,7 +83,7 @@ async function runOnce(): Promise<void> {
  */
 export function startPollScheduler(): void {
   if (schedulerTimer !== null) return;
-  console.log(`[poll-scheduler] Started (check interval: ${CHECK_INTERVAL_MS / 1000}s)`);
+  logger.info(`Started (check interval: ${CHECK_INTERVAL_MS / 1000}s)`);
 
   // Run once immediately on startup (don't block server boot).
   void runOnce();
@@ -104,6 +105,6 @@ export function stopPollScheduler(): void {
   if (schedulerTimer !== null) {
     clearInterval(schedulerTimer);
     schedulerTimer = null;
-    console.log('[poll-scheduler] Stopped');
+    logger.info('Stopped');
   }
 }

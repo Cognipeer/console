@@ -8,6 +8,9 @@ import {
   isDateInDashboardRange,
   parseDashboardDateFilterFromSearchParams,
 } from '@/lib/utils/dashboardDateFilter';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('vector-dashboard');
 
 export const runtime = 'nodejs';
 
@@ -145,7 +148,7 @@ export async function GET(request: NextRequest) {
       recentIndexes,
     });
   } catch (error: unknown) {
-    console.error('[vector/dashboard] error', error);
+    logger.error('Dashboard error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }

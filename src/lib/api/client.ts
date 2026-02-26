@@ -1,3 +1,6 @@
+// NOTE: This module is imported by 'use client' components (browser runtime).
+// Do NOT use Winston logger here — only console.* is available in the browser.
+
 export class ApiError extends Error {
   readonly status: number;
   readonly payload: unknown;
@@ -63,7 +66,8 @@ async function safeParseJson(response: Response): Promise<unknown | undefined> {
   try {
     return await response.json();
   } catch (error) {
-    console.warn('Failed to parse error response body', error);
+    // eslint-disable-next-line no-console
+    console.warn('[api-client] Failed to parse error response body', error);
     return undefined;
   }
 }

@@ -3,6 +3,9 @@ import crypto from 'crypto';
 import { getDatabase } from '@/lib/database';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { checkResourceQuota } from '@/lib/quota/quotaGuard';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('project-tokens');
 
 export const runtime = 'nodejs';
 
@@ -94,7 +97,7 @@ export async function GET(
 
     return NextResponse.json({ tokens }, { status: 200 });
   } catch (error) {
-    console.error('List project tokens error:', error);
+    logger.error('List project tokens error', { error });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
@@ -151,7 +154,7 @@ export async function POST(
       { status: 201 },
     );
   } catch (error) {
-    console.error('Create project token error:', error);
+    logger.error('Create project token error', { error });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

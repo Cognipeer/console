@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { evaluateGuardrail } from '@/lib/services/guardrail';
+import { createLogger } from '@/lib/core/logger';
+import { withRequestContext } from '@/lib/api/withRequestContext';
+
+const logger = createLogger('client-guardrails');
 
 export const runtime = 'nodejs';
 
@@ -14,7 +18,7 @@ export const runtime = 'nodejs';
  *   - text: string (required) - the text to evaluate
  *   - target?: "input" | "output" | "both" - optional target filter (default: no filter)
  */
-export async function POST(request: NextRequest) {
+const _POST = async (request: NextRequest) => {
   let ctx;
   try {
     ctx = await requireApiToken(request);
@@ -55,12 +59,14 @@ export async function POST(request: NextRequest) {
         : buildUserMessage(result.findings),
     });
   } catch (error: unknown) {
-    console.error('[client/v1/guardrails/evaluate]', error);
+    logger.error('Guardrails evaluate error', { error });
     const message = error instanceof Error ? error.message : 'Internal error';
     const is404 = message.toLowerCase().includes('not found');
     return NextResponse.json({ error: message }, { status: is404 ? 404 : 500 });
   }
-}
+};
+
+export const POST = withRequestContext(_POST);
 
 function buildUserMessage(findings: Array<{ category: string; message: string; block: boolean }>) {
   const blocking = findings.filter((f) => f.block);

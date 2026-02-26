@@ -5,6 +5,9 @@ import { sendEmail } from '@/lib/email/mailer';
 import { ensureDefaultProject } from '@/lib/services/projects/projectService';
 import { checkResourceQuota } from '@/lib/quota/quotaGuard';
 import type { LicenseType } from '@/lib/license/license-manager';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('users');
 
 export async function POST(request: NextRequest) {
   try {
@@ -144,7 +147,7 @@ export async function POST(request: NextRequest) {
       tempPassword,
       inviterName: inviterRole, // You might want to fetch the actual inviter's name
     }).catch((err: Error) =>
-      console.error('Failed to send invitation email:', err),
+      logger.error('Failed to send invitation email', { error: err }),
     );
 
     return NextResponse.json(
@@ -160,7 +163,7 @@ export async function POST(request: NextRequest) {
       { status: 201 },
     );
   } catch (error) {
-    console.error('Invite user error:', error);
+    logger.error('Invite user error', { error });
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 },

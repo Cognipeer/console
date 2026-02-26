@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { providerRegistry } from '@/lib/providers';
 import type { ProviderDomain } from '@/lib/database';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('client-vector');
 
 export const runtime = 'nodejs';
 
@@ -10,7 +13,7 @@ function handleError(error: unknown) {
     return NextResponse.json({ error: error.message }, { status: error.status });
   }
 
-  console.error('Client list vector provider drivers error', error);
+  logger.error('List vector provider drivers error', { error });
   return NextResponse.json(
     { error: 'Internal server error' },
     { status: 500 },

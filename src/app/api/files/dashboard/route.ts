@@ -5,6 +5,9 @@ import {
   isDateInDashboardRange,
   parseDashboardDateFilterFromSearchParams,
 } from '@/lib/utils/dashboardDateFilter';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('files-dashboard');
 
 export const runtime = 'nodejs';
 
@@ -81,7 +84,7 @@ export async function GET(request: NextRequest) {
       recentBuckets,
     });
   } catch (error: unknown) {
-    console.error('[files/dashboard] error', error);
+    logger.error('Dashboard error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }

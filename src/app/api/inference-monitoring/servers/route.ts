@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { InferenceMonitoringService } from '@/lib/services/inferenceMonitoring';
 import { sanitizeServer, normalizeBaseUrl } from '@/lib/services/inferenceMonitoring/utils';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('inference-monitoring');
 
 /**
  * GET /api/inference-monitoring/servers
@@ -18,7 +21,7 @@ export async function GET(request: NextRequest) {
     const servers = await InferenceMonitoringService.listServers(tenantDbName, tenantId);
     return NextResponse.json({ servers: servers.map(sanitizeServer) });
   } catch (error) {
-    console.error('[inference-monitoring] list servers error:', error);
+    logger.error('List servers error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Failed to list servers' },
       { status: 500 },
@@ -81,7 +84,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ server: sanitizeServer(server) }, { status: 201 });
   } catch (error) {
-    console.error('[inference-monitoring] create server error:', error);
+    logger.error('Create server error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Failed to create server' },
       { status: 500 },

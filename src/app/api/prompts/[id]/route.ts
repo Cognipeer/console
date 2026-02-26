@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { deletePrompt, getPromptById, updatePrompt } from '@/lib/services/prompts';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('prompts');
 
 export const runtime = 'nodejs';
 
@@ -32,7 +35,7 @@ export async function GET(
 
     return NextResponse.json({ prompt }, { status: 200 });
   } catch (error: unknown) {
-    console.error('Get prompt error', error);
+    logger.error('Get prompt error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
@@ -80,7 +83,7 @@ export async function PATCH(
 
     return NextResponse.json({ prompt }, { status: 200 });
   } catch (error: unknown) {
-    console.error('Update prompt error', error);
+    logger.error('Update prompt error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
@@ -119,7 +122,7 @@ export async function DELETE(
 
     return NextResponse.json({ success: true }, { status: 200 });
   } catch (error: unknown) {
-    console.error('Delete prompt error', error);
+    logger.error('Delete prompt error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }

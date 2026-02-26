@@ -1,5 +1,9 @@
 import { SignJWT, jwtVerify } from 'jose';
 import { LicenseType } from './license-manager';
+import { getConfig } from '@/lib/core/config';
+
+// NOTE: This module is imported by middleware.ts which runs in Edge Runtime.
+// Winston/createLogger cannot be used here — Edge Runtime lacks Node.js APIs.
 
 export interface JWTPayload {
   userId: string;
@@ -17,11 +21,11 @@ export interface JWTPayload {
 
 export class TokenManager {
   private static getSecretKey(): Uint8Array {
-    const secret = process.env.JWT_SECRET;
-    if (!secret) {
+    const cfg = getConfig();
+    if (!cfg.auth.jwtSecret) {
       throw new Error('JWT_SECRET is not defined in environment variables');
     }
-    return new TextEncoder().encode(secret);
+    return new TextEncoder().encode(cfg.auth.jwtSecret);
   }
 
   /**
@@ -30,7 +34,7 @@ export class TokenManager {
   static async generateToken(
     payload: Omit<JWTPayload, 'iat' | 'exp'>,
   ): Promise<string> {
-    const expiresIn = process.env.JWT_EXPIRES_IN || '7d';
+    const expiresIn = getConfig().auth.jwtExpiresIn;
 
     // Convert expiry string to seconds (7d -> 604800)
     const expiryMap: Record<string, number> = {
@@ -56,8 +60,8 @@ export class TokenManager {
     try {
       const { payload } = await jwtVerify(token, this.getSecretKey());
       return payload as unknown as JWTPayload;
-    } catch (error) {
-      console.error('Token verification failed:', error);
+    } catch {
+      // Edge Runtime — cannot use Winston logger here
       return null;
     }
   }

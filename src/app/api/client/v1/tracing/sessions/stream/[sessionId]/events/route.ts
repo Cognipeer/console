@@ -3,6 +3,11 @@ import { getDatabase } from '@/lib/database';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { checkRateLimit, checkPerRequestLimits } from '@/lib/quota/quotaGuard';
+import { createLogger } from '@/lib/core/logger';
+import { fireAndForget } from '@/lib/core/asyncTask';
+import { withRequestContext } from '@/lib/api/withRequestContext';
+
+const logger = createLogger('client-tracing');
 
 export const runtime = 'nodejs';
 
@@ -12,10 +17,10 @@ export const runtime = 'nodejs';
  * Add a single event to an existing streaming session.
  * The session must have been started via /start endpoint.
  */
-export async function POST(
+const _POST = async (
     request: NextRequest,
     { params }: { params: Promise<{ sessionId: string }> }
-) {
+) => {
     try {
         const { sessionId } = await params;
         const auth = await requireApiToken(request);
@@ -92,66 +97,27 @@ export async function POST(
             usage?.cache_read_input_tokens ??
             undefined;
 
-        // Create the event
-        await db.createAgentTracingEvent({
-            sessionId,
-            tenantId: auth.tenantId,
-            projectId: auth.projectId,
-            id: event.id || null,
-            type: event.type || null,
-            label: event.label || null,
-            sequence: event.sequence || 0,
-            timestamp: event.timestamp ? new Date(event.timestamp) : new Date(),
-            status: event.status || null,
-            actor: event.actor || {},
-            metadata: event.metadata || {},
-            sections,
-            modelNames: event.modelNames || [],
-            model: event.model || null,
-            error: event.error || null,
-            durationMs: event.durationMs,
-            actorName: event.actor?.name || null,
-            actorRole: event.actor?.role || event.actor?.scope || null,
-            toolName:
-                event.toolName ||
-                (event.actor?.scope === 'tool' ? event.actor?.name : null),
-            toolExecutionId: event.toolExecutionId || null,
-            inputTokens,
-            outputTokens,
-            cachedInputTokens,
-            totalTokens: event.totalTokens,
-            bytesIn: event.bytesIn,
-            bytesOut: event.bytesOut,
-            requestBytes: event.requestBytes,
-            responseBytes: event.responseBytes,
-        });
-
-        // Update session summary
+        // Compute summary updates synchronously for the response
         const newTotalEvents = (session.totalEvents || 0) + 1;
         const newInputTokens = (session.totalInputTokens || 0) + (inputTokens || 0);
         const newOutputTokens = (session.totalOutputTokens || 0) + (outputTokens || 0);
         const newCachedTokens = (session.totalCachedInputTokens || 0) + (cachedInputTokens || 0);
 
-        // Update models and tools used
         const modelsUsed = new Set<string>(session.modelsUsed || []);
         const toolsUsed = new Set<string>(session.toolsUsed || []);
-
         if (event?.model) modelsUsed.add(event.model);
         if (event?.modelName) modelsUsed.add(event.modelName);
         if (event?.metadata?.modelName) modelsUsed.add(event.metadata.modelName);
-
         if (event?.toolName) toolsUsed.add(event.toolName);
         if (event?.actor?.scope === 'tool' && event?.actor?.name) {
             toolsUsed.add(event.actor.name);
         }
 
-        // Update event counts
         const eventCounts = { ...(session.eventCounts || {}) };
         if (event.type) {
             eventCounts[event.type] = (eventCounts[event.type] || 0) + 1;
         }
 
-        // Update summary
         const summary = { ...(session.summary || {}) };
         summary.totalInputTokens = newInputTokens;
         summary.totalOutputTokens = newOutputTokens;
@@ -161,16 +127,55 @@ export async function POST(
             summary.totalDurationMs = (summary.totalDurationMs || 0) + event.durationMs;
         }
 
-        await db.updateAgentTracingSession(sessionId, {
-            totalEvents: newTotalEvents,
-            totalInputTokens: newInputTokens,
-            totalOutputTokens: newOutputTokens,
-            totalCachedInputTokens: newCachedTokens,
-            modelsUsed: Array.from(modelsUsed),
-            toolsUsed: Array.from(toolsUsed),
-            eventCounts,
-            summary,
-        }, auth.projectId);
+        // Fire-and-forget: persist event + session update in background
+        fireAndForget('tracing-stream-event', async () => {
+            const bgDb = await getDatabase();
+            await bgDb.switchToTenant(auth.tenantDbName);
+
+            await bgDb.createAgentTracingEvent({
+                sessionId,
+                tenantId: auth.tenantId,
+                projectId: auth.projectId,
+                id: event.id || null,
+                type: event.type || null,
+                label: event.label || null,
+                sequence: event.sequence || 0,
+                timestamp: event.timestamp ? new Date(event.timestamp) : new Date(),
+                status: event.status || null,
+                actor: event.actor || {},
+                metadata: event.metadata || {},
+                sections,
+                modelNames: event.modelNames || [],
+                model: event.model || null,
+                error: event.error || null,
+                durationMs: event.durationMs,
+                actorName: event.actor?.name || null,
+                actorRole: event.actor?.role || event.actor?.scope || null,
+                toolName:
+                    event.toolName ||
+                    (event.actor?.scope === 'tool' ? event.actor?.name : null),
+                toolExecutionId: event.toolExecutionId || null,
+                inputTokens,
+                outputTokens,
+                cachedInputTokens,
+                totalTokens: event.totalTokens,
+                bytesIn: event.bytesIn,
+                bytesOut: event.bytesOut,
+                requestBytes: event.requestBytes,
+                responseBytes: event.responseBytes,
+            });
+
+            await bgDb.updateAgentTracingSession(sessionId, {
+                totalEvents: newTotalEvents,
+                totalInputTokens: newInputTokens,
+                totalOutputTokens: newOutputTokens,
+                totalCachedInputTokens: newCachedTokens,
+                modelsUsed: Array.from(modelsUsed),
+                toolsUsed: Array.from(toolsUsed),
+                eventCounts,
+                summary,
+            }, auth.projectId);
+        });
 
         return NextResponse.json({
             success: true,
@@ -179,7 +184,7 @@ export async function POST(
             totalEvents: newTotalEvents,
         });
     } catch (error: unknown) {
-        console.error('Tracing event ingest error:', error);
+        logger.error('Tracing event ingest error', { error });
 
         if (error instanceof ApiTokenAuthError) {
             return NextResponse.json({ error: error.message }, { status: error.status });
@@ -189,4 +194,6 @@ export async function POST(
             error instanceof Error ? error.message : 'Failed to ingest tracing event';
         return NextResponse.json({ error: message }, { status: 500 });
     }
-}
+};
+
+export const POST = withRequestContext(_POST);

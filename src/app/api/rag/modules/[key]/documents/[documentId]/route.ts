@@ -4,6 +4,9 @@ import {
   getRagDocument as getRagDocumentService,
   reingestDocument,
 } from '@/lib/services/rag/ragService';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('rag-documents');
 
 export async function GET(
   request: NextRequest,
@@ -22,7 +25,7 @@ export async function GET(
     }
     return NextResponse.json({ document });
   } catch (error) {
-    console.error('[rag] get document error', error);
+    logger.error('Get document error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal error' },
       { status: 500 },
@@ -49,7 +52,7 @@ export async function DELETE(
     });
     return NextResponse.json({ success: true });
   } catch (error) {
-    console.error('[rag] delete document error', error);
+    logger.error('Delete document error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal error' },
       { status: 500 },
@@ -110,7 +113,7 @@ export async function POST(
 
     return NextResponse.json({ document });
   } catch (error) {
-    console.error('[rag] reingest error', error);
+    logger.error('Reingest error', { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal error' },
       { status: 500 },

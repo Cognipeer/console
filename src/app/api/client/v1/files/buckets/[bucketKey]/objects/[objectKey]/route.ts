@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { getFileRecord, deleteFile } from '@/lib/services/files';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('client-file-objects');
 
 export const runtime = 'nodejs';
 
@@ -34,7 +37,7 @@ export async function GET(
 
     return NextResponse.json({ file });
   } catch (error) {
-    console.error('[client-api:files:get]', error);
+    logger.error('Get file error', { error });
 
     if (error instanceof ApiTokenAuthError) {
       return NextResponse.json(
@@ -80,7 +83,7 @@ export async function DELETE(
       objectKey,
     });
   } catch (error) {
-    console.error('[client-api:files:delete]', error);
+    logger.error('Delete file error', { error });
 
     if (error instanceof ApiTokenAuthError) {
       return NextResponse.json(

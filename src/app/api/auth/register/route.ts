@@ -5,6 +5,10 @@ import { TokenManager } from '@/lib/license/token-manager';
 import { LicenseManager, LicenseType } from '@/lib/license/license-manager';
 import { sendEmail } from '@/lib/email/mailer';
 import { ensureDefaultProject } from '@/lib/services/projects/projectService';
+import { createLogger } from '@/lib/core/logger';
+import { getConfig } from '@/lib/core/config';
+
+const logger = createLogger('auth');
 
 export async function POST(request: NextRequest) {
   try {
@@ -20,7 +24,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Block registration with demo account identifiers
-    const DEMO_EMAIL = process.env.DEMO_EMAIL || 'demo@cognipeer.ai';
+    const DEMO_EMAIL = getConfig().app.demoEmail;
     const DEMO_SLUG = 'demo';
     if (email.trim().toLowerCase() === DEMO_EMAIL) {
       return NextResponse.json(
@@ -143,7 +147,7 @@ export async function POST(request: NextRequest) {
       slug,
       licenseType: finalLicenseType,
     }).catch((err: Error) =>
-      console.error('Failed to send welcome email:', err),
+      logger.error('Failed to send welcome email', { error: err }),
     );
 
     // Create response with cookie
@@ -168,9 +172,10 @@ export async function POST(request: NextRequest) {
     );
 
     // Set HTTP-only cookie
+    const isProduction = getConfig().nodeEnv === 'production';
     response.cookies.set('token', token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
+      secure: isProduction,
       sameSite: 'lax',
       maxAge: 60 * 60 * 24 * 7, // 7 days
       path: '/',
@@ -179,7 +184,7 @@ export async function POST(request: NextRequest) {
     if (defaultProjectId) {
       response.cookies.set('active_project_id', defaultProjectId, {
         httpOnly: false,
-        secure: process.env.NODE_ENV === 'production',
+        secure: isProduction,
         sameSite: 'lax',
         maxAge: 60 * 60 * 24 * 30,
         path: '/',
@@ -188,7 +193,7 @@ export async function POST(request: NextRequest) {
 
     return response;
   } catch (error) {
-    console.error('Registration error:', error);
+    logger.error('Registration error', { error });
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 },

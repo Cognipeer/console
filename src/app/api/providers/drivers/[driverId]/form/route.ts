@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { providerRegistry } from '@/lib/providers';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('provider-drivers');
 
 export const runtime = 'nodejs';
 
@@ -29,7 +32,7 @@ export async function GET(
       { status: 200 },
     );
   } catch (error) {
-    console.error('Get provider driver form error', error);
+    logger.error('Get provider driver form error', { error });
     return NextResponse.json(
       {
         error:

@@ -4,6 +4,9 @@ import crypto from 'crypto';
 import { ProjectContextError, requireProjectContext } from '@/lib/services/projects/projectContext';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { checkResourceQuota } from '@/lib/quota/quotaGuard';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('tokens');
 
 export async function GET(request: NextRequest) {
   try {
@@ -52,7 +55,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ tokens }, { status: 200 });
   } catch (error) {
-    console.error('List tokens error:', error);
+    logger.error('List tokens error', { error });
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 },
@@ -149,7 +152,7 @@ export async function POST(request: NextRequest) {
       { status: 201 },
     );
   } catch (error) {
-    console.error('Create token error:', error);
+    logger.error('Create token error', { error });
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 },

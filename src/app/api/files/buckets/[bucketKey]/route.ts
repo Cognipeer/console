@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { deleteFileBucket, getFileBucket } from '@/lib/services/files';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('file-buckets');
 
 export const runtime = 'nodejs';
 
@@ -30,7 +33,7 @@ export async function GET(request: NextRequest, context: { params: Promise<{ buc
 
     return NextResponse.json({ bucket }, { status: 200 });
   } catch (error) {
-    console.error('Get file bucket error', error);
+    logger.error('Get file bucket error', { error });
 
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
@@ -80,7 +83,7 @@ export async function DELETE(request: NextRequest, context: { params: Promise<{ 
 
     return NextResponse.json({ success: true }, { status: 200 });
   } catch (error) {
-    console.error('Delete file bucket error', error);
+    logger.error('Delete file bucket error', { error });
 
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });

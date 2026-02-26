@@ -4,6 +4,9 @@ import {
   updateQuotaPolicy,
 } from '@/lib/services/quota/quotaService';
 import type { QuotaPolicyInput } from '@/lib/quota/types';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('quota-policies');
 
 export const runtime = 'nodejs';
 
@@ -59,7 +62,7 @@ export async function PATCH(
 
     return NextResponse.json({ policy }, { status: 200 });
   } catch (error) {
-    console.error('Update quota policy error:', error);
+    logger.error('Update quota policy error', { error });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
@@ -94,7 +97,7 @@ export async function DELETE(
 
     return NextResponse.json({ success: true }, { status: 200 });
   } catch (error) {
-    console.error('Delete quota policy error:', error);
+    logger.error('Delete quota policy error', { error });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
