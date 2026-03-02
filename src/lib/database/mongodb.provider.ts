@@ -27,6 +27,7 @@ import { GuardrailMixin } from './mongodb/guardrail.mixin';
 import { AlertMixin } from './mongodb/alert.mixin';
 import { RagMixin } from './mongodb/rag.mixin';
 import { MemoryMixin } from './mongodb/memory.mixin';
+import { ConfigMixin } from './mongodb/config.mixin';
 
 // ── Compose mixins in domain groups ──────────────────────────────────────
 // Order matters where there are cross-mixin dependencies.
@@ -45,7 +46,7 @@ const AIBase = VectorMixin(ModelMixin(TracingMixin(ContentBase)));
 const StorageBase = ProviderRecordMixin(FileMixin(AIBase));
 
 // Group 5 – Advanced features
-const AdvancedBase = MemoryMixin(RagMixin(AlertMixin(GuardrailMixin(InferenceMixin(StorageBase)))));
+const AdvancedBase = ConfigMixin(MemoryMixin(RagMixin(AlertMixin(GuardrailMixin(InferenceMixin(StorageBase))))));
 
 // ── Final composed class ─────────────────────────────────────────────────
 

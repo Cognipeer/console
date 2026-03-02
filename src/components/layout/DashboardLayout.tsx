@@ -40,6 +40,7 @@ import {
   IconBell,
   IconBulb,
   IconBook2,
+  IconLock,
 } from '@tabler/icons-react';
 import { ReactNode, useMemo, useState } from 'react';
 import DashboardBreadcrumbs from './DashboardBreadcrumbs';
@@ -147,6 +148,12 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
       description: tNav('ragDescription'),
       icon: IconBook2,
       href: '/dashboard/rag',
+    },
+    {
+      label: tNav('config'),
+      description: tNav('configDescription'),
+      icon: IconLock,
+      href: '/dashboard/config',
     },
     {
       label: tNav('agentTracing'),

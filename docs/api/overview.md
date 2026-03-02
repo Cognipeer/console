@@ -35,6 +35,11 @@ Tokens are created in the dashboard under **Settings → API Tokens**.
 | [Prompts](./prompts) | `/prompts` | GET, POST |
 | [RAG](./rag) | `/rag/modules` | GET, POST, DELETE |
 | [Memory](./memory) | `/memory/stores` | GET, POST, PATCH, DELETE |
+| [Config Groups](./config) | `/config/groups` | GET, POST |
+| [Config Group Items](./config) | `/config/groups/:groupKey/items` | GET, POST |
+| [Config Item](./config) | `/config/items/:key` | GET, PATCH, DELETE |
+| [Config Resolve](./config) | `/config/resolve` | POST |
+| [Config Audit](./config) | `/config/items/:key/audit` | GET |
 | [Health](./health) | `/api/health` | GET |
 
 ## Request Format

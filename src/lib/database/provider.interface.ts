@@ -1174,6 +1174,59 @@ export interface DatabaseProvider {
   ): Promise<{ items: IMemoryItem[]; total: number }>;
   countMemoryItems(storeKey: string, projectId?: string): Promise<number>;
   incrementMemoryAccess(id: string): Promise<void>;
+
+  // ── Config (Secret/Configuration Management) operations (tenant-specific) ──
+
+  // Config Group operations
+  createConfigGroup(
+    group: Omit<IConfigGroup, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IConfigGroup>;
+  updateConfigGroup(
+    id: string,
+    data: Partial<Omit<IConfigGroup, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IConfigGroup | null>;
+  deleteConfigGroup(id: string): Promise<boolean>;
+  findConfigGroupById(id: string): Promise<IConfigGroup | null>;
+  findConfigGroupByKey(key: string, projectId?: string): Promise<IConfigGroup | null>;
+  listConfigGroups(filters?: {
+    projectId?: string;
+    tags?: string[];
+    search?: string;
+  }): Promise<IConfigGroup[]>;
+  countConfigGroups(projectId?: string): Promise<number>;
+
+  // Config Item operations
+  createConfigItem(
+    item: Omit<IConfigItem, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IConfigItem>;
+  updateConfigItem(
+    id: string,
+    data: Partial<Omit<IConfigItem, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IConfigItem | null>;
+  deleteConfigItem(id: string): Promise<boolean>;
+  deleteConfigItemsByGroupId(groupId: string): Promise<number>;
+  findConfigItemById(id: string): Promise<IConfigItem | null>;
+  findConfigItemByKey(
+    key: string,
+    projectId?: string,
+  ): Promise<IConfigItem | null>;
+  listConfigItems(filters?: {
+    projectId?: string;
+    groupId?: string;
+    isSecret?: boolean;
+    tags?: string[];
+    search?: string;
+  }): Promise<IConfigItem[]>;
+  countConfigItems(projectId?: string): Promise<number>;
+
+  // ── Config Audit Log operations (tenant-specific) ──
+  createConfigAuditLog(
+    log: Omit<IConfigAuditLog, '_id' | 'createdAt'>,
+  ): Promise<IConfigAuditLog>;
+  listConfigAuditLogs(
+    configKey: string,
+    options?: { limit?: number; skip?: number; from?: Date; to?: Date },
+  ): Promise<IConfigAuditLog[]>;
 }
 
 // ── Memory types ─────────────────────────────────────────────────────────
@@ -1280,4 +1333,60 @@ export interface IGuardrailEvalAggregate {
     passed: number;
     failed: number;
   }>;
+}
+
+// ── Config (Secret/Configuration Management) types ───────────────────────
+
+export type ConfigValueType = 'string' | 'number' | 'boolean' | 'json';
+
+export interface IConfigGroup {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name: string;
+  description?: string;
+  tags?: string[];
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IConfigItem {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  groupId: string;
+  key: string;
+  name: string;
+  description?: string;
+  /** Stored value. If `isSecret` is true, this is encrypted at rest. */
+  value: string;
+  valueType: ConfigValueType;
+  isSecret: boolean;
+  tags?: string[];
+  version: number;
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IConfigAuditLog {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  configKey: string;
+  action: 'create' | 'update' | 'delete' | 'read';
+  previousValue?: string;
+  newValue?: string;
+  version?: number;
+  performedBy: string;
+  ipAddress?: string;
+  userAgent?: string;
+  metadata?: Record<string, unknown>;
+  createdAt?: Date;
 }

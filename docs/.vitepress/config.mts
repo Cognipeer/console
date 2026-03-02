@@ -86,6 +86,7 @@ export default defineConfig({
             { text: 'Prompts', link: '/api/prompts' },
             { text: 'RAG', link: '/api/rag' },
             { text: 'Memory', link: '/api/memory' },
+            { text: 'Config', link: '/api/config' },
             { text: 'Health', link: '/api/health' },
           ],
         },

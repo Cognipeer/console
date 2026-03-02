@@ -588,6 +588,64 @@ export const TENANT_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_memory_items_storeKey ON memory_items(storeKey);
   CREATE INDEX IF NOT EXISTS idx_memory_items_hash ON memory_items(storeKey, contentHash);
 
+  -- Config groups
+  CREATE TABLE IF NOT EXISTS config_groups (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    tags TEXT DEFAULT '[]',
+    metadata TEXT DEFAULT '{}',
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_config_groups_key ON config_groups(key);
+
+  -- Config items (secret/configuration values within groups)
+  CREATE TABLE IF NOT EXISTS config_items (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    groupId TEXT NOT NULL,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    value TEXT NOT NULL,
+    valueType TEXT NOT NULL DEFAULT 'string',
+    isSecret INTEGER NOT NULL DEFAULT 0,
+    tags TEXT DEFAULT '[]',
+    version INTEGER NOT NULL DEFAULT 1,
+    metadata TEXT DEFAULT '{}',
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_config_items_key ON config_items(key);
+  CREATE INDEX IF NOT EXISTS idx_config_items_groupId ON config_items(groupId);
+
+  -- Config audit logs
+  CREATE TABLE IF NOT EXISTS config_audit_logs (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    configKey TEXT NOT NULL,
+    action TEXT NOT NULL,
+    previousValue TEXT,
+    newValue TEXT,
+    version INTEGER,
+    performedBy TEXT NOT NULL,
+    ipAddress TEXT,
+    userAgent TEXT,
+    metadata TEXT DEFAULT '{}',
+    createdAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_config_audit_configKey ON config_audit_logs(configKey);
+
   -- Vector counters (approximate counts per project)
   CREATE TABLE IF NOT EXISTS vector_counters (
     projectId TEXT PRIMARY KEY,

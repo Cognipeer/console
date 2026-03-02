@@ -157,6 +157,16 @@
         "/api/client/v1/rag",
         "/api/client/v1/rag/*"
       ]
+    },
+    "CONFIG_MANAGEMENT": {
+      "name": "Config Management",
+      "description": "Centralized secret and configuration management with encryption and audit logging",
+      "endpoints": [
+        "/api/config",
+        "/api/config/*",
+        "/api/client/v1/config",
+        "/api/client/v1/config/*"
+      ]
     }
   },
   "licenses": {
@@ -178,6 +188,7 @@
         "ALERTS",
         "MEMORY",
         "RAG_PIPELINE",
+        "CONFIG_MANAGEMENT",
         "DASHBOARD"
       ],
       "limits": {
@@ -197,7 +208,8 @@
         "INFERENCE_MONITORING",
         "ALERTS",
         "MEMORY",
-        "RAG_PIPELINE"
+        "RAG_PIPELINE",
+        "CONFIG_MANAGEMENT"
       ],
       "limits": {
         "requestsPerMonth": 10000,
@@ -220,7 +232,8 @@
         "GUARDRAILS",
         "ALERTS",
         "MEMORY",
-        "RAG_PIPELINE"
+        "RAG_PIPELINE",
+        "CONFIG_MANAGEMENT"
       ],
       "limits": {
         "requestsPerMonth": 100000,
@@ -249,6 +262,7 @@
         "ALERTS",
         "MEMORY",
         "RAG_PIPELINE",
+        "CONFIG_MANAGEMENT",
         "DASHBOARD"
       ],
       "limits": {
@@ -278,6 +292,7 @@
         "ALERTS",
         "MEMORY",
         "RAG_PIPELINE",
+        "CONFIG_MANAGEMENT",
         "DASHBOARD"
       ],
       "limits": {

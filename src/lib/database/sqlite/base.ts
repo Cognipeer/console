@@ -47,6 +47,9 @@ export const TABLES = {
   ragQueryLogs: 'rag_query_logs',
   memoryStores: 'memory_stores',
   memoryItems: 'memory_items',
+  configGroups: 'config_groups',
+  configItems: 'config_items',
+  configAuditLogs: 'config_audit_logs',
   vectorCounters: 'vector_counters',
 } as const;
 

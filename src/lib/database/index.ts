@@ -188,4 +188,8 @@ export type {
   MemorySource,
   MemoryStoreStatus,
   MemoryItemStatus,
+  IConfigGroup,
+  IConfigItem,
+  IConfigAuditLog,
+  ConfigValueType,
 } from './provider.interface';
