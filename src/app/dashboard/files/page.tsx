@@ -44,7 +44,7 @@ export default function FilesDashboardPage() {
       {/* Header */}
       <PageHeader
         icon={<IconFolder size={18} />}
-        title="File Buckets"
+        title="Document Store"
         subtitle="View and manage storage buckets connected to your tenant."
         actions={<DashboardDateFilter value={dateFilter} onChange={setDateFilter} />}
       />

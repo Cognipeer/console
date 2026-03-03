@@ -471,6 +471,30 @@ export const TENANT_SCHEMA_SQL = `
     metadata TEXT DEFAULT '{}'
   );
 
+  CREATE TABLE IF NOT EXISTS incidents (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT NOT NULL,
+    alertEventId TEXT NOT NULL,
+    ruleId TEXT NOT NULL,
+    ruleName TEXT NOT NULL,
+    metric TEXT NOT NULL,
+    threshold REAL NOT NULL,
+    actualValue REAL NOT NULL,
+    severity TEXT NOT NULL DEFAULT 'warning',
+    status TEXT NOT NULL DEFAULT 'open',
+    assignedTo TEXT,
+    notes TEXT NOT NULL DEFAULT '[]',
+    firedAt TEXT NOT NULL,
+    acknowledgedAt TEXT,
+    resolvedAt TEXT,
+    closedAt TEXT,
+    resolvedBy TEXT,
+    metadata TEXT DEFAULT '{}',
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+
   -- RAG modules
   CREATE TABLE IF NOT EXISTS rag_modules (
     id TEXT PRIMARY KEY,
@@ -658,4 +682,46 @@ export const TENANT_SCHEMA_SQL = `
     count INTEGER NOT NULL DEFAULT 0,
     resetAt TEXT NOT NULL
   );
+
+  -- MCP Servers
+  CREATE TABLE IF NOT EXISTS mcp_servers (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    openApiSpec TEXT NOT NULL,
+    tools TEXT DEFAULT '[]',
+    upstreamBaseUrl TEXT NOT NULL,
+    upstreamAuth TEXT DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'active',
+    endpointSlug TEXT NOT NULL,
+    totalRequests INTEGER DEFAULT 0,
+    metadata TEXT DEFAULT '{}',
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_mcp_servers_key ON mcp_servers(key);
+  CREATE INDEX IF NOT EXISTS idx_mcp_servers_slug ON mcp_servers(endpointSlug);
+
+  -- MCP Request Logs
+  CREATE TABLE IF NOT EXISTS mcp_request_logs (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    serverKey TEXT NOT NULL,
+    toolName TEXT NOT NULL,
+    status TEXT NOT NULL,
+    requestPayload TEXT DEFAULT '{}',
+    responsePayload TEXT DEFAULT '{}',
+    errorMessage TEXT,
+    latencyMs INTEGER,
+    callerTokenId TEXT,
+    createdAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_mcp_request_logs_serverKey ON mcp_request_logs(serverKey);
+  CREATE INDEX IF NOT EXISTS idx_mcp_request_logs_createdAt ON mcp_request_logs(createdAt);
 `;

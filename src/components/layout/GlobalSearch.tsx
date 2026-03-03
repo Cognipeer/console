@@ -1,17 +1,20 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useCallback, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   IconBrain,
   IconFolder,
   IconLayoutDashboard,
   IconSearch,
-  IconSettings,
   IconSparkles,
   IconTimeline,
   IconVectorBezier,
   IconServerBolt,
+  IconKey,
+  IconPlug,
+  IconUsers,
+  IconApi,
 } from '@tabler/icons-react';
 import { Spotlight, spotlight, SpotlightActionData } from '@mantine/spotlight';
 import { useTranslations } from '@/lib/i18n';
@@ -94,24 +97,39 @@ export function GlobalSearch({ isTenantAdmin = false }: GlobalSearchProps) {
       ...(isTenantAdmin
         ? [
             {
-              id: 'tenant-settings',
-              label: tNav('tenantSettings'),
-              description: tNav('tenantSettingsDescription'),
-              onClick: () => router.push('/dashboard/tenant-settings'),
-              leftSection: <IconSettings size={20} stroke={1.5} />,
-              keywords: ['settings', 'admin', 'tenant', 'ayarlar'],
+              id: 'members',
+              label: tNav('members'),
+              description: tNav('membersDescription'),
+              onClick: () => router.push('/dashboard/members'),
+              leftSection: <IconUsers size={20} stroke={1.5} />,
+              keywords: ['members', 'users', 'invite', 'tenant', 'üyeler'],
+            },
+            {
+              id: 'providers',
+              label: tNav('providers'),
+              description: tNav('providersDescription'),
+              onClick: () => router.push('/dashboard/providers'),
+              leftSection: <IconPlug size={20} stroke={1.5} />,
+              keywords: ['providers', 'integrations', 'sağlayıcılar'],
             },
           ]
-        : [
-            {
-              id: 'settings',
-              label: tNav('settings'),
-              description: tNav('settingsDescription'),
-              onClick: () => router.push('/dashboard/settings'),
-              leftSection: <IconSettings size={20} stroke={1.5} />,
-              keywords: ['settings', 'ayarlar', 'profil'],
-            },
-          ]),
+        : []),
+      {
+        id: 'tokens',
+        label: tNav('tokens'),
+        description: tNav('tokensDescription'),
+        onClick: () => router.push('/dashboard/tokens'),
+        leftSection: <IconKey size={20} stroke={1.5} />,
+        keywords: ['token', 'api', 'key', 'anahtar'],
+      },
+      {
+        id: 'mcp',
+        label: tNav('mcp'),
+        description: tNav('mcpDescription'),
+        onClick: () => router.push('/dashboard/mcp'),
+        leftSection: <IconApi size={20} stroke={1.5} />,
+        keywords: ['mcp', 'openapi', 'swagger', 'tool', 'server', 'proxy', 'api'],
+      },
     ],
     [router, tNav, isTenantAdmin]
   );

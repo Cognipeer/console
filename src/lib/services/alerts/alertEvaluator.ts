@@ -14,6 +14,7 @@ import type { IAlertEvent, AlertConditionOperator } from '@/lib/database';
 import { collectMetric } from './metrics';
 import { getChannel } from './channels';
 import type { AlertContext, DispatchResult } from './channels';
+import { IncidentService } from './incidentService';
 
 /**
  * Evaluate a single condition: `actualValue <op> threshold`
@@ -83,6 +84,7 @@ export async function evaluateTenantAlerts(
           serverKey: rule.scope?.serverKey,
           guardrailKey: rule.scope?.guardrailKey,
           ragModuleKey: rule.scope?.ragModuleKey,
+          mcpServerKey: rule.scope?.mcpServerKey,
         },
       });
 
@@ -125,14 +127,51 @@ export async function evaluateTenantAlerts(
         },
       };
 
-      // 6. Dispatch to channels
+      // 6. Persist alert event first
+      await db.switchToTenant(ctx.tenantDbName);
+      const createdEvent = await db.createAlertEvent(alertEvent);
+
+      // 7. Create incident for this alert event
+      let incidentId: string | undefined;
+      try {
+        await db.switchToTenant(ctx.tenantDbName);
+        const incident = await IncidentService.createIncident(ctx.tenantDbName, {
+          tenantId: ctx.tenantId,
+          projectId: rule.projectId,
+          alertEventId: String(createdEvent._id),
+          ruleId: String(rule._id),
+          ruleName: rule.name,
+          metric: rule.metric,
+          threshold: rule.condition.threshold,
+          actualValue: metricResult.value,
+          firedAt: now,
+          metadata: {
+            operator: rule.condition.operator,
+            windowMinutes: rule.windowMinutes,
+            sampleCount: metricResult.sampleCount,
+            scope: rule.scope,
+          },
+        });
+        incidentId = String(incident._id);
+      } catch (incErr) {
+        logger.error(`Failed to create incident for rule "${rule.name}"`, {
+          error: incErr instanceof Error ? incErr.message : incErr,
+        });
+      }
+
+      // 8. Dispatch to notification channels (with incident link)
+      const appUrl = getConfig().app.url;
       const channelCtx: AlertContext = {
         tenantDbName: ctx.tenantDbName,
         tenantId: ctx.tenantId,
         tenantSlug: ctx.tenantSlug,
         companyName: ctx.companyName,
         projectName,
-        dashboardUrl: `${getConfig().app.url}/dashboard/alerts`,
+        dashboardUrl: `${appUrl}/dashboard/alerts/incidents`,
+        incidentUrl: incidentId
+          ? `${appUrl}/dashboard/alerts/incidents?highlight=${incidentId}`
+          : undefined,
+        incidentId,
       };
 
       const allResults: DispatchResult[] = [];
@@ -151,14 +190,12 @@ export async function evaluateTenantAlerts(
         allResults.push(...results);
       }
 
-      alertEvent.channels = allResults;
-
-      // 7. Persist event
-      // Re-switch tenant in case channel dispatchers touched it
+      // Update event with channel results
       await db.switchToTenant(ctx.tenantDbName);
-      await db.createAlertEvent(alertEvent);
+      await db.updateAlertEvent(String(createdEvent._id), { channels: allResults });
 
-      // 8. Update rule's lastTriggeredAt
+      // 9. Update rule's lastTriggeredAt
+      await db.switchToTenant(ctx.tenantDbName);
       await db.updateAlertRule(String(rule._id), { lastTriggeredAt: now });
 
       firedCount++;

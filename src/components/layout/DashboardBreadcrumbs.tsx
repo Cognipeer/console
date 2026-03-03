@@ -19,7 +19,12 @@ const SEGMENT_KEYS: Record<string, string> = {
   prompts: 'prompts',
   projects: 'projects',
   'inference-monitoring': 'inference-monitoring',
+  mcp: 'mcp',
   servers: 'servers',
+  members: 'members',
+  providers: 'providers',
+  tokens: 'tokens',
+  incidents: 'incidents',
 };
 
 const formatSegment = (
@@ -244,6 +249,29 @@ export default function DashboardBreadcrumbs() {
               });
               if (label) {
                 next[projectsIndex + 1] = label;
+              }
+            })(),
+          );
+        }
+      }
+
+      // MCP: /dashboard/mcp/:id
+      const mcpIndex = segments.indexOf('mcp');
+      if (mcpIndex >= 0) {
+        const mcpId = segments[mcpIndex + 1];
+        if (mcpId) {
+          tasks.push(
+            (async () => {
+              const label = await resolveLabel(`mcp:${mcpId}`, async () => {
+                const res = await fetch(`/api/mcp/${encodeURIComponent(mcpId)}`, {
+                  cache: 'no-store',
+                });
+                if (!res.ok) return undefined;
+                const body = (await res.json()) as { server?: { name?: string; key?: string } };
+                return body.server?.name || body.server?.key;
+              });
+              if (label) {
+                next[mcpIndex + 1] = label;
               }
             })(),
           );

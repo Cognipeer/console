@@ -116,7 +116,7 @@ export default function PromptsPage() {
 						<IconTemplate size={22} />
 					</ThemeIcon>
 					<div>
-						<Title order={2}>Prompts</Title>
+						<Title order={2}>Prompt Studio</Title>
 						<Text size="sm" c="dimmed">
 							Organize prompt templates and reusable system instructions.
 						</Text>

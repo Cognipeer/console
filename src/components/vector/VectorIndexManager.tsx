@@ -301,7 +301,7 @@ export default function VectorIndexManager({ provider }: VectorIndexManagerProps
       <Stack gap="md">
         <Group justify="space-between">
           <div>
-            <Text fw={600}>Vector Indexes</Text>
+            <Text fw={600}>Knowledge Index</Text>
             <Text size="sm" c="dimmed">
               {provider
                 ? `Manage indexes for ${provider.label}`

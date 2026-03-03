@@ -1,5 +1,7 @@
-import ProjectSettingsPage from '@/components/settings/ProjectSettingsPage';
+import { redirect } from 'next/navigation';
 
+// Settings has been split into standalone pages:
+// /dashboard/tokens, /dashboard/members, /dashboard/providers
 export default function SettingsPage() {
-  return <ProjectSettingsPage />;
+  redirect('/dashboard/tokens');
 }

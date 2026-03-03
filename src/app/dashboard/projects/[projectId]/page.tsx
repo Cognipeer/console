@@ -8,7 +8,6 @@ import { IconArrowLeft, IconRefresh, IconUsers } from '@tabler/icons-react';
 import { useRouter } from 'next/navigation';
 import ProjectMembersManager from '@/components/projects/ProjectMembersManager';
 import ProjectProvidersManager from '@/components/projects/ProjectProvidersManager';
-import TokenManagement from '@/components/settings/TokenManagement';
 import QuotaManagement from '@/components/settings/QuotaManagement';
 
 type Project = {
@@ -88,7 +87,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ projec
       <PageHeader
         icon={<IconUsers size={18} />}
         title={currentProject?.name ?? 'Project'}
-        subtitle="Project settings and access control."
+        subtitle="Project users, providers, and quotas."
         actions={
           <>
             <Button
@@ -117,7 +116,6 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ projec
           <Tabs.List>
             <Tabs.Tab value="users">Users</Tabs.Tab>
             <Tabs.Tab value="providers">Providers</Tabs.Tab>
-            <Tabs.Tab value="tokens">Tokens</Tabs.Tab>
             <Tabs.Tab value="quotas">Quotas</Tabs.Tab>
           </Tabs.List>
 
@@ -128,16 +126,6 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ projec
           <Tabs.Panel value="providers" pt="md">
             {ready ? (
               <ProjectProvidersManager projectId={projectId} />
-            ) : (
-              <Text size="sm" c="dimmed" p="md">
-                Switching active project…
-              </Text>
-            )}
-          </Tabs.Panel>
-
-          <Tabs.Panel value="tokens" pt="md">
-            {ready ? (
-              <TokenManagement />
             ) : (
               <Text size="sm" c="dimmed" p="md">
                 Switching active project…

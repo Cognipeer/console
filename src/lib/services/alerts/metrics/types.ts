@@ -18,6 +18,7 @@ export interface MetricQuery {
     serverKey?: string;
     guardrailKey?: string;
     ragModuleKey?: string;
+    mcpServerKey?: string;
     projectId?: string;
   };
 }

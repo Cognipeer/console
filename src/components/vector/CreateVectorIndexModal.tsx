@@ -197,7 +197,7 @@ export default function CreateVectorIndexModal({
 				<form onSubmit={handleSubmit}>
 					<Stack gap="lg">
 						<Text size="sm" c="dimmed">
-							Vector indexes store embeddings for semantic search and similarity matching. Each index is backed by a vector database provider.
+							Knowledge indexes store embeddings for semantic search and similarity matching. Each index is backed by a vector database provider.
 						</Text>
 
 						<Stack gap="sm">

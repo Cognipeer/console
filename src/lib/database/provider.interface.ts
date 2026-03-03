@@ -614,7 +614,7 @@ export interface IRagQueryLog {
 
 // ── Alert types ─────────────────────────────────────────────────────────
 
-export type AlertModule = 'models' | 'inference' | 'guardrails' | 'rag';
+export type AlertModule = 'models' | 'inference' | 'guardrails' | 'rag' | 'mcp';
 
 export type AlertMetric =
   // models
@@ -633,7 +633,11 @@ export type AlertMetric =
   // rag
   | 'rag_avg_latency_ms'
   | 'rag_total_queries'
-  | 'rag_failed_documents';
+  | 'rag_failed_documents'
+  // mcp
+  | 'mcp_error_rate'
+  | 'mcp_avg_latency_ms'
+  | 'mcp_total_requests';
 
 export type AlertConditionOperator = 'gt' | 'lt' | 'gte' | 'lte' | 'eq';
 
@@ -664,6 +668,7 @@ export interface IAlertRule {
     serverKey?: string;
     guardrailKey?: string;
     ragModuleKey?: string;
+    mcpServerKey?: string;
   };
   channels: IAlertChannel[];
   lastTriggeredAt?: Date;
@@ -692,6 +697,106 @@ export interface IAlertEvent {
   firedAt: Date;
   resolvedAt?: Date;
   metadata?: Record<string, unknown>;
+}
+
+// ── Agent types ──────────────────────────────────────────────────────────
+
+export type AgentStatus = 'active' | 'inactive' | 'draft';
+
+export interface IAgentConfig {
+  modelKey: string;
+  systemPrompt?: string;
+  promptKey?: string;
+  temperature?: number;
+  topP?: number;
+  maxTokens?: number;
+  /** RAG module key – attached as a retrieval tool */
+  knowledgeEngineKey?: string;
+  /** Guardrail key applied to user input */
+  inputGuardrailKey?: string;
+  /** Guardrail key applied to assistant output */
+  outputGuardrailKey?: string;
+  /** Bound tools from various sources (MCP servers, custom, etc.) */
+  toolBindings?: IAgentToolBinding[];
+}
+
+/** A single tool-source binding for an agent */
+export interface IAgentToolBinding {
+  /** Source type – extensible for future providers */
+  source: 'mcp';
+  /** Identifier of the source (e.g. MCP server key) */
+  sourceKey: string;
+  /** Tool names selected from that source */
+  toolNames: string[];
+}
+
+export interface IAgent {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId: string;
+  key: string;
+  name: string;
+  description?: string;
+  config: IAgentConfig;
+  status: AgentStatus;
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IAgentConversation {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId: string;
+  agentKey: string;
+  title?: string;
+  messages: Array<{
+    role: string;
+    content: string;
+    timestamp: Date;
+  }>;
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+// ── Incident types ──────────────────────────────────────────────────────
+
+export type IncidentStatus = 'open' | 'acknowledged' | 'investigating' | 'resolved' | 'closed';
+export type IncidentSeverity = 'critical' | 'warning' | 'info';
+
+export interface IIncidentNote {
+  userId: string;
+  userName: string;
+  content: string;
+  createdAt: Date;
+}
+
+export interface IIncident {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId: string;
+  alertEventId: string;
+  ruleId: string;
+  ruleName: string;
+  metric: AlertMetric;
+  threshold: number;
+  actualValue: number;
+  severity: IncidentSeverity;
+  status: IncidentStatus;
+  assignedTo?: string;
+  notes: IIncidentNote[];
+  firedAt: Date;
+  acknowledgedAt?: Date;
+  resolvedAt?: Date;
+  closedAt?: Date;
+  resolvedBy?: string;
+  metadata?: Record<string, unknown>;
+  createdAt?: Date;
+  updatedAt?: Date;
 }
 
 export interface DatabaseProvider {
@@ -1076,6 +1181,32 @@ export interface DatabaseProvider {
   ): Promise<IAlertEvent | null>;
   countActiveAlerts(tenantId: string, projectId?: string): Promise<number>;
 
+  // ── Incident operations (tenant-specific) ──
+  createIncident(
+    incident: Omit<IIncident, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IIncident>;
+  updateIncident(
+    id: string,
+    data: Partial<Omit<IIncident, 'tenantId' | 'alertEventId' | 'ruleId'>>,
+  ): Promise<IIncident | null>;
+  findIncidentById(id: string): Promise<IIncident | null>;
+  findIncidentByAlertEventId(alertEventId: string): Promise<IIncident | null>;
+  listIncidents(
+    tenantId: string,
+    options?: {
+      projectId?: string;
+      ruleId?: string;
+      status?: IncidentStatus;
+      severity?: IncidentSeverity;
+      limit?: number;
+      skip?: number;
+    },
+  ): Promise<IIncident[]>;
+  countIncidents(
+    tenantId: string,
+    options?: { projectId?: string; status?: IncidentStatus },
+  ): Promise<number>;
+
   // ── RAG Module operations (tenant-specific) ──
   createRagModule(
     ragModule: Omit<IRagModule, '_id' | 'createdAt' | 'updatedAt'>,
@@ -1227,6 +1358,81 @@ export interface DatabaseProvider {
     configKey: string,
     options?: { limit?: number; skip?: number; from?: Date; to?: Date },
   ): Promise<IConfigAuditLog[]>;
+
+  // ── Agent operations (tenant-specific) ──
+  createAgent(
+    agent: Omit<IAgent, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IAgent>;
+  updateAgent(
+    id: string,
+    data: Partial<Omit<IAgent, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IAgent | null>;
+  deleteAgent(id: string): Promise<boolean>;
+  findAgentById(id: string): Promise<IAgent | null>;
+  findAgentByKey(key: string, projectId?: string): Promise<IAgent | null>;
+  listAgents(filters?: {
+    projectId?: string;
+    status?: AgentStatus;
+    search?: string;
+  }): Promise<IAgent[]>;
+  countAgents(projectId?: string): Promise<number>;
+
+  // ── Agent Conversation operations (tenant-specific) ──
+  createAgentConversation(
+    conversation: Omit<IAgentConversation, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IAgentConversation>;
+  updateAgentConversation(
+    id: string,
+    data: Partial<Omit<IAgentConversation, 'tenantId' | 'agentKey' | 'createdBy'>>,
+  ): Promise<IAgentConversation | null>;
+  deleteAgentConversation(id: string): Promise<boolean>;
+  findAgentConversationById(id: string): Promise<IAgentConversation | null>;
+  listAgentConversations(
+    agentKey: string,
+    filters?: { projectId?: string; limit?: number; skip?: number },
+  ): Promise<IAgentConversation[]>;
+
+  // ── MCP Server operations (tenant-specific) ──
+  createMcpServer(
+    server: Omit<IMcpServer, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IMcpServer>;
+  updateMcpServer(
+    id: string,
+    data: Partial<Omit<IMcpServer, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IMcpServer | null>;
+  deleteMcpServer(id: string): Promise<boolean>;
+  findMcpServerById(id: string): Promise<IMcpServer | null>;
+  findMcpServerByKey(key: string, projectId?: string): Promise<IMcpServer | null>;
+  listMcpServers(filters?: {
+    projectId?: string;
+    status?: McpServerStatus;
+    search?: string;
+  }): Promise<IMcpServer[]>;
+  countMcpServers(projectId?: string): Promise<number>;
+
+  // ── MCP Request Log operations (tenant-specific) ──
+  createMcpRequestLog(
+    log: Omit<IMcpRequestLog, '_id' | 'createdAt'>,
+  ): Promise<IMcpRequestLog>;
+  listMcpRequestLogs(
+    serverKey: string,
+    options?: {
+      limit?: number;
+      skip?: number;
+      from?: Date;
+      to?: Date;
+      status?: string;
+      keyword?: string;
+    },
+  ): Promise<IMcpRequestLog[]>;
+  countMcpRequestLogs(
+    serverKey: string,
+    options?: { from?: Date; to?: Date; status?: string; keyword?: string },
+  ): Promise<number>;
+  aggregateMcpRequestLogs(
+    serverKey: string,
+    options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month' },
+  ): Promise<IMcpRequestAggregate>;
 }
 
 // ── Memory types ─────────────────────────────────────────────────────────
@@ -1389,4 +1595,89 @@ export interface IConfigAuditLog {
   userAgent?: string;
   metadata?: Record<string, unknown>;
   createdAt?: Date;
+}
+
+// ── MCP Server types ─────────────────────────────────────────────────────
+
+export type McpServerStatus = 'active' | 'disabled';
+
+export type McpAuthType = 'none' | 'token' | 'header' | 'basic';
+
+export interface IMcpAuthConfig {
+  type: McpAuthType;
+  /** For 'token': the bearer token value */
+  token?: string;
+  /** For 'header': custom header name + value */
+  headerName?: string;
+  headerValue?: string;
+  /** For 'basic': username + password */
+  username?: string;
+  password?: string;
+}
+
+export interface IMcpServer {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name: string;
+  description?: string;
+  /** Raw OpenAPI spec JSON string */
+  openApiSpec: string;
+  /** Parsed tool definitions extracted from the spec */
+  tools: IMcpTool[];
+  /** Upstream base URL (derived from spec or overridden) */
+  upstreamBaseUrl: string;
+  /** Authentication for upstream API calls */
+  upstreamAuth: IMcpAuthConfig;
+  status: McpServerStatus;
+  /** Unique slug used in the public MCP endpoint URL */
+  endpointSlug: string;
+  totalRequests?: number;
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IMcpTool {
+  name: string;
+  description: string;
+  /** JSON Schema for tool input parameters */
+  inputSchema: Record<string, unknown>;
+  /** HTTP method mapped from the OpenAPI operation */
+  httpMethod: string;
+  /** Path template from the OpenAPI spec */
+  httpPath: string;
+}
+
+export interface IMcpRequestLog {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  serverKey: string;
+  toolName: string;
+  status: 'success' | 'error';
+  requestPayload?: Record<string, unknown>;
+  responsePayload?: Record<string, unknown>;
+  errorMessage?: string;
+  latencyMs?: number;
+  callerTokenId?: string;
+  createdAt?: Date;
+}
+
+export interface IMcpRequestAggregate {
+  serverKey: string;
+  totalRequests: number;
+  successCount: number;
+  errorCount: number;
+  avgLatencyMs: number | null;
+  toolBreakdown: Record<string, number>;
+  timeseries?: Array<{
+    period: string;
+    total: number;
+    success: number;
+    errors: number;
+  }>;
 }

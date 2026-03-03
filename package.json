@@ -26,6 +26,7 @@
     "@aws-sdk/client-s3vectors": "^3.901.0",
     "@aws-sdk/client-sts": "^3.901.0",
     "@aws-sdk/util-stream-node": "^3.370.0",
+    "@cognipeer/agent-sdk": "file:../agent-sdk",
     "@cognipeer/to-markdown": "^2.0.1",
     "@langchain/aws": "^0.1.12",
     "@langchain/community": "^0.3.57",
@@ -58,7 +59,9 @@
     "postcss-simple-vars": "^7.0.1",
     "react": "19.1.0",
     "react-dom": "19.1.0",
+    "react-markdown": "^10.1.0",
     "recharts": "^3.7.0",
+    "remark-gfm": "^4.0.1",
     "slugify": "^1.6.6",
     "winston": "^3.19.0"
   },

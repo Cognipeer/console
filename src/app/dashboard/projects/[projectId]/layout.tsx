@@ -1,11 +1,18 @@
-import { redirect } from 'next/navigation';
+import { headers } from 'next/headers';
+import { notFound } from 'next/navigation';
 
 export default async function ProjectLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
-  void children;
-  // Project detail/settings page removed; use /dashboard/settings instead.
-  redirect('/dashboard/settings');
+  const headerList = await headers();
+  const role = headerList.get('x-user-role');
+
+  // Only owner/admin can access project detail (users, providers, quotas)
+  if (role !== 'owner' && role !== 'admin') {
+    notFound();
+  }
+
+  return children;
 }

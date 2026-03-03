@@ -95,6 +95,15 @@ export function initLifecycle(): void {
   });
 
   process.on('uncaughtException', (error) => {
+    // Ignore transient connection errors that are normal in dev
+    // (browser closing connections, HMR reload, SSE disconnect, etc.)
+    const benignCodes = new Set(['ECONNRESET', 'EPIPE', 'ECONNABORTED', 'ERR_STREAM_PREMATURE_CLOSE']);
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code && benignCodes.has(code)) {
+      log.debug('Ignoring benign connection error', { code, error: error.message });
+      return;
+    }
+
     log.error('Uncaught exception', {
       error: error.message,
       stack: error.stack,

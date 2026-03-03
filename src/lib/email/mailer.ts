@@ -59,9 +59,11 @@ class EmailService {
       const subjectMatch = templateContent.match(
         /<!--\s*subject:\s*(.+?)\s*-->/i,
       );
-      const subject = subjectMatch
+      const rawSubject = subjectMatch
         ? subjectMatch[1]
         : 'Notification from CognipeerAI Gateway';
+      // Compile subject through Handlebars so template variables (e.g. {{alertName}}) are resolved
+      const subject = Handlebars.compile(rawSubject)(data);
 
       return { subject, html };
     } catch (error) {

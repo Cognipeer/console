@@ -88,6 +88,8 @@ export class EmailAlertChannel implements IAlertDispatcher {
       unit: METRIC_UNITS[event.metric] ?? '',
       firedAt: event.firedAt.toISOString(),
       dashboardUrl: ctx.dashboardUrl,
+      incidentUrl: ctx.incidentUrl || ctx.dashboardUrl,
+      incidentId: ctx.incidentId || '',
       metadata: event.metadata,
     };
 

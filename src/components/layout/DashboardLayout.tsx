@@ -14,7 +14,6 @@ import {
   SimpleGrid,
   Stack,
   Text,
-  TextInput,
   ThemeIcon,
   Tooltip,
   UnstyledButton,
@@ -41,6 +40,11 @@ import {
   IconBulb,
   IconBook2,
   IconLock,
+  IconKey,
+  IconPlug,
+  IconUsers,
+  IconApi,
+  IconRobot,
 } from '@tabler/icons-react';
 import { ReactNode, useMemo, useState } from 'react';
 import DashboardBreadcrumbs from './DashboardBreadcrumbs';
@@ -150,6 +154,12 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
       href: '/dashboard/rag',
     },
     {
+      label: tNav('agents'),
+      description: tNav('agentsDescription'),
+      icon: IconRobot,
+      href: '/dashboard/agents',
+    },
+    {
       label: tNav('config'),
       description: tNav('configDescription'),
       icon: IconLock,
@@ -174,37 +184,49 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
       href: '/dashboard/guardrails',
     },
     {
+      label: tNav('mcp'),
+      description: tNav('mcpDescription'),
+      icon: IconApi,
+      href: '/dashboard/mcp',
+    },
+    {
       label: tNav('alerts'),
       description: tNav('alertsDescription'),
       icon: IconBell,
       href: '/dashboard/alerts',
     },
+    ...(isTenantAdmin
+      ? [
+          {
+            label: tNav('members'),
+            description: tNav('membersDescription'),
+            icon: IconUsers,
+            href: '/dashboard/members',
+          },
+        ]
+      : []),
     {
       label: tNav('projects'),
       description: tNav('projectsDescription'),
       icon: IconLayoutDashboard,
       href: '/dashboard/projects',
     },
-    ...(!isTenantAdmin
-      ? [
-          {
-            label: tNav('settings'),
-            description: tNav('settingsDescription'),
-            icon: IconSettings,
-            href: '/dashboard/settings',
-          },
-        ]
-      : []),
     ...(isTenantAdmin
       ? [
           {
-            label: tNav('tenantSettings'),
-            description: tNav('tenantSettingsDescription'),
-            icon: IconSettings,
-            href: '/dashboard/tenant-settings',
+            label: tNav('providers'),
+            description: tNav('providersDescription'),
+            icon: IconPlug,
+            href: '/dashboard/providers',
           },
         ]
       : []),
+    {
+      label: tNav('tokens'),
+      description: tNav('tokensDescription'),
+      icon: IconKey,
+      href: '/dashboard/tokens',
+    },
   ];
 
   const handleNavClick = (href?: string) => {
@@ -427,7 +449,7 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
                   <Menu.Label>{tAccount('menuLabel')}</Menu.Label>
                   <Menu.Item
                     leftSection={<IconSettings size={14} />}
-                    onClick={() => handleNavClick('/dashboard/settings')}
+                    onClick={() => handleNavClick('/dashboard/tokens')}
                   >
                     {tAccount('settings')}
                   </Menu.Item>

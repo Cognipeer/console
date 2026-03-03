@@ -63,7 +63,10 @@
       "description": "Create and manage AI agents",
       "endpoints": [
         "/api/agents",
-        "/api/agents/*"
+        "/api/agents/*",
+        "/api/client/v1/agents",
+        "/api/client/v1/agents/*",
+        "/api/client/v1/responses"
       ]
     },
     "AGENT_TRACING": {
@@ -167,6 +170,16 @@
         "/api/client/v1/config",
         "/api/client/v1/config/*"
       ]
+    },
+    "MCP_SERVERS": {
+      "name": "MCP Servers",
+      "description": "Expose APIs as Model Context Protocol servers with OpenAPI specifications",
+      "endpoints": [
+        "/api/mcp",
+        "/api/mcp/*",
+        "/api/client/v1/mcp",
+        "/api/client/v1/mcp/*"
+      ]
     }
   },
   "licenses": {
@@ -189,7 +202,9 @@
         "MEMORY",
         "RAG_PIPELINE",
         "CONFIG_MANAGEMENT",
-        "DASHBOARD"
+        "MCP_SERVERS",
+        "DASHBOARD",
+        "AGENT_ORCHESTRATION"
       ],
       "limits": {
         "requestsPerMonth": 1000,
@@ -209,7 +224,9 @@
         "ALERTS",
         "MEMORY",
         "RAG_PIPELINE",
-        "CONFIG_MANAGEMENT"
+        "CONFIG_MANAGEMENT",
+        "MCP_SERVERS",
+        "AGENT_ORCHESTRATION"
       ],
       "limits": {
         "requestsPerMonth": 10000,
@@ -233,7 +250,8 @@
         "ALERTS",
         "MEMORY",
         "RAG_PIPELINE",
-        "CONFIG_MANAGEMENT"
+        "CONFIG_MANAGEMENT",
+        "MCP_SERVERS"
       ],
       "limits": {
         "requestsPerMonth": 100000,
@@ -263,6 +281,7 @@
         "MEMORY",
         "RAG_PIPELINE",
         "CONFIG_MANAGEMENT",
+        "MCP_SERVERS",
         "DASHBOARD"
       ],
       "limits": {
@@ -293,6 +312,7 @@
         "MEMORY",
         "RAG_PIPELINE",
         "CONFIG_MANAGEMENT",
+        "MCP_SERVERS",
         "DASHBOARD"
       ],
       "limits": {

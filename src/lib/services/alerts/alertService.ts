@@ -21,13 +21,14 @@ const MODULE_METRICS: Record<AlertModule, AlertMetric[]> = {
   inference: ['gpu_cache_usage', 'request_queue_depth'],
   guardrails: ['guardrail_fail_rate', 'guardrail_avg_latency_ms', 'guardrail_total_evaluations'],
   rag: ['rag_avg_latency_ms', 'rag_total_queries', 'rag_failed_documents'],
+  mcp: ['mcp_error_rate', 'mcp_avg_latency_ms', 'mcp_total_requests'],
 };
 
 /** Supported metric names for validation */
 const VALID_METRICS: AlertMetric[] = Object.values(MODULE_METRICS).flat();
 
 /** Supported module names */
-const VALID_MODULES: AlertModule[] = ['models', 'inference', 'guardrails', 'rag'];
+const VALID_MODULES: AlertModule[] = ['models', 'inference', 'guardrails', 'rag', 'mcp'];
 
 /** Supported window durations (minutes) */
 const VALID_WINDOWS = [5, 15, 30, 60];
@@ -40,7 +41,7 @@ export interface CreateAlertRuleInput {
   condition: IAlertCondition;
   windowMinutes: number;
   cooldownMinutes?: number;
-  scope?: { modelKey?: string; serverKey?: string; guardrailKey?: string; ragModuleKey?: string };
+  scope?: { modelKey?: string; serverKey?: string; guardrailKey?: string; ragModuleKey?: string; mcpServerKey?: string };
   channels?: IAlertChannel[];
   enabled?: boolean;
 }

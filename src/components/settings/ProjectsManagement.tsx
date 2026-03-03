@@ -1,9 +1,10 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { Box, Button, Group, Modal, Stack, Text, TextInput, Textarea } from '@mantine/core';
+import { ActionIcon, Box, Button, Group, Modal, Stack, Text, TextInput, Textarea, Tooltip } from '@mantine/core';
 import { DataTable } from 'mantine-datatable';
 import { notifications } from '@mantine/notifications';
+import { IconEdit, IconTrash } from '@tabler/icons-react';
 
 type Project = {
   _id: string;
@@ -18,11 +19,14 @@ export default function ProjectsManagement() {
   const [activeProjectId, setActiveProjectId] = useState<string | undefined>(undefined);
   const [loading, setLoading] = useState(true);
   const [createOpened, setCreateOpened] = useState(false);
+  const [editOpened, setEditOpened] = useState(false);
+  const [deleteOpened, setDeleteOpened] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [name, setName] = useState('');
   const [key, setKey] = useState('');
   const [description, setDescription] = useState('');
-
+  const [editingProject, setEditingProject] = useState<Project | null>(null);
+  const [deletingProject, setDeletingProject] = useState<Project | null>(null);
   const fetchProjects = async () => {
     setLoading(true);
     try {
@@ -101,7 +105,70 @@ export default function ProjectsManagement() {
 
   const handleManage = (projectId: string) => {
     if (!projectId) return;
-    window.location.assign(`/dashboard/tenant-settings/projects/${encodeURIComponent(projectId)}`);
+    window.location.assign(`/dashboard/projects/${encodeURIComponent(projectId)}`);
+  };
+
+  const openEditModal = (project: Project) => {
+    setEditingProject(project);
+    setName(project.name);
+    setDescription(project.description || '');
+    setEditOpened(true);
+  };
+
+  const handleEdit = async () => {
+    if (submitting || !editingProject) return;
+    setSubmitting(true);
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(String(editingProject._id))}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: name.trim(), description: description || undefined }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error || 'Failed to update project');
+      }
+
+      notifications.show({ title: 'Projects', message: 'Project updated', color: 'green' });
+      setEditOpened(false);
+      setEditingProject(null);
+      resetForm();
+      await fetchProjects();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to update project';
+      notifications.show({ title: 'Projects', message, color: 'red' });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const openDeleteModal = (project: Project) => {
+    setDeletingProject(project);
+    setDeleteOpened(true);
+  };
+
+  const handleDelete = async () => {
+    if (submitting || !deletingProject) return;
+    setSubmitting(true);
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(String(deletingProject._id))}`, {
+        method: 'DELETE',
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error || 'Failed to delete project');
+      }
+
+      notifications.show({ title: 'Projects', message: 'Project deleted', color: 'green' });
+      setDeleteOpened(false);
+      setDeletingProject(null);
+      await fetchProjects();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to delete project';
+      notifications.show({ title: 'Projects', message, color: 'red' });
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -157,6 +224,26 @@ export default function ProjectsManagement() {
             textAlign: 'right',
             render: (project) => (
               <Group gap="xs" justify="flex-end">
+                <Tooltip label="Edit project">
+                  <ActionIcon
+                    variant="subtle"
+                    color="gray"
+                    onClick={() => openEditModal(project)}
+                  >
+                    <IconEdit size={16} />
+                  </ActionIcon>
+                </Tooltip>
+                {project.key !== 'default' && (
+                  <Tooltip label="Delete project">
+                    <ActionIcon
+                      variant="subtle"
+                      color="red"
+                      onClick={() => openDeleteModal(project)}
+                    >
+                      <IconTrash size={16} />
+                    </ActionIcon>
+                  </Tooltip>
+                )}
                 <Button
                   size="xs"
                   variant="default"
@@ -218,6 +305,82 @@ export default function ProjectsManagement() {
             </Button>
             <Button onClick={handleCreate} loading={submitting}>
               Create
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
+
+      {/* Edit modal */}
+      <Modal
+        opened={editOpened}
+        onClose={() => {
+          if (submitting) return;
+          setEditOpened(false);
+          setEditingProject(null);
+        }}
+        title="Edit project"
+        size="md"
+      >
+        <Stack gap="sm">
+          <TextInput
+            label="Name"
+            value={name}
+            onChange={(e) => setName(e.currentTarget.value)}
+            required
+          />
+          <Textarea
+            label="Description (optional)"
+            value={description}
+            onChange={(e) => setDescription(e.currentTarget.value)}
+            minRows={3}
+          />
+          <Group justify="flex-end">
+            <Button
+              variant="default"
+              onClick={() => {
+                if (submitting) return;
+                setEditOpened(false);
+                setEditingProject(null);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button onClick={handleEdit} loading={submitting}>
+              Save
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
+
+      {/* Delete confirmation modal */}
+      <Modal
+        opened={deleteOpened}
+        onClose={() => {
+          if (submitting) return;
+          setDeleteOpened(false);
+          setDeletingProject(null);
+        }}
+        title="Delete project"
+        size="sm"
+      >
+        <Stack gap="sm">
+          <Text size="sm">
+            Are you sure you want to delete{' '}
+            <Text span fw={600}>{deletingProject?.name}</Text>? This action cannot be undone.
+          </Text>
+          <Group justify="flex-end">
+            <Button
+              variant="default"
+              onClick={() => {
+                if (submitting) return;
+                setDeleteOpened(false);
+                setDeletingProject(null);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button color="red" onClick={handleDelete} loading={submitting}>
+              Delete
             </Button>
           </Group>
         </Stack>

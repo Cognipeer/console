@@ -41,6 +41,7 @@ export const TABLES = {
   guardrailEvalLogs: 'guardrail_evaluation_logs',
   alertRules: 'alert_rules',
   alertEvents: 'alert_events',
+  incidents: 'incidents',
   ragModules: 'rag_modules',
   ragDocuments: 'rag_documents',
   ragChunks: 'rag_chunks',
@@ -50,6 +51,10 @@ export const TABLES = {
   configGroups: 'config_groups',
   configItems: 'config_items',
   configAuditLogs: 'config_audit_logs',
+  mcpServers: 'mcp_servers',
+  mcpRequestLogs: 'mcp_request_logs',
+  agents: 'agents',
+  agentConversations: 'agent_conversations',
   vectorCounters: 'vector_counters',
 } as const;
 

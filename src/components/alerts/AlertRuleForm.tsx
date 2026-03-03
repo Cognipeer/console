@@ -15,7 +15,7 @@ import {
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useTranslations } from '@/lib/i18n';
 
 interface AlertRuleFormProps {
@@ -34,6 +34,7 @@ const MODULE_OPTIONS = [
   { value: 'inference', label: 'Inference Servers' },
   { value: 'guardrails', label: 'Guardrails' },
   { value: 'rag', label: 'RAG' },
+  { value: 'mcp', label: 'MCP Servers' },
 ];
 
 /** Metrics grouped by module */
@@ -58,6 +59,11 @@ const MODULE_METRICS: Record<string, Array<{ value: string; label: string }>> = 
     { value: 'rag_avg_latency_ms', label: 'Avg Query Latency (ms)' },
     { value: 'rag_total_queries', label: 'Total Queries' },
     { value: 'rag_failed_documents', label: 'Failed Documents' },
+  ],
+  mcp: [
+    { value: 'mcp_error_rate', label: 'Error Rate (%)' },
+    { value: 'mcp_avg_latency_ms', label: 'Avg Latency (ms)' },
+    { value: 'mcp_total_requests', label: 'Total Requests' },
   ],
 };
 
@@ -122,6 +128,7 @@ export default function AlertRuleForm({
       serverKey: ((initialData?.scope as Record<string, unknown>)?.serverKey as string) || '',
       guardrailKey: ((initialData?.scope as Record<string, unknown>)?.guardrailKey as string) || '',
       ragModuleKey: ((initialData?.scope as Record<string, unknown>)?.ragModuleKey as string) || '',
+      mcpServerKey: ((initialData?.scope as Record<string, unknown>)?.mcpServerKey as string) || '',
       recipients: ((initialData?.channels as Array<Record<string, unknown>>)?.[0]?.recipients as string[]) || [],
     },
     validate: {
@@ -129,6 +136,34 @@ export default function AlertRuleForm({
       threshold: (value) => (typeof value !== 'number' ? t('validation.thresholdRequired') : null),
     },
   });
+
+  // Reset form values when initialData or mode changes (edit vs create)
+  useEffect(() => {
+    if (opened) {
+      const mod =
+        (initialData?.module as string) ||
+        (initialData?.metric ? inferModuleFromMetric(initialData.metric as string) : 'models');
+      form.setValues({
+        name: (initialData?.name as string) || '',
+        description: (initialData?.description as string) || '',
+        module: mod,
+        metric: (initialData?.metric as string) || (MODULE_METRICS[mod]?.[0]?.value ?? 'error_rate'),
+        operator: ((initialData?.condition as Record<string, unknown>)?.operator as string) || 'gt',
+        threshold: ((initialData?.condition as Record<string, unknown>)?.threshold as number) ?? 0,
+        windowMinutes: String((initialData?.windowMinutes as number) || 15),
+        cooldownMinutes: String((initialData?.cooldownMinutes as number) || 60),
+        enabled: (initialData?.enabled as boolean) ?? true,
+        modelKey: ((initialData?.scope as Record<string, unknown>)?.modelKey as string) || '',
+        serverKey: ((initialData?.scope as Record<string, unknown>)?.serverKey as string) || '',
+        guardrailKey: ((initialData?.scope as Record<string, unknown>)?.guardrailKey as string) || '',
+        ragModuleKey: ((initialData?.scope as Record<string, unknown>)?.ragModuleKey as string) || '',
+        mcpServerKey: ((initialData?.scope as Record<string, unknown>)?.mcpServerKey as string) || '',
+        recipients: ((initialData?.channels as Array<Record<string, unknown>>)?.[0]?.recipients as string[]) || [],
+      });
+      form.resetDirty();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [opened, initialData, mode]);
 
   /** Metric options change when module changes */
   const metricOptions = useMemo(
@@ -147,6 +182,7 @@ export default function AlertRuleForm({
     form.setFieldValue('serverKey', '');
     form.setFieldValue('guardrailKey', '');
     form.setFieldValue('ragModuleKey', '');
+    form.setFieldValue('mcpServerKey', '');
   };
 
   const handleSubmit = async (values: typeof form.values) => {
@@ -157,6 +193,7 @@ export default function AlertRuleForm({
       if (values.module === 'inference' && values.serverKey) scope.serverKey = values.serverKey;
       if (values.module === 'guardrails' && values.guardrailKey) scope.guardrailKey = values.guardrailKey;
       if (values.module === 'rag' && values.ragModuleKey) scope.ragModuleKey = values.ragModuleKey;
+      if (values.module === 'mcp' && values.mcpServerKey) scope.mcpServerKey = values.mcpServerKey;
 
       const body = {
         name: values.name.trim(),
@@ -313,6 +350,14 @@ export default function AlertRuleForm({
               label={t('form.ragModuleKey')}
               placeholder={t('form.ragModuleKeyPlaceholder')}
               {...form.getInputProps('ragModuleKey')}
+            />
+          )}
+
+          {form.values.module === 'mcp' && (
+            <TextInput
+              label={t('form.mcpServerKey')}
+              placeholder={t('form.mcpServerKeyPlaceholder')}
+              {...form.getInputProps('mcpServerKey')}
             />
           )}
 

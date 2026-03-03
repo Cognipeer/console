@@ -100,6 +100,19 @@
         .button:hover {
             background-color: #bf360c;
         }
+        .button-secondary {
+            display: inline-block;
+            padding: 12px 30px;
+            background-color: #1565c0;
+            color: #ffffff;
+            text-decoration: none;
+            border-radius: 6px;
+            font-weight: 600;
+            margin-top: 10px;
+        }
+        .button-secondary:hover {
+            background-color: #0d47a1;
+        }
         .project-tag {
             display: inline-block;
             padding: 3px 10px;
@@ -155,11 +168,14 @@
         </table>
 
         <div style="text-align: center;">
-            <a href="{{dashboardUrl}}" class="button">View Dashboard</a>
+            <a href="{{incidentUrl}}" class="button">View Incident</a>
+            <br/>
+            <a href="{{dashboardUrl}}" class="button-secondary">View All Incidents</a>
         </div>
 
         <div class="footer">
             <p>This is an automated alert from CognipeerAI Gateway.</p>
+            <p>An incident has been created for this alert. You can acknowledge, investigate, and resolve it from the Incidents dashboard.</p>
             <p style="font-size: 12px; color: #999;">
                 To manage alert rules, visit your project's Alerts settings.
             </p>

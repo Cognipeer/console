@@ -14,6 +14,8 @@ export interface AlertContext {
   companyName: string;
   projectName: string;
   dashboardUrl: string;
+  incidentUrl?: string;
+  incidentId?: string;
 }
 
 export interface DispatchResult {

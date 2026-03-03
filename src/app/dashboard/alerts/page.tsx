@@ -30,6 +30,7 @@ import {
   IconCheck,
   IconClock,
   IconActivity,
+  IconExclamationCircle,
 } from '@tabler/icons-react';
 import Link from 'next/link';
 import PageHeader from '@/components/layout/PageHeader';
@@ -66,6 +67,9 @@ const METRIC_LABELS: Record<string, string> = {
   rag_avg_latency_ms: 'Avg Latency',
   rag_total_queries: 'Total Queries',
   rag_failed_documents: 'Failed Docs',
+  mcp_error_rate: 'Error Rate',
+  mcp_avg_latency_ms: 'Avg Latency',
+  mcp_total_requests: 'Total Requests',
 };
 
 const METRIC_UNITS: Record<string, string> = {
@@ -82,6 +86,9 @@ const METRIC_UNITS: Record<string, string> = {
   rag_avg_latency_ms: 'ms',
   rag_total_queries: '',
   rag_failed_documents: '',
+  mcp_error_rate: '%',
+  mcp_avg_latency_ms: 'ms',
+  mcp_total_requests: '',
 };
 
 const METRIC_COLORS: Record<string, string> = {
@@ -98,13 +105,17 @@ const METRIC_COLORS: Record<string, string> = {
   rag_avg_latency_ms: 'orange',
   rag_total_queries: 'blue',
   rag_failed_documents: 'red',
+  mcp_error_rate: 'red',
+  mcp_avg_latency_ms: 'orange',
+  mcp_total_requests: 'blue',
 };
 
 const MODULE_LABELS: Record<string, string> = {
-  models: 'Models',
-  inference: 'Inference',
-  guardrails: 'Guardrails',
-  rag: 'RAG',
+  models: 'Model Hub',
+  inference: 'Model Monitoring',
+  guardrails: 'AI Governance',
+  rag: 'Knowledge Engine',
+  mcp: 'MCP Servers',
 };
 
 const MODULE_COLORS: Record<string, string> = {
@@ -112,6 +123,7 @@ const MODULE_COLORS: Record<string, string> = {
   inference: 'teal',
   guardrails: 'grape',
   rag: 'indigo',
+  mcp: 'cyan',
 };
 
 const OPERATOR_SYMBOLS: Record<string, string> = {
@@ -245,6 +257,16 @@ export default function AlertsPage() {
           <Group gap="xs">
             <Button
               component={Link}
+              href="/dashboard/alerts/incidents"
+              variant="light"
+              size="xs"
+              color="red"
+              leftSection={<IconExclamationCircle size={14} />}
+            >
+              Incidents
+            </Button>
+            <Button
+              component={Link}
               href="/dashboard/alerts/history"
               variant="light"
               size="xs"
@@ -306,10 +328,11 @@ export default function AlertsPage() {
         onChange={setModuleFilter}
         data={[
           { label: t('allModules'), value: 'all' },
-          { label: 'Models', value: 'models' },
-          { label: 'Inference', value: 'inference' },
-          { label: 'Guardrails', value: 'guardrails' },
-          { label: 'RAG', value: 'rag' },
+          { label: 'Model Hub', value: 'models' },
+          { label: 'Model Monitoring', value: 'inference' },
+          { label: 'AI Governance', value: 'guardrails' },
+          { label: 'Knowledge Engine', value: 'rag' },
+          { label: 'MCP Servers', value: 'mcp' },
         ]}
         size="xs"
       />

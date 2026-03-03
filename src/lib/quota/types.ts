@@ -21,7 +21,7 @@ export const QUOTA_DOMAIN_LABELS: Record<QuotaDomain, string> = {
   embedding: 'Embeddings',
   vector: 'Vector Store',
   file: 'Files',
-  tracing: 'Agent Tracing',
+  tracing: 'Agent Observability',
 };
 
 export interface QuotaRequestWindow {

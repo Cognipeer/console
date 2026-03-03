@@ -13,6 +13,7 @@ import { ModelUsageCollector } from './modelUsageCollector';
 import { InferenceServerCollector } from './inferenceServerCollector';
 import { GuardrailCollector } from './guardrailCollector';
 import { RagCollector } from './ragCollector';
+import { McpCollector } from './mcpCollector';
 
 const collectors: IMetricCollector[] = [];
 
@@ -38,5 +39,6 @@ register(new ModelUsageCollector());
 register(new InferenceServerCollector());
 register(new GuardrailCollector());
 register(new RagCollector());
+register(new McpCollector());
 
 export type { IMetricCollector, MetricQuery, MetricResult } from './types';

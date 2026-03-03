@@ -25,9 +25,12 @@ import { ProviderRecordMixin } from './sqlite/provider-record.mixin';
 import { InferenceMixin } from './sqlite/inference.mixin';
 import { GuardrailMixin } from './sqlite/guardrail.mixin';
 import { AlertMixin } from './sqlite/alert.mixin';
+import { IncidentMixin } from './sqlite/incident.mixin';
 import { RagMixin } from './sqlite/rag.mixin';
 import { MemoryMixin } from './sqlite/memory.mixin';
 import { ConfigMixin } from './sqlite/config.mixin';
+import { McpServerMixin } from './sqlite/mcp-server.mixin';
+import { AgentMixin } from './sqlite/agent.mixin';
 
 // ── Compose mixins in domain groups ──────────────────────────────────────
 // Order follows the MongoDB provider composition for consistency.
@@ -45,7 +48,7 @@ const AIBase = VectorMixin(ModelMixin(TracingMixin(ContentBase)));
 const StorageBase = ProviderRecordMixin(FileMixin(AIBase));
 
 // Group 5 – Advanced features
-const AdvancedBase = ConfigMixin(MemoryMixin(RagMixin(AlertMixin(GuardrailMixin(InferenceMixin(StorageBase))))));
+const AdvancedBase = AgentMixin(McpServerMixin(ConfigMixin(MemoryMixin(RagMixin(IncidentMixin(AlertMixin(GuardrailMixin(InferenceMixin(StorageBase)))))))));
 
 // ── Final composed class ─────────────────────────────────────────────────
 

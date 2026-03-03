@@ -580,7 +580,7 @@ export default function AgentTracingAgentPage() {
             /api/client/tracing/sessions
           </Text>
           {' '}with your API token from{' '}
-          <Anchor href="/dashboard/settings">Settings → API Tokens</Anchor>.
+          <Anchor href="/dashboard/tokens">API Tokens</Anchor>.
           {' '}See our{' '}
           <Anchor component="button" onClick={() => openDocs('examples-tracing')}>
             LangChain/LangGraph integration examples

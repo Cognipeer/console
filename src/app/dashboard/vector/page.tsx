@@ -207,8 +207,8 @@ export default function VectorIndexPage() {
       {/* Header */}
       <PageHeader
         icon={<IconDatabase size={18} />}
-        title="Vector Indexes"
-        subtitle="Manage vector indexes across providers, inspect recent items, and launch queries."
+        title="Knowledge Index"
+        subtitle="Manage knowledge indexes across providers, inspect recent items, and launch queries."
         actions={
           <>
             <DashboardDateFilter value={dateFilter} onChange={setDateFilter} />

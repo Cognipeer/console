@@ -7,9 +7,9 @@ const __dirname = path.dirname(__filename);
 
 const nextConfig: NextConfig = {
   output: 'standalone',
-  serverExternalPackages: ['ioredis', 'winston', 'async_hooks'],
+  serverExternalPackages: ['ioredis', 'winston', 'async_hooks', '@cognipeer/agent-sdk'],
   turbopack: {
-    root: __dirname,
+    root: path.resolve(__dirname, '..'),
   },
   experimental: {
     serverActions: {

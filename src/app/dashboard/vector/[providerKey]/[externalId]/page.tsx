@@ -495,7 +495,7 @@ export default function VectorIndexDetailPage() {
         <Stack gap="sm" align="center">
           <Text c="dimmed">Vector index not found.</Text>
           <Button leftSection={<IconArrowLeft size={16} />} onClick={() => router.push('/dashboard/vector')}>
-            Back to vector indexes
+            Back to knowledge indexes
           </Button>
         </Stack>
       </Center>

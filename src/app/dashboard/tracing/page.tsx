@@ -282,7 +282,7 @@ export default function AgentTracingPage() {
           </Text>
           <Text size="xs" c="dimmed">
             Prefer HTTP? Generate an API key under{' '}
-            <Anchor href="/dashboard/settings" size="xs">Settings → API Tokens</Anchor>{' '}
+            <Anchor href="/dashboard/tokens" size="xs">API Tokens</Anchor>{' '}
             and POST your agent payloads to{' '}
             <Text component="span" ff="monospace" size="xs" style={{ backgroundColor: 'var(--mantine-color-gray-1)', padding: '1px 4px', borderRadius: 3 }}>
               /api/client/tracing/sessions

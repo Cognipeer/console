@@ -134,7 +134,7 @@ export default function RagDashboardPage() {
     <Stack gap="md">
       <PageHeader
         icon={<IconBook2 size={18} />}
-        title="RAG Modules"
+        title="Knowledge Engine"
         subtitle="Manage retrieval-augmented generation modules — ingest documents, query knowledge, and monitor usage."
         actions={
           <>

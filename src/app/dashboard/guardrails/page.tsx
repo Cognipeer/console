@@ -270,7 +270,7 @@ export default function GuardrailsPage() {
     <>
       <PageHeader
         icon={<IconShield size={20} />}
-        title="Guardrails"
+        title="AI Governance"
         subtitle="Define safety policies to protect your AI services from harmful or policy-violating content."
         actions={
           <Button
