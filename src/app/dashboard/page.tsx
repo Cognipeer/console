@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Badge,
@@ -15,34 +15,22 @@ import {
   ThemeIcon,
 } from '@mantine/core';
 import PageHeader from '@/components/layout/PageHeader';
-import {
-  IconBrain,
-  IconChevronRight,
-  IconFolder,
-  IconLayoutGrid,
-  IconSearch,
-  IconShield,
-  IconSparkles,
-  IconTimeline,
-  IconVectorBezier,
-  IconServerBolt,
-  IconBulb,
-  IconBook2,
-  IconBell,
-  IconKey,
-  IconPlug,
-  IconUsers,
-} from '@tabler/icons-react';
+import { IconChevronRight, IconLayoutGrid, IconSearch } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import {
+  getDashboardServices,
+  type DashboardServiceCategory,
+  type DashboardServiceDefinition,
+} from '@/lib/utils/dashboardServices';
 
-type ModuleCategory = 'all' | 'build' | 'data' | 'operate' | 'admin';
+type ModuleCategory = 'all' | DashboardServiceCategory;
 
 type ModuleCard = {
   id: string;
   title: string;
   description: string;
   href: string;
-  icon: typeof IconBrain;
+  icon: DashboardServiceDefinition['icon'];
   category: Exclude<ModuleCategory, 'all'>;
   tags: string[];
 };
@@ -50,139 +38,49 @@ type ModuleCard = {
 export default function DashboardPage() {
   const router = useRouter();
   const t = useTranslations('dashboard');
+  const tNav = useTranslations('navigation');
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState<ModuleCategory>('all');
+  const [isTenantAdmin, setIsTenantAdmin] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+
+    const fetchSession = async () => {
+      try {
+        const res = await fetch('/api/auth/session', { cache: 'no-store' });
+        if (!res.ok) return;
+
+        const data = (await res.json()) as { role?: string };
+        if (!active) return;
+
+        setIsTenantAdmin(data.role === 'owner' || data.role === 'admin');
+      } catch {
+      }
+    };
+
+    fetchSession();
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const modules = useMemo<ModuleCard[]>(
-    () => [
-      {
-        id: 'models',
-        title: t('modules.models.title'),
-        description: t('modules.models.description'),
-        href: '/dashboard/models',
-        icon: IconBrain,
-        category: 'build',
-        tags: ['llm', 'providers', 'inference'],
-      },
-      {
-        id: 'prompts',
-        title: t('modules.prompts.title'),
-        description: t('modules.prompts.description'),
-        href: '/dashboard/prompts',
-        icon: IconSparkles,
-        category: 'build',
-        tags: ['templates', 'prompting'],
-      },
-      {
-        id: 'vector',
-        title: t('modules.vector.title'),
-        description: t('modules.vector.description'),
-        href: '/dashboard/vector',
-        icon: IconVectorBezier,
-        category: 'data',
-        tags: ['indexes', 'embeddings'],
-      },
-      {
-        id: 'files',
-        title: t('modules.files.title'),
-        description: t('modules.files.description'),
-        href: '/dashboard/files',
-        icon: IconFolder,
-        category: 'data',
-        tags: ['storage', 'uploads'],
-      },
-      {
-        id: 'memory',
-        title: t('modules.memory.title'),
-        description: t('modules.memory.description'),
-        href: '/dashboard/memory',
-        icon: IconBulb,
-        category: 'data',
-        tags: ['semantic', 'memory', 'stores'],
-      },
-      {
-        id: 'rag',
-        title: t('modules.rag.title'),
-        description: t('modules.rag.description'),
-        href: '/dashboard/rag',
-        icon: IconBook2,
-        category: 'data',
-        tags: ['knowledge', 'retrieval', 'documents'],
-      },
-      {
-        id: 'tracing',
-        title: t('modules.tracing.title'),
-        description: t('modules.tracing.description'),
-        href: '/dashboard/tracing',
-        icon: IconTimeline,
-        category: 'operate',
-        tags: ['observability', 'sessions'],
-      },
-      {
-        id: 'inference-monitoring',
-        title: t('modules.inferenceMonitoring.title'),
-        description: t('modules.inferenceMonitoring.description'),
-        href: '/dashboard/inference-monitoring',
-        icon: IconServerBolt,
-        category: 'operate',
-        tags: ['vllm', 'gpu', 'inference', 'monitoring'],
-      },
-      {
-        id: 'guardrails',
-        title: t('modules.guardrails.title'),
-        description: t('modules.guardrails.description'),
-        href: '/dashboard/guardrails',
-        icon: IconShield,
-        category: 'operate',
-        tags: ['safety', 'pii', 'moderation', 'prompt injection'],
-      },
-      {
-        id: 'alerts',
-        title: t('modules.alerts.title'),
-        description: t('modules.alerts.description'),
-        href: '/dashboard/alerts',
-        icon: IconBell,
-        category: 'operate',
-        tags: ['thresholds', 'notifications', 'incidents'],
-      },
-      {
-        id: 'projects',
-        title: t('modules.projects.title'),
-        description: t('modules.projects.description'),
-        href: '/dashboard/projects',
-        icon: IconLayoutGrid,
-        category: 'operate',
-        tags: ['workspaces', 'access'],
-      },
-      {
-        id: 'members',
-        title: t('modules.members.title'),
-        description: t('modules.members.description'),
-        href: '/dashboard/members',
-        icon: IconUsers,
-        category: 'admin',
-        tags: ['users', 'invite', 'roles'],
-      },
-      {
-        id: 'providers',
-        title: t('modules.providers.title'),
-        description: t('modules.providers.description'),
-        href: '/dashboard/providers',
-        icon: IconPlug,
-        category: 'admin',
-        tags: ['providers', 'integrations'],
-      },
-      {
-        id: 'tokens',
-        title: t('modules.tokens.title'),
-        description: t('modules.tokens.description'),
-        href: '/dashboard/tokens',
-        icon: IconKey,
-        category: 'admin',
-        tags: ['api', 'tokens', 'keys'],
-      },
-    ],
-    [t],
+    () =>
+      getDashboardServices({
+        isTenantAdmin,
+        servicesHomeOnly: true,
+      }).map((service) => ({
+        id: service.id,
+        title: tNav(service.navLabelKey),
+        description: tNav(service.navDescriptionKey),
+        href: service.href,
+        icon: service.icon,
+        category: service.category,
+        tags: service.tags,
+      })),
+    [isTenantAdmin, tNav],
   );
 
   const filteredModules = useMemo(() => {

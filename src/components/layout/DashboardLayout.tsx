@@ -27,25 +27,9 @@ import {
   IconLogout,
   IconSearch,
   IconSettings,
-  IconTimeline,
-  IconBrain,
-  IconSparkles,
-  IconVectorBezier,
   IconFolder,
   IconBook,
   IconX,
-  IconServerBolt,
-  IconShield,
-  IconBell,
-  IconBulb,
-  IconBook2,
-  IconLock,
-  IconKey,
-  IconPlug,
-  IconUsers,
-  IconApi,
-  IconRobot,
-  IconTool,
 } from '@tabler/icons-react';
 import { ReactNode, useMemo, useState } from 'react';
 import DashboardBreadcrumbs from './DashboardBreadcrumbs';
@@ -55,6 +39,7 @@ import classes from './DashboardLayout.module.css';
 import ProjectSelector from '@/components/projects/ProjectSelector';
 import { DocsDrawerProvider } from '@/components/docs/DocsDrawerContext';
 import { DEFAULT_SDK_DOC, resolveSdkDoc, type SdkDocId } from '@/lib/docs/sdkDocs';
+import { getDashboardServices } from '@/lib/utils/dashboardServices';
 
 interface DashboardLayoutProps {
   children: ReactNode;
@@ -111,130 +96,16 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
 
   const isTenantAdmin = defaultUser.role === 'owner' || defaultUser.role === 'admin';
 
-  const serviceItems = [
-    {
-      label: tNav('servicesHome'),
-      description: tNav('servicesHomeDescription'),
-      icon: IconLayoutDashboard,
-      href: '/dashboard',
-    },
-    {
-      label: tNav('models'),
-      description: tNav('modelsDescription'),
-      icon: IconBrain,
-      href: '/dashboard/models',
-    },
-    {
-      label: tNav('prompts'),
-      description: tNav('promptsDescription'),
-      icon: IconSparkles,
-      href: '/dashboard/prompts',
-    },
-    {
-      label: tNav('vector'),
-      description: tNav('vectorDescription'),
-      icon: IconVectorBezier,
-      href: '/dashboard/vector',
-    },
-    {
-      label: tNav('memory'),
-      description: tNav('memoryDescription'),
-      icon: IconBulb,
-      href: '/dashboard/memory',
-    },
-    {
-      label: tNav('files'),
-      description: tNav('filesDescription'),
-      icon: IconFolder,
-      href: '/dashboard/files',
-    },
-    {
-      label: tNav('rag'),
-      description: tNav('ragDescription'),
-      icon: IconBook2,
-      href: '/dashboard/rag',
-    },
-    {
-      label: tNav('agents'),
-      description: tNav('agentsDescription'),
-      icon: IconRobot,
-      href: '/dashboard/agents',
-    },
-    {
-      label: tNav('config'),
-      description: tNav('configDescription'),
-      icon: IconLock,
-      href: '/dashboard/config',
-    },
-    {
-      label: tNav('agentTracing'),
-      description: tNav('agentTracingDescription'),
-      icon: IconTimeline,
-      href: '/dashboard/tracing',
-    },
-    {
-      label: tNav('inferenceMonitoring'),
-      description: tNav('inferenceMonitoringDescription'),
-      icon: IconServerBolt,
-      href: '/dashboard/inference-monitoring',
-    },
-    {
-      label: tNav('guardrails'),
-      description: tNav('guardrailsDescription'),
-      icon: IconShield,
-      href: '/dashboard/guardrails',
-    },
-    {
-      label: tNav('mcp'),
-      description: tNav('mcpDescription'),
-      icon: IconApi,
-      href: '/dashboard/mcp',
-    },
-    {
-      label: tNav('tools'),
-      description: tNav('toolsDescription'),
-      icon: IconTool,
-      href: '/dashboard/tools',
-    },
-    {
-      label: tNav('alerts'),
-      description: tNav('alertsDescription'),
-      icon: IconBell,
-      href: '/dashboard/alerts',
-    },
-    ...(isTenantAdmin
-      ? [
-          {
-            label: tNav('members'),
-            description: tNav('membersDescription'),
-            icon: IconUsers,
-            href: '/dashboard/members',
-          },
-        ]
-      : []),
-    {
-      label: tNav('projects'),
-      description: tNav('projectsDescription'),
-      icon: IconLayoutDashboard,
-      href: '/dashboard/projects',
-    },
-    ...(isTenantAdmin
-      ? [
-          {
-            label: tNav('providers'),
-            description: tNav('providersDescription'),
-            icon: IconPlug,
-            href: '/dashboard/providers',
-          },
-        ]
-      : []),
-    {
-      label: tNav('tokens'),
-      description: tNav('tokensDescription'),
-      icon: IconKey,
-      href: '/dashboard/tokens',
-    },
-  ];
+  const serviceItems = useMemo(
+    () =>
+      getDashboardServices({ isTenantAdmin }).map((service) => ({
+        label: tNav(service.navLabelKey),
+        description: tNav(service.navDescriptionKey),
+        icon: service.icon,
+        href: service.href,
+      })),
+    [isTenantAdmin, tNav],
+  );
 
   const handleNavClick = (href?: string) => {
     if (!href) return;
