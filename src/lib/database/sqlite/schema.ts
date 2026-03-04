@@ -612,6 +612,59 @@ export const TENANT_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_memory_items_storeKey ON memory_items(storeKey);
   CREATE INDEX IF NOT EXISTS idx_memory_items_hash ON memory_items(storeKey, contentHash);
 
+  -- Agents
+  CREATE TABLE IF NOT EXISTS agents (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    description TEXT,
+    config TEXT DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'active',
+    metadata TEXT DEFAULT '{}',
+    publishedVersion INTEGER,
+    latestVersion INTEGER,
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_key ON agents(key);
+  CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(projectId);
+
+  -- Agent versions
+  CREATE TABLE IF NOT EXISTS agent_versions (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    agentId TEXT NOT NULL,
+    agentKey TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    snapshot TEXT DEFAULT '{}',
+    changelog TEXT,
+    publishedBy TEXT NOT NULL,
+    createdAt TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_versions_agent_ver ON agent_versions(agentId, version);
+  CREATE INDEX IF NOT EXISTS idx_agent_versions_agent ON agent_versions(agentId);
+
+  -- Agent conversations
+  CREATE TABLE IF NOT EXISTS agent_conversations (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    agentKey TEXT NOT NULL,
+    title TEXT,
+    messages TEXT DEFAULT '[]',
+    metadata TEXT DEFAULT '{}',
+    createdBy TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_aconv_agent ON agent_conversations(agentKey);
+  CREATE INDEX IF NOT EXISTS idx_aconv_project ON agent_conversations(projectId);
+
   -- Config groups
   CREATE TABLE IF NOT EXISTS config_groups (
     id TEXT PRIMARY KEY,
