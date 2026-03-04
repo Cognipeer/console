@@ -74,12 +74,23 @@ export const POST = withRequestContext(async (request: NextRequest) => {
     const { tenantDbName, tenantId, projectId } = ctx;
 
     const body = await request.json();
-    const { model, input, previous_response_id } = body;
+    const { model, input, previous_response_id, version } = body;
 
     // `model` field carries the agent key
     if (!model || typeof model !== 'string') {
       return NextResponse.json(
         { error: 'model field is required and must contain the agent key' },
+        { status: 400 },
+      );
+    }
+
+    // Validate version if provided
+    const requestedVersion = version !== undefined && version !== null
+      ? Number(version)
+      : undefined;
+    if (requestedVersion !== undefined && (isNaN(requestedVersion) || requestedVersion < 1)) {
+      return NextResponse.json(
+        { error: 'version must be a positive integer' },
         { status: 400 },
       );
     }
@@ -140,6 +151,8 @@ export const POST = withRequestContext(async (request: NextRequest) => {
       conversationId: convId,
       userMessage,
       userId: ctx.tokenRecord.userId,
+      usePublished: true,
+      version: requestedVersion,
     });
 
     // Return Responses API shape (strip internal fields)

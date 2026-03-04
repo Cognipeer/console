@@ -53,7 +53,10 @@ export const TABLES = {
   configAuditLogs: 'config_audit_logs',
   mcpServers: 'mcp_servers',
   mcpRequestLogs: 'mcp_request_logs',
+  tools: 'tools',
+  toolRequestLogs: 'tool_request_logs',
   agents: 'agents',
+  agentVersions: 'agent_versions',
   agentConversations: 'agent_conversations',
   vectorCounters: 'vector_counters',
 } as const;

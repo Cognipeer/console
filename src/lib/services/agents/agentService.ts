@@ -6,23 +6,28 @@
  */
 
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase, type IAgent, type IAgentConversation } from '@/lib/database';
+import { getDatabase, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentVersion } from '@/lib/database';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
 import { queryRag } from '@/lib/services/rag/ragService';
 import { evaluateGuardrail } from '@/lib/services/guardrail';
 import { getMcpServerByKey, executeMcpTool } from '@/lib/services/mcp';
+import { getToolByKey, executeToolAction, logToolRequest } from '@/lib/services/tools';
 
 const logger = createLogger('agents');
 
-// ── MCP Tool Bridge ──────────────────────────────────────────────────
+// ── Tool Bridge ─────────────────────────────────────────────────────
 
 /**
  * Converts IAgentToolBinding entries into agent-sdk ToolInterface instances.
- * Extensible: add new source types (e.g. 'custom', 'langchain') as needed.
+ * Supports two source types:
+ *   - 'tool'  – unified tool system (OpenAPI / MCP sources)
+ *   - 'mcp'   – legacy direct MCP server bindings (backward compat)
  */
 async function buildBoundTools(
     tenantDbName: string,
+    tenantId: string,
+    projectId: string,
     bindings: { source: string; sourceKey: string; toolNames: string[] }[] | undefined,
     createToolFn: typeof import('@cognipeer/agent-sdk').createTool,
     zod: typeof import('zod').z,
@@ -32,7 +37,62 @@ async function buildBoundTools(
     const tools: any[] = [];
 
     for (const binding of bindings) {
-        if (binding.source === 'mcp') {
+        if (binding.source === 'tool') {
+            // ── Unified tool system ──────────────────────────────
+            const toolRecord = await getToolByKey(tenantDbName, binding.sourceKey);
+            if (!toolRecord || toolRecord.status !== 'active') {
+                logger.warn('Skipping inactive/missing tool', { key: binding.sourceKey });
+                continue;
+            }
+
+            for (const actionName of binding.toolNames) {
+                const action = toolRecord.actions.find(
+                    (a) => a.key === actionName || a.name === actionName,
+                );
+                if (!action) {
+                    logger.warn('Tool action not found, skipping', {
+                        tool: binding.sourceKey,
+                        action: actionName,
+                    });
+                    continue;
+                }
+
+                const tool = createToolFn({
+                    name: action.name,
+                    description: action.description || `Call ${action.name} on ${toolRecord.name}`,
+                    schema: zod.object({}).passthrough(),
+                    func: async (args: Record<string, unknown>) => {
+                        try {
+                            const { result, latencyMs } = await executeToolAction(toolRecord, action.key, args);
+                            logToolRequest(
+                                tenantDbName, tenantId, toolRecord.projectId,
+                                toolRecord.key, action.key, action.name,
+                                'success', latencyMs,
+                                args,
+                                typeof result === 'object' ? (result as Record<string, unknown>) : { value: result },
+                                undefined,
+                                'agent',
+                            );
+                            return typeof result === 'string' ? result : JSON.stringify(result);
+                        } catch (execError) {
+                            const errorMessage = execError instanceof Error ? execError.message : 'Failed to execute tool action';
+                            logToolRequest(
+                                tenantDbName, tenantId, toolRecord.projectId,
+                                toolRecord.key, action.key, action.name,
+                                'error', 0,
+                                args,
+                                undefined,
+                                errorMessage,
+                                'agent',
+                            );
+                            throw execError;
+                        }
+                    },
+                });
+                tools.push(tool);
+            }
+        } else if (binding.source === 'mcp') {
+            // ── Legacy MCP server bindings ───────────────────────
             const server = await getMcpServerByKey(tenantDbName, binding.sourceKey);
             if (!server || server.status !== 'active') {
                 logger.warn('Skipping inactive/missing MCP server', { key: binding.sourceKey });
@@ -52,7 +112,6 @@ async function buildBoundTools(
                 const tool = createToolFn({
                     name: mcpToolDef.name,
                     description: mcpToolDef.description || `Call ${mcpToolDef.name} on ${server.name}`,
-                    // Use a permissive schema – the upstream validates
                     schema: zod.object({}).passthrough(),
                     func: async (args: Record<string, unknown>) => {
                         const { result } = await executeMcpTool(server, toolName, args);
@@ -62,7 +121,6 @@ async function buildBoundTools(
                 tools.push(tool);
             }
         }
-        // Future: else if (binding.source === 'custom') { ... }
     }
 
     return tools;
@@ -313,6 +371,144 @@ export async function countAgents(
     return db.countAgents(projectId);
 }
 
+// ── Agent Publish & Versioning ───────────────────────────────────────
+
+/**
+ * Publishes the current agent config as a new immutable version.
+ * After publishing, API/SDK calls will use this version by default.
+ */
+export async function publishAgent(
+    tenantDbName: string,
+    agentId: string,
+    userId: string,
+    changelog?: string,
+): Promise<IAgentVersion> {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+
+    const agent = await db.findAgentById(agentId);
+    if (!agent) throw new Error(`Agent "${agentId}" not found`);
+
+    const nextVersion = (agent.latestVersion ?? 0) + 1;
+
+    const version = await db.createAgentVersion({
+        tenantId: agent.tenantId,
+        projectId: agent.projectId,
+        agentId: String(agent._id),
+        agentKey: agent.key,
+        version: nextVersion,
+        snapshot: {
+            name: agent.name,
+            description: agent.description,
+            config: agent.config,
+            status: agent.status,
+        },
+        changelog,
+        publishedBy: userId,
+    });
+
+    // Update agent with latest published version
+    await db.updateAgent(agentId, {
+        publishedVersion: nextVersion,
+        latestVersion: nextVersion,
+        updatedBy: userId,
+    });
+
+    logger.info('Agent published', {
+        agentId,
+        agentKey: agent.key,
+        version: nextVersion,
+    });
+
+    return version;
+}
+
+export async function getAgentVersion(
+    tenantDbName: string,
+    agentId: string,
+    version: number,
+): Promise<IAgentVersion | null> {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+    return db.findAgentVersion(agentId, version);
+}
+
+export async function listAgentVersions(
+    tenantDbName: string,
+    agentId: string,
+    options?: { limit?: number; skip?: number },
+): Promise<{ versions: IAgentVersion[]; total: number }> {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+    return db.listAgentVersions(agentId, options);
+}
+
+/**
+ * Resolves the agent config to use for execution.
+ * - If a specific version is requested, returns that version's config.
+ * - For API/SDK calls (not playground), uses the published version.
+ * - Falls back to current agent config if no version is published (backward compat).
+ */
+export async function resolveAgentConfig(
+    tenantDbName: string,
+    agentKey: string,
+    projectId?: string,
+    requestedVersion?: number,
+): Promise<{
+    agent: IAgent;
+    config: IAgent['config'];
+    resolvedVersion: number | null;
+    agentName: string;
+    agentDescription?: string;
+}> {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+
+    const agent = await db.findAgentByKey(agentKey, projectId);
+    if (!agent) throw new Error(`Agent "${agentKey}" not found`);
+
+    // If a specific version is requested
+    if (requestedVersion !== undefined && requestedVersion !== null) {
+        const version = await db.findAgentVersion(String(agent._id), requestedVersion);
+        if (!version) {
+            throw new Error(`Version ${requestedVersion} not found for agent "${agentKey}"`);
+        }
+        return {
+            agent,
+            config: version.snapshot.config,
+            resolvedVersion: version.version,
+            agentName: version.snapshot.name,
+            agentDescription: version.snapshot.description,
+        };
+    }
+
+    // Use published version if available
+    if (agent.publishedVersion) {
+        const version = await db.findAgentVersion(
+            String(agent._id),
+            agent.publishedVersion,
+        );
+        if (version) {
+            return {
+                agent,
+                config: version.snapshot.config,
+                resolvedVersion: version.version,
+                agentName: version.snapshot.name,
+                agentDescription: version.snapshot.description,
+            };
+        }
+    }
+
+    // Fallback to current config (never published or version data missing)
+    return {
+        agent,
+        config: agent.config,
+        resolvedVersion: null,
+        agentName: agent.name,
+        agentDescription: agent.description,
+    };
+}
+
 // ── Conversation CRUD ────────────────────────────────────────────────
 
 export async function createConversation(
@@ -374,6 +570,10 @@ export interface AgentChatRequest {
     conversationId: string;
     userMessage: string;
     userId: string;
+    /** Request a specific published version (API/SDK) */
+    version?: number;
+    /** When true, use the published version (default for API/SDK calls) */
+    usePublished?: boolean;
 }
 
 /** Ephemeral (playground) chat — no DB conversation required */
@@ -418,6 +618,8 @@ export interface AgentChatResponse {
     usage: ResponseUsage;
     created_at: number;
     previous_response_id: string | null;
+    /** Version used for this response (null if not versioned) */
+    version: number | null;
     /** Conversation messages for dashboard playgrounds */
     _conversation_messages?: Array<{ role: string; content: string; timestamp: Date }>;
 }
@@ -434,14 +636,32 @@ export async function executeAgentChat(
         userMessage,
     } = request;
 
-    // 1. Load agent config
+    // 1. Load agent config (use published version for API/SDK calls)
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
 
-    const agent = await db.findAgentByKey(agentKey, projectId);
-    if (!agent) throw new Error(`Agent "${agentKey}" not found`);
+    let resolvedVersion: number | null = null;
+    let agent: IAgent;
+    let config: IAgentConfig;
 
-    const { config } = agent;
+    if (request.usePublished || request.version !== undefined) {
+        // Resolve from published version
+        const resolved = await resolveAgentConfig(
+            tenantDbName,
+            agentKey,
+            projectId,
+            request.version,
+        );
+        agent = resolved.agent;
+        config = resolved.config;
+        resolvedVersion = resolved.resolvedVersion;
+    } else {
+        // Playground-style: use current draft config
+        const foundAgent = await db.findAgentByKey(agentKey, projectId);
+        if (!foundAgent) throw new Error(`Agent "${agentKey}" not found`);
+        agent = foundAgent;
+        config = foundAgent.config;
+    }
 
     // 2. Load conversation
     const conversation = await db.findAgentConversationById(conversationId);
@@ -537,7 +757,7 @@ export async function executeAgentChat(
     }
 
     // 5c. Build bound tools from toolBindings (MCP, future sources)
-    const boundTools = await buildBoundTools(tenantDbName, config.toolBindings, createTool, z);
+    const boundTools = await buildBoundTools(tenantDbName, tenantId, projectId, config.toolBindings, createTool, z);
     tools.push(...boundTools);
 
     // 6. Build message history
@@ -639,6 +859,7 @@ export async function executeAgentChat(
         },
         created_at: Math.floor(Date.now() / 1000),
         previous_response_id: (conversation.messages?.length ?? 0) > 0 ? responseId : null,
+        version: resolvedVersion,
         _conversation_messages: updatedMessages,
     };
 }
@@ -743,7 +964,7 @@ export async function executePlaygroundChat(
     }
 
     // Build bound tools from toolBindings (MCP, future sources)
-    const boundPlaygroundTools = await buildBoundTools(tenantDbName, config.toolBindings, createTool, z);
+    const boundPlaygroundTools = await buildBoundTools(tenantDbName, tenantId, projectId, config.toolBindings, createTool, z);
     playgroundTools.push(...boundPlaygroundTools);
 
     // Build messages (in-memory history only)

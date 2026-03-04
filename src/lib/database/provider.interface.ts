@@ -699,6 +699,104 @@ export interface IAlertEvent {
   metadata?: Record<string, unknown>;
 }
 
+// ── Tool (unified tool system) types ─────────────────────────────────────
+
+export type ToolSourceType = 'openapi' | 'mcp';
+export type ToolStatus = 'active' | 'disabled';
+
+export type ToolAuthType = 'none' | 'token' | 'header' | 'basic';
+
+export interface IToolAuthConfig {
+  type: ToolAuthType;
+  /** For 'token': the bearer token value */
+  token?: string;
+  /** For 'header': custom header name + value */
+  headerName?: string;
+  headerValue?: string;
+  /** For 'basic': username + password */
+  username?: string;
+  password?: string;
+}
+
+export interface IToolAction {
+  /** Unique key within the tool (slug of operationId or tool name) */
+  key: string;
+  name: string;
+  description: string;
+  /** JSON Schema for tool input parameters */
+  inputSchema: Record<string, unknown>;
+  /** How this action is executed */
+  executionType: 'openapi_http' | 'mcp_call';
+  /** OpenAPI-specific: HTTP method */
+  httpMethod?: string;
+  /** OpenAPI-specific: Path template */
+  httpPath?: string;
+  /** MCP-specific: original tool name on the MCP server */
+  mcpToolName?: string;
+}
+
+export interface ITool {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name: string;
+  description?: string;
+  type: ToolSourceType;
+  status: ToolStatus;
+  /** Actions (callable tools) derived from the source */
+  actions: IToolAction[];
+  /** OpenAPI-specific: raw spec JSON string */
+  openApiSpec?: string;
+  /** Upstream base URL for HTTP calls */
+  upstreamBaseUrl?: string;
+  /** Authentication for upstream API / MCP server */
+  upstreamAuth?: IToolAuthConfig;
+  /** MCP-specific: MCP server endpoint URL */
+  mcpEndpoint?: string;
+  /** MCP-specific: transport type */
+  mcpTransport?: 'sse' | 'streamable-http';
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+// ── Tool Request Log types ────────────────────────────────────────────────
+
+export interface IToolRequestLog {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  toolKey: string;
+  actionKey: string;
+  actionName: string;
+  status: 'success' | 'error';
+  requestPayload?: Record<string, unknown>;
+  responsePayload?: Record<string, unknown>;
+  errorMessage?: string;
+  latencyMs?: number;
+  callerType?: 'dashboard' | 'api' | 'agent';
+  callerTokenId?: string;
+  createdAt?: Date;
+}
+
+export interface IToolRequestAggregate {
+  toolKey: string;
+  totalRequests: number;
+  successCount: number;
+  errorCount: number;
+  avgLatencyMs: number | null;
+  actionBreakdown: Record<string, number>;
+  timeseries?: Array<{
+    period: string;
+    total: number;
+    success: number;
+    errors: number;
+  }>;
+}
+
 // ── Agent types ──────────────────────────────────────────────────────────
 
 export type AgentStatus = 'active' | 'inactive' | 'draft';
@@ -716,17 +814,17 @@ export interface IAgentConfig {
   inputGuardrailKey?: string;
   /** Guardrail key applied to assistant output */
   outputGuardrailKey?: string;
-  /** Bound tools from various sources (MCP servers, custom, etc.) */
+  /** Bound tools from various sources (tools, MCP servers legacy) */
   toolBindings?: IAgentToolBinding[];
 }
 
 /** A single tool-source binding for an agent */
 export interface IAgentToolBinding {
-  /** Source type – extensible for future providers */
-  source: 'mcp';
-  /** Identifier of the source (e.g. MCP server key) */
+  /** Source type – 'tool' for unified tool system, 'mcp' for legacy */
+  source: 'tool' | 'mcp';
+  /** Identifier of the source (tool key or MCP server key) */
   sourceKey: string;
-  /** Tool names selected from that source */
+  /** Action/tool names selected from that source */
   toolNames: string[];
 }
 
@@ -739,11 +837,36 @@ export interface IAgent {
   description?: string;
   config: IAgentConfig;
   status: AgentStatus;
+  /** Currently published version number (null = never published) */
+  publishedVersion?: number | null;
+  /** Latest version number (incremented on each publish) */
+  latestVersion?: number;
   metadata?: Record<string, unknown>;
   createdBy: string;
   updatedBy?: string;
   createdAt?: Date;
   updatedAt?: Date;
+}
+
+/** Immutable snapshot of an agent version (created on publish) */
+export interface IAgentVersion {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId: string;
+  agentId: string;
+  agentKey: string;
+  version: number;
+  /** Full agent data snapshot stored as single JSON object */
+  snapshot: {
+    name: string;
+    description?: string;
+    config: IAgentConfig;
+    status: AgentStatus;
+  };
+  /** Optional user-provided changelog message */
+  changelog?: string;
+  publishedBy: string;
+  createdAt?: Date;
 }
 
 export interface IAgentConversation {
@@ -1359,6 +1482,50 @@ export interface DatabaseProvider {
     options?: { limit?: number; skip?: number; from?: Date; to?: Date },
   ): Promise<IConfigAuditLog[]>;
 
+  // ── Tool operations (tenant-specific) ──
+  createTool(
+    tool: Omit<ITool, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<ITool>;
+  updateTool(
+    id: string,
+    data: Partial<Omit<ITool, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<ITool | null>;
+  deleteTool(id: string): Promise<boolean>;
+  findToolById(id: string): Promise<ITool | null>;
+  findToolByKey(key: string, projectId?: string): Promise<ITool | null>;
+  listTools(filters?: {
+    projectId?: string;
+    type?: ToolSourceType;
+    status?: ToolStatus;
+    search?: string;
+  }): Promise<ITool[]>;
+  countTools(projectId?: string): Promise<number>;
+
+  // ── Tool Request Log operations (tenant-specific) ──
+  createToolRequestLog(
+    log: Omit<IToolRequestLog, '_id' | 'createdAt'>,
+  ): Promise<IToolRequestLog>;
+  listToolRequestLogs(
+    toolKey: string,
+    options?: {
+      limit?: number;
+      skip?: number;
+      from?: Date;
+      to?: Date;
+      status?: string;
+      actionKey?: string;
+      keyword?: string;
+    },
+  ): Promise<IToolRequestLog[]>;
+  countToolRequestLogs(
+    toolKey: string,
+    options?: { from?: Date; to?: Date; status?: string; actionKey?: string; keyword?: string },
+  ): Promise<number>;
+  aggregateToolRequestLogs(
+    toolKey: string,
+    options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month' },
+  ): Promise<IToolRequestAggregate>;
+
   // ── Agent operations (tenant-specific) ──
   createAgent(
     agent: Omit<IAgent, '_id' | 'createdAt' | 'updatedAt'>,
@@ -1376,6 +1543,22 @@ export interface DatabaseProvider {
     search?: string;
   }): Promise<IAgent[]>;
   countAgents(projectId?: string): Promise<number>;
+
+  // ── Agent Version operations (tenant-specific) ──
+  createAgentVersion(
+    version: Omit<IAgentVersion, '_id' | 'createdAt'>,
+  ): Promise<IAgentVersion>;
+  findAgentVersion(
+    agentId: string,
+    version: number,
+  ): Promise<IAgentVersion | null>;
+  findLatestAgentVersion(
+    agentId: string,
+  ): Promise<IAgentVersion | null>;
+  listAgentVersions(
+    agentId: string,
+    options?: { limit?: number; skip?: number },
+  ): Promise<{ versions: IAgentVersion[]; total: number }>;
 
   // ── Agent Conversation operations (tenant-specific) ──
   createAgentConversation(

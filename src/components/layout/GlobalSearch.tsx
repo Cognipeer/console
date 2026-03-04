@@ -15,6 +15,7 @@ import {
   IconPlug,
   IconUsers,
   IconApi,
+  IconTool,
 } from '@tabler/icons-react';
 import { Spotlight, spotlight, SpotlightActionData } from '@mantine/spotlight';
 import { useTranslations } from '@/lib/i18n';
@@ -129,6 +130,14 @@ export function GlobalSearch({ isTenantAdmin = false }: GlobalSearchProps) {
         onClick: () => router.push('/dashboard/mcp'),
         leftSection: <IconApi size={20} stroke={1.5} />,
         keywords: ['mcp', 'openapi', 'swagger', 'tool', 'server', 'proxy', 'api'],
+      },
+      {
+        id: 'tools',
+        label: tNav('tools'),
+        description: tNav('toolsDescription'),
+        onClick: () => router.push('/dashboard/tools'),
+        leftSection: <IconTool size={20} stroke={1.5} />,
+        keywords: ['tool', 'action', 'openapi', 'mcp', 'execute', 'api'],
       },
     ],
     [router, tNav, isTenantAdmin]

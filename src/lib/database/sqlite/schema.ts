@@ -683,6 +683,51 @@ export const TENANT_SCHEMA_SQL = `
     resetAt TEXT NOT NULL
   );
 
+  -- Tools (unified tool system)
+  CREATE TABLE IF NOT EXISTS tools (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    actions TEXT DEFAULT '[]',
+    openApiSpec TEXT,
+    upstreamBaseUrl TEXT,
+    upstreamAuth TEXT DEFAULT '{}',
+    mcpEndpoint TEXT,
+    mcpTransport TEXT,
+    metadata TEXT DEFAULT '{}',
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_tools_key ON tools(key);
+  CREATE INDEX IF NOT EXISTS idx_tools_type ON tools(type);
+
+  -- Tool Request Logs
+  CREATE TABLE IF NOT EXISTS tool_request_logs (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    toolKey TEXT NOT NULL,
+    actionKey TEXT NOT NULL,
+    actionName TEXT NOT NULL,
+    status TEXT NOT NULL,
+    requestPayload TEXT DEFAULT '{}',
+    responsePayload TEXT DEFAULT '{}',
+    errorMessage TEXT,
+    latencyMs INTEGER,
+    callerType TEXT,
+    callerTokenId TEXT,
+    createdAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_tool_request_logs_toolKey ON tool_request_logs(toolKey);
+  CREATE INDEX IF NOT EXISTS idx_tool_request_logs_createdAt ON tool_request_logs(createdAt);
+
   -- MCP Servers
   CREATE TABLE IF NOT EXISTS mcp_servers (
     id TEXT PRIMARY KEY,

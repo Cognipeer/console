@@ -643,6 +643,21 @@ CREATE TABLE IF NOT EXISTS agents (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_key ON agents(key);
 CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(projectId);
 
+CREATE TABLE IF NOT EXISTS agent_versions (
+  id TEXT PRIMARY KEY,
+  tenantId TEXT NOT NULL,
+  projectId TEXT NOT NULL,
+  agentId TEXT NOT NULL,
+  agentKey TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  snapshot TEXT DEFAULT '{}',
+  changelog TEXT,
+  publishedBy TEXT NOT NULL,
+  createdAt TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_versions_agent_ver ON agent_versions(agentId, version);
+CREATE INDEX IF NOT EXISTS idx_agent_versions_agent ON agent_versions(agentId);
+
 CREATE TABLE IF NOT EXISTS agent_conversations (
   id TEXT PRIMARY KEY,
   tenantId TEXT NOT NULL,

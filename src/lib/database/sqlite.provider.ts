@@ -30,6 +30,7 @@ import { RagMixin } from './sqlite/rag.mixin';
 import { MemoryMixin } from './sqlite/memory.mixin';
 import { ConfigMixin } from './sqlite/config.mixin';
 import { McpServerMixin } from './sqlite/mcp-server.mixin';
+import { ToolMixin } from './sqlite/tool.mixin';
 import { AgentMixin } from './sqlite/agent.mixin';
 
 // ── Compose mixins in domain groups ──────────────────────────────────────
@@ -48,7 +49,7 @@ const AIBase = VectorMixin(ModelMixin(TracingMixin(ContentBase)));
 const StorageBase = ProviderRecordMixin(FileMixin(AIBase));
 
 // Group 5 – Advanced features
-const AdvancedBase = AgentMixin(McpServerMixin(ConfigMixin(MemoryMixin(RagMixin(IncidentMixin(AlertMixin(GuardrailMixin(InferenceMixin(StorageBase)))))))));
+const AdvancedBase = AgentMixin(ToolMixin(McpServerMixin(ConfigMixin(MemoryMixin(RagMixin(IncidentMixin(AlertMixin(GuardrailMixin(InferenceMixin(StorageBase))))))))));
 
 // ── Final composed class ─────────────────────────────────────────────────
 

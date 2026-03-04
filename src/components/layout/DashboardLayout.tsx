@@ -45,6 +45,7 @@ import {
   IconUsers,
   IconApi,
   IconRobot,
+  IconTool,
 } from '@tabler/icons-react';
 import { ReactNode, useMemo, useState } from 'react';
 import DashboardBreadcrumbs from './DashboardBreadcrumbs';
@@ -188,6 +189,12 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
       description: tNav('mcpDescription'),
       icon: IconApi,
       href: '/dashboard/mcp',
+    },
+    {
+      label: tNav('tools'),
+      description: tNav('toolsDescription'),
+      icon: IconTool,
+      href: '/dashboard/tools',
     },
     {
       label: tNav('alerts'),

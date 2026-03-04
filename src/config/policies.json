@@ -180,6 +180,16 @@
         "/api/client/v1/mcp",
         "/api/client/v1/mcp/*"
       ]
+    },
+    "TOOLS": {
+      "name": "Tools",
+      "description": "Manage and execute tools from OpenAPI specs or MCP servers",
+      "endpoints": [
+        "/api/tools",
+        "/api/tools/*",
+        "/api/client/v1/tools",
+        "/api/client/v1/tools/*"
+      ]
     }
   },
   "licenses": {
@@ -203,6 +213,7 @@
         "RAG_PIPELINE",
         "CONFIG_MANAGEMENT",
         "MCP_SERVERS",
+        "TOOLS",
         "DASHBOARD",
         "AGENT_ORCHESTRATION"
       ],
@@ -226,6 +237,7 @@
         "RAG_PIPELINE",
         "CONFIG_MANAGEMENT",
         "MCP_SERVERS",
+        "TOOLS",
         "AGENT_ORCHESTRATION"
       ],
       "limits": {
@@ -251,7 +263,8 @@
         "MEMORY",
         "RAG_PIPELINE",
         "CONFIG_MANAGEMENT",
-        "MCP_SERVERS"
+        "MCP_SERVERS",
+        "TOOLS"
       ],
       "limits": {
         "requestsPerMonth": 100000,
@@ -282,6 +295,7 @@
         "RAG_PIPELINE",
         "CONFIG_MANAGEMENT",
         "MCP_SERVERS",
+        "TOOLS",
         "DASHBOARD"
       ],
       "limits": {
@@ -313,6 +327,7 @@
         "RAG_PIPELINE",
         "CONFIG_MANAGEMENT",
         "MCP_SERVERS",
+        "TOOLS",
         "DASHBOARD"
       ],
       "limits": {

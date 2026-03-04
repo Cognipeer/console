@@ -278,6 +278,29 @@ export default function DashboardBreadcrumbs() {
         }
       }
 
+      // Tools: /dashboard/tools/:id
+      const toolsIndex = segments.indexOf('tools');
+      if (toolsIndex >= 0) {
+        const toolId = segments[toolsIndex + 1];
+        if (toolId) {
+          tasks.push(
+            (async () => {
+              const label = await resolveLabel(`tool:${toolId}`, async () => {
+                const res = await fetch(`/api/tools/${encodeURIComponent(toolId)}`, {
+                  cache: 'no-store',
+                });
+                if (!res.ok) return undefined;
+                const body = (await res.json()) as { tool?: { name?: string; key?: string } };
+                return body.tool?.name || body.tool?.key;
+              });
+              if (label) {
+                next[toolsIndex + 1] = label;
+              }
+            })(),
+          );
+        }
+      }
+
       await Promise.all(tasks);
       if (!cancelled) {
         setResolvedLabels(next);

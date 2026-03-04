@@ -30,6 +30,7 @@ import { RagMixin } from './mongodb/rag.mixin';
 import { MemoryMixin } from './mongodb/memory.mixin';
 import { ConfigMixin } from './mongodb/config.mixin';
 import { McpServerMixin } from './mongodb/mcp-server.mixin';
+import { ToolMixin } from './mongodb/tool.mixin';
 import { AgentMixin } from './mongodb/agent.mixin';
 
 // ── Compose mixins in domain groups ──────────────────────────────────────
@@ -49,8 +50,7 @@ const AIBase = VectorMixin(ModelMixin(TracingMixin(ContentBase)));
 const StorageBase = ProviderRecordMixin(FileMixin(AIBase));
 
 // Group 5 – Advanced features
-const AdvancedBase = AgentMixin(McpServerMixin(ConfigMixin(MemoryMixin(RagMixin(IncidentMixin(AlertMixin(GuardrailMixin(InferenceMixin(StorageBase)))))))));
-
+const AdvancedBase = AgentMixin(ToolMixin(McpServerMixin(ConfigMixin(MemoryMixin(RagMixin(IncidentMixin(AlertMixin(GuardrailMixin(InferenceMixin(StorageBase))))))))));
 // ── Final composed class ─────────────────────────────────────────────────
 
 export class MongoDBProvider extends AdvancedBase implements DatabaseProvider {}

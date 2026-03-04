@@ -4,7 +4,7 @@
  * Includes agent CRUD and conversation management.
  */
 
-import type { IAgent, AgentStatus, IAgentConversation } from '../provider.interface';
+import type { IAgent, AgentStatus, IAgentConversation, IAgentVersion } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
 
@@ -115,6 +115,77 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       return Number(row.cnt) || 0;
     }
 
+    // ── Agent Version operations ─────────────────────────────────
+
+    async createAgentVersion(
+      version: Omit<IAgentVersion, '_id' | 'createdAt'>,
+    ): Promise<IAgentVersion> {
+      const db = this.getTenantDb();
+      const id = this.newId();
+      const now = this.now();
+
+      db.prepare(`
+        INSERT INTO ${TABLES.agentVersions}
+        (id, tenantId, projectId, agentId, agentKey, version, snapshot,
+         changelog, publishedBy, createdAt)
+        VALUES (@id, @tenantId, @projectId, @agentId, @agentKey, @version, @snapshot,
+         @changelog, @publishedBy, @createdAt)
+      `).run({
+        id,
+        tenantId: version.tenantId,
+        projectId: version.projectId,
+        agentId: version.agentId,
+        agentKey: version.agentKey,
+        version: version.version,
+        snapshot: this.toJson(version.snapshot),
+        changelog: version.changelog ?? null,
+        publishedBy: version.publishedBy,
+        createdAt: now,
+      });
+
+      return { ...version, _id: id, createdAt: new Date(now) };
+    }
+
+    async findAgentVersion(
+      agentId: string,
+      version: number,
+    ): Promise<IAgentVersion | null> {
+      const db = this.getTenantDb();
+      const row = db.prepare(
+        `SELECT * FROM ${TABLES.agentVersions} WHERE agentId = @agentId AND version = @version`,
+      ).get({ agentId, version }) as SqliteRow | undefined;
+      return row ? this.mapAgentVersion(row) : null;
+    }
+
+    async findLatestAgentVersion(
+      agentId: string,
+    ): Promise<IAgentVersion | null> {
+      const db = this.getTenantDb();
+      const row = db.prepare(
+        `SELECT * FROM ${TABLES.agentVersions} WHERE agentId = @agentId ORDER BY version DESC LIMIT 1`,
+      ).get({ agentId }) as SqliteRow | undefined;
+      return row ? this.mapAgentVersion(row) : null;
+    }
+
+    async listAgentVersions(
+      agentId: string,
+      options?: { limit?: number; skip?: number },
+    ): Promise<{ versions: IAgentVersion[]; total: number }> {
+      const db = this.getTenantDb();
+      const countRow = db.prepare(
+        `SELECT COUNT(*) as cnt FROM ${TABLES.agentVersions} WHERE agentId = @agentId`,
+      ).get({ agentId }) as SqliteRow;
+      const total = Number(countRow.cnt) || 0;
+
+      let sql = `SELECT * FROM ${TABLES.agentVersions} WHERE agentId = @agentId ORDER BY version DESC`;
+      if (options?.limit) sql += ` LIMIT ${options.limit}`;
+      if (options?.skip) sql += ` OFFSET ${options.skip}`;
+
+      const rows = db.prepare(sql).all({ agentId }) as SqliteRow[];
+      const versions = rows.map((r) => this.mapAgentVersion(r));
+      return { versions, total };
+    }
+
     // ── Agent Conversation operations ────────────────────────────
 
     async createAgentConversation(
@@ -222,6 +293,21 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         createdBy: String(row.createdBy),
         createdAt: row.createdAt ? new Date(row.createdAt as string) : undefined,
         updatedAt: row.updatedAt ? new Date(row.updatedAt as string) : undefined,
+      };
+    }
+
+    private mapAgentVersion(row: SqliteRow): IAgentVersion {
+      return {
+        _id: String(row.id),
+        tenantId: String(row.tenantId),
+        projectId: String(row.projectId),
+        agentId: String(row.agentId),
+        agentKey: String(row.agentKey),
+        version: Number(row.version),
+        snapshot: this.parseJson(row.snapshot, { name: '', config: { modelKey: '' }, status: 'draft' as const }),
+        changelog: row.changelog ? String(row.changelog) : undefined,
+        publishedBy: String(row.publishedBy),
+        createdAt: row.createdAt ? new Date(row.createdAt as string) : undefined,
       };
     }
   };

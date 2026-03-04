@@ -29,10 +29,10 @@ import { useTranslations } from '@/lib/i18n';
 
 // ── Generic tool-binding shape ──────────────────────────────────────────
 // Mirrors IAgentToolBinding from the DB but kept local so the component
-// stays self-contained.  Extensible: add new source types later.
+// stays self-contained.  Supports both unified 'tool' and legacy 'mcp' sources.
 
 export interface ToolBinding {
-  source: 'mcp';
+  source: 'tool' | 'mcp';
   sourceKey: string;
   toolNames: string[];
 }
@@ -41,12 +41,14 @@ export interface ToolBinding {
 
 interface ToolSourceGroup {
   /** Discriminator – matches ToolBinding.source */
-  source: 'mcp';
-  /** Unique key of the source (e.g. MCP server key) */
+  source: 'tool' | 'mcp';
+  /** Unique key of the source (e.g. tool key or MCP server key) */
   sourceKey: string;
   /** Human-readable name */
   name: string;
   description?: string;
+  /** Source type label (OpenAPI / MCP) */
+  typeLabel?: string;
   /** Available tools within this source */
   tools: { name: string; description: string }[];
 }
@@ -112,36 +114,61 @@ export function ToolSelectorModal({
   const loadSources = useCallback(async () => {
     setLoading(true);
     try {
-      // MCP servers (active only)
-      const res = await fetch('/api/mcp?status=active', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        const mcpGroups: ToolSourceGroup[] = (data.servers ?? []).map(
+      const allGroups: ToolSourceGroup[] = [];
+
+      // Unified Tools (primary source)
+      const toolsRes = await fetch('/api/tools?status=active', { cache: 'no-store' });
+      if (toolsRes.ok) {
+        const toolsData = await toolsRes.json();
+        const toolGroups: ToolSourceGroup[] = (toolsData.tools ?? []).map(
+          (t: { key: string; name: string; description?: string; type: string; actions: { key: string; name: string; description: string }[] }) => ({
+            source: 'tool' as const,
+            sourceKey: t.key,
+            name: t.name,
+            description: t.description,
+            typeLabel: t.type === 'openapi' ? 'OpenAPI' : 'MCP',
+            tools: (t.actions ?? []).map((a) => ({
+              name: a.key,
+              description: a.description || a.name,
+            })),
+          }),
+        );
+        allGroups.push(...toolGroups);
+      }
+
+      // Legacy MCP servers (backward compat)
+      const mcpRes = await fetch('/api/mcp?status=active', { cache: 'no-store' });
+      if (mcpRes.ok) {
+        const mcpData = await mcpRes.json();
+        const mcpGroups: ToolSourceGroup[] = (mcpData.servers ?? []).map(
           (s: { key: string; name: string; description?: string; tools: { name: string; description: string }[] }) => ({
             source: 'mcp' as const,
             sourceKey: s.key,
             name: s.name,
             description: s.description,
+            typeLabel: 'MCP (legacy)',
             tools: s.tools ?? [],
           }),
         );
-        setSources(mcpGroups);
-
-        // Auto-expand sources that have selected tools
-        const expanded = new Set<string>();
-        for (const g of mcpGroups) {
-          const hasSelected = g.tools.some((tool) =>
-            value.some(
-              (b) =>
-                b.source === g.source &&
-                b.sourceKey === g.sourceKey &&
-                b.toolNames.includes(tool.name),
-            ),
-          );
-          if (hasSelected) expanded.add(`${g.source}::${g.sourceKey}`);
-        }
-        setExpandedSources(expanded);
+        allGroups.push(...mcpGroups);
       }
+
+      setSources(allGroups);
+
+      // Auto-expand sources that have selected tools
+      const expanded = new Set<string>();
+      for (const g of allGroups) {
+        const hasSelected = g.tools.some((tool) =>
+          value.some(
+            (b) =>
+              b.source === g.source &&
+              b.sourceKey === g.sourceKey &&
+              b.toolNames.includes(tool.name),
+          ),
+        );
+        if (hasSelected) expanded.add(`${g.source}::${g.sourceKey}`);
+      }
+      setExpandedSources(expanded);
     } catch (err) {
       console.error('Failed to load tool sources', err);
     } finally {
@@ -195,7 +222,7 @@ export function ToolSelectorModal({
       const { source, sourceKey, toolName } = parseKey(key);
       const id = `${source}::${sourceKey}`;
       if (!map.has(id)) {
-        map.set(id, { source: source as 'mcp', sourceKey, toolNames: [] });
+        map.set(id, { source: source as 'tool' | 'mcp', sourceKey, toolNames: [] });
       }
       map.get(id)!.toolNames.push(toolName);
     }
@@ -311,7 +338,7 @@ export function ToolSelectorModal({
                           </Badge>
                         )}
                         <Badge size="xs" variant="light" color="gray">
-                          MCP
+                          {group.typeLabel || (group.source === 'tool' ? 'Tool' : 'MCP')}
                         </Badge>
                       </Group>
                     </Group>
