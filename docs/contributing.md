@@ -1,6 +1,6 @@
 # Contributing
 
-Thank you for your interest in contributing to the Cognipeer Gateway.
+Thank you for your interest in contributing to Cognipeer Console.
 
 ## Development Setup
 
@@ -13,8 +13,8 @@ Thank you for your interest in contributing to the Cognipeer Gateway.
 ### Getting Started
 
 ```bash
-git clone https://github.com/Cognipeer/cgate.git
-cd cgate
+git clone https://github.com/Cognipeer/cognipeer-console.git
+cd cognipeer-console
 npm install
 cp .env.example .env.local
 npm run dev

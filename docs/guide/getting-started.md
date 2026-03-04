@@ -2,11 +2,11 @@
 
 ## Quick Installation (Zero Dependencies)
 
-The fastest way to run Cognipeer Gateway — no external services needed:
+The fastest way to run Cognipeer Console — no external services needed:
 
 ```bash
-git clone https://github.com/Cognipeer/cgate.git
-cd cgate
+git clone https://github.com/Cognipeer/cognipeer-console.git
+cd cognipeer-console
 npm install
 ```
 
@@ -29,14 +29,14 @@ That's it! The gateway starts with **SQLite** as the database (default), storing
 ### Quick Docker Run
 
 ```bash
-docker build -t cgate .
+docker build -t cognipeer-console .
 docker run -p 3000:3000 \
   -e JWT_SECRET=your-secret-key-must-be-at-least-32-characters-long \
-  -v cgate-data:/app/data \
-  cgate
+  -v console-data:/app/data \
+  cognipeer-console
 ```
 
-The `-v cgate-data:/app/data` volume persists your SQLite databases and local files across container restarts.
+The `-v console-data:/app/data` volume persists your SQLite databases and local files across container restarts.
 
 ---
 
@@ -49,8 +49,8 @@ The `-v cgate-data:/app/data` volume persists your SQLite databases and local fi
 ## Installation
 
 ```bash
-git clone https://github.com/Cognipeer/cgate.git
-cd cgate
+git clone https://github.com/Cognipeer/cognipeer-console.git
+cd cognipeer-console
 npm install
 ```
 
@@ -97,13 +97,13 @@ npm start
 ### Docker
 
 ```bash
-docker build -t cgate .
+docker build -t cognipeer-console .
 
 # SQLite mode (default, zero dependencies)
-docker run -p 3000:3000 -v cgate-data:/app/data --env-file .env.local cgate
+docker run -p 3000:3000 -v console-data:/app/data --env-file .env.local cognipeer-console
 
 # MongoDB mode
-docker run -p 3000:3000 --env-file .env.local cgate
+docker run -p 3000:3000 --env-file .env.local cognipeer-console
 ```
 
 ## First Steps

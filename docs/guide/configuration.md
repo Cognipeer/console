@@ -52,7 +52,7 @@ All application configuration is managed through the central `getConfig()` funct
 | `CACHE_PROVIDER` | Cache backend: `none`, `memory`, `redis` | `memory` |
 | `CACHE_TTL_SECONDS` | Default cache TTL | `300` |
 | `REDIS_URL` | Redis connection URL (required when provider=redis) | — |
-| `REDIS_KEY_PREFIX` | Key prefix for Redis cache | `cgate:` |
+| `REDIS_KEY_PREFIX` | Key prefix for Redis cache | `console:` |
 
 ### Rate Limiting
 

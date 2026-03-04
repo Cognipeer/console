@@ -27,6 +27,15 @@ Tokens are created in the dashboard under **Settings → API Tokens**.
 |--------|-----------|---------|
 | [Chat Completions](./chat-completions) | `/chat/completions` | POST |
 | [Embeddings](./embeddings) | `/embeddings` | POST |
+| [Agents](./agents) | `/agents` | GET |
+| [Agent Detail](./agents) | `/agents/:agentKey` | GET |
+| [Agent Responses](./agents) | `/responses` | POST |
+| [Tools](./tools) | `/tools` | GET |
+| [Tool Detail](./tools) | `/tools/:toolKey` | GET |
+| [Tool Execute](./tools) | `/tools/:toolKey/actions/:actionKey/execute` | POST |
+| [MCP Execute](./mcp) | `/mcp/:serverKey/execute` | GET, POST |
+| [MCP SSE](./mcp) | `/mcp/:serverKey/sse` | GET |
+| [MCP Message](./mcp) | `/mcp/:serverKey/message` | POST |
 | [Vector Providers](./vector) | `/vector/providers` | GET, POST |
 | [Vector Indexes](./vector) | `/vector/providers/:key/indexes` | GET, POST, PATCH, DELETE |
 | [Tracing](./tracing) | `/tracing/sessions` | POST |
@@ -40,6 +49,7 @@ Tokens are created in the dashboard under **Settings → API Tokens**.
 | [Config Item](./config) | `/config/items/:key` | GET, PATCH, DELETE |
 | [Config Resolve](./config) | `/config/resolve` | POST |
 | [Config Audit](./config) | `/config/items/:key/audit` | GET |
+| [Incidents](./incidents) | `/api/alerts/incidents` | GET, PATCH, POST |
 | [Health](./health) | `/api/health` | GET |
 
 ## Request Format

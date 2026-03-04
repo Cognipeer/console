@@ -25,7 +25,7 @@ The core infrastructure layer (`src/lib/core/`) provides production-ready cross-
 
 3. **Singleton lifecycle** — Core modules are initialized once at startup via `src/instrumentation.ts` and destroyed during graceful shutdown.
 
-4. **Mandatory rules** — See [AGENTS.md](https://github.com/Cognipeer/cgate/blob/main/AGENTS.md) for the full list of core infrastructure rules.
+4. **Mandatory rules** — See [AGENTS.md](https://github.com/Cognipeer/cognipeer-console/blob/main/AGENTS.md) for the full list of core infrastructure rules.
 
 ## Initialization Order
 

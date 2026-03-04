@@ -79,7 +79,7 @@ interface CacheProvider {
 | `CACHE_PROVIDER` | `memory` | Provider: `none`, `memory`, `redis` |
 | `CACHE_TTL_SECONDS` | `300` | Default TTL for cached entries |
 | `REDIS_URL` | — | Redis connection URL (required for `redis` provider) |
-| `REDIS_KEY_PREFIX` | `cgate:` | Key prefix for Redis entries |
+| `REDIS_KEY_PREFIX` | `console:` | Key prefix for Redis entries |
 
 ## Where Cache is Used
 

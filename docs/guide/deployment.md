@@ -1,13 +1,13 @@
 # Deployment
 
-The Cognipeer Gateway supports multiple deployment strategies: standalone Docker, Kubernetes with Helm, and traditional Node.js process management.
+The Cognipeer Console supports multiple deployment strategies: standalone Docker, Kubernetes with Helm, and traditional Node.js process management.
 
 ## Docker
 
 ### Build
 
 ```bash
-docker build -t cgate:latest .
+docker build -t cognipeer-console:latest .
 ```
 
 The Dockerfile uses a multi-stage build:
@@ -20,11 +20,11 @@ The Dockerfile uses a multi-stage build:
 
 ```bash
 docker run -d \
-  --name cgate \
+  --name cognipeer-console \
   -p 3000:3000 \
   -e MONGODB_URI="mongodb://host.docker.internal:27017" \
   -e JWT_SECRET="your-secret-here" \
-  cgate:latest
+  cognipeer-console:latest
 ```
 
 ### Docker Compose
@@ -70,12 +70,12 @@ The project includes a Helm chart at `deploy/k8s/cgate/`:
 
 ```bash
 # Install
-helm install cgate deploy/k8s/cgate \
-  --set image.repository=your-registry/cgate \
+helm install cognipeer-console deploy/k8s/cgate \
+  --set image.repository=your-registry/cognipeer-console \
   --set image.tag=latest
 
 # Upgrade
-helm upgrade cgate deploy/k8s/cgate \
+helm upgrade cognipeer-console deploy/k8s/cgate \
   --set image.tag=v1.2.0
 ```
 
@@ -149,7 +149,7 @@ node .next/standalone/server.js
 With PM2:
 
 ```bash
-pm2 start .next/standalone/server.js --name cgate -i max
+pm2 start .next/standalone/server.js --name cognipeer-console -i max
 ```
 
 ## Environment Configuration

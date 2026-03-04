@@ -1,10 +1,10 @@
 import { defineConfig } from 'vitepress';
 
 export default defineConfig({
-  title: 'Cognipeer Gateway',
+  title: 'Cognipeer Console',
   description:
-    'Multi-tenant AI gateway for LLM inference, vector stores, agent tracing, RAG, and more',
-  base: '/cgate/',
+    'Multi-tenant AI platform for LLM inference, vector stores, agent tracing, RAG, and more',
+  base: '/cognipeer-console/',
   ignoreDeadLinks: true,
 
   themeConfig: {
@@ -54,13 +54,18 @@ export default defineConfig({
             { text: 'Authentication', link: '/guide/authentication' },
             { text: 'Providers', link: '/guide/providers' },
             { text: 'Model Inference', link: '/guide/inference' },
+            { text: 'Agents', link: '/guide/agents' },
+            { text: 'Tools', link: '/guide/tools' },
+            { text: 'MCP Servers', link: '/guide/mcp' },
             { text: 'Vector Stores', link: '/guide/vector-stores' },
             { text: 'Agent Tracing', link: '/guide/tracing' },
             { text: 'Guardrails', link: '/guide/guardrails' },
             { text: 'RAG', link: '/guide/rag' },
             { text: 'Prompts', link: '/guide/prompts' },
             { text: 'Memory', link: '/guide/memory' },
+            { text: 'Config Management', link: '/guide/config-management' },
             { text: 'File Storage', link: '/guide/files' },
+            { text: 'Alerts & Incidents', link: '/guide/alerts' },
           ],
         },
         {
@@ -79,6 +84,9 @@ export default defineConfig({
             { text: 'Overview', link: '/api/overview' },
             { text: 'Chat Completions', link: '/api/chat-completions' },
             { text: 'Embeddings', link: '/api/embeddings' },
+            { text: 'Agents', link: '/api/agents' },
+            { text: 'Tools', link: '/api/tools' },
+            { text: 'MCP Servers', link: '/api/mcp' },
             { text: 'Vector', link: '/api/vector' },
             { text: 'Tracing', link: '/api/tracing' },
             { text: 'Files', link: '/api/files' },
@@ -87,6 +95,7 @@ export default defineConfig({
             { text: 'RAG', link: '/api/rag' },
             { text: 'Memory', link: '/api/memory' },
             { text: 'Config', link: '/api/config' },
+            { text: 'Incidents', link: '/api/incidents' },
             { text: 'Health', link: '/api/health' },
           ],
         },
@@ -94,7 +103,7 @@ export default defineConfig({
     },
 
     socialLinks: [
-      { icon: 'github', link: 'https://github.com/Cognipeer/cgate' },
+      { icon: 'github', link: 'https://github.com/Cognipeer/cognipeer-console' },
     ],
 
     footer: {
@@ -111,6 +120,6 @@ export default defineConfig({
     ['meta', { name: 'theme-color', content: '#3eaf7c' }],
     ['meta', { name: 'og:type', content: 'website' }],
     ['meta', { name: 'og:locale', content: 'en' }],
-    ['meta', { name: 'og:site_name', content: 'Cognipeer Gateway Docs' }],
+    ['meta', { name: 'og:site_name', content: 'Cognipeer Console Docs' }],
   ],
 });
