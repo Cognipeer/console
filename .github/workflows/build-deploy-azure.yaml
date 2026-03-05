@@ -87,7 +87,7 @@ jobs:
       # --- AZURE: Password based auth -----
       - name: "[Azure] Login via OIDC"
         if: matrix.cloud == 'azure'
-        uses: azure/login@v1
+        uses: azure/login@v2
         with:
           creds: |
             {
