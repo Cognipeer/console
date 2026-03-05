@@ -99,7 +99,7 @@ const METRIC_UNITS: Record<string, string> = {
 const MODULE_LABELS: Record<string, string> = {
   models: 'Model Hub',
   inference: 'Model Monitoring',
-  guardrails: 'AI Governance',
+  guardrails: 'Guardrail',
   rag: 'Knowledge Engine',
 };
 

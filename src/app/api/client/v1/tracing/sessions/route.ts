@@ -128,6 +128,10 @@ const _POST = async (request: NextRequest) => {
             totalCachedInputTokens,
             totalBytesIn: payload.summary?.totalBytesIn || null,
             totalBytesOut: payload.summary?.totalBytesOut || null,
+            // OTel fields
+            traceId: typeof payload.traceId === 'string' ? payload.traceId : undefined,
+            rootSpanId: typeof payload.rootSpanId === 'string' ? payload.rootSpanId : undefined,
+            source: 'custom' as const,
         };
 
         const existing = await db.findAgentTracingSessionById(
@@ -245,6 +249,10 @@ const _POST = async (request: NextRequest) => {
                         bytesOut: event.bytesOut || null,
                         requestBytes: event.requestBytes || null,
                         responseBytes: event.responseBytes || null,
+                        // OTel fields
+                        traceId: typeof event.traceId === 'string' ? event.traceId : undefined,
+                        spanId: typeof event.spanId === 'string' ? event.spanId : undefined,
+                        parentSpanId: typeof event.parentSpanId === 'string' ? event.parentSpanId : undefined,
                     });
                 }
             }

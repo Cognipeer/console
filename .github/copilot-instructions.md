@@ -43,7 +43,9 @@ The database layer supports multi-tenancy with complete isolation:
 
 ```typescript
 // Location: src/lib/database/
-// - provider.interface.ts: Defines ITenant, IUser, IApiToken interfaces
+// - provider/contract.ts: Defines DatabaseProvider contract
+// - provider/types.base.ts: Core entity interfaces (ITenant, IUser, IApiToken, ...)
+// - provider.interface.ts: Backward-compatible re-export for older imports
 // - mongodb.provider.ts: Multi-tenant MongoDB implementation
 // - index.ts: Database factory with tenant switching
 
@@ -200,8 +202,9 @@ await sendEmail(email, 'welcome', { name, companyName, slug, licenseType });
 | `/api/client/v1/vector/providers/:providerKey/indexes/:externalId` | `PATCH` | Update index name/metadata. |
 | `/api/client/v1/vector/providers/:providerKey/indexes/:externalId` | `DELETE` | Delete an index and detach remote resources. |
 | `/api/client/v1/tracing/sessions` | `POST` | Ingest agent tracing session data (batch mode). Supports optional `threadId` for cross-agent correlation. |
+| `/api/client/v1/traces` | `POST` | Ingest OpenTelemetry OTLP/HTTP JSON traces. |
 | `/api/client/v1/tracing/sessions/stream/:sessionId/start` | `POST` | Start a streaming tracing session. Supports optional `threadId`. |
-| `/api/client/v1/tracing/sessions/stream/:sessionId/event` | `POST` | Send a streaming tracing event. |
+| `/api/client/v1/tracing/sessions/stream/:sessionId/events` | `POST` | Send a streaming tracing event. |
 | `/api/client/v1/tracing/sessions/stream/:sessionId/end` | `POST` | End a streaming tracing session. |
 
 - When adding new routes, keep the folder structure RESTful (`/client/v1/<domain>/<resource>/route.ts`). Expose only tenant-scoped data and sanitize logs via `sanitize` helpers as shown in existing handlers.
@@ -213,7 +216,7 @@ await sendEmail(email, 'welcome', { name, companyName, slug, licenseType });
 - Validate all required fields with clear 400 responses before invoking services.
 - Sanitize provider responses (e.g., trim large payloads) before logging with `logModelUsage` to protect sensitive data.
 - Include `request_id` in responses to help users correlate requests with usage logs. Reuse client-provided IDs when available.
-- Wrap runtime operations in `try/catch` and log errors with scoped messages (`console.error('[scope]', error)`), mirroring patterns in chat/embedding routes.
+- Wrap runtime operations in `try/catch` and log errors with scoped loggers (`createLogger('scope').error(...)`) while avoiding sensitive data.
 
 ## Project Structure
 
@@ -273,9 +276,10 @@ const db = await getDatabase();
 
 ### Adding New Database Methods
 
-1. Add method signature to `provider.interface.ts`
+1. Add method signature to `src/lib/database/provider/contract.ts`
 2. Implement in `mongodb.provider.ts`
-3. Can create additional providers (PostgreSQL, etc.) by implementing the interface
+3. Export/update related types in `src/lib/database/provider/types*.ts` when needed
+4. Can create additional providers (PostgreSQL, etc.) by implementing the contract
 
 ### Creating New Email Templates
 
@@ -447,7 +451,7 @@ Create users with different `licenseType` values and verify feature access.
 ## Getting Help
 
 - Check `policies.json` for available features and licenses
-- Review `provider.interface.ts` for database operations
+- Review `src/lib/database/provider/contract.ts` for database operations
 - Look at existing API routes for patterns
 - Mantine docs: https://mantine.dev/
 - Next.js docs: https://nextjs.org/docs

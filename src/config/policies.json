@@ -74,7 +74,9 @@
       "description": "Capture and inspect agent sessions and events",
       "endpoints": [
         "/api/tracing",
-        "/api/tracing/*"
+        "/api/tracing/*",
+        "/api/client/v1/traces",
+        "/api/client/v1/traces/*"
       ]
     },
     "VECTOR_STORE": {

@@ -163,6 +163,10 @@ const _POST = async (
                 bytesOut: event.bytesOut,
                 requestBytes: event.requestBytes,
                 responseBytes: event.responseBytes,
+                // OTel fields
+                traceId: typeof event.traceId === 'string' ? event.traceId : undefined,
+                spanId: typeof event.spanId === 'string' ? event.spanId : undefined,
+                parentSpanId: typeof event.parentSpanId === 'string' ? event.parentSpanId : undefined,
             });
 
             await bgDb.updateAgentTracingSession(sessionId, {

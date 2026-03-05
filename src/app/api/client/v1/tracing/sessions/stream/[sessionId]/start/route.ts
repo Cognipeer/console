@@ -114,6 +114,10 @@ const _POST = async (
             totalCachedInputTokens: 0,
             totalBytesIn: undefined,
             totalBytesOut: undefined,
+            // OTel fields
+            traceId: typeof payload.traceId === 'string' ? payload.traceId : undefined,
+            rootSpanId: typeof payload.rootSpanId === 'string' ? payload.rootSpanId : undefined,
+            source: 'custom' as const,
         };
 
         // Fire-and-forget: persist session in background

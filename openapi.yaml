@@ -719,12 +719,60 @@ paths:
                     type: boolean
                   sessionId:
                     type: string
+                  eventsStored:
+                    type: integer
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /traces:
+    post:
+      tags:
+        - Tracing
+      summary: Ingest OTLP traces
+      description: |
+        Ingest OpenTelemetry OTLP/HTTP JSON traces and map them into
+        Cognipeer tracing sessions/events.
+      operationId: ingestOtlpTraces
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OtlpTraceRequest'
+      responses:
+        '200':
+          description: OTLP traces ingested
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  sessionsIngested:
+                    type: integer
+                  spansProcessed:
+                    type: integer
+                  eventsStored:
+                    type: integer
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          description: Payload too large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -1884,6 +1932,15 @@ components:
             Optional thread identifier that groups multiple sessions
             (potentially from different agents) into a single logical
             workflow or conversation thread.
+        traceId:
+          type: string
+          description: W3C trace identifier (32 hex chars)
+        rootSpanId:
+          type: string
+          description: Root span identifier for the session
+        source:
+          type: string
+          enum: [custom, otlp]
         agent:
           type: object
           properties:
@@ -1947,6 +2004,12 @@ components:
           type: string
         model:
           type: string
+        traceId:
+          type: string
+        spanId:
+          type: string
+        parentSpanId:
+          type: string
         modelName:
           type: string
         toolName:
@@ -1967,6 +2030,65 @@ components:
           type: object
         usage:
           type: object
+
+    OtlpTraceRequest:
+      type: object
+      required:
+        - resourceSpans
+      properties:
+        resourceSpans:
+          type: array
+          items:
+            type: object
+            properties:
+              resource:
+                type: object
+                properties:
+                  attributes:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        key:
+                          type: string
+                        value:
+                          type: object
+                          additionalProperties: true
+              scopeSpans:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    scope:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                        version:
+                          type: string
+                    spans:
+                      type: array
+                      items:
+                        type: object
+                        required: [traceId, spanId]
+                        properties:
+                          traceId:
+                            type: string
+                          spanId:
+                            type: string
+                          parentSpanId:
+                            type: string
+                          name:
+                            type: string
+                          startTimeUnixNano:
+                            type: string
+                          endTimeUnixNano:
+                            type: string
+                          attributes:
+                            type: array
+                            items:
+                              type: object
+                              additionalProperties: true
 
     Error:
       type: object

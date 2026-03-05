@@ -19,6 +19,9 @@ The tracing system records and visualizes AI agent execution sessions, including
 interface IAgentTracingSession {
   sessionId: string;       // Unique session identifier
   threadId?: string;       // Cross-session correlation
+  traceId?: string;        // W3C trace identifier
+  rootSpanId?: string;     // Root span for the session
+  source?: 'custom' | 'otlp';
   agentName: string;       // Agent identifier
   agentLabel?: string;     // Human-friendly label
   summary?: string;        // Session summary
@@ -38,6 +41,9 @@ interface IAgentTracingEvent {
   type: string;           // llm_call, tool_call, retrieval, etc.
   label?: string;         // Step description
   sequence: number;       // Ordering within session
+  traceId?: string;       // Correlates to session trace
+  spanId?: string;        // Unique span for this event
+  parentSpanId?: string;  // Parent span (hierarchy)
   actor?: string;         // Agent/tool name
   sections: EventSection[];
   inputTokens?: number;
@@ -60,7 +66,9 @@ Authorization: Bearer <token>
 {
   "sessionId": "sess-123",
   "threadId": "thread-456",
-  "agentName": "research-agent",
+  "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "rootSpanId": "00f067aa0ba902b7",
+  "agent": { "name": "research-agent", "version": "1.0.0", "model": "gpt-4" },
   "status": "completed",
   "durationMs": 3500,
   "events": [
@@ -83,7 +91,7 @@ For long-running sessions, stream events as they happen:
 
 ```
 POST /api/client/v1/tracing/sessions/stream/:sessionId/start
-POST /api/client/v1/tracing/sessions/stream/:sessionId/event
+POST /api/client/v1/tracing/sessions/stream/:sessionId/events
 POST /api/client/v1/tracing/sessions/stream/:sessionId/end
 ```
 
@@ -95,6 +103,28 @@ POST /api/client/v1/tracing/sessions/stream/:sessionId/end
   "threadId": "thread-456"
 }
 ```
+
+### OTLP Mode
+
+For OpenTelemetry-native producers (OTLP/HTTP JSON):
+
+```
+POST /api/client/v1/traces
+```
+
+This endpoint accepts `ExportTraceServiceRequest` payloads and maps spans into sessions/events automatically.
+
+## Correlation Fields
+
+Use these fields to connect traces across tools and dashboards:
+
+| Field | Scope | Description |
+|-------|-------|-------------|
+| `traceId` | Session + Event | End-to-end trace correlation ID |
+| `rootSpanId` | Session | Root span for the full session |
+| `spanId` | Event | Span generated for each event |
+| `parentSpanId` | Event | Parent-child span linkage |
+| `source` | Session | Ingestion mode (`custom` or `otlp`) |
 
 **Send an event:**
 

@@ -113,7 +113,7 @@ const METRIC_COLORS: Record<string, string> = {
 const MODULE_LABELS: Record<string, string> = {
   models: 'Model Hub',
   inference: 'Model Monitoring',
-  guardrails: 'AI Governance',
+  guardrails: 'Guardrail',
   rag: 'Knowledge Engine',
   mcp: 'MCP Servers',
 };
@@ -330,7 +330,7 @@ export default function AlertsPage() {
           { label: t('allModules'), value: 'all' },
           { label: 'Model Hub', value: 'models' },
           { label: 'Model Monitoring', value: 'inference' },
-          { label: 'AI Governance', value: 'guardrails' },
+          { label: 'Guardrail', value: 'guardrails' },
           { label: 'Knowledge Engine', value: 'rag' },
           { label: 'MCP Servers', value: 'mcp' },
         ]}
