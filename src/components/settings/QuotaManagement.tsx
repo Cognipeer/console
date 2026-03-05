@@ -370,20 +370,29 @@ export default function QuotaManagement({ projectId }: QuotaManagementProps) {
             <TextInput
               label="Label"
               value={formState.label}
-              onChange={(e) => setFormState((s) => ({ ...s, label: e.currentTarget.value }))}
+              onChange={(e) => {
+                const value = e.currentTarget.value;
+                setFormState((s) => ({ ...s, label: value }));
+              }}
               w={420}
             />
             <Switch
               label="Enabled"
               checked={formState.enabled}
-              onChange={(e) => setFormState((s) => ({ ...s, enabled: e.currentTarget.checked }))}
+              onChange={(e) => {
+                const checked = e.currentTarget.checked;
+                setFormState((s) => ({ ...s, enabled: checked }));
+              }}
             />
           </Group>
 
           <TextInput
             label="Description"
             value={formState.description || ''}
-            onChange={(e) => setFormState((s) => ({ ...s, description: e.currentTarget.value }))}
+            onChange={(e) => {
+              const value = e.currentTarget.value;
+              setFormState((s) => ({ ...s, description: value }));
+            }}
             mb="md"
           />
 
