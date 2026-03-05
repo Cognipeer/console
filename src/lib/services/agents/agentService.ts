@@ -389,7 +389,15 @@ export async function publishAgent(
     const agent = await db.findAgentById(agentId);
     if (!agent) throw new Error(`Agent "${agentId}" not found`);
 
-    const nextVersion = (agent.latestVersion ?? 0) + 1;
+    // Keep versioning monotonic even if agent.latestVersion was not persisted
+    // correctly in older SQLite writes.
+    const latestPublishedSnapshot = await db.findLatestAgentVersion(String(agent._id));
+    const latestKnownVersion = Math.max(
+      agent.latestVersion ?? 0,
+      agent.publishedVersion ?? 0,
+      latestPublishedSnapshot?.version ?? 0,
+    );
+    const nextVersion = latestKnownVersion + 1;
 
     const version = await db.createAgentVersion({
         tenantId: agent.tenantId,

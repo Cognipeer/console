@@ -22,9 +22,9 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       db.prepare(`
         INSERT INTO ${TABLES.agents}
         (id, tenantId, projectId, key, name, description, config, status,
-         metadata, createdBy, updatedBy, createdAt, updatedAt)
+         publishedVersion, latestVersion, metadata, createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @key, @name, @description, @config, @status,
-         @metadata, @createdBy, @updatedBy, @createdAt, @updatedAt)
+         @publishedVersion, @latestVersion, @metadata, @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
         tenantId: agent.tenantId,
@@ -34,6 +34,8 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         description: agent.description ?? null,
         config: this.toJson(agent.config),
         status: agent.status,
+        publishedVersion: agent.publishedVersion ?? null,
+        latestVersion: agent.latestVersion ?? null,
         metadata: this.toJson(agent.metadata ?? {}),
         createdBy: agent.createdBy,
         updatedBy: agent.updatedBy ?? null,
@@ -57,6 +59,8 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       if (data.description !== undefined) { sets.push('description = @description'); params.description = data.description; }
       if (data.config !== undefined) { sets.push('config = @config'); params.config = this.toJson(data.config); }
       if (data.status !== undefined) { sets.push('status = @status'); params.status = data.status; }
+      if (data.publishedVersion !== undefined) { sets.push('publishedVersion = @publishedVersion'); params.publishedVersion = data.publishedVersion; }
+      if (data.latestVersion !== undefined) { sets.push('latestVersion = @latestVersion'); params.latestVersion = data.latestVersion; }
       if (data.metadata !== undefined) { sets.push('metadata = @metadata'); params.metadata = this.toJson(data.metadata); }
       if (data.updatedBy !== undefined) { sets.push('updatedBy = @updatedBy'); params.updatedBy = data.updatedBy; }
       if (data.projectId !== undefined) { sets.push('projectId = @projectId'); params.projectId = data.projectId; }
@@ -273,6 +277,14 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         description: row.description ? String(row.description) : undefined,
         config: this.parseJson(row.config, { modelKey: '' }),
         status: String(row.status) as IAgent['status'],
+        publishedVersion:
+          row.publishedVersion === null || row.publishedVersion === undefined
+            ? null
+            : Number(row.publishedVersion),
+        latestVersion:
+          row.latestVersion === null || row.latestVersion === undefined
+            ? undefined
+            : Number(row.latestVersion),
         metadata: row.metadata ? this.parseJson(row.metadata, {}) : undefined,
         createdBy: String(row.createdBy),
         updatedBy: row.updatedBy ? String(row.updatedBy) : undefined,

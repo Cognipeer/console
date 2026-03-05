@@ -122,9 +122,69 @@ export class SQLiteProviderBase {
     db.pragma('journal_mode = WAL');
     db.pragma('foreign_keys = ON');
     db.exec(TENANT_SCHEMA_SQL);
+    this.applyTenantMigrations(db);
 
     this.tenantDbCache.set(tenantDbName, db);
     this.tenantDb = db;
+  }
+
+  private applyTenantMigrations(db: Database.Database): void {
+    this.ensureTableColumn(
+      db,
+      TABLES.quotaPolicies,
+      'scopeId',
+      'scopeId TEXT',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.quotaPolicies,
+      'priority',
+      'priority INTEGER NOT NULL DEFAULT 100',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.quotaPolicies,
+      'enabled',
+      'enabled INTEGER NOT NULL DEFAULT 1',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.quotaPolicies,
+      'label',
+      'label TEXT',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.quotaPolicies,
+      'description',
+      'description TEXT',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.quotaPolicies,
+      'createdBy',
+      'createdBy TEXT',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.quotaPolicies,
+      'updatedBy',
+      'updatedBy TEXT',
+    );
+  }
+
+  private ensureTableColumn(
+    db: Database.Database,
+    tableName: string,
+    columnName: string,
+    columnDefinition: string,
+  ): void {
+    const columns = db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name?: unknown }>;
+    const hasColumn = columns.some((column) => String(column.name) === columnName);
+    if (hasColumn) return;
+
+    db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnDefinition}`);
+    logger.info('SQLite schema migration applied', { tableName, columnName });
   }
 
   // ── Public helpers ────────────────────────────────────────────────
