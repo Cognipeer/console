@@ -1,0 +1,186 @@
+name: Cognipeer Console Build Artifact
+
+on:
+  push:
+    branches:
+      - main
+      - production
+      - infra/azure-gh-action
+
+  workflow_dispatch:
+    inputs:
+      cloud_provider:
+        description: "Target cloud provider"
+        required: false
+        default: "both"    # su anki asamada hem aws hem azure taskları beraber calısacak
+        type: choice
+        options:
+          - both
+          - aws
+          - azure
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  # ── AWS ───────────────────────────────────────────────────────────────────
+  AWS_REGION: eu-central-1
+  AWS_ROLE_ARN: arn:aws:iam::339713139704:role/GitHubActionsECRPushRole
+  ECR_REPOSITORY: cognipeer-cgate
+
+  # ── Azure ─────────────────────────────────────────────────────────────────
+  ACR_LOGIN_SERVER: cognipeerconsole.azurecr.io
+  ACR_REPOSITORY: cognipeerconsole
+
+  # ── Shared ────────────────────────────────────────────────────────────────
+  HELM_VERSION: v3.15.2
+  HELMFILE_VERSION: v0.162.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false   # birinin patlaması diğerini durdurmasın
+      matrix:            # ["aws] ,["azure"] veya ["aws","azure"] array'ini üretir.
+        cloud:
+          ${{ fromJSON(
+            (inputs.cloud_provider == 'aws' || inputs.cloud_provider == 'azure')
+              && format('["{0}"]', inputs.cloud_provider)
+              || '["aws","azure"]'
+          ) }}
+
+    outputs:
+      image_tag: ${{ steps.vars.outputs.tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Set image tag (shared) ────────────────────────────────────────────
+      - name: Set image tag
+        id: vars
+        run: |
+          if [[ "${GITHUB_REF_NAME}" == "main" ]]; then
+            echo "tag=dev" >> $GITHUB_OUTPUT
+          elif [[ "${GITHUB_REF_NAME}" == "production" ]]; then
+            echo "tag=production" >> $GITHUB_OUTPUT
+          else
+            echo "tag=dev-${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+          fi
+
+      # ── AWS: OIDC auth + ECR login ────────────────────────────────────────
+      - name: "[AWS] Configure credentials (OIDC)"
+        if: matrix.cloud == 'aws'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: "[AWS] Login to Amazon ECR"
+        if: matrix.cloud == 'aws'
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # --- AZURE: Password based auth -----
+      - name: "[Azure] Login via OIDC"
+        if: matrix.cloud == 'azure'
+        uses: azure/login@v1
+        with:
+          creds: |
+            {
+              "clientId": "${{ secrets.AZURE_CLIENT_ID }}",
+              "clientSecret": "${{ secrets.AZURE_CLIENT_SECRET }}",
+              "tenantId": "${{ secrets.AZURE_TENANT_ID }}",
+              "subscriptionId": "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+            }
+
+      - name: "[Azure] Login to Azure Container Registry"
+        if: matrix.cloud == 'azure'
+        run: az acr login --name ${{ env.ACR_LOGIN_SERVER }}
+
+      # ── Resolve full image URI ────────────────────────────────────────────
+      - name: Resolve image URI
+        id: image_uri
+        run: |
+          TAG="${{ steps.vars.outputs.tag }}"
+          if [[ "${{ matrix.cloud }}" == "aws" ]]; then
+            echo "uri=${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${TAG}" >> $GITHUB_OUTPUT
+          else
+            echo "uri=${{ env.ACR_LOGIN_SERVER }}/${{ env.ACR_REPOSITORY }}:${TAG}" >> $GITHUB_OUTPUT
+          fi
+
+          if [[ "${GITHUB_REF_NAME}" == "main" ]]; then
+            echo "tag=dev" >> $GITHUB_OUTPUT
+          elif [[ "${GITHUB_REF_NAME}" == "production" ]]; then
+            echo "tag=production" >> $GITHUB_OUTPUT
+          else
+            echo "tag=dev-${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+          fi
+
+      # ── Build & Push ──────────────────────────────────────────────────────
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: "Build & Push (${{ matrix.cloud }})"
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Next.js inlines NEXT_PUBLIC_* at build time.
+          # Add GitHub secrets for environment-specific values.
+          tags: ${{ steps.image_uri.outputs.uri }}
+
+# ─────────────────────────────────────────────────────────────────────────────
+  deploy:
+    #runs-on: self-hosted-runner-${{ matrix.cloud }}                      ## runner ismini konuşalım
+    runs-on: self-hosted-runner-cgate-${{ matrix.cloud }}       ## runner ismini konuşalım
+    needs: build
+
+    strategy:
+      fail-fast: false
+      matrix:
+        cloud:
+          ${{ fromJSON(
+            (inputs.cloud_provider == 'aws' || inputs.cloud_provider == 'azure')
+              && format('["{0}"]', inputs.cloud_provider)
+              || '["aws","azure"]'
+          ) }}
+
+    env:
+      TAG: ${{ needs.build.outputs.image_tag }}
+      CLOUD: ${{ matrix.cloud }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Install tooling (shared) ──────────────────────────────────────────
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Install Helmfile
+        run: |
+          curl -fsSL -o /tmp/helmfile.tgz \
+            https://github.com/helmfile/helmfile/releases/download/${HELMFILE_VERSION}/helmfile_${HELMFILE_VERSION#v}_linux_amd64.tar.gz
+          sudo tar -C /usr/local/bin -xzf /tmp/helmfile.tgz helmfile
+          helmfile --version
+
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.33.2'
+
+      # ── Deploy (shared) ───────────────────────────────────────────────────
+      - name: "Apply changes (${{ matrix.cloud }})"
+        run: |
+          pushd deploy/k8s
+            helmfile sync -e "${TAG}" --set cloud="${CLOUD}" --wait
+            kubectl rollout restart deployment/cgate -n cgate-${TAG}
+          popd
