@@ -5,6 +5,13 @@ environments:
   production:
     values:
       - values/production.yaml
+
+  dev-azure:
+    values:
+      - values/dev-azure.yaml
+  production-azure:
+    values:
+      - values/production-azure.yaml
 ---
 releases:
   - name: cgate

@@ -181,6 +181,6 @@ jobs:
       - name: "Apply changes (${{ matrix.cloud }})"
         run: |
           pushd deploy/k8s
-            helmfile sync -e "${TAG}" --set cloud="${CLOUD}" --wait
+            helmfile sync -e "${TAG}-${{ matrix.cloud }}" --set cloud="${CLOUD}" --wait
             kubectl rollout restart deployment/cgate -n cgate-${TAG}
           popd
