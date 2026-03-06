@@ -38,7 +38,8 @@ Tokens are created in the dashboard under **Settings → API Tokens**.
 | [MCP Message](./mcp) | `/mcp/:serverKey/message` | POST |
 | [Vector Providers](./vector) | `/vector/providers` | GET, POST |
 | [Vector Indexes](./vector) | `/vector/providers/:key/indexes` | GET, POST, PATCH, DELETE |
-| [Tracing](./tracing) | `/tracing/sessions` | POST |
+| [Tracing (Custom)](./tracing) | `/tracing/sessions` | POST |
+| [Tracing (OTLP)](./tracing) | `/traces` | POST |
 | [Files](./files) | `/files/buckets` | GET, POST |
 | [Guardrails](./guardrails) | `/guardrails/evaluate` | POST |
 | [Prompts](./prompts) | `/prompts` | GET, POST |

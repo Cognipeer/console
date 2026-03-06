@@ -43,7 +43,7 @@ export const en = {
     docs: 'Docs',
     inferenceMonitoring: 'Model Monitoring',
     inferenceMonitoringDescription: 'Monitor vLLM and inference servers',
-    guardrails: 'AI Governance',
+    guardrails: 'Guardrail',
     guardrailsDescription: 'Safety policies for AI services',
     alerts: 'Alerts & Incidents',
     alertsDescription: 'Threshold alerts for quality, cost & latency',
@@ -102,7 +102,7 @@ export const en = {
     docs: 'Docs',
     'inference-monitoring': 'Model Monitoring',
     servers: 'Servers',
-    guardrails: 'AI Governance',
+    guardrails: 'Guardrail',
     alerts: 'Alerts & Incidents',
     history: 'History',
     memory: 'Agent Memory',
@@ -669,7 +669,7 @@ export const en = {
         description: 'Monitor inference server health and performance.',
       },
       guardrails: {
-        title: 'AI Governance',
+        title: 'Guardrail',
         description: 'Define safety policies against PII, harmful content, and prompt injection.',
       },
       memory: {

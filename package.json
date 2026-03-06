@@ -59,6 +59,7 @@
     "postcss-simple-vars": "^7.0.1",
     "react": "19.1.0",
     "react-dom": "19.1.0",
+    "react-json-view-lite": "^2.5.0",
     "react-markdown": "^10.1.0",
     "recharts": "^3.7.0",
     "remark-gfm": "^4.0.1",

@@ -93,8 +93,15 @@ CREATE TABLE IF NOT EXISTS quota_policies (
   tenantId TEXT NOT NULL,
   projectId TEXT,
   scope TEXT NOT NULL,
+  scopeId TEXT,
   domain TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 100,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  label TEXT,
+  description TEXT,
   limits TEXT NOT NULL DEFAULT '{}',
+  createdBy TEXT,
+  updatedBy TEXT,
   createdAt TEXT NOT NULL,
   updatedAt TEXT NOT NULL
 );

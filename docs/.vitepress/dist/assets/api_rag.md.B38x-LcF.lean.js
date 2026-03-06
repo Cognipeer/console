@@ -1,1 +1,0 @@
-import{_ as i,o as a,c as t,ag as e}from"./chunks/framework.CN92kLqn.js";const E=JSON.parse('{"title":"RAG API","description":"","frontmatter":{},"headers":[],"relativePath":"api/rag.md","filePath":"api/rag.md"}'),n={name:"api/rag.md"};function l(h,s,p,k,d,o){return a(),t("div",null,[...s[0]||(s[0]=[e("",37)])])}const u=i(n,[["render",l]]);export{E as __pageData,u as default};
