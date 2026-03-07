@@ -22,8 +22,8 @@ vi.mock('@/lib/utils/dashboardDateFilter', () => ({
   parseDashboardDateFilterFromSearchParams: vi.fn().mockReturnValue({ from: null, to: null }),
 }));
 
-import { GET as getModelLogs } from '@/app/api/models/[id]/logs/route';
-import { GET as getModelUsage } from '@/app/api/models/[id]/usage/route';
+import { GET as getModelLogs } from '@/server/api/routes/models/[id]/logs/route';
+import { GET as getModelUsage } from '@/server/api/routes/models/[id]/usage/route';
 import {
   getModelById,
   listUsageLogs,

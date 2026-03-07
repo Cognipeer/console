@@ -21,9 +21,9 @@ vi.mock('@/lib/services/memory/memoryService', () => ({
   recallForChat: vi.fn(),
 }));
 
-import { POST as ragQueryPOST } from '@/app/api/client/v1/rag/modules/[key]/query/route';
-import { GET as ragModulesGET } from '@/app/api/client/v1/rag/modules/route';
-import { POST as memoryRecallPOST } from '@/app/api/client/v1/memory/stores/[storeKey]/recall/route';
+import { POST as ragQueryPOST } from '@/server/api/routes/client/v1/rag/modules/[key]/query/route';
+import { GET as ragModulesGET } from '@/server/api/routes/client/v1/rag/modules/route';
+import { POST as memoryRecallPOST } from '@/server/api/routes/client/v1/memory/stores/[storeKey]/recall/route';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { queryRag, listRagModules } from '@/lib/services/rag/ragService';
 import { recallForChat } from '@/lib/services/memory/memoryService';

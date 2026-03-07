@@ -21,7 +21,7 @@ vi.mock('@/lib/services/inferenceMonitoring/utils', () => ({
   }),
 }));
 
-import { GET, PUT, DELETE } from '@/app/api/inference-monitoring/servers/[serverKey]/route';
+import { GET, PUT, DELETE } from '@/server/api/routes/inference-monitoring/servers/[serverKey]/route';
 import { InferenceMonitoringService } from '@/lib/services/inferenceMonitoring';
 
 const mockGetServerByKey = InferenceMonitoringService.getServerByKey as ReturnType<typeof vi.fn>;

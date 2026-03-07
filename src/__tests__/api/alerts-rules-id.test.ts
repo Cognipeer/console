@@ -15,7 +15,7 @@ import {
   PUT,
   DELETE,
   PATCH,
-} from '@/app/api/alerts/rules/[ruleId]/route';
+} from '@/server/api/routes/alerts/rules/[ruleId]/route';
 import { AlertService } from '@/lib/services/alerts';
 
 const mockGetRule = AlertService.getRule as ReturnType<typeof vi.fn>;

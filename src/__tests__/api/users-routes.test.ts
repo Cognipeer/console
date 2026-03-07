@@ -10,7 +10,7 @@ vi.mock('@/lib/database', () => ({
   getDatabase: vi.fn().mockResolvedValue(mockDb),
 }));
 
-import { GET } from '@/app/api/users/route';
+import { GET } from '@/server/api/routes/users/route';
 
 const ADMIN_HEADERS = {
   'x-tenant-db-name': 'tenant_acme',

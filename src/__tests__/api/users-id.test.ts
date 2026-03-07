@@ -11,7 +11,7 @@ vi.mock('@/lib/database', () => ({
   getDatabase: vi.fn().mockResolvedValue(mockDb),
 }));
 
-import { DELETE } from '@/app/api/users/[id]/route';
+import { DELETE } from '@/server/api/routes/users/[id]/route';
 
 const mockParams = { params: Promise.resolve({ id: 'user-99' }) };
 

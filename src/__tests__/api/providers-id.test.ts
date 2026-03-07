@@ -18,7 +18,7 @@ vi.mock('@/lib/services/projects/projectContext', () => ({
   },
 }));
 
-import { GET, PATCH, DELETE } from '@/app/api/providers/[id]/route';
+import { GET, PATCH, DELETE } from '@/server/api/routes/providers/[id]/route';
 import { getProviderConfigById, updateProviderConfig, deleteProviderConfig } from '@/lib/services/providers/providerService';
 import { requireProjectContext } from '@/lib/services/projects/projectContext';
 

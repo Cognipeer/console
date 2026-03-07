@@ -31,7 +31,7 @@ vi.mock('@/lib/quota/quotaGuard', () => ({
   checkBudget: vi.fn().mockResolvedValue({ allowed: true }),
 }));
 
-import { POST } from '@/app/api/client/v1/embeddings/route';
+import { POST } from '@/server/api/routes/client/v1/embeddings/route';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { handleEmbeddingRequest } from '@/lib/services/models/inferenceService';
 import { getModelByKey } from '@/lib/services/models/modelService';

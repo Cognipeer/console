@@ -13,7 +13,8 @@ const tealPalette: MantineColorsTuple = [
   '#0a706b',
 ];
 
-const sharedFontStack = 'var(--font-lexend), "Lexend Deca", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+const sharedFontStack =
+  '"Avenir Next", "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, Helvetica, Arial, sans-serif';
 
 const componentDefaults: MantineThemeOverride['components'] = {
   Button: {

@@ -16,7 +16,7 @@ vi.mock('@/lib/services/projects/projectContext', () => ({
   },
 }));
 
-import { POST } from '@/app/api/guardrails/evaluate/route';
+import { POST } from '@/server/api/routes/guardrails/evaluate/route';
 import { evaluateGuardrail } from '@/lib/services/guardrail';
 import { requireProjectContext } from '@/lib/services/projects/projectContext';
 

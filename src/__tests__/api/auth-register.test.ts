@@ -26,7 +26,7 @@ vi.mock('@/lib/services/projects/projectService', () => ({
   ensureDefaultProject: vi.fn().mockResolvedValue({ _id: 'proj-1', key: '__default__' }),
 }));
 
-import { POST } from '@/app/api/auth/register/route';
+import { POST } from '@/server/api/routes/auth/register/route';
 import { getDatabase } from '@/lib/database';
 import bcrypt from 'bcryptjs';
 import { TokenManager } from '@/lib/license/token-manager';

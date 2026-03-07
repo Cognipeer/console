@@ -14,7 +14,7 @@ vi.mock('@/lib/database', () => ({
   getDatabase: vi.fn().mockResolvedValue(mockDb),
 }));
 
-import { GET, POST, DELETE, PATCH } from '@/app/api/projects/[projectId]/members/route';
+import { GET, POST, DELETE, PATCH } from '@/server/api/routes/projects/[projectId]/members/route';
 
 const mockProject = { _id: 'proj-1', tenantId: 'tenant-id-1', name: 'Test Project' };
 const mockOwner = { _id: 'user-1', role: 'owner', tenantId: 'tenant-id-1', projectIds: ['proj-1'] };

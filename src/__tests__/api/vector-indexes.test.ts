@@ -24,7 +24,7 @@ vi.mock('@/lib/quota/quotaGuard', () => ({
   checkResourceQuota: vi.fn().mockResolvedValue({ allowed: true } as any),
 }));
 
-import { GET, POST } from '@/app/api/vector/indexes/route';
+import { GET, POST } from '@/server/api/routes/vector/indexes/route';
 import { listVectorIndexes, createVectorIndex } from '@/lib/services/vector';
 import { requireProjectContext } from '@/lib/services/projects/projectContext';
 import { checkRateLimit, checkResourceQuota } from '@/lib/quota/quotaGuard';

@@ -30,8 +30,8 @@ vi.mock('@/lib/services/projects/projectContext', () => {
   return { requireProjectContext: vi.fn(), ProjectContextError };
 });
 
-import { GET as getModel, PUT as putModel, DELETE as deleteModelRoute } from '@/app/api/models/[id]/route';
-import { GET as getGuardrailRoute, PATCH as patchGuardrail, DELETE as deleteGuardrailRoute } from '@/app/api/guardrails/[id]/route';
+import { GET as getModel, PUT as putModel, DELETE as deleteModelRoute } from '@/server/api/routes/models/[id]/route';
+import { GET as getGuardrailRoute, PATCH as patchGuardrail, DELETE as deleteGuardrailRoute } from '@/server/api/routes/guardrails/[id]/route';
 import { getModelById, updateModel, deleteModel } from '@/lib/services/models/modelService';
 import { getGuardrail, updateGuardrail, deleteGuardrail } from '@/lib/services/guardrail';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';

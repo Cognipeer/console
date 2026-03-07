@@ -21,8 +21,8 @@ vi.mock('@/lib/services/projects/projectContext', () => {
   return { requireProjectContext: vi.fn(), ProjectContextError };
 });
 
-import { GET as getSessions } from '@/app/api/tracing/sessions/route';
-import { GET as getThreads } from '@/app/api/tracing/threads/route';
+import { GET as getSessions } from '@/server/api/routes/tracing/sessions/route';
+import { GET as getThreads } from '@/server/api/routes/tracing/threads/route';
 import { AgentTracingService } from '@/lib/services/agentTracing';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
 

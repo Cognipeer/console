@@ -7,7 +7,7 @@ vi.mock('@/lib/services/rag/ragService', () => ({
   ingestFile: vi.fn(),
 }));
 
-import { GET, POST } from '@/app/api/rag/modules/[key]/documents/route';
+import { GET, POST } from '@/server/api/routes/rag/modules/[key]/documents/route';
 import { listRagDocuments, ingestDocument, ingestFile } from '@/lib/services/rag/ragService';
 
 const mockListRagDocuments = vi.mocked(listRagDocuments);

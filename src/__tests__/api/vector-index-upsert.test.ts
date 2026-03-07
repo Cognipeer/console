@@ -33,7 +33,7 @@ vi.mock('@/lib/quota/quotaGuard', () => ({
   checkRateLimit: vi.fn().mockResolvedValue({ allowed: true } as any),
 }));
 
-import { POST } from '@/app/api/vector/indexes/[externalId]/upsert/route';
+import { POST } from '@/server/api/routes/vector/indexes/[externalId]/upsert/route';
 import { upsertVectors } from '@/lib/services/vector';
 import { requireProjectContext } from '@/lib/services/projects/projectContext';
 import { checkPerRequestLimits, checkRateLimit } from '@/lib/quota/quotaGuard';

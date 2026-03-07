@@ -7,7 +7,7 @@ vi.mock('@/lib/services/rag/ragService', () => ({
   reingestDocument: vi.fn(),
 }));
 
-import { GET, DELETE, POST } from '@/app/api/rag/modules/[key]/documents/[documentId]/route';
+import { GET, DELETE, POST } from '@/server/api/routes/rag/modules/[key]/documents/[documentId]/route';
 import { deleteRagDocument, reingestDocument } from '@/lib/services/rag/ragService';
 
 // getRagDocument is exported as getRagDocumentService in the module, imported as getRagDocument

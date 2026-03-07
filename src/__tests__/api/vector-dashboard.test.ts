@@ -22,7 +22,7 @@ vi.mock('@/lib/utils/dashboardDateFilter', () => ({
   isDateInDashboardRange: vi.fn().mockReturnValue(true),
 }));
 
-import { GET } from '@/app/api/vector/dashboard/route';
+import { GET } from '@/server/api/routes/vector/dashboard/route';
 import { listVectorProviders, listVectorIndexes } from '@/lib/services/vector/vectorService';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
 

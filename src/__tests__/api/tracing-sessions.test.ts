@@ -91,7 +91,7 @@ describe('POST /api/client/v1/tracing/sessions', () => {
   // ── Auth & Validation ────────────────────────────────────────────────────────
 
   it('returns 413 when content-length exceeds limit', async () => {
-    const { POST } = await import('@/app/api/client/v1/tracing/sessions/route');
+    const { POST } = await import('@/server/api/routes/client/v1/tracing/sessions/route');
 
     const req = buildRequest({ sessionId: 's1' }, { contentLength: 999_999_999 });
     const res = await POST(req);
@@ -102,7 +102,7 @@ describe('POST /api/client/v1/tracing/sessions', () => {
   });
 
   it('returns 401 when requireApiToken throws ApiTokenAuthError', async () => {
-    const { POST } = await import('@/app/api/client/v1/tracing/sessions/route');
+    const { POST } = await import('@/server/api/routes/client/v1/tracing/sessions/route');
 
     (requireApiToken as ReturnType<typeof vi.fn>).mockRejectedValue(
       new ApiTokenAuthError('Unauthorized', 401),
@@ -115,7 +115,7 @@ describe('POST /api/client/v1/tracing/sessions', () => {
   });
 
   it('returns 400 when sessionId is missing', async () => {
-    const { POST } = await import('@/app/api/client/v1/tracing/sessions/route');
+    const { POST } = await import('@/server/api/routes/client/v1/tracing/sessions/route');
 
     const req = buildRequest({ status: 'completed' }); // no sessionId
     const res = await POST(req);
@@ -128,7 +128,7 @@ describe('POST /api/client/v1/tracing/sessions', () => {
   // ── Quota checks ─────────────────────────────────────────────────────────────
 
   it('returns 429 when per-request limits are exceeded', async () => {
-    const { POST } = await import('@/app/api/client/v1/tracing/sessions/route');
+    const { POST } = await import('@/server/api/routes/client/v1/tracing/sessions/route');
 
     (checkPerRequestLimits as ReturnType<typeof vi.fn>).mockResolvedValue(QUOTA_FAIL);
 
@@ -141,7 +141,7 @@ describe('POST /api/client/v1/tracing/sessions', () => {
   });
 
   it('returns 429 when rate limit is exceeded', async () => {
-    const { POST } = await import('@/app/api/client/v1/tracing/sessions/route');
+    const { POST } = await import('@/server/api/routes/client/v1/tracing/sessions/route');
 
     (checkRateLimit as ReturnType<typeof vi.fn>).mockResolvedValue(QUOTA_FAIL);
 
@@ -154,7 +154,7 @@ describe('POST /api/client/v1/tracing/sessions', () => {
   // ── Happy path ───────────────────────────────────────────────────────────────
 
   it('returns 200 with sessionId for minimal valid payload', async () => {
-    const { POST } = await import('@/app/api/client/v1/tracing/sessions/route');
+    const { POST } = await import('@/server/api/routes/client/v1/tracing/sessions/route');
 
     const req = buildRequest({ sessionId: 'sess-minimal', status: 'completed' });
     const res = await POST(req);
@@ -167,7 +167,7 @@ describe('POST /api/client/v1/tracing/sessions', () => {
   });
 
   it('calls createAgentTracingSession when session is new', async () => {
-    const { POST } = await import('@/app/api/client/v1/tracing/sessions/route');
+    const { POST } = await import('@/server/api/routes/client/v1/tracing/sessions/route');
     db.findAgentTracingSessionById.mockResolvedValue(null); // new session
 
     const req = buildRequest({
@@ -186,7 +186,7 @@ describe('POST /api/client/v1/tracing/sessions', () => {
   });
 
   it('calls updateAgentTracingSession when session already exists', async () => {
-    const { POST } = await import('@/app/api/client/v1/tracing/sessions/route');
+    const { POST } = await import('@/server/api/routes/client/v1/tracing/sessions/route');
     db.findAgentTracingSessionById.mockResolvedValue({ sessionId: 'sess-existing', tenantId: 'tenant-1', projectId: 'proj-1', agent: {}, config: {}, summary: {}, status: 'completed', startedAt: new Date(), errors: [], modelsUsed: [], toolsUsed: [], eventCounts: {}, totalEvents: 0, totalInputTokens: 0, totalOutputTokens: 0, totalCachedInputTokens: 0 });
 
     const req = buildRequest({ sessionId: 'sess-existing', status: 'completed' });
@@ -198,7 +198,7 @@ describe('POST /api/client/v1/tracing/sessions', () => {
   });
 
   it('persists each event with createAgentTracingEvent', async () => {
-    const { POST } = await import('@/app/api/client/v1/tracing/sessions/route');
+    const { POST } = await import('@/server/api/routes/client/v1/tracing/sessions/route');
 
     const events = [
       { id: 'e1', type: 'llm', sequence: 1, model: 'gpt-4o' },
@@ -216,7 +216,7 @@ describe('POST /api/client/v1/tracing/sessions', () => {
   });
 
   it('extracts modelsUsed from event.model fields', async () => {
-    const { POST } = await import('@/app/api/client/v1/tracing/sessions/route');
+    const { POST } = await import('@/server/api/routes/client/v1/tracing/sessions/route');
 
     const events = [
       { id: 'e1', type: 'llm', sequence: 1, model: 'claude-3-5-sonnet' },
@@ -232,7 +232,7 @@ describe('POST /api/client/v1/tracing/sessions', () => {
   });
 
   it('extracts toolsUsed from actor.scope=tool events', async () => {
-    const { POST } = await import('@/app/api/client/v1/tracing/sessions/route');
+    const { POST } = await import('@/server/api/routes/client/v1/tracing/sessions/route');
 
     const events = [
       { id: 'e1', type: 'tool', sequence: 1, actor: { scope: 'tool', name: 'wikipedia' } },
@@ -246,7 +246,7 @@ describe('POST /api/client/v1/tracing/sessions', () => {
   });
 
   it('stores threadId when provided', async () => {
-    const { POST } = await import('@/app/api/client/v1/tracing/sessions/route');
+    const { POST } = await import('@/server/api/routes/client/v1/tracing/sessions/route');
 
     const req = buildRequest({
       sessionId: 'sess-thread',
@@ -261,7 +261,7 @@ describe('POST /api/client/v1/tracing/sessions', () => {
   });
 
   it('returns 200 even when async DB write fails (fire-and-forget)', async () => {
-    const { POST } = await import('@/app/api/client/v1/tracing/sessions/route');
+    const { POST } = await import('@/server/api/routes/client/v1/tracing/sessions/route');
     db.createAgentTracingSession.mockRejectedValue(new Error('DB connection lost'));
 
     const req = buildRequest({ sessionId: 'sess-err', status: 'completed' });

@@ -49,7 +49,7 @@ vi.mock('@/lib/quota/quotaGuard', () => ({
   checkBudget: vi.fn().mockResolvedValue({ allowed: true }),
 }));
 
-import { POST } from '@/app/api/client/v1/chat/completions/route';
+import { POST } from '@/server/api/routes/client/v1/chat/completions/route';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { handleChatCompletion } from '@/lib/services/models/inferenceService';
 import * as inferenceServiceMod from '@/lib/services/models/inferenceService';

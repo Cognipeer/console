@@ -14,9 +14,9 @@ vi.mock('@/lib/utils/dashboardDateFilter', () => ({
   parseDashboardDateFilterFromSearchParams: vi.fn().mockReturnValue({ from: null, to: null }),
 }));
 
-import { GET as getDashboard } from '@/app/api/inference-monitoring/dashboard/route';
-import { GET as getMetrics } from '@/app/api/inference-monitoring/servers/[serverKey]/metrics/route';
-import { POST as pollServer } from '@/app/api/inference-monitoring/servers/[serverKey]/poll/route';
+import { GET as getDashboard } from '@/server/api/routes/inference-monitoring/dashboard/route';
+import { GET as getMetrics } from '@/server/api/routes/inference-monitoring/servers/[serverKey]/metrics/route';
+import { POST as pollServer } from '@/server/api/routes/inference-monitoring/servers/[serverKey]/poll/route';
 import { InferenceMonitoringService } from '@/lib/services/inferenceMonitoring';
 
 const mockListServers = InferenceMonitoringService.listServers as ReturnType<typeof vi.fn>;

@@ -24,12 +24,12 @@ vi.mock('@/lib/services/rag/ragService', () => ({
   reingestDocument: vi.fn(),
 }));
 
-import { GET as listModulesGET } from '@/app/api/client/v1/rag/modules/route';
-import { GET as moduleGET, DELETE as moduleDELETE } from '@/app/api/client/v1/rag/modules/[key]/route';
-import { POST as ingestPOST } from '@/app/api/client/v1/rag/modules/[key]/ingest/route';
-import { POST as queryPOST } from '@/app/api/client/v1/rag/modules/[key]/query/route';
-import { GET as documentsGET } from '@/app/api/client/v1/rag/modules/[key]/documents/route';
-import { DELETE as docDELETE, POST as reingestPOST } from '@/app/api/client/v1/rag/modules/[key]/documents/[documentId]/route';
+import { GET as listModulesGET } from '@/server/api/routes/client/v1/rag/modules/route';
+import { GET as moduleGET, DELETE as moduleDELETE } from '@/server/api/routes/client/v1/rag/modules/[key]/route';
+import { POST as ingestPOST } from '@/server/api/routes/client/v1/rag/modules/[key]/ingest/route';
+import { POST as queryPOST } from '@/server/api/routes/client/v1/rag/modules/[key]/query/route';
+import { GET as documentsGET } from '@/server/api/routes/client/v1/rag/modules/[key]/documents/route';
+import { DELETE as docDELETE, POST as reingestPOST } from '@/server/api/routes/client/v1/rag/modules/[key]/documents/[documentId]/route';
 
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import {

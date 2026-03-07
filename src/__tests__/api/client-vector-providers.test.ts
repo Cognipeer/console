@@ -20,7 +20,7 @@ vi.mock('@/lib/services/vector', () => ({
   createVectorProvider: vi.fn(),
 }));
 
-import { GET, POST } from '@/app/api/client/v1/vector/providers/route';
+import { GET, POST } from '@/server/api/routes/client/v1/vector/providers/route';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { listVectorProviders, createVectorProvider } from '@/lib/services/vector';
 

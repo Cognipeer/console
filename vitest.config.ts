@@ -16,7 +16,7 @@ export default defineConfig({
         'src/lib/services/**/*.ts',
         'src/lib/providers/**/*.ts',
         'src/lib/license/**/*.ts',
-        'src/app/api/client/**/*.ts',
+        'src/server/api/**/*.ts',
       ],
       exclude: ['node_modules/**', 'src/__tests__/**'],
       reporter: ['text', 'html', 'lcov'],

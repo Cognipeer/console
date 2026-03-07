@@ -7,7 +7,7 @@ vi.mock('@/lib/services/rag/ragService', () => ({
   deleteRagModule: vi.fn(),
 }));
 
-import { GET, PATCH, DELETE } from '@/app/api/rag/modules/[key]/route';
+import { GET, PATCH, DELETE } from '@/server/api/routes/rag/modules/[key]/route';
 import {
   getRagModule,
   updateRagModule,

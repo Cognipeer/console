@@ -18,7 +18,7 @@ vi.mock('@/lib/services/projects/projectContext', () => {
   return { requireProjectContext: vi.fn(), ProjectContextError };
 });
 
-import { GET, PATCH, DELETE } from '@/app/api/vector/indexes/[externalId]/route';
+import { GET, PATCH, DELETE } from '@/server/api/routes/vector/indexes/[externalId]/route';
 import { getVectorIndex, updateVectorIndex, deleteVectorIndex } from '@/lib/services/vector';
 import { requireProjectContext } from '@/lib/services/projects/projectContext';
 

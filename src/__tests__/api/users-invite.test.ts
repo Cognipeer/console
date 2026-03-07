@@ -31,7 +31,7 @@ vi.mock('@/lib/quota/quotaGuard', () => ({
   checkResourceQuota: vi.fn().mockResolvedValue({ allowed: true } as any),
 }));
 
-import { POST } from '@/app/api/users/invite/route';
+import { POST } from '@/server/api/routes/users/invite/route';
 import { checkResourceQuota } from '@/lib/quota/quotaGuard';
 
 const mockCheckResourceQuota = vi.mocked(checkResourceQuota);

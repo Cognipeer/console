@@ -16,7 +16,7 @@ vi.mock('@/lib/services/prompts', () => ({
   resolvePromptForEnvironment: vi.fn(),
 }));
 
-import { GET } from '@/app/api/client/v1/prompts/[key]/route';
+import { GET } from '@/server/api/routes/client/v1/prompts/[key]/route';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { resolvePromptForEnvironment } from '@/lib/services/prompts';
 

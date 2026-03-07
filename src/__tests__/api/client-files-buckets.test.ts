@@ -19,7 +19,7 @@ vi.mock('@/lib/services/files', () => ({
   listFileBuckets: vi.fn(),
 }));
 
-import { GET } from '@/app/api/client/v1/files/buckets/route';
+import { GET } from '@/server/api/routes/client/v1/files/buckets/route';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { listFileBuckets } from '@/lib/services/files';
 

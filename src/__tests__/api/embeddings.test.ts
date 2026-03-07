@@ -106,7 +106,7 @@ describe('POST /api/client/v1/embeddings', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
-    const route = await import('@/app/api/client/v1/embeddings/route');
+    const route = await import('@/server/api/routes/client/v1/embeddings/route');
     POST = route.POST;
   });
 

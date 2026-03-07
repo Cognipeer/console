@@ -18,7 +18,7 @@ vi.mock('@/lib/services/memory/memoryService', () => ({
   deleteMemoryItemsBulk: vi.fn(),
 }));
 
-import { GET, POST } from '@/app/api/client/v1/memory/stores/[storeKey]/memories/route';
+import { GET, POST } from '@/server/api/routes/client/v1/memory/stores/[storeKey]/memories/route';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { addMemory, listMemoryItems, deleteMemoryItemsBulk } from '@/lib/services/memory/memoryService';
 

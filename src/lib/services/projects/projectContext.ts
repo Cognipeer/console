@@ -1,4 +1,4 @@
-import type { NextRequest } from 'next/server';
+import type { NextRequest } from '@/server/api/http';
 import { getDatabase, type IProject, type IUser } from '@/lib/database';
 import { ensureDefaultProject } from './projectService';
 

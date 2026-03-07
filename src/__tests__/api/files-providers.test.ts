@@ -17,7 +17,7 @@ vi.mock('@/lib/services/projects/projectContext', () => {
   return { requireProjectContext: vi.fn(), ProjectContextError };
 });
 
-import { GET, POST } from '@/app/api/files/providers/route';
+import { GET, POST } from '@/server/api/routes/files/providers/route';
 import { listFileProviders, createFileProvider } from '@/lib/services/files';
 import { requireProjectContext } from '@/lib/services/projects/projectContext';
 

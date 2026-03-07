@@ -22,7 +22,7 @@ vi.mock('@/lib/services/projects/projectContext', () => {
   return { requireProjectContext: vi.fn(), ProjectContextError };
 });
 
-import { DELETE } from '@/app/api/tokens/[id]/route';
+import { DELETE } from '@/server/api/routes/tokens/[id]/route';
 import { requireProjectContext } from '@/lib/services/projects/projectContext';
 
 const mockRequireProjectContext = vi.mocked(requireProjectContext);

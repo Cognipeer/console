@@ -3,6 +3,9 @@
  * Provides the environment variables that application code reads at module load time.
  */
 
+import { beforeEach } from 'vitest';
+import { resetRateLimitStore } from '@/lib/services/auth/rateLimiter';
+
 // Database provider — default to mongodb for existing tests
 process.env.DB_PROVIDER = process.env.DB_PROVIDER || 'mongodb';
 
@@ -17,3 +20,7 @@ process.env.JWT_SECRET = 'test-jwt-secret-must-be-at-least-32-chars!!';
 if (!process.env.DEBUG) {
   globalThis.console.debug = () => {};
 }
+
+beforeEach(() => {
+  resetRateLimitStore();
+});

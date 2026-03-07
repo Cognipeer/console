@@ -18,7 +18,7 @@ vi.mock('@/lib/services/projects/projectContext', () => {
   return { requireProjectContext: vi.fn(), ProjectContextError };
 });
 
-import { GET, DELETE } from '@/app/api/files/buckets/[bucketKey]/objects/[...objectKey]/route';
+import { GET, DELETE } from '@/server/api/routes/files/buckets/[bucketKey]/objects/[...objectKey]/route';
 import { deleteFile, downloadFile, getFileRecord } from '@/lib/services/files';
 import { requireProjectContext } from '@/lib/services/projects/projectContext';
 

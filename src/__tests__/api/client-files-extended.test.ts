@@ -39,11 +39,11 @@ vi.mock('@/lib/quota/quotaGuard', () => ({
   checkResourceQuota: vi.fn().mockResolvedValue({ allowed: true }),
 }));
 
-import { GET as bucketGET } from '@/app/api/client/v1/files/buckets/[bucketKey]/route';
-import { GET as objectsGET, POST as objectsPOST } from '@/app/api/client/v1/files/buckets/[bucketKey]/objects/route';
-import { GET as objectKeyGET, DELETE as objectKeyDELETE } from '@/app/api/client/v1/files/buckets/[bucketKey]/objects/[objectKey]/route';
-import { GET as downloadGET } from '@/app/api/client/v1/files/buckets/[bucketKey]/objects/[objectKey]/download/route';
-import { GET as fileProvidersGET, POST as fileProvidersPOST } from '@/app/api/client/v1/files/providers/route';
+import { GET as bucketGET } from '@/server/api/routes/client/v1/files/buckets/[bucketKey]/route';
+import { GET as objectsGET, POST as objectsPOST } from '@/server/api/routes/client/v1/files/buckets/[bucketKey]/objects/route';
+import { GET as objectKeyGET, DELETE as objectKeyDELETE } from '@/server/api/routes/client/v1/files/buckets/[bucketKey]/objects/[objectKey]/route';
+import { GET as downloadGET } from '@/server/api/routes/client/v1/files/buckets/[bucketKey]/objects/[objectKey]/download/route';
+import { GET as fileProvidersGET, POST as fileProvidersPOST } from '@/server/api/routes/client/v1/files/providers/route';
 
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import {

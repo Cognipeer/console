@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --turbopack",
-    "build": "next build --turbopack",
-    "start": "next start",
+    "dev": "NODE_ENV=development node --import tsx src/server/index.ts --dev",
+    "build": "next build",
+    "start": "NODE_ENV=production node --import tsx src/server/index.ts",
     "lint": "eslint",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -45,6 +45,7 @@
     "bcryptjs": "^3.0.2",
     "better-sqlite3": "^11.10.0",
     "dayjs": "^1.11.18",
+    "fastify": "^5.8.1",
     "handlebars": "^4.7.8",
     "ioredis": "^5.9.3",
     "jose": "^6.1.0",
@@ -67,6 +68,7 @@
     "winston": "^3.19.0"
   },
   "devDependencies": {
+    "@fastify/cookie": "^11.0.2",
     "@eslint/eslintrc": "^3",
     "@tailwindcss/postcss": "^4",
     "@types/bcryptjs": "^2.4.6",
@@ -86,6 +88,7 @@
     "msw": "^2.12.10",
     "prettier": "^3.6.2",
     "tailwindcss": "^4",
+    "tsx": "^4.20.5",
     "typescript": "^5",
     "vite-tsconfig-paths": "^6.1.1",
     "vitepress": "^1.6.4",

@@ -6,7 +6,7 @@ vi.mock('@/lib/services/quota/quotaService', () => ({
   createQuotaPolicy: vi.fn(),
 }));
 
-import { GET, POST } from '@/app/api/quota/policies/route';
+import { GET, POST } from '@/server/api/routes/quota/policies/route';
 import { listQuotaPolicies, createQuotaPolicy } from '@/lib/services/quota/quotaService';
 
 const mockListQuotaPolicies = listQuotaPolicies as ReturnType<typeof vi.fn>;

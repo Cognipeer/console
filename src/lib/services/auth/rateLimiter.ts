@@ -111,3 +111,7 @@ export const PASSWORD_RESET_RATE_LIMIT: RateLimitConfig = {
   maxAttempts: 3,
   windowSeconds: 15 * 60,
 };
+
+export function resetRateLimitStore(): void {
+  store.clear();
+}

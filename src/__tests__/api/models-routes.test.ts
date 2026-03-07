@@ -22,7 +22,7 @@ vi.mock('@/lib/services/projects/projectContext', () => {
   return { requireProjectContext: vi.fn(), ProjectContextError };
 });
 
-import { GET, POST } from '@/app/api/models/route';
+import { GET, POST } from '@/server/api/routes/models/route';
 import { listModels, createModel, listModelProviders } from '@/lib/services/models/modelService';
 import { checkResourceQuota } from '@/lib/quota';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';

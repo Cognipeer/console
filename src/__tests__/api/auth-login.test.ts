@@ -22,7 +22,7 @@ vi.mock('@/lib/services/projects/projectService', () => ({
   DEFAULT_PROJECT_KEY: '__default__',
 }));
 
-import { POST } from '@/app/api/auth/login/route';
+import { POST } from '@/server/api/routes/auth/login/route';
 import { getDatabase } from '@/lib/database';
 import bcrypt from 'bcryptjs';
 import { TokenManager } from '@/lib/license/token-manager';

@@ -12,7 +12,7 @@ vi.mock('@/lib/database', () => ({
   getDatabase: vi.fn().mockResolvedValue(mockDb),
 }));
 
-import { GET } from '@/app/api/projects/[projectId]/member-candidates/route';
+import { GET } from '@/server/api/routes/projects/[projectId]/member-candidates/route';
 
 const mockProject = { _id: 'proj-1', tenantId: 'tenant-id-1' };
 const mockUsers = [

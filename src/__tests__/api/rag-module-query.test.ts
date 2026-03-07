@@ -5,7 +5,7 @@ vi.mock('@/lib/services/rag/ragService', () => ({
   queryRag: vi.fn(),
 }));
 
-import { POST } from '@/app/api/rag/modules/[key]/query/route';
+import { POST } from '@/server/api/routes/rag/modules/[key]/query/route';
 import { queryRag } from '@/lib/services/rag/ragService';
 
 const mockQueryRag = vi.mocked(queryRag);

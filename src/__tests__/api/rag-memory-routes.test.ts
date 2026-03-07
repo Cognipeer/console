@@ -22,8 +22,8 @@ vi.mock('@/lib/services/projects/projectContext', () => {
   return { requireProjectContext: vi.fn(), ProjectContextError };
 });
 
-import { GET as getRagModules, POST as postRagModule } from '@/app/api/rag/modules/route';
-import { GET as getMemoryStores, POST as postMemoryStore } from '@/app/api/memory/stores/route';
+import { GET as getRagModules, POST as postRagModule } from '@/server/api/routes/rag/modules/route';
+import { GET as getMemoryStores, POST as postMemoryStore } from '@/server/api/routes/memory/stores/route';
 import { listRagModules, createRagModule } from '@/lib/services/rag/ragService';
 import { listMemoryStores, createMemoryStore } from '@/lib/services/memory/memoryService';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';

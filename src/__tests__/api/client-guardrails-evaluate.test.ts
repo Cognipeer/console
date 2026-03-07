@@ -16,7 +16,7 @@ vi.mock('@/lib/services/guardrail', () => ({
   evaluateGuardrail: vi.fn(),
 }));
 
-import { POST } from '@/app/api/client/v1/guardrails/evaluate/route';
+import { POST } from '@/server/api/routes/client/v1/guardrails/evaluate/route';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { evaluateGuardrail } from '@/lib/services/guardrail';
 

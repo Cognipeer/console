@@ -41,7 +41,7 @@ vi.mock('@/lib/utils/dashboardDateFilter', () => ({
   parseDashboardDateFilterFromSearchParams: vi.fn().mockReturnValue({ from: null, to: null }),
 }));
 
-import { GET } from '@/app/api/vector/indexes/[externalId]/stats/route';
+import { GET } from '@/server/api/routes/vector/indexes/[externalId]/stats/route';
 import { requireProjectContext } from '@/lib/services/projects/projectContext';
 
 const mockRequireProjectContext = vi.mocked(requireProjectContext);

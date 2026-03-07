@@ -20,8 +20,8 @@ vi.mock('@/lib/services/quota/quotaService', () => ({
   getPlanDefaults: vi.fn(),
 }));
 
-import { GET as getMetrics } from '@/app/api/metrics/route';
-import { GET as getQuotaDefaults } from '@/app/api/quota/defaults/route';
+import { GET as getMetrics } from '@/server/api/routes/metrics/route';
+import { GET as getQuotaDefaults } from '@/server/api/routes/quota/defaults/route';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { collectPrometheusMetrics } from '@/lib/services/metrics/prometheusExporter';
 import { getPlanDefaults } from '@/lib/services/quota/quotaService';

@@ -9,7 +9,7 @@ vi.mock('bcryptjs', () => ({
   hash: vi.fn().mockResolvedValue('$2a$10$newHash'),
 }));
 
-import { POST } from '@/app/api/auth/change-password/route';
+import { POST } from '@/server/api/routes/auth/change-password/route';
 import { getDatabase } from '@/lib/database';
 import bcrypt from 'bcryptjs';
 

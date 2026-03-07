@@ -20,7 +20,7 @@ vi.mock('@/lib/services/memory/memoryService', () => ({
   createMemoryStore: vi.fn(),
 }));
 
-import { GET, POST } from '@/app/api/client/v1/memory/stores/route';
+import { GET, POST } from '@/server/api/routes/client/v1/memory/stores/route';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { listMemoryStores, createMemoryStore } from '@/lib/services/memory/memoryService';
 

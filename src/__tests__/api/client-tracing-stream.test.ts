@@ -34,9 +34,9 @@ vi.mock('@/lib/quota/quotaGuard', () => ({
 
 vi.mock('@/lib/core/lifecycle', () => ({ isShuttingDown: vi.fn().mockReturnValue(false) }));
 
-import { POST as startPOST } from '@/app/api/client/v1/tracing/sessions/stream/[sessionId]/start/route';
-import { POST as eventsPOST } from '@/app/api/client/v1/tracing/sessions/stream/[sessionId]/events/route';
-import { POST as endPOST } from '@/app/api/client/v1/tracing/sessions/stream/[sessionId]/end/route';
+import { POST as startPOST } from '@/server/api/routes/client/v1/tracing/sessions/stream/[sessionId]/start/route';
+import { POST as eventsPOST } from '@/server/api/routes/client/v1/tracing/sessions/stream/[sessionId]/events/route';
+import { POST as endPOST } from '@/server/api/routes/client/v1/tracing/sessions/stream/[sessionId]/end/route';
 import { drainPendingTasks } from '@/lib/core/asyncTask';
 
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';

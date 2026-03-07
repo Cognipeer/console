@@ -21,10 +21,10 @@ vi.mock('@/lib/services/memory/memoryService', () => ({
   deleteMemoryItem: vi.fn(),
 }));
 
-import { POST as recallPOST } from '@/app/api/client/v1/memory/stores/[storeKey]/recall/route';
-import { POST as searchPOST } from '@/app/api/client/v1/memory/stores/[storeKey]/search/route';
-import { POST as batchPOST } from '@/app/api/client/v1/memory/stores/[storeKey]/memories/batch/route';
-import { GET as memoryGET, PATCH as memoryPATCH, DELETE as memoryDELETE } from '@/app/api/client/v1/memory/stores/[storeKey]/memories/[memoryId]/route';
+import { POST as recallPOST } from '@/server/api/routes/client/v1/memory/stores/[storeKey]/recall/route';
+import { POST as searchPOST } from '@/server/api/routes/client/v1/memory/stores/[storeKey]/search/route';
+import { POST as batchPOST } from '@/server/api/routes/client/v1/memory/stores/[storeKey]/memories/batch/route';
+import { GET as memoryGET, PATCH as memoryPATCH, DELETE as memoryDELETE } from '@/server/api/routes/client/v1/memory/stores/[storeKey]/memories/[memoryId]/route';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import {
   recallForChat,

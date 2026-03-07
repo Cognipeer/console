@@ -16,7 +16,7 @@ vi.mock('@/lib/services/projects/projectContext', () => {
   return { requireProjectContext: vi.fn(), ProjectContextError };
 });
 
-import { POST } from '@/app/api/vector/indexes/[externalId]/query/route';
+import { POST } from '@/server/api/routes/vector/indexes/[externalId]/query/route';
 import { queryVectorIndex } from '@/lib/services/vector';
 import { requireProjectContext } from '@/lib/services/projects/projectContext';
 

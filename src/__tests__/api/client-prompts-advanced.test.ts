@@ -29,10 +29,10 @@ vi.mock('mustache', () => ({
   default: { render: vi.fn().mockReturnValue('Hello World') },
 }));
 
-import { GET as compareGET } from '@/app/api/client/v1/prompts/[key]/compare/route';
-import { POST as renderPOST } from '@/app/api/client/v1/prompts/[key]/render/route';
-import { GET as versionsGET } from '@/app/api/client/v1/prompts/[key]/versions/route';
-import { GET as deploymentsGET, POST as deploymentsPOST } from '@/app/api/client/v1/prompts/[key]/deployments/route';
+import { GET as compareGET } from '@/server/api/routes/client/v1/prompts/[key]/compare/route';
+import { POST as renderPOST } from '@/server/api/routes/client/v1/prompts/[key]/render/route';
+import { GET as versionsGET } from '@/server/api/routes/client/v1/prompts/[key]/versions/route';
+import { GET as deploymentsGET, POST as deploymentsPOST } from '@/server/api/routes/client/v1/prompts/[key]/deployments/route';
 
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import {

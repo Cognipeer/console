@@ -18,7 +18,7 @@ vi.mock('@/lib/services/memory/memoryService', () => ({
   deleteMemoryStore: vi.fn(),
 }));
 
-import { GET, PATCH, DELETE } from '@/app/api/client/v1/memory/stores/[storeKey]/route';
+import { GET, PATCH, DELETE } from '@/server/api/routes/client/v1/memory/stores/[storeKey]/route';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { getMemoryStore, updateMemoryStore, deleteMemoryStore } from '@/lib/services/memory/memoryService';
 

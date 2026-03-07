@@ -20,7 +20,7 @@ vi.mock('@/lib/utils/dashboardDateFilter', () => ({
   parseDashboardDateFilterFromSearchParams: vi.fn().mockReturnValue({ from: null, to: null }),
 }));
 
-import { GET } from '@/app/api/dashboard/route';
+import { GET } from '@/server/api/routes/dashboard/route';
 import { getDashboardData } from '@/lib/services/dashboard/dashboardService';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
 

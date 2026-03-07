@@ -6,7 +6,7 @@ vi.mock('@/lib/services/quota/quotaService', () => ({
   deleteQuotaPolicy: vi.fn(),
 }));
 
-import { PATCH, DELETE } from '@/app/api/quota/policies/[id]/route';
+import { PATCH, DELETE } from '@/server/api/routes/quota/policies/[id]/route';
 import { updateQuotaPolicy, deleteQuotaPolicy } from '@/lib/services/quota/quotaService';
 
 const mockUpdateQuotaPolicy = vi.mocked(updateQuotaPolicy);

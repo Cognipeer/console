@@ -108,7 +108,7 @@ describe('POST /api/client/v1/chat/completions', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
-    const route = await import('@/app/api/client/v1/chat/completions/route');
+    const route = await import('@/server/api/routes/client/v1/chat/completions/route');
     POST = route.POST;
   });
 

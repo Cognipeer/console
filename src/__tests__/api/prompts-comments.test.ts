@@ -6,7 +6,7 @@ vi.mock('@/lib/services/prompts', () => ({
   createPromptComment: vi.fn(),
 }));
 
-import { GET, POST } from '@/app/api/prompts/[id]/comments/route';
+import { GET, POST } from '@/server/api/routes/prompts/[id]/comments/route';
 import { listPromptComments, createPromptComment } from '@/lib/services/prompts';
 
 const mockListPromptComments = vi.mocked(listPromptComments);

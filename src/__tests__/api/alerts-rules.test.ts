@@ -30,8 +30,8 @@ vi.mock('@/lib/services/projects/projectContext', () => {
   };
 });
 
-import { GET, POST } from '@/app/api/alerts/rules/route';
-import { GET as ruleGet, PUT as rulePut } from '@/app/api/alerts/rules/[ruleId]/route';
+import { GET, POST } from '@/server/api/routes/alerts/rules/route';
+import { GET as ruleGet, PUT as rulePut } from '@/server/api/routes/alerts/rules/[ruleId]/route';
 import { AlertService } from '@/lib/services/alerts';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
 

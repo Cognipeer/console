@@ -4,8 +4,8 @@ import { createMockDb } from '../helpers/db.mock';
 
 vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
 
-import { POST as logoutPOST } from '@/app/api/auth/logout/route';
-import { GET as sessionGET } from '@/app/api/auth/session/route';
+import { POST as logoutPOST } from '@/server/api/routes/auth/logout/route';
+import { GET as sessionGET } from '@/server/api/routes/auth/session/route';
 import { getDatabase } from '@/lib/database';
 
 function makeSessionRequest(headers: Record<string, string>): NextRequest {

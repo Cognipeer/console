@@ -1,4 +1,4 @@
-import { NextRequest } from 'next/server';
+import type { NextRequest } from '@/server/api/http';
 import { createHash } from 'crypto';
 import { getDatabase } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';

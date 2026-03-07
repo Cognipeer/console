@@ -19,7 +19,7 @@ vi.mock('@/lib/services/prompts', () => ({
   listPrompts: vi.fn(),
 }));
 
-import { GET } from '@/app/api/client/v1/prompts/route';
+import { GET } from '@/server/api/routes/client/v1/prompts/route';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { listPrompts } from '@/lib/services/prompts';
 

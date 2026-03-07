@@ -20,8 +20,8 @@ vi.mock('@/lib/services/projects/projectContext', () => {
   return { requireProjectContext: vi.fn(), ProjectContextError };
 });
 
-import { GET } from '@/app/api/alerts/history/route';
-import { PATCH } from '@/app/api/alerts/history/[eventId]/acknowledge/route';
+import { GET } from '@/server/api/routes/alerts/history/route';
+import { PATCH } from '@/server/api/routes/alerts/history/[eventId]/acknowledge/route';
 import { AlertService } from '@/lib/services/alerts';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
 

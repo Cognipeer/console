@@ -18,7 +18,7 @@ vi.mock('@/lib/services/projects/projectContext', () => {
   return { requireProjectContext: vi.fn(), ProjectContextError };
 });
 
-import { GET, PATCH, DELETE } from '@/app/api/memory/stores/[storeKey]/route';
+import { GET, PATCH, DELETE } from '@/server/api/routes/memory/stores/[storeKey]/route';
 import {
   getMemoryStore,
   updateMemoryStore,

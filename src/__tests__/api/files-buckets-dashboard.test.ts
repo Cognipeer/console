@@ -21,7 +21,7 @@ vi.mock('@/lib/quota/quotaGuard', () => ({
   checkResourceQuota: vi.fn(),
 }));
 
-import { GET, POST } from '@/app/api/files/buckets/route';
+import { GET, POST } from '@/server/api/routes/files/buckets/route';
 import { listFileBuckets, createFileBucket } from '@/lib/services/files';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
 import { checkResourceQuota } from '@/lib/quota/quotaGuard';

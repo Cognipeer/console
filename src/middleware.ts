@@ -1,25 +1,14 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { TokenManager } from '@/lib/license/token-manager';
-import { LicenseManager } from '@/lib/license/license-manager';
-import { applyCors, handleCorsPreflightIfNeeded } from '@/lib/core/cors';
 
-// Paths that don't require authentication
-const PUBLIC_PATHS = [
+// UI paths that don't require a session cookie.
+const PUBLIC_UI_PATHS = [
   '/login',
   '/register',
   '/forgot-password',
   '/reset-password',
-  '/api/auth/login',
-  '/api/auth/register',
-  '/api/auth/forgot-password',
-  '/api/auth/reset-password',
-  '/api/health/live',
-  '/api/health/ready',
 ];
-
-// Client API paths that use Bearer token authentication instead of cookie
-const CLIENT_API_PATHS = ['/api/client/', '/api/models/v1/', '/api/metrics'];
 
 /** Inject common security headers into every response. */
 function applySecurityHeaders(response: NextResponse): void {
@@ -41,39 +30,8 @@ function applySecurityHeaders(response: NextResponse): void {
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // CORS preflight handling for client API paths
-  if (CLIENT_API_PATHS.some((path) => pathname.startsWith(path))) {
-    const preflightResponse = handleCorsPreflightIfNeeded(request);
-    if (preflightResponse) return preflightResponse;
-  }
-
-  // Allow public paths
-  if (PUBLIC_PATHS.some((path) => pathname.startsWith(path))) {
+  if (PUBLIC_UI_PATHS.some((path) => pathname.startsWith(path))) {
     const response = NextResponse.next();
-    applySecurityHeaders(response);
-    return response;
-  }
-
-  // Allow client API paths (they use Bearer token authentication)
-  if (CLIENT_API_PATHS.some((path) => pathname.startsWith(path))) {
-    // Defense-in-depth: reject requests without a Bearer token early
-    const authHeader = request.headers.get('authorization');
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return NextResponse.json(
-        { error: 'Unauthorized', message: 'Missing or invalid Authorization header. Use: Bearer <token>' },
-        { status: 401 },
-      );
-    }
-
-    const response = NextResponse.next({
-      request: {
-        headers: new Headers([
-          ...Array.from(request.headers.entries()),
-          ['x-request-id', crypto.randomUUID()],
-        ]),
-      },
-    });
-    applyCors(request, response);
     applySecurityHeaders(response);
     return response;
   }
@@ -82,13 +40,6 @@ export async function middleware(request: NextRequest) {
   const token = request.cookies.get('token')?.value;
 
   if (!token) {
-    // Redirect to login if no token
-    if (pathname.startsWith('/api/')) {
-      return NextResponse.json(
-        { error: 'Unauthorized', message: 'Authentication required' },
-        { status: 401 },
-      );
-    }
     return NextResponse.redirect(new URL('/login', request.url));
   }
 
@@ -96,36 +47,9 @@ export async function middleware(request: NextRequest) {
   const payload = await TokenManager.verifyToken(token);
 
   if (!payload) {
-    // Token is invalid
-    if (pathname.startsWith('/api/')) {
-      return NextResponse.json(
-        { error: 'Unauthorized', message: 'Invalid or expired token' },
-        { status: 401 },
-      );
-    }
-
     const response = NextResponse.redirect(new URL('/login', request.url));
     response.cookies.delete('token');
     return response;
-  }
-
-  // Check feature access for API routes
-  if (pathname.startsWith('/api/')) {
-    const hasAccess = LicenseManager.hasEndpointAccess(
-      payload.licenseType,
-      pathname,
-    );
-
-    if (!hasAccess) {
-      return NextResponse.json(
-        {
-          error: 'Forbidden',
-          message: 'Your license does not have access to this feature',
-          requiredLicense: 'Please upgrade your plan',
-        },
-        { status: 403 },
-      );
-    }
   }
 
   // Add user and tenant info to downstream request headers
@@ -164,11 +88,12 @@ export const config = {
   matcher: [
     /*
      * Match all request paths except for the ones starting with:
+     * - api (handled by the custom Fastify server)
      * - _next/static (static files)
      * - _next/image (image optimization files)
      * - favicon.ico (favicon file)
      * - public folder
      */
-    '/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
+    '/((?!api|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
   ],
 };

@@ -5,7 +5,7 @@ vi.mock('@/lib/services/prompts', () => ({
   deletePromptComment: vi.fn(),
 }));
 
-import { DELETE } from '@/app/api/prompts/[id]/comments/[commentId]/route';
+import { DELETE } from '@/server/api/routes/prompts/[id]/comments/[commentId]/route';
 import { deletePromptComment } from '@/lib/services/prompts';
 
 const mockDeletePromptComment = vi.mocked(deletePromptComment);

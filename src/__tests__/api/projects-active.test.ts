@@ -15,7 +15,7 @@ vi.mock('@/lib/services/projects/projectService', () => ({
   listAccessibleProjects: vi.fn(),
 }));
 
-import { POST } from '@/app/api/projects/active/route';
+import { POST } from '@/server/api/routes/projects/active/route';
 import { ensureDefaultProject, listAccessibleProjects } from '@/lib/services/projects/projectService';
 
 const mockEnsureDefaultProject = vi.mocked(ensureDefaultProject);

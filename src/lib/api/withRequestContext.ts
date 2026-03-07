@@ -2,8 +2,8 @@
  * Route handler wrapper — establishes per-request AsyncLocalStorage context.
  *
  * Reads `x-request-id`, `x-tenant-id`, `x-tenant-slug`, `x-user-id` headers
- * injected by the middleware and wires them into the request context so that
- * every downstream `createLogger(…)` call auto-correlates logs.
+ * injected by the Fastify API hooks and wires them into the request context so
+ * that every downstream `createLogger(…)` call auto-correlates logs.
  *
  * Usage (named export):
  *   export const POST = withRequestContext(async (request) => { … });
@@ -12,7 +12,7 @@
  *   export const GET = withRequestContext(async (request, ctx) => { … });
  */
 
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse, type NextRequest } from '@/server/api/http';
 import { runWithRequestContext } from '@/lib/core/requestContext';
 import { isShuttingDown } from '@/lib/core/lifecycle';
 

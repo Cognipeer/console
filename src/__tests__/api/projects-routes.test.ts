@@ -18,7 +18,7 @@ vi.mock('@/lib/services/projects/projectService', () => ({
   DEFAULT_PROJECT_KEY: 'default',
 }));
 
-import { GET, POST } from '@/app/api/projects/route';
+import { GET, POST } from '@/server/api/routes/projects/route';
 import { ensureDefaultProject, generateUniqueProjectKey, listAccessibleProjects } from '@/lib/services/projects/projectService';
 
 const OWNER_HEADERS = {

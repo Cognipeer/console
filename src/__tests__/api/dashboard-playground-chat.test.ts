@@ -48,7 +48,7 @@ vi.mock('@/lib/services/projects/projectContext', () => ({
   },
 }));
 
-import { POST } from '@/app/api/dashboard/playground/chat/route';
+import { POST } from '@/server/api/routes/dashboard/playground/chat/route';
 import { handleChatCompletion } from '@/lib/services/models/inferenceService';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { requireProjectContext } from '@/lib/services/projects/projectContext';

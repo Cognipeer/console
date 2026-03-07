@@ -21,7 +21,7 @@ vi.mock('@/lib/services/projects/projectContext', () => {
   };
 });
 
-import { GET, PATCH, DELETE } from '@/app/api/prompts/[id]/route';
+import { GET, PATCH, DELETE } from '@/server/api/routes/prompts/[id]/route';
 import { getPromptById, updatePrompt, deletePrompt } from '@/lib/services/prompts';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
 

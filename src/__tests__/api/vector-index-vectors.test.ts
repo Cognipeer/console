@@ -33,7 +33,7 @@ vi.mock('@/lib/quota/quotaGuard', () => ({
   checkRateLimit: vi.fn().mockResolvedValue({ allowed: true } as any),
 }));
 
-import { DELETE } from '@/app/api/vector/indexes/[externalId]/vectors/route';
+import { DELETE } from '@/server/api/routes/vector/indexes/[externalId]/vectors/route';
 import { deleteVectors } from '@/lib/services/vector';
 import { requireProjectContext } from '@/lib/services/projects/projectContext';
 import { checkRateLimit } from '@/lib/quota/quotaGuard';

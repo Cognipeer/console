@@ -16,7 +16,7 @@ vi.mock('@/lib/services/inferenceMonitoring/utils', () => ({
   normalizeBaseUrl: vi.fn((url: string) => url.startsWith('http') ? url : null),
 }));
 
-import { GET, POST } from '@/app/api/inference-monitoring/servers/route';
+import { GET, POST } from '@/server/api/routes/inference-monitoring/servers/route';
 import { InferenceMonitoringService } from '@/lib/services/inferenceMonitoring';
 import { normalizeBaseUrl } from '@/lib/services/inferenceMonitoring/utils';
 

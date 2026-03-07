@@ -46,11 +46,11 @@ vi.mock('@/lib/quota/quotaGuard', () => ({
   checkResourceQuota: vi.fn().mockResolvedValue({ allowed: true }),
 }));
 
-import { GET as indexGET, PATCH as indexPATCH, DELETE as indexDELETE } from '@/app/api/client/v1/vector/providers/[providerKey]/indexes/[externalId]/route';
-import { POST as queryPOST } from '@/app/api/client/v1/vector/providers/[providerKey]/indexes/[externalId]/query/route';
-import { POST as upsertPOST } from '@/app/api/client/v1/vector/providers/[providerKey]/indexes/[externalId]/upsert/route';
-import { DELETE as vectorsDELETE } from '@/app/api/client/v1/vector/providers/[providerKey]/indexes/[externalId]/vectors/route';
-import { GET as driversGET } from '@/app/api/client/v1/vector/providers/drivers/route';
+import { GET as indexGET, PATCH as indexPATCH, DELETE as indexDELETE } from '@/server/api/routes/client/v1/vector/providers/[providerKey]/indexes/[externalId]/route';
+import { POST as queryPOST } from '@/server/api/routes/client/v1/vector/providers/[providerKey]/indexes/[externalId]/query/route';
+import { POST as upsertPOST } from '@/server/api/routes/client/v1/vector/providers/[providerKey]/indexes/[externalId]/upsert/route';
+import { DELETE as vectorsDELETE } from '@/server/api/routes/client/v1/vector/providers/[providerKey]/indexes/[externalId]/vectors/route';
+import { GET as driversGET } from '@/server/api/routes/client/v1/vector/providers/drivers/route';
 
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import {

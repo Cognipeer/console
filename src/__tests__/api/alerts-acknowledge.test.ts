@@ -7,7 +7,7 @@ vi.mock('@/lib/services/alerts', () => ({
   },
 }));
 
-import { PATCH } from '@/app/api/alerts/history/[eventId]/acknowledge/route';
+import { PATCH } from '@/server/api/routes/alerts/history/[eventId]/acknowledge/route';
 import { AlertService } from '@/lib/services/alerts';
 
 const mockAcknowledgeEvent = vi.mocked(AlertService.acknowledgeEvent);

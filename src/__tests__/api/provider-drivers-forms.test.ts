@@ -15,13 +15,13 @@ vi.mock('@/lib/providers', () => ({
   },
 }));
 
-import { GET as providersDriversGET } from '@/app/api/providers/drivers/route';
-import { GET as providerDriverFormGET } from '@/app/api/providers/drivers/[driverId]/form/route';
-import { GET as vectorDriversGET } from '@/app/api/vector/providers/drivers/route';
-import { GET as vectorDriverFormGET } from '@/app/api/vector/providers/drivers/[driverId]/form/route';
-import { GET as modelsDriversGET } from '@/app/api/models/providers/drivers/route';
-import { GET as modelDriverFormGET } from '@/app/api/models/providers/drivers/[driverId]/form/route';
-import { GET as filesDriversGET } from '@/app/api/files/providers/drivers/route';
+import { GET as providersDriversGET } from '@/server/api/routes/providers/drivers/route';
+import { GET as providerDriverFormGET } from '@/server/api/routes/providers/drivers/[driverId]/form/route';
+import { GET as vectorDriversGET } from '@/server/api/routes/vector/providers/drivers/route';
+import { GET as vectorDriverFormGET } from '@/server/api/routes/vector/providers/drivers/[driverId]/form/route';
+import { GET as modelsDriversGET } from '@/server/api/routes/models/providers/drivers/route';
+import { GET as modelDriverFormGET } from '@/server/api/routes/models/providers/drivers/[driverId]/form/route';
+import { GET as filesDriversGET } from '@/server/api/routes/files/providers/drivers/route';
 
 const mockDrivers = [
   { id: 'pinecone', label: 'Pinecone', domains: ['vector'] },

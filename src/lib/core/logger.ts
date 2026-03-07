@@ -103,7 +103,14 @@ export const logger = new Proxy({} as winston.Logger, {
  * The scope is included in every log entry automatically.
  */
 export function createLogger(scope: string): winston.Logger {
-  return getRootLogger().child({ scope });
+  return new Proxy({} as winston.Logger, {
+    get(_target, prop: string) {
+      const child = getRootLogger().child({ scope });
+      const val = (child as unknown as Record<string, unknown>)[prop];
+      if (typeof val === 'function') return val.bind(child);
+      return val;
+    },
+  });
 }
 
 /**

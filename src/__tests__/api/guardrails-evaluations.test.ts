@@ -27,7 +27,7 @@ vi.mock('@/lib/utils/dashboardDateFilter', () => ({
   parseDashboardDateFilterFromSearchParams: vi.fn().mockReturnValue({ from: null, to: null }),
 }));
 
-import { GET } from '@/app/api/guardrails/[id]/evaluations/route';
+import { GET } from '@/server/api/routes/guardrails/[id]/evaluations/route';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
 
 const mockRequireProjectContext = requireProjectContext as ReturnType<typeof vi.fn>;
