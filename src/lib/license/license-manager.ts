@@ -1,3 +1,4 @@
+import { getConfig } from '@/lib/core/config';
 import policies from '@/config/policies.json';
 
 export interface FeaturePolicy {
@@ -44,10 +45,8 @@ export class LicenseManager {
    * On-premise / self-hosted deployments get unrestricted access by default.
    * Override with ENFORCE_LICENSE=true to enable license checks even on-prem.
    */
-  private static get isUnrestricted(): boolean {
-    const licenseMode = process.env.ENFORCE_LICENSE?.toLowerCase();
-    // When not explicitly enforced, on-prem has no restrictions
-    return licenseMode !== 'true';
+  private static isUnrestrictedLicense(licenseType: LicenseType): boolean {
+    return licenseType === 'ON_PREMISE' && !getConfig().license.enforceLicense;
   }
 
   /**
@@ -55,7 +54,7 @@ export class LicenseManager {
    * On-prem: returns ALL features when unrestricted.
    */
   static getFeaturesForLicense(licenseType: LicenseType): string[] {
-    if (this.isUnrestricted) {
+    if (this.isUnrestrictedLicense(licenseType)) {
       return Object.keys(this.policies.features);
     }
     const license = this.policies.licenses[licenseType];
@@ -67,7 +66,9 @@ export class LicenseManager {
    * On-prem: always true when unrestricted.
    */
   static hasFeature(licenseType: LicenseType, featureKey: string): boolean {
-    if (this.isUnrestricted) return true;
+    if (this.isUnrestrictedLicense(licenseType)) {
+      return true;
+    }
     const features = this.getFeaturesForLicense(licenseType);
     return features.includes(featureKey);
   }
@@ -80,7 +81,9 @@ export class LicenseManager {
     licenseType: LicenseType,
     endpoint: string,
   ): boolean {
-    if (this.isUnrestricted) return true;
+    if (this.isUnrestrictedLicense(licenseType)) {
+      return true;
+    }
 
     const features = this.getFeaturesForLicense(licenseType);
 
@@ -132,7 +135,7 @@ export class LicenseManager {
    * On-prem: returns unlimited when unrestricted.
    */
   static getLimits(licenseType: LicenseType) {
-    if (this.isUnrestricted) {
+    if (this.isUnrestrictedLicense(licenseType)) {
       return { requestsPerMonth: Infinity, maxAgents: Infinity };
     }
     const license = this.policies.licenses[licenseType];

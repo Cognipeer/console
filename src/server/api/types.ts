@@ -1,24 +1,6 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { JWTPayload } from '@/lib/license/token-manager';
-import type { GatewayResponse, NextRequest } from './http';
-
-export type RouteHandlerContext = {
-  params: Promise<Record<string, string | string[]>>;
-};
-
-export type RouteHandler = (
-  request: NextRequest,
-  context: any,
-) => Promise<GatewayResponse | Response>;
-
-export type RouteModule = Partial<Record<'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'OPTIONS', RouteHandler>>;
-
-export interface ApiRouteManifestEntry {
-  importPath: string;
-  routePath: string;
-  catchAllParam?: string;
-  module: RouteModule;
-}
+import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 
 export interface CookieMutation {
   action: 'set' | 'delete';
@@ -44,6 +26,7 @@ declare module 'fastify' {
     apiContextHeaders?: ApiRequestContextHeaders;
     apiRequestId?: string;
     apiSession?: JWTPayload;
+    apiTokenContext?: ApiTokenContext;
   }
 
   interface FastifyReply {

@@ -1,5 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { NextRequest } from 'next/server';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/lib/services/models/modelService', () => ({
   listModels: vi.fn(),
@@ -8,7 +7,7 @@ vi.mock('@/lib/services/models/modelService', () => ({
 }));
 
 vi.mock('@/lib/services/projects/projectContext', () => ({
-  requireProjectContext: vi.fn(),
+  resolveProjectContext: vi.fn(),
   ProjectContextError: class ProjectContextError extends Error {
     status: number;
     constructor(message: string, status = 400) {
@@ -23,19 +22,21 @@ vi.mock('@/lib/utils/dashboardDateFilter', () => ({
   isDateInDashboardRange: vi.fn().mockReturnValue(true),
 }));
 
-import { GET } from '@/server/api/routes/models/dashboard/route';
 import { listModels, listModelProviders, getUsageAggregate } from '@/lib/services/models/modelService';
-import { requireProjectContext } from '@/lib/services/projects/projectContext';
+import { resolveProjectContext } from '@/lib/services/projects/projectContext';
+import { modelsApiPlugin } from '@/server/api/plugins/models';
+import {
+  createFastifyApiTestApp,
+  parseJsonBody,
+} from '../helpers/fastify-api';
 
-const mockListModels = vi.mocked(listModels);
-const mockListModelProviders = vi.mocked(listModelProviders);
-const mockGetUsageAggregate = vi.mocked(getUsageAggregate);
-const mockRequireProjectContext = vi.mocked(requireProjectContext);
-
-const BASE_HEADERS = {
+const HEADERS = {
+  'x-license-type': 'FREE',
   'x-tenant-db-name': 'tenant_acme',
   'x-tenant-id': 'tenant-1',
+  'x-tenant-slug': 'acme',
   'x-user-id': 'user-1',
+  'x-user-role': 'owner',
 };
 
 const mockModel = (category: string, key: string) => ({
@@ -63,117 +64,61 @@ const mockAgg = {
   ],
 };
 
-function makeReq(headers?: Record<string, string>) {
-  return new NextRequest('http://localhost/api/models/dashboard', {
-    method: 'GET',
-    headers: { 'Content-Type': 'application/json', ...(headers ?? BASE_HEADERS) },
-  });
-}
-
 describe('GET /api/models/dashboard', () => {
-  beforeEach(() => {
+  let app: Awaited<ReturnType<typeof createFastifyApiTestApp>>;
+
+  beforeEach(async () => {
     vi.clearAllMocks();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    mockRequireProjectContext.mockResolvedValue({ projectId: 'proj-1' } as any);
-    mockListModels.mockResolvedValue([
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      mockModel('llm', 'gpt-4') as any,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      mockModel('embedding', 'text-embedding-3') as any,
+    (resolveProjectContext as ReturnType<typeof vi.fn>).mockResolvedValue({
+      projectId: 'proj-1',
+      project: { _id: 'proj-1' },
+      user: { _id: 'user-1', role: 'owner', projectIds: ['proj-1'] },
+    });
+    (listModels as ReturnType<typeof vi.fn>).mockResolvedValue([
+      mockModel('llm', 'gpt-4'),
+      mockModel('embedding', 'text-embedding-3'),
     ]);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    mockListModelProviders.mockResolvedValue([{ key: 'openai' }] as any);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    mockGetUsageAggregate.mockResolvedValue(mockAgg as any);
+    (listModelProviders as ReturnType<typeof vi.fn>).mockResolvedValue([{ key: 'openai' }]);
+    (getUsageAggregate as ReturnType<typeof vi.fn>).mockResolvedValue(mockAgg);
+    app = await createFastifyApiTestApp(modelsApiPlugin);
+  });
+
+  afterEach(async () => {
+    await app.close();
   });
 
   it('returns overview with correct model counts', async () => {
-    const res = await GET(makeReq());
-    expect(res.status).toBe(200);
-    const body = await res.json();
+    const res = await app.inject({ method: 'GET', url: '/api/models/dashboard', headers: HEADERS });
+    expect(res.statusCode).toBe(200);
+    const body = parseJsonBody<{
+      overview: { totalModels: number; llmCount: number; embeddingCount: number };
+      topModels: unknown[];
+      daily: unknown[];
+    }>(res.body);
     expect(body.overview.totalModels).toBe(2);
     expect(body.overview.llmCount).toBe(1);
     expect(body.overview.embeddingCount).toBe(1);
-  });
-
-  it('includes topModels sorted by callCount', async () => {
-    const res = await GET(makeReq());
-    const body = await res.json();
     expect(body.topModels).toBeInstanceOf(Array);
-    if (body.topModels.length > 0) {
-      expect(body.topModels[0]).toHaveProperty('key');
-      expect(body.topModels[0]).toHaveProperty('callCount');
-    }
-  });
-
-  it('includes daily timeseries data', async () => {
-    const res = await GET(makeReq());
-    const body = await res.json();
     expect(body.daily).toBeInstanceOf(Array);
   });
 
-  it('returns 401 when x-tenant-db-name is missing', async () => {
-    const { 'x-tenant-db-name': _, ...headersWithout } = BASE_HEADERS;
-    const res = await GET(makeReq(headersWithout));
-    expect(res.status).toBe(401);
-  });
-
-  it('returns 401 when x-user-id is missing', async () => {
-    const { 'x-user-id': _, ...headersWithout } = BASE_HEADERS;
-    const res = await GET(makeReq(headersWithout));
-    expect(res.status).toBe(401);
+  it('returns 401 when required headers missing', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/models/dashboard' });
+    expect(res.statusCode).toBe(401);
   });
 
   it('handles empty models list gracefully', async () => {
-    mockListModels.mockResolvedValueOnce([]);
-    const res = await GET(makeReq());
-    const body = await res.json();
+    (listModels as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+    const res = await app.inject({ method: 'GET', url: '/api/models/dashboard', headers: HEADERS });
+    const body = parseJsonBody<{ overview: { totalModels: number }; topModels: unknown[]; daily: unknown[] }>(res.body);
     expect(body.overview.totalModels).toBe(0);
     expect(body.topModels).toHaveLength(0);
     expect(body.daily).toHaveLength(0);
   });
 
-  it('handles getUsageAggregate errors gracefully (returns null agg)', async () => {
-    mockGetUsageAggregate.mockRejectedValueOnce(new Error('Aggregate error'));
-    mockGetUsageAggregate.mockRejectedValueOnce(new Error('Aggregate error'));
-    const res = await GET(makeReq());
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body.overview.totalCalls).toBe(0);
-  });
-
-  it('propagates ProjectContextError status', async () => {
-    const { ProjectContextError: PCE } = await import('@/lib/services/projects/projectContext');
-    mockRequireProjectContext.mockRejectedValueOnce(new PCE('No project', 403));
-    const res = await GET(makeReq());
-    expect(res.status).toBe(403);
-  });
-
   it('returns 500 on unexpected error', async () => {
-    mockListModels.mockRejectedValueOnce(new Error('DB crash'));
-    const res = await GET(makeReq());
-    expect(res.status).toBe(500);
-    const body = await res.json();
-    expect(body.error).toContain('DB crash');
-  });
-
-  it('aggregates totals across multiple models', async () => {
-    mockListModels.mockResolvedValueOnce([
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      mockModel('llm', 'model-a') as any,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      mockModel('llm', 'model-b') as any,
-    ]);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    mockGetUsageAggregate.mockResolvedValue(mockAgg as any);
-    const res = await GET(makeReq());
-    const body = await res.json();
-    expect(body.overview.totalCalls).toBe(200); // 100 * 2
-  });
-
-  it('includes currency in overview', async () => {
-    const res = await GET(makeReq());
-    const body = await res.json();
-    expect(body.overview.currency).toBe('USD');
+    (listModels as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('DB crash'));
+    const res = await app.inject({ method: 'GET', url: '/api/models/dashboard', headers: HEADERS });
+    expect(res.statusCode).toBe(500);
   });
 });

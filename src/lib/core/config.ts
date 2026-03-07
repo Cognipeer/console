@@ -37,6 +37,10 @@ class EnvConfigSource implements ConfigSource {
 export interface AppConfig {
   nodeEnv: string;
 
+  license: {
+    enforceLicense: boolean;
+  };
+
   database: {
     provider: 'mongodb' | 'sqlite';
     uri: string;
@@ -168,6 +172,10 @@ function buildConfig(source: ConfigSource): AppConfig {
 
   return {
     nodeEnv,
+
+    license: {
+      enforceLicense: bool(source, 'ENFORCE_LICENSE', false),
+    },
 
     database: {
       provider: oneOf(source, 'DB_PROVIDER', ['mongodb', 'sqlite'], 'sqlite'),

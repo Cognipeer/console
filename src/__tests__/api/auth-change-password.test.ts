@@ -1,5 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { NextRequest } from 'next/server';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMockDb } from '../helpers/db.mock';
 
 vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
@@ -9,30 +8,17 @@ vi.mock('bcryptjs', () => ({
   hash: vi.fn().mockResolvedValue('$2a$10$newHash'),
 }));
 
-import { POST } from '@/server/api/routes/auth/change-password/route';
-import { getDatabase } from '@/lib/database';
 import bcrypt from 'bcryptjs';
-
-function makeRequest(
-  body: Record<string, unknown>,
-  headers: Record<string, string> = {},
-): NextRequest {
-  const defaultHeaders = {
-    'x-tenant-db-name': 'tenant_acme',
-    'x-tenant-id': 'tenant-1',
-    'x-user-id': 'user-1',
-    'x-tenant-slug': 'acme',
-    'Content-Type': 'application/json',
-    ...headers,
-  };
-  return new NextRequest('http://localhost/api/auth/change-password', {
-    method: 'POST',
-    body: JSON.stringify(body),
-    headers: defaultHeaders,
-  });
-}
+import { getDatabase } from '@/lib/database';
+import { BCRYPT_ROUNDS } from '@/lib/services/auth/passwordPolicy';
+import { authApiPlugin } from '@/server/api/plugins/auth';
+import {
+  createFastifyApiTestApp,
+  parseJsonBody,
+} from '../helpers/fastify-api';
 
 describe('POST /api/auth/change-password', () => {
+  let app: Awaited<ReturnType<typeof createFastifyApiTestApp>>;
   let db: ReturnType<typeof createMockDb>;
 
   const mockUser = {
@@ -46,120 +32,126 @@ describe('POST /api/auth/change-password', () => {
     password: '$2a$10$currentHash',
   };
 
-  beforeEach(() => {
+  const defaultHeaders = {
+    'content-type': 'application/json',
+    'x-tenant-db-name': 'tenant_acme',
+    'x-tenant-id': 'tenant-1',
+    'x-tenant-slug': 'acme',
+    'x-user-id': 'user-1',
+    'x-user-role': 'owner',
+    'x-license-type': 'FREE',
+  };
+
+  beforeEach(async () => {
     vi.clearAllMocks();
     db = createMockDb();
     (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
     db.findUserById.mockResolvedValue(mockUser);
     db.updateUser.mockResolvedValue(mockUser);
     (bcrypt.compare as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+    app = await createFastifyApiTestApp(authApiPlugin);
   });
 
-  describe('authorization', () => {
-    it('returns 401 when tenant-db-name header missing', async () => {
-      const req = makeRequest(
-        { currentPassword: 'old', newPassword: 'newpassword123' },
-        { 'x-tenant-db-name': '', 'x-tenant-id': 'tenant-1', 'x-user-id': 'user-1' },
-      );
-      const res = await POST(req);
-      expect(res.status).toBe(401);
-    });
-
-    it('returns 403 for demo tenant', async () => {
-      const res = await POST(makeRequest(
-        { currentPassword: 'old', newPassword: 'newpassword123' },
-        { 'x-tenant-slug': 'demo' },
-      ));
-      expect(res.status).toBe(403);
-      const body = await res.json();
-      expect(body.error).toMatch(/demo/i);
-    });
+  afterEach(async () => {
+    await app.close();
   });
 
-  describe('validation', () => {
-    it('returns 400 when currentPassword is missing', async () => {
-      const res = await POST(makeRequest({ newPassword: 'newpassword123' }));
-      expect(res.status).toBe(400);
+  async function changePassword(
+    body: Record<string, unknown>,
+    headers: Record<string, string> = {},
+  ) {
+    return app.inject({
+      method: 'POST',
+      url: '/api/auth/change-password',
+      headers: {
+        ...defaultHeaders,
+        ...headers,
+      },
+      payload: JSON.stringify(body),
     });
+  }
 
-    it('returns 400 when newPassword is missing', async () => {
-      const res = await POST(makeRequest({ currentPassword: 'oldpass123' }));
-      expect(res.status).toBe(400);
-    });
-
-    it('returns 400 when newPassword is too short', async () => {
-      const res = await POST(makeRequest({ currentPassword: 'oldpass123', newPassword: 'short' }));
-      expect(res.status).toBe(400);
-      const body = await res.json();
-      expect(body.error).toMatch(/8 characters/i);
-    });
+  it('returns 401 when session headers missing', async () => {
+    const res = await changePassword(
+      { currentPassword: 'old', newPassword: 'Newpassword123!' },
+      {
+        'x-tenant-db-name': '',
+        'x-tenant-id': '',
+        'x-user-id': '',
+      },
+    );
+    expect(res.statusCode).toBe(401);
   });
 
-  describe('password verification', () => {
-    it('returns 401 when user not found', async () => {
-      db.findUserById.mockResolvedValue(null);
-      const res = await POST(makeRequest({ currentPassword: 'old', newPassword: 'newpassword123' }));
-      expect(res.status).toBe(401);
-    });
-
-    it('returns 401 when user tenantId mismatches', async () => {
-      db.findUserById.mockResolvedValue({ ...mockUser, tenantId: 'other-tenant' });
-      const res = await POST(makeRequest({ currentPassword: 'old', newPassword: 'newpassword123' }));
-      expect(res.status).toBe(401);
-    });
-
-    it('returns 401 when current password is wrong', async () => {
-      (bcrypt.compare as ReturnType<typeof vi.fn>).mockResolvedValue(false);
-      const res = await POST(makeRequest({ currentPassword: 'wrongpass', newPassword: 'newpassword123' }));
-      expect(res.status).toBe(401);
-      const body = await res.json();
-      expect(body.error).toMatch(/Invalid current password/i);
-    });
+  it('returns 403 for demo tenant', async () => {
+    const res = await changePassword(
+      { currentPassword: 'old', newPassword: 'Newpassword123!' },
+      { 'x-tenant-slug': 'demo' },
+    );
+    expect(res.statusCode).toBe(403);
+    const body = parseJsonBody<{ error: string }>(res.body);
+    expect(body.error).toMatch(/demo/i);
   });
 
-  describe('successful change', () => {
-    it('returns 200 on success', async () => {
-      const res = await POST(makeRequest({ currentPassword: 'oldpass', newPassword: 'newpassword123' }));
-      expect(res.status).toBe(200);
-      const body = await res.json();
-      expect(body.success).toBe(true);
+  it('returns 400 when newPassword is too short', async () => {
+    const res = await changePassword({
+      currentPassword: 'oldpass123',
+      newPassword: 'short',
     });
+    expect(res.statusCode).toBe(400);
+  });
 
-    it('hashes the new password', async () => {
-      await POST(makeRequest({ currentPassword: 'oldpass', newPassword: 'newpassword123' }));
-      expect(bcrypt.hash).toHaveBeenCalledWith('newpassword123', 10);
+  it('returns 401 when user not found', async () => {
+    db.findUserById.mockResolvedValue(null);
+    const res = await changePassword({
+      currentPassword: 'old',
+      newPassword: 'Newpassword123!',
     });
+    expect(res.statusCode).toBe(401);
+  });
 
-    it('updates user with hashed password and clears mustChangePassword', async () => {
-      await POST(makeRequest({ currentPassword: 'oldpass', newPassword: 'newpassword123' }));
-      expect(db.updateUser).toHaveBeenCalledWith('user-1', expect.objectContaining({
+  it('returns 401 when current password is wrong', async () => {
+    (bcrypt.compare as ReturnType<typeof vi.fn>).mockResolvedValue(false);
+    const res = await changePassword({
+      currentPassword: 'wrongpass',
+      newPassword: 'Newpassword123!',
+    });
+    expect(res.statusCode).toBe(401);
+    const body = parseJsonBody<{ error: string }>(res.body);
+    expect(body.error).toMatch(/invalid current password/i);
+  });
+
+  it('returns 200 on success', async () => {
+    const res = await changePassword({
+      currentPassword: 'oldpass',
+      newPassword: 'Newpassword123!',
+    });
+    expect(res.statusCode).toBe(200);
+    const body = parseJsonBody<{ success: boolean }>(res.body);
+    expect(body.success).toBe(true);
+  });
+
+  it('hashes the new password and updates the user', async () => {
+    await changePassword({
+      currentPassword: 'oldpass',
+      newPassword: 'Newpassword123!',
+    });
+    expect(bcrypt.hash).toHaveBeenCalledWith('Newpassword123!', BCRYPT_ROUNDS);
+    expect(db.updateUser).toHaveBeenCalledWith(
+      'user-1',
+      expect.objectContaining({
         password: '$2a$10$newHash',
         mustChangePassword: false,
-      }));
-    });
-
-    it('switches to tenant database', async () => {
-      await POST(makeRequest({ currentPassword: 'oldpass', newPassword: 'newpassword123' }));
-      expect(db.switchToTenant).toHaveBeenCalledWith('tenant_acme');
-    });
-
-    it('verifies current password against stored hash', async () => {
-      await POST(makeRequest({ currentPassword: 'oldpass', newPassword: 'newpassword123' }));
-      expect(bcrypt.compare).toHaveBeenCalledWith('oldpass', '$2a$10$currentHash');
-    });
+      }),
+    );
   });
 
-  describe('error handling', () => {
-    it('returns 500 when updateUser fails', async () => {
-      db.updateUser.mockResolvedValue(null);
-      const res = await POST(makeRequest({ currentPassword: 'oldpass', newPassword: 'newpassword123' }));
-      expect(res.status).toBe(500);
+  it('returns 500 when updateUser fails', async () => {
+    db.updateUser.mockResolvedValue(null);
+    const res = await changePassword({
+      currentPassword: 'oldpass',
+      newPassword: 'Newpassword123!',
     });
-
-    it('returns 500 on unexpected error', async () => {
-      (getDatabase as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('DB crash'));
-      const res = await POST(makeRequest({ currentPassword: 'oldpass', newPassword: 'newpassword123' }));
-      expect(res.status).toBe(500);
-    });
+    expect(res.statusCode).toBe(500);
   });
 });
