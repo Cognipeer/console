@@ -1,21 +1,46 @@
 import { randomUUID } from 'node:crypto';
 import type {
-  FastifyInstance,
   FastifyPluginAsync,
   FastifyReply,
-  FastifyRequest,
 } from 'fastify';
 import { LicenseManager } from '@/lib/license/license-manager';
 import { TokenManager, type JWTPayload } from '@/lib/license/token-manager';
-import { createLogger } from '@/lib/core/logger';
-import { isShuttingDown } from '@/lib/core/lifecycle';
-import { runWithRequestContext } from '@/lib/core/requestContext';
 import { applyCorsHeaders } from './cors';
-import { createGatewayRequest, GatewayResponse, sendGatewayResponse } from './http';
-import { apiRouteManifest } from './routeManifest';
-import type { ApiRouteManifestEntry, RouteHandler, RouteHandlerContext, RouteModule } from './types';
-
-const logger = createLogger('fastify-api');
+import { authApiPlugin } from './plugins/auth';
+import { clientAgentsApiPlugin } from './plugins/client-agents';
+import { clientConfigApiPlugin } from './plugins/client-config';
+import { clientFilesApiPlugin } from './plugins/client-files';
+import { clientGuardrailsApiPlugin } from './plugins/client-guardrails';
+import { clientInferenceApiPlugin } from './plugins/client-inference';
+import { clientMemoryApiPlugin } from './plugins/client-memory';
+import { clientMcpApiPlugin } from './plugins/client-mcp';
+import { clientPromptsApiPlugin } from './plugins/client-prompts';
+import { clientRagApiPlugin } from './plugins/client-rag';
+import { clientToolsApiPlugin } from './plugins/client-tools';
+import { clientTracingApiPlugin } from './plugins/client-tracing';
+import { clientVectorApiPlugin } from './plugins/client-vector';
+import { agentsApiPlugin } from './plugins/agents';
+import { alertsApiPlugin } from './plugins/alerts';
+import { configApiPlugin } from './plugins/config';
+import { dashboardApiPlugin } from './plugins/dashboard';
+import { filesApiPlugin } from './plugins/files';
+import { guardrailsApiPlugin } from './plugins/guardrails';
+import { healthApiPlugin } from './plugins/health';
+import { inferenceMonitoringApiPlugin } from './plugins/inference-monitoring';
+import { mcpApiPlugin } from './plugins/mcp';
+import { memoryApiPlugin } from './plugins/memory';
+import { metricsApiPlugin } from './plugins/metrics';
+import { modelsApiPlugin } from './plugins/models';
+import { promptsApiPlugin } from './plugins/prompts';
+import { providersApiPlugin } from './plugins/providers';
+import { projectsApiPlugin } from './plugins/projects';
+import { quotaApiPlugin } from './plugins/quota';
+import { ragApiPlugin } from './plugins/rag';
+import { tokensApiPlugin } from './plugins/tokens';
+import { toolsApiPlugin } from './plugins/tools';
+import { tracingApiPlugin } from './plugins/tracing';
+import { usersApiPlugin } from './plugins/users';
+import { vectorApiPlugin } from './plugins/vector';
 
 const PUBLIC_API_PATHS = [
   '/api/auth/login',
@@ -27,14 +52,6 @@ const PUBLIC_API_PATHS = [
 ];
 
 const CLIENT_API_PREFIXES = ['/api/client/', '/api/models/v1/', '/api/metrics'];
-const HTTP_METHODS: Array<keyof RouteModule> = [
-  'GET',
-  'POST',
-  'PUT',
-  'PATCH',
-  'DELETE',
-  'OPTIONS',
-];
 
 function getPathname(url: string | undefined): string {
   return new URL(url || '/', 'http://localhost').pathname;
@@ -79,120 +96,12 @@ function buildSessionHeaders(payload: JWTPayload, requestId: string) {
   };
 }
 
-function buildRouteParams(
-  entry: ApiRouteManifestEntry,
-  params: unknown,
-): Record<string, string | string[]> {
-  if (!params || typeof params !== 'object') {
-    return {};
-  }
-
-  const source = params as Record<string, string>;
-  const normalized: Record<string, string | string[]> = {};
-
-  for (const [key, value] of Object.entries(source)) {
-    if (key === '*') {
-      continue;
-    }
-    normalized[key] = value;
-  }
-
-  if (entry.catchAllParam) {
-    const wildcard = source['*'];
-    normalized[entry.catchAllParam] = wildcard
-      ? wildcard.split('/').filter(Boolean).map((segment) => decodeURIComponent(segment))
-      : [];
-  }
-
-  return normalized;
-}
-
-async function invokeRouteHandler(
-  entry: ApiRouteManifestEntry,
-  handler: RouteHandler,
-  request: FastifyRequest,
-  reply: FastifyReply,
-): Promise<void> {
-  if (isShuttingDown()) {
-    await sendGatewayResponse(
-      reply,
-      GatewayResponse.json(
-        { error: 'Service is shutting down' },
-        { status: 503, headers: { 'Retry-After': '5' } },
-      ),
-    );
-    return;
-  }
-
-  const apiRequest = createGatewayRequest(request, request.apiContextHeaders);
-  const context: RouteHandlerContext = {
-    params: Promise.resolve(buildRouteParams(entry, request.params)),
-  };
-
-  const tenantId =
-    request.apiContextHeaders?.['x-tenant-id']
-    || request.apiSession?.tenantId;
-  const tenantSlug =
-    request.apiContextHeaders?.['x-tenant-slug']
-    || request.apiSession?.tenantSlug;
-  const userId =
-    request.apiContextHeaders?.['x-user-id']
-    || request.apiSession?.userId;
-
-  const result = await runWithRequestContext(
-    {
-      requestId: request.apiRequestId,
-      tenantId,
-      tenantSlug,
-      userId,
-    },
-    () => handler(apiRequest, context),
-  );
-
-  await sendGatewayResponse(reply, result);
-}
-
-function registerRouteModule(
-  app: FastifyInstance,
-  entry: ApiRouteManifestEntry,
-): void {
-  for (const method of HTTP_METHODS) {
-    const handler = entry.module[method];
-    if (!handler) {
-      continue;
-    }
-
-    app.route({
-      handler: async (request, reply) => {
-        try {
-          await invokeRouteHandler(entry, handler, request, reply);
-        } catch (error) {
-          logger.error('Unhandled Fastify API error', {
-            error,
-            method,
-            routePath: entry.routePath,
-          });
-          await sendGatewayResponse(
-            reply,
-            GatewayResponse.json(
-              { error: 'Internal server error' },
-              { status: 500 },
-            ),
-          );
-        }
-      },
-      method,
-      url: entry.routePath,
-    });
-  }
-}
-
 function unauthorized(
   reply: FastifyReply,
   body: Record<string, unknown>,
   status = 401,
 ) {
-  return sendGatewayResponse(reply, GatewayResponse.json(body, { status }));
+  return reply.code(status).send(body);
 }
 
 export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
@@ -273,7 +182,39 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
     request.apiContextHeaders = sessionHeaders;
   });
 
-  for (const entry of apiRouteManifest) {
-    registerRouteModule(app, entry);
-  }
+  await app.register(agentsApiPlugin);
+  await app.register(alertsApiPlugin);
+  await app.register(authApiPlugin);
+  await app.register(clientAgentsApiPlugin);
+  await app.register(clientConfigApiPlugin);
+  await app.register(clientFilesApiPlugin);
+  await app.register(clientGuardrailsApiPlugin);
+  await app.register(clientInferenceApiPlugin);
+  await app.register(clientMemoryApiPlugin);
+  await app.register(clientMcpApiPlugin);
+  await app.register(clientPromptsApiPlugin);
+  await app.register(clientRagApiPlugin);
+  await app.register(clientToolsApiPlugin);
+  await app.register(clientTracingApiPlugin);
+  await app.register(clientVectorApiPlugin);
+  await app.register(configApiPlugin);
+  await app.register(dashboardApiPlugin);
+  await app.register(filesApiPlugin);
+  await app.register(guardrailsApiPlugin);
+  await app.register(healthApiPlugin);
+  await app.register(inferenceMonitoringApiPlugin);
+  await app.register(mcpApiPlugin);
+  await app.register(memoryApiPlugin);
+  await app.register(metricsApiPlugin);
+  await app.register(modelsApiPlugin);
+  await app.register(promptsApiPlugin);
+  await app.register(providersApiPlugin);
+  await app.register(projectsApiPlugin);
+  await app.register(quotaApiPlugin);
+  await app.register(ragApiPlugin);
+  await app.register(tokensApiPlugin);
+  await app.register(toolsApiPlugin);
+  await app.register(tracingApiPlugin);
+  await app.register(usersApiPlugin);
+  await app.register(vectorApiPlugin);
 };

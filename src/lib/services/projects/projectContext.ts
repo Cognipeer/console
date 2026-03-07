@@ -18,9 +18,13 @@ export interface ProjectContext {
   user: IUser;
 }
 
-export async function requireProjectContext(
-  request: NextRequest,
-  ctx: { tenantDbName: string; tenantId: string; userId: string },
+export async function resolveProjectContext(
+  ctx: {
+    tenantDbName: string;
+    tenantId: string;
+    userId: string;
+    activeProjectId?: string;
+  },
 ): Promise<ProjectContext> {
   const db = await getDatabase();
   await db.switchToTenant(ctx.tenantDbName);
@@ -37,8 +41,7 @@ export async function requireProjectContext(
   );
   const defaultProjectId = defaultProject._id ? String(defaultProject._id) : undefined;
 
-  const cookieProjectId = request.cookies.get('active_project_id')?.value;
-  let projectId = cookieProjectId || defaultProjectId;
+  let projectId = ctx.activeProjectId || defaultProjectId;
 
   if (user.role === 'user' || user.role === 'project_admin') {
     const allowed = (user.projectIds ?? []).map(String);
@@ -70,4 +73,14 @@ export async function requireProjectContext(
     project,
     user,
   };
+}
+
+export async function requireProjectContext(
+  request: NextRequest,
+  ctx: { tenantDbName: string; tenantId: string; userId: string },
+): Promise<ProjectContext> {
+  return resolveProjectContext({
+    ...ctx,
+    activeProjectId: request.cookies.get('active_project_id')?.value,
+  });
 }

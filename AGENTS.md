@@ -8,7 +8,7 @@ This document defines the general development rules for `cognipeer-console` (gat
 - Architecture: multi-tenant SaaS (isolated database per tenant)
 - Authentication: JWT (`jose`)
 - Runtime entrypoint: `src/server/index.ts`
-- Client API surface: `src/server/api/routes/client/v1/*`
+- Client API surface: `src/server/api/plugins/client-*.ts`
 - Core principle: tenant isolation and license/feature constraints must be enforced in every layer.
 
 ## 2) Module Map (cognipeer-console)
@@ -17,10 +17,10 @@ This document defines the general development rules for `cognipeer-console` (gat
 - `src/app/*`: Next.js pages, layouts, middleware-backed UI shell
 - `src/middleware.ts`: UI-only auth/header propagation for Next-rendered screens
 - `src/server/*`: Node runtime, Fastify bootstrap, Next delegation
-- `src/server/api/routes/*`: Fastify route tree for dashboard/internal + client APIs
-- `src/server/api/http.ts`: shared request/response primitives used by Fastify route modules
+- `src/server/api/plugins/*`: native Fastify endpoint registrations for dashboard/internal + client APIs
+- `src/server/api/fastify-utils.ts`: shared Fastify auth, request-context, parsing, cookie helpers
 - `src/server/api/plugin.ts`: API auth, CORS, security headers, request-context hooks
-- `src/server/api/routeManifest.ts`: generated Fastify route manifest
+- `src/server/api/routes/*`: legacy handler modules kept only until tests are migrated; runtime must not depend on them
 
 ### UI layer
 - `src/components/*`: domain-focused UI components
@@ -62,9 +62,9 @@ This document defines the general development rules for `cognipeer-console` (gat
    - Never create query patterns that can return cross-tenant data.
 
 3. **Client API authentication standard**
-   - In `src/server/api/routes/client/v1/*` endpoints, use `requireApiToken`.
-   - Do not import `next/server` in Fastify routes; use `NextRequest`/`NextResponse` from `@/server/api/http`.
-   - Return errors as `NextResponse.json({ error }, { status })` from `@/server/api/http`.
+   - In native Fastify client endpoints, use `withClientApiRequestContext` / `getApiTokenContextForRequest`.
+   - Do not import `next/server` in runtime API code.
+   - Return Fastify responses directly with `reply.code(...).send(...)`.
 
 4. **Feature/license enforcement**
    - Update feature endpoint patterns in `src/config/policies.json` when adding endpoints.
@@ -112,14 +112,13 @@ This document defines the general development rules for `cognipeer-console` (gat
 
 ## 4) API Design Rules
 
-- All APIs must live under `src/server/api/routes`.
-- Client-facing APIs must live under `src/server/api/routes/client/v1`.
-- Keep resource structure RESTful within the Fastify route tree: `/client/v1/<domain>/<resource>/route.ts`.
-- For streaming routes, return a standard `Response` with explicit SSE headers; do not use Next route runtime exports.
+- All runtime APIs must be registered from `src/server/api/plugins/*`.
+- Client-facing APIs must live under `/client/v1` in native Fastify plugins.
+- Keep resource structure RESTful in plugin route declarations.
+- For streaming routes, use Fastify raw headers/streams directly or return a standard `Response` only when necessary.
 - Validate request payloads early and return `400` for malformed input.
 - Keep response schemas predictable and OpenAI-compatible where relevant.
 - Produce/propagate `request_id` when possible for observability.
-- When adding/removing route files, regenerate `src/server/api/routeManifest.ts`.
 
 ## 5) UI and Screen Development Rules
 
@@ -200,13 +199,13 @@ Note: fixing unrelated legacy issues is not required, but they should be reporte
 ## 9) PR Checklist
 
 - [ ] Tenant isolation remains intact (`switchToTenant` in the correct place)
-- [ ] New client endpoints are under `src/server/api/routes/client/v1`
+- [ ] New client endpoints are registered from native Fastify plugins under `/client/v1`
 - [ ] `policies.json` feature-endpoint mapping is up to date
 - [ ] UI follows theme/component language
 - [ ] Loading/error/empty states are handled
 - [ ] No `process.env` in application code — use `getConfig()`
 - [ ] No `console.*` in server code (`src/lib/`, `src/server/`) — use `createLogger()`
-- [ ] Fastify route files do not import from `next/server`
+- [ ] Runtime Fastify code does not depend on `src/server/api/routes/*`
 - [ ] No sensitive data in logs
 - [ ] Lint/build (and relevant tests) pass
 
@@ -222,7 +221,7 @@ If gateway and SDK evolve together:
 ## Short Agent Summary
 
 - Prioritize tenant safety and license checks first.
-- Keep UI work in `src/app/*` and API work in `src/server/api/routes/*`.
+- Keep UI work in `src/app/*` and runtime API work in `src/server/api/plugins/*`.
 - Then implement API and service changes within correct domain boundaries.
 - Keep UI strictly aligned with existing Mantine design language.
 - Deliver changes small, traceable, and validated.

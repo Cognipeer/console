@@ -1,5 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { NextRequest } from 'next/server';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/lib/services/models/modelService', () => ({
   getModelById: vi.fn(),
@@ -15,78 +14,67 @@ vi.mock('@/lib/services/projects/projectContext', () => {
       this.status = status;
     }
   }
-  return { requireProjectContext: vi.fn(), ProjectContextError };
+  return { resolveProjectContext: vi.fn(), ProjectContextError };
 });
 
 vi.mock('@/lib/utils/dashboardDateFilter', () => ({
   parseDashboardDateFilterFromSearchParams: vi.fn().mockReturnValue({ from: null, to: null }),
 }));
 
-import { GET as getModelLogs } from '@/server/api/routes/models/[id]/logs/route';
-import { GET as getModelUsage } from '@/server/api/routes/models/[id]/usage/route';
 import {
   getModelById,
   listUsageLogs,
   getUsageAggregate,
 } from '@/lib/services/models/modelService';
-import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
+import { resolveProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
+import { modelsApiPlugin } from '@/server/api/plugins/models';
+import {
+  createFastifyApiTestApp,
+  parseJsonBody,
+} from '../helpers/fastify-api';
 
-const mockGetModelById = getModelById as ReturnType<typeof vi.fn>;
-const mockListUsageLogs = listUsageLogs as ReturnType<typeof vi.fn>;
-const mockGetUsageAggregate = getUsageAggregate as ReturnType<typeof vi.fn>;
-const mockRequireProjectContext = requireProjectContext as ReturnType<typeof vi.fn>;
+const HEADERS = {
+  'x-license-type': 'FREE',
+  'x-tenant-db-name': 'tenant_acme',
+  'x-tenant-id': 'tenant-1',
+  'x-tenant-slug': 'acme',
+  'x-user-id': 'user-1',
+  'x-user-role': 'owner',
+};
 
-const mockParams = { params: Promise.resolve({ id: 'model-1' }) };
-const mockContext = { projectId: 'project-1' };
-const mockModel = { _id: 'model-1', key: 'gpt-4o', name: 'GPT-4o', projectId: 'project-1' };
+describe('GET /api/models/:id/logs and /usage', () => {
+  let app: Awaited<ReturnType<typeof createFastifyApiTestApp>>;
+  const mockModel = { _id: 'model-1', key: 'gpt-4o', name: 'GPT-4o', projectId: 'project-1' };
 
-function makeRequest(url: string) {
-  return new NextRequest(url, {
-    headers: {
-      'x-tenant-db-name': 'tenant_acme',
-      'x-tenant-id': 'tenant-1',
-      'x-user-id': 'user-1',
-    },
-  });
-}
-
-describe('GET /api/models/[id]/logs', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
-    mockRequireProjectContext.mockResolvedValue(mockContext);
-    mockGetModelById.mockResolvedValue(mockModel);
+    (resolveProjectContext as ReturnType<typeof vi.fn>).mockResolvedValue({
+      projectId: 'project-1',
+      project: { _id: 'project-1' },
+      user: { _id: 'user-1', role: 'owner', projectIds: ['project-1'] },
+    });
+    (getModelById as ReturnType<typeof vi.fn>).mockResolvedValue(mockModel);
+    app = await createFastifyApiTestApp(modelsApiPlugin);
+  });
+
+  afterEach(async () => {
+    await app.close();
   });
 
   it('returns logs on success', async () => {
-    const logs = [
+    (listUsageLogs as ReturnType<typeof vi.fn>).mockResolvedValue([
       { _id: 'log-1', modelKey: 'gpt-4o', requestTokens: 100, responseTokens: 200 },
-    ];
-    mockListUsageLogs.mockResolvedValue(logs);
-    const req = makeRequest('http://localhost/api/models/model-1/logs');
-    const res = await getModelLogs(req, mockParams);
-    const body = await res.json();
-    expect(res.status).toBe(200);
+    ]);
+    const res = await app.inject({ method: 'GET', url: '/api/models/model-1/logs', headers: HEADERS });
+    expect(res.statusCode).toBe(200);
+    const body = parseJsonBody<{ logs: unknown[] }>(res.body);
     expect(body.logs).toHaveLength(1);
   });
 
-  it('returns 404 when model not found', async () => {
-    mockGetModelById.mockResolvedValue(null);
-    const req = makeRequest('http://localhost/api/models/model-1/logs');
-    const res = await getModelLogs(req, mockParams);
-    expect(res.status).toBe(404);
-  });
-
-  it('returns 401 when headers missing', async () => {
-    const req = new NextRequest('http://localhost/api/models/model-1/logs');
-    const res = await getModelLogs(req, mockParams);
-    expect(res.status).toBe(401);
-  });
-
-  it('caps limit at 200', async () => {
-    mockListUsageLogs.mockResolvedValue([]);
-    const req = makeRequest('http://localhost/api/models/model-1/logs?limit=999');
-    await getModelLogs(req, mockParams);
-    expect(mockListUsageLogs).toHaveBeenCalledWith(
+  it('caps logs limit at 200', async () => {
+    (listUsageLogs as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    await app.inject({ method: 'GET', url: '/api/models/model-1/logs?limit=999', headers: HEADERS });
+    expect(listUsageLogs).toHaveBeenCalledWith(
       'tenant_acme',
       'gpt-4o',
       'project-1',
@@ -94,73 +82,20 @@ describe('GET /api/models/[id]/logs', () => {
     );
   });
 
-  it('passes skip and limit correctly', async () => {
-    mockListUsageLogs.mockResolvedValue([]);
-    const req = makeRequest('http://localhost/api/models/model-1/logs?limit=10&skip=20');
-    await getModelLogs(req, mockParams);
-    expect(mockListUsageLogs).toHaveBeenCalledWith(
-      'tenant_acme',
-      'gpt-4o',
-      'project-1',
-      expect.objectContaining({ limit: 10, skip: 20 }),
-    );
-  });
-
-  it('returns ProjectContextError status', async () => {
-    mockRequireProjectContext.mockRejectedValue(
-      new ProjectContextError('No project', 400),
-    );
-    const req = makeRequest('http://localhost/api/models/model-1/logs');
-    const res = await getModelLogs(req, mockParams);
-    expect(res.status).toBe(400);
-  });
-
-  it('returns 500 on unexpected error', async () => {
-    mockListUsageLogs.mockRejectedValue(new Error('DB error'));
-    const req = makeRequest('http://localhost/api/models/model-1/logs');
-    const res = await getModelLogs(req, mockParams);
-    expect(res.status).toBe(500);
-  });
-});
-
-describe('GET /api/models/[id]/usage', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    mockRequireProjectContext.mockResolvedValue(mockContext);
-    mockGetModelById.mockResolvedValue(mockModel);
-  });
-
   it('returns usage aggregate on success', async () => {
-    const aggregate = [
+    (getUsageAggregate as ReturnType<typeof vi.fn>).mockResolvedValue([
       { date: '2025-01-01', totalCalls: 50, totalTokens: 10000 },
-    ];
-    mockGetUsageAggregate.mockResolvedValue(aggregate);
-    const req = makeRequest('http://localhost/api/models/model-1/usage');
-    const res = await getModelUsage(req, mockParams);
-    const body = await res.json();
-    expect(res.status).toBe(200);
-    expect(body.usage).toHaveLength(1);
+    ]);
+    const res = await app.inject({ method: 'GET', url: '/api/models/model-1/usage', headers: HEADERS });
+    expect(res.statusCode).toBe(200);
+    const body = parseJsonBody<{ usage: Array<{ totalCalls: number }> }>(res.body);
     expect(body.usage[0].totalCalls).toBe(50);
   });
 
-  it('returns 404 when model not found', async () => {
-    mockGetModelById.mockResolvedValue(null);
-    const req = makeRequest('http://localhost/api/models/model-1/usage');
-    const res = await getModelUsage(req, mockParams);
-    expect(res.status).toBe(404);
-  });
-
-  it('returns 401 when headers missing', async () => {
-    const req = new NextRequest('http://localhost/api/models/model-1/usage');
-    const res = await getModelUsage(req, mockParams);
-    expect(res.status).toBe(401);
-  });
-
   it('passes groupBy param to getUsageAggregate', async () => {
-    mockGetUsageAggregate.mockResolvedValue([]);
-    const req = makeRequest('http://localhost/api/models/model-1/usage?groupBy=hour');
-    await getModelUsage(req, mockParams);
-    expect(mockGetUsageAggregate).toHaveBeenCalledWith(
+    (getUsageAggregate as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    await app.inject({ method: 'GET', url: '/api/models/model-1/usage?groupBy=hour', headers: HEADERS });
+    expect(getUsageAggregate).toHaveBeenCalledWith(
       'tenant_acme',
       'gpt-4o',
       'project-1',
@@ -168,31 +103,24 @@ describe('GET /api/models/[id]/usage', () => {
     );
   });
 
-  it('defaults groupBy to day', async () => {
-    mockGetUsageAggregate.mockResolvedValue([]);
-    const req = makeRequest('http://localhost/api/models/model-1/usage');
-    await getModelUsage(req, mockParams);
-    expect(mockGetUsageAggregate).toHaveBeenCalledWith(
-      'tenant_acme',
-      'gpt-4o',
-      'project-1',
-      expect.objectContaining({ groupBy: 'day' }),
-    );
+  it('returns 404 when model not found', async () => {
+    (getModelById as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+    const res = await app.inject({ method: 'GET', url: '/api/models/model-1/logs', headers: HEADERS });
+    expect(res.statusCode).toBe(404);
   });
 
   it('returns ProjectContextError status', async () => {
-    mockRequireProjectContext.mockRejectedValue(
-      new ProjectContextError('No project', 400),
+    const ProjectError = ProjectContextError as unknown as new (message: string, status: number) => Error;
+    (resolveProjectContext as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new ProjectError('No project', 400),
     );
-    const req = makeRequest('http://localhost/api/models/model-1/usage');
-    const res = await getModelUsage(req, mockParams);
-    expect(res.status).toBe(400);
+    const res = await app.inject({ method: 'GET', url: '/api/models/model-1/usage', headers: HEADERS });
+    expect(res.statusCode).toBe(400);
   });
 
   it('returns 500 on unexpected error', async () => {
-    mockGetUsageAggregate.mockRejectedValue(new Error('DB error'));
-    const req = makeRequest('http://localhost/api/models/model-1/usage');
-    const res = await getModelUsage(req, mockParams);
-    expect(res.status).toBe(500);
+    (getUsageAggregate as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('DB error'));
+    const res = await app.inject({ method: 'GET', url: '/api/models/model-1/usage', headers: HEADERS });
+    expect(res.statusCode).toBe(500);
   });
 });

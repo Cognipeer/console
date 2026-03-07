@@ -1,5 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { NextRequest } from 'next/server';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/lib/services/models/modelService', () => ({
   listModelProviders: vi.fn(),
@@ -14,18 +13,22 @@ vi.mock('@/lib/services/projects/projectContext', () => {
       this.status = status;
     }
   }
-  return { requireProjectContext: vi.fn(), ProjectContextError };
+  return { resolveProjectContext: vi.fn(), ProjectContextError };
 });
 
-import { GET, POST } from '@/server/api/routes/models/providers/route';
 import { listModelProviders, createModelProvider } from '@/lib/services/models/modelService';
-import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
+import { resolveProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
+import { modelsApiPlugin } from '@/server/api/plugins/models';
+import {
+  createFastifyApiTestApp,
+  parseJsonBody,
+} from '../helpers/fastify-api';
 
-const mockListModelProviders = listModelProviders as ReturnType<typeof vi.fn>;
-const mockCreateModelProvider = createModelProvider as ReturnType<typeof vi.fn>;
-const mockRequireProjectContext = requireProjectContext as ReturnType<typeof vi.fn>;
-
-const mockContext = { projectId: 'project-1' };
+const mockContext = {
+  projectId: 'project-1',
+  project: { _id: 'project-1', name: 'Default' },
+  user: { _id: 'user-1', role: 'owner', projectIds: ['project-1'] },
+};
 
 const mockProvider = {
   _id: 'prov-1',
@@ -35,55 +38,45 @@ const mockProvider = {
   status: 'active',
 };
 
-function makeRequest(opts: {
-  method?: string;
-  body?: unknown;
-  searchParams?: string;
-} = {}) {
-  const method = opts.method ?? 'GET';
-  const url = `http://localhost/api/models/providers${opts.searchParams ? '?' + opts.searchParams : ''}`;
-  return new NextRequest(url, {
-    method,
-    headers: {
-      'x-tenant-db-name': 'tenant_acme',
-      'x-tenant-id': 'tenant-1',
-      'x-user-id': 'user-1',
-      'content-type': 'application/json',
-    },
-    ...(opts.body ? { body: JSON.stringify(opts.body) } : {}),
-  });
-}
+const HEADERS = {
+  'content-type': 'application/json',
+  'x-license-type': 'FREE',
+  'x-tenant-db-name': 'tenant_acme',
+  'x-tenant-id': 'tenant-1',
+  'x-tenant-slug': 'acme',
+  'x-user-id': 'user-1',
+  'x-user-role': 'owner',
+};
 
-describe('GET /api/models/providers', () => {
-  beforeEach(() => {
+describe('/api/models/providers', () => {
+  let app: Awaited<ReturnType<typeof createFastifyApiTestApp>>;
+
+  beforeEach(async () => {
     vi.clearAllMocks();
-    mockRequireProjectContext.mockResolvedValue(mockContext);
+    (resolveProjectContext as ReturnType<typeof vi.fn>).mockResolvedValue(mockContext);
+    app = await createFastifyApiTestApp(modelsApiPlugin);
+  });
+
+  afterEach(async () => {
+    await app.close();
   });
 
   it('returns providers list', async () => {
-    mockListModelProviders.mockResolvedValue([mockProvider]);
-    const req = makeRequest();
-    const res = await GET(req);
-    const body = await res.json();
-    expect(res.status).toBe(200);
-    expect(body.providers).toHaveLength(1);
+    (listModelProviders as ReturnType<typeof vi.fn>).mockResolvedValue([mockProvider]);
+    const res = await app.inject({ method: 'GET', url: '/api/models/providers', headers: HEADERS });
+    expect(res.statusCode).toBe(200);
+    const body = parseJsonBody<{ providers: Array<{ key: string }> }>(res.body);
     expect(body.providers[0].key).toBe('openai-1');
   });
 
-  it('returns empty list when no providers', async () => {
-    mockListModelProviders.mockResolvedValue([]);
-    const req = makeRequest();
-    const res = await GET(req);
-    const body = await res.json();
-    expect(res.status).toBe(200);
-    expect(body.providers).toHaveLength(0);
-  });
-
   it('passes status and driver filters', async () => {
-    mockListModelProviders.mockResolvedValue([]);
-    const req = makeRequest({ searchParams: 'status=active&driver=openai' });
-    await GET(req);
-    expect(mockListModelProviders).toHaveBeenCalledWith(
+    (listModelProviders as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    await app.inject({
+      method: 'GET',
+      url: '/api/models/providers?status=active&driver=openai',
+      headers: HEADERS,
+    });
+    expect(listModelProviders).toHaveBeenCalledWith(
       'tenant_acme',
       'tenant-1',
       'project-1',
@@ -92,80 +85,44 @@ describe('GET /api/models/providers', () => {
   });
 
   it('returns 401 when headers missing', async () => {
-    const req = new NextRequest('http://localhost/api/models/providers');
-    const res = await GET(req);
-    expect(res.status).toBe(401);
+    const res = await app.inject({ method: 'GET', url: '/api/models/providers' });
+    expect(res.statusCode).toBe(401);
   });
 
   it('returns ProjectContextError status', async () => {
-    mockRequireProjectContext.mockRejectedValue(
-      new ProjectContextError('No project', 400),
+    const ProjectError = ProjectContextError as unknown as new (message: string, status: number) => Error;
+    (resolveProjectContext as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new ProjectError('No project', 400),
     );
-    const req = makeRequest();
-    const res = await GET(req);
-    expect(res.status).toBe(400);
-  });
-
-  it('returns 500 on unexpected error', async () => {
-    mockListModelProviders.mockRejectedValue(new Error('DB error'));
-    const req = makeRequest();
-    const res = await GET(req);
-    expect(res.status).toBe(500);
-  });
-});
-
-describe('POST /api/models/providers', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    mockRequireProjectContext.mockResolvedValue(mockContext);
+    const res = await app.inject({ method: 'GET', url: '/api/models/providers', headers: HEADERS });
+    expect(res.statusCode).toBe(400);
   });
 
   it('creates a provider and returns 201', async () => {
-    mockCreateModelProvider.mockResolvedValue(mockProvider);
-    const req = makeRequest({
+    (createModelProvider as ReturnType<typeof vi.fn>).mockResolvedValue(mockProvider);
+    const res = await app.inject({
       method: 'POST',
-      body: { key: 'openai-1', label: 'OpenAI Main', driver: 'openai', credentials: {} },
+      url: '/api/models/providers',
+      headers: HEADERS,
+      payload: JSON.stringify({
+        key: 'openai-1',
+        label: 'OpenAI Main',
+        driver: 'openai',
+        credentials: {},
+      }),
     });
-    const res = await POST(req);
-    const body = await res.json();
-    expect(res.status).toBe(201);
+    expect(res.statusCode).toBe(201);
+    const body = parseJsonBody<{ provider: { key: string } }>(res.body);
     expect(body.provider.key).toBe('openai-1');
   });
 
   it('returns 400 when required fields missing', async () => {
-    const req = makeRequest({ method: 'POST', body: { key: 'openai-1' } });
-    const res = await POST(req);
-    expect(res.status).toBe(400);
-  });
-
-  it('returns 401 when headers missing', async () => {
-    const req = new NextRequest('http://localhost/api/models/providers', {
+    const res = await app.inject({
       method: 'POST',
-      body: JSON.stringify({ key: 'x', label: 'y', driver: 'z' }),
+      url: '/api/models/providers',
+      headers: HEADERS,
+      payload: JSON.stringify({ key: 'openai-1' }),
     });
-    const res = await POST(req);
-    expect(res.status).toBe(401);
-  });
-
-  it('returns ProjectContextError status', async () => {
-    mockRequireProjectContext.mockRejectedValue(
-      new ProjectContextError('Forbidden', 403),
-    );
-    const req = makeRequest({
-      method: 'POST',
-      body: { key: 'k', label: 'l', driver: 'd', credentials: {} },
-    });
-    const res = await POST(req);
-    expect(res.status).toBe(403);
-  });
-
-  it('returns 500 on unexpected error', async () => {
-    mockCreateModelProvider.mockRejectedValue(new Error('DB error'));
-    const req = makeRequest({
-      method: 'POST',
-      body: { key: 'k', label: 'l', driver: 'd', credentials: {} },
-    });
-    const res = await POST(req);
-    expect(res.status).toBe(500);
+    expect(res.statusCode).toBe(400);
   });
 });

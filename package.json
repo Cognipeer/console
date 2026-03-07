@@ -26,7 +26,7 @@
     "@aws-sdk/client-s3vectors": "^3.901.0",
     "@aws-sdk/client-sts": "^3.901.0",
     "@aws-sdk/util-stream-node": "^3.370.0",
-    "@cognipeer/agent-sdk": "file:../agent-sdk",
+    "@cognipeer/agent-sdk": "^0.3.1",
     "@cognipeer/to-markdown": "^2.0.1",
     "@langchain/aws": "^0.1.12",
     "@langchain/community": "^0.3.57",
@@ -68,8 +68,8 @@
     "winston": "^3.19.0"
   },
   "devDependencies": {
-    "@fastify/cookie": "^11.0.2",
     "@eslint/eslintrc": "^3",
+    "@fastify/cookie": "^11.0.2",
     "@tailwindcss/postcss": "^4",
     "@types/bcryptjs": "^2.4.6",
     "@types/better-sqlite3": "^7.6.13",

@@ -1,4 +1,3 @@
-import type { NextRequest } from '@/server/api/http';
 import { createHash } from 'crypto';
 import { getDatabase } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
@@ -30,14 +29,22 @@ export interface ApiTokenContext {
   user: IUser | null;
 }
 
-export async function requireApiToken(request: NextRequest): Promise<ApiTokenContext> {
-  const authHeader = request.headers.get('authorization');
+export interface ApiTokenRequestLike {
+  headers: {
+    get(name: string): string | null;
+  };
+}
 
-  if (!authHeader || !authHeader.toLowerCase().startsWith('bearer ')) {
+export async function requireApiTokenFromHeader(
+  authHeader: string | null | undefined,
+): Promise<ApiTokenContext> {
+  const normalizedHeader = authHeader ?? null;
+
+  if (!normalizedHeader || !normalizedHeader.toLowerCase().startsWith('bearer ')) {
     throw new ApiTokenAuthError('Missing or invalid authorization header');
   }
 
-  const token = authHeader.slice('bearer '.length).trim();
+  const token = normalizedHeader.slice('bearer '.length).trim();
 
   if (!token) {
     throw new ApiTokenAuthError('Missing API token');
@@ -116,4 +123,10 @@ export async function requireApiToken(request: NextRequest): Promise<ApiTokenCon
     projectId,
     user,
   };
+}
+
+export async function requireApiToken(
+  request: ApiTokenRequestLike,
+): Promise<ApiTokenContext> {
+  return requireApiTokenFromHeader(request.headers.get('authorization'));
 }

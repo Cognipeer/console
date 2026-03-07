@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { Lexend_Deca } from "next/font/google";
 import "@mantine/core/styles.css";
 import '@mantine/dates/styles.css';
 import "@mantine/notifications/styles.css";
@@ -12,6 +13,12 @@ import LicenseErrorHandler from "@/components/providers/LicenseErrorHandler";
 import { I18nProvider } from "@/lib/i18n";
 import { theme } from "@/theme/theme";
 
+const lexendDeca = Lexend_Deca({
+  subsets: ["latin"],
+  display: "swap",
+  variable: "--font-lexend-deca",
+});
+
 export const metadata: Metadata = {
   title: "CognipeerAI Gateway",
   description: "AI and Agentic Services Platform",
@@ -23,11 +30,11 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="en" suppressHydrationWarning className={lexendDeca.variable}>
       <head>
         <ColorSchemeScript defaultColorScheme="light" />
       </head>
-      <body>
+      <body className={lexendDeca.className}>
         <MantineProvider theme={theme} defaultColorScheme="light">
           <I18nProvider locale="en">
             <ReactQueryProvider>
