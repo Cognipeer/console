@@ -1,8 +1,14 @@
-import { ChatOpenAI, OpenAIEmbeddings } from '@langchain/openai';
+import { ChatOpenAI, OpenAIEmbeddings, AzureChatOpenAI, AzureOpenAIEmbeddings } from '@langchain/openai';
 import { ChatTogetherAI } from '@langchain/community/chat_models/togetherai';
 import { TogetherAIEmbeddings } from '@langchain/community/embeddings/togetherai';
+import { ChatOllama } from '@langchain/community/chat_models/ollama';
+import { OllamaEmbeddings } from '@langchain/community/embeddings/ollama';
 import { ChatBedrockConverse, BedrockEmbeddings } from '@langchain/aws';
 import { VertexAI, VertexAIEmbeddings } from '@langchain/google-vertexai';
+import { SimpleChatModel } from '@langchain/core/language_models/chat_models';
+import type { BaseMessage } from '@langchain/core/messages';
+import type { CallbackManagerForLLMRun } from '@langchain/core/callbacks/manager';
+import { getConfig } from '@/lib/core/config';
 import type { ProviderContract } from '../types';
 import type { ModelProviderRuntime } from '../domains/model';
 
@@ -44,6 +50,28 @@ interface VertexCredentials {
 interface VertexSettings {
   projectId: string;
   location: string;
+}
+
+interface AzureCredentials {
+  apiKey: string;
+}
+
+interface AzureSettings {
+  instanceName: string;
+  deploymentName: string;
+  apiVersion: string;
+}
+
+interface OllamaCredentials {
+  // Ollama is a local service — no credentials required
+}
+
+interface OllamaSettings {
+  baseUrl: string;
+}
+
+interface CognipeerLlmCredentials {
+  url: string;
 }
 
 interface ModelSettingsOverrides {
@@ -491,10 +519,440 @@ export const VertexModelProviderContract: ProviderContract<ModelProviderRuntime,
   },
 };
 
+// ─── Azure OpenAI ────────────────────────────────────────────────────────────
+
+export const AzureModelProviderContract: ProviderContract<ModelProviderRuntime, AzureCredentials, AzureSettings> = {
+  id: 'azure',
+  version: '1.0.0',
+  domains: ['model', 'embedding'],
+  display: {
+    label: 'Azure OpenAI',
+    description: 'Microsoft Azure-hosted OpenAI models with deployment-based access.',
+  },
+  capabilities: {
+    'model.categories': ['llm', 'embedding'],
+    'model.supports.tool_calls': true,
+    'model.supports.streaming': true,
+  },
+  form: {
+    sections: [
+      {
+        title: 'Credentials',
+        fields: [
+          {
+            name: 'apiKey',
+            label: 'API Key',
+            type: 'password',
+            required: true,
+          },
+        ],
+      },
+      {
+        title: 'Settings',
+        fields: [
+          {
+            name: 'instanceName',
+            label: 'Instance Name',
+            type: 'text',
+            required: true,
+            placeholder: 'my-resource',
+            description: 'Azure OpenAI resource name (subdomain of openai.azure.com).',
+            scope: 'settings',
+          },
+          {
+            name: 'deploymentName',
+            label: 'Deployment Name',
+            type: 'text',
+            required: true,
+            placeholder: 'gpt-4o-deployment',
+            description: 'The deployment name created in Azure OpenAI Studio.',
+            scope: 'settings',
+          },
+          {
+            name: 'apiVersion',
+            label: 'API Version',
+            type: 'text',
+            required: true,
+            placeholder: '2024-08-01-preview',
+            description: 'Azure OpenAI API version string.',
+            scope: 'settings',
+          },
+        ],
+      },
+    ],
+  },
+  createRuntime: ({ credentials, settings }) => {
+    const apiKey = ensureValue(credentials.apiKey, 'Azure OpenAI API key is required.');
+    const instanceName = ensureValue(settings.instanceName, 'Azure OpenAI instance name is required.');
+    const deploymentName = ensureValue(settings.deploymentName, 'Azure OpenAI deployment name is required.');
+    const apiVersion = ensureValue(settings.apiVersion, 'Azure OpenAI API version is required.');
+
+    const runtime: ModelProviderRuntime = {
+      createChatModel: (config) => {
+        const overrides = resolveOverrides(config.modelSettings);
+        return new AzureChatOpenAI({
+          model: config.modelId,
+          azureOpenAIApiKey: apiKey,
+          azureOpenAIApiInstanceName: instanceName,
+          azureOpenAIApiDeploymentName: deploymentName,
+          azureOpenAIApiVersion: apiVersion,
+          temperature: overrides.temperature,
+          maxTokens: overrides.maxTokens,
+          streaming: config.options?.streaming ?? false,
+        });
+      },
+      createEmbeddingModel: (config) =>
+        new AzureOpenAIEmbeddings({
+          model: config.modelId,
+          azureOpenAIApiKey: apiKey,
+          azureOpenAIApiInstanceName: instanceName,
+          azureOpenAIApiDeploymentName: deploymentName,
+          azureOpenAIApiVersion: apiVersion,
+        }),
+    };
+
+    return runtime;
+  },
+};
+
+// ─── Ollama ──────────────────────────────────────────────────────────────────
+
+export const OllamaModelProviderContract: ProviderContract<ModelProviderRuntime, OllamaCredentials, OllamaSettings> = {
+  id: 'ollama',
+  version: '1.0.0',
+  domains: ['model', 'embedding'],
+  display: {
+    label: 'Ollama',
+    description: 'Locally hosted open-source models via the Ollama runtime.',
+  },
+  capabilities: {
+    'model.categories': ['llm', 'embedding'],
+    'model.supports.tool_calls': false,
+    'model.supports.streaming': true,
+  },
+  form: {
+    sections: [
+      {
+        title: 'Settings',
+        fields: [
+          {
+            name: 'baseUrl',
+            label: 'Base URL',
+            type: 'text',
+            required: true,
+            placeholder: 'http://localhost:11434',
+            description: 'URL of the running Ollama server.',
+            scope: 'settings',
+          },
+        ],
+      },
+    ],
+  },
+  createRuntime: ({ settings }) => {
+    const baseUrl = ensureValue(settings.baseUrl, 'Ollama base URL is required.');
+
+    const runtime: ModelProviderRuntime = {
+      createChatModel: (config) => {
+        const overrides = resolveOverrides(config.modelSettings);
+        return new ChatOllama({
+          model: config.modelId,
+          baseUrl,
+          temperature: overrides.temperature,
+        });
+      },
+      createEmbeddingModel: (config) =>
+        new OllamaEmbeddings({
+          model: config.modelId,
+          baseUrl,
+        }),
+    };
+
+    return runtime;
+  },
+};
+
+// ─── CognipeerLLM (custom HTTP chat endpoint) ────────────────────────────────
+
+class CognipeerLlmModel extends SimpleChatModel {
+  private readonly endpointUrl: string;
+
+  constructor(endpointUrl: string) {
+    super({});
+    this.endpointUrl = endpointUrl;
+  }
+
+  _llmType(): string {
+    return 'cognipeer-llm';
+  }
+
+  async _call(
+    messages: BaseMessage[],
+    _options: this['ParsedCallOptions'],
+    _runManager?: CallbackManagerForLLMRun,
+  ): Promise<string> {
+    const payload = messages.map((m) => ({
+      role: m._getType() === 'human' ? 'user' : m._getType() === 'ai' ? 'assistant' : m._getType(),
+      content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+    }));
+
+    const response = await fetch(`${this.endpointUrl}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: payload }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`CognipeerLLM request failed: ${response.status} ${response.statusText}`);
+    }
+
+    const data = (await response.json()) as { message?: { content?: string }; content?: string };
+    const content = data?.message?.content ?? (data?.content as string | undefined) ?? '';
+    return content.trim();
+  }
+}
+
+export const CognipeerLlmModelProviderContract: ProviderContract<ModelProviderRuntime, CognipeerLlmCredentials, Record<string, never>> = {
+  id: 'cognipeer-llm',
+  version: '1.0.0',
+  domains: ['model'],
+  display: {
+    label: 'Cognipeer LLM',
+    description: 'Custom self-hosted LLM accessible via an HTTP chat endpoint.',
+  },
+  capabilities: {
+    'model.categories': ['llm'],
+    'model.supports.tool_calls': false,
+    'model.supports.streaming': false,
+  },
+  form: {
+    sections: [
+      {
+        title: 'Connection',
+        fields: [
+          {
+            name: 'url',
+            label: 'Endpoint URL',
+            type: 'text',
+            required: true,
+            placeholder: 'http://localhost:8080',
+            description: 'Base URL of the Cognipeer LLM server (without /api/chat).',
+            scope: 'credentials',
+          },
+        ],
+      },
+    ],
+  },
+  createRuntime: ({ credentials }) => {
+    const url = ensureValue(credentials.url, 'Cognipeer LLM endpoint URL is required.');
+
+    const runtime: ModelProviderRuntime = {
+      createChatModel: () => new CognipeerLlmModel(url),
+    };
+
+    return runtime;
+  },
+};
+
+// ─── System OpenAI (server-side API key) ────────────────────────────────────
+
+export const SystemOpenAiModelProviderContract: ProviderContract<ModelProviderRuntime, Record<string, never>, Record<string, never>> = {
+  id: 'system-openai',
+  version: '1.0.0',
+  domains: ['model', 'embedding'],
+  display: {
+    label: 'System OpenAI',
+    description: 'OpenAI models using platform-managed API credentials (SYSTEM_OPENAI_API_KEY).',
+  },
+  capabilities: {
+    'model.categories': ['llm', 'embedding'],
+    'model.supports.tool_calls': true,
+    'model.supports.streaming': true,
+    'model.supports.reasoning': true,
+  },
+  form: {
+    sections: [],
+  },
+  createRuntime: () => {
+    const cfg = getConfig().systemModels.openai;
+
+    const runtime: ModelProviderRuntime = {
+      createChatModel: (config) => {
+        const overrides = resolveOverrides(config.modelSettings);
+        return new ChatOpenAI({
+          model: config.modelId,
+          apiKey: cfg.apiKey,
+          configuration: cfg.organizationId ? { organization: cfg.organizationId } : undefined,
+          temperature: overrides.temperature,
+          maxCompletionTokens: overrides.maxCompletionTokens,
+          maxTokens: overrides.maxTokens,
+          reasoning: overrides.reasoning,
+          streaming: config.options?.streaming ?? false,
+        });
+      },
+      createEmbeddingModel: (config) =>
+        new OpenAIEmbeddings({
+          model: config.modelId,
+          apiKey: cfg.apiKey,
+          configuration: cfg.organizationId ? { organization: cfg.organizationId } : undefined,
+        }),
+    };
+
+    return runtime;
+  },
+};
+
+// ─── System Bedrock (server-side AWS credentials) ────────────────────────────
+
+export const SystemBedrockModelProviderContract: ProviderContract<ModelProviderRuntime, Record<string, never>, Record<string, never>> = {
+  id: 'system-bedrock',
+  version: '1.0.0',
+  domains: ['model', 'embedding'],
+  display: {
+    label: 'System Bedrock',
+    description: 'AWS Bedrock models using platform-managed credentials (SYSTEM_BEDROCK_*).',
+  },
+  capabilities: {
+    'model.categories': ['llm', 'embedding'],
+    'model.supports.tool_calls': true,
+    'model.supports.streaming': true,
+  },
+  form: {
+    sections: [],
+  },
+  createRuntime: () => {
+    const cfg = getConfig().systemModels.bedrock;
+
+    const runtime: ModelProviderRuntime = {
+      createChatModel: (config) => {
+        const overrides = resolveOverrides(config.modelSettings);
+        return new ChatBedrockConverse({
+          model: config.modelId,
+          region: cfg.region,
+          credentials: {
+            accessKeyId: cfg.accessKeyId,
+            secretAccessKey: cfg.secretAccessKey,
+          },
+          temperature: overrides.temperature,
+          maxTokens: overrides.maxTokens,
+        });
+      },
+      createEmbeddingModel: (config) =>
+        new BedrockEmbeddings({
+          model: config.modelId,
+          region: cfg.region,
+          credentials: {
+            accessKeyId: cfg.accessKeyId,
+            secretAccessKey: cfg.secretAccessKey,
+          },
+        }),
+    };
+
+    return runtime;
+  },
+};
+
+// ─── System Together AI (server-side API key) ────────────────────────────────
+
+export const SystemTogetherModelProviderContract: ProviderContract<ModelProviderRuntime, Record<string, never>, Record<string, never>> = {
+  id: 'system-together',
+  version: '1.0.0',
+  domains: ['model', 'embedding'],
+  display: {
+    label: 'System Together AI',
+    description: 'Together AI models using platform-managed API credentials (SYSTEM_TOGETHER_API_KEY).',
+  },
+  capabilities: {
+    'model.categories': ['llm', 'embedding'],
+    'model.supports.tool_calls': true,
+    'model.supports.streaming': true,
+  },
+  form: {
+    sections: [],
+  },
+  createRuntime: () => {
+    const cfg = getConfig().systemModels.together;
+
+    const runtime: ModelProviderRuntime = {
+      createChatModel: (config) => {
+        const overrides = resolveOverrides(config.modelSettings);
+        return new ChatTogetherAI({
+          model: config.modelId,
+          apiKey: cfg.apiKey,
+          temperature: overrides.temperature,
+          maxTokens: overrides.maxTokens,
+          streaming: config.options?.streaming ?? false,
+        });
+      },
+      createEmbeddingModel: (config) =>
+        new TogetherAIEmbeddings({
+          model: config.modelId,
+          apiKey: cfg.apiKey,
+        }),
+    };
+
+    return runtime;
+  },
+};
+
+// ─── System Vertex AI (server-side service account) ──────────────────────────
+
+export const SystemVertexModelProviderContract: ProviderContract<ModelProviderRuntime, Record<string, never>, Record<string, never>> = {
+  id: 'system-vertex',
+  version: '1.0.0',
+  domains: ['model', 'embedding'],
+  display: {
+    label: 'System Vertex AI',
+    description: 'Google Vertex AI models using platform-managed service account (SYSTEM_VERTEX_*).',
+  },
+  capabilities: {
+    'model.categories': ['llm', 'embedding'],
+    'model.supports.tool_calls': true,
+    'model.supports.streaming': true,
+    'model.supports.multimodal': true,
+  },
+  form: {
+    sections: [],
+  },
+  createRuntime: () => {
+    const cfg = getConfig().systemModels.vertex;
+    const authOptions = parseServiceAccountKey(cfg.serviceAccountKey || undefined);
+
+    const runtime: ModelProviderRuntime = {
+      createChatModel: (config) => {
+        const overrides = resolveOverrides(config.modelSettings);
+        return new VertexAI({
+          model: config.modelId,
+          location: cfg.location,
+          authOptions,
+          temperature: overrides.temperature,
+          maxOutputTokens: overrides.maxTokens,
+          ...({ project: cfg.projectId } as Record<string, unknown>),
+        });
+      },
+      createEmbeddingModel: (config) =>
+        new VertexAIEmbeddings({
+          model: config.modelId,
+          location: cfg.location,
+          authOptions,
+          ...({ project: cfg.projectId } as Record<string, unknown>),
+        }),
+    };
+
+    return runtime;
+  },
+};
+
 export const MODEL_PROVIDER_CONTRACTS = [
   OpenAiModelProviderContract,
   OpenAiCompatibleModelProviderContract,
   TogetherModelProviderContract,
   BedrockModelProviderContract,
   VertexModelProviderContract,
+  AzureModelProviderContract,
+  OllamaModelProviderContract,
+  CognipeerLlmModelProviderContract,
+  SystemOpenAiModelProviderContract,
+  SystemBedrockModelProviderContract,
+  SystemTogetherModelProviderContract,
+  SystemVertexModelProviderContract,
 ] as unknown as ProviderContract<ModelProviderRuntime, unknown, unknown>[];

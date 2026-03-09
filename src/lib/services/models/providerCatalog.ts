@@ -150,4 +150,124 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     defaultPricingCurrency: 'USD',
     modelIdHint: 'e.g., gemini-1.5-pro, text-embedding-004',
   },
+  {
+    id: 'azure',
+    label: 'Azure OpenAI',
+    description:
+      'Microsoft Azure-hosted OpenAI models with deployment-based access.',
+    categories: ['llm', 'embedding'],
+    credentialFields: [
+      {
+        name: 'apiKey',
+        label: 'API Key',
+        type: 'password',
+        required: true,
+      },
+      {
+        name: 'instanceName',
+        label: 'Instance Name',
+        type: 'text',
+        required: true,
+        placeholder: 'my-resource',
+        description: 'Azure OpenAI resource name (subdomain of openai.azure.com).',
+      },
+      {
+        name: 'deploymentName',
+        label: 'Deployment Name',
+        type: 'text',
+        required: true,
+        placeholder: 'gpt-4o-deployment',
+        description: 'The deployment name created in Azure OpenAI Studio.',
+      },
+      {
+        name: 'apiVersion',
+        label: 'API Version',
+        type: 'text',
+        required: true,
+        placeholder: '2024-08-01-preview',
+        description: 'Azure OpenAI API version string.',
+      },
+    ],
+    defaultPricingCurrency: 'USD',
+    modelIdHint: 'e.g., gpt-4o, gpt-4o-mini',
+  },
+  {
+    id: 'ollama',
+    label: 'Ollama',
+    description:
+      'Locally hosted open-source models via the Ollama runtime.',
+    categories: ['llm', 'embedding'],
+    credentialFields: [
+      {
+        name: 'baseUrl',
+        label: 'Base URL',
+        type: 'text',
+        required: true,
+        placeholder: 'http://localhost:11434',
+        description: 'URL of the running Ollama server.',
+      },
+    ],
+    defaultPricingCurrency: 'USD',
+    supportsCustomBaseUrl: true,
+    modelIdHint: 'e.g., llama3:instruct, nomic-embed-text',
+  },
+  {
+    id: 'cognipeer-llm',
+    label: 'Cognipeer LLM',
+    description:
+      'Custom self-hosted LLM accessible via an HTTP chat endpoint.',
+    categories: ['llm'],
+    credentialFields: [
+      {
+        name: 'url',
+        label: 'Endpoint URL',
+        type: 'text',
+        required: true,
+        placeholder: 'http://localhost:8080',
+        description: 'Base URL of the Cognipeer LLM server (without /api/chat).',
+      },
+    ],
+    defaultPricingCurrency: 'USD',
+    modelIdHint: 'e.g., my-custom-model',
+  },
+  {
+    id: 'system-openai',
+    label: 'System OpenAI',
+    description:
+      'OpenAI models using platform-managed API credentials (SYSTEM_OPENAI_API_KEY). No user credentials required.',
+    categories: ['llm', 'embedding'],
+    credentialFields: [],
+    defaultPricingCurrency: 'USD',
+    modelIdHint: 'e.g., gpt-4o-2024-08-06, o3, text-embedding-3-large',
+  },
+  {
+    id: 'system-bedrock',
+    label: 'System Bedrock',
+    description:
+      'AWS Bedrock models using platform-managed credentials (SYSTEM_BEDROCK_*). No user credentials required.',
+    categories: ['llm', 'embedding'],
+    credentialFields: [],
+    defaultPricingCurrency: 'USD',
+    modelIdHint: 'e.g., anthropic.claude-3-7-sonnet-v1:0, amazon.nova-pro-v1:0',
+  },
+  {
+    id: 'system-together',
+    label: 'System Together AI',
+    description:
+      'Together AI models using platform-managed API credentials (SYSTEM_TOGETHER_API_KEY). No user credentials required.',
+    categories: ['llm', 'embedding'],
+    credentialFields: [],
+    defaultPricingCurrency: 'USD',
+    modelIdHint: 'e.g., deepseek-ai/DeepSeek-R1, meta-llama/Llama-4-Scout-17B-16E-Instruct',
+  },
+  {
+    id: 'system-vertex',
+    label: 'System Vertex AI',
+    description:
+      'Google Vertex AI models using platform-managed service account (SYSTEM_VERTEX_*). No user credentials required.',
+    categories: ['llm', 'embedding'],
+    credentialFields: [],
+    defaultPricingCurrency: 'USD',
+    modelIdHint: 'e.g., gemini-2.5-pro, gemini-2.5-flash',
+  },
 ];

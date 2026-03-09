@@ -123,6 +123,27 @@ export interface AppConfig {
   providerRuntime: {
     cacheTtlSeconds: number;
   };
+
+  systemModels: {
+    openai: {
+      apiKey: string;
+      organizationId: string;
+    };
+    bedrock: {
+      accessKeyId: string;
+      secretAccessKey: string;
+      region: string;
+    };
+    together: {
+      apiKey: string;
+    };
+    vertex: {
+      projectId: string;
+      location: string;
+      /** Full service account key JSON string */
+      serviceAccountKey: string;
+    };
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -260,6 +281,26 @@ function buildConfig(source: ConfigSource): AppConfig {
 
     providerRuntime: {
       cacheTtlSeconds: int(source, 'PROVIDER_RUNTIME_CACHE_TTL_SECONDS', 300),
+    },
+
+    systemModels: {
+      openai: {
+        apiKey: str(source, 'SYSTEM_OPENAI_API_KEY', ''),
+        organizationId: str(source, 'SYSTEM_OPENAI_ORG_ID', ''),
+      },
+      bedrock: {
+        accessKeyId: str(source, 'SYSTEM_BEDROCK_ACCESS_KEY_ID', ''),
+        secretAccessKey: str(source, 'SYSTEM_BEDROCK_SECRET_ACCESS_KEY', ''),
+        region: str(source, 'SYSTEM_BEDROCK_REGION', 'us-east-1'),
+      },
+      together: {
+        apiKey: str(source, 'SYSTEM_TOGETHER_API_KEY', ''),
+      },
+      vertex: {
+        projectId: str(source, 'SYSTEM_VERTEX_PROJECT_ID', ''),
+        location: str(source, 'SYSTEM_VERTEX_LOCATION', 'us-central1'),
+        serviceAccountKey: str(source, 'SYSTEM_VERTEX_SERVICE_ACCOUNT_KEY', ''),
+      },
     },
   };
 }
