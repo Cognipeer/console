@@ -9,7 +9,7 @@ import type {
 } from '../domains/vector';
 
 interface DummyVectorCredentials {
-  apiKey: string;
+  apiKey?: string;
 }
 
 interface DummyVectorSettings {
@@ -81,7 +81,7 @@ export const DummyVectorProviderContract: ProviderContract<
             name: 'apiKey',
             label: 'API Key',
             type: 'text',
-            required: true,
+            required: false,
             description: 'Any non-empty value will satisfy the dummy provider.',
             scope: 'credentials',
           },
@@ -108,10 +108,6 @@ export const DummyVectorProviderContract: ProviderContract<
     supportsQuery: true,
   },
   async createRuntime({ providerKey, credentials, settings, logger }) {
-    if (!credentials?.apiKey) {
-      throw new Error('Dummy vector provider requires an apiKey credential.');
-    }
-
     const runtimeState: DummyVectorRuntimeState = {
       indexes: new Map<string, VectorIndexHandle>(),
     };
