@@ -80,6 +80,7 @@ import {
   VertexModelProviderContract,
   AzureModelProviderContract,
 } from '@/lib/providers/contracts/modelContracts';
+import type { ModelProviderRuntime } from '@/lib/providers/domains/model';
 
 // ── Helper ───────────────────────────────────────────────────────────────────
 
@@ -109,7 +110,7 @@ function assertEmbeddingModel(model: unknown) {
 describe('openai provider', () => {
   const runtime = OpenAiModelProviderContract.createRuntime(
     makeCtx({ apiKey: 'sk-test-openai' }) as never,
-  );
+  ) as unknown as ModelProviderRuntime;
 
   it('createRuntime returns runtime object', () => {
     expect(runtime).toBeDefined();
@@ -118,13 +119,13 @@ describe('openai provider', () => {
   });
 
   it('createChatModel returns LangChain-compatible object', () => {
-    const model = (runtime as ReturnType<typeof OpenAiModelProviderContract.createRuntime>)
+    const model = runtime
       .createChatModel!({ modelId: 'gpt-4o', category: 'llm' });
     assertChatModel(model);
   });
 
   it('createEmbeddingModel returns LangChain-compatible object', () => {
-    const model = (runtime as ReturnType<typeof OpenAiModelProviderContract.createRuntime>)
+    const model = runtime
       .createEmbeddingModel!({ modelId: 'text-embedding-3-small', category: 'embedding' });
     assertEmbeddingModel(model);
   });
@@ -143,20 +144,20 @@ describe('openai provider', () => {
 describe('openai-compatible provider', () => {
   const runtime = OpenAiCompatibleModelProviderContract.createRuntime(
     makeCtx({ apiKey: 'sk-test' }, { baseUrl: 'https://api.custom.com/v1' }) as never,
-  );
+  ) as unknown as ModelProviderRuntime;
 
   it('createRuntime returns runtime object', () => {
     expect(runtime).toBeDefined();
   });
 
   it('createChatModel returns LangChain-compatible object', () => {
-    const model = (runtime as ReturnType<typeof OpenAiCompatibleModelProviderContract.createRuntime>)
+    const model = runtime
       .createChatModel!({ modelId: 'mistral-large', category: 'llm' });
     assertChatModel(model);
   });
 
   it('createEmbeddingModel returns LangChain-compatible object', () => {
-    const model = (runtime as ReturnType<typeof OpenAiCompatibleModelProviderContract.createRuntime>)
+    const model = runtime
       .createEmbeddingModel!({ modelId: 'text-embedding', category: 'embedding' });
     assertEmbeddingModel(model);
   });
@@ -185,20 +186,20 @@ describe('openai-compatible provider', () => {
 describe('together provider', () => {
   const runtime = TogetherModelProviderContract.createRuntime(
     makeCtx({ apiKey: 'together-test-key' }) as never,
-  );
+  ) as unknown as ModelProviderRuntime;
 
   it('createRuntime returns runtime object', () => {
     expect(runtime).toBeDefined();
   });
 
   it('createChatModel returns LangChain-compatible object', () => {
-    const model = (runtime as ReturnType<typeof TogetherModelProviderContract.createRuntime>)
+    const model = runtime
       .createChatModel!({ modelId: 'meta-llama/Llama-3.1-70B-Instruct-Turbo', category: 'llm' });
     assertChatModel(model);
   });
 
   it('createEmbeddingModel returns LangChain-compatible object', () => {
-    const model = (runtime as ReturnType<typeof TogetherModelProviderContract.createRuntime>)
+    const model = runtime
       .createEmbeddingModel!({ modelId: 'togethercomputer/m2-bert-80M', category: 'embedding' });
     assertEmbeddingModel(model);
   });
@@ -220,7 +221,7 @@ describe('bedrock provider', () => {
       { accessKeyId: 'AKIATEST', secretAccessKey: 'secret' },
       { region: 'us-east-1' },
     ) as never,
-  );
+  ) as unknown as ModelProviderRuntime;
 
   it('createRuntime returns runtime object', () => {
     expect(runtime).toBeDefined();
@@ -229,13 +230,13 @@ describe('bedrock provider', () => {
   });
 
   it('createChatModel returns LangChain-compatible object', () => {
-    const model = (runtime as ReturnType<typeof BedrockModelProviderContract.createRuntime>)
+    const model = runtime
       .createChatModel!({ modelId: 'anthropic.claude-3-7-sonnet-v1:0', category: 'llm' });
     assertChatModel(model);
   });
 
   it('createEmbeddingModel returns LangChain-compatible object', () => {
-    const model = (runtime as ReturnType<typeof BedrockModelProviderContract.createRuntime>)
+    const model = runtime
       .createEmbeddingModel!({ modelId: 'amazon.titan-embed-text-v1', category: 'embedding' });
     assertEmbeddingModel(model);
   });
@@ -277,7 +278,7 @@ describe('vertex provider', () => {
       { serviceAccountKey: validKey },
       { projectId: 'test-project', location: 'us-central1' },
     ) as never,
-  );
+  ) as unknown as ModelProviderRuntime;
 
   it('createRuntime returns runtime object', () => {
     expect(runtime).toBeDefined();
@@ -286,13 +287,13 @@ describe('vertex provider', () => {
   });
 
   it('createChatModel returns LangChain-compatible object', () => {
-    const model = (runtime as ReturnType<typeof VertexModelProviderContract.createRuntime>)
+    const model = runtime
       .createChatModel!({ modelId: 'gemini-2.5-flash', category: 'llm' });
     assertChatModel(model);
   });
 
   it('createEmbeddingModel returns LangChain-compatible object', () => {
-    const model = (runtime as ReturnType<typeof VertexModelProviderContract.createRuntime>)
+    const model = runtime
       .createEmbeddingModel!({ modelId: 'text-embedding-004', category: 'embedding' });
     assertEmbeddingModel(model);
   });
@@ -332,7 +333,7 @@ describe('azure provider', () => {
       { apiKey: 'azure-key' },
       { instanceName: 'my-resource', deploymentName: 'gpt-4o', apiVersion: '2024-08-01-preview' },
     ) as never,
-  );
+  ) as unknown as ModelProviderRuntime;
 
   it('createRuntime returns runtime object', () => {
     expect(runtime).toBeDefined();
@@ -341,13 +342,13 @@ describe('azure provider', () => {
   });
 
   it('createChatModel returns LangChain-compatible object', () => {
-    const model = (runtime as ReturnType<typeof AzureModelProviderContract.createRuntime>)
+    const model = runtime
       .createChatModel!({ modelId: 'gpt-4o', category: 'llm' });
     assertChatModel(model);
   });
 
   it('createEmbeddingModel returns LangChain-compatible object', () => {
-    const model = (runtime as ReturnType<typeof AzureModelProviderContract.createRuntime>)
+    const model = runtime
       .createEmbeddingModel!({ modelId: 'text-embedding-ada-002', category: 'embedding' });
     assertEmbeddingModel(model);
   });
@@ -405,9 +406,9 @@ describe('Model settings overrides propagation', () => {
   it('openai — createChatModel accepts temperature override', () => {
     const runtime = OpenAiModelProviderContract.createRuntime(
       makeCtx({ apiKey: 'sk-test' }) as never,
-    );
+    ) as unknown as ModelProviderRuntime;
     expect(() =>
-      (runtime as ReturnType<typeof OpenAiModelProviderContract.createRuntime>)
+      runtime
         .createChatModel!({
           modelId: 'gpt-4o',
           category: 'llm',
@@ -419,9 +420,9 @@ describe('Model settings overrides propagation', () => {
   it('openai — createChatModel accepts reasoning effort override', () => {
     const runtime = OpenAiModelProviderContract.createRuntime(
       makeCtx({ apiKey: 'sk-test' }) as never,
-    );
+    ) as unknown as ModelProviderRuntime;
     expect(() =>
-      (runtime as ReturnType<typeof OpenAiModelProviderContract.createRuntime>)
+      runtime
         .createChatModel!({
           modelId: 'o3',
           category: 'llm',
@@ -436,9 +437,9 @@ describe('Model settings overrides propagation', () => {
         { accessKeyId: 'AKIA', secretAccessKey: 'secret' },
         { region: 'us-east-1' },
       ) as never,
-    );
+    ) as unknown as ModelProviderRuntime;
     expect(() =>
-      (runtime as ReturnType<typeof BedrockModelProviderContract.createRuntime>)
+      runtime
         .createChatModel!({
           modelId: 'anthropic.claude-3-7-sonnet-v1:0',
           category: 'llm',
