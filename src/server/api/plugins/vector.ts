@@ -501,7 +501,7 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
         session.tenantId,
         projectId,
         {
-          indexExternalId: externalId,
+          indexKey: externalId,
           providerKey: query.providerKey,
           query: {
             filter: body.query.filter as Record<string, unknown> | undefined,
@@ -722,7 +722,7 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       await upsertVectors(session.tenantDbName, session.tenantId, projectId, {
-        indexExternalId: externalId,
+        indexKey: externalId,
         providerKey: query.providerKey,
         updatedBy: session.userId,
         vectors: body.vectors as Array<{ id: string; values: number[] }>,
@@ -785,7 +785,7 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
 
       await deleteVectors(session.tenantDbName, session.tenantId, projectId, {
         ids,
-        indexExternalId: externalId,
+        indexKey: externalId,
         providerKey: query.providerKey,
         updatedBy: session.userId,
       });

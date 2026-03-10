@@ -95,9 +95,10 @@ export const MilvusLocalVectorProviderContract: ProviderContract<
     supportsQuery: true,
     supportsDelete: true,
   },
-  async createRuntime({ credentials: _credentials, settings, providerKey, logger }) {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/ban-ts-comment
+  async createRuntime({ settings, providerKey, logger }) {
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
     // @ts-ignore – @zilliz/milvus2-sdk-node is an optional peer dependency
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { MilvusClient, DataType } = await import('@zilliz/milvus2-sdk-node') as any;
 
     const resolvedHost = settings.host?.trim() || 'localhost';
@@ -110,10 +111,12 @@ export const MilvusLocalVectorProviderContract: ProviderContract<
 
     const runtime: VectorProviderRuntime = {
       async createIndex(input: CreateVectorIndexInput): Promise<VectorIndexHandle> {
-        const collectionName = input.name || settings.collectionName;
-        if (!collectionName) {
+        const rawName = input.name || settings.collectionName;
+        if (!rawName) {
           throw new Error('Collection name is required to create a Milvus Local index.');
         }
+        // Milvus only allows letters, numbers and underscores
+        const collectionName = rawName.replace(/[^a-zA-Z0-9_]/g, '_');
         const dimension = input.dimension || dim;
         const metric = input.metric ?? 'cosine';
         const metricType = metric === 'euclidean' ? 'L2' : metric === 'dot' ? 'IP' : 'COSINE';
@@ -129,6 +132,13 @@ export const MilvusLocalVectorProviderContract: ProviderContract<
             ],
             metric_type: metricType,
           });
+          await milvusClient.createIndex({
+            collection_name: collectionName,
+            field_name: vf,
+            index_type: 'FLAT',
+            metric_type: metricType,
+          });
+          await milvusClient.loadCollection({ collection_name: collectionName });
           logger?.info?.('Milvus Local collection created', { providerKey, collectionName });
         }
 
@@ -159,6 +169,25 @@ export const MilvusLocalVectorProviderContract: ProviderContract<
 
       async upsertVectors(handle: VectorIndexHandle, items: VectorUpsertItem[]): Promise<void> {
         const vectorField = (handle.metadata?.vectorField as string) ?? vf;
+
+        const hasCollection = await milvusClient.hasCollection({ collection_name: handle.externalId });
+        if (!hasCollection.value) {
+          throw new Error(`Milvus Local collection "${handle.externalId}" not found. Create the index first.`);
+        }
+
+        // Ensure a vector index exists before loading (collection may have been created externally without one)
+        const indexInfo = await milvusClient.describeIndex({ collection_name: handle.externalId, field_name: vectorField }).catch(() => null);
+        if (!indexInfo || !indexInfo.index_descriptions?.length) {
+          await milvusClient.createIndex({
+            collection_name: handle.externalId,
+            field_name: vectorField,
+            index_type: 'FLAT',
+            metric_type: 'COSINE',
+          });
+        }
+
+        await milvusClient.loadCollection({ collection_name: handle.externalId });
+
         const data = items.map((item) => ({
           id: item.id,
           [vectorField]: item.values,
@@ -170,6 +199,7 @@ export const MilvusLocalVectorProviderContract: ProviderContract<
 
       async queryVectors(handle: VectorIndexHandle, query: VectorQueryInput): Promise<VectorQueryResult> {
         const vectorField = (handle.metadata?.vectorField as string) ?? vf;
+        await milvusClient.loadCollection({ collection_name: handle.externalId });
         const result = await milvusClient.search({
           collection_name: handle.externalId,
           data: [query.vector],

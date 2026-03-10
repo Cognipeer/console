@@ -78,7 +78,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
     const result = await queryVectorIndex(tenantDbName, tenantId, projectId, {
       providerKey,
-      indexExternalId: externalId,
+      indexKey: externalId,
       query: {
         topK,
         vector: body.query.vector,

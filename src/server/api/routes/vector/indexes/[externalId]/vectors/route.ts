@@ -109,7 +109,7 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
 
     await deleteVectors(tenantDbName, tenantId, projectId, {
       providerKey,
-      indexExternalId: externalId,
+      indexKey: externalId,
       ids,
       updatedBy: userId,
     });
