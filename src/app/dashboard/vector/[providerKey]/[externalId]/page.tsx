@@ -192,8 +192,10 @@ export default function VectorIndexDetailPage() {
   const { openDocs } = useDocsDrawer();
   const providerKeyParam = params.providerKey;
   const indexKeyParam = params.externalId;
-  const providerKey = Array.isArray(providerKeyParam) ? providerKeyParam[0] : providerKeyParam;
-  const indexKey = Array.isArray(indexKeyParam) ? indexKeyParam[0] : indexKeyParam;
+  const providerKeyRaw = Array.isArray(providerKeyParam) ? providerKeyParam[0] : providerKeyParam;
+  const indexKeyRaw = Array.isArray(indexKeyParam) ? indexKeyParam[0] : indexKeyParam;
+  const providerKey = providerKeyRaw ? decodeURIComponent(providerKeyRaw) : providerKeyRaw;
+  const indexKey = indexKeyRaw ? decodeURIComponent(indexKeyRaw) : indexKeyRaw;
 
   const [provider, setProvider] = useState<VectorProviderView | null>(null);
   const [index, setIndex] = useState<VectorIndexRecord | null>(null);

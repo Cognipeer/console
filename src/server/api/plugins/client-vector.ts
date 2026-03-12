@@ -114,7 +114,7 @@ export const clientVectorApiPlugin: FastifyPluginAsync = async (app) => {
         credentials: body.credentials as Record<string, unknown>,
         description: body.description as string | undefined,
         driver: body.driver as string,
-        key: body.key as string,
+        key: (body.key as string).trim(),
         label: body.label as string,
         metadata: body.metadata as Record<string, unknown> | undefined,
         settings: body.settings as Record<string, unknown> | undefined,

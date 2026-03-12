@@ -146,8 +146,8 @@ export default function DashboardBreadcrumbs() {
       // Vector: /dashboard/vector/:providerKey/:externalId
       const vectorIndex = segments.indexOf('vector');
       if (vectorIndex >= 0) {
-        const providerKey = segments[vectorIndex + 1];
-        const externalId = segments[vectorIndex + 2];
+        const providerKey = segments[vectorIndex + 1] ? decodeURIComponent(segments[vectorIndex + 1]) : undefined;
+        const externalId = segments[vectorIndex + 2] ? decodeURIComponent(segments[vectorIndex + 2]) : undefined;
         if (providerKey && externalId) {
           tasks.push(
             (async () => {
