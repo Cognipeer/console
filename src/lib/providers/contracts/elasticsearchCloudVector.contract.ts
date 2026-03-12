@@ -115,8 +115,8 @@ export const ElasticsearchCloudVectorProviderContract: ProviderContract<
             name: 'apiKey',
             label: 'API Key',
             type: 'password',
-            required: true,
-            description: 'Elasticsearch API key. Create it from Kibana → Stack Management → API Keys.',
+            required: false,
+            description: 'Elasticsearch API key (recommended). If omitted, provide Username and Password below instead.',
             scope: 'credentials',
           },
           {

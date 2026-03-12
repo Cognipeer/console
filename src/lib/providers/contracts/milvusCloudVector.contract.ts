@@ -24,6 +24,18 @@ interface MilvusCloudSettings {
 const DEFAULT_DIMENSIONS = 1536;
 const DEFAULT_VECTOR_FIELD = 'vector';
 
+function milvusCloudMetricType(metric: string): string {
+  if (metric === 'euclidean') return 'L2';
+  if (metric === 'dot') return 'IP';
+  return 'COSINE';
+}
+
+function metricFromMilvusCloudType(milvusMetric: string | undefined): 'cosine' | 'euclidean' | 'dot' {
+  if (milvusMetric === 'L2') return 'euclidean';
+  if (milvusMetric === 'IP') return 'dot';
+  return 'cosine';
+}
+
 export const MilvusCloudVectorProviderContract: ProviderContract<
   VectorProviderRuntime,
   MilvusCloudCredentials,
@@ -123,7 +135,7 @@ export const MilvusCloudVectorProviderContract: ProviderContract<
         }
         const dimension = input.dimension || dim;
         const metric = input.metric ?? 'cosine';
-        const metricType = metric === 'euclidean' ? 'L2' : metric === 'dot' ? 'IP' : 'COSINE';
+        const metricType = milvusCloudMetricType(metric);
 
         const hasCollection = await milvusClient.hasCollection({ collection_name: collectionName });
         if (!hasCollection.value) {
@@ -167,13 +179,20 @@ export const MilvusCloudVectorProviderContract: ProviderContract<
       async listIndexes(): Promise<VectorIndexHandle[]> {
         const result = await milvusClient.listCollections();
         const names: string[] = result.data?.map((c: { name: string }) => c.name) ?? [];
-        return names.map((name) => ({
-          externalId: name,
-          name,
-          dimension: dim,
-          metric: 'cosine' as const,
-          metadata: { vectorField: vf, provider: 'milvus-cloud' },
-        }));
+        return Promise.all(
+          names.map(async (name) => {
+            const descResult = await milvusClient.describeIndex({ collection_name: name, field_name: vf }).catch(() => null);
+            const milvusMetric: string | undefined = descResult?.index_descriptions?.[0]?.metric_type;
+            const metric = metricFromMilvusCloudType(milvusMetric);
+            return {
+              externalId: name,
+              name,
+              dimension: dim,
+              metric,
+              metadata: { vectorField: vf, provider: 'milvus-cloud' },
+            };
+          }),
+        );
       },
 
       async upsertVectors(handle: VectorIndexHandle, items: VectorUpsertItem[]): Promise<void> {
@@ -186,7 +205,7 @@ export const MilvusCloudVectorProviderContract: ProviderContract<
             collection_name: handle.externalId,
             field_name: vectorField,
             index_type: 'AUTOINDEX',
-            metric_type: 'COSINE',
+            metric_type: milvusCloudMetricType(handle.metric ?? 'cosine'),
             params: {},
           });
         }
