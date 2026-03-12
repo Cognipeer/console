@@ -6,6 +6,8 @@ import type {
   VectorQueryInput,
   VectorQueryResult,
   VectorUpsertItem,
+  VectorListInput,
+  VectorListResult,
 } from '../domains/vector';
 
 interface ElasticsearchCredentials {
@@ -33,9 +35,10 @@ type EsClient = {
   };
   index: (p: { index: string; id: string; document: Record<string, unknown> }) => Promise<unknown>;
   bulk: (p: { body: unknown[] }) => Promise<{ errors: boolean }>;
-  search: (p: { index: string; knn: unknown; size: number }) => Promise<{
-    hits: { hits: Array<{ _id: string; _score: number; _source?: Record<string, unknown> }> };
+  search: (p: { index: string; knn?: unknown; size: number; _source?: string[]; sort?: unknown[]; search_after?: unknown[] }) => Promise<{
+    hits: { hits: Array<{ _id: string; _score: number; _source?: Record<string, unknown>; sort?: unknown[] }> };
   }>;
+  count: (p: { index: string }) => Promise<{ count: number }>;
   delete: (p: { index: string; id: string }) => Promise<unknown>;
   deleteByQuery: (p: { index: string; query: unknown }) => Promise<unknown>;
   cat: {
@@ -275,6 +278,43 @@ export const ElasticsearchVectorProviderContract: ProviderContract<
           query: { ids: { values: ids } },
         });
         logger?.debug?.('Elasticsearch deleted vectors', { providerKey, count: ids.length });
+      },
+
+      async listVectors(handle: VectorIndexHandle, input?: VectorListInput): Promise<VectorListResult> {
+        const limit = input?.limit ?? 100;
+        // cursor encodes the search_after value serialized as JSON, or a plain offset string
+        let searchAfter: unknown[] | undefined;
+        if (input?.cursor) {
+          try { searchAfter = JSON.parse(input.cursor) as unknown[]; } catch { /* use as pit */ }
+        }
+
+        const countRes = await client.count({ index: handle.externalId });
+        const total: number | undefined = countRes?.count;
+
+        const result = await client.search({
+          index: handle.externalId,
+          size: limit,
+          _source: ['vector', 'metadata'],
+          sort: [{ _doc: 'asc' }],
+          ...(searchAfter ? { search_after: searchAfter } : {}),
+        });
+
+        const hits = result.hits?.hits ?? [];
+        const items = hits.map((hit: Record<string, unknown>) => {
+          const src = (hit._source ?? {}) as Record<string, unknown>;
+          return {
+            id: hit._id as string,
+            values: Array.isArray(src.vector) ? src.vector as number[] : [],
+            metadata: src.metadata as Record<string, unknown> | undefined,
+          };
+        });
+
+        const lastHit = hits[hits.length - 1] as Record<string, unknown> | undefined;
+        const nextCursor = items.length === limit && lastHit?.sort
+          ? JSON.stringify(lastHit.sort)
+          : undefined;
+
+        return { items, nextCursor, total };
       },
     };
 

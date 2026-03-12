@@ -6,6 +6,8 @@ import type {
   VectorQueryInput,
   VectorQueryResult,
   VectorUpsertItem,
+  VectorListInput,
+  VectorListResult,
 } from '../domains/vector';
 
 interface MilvusCredentials {
@@ -278,6 +280,40 @@ export const MilvusVectorProviderContract: ProviderContract<
         const expr = `id in [${ids.map((id) => `"${id}"`).join(', ')}]`;
         await milvusClient.deleteEntities({ collection_name: handle.externalId, expr });
         logger?.debug?.('Milvus deleted vectors', { providerKey, count: ids.length });
+      },
+
+      async listVectors(handle: VectorIndexHandle, input?: VectorListInput): Promise<VectorListResult> {
+        const vf = (handle.metadata?.vectorField as string) ?? vectorField;
+        const limit = input?.limit ?? 100;
+        const offset = input?.cursor ? parseInt(input.cursor, 10) : 0;
+
+        try { await milvusClient.loadCollection({ collection_name: handle.externalId }); } catch (_) { /* already loaded */ }
+
+        const countRes = await milvusClient.count({ collection_name: handle.externalId }).catch(() => null);
+        const total: number | undefined = countRes?.data?.count != null ? Number(countRes.data.count) : undefined;
+
+        const result = await milvusClient.query({
+          collection_name: handle.externalId,
+          expr: '',
+          output_fields: ['id', vf, 'metadata_json'],
+          limit,
+          offset,
+        });
+
+        const items = (result.data ?? []).map((row: Record<string, unknown>) => {
+          let metadata: Record<string, unknown> = {};
+          try { metadata = row.metadata_json ? JSON.parse(row.metadata_json as string) : {}; } catch { /* ignore */ }
+          return {
+            id: row.id as string,
+            values: Array.isArray(row[vf]) ? row[vf] as number[] : [],
+            metadata,
+          };
+        });
+
+        const nextOffset = offset + items.length;
+        const hasMore = total !== undefined ? nextOffset < total : items.length === limit;
+
+        return { items, nextCursor: hasMore ? String(nextOffset) : undefined, total };
       },
     };
 

@@ -13,6 +13,8 @@ import type {
     VectorQueryInput,
     VectorQueryResult,
     VectorUpsertItem,
+    VectorListInput,
+    VectorListResult,
 } from '../domains/vector';
 
 interface AzureAiSearchCredentials {
@@ -392,6 +394,47 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                     indexName: handle.externalId,
                     count: ids.length,
                 });
+            },
+
+            async listVectors(handle: VectorIndexHandle, input?: VectorListInput): Promise<VectorListResult> {
+                const limit = input?.limit ?? 100;
+                const skip = input?.cursor ? parseInt(input.cursor, 10) : 0;
+
+                const client = getSearchClient(handle.externalId);
+
+                const searchResults = await client.search('*', {
+                    select: [ID_FIELD, VECTOR_FIELD, METADATA_FIELD] as (keyof AzureSearchDocument)[],
+                    top: limit,
+                    skip,
+                    includeTotalCount: true,
+                });
+
+                const items: VectorListResult['items'] = [];
+
+                for await (const result of searchResults.results) {
+                    const doc = result.document;
+                    let metadata: Record<string, unknown> = {};
+                    try {
+                        metadata = JSON.parse(doc[METADATA_FIELD] ?? '{}');
+                    } catch {
+                        // ignore malformed metadata
+                    }
+                    items.push({
+                        id: doc[ID_FIELD],
+                        values: Array.isArray(doc[VECTOR_FIELD]) ? doc[VECTOR_FIELD] : [],
+                        metadata,
+                    });
+                }
+
+                const nextOffset = skip + items.length;
+                const total = searchResults.count ?? undefined;
+                const hasMore = total !== undefined ? nextOffset < total : items.length === limit;
+
+                return {
+                    items,
+                    nextCursor: hasMore ? String(nextOffset) : undefined,
+                    total: total !== undefined ? Number(total) : undefined,
+                };
             },
         };
 

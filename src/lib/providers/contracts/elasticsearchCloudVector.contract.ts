@@ -6,6 +6,8 @@ import type {
   VectorQueryInput,
   VectorQueryResult,
   VectorUpsertItem,
+  VectorListInput,
+  VectorListResult,
 } from '../domains/vector';
 
 interface ElasticsearchCloudCredentials {
@@ -312,6 +314,36 @@ export const ElasticsearchCloudVectorProviderContract: ProviderContract<
           throw extractEsError(err);
         }
       },
+    
+      async listVectors(handle: VectorIndexHandle, input?: VectorListInput): Promise<VectorListResult> {
+        const limit = input?.limit ?? 100;
+        let searchAfter: unknown[] | undefined;
+        if (input?.cursor) { try { searchAfter = JSON.parse(input.cursor) as unknown[]; } catch { /* ignore */ } }
+        const countRes = await client.count({ index: handle.externalId });
+        const total: number | undefined = countRes?.count;
+        const result = await client.search({
+          index: handle.externalId,
+          size: limit,
+          _source: ['vector', 'metadata'],
+          sort: [{ _doc: 'asc' }],
+          ...(searchAfter ? { search_after: searchAfter } : {}),
+        });
+        const hits = result.hits?.hits ?? [];
+        const items = hits.map((hit: Record<string, unknown>) => {
+          const src = (hit._source ?? {}) as Record<string, unknown>;
+          return {
+            id: hit._id as string,
+            values: Array.isArray(src.vector) ? src.vector as number[] : [],
+            metadata: src.metadata as Record<string, unknown> | undefined,
+          };
+        });
+        const lastHit = hits[hits.length - 1] as Record<string, unknown> | undefined;
+        const nextCursor = items.length === limit && lastHit?.sort
+          ? JSON.stringify(lastHit.sort)
+          : undefined;
+        return { items, nextCursor, total };
+      },
+    
     };
 
     return runtime;

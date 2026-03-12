@@ -46,6 +46,10 @@ import type {
   IToolRequestLog,
   IUser,
   IVectorIndexRecord,
+  IVectorMigration,
+  IVectorMigrationLog,
+  VectorMigrationStatus,
+  VectorMigrationLogStatus,
   IncidentSeverity,
   IncidentStatus,
   McpServerStatus,
@@ -272,6 +276,32 @@ export interface DatabaseProvider {
     externalId: string,
     projectId?: string,
   ): Promise<IVectorIndexRecord | null>;
+
+  // Vector migration operations (tenant-specific)
+  createVectorMigration(
+    migration: Omit<IVectorMigration, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IVectorMigration>;
+  updateVectorMigration(
+    key: string,
+    data: Partial<Omit<IVectorMigration, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IVectorMigration | null>;
+  deleteVectorMigration(key: string): Promise<boolean>;
+  listVectorMigrations(filters?: {
+    projectId?: string;
+    status?: VectorMigrationStatus;
+  }): Promise<IVectorMigration[]>;
+  findVectorMigrationByKey(key: string): Promise<IVectorMigration | null>;
+  createVectorMigrationLog(
+    log: Omit<IVectorMigrationLog, '_id' | 'createdAt'>,
+  ): Promise<IVectorMigrationLog>;
+  listVectorMigrationLogs(
+    migrationKey: string,
+    options?: { limit?: number; offset?: number },
+  ): Promise<IVectorMigrationLog[]>;
+  countVectorMigrationLogs(
+    migrationKey: string,
+    status?: VectorMigrationLogStatus,
+  ): Promise<number>;
 
   // File object operations (tenant-specific)
   createFileRecord(

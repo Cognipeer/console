@@ -6,6 +6,8 @@ import type {
   VectorQueryInput,
   VectorQueryResult,
   VectorUpsertItem,
+  VectorListInput,
+  VectorListResult,
 } from '../domains/vector';
 
 interface ChromaCloudCredentials {
@@ -45,6 +47,12 @@ type ChromaCloudCollection = {
     metadatas?: Array<Record<string, unknown>>;
   }) => Promise<void>;
   delete: (opts: { ids?: string[] }) => Promise<void>;
+  count: () => Promise<number>;
+  get: (opts: { limit: number; offset: number; include: string[] }) => Promise<{
+    ids: string[];
+    embeddings: number[][] | null;
+    metadatas: Array<Record<string, unknown> | null> | null;
+  }>;
 };
 
 export const ChromaCloudVectorProviderContract: ProviderContract<
@@ -209,6 +217,25 @@ export const ChromaCloudVectorProviderContract: ProviderContract<
         const collection = await client.getCollection({ name: handle.name });
         await collection.delete({ ids });
       },
+    
+      async listVectors(handle: VectorIndexHandle, input?: VectorListInput): Promise<VectorListResult> {
+        const limit = input?.limit ?? 100;
+        const offset = input?.cursor ? parseInt(input.cursor, 10) : 0;
+        const collection = await client.getCollection({ name: handle.name });
+        const total = await collection.count();
+        const result = await collection.get({ limit, offset, include: ['embeddings', 'metadatas'] });
+        const ids = result.ids ?? [];
+        const embeddings = (result.embeddings ?? []) as number[][];
+        const metadatas = (result.metadatas ?? []) as (Record<string, unknown> | null)[];
+        const items = ids.map((id: string, i: number) => ({
+          id,
+          values: embeddings[i] ?? [],
+          metadata: metadatas[i] ?? undefined,
+        }));
+        const nextOffset = offset + items.length;
+        return { items, nextCursor: nextOffset < total ? String(nextOffset) : undefined, total };
+      },
+    
     };
 
     return runtime;

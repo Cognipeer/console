@@ -22,7 +22,7 @@ import {
 import PageHeader from '@/components/layout/PageHeader';
 import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
 import { notifications } from '@mantine/notifications';
-import { IconPlus, IconRefresh, IconTrash, IconDatabase, IconServer, IconChartDots3, IconArrowRight, IconSparkles, IconChartBar, IconGitBranch } from '@tabler/icons-react';
+import { IconPlus, IconRefresh, IconTrash, IconDatabase, IconServer, IconChartDots3, IconArrowRight, IconSparkles, IconChartBar, IconGitBranch, IconDatabaseExport } from '@tabler/icons-react';
 import type { VectorIndexRecord, VectorProviderView } from '@/lib/services/vector';
 import CreateVectorIndexModal from '@/components/vector/CreateVectorIndexModal';
 import {
@@ -220,6 +220,14 @@ export default function VectorIndexPage() {
               disabled={refreshing}
             >
               Refresh
+            </Button>
+            <Button
+              variant="light"
+              size="xs"
+              leftSection={<IconDatabaseExport size={14} />}
+              onClick={() => router.push('/dashboard/vector/migrations')}
+            >
+              Migrations
             </Button>
             <Button
               size="xs"
