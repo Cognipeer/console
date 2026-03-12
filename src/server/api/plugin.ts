@@ -51,6 +51,16 @@ const PUBLIC_API_PATHS = [
   '/api/health/ready',
 ];
 
+/**
+ * Authenticated API paths that bypass license/feature endpoint checks.
+ * These are core auth operations every logged-in user must access.
+ */
+const LICENSE_EXEMPT_API_PATHS = [
+  '/api/auth/session',
+  '/api/auth/change-password',
+  '/api/auth/logout',
+];
+
 const CLIENT_API_PREFIXES = ['/api/client/', '/api/models/v1/', '/api/metrics'];
 
 function getPathname(url: string | undefined): string {
@@ -59,6 +69,10 @@ function getPathname(url: string | undefined): string {
 
 function isPublicApiPath(pathname: string): boolean {
   return PUBLIC_API_PATHS.some((path) => pathname === path || pathname.startsWith(`${path}/`));
+}
+
+function isLicenseExemptPath(pathname: string): boolean {
+  return LICENSE_EXEMPT_API_PATHS.some((path) => pathname === path || pathname.startsWith(`${path}/`));
 }
 
 function isClientApiPath(pathname: string): boolean {
@@ -158,7 +172,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
       });
     }
 
-    if (!LicenseManager.hasEndpointAccess(payload.licenseType, pathname)) {
+    if (!isLicenseExemptPath(pathname) && !LicenseManager.hasEndpointAccess(payload.licenseType, pathname)) {
       return unauthorized(
         reply,
         {

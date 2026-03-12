@@ -5,6 +5,7 @@ import { sendEmail } from '@/lib/email/mailer';
 import { ensureDefaultProject } from '@/lib/services/projects/projectService';
 import { checkResourceQuota } from '@/lib/quota/quotaGuard';
 import type { LicenseType } from '@/lib/license/license-manager';
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 
 const logger = createLogger('users');
@@ -142,9 +143,11 @@ export async function POST(request: NextRequest) {
     // Send invitation email
     sendEmail(email, 'user-invitation', {
       name,
+      email,
       companyName: tenant.companyName,
       slug: tenant.slug,
       tempPassword,
+      loginUrl: `${getConfig().app.url}/login`,
       inviterName: inviterRole, // You might want to fetch the actual inviter's name
     }).catch((err: Error) =>
       logger.error('Failed to send invitation email', { error: err }),

@@ -1,5 +1,6 @@
 import bcrypt from 'bcryptjs';
 import type { FastifyPluginAsync } from 'fastify';
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
 import { sendEmail } from '@/lib/email/mailer';
@@ -183,7 +184,9 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
 
       sendEmail(body.email, 'user-invitation', {
         companyName: tenant.companyName,
+        email: body.email,
         inviterName: session.userRole,
+        loginUrl: `${getConfig().app.url}/login`,
         name: body.name,
         slug: tenant.slug,
         tempPassword,
