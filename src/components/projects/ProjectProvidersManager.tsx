@@ -18,10 +18,10 @@ type Provider = {
 };
 
 function isAssigned(provider: Provider, projectId: string) {
-  if (provider.projectId && String(provider.projectId) === String(projectId)) return true;
   if (Array.isArray(provider.projectIds)) {
     return provider.projectIds.map(String).includes(String(projectId));
   }
+  if (provider.projectId && String(provider.projectId) === String(projectId)) return true;
   return false;
 }
 
@@ -82,6 +82,9 @@ export default function ProjectProvidersManager({ projectId }: { projectId: stri
     setSubmitting(true);
     try {
       const next = new Set((provider.projectIds ?? []).map(String));
+      if (provider.projectId) {
+        next.add(String(provider.projectId));
+      }
       if (assign) {
         next.add(String(projectId));
       } else {
