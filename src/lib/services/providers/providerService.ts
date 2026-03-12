@@ -61,8 +61,7 @@ export async function createProviderConfig(
   const db = await withTenantDb(tenantDbName);
 
   // Provider keys are tenant-level; project assignment is handled via projectIds.
-  const trimmedKey = payload.key.trim();
-  const existing = await db.findProviderByKey(tenantId, trimmedKey);
+  const existing = await db.findProviderByKey(tenantId, payload.key);
   if (existing) {
     throw new Error(`Provider with key "${payload.key}" already exists.`);
   }
@@ -70,7 +69,7 @@ export async function createProviderConfig(
   const record = await db.createProvider({
     tenantId,
     projectIds: payload.projectId ? [payload.projectId] : undefined,
-    key: trimmedKey,
+    key: payload.key,
     type: payload.type,
     driver: payload.driver,
     label: payload.label,

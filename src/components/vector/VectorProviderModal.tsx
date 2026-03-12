@@ -212,7 +212,7 @@ export default function VectorProviderModal({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          key: values.key.trim(),
+          key: values.key,
           label: values.label,
           description: values.description,
           driver: selectedDriver,
