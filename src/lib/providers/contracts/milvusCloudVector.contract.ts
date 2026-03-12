@@ -127,14 +127,26 @@ export const MilvusCloudVectorProviderContract: ProviderContract<
         if (!hasCollection.value) {
           await milvusClient.createCollection({
             collection_name: collectionName,
+            enable_dynamic_field: true,
             fields: [
               { name: 'id', data_type: DataType.VarChar, max_length: 255, is_primary_key: true, auto_id: false },
               { name: vf, data_type: DataType.FloatVector, dim: dimension },
               { name: 'metadata_json', data_type: DataType.VarChar, max_length: 65535, default_value: '{}' },
             ],
-            metric_type: metricType,
           });
+          // Zilliz Cloud Free Tier requires AUTOINDEX
+          await milvusClient.createIndex({
+            collection_name: collectionName,
+            field_name: vf,
+            index_type: 'AUTOINDEX',
+            metric_type: metricType,
+            params: {},
+          });
+          await milvusClient.loadCollection({ collection_name: collectionName });
           logger?.info?.('Zilliz Cloud collection created', { providerKey, collectionName });
+        } else {
+          // Ensure collection is loaded after server restart
+          try { await milvusClient.loadCollection({ collection_name: collectionName }); } catch (_) { /* already loaded */ }
         }
 
         return {
@@ -164,6 +176,20 @@ export const MilvusCloudVectorProviderContract: ProviderContract<
 
       async upsertVectors(handle: VectorIndexHandle, items: VectorUpsertItem[]): Promise<void> {
         const vectorField = (handle.metadata?.vectorField as string) ?? vf;
+
+        // Ensure index exists (may be missing if collection was created with older code)
+        const indexInfo = await milvusClient.describeIndex({ collection_name: handle.externalId, field_name: vectorField }).catch(() => null);
+        if (!indexInfo || !indexInfo.index_descriptions?.length) {
+          await milvusClient.createIndex({
+            collection_name: handle.externalId,
+            field_name: vectorField,
+            index_type: 'AUTOINDEX',
+            metric_type: 'COSINE',
+            params: {},
+          });
+        }
+        try { await milvusClient.loadCollection({ collection_name: handle.externalId }); } catch (_) { /* already loaded */ }
+
         const data = items.map((item) => ({
           id: item.id,
           [vectorField]: item.values,
@@ -175,6 +201,7 @@ export const MilvusCloudVectorProviderContract: ProviderContract<
 
       async queryVectors(handle: VectorIndexHandle, query: VectorQueryInput): Promise<VectorQueryResult> {
         const vectorField = (handle.metadata?.vectorField as string) ?? vf;
+        try { await milvusClient.loadCollection({ collection_name: handle.externalId }); } catch (_) { /* already loaded */ }
         const result = await milvusClient.search({
           collection_name: handle.externalId,
           data: [query.vector],
@@ -182,6 +209,7 @@ export const MilvusCloudVectorProviderContract: ProviderContract<
           limit: query.topK,
           output_fields: ['id', 'metadata_json'],
         });
+        logger?.debug?.('Zilliz Cloud search raw result', { status: result.status, resultCount: result.results?.length ?? 0 });
         const hits = result.results ?? [];
         return {
           matches: hits.map((hit: { id: string; score: number; metadata_json?: string }) => {

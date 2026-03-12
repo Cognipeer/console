@@ -166,14 +166,26 @@ export const MilvusVectorProviderContract: ProviderContract<
         if (!hasCollection.value) {
           await milvusClient.createCollection({
             collection_name: collectionName,
+            enable_dynamic_field: true,
             fields: [
               { name: 'id', data_type: DataType.VarChar, max_length: 255, is_primary_key: true, auto_id: false },
               { name: vectorField, data_type: DataType.FloatVector, dim },
               { name: 'metadata_json', data_type: DataType.VarChar, max_length: 65535, default_value: '{}' },
             ],
-            metric_type: milvusMetricType(metric),
           });
+          // Use AUTOINDEX for cloud compatibility (Zilliz), FLAT is used for local
+          const isCloud = !!credentials.token;
+          await milvusClient.createIndex({
+            collection_name: collectionName,
+            field_name: vectorField,
+            index_type: isCloud ? 'AUTOINDEX' : 'FLAT',
+            metric_type: milvusMetricType(metric),
+            params: {},
+          });
+          await milvusClient.loadCollection({ collection_name: collectionName });
           logger?.info?.('Milvus collection created', { providerKey, collectionName });
+        } else {
+          try { await milvusClient.loadCollection({ collection_name: collectionName }); } catch (_) { /* already loaded */ }
         }
 
         return {
@@ -204,6 +216,21 @@ export const MilvusVectorProviderContract: ProviderContract<
 
       async upsertVectors(handle: VectorIndexHandle, items: VectorUpsertItem[]): Promise<void> {
         const vf = (handle.metadata?.vectorField as string) ?? vectorField;
+
+        // Ensure index exists before upsert (collection may have been created externally)
+        const indexInfo = await milvusClient.describeIndex({ collection_name: handle.externalId, field_name: vf }).catch(() => null);
+        if (!indexInfo || !indexInfo.index_descriptions?.length) {
+          const isCloud = !!credentials.token;
+          await milvusClient.createIndex({
+            collection_name: handle.externalId,
+            field_name: vf,
+            index_type: isCloud ? 'AUTOINDEX' : 'FLAT',
+            metric_type: 'COSINE',
+            params: {},
+          });
+        }
+        try { await milvusClient.loadCollection({ collection_name: handle.externalId }); } catch (_) { /* already loaded */ }
+
         const data = items.map((item) => ({
           id: item.id,
           [vf]: item.values,
@@ -220,6 +247,8 @@ export const MilvusVectorProviderContract: ProviderContract<
 
       async queryVectors(handle: VectorIndexHandle, query: VectorQueryInput): Promise<VectorQueryResult> {
         const vf = (handle.metadata?.vectorField as string) ?? vectorField;
+
+        try { await milvusClient.loadCollection({ collection_name: handle.externalId }); } catch (_) { /* already loaded */ }
 
         const result = await milvusClient.search({
           collection_name: handle.externalId,

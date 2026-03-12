@@ -27,6 +27,63 @@ function getCloudDimensions(settings: ElasticsearchCloudSettings): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_DIMENSIONS;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function extractEsError(error: any): Error {
+  if (!(error instanceof Error)) {
+    return new Error(String(error) || 'Unknown Elasticsearch error');
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const esError = error as any;
+
+  // @elastic/elasticsearch v8 ResponseError — has meta.body with server response
+  const body = esError?.meta?.body;
+  if (body) {
+    const reason =
+      body?.error?.reason ||
+      body?.error?.root_cause?.[0]?.reason ||
+      body?.error?.type ||
+      body?.message;
+    const status = esError?.meta?.statusCode;
+    if (reason) {
+      return new Error(`Elasticsearch error (HTTP ${status ?? 'unknown'}): ${reason}`);
+    }
+    if (status) {
+      return new Error(`Elasticsearch HTTP ${status}: ${JSON.stringify(body).slice(0, 300)}`);
+    }
+  }
+
+  // ConnectionError / serialization error — cause is the underlying Node.js error
+  const cause = esError?.cause;
+  if (cause) {
+    const causeMsg = cause?.message || cause?.code || String(cause);
+    if (causeMsg) {
+      return new Error(`Elasticsearch connection error: ${causeMsg}`);
+    }
+  }
+
+  // Some errors have a non-empty message but still reach here
+  if (error.message) {
+    // Enrich with error name if available
+    const name = esError?.name;
+    if (name && name !== 'Error') {
+      return new Error(`[${name}] ${error.message}`);
+    }
+    return error;
+  }
+
+  // Last resort — try to stringify for any clue
+  let details = '';
+  try {
+    details = JSON.stringify({ name: esError?.name, meta: esError?.meta, keys: Object.keys(esError) }).slice(0, 300);
+  } catch {
+    details = String(esError);
+  }
+  return new Error(
+    `Elasticsearch error — check Cloud ID format (must contain ":"), API key validity, and network connectivity.` +
+    (details ? ` Debug: ${details}` : ''),
+  );
+}
+
 export const ElasticsearchCloudVectorProviderContract: ProviderContract<
   VectorProviderRuntime,
   ElasticsearchCloudCredentials,
@@ -56,8 +113,8 @@ export const ElasticsearchCloudVectorProviderContract: ProviderContract<
             name: 'apiKey',
             label: 'API Key',
             type: 'password',
-            required: false,
-            description: 'Elasticsearch API key. Takes priority over username/password.',
+            required: true,
+            description: 'Elasticsearch API key. Create it from Kibana → Stack Management → API Keys.',
             scope: 'credentials',
           },
           {
@@ -108,12 +165,27 @@ export const ElasticsearchCloudVectorProviderContract: ProviderContract<
       throw new Error('Elastic Cloud ID is required.');
     }
 
+    // Validate Cloud ID format: must contain a colon separating cluster name from base64 endpoint
+    const cloudId = credentials.cloudId.trim();
+    if (!cloudId.includes(':')) {
+      throw new Error(
+        'Invalid Elastic Cloud ID format. Expected "<cluster-name>:<base64-endpoint>". ' +
+        'Find it at cloud.elastic.co → your deployment → Manage page.',
+      );
+    }
+
+    if (!credentials.apiKey && !(credentials.username && credentials.password)) {
+      throw new Error(
+        'Authentication is required for Elasticsearch Cloud. Provide an API Key or username/password.',
+      );
+    }
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/ban-ts-comment
     // @ts-ignore – @elastic/elasticsearch is an optional peer dependency
     const { Client } = await import('@elastic/elasticsearch') as any;
 
     const config: Record<string, unknown> = {
-      cloud: { id: credentials.cloudId.trim() },
+      cloud: { id: cloudId },
     };
 
     if (credentials.apiKey) {
@@ -122,7 +194,16 @@ export const ElasticsearchCloudVectorProviderContract: ProviderContract<
       config.auth = { username: credentials.username, password: credentials.password };
     }
 
-    const client = new Client(config);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let client: any;
+    try {
+      client = new Client(config);
+      // Verify connectivity and credentials with a lightweight ping
+      await client.info();
+    } catch (err) {
+      throw extractEsError(err);
+    }
+
     const dimensions = getCloudDimensions(settings);
 
     const runtime: VectorProviderRuntime = {
@@ -133,18 +214,22 @@ export const ElasticsearchCloudVectorProviderContract: ProviderContract<
         }
         const dim = input.dimension || dimensions;
         const metric = input.metric ?? 'cosine';
-        const exists = await client.indices.exists({ index: indexName });
-        if (!exists) {
-          const similarity = metric === 'dot' ? 'dot_product' : metric === 'euclidean' ? 'l2_norm' : 'cosine';
-          await client.indices.create({
-            index: indexName,
-            mappings: {
-              properties: {
-                vector: { type: 'dense_vector', dims: dim, index: true, similarity },
-                metadata: { type: 'object', dynamic: true },
+        try {
+          const exists = await client.indices.exists({ index: indexName });
+          if (!exists) {
+            const similarity = metric === 'dot' ? 'dot_product' : metric === 'euclidean' ? 'l2_norm' : 'cosine';
+            await client.indices.create({
+              index: indexName,
+              mappings: {
+                properties: {
+                  vector: { type: 'dense_vector', dims: dim, index: true, similarity },
+                  metadata: { type: 'object', dynamic: true },
+                },
               },
-            },
-          });
+            });
+          }
+        } catch (err) {
+          throw extractEsError(err);
         }
         logger?.info?.('Elasticsearch Cloud index ensured', { providerKey, indexName });
         return {
@@ -157,7 +242,11 @@ export const ElasticsearchCloudVectorProviderContract: ProviderContract<
       },
 
       async deleteIndex({ externalId }: { externalId: string }): Promise<void> {
-        await client.indices.delete({ index: externalId });
+        try {
+          await client.indices.delete({ index: externalId });
+        } catch (err) {
+          throw extractEsError(err);
+        }
       },
 
       async listIndexes(): Promise<VectorIndexHandle[]> {
@@ -178,22 +267,31 @@ export const ElasticsearchCloudVectorProviderContract: ProviderContract<
           body.push({ index: { _index: handle.externalId, _id: item.id } });
           body.push({ vector: item.values, metadata: item.metadata ?? {} });
         }
-        await client.bulk({ body });
+        try {
+          await client.bulk({ body });
+        } catch (err) {
+          throw extractEsError(err);
+        }
         logger?.debug?.('Elasticsearch Cloud upserted vectors', { providerKey, count: items.length });
       },
 
       async queryVectors(handle: VectorIndexHandle, query: VectorQueryInput): Promise<VectorQueryResult> {
-        const result = await client.search({
-          index: handle.externalId,
-          knn: {
-            field: 'vector',
-            query_vector: query.vector,
-            k: query.topK,
-            num_candidates: query.topK * 2,
-            filter: query.filter,
-          },
-          size: query.topK,
-        });
+        let result;
+        try {
+          result = await client.search({
+            index: handle.externalId,
+            knn: {
+              field: 'vector',
+              query_vector: query.vector,
+              k: query.topK,
+              num_candidates: query.topK * 2,
+              filter: query.filter,
+            },
+            size: query.topK,
+          });
+        } catch (err) {
+          throw extractEsError(err);
+        }
         return {
           matches: (result.hits.hits as Array<{ _id: string; _score: number; _source?: Record<string, unknown> }>).map((hit) => ({
             id: hit._id,
@@ -205,10 +303,14 @@ export const ElasticsearchCloudVectorProviderContract: ProviderContract<
 
       async deleteVectors(handle: VectorIndexHandle, ids: string[]): Promise<void> {
         if (ids.length === 0) return;
-        await client.deleteByQuery({
-          index: handle.externalId,
-          query: { ids: { values: ids } },
-        });
+        try {
+          await client.deleteByQuery({
+            index: handle.externalId,
+            query: { ids: { values: ids } },
+          });
+        } catch (err) {
+          throw extractEsError(err);
+        }
       },
     };
 
