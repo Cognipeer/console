@@ -124,7 +124,7 @@ jobs:
   #       env:
   #         TAG: ${{ steps.vars.outputs.tag }}
   deploy-azure:
-    runs-on: self-hosted-runner-kogniser-crm-azure
+    runs-on: self-hosted-runner-cgate-crm-azure
     needs: build
     steps:
       - name: Checkout
