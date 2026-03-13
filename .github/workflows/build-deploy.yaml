@@ -160,8 +160,8 @@ jobs:
       - name: Apply changes
         run: |
           pushd deploy/k8s
-            helmfile sync -e "${TAG}-azure" --wait
-            kubectl rollout restart deployment/cgate -n cgate-${TAG} 
+            helmfile sync -e "dev-azure" --wait
+            kubectl rollout restart deployment/cgate -n cgate-dev 
           popd
         env:
           TAG: ${{ steps.vars.outputs.tag }}

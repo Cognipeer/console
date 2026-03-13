@@ -6,6 +6,22 @@ image:
 
 cloudEnvironment: "aws"
 environment: production
+secrets:
+  jwt_expires_in: ref+awssecrets://cgate-application-credentials-production?region=eu-central-1#/JWT_EXPIRES_IN 
+  jwt_secret: ref+awssecrets://cgate-application-credentials-production?region=eu-central-1#/JWT_SECRET
+  main_db_name: ref+awssecrets://cgate-application-credentials-production?region=eu-central-1#/MAIN_DB_NAME
+  mongodb_uri: ref+awssecrets://cgate-application-credentials-production?region=eu-central-1#/MONGODB_URI
+  smtp_from: ref+awssecrets://cgate-application-credentials-production?region=eu-central-1#/SMTP_FROM
+  smtp_host: ref+awssecrets://cgate-application-credentials-production?region=eu-central-1#/SMTP_HOST
+  smtp_port: ref+awssecrets://cgate-application-credentials-production?region=eu-central-1#/SMTP_PORT
+  smtp_secure: ref+awssecrets://cgate-application-credentials-production?region=eu-central-1#/SMTP_SECURE
+  smtp_user: ref+awssecrets://cgate-application-credentials-production?region=eu-central-1#/SMTP_USER
+  smtp_pass: ref+awssecrets://cgate-application-credentials-production?region=eu-central-1#/SMTP_PASS
+  db_provider: "mongodb"
+tls_secrets:
+  fullchain_pem: ref+awssecrets://cgate-production-tls?region=eu-central-1#/fullchain.pem
+  privatekey_pem: ref+awssecrets://cgate-production-tls?region=eu-central-1#/privkey.pem
+
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
@@ -84,18 +100,3 @@ volumeMounts:
 nodeSelector: {}
 tolerations: []
 affinity: {}
-secrets:
-  jwt_expires_in: ref+awssecrets://cgate-application-credentials-production?region=eu-central-1#/JWT_EXPIRES_IN 
-  jwt_secret: ref+awssecrets://cgate-application-credentials-production?region=eu-central-1#/JWT_SECRET
-  main_db_name: ref+awssecrets://cgate-application-credentials-production?region=eu-central-1#/MAIN_DB_NAME
-  mongodb_uri: ref+awssecrets://cgate-application-credentials-production?region=eu-central-1#/MONGODB_URI
-  smtp_from: ref+awssecrets://cgate-application-credentials-production?region=eu-central-1#/SMTP_FROM
-  smtp_host: ref+awssecrets://cgate-application-credentials-production?region=eu-central-1#/SMTP_HOST
-  smtp_port: ref+awssecrets://cgate-application-credentials-production?region=eu-central-1#/SMTP_PORT
-  smtp_secure: ref+awssecrets://cgate-application-credentials-production?region=eu-central-1#/SMTP_SECURE
-  smtp_user: ref+awssecrets://cgate-application-credentials-production?region=eu-central-1#/SMTP_USER
-  smtp_pass: ref+awssecrets://cgate-application-credentials-production?region=eu-central-1#/SMTP_PASS
-  db_provider: "mongodb"
-tls_secrets:
-  fullchain_pem: ref+awssecrets://cgate-production-tls?region=eu-central-1#/fullchain.pem
-  privatekey_pem: ref+awssecrets://cgate-production-tls?region=eu-central-1#/privkey.pem
