@@ -10,6 +10,8 @@ import type {
   VectorQueryInput,
   VectorQueryResult,
   VectorUpsertItem,
+  VectorListInput,
+  VectorListResult,
 } from '../domains/vector';
 
 /* ------------------------------------------------------------------ */
@@ -338,6 +340,43 @@ export const SqliteVectorProviderContract: ProviderContract<
             candidateCount: rows.length,
             metric,
           },
+        };
+      },
+
+      /* ---- listVectors ---- */
+      async listVectors(
+        handle: VectorIndexHandle,
+        input?: VectorListInput,
+      ): Promise<VectorListResult> {
+        const limit = input?.limit ?? 100;
+        const cursor = input?.cursor;
+
+        // Cursor encodes offset as a base-10 integer string
+        const offset = cursor ? parseInt(cursor, 10) : 0;
+
+        const rows = db
+          .prepare(
+            `SELECT id, vec_values, metadata FROM vector_entries WHERE index_id = ? ORDER BY rowid ASC LIMIT ? OFFSET ?`,
+          )
+          .all(handle.externalId, limit + 1, offset) as EntryRow[];
+
+        const hasMore = rows.length > limit;
+        const pageRows = hasMore ? rows.slice(0, limit) : rows;
+
+        const totalRow = db
+          .prepare(`SELECT COUNT(*) as cnt FROM vector_entries WHERE index_id = ?`)
+          .get(handle.externalId) as { cnt: number } | undefined;
+
+        const items = pageRows.map((row) => ({
+          id: row.id,
+          values: JSON.parse(row.vec_values) as number[],
+          metadata: row.metadata ? (JSON.parse(row.metadata) as Record<string, unknown>) : undefined,
+        }));
+
+        return {
+          items,
+          nextCursor: hasMore ? String(offset + limit) : undefined,
+          total: totalRow?.cnt,
         };
       },
     };

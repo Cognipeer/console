@@ -7,6 +7,7 @@ import {
   QueryVectorsCommand,
   DeleteVectorsCommand,
   GetIndexCommand,
+  ListVectorsCommand,
   type PutInputVector,
 } from '@aws-sdk/client-s3vectors';
 import type { DocumentType } from '@smithy/types';
@@ -18,6 +19,8 @@ import type {
   VectorQueryInput,
   VectorQueryResult,
   VectorUpsertItem,
+  VectorListInput,
+  VectorListResult,
 } from '../domains/vector';
 
 /**
@@ -365,6 +368,28 @@ export const SystemDefaultVectorProviderContract: ProviderContract<
         );
         logger?.debug?.('System default deleted vectors', { providerKey, count: ids.length });
       },
+    
+      async listVectors(handle: VectorIndexHandle, input?: VectorListInput): Promise<VectorListResult> {
+        const limit = input?.limit ?? 100;
+        const nextToken = input?.cursor || undefined;
+        const response = await client.send(
+          new ListVectorsCommand({
+            ...bucketInput,
+            indexName: handle.externalId,
+            maxResults: limit,
+            nextToken,
+            returnMetadata: true,
+            returnData: true,
+          }),
+        );
+        const items: VectorListResult['items'] = (response.vectors ?? []).map((vec) => ({
+          id: vec.key ?? '',
+          values: vec.data?.float32 ? Array.from(vec.data.float32) : [],
+          metadata: (vec.metadata as Record<string, unknown>) ?? undefined,
+        }));
+        return { items, nextCursor: response.nextToken ?? undefined };
+      },
+    
     };
 
     return runtime;

@@ -6,6 +6,8 @@ import type {
   VectorQueryInput,
   VectorQueryResult,
   VectorUpsertItem,
+  VectorListInput,
+  VectorListResult,
 } from '../domains/vector';
 
 // eslint-disable-next-line @typescript-eslint/no-empty-object-type
@@ -160,6 +162,26 @@ export const OramaVectorProviderContract: ProviderContract<
         }
         logger?.debug?.('Orama deleted vectors', { providerKey, count: ids.length });
       },
+    
+      async listVectors(handle: VectorIndexHandle, input?: VectorListInput): Promise<VectorListResult> {
+        const entry = store.get(handle.externalId);
+        if (!entry) throw new Error(`Orama index "${handle.externalId}" not found. Call createIndex first.`);
+        const limit = input?.limit ?? 100;
+        const offset = input?.cursor ? parseInt(input.cursor, 10) : 0;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const result = await search(entry.db, { mode: 'fulltext', term: '', limit, offset } as any);
+        const total: number = result.count ?? 0;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const items = (result.hits ?? []).map((hit: any) => {
+          let metadata: Record<string, unknown> = {};
+          try { if (hit.document?.metadata) metadata = JSON.parse(hit.document.metadata as string); } catch {}
+          const values = Array.isArray(hit.document?.vector) ? hit.document.vector as number[] : [];
+          return { id: hit.id as string, values, metadata };
+        });
+        const nextOffset = offset + items.length;
+        return { items, nextCursor: nextOffset < total ? String(nextOffset) : undefined, total };
+      },
+    
     };
 
     return runtime;

@@ -829,4 +829,54 @@ export const TENANT_SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_mcp_request_logs_serverKey ON mcp_request_logs(serverKey);
   CREATE INDEX IF NOT EXISTS idx_mcp_request_logs_createdAt ON mcp_request_logs(createdAt);
+
+  -- Vector migrations
+  CREATE TABLE IF NOT EXISTS vector_migrations (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    sourceProviderKey TEXT NOT NULL,
+    sourceIndexKey TEXT NOT NULL,
+    sourceIndexName TEXT NOT NULL,
+    destinationProviderKey TEXT NOT NULL,
+    destinationIndexKey TEXT NOT NULL,
+    destinationIndexName TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    totalVectors INTEGER NOT NULL DEFAULT 0,
+    migratedVectors INTEGER NOT NULL DEFAULT 0,
+    failedVectors INTEGER NOT NULL DEFAULT 0,
+    batchSize INTEGER NOT NULL DEFAULT 100,
+    errorMessage TEXT,
+    startedAt TEXT,
+    completedAt TEXT,
+    metadata TEXT DEFAULT '{}',
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_vector_migrations_key ON vector_migrations(key);
+  CREATE INDEX IF NOT EXISTS idx_vector_migrations_tenantId ON vector_migrations(tenantId);
+  CREATE INDEX IF NOT EXISTS idx_vector_migrations_status ON vector_migrations(status);
+
+  -- Vector migration logs
+  CREATE TABLE IF NOT EXISTS vector_migration_logs (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    migrationKey TEXT NOT NULL,
+    batchIndex INTEGER NOT NULL,
+    vectorIds TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL,
+    migratedCount INTEGER NOT NULL DEFAULT 0,
+    failedCount INTEGER NOT NULL DEFAULT 0,
+    errorMessage TEXT,
+    durationMs INTEGER,
+    createdAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_vml_migrationKey ON vector_migration_logs(migrationKey);
+  CREATE INDEX IF NOT EXISTS idx_vml_status ON vector_migration_logs(status);
 `;

@@ -156,6 +156,11 @@ export const DummyVectorProviderContract: ProviderContract<
         });
         return mockQueryResult(query, runtimeState.indexes);
       },
+    
+      async listVectors(_handle, _input) {
+        throw new Error('listVectors is not supported by this provider');
+      },
+    
     };
 
     return runtime;

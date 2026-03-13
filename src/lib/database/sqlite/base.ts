@@ -59,6 +59,8 @@ export const TABLES = {
   agentVersions: 'agent_versions',
   agentConversations: 'agent_conversations',
   vectorCounters: 'vector_counters',
+  vectorMigrations: 'vector_migrations',
+  vectorMigrationLogs: 'vector_migration_logs',
 } as const;
 
 // ── Base class ───────────────────────────────────────────────────────

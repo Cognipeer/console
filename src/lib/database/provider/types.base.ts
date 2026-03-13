@@ -297,6 +297,55 @@ export interface IVectorIndexRecord {
   updatedAt?: Date;
 }
 
+// ── Vector Migration types ──────────────────────────────────────────────
+
+export type VectorMigrationStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+
+export interface IVectorMigration {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name: string;
+  description?: string;
+  sourceProviderKey: string;
+  sourceIndexKey: string;
+  sourceIndexName: string;
+  destinationProviderKey: string;
+  destinationIndexKey: string;
+  destinationIndexName: string;
+  status: VectorMigrationStatus;
+  totalVectors: number;
+  migratedVectors: number;
+  failedVectors: number;
+  batchSize: number;
+  errorMessage?: string;
+  startedAt?: Date;
+  completedAt?: Date;
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export type VectorMigrationLogStatus = 'success' | 'failed' | 'skipped';
+
+export interface IVectorMigrationLog {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  migrationKey: string;
+  batchIndex: number;
+  vectorIds: string[];
+  status: VectorMigrationLogStatus;
+  migratedCount: number;
+  failedCount: number;
+  errorMessage?: string;
+  durationMs?: number;
+  createdAt?: Date;
+}
+
 export type FileMarkdownStatus = 'pending' | 'succeeded' | 'failed' | 'skipped';
 
 export interface IFileBucketRecord {

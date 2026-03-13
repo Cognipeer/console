@@ -4,6 +4,7 @@ import {
     DeleteVectorsCommand,
     GetIndexCommand,
     ListIndexesCommand,
+    ListVectorsCommand,
     PutVectorsCommand,
     QueryVectorsCommand,
     S3VectorsClient,
@@ -19,6 +20,8 @@ import type {
     VectorQueryInput,
     VectorQueryResult,
     VectorUpsertItem,
+    VectorListInput,
+    VectorListResult,
 } from '../domains/vector';
 
 interface AwsS3VectorsCredentials {
@@ -745,7 +748,34 @@ export const AwsS3VectorsProviderContract: ProviderContract<
                     },
                 } satisfies VectorQueryResult;
             },
-        };
+
+            async listVectors(handle: VectorIndexHandle, input?: VectorListInput): Promise<VectorListResult> {
+                const source = extractIndexSource(handle);
+                const limit = input?.limit ?? 100;
+                const nextToken = input?.cursor || undefined;
+
+                const response = await client.send(
+                    new ListVectorsCommand({
+                        indexArn: source.indexArn,
+                        maxResults: limit,
+                        nextToken,
+                        returnMetadata: true,
+                        returnData: true,
+                    }),
+                );
+
+                const items: VectorListResult['items'] = (response.vectors ?? []).map((vec) => ({
+                    id: vec.key ?? '',
+                    values: vec.data?.float32 ? Array.from(vec.data.float32) : [],
+                    metadata: (vec.metadata as Record<string, unknown>) ?? undefined,
+                }));
+
+                return {
+                    items,
+                    nextCursor: response.nextToken ?? undefined,
+                };
+            },
+    };
 
         return runtime;
     },

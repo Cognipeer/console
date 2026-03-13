@@ -6,6 +6,8 @@ import type {
   VectorQueryInput,
   VectorQueryResult,
   VectorUpsertItem,
+  VectorListInput,
+  VectorListResult,
 } from '../domains/vector';
 
 interface ChromaCredentials {
@@ -56,6 +58,12 @@ type ChromaCollection = {
     documents?: string[];
   }) => Promise<void>;
   delete: (opts: { ids?: string[]; where?: Record<string, unknown> }) => Promise<void>;
+  count: () => Promise<number>;
+  get: (opts: { limit: number; offset: number; include: string[] }) => Promise<{
+    ids: string[];
+    embeddings: number[][] | null;
+    metadatas: Array<Record<string, unknown> | null> | null;
+  }>;
 };
 
 function buildClient(credentials: ChromaCredentials, settings: ChromaSettings, ChromaClientClass: new (config: Record<string, unknown>) => ChromaClient): ChromaClient {
@@ -286,6 +294,37 @@ export const ChromaVectorProviderContract: ProviderContract<
         const collection = await client.getCollection({ name: handle.name });
         await collection.delete({ ids });
         logger?.debug?.('Chroma deleted vectors', { providerKey, count: ids.length });
+      },
+
+      async listVectors(handle: VectorIndexHandle, input?: VectorListInput): Promise<VectorListResult> {
+        const limit = input?.limit ?? 100;
+        const offset = input?.cursor ? parseInt(input.cursor, 10) : 0;
+
+        const collection = await client.getCollection({ name: handle.name });
+        const total: number = await collection.count();
+
+        const result = await collection.get({
+          limit,
+          offset,
+          include: ['embeddings', 'metadatas'] as string[],
+        });
+
+        const ids = result.ids ?? [];
+        const embeddings = (result.embeddings ?? []) as number[][];
+        const metadatas = (result.metadatas ?? []) as (Record<string, unknown> | null)[];
+
+        const items = ids.map((id: string, i: number) => ({
+          id,
+          values: embeddings[i] ?? [],
+          metadata: metadatas[i] ?? undefined,
+        }));
+
+        const nextOffset = offset + items.length;
+        return {
+          items,
+          nextCursor: nextOffset < total ? String(nextOffset) : undefined,
+          total,
+        };
       },
     };
 
