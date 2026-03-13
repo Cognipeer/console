@@ -69,60 +69,60 @@ jobs:
             echo "tag=dev-${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
           fi
 
-      # - name: Build & Push to ECR
-      #   uses: docker/build-push-action@v6
-      #   with:
-      #     context: .
-      #     file: ./Dockerfile
-      #     push: true
-      #     cache-from: type=gha
-      #     cache-to: type=gha,mode=max
-      #     tags: |
-      #       ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.vars.outputs.tag }}
-      #       ${{ env.ACR_LOGIN_SERVER }}/${{ env.ACR_REPOSITORY }}:${{ steps.vars.outputs.tag }}
-
-  deploy-aws:
-    runs-on: self-hosted-runner-cgate
-    needs: build
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Helm
-        uses: azure/setup-helm@v4
+      - name: Build & Push to ECR
+        uses: docker/build-push-action@v6
         with:
-          version: ${{ env.HELM_VERSION }}
+          context: .
+          file: ./Dockerfile
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.vars.outputs.tag }}
+            ${{ env.ACR_LOGIN_SERVER }}/${{ env.ACR_REPOSITORY }}:${{ steps.vars.outputs.tag }}
 
-      - name: Set image tag
-        id: vars
-        run: |
-          if [[ "${GITHUB_REF_NAME}" == "main" ]]; then
-            echo "tag=dev" >> $GITHUB_OUTPUT
-          elif [[ "${GITHUB_REF_NAME}" == "production" ]]; then
-            echo "tag=production" >> $GITHUB_OUTPUT
-          else
-            echo "tag=dev" >> $GITHUB_OUTPUT
-          fi
+  # deploy-aws:
+  #   runs-on: self-hosted-runner-cgate
+  #   needs: build
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v4
 
-      - name: Install Helmfile
-        run: |
-          curl -fsSL -o /tmp/helmfile.tgz \
-            https://github.com/helmfile/helmfile/releases/download/${HELMFILE_VERSION}/helmfile_${HELMFILE_VERSION#v}_linux_amd64.tar.gz
-          sudo tar -C /usr/local/bin -xzf /tmp/helmfile.tgz helmfile
-          helmfile --version
+  #     - name: Install Helm
+  #       uses: azure/setup-helm@v4
+  #       with:
+  #         version: ${{ env.HELM_VERSION }}
 
-      - uses: azure/setup-kubectl@v4
-        with:
-          version: 'v1.33.2'
+  #     - name: Set image tag
+  #       id: vars
+  #       run: |
+  #         if [[ "${GITHUB_REF_NAME}" == "main" ]]; then
+  #           echo "tag=dev" >> $GITHUB_OUTPUT
+  #         elif [[ "${GITHUB_REF_NAME}" == "production" ]]; then
+  #           echo "tag=production" >> $GITHUB_OUTPUT
+  #         else
+  #           echo "tag=dev-${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+  #         fi
 
-      - name: Apply changes
-        run: |
-          pushd deploy/k8s
-            helmfile sync -e "${TAG}-aws" --wait
-            kubectl rollout restart -n cgate-${TAG} deployment/cgate
-          popd
-        env:
-          TAG: ${{ steps.vars.outputs.tag }}
+  #     - name: Install Helmfile
+  #       run: |
+  #         curl -fsSL -o /tmp/helmfile.tgz \
+  #           https://github.com/helmfile/helmfile/releases/download/${HELMFILE_VERSION}/helmfile_${HELMFILE_VERSION#v}_linux_amd64.tar.gz
+  #         sudo tar -C /usr/local/bin -xzf /tmp/helmfile.tgz helmfile
+  #         helmfile --version
+
+  #     - uses: azure/setup-kubectl@v4
+  #       with:
+  #         version: 'v1.33.2'
+
+  #     - name: Apply changes
+  #       run: |
+  #         pushd deploy/k8s
+  #           helmfile sync -e "${TAG}-aws" --wait
+  #           kubectl rollout restart -n cgate-${TAG} deployment/cgate
+  #         popd
+  #       env:
+  #         TAG: ${{ steps.vars.outputs.tag }}
   deploy-azure:
     runs-on: self-hosted-runner-cgate-crm-azure
     needs: build
@@ -143,7 +143,7 @@ jobs:
           elif [[ "${GITHUB_REF_NAME}" == "production" ]]; then
             echo "tag=production" >> $GITHUB_OUTPUT
           else
-            echo "tag=dev" >> $GITHUB_OUTPUT
+            echo "tag=dev-${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
           fi
 
       - name: Install Helmfile
