@@ -24,6 +24,17 @@ spec:
         vault.hashicorp.com/secret-volume-path: "/app/.env"
         vault.hashicorp.com/agent-inject-template-env: |
           {{`{{- with secret "`}}{{ .Values.vault.secretPath }}{{`" -}}`}}
+          JWT_EXPIRES_IN={{`{{ .Data.data.JWT_EXPIRES_IN }}`}}
+          JWT_SECRET={{`{{ .Data.data.JWT_SECRET }}`}}
+          MAIN_DB_NAME={{`{{ .Data.data.MAIN_DB_NAME }}`}}
+          MONGODB_URI={{`{{ .Data.data.MONGODB_URI }}`}}
+          DB_PROVIDER={{`{{ .Data.data.DB_PROVIDER }}`}}
+          SMTP_FROM={{`{{ .Data.data.SMTP_FROM }}`}}
+          SMTP_HOST={{`{{ .Data.data.SMTP_HOST }}`}}
+          SMTP_PORT={{`{{ .Data.data.SMTP_PORT }}`}}
+          SMTP_SECURE={{`{{ .Data.data.SMTP_SECURE }}`}}
+          SMTP_USER={{`{{ .Data.data.SMTP_USER }}`}}
+          SMTP_PASS={{`{{ .Data.data.SMTP_PASS }}`}}
           {{`{{- end }}`}}
         vault.hashicorp.com/tls-secret: "vault-ca-secret"
         vault.hashicorp.com/ca-cert: "/vault/tls/ca.crt"
@@ -55,6 +66,10 @@ spec:
           {{- end }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{if contains "azure" (.Values.cloudEnvironment | toString)}}
+          command: {{ toJson .Values.bootstrap.command }}
+          args: {{ toJson .Values.bootstrap.args }}
+          {{- end}}
           env:
             - name: NODE_ENV
               value: {{ .Values.environment | quote }}

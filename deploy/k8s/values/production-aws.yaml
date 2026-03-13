@@ -4,6 +4,8 @@ image:
   pullPolicy: Always
   tag: "dev"
 
+cloudEnvironment: "aws"
+environment: production
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""

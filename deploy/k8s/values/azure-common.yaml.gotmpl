@@ -21,22 +21,6 @@ image:
   pullPolicy: Always
   tag: {{.Environment.Values.image.tag}}
 
-vaultTemplates:
-  crm: |
-  {{`{{- with secret "`}}{{ .Environment.Values.vaultSecretPath }}{{`" -}}`}}
-  JWT_EXPIRES_IN={{`{{ .Data.data.JWT_EXPIRES_IN }}`}}
-  JWT_SECRET={{`{{ .Data.data.JWT_SECRET }}`}}
-  MAIN_DB_NAME={{`{{ .Data.data.MAIN_DB_NAME }}`}}
-  MONGODB_URI={{`{{ .Data.data.MONGODB_URI }}`}}
-  DB_PROVIDER={{`{{ .Data.data.DB_PROVIDER }}`}}
-  SMTP_FROM={{`{{ .Data.data.SMTP_FROM }}`}}
-  SMTP_HOST={{`{{ .Data.data.SMTP_HOST }}`}}
-  SMTP_PORT={{`{{ .Data.data.SMTP_PORT }}`}}
-  SMTP_SECURE={{`{{ .Data.data.SMTP_SECURE }}`}}
-  SMTP_USER={{`{{ .Data.data.SMTP_USER }}`}}
-  SMTP_PASS={{`{{ .Data.data.SMTP_PASS }}`}}
-  {{`{{- end }}`}}
-
 serviceAccount:
   create: true
   automount: true

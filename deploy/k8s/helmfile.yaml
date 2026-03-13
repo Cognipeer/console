@@ -1,10 +1,16 @@
 environments:
-  dev:
+  dev-aws:
     values:
-      - values/dev.yaml
-  production:
+      - values/dev-aws.yaml
+  production-aws:
     values:
-      - values/production.yaml
+      - values/production-aws.yaml
+  production-azure:
+    values:
+      - values/production-azure.yaml
+  dev-azure:
+    values:
+      - values/dev-azure.yaml
 ---
 releases:
   - name: cgate
@@ -12,4 +18,5 @@ releases:
     createNamespace: true
     chart: ./cgate
     values:
-    - values/common.yaml.gotmpl
+    - values/{{.Environment.Values.cloudEnvironment}}-common.yaml.gotmpl
+    - values/{{ .Environment.Name }}.yaml

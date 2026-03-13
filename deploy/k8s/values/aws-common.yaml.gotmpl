@@ -9,23 +9,6 @@ image:
   repository: {{.Environment.Values.image.repository}}
   pullPolicy: Always
   tag: {{.Environment.Values.image.tag}}
-{{ if contains "azure" .Environment.Values.cloudEnvironment }}
-
-vaultTemplates:
-crm: |
-  {{`{{- with secret "`}}{{ .Environment.Values.vaultSecretPath }}{{`" -}}`}}
-  JWT_EXPIRES_IN={{`{{ .Data.data.JWT_EXPIRES_IN }}`}}
-  JWT_SECRET={{`{{ .Data.data.JWT_SECRET }}`}}
-  MAIN_DB_NAME={{`{{ .Data.data.MAIN_DB_NAME }}`}}
-  MONGODB_URI={{`{{ .Data.data.MONGODB_URI }}`}}
-  DB_PROVIDER={{`{{ .Data.data.DB_PROVIDER }}`}}
-  SMTP_FROM={{`{{ .Data.data.SMTP_FROM }}`}}
-  SMTP_HOST={{`{{ .Data.data.SMTP_HOST }}`}}
-  SMTP_PORT={{`{{ .Data.data.SMTP_PORT }}`}}
-  SMTP_SECURE={{`{{ .Data.data.SMTP_SECURE }}`}}
-  SMTP_USER={{`{{ .Data.data.SMTP_USER }}`}}
-  SMTP_PASS={{`{{ .Data.data.SMTP_PASS }}`}}
-  {{`{{- end }}`}}
 
 {{ if contains "aws" .Environment.Values.cloudEnvironment }}
 secrets:
@@ -42,7 +25,7 @@ secrets:
   smtp_pass: {{.Environment.Values.secrets.smtp_pass}}
 tls_secrets:
   fullchain_pem:  {{.Environment.Values.tls_secrets.fullchain_pem}}
-  privatekey_pem:  {{.Environment.Values.tls_secrets.privatekey_pem}}s
+  privatekey_pem:  {{.Environment.Values.tls_secrets.privatekey_pem}}
 
 {{- end }}
 
@@ -119,19 +102,3 @@ volumeMounts:
 nodeSelector: {}
 tolerations: []
 affinity: {}
-
-secrets:
-  jwt_expires_in: {{.Environment.Values.secrets.jwt_expires_in}}
-  jwt_secret: {{.Environment.Values.secrets.jwt_secret}}
-  main_db_name: {{.Environment.Values.secrets.main_db_name}}
-  mongodb_uri: {{.Environment.Values.secrets.mongodb_uri}}
-  db_provider: {{.Environment.Values.secrets.db_provider}}
-  smtp_from: {{.Environment.Values.secrets.smtp_from}}
-  smtp_host: {{.Environment.Values.secrets.smtp_host}}
-  smtp_port: {{.Environment.Values.secrets.smtp_port}}
-  smtp_secure: {{.Environment.Values.secrets.smtp_secure}}
-  smtp_user: {{.Environment.Values.secrets.smtp_user}}
-  smtp_pass: {{.Environment.Values.secrets.smtp_pass}}
-tls_secrets:
-  fullchain_pem:  {{.Environment.Values.tls_secrets.fullchain_pem}}
-  privatekey_pem:  {{.Environment.Values.tls_secrets.privatekey_pem}}s

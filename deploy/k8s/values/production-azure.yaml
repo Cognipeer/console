@@ -1,19 +1,19 @@
 image:
   repository: cognipeer.azurecr.io/cognipeer-cgate
   pullPolicy: Always
-  tag: 'dev'
+  tag: 'production'
 
-environment: "development"
+environment: "productionelopment"
 cloudEnvironment: azure
-vaultSecretPath: "kv-v2/data/cgate-application-dev"
+vaultSecretPath: "kv-v2/data/cgate-application-production"
 
 tls_secrets:
   fullchain_pem: /fullchain.pem ## todo : eso
   privatekey_pem: /privkey.pem ## todo : eso
 
 vault:
-  secretPath: kv-v2/data/cgate-application-dev
-  role: cgate-application-dev
+  secretPath: kv-v2/data/cgate-application-production
+  role: cgate-application-production
 
 ingress:
   enabled: true
@@ -24,7 +24,7 @@ ingress:
     appgw.ingress.kubernetes.io/backend-protocol: "http"
     appgw.ingress.kubernetes.io/appgw-ssl-certificate: "tls-cert"
   hosts:
-    - host: app.dev.cgate.ai
+    - host: console.cognipeer.com
       paths:
         - path: /
           pathType: Prefix
