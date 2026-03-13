@@ -1,0 +1,90 @@
+replicaCount: 1
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+bootstrap:
+  command:
+  - "/bin/sh"
+  - "-c"
+  args: ["set -a && source /app/.env/env && set +a && exec npm start"]
+
+
+vault:
+  secretPath: {{.Environment.Values.vault.secretPath}}
+  role: {{.Environment.Values.vault.role}}
+
+environment: {{.Environment.Values.environment}}
+cloudEnvironment: {{.Environment.Values.cloudEnvironment}}
+image:
+  repository: {{.Environment.Values.image.repository}}
+  pullPolicy: Always
+  tag: {{.Environment.Values.image.tag}}
+
+vaultTemplates:
+  crm: |
+  {{`{{- with secret "`}}{{ .Environment.Values.vaultSecretPath }}{{`" -}}`}}
+  JWT_EXPIRES_IN={{`{{ .Data.data.JWT_EXPIRES_IN }}`}}
+  JWT_SECRET={{`{{ .Data.data.JWT_SECRET }}`}}
+  MAIN_DB_NAME={{`{{ .Data.data.MAIN_DB_NAME }}`}}
+  MONGODB_URI={{`{{ .Data.data.MONGODB_URI }}`}}
+  DB_PROVIDER={{`{{ .Data.data.DB_PROVIDER }}`}}
+  SMTP_FROM={{`{{ .Data.data.SMTP_FROM }}`}}
+  SMTP_HOST={{`{{ .Data.data.SMTP_HOST }}`}}
+  SMTP_PORT={{`{{ .Data.data.SMTP_PORT }}`}}
+  SMTP_SECURE={{`{{ .Data.data.SMTP_SECURE }}`}}
+  SMTP_USER={{`{{ .Data.data.SMTP_USER }}`}}
+  SMTP_PASS={{`{{ .Data.data.SMTP_PASS }}`}}
+  {{`{{- end }}`}}
+
+serviceAccount:
+  create: true
+  automount: true
+  annotations: {}
+  name: "cgate"
+
+podLabels: {}
+podSecurityContext: {}
+
+service:
+  type: ClusterIP
+  port: 3000
+
+ingress:
+  {{- with .Environment.Values.ingress }}
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+livenessProbe:
+  tcpSocket:
+    port: 3000
+  initialDelaySeconds: 5
+  periodSeconds: 5
+readinessProbe:
+  tcpSocket:
+    port: 3000
+  initialDelaySeconds: 5
+  periodSeconds: 5
+
+#securityContext:
+#  capabilities:
+#    drop:
+#    - ALL
+#  readOnlyRootFilesystem: true
+#  runAsNonRoot: true
+#  runAsUser: 1000
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 100
+  targetCPUUtilizationPercentage: 80
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
