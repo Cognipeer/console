@@ -69,17 +69,17 @@ jobs:
             echo "tag=dev-${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
           fi
 
-      - name: Build & Push to ECR
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          tags: |
-            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.vars.outputs.tag }}
-            ${{ env.ACR_LOGIN_SERVER }}/${{ env.ACR_REPOSITORY }}:${{ steps.vars.outputs.tag }}
+      # - name: Build & Push to ECR
+      #   uses: docker/build-push-action@v6
+      #   with:
+      #     context: .
+      #     file: ./Dockerfile
+      #     push: true
+      #     cache-from: type=gha
+      #     cache-to: type=gha,mode=max
+      #     tags: |
+      #       ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.vars.outputs.tag }}
+      #       ${{ env.ACR_LOGIN_SERVER }}/${{ env.ACR_REPOSITORY }}:${{ steps.vars.outputs.tag }}
 
   deploy-aws:
     runs-on: self-hosted-runner-cgate
