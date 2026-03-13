@@ -69,17 +69,17 @@ jobs:
             echo "tag=dev-${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
           fi
 
-      # - name: Build & Push to ECR
-      #   uses: docker/build-push-action@v6
-      #   with:
-      #     context: .
-      #     file: ./Dockerfile
-      #     push: true
-      #     cache-from: type=gha
-      #     cache-to: type=gha,mode=max
-      #     tags: |
-      #       ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.vars.outputs.tag }}
-      #       ${{ env.ACR_LOGIN_SERVER }}/${{ env.ACR_REPOSITORY }}:${{ steps.vars.outputs.tag }}
+      - name: Build & Push to ECR
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.vars.outputs.tag }}
+            ${{ env.ACR_LOGIN_SERVER }}/${{ env.ACR_REPOSITORY }}:${{ steps.vars.outputs.tag }}
 
   deploy-aws:
     runs-on: self-hosted-runner-cgate
@@ -117,14 +117,20 @@ jobs:
 
       - name: Apply changes
         run: |
+          if [[ "${GITHUB_REF_NAME}" == "production" ]]; then
+            ENV_NAME="production-aws"
+          else
+            ENV_NAME="dev-aws"
+          fi
+
           pushd deploy/k8s
-            helmfile sync -e "${TAG}-aws" --wait
-            kubectl rollout restart -n cgate-${TAG} deployment/cgate
+            helmfile sync -e "${ENV_NAME}" --wait
+            kubectl rollout restart deployment/cgate -n cgate-${TAG}
           popd
         env:
-          TAG: ${{ steps.vars.outputs.tag }}
+         TAG: ${{ steps.vars.outputs.tag }}
   deploy-azure:
-    runs-on: self-hosted-runner-cgate-azure
+    runs-on: self-hosted-runner-cgate-crm-azure
     needs: build
     steps:
       - name: Checkout
@@ -159,9 +165,15 @@ jobs:
 
       - name: Apply changes
         run: |
+          if [[ "${GITHUB_REF_NAME}" == "production" ]]; then
+            ENV_NAME="production-azure"
+          else
+            ENV_NAME="dev-azure"
+          fi
+
           pushd deploy/k8s
-            helmfile sync -e "dev-azure" --wait
-            kubectl rollout restart deployment/cgate -n cgate-dev 
+            helmfile sync -e "${ENV_NAME}" --wait
+            kubectl rollout restart deployment/cgate -n cgate-${TAG}
           popd
         env:
           TAG: ${{ steps.vars.outputs.tag }}
