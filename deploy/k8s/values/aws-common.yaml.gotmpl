@@ -40,14 +40,13 @@ podLabels: {}
 podSecurityContext: {}
   # fsGroup: 2000
 
-securityContext:
-  capabilities:
-    drop:
-    - ALL
-  readOnlyRootFilesystem: false
-  runAsUser: 1001
-  runAsGroup: 1001
-  fsGroup: 1001
+#securityContext:
+#  capabilities:
+#    drop:
+#    - ALL
+#  readOnlyRootFilesystem: true
+#  runAsNonRoot: true
+#  runAsUser: 1000
 
 service:
   type: ClusterIP
