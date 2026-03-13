@@ -2,7 +2,7 @@ replicaCount: 3
 image:
   repository: 339713139704.dkr.ecr.eu-central-1.amazonaws.com/cognipeer-cgate
   pullPolicy: Always
-  tag: "dev"
+  tag: "production"
 
 cloudEnvironment: "aws"
 environment: production

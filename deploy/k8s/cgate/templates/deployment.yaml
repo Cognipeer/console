@@ -13,11 +13,11 @@ spec:
       {{- include "cgate.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      annotations:
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
         {{- if contains "azure" (.Values.cloudEnvironment | toString) }}
+      annotations:
         vault.hashicorp.com/agent-inject: "true"
         vault.hashicorp.com/role: "{{ .Values.vault.role }}"
         vault.hashicorp.com/agent-inject-secret-env: "{{ .Values.vault.secretPath }}"

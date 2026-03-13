@@ -3,7 +3,7 @@ image:
   pullPolicy: Always
   tag: 'production'
 
-environment: "productionelopment"
+environment: "production"
 cloudEnvironment: azure
 vaultSecretPath: "kv-v2/data/cgate-application-production"
 

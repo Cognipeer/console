@@ -14,7 +14,7 @@ environments:
 ---
 releases:
   - name: cgate
-    namespace: cgate-{{.Environment.Name}}
+    namespace: cgate-{{.Environment.Values.image.tag}}
     createNamespace: true
     chart: ./cgate
     values:
