@@ -2,6 +2,8 @@
 
 Thank you for your interest in contributing to Cognipeer Console.
 
+Cognipeer Console docs live under `docs/` and are rendered with VitePress using the shared Cognipeer docs shell.
+
 ## Development Setup
 
 ### Prerequisites
@@ -24,21 +26,21 @@ npm run dev
 
 ### Mandatory Rules
 
-1. **Never read `process.env` directly** — Use `getConfig()` from `@/lib/core/config`
-2. **Never use `console.*` in server code** — Use `createLogger()` from `@/lib/core/logger`
-3. **Never import MongoDB directly** — Use `getDatabase()` from `@/lib/database`
-4. **Preserve tenant isolation** — Always call `switchToTenant()` before tenant-scoped queries
-5. **Client APIs under `/api/client/v1/`** — Use `requireApiToken()` for authentication
-6. **Update `policies.json`** — When adding endpoints that require feature access
+1. **Never read `process.env` directly**. Use `getConfig()` from `@/lib/core/config`.
+2. **Never use `console.*` in server code**. Use `createLogger()` from `@/lib/core/logger`.
+3. **Never import MongoDB directly**. Use `getDatabase()` from `@/lib/database`.
+4. **Preserve tenant isolation**. Always call `switchToTenant()` before tenant-scoped queries.
+5. **Client APIs under `/api/client/v1/`**. Use the native Fastify auth helpers and keep policies aligned.
+6. **Update `policies.json`** when adding endpoints that require feature access.
 
 ### Code Style
 
 - TypeScript with strict types
-- Async/await over raw promises
-- Functional components with hooks (UI)
-- Scoped loggers per file/module
+- Async and await over raw promise chains
+- Functional components with hooks for UI
+- Scoped loggers per file or module
 - Meaningful variable names
-- Comments for complex business logic
+- Comments only where the code would otherwise hide important intent
 
 ### UI Guidelines
 
@@ -51,41 +53,49 @@ npm run dev
 ## Documentation
 
 When making changes that affect:
-- Core modules (`src/lib/core/`)
-- API endpoints (`src/app/api/client/v1/`)
-- Configuration (environment variables)
-- Database schema
-- Provider contracts
+
+- core modules under `src/lib/core/`
+- API endpoints under `src/server/api/plugins/`
+- configuration and environment variables
+- database schema or tenant behavior
+- provider contracts or runtime behavior
 
 Update the corresponding documentation page under `docs/`.
+
+### Docs Structure
+
+- Docs source: `docs/`
+- Theme config: `docs/.vitepress/config.mts`
+- Theme styling: `docs/.vitepress/theme/`
+- Public docs assets: `docs/public/`
 
 ### Building Docs Locally
 
 ```bash
-npm run docs:dev      # Dev server with hot reload
-npm run docs:build    # Production build
-npm run docs:preview  # Preview production build
+npm run docs:dev
+npm run docs:build
+npm run docs:preview
 ```
 
 ## PR Checklist
 
 - [ ] Tenant isolation intact (`switchToTenant` where needed)
-- [ ] New client endpoints under `client/v1`
+- [ ] New client endpoints under `/client/v1`
 - [ ] `policies.json` mapping updated
-- [ ] UI follows theme/component language
-- [ ] Loading/error/empty states handled
+- [ ] UI follows existing theme and component language
+- [ ] Loading, error, and empty states handled
 - [ ] No `process.env` in application code
 - [ ] No `console.*` in server code
 - [ ] No sensitive data in logs
-- [ ] Documentation updated (if applicable)
+- [ ] Documentation updated where behavior changed
 - [ ] Lint passes (`npm run lint`)
 - [ ] Build passes (`npm run build`)
 
 ## Validation
 
 ```bash
-npm run lint          # ESLint
-npm run build         # Next.js build
-npm run test          # Vitest tests
-npm run docs:build    # Documentation build
+npm run lint
+npm run build
+npm run test
+npm run docs:build
 ```

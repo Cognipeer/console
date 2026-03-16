@@ -1,43 +1,54 @@
 ---
 layout: home
+
 hero:
   name: Cognipeer Console
-  text: Multi-Tenant AI Platform
-  tagline: Production-ready platform for LLM inference, vector stores, agent orchestration, RAG, guardrails, and more — with complete tenant isolation.
+  text: Run Multi-Tenant AI Infrastructure Without Rebuilding The Control Plane
+  tagline: Operate inference, vector stores, tracing, guardrails, RAG, config, and incident workflows behind one production-ready console with tenant isolation built in.
   actions:
     - theme: brand
       text: Get Started
       link: /guide/getting-started
     - theme: alt
-      text: View on GitHub
-      link: https://github.com/Cognipeer/cognipeer-console
+      text: Study Architecture
+      link: /guide/architecture
 
 features:
-  - title: 🏢 Multi-Tenant
-    details: Complete data isolation per company with separate databases and license-based feature control.
-  - title: 🤖 LLM Gateway
-    details: OpenAI-compatible chat completions and embeddings API with provider abstraction and automatic retries.
-  - title: 🤝 Agents
-    details: Build, version, and deploy AI agents with bound tools, guardrails, and RAG — invoke via OpenAI Responses API.
-  - title: 🔧 Tools & MCP
-    details: Unified tool system backed by OpenAPI specs or MCP servers, with action-level execution and request logging.
-  - title: 🔍 Vector Stores
-    details: Manage vector indexes across providers (Pinecone, Qdrant, Weaviate, S3 Vectors) with a unified API.
-  - title: 📊 Agent Tracing
-    details: Ingest and visualize agent execution traces with batch and streaming modes, async persistence.
-  - title: 🛡️ Guardrails
-    details: Input/output validation with regex, keyword, and LLM-based evaluators to enforce content policies.
-  - title: 📚 RAG Modules
-    details: End-to-end retrieval-augmented generation with document ingestion, chunking, and query pipelines.
-  - title: ⚙️ Config Management
-    details: Centralized secrets and configuration with AES-256-GCM encryption, groups, audit logs, and API access.
-  - title: 🚨 Alerts & Incidents
-    details: Automated alert evaluation with incident lifecycle management, severity tracking, and notification channels.
-  - title: 💾 Caching & Resilience
-    details: Built-in cache layer (memory/Redis), retry with exponential back-off, and circuit breaker protection.
-  - title: 📈 Observability
-    details: Structured logging with request correlation, health checks, Prometheus metrics, and usage tracking.
+  - title: OpenAI-Compatible Runtime Surface
+    details: Ship chat completions, embeddings, and agent execution behind one gateway instead of stitching together provider-specific entry points by hand.
+  - title: Tenant Isolation As A First-Class Constraint
+    details: Keep data, credentials, projects, and usage boundaries intact across companies with tenant-aware request context and policy enforcement.
+  - title: Core Services Built For Production
+    details: Reuse cache, resilience, request context, runtime pooling, health checks, lifecycle management, and observability primitives across the platform.
+  - title: Agents, Tools, And MCP In One Control Plane
+    details: Manage agents, OpenAPI-backed tools, MCP servers, and prompt assets from the same operational surface used to serve requests.
+  - title: Retrieval, Guardrails, And Files Without Glue Code
+    details: Combine vector stores, document pipelines, file storage, and validation layers without re-deriving integration patterns for each feature area.
+  - title: Docs That Match How Teams Actually Adopt The Stack
+    details: Move from setup and architecture into API details and operational modules without losing the structure of the existing documentation tree.
 ---
+
+## Start Here
+
+If you are evaluating or onboarding Cognipeer Console, this is the shortest useful reading order:
+
+1. [Getting Started](/guide/getting-started) to boot the platform locally.
+2. [Architecture](/guide/architecture) to understand the runtime split between UI, API plugins, and core services.
+3. [Core Overview](/guide/core-overview) to see how config, logging, cache, resilience, and request context fit together.
+
+If you already know the basics, jump directly to the part that matches your work:
+
+- Building against the gateway surface? Start with [API Overview](/api/overview) and [Authentication](/guide/authentication).
+- Extending platform internals? Start with [Core Modules](/guide/core-overview) and [Providers](/guide/providers).
+- Operating agent workflows? Start with [Tracing](/guide/tracing), [Guardrails](/guide/guardrails), and [RAG](/guide/rag).
+
+## Choose Your Entry Point
+
+| Start with | Best for | What you get |
+| --- | --- | --- |
+| Guide | Teams onboarding the platform for the first time | Local setup, architecture, core module docs, and operational guidance |
+| API Reference | SDK authors and integrators | Endpoint behavior, request and response models, and OpenAI-compatible surface details |
+| Core Modules | Platform engineers extending the runtime | The shared infrastructure primitives that shape behavior across every domain service |
 
 ## Quick Start
 
@@ -56,52 +67,24 @@ docker run -p 3000:3000 --env-file .env.local cognipeer-console
 
 :::
 
-## Architecture Overview
+## Docs Map
 
-Cognipeer Console is built on **Next.js 15** with the App Router, TypeScript, and MongoDB. It serves as the central platform for all AI operations:
+- [Guide](/guide/getting-started): setup, architecture, deployment, providers, and feature walkthroughs.
+- [Core Modules](/guide/core-overview): config, request context, cache, resilience, runtime pool, health, lifecycle, and CORS.
+- [API Reference](/api/overview): gateway endpoints for chat, embeddings, agents, tools, tracing, vector, RAG, files, and health.
+- [Contributing](/contributing): development rules, validation steps, and docs workflow notes.
 
-```
-┌─────────────────────────────────────────────────┐
-│                   Clients                        │
-│          (SDKs, Agents, Applications)            │
-└────────────────┬────────────────────────────────┘
-                 │ REST API
-┌────────────────▼────────────────────────────────┐
-│              Cognipeer Console                   │
-│  ┌──────────┐ ┌──────────┐ ┌──────────────────┐ │
-│  │ Middleware│ │  CORS    │ │ Request Context  │ │
-│  │ (Auth)   │ │          │ │ (AsyncLocalStore)│ │
-│  └──────────┘ └──────────┘ └──────────────────┘ │
-│  ┌──────────┐ ┌──────────┐ ┌──────────────────┐ │
-│  │ Inference│ │  Vector  │ │  Agent Tracing   │ │
-│  │ Service  │ │  Service │ │  Service         │ │
-│  └──────────┘ └──────────┘ └──────────────────┘ │
-│  ┌──────────┐ ┌──────────┐ ┌──────────────────┐ │
-│  │   RAG    │ │Guardrails│ │  File Storage    │ │
-│  │ Service  │ │ Service  │ │  Service         │ │
-│  └──────────┘ └──────────┘ └──────────────────┘ │
-│  ┌──────────────────────────────────────────────┤
-│  │  Core: Config │ Logger │ Cache │ Resilience  │
-│  │  Runtime Pool │ Health │ Lifecycle │ Async   │
-│  └──────────────────────────────────────────────┤
-└────────────────┬────────────────────────────────┘
-                 │
-┌────────────────▼────────────────────────────────┐
-│          LLM / Vector / Storage Providers        │
-│   OpenAI, Anthropic, Google, AWS Bedrock, etc.   │
-└─────────────────────────────────────────────────┘
-```
+## Production Checklist
 
-## Key Capabilities
+- Confirm tenant identity, feature policy checks, and request context propagation are enforced on every new API surface.
+- Decide which providers, vector backends, and storage systems must be available in your target environment before onboarding teams.
+- Validate health, cache, resilience, and lifecycle behavior up front instead of treating them as optional infrastructure later.
+- Map your docs updates to the right guide or API page when new modules or endpoints are introduced.
+- Keep docs local verification in the release loop with `npm run docs:build`.
 
-- **OpenAI-compatible API** — Drop-in replacement for `/v1/chat/completions`, `/v1/embeddings`, and `/v1/responses`
-- **Agent orchestration** — Deploy agents with tools, guardrails, RAG modules, and version pinning
-- **Unified tool system** — Register OpenAPI specs or MCP servers as tools, execute actions via API
-- **MCP protocol support** — Full MCP gateway with SSE transport and JSON-RPC messaging
-- **Provider abstraction** — Swap between OpenAI, Anthropic, Google Vertex, AWS Bedrock, and custom models
-- **Multi-tenant isolation** — Each company gets a separate database and license tier
-- **Config management** — Centralized secrets and configuration with AES-256-GCM encryption and audit trails
-- **Alerts & incidents** — Rule-based alert evaluation with automated incident lifecycle management
-- **Production infrastructure** — Retry, circuit breaker, caching, structured logging, health checks
-- **Async-first design** — Usage logging and tracing persist asynchronously without blocking responses
-- **Kubernetes-ready** — Dockerfile, Helm charts, and graceful shutdown support included
+## What This Site Covers
+
+- A platform-level view of Cognipeer Console as a multi-tenant AI control plane rather than a loose collection of feature modules.
+- The runtime contracts behind inference, tracing, vector, guardrails, files, prompts, and RAG workflows.
+- The shared core infrastructure that keeps request handling, logging, caching, resilience, and shutdown behavior predictable.
+- A docs shell aligned with the `agent-sdk` and `chat-ui` surfaces while keeping Cognipeer Console's own information architecture.
