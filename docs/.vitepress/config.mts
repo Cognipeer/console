@@ -3,13 +3,17 @@ import { defineConfig } from 'vitepress';
 export default defineConfig({
   title: 'Cognipeer Console',
   description:
-    'Multi-tenant AI platform for LLM inference, vector stores, agent tracing, RAG, and more',
+    'Multi-tenant AI platform for LLM inference, vector stores, agent tracing, RAG, and more.',
   base: '/cognipeer-console/',
   ignoreDeadLinks: true,
+  appearance: false,
 
   themeConfig: {
+    logo: '/ConsoleSDK.svg',
+    siteTitle: 'Cognipeer Console',
     nav: [
       { text: 'Guide', link: '/guide/getting-started' },
+      { text: 'Architecture', link: '/guide/architecture' },
       { text: 'Core Modules', link: '/guide/core-overview' },
       { text: 'API Reference', link: '/api/overview' },
       {
@@ -54,18 +58,13 @@ export default defineConfig({
             { text: 'Authentication', link: '/guide/authentication' },
             { text: 'Providers', link: '/guide/providers' },
             { text: 'Model Inference', link: '/guide/inference' },
-            { text: 'Agents', link: '/guide/agents' },
-            { text: 'Tools', link: '/guide/tools' },
-            { text: 'MCP Servers', link: '/guide/mcp' },
             { text: 'Vector Stores', link: '/guide/vector-stores' },
             { text: 'Agent Tracing', link: '/guide/tracing' },
             { text: 'Guardrails', link: '/guide/guardrails' },
             { text: 'RAG', link: '/guide/rag' },
             { text: 'Prompts', link: '/guide/prompts' },
             { text: 'Memory', link: '/guide/memory' },
-            { text: 'Config Management', link: '/guide/config-management' },
             { text: 'File Storage', link: '/guide/files' },
-            { text: 'Alerts & Incidents', link: '/guide/alerts' },
           ],
         },
         {
@@ -107,8 +106,8 @@ export default defineConfig({
     ],
 
     footer: {
-      message: 'Released under the MIT License.',
-      copyright: 'Copyright © 2025-2026 CognipeerAI',
+      message: 'Cognipeer Console is part of the Cognipeer platform.',
+      copyright: 'Copyright © 2026 Cognipeer',
     },
 
     search: {
@@ -117,9 +116,13 @@ export default defineConfig({
   },
 
   head: [
-    ['meta', { name: 'theme-color', content: '#3eaf7c' }],
+    ['link', { rel: 'preconnect', href: 'https://fonts.googleapis.com' }],
+    ['link', { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossorigin: '' }],
+    ['link', { rel: 'stylesheet', href: 'https://fonts.googleapis.com/css2?family=Lexend+Deca:wght@400;500;600;700;800&display=swap' }],
+    ['link', { rel: 'icon', type: 'image/svg+xml', href: '/cognipeer-console/ConsoleSDK.svg' }],
+    ['meta', { name: 'theme-color', content: '#00b5a5' }],
     ['meta', { name: 'og:type', content: 'website' }],
     ['meta', { name: 'og:locale', content: 'en' }],
-    ['meta', { name: 'og:site_name', content: 'Cognipeer Console Docs' }],
+    ['meta', { name: 'og:site_name', content: 'Cognipeer Console Documentation' }],
   ],
 });
