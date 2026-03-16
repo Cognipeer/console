@@ -17,8 +17,17 @@ import {
   queryVectorIndex,
   updateVectorIndex,
   upsertVectors,
+  createVectorMigration,
+  listVectorMigrations,
+  getVectorMigration,
+  startVectorMigration,
+  cancelVectorMigration,
+  deleteVectorMigration,
+  listVectorMigrationLogs,
+  countVectorMigrationLogs,
 } from '@/lib/services/vector';
 import type { VectorMetric } from '@/lib/services/vector/types';
+import type { VectorMigrationStatus } from '@/lib/database/provider/types.base';
 import {
   checkPerRequestLimits,
   checkRateLimit,
@@ -803,6 +812,149 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Internal server error',
         });
+    }
+  }));
+
+  // ── Vector migrations ────────────────────────────────────────────────
+
+  app.get('/vector/migrations', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const query = (request.query ?? {}) as { status?: string };
+      const migrations = await listVectorMigrations(
+        session.tenantDbName,
+        projectId,
+        query.status as VectorMigrationStatus | undefined,
+      );
+      return reply.code(200).send({ migrations });
+    } catch (error) {
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Internal server error' });
+    }
+  }));
+
+  app.post('/vector/migrations', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const body = readJsonBody<Record<string, unknown>>(request);
+
+      const required = ['name', 'sourceProviderKey', 'sourceIndexKey', 'destinationProviderKey', 'destinationIndexKey'];
+      for (const field of required) {
+        if (!body[field] || typeof body[field] !== 'string') {
+          return reply.code(400).send({ error: `${field} is required` });
+        }
+      }
+
+      const migration = await createVectorMigration(
+        session.tenantDbName,
+        session.tenantId,
+        projectId,
+        session.userId,
+        {
+          name: body.name as string,
+          description: typeof body.description === 'string' ? body.description : undefined,
+          sourceProviderKey: body.sourceProviderKey as string,
+          sourceIndexKey: body.sourceIndexKey as string,
+          destinationProviderKey: body.destinationProviderKey as string,
+          destinationIndexKey: body.destinationIndexKey as string,
+          batchSize: typeof body.batchSize === 'number' ? body.batchSize : undefined,
+          createdBy: session.userId,
+        },
+      );
+
+      return reply.code(201).send({ migration });
+    } catch (error) {
+      if (error instanceof Error && (error.message.includes('not found') || error.message.includes('cannot be the same'))) {
+        return reply.code(400).send({ error: error.message });
+      }
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Internal server error' });
+    }
+  }));
+
+  app.get('/vector/migrations/:key', withApiRequestContext(async (request, reply) => {
+    try {
+      const { key } = request.params as { key: string };
+      const { session } = await requireProjectContextForRequest(request);
+      const query = (request.query ?? {}) as { logsLimit?: string; logsOffset?: string };
+
+      const migration = await getVectorMigration(session.tenantDbName, key);
+      if (!migration) {
+        return reply.code(404).send({ error: 'Migration not found' });
+      }
+
+      const logsLimit = parseInt(query.logsLimit ?? '50', 10);
+      const logsOffset = parseInt(query.logsOffset ?? '0', 10);
+
+      const [logs, totalLogs] = await Promise.all([
+        listVectorMigrationLogs(session.tenantDbName, key, { limit: logsLimit, offset: logsOffset }),
+        countVectorMigrationLogs(session.tenantDbName, key),
+      ]);
+
+      return reply.code(200).send({ migration, logs, totalLogs });
+    } catch (error) {
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Internal server error' });
+    }
+  }));
+
+  app.delete('/vector/migrations/:key', withApiRequestContext(async (request, reply) => {
+    try {
+      const { key } = request.params as { key: string };
+      const { session } = await requireProjectContextForRequest(request);
+
+      await deleteVectorMigration(session.tenantDbName, key);
+
+      return reply.code(200).send({ success: true });
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('Cannot delete')) {
+        return reply.code(409).send({ error: error.message });
+      }
+      if (error instanceof Error && error.message.includes('not found')) {
+        return reply.code(404).send({ error: 'Migration not found' });
+      }
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Internal server error' });
+    }
+  }));
+
+  app.post('/vector/migrations/:key/start', withApiRequestContext(async (request, reply) => {
+    try {
+      const { key } = request.params as { key: string };
+      const { projectId, session } = await requireProjectContextForRequest(request);
+
+      const migration = await startVectorMigration(session.tenantDbName, session.tenantId, projectId, key);
+
+      return reply.code(200).send({ migration });
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('not found')) {
+        return reply.code(404).send({ error: 'Migration not found' });
+      }
+      if (error instanceof Error && (error.message.includes('already running') || error.message.includes('already completed'))) {
+        return reply.code(409).send({ error: error.message });
+      }
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Internal server error' });
+    }
+  }));
+
+  app.post('/vector/migrations/:key/cancel', withApiRequestContext(async (request, reply) => {
+    try {
+      const { key } = request.params as { key: string };
+      const { session } = await requireProjectContextForRequest(request);
+
+      const migration = await cancelVectorMigration(session.tenantDbName, key);
+
+      return reply.code(200).send({ migration });
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('not found')) {
+        return reply.code(404).send({ error: 'Migration not found' });
+      }
+      if (error instanceof Error && error.message.includes('not running')) {
+        return reply.code(409).send({ error: error.message });
+      }
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Internal server error' });
     }
   }));
 };

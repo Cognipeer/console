@@ -6,6 +6,8 @@ import type {
   VectorQueryInput,
   VectorQueryResult,
   VectorUpsertItem,
+  VectorListInput,
+  VectorListResult,
 } from '../domains/vector';
 
 interface PostgresVectorCredentials {
@@ -294,6 +296,42 @@ export const PostgresVectorProviderContract: ProviderContract<
         });
 
         logger?.debug?.('PostgreSQL deleted vectors', { providerKey, count: ids.length });
+      },
+
+      async listVectors(handle: VectorIndexHandle, input?: VectorListInput): Promise<VectorListResult> {
+        const tbl = (handle.metadata?.tableName as string) || tableName;
+        const limit = input?.limit ?? 100;
+        const offset = input?.cursor ? parseInt(input.cursor, 10) : 0;
+
+        const [rows, countRows] = await withClient(async (client) => {
+          const dataRes = await client.query(
+            `SELECT id, vector::text, metadata FROM ${tbl} ORDER BY id LIMIT $1 OFFSET $2`,
+            [limit, offset],
+          );
+          const cntRes = await client.query(`SELECT COUNT(*)::int AS cnt FROM ${tbl}`);
+          return [dataRes.rows, cntRes.rows];
+        });
+
+        const total: number | undefined = countRows[0]?.cnt != null ? Number(countRows[0].cnt) : undefined;
+        const items = (rows as Record<string, unknown>[]).map((row) => {
+          // pgvector returns vector as "[1,2,3]" string
+          let values: number[] = [];
+          if (typeof row.vector === 'string') {
+            try { values = JSON.parse(row.vector as string) as number[]; } catch { /* ignore */ }
+          }
+          return {
+            id: row.id as string,
+            values,
+            metadata: row.metadata as Record<string, unknown> | undefined,
+          };
+        });
+
+        const nextOffset = offset + items.length;
+        return {
+          items,
+          nextCursor: total !== undefined && nextOffset < total ? String(nextOffset) : items.length === limit ? String(nextOffset) : undefined,
+          total,
+        };
       },
     };
 

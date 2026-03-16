@@ -7,6 +7,8 @@ import type {
   VectorQueryInput,
   VectorQueryResult,
   VectorUpsertItem,
+  VectorListInput,
+  VectorListResult,
 } from '../domains/vector';
 
 interface MongoDbVectorCredentials {
@@ -275,6 +277,40 @@ export const MongoDbVectorProviderContract: ProviderContract<
         try {
           await coll.deleteMany({ _id: { $in: ids } } as Parameters<typeof coll.deleteMany>[0]);
           logger?.debug?.('MongoDB deleted vectors', { providerKey, count: ids.length });
+        } finally {
+          await client.close();
+        }
+      },
+
+      async listVectors(handle: VectorIndexHandle, input?: VectorListInput): Promise<VectorListResult> {
+        const meta = handle.metadata ?? {};
+        const db = (meta.database as string) || database;
+        const coll_ = (meta.collectionName as string) || collectionName;
+        const vf = (meta.vectorField as string) || vectorField;
+        const limit = input?.limit ?? 100;
+        const skip = input?.cursor ? parseInt(input.cursor, 10) : 0;
+
+        const { client, coll } = await getMongoCollection(uri, db, coll_);
+        try {
+          const total = await coll.countDocuments();
+          const docs = await coll.find({}, { projection: { _id: 1, [vf]: 1, metadata: 1 } })
+            .sort({ _id: 1 })
+            .skip(skip)
+            .limit(limit)
+            .toArray();
+
+          const items = docs.map((doc) => ({
+            id: doc._id as unknown as string,
+            values: Array.isArray(doc[vf]) ? (doc[vf] as number[]) : [],
+            metadata: doc.metadata as Record<string, unknown> | undefined,
+          }));
+
+          const nextOffset = skip + items.length;
+          return {
+            items,
+            nextCursor: nextOffset < total ? String(nextOffset) : undefined,
+            total,
+          };
         } finally {
           await client.close();
         }

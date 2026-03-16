@@ -6,6 +6,8 @@ import type {
   VectorQueryInput,
   VectorQueryResult,
   VectorUpsertItem,
+  VectorListInput,
+  VectorListResult,
 } from '../domains/vector';
 
 interface MilvusCloudCredentials {
@@ -21,6 +23,18 @@ interface MilvusCloudSettings {
 
 const DEFAULT_DIMENSIONS = 1536;
 const DEFAULT_VECTOR_FIELD = 'vector';
+
+function milvusCloudMetricType(metric: string): string {
+  if (metric === 'euclidean') return 'L2';
+  if (metric === 'dot') return 'IP';
+  return 'COSINE';
+}
+
+function metricFromMilvusCloudType(milvusMetric: string | undefined): 'cosine' | 'euclidean' | 'dot' {
+  if (milvusMetric === 'L2') return 'euclidean';
+  if (milvusMetric === 'IP') return 'dot';
+  return 'cosine';
+}
 
 export const MilvusCloudVectorProviderContract: ProviderContract<
   VectorProviderRuntime,
@@ -121,20 +135,32 @@ export const MilvusCloudVectorProviderContract: ProviderContract<
         }
         const dimension = input.dimension || dim;
         const metric = input.metric ?? 'cosine';
-        const metricType = metric === 'euclidean' ? 'L2' : metric === 'dot' ? 'IP' : 'COSINE';
+        const metricType = milvusCloudMetricType(metric);
 
         const hasCollection = await milvusClient.hasCollection({ collection_name: collectionName });
         if (!hasCollection.value) {
           await milvusClient.createCollection({
             collection_name: collectionName,
+            enable_dynamic_field: true,
             fields: [
               { name: 'id', data_type: DataType.VarChar, max_length: 255, is_primary_key: true, auto_id: false },
               { name: vf, data_type: DataType.FloatVector, dim: dimension },
               { name: 'metadata_json', data_type: DataType.VarChar, max_length: 65535, default_value: '{}' },
             ],
-            metric_type: metricType,
           });
+          // Zilliz Cloud Free Tier requires AUTOINDEX
+          await milvusClient.createIndex({
+            collection_name: collectionName,
+            field_name: vf,
+            index_type: 'AUTOINDEX',
+            metric_type: metricType,
+            params: {},
+          });
+          await milvusClient.loadCollection({ collection_name: collectionName });
           logger?.info?.('Zilliz Cloud collection created', { providerKey, collectionName });
+        } else {
+          // Ensure collection is loaded after server restart
+          try { await milvusClient.loadCollection({ collection_name: collectionName }); } catch (_) { /* already loaded */ }
         }
 
         return {
@@ -153,17 +179,38 @@ export const MilvusCloudVectorProviderContract: ProviderContract<
       async listIndexes(): Promise<VectorIndexHandle[]> {
         const result = await milvusClient.listCollections();
         const names: string[] = result.data?.map((c: { name: string }) => c.name) ?? [];
-        return names.map((name) => ({
-          externalId: name,
-          name,
-          dimension: dim,
-          metric: 'cosine' as const,
-          metadata: { vectorField: vf, provider: 'milvus-cloud' },
-        }));
+        return Promise.all(
+          names.map(async (name) => {
+            const descResult = await milvusClient.describeIndex({ collection_name: name, field_name: vf }).catch(() => null);
+            const milvusMetric: string | undefined = descResult?.index_descriptions?.[0]?.metric_type;
+            const metric = metricFromMilvusCloudType(milvusMetric);
+            return {
+              externalId: name,
+              name,
+              dimension: dim,
+              metric,
+              metadata: { vectorField: vf, provider: 'milvus-cloud' },
+            };
+          }),
+        );
       },
 
       async upsertVectors(handle: VectorIndexHandle, items: VectorUpsertItem[]): Promise<void> {
         const vectorField = (handle.metadata?.vectorField as string) ?? vf;
+
+        // Ensure index exists (may be missing if collection was created with older code)
+        const indexInfo = await milvusClient.describeIndex({ collection_name: handle.externalId, field_name: vectorField }).catch(() => null);
+        if (!indexInfo || !indexInfo.index_descriptions?.length) {
+          await milvusClient.createIndex({
+            collection_name: handle.externalId,
+            field_name: vectorField,
+            index_type: 'AUTOINDEX',
+            metric_type: milvusCloudMetricType(handle.metric ?? 'cosine'),
+            params: {},
+          });
+        }
+        try { await milvusClient.loadCollection({ collection_name: handle.externalId }); } catch (_) { /* already loaded */ }
+
         const data = items.map((item) => ({
           id: item.id,
           [vectorField]: item.values,
@@ -175,6 +222,7 @@ export const MilvusCloudVectorProviderContract: ProviderContract<
 
       async queryVectors(handle: VectorIndexHandle, query: VectorQueryInput): Promise<VectorQueryResult> {
         const vectorField = (handle.metadata?.vectorField as string) ?? vf;
+        try { await milvusClient.loadCollection({ collection_name: handle.externalId }); } catch (_) { /* already loaded */ }
         const result = await milvusClient.search({
           collection_name: handle.externalId,
           data: [query.vector],
@@ -182,6 +230,7 @@ export const MilvusCloudVectorProviderContract: ProviderContract<
           limit: query.topK,
           output_fields: ['id', 'metadata_json'],
         });
+        logger?.debug?.('Zilliz Cloud search raw result', { status: result.status, resultCount: result.results?.length ?? 0 });
         const hits = result.results ?? [];
         return {
           matches: hits.map((hit: { id: string; score: number; metadata_json?: string }) => {
@@ -201,6 +250,31 @@ export const MilvusCloudVectorProviderContract: ProviderContract<
         const expr = `id in [${ids.map((id) => `"${id}"`).join(', ')}]`;
         await milvusClient.deleteEntities({ collection_name: handle.externalId, expr });
       },
+    
+      async listVectors(handle: VectorIndexHandle, input?: VectorListInput): Promise<VectorListResult> {
+        const vectorField = (handle.metadata?.vectorField as string) ?? vf;
+        const limit = input?.limit ?? 100;
+        const offset = input?.cursor ? parseInt(input.cursor, 10) : 0;
+        try { await milvusClient.loadCollection({ collection_name: handle.externalId }); } catch (_) {}
+        const countRes = await milvusClient.count({ collection_name: handle.externalId }).catch(() => null);
+        const total = countRes?.data?.count != null ? Number(countRes.data.count) : undefined;
+        const result = await milvusClient.query({
+          collection_name: handle.externalId,
+          expr: '',
+          output_fields: ['id', vectorField, 'metadata_json'],
+          limit,
+          offset,
+        });
+        const items = (result.data ?? []).map((row: Record<string, unknown>) => {
+          let metadata: Record<string, unknown> = {};
+          try { if (row.metadata_json) metadata = JSON.parse(row.metadata_json as string); } catch {}
+          return { id: row.id as string, values: Array.isArray(row[vectorField]) ? row[vectorField] as number[] : [], metadata };
+        });
+        const nextOffset = offset + items.length;
+        const hasMore = total !== undefined ? nextOffset < total : items.length === limit;
+        return { items, nextCursor: hasMore ? String(nextOffset) : undefined, total };
+      },
+    
     };
 
     return runtime;

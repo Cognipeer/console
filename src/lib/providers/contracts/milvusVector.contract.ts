@@ -6,6 +6,8 @@ import type {
   VectorQueryInput,
   VectorQueryResult,
   VectorUpsertItem,
+  VectorListInput,
+  VectorListResult,
 } from '../domains/vector';
 
 interface MilvusCredentials {
@@ -38,6 +40,12 @@ function milvusMetricType(metric: string): string {
   if (metric === 'euclidean') return 'L2';
   if (metric === 'dot') return 'IP';
   return 'COSINE';
+}
+
+function metricFromMilvusType(milvusMetric: string | undefined): 'cosine' | 'euclidean' | 'dot' {
+  if (milvusMetric === 'L2') return 'euclidean';
+  if (milvusMetric === 'IP') return 'dot';
+  return 'cosine';
 }
 
 export const MilvusVectorProviderContract: ProviderContract<
@@ -166,14 +174,26 @@ export const MilvusVectorProviderContract: ProviderContract<
         if (!hasCollection.value) {
           await milvusClient.createCollection({
             collection_name: collectionName,
+            enable_dynamic_field: true,
             fields: [
               { name: 'id', data_type: DataType.VarChar, max_length: 255, is_primary_key: true, auto_id: false },
               { name: vectorField, data_type: DataType.FloatVector, dim },
               { name: 'metadata_json', data_type: DataType.VarChar, max_length: 65535, default_value: '{}' },
             ],
-            metric_type: milvusMetricType(metric),
           });
+          // Use AUTOINDEX for cloud compatibility (Zilliz), FLAT is used for local
+          const isCloud = !!credentials.token;
+          await milvusClient.createIndex({
+            collection_name: collectionName,
+            field_name: vectorField,
+            index_type: isCloud ? 'AUTOINDEX' : 'FLAT',
+            metric_type: milvusMetricType(metric),
+            params: {},
+          });
+          await milvusClient.loadCollection({ collection_name: collectionName });
           logger?.info?.('Milvus collection created', { providerKey, collectionName });
+        } else {
+          try { await milvusClient.loadCollection({ collection_name: collectionName }); } catch (_) { /* already loaded */ }
         }
 
         return {
@@ -193,17 +213,39 @@ export const MilvusVectorProviderContract: ProviderContract<
       async listIndexes(): Promise<VectorIndexHandle[]> {
         const result = await milvusClient.listCollections();
         const names: string[] = result.data?.map((c: { name: string }) => c.name) ?? [];
-        return names.map((name) => ({
-          externalId: name,
-          name,
-          dimension: dimensions,
-          metric: 'cosine' as const,
-          metadata: { vectorField, provider: 'milvus' },
-        }));
+        return Promise.all(
+          names.map(async (name) => {
+            const descResult = await milvusClient.describeIndex({ collection_name: name, field_name: vectorField }).catch(() => null);
+            const milvusMetric: string | undefined = descResult?.index_descriptions?.[0]?.metric_type;
+            const metric = metricFromMilvusType(milvusMetric);
+            return {
+              externalId: name,
+              name,
+              dimension: dimensions,
+              metric,
+              metadata: { vectorField, provider: 'milvus' },
+            };
+          }),
+        );
       },
 
       async upsertVectors(handle: VectorIndexHandle, items: VectorUpsertItem[]): Promise<void> {
         const vf = (handle.metadata?.vectorField as string) ?? vectorField;
+
+        // Ensure index exists before upsert (collection may have been created externally)
+        const indexInfo = await milvusClient.describeIndex({ collection_name: handle.externalId, field_name: vf }).catch(() => null);
+        if (!indexInfo || !indexInfo.index_descriptions?.length) {
+          const isCloud = !!credentials.token;
+          await milvusClient.createIndex({
+            collection_name: handle.externalId,
+            field_name: vf,
+            index_type: isCloud ? 'AUTOINDEX' : 'FLAT',
+            metric_type: milvusMetricType(handle.metric ?? 'cosine'),
+            params: {},
+          });
+        }
+        try { await milvusClient.loadCollection({ collection_name: handle.externalId }); } catch (_) { /* already loaded */ }
+
         const data = items.map((item) => ({
           id: item.id,
           [vf]: item.values,
@@ -220,6 +262,8 @@ export const MilvusVectorProviderContract: ProviderContract<
 
       async queryVectors(handle: VectorIndexHandle, query: VectorQueryInput): Promise<VectorQueryResult> {
         const vf = (handle.metadata?.vectorField as string) ?? vectorField;
+
+        try { await milvusClient.loadCollection({ collection_name: handle.externalId }); } catch (_) { /* already loaded */ }
 
         const result = await milvusClient.search({
           collection_name: handle.externalId,
@@ -249,6 +293,40 @@ export const MilvusVectorProviderContract: ProviderContract<
         const expr = `id in [${ids.map((id) => `"${id}"`).join(', ')}]`;
         await milvusClient.deleteEntities({ collection_name: handle.externalId, expr });
         logger?.debug?.('Milvus deleted vectors', { providerKey, count: ids.length });
+      },
+
+      async listVectors(handle: VectorIndexHandle, input?: VectorListInput): Promise<VectorListResult> {
+        const vf = (handle.metadata?.vectorField as string) ?? vectorField;
+        const limit = input?.limit ?? 100;
+        const offset = input?.cursor ? parseInt(input.cursor, 10) : 0;
+
+        try { await milvusClient.loadCollection({ collection_name: handle.externalId }); } catch (_) { /* already loaded */ }
+
+        const countRes = await milvusClient.count({ collection_name: handle.externalId }).catch(() => null);
+        const total: number | undefined = countRes?.data?.count != null ? Number(countRes.data.count) : undefined;
+
+        const result = await milvusClient.query({
+          collection_name: handle.externalId,
+          expr: '',
+          output_fields: ['id', vf, 'metadata_json'],
+          limit,
+          offset,
+        });
+
+        const items = (result.data ?? []).map((row: Record<string, unknown>) => {
+          let metadata: Record<string, unknown> = {};
+          try { metadata = row.metadata_json ? JSON.parse(row.metadata_json as string) : {}; } catch { /* ignore */ }
+          return {
+            id: row.id as string,
+            values: Array.isArray(row[vf]) ? row[vf] as number[] : [],
+            metadata,
+          };
+        });
+
+        const nextOffset = offset + items.length;
+        const hasMore = total !== undefined ? nextOffset < total : items.length === limit;
+
+        return { items, nextCursor: hasMore ? String(nextOffset) : undefined, total };
       },
     };
 
