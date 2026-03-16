@@ -3,11 +3,31 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
-environment: {{.Environment.Name}}
+environment: {{.Environment.Values.environment}}
+cloudEnvironment: {{.Environment.Values.cloudEnvironment}}
 image:
   repository: {{.Environment.Values.image.repository}}
   pullPolicy: Always
   tag: {{.Environment.Values.image.tag}}
+
+{{ if contains "aws" .Environment.Values.cloudEnvironment }}
+secrets:
+  jwt_expires_in: {{.Environment.Values.secrets.jwt_expires_in}}
+  jwt_secret: {{.Environment.Values.secrets.jwt_secret}}
+  main_db_name: {{.Environment.Values.secrets.main_db_name}}
+  mongodb_uri: {{.Environment.Values.secrets.mongodb_uri}}
+  db_provider: {{.Environment.Values.secrets.db_provider}}
+  smtp_from: {{.Environment.Values.secrets.smtp_from}}
+  smtp_host: {{.Environment.Values.secrets.smtp_host}}
+  smtp_port: {{.Environment.Values.secrets.smtp_port}}
+  smtp_secure: {{.Environment.Values.secrets.smtp_secure}}
+  smtp_user: {{.Environment.Values.secrets.smtp_user}}
+  smtp_pass: {{.Environment.Values.secrets.smtp_pass}}
+tls_secrets:
+  fullchain_pem:  {{.Environment.Values.tls_secrets.fullchain_pem}}
+  privatekey_pem:  {{.Environment.Values.tls_secrets.privatekey_pem}}
+
+{{- end }}
 
 serviceAccount:
   create: true
@@ -20,14 +40,13 @@ podLabels: {}
 podSecurityContext: {}
   # fsGroup: 2000
 
-securityContext:
-  capabilities:
-    drop:
-    - ALL
-  readOnlyRootFilesystem: false
-  runAsUser: 1001
-  runAsGroup: 1001
-  fsGroup: 1001
+#securityContext:
+#  capabilities:
+#    drop:
+#    - ALL
+#  readOnlyRootFilesystem: true
+#  runAsNonRoot: true
+#  runAsUser: 1000
 
 service:
   type: ClusterIP
@@ -82,19 +101,3 @@ volumeMounts:
 nodeSelector: {}
 tolerations: []
 affinity: {}
-
-secrets:
-  jwt_expires_in: {{.Environment.Values.secrets.jwt_expires_in}}
-  jwt_secret: {{.Environment.Values.secrets.jwt_secret}}
-  main_db_name: {{.Environment.Values.secrets.main_db_name}}
-  mongodb_uri: {{.Environment.Values.secrets.mongodb_uri}}
-  db_provider: {{.Environment.Values.secrets.db_provider}}
-  smtp_from: {{.Environment.Values.secrets.smtp_from}}
-  smtp_host: {{.Environment.Values.secrets.smtp_host}}
-  smtp_port: {{.Environment.Values.secrets.smtp_port}}
-  smtp_secure: {{.Environment.Values.secrets.smtp_secure}}
-  smtp_user: {{.Environment.Values.secrets.smtp_user}}
-  smtp_pass: {{.Environment.Values.secrets.smtp_pass}}
-tls_secrets:
-  fullchain_pem:  {{.Environment.Values.tls_secrets.fullchain_pem}}
-  privatekey_pem:  {{.Environment.Values.tls_secrets.privatekey_pem}}

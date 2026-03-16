@@ -13,22 +13,47 @@ spec:
       {{- include "cgate.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      {{- with .Values.podAnnotations }}
-      annotations:
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
+        {{- if contains "azure" (.Values.cloudEnvironment | toString) }}
+      annotations:
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: "{{ .Values.vault.role }}"
+        vault.hashicorp.com/agent-inject-secret-env: "{{ .Values.vault.secretPath }}"
+        vault.hashicorp.com/secret-volume-path: "/app/.env"
+        vault.hashicorp.com/agent-inject-template-env: |
+          {{`{{- with secret "`}}{{ .Values.vault.secretPath }}{{`" -}}`}}
+          JWT_EXPIRES_IN={{`{{ .Data.data.JWT_EXPIRES_IN }}`}}
+          JWT_SECRET={{`{{ .Data.data.JWT_SECRET }}`}}
+          MAIN_DB_NAME={{`{{ .Data.data.MAIN_DB_NAME }}`}}
+          MONGODB_URI={{`{{ .Data.data.MONGODB_URI }}`}}
+          DB_PROVIDER={{`{{ .Data.data.DB_PROVIDER }}`}}
+          SMTP_FROM={{`{{ .Data.data.SMTP_FROM }}`}}
+          SMTP_HOST={{`{{ .Data.data.SMTP_HOST }}`}}
+          SMTP_PORT={{`{{ .Data.data.SMTP_PORT }}`}}
+          SMTP_SECURE={{`{{ .Data.data.SMTP_SECURE }}`}}
+          SMTP_USER={{`{{ .Data.data.SMTP_USER }}`}}
+          SMTP_PASS={{`{{ .Data.data.SMTP_PASS }}`}}
+          {{`{{- end }}`}}
+        vault.hashicorp.com/tls-secret: "vault-ca-secret"
+        vault.hashicorp.com/ca-cert: "/vault/tls/ca.crt"
+        {{- end }}
       labels:
         {{- include "cgate.labels" . | nindent 8 }}
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-        checksum/secret-values: {{ toYaml .Values.secrets | sha256sum | trunc 7}}
+        {{- if contains "aws" (.Values.cloudEnvironment | toString) }}
+        checksum/secret-values: {{ toYaml .Values.secrets | sha256sum | trunc 7 }}
+        {{- end }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "cgate.serviceAccountName" . }}
+      automountServiceAccountToken: true
       {{- with .Values.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
@@ -41,14 +66,22 @@ spec:
           {{- end }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{if contains "azure" (.Values.cloudEnvironment | toString)}}
+          command: {{ toJson .Values.bootstrap.command }}
+          args: {{ toJson .Values.bootstrap.args }}
+          {{- end}}
           env:
-          {{- range $key, $val := .Values.secrets }}
+            - name: NODE_ENV
+              value: {{ .Values.environment | quote }}
+            {{- if contains "aws" (.Values.cloudEnvironment | toString) }}
+            {{- range $key, $val := .Values.secrets }}
             - name: {{ $key | upper }}
               valueFrom:
                 secretKeyRef:
                   name: cgate-application-secrets
-                  key: {{$key | upper }}
-          {{- end }}
+                  key: {{ $key | upper }}
+            {{- end }}
+            {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.service.port }}
