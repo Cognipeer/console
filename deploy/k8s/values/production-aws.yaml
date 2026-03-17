@@ -68,18 +68,6 @@ resources:
     cpu: 100m
     memory: 128Mi
 
-livenessProbe:
-  tcpSocket:
-    port: 3000
-  initialDelaySeconds: 5
-  periodSeconds: 5
-
-readinessProbe:
-  tcpSocket:
-    port: 3000
-  initialDelaySeconds: 5
-  periodSeconds: 5
-
 autoscaling:
   enabled: false
   minReplicas: 3
