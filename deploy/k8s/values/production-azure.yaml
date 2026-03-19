@@ -61,17 +61,6 @@ autoscaling:
   maxReplicas: 100
   targetCPUUtilizationPercentage: 80
 
-volumes:
-  - configMap:
-      defaultMode: 420
-      name: mongo-ca-bundle
-    name: mongo-ca-volume
-
-volumeMounts:
-  - mountPath: /app/global-bundle.pem
-    name: mongo-ca-volume
-    subPath: global-bundle.pem
-
 nodeSelector: {}
 tolerations: []
 affinity: {}
