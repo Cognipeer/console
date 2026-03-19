@@ -27,7 +27,7 @@ spec:
           JWT_EXPIRES_IN={{`{{ .Data.data.JWT_EXPIRES_IN }}`}}
           JWT_SECRET={{`{{ .Data.data.JWT_SECRET }}`}}
           MAIN_DB_NAME={{`{{ .Data.data.MAIN_DB_NAME }}`}}
-          MONGODB_URI={{`{{ .Data.data.MONGODB_URI }}`}}
+          MONGODB_URI="{{`{{ .Data.data.MONGODB_URI }}`}}"
           DB_PROVIDER={{`{{ .Data.data.DB_PROVIDER }}`}}
           SMTP_FROM={{`{{ .Data.data.SMTP_FROM }}`}}
           SMTP_HOST={{`{{ .Data.data.SMTP_HOST }}`}}
