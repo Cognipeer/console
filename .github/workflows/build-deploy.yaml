@@ -87,5 +87,5 @@ jobs:
           curl -X POST \
             -H "Authorization: Bearer ${{ secrets.REPO_PAT_TO_DEPLOY }}" \
             -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/Cognipeer/cognipeer-console-helm-chart/dispatches \
+            https://api.github.com/repos/${{secrets.TENANT_REPO_ADDRESS}}/dispatches \
             -d '{"event_type":"app-released","client_payload":{"image_tag":"${{ github.ref_name }}"}}'
