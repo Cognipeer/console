@@ -1,0 +1,122 @@
+.page {
+  position: relative;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  padding: var(--app-space-5) 0;
+}
+
+.page::before,
+.page::after {
+  content: '';
+  position: absolute;
+  border-radius: 999px;
+  pointer-events: none;
+  filter: blur(24px);
+}
+
+.page::before {
+  width: 18rem;
+  height: 18rem;
+  left: max(2rem, 6vw);
+  top: max(2rem, 8vh);
+  background: rgba(39, 195, 187, 0.16);
+}
+
+.page::after {
+  width: 22rem;
+  height: 22rem;
+  right: max(2rem, 5vw);
+  bottom: max(2rem, 8vh);
+  background: rgba(14, 165, 233, 0.14);
+}
+
+.container {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+}
+
+.shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(20rem, 30rem);
+  gap: var(--app-space-5);
+  align-items: stretch;
+  padding: clamp(1.25rem, 2vw, 2rem);
+  background: var(--app-surface-1);
+  border: 1px solid var(--app-border-soft);
+  border-radius: var(--mantine-radius-xl);
+  box-shadow: var(--app-shadow-md);
+  backdrop-filter: blur(18px);
+}
+
+.intro {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--app-space-4);
+  padding: clamp(0.5rem, 1vw, 1rem);
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  padding: 0.35rem 0.8rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  background: rgba(255, 255, 255, 0.64);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  color: var(--mantine-primary-color-8);
+}
+
+.introTitle {
+  max-width: 14ch;
+}
+
+.introText {
+  max-width: 34rem;
+}
+
+.panel {
+  background: var(--app-surface-0);
+  border: 1px solid var(--app-border-strong);
+  border-radius: var(--mantine-radius-xl);
+  box-shadow: var(--app-shadow-sm);
+}
+
+.footer {
+  padding-top: var(--app-space-4);
+}
+
+:global(body[data-mantine-color-scheme='dark']) .brand {
+  background: rgba(18, 30, 41, 0.72);
+  border-color: rgba(148, 163, 184, 0.18);
+  color: var(--mantine-primary-color-2);
+}
+
+@media (max-width: 64em) {
+  .shell {
+    grid-template-columns: 1fr;
+    gap: var(--app-space-4);
+  }
+
+  .introTitle,
+  .introText {
+    max-width: none;
+  }
+}
+
+@media (max-width: 48em) {
+  .page {
+    padding: var(--app-space-4) 0;
+  }
+
+  .shell {
+    padding: 1rem;
+    border-radius: var(--mantine-radius-lg);
+  }
+}

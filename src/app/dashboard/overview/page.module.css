@@ -1,0 +1,36 @@
+.resourceCard {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid var(--app-border-soft);
+  border-radius: var(--mantine-radius-lg);
+  padding: var(--app-space-2);
+  transition:
+    transform var(--app-motion-base) ease,
+    box-shadow var(--app-motion-base) ease,
+    background-color var(--app-motion-fast) ease,
+    border-color var(--app-motion-fast) ease;
+  cursor: pointer;
+}
+
+.resourceCard:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--app-shadow-xs);
+  border-color: rgba(22, 179, 171, 0.22);
+  background: rgba(255, 255, 255, 0.45);
+}
+
+.resourceCard:focus-visible {
+  box-shadow: var(--app-focus-ring);
+}
+
+.resourceCardContent {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--app-space-2);
+}
+
+.resourceCardBody {
+  flex: 1;
+  min-width: 0;
+}

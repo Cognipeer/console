@@ -1,0 +1,64 @@
+{
+  "plans": {
+    "FREE": {
+      "maxModels": 5,
+      "maxVectorIndexes": 3,
+      "maxApiTokens": 5,
+      "maxUsers": 5,
+      "maxAgents": -1,
+      "maxAlertRules": 3,
+      "maxMemoryStores": 2,
+      "maxMemoriesPerStore": 1000,
+      "maxStorageBytes": 1073741824,
+      "requestsPerMonth": 1000
+    },
+    "STARTER": {
+      "maxModels": 10,
+      "maxVectorIndexes": 15,
+      "maxApiTokens": 20,
+      "maxUsers": 20,
+      "maxAgents": -1,
+      "maxAlertRules": 15,
+      "maxMemoryStores": 10,
+      "maxMemoriesPerStore": 10000,
+      "maxStorageBytes": 10737418240,
+      "requestsPerMonth": 10000
+    },
+    "PROFESSIONAL": {
+      "maxModels": 50,
+      "maxVectorIndexes": 100,
+      "maxApiTokens": 100,
+      "maxUsers": 200,
+      "maxAgents": -1,
+      "maxAlertRules": 50,
+      "maxMemoryStores": 50,
+      "maxMemoriesPerStore": 100000,
+      "maxStorageBytes": 107374182400,
+      "requestsPerMonth": 100000
+    },
+    "ENTERPRISE": {
+      "maxModels": -1,
+      "maxVectorIndexes": -1,
+      "maxApiTokens": -1,
+      "maxUsers": -1,
+      "maxAgents": -1,
+      "maxAlertRules": -1,
+      "maxMemoryStores": -1,
+      "maxMemoriesPerStore": -1,
+      "maxStorageBytes": -1,
+      "requestsPerMonth": -1
+    },
+    "ON_PREMISE": {
+      "maxModels": -1,
+      "maxVectorIndexes": -1,
+      "maxApiTokens": -1,
+      "maxUsers": -1,
+      "maxAgents": -1,
+      "maxAlertRules": -1,
+      "maxMemoryStores": -1,
+      "maxMemoriesPerStore": -1,
+      "maxStorageBytes": -1,
+      "requestsPerMonth": -1
+    }
+  }
+}

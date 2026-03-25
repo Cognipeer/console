@@ -1,0 +1,121 @@
+.playgroundLayout {
+  display: grid;
+  grid-template-columns: minmax(18rem, 21.25rem) minmax(0, 1fr);
+  gap: var(--app-space-3);
+  min-height: 37.5rem;
+  align-items: stretch;
+}
+
+.configPanel {
+  overflow: auto;
+}
+
+.sectionToggle {
+  width: 100%;
+}
+
+.chatPanel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 37.5rem;
+}
+
+.panelHeader {
+  border-bottom: 1px solid var(--mantine-color-gray-3);
+}
+
+.panelBody {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.chatEmpty {
+  flex: 1;
+}
+
+.chatScroll {
+  flex: 1;
+}
+
+.chatBubble {
+  max-width: min(75%, 42rem);
+}
+
+.chatBubbleUser {
+  background: var(--mantine-color-blue-light);
+}
+
+.chatMarkdown {
+  font-size: var(--mantine-font-size-sm);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.preWrap {
+  white-space: pre-wrap;
+}
+
+.chatInputRow {
+  border-top: 1px solid var(--mantine-color-gray-3);
+}
+
+.flexGrow {
+  flex: 1;
+}
+
+.filterControlSm {
+  min-width: 11.25rem;
+}
+
+.filterControlMd {
+  min-width: 16.25rem;
+}
+
+.filterControlXs {
+  min-width: 8.75rem;
+}
+
+.filterActions {
+  align-self: flex-end;
+}
+
+.codeGrow {
+  flex: 1;
+}
+
+.snapshotCode {
+  max-height: 31.25rem;
+  overflow: auto;
+}
+
+.diffCode {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+@media (max-width: 75em) {
+  .playgroundLayout {
+    grid-template-columns: 1fr;
+    min-height: auto;
+  }
+
+  .chatPanel {
+    min-height: 34rem;
+  }
+}
+
+@media (max-width: 48em) {
+  .filterControlSm,
+  .filterControlMd,
+  .filterControlXs {
+    min-width: 100%;
+  }
+
+  .filterActions {
+    width: 100%;
+  }
+}

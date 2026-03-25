@@ -1,0 +1,341 @@
+{
+  "features": {
+    "USER_MANAGEMENT": {
+      "name": "User Management",
+      "description": "Create and manage users",
+      "endpoints": [
+        "/api/users",
+        "/api/users/*"
+      ]
+    },
+    "DASHBOARD": {
+      "name": "Dashboard",
+      "description": "Access to dashboard endpoints",
+      "endpoints": [
+        "/api/dashboard",
+        "/api/dashboard/*"
+      ]
+    },
+    "PROJECT_MANAGEMENT": {
+      "name": "Project Management",
+      "description": "Create and manage projects",
+      "endpoints": [
+        "/api/projects",
+        "/api/projects/*"
+      ]
+    },
+    "LLM_CHAT": {
+      "name": "LLM Chat Service",
+      "description": "Access to LLM chat endpoints",
+      "endpoints": [
+        "/api/llm/chat",
+        "/api/llm/chat/*"
+      ]
+    },
+    "LLM_EMBEDDINGS": {
+      "name": "LLM Embeddings",
+      "description": "Generate text embeddings",
+      "endpoints": [
+        "/api/llm/embeddings",
+        "/api/llm/embeddings/*"
+      ]
+    },
+    "MODEL_MANAGEMENT": {
+      "name": "Model Management",
+      "description": "Manage and deploy AI models",
+      "endpoints": [
+        "/api/models",
+        "/api/models/*"
+      ]
+    },
+    "PROMPTS": {
+      "name": "Prompt Management",
+      "description": "Create and render prompt templates",
+      "endpoints": [
+        "/api/prompts",
+        "/api/prompts/*",
+        "/api/client/v1/prompts",
+        "/api/client/v1/prompts/*"
+      ]
+    },
+    "AGENT_ORCHESTRATION": {
+      "name": "Agent Orchestration",
+      "description": "Create and manage AI agents",
+      "endpoints": [
+        "/api/agents",
+        "/api/agents/*",
+        "/api/client/v1/agents",
+        "/api/client/v1/agents/*",
+        "/api/client/v1/responses"
+      ]
+    },
+    "AGENT_TRACING": {
+      "name": "Agent Tracing",
+      "description": "Capture and inspect agent sessions and events",
+      "endpoints": [
+        "/api/tracing",
+        "/api/tracing/*",
+        "/api/client/v1/traces",
+        "/api/client/v1/traces/*"
+      ]
+    },
+    "VECTOR_STORE": {
+      "name": "Vector Store",
+      "description": "Store and query vector embeddings",
+      "endpoints": [
+        "/api/vector",
+        "/api/vector/*",
+        "/api/client/vector",
+        "/api/client/vector/*"
+      ]
+    },
+    "API_KEYS": {
+      "name": "API Key Management",
+      "description": "Create and manage API keys",
+      "endpoints": [
+        "/api/keys",
+        "/api/keys/*",
+        "/api/tokens",
+        "/api/tokens/*"
+      ]
+    },
+    "FILES": {
+      "name": "File Management",
+      "description": "Upload and manage files",
+      "endpoints": [
+        "/api/files",
+        "/api/files/*",
+        "/api/providers",
+        "/api/providers/*"
+      ]
+    },
+    "QUOTA_MANAGEMENT": {
+      "name": "Quota Management",
+      "description": "Manage tenant quota policies and limits",
+      "endpoints": [
+        "/api/quota",
+        "/api/quota/*"
+      ]
+    },
+    "INFERENCE_MONITORING": {
+      "name": "Inference Monitoring",
+      "description": "Monitor inference servers and view performance metrics",
+      "endpoints": [
+        "/api/inference-monitoring",
+        "/api/inference-monitoring/*"
+      ]
+    },
+    "GUARDRAILS": {
+      "name": "Guardrails",
+      "description": "Create and manage content safety guardrails",
+      "endpoints": [
+        "/api/guardrails",
+        "/api/guardrails/*",
+        "/api/client/v1/guardrails",
+        "/api/client/v1/guardrails/*"
+      ]
+    },
+    "ALERTS": {
+      "name": "Alerts & Notifications",
+      "description": "Threshold-based alerts for quality, cost, and latency metrics",
+      "endpoints": [
+        "/api/alerts",
+        "/api/alerts/*"
+      ]
+    },
+    "MEMORY": {
+      "name": "Memory",
+      "description": "Persistent memory stores with vector-backed semantic search",
+      "endpoints": [
+        "/api/memory",
+        "/api/memory/*",
+        "/api/client/v1/memory",
+        "/api/client/v1/memory/*"
+      ]
+    },
+    "RAG_PIPELINE": {
+      "name": "RAG Pipeline",
+      "description": "Document ingestion, chunking, embedding, and retrieval-augmented generation",
+      "endpoints": [
+        "/api/rag",
+        "/api/rag/*",
+        "/api/client/v1/rag",
+        "/api/client/v1/rag/*"
+      ]
+    },
+    "CONFIG_MANAGEMENT": {
+      "name": "Config Management",
+      "description": "Centralized secret and configuration management with encryption and audit logging",
+      "endpoints": [
+        "/api/config",
+        "/api/config/*",
+        "/api/client/v1/config",
+        "/api/client/v1/config/*"
+      ]
+    },
+    "MCP_SERVERS": {
+      "name": "MCP Servers",
+      "description": "Expose APIs as Model Context Protocol servers with OpenAPI specifications",
+      "endpoints": [
+        "/api/mcp",
+        "/api/mcp/*",
+        "/api/client/v1/mcp",
+        "/api/client/v1/mcp/*"
+      ]
+    },
+    "TOOLS": {
+      "name": "Tools",
+      "description": "Manage and execute tools from OpenAPI specs or MCP servers",
+      "endpoints": [
+        "/api/tools",
+        "/api/tools/*",
+        "/api/client/v1/tools",
+        "/api/client/v1/tools/*"
+      ]
+    }
+  },
+  "licenses": {
+    "FREE": {
+      "name": "Free Tier",
+      "features": [
+        "USER_MANAGEMENT",
+        "PROJECT_MANAGEMENT",
+        "LLM_CHAT",
+        "AGENT_TRACING",
+        "API_KEYS",
+        "MODEL_MANAGEMENT",
+        "PROMPTS",
+        "VECTOR_STORE",
+        "FILES",
+        "QUOTA_MANAGEMENT",
+        "INFERENCE_MONITORING",
+        "GUARDRAILS",
+        "ALERTS",
+        "MEMORY",
+        "RAG_PIPELINE",
+        "CONFIG_MANAGEMENT",
+        "MCP_SERVERS",
+        "TOOLS",
+        "DASHBOARD",
+        "AGENT_ORCHESTRATION"
+      ],
+      "limits": {
+        "requestsPerMonth": 1000,
+        "maxAgents": -1
+      }
+    },
+    "STARTER": {
+      "name": "Starter Plan",
+      "features": [
+        "LLM_CHAT",
+        "LLM_EMBEDDINGS",
+        "AGENT_TRACING",
+        "API_KEYS",
+        "PROMPTS",
+        "QUOTA_MANAGEMENT",
+        "INFERENCE_MONITORING",
+        "ALERTS",
+        "MEMORY",
+        "RAG_PIPELINE",
+        "CONFIG_MANAGEMENT",
+        "MCP_SERVERS",
+        "TOOLS",
+        "AGENT_ORCHESTRATION"
+      ],
+      "limits": {
+        "requestsPerMonth": 10000,
+        "maxAgents": -1
+      }
+    },
+    "PROFESSIONAL": {
+      "name": "Professional Plan",
+      "features": [
+        "LLM_CHAT",
+        "LLM_EMBEDDINGS",
+        "AGENT_ORCHESTRATION",
+        "AGENT_TRACING",
+        "VECTOR_STORE",
+        "API_KEYS",
+        "PROMPTS",
+        "ANALYTICS",
+        "QUOTA_MANAGEMENT",
+        "INFERENCE_MONITORING",
+        "GUARDRAILS",
+        "ALERTS",
+        "MEMORY",
+        "RAG_PIPELINE",
+        "CONFIG_MANAGEMENT",
+        "MCP_SERVERS",
+        "TOOLS"
+      ],
+      "limits": {
+        "requestsPerMonth": 100000,
+        "maxAgents": -1
+      }
+    },
+    "ENTERPRISE": {
+      "name": "Enterprise Plan",
+      "features": [
+        "USER_MANAGEMENT",
+        "PROJECT_MANAGEMENT",
+        "LLM_CHAT",
+        "LLM_EMBEDDINGS",
+        "AGENT_ORCHESTRATION",
+        "AGENT_TRACING",
+        "MODEL_MANAGEMENT",
+        "VECTOR_STORE",
+        "FILES",
+        "WORKFLOW_AUTOMATION",
+        "ANALYTICS",
+        "API_KEYS",
+        "PROMPTS",
+        "QUOTA_MANAGEMENT",
+        "INFERENCE_MONITORING",
+        "GUARDRAILS",
+        "ALERTS",
+        "MEMORY",
+        "RAG_PIPELINE",
+        "CONFIG_MANAGEMENT",
+        "MCP_SERVERS",
+        "TOOLS",
+        "DASHBOARD"
+      ],
+      "limits": {
+        "requestsPerMonth": -1,
+        "maxAgents": -1
+      }
+    },
+    "ON_PREMISE": {
+      "name": "On-Premise",
+      "features": [
+        "USER_MANAGEMENT",
+        "PROJECT_MANAGEMENT",
+        "LLM_CHAT",
+        "LLM_EMBEDDINGS",
+        "AGENT_ORCHESTRATION",
+        "AGENT_TRACING",
+        "MODEL_MANAGEMENT",
+        "VECTOR_STORE",
+        "FILES",
+        "WORKFLOW_AUTOMATION",
+        "ANALYTICS",
+        "API_KEYS",
+        "PROMPTS",
+        "QUOTA_MANAGEMENT",
+        "INFERENCE_MONITORING",
+        "GUARDRAILS",
+        "ALERTS",
+        "MEMORY",
+        "RAG_PIPELINE",
+        "CONFIG_MANAGEMENT",
+        "MCP_SERVERS",
+        "TOOLS",
+        "DASHBOARD"
+      ],
+      "limits": {
+        "requestsPerMonth": -1,
+        "maxAgents": -1
+      }
+    }
+  }
+}

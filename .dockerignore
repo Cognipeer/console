@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+
+# Version control
+.git/
+.gitignore
+
+# Build outputs
+.next/
+out/
+build/
+coverage/
+
+# Data (runtime databases, vectors)
+data/
+
+# Environment files
+.env*
+
+# Documentation source (not needed in image)
+docs/
+*.md
+!README.md
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Deployment configs
+deploy/
+
+# Test files
+src/__tests__/
+vitest.config.ts
+test-tracing.sh
+
+# Scripts
+scripts/

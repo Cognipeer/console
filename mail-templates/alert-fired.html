@@ -1,0 +1,185 @@
+<!-- subject: ⚠️ Alert: {{alertName}} — {{metricLabel}} threshold breached -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Alert Notification</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: #ffffff;
+            border-radius: 8px;
+            padding: 40px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .logo {
+            font-size: 28px;
+            font-weight: bold;
+            color: #0969ff;
+            margin-bottom: 10px;
+        }
+        .alert-badge {
+            display: inline-block;
+            padding: 6px 16px;
+            background-color: #fff3e0;
+            color: #e65100;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 600;
+            margin-bottom: 16px;
+        }
+        h1 {
+            color: #e65100;
+            font-size: 22px;
+            margin-bottom: 12px;
+        }
+        .info-box {
+            background-color: #fff8f0;
+            border-left: 4px solid #e65100;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 4px;
+        }
+        .metric-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+        .metric-table td {
+            padding: 10px 12px;
+            border-bottom: 1px solid #f0f0f0;
+        }
+        .metric-table td:first-child {
+            color: #666;
+            font-size: 13px;
+            font-weight: 500;
+            width: 40%;
+        }
+        .metric-table td:last-child {
+            font-weight: 600;
+            text-align: right;
+        }
+        .metric-value {
+            color: #e65100;
+            font-size: 16px;
+        }
+        .threshold-value {
+            color: #666;
+        }
+        .footer {
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #e0e0e0;
+            text-align: center;
+            color: #666;
+            font-size: 14px;
+        }
+        .button {
+            display: inline-block;
+            padding: 12px 30px;
+            background-color: #e65100;
+            color: #ffffff;
+            text-decoration: none;
+            border-radius: 6px;
+            font-weight: 600;
+            margin-top: 20px;
+        }
+        .button:hover {
+            background-color: #bf360c;
+        }
+        .button-secondary {
+            display: inline-block;
+            padding: 12px 30px;
+            background-color: #1565c0;
+            color: #ffffff;
+            text-decoration: none;
+            border-radius: 6px;
+            font-weight: 600;
+            margin-top: 10px;
+        }
+        .button-secondary:hover {
+            background-color: #0d47a1;
+        }
+        .project-tag {
+            display: inline-block;
+            padding: 3px 10px;
+            background-color: #f0f0f0;
+            border-radius: 12px;
+            font-size: 12px;
+            color: #555;
+            margin-bottom: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo">Cognipeer</div>
+            <div class="alert-badge">⚠️ Alert Fired</div>
+        </div>
+
+        <h1>{{alertName}}</h1>
+
+        <p>
+            An alert rule has been triggered for
+            <span class="project-tag">{{projectName}}</span>
+            in <strong>{{companyName}}</strong>.
+        </p>
+
+        <div class="info-box">
+            <strong>{{metricLabel}}</strong> reached <strong>{{actualValue}}{{unit}}</strong>,
+            which breaches the configured threshold of <strong>{{threshold}}{{unit}}</strong>.
+        </div>
+
+        <table class="metric-table">
+            <tr>
+                <td>Metric</td>
+                <td>{{metricLabel}}</td>
+            </tr>
+            <tr>
+                <td>Actual Value</td>
+                <td class="metric-value">{{actualValue}}{{unit}}</td>
+            </tr>
+            <tr>
+                <td>Threshold</td>
+                <td class="threshold-value">{{threshold}}{{unit}}</td>
+            </tr>
+            <tr>
+                <td>Evaluation Window</td>
+                <td>Last {{windowMinutes}} minutes</td>
+            </tr>
+            <tr>
+                <td>Fired At</td>
+                <td>{{firedAt}}</td>
+            </tr>
+        </table>
+
+        <div style="text-align: center;">
+            <a href="{{incidentUrl}}" class="button">View Incident</a>
+            <br/>
+            <a href="{{dashboardUrl}}" class="button-secondary">View All Incidents</a>
+        </div>
+
+        <div class="footer">
+            <p>This is an automated alert from Cognipeer Console.</p>
+            <p>An incident has been created for this alert. You can acknowledge, investigate, and resolve it from the Incidents dashboard.</p>
+            <p style="font-size: 12px; color: #999;">
+                To manage alert rules, visit your project's Alerts settings.
+            </p>
+        </div>
+    </div>
+</body>
+</html>
