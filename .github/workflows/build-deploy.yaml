@@ -5,22 +5,17 @@ on:
     branches:
     - main
     - production
-    - infra/k8s-full
 
 permissions:
   id-token: write
   contents: read
 
 env:
-    # ── AWS ───────────────────────────────────────────────────────────────────
   AWS_REGION: eu-central-1
   ECR_REPOSITORY: cognipeer-cgate
 
-  # ── Azure ─────────────────────────────────────────────────────────────────
   ACR_LOGIN_SERVER: cognipeer.azurecr.io
   ACR_REPOSITORY: cognipeer-cgate
-
-  # ── Shared ────────────────────────────────────────────────────────────────
 
   HELM_VERSION: v3.15.2
   HELMFILE_VERSION: v0.162.0
@@ -80,88 +75,3 @@ jobs:
           tags: |
             ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.vars.outputs.tag }}
             ${{ env.ACR_LOGIN_SERVER }}/${{ env.ACR_REPOSITORY }}:${{ steps.vars.outputs.tag }}
-
-  deploy-aws:
-    runs-on: self-hosted-runner-cgate
-    needs: build
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Helm
-        uses: azure/setup-helm@v4
-        with:
-          version: ${{ env.HELM_VERSION }}
-
-      - name: Set image tag
-        id: vars
-        run: |
-          if [[ "${GITHUB_REF_NAME}" == "main" ]]; then
-            echo "tag=dev" >> $GITHUB_OUTPUT
-          elif [[ "${GITHUB_REF_NAME}" == "production" ]]; then
-            echo "tag=production" >> $GITHUB_OUTPUT
-          else
-            echo "tag=dev" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Install Helmfile
-        run: |
-          curl -fsSL -o /tmp/helmfile.tgz \
-            https://github.com/helmfile/helmfile/releases/download/${HELMFILE_VERSION}/helmfile_${HELMFILE_VERSION#v}_linux_amd64.tar.gz
-          sudo tar -C /usr/local/bin -xzf /tmp/helmfile.tgz helmfile
-          helmfile --version
-
-      - uses: azure/setup-kubectl@v4
-        with:
-          version: 'v1.33.2'
-
-      - name: Apply changes
-        run: |
-          pushd deploy/k8s
-            helmfile sync -e "${TAG}-aws" --wait
-            kubectl rollout restart -n cgate-${TAG} deployment/cgate
-          popd
-        env:
-          TAG: ${{ steps.vars.outputs.tag }}
-  deploy-azure:
-    runs-on: self-hosted-runner-cgate-azure
-    needs: build
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Helm
-        uses: azure/setup-helm@v4
-        with:
-          version: ${{ env.HELM_VERSION }}
-
-      - name: Set image tag
-        id: vars
-        run: |
-          if [[ "${GITHUB_REF_NAME}" == "main" ]]; then
-            echo "tag=dev" >> $GITHUB_OUTPUT
-          elif [[ "${GITHUB_REF_NAME}" == "production" ]]; then
-            echo "tag=production" >> $GITHUB_OUTPUT
-          else
-            echo "tag=dev" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Install Helmfile
-        run: |
-          curl -fsSL -o /tmp/helmfile.tgz \
-            https://github.com/helmfile/helmfile/releases/download/${HELMFILE_VERSION}/helmfile_${HELMFILE_VERSION#v}_linux_amd64.tar.gz
-          sudo tar -C /usr/local/bin -xzf /tmp/helmfile.tgz helmfile
-          helmfile --version
-
-      - uses: azure/setup-kubectl@v4
-        with:
-          version: 'v1.33.2'
-
-      - name: Apply changes
-        run: |
-          pushd deploy/k8s
-            helmfile sync -e "${TAG}-azure" --wait
-            kubectl rollout restart deployment/cgate -n cgate-${TAG} 
-          popd
-        env:
-          TAG: ${{ steps.vars.outputs.tag }}
