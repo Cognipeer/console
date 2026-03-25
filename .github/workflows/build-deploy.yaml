@@ -51,7 +51,7 @@ jobs:
       - name: "[Azure] Login to ACR"
         run: az acr login --name ${{ env.ACR_LOGIN_SERVER }}
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Set image tag
         id: vars
