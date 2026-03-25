@@ -66,8 +66,8 @@ export function TenantMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
       const now = this.now();
 
       db.prepare(`
-        INSERT INTO ${TABLES.tenants} (id, companyName, slug, dbName, licenseType, ownerId, isDemo, createdAt, updatedAt)
-        VALUES (@id, @companyName, @slug, @dbName, @licenseType, @ownerId, @isDemo, @createdAt, @updatedAt)
+        INSERT INTO ${TABLES.tenants} (id, companyName, slug, dbName, licenseType, ownerId, createdAt, updatedAt)
+        VALUES (@id, @companyName, @slug, @dbName, @licenseType, @ownerId, @createdAt, @updatedAt)
       `).run({
         id,
         companyName: tenantData.companyName,
@@ -75,7 +75,6 @@ export function TenantMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
         dbName: tenantData.dbName,
         licenseType: tenantData.licenseType,
         ownerId: tenantData.ownerId ?? null,
-        isDemo: this.toBoolInt(tenantData.isDemo),
         createdAt: now,
         updatedAt: now,
       });
@@ -120,7 +119,6 @@ export function TenantMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
       if (data.dbName !== undefined) { sets.push('dbName = @dbName'); params.dbName = data.dbName; }
       if (data.licenseType !== undefined) { sets.push('licenseType = @licenseType'); params.licenseType = data.licenseType; }
       if (data.ownerId !== undefined) { sets.push('ownerId = @ownerId'); params.ownerId = data.ownerId; }
-      if (data.isDemo !== undefined) { sets.push('isDemo = @isDemo'); params.isDemo = this.toBoolInt(data.isDemo); }
 
       db.prepare(`UPDATE ${TABLES.tenants} SET ${sets.join(', ')} WHERE id = @id`).run(params);
 
@@ -135,7 +133,6 @@ export function TenantMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
         dbName: r.dbName as string,
         licenseType: r.licenseType as string,
         ownerId: r.ownerId as string | undefined,
-        isDemo: this.fromBoolInt(r.isDemo),
         createdAt: this.toDate(r.createdAt),
         updatedAt: this.toDate(r.updatedAt),
       };

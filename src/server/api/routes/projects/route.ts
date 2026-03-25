@@ -51,21 +51,17 @@ export async function GET(request: NextRequest) {
         const cookieIsValid =
             activeCookie && projects.some((p) => String(p._id) === String(activeCookie));
 
-        // For the demo tenant: if the cookie points to the 'default' placeholder but
-        // real enterprise projects exist, silently redirect to the first non-default one.
-        // This never fires for regular tenants who may deliberately use their default project.
-        const isDemo = ctx.tenantSlug === 'demo';
         const cookieProject = cookieIsValid
             ? projects.find((p) => String(p._id) === String(activeCookie))
             : undefined;
         const hasNonDefaultProjects = projects.some((p) => p.key !== DEFAULT_PROJECT_KEY);
-        const cookieIsDefault = isDemo && cookieProject?.key === DEFAULT_PROJECT_KEY && hasNonDefaultProjects;
+        const cookieIsDefault = Boolean(
+            cookieProject?.key === DEFAULT_PROJECT_KEY && hasNonDefaultProjects,
+        );
 
         const preferredProject = cookieIsValid && !cookieIsDefault
             ? projects.find((p) => String(p._id) === String(activeCookie))
-            : isDemo
-                ? (projects.find((p) => p.key !== DEFAULT_PROJECT_KEY) ?? projects[0])
-                : projects[0];
+            : (projects.find((p) => p.key !== DEFAULT_PROJECT_KEY) ?? projects[0]);
 
         const activeProjectId = preferredProject?._id
             ? String(preferredProject._id)

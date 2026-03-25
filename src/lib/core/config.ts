@@ -116,7 +116,6 @@ export interface AppConfig {
 
   app: {
     url: string;
-    demoEmail: string;
     shutdownTimeoutMs: number;
   };
 
@@ -275,7 +274,6 @@ function buildConfig(source: ConfigSource): AppConfig {
 
     app: {
       url: str(source, 'NEXT_PUBLIC_APP_URL', 'http://localhost:3000'),
-      demoEmail: str(source, 'DEMO_EMAIL', ''),
       shutdownTimeoutMs: int(source, 'SHUTDOWN_TIMEOUT_MS', 15000),
     },
 

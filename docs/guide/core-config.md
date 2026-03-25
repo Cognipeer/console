@@ -129,7 +129,7 @@ interface AppConfig {
   cors: { enabled; allowedOrigins; maxAge };
   health: { endpointEnabled };
   limits: { bodySize; tracingMaxBodySizeMb };
-  app: { url; demoEmail; shutdownTimeoutMs };
+  app: { url; shutdownTimeoutMs };
   providerRuntime: { cacheTtlSeconds };
 }
 ```

@@ -83,16 +83,6 @@ describe('POST /api/auth/change-password', () => {
     expect(res.statusCode).toBe(401);
   });
 
-  it('returns 403 for demo tenant', async () => {
-    const res = await changePassword(
-      { currentPassword: 'old', newPassword: 'Newpassword123!' },
-      { 'x-tenant-slug': 'demo' },
-    );
-    expect(res.statusCode).toBe(403);
-    const body = parseJsonBody<{ error: string }>(res.body);
-    expect(body.error).toMatch(/demo/i);
-  });
-
   it('returns 400 when newPassword is too short', async () => {
     const res = await changePassword({
       currentPassword: 'oldpass123',

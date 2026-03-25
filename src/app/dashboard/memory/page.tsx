@@ -202,6 +202,13 @@ export default function MemoryPage() {
         }}
       />
 
+      <Paper withBorder p="md" radius="md" mb="md">
+        <Text fw={600} mb={4}>{t('storeExplainTitle')}</Text>
+        <Text size="sm" c="dimmed">
+          {t('storeExplainText')}
+        </Text>
+      </Paper>
+
       {/* Store table */}
       <Paper withBorder radius="md">
         {loading ? (

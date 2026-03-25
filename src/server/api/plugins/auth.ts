@@ -277,11 +277,8 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
       });
 
       return reply.code(200).send({
-        isDemo: Boolean(tenant.isDemo),
         message: 'Login successful',
-        mustChangePassword: tenant.isDemo
-          ? false
-          : Boolean(user.mustChangePassword),
+        mustChangePassword: Boolean(user.mustChangePassword),
         tenant: {
           companyName: tenant.companyName,
           id: tenant._id,
@@ -329,23 +326,10 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const demoEmail = getConfig().app.demoEmail;
-      if (email.trim().toLowerCase() === demoEmail) {
-        return reply.code(409).send({
-          error: 'This email address is reserved for the demo account.',
-        });
-      }
-
       const slug = companyName
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, '-')
         .replace(/^-+|-+$/g, '');
-
-      if (slug === 'demo') {
-        return reply.code(409).send({
-          error: 'This company name is reserved. Please choose a different name.',
-        });
-      }
 
       const pwResult = validatePassword(password);
       if (!pwResult.valid) {
@@ -492,12 +476,6 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
       const session = getSessionContext(request);
       if (!session) {
         return reply.code(401).send({ error: 'Unauthorized' });
-      }
-
-      if (session.tenantSlug === 'demo') {
-        return reply.code(403).send({
-          error: 'Password changes are not allowed for the demo account.',
-        });
       }
 
       const body = readJsonBody<{

@@ -18,8 +18,6 @@ export interface ITenant {
   dbName: string;
   licenseType: string;
   ownerId?: string;
-  /** Marks this tenant as the read-only demo tenant. */
-  isDemo?: boolean;
   createdAt?: Date;
   updatedAt?: Date;
 }

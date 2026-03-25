@@ -55,14 +55,6 @@ docker build -t cognipeer-console .
 docker run -p 3000:3000 -v ./data:/app/data -e JWT_SECRET=your-secret-here cognipeer-console
 ```
 
-### Demo Data
-
-Load sample data to explore all features:
-
-```bash
-npm run seed:demo
-```
-
 ## Architecture
 
 ```

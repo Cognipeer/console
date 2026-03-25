@@ -2,23 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMockDb } from '../helpers/db.mock';
 
 vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
-vi.mock('@/lib/core/config', async () => {
-  const actual = await vi.importActual<typeof import('@/lib/core/config')>('@/lib/core/config');
-  return {
-    ...actual,
-    getConfig: vi.fn(() => {
-      const config = actual.getConfig();
-      return {
-        ...config,
-        app: {
-          ...config.app,
-          demoEmail: 'demo@cognipeer.ai',
-        },
-        nodeEnv: 'test',
-      };
-    }),
-  };
-});
 vi.mock('bcryptjs', () => ({
   default: { compare: vi.fn(), hash: vi.fn().mockResolvedValue('$2a$10$hashed') },
   compare: vi.fn(),
@@ -43,7 +26,6 @@ vi.mock('@/lib/services/projects/projectService', () => ({
 }));
 
 import bcrypt from 'bcryptjs';
-import { getConfig } from '@/lib/core/config';
 import { getDatabase } from '@/lib/database';
 import { sendEmail } from '@/lib/email/mailer';
 import { LicenseManager } from '@/lib/license/license-manager';
@@ -122,23 +104,6 @@ describe('POST /api/auth/register', () => {
       expect(res.statusCode).toBe(400);
       const body = parseJsonBody<{ error: string }>(res.body);
       expect(body.error).toMatch(/8 characters/i);
-    });
-  });
-
-  describe('reserved identifiers', () => {
-    it('blocks demo email', async () => {
-      const res = await register({
-        ...validPayload,
-        email: getConfig().app.demoEmail,
-      });
-      expect(res.statusCode).toBe(409);
-      const body = parseJsonBody<{ error: string }>(res.body);
-      expect(body.error).toMatch(/reserved/i);
-    });
-
-    it('blocks demo slug', async () => {
-      const res = await register({ ...validPayload, companyName: 'Demo' });
-      expect(res.statusCode).toBe(409);
     });
   });
 

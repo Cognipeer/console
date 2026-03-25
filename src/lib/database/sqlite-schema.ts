@@ -18,7 +18,6 @@ CREATE TABLE IF NOT EXISTS tenants (
   dbName TEXT NOT NULL,
   licenseType TEXT NOT NULL DEFAULT 'FREE',
   ownerId TEXT,
-  isDemo INTEGER DEFAULT 0,
   createdAt TEXT NOT NULL,
   updatedAt TEXT NOT NULL
 );

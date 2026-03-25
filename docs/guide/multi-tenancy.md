@@ -67,7 +67,6 @@ Each tenant has:
 | `dbName` | Database name (`tenant_{slug}`) |
 | `licenseType` | Active license tier |
 | `ownerId` | Owner user ID |
-| `isDemo` | Whether this is a demo tenant |
 
 ## Database Abstraction
 

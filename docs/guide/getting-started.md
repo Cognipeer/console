@@ -161,5 +161,4 @@ src/
 | `npm run lint` | ESLint check |
 | `npm test` | Run all tests (Vitest) |
 | `npm run test:watch` | Run tests in watch mode |
-| `npm run seed:demo` | Seed demo data |
 | `npm run docs:dev` | Start documentation dev server |

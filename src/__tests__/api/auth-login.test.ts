@@ -50,7 +50,6 @@ describe('POST /api/auth/login', () => {
     dbName: 'tenant_acme-corp',
     licenseType: 'FREE',
     ownerId: 'user-1',
-    isDemo: false,
   };
 
   const mockUser = {
@@ -240,18 +239,6 @@ describe('POST /api/auth/login', () => {
         'user-1',
         { inviteAcceptedAt: expect.any(Date) },
       );
-    });
-
-    it('demo tenant does not force password change', async () => {
-      db.findTenantBySlug.mockResolvedValue({ ...mockTenant, isDemo: true });
-      db.findUserByEmail.mockResolvedValue({ ...mockUser, mustChangePassword: true });
-      const res = await login({
-        email: 'admin@acme.com',
-        password: 'password123',
-        slug: 'acme-corp',
-      });
-      const body = parseJsonBody<{ mustChangePassword: boolean }>(res.body);
-      expect(body.mustChangePassword).toBe(false);
     });
   });
 

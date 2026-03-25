@@ -41,8 +41,9 @@ yarn-error.log*
 .env*
 !.env.example
 
-# runtime data (databases, vectors)
-data/
+# runtime data (SQLite databases, vectors)
+data/sqlite/
+data/vectors/
 
 # VitePress build output
 docs/.vitepress/dist/

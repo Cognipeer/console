@@ -14,9 +14,6 @@
     "test:ui": "vitest --ui",
     "format": "prettier --log-level warn --no-error-on-unmatched-pattern --write ./src/{,*/**/,*/**/**/,*/**/**/**/}*.{js,jsx,ts}",
     "check-setup": "node scripts/check-setup.js",
-    "seed:demo": "node --env-file=.env.local scripts/demo/seed.mjs",
-    "seed:demo:reset": "node --env-file=.env.local scripts/demo/seed.mjs --reset",
-    "seed:demo:status": "node --env-file=.env.local scripts/demo/seed.mjs --status",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs"
