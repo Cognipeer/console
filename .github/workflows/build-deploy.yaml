@@ -56,12 +56,14 @@ jobs:
       - name: Set image tag
         id: vars
         run: |
-          if [[ "${GITHUB_REF_NAME}" == "main" ]]; then
+          if [[ "${GITHUB_REF_NAME}" == *"-rc"* ]]; then
+            echo "tag=dev" >> $GITHUB_OUTPUT
+          elif [[ "${GITHUB_REF_NAME}" == "main" ]]; then
             echo "tag=dev" >> $GITHUB_OUTPUT
           elif [[ "${GITHUB_REF_NAME}" == "production" ]]; then
             echo "tag=production" >> $GITHUB_OUTPUT
           else
-            echo "tag=dev-${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+            echo "tag=dev" >> $GITHUB_OUTPUT
           fi
 
       - name: Build & Push to ECR
@@ -86,4 +88,4 @@ jobs:
             -H "Authorization: Bearer ${{ secrets.REPO_PAT_TO_DEPLOY }}" \
             -H "Accept: application/vnd.github+json" \
             https://api.github.com/repos/Cognipeer/cognipeer-console-helm-chart/dispatches \
-            -d '{"event_type":"app-released","client_payload":{"tag":"${{ github.ref_name }}"}}'
+            -d '{"event_type":"app-released","client_payload":{"image_tag":"${{ github.ref_name }}"}}'
