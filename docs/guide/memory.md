@@ -30,18 +30,17 @@ The memory service provides semantic memory stores for AI agents — enabling th
 | `searchMemories()` | Semantic search |
 | `recallForChat()` | Chat-optimized recall with token limit |
 
-## Store Configuration
+## Create Store Request
 
 ```json
 {
   "name": "Agent Working Memory",
-  "key": "agent-memory",
   "vectorProviderKey": "pinecone-prod",
   "embeddingModelKey": "text-embedding-ada-002"
 }
 ```
 
-Creating a store automatically provisions a vector index.
+The store key is generated automatically, and creating a store provisions the backing vector index.
 
 ## Client API
 
@@ -80,7 +79,10 @@ Authorization: Bearer <token>
 {
   "query": "What are the user's UI preferences?",
   "topK": 5,
-  "filter": { "scope": "user" }
+  "scope": "user",
+  "scopeId": "user-123",
+  "tags": ["preferences"],
+  "minScore": 0.7
 }
 ```
 
@@ -88,14 +90,20 @@ Response:
 
 ```json
 {
-  "results": [
+  "memories": [
     {
+      "id": "mem_123",
       "content": "User prefers dark mode and concise responses",
       "score": 0.94,
+      "scope": "user",
+      "scopeId": "user-123",
       "tags": ["preferences", "ui"],
+      "metadata": { "userId": "user-123" },
       "importance": 0.8
     }
-  ]
+  ],
+  "query": "What are the user's UI preferences?",
+  "storeKey": "mem-agent-working-memory"
 }
 ```
 
@@ -109,11 +117,14 @@ Authorization: Bearer <token>
 ```json
 {
   "query": "What does this user like?",
+  "scope": "user",
+  "scopeId": "user-123",
+  "topK": 5,
   "maxTokens": 500
 }
 ```
 
-The recall function is optimized for chat contexts — it retrieves relevant memories and fits them within a token budget.
+The recall function is optimized for chat contexts. It returns a compact `context` string together with the matched `memories`, trimmed to fit the requested token budget.
 
 ## Memory Properties
 

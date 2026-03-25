@@ -96,7 +96,7 @@ GET /api/client/v1/memory/stores/:storeKey/memories?scope=user&scopeId=user-123&
 ```
 
 ```json
-{ "memories": [...], "total": 25 }
+{ "items": [...], "total": 25 }
 ```
 
 | Query Parameter | Description |
@@ -166,6 +166,64 @@ POST /api/client/v1/memory/stores/:storeKey/search
 | `scope` | string | — | Filter by scope |
 | `scopeId` | string | — | Filter by scope ID |
 | `tags` | string[] | — | Filter by tags |
+
+Response:
+
+```json
+{
+  "memories": [
+    {
+      "id": "mem_123",
+      "content": "User prefers dark mode and concise responses",
+      "score": 0.94,
+      "scope": "user",
+      "scopeId": "user-123",
+      "tags": ["preferences", "ui"],
+      "metadata": { "source": "conversation" },
+      "importance": 0.8
+    }
+  ],
+  "query": "What are the user's UI preferences?",
+  "storeKey": "mem-agent-working-memory"
+}
+```
+
+### Recall for Chat
+
+```
+POST /api/client/v1/memory/stores/:storeKey/recall
+```
+
+```json
+{
+  "query": "What should I remember before answering?",
+  "topK": 5,
+  "scope": "user",
+  "scopeId": "user-123",
+  "maxTokens": 800
+}
+```
+
+Response:
+
+```json
+{
+  "context": "- User prefers dark mode and concise responses",
+  "memories": [
+    {
+      "id": "mem_123",
+      "content": "User prefers dark mode and concise responses",
+      "score": 0.94,
+      "scope": "user",
+      "scopeId": "user-123",
+      "tags": ["preferences", "ui"],
+      "metadata": { "source": "conversation" },
+      "importance": 0.8
+    }
+  ],
+  "storeKey": "mem-agent-working-memory"
+}
+```
 
 ## Errors
 
