@@ -2,9 +2,9 @@ name: Cgate Build Artifact
 
 on:
   push:
-    branches:
-    - main
-    - production
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v*'
 
 permissions:
   id-token: write
@@ -75,3 +75,14 @@ jobs:
           tags: |
             ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.vars.outputs.tag }}
             ${{ env.ACR_LOGIN_SERVER }}/${{ env.ACR_REPOSITORY }}:${{ steps.vars.outputs.tag }}
+
+  notify:
+    needs: build
+    steps:
+      - name: Fire repository_dispatch
+        run: |
+          curl -X POST \
+            -H "Authorization: Bearer ${{ secrets.REPO_PAT_TO_DEPLOY }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/Cognipeer/cognipeer-console-helm-chart/dispatches \
+            -d '{"event_type":"app-released","client_payload":{"tag":"${{ github.ref_name }}"}}'
