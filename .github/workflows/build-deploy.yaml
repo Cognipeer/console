@@ -38,7 +38,7 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: "[Azure] Login via Service Principal"
-        uses: azure/login@v1
+        uses: azure/login@v3
         with:
           creds: |
             {
