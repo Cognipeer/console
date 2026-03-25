@@ -1,0 +1,7 @@
+# Replace or extend these owners to match your GitHub usernames or teams.
+# This scaffold keeps the repository ready for automatic review routing once the public repo is live.
+
+* @anilguleroglu
+docs/ @anilguleroglu
+src/server/ @anilguleroglu
+src/lib/ @anilguleroglu
