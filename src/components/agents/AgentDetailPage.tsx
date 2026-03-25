@@ -26,11 +26,11 @@ import {
   Box,
   NumberInput,
   Pagination,
-  Card,
   Collapse,
   UnstyledButton,
   Modal,
   Table,
+  VisuallyHidden,
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { DatePickerInput } from '@mantine/dates';
@@ -57,11 +57,15 @@ import {
   IconArrowsExchange,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import EmptyState from '@/components/common/EmptyState';
+import LoadingState from '@/components/common/LoadingState';
 import PageHeader from '@/components/layout/PageHeader';
+import SectionCard from '@/components/common/SectionCard';
 import SessionTable from '@/components/tracing/SessionTable';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { ToolSelectorModal, type ToolBinding } from './ToolSelectorModal';
+import classes from './AgentDetailPage.module.css';
 
 interface Agent {
   _id: string;
@@ -519,19 +523,11 @@ export default function AgentDetailPage() {
   };
 
   if (loading) {
-    return (
-      <Center h={400}>
-        <Loader />
-      </Center>
-    );
+    return <LoadingState label="Loading agent..." minHeight={400} />;
   }
 
   if (!agent) {
-    return (
-      <Center h={400}>
-        <Text c="dimmed">{t('notFound')}</Text>
-      </Center>
-    );
+    return <EmptyState title={t('notFound')} description="The selected agent could not be loaded." minHeight={400} />;
   }
 
   return (
@@ -580,13 +576,13 @@ export default function AgentDetailPage() {
 
         {/* ── Playground Tab ──────────────────────────────────── */}
         <Tabs.Panel value="playground">
-          <Group align="stretch" gap="md" style={{ minHeight: 600 }} wrap="nowrap">
+          <div className={classes.playgroundLayout}>
             {/* Left: Configuration Panel */}
             <Paper
               withBorder
               radius="md"
               p="md"
-              style={{ width: 340, flexShrink: 0, overflow: 'auto' }}
+              className={classes.configPanel}
             >
               <Stack gap="md">
                 <Text size="sm" fw={600}>
@@ -641,7 +637,7 @@ export default function AgentDetailPage() {
                 <Divider />
                 <UnstyledButton
                   onClick={() => setKnowledgeEngineOpen((o) => !o)}
-                  style={{ width: '100%' }}
+                  className={classes.sectionToggle}
                 >
                   <Group gap="xs">
                     {knowledgeEngineOpen ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
@@ -672,7 +668,7 @@ export default function AgentDetailPage() {
                 <Divider />
                 <UnstyledButton
                   onClick={() => setGuardrailsOpen((o) => !o)}
-                  style={{ width: '100%' }}
+                  className={classes.sectionToggle}
                 >
                   <Group gap="xs">
                     {guardrailsOpen ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
@@ -717,7 +713,7 @@ export default function AgentDetailPage() {
                 <Divider />
                 <UnstyledButton
                   onClick={() => setToolsOpen((o) => !o)}
-                  style={{ width: '100%' }}
+                  className={classes.sectionToggle}
                 >
                   <Group gap="xs">
                     {toolsOpen ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
@@ -774,7 +770,7 @@ export default function AgentDetailPage() {
                 <Divider />
                 <UnstyledButton
                   onClick={() => setAdvancedOpen((o) => !o)}
-                  style={{ width: '100%' }}
+                  className={classes.sectionToggle}
                 >
                   <Group gap="xs">
                     {advancedOpen ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
@@ -838,15 +834,13 @@ export default function AgentDetailPage() {
             <Paper
               withBorder
               radius="md"
-              style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}
+              className={classes.chatPanel}
             >
               {/* Chat Header */}
               <Group
                 p="sm"
                 justify="space-between"
-                style={{
-                  borderBottom: '1px solid var(--mantine-color-gray-3)',
-                }}
+                className={classes.panelHeader}
               >
                 <Group gap="xs">
                   <Text size="sm" fw={600}>
@@ -870,9 +864,9 @@ export default function AgentDetailPage() {
               </Group>
 
               {/* Chat Messages */}
-              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+              <div className={classes.panelBody}>
                 {chatMessages.length === 0 && !chatLoading ? (
-                  <Center style={{ flex: 1 }}>
+                  <Center className={classes.chatEmpty}>
                     <Stack align="center" gap="sm">
                       <ThemeIcon size={48} radius="xl" variant="light" color="gray">
                         <IconRobot size={24} />
@@ -886,7 +880,7 @@ export default function AgentDetailPage() {
                 ) : (
                   <>
                     <ScrollArea
-                      style={{ flex: 1 }}
+                      className={classes.chatScroll}
                       viewportRef={chatViewportRef}
                       p="md"
                     >
@@ -901,28 +895,16 @@ export default function AgentDetailPage() {
                               p="sm"
                               radius="md"
                               withBorder={msg.role === 'assistant'}
-                              style={{
-                                maxWidth: '75%',
-                                background:
-                                  msg.role === 'user'
-                                    ? 'var(--mantine-color-blue-light)'
-                                    : undefined,
-                              }}
+                              className={`${classes.chatBubble} ${msg.role === 'user' ? classes.chatBubbleUser : ''}`}
                             >
                               {msg.role === 'assistant' ? (
-                                <Box
-                                  style={{
-                                    fontSize: 'var(--mantine-font-size-sm)',
-                                    lineHeight: 1.5,
-                                    overflowWrap: 'anywhere',
-                                  }}
-                                >
+                                <Box className={classes.chatMarkdown}>
                                   <ReactMarkdown remarkPlugins={[remarkGfm]}>
                                     {msg.content}
                                   </ReactMarkdown>
                                 </Box>
                               ) : (
-                                <Text size="sm" style={{ whiteSpace: 'pre-wrap' }}>
+                                <Text size="sm" className={classes.preWrap}>
                                   {msg.content}
                                 </Text>
                               )}
@@ -943,9 +925,7 @@ export default function AgentDetailPage() {
                     <Group
                       p="sm"
                       gap="sm"
-                      style={{
-                        borderTop: '1px solid var(--mantine-color-gray-3)',
-                      }}
+                      className={classes.chatInputRow}
                     >
                       <TextInput
                         placeholder={t('chat.inputPlaceholder')}
@@ -957,7 +937,7 @@ export default function AgentDetailPage() {
                             sendMessage();
                           }
                         }}
-                        style={{ flex: 1 }}
+                        className={classes.flexGrow}
                         disabled={chatLoading}
                         rightSection={
                           <ActionIcon
@@ -979,9 +959,7 @@ export default function AgentDetailPage() {
                   <Group
                     p="sm"
                     gap="sm"
-                    style={{
-                      borderTop: '1px solid var(--mantine-color-gray-3)',
-                    }}
+                    className={classes.chatInputRow}
                   >
                     <TextInput
                       placeholder={t('chat.inputPlaceholder')}
@@ -993,7 +971,7 @@ export default function AgentDetailPage() {
                           sendMessage();
                         }
                       }}
-                      style={{ flex: 1 }}
+                      className={classes.flexGrow}
                       disabled={chatLoading}
                       rightSection={
                         <ActionIcon
@@ -1010,14 +988,14 @@ export default function AgentDetailPage() {
                 )}
               </div>
             </Paper>
-          </Group>
+          </div>
         </Tabs.Panel>
 
         {/* ── Traces Tab ─────────────────────────────────────── */}
         <Tabs.Panel value="traces">
           <Stack gap="md">
             {/* Filters */}
-            <Card withBorder shadow="sm" p="md">
+            <SectionCard p="md">
               <Group gap="md" wrap="wrap">
                 <Select
                   label={t('traces.statusFilter')}
@@ -1033,7 +1011,7 @@ export default function AgentDetailPage() {
                     setTracingPage(1);
                   }}
                   clearable
-                  style={{ minWidth: 180 }}
+                  className={classes.filterControlSm}
                 />
                 <DatePickerInput
                   type="range"
@@ -1046,7 +1024,7 @@ export default function AgentDetailPage() {
                   }}
                   leftSection={<IconCalendar size={16} />}
                   clearable
-                  style={{ minWidth: 260 }}
+                  className={classes.filterControlMd}
                 />
                 <Select
                   label={t('traces.pageSize')}
@@ -1056,9 +1034,9 @@ export default function AgentDetailPage() {
                     setTracingPageSize(v ? parseInt(v, 10) : DEFAULT_PAGE_SIZE);
                     setTracingPage(1);
                   }}
-                  style={{ minWidth: 140 }}
+                  className={classes.filterControlXs}
                 />
-                <Box style={{ alignSelf: 'flex-end' }}>
+                <Box className={classes.filterActions}>
                   <Button
                     leftSection={<IconRefresh size={14} />}
                     variant="light"
@@ -1070,10 +1048,10 @@ export default function AgentDetailPage() {
                   </Button>
                 </Box>
               </Group>
-            </Card>
+            </SectionCard>
 
             {/* Sessions table */}
-            <Paper withBorder shadow="sm" p="md">
+            <SectionCard p="md">
               <Stack gap="md">
                 <Group justify="space-between" align="center">
                   <Text fw={600}>{t('traces.sessions')}</Text>
@@ -1106,14 +1084,14 @@ export default function AgentDetailPage() {
                   </Group>
                 )}
               </Stack>
-            </Paper>
+            </SectionCard>
           </Stack>
         </Tabs.Panel>
 
         {/* ── Usage Tab ──────────────────────────────────────── */}
         <Tabs.Panel value="usage">
           <Stack gap="md">
-            <Paper withBorder radius="md" p="md">
+            <SectionCard p="md">
               <Stack gap="md">
                 <Text size="lg" fw={600}>
                   {t('usage.title')}
@@ -1134,7 +1112,7 @@ export default function AgentDetailPage() {
                 </Text>
                 <Box>
                   <Group gap="xs" align="center">
-                    <Code block style={{ flex: 1 }}>
+                    <Code block className={classes.codeGrow}>
                       npm install @cognipeer/console-sdk
                     </Code>
                     <CopyButton value="npm install @cognipeer/console-sdk">
@@ -1265,14 +1243,14 @@ curl -X POST ${typeof window !== 'undefined' ? window.location.origin : 'https:/
 }`}
                 </Code>
               </Stack>
-            </Paper>
+            </SectionCard>
           </Stack>
         </Tabs.Panel>
 
         {/* ── Versions Tab ───────────────────────────────────── */}
         <Tabs.Panel value="versions">
           <Stack gap="md">
-            <Paper withBorder radius="md" p="md">
+            <SectionCard p="md">
               <Stack gap="md">
                 <Group justify="space-between" align="center">
                   <div>
@@ -1294,24 +1272,21 @@ curl -X POST ${typeof window !== 'undefined' ? window.location.origin : 'https:/
                 </Group>
 
                 {versionsLoading ? (
-                  <Center h={200}><Loader /></Center>
+                  <LoadingState label="Loading versions..." minHeight={200} />
                 ) : versions.length === 0 ? (
-                  <Center h={200}>
-                    <Stack align="center" gap="sm">
-                      <ThemeIcon size={48} radius="xl" variant="light" color="gray">
-                        <IconGitBranch size={24} />
-                      </ThemeIcon>
-                      <Text fw={600}>{t('versions.noVersions')}</Text>
-                      <Text size="sm" c="dimmed" ta="center" maw={300}>
-                        {t('versions.noVersionsDesc')}
-                      </Text>
-                    </Stack>
-                  </Center>
+                  <EmptyState
+                    title={t('versions.noVersions')}
+                    description={t('versions.noVersionsDesc')}
+                    icon={<IconGitBranch size={24} />}
+                    minHeight={220}
+                  />
                 ) : (
                   <Table striped highlightOnHover>
                     <Table.Thead>
                       <Table.Tr>
-                        <Table.Th style={{ width: 40 }} />
+                        <Table.Th w={40}>
+                          <VisuallyHidden>Select version</VisuallyHidden>
+                        </Table.Th>
                         <Table.Th>{t('versions.version')}</Table.Th>
                         <Table.Th>{t('versions.changelog')}</Table.Th>
                         <Table.Th>{t('versions.publishedAt')}</Table.Th>
@@ -1383,7 +1358,7 @@ curl -X POST ${typeof window !== 'undefined' ? window.location.origin : 'https:/
                   </Table>
                 )}
               </Stack>
-            </Paper>
+            </SectionCard>
           </Stack>
         </Tabs.Panel>
       </Tabs>
@@ -1459,9 +1434,7 @@ function VersionCompareView({
 
   if (!a && !b) {
     return (
-      <Center h={200}>
-        <Text c="dimmed">{t('versions.selectVersions')}</Text>
-      </Center>
+      <EmptyState title={t('versions.selectVersions')} minHeight={200} />
     );
   }
 
@@ -1473,7 +1446,7 @@ function VersionCompareView({
           <Badge size="sm" variant="filled" color="blue">v{a.version}</Badge>
           {a.changelog && <Text size="sm" c="dimmed">{a.changelog}</Text>}
         </Group>
-        <Code block style={{ maxHeight: 500, overflow: 'auto' }}>
+        <Code block className={classes.snapshotCode}>
           {JSON.stringify(a.snapshot, null, 2)}
         </Code>
       </Stack>
@@ -1486,9 +1459,7 @@ function VersionCompareView({
 
     if (diffs.length === 0) {
       return (
-        <Center h={200}>
-          <Text c="dimmed">{t('versions.noDifferences')}</Text>
-        </Center>
+        <EmptyState title={t('versions.noDifferences')} minHeight={200} />
       );
     }
 
@@ -1515,12 +1486,12 @@ function VersionCompareView({
                   <Text size="sm" fw={500}>{diff.path}</Text>
                 </Table.Td>
                 <Table.Td>
-                  <Code style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                  <Code className={classes.diffCode}>
                     {diff.oldValue !== undefined ? JSON.stringify(diff.oldValue, null, 2) : '—'}
                   </Code>
                 </Table.Td>
                 <Table.Td>
-                  <Code style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                  <Code className={classes.diffCode}>
                     {diff.newValue !== undefined ? JSON.stringify(diff.newValue, null, 2) : '—'}
                   </Code>
                 </Table.Td>

@@ -1,8 +1,10 @@
-# CognipeerAI Gateway (cgate)
+# Cognipeer Console
 
 Open-source, multi-tenant AI gateway for LLM services, agent orchestration, vector stores, RAG pipelines, prompt management, and more.
 
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
+
+Community edition is available under AGPL-3.0. Commercial licensing, hosted deployments, and support agreements are available separately through Cognipeer.
 
 ## Features
 
@@ -29,8 +31,8 @@ Open-source, multi-tenant AI gateway for LLM services, agent orchestration, vect
 ### Installation
 
 ```bash
-git clone https://github.com/Cognipeer/cgate.git
-cd cgate
+git clone https://github.com/Cognipeer/cognipeer-console.git
+cd cognipeer-console
 npm install
 cp .env.example .env.local
 npm run dev
@@ -49,8 +51,8 @@ docker compose up -d
 Or build and run manually:
 
 ```bash
-docker build -t cgate .
-docker run -p 3000:3000 -v ./data:/app/data -e JWT_SECRET=your-secret-here cgate
+docker build -t cognipeer-console .
+docker run -p 3000:3000 -v ./data:/app/data -e JWT_SECRET=your-secret-here cognipeer-console
 ```
 
 ### Demo Data
@@ -132,6 +134,15 @@ curl -X POST http://localhost:3000/api/client/v1/embeddings \
 
 See [openapi.yaml](openapi.yaml) for the full API specification.
 
+## Official SDK
+
+If you are building an application against Cognipeer Console, prefer the official TypeScript/JavaScript SDK:
+
+- SDK repo: [console-sdk](https://github.com/Cognipeer/console-sdk)
+- SDK docs: [cognipeer.github.io/console-sdk](https://cognipeer.github.io/console-sdk/)
+
+Use this repository and its docs for platform setup, deployment, providers, tenancy, auth, and raw HTTP API semantics.
+
 ## Documentation
 
 Full documentation is available in the [docs/](docs/) directory:
@@ -142,6 +153,8 @@ Full documentation is available in the [docs/](docs/) directory:
 - [Deployment](docs/guide/deployment.md)
 - [Multi-Tenancy](docs/guide/multi-tenancy.md)
 - [API Reference](docs/api/overview.md)
+- [Licensing](docs/guide/licensing.md)
+- [Security](docs/guide/security.md)
 
 Build and preview the documentation site:
 
@@ -153,6 +166,12 @@ npm run docs:dev
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines, code style, and PR checklist.
 
+## Security
+
+Security reporting guidance is in [SECURITY.md](SECURITY.md). Do not disclose vulnerabilities in public issues.
+
 ## License
 
-This project is licensed under the Apache License 2.0 — see the [LICENSE](LICENSE) file for details.
+This repository is licensed under the GNU Affero General Public License v3.0. See [LICENSE](LICENSE) for the full text.
+
+If you want to embed Cognipeer Console in a closed-source product, offer a proprietary hosted derivative without AGPL obligations, or purchase support/SLA coverage, see [COMMERCIAL.md](COMMERCIAL.md).

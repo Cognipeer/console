@@ -4,11 +4,8 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   Badge,
   Button,
-  Center,
   Group,
-  Loader,
   Modal,
-  Paper,
   ScrollArea,
   Select,
   Stack,
@@ -17,6 +14,10 @@ import {
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconCheck, IconRestore } from '@tabler/icons-react';
+import EmptyState from '@/components/common/EmptyState';
+import LoadingState from '@/components/common/LoadingState';
+import SectionCard from '@/components/common/SectionCard';
+import classes from './PromptVersionHistoryModal.module.css';
 import type {
   PromptCompareView,
   PromptDeploymentEventView,
@@ -261,32 +262,31 @@ export default function PromptVersionHistoryModal({
       centered
     >
       {loading ? (
-        <Center py="xl">
-          <Loader size="md" />
-        </Center>
+        <LoadingState label="Loading version history..." minHeight={240} size="md" />
       ) : versions.length === 0 ? (
-        <Center py="xl" c="dimmed">
-          No version history available.
-        </Center>
+        <EmptyState title="No version history available" description="Save and publish prompt changes to create the first version record." minHeight={240} />
       ) : (
-        <Group align="flex-start" gap="md" style={{ minHeight: 400 }}>
+        <div className={classes.shell}>
           {/* Version list */}
-          <Paper withBorder p="xs" style={{ width: 200, flexShrink: 0 }}>
+          <SectionCard p="xs" className={classes.sidebar}>
             <Text size="sm" fw={600} mb="xs">Versions</Text>
-            <ScrollArea h={350}>
+            <ScrollArea className={classes.versionList}>
               <Stack gap="xs">
                 {versions.map((version) => (
-                  <Paper
+                  <SectionCard
                     key={version.id}
-                    withBorder
                     p="xs"
-                    style={{ 
-                      cursor: 'pointer',
-                      backgroundColor: selectedVersion?.id === version.id 
-                        ? 'var(--mantine-color-blue-light)' 
-                        : undefined,
-                    }}
+                    className={`${classes.versionCard} ${selectedVersion?.id === version.id ? classes.versionCardSelected : ''}`}
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`Select version ${version.version}`}
                     onClick={() => setSelectedVersion(version)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        setSelectedVersion(version);
+                      }
+                    }}
                   >
                     <Group justify="space-between" gap="xs">
                       <Text size="sm" fw={500}>v{version.version}</Text>
@@ -304,14 +304,14 @@ export default function PromptVersionHistoryModal({
                         {version.comment}
                       </Text>
                     )}
-                  </Paper>
+                  </SectionCard>
                 ))}
               </Stack>
             </ScrollArea>
-          </Paper>
+          </SectionCard>
 
           {/* Version details */}
-          <Stack style={{ flex: 1 }} gap="md">
+          <Stack className={classes.detailColumn} gap="md">
             {selectedVersion ? (
               <>
                 <Group justify="space-between">
@@ -365,16 +365,11 @@ export default function PromptVersionHistoryModal({
                     autosize
                     minRows={6}
                     maxRows={12}
-                    styles={{
-                      input: {
-                        fontFamily: 'monospace',
-                        fontSize: '0.85rem',
-                      },
-                    }}
+                    classNames={{ input: classes.templateInput }}
                   />
                 </div>
 
-                <Paper withBorder p="sm" radius="md">
+                <SectionCard p="sm">
                   <Stack gap="sm">
                     <Text size="sm" fw={600}>Deployment Flow</Text>
                     <Group grow>
@@ -455,14 +450,14 @@ export default function PromptVersionHistoryModal({
                       </Button>
                     </Group>
                   </Stack>
-                </Paper>
+                </SectionCard>
 
-                <Paper withBorder p="sm" radius="md">
+                <SectionCard p="sm">
                   <Stack gap="sm">
                     <Text size="sm" fw={600}>Version Compare</Text>
                     <Group align="flex-end">
                       <Select
-                        style={{ flex: 1 }}
+                        className={classes.compareSelect}
                         label="Compare with"
                         value={compareWithVersionId}
                         onChange={setCompareWithVersionId}
@@ -506,12 +501,7 @@ export default function PromptVersionHistoryModal({
                           minRows={6}
                           maxRows={10}
                           autosize
-                          styles={{
-                            input: {
-                              fontFamily: 'monospace',
-                              fontSize: '0.78rem',
-                            },
-                          }}
+                          classNames={{ input: classes.diffInput }}
                         />
 
                         <Text size="xs" fw={600}>Deploy history</Text>
@@ -542,16 +532,14 @@ export default function PromptVersionHistoryModal({
                       </Stack>
                     ) : null}
                   </Stack>
-                </Paper>
+                </SectionCard>
               </>
             ) : (
-              <Center py="xl" c="dimmed">
-                Select a version to view details
-              </Center>
+              <EmptyState title="Select a version" description="Choose a version from the left to review template content, deployment state, and version diffs." minHeight={240} />
             )}
 
             {deploymentHistory.length > 0 ? (
-              <Paper withBorder p="sm" radius="md">
+              <SectionCard p="sm">
                 <Stack gap={6}>
                   <Text size="sm" fw={600}>Recent Deployment History</Text>
                   {deploymentHistory.slice(0, 8).map((event) => (
@@ -560,10 +548,10 @@ export default function PromptVersionHistoryModal({
                     </Text>
                   ))}
                 </Stack>
-              </Paper>
+              </SectionCard>
             ) : null}
           </Stack>
-        </Group>
+        </div>
       )}
 
       <Group justify="flex-end" mt="md">

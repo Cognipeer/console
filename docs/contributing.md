@@ -9,7 +9,7 @@ Cognipeer Console docs live under `docs/` and are rendered with VitePress using 
 ### Prerequisites
 
 - Node.js 20+
-- MongoDB 6+
+- MongoDB 6+ *(optional — only required when `DB_PROVIDER=mongodb`)*
 - npm
 
 ### Getting Started
@@ -21,6 +21,8 @@ npm install
 cp .env.example .env.local
 npm run dev
 ```
+
+SQLite is the default database backend, so a local MongoDB instance is not required for normal docs or UI development.
 
 ## Development Guidelines
 
@@ -99,3 +101,5 @@ npm run build
 npm run test
 npm run docs:build
 ```
+
+If you are changing licensing, community policies, or release-process documents, update the root repo files and the mirrored pages under `docs/guide/` in the same pull request.

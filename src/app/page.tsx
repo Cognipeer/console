@@ -2,7 +2,7 @@
 
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { Center, Loader } from '@mantine/core';
+import LoadingState from '@/components/common/LoadingState';
 
 export default function Home() {
   const router = useRouter();
@@ -32,8 +32,6 @@ export default function Home() {
   }, [router]);
 
   return (
-    <Center style={{ height: '100vh', width: '100vw' }}>
-      <Loader size="lg" />
-    </Center>
+    <LoadingState minHeight="100vh" size="lg" label="Redirecting to dashboard" />
   );
 }

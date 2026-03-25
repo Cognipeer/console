@@ -19,7 +19,7 @@ let tmpDir: string;
 let runtime: VectorProviderRuntime;
 
 beforeAll(async () => {
-  tmpDir = mkdtempSync(path.join(tmpdir(), 'cgate-vec-test-'));
+  tmpDir = mkdtempSync(path.join(tmpdir(), 'cognipeer-console-vec-test-'));
 
   runtime = await SqliteVectorProviderContract.createRuntime({
     tenantId: TENANT_ID,

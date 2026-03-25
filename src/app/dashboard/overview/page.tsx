@@ -6,17 +6,18 @@ import {
   Badge,
   Box,
   Button,
-  Card,
   Grid,
   Group,
-  Loader,
-  Paper,
   Progress,
   SimpleGrid,
   Stack,
   Text,
   ThemeIcon,
+  Title,
+  UnstyledButton,
 } from '@mantine/core';
+import LoadingState from '@/components/common/LoadingState';
+import SectionCard from '@/components/common/SectionCard';
 import PageHeader from '@/components/layout/PageHeader';
 import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
 import {
@@ -35,6 +36,7 @@ import {
   buildDashboardDateSearchParams,
   defaultDashboardDateFilter,
 } from '@/lib/utils/dashboardDateFilter';
+import classes from './page.module.css';
 
 interface DashboardStats {
   models: { total: number; llm: number; embedding: number };
@@ -159,22 +161,20 @@ export default function DashboardOverviewPage() {
       />
 
       {loading ? (
-        <Group justify="center" py="xl">
-          <Loader size="sm" />
-        </Group>
+        <LoadingState label={t('commonLoading', { defaultValue: 'Loading dashboard overview...' })} minHeight={260} />
       ) : (
         <>
           <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>
             {stats.map((stat) => (
-              <Card key={stat.title} padding="lg" radius="lg" withBorder>
+              <SectionCard key={stat.title} p="lg" className="stat-card-accent">
                 <Group justify="space-between" align="flex-start">
                   <Stack gap={4}>
                     <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
                       {stat.title}
                     </Text>
-                    <Text size="xl" fw={700} style={{ fontSize: '1.75rem', lineHeight: 1.2 }}>
+                    <Title order={2} size="1.9rem">
                       {stat.value}
-                    </Text>
+                    </Title>
                     <Group gap={4}>
                       {stat.trend !== 0 && (
                         <>
@@ -202,26 +202,21 @@ export default function DashboardOverviewPage() {
                     <stat.icon size={24} stroke={1.5} />
                   </ThemeIcon>
                 </Group>
-              </Card>
+              </SectionCard>
             ))}
           </SimpleGrid>
 
           <Grid>
             <Grid.Col span={{ base: 12, lg: 8 }}>
-              <Paper p="lg" radius="lg" withBorder>
-                <Group justify="space-between" mb="md">
-                  <div>
-                    <Text fw={600} size="lg">
-                      {t('activity.title')}
-                    </Text>
-                    <Text size="sm" c="dimmed">
-                      {t('subtitle')}
-                    </Text>
-                  </div>
+              <SectionCard
+                title={t('activity.title')}
+                description={t('subtitle')}
+                actions={
                   <Button variant="subtle" size="xs" onClick={() => router.push('/dashboard/tracing')}>
                     {t('activity.viewAll')}
                   </Button>
-                </Group>
+                }
+              >
                 <DataTable
                   columns={[
                     {
@@ -232,7 +227,7 @@ export default function DashboardOverviewPage() {
                       accessor: 'endpoint',
                       title: t('activity.table.endpoint'),
                       render: (record) => (
-                        <Text size="sm" lineClamp={1} style={{ maxWidth: 260 }}>
+                        <Text size="sm" lineClamp={1} maw={260}>
                           {(record as { endpoint: string }).endpoint}
                         </Text>
                       ),
@@ -262,20 +257,19 @@ export default function DashboardOverviewPage() {
                   minHeight={200}
                   noRecordsText={t('activity.empty')}
                 />
-              </Paper>
+              </SectionCard>
             </Grid.Col>
 
             <Grid.Col span={{ base: 12, lg: 4 }}>
               <Stack gap="lg">
-                <Paper p="lg" radius="lg" withBorder>
-                  <Group justify="space-between" mb="md">
-                    <Text fw={600} size="lg">
-                      {t('plan.title')}
-                    </Text>
+                <SectionCard
+                  title={t('plan.title')}
+                  actions={
                     <Badge variant="light" color="teal" size="sm">
                       {licenseType}
                     </Badge>
-                  </Group>
+                  }
+                >
                   <Stack gap="md">
                     <Box>
                       <Group justify="space-between" mb={8}>
@@ -322,31 +316,26 @@ export default function DashboardOverviewPage() {
                       </Group>
                     </div>
                   </Stack>
-                </Paper>
+                </SectionCard>
 
-                <Paper p="lg" radius="lg" withBorder>
-                  <Text fw={600} size="lg" mb="md">
-                    {t('resources.title')}
-                  </Text>
+                <SectionCard title={t('resources.title')}>
                   <Stack gap="xs">
                     {resources.map((resource) => (
-                      <Paper
+                      <UnstyledButton
                         key={resource.title}
-                        p="sm"
-                        radius="md"
-                        withBorder
-                        style={{ cursor: 'pointer', transition: 'all 0.2s ease' }}
+                        className={classes.resourceCard}
+                        aria-label={resource.title}
                         onClick={() =>
                           resource.href.startsWith('http')
                             ? window.open(resource.href, '_blank')
                             : router.push(resource.href)
                         }
                       >
-                        <Group gap="sm">
+                        <div className={classes.resourceCardContent}>
                           <ThemeIcon size={32} radius="md" variant="light" color="gray">
                             <resource.icon size={16} />
                           </ThemeIcon>
-                          <Stack gap={0} style={{ flex: 1 }}>
+                          <Stack gap={0} className={classes.resourceCardBody}>
                             <Text size="sm" fw={500}>
                               {resource.title}
                             </Text>
@@ -354,11 +343,11 @@ export default function DashboardOverviewPage() {
                               {resource.description}
                             </Text>
                           </Stack>
-                        </Group>
-                      </Paper>
+                        </div>
+                      </UnstyledButton>
                     ))}
                   </Stack>
-                </Paper>
+                </SectionCard>
               </Stack>
             </Grid.Col>
           </Grid>

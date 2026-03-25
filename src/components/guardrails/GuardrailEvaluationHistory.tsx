@@ -3,11 +3,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   Badge,
-  Center,
   Grid,
   Group,
-  Loader,
-  Paper,
   Progress,
   RingProgress,
   ScrollArea,
@@ -27,6 +24,9 @@ import {
   IconAlertTriangle,
   IconEye,
 } from '@tabler/icons-react';
+import EmptyState from '@/components/common/EmptyState';
+import LoadingState from '@/components/common/LoadingState';
+import SectionCard from '@/components/common/SectionCard';
 import type { IGuardrailEvaluationLog, IGuardrailEvalAggregate } from '@/lib/database';
 import {
   buildDashboardDateSearchParams,
@@ -55,9 +55,7 @@ interface KpiProps {
 }
 function KpiCard({ icon, color, label, value, highlight }: KpiProps) {
   return (
-    <Paper
-      withBorder
-      radius="md"
+    <SectionCard
       p="md"
       style={highlight ? { borderColor: `var(--mantine-color-${color}-4)`, borderWidth: 2 } : undefined}
     >
@@ -70,7 +68,7 @@ function KpiCard({ icon, color, label, value, highlight }: KpiProps) {
           <Text fw={700} fz="lg" lh={1.2}>{value}</Text>
         </div>
       </Group>
-    </Paper>
+    </SectionCard>
   );
 }
 
@@ -129,19 +127,11 @@ export default function GuardrailEvaluationHistory({
   }, [fetchData]);
 
   if (loading) {
-    return (
-      <Center h={300}>
-        <Loader size="sm" />
-      </Center>
-    );
+    return <LoadingState label="Loading evaluation history..." minHeight={300} />;
   }
 
   if (error) {
-    return (
-      <Center h={200}>
-        <Text c="red" size="sm">{error}</Text>
-      </Center>
-    );
+    return <EmptyState title="Unable to load evaluation history" description={error} minHeight={220} />;
   }
 
   const showOverview = mode === 'all' || mode === 'overview';
@@ -150,25 +140,23 @@ export default function GuardrailEvaluationHistory({
 
   if (showOverview && !hasAggregate) {
     return (
-      <Center h={200}>
-        <Stack align="center" gap="xs">
-          <IconEye size={32} color="var(--mantine-color-dimmed)" />
-          <Text c="dimmed" size="sm">No evaluation data yet</Text>
-          <Text c="dimmed" size="xs">Evaluations will appear here once the guardrail is used.</Text>
-        </Stack>
-      </Center>
+      <EmptyState
+        title="No evaluation data yet"
+        description="Evaluations will appear here once the guardrail is used."
+        icon={<IconEye size={24} />}
+        minHeight={220}
+      />
     );
   }
 
   if (!showOverview && showLogs && logs.length === 0) {
     return (
-      <Center h={200}>
-        <Stack align="center" gap="xs">
-          <IconEye size={32} color="var(--mantine-color-dimmed)" />
-          <Text c="dimmed" size="sm">No evaluation logs found</Text>
-          <Text c="dimmed" size="xs">Row-based evaluation records will appear here.</Text>
-        </Stack>
-      </Center>
+      <EmptyState
+        title="No evaluation logs found"
+        description="Row-based evaluation records will appear here."
+        icon={<IconEye size={24} />}
+        minHeight={220}
+      />
     );
   }
 
@@ -228,8 +216,7 @@ export default function GuardrailEvaluationHistory({
       <Grid gutter="md">
         {/* ── Daily chart ── */}
         <Grid.Col span={{ base: 12, md: 8 }}>
-          <Paper withBorder radius="md" p="md" h="100%">
-            <Text fw={600} mb="xs">Daily Evaluations</Text>
+          <SectionCard title="Daily Evaluations" p="md" h="100%">
             {chartData.length > 1 ? (
               <AreaChart
                 h={240}
@@ -246,18 +233,15 @@ export default function GuardrailEvaluationHistory({
                 tickLine="x"
               />
             ) : (
-              <Center h={200}>
-                <Text c="dimmed" size="xs">Not enough data for a chart yet</Text>
-              </Center>
+              <EmptyState title="Not enough data for a chart yet" minHeight={200} />
             )}
-          </Paper>
+          </SectionCard>
         </Grid.Col>
 
         {/* ── Pass / Fail donut ── */}
         <Grid.Col span={{ base: 12, md: 4 }}>
-          <Paper withBorder radius="md" p="md" h="100%">
-            <Text fw={600} mb="sm">Pass / Fail Ratio</Text>
-            <Center>
+          <SectionCard title="Pass / Fail Ratio" p="md" h="100%">
+            <Group justify="center">
               <RingProgress
                 size={150}
                 thickness={16}
@@ -270,7 +254,7 @@ export default function GuardrailEvaluationHistory({
                   { value: failRate, color: 'red' },
                 ]}
               />
-            </Center>
+            </Group>
             <Group justify="center" gap="md" mt="sm">
               <Group gap={4}>
                 <Badge size="xs" variant="dot" color="teal">Passed</Badge>
@@ -281,15 +265,14 @@ export default function GuardrailEvaluationHistory({
                 <Text size="xs">{fmtNumber(agg?.failedCount ?? 0)}</Text>
               </Group>
             </Group>
-          </Paper>
+          </SectionCard>
         </Grid.Col>
       </Grid>
 
       {/* ── Findings breakdown ── */}
       <Grid gutter="md">
         <Grid.Col span={{ base: 12, md: 6 }}>
-          <Paper withBorder radius="md" p="md">
-            <Text fw={600} mb="sm">Findings by Type</Text>
+          <SectionCard title="Findings by Type" p="md">
             {findingsByType.length === 0 ? (
               <Text c="dimmed" size="xs">No findings recorded</Text>
             ) : (
@@ -309,12 +292,11 @@ export default function GuardrailEvaluationHistory({
                 ))}
               </Stack>
             )}
-          </Paper>
+          </SectionCard>
         </Grid.Col>
 
         <Grid.Col span={{ base: 12, md: 6 }}>
-          <Paper withBorder radius="md" p="md">
-            <Text fw={600} mb="sm">Findings by Severity</Text>
+          <SectionCard title="Findings by Severity" p="md">
             {findingsBySeverity.length === 0 ? (
               <Text c="dimmed" size="xs">No findings recorded</Text>
             ) : (
@@ -337,7 +319,7 @@ export default function GuardrailEvaluationHistory({
                 })}
               </Stack>
             )}
-          </Paper>
+          </SectionCard>
         </Grid.Col>
       </Grid>
         </>
@@ -346,8 +328,7 @@ export default function GuardrailEvaluationHistory({
       {showLogs && (
         <>
       {/* ── Recent evaluation logs ── */}
-      <Paper withBorder radius="md" p="md">
-        <Text fw={600} mb="sm">Recent Evaluations</Text>
+      <SectionCard title="Recent Evaluations" p="md">
         <ScrollArea>
           <Table striped highlightOnHover fz="xs">
             <Table.Thead>
@@ -427,7 +408,7 @@ export default function GuardrailEvaluationHistory({
             </Table.Tbody>
           </Table>
         </ScrollArea>
-      </Paper>
+      </SectionCard>
         </>
       )}
     </Stack>

@@ -1,6 +1,9 @@
 # API Reference Overview
 
-The Cognipeer Gateway exposes an OpenAI-compatible client API surface under `/api/client/v1/`. All client endpoints use Bearer token authentication.
+Cognipeer Console exposes two HTTP surfaces:
+
+- **Client API** under `/api/client/v1/` for API-token authenticated integrations.
+- **Dashboard/Internal API** under `/api/` for JWT-authenticated console features such as incidents and health.
 
 ## Base URL
 
@@ -21,7 +24,16 @@ curl -X POST https://gateway.example.com/api/client/v1/chat/completions \
 
 Tokens are created in the dashboard under **Settings → API Tokens**.
 
-## Endpoint Map
+## Official SDK
+
+If you are integrating from a TypeScript or JavaScript application, use the official [Cognipeer Console SDK](https://cognipeer.github.io/console-sdk/).
+
+- Platform behavior, deployment, and endpoint semantics stay canonical in the Console docs.
+- Method names, request helpers, and framework integrations stay canonical in the SDK docs.
+
+For the relationship between the two, see [Using the SDK](/guide/sdk-integration) in this site and the SDK-side [Console API Mapping](https://cognipeer.github.io/console-sdk/api/console-mapping).
+
+## Client API Endpoint Map
 
 | Domain | Base Path | Methods |
 |--------|-----------|---------|
@@ -50,8 +62,14 @@ Tokens are created in the dashboard under **Settings → API Tokens**.
 | [Config Item](./config) | `/config/items/:key` | GET, PATCH, DELETE |
 | [Config Resolve](./config) | `/config/resolve` | POST |
 | [Config Audit](./config) | `/config/items/:key/audit` | GET |
-| [Incidents](./incidents) | `/api/alerts/incidents` | GET, PATCH, POST |
-| [Health](./health) | `/api/health` | GET |
+## Dashboard And Operational Endpoints
+
+These endpoints are documented here because operators often need them during rollout, but they are **not** part of the `/api/client/v1` customer surface.
+
+| Domain | Base Path | Auth | Methods |
+|--------|-----------|------|---------|
+| [Incidents](./incidents) | `/api/alerts/incidents` | JWT session | GET, PATCH, POST |
+| [Health](./health) | `/api/health/live`, `/api/health/ready` | Public | GET |
 
 ## Request Format
 

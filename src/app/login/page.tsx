@@ -6,19 +6,16 @@ import {
   TextInput,
   PasswordInput,
   Button,
-  Paper,
-  Title,
   Text,
-  Container,
   Anchor,
   Stack,
   Group,
-  Center,
-  Loader,
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { IconLogin } from '@tabler/icons-react';
+import LoadingState from '@/components/common/LoadingState';
+import AuthShell from '@/components/layout/AuthShell';
 import { useTranslations } from '@/lib/i18n';
 
 export default function LoginPage() {
@@ -114,70 +111,14 @@ export default function LoginPage() {
 
   // Show loading state while checking authentication
   if (checkingAuth) {
-    return (
-      <Center style={{ height: '100vh', width: '100vw', background: 'var(--mantine-color-gray-0)' }}>
-        <Loader size="lg" color="teal" />
-      </Center>
-    );
+    return <LoadingState minHeight="100vh" size="lg" label={tCommon('loading')} />;
   }
 
   return (
-    <Container
-      size={440}
-      py={40}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        minHeight: '100vh',
-      }}>
-      <Stack gap="xl" w="100%">
-        <div style={{ textAlign: 'center' }}>
-          <Title order={1} mb="sm" fw={700} style={{ fontSize: '2rem' }}>
-            {t('hero.title')}
-          </Title>
-          <Text c="dimmed" size="md">
-            {t('hero.subtitle')}
-          </Text>
-        </div>
-
-        <Paper withBorder shadow="lg" p={36} radius="lg" style={{ background: 'var(--mantine-color-gray-0)' }}>
-          <form onSubmit={form.onSubmit(handleSubmit)}>
-            <Stack gap="lg">
-              <TextInput
-                label={t('form.email.label')}
-                placeholder={t('form.email.placeholder')}
-                required
-                size="md"
-                {...form.getInputProps('email')}
-              />
-
-              <PasswordInput
-                label={t('form.password.label')}
-                placeholder={t('form.password.placeholder')}
-                required
-                size="md"
-                {...form.getInputProps('password')}
-              />
-
-              <Anchor href="/forgot-password" size="sm" ta="right">
-                Forgot password?
-              </Anchor>
-
-              <Button
-                mt="sm"
-                type="submit"
-                size="lg"
-                fullWidth
-                loading={loading}
-                leftSection={<IconLogin size={20} />}
-                variant="gradient"
-                gradient={{ from: 'teal', to: 'cyan', deg: 90 }}>
-                {t('form.submit')}
-              </Button>
-            </Stack>
-          </form>
-        </Paper>
-
+    <AuthShell
+      title={t('hero.title')}
+      subtitle={t('hero.subtitle')}
+      footer={
         <Group justify="center">
           <Text size="sm" c="dimmed">
             {t('footer.cta')}{' '}
@@ -186,7 +127,45 @@ export default function LoginPage() {
             </Anchor>
           </Text>
         </Group>
-      </Stack>
-    </Container>
+      }
+    >
+      <form onSubmit={form.onSubmit(handleSubmit)}>
+        <Stack gap="lg">
+          <TextInput
+            label={t('form.email.label')}
+            placeholder={t('form.email.placeholder')}
+            required
+            size="md"
+            autoComplete="email"
+            {...form.getInputProps('email')}
+          />
+
+          <PasswordInput
+            label={t('form.password.label')}
+            placeholder={t('form.password.placeholder')}
+            required
+            size="md"
+            autoComplete="current-password"
+            {...form.getInputProps('password')}
+          />
+
+          <Anchor href="/forgot-password" size="sm" ta="right">
+            Forgot password?
+          </Anchor>
+
+          <Button
+            mt="xs"
+            type="submit"
+            size="lg"
+            fullWidth
+            loading={loading}
+            leftSection={<IconLogin size={20} />}
+            variant="gradient"
+          >
+            {t('form.submit')}
+          </Button>
+        </Stack>
+      </form>
+    </AuthShell>
   );
 }

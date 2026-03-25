@@ -6,7 +6,7 @@ services:
     environment:
       - NODE_ENV=production
       - DB_PROVIDER=sqlite
-      - MAIN_DB_NAME=cgate_main
+      - MAIN_DB_NAME=console_main
       - SQLITE_DATA_DIR=/app/data/sqlite
       - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env.local or environment}
       - CACHE_PROVIDER=memory

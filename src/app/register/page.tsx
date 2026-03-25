@@ -6,20 +6,17 @@ import {
   TextInput,
   PasswordInput,
   Button,
-  Paper,
-  Title,
   Text,
-  Container,
   Anchor,
   Stack,
   Group,
   Select,
-  Center,
-  Loader,
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { IconUserPlus } from '@tabler/icons-react';
+import LoadingState from '@/components/common/LoadingState';
+import AuthShell from '@/components/layout/AuthShell';
 import { useTranslations } from '@/lib/i18n';
 
 export default function RegisterPage() {
@@ -137,99 +134,14 @@ export default function RegisterPage() {
 
   // Show loading state while checking authentication
   if (checkingAuth) {
-    return (
-      <Center style={{ height: '100vh', width: '100vw', background: 'var(--mantine-color-gray-0)' }}>
-        <Loader size="lg" color="teal" />
-      </Center>
-    );
+    return <LoadingState minHeight="100vh" size="lg" label={tCommon('loading')} />;
   }
 
   return (
-    <Container
-      size={480}
-      py={40}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        minHeight: '100vh',
-      }}>
-      <Stack gap="xl" w="100%">
-        <div style={{ textAlign: 'center' }}>
-          <Title order={1} mb="sm" fw={700} style={{ fontSize: '2rem' }}>
-            {t('hero.title')}
-          </Title>
-          <Text c="dimmed" size="md">
-            {t('hero.subtitle')}
-          </Text>
-        </div>
-
-        <Paper withBorder shadow="lg" p={36} radius="lg" style={{ background: 'var(--mantine-color-gray-0)' }}>
-          <form onSubmit={form.onSubmit(handleSubmit)}>
-            <Stack gap="md">
-              <TextInput
-                label={t('form.name.label')}
-                placeholder={t('form.name.placeholder')}
-                required
-                size="md"
-                {...form.getInputProps('name')}
-              />
-
-              <TextInput
-                label={t('form.email.label')}
-                placeholder={t('form.email.placeholder')}
-                required
-                size="md"
-                {...form.getInputProps('email')}
-              />
-
-              <TextInput
-                label={t('form.companyName.label')}
-                placeholder={t('form.companyName.placeholder')}
-                required
-                size="md"
-                description={t('form.companyName.description')}
-                {...form.getInputProps('companyName')}
-              />
-
-              <PasswordInput
-                label={t('form.password.label')}
-                placeholder={t('form.password.placeholder')}
-                required
-                size="md"
-                {...form.getInputProps('password')}
-              />
-
-              <PasswordInput
-                label={t('form.confirmPassword.label')}
-                placeholder={t('form.confirmPassword.placeholder')}
-                required
-                size="md"
-                {...form.getInputProps('confirmPassword')}
-              />
-
-              <Select
-                label={t('form.license.label')}
-                placeholder={t('form.license.placeholder')}
-                data={licenseOptions}
-                size="md"
-                {...form.getInputProps('licenseType')}
-              />
-
-              <Button
-                mt="md"
-                type="submit"
-                size="lg"
-                fullWidth
-                loading={loading}
-                leftSection={<IconUserPlus size={20} />}
-                variant="gradient"
-                gradient={{ from: 'teal', to: 'cyan', deg: 90 }}>
-                {t('form.submit')}
-              </Button>
-            </Stack>
-          </form>
-        </Paper>
-
+    <AuthShell
+      title={t('hero.title')}
+      subtitle={t('hero.subtitle')}
+      footer={
         <Group justify="center">
           <Text size="sm" c="dimmed">
             {t('footer.cta')}{' '}
@@ -238,7 +150,77 @@ export default function RegisterPage() {
             </Anchor>
           </Text>
         </Group>
-      </Stack>
-    </Container>
+      }
+    >
+      <form onSubmit={form.onSubmit(handleSubmit)}>
+        <Stack gap="md">
+          <TextInput
+            label={t('form.name.label')}
+            placeholder={t('form.name.placeholder')}
+            required
+            size="md"
+            autoComplete="name"
+            {...form.getInputProps('name')}
+          />
+
+          <TextInput
+            label={t('form.email.label')}
+            placeholder={t('form.email.placeholder')}
+            required
+            size="md"
+            autoComplete="email"
+            {...form.getInputProps('email')}
+          />
+
+          <TextInput
+            label={t('form.companyName.label')}
+            placeholder={t('form.companyName.placeholder')}
+            required
+            size="md"
+            description={t('form.companyName.description')}
+            autoComplete="organization"
+            {...form.getInputProps('companyName')}
+          />
+
+          <PasswordInput
+            label={t('form.password.label')}
+            placeholder={t('form.password.placeholder')}
+            required
+            size="md"
+            autoComplete="new-password"
+            {...form.getInputProps('password')}
+          />
+
+          <PasswordInput
+            label={t('form.confirmPassword.label')}
+            placeholder={t('form.confirmPassword.placeholder')}
+            required
+            size="md"
+            autoComplete="new-password"
+            {...form.getInputProps('confirmPassword')}
+          />
+
+          <Select
+            label={t('form.license.label')}
+            placeholder={t('form.license.placeholder')}
+            data={licenseOptions}
+            size="md"
+            {...form.getInputProps('licenseType')}
+          />
+
+          <Button
+            mt="xs"
+            type="submit"
+            size="lg"
+            fullWidth
+            loading={loading}
+            leftSection={<IconUserPlus size={20} />}
+            variant="gradient"
+          >
+            {t('form.submit')}
+          </Button>
+        </Stack>
+      </form>
+    </AuthShell>
   );
 }

@@ -11,6 +11,7 @@ import {
   Table,
   Text,
   Tooltip,
+  VisuallyHidden,
 } from '@mantine/core';
 import { IconDots, IconEdit, IconTrash, IconTable } from '@tabler/icons-react';
 import type { ProviderConfigView } from '@/lib/services/providers/providerService';
@@ -72,21 +73,9 @@ export default function ProviderList({
               <Table.Th style={{ width: '20%' }}>Created</Table.Th>
               <Table.Th style={{ width: '20%' }}>Updated</Table.Th>
               <Table.Th style={{ width: '10%' }}>
-                <span
-                  style={{
-                    position: 'absolute',
-                    width: 1,
-                    height: 1,
-                    padding: 0,
-                    margin: -1,
-                    overflow: 'hidden',
-                    clip: 'rect(0, 0, 0, 0)',
-                    whiteSpace: 'nowrap',
-                    border: 0,
-                  }}
-                >
+                <VisuallyHidden>
                   Actions
-                </span>
+                </VisuallyHidden>
               </Table.Th>
             </Table.Tr>
           </Table.Thead>

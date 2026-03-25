@@ -1,14 +1,14 @@
 # Contributing
 
-Thank you for your interest in contributing to the CognipeerAI Gateway.
+Thank you for your interest in contributing to Cognipeer Console.
 
 For full development guidelines, code style rules, and PR checklist, please see the [Contributing Guide](docs/contributing.md).
 
 ## Quick Start
 
 ```bash
-git clone https://github.com/Cognipeer/cgate.git
-cd cgate
+git clone https://github.com/Cognipeer/cognipeer-console.git
+cd cognipeer-console
 npm install
 cp .env.example .env.local
 # Edit .env.local — set JWT_SECRET at minimum

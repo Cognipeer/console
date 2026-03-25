@@ -1,9 +1,11 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Card, Stack, Text, Loader, Center } from '@mantine/core';
+import { Stack } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import LoadingState from '@/components/common/LoadingState';
+import SectionCard from '@/components/common/SectionCard';
 import type { ProviderDomain } from '@/lib/database';
 import type { ProviderDescriptor } from '@/lib/providers';
 import type { ProviderConfigView } from '@/lib/services/providers/providerService';
@@ -208,21 +210,10 @@ export default function ProviderManager({
     : { opened: false };
 
   return (
-    <Card withBorder radius="md" shadow="sm">
+    <SectionCard title={title} description={description}>
       <Stack gap="md">
-        <div>
-          <Text fw={600}>{title}</Text>
-          {description && (
-            <Text size="sm" c="dimmed">
-              {description}
-            </Text>
-          )}
-        </div>
-
         {combinedLoading ? (
-          <Center py="lg">
-            <Loader size="sm" />
-          </Center>
+          <LoadingState label="Loading providers..." minHeight={200} />
         ) : (
           <ProviderList
             providers={providers}
@@ -251,6 +242,6 @@ export default function ProviderManager({
           }
         }}
       />
-    </Card>
+    </SectionCard>
   );
 }

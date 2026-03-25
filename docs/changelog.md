@@ -31,7 +31,7 @@
 
 ## 1.0.0
 
-Initial release of the Cognipeer Gateway documentation.
+Initial release of the Cognipeer Console documentation.
 
 ### Core Infrastructure
 - Centralized configuration via `getConfig()`

@@ -4,6 +4,11 @@ The Cognipeer Console supports multiple deployment strategies: standalone Docker
 
 ## Docker
 
+Cognipeer Console runs in two common modes:
+
+- **SQLite mode** for zero-dependency local, edge, or smaller self-hosted installations.
+- **MongoDB mode** for higher-concurrency or centralized database deployments.
+
 ### Build
 
 ```bash
@@ -18,10 +23,24 @@ The Dockerfile uses a multi-stage build:
 
 ### Run
 
+SQLite mode (default):
+
 ```bash
 docker run -d \
   --name cognipeer-console \
   -p 3000:3000 \
+  -e JWT_SECRET="your-secret-here" \
+  -v console-data:/app/data \
+  cognipeer-console:latest
+```
+
+MongoDB mode:
+
+```bash
+docker run -d \
+  --name cognipeer-console \
+  -p 3000:3000 \
+  -e DB_PROVIDER="mongodb" \
   -e MONGODB_URI="mongodb://host.docker.internal:27017" \
   -e JWT_SECRET="your-secret-here" \
   cognipeer-console:latest
@@ -37,13 +56,13 @@ services:
     ports:
       - "3000:3000"
     environment:
-      MONGODB_URI: mongodb://mongo:27017
+      DB_PROVIDER: sqlite
+      MAIN_DB_NAME: cgate_main
+      SQLITE_DATA_DIR: /app/data/sqlite
       JWT_SECRET: change-me-in-production
       LOG_LEVEL: info
       LOG_FORMAT: json
       CACHE_PROVIDER: memory
-    depends_on:
-      - mongo
     healthcheck:
       test: wget -q --spider http://localhost:3000/api/health/live || exit 1
       interval: 30s
@@ -51,16 +70,11 @@ services:
       start_period: 10s
       retries: 3
 
-  mongo:
-    image: mongo:7
-    ports:
-      - "27017:27017"
-    volumes:
-      - mongo-data:/data/db
-
 volumes:
-  mongo-data:
+  console-data:
 ```
+
+If you want MongoDB instead, set `DB_PROVIDER=mongodb`, add `MONGODB_URI`, and provision the database separately.
 
 ## Kubernetes
 
@@ -158,8 +172,13 @@ pm2 start .next/standalone/server.js --name cognipeer-console -i max
 
 | Variable | Description |
 |----------|-------------|
-| `MONGODB_URI` | MongoDB connection string |
 | `JWT_SECRET` | JWT signing secret |
+
+### Conditionally Required Variables
+
+| Variable | Description |
+|----------|-------------|
+| `MONGODB_URI` | Required only when `DB_PROVIDER=mongodb` |
 
 ### Recommended Production Settings
 

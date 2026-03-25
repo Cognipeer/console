@@ -1,0 +1,57 @@
+.shell {
+  display: grid;
+  grid-template-columns: minmax(12rem, 13rem) minmax(0, 1fr);
+  gap: var(--app-space-3);
+  min-height: 25rem;
+}
+
+.sidebar {
+  min-width: 0;
+}
+
+.versionList {
+  max-height: 22rem;
+}
+
+.versionCard {
+  cursor: pointer;
+  transition:
+    border-color var(--app-motion-fast) ease,
+    box-shadow var(--app-motion-fast) ease,
+    background-color var(--app-motion-fast) ease,
+    transform var(--app-motion-fast) ease;
+}
+
+.versionCard:hover {
+  box-shadow: var(--app-shadow-xs);
+  transform: translateY(-1px);
+}
+
+.versionCardSelected {
+  background: var(--mantine-color-blue-light);
+  border-color: rgba(59, 130, 246, 0.3);
+}
+
+.detailColumn {
+  min-width: 0;
+}
+
+.templateInput {
+  font-family: monospace;
+  font-size: 0.85rem;
+}
+
+.diffInput {
+  font-family: monospace;
+  font-size: 0.78rem;
+}
+
+.compareSelect {
+  flex: 1;
+}
+
+@media (max-width: 62em) {
+  .shell {
+    grid-template-columns: 1fr;
+  }
+}

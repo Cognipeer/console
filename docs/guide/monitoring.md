@@ -1,6 +1,6 @@
 # Monitoring & Observability
 
-The Cognipeer Gateway provides structured logging, health checks, and usage tracking for production observability.
+Cognipeer Console provides structured logging, health checks, and usage tracking for production observability.
 
 ## Structured Logging
 

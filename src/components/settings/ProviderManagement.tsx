@@ -1,7 +1,8 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { Paper, Stack, Title, Text, Grid, Badge, Group, Card } from '@mantine/core';
+import { Stack, Title, Text, Grid, Badge, Group } from '@mantine/core';
+import SectionCard from '@/components/common/SectionCard';
 import type { VectorProviderView } from '@/lib/services/vector';
 import ProviderManager from '@/components/providers/ProviderManager';
 import VectorIndexManager from '@/components/vector/VectorIndexManager';
@@ -14,10 +15,9 @@ export default function ProviderManagement() {
   const providerSummary = useMemo(() => {
     if (!selectedProvider) return null;
     return (
-      <Card shadow="xs" radius="md" withBorder>
+      <SectionCard title={selectedProvider.label}>
         <Stack gap="xs">
           <Group gap="xs">
-            <Title order={4}>{selectedProvider.label}</Title>
             <Badge color={selectedProvider.status === 'active' ? 'green' : 'yellow'}>
               {selectedProvider.status}
             </Badge>
@@ -34,20 +34,20 @@ export default function ProviderManagement() {
             Key: {selectedProvider.key}
           </Text>
         </Stack>
-      </Card>
+      </SectionCard>
     );
   }, [selectedProvider]);
 
   return (
-    <Paper shadow="sm" radius="md" withBorder p="md">
+    <SectionCard
+      title={<Title order={3}>{t('providerManagement.title')}</Title>}
+      description={
+        <Text size="sm" c="dimmed">
+          {t('providerManagement.subtitle')}
+        </Text>
+      }
+    >
       <Stack gap="lg">
-        <div>
-          <Title order={3}>{t('providerManagement.title')}</Title>
-          <Text size="sm" c="dimmed">
-            {t('providerManagement.subtitle')}
-          </Text>
-        </div>
-
         <Grid gutter="md">
           <Grid.Col span={{ base: 12, md: 6 }}>
             <ProviderManager
@@ -66,6 +66,6 @@ export default function ProviderManagement() {
           </Grid.Col>
         </Grid>
       </Stack>
-    </Paper>
+    </SectionCard>
   );
 }

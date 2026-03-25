@@ -20,10 +20,10 @@ export class RedisCacheProvider implements CacheProvider {
 
   /**
    * @param url Redis connection URL (e.g. redis://localhost:6379)
-   * @param keyPrefix Prefix for all cache keys (default 'cgate:')
+   * @param keyPrefix Prefix for all cache keys (default 'console:')
    * @param defaultTtlSeconds Default TTL in seconds (0 = no expiry)
    */
-  constructor(url: string, keyPrefix: string = 'cgate:', defaultTtlSeconds: number = 300) {
+  constructor(url: string, keyPrefix: string = 'console:', defaultTtlSeconds: number = 300) {
     this.url = url;
     this.keyPrefix = keyPrefix;
     this.defaultTtl = defaultTtlSeconds;

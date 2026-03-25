@@ -242,7 +242,7 @@ function buildConfig(source: ConfigSource): AppConfig {
       ttlSeconds: int(source, 'CACHE_TTL_SECONDS', 300),
       redis: {
         url: str(source, 'REDIS_URL', ''),
-        keyPrefix: str(source, 'REDIS_KEY_PREFIX', 'cgate:'),
+        keyPrefix: str(source, 'REDIS_KEY_PREFIX', 'console:'),
       },
     },
 

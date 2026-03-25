@@ -4,9 +4,6 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Button,
-  Paper,
-  Center,
-  Loader,
   Text,
   Group,
   Stack,
@@ -19,6 +16,8 @@ import {
   Menu,
   Table,
   Badge,
+  VisuallyHidden,
+  UnstyledButton,
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
@@ -30,7 +29,11 @@ import {
   IconEye,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import EmptyState from '@/components/common/EmptyState';
+import LoadingState from '@/components/common/LoadingState';
 import PageHeader from '@/components/layout/PageHeader';
+import SectionCard from '@/components/common/SectionCard';
+import classes from './AgentsPage.module.css';
 
 interface Agent {
   _id: string;
@@ -194,23 +197,16 @@ export default function AgentsPage() {
         }
       />
 
-      <Paper withBorder radius="md" p={0} style={{ overflow: 'hidden' }}>
+      <SectionCard p={0} className={classes.tableShell}>
         {loading ? (
-          <Center p="xl">
-            <Loader size="sm" />
-          </Center>
+          <LoadingState label={t('loading', { defaultValue: 'Loading agents...' })} minHeight={220} />
         ) : agents.length === 0 ? (
-          <Center p="xl">
-            <Stack align="center" gap="sm">
-              <ThemeIcon size={48} radius="xl" variant="light" color="gray">
-                <IconRobot size={24} />
-              </ThemeIcon>
-              <Text size="lg" fw={600}>
-                {t('empty.title')}
-              </Text>
-              <Text size="sm" c="dimmed" ta="center" maw={400}>
-                {t('empty.description')}
-              </Text>
+          <EmptyState
+            title={t('empty.title')}
+            description={t('empty.description')}
+            icon={<IconRobot size={24} />}
+            minHeight={260}
+            action={
               <Button
                 size="sm"
                 leftSection={<IconPlus size={14} />}
@@ -218,8 +214,8 @@ export default function AgentsPage() {
               >
                 {t('createAgent')}
               </Button>
-            </Stack>
-          </Center>
+            }
+          />
         ) : (
           <Table striped highlightOnHover>
             <Table.Thead>
@@ -228,15 +224,26 @@ export default function AgentsPage() {
                 <Table.Th>{t('table.model')}</Table.Th>
                 <Table.Th>{t('table.status')}</Table.Th>
                 <Table.Th>{t('table.createdAt')}</Table.Th>
-                <Table.Th style={{ width: 60 }} />
+                <Table.Th w={60}>
+                  <VisuallyHidden>Actions</VisuallyHidden>
+                </Table.Th>
               </Table.Tr>
             </Table.Thead>
             <Table.Tbody>
               {agents.map((agent) => (
                 <Table.Tr
                   key={agent._id}
-                  style={{ cursor: 'pointer' }}
+                  className={classes.agentRow}
                   onClick={() => router.push(`/dashboard/agents/${agent._id}`)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      router.push(`/dashboard/agents/${agent._id}`);
+                    }
+                  }}
+                  tabIndex={0}
+                  role="button"
+                  aria-label={`${t('actions.view')} ${agent.name}`}
                 >
                   <Table.Td>
                     <Group gap="xs">
@@ -278,6 +285,8 @@ export default function AgentsPage() {
                         <ActionIcon
                           variant="subtle"
                           size="sm"
+                          className={classes.agentMenuButton}
+                          aria-label={`Open actions for ${agent.name}`}
                           onClick={(e) => e.stopPropagation()}
                         >
                           <IconDotsVertical size={14} />
@@ -311,7 +320,7 @@ export default function AgentsPage() {
             </Table.Tbody>
           </Table>
         )}
-      </Paper>
+      </SectionCard>
 
       {/* Create Agent Modal */}
       <Modal

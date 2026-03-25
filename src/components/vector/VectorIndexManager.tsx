@@ -6,10 +6,7 @@ import {
   ActionIcon,
   Badge,
   Button,
-  Card,
-  Center,
   Group,
-  Loader,
   Modal,
   NumberInput,
   Select,
@@ -22,6 +19,9 @@ import {
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { IconTrash, IconRefresh } from '@tabler/icons-react';
+import EmptyState from '@/components/common/EmptyState';
+import LoadingState from '@/components/common/LoadingState';
+import SectionCard from '@/components/common/SectionCard';
 import type { VectorIndexRecord, VectorProviderView } from '@/lib/services/vector';
 
 const DEFAULT_METRIC_OPTIONS = [
@@ -297,124 +297,125 @@ export default function VectorIndexManager({ provider }: VectorIndexManagerProps
   );
 
   return (
-    <Card withBorder radius="md" shadow="sm">
-      <Stack gap="md">
-        <Group justify="space-between">
-          <div>
-            <Text fw={600}>Knowledge Index</Text>
-            <Text size="sm" c="dimmed">
-              {provider
-                ? `Manage indexes for ${provider.label}`
-                : 'Select a vector provider to view its indexes.'}
-            </Text>
-          </div>
-          <Group gap="xs">
-            <Tooltip label="Refresh">
-              <ActionIcon
-                variant="subtle"
-                onClick={() => void loadIndexes()}
-                disabled={!providerKey}
-              >
-                <IconRefresh size={16} />
-              </ActionIcon>
-            </Tooltip>
-            <Button
-              onClick={() => setCreateModalOpen(true)}
+    <SectionCard
+      title="Knowledge Index"
+      description={
+        provider
+          ? `Manage indexes for ${provider.label}`
+          : 'Select a vector provider to view its indexes.'
+      }
+      actions={
+        <Group gap="xs">
+          <Tooltip label="Refresh">
+            <ActionIcon
+              variant="subtle"
+              onClick={() => void loadIndexes()}
               disabled={!providerKey}
+              aria-label="Refresh indexes"
             >
-              New Index
-            </Button>
-          </Group>
+              <IconRefresh size={16} />
+            </ActionIcon>
+          </Tooltip>
+          <Button onClick={() => setCreateModalOpen(true)} disabled={!providerKey}>
+            New Index
+          </Button>
         </Group>
-
-        {provider && indexes.length === 0 && !loading && (
-          <Center py="lg">
-            <Text c="dimmed">No indexes yet for this provider.</Text>
-          </Center>
-        )}
-
-        {loading ? (
-          <Center py="lg">
-            <Loader size="sm" />
-          </Center>
+      }
+    >
+      <Stack gap="md">
+        {!provider ? (
+          <EmptyState
+            title="No provider selected"
+            description="Choose a vector provider to inspect or create indexes."
+            minHeight={220}
+          />
+        ) : loading ? (
+          <LoadingState label="Loading vector indexes..." minHeight={220} />
+        ) : indexes.length === 0 ? (
+          <EmptyState
+            title="No indexes yet"
+            description="Create the first vector index for this provider to start storing embeddings."
+            minHeight={220}
+          />
         ) : (
-          provider && (
-            <Table striped highlightOnHover withColumnBorders>
-              <Table.Thead>
-                <Table.Tr>
-                  <Table.Th>Name</Table.Th>
-                  <Table.Th>Index ID</Table.Th>
-                  <Table.Th>Dimension</Table.Th>
-                  <Table.Th>Metric</Table.Th>
-                  <Table.Th>Created</Table.Th>
-                  <Table.Th></Table.Th>
-                </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {indexes.map((index) => {
-                  const providerHandle = resolveProviderHandle(index.metadata);
-                  return (
-                    <Table.Tr
-                      key={index.key}
-                      onClick={() => navigateToIndex(index)}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter' || event.key === ' ') {
-                          event.preventDefault();
-                          navigateToIndex(index);
-                        }
-                      }}
-                      tabIndex={0}
-                      style={{ cursor: 'pointer' }}
-                    >
-                      <Table.Td>
-                        <Group gap="xs">
-                          <Text fw={500}>{index.name}</Text>
-                          <Badge color="blue" variant="light">
-                            {index.createdBy ?? 'system'}
-                          </Badge>
-                        </Group>
-                      </Table.Td>
-                      <Table.Td>
-                        <Stack gap={4}>
-                          <Text size="sm" c="dimmed" ff="monospace">
-                            {index.key}
-                          </Text>
+          <Table striped highlightOnHover withColumnBorders>
+            <Table.Thead>
+              <Table.Tr>
+                <Table.Th>Name</Table.Th>
+                <Table.Th>Index ID</Table.Th>
+                <Table.Th>Dimension</Table.Th>
+                <Table.Th>Metric</Table.Th>
+                <Table.Th>Created</Table.Th>
+                <Table.Th></Table.Th>
+              </Table.Tr>
+            </Table.Thead>
+            <Table.Tbody>
+              {indexes.map((index) => {
+                const providerHandle = resolveProviderHandle(index.metadata);
+                return (
+                  <Table.Tr
+                    key={index.key}
+                    onClick={() => navigateToIndex(index)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        navigateToIndex(index);
+                      }
+                    }}
+                    tabIndex={0}
+                    role="button"
+                    aria-label={`Open index ${index.name}`}
+                    style={{ cursor: 'pointer' }}
+                  >
+                    <Table.Td>
+                      <Group gap="xs">
+                        <Text fw={500}>{index.name}</Text>
+                        <Badge color="blue" variant="light">
+                          {index.createdBy ?? 'system'}
+                        </Badge>
+                      </Group>
+                    </Table.Td>
+                    <Table.Td>
+                      <Stack gap={4}>
+                        <Text size="sm" c="dimmed" ff="monospace">
+                          {index.key}
+                        </Text>
+                        <Text size="xs" c="dimmed">
+                          External ID: {index.externalId}
+                        </Text>
+                        {providerHandle ? (
                           <Text size="xs" c="dimmed">
-                            External ID: {index.externalId}
+                            Handle: {providerHandle}
                           </Text>
-                          {providerHandle ? (
-                            <Text size="xs" c="dimmed">
-                              Handle: {providerHandle}
-                            </Text>
-                          ) : null}
-                        </Stack>
-                      </Table.Td>
-                      <Table.Td>{index.dimension}</Table.Td>
-                      <Table.Td>{index.metric}</Table.Td>
-                      <Table.Td>{formatDate(index.createdAt)}</Table.Td>
-                      <Table.Td>
-                        <Tooltip label="Delete index">
-                          <ActionIcon
-                            variant="subtle"
-                            color="red"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              void handleDeleteIndex(index);
-                            }}
-                          >
-                            <IconTrash size={16} />
-                          </ActionIcon>
-                        </Tooltip>
-                      </Table.Td>
-                    </Table.Tr>
-                  );
-                })}
-              </Table.Tbody>
-            </Table>
-          )
+                        ) : null}
+                      </Stack>
+                    </Table.Td>
+                    <Table.Td>{index.dimension}</Table.Td>
+                    <Table.Td>{index.metric}</Table.Td>
+                    <Table.Td>{formatDate(index.createdAt)}</Table.Td>
+                    <Table.Td>
+                      <Tooltip label="Delete index">
+                        <ActionIcon
+                          variant="subtle"
+                          color="red"
+                          aria-label={`Delete ${index.name}`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void handleDeleteIndex(index);
+                          }}
+                        >
+                          <IconTrash size={16} />
+                        </ActionIcon>
+                      </Tooltip>
+                    </Table.Td>
+                  </Table.Tr>
+                );
+              })}
+            </Table.Tbody>
+          </Table>
         )}
       </Stack>
       {createModal}
-    </Card>
+    </SectionCard>
   );
 }

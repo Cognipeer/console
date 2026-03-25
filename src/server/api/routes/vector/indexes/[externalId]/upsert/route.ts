@@ -140,6 +140,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
     await upsertVectors(tenantDbName, tenantId, projectId, {
       providerKey,
+      indexExternalId: externalId,
       indexKey: externalId,
       vectors: body.vectors,
       updatedBy: userId,

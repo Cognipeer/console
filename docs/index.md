@@ -12,6 +12,9 @@ hero:
     - theme: alt
       text: Study Architecture
       link: /guide/architecture
+    - theme: alt
+      text: Review Licensing
+      link: /guide/licensing
 
 features:
   - title: OpenAI-Compatible Runtime Surface
@@ -39,8 +42,10 @@ If you are evaluating or onboarding Cognipeer Console, this is the shortest usef
 If you already know the basics, jump directly to the part that matches your work:
 
 - Building against the gateway surface? Start with [API Overview](/api/overview) and [Authentication](/guide/authentication).
+- Writing application code against Cognipeer Console? Start with the [Console SDK documentation](https://cognipeer.github.io/console-sdk/) and use this site for platform and endpoint semantics.
 - Extending platform internals? Start with [Core Modules](/guide/core-overview) and [Providers](/guide/providers).
 - Operating agent workflows? Start with [Tracing](/guide/tracing), [Guardrails](/guide/guardrails), and [RAG](/guide/rag).
+- Planning a public or commercial rollout? Start with [Licensing](/guide/licensing) and [Security](/guide/security).
 
 ## Choose Your Entry Point
 
@@ -49,6 +54,7 @@ If you already know the basics, jump directly to the part that matches your work
 | Guide | Teams onboarding the platform for the first time | Local setup, architecture, core module docs, and operational guidance |
 | API Reference | SDK authors and integrators | Endpoint behavior, request and response models, and OpenAI-compatible surface details |
 | Core Modules | Platform engineers extending the runtime | The shared infrastructure primitives that shape behavior across every domain service |
+| [Console SDK Docs](https://cognipeer.github.io/console-sdk/) | Application developers integrating from TypeScript or JavaScript | Client initialization, resource methods, examples, and framework integrations |
 
 ## Quick Start
 
@@ -72,6 +78,9 @@ docker run -p 3000:3000 --env-file .env.local cognipeer-console
 - [Guide](/guide/getting-started): setup, architecture, deployment, providers, and feature walkthroughs.
 - [Core Modules](/guide/core-overview): config, request context, cache, resilience, runtime pool, health, lifecycle, and CORS.
 - [API Reference](/api/overview): gateway endpoints for chat, embeddings, agents, tools, tracing, vector, RAG, files, and health.
+- [Using the SDK](/guide/sdk-integration): where Console stops, where the SDK starts, and how teams should split responsibility.
+- [Licensing](/guide/licensing): AGPL community terms, commercial options, and redistribution guidance.
+- [Security](/guide/security): secret handling, hardening defaults, and vulnerability disclosure workflow.
 - [Contributing](/contributing): development rules, validation steps, and docs workflow notes.
 
 ## Production Checklist

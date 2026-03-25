@@ -1,7 +1,8 @@
 'use client';
 
-import { Group, Paper, Text, Title, ThemeIcon } from '@mantine/core';
+import { Group, Stack, Text, ThemeIcon, Title } from '@mantine/core';
 import { ReactNode } from 'react';
+import SectionCard from '@/components/common/SectionCard';
 
 interface PageHeaderProps {
   icon: ReactNode;
@@ -19,40 +20,28 @@ export default function PageHeader({
   iconColor = 'teal',
 }: PageHeaderProps) {
   return (
-    <Paper
-      p="md"
-      radius="md"
-      withBorder
-      style={{
-        background: 'var(--mantine-color-gray-0)',
-        borderColor: 'var(--mantine-color-gray-2)',
-      }}
-    >
-      <Group justify="space-between" align="center">
-        <Group gap="sm">
-          <ThemeIcon
-            size={36}
-            radius="md"
-            variant="light"
-            color={iconColor}
-          >
-            {icon}
-          </ThemeIcon>
-          <div>
-            <Title order={3} size="h4">{title}</Title>
-            {subtitle && (
-              <Text size="xs" c="dimmed">
-                {subtitle}
-              </Text>
-            )}
-          </div>
-        </Group>
-        {actions && (
-          <Group gap="xs">
-            {actions}
+    <header>
+      <SectionCard
+        p={{ base: 'md', sm: 'lg' }}
+        title={
+          <Group gap="md" wrap="nowrap" align="flex-start">
+            <ThemeIcon size={42} radius="lg" variant="light" color={iconColor}>
+              {icon}
+            </ThemeIcon>
+            <Stack gap={2}>
+              <Title order={1} size="h3">
+                {title}
+              </Title>
+              {subtitle ? (
+                <Text size="sm" c="dimmed">
+                  {subtitle}
+                </Text>
+              ) : null}
+            </Stack>
           </Group>
-        )}
-      </Group>
-    </Paper>
+        }
+        actions={actions ? <Group gap="xs" wrap="wrap">{actions}</Group> : undefined}
+      />
+    </header>
   );
 }

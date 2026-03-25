@@ -16,11 +16,15 @@ export default defineConfig({
       { text: 'Architecture', link: '/guide/architecture' },
       { text: 'Core Modules', link: '/guide/core-overview' },
       { text: 'API Reference', link: '/api/overview' },
+      { text: 'SDK Docs', link: 'https://cognipeer.github.io/console-sdk/' },
+      { text: 'Licensing', link: '/guide/licensing' },
       {
         text: 'v0.1.0',
         items: [
           { text: 'Changelog', link: '/changelog' },
           { text: 'Contributing', link: '/contributing' },
+          { text: 'Security', link: '/guide/security' },
+          { text: 'Commercial', link: '/guide/licensing#commercial-options' },
         ],
       },
     ],
@@ -33,6 +37,7 @@ export default defineConfig({
             { text: 'Getting Started', link: '/guide/getting-started' },
             { text: 'Architecture', link: '/guide/architecture' },
             { text: 'Configuration', link: '/guide/configuration' },
+            { text: 'Using the SDK', link: '/guide/sdk-integration' },
           ],
         },
         {
@@ -74,6 +79,14 @@ export default defineConfig({
             { text: 'Monitoring', link: '/guide/monitoring' },
           ],
         },
+        {
+          text: 'Project',
+          items: [
+            { text: 'Licensing', link: '/guide/licensing' },
+            { text: 'Security', link: '/guide/security' },
+            { text: 'Contributing', link: '/contributing' },
+          ],
+        },
       ],
 
       '/api/': [
@@ -106,7 +119,7 @@ export default defineConfig({
     ],
 
     footer: {
-      message: 'Cognipeer Console is part of the Cognipeer platform.',
+      message: 'Community edition is AGPL-3.0. Commercial licensing and support are available separately.',
       copyright: 'Copyright © 2026 Cognipeer',
     },
 

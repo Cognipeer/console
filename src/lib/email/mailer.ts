@@ -1,11 +1,22 @@
 import nodemailer from 'nodemailer';
-import Handlebars from 'handlebars';
 import fs from 'fs/promises';
 import path from 'path';
 import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 
 const log = createLogger('email');
+
+type HandlebarsInstance = typeof import('handlebars');
+
+let handlebarsPromise: Promise<HandlebarsInstance> | null = null;
+
+async function getHandlebars(): Promise<HandlebarsInstance> {
+  if (!handlebarsPromise) {
+    handlebarsPromise = import('handlebars/dist/cjs/handlebars').then((module) => module.default);
+  }
+
+  return handlebarsPromise;
+}
 
 export interface EmailTemplate {
   subject: string;
@@ -52,7 +63,8 @@ class EmailService {
 
     try {
       const templateContent = await fs.readFile(templatePath, 'utf-8');
-      const template = Handlebars.compile(templateContent);
+      const handlebars = await getHandlebars();
+      const template = handlebars.compile(templateContent);
       const html = template(data);
 
       // Extract subject from template (first line should be: <!-- subject: Your Subject -->)
@@ -61,9 +73,9 @@ class EmailService {
       );
       const rawSubject = subjectMatch
         ? subjectMatch[1]
-        : 'Notification from CognipeerAI Gateway';
+        : 'Notification from Cognipeer Console';
       // Compile subject through Handlebars so template variables (e.g. {{alertName}}) are resolved
-      const subject = Handlebars.compile(rawSubject)(data);
+      const subject = handlebars.compile(rawSubject)(data);
 
       return { subject, html };
     } catch (error) {

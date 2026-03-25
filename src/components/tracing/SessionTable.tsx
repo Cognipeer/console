@@ -1,6 +1,8 @@
 'use client';
 
-import { Table, Badge, Text, Tooltip, Box } from '@mantine/core';
+import { Anchor, Badge, Table, Text, Tooltip } from '@mantine/core';
+import EmptyState from '@/components/common/EmptyState';
+import LoadingState from '@/components/common/LoadingState';
 import { formatDuration, formatRelativeTime, formatNumber, resolveStatusColor } from '@/lib/utils/tracingUtils';
 
 interface Session {
@@ -23,19 +25,11 @@ interface SessionTableProps {
 
 export default function SessionTable({ sessions, onRowClick, onThreadClick, loading }: SessionTableProps) {
   if (loading) {
-    return (
-      <Box p="xl" style={{ textAlign: 'center' }}>
-        <Text c="dimmed">Loading sessions...</Text>
-      </Box>
-    );
+    return <LoadingState label="Loading sessions..." minHeight={180} />;
   }
 
   if (!sessions || sessions.length === 0) {
-    return (
-      <Box p="xl" style={{ textAlign: 'center' }}>
-        <Text c="dimmed">No sessions found.</Text>
-      </Box>
-    );
+    return <EmptyState title="No sessions found" description="Tracing sessions will appear here once agents start running." minHeight={180} />;
   }
 
   return (
@@ -71,7 +65,7 @@ export default function SessionTable({ sessions, onRowClick, onThreadClick, load
                 <Text
                   size="xs"
                   c="dimmed"
-                  style={{ fontFamily: 'monospace' }}
+                  ff="monospace"
                   lineClamp={1}
                 >
                   {session.sessionId.substring(0, 8)}...
@@ -81,10 +75,12 @@ export default function SessionTable({ sessions, onRowClick, onThreadClick, load
             <Table.Td>
               {session.threadId ? (
                 <Tooltip label={session.threadId}>
-                  <Text
+                  <Anchor
+                    component="button"
+                    type="button"
                     size="xs"
                     c="blue"
-                    style={{ fontFamily: 'monospace', cursor: 'pointer' }}
+                    ff="monospace"
                     lineClamp={1}
                     onClick={(e) => {
                       e.stopPropagation();
@@ -92,7 +88,7 @@ export default function SessionTable({ sessions, onRowClick, onThreadClick, load
                     }}
                   >
                     {session.threadId.substring(0, 8)}...
-                  </Text>
+                  </Anchor>
                 </Tooltip>
               ) : (
                 <Text size="xs" c="dimmed">—</Text>

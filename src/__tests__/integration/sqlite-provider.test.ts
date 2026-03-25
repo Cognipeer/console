@@ -22,7 +22,7 @@ let userId: string;
 let projectId: string;
 
 beforeAll(async () => {
-  tmpDir = mkdtempSync(path.join(tmpdir(), 'cgate-sqlite-test-'));
+  tmpDir = mkdtempSync(path.join(tmpdir(), 'cognipeer-console-sqlite-test-'));
   db = new SQLiteProvider(tmpDir, 'test_main');
   await db.connect();
 });

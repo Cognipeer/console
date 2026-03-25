@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * ============================================================
- * CognipeerAI Gateway — Demo Tenant Seed Script
+ * Cognipeer Console — Demo Tenant Seed Script
  * ============================================================
  *
  * Creates a fully-populated ENTERPRISE demo tenant so that
@@ -122,7 +122,7 @@ const DEMO_SLUG        = 'demo';
 const DEMO_DB_NAME     = 'tenant_demo';
 const DEMO_EMAIL       = 'demo@cognipeer.ai';
 const DEMO_PASSWORD    = 'Demo1234!';
-const DEMO_COMPANY     = 'CognipeerAI Enterprise Demo';
+const DEMO_COMPANY     = 'Cognipeer Demo';
 const SEED_META_COLL   = '__seed_metadata__';
 
 // ── MongoDB connection ─────────────────────────────────────────────────────────
@@ -2717,7 +2717,7 @@ async function main() {
   const statusOnly   = args.includes('--status');
 
   console.log('\n====================================================');
-  console.log('  CognipeerAI Gateway — Demo Seed Script');
+  console.log('  Cognipeer Console — Demo Seed Script');
   console.log('====================================================\n');
 
   const client = new MongoClient(MONGODB_URI);

@@ -1,6 +1,6 @@
 # Multi-Tenancy
 
-Cognipeer Gateway is a fully multi-tenant platform with complete data isolation per company. Each tenant gets a dedicated database — either a separate SQLite file (default) or a separate MongoDB database.
+Cognipeer Console is a fully multi-tenant platform with complete data isolation per company. Each tenant gets a dedicated database — either a separate SQLite file (default) or a separate MongoDB database.
 
 ## Database Backends
 

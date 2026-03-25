@@ -1,6 +1,6 @@
 openapi: 3.0.3
 info:
-  title: CognipeerAI Gateway Client API
+  title: Cognipeer Console Client API
   version: 1.0.0
   description: |
     Multi-tenant SaaS platform for AI and Agentic services providing LLM services, 
@@ -11,15 +11,19 @@ info:
     Include the token in the Authorization header: `Authorization: Bearer <token>`
     
     ## Base URL
-    Production: `https://api.cognipeer.com/api/client/v1`
-    Development: `http://localhost:3000/api/client/v1`
+    Managed service: `https://api.cognipeer.com/api/client/v1`
+    Self-hosted: `http://localhost:3000/api/client/v1`
+
+    ## License
+    This API surface is documented from the AGPL community edition of Cognipeer Console.
+    Commercial licensing and managed service terms may differ from self-hosted community use.
     
   contact:
-    name: CognipeerAI Support
-    url: https://github.com/Cognipeer/cgate
+    name: Cognipeer Support
+    url: https://github.com/Cognipeer/cognipeer-console
   license:
-    name: Apache-2.0
-    url: https://www.apache.org/licenses/LICENSE-2.0
+    name: AGPL-3.0-only
+    url: https://www.gnu.org/licenses/agpl-3.0.html
 
 servers:
   - url: http://localhost:3000/api/client/v1

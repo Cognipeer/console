@@ -124,7 +124,7 @@ function printNextSteps(envOk, depsOk) {
 
 function main() {
   console.log('\n' + '='.repeat(60));
-  console.log('🚀 CognipeerAI Gateway - Setup Verification');
+  console.log('🚀 Cognipeer Console - Setup Verification');
   console.log('='.repeat(60) + '\n');
   
   const depsOk = checkDependencies();

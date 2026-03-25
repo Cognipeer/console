@@ -20,8 +20,8 @@ const lexendDeca = Lexend_Deca({
 });
 
 export const metadata: Metadata = {
-  title: "CognipeerAI Gateway",
-  description: "AI and Agentic Services Platform",
+  title: "Cognipeer Console",
+  description: "Multi-tenant AI and agentic services platform",
 };
 
 export default function RootLayout({

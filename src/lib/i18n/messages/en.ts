@@ -1,6 +1,6 @@
 export const en = {
   common: {
-    appName: 'CognipeerAI Gateway',
+    appName: 'Cognipeer Console',
     loading: 'Loading',
     error: 'Error',
     success: 'Success',
@@ -9,7 +9,7 @@ export const en = {
     },
   },
   layout: {
-    brandTitle: '🚀 CognipeerAI Gateway',
+    brandTitle: '🚀 Cognipeer Console',
     defaultUser: {
       name: 'Account',
       email: '',
@@ -128,7 +128,7 @@ export const en = {
     hero: {
       emoji: '🚀',
       title: 'Welcome Back',
-      subtitle: 'Sign in to your CognipeerAI Gateway account',
+      subtitle: 'Sign in to your Cognipeer Console account',
     },
     form: {
       email: {
@@ -150,7 +150,7 @@ export const en = {
     hero: {
       emoji: '🚀',
       title: 'Create Account',
-      subtitle: 'Join CognipeerAI Gateway and access powerful AI services',
+      subtitle: 'Join Cognipeer Console and access powerful AI services',
     },
     form: {
       name: {
