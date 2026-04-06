@@ -8,9 +8,9 @@
       "maxAgents": -1,
       "maxAlertRules": 3,
       "maxMemoryStores": 2,
-      "maxMemoriesPerStore": 1000,
+      "maxMemoriesPerStore": 10000,
       "maxStorageBytes": 1073741824,
-      "requestsPerMonth": 1000
+      "requestsPerMonth": 100000
     },
     "STARTER": {
       "maxModels": 10,
