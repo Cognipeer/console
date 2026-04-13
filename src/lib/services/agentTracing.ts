@@ -934,14 +934,7 @@ export class AgentTracingService {
       agent,
       recentSessions,
       analytics: {
-        totals: {
-          sessionsCount: totals.sessionsCount,
-          totalEvents: totals.totalEvents,
-          totalTokens: totals.totalTokens,
-          totalDurationMs: totals.totalDurationMs,
-          averageTokensPerSession: totals.averageTokensPerSession,
-          averageDurationMs: totals.averageDurationMs,
-        },
+        totals,
         tools: {
           totals: toolTotals,
           items: toolItems,
