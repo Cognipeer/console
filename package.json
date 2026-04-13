@@ -96,5 +96,8 @@
     "vite-tsconfig-paths": "^6.1.1",
     "vitepress": "^1.6.4",
     "vitest": "^4.0.18"
+  },
+  "overrides": {
+    "@mapbox/node-pre-gyp": "^2.0.3"
   }
 }
