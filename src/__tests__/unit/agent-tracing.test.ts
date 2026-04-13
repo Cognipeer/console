@@ -263,3 +263,132 @@ describe('AgentTracingService.getSessionDetail', () => {
     expect(db.listAgentTracingEvents).toHaveBeenCalledWith(SESSION_ID, PROJECT_ID);
   });
 });
+
+// ── getDashboardOverview ─────────────────────────────────────────────────────
+
+describe('AgentTracingService.getDashboardOverview', () => {
+  let db: ReturnType<typeof createMockDb>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    db = createMockDb();
+    (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
+  });
+
+  it('aggregates token usage per agent for dashboard reporting', async () => {
+    db.listAgentTracingSessions.mockImplementation(async (filters?: { limit?: number }) => {
+      const sessions = [
+        makeSession({
+          agentName: 'alpha-agent',
+          startedAt: new Date('2025-01-10T10:00:00Z'),
+          status: 'success',
+          totalEvents: 4,
+          totalInputTokens: 100,
+          totalOutputTokens: 50,
+          totalCachedInputTokens: 25,
+          durationMs: 1_000,
+        }),
+        makeSession({
+          sessionId: 'session-2',
+          agentName: 'alpha-agent',
+          startedAt: new Date('2025-01-09T10:00:00Z'),
+          status: 'error',
+          totalEvents: 2,
+          totalInputTokens: 20,
+          totalOutputTokens: 30,
+          totalCachedInputTokens: 5,
+          durationMs: 500,
+        }),
+        makeSession({
+          sessionId: 'session-3',
+          agentName: 'beta-agent',
+          startedAt: new Date('2025-01-11T10:00:00Z'),
+          status: 'success',
+          totalEvents: 1,
+          totalInputTokens: 10,
+          totalOutputTokens: 5,
+          totalCachedInputTokens: 0,
+          durationMs: 200,
+        }),
+      ];
+
+      if (filters?.limit === 10) {
+        return { sessions: sessions.slice(0, 3), total: 3 };
+      }
+
+      return { sessions, total: sessions.length };
+    });
+
+    const result = await AgentTracingService.getDashboardOverview(TENANT_DB, PROJECT_ID);
+
+    expect(result.analytics.totals.totalInputTokens).toBe(130);
+    expect(result.analytics.totals.totalOutputTokens).toBe(85);
+    expect(result.analytics.totals.totalCachedInputTokens).toBe(30);
+    expect(result.analytics.totals.totalTokens).toBe(215);
+
+    expect(result.recentAgents[0].name).toBe('beta-agent');
+    expect(result.recentAgents[1].name).toBe('alpha-agent');
+
+    const alphaAgent = result.analytics.agents.find((item) => item.name === 'alpha-agent');
+    expect(alphaAgent).toBeDefined();
+    expect(alphaAgent?.totalTokens).toBe(200);
+    expect(alphaAgent?.averageTokensPerSession).toBe(100);
+    expect(alphaAgent?.latestStatus).toBe('success');
+
+    expect(result.analytics.agents[0].name).toBe('alpha-agent');
+    expect(result.analytics.agents[1].name).toBe('beta-agent');
+  });
+});
+
+// ── getAgentOverview ─────────────────────────────────────────────────────────
+
+describe('AgentTracingService.getAgentOverview', () => {
+  let db: ReturnType<typeof createMockDb>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    db = createMockDb();
+    (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
+  });
+
+  it('returns input, output, cached, and average token totals for an agent', async () => {
+    db.listAgentTracingSessions.mockResolvedValue({
+      sessions: [
+        makeSession({
+          startedAt: new Date('2025-01-11T10:00:00Z'),
+          totalEvents: 3,
+          totalInputTokens: 100,
+          totalOutputTokens: 40,
+          totalCachedInputTokens: 10,
+          durationMs: 1_000,
+        }),
+        makeSession({
+          sessionId: 'session-2',
+          startedAt: new Date('2025-01-10T10:00:00Z'),
+          totalEvents: 2,
+          totalInputTokens: 50,
+          totalOutputTokens: 10,
+          totalCachedInputTokens: 5,
+          durationMs: 500,
+        }),
+      ],
+      total: 2,
+    });
+
+    const result = await AgentTracingService.getAgentOverview(
+      TENANT_DB,
+      PROJECT_ID,
+      'my-agent',
+    );
+
+    expect(result.analytics.totals.totalInputTokens).toBe(150);
+    expect(result.analytics.totals.totalOutputTokens).toBe(50);
+    expect(result.analytics.totals.totalCachedInputTokens).toBe(15);
+    expect(result.analytics.totals.totalTokens).toBe(200);
+    expect(result.analytics.totals.averageInputTokensPerSession).toBe(75);
+    expect(result.analytics.totals.averageOutputTokensPerSession).toBe(25);
+    expect(result.analytics.totals.averageCachedInputTokensPerSession).toBe(8);
+    expect(result.analytics.totals.averageTokensPerSession).toBe(100);
+    expect(result.analytics.totals.averageDurationMs).toBe(750);
+  });
+});

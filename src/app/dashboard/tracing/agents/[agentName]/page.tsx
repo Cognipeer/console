@@ -70,8 +70,14 @@ interface AgentOverviewResponse {
     totals: {
       sessionsCount: number;
       totalEvents: number;
+      totalInputTokens: number;
+      totalOutputTokens: number;
+      totalCachedInputTokens: number;
       totalTokens: number;
       totalDurationMs: number;
+      averageInputTokensPerSession: number;
+      averageOutputTokensPerSession: number;
+      averageCachedInputTokensPerSession: number;
       averageTokensPerSession: number;
       averageDurationMs: number;
     };
@@ -188,8 +194,14 @@ export default function AgentTracingAgentPage() {
   const totals = analytics?.totals || {
     sessionsCount: 0,
     totalEvents: 0,
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    totalCachedInputTokens: 0,
     totalTokens: 0,
     totalDurationMs: 0,
+    averageInputTokensPerSession: 0,
+    averageOutputTokensPerSession: 0,
+    averageCachedInputTokensPerSession: 0,
     averageTokensPerSession: 0,
     averageDurationMs: 0,
   };
@@ -301,52 +313,90 @@ export default function AgentTracingAgentPage() {
               <Loader size="sm" />
             </Center>
           ) : (
-            <SimpleGrid cols={{ base: 1, sm: 2, md: 4 }} spacing="md">
-              <Paper withBorder radius="md" p="md">
-                <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
-                  Total sessions
-                </Text>
-                <Text fz={28} fw={700} mt={8}>
-                  {formatNumber(totals.sessionsCount)}
-                </Text>
-                <Text size="xs" c="dimmed" mt={4}>
-                  All-time: {formatNumber(agent?.sessionsCount || 0)}
-                </Text>
-              </Paper>
-              <Paper withBorder radius="md" p="md">
-                <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
-                  Total events
-                </Text>
-                <Text fz={28} fw={700} mt={8}>
-                  {formatNumber(totals.totalEvents)}
-                </Text>
-                <Text size="xs" c="dimmed" mt={4}>
-                  Avg duration: {formatDuration(totals.averageDurationMs)}
-                </Text>
-              </Paper>
-              <Paper withBorder radius="md" p="md">
-                <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
-                  Total tokens
-                </Text>
-                <Text fz={28} fw={700} mt={8}>
-                  {formatNumber(totals.totalTokens)}
-                </Text>
-                <Text size="xs" c="dimmed" mt={4}>
-                  Avg per session: {formatNumber(totals.averageTokensPerSession)}
-                </Text>
-              </Paper>
-              <Paper withBorder radius="md" p="md">
-                <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
-                  Tool error rate
-                </Text>
-                <Text fz={28} fw={700} mt={8}>
-                  {formatPercent(toolTotals.errorRate)}
-                </Text>
-                <Text size="xs" c="dimmed" mt={4}>
-                  Total calls: {formatNumber(toolTotals.totalCalls)}
-                </Text>
-              </Paper>
-            </SimpleGrid>
+            <Stack gap="md">
+              <SimpleGrid cols={{ base: 1, sm: 2, md: 4 }} spacing="md">
+                <Paper withBorder radius="md" p="md">
+                  <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
+                    Total sessions
+                  </Text>
+                  <Text fz={28} fw={700} mt={8}>
+                    {formatNumber(totals.sessionsCount)}
+                  </Text>
+                  <Text size="xs" c="dimmed" mt={4}>
+                    All-time: {formatNumber(agent?.sessionsCount || 0)}
+                  </Text>
+                </Paper>
+                <Paper withBorder radius="md" p="md">
+                  <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
+                    Total events
+                  </Text>
+                  <Text fz={28} fw={700} mt={8}>
+                    {formatNumber(totals.totalEvents)}
+                  </Text>
+                  <Text size="xs" c="dimmed" mt={4}>
+                    Avg duration: {formatDuration(totals.averageDurationMs)}
+                  </Text>
+                </Paper>
+                <Paper withBorder radius="md" p="md">
+                  <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
+                    Total tokens
+                  </Text>
+                  <Text fz={28} fw={700} mt={8}>
+                    {formatNumber(totals.totalTokens)}
+                  </Text>
+                  <Text size="xs" c="dimmed" mt={4}>
+                    Avg per session: {formatNumber(totals.averageTokensPerSession)}
+                  </Text>
+                </Paper>
+                <Paper withBorder radius="md" p="md">
+                  <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
+                    Tool error rate
+                  </Text>
+                  <Text fz={28} fw={700} mt={8}>
+                    {formatPercent(toolTotals.errorRate)}
+                  </Text>
+                  <Text size="xs" c="dimmed" mt={4}>
+                    Total calls: {formatNumber(toolTotals.totalCalls)}
+                  </Text>
+                </Paper>
+              </SimpleGrid>
+
+              <SimpleGrid cols={{ base: 1, sm: 3 }} spacing="md">
+                <Paper withBorder radius="md" p="md">
+                  <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
+                    Input tokens
+                  </Text>
+                  <Text fz={24} fw={700} mt={8}>
+                    {formatNumber(totals.totalInputTokens)}
+                  </Text>
+                  <Text size="xs" c="dimmed" mt={4}>
+                    Avg per session: {formatNumber(totals.averageInputTokensPerSession)}
+                  </Text>
+                </Paper>
+                <Paper withBorder radius="md" p="md">
+                  <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
+                    Output tokens
+                  </Text>
+                  <Text fz={24} fw={700} mt={8}>
+                    {formatNumber(totals.totalOutputTokens)}
+                  </Text>
+                  <Text size="xs" c="dimmed" mt={4}>
+                    Avg per session: {formatNumber(totals.averageOutputTokensPerSession)}
+                  </Text>
+                </Paper>
+                <Paper withBorder radius="md" p="md">
+                  <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
+                    Cached input
+                  </Text>
+                  <Text fz={24} fw={700} mt={8}>
+                    {formatNumber(totals.totalCachedInputTokens)}
+                  </Text>
+                  <Text size="xs" c="dimmed" mt={4}>
+                    Cache share: {formatPercent(totals.totalInputTokens > 0 ? totals.totalCachedInputTokens / totals.totalInputTokens : 0)}
+                  </Text>
+                </Paper>
+              </SimpleGrid>
+            </Stack>
           )}
         </Stack>
       </Card>

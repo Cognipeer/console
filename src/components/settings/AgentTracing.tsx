@@ -262,11 +262,19 @@ export default function AgentTracing() {
                 <SimpleGrid cols={{ base: 1, sm: 2, md: 3 }} spacing="sm">
                   {dashboardData.recentAgents.slice(0, 6).map((agent) => (
                     <Paper key={agent.name} withBorder p="sm" radius="md">
-                      <Text size="sm" fw={500} lineClamp={1}>
-                        {agent.label || agent.name}
+                      <Group justify="space-between" align="flex-start" gap="xs">
+                        <Text size="sm" fw={500} lineClamp={1}>
+                          {agent.label || agent.name}
+                        </Text>
+                        <Badge size="xs" variant="light" color="blue">
+                          {formatNumber(agent.totalTokens)} tokens
+                        </Badge>
+                      </Group>
+                      <Text size="xs" c="dimmed">
+                        {formatNumber(agent.sessionsCount)} sessions
                       </Text>
                       <Text size="xs" c="dimmed">
-                        {agent.sessionsCount} sessions
+                        Avg {formatNumber(agent.averageTokensPerSession)} / session
                       </Text>
                     </Paper>
                   ))}

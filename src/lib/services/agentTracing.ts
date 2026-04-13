@@ -29,11 +29,32 @@ export interface AgentTracingSessionSummary {
   totalTokens: number;
 }
 
-export interface AgentTracingAgentSummary {
+export interface AgentTracingTokenSummary {
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCachedInputTokens: number;
+  totalTokens: number;
+  averageInputTokensPerSession: number;
+  averageOutputTokensPerSession: number;
+  averageCachedInputTokensPerSession: number;
+  averageTokensPerSession: number;
+}
+
+export interface AgentTracingAggregateTotals extends AgentTracingTokenSummary {
+  sessionsCount: number;
+  totalEvents: number;
+  totalDurationMs: number;
+  averageDurationMs: number;
+}
+
+export interface AgentTracingAgentSummary extends AgentTracingTokenSummary {
   name: string;
   label: string;
   latestSessionAt?: Date;
+  latestStatus?: string;
   sessionsCount: number;
+  totalEvents: number;
+  averageDurationMs: number;
 }
 
 export interface DashboardOverview {
@@ -41,14 +62,7 @@ export interface DashboardOverview {
   recentAgents: AgentTracingAgentSummary[];
   recentAgentsTotal: number;
   analytics: {
-    totals: {
-      sessionsCount: number;
-      totalEvents: number;
-      totalTokens: number;
-      totalDurationMs: number;
-      averageTokensPerSession: number;
-      averageDurationMs: number;
-    };
+    totals: AgentTracingAggregateTotals;
     tools: {
       totals: {
         totalCalls: number;
@@ -72,6 +86,7 @@ export interface DashboardOverview {
       model: string;
       sessionsCount: number;
     }>;
+    agents: AgentTracingAgentSummary[];
     daily: Array<{
       date: string;
       sessionsCount: number;
@@ -79,6 +94,80 @@ export interface DashboardOverview {
       totalTokens: number;
       averageDurationMs: number;
     }>;
+  };
+}
+
+type SessionMetricsSource = {
+  totalEvents?: number;
+  totalInputTokens?: number;
+  totalOutputTokens?: number;
+  totalCachedInputTokens?: number;
+  durationMs?: number;
+};
+
+type AgentSummaryAccumulator = AgentTracingAgentSummary & {
+  totalDurationMs: number;
+};
+
+function getSessionTokenSummary(session: SessionMetricsSource) {
+  const totalInputTokens = session.totalInputTokens || 0;
+  const totalOutputTokens = session.totalOutputTokens || 0;
+  const totalCachedInputTokens = session.totalCachedInputTokens || 0;
+
+  return {
+    totalEvents: session.totalEvents || 0,
+    totalInputTokens,
+    totalOutputTokens,
+    totalCachedInputTokens,
+    totalTokens: totalInputTokens + totalOutputTokens,
+    totalDurationMs: session.durationMs || 0,
+  };
+}
+
+function buildAggregateTotals(sessions: SessionMetricsSource[]): AgentTracingAggregateTotals {
+  const totals = sessions.reduce(
+    (aggregate, session) => {
+      const sessionSummary = getSessionTokenSummary(session);
+
+      aggregate.totalEvents += sessionSummary.totalEvents;
+      aggregate.totalInputTokens += sessionSummary.totalInputTokens;
+      aggregate.totalOutputTokens += sessionSummary.totalOutputTokens;
+      aggregate.totalCachedInputTokens += sessionSummary.totalCachedInputTokens;
+      aggregate.totalTokens += sessionSummary.totalTokens;
+      aggregate.totalDurationMs += sessionSummary.totalDurationMs;
+
+      return aggregate;
+    },
+    {
+      totalEvents: 0,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalCachedInputTokens: 0,
+      totalTokens: 0,
+      totalDurationMs: 0,
+    },
+  );
+
+  const sessionsCount = sessions.length;
+
+  return {
+    sessionsCount,
+    totalEvents: totals.totalEvents,
+    totalInputTokens: totals.totalInputTokens,
+    totalOutputTokens: totals.totalOutputTokens,
+    totalCachedInputTokens: totals.totalCachedInputTokens,
+    totalTokens: totals.totalTokens,
+    totalDurationMs: totals.totalDurationMs,
+    averageInputTokensPerSession:
+      sessionsCount > 0 ? Math.round(totals.totalInputTokens / sessionsCount) : 0,
+    averageOutputTokensPerSession:
+      sessionsCount > 0 ? Math.round(totals.totalOutputTokens / sessionsCount) : 0,
+    averageCachedInputTokensPerSession:
+      sessionsCount > 0 ? Math.round(totals.totalCachedInputTokens / sessionsCount) : 0,
+    averageTokensPerSession:
+      sessionsCount > 0 ? Math.round(totals.totalTokens / sessionsCount) : 0,
+    averageDurationMs:
+      sessionsCount > 0 ? Math.round(totals.totalDurationMs / sessionsCount) : 0,
   };
 }
 
@@ -240,8 +329,14 @@ export class AgentTracingService {
             totals: {
               sessionsCount: 0,
               totalEvents: 0,
+              totalInputTokens: 0,
+              totalOutputTokens: 0,
+              totalCachedInputTokens: 0,
               totalTokens: 0,
               totalDurationMs: 0,
+              averageInputTokensPerSession: 0,
+              averageOutputTokensPerSession: 0,
+              averageCachedInputTokensPerSession: 0,
               averageTokensPerSession: 0,
               averageDurationMs: 0,
             },
@@ -256,36 +351,14 @@ export class AgentTracingService {
             },
             statuses: [],
             models: [],
+            agents: [],
             daily: [],
           },
         };
       }
 
       // Calculate totals
-      const totals = {
-        sessionsCount: sessions.length,
-        totalEvents: sessions.reduce((sum, s) => sum + (s.totalEvents || 0), 0),
-        totalTokens: sessions.reduce(
-          (sum, s) =>
-            sum + ((s.totalInputTokens || 0) + (s.totalOutputTokens || 0)),
-          0,
-        ),
-        totalDurationMs: sessions.reduce(
-          (sum, s) => sum + (s.durationMs || 0),
-          0,
-        ),
-        averageTokensPerSession: 0,
-        averageDurationMs: 0,
-      };
-
-      if (totals.sessionsCount > 0) {
-        totals.averageTokensPerSession = Math.round(
-          totals.totalTokens / totals.sessionsCount,
-        );
-        totals.averageDurationMs = Math.round(
-          totals.totalDurationMs / totals.sessionsCount,
-        );
-      }
+      const totals = buildAggregateTotals(sessions);
 
       // Tool analytics
       const toolMap = new Map<
@@ -361,30 +434,86 @@ export class AgentTracingService {
         .sort((a, b) => b.sessionsCount - a.sessionsCount);
 
       // Recent agents
-      const agentMap = new Map<string, AgentTracingAgentSummary>();
+      const agentMap = new Map<string, AgentSummaryAccumulator>();
       sessions.forEach((session) => {
         const agentName = session.agentName || 'unknown';
+        const sessionSummary = getSessionTokenSummary(session);
+
         if (!agentMap.has(agentName)) {
           agentMap.set(agentName, {
             name: agentName,
             label: agentName,
             latestSessionAt: session.startedAt,
+            latestStatus: session.status,
             sessionsCount: 0,
+            totalEvents: 0,
+            totalInputTokens: 0,
+            totalOutputTokens: 0,
+            totalCachedInputTokens: 0,
+            totalTokens: 0,
+            averageInputTokensPerSession: 0,
+            averageOutputTokensPerSession: 0,
+            averageCachedInputTokensPerSession: 0,
+            averageTokensPerSession: 0,
+            averageDurationMs: 0,
+            totalDurationMs: 0,
           });
         }
         const agent = agentMap.get(agentName)!;
         agent.sessionsCount++;
+        agent.totalEvents += sessionSummary.totalEvents;
+        agent.totalInputTokens += sessionSummary.totalInputTokens;
+        agent.totalOutputTokens += sessionSummary.totalOutputTokens;
+        agent.totalCachedInputTokens += sessionSummary.totalCachedInputTokens;
+        agent.totalTokens += sessionSummary.totalTokens;
+        agent.totalDurationMs += sessionSummary.totalDurationMs;
         if (!agent.latestSessionAt) {
           agent.latestSessionAt = session.startedAt;
+          agent.latestStatus = session.status;
         } else if (session.startedAt && session.startedAt > agent.latestSessionAt) {
           agent.latestSessionAt = session.startedAt;
+          agent.latestStatus = session.status;
+        } else if (!agent.latestStatus && session.status) {
+          agent.latestStatus = session.status;
         }
       });
 
+      const agentSummaries = Array.from(agentMap.values()).map((agent) => ({
+        ...agent,
+        averageInputTokensPerSession:
+          agent.sessionsCount > 0
+            ? Math.round(agent.totalInputTokens / agent.sessionsCount)
+            : 0,
+        averageOutputTokensPerSession:
+          agent.sessionsCount > 0
+            ? Math.round(agent.totalOutputTokens / agent.sessionsCount)
+            : 0,
+        averageCachedInputTokensPerSession:
+          agent.sessionsCount > 0
+            ? Math.round(agent.totalCachedInputTokens / agent.sessionsCount)
+            : 0,
+        averageTokensPerSession:
+          agent.sessionsCount > 0
+            ? Math.round(agent.totalTokens / agent.sessionsCount)
+            : 0,
+        averageDurationMs:
+          agent.sessionsCount > 0
+            ? Math.round(agent.totalDurationMs / agent.sessionsCount)
+            : 0,
+      }));
+
       const toTime = (value?: Date) => (value ? value.getTime() : 0);
-      const recentAgents = Array.from(agentMap.values())
+      const recentAgents = agentSummaries
         .sort((a, b) => toTime(b.latestSessionAt) - toTime(a.latestSessionAt))
         .slice(0, 20);
+      const agentAnalytics = agentSummaries
+        .slice()
+        .sort(
+          (a, b) =>
+            b.totalTokens - a.totalTokens
+            || b.sessionsCount - a.sessionsCount
+            || a.name.localeCompare(b.name),
+        );
 
       // Daily trend (last 30 days window)
       const dailyMap = new Map<
@@ -444,20 +573,14 @@ export class AgentTracingService {
         recentAgents,
         recentAgentsTotal: agentMap.size,
         analytics: {
-          totals: {
-            sessionsCount: totals.sessionsCount,
-            totalEvents: totals.totalEvents,
-            totalTokens: totals.totalTokens,
-            totalDurationMs: totals.totalDurationMs,
-            averageTokensPerSession: totals.averageTokensPerSession,
-            averageDurationMs: totals.averageDurationMs,
-          },
+          totals,
           tools: {
             totals: toolTotals,
             items: toolItems,
           },
           statuses,
           models,
+          agents: agentAnalytics,
           daily,
         },
       };
@@ -627,8 +750,14 @@ export class AgentTracingService {
           totals: {
             sessionsCount: 0,
             totalEvents: 0,
+            totalInputTokens: 0,
+            totalOutputTokens: 0,
+            totalCachedInputTokens: 0,
             totalTokens: 0,
             totalDurationMs: 0,
+            averageInputTokensPerSession: 0,
+            averageOutputTokensPerSession: 0,
+            averageCachedInputTokensPerSession: 0,
             averageTokensPerSession: 0,
             averageDurationMs: 0,
           },
@@ -657,30 +786,7 @@ export class AgentTracingService {
           new Date(a.startedAt || 0).getTime(),
       );
 
-    const totals = {
-      sessionsCount: sessions.length,
-      totalEvents: sessions.reduce((sum, s) => sum + (s.totalEvents || 0), 0),
-      totalTokens: sessions.reduce(
-        (sum, s) =>
-          sum + ((s.totalInputTokens || 0) + (s.totalOutputTokens || 0)),
-        0,
-      ),
-      totalDurationMs: sessions.reduce(
-        (sum, s) => sum + (s.durationMs || 0),
-        0,
-      ),
-      averageTokensPerSession: 0,
-      averageDurationMs: 0,
-    };
-
-    if (totals.sessionsCount > 0) {
-      totals.averageTokensPerSession = Math.round(
-        totals.totalTokens / totals.sessionsCount,
-      );
-      totals.averageDurationMs = Math.round(
-        totals.totalDurationMs / totals.sessionsCount,
-      );
-    }
+    const totals = buildAggregateTotals(sessions);
 
     const recentSessions = sortedSessions.slice(0, 10).map((s) => ({
       sessionId: s.sessionId,

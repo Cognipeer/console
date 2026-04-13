@@ -50,10 +50,7 @@ import type { AgentTracingAgentSummary, DashboardOverview } from '@/lib/services
 
 dayjs.extend(relativeTime);
 
-type RecentAgentItem = AgentTracingAgentSummary & { latestStatus?: string };
-type DashboardData = Omit<DashboardOverview, 'recentAgents'> & {
-  recentAgents: RecentAgentItem[];
-};
+type DashboardData = DashboardOverview;
 
 export default function AgentTracingPage() {
   const router = useRouter();
@@ -149,6 +146,7 @@ export default function AgentTracingPage() {
     errorRate: 0,
   };
   const toolItems = analytics?.tools?.items || [];
+  const agentAnalytics = analytics?.agents || [];
   const dailyRows = (analytics?.daily || []).slice(-7);
 
   return (
@@ -344,7 +342,7 @@ export default function AgentTracingPage() {
         </Box>
 
         {/* Status, Models, Tools Breakdown */}
-        <SimpleGrid cols={{ base: 1, md: 3 }} spacing="md">
+        <SimpleGrid cols={{ base: 1, md: 2, xl: 4 }} spacing="md">
           <Paper withBorder p="md" radius="lg">
             <Group gap="sm" mb="md">
               <ThemeIcon size={32} radius="md" variant="light" color="teal">
@@ -430,6 +428,37 @@ export default function AgentTracingPage() {
               )}
             </Stack>
           </Paper>
+
+          <Paper withBorder p="md" radius="lg">
+            <Group gap="sm" mb="md">
+              <ThemeIcon size={32} radius="md" variant="light" color="blue">
+                <IconRobot size={16} />
+              </ThemeIcon>
+              <Text fw={600}>Top Token Consumers</Text>
+            </Group>
+            <Stack gap={8}>
+              {agentAnalytics.slice(0, 6).map((item: AgentTracingAgentSummary) => (
+                <Group key={item.name} justify="space-between" align="center">
+                  <Stack gap={0}>
+                    <Text size="sm" fw={500} lineClamp={1}>
+                      {item.label || item.name}
+                    </Text>
+                    <Text size="xs" c="dimmed">
+                      {formatNumber(item.sessionsCount)} sessions · avg {formatNumber(item.averageTokensPerSession)} tokens
+                    </Text>
+                  </Stack>
+                  <Badge size="sm" variant="light" color="blue">
+                    {formatNumber(item.totalTokens)}
+                  </Badge>
+                </Group>
+              ))}
+              {agentAnalytics.length === 0 && (
+                <Text size="sm" c="dimmed">
+                  No agent-level token data available.
+                </Text>
+              )}
+            </Stack>
+          </Paper>
         </SimpleGrid>
       </Paper>
 
@@ -491,16 +520,21 @@ export default function AgentTracingPage() {
                         </Badge>
                       )}
                     </Group>
-                    <Group gap="lg">
-                      <Text size="xs" c="dimmed">
-                        <Text component="span" fw={500} c="dark">{formatNumber(item.sessionsCount)}</Text> sessions
-                      </Text>
-                      {item.latestSessionAt && (
+                    <Stack gap={4}>
+                      <Group gap="lg" wrap="wrap">
                         <Text size="xs" c="dimmed">
-                          Last: {dayjs(item.latestSessionAt).fromNow()}
+                          <Text component="span" fw={500} c="dark">{formatNumber(item.sessionsCount)}</Text> sessions
                         </Text>
-                      )}
-                    </Group>
+                        {item.latestSessionAt && (
+                          <Text size="xs" c="dimmed">
+                            Last: {dayjs(item.latestSessionAt).fromNow()}
+                          </Text>
+                        )}
+                      </Group>
+                      <Text size="xs" c="dimmed">
+                        <Text component="span" fw={500} c="dark">{formatNumber(item.totalTokens)}</Text> tokens · avg {formatNumber(item.averageTokensPerSession)}/session
+                      </Text>
+                    </Stack>
                   </Stack>
                 </Paper>
               );
