@@ -109,6 +109,15 @@ type AgentSummaryAccumulator = AgentTracingAgentSummary & {
   totalDurationMs: number;
 };
 
+type AggregateTotalsAccumulator = {
+  totalEvents: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCachedInputTokens: number;
+  totalTokens: number;
+  totalDurationMs: number;
+};
+
 function getSessionTokenSummary(session: SessionMetricsSource) {
   const totalInputTokens = session.totalInputTokens || 0;
   const totalOutputTokens = session.totalOutputTokens || 0;
@@ -125,7 +134,7 @@ function getSessionTokenSummary(session: SessionMetricsSource) {
 }
 
 function buildAggregateTotals(sessions: SessionMetricsSource[]): AgentTracingAggregateTotals {
-  const totals = sessions.reduce(
+  const totals = sessions.reduce<AggregateTotalsAccumulator>(
     (aggregate, session) => {
       const sessionSummary = getSessionTokenSummary(session);
 

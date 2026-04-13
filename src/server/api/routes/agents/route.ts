@@ -1,3 +1,4 @@
+import { type IAgent } from '@/lib/database';
 import { NextResponse, type NextRequest } from '@/server/api/http';
 import {
   createAgentRecord,
@@ -26,7 +27,11 @@ export async function GET(request: NextRequest) {
     });
 
     const search = request.nextUrl.searchParams.get('search') || undefined;
-    const status = (request.nextUrl.searchParams.get('status') as any) || undefined;
+    const rawStatus = request.nextUrl.searchParams.get('status');
+    const status: IAgent['status'] | undefined =
+      rawStatus === 'active' || rawStatus === 'inactive' || rawStatus === 'draft'
+        ? rawStatus
+        : undefined;
 
     const agents = await listAgents(tenantDbName, {
       projectId,

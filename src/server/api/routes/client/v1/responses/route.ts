@@ -141,7 +141,8 @@ export const POST = withRequestContext(async (request: NextRequest) => {
     });
 
     // Return Responses API shape (strip internal fields)
-    const { _conversation_messages, ...responseBody } = result;
+    const responseBody = { ...result };
+    delete responseBody._conversation_messages;
     return NextResponse.json(responseBody);
   } catch (error) {
     if (error instanceof ApiTokenAuthError) {

@@ -17,15 +17,38 @@ interface OramaSettings {
   defaultDimension?: number;
 }
 
-type OramaDb = {
-  insert: (db: OramaDb, document: Record<string, unknown>) => Promise<void>;
-  insertMultiple: (db: OramaDb, documents: Record<string, unknown>[]) => Promise<void>;
-  remove: (db: OramaDb, id: string) => Promise<boolean>;
-  search: (
-    db: OramaDb,
-    params: { mode: string; vector: { value: number[]; property: string }; limit?: number; similarity?: number },
-  ) => Promise<{ hits: Array<{ id: string; score: number; document: Record<string, unknown> }> }>;
-  create: (schema: Record<string, unknown>) => Promise<OramaDb>;
+type OramaStore = Record<string, unknown>;
+
+type OramaVectorSearchParams = {
+  mode: 'vector';
+  vector: { value: number[]; property: string };
+  limit?: number;
+  similarity?: number;
+};
+
+type OramaListSearchParams = {
+  mode: 'fulltext';
+  term: string;
+  limit?: number;
+  offset?: number;
+};
+
+type OramaSearchHit = {
+  id: string;
+  score: number;
+  document: Record<string, unknown>;
+};
+
+type OramaSearchResult = {
+  hits: OramaSearchHit[];
+  count?: number;
+};
+
+type OramaModule = {
+  create: (options: { schema: Record<string, unknown> }) => Promise<OramaStore>;
+  insertMultiple: (db: OramaStore, documents: Record<string, unknown>[]) => Promise<void>;
+  remove: (db: OramaStore, id: string) => Promise<boolean>;
+  search: (db: OramaStore, params: OramaVectorSearchParams | OramaListSearchParams) => Promise<OramaSearchResult>;
 };
 
 const DEFAULT_DIMENSIONS = 1536;
@@ -67,25 +90,24 @@ export const OramaVectorProviderContract: ProviderContract<
     supportsQuery: true,
     supportsDelete: true,
   },
-  async createRuntime({ credentials: _credentials, settings, providerKey, logger }) {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/ban-ts-comment
-    // @ts-ignore – @orama/orama is an optional peer dependency
-    const orama = await import('@orama/orama') as any;
-    const { create, insert, insertMultiple, remove, search } = orama;
+  async createRuntime({ settings, providerKey, logger }) {
+    // @ts-expect-error -- @orama/orama is an optional peer dependency
+    const orama = await import('@orama/orama') as unknown as OramaModule;
+    const { create, insertMultiple, remove, search } = orama;
 
     const dimensions = Number(settings.defaultDimension) > 0
       ? Number(settings.defaultDimension)
       : DEFAULT_DIMENSIONS;
 
     // In-memory store: externalId → { db, handle }
-    const store = new Map<string, { db: OramaDb; handle: VectorIndexHandle }>();
+    const store = new Map<string, { db: OramaStore; handle: VectorIndexHandle }>();
 
     const runtime: VectorProviderRuntime = {
       async createIndex(input: CreateVectorIndexInput): Promise<VectorIndexHandle> {
         const dim = input.dimension || dimensions;
         const metric = input.metric ?? 'cosine';
 
-        const db: OramaDb = await create({
+        const db = await create({
           schema: {
             id: 'string',
             vector: `vector[${dim}]`,
@@ -168,11 +190,9 @@ export const OramaVectorProviderContract: ProviderContract<
         if (!entry) throw new Error(`Orama index "${handle.externalId}" not found. Call createIndex first.`);
         const limit = input?.limit ?? 100;
         const offset = input?.cursor ? parseInt(input.cursor, 10) : 0;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const result = await search(entry.db, { mode: 'fulltext', term: '', limit, offset } as any);
+        const result = await search(entry.db, { mode: 'fulltext', term: '', limit, offset });
         const total: number = result.count ?? 0;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const items = (result.hits ?? []).map((hit: any) => {
+        const items = (result.hits ?? []).map((hit: OramaSearchHit) => {
           let metadata: Record<string, unknown> = {};
           try { if (hit.document?.metadata) metadata = JSON.parse(hit.document.metadata as string); } catch {}
           const values = Array.isArray(hit.document?.vector) ? hit.document.vector as number[] : [];

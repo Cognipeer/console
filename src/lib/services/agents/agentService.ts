@@ -6,7 +6,13 @@
  */
 
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentVersion } from '@/lib/database';
+import type {
+    AgentInvokeResult as AgentSdkInvokeResult,
+    Message as AgentSdkMessage,
+    ToolInterface as AgentSdkToolInterface,
+    TraceSessionFile,
+} from '@cognipeer/agent-sdk';
+import { getDatabase, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentTracingEvent, type IAgentTracingSession, type IAgentVersion } from '@/lib/database';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
 import { queryRag } from '@/lib/services/rag/ragService';
@@ -15,6 +21,21 @@ import { getMcpServerByKey, executeMcpTool } from '@/lib/services/mcp';
 import { getToolByKey, executeToolAction, logToolRequest } from '@/lib/services/tools';
 
 const logger = createLogger('agents');
+
+type InternalTraceEvent = TraceSessionFile['events'][number] & {
+    toolName?: string;
+    usage?: Record<string, unknown>;
+    metadata?: Record<string, unknown> & { usage?: Record<string, unknown> };
+    sections?: unknown[];
+    data?: { sections?: unknown[] };
+    modelNames?: string[];
+    bytesIn?: number | null;
+    bytesOut?: number | null;
+};
+
+type InternalTraceSession = Omit<TraceSessionFile, 'events'> & {
+    events: InternalTraceEvent[];
+};
 
 // ── Tool Bridge ─────────────────────────────────────────────────────
 
@@ -31,10 +52,10 @@ async function buildBoundTools(
     bindings: { source: string; sourceKey: string; toolNames: string[] }[] | undefined,
     createToolFn: typeof import('@cognipeer/agent-sdk').createTool,
     zod: typeof import('zod').z,
-): Promise<any[]> {
+): Promise<AgentSdkToolInterface[]> {
     if (!bindings || bindings.length === 0) return [];
 
-    const tools: any[] = [];
+    const tools: AgentSdkToolInterface[] = [];
 
     for (const binding of bindings) {
         if (binding.source === 'tool') {
@@ -141,7 +162,7 @@ async function createInternalTracingSink(
     const { customSink } = await import('@cognipeer/agent-sdk');
 
     return customSink({
-        onSession: async (session: any) => {
+        onSession: async (session: InternalTraceSession) => {
             try {
                 const db = await getDatabase();
                 await db.switchToTenant(tenantDbName);
@@ -160,31 +181,31 @@ async function createInternalTracingSink(
                 }
                 if (session?.agent?.model) modelsUsed.add(session.agent.model);
 
-                const sessionDoc = {
+                const sessionDoc: Omit<IAgentTracingSession, '_id' | 'createdAt' | 'updatedAt'> = {
                     sessionId: session.sessionId,
                     threadId: session.threadId,
                     tenantId,
                     projectId,
-                    agent: session.agent || {},
-                    agentName: session.agent?.name || null,
-                    agentVersion: session.agent?.version || null,
-                    agentModel: session.agent?.model || null,
-                    config: session.config || {},
-                    summary: session.summary || {},
+                    agent: session.agent ?? {},
+                    agentName: session.agent?.name ?? undefined,
+                    agentVersion: session.agent?.version ?? undefined,
+                    agentModel: session.agent?.model ?? undefined,
+                    config: session.config ?? {},
+                    summary: session.summary ?? {},
                     status: session.status || 'unknown',
                     startedAt: session.startedAt ? new Date(session.startedAt) : new Date(),
                     endedAt: session.endedAt ? new Date(session.endedAt) : undefined,
-                    durationMs: session.durationMs || null,
-                    errors: session.errors || [],
+                    durationMs: session.durationMs ?? undefined,
+                    errors: session.errors ?? [],
                     modelsUsed: Array.from(modelsUsed),
                     toolsUsed: Array.from(toolsUsed),
-                    eventCounts: session.summary?.eventCounts || {},
+                    eventCounts: session.summary?.eventCounts ?? {},
                     totalEvents: events.length,
-                    totalInputTokens: session.summary?.totalInputTokens || 0,
-                    totalOutputTokens: session.summary?.totalOutputTokens || 0,
-                    totalCachedInputTokens: session.summary?.totalCachedInputTokens || 0,
-                    totalBytesIn: session.summary?.totalBytesIn || null,
-                    totalBytesOut: session.summary?.totalBytesOut || null,
+                    totalInputTokens: session.summary?.totalInputTokens ?? 0,
+                    totalOutputTokens: session.summary?.totalOutputTokens ?? 0,
+                    totalCachedInputTokens: session.summary?.totalCachedInputTokens ?? 0,
+                    totalBytesIn: session.summary?.totalBytesIn ?? undefined,
+                    totalBytesOut: session.summary?.totalBytesOut ?? undefined,
                 };
 
                 // Upsert session
@@ -198,57 +219,61 @@ async function createInternalTracingSink(
                 // Replace events
                 await db.deleteAgentTracingEvents(session.sessionId, projectId);
                 for (const event of events) {
-                    const sections = Array.isArray(event?.sections)
+                    const sections = (Array.isArray(event?.sections)
                         ? event.sections
                         : Array.isArray(event?.data?.sections)
                             ? event.data.sections
-                            : [];
+                            : []) as Array<Record<string, unknown>>;
 
                     const usage = event?.usage || event?.metadata?.usage || {};
-                    const inputTokens =
-                        event?.inputTokens ?? usage?.inputTokens ?? usage?.input_tokens ?? null;
-                    const outputTokens =
-                        event?.outputTokens ?? usage?.outputTokens ?? usage?.output_tokens ?? null;
-                    const cachedInputTokens =
-                        event?.cachedInputTokens ??
-                        usage?.cachedInputTokens ??
-                        usage?.cached_input_tokens ??
-                        usage?.cacheReadInputTokens ??
-                        usage?.cache_read_input_tokens ??
-                        null;
+                        const inputTokens = toOptionalNumber(
+                            event?.inputTokens ?? usage?.inputTokens ?? usage?.input_tokens,
+                        );
+                        const outputTokens = toOptionalNumber(
+                            event?.outputTokens ?? usage?.outputTokens ?? usage?.output_tokens,
+                        );
+                        const cachedInputTokens = toOptionalNumber(
+                            event?.cachedInputTokens ??
+                            usage?.cachedInputTokens ??
+                            usage?.cached_input_tokens ??
+                            usage?.cacheReadInputTokens ??
+                            usage?.cache_read_input_tokens,
+                        );
 
-                    await db.createAgentTracingEvent({
+                    const eventDoc: Omit<IAgentTracingEvent, '_id' | 'createdAt'> = {
                         sessionId: session.sessionId,
                         tenantId,
                         projectId,
-                        id: event.id || null,
-                        type: event.type || null,
-                        label: event.label || null,
-                        sequence: event.sequence || 0,
+                        id: event.id ?? undefined,
+                        type: event.type ?? undefined,
+                        label: event.label ?? undefined,
+                        sequence: event.sequence ?? 0,
                         timestamp: event.timestamp ? new Date(event.timestamp) : new Date(),
-                        status: event.status || null,
-                        actor: event.actor || {},
-                        metadata: event.metadata || {},
+                        status: event.status ?? undefined,
+                        actor: event.actor ?? {},
+                        metadata: event.metadata ?? {},
                         sections,
-                        modelNames: event.modelNames || [],
-                        model: event.model || null,
-                        error: event.error || null,
-                        durationMs: event.durationMs || null,
-                        actorName: event.actor?.name || null,
-                        actorRole: event.actor?.role || event.actor?.scope || null,
+                        modelNames: event.modelNames ?? [],
+                        model: event.model ?? undefined,
+                        error: event.error ?? undefined,
+                        durationMs: event.durationMs ?? undefined,
+                        actorName: event.actor?.name ?? undefined,
+                        actorRole: event.actor?.role ?? event.actor?.scope ?? undefined,
                         toolName:
-                            event.toolName ||
-                            (event.actor?.scope === 'tool' ? event.actor?.name : null),
-                        toolExecutionId: event.toolExecutionId || null,
+                            event.toolName ??
+                            (event.actor?.scope === 'tool' ? event.actor?.name : undefined),
+                        toolExecutionId: event.toolExecutionId ?? undefined,
                         inputTokens,
                         outputTokens,
                         cachedInputTokens,
-                        totalTokens: event.totalTokens || null,
-                        bytesIn: event.bytesIn || null,
-                        bytesOut: event.bytesOut || null,
-                        requestBytes: event.requestBytes || null,
-                        responseBytes: event.responseBytes || null,
-                    });
+                        totalTokens: event.totalTokens ?? undefined,
+                        bytesIn: event.bytesIn ?? undefined,
+                        bytesOut: event.bytesOut ?? undefined,
+                        requestBytes: event.requestBytes ?? undefined,
+                        responseBytes: event.responseBytes ?? undefined,
+                    };
+
+                    await db.createAgentTracingEvent(eventDoc);
                 }
 
                 logger.info('Internal tracing session saved', {
@@ -262,6 +287,15 @@ async function createInternalTracingSink(
         },
     });
 }
+
+    function toOptionalNumber(value: unknown): number | undefined {
+        if (value === null || value === undefined || value === '') {
+            return undefined;
+        }
+
+        const normalized = typeof value === 'number' ? value : Number(value);
+        return Number.isFinite(normalized) ? normalized : undefined;
+    }
 
 // ── Utility ──────────────────────────────────────────────────────────
 
@@ -728,7 +762,7 @@ export async function executeAgentChat(
     const { createAgent, fromLangchainModel, createTool } = await import('@cognipeer/agent-sdk');
     const { z } = await import('zod');
 
-    const tools: any[] = [];
+    const tools: AgentSdkToolInterface[] = [];
     if (config.knowledgeEngineKey) {
         const ragModuleKey = config.knowledgeEngineKey;
         const ragTool = createTool({
@@ -770,8 +804,7 @@ export async function executeAgentChat(
 
     // 6. Build message history
     const now = new Date();
-    type SdkMessage = { role: string; content: string };
-    const existingMessages: SdkMessage[] = (conversation.messages || []).map((m) => ({
+    const existingMessages: AgentSdkMessage[] = (conversation.messages || []).map((m) => ({
         role: m.role,
         content: m.content,
     }));
@@ -792,17 +825,17 @@ export async function executeAgentChat(
         },
     });
 
-    const inputMessages: SdkMessage[] = [
+    const inputMessages: AgentSdkMessage[] = [
         ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
         ...existingMessages,
         { role: 'user', content: userMessage },
     ];
 
-    const result = await sdkAgent.invoke({
-        messages: inputMessages as any,
+    const result: AgentSdkInvokeResult = await sdkAgent.invoke({
+        messages: inputMessages,
     });
 
-    const assistantContent = (result as any).content || '';
+    const assistantContent = result.content || '';
 
     // 7b. Output guardrail check
     if (config.outputGuardrailKey && assistantContent) {
@@ -935,7 +968,7 @@ export async function executePlaygroundChat(
     const { createAgent, fromLangchainModel, createTool } = await import('@cognipeer/agent-sdk');
     const { z } = await import('zod');
 
-    const playgroundTools: any[] = [];
+    const playgroundTools: AgentSdkToolInterface[] = [];
     if (config.knowledgeEngineKey) {
         const ragModuleKey = config.knowledgeEngineKey;
         const ragTool = createTool({
@@ -976,8 +1009,7 @@ export async function executePlaygroundChat(
     playgroundTools.push(...boundPlaygroundTools);
 
     // Build messages (in-memory history only)
-    type SdkMessage = { role: string; content: string };
-    const inputMessages: SdkMessage[] = [
+    const inputMessages: AgentSdkMessage[] = [
         ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
         ...(history || []),
         { role: 'user', content: userMessage },
@@ -998,8 +1030,8 @@ export async function executePlaygroundChat(
         },
     });
 
-    const result = await sdkAgent.invoke({ messages: inputMessages as any });
-    const assistantContent = (result as any).content || '';
+    const result: AgentSdkInvokeResult = await sdkAgent.invoke({ messages: inputMessages });
+    const assistantContent = result.content || '';
 
     // Output guardrail check
     if (config.outputGuardrailKey && assistantContent) {

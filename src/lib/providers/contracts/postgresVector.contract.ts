@@ -37,6 +37,10 @@ type PgClient = {
   release: () => void;
 };
 
+type PgModule = {
+  Pool: new (config: Record<string, unknown>) => PgPool;
+};
+
 function buildPoolConfig(credentials: PostgresVectorCredentials): Record<string, unknown> {
   if (credentials.connectionString?.trim()) {
     return { connectionString: credentials.connectionString.trim() };
@@ -171,9 +175,7 @@ export const PostgresVectorProviderContract: ProviderContract<
       );
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/ban-ts-comment
-    // @ts-ignore – pg is an optional peer dependency
-    const { Pool } = await import('pg') as any;
+    const { Pool } = await import('pg') as unknown as PgModule;
     const pool: PgPool = new Pool(buildPoolConfig(credentials));
     const tableName = settings.tableName.trim();
     const dimensions = Number(settings.dimensions) > 0 ? Number(settings.dimensions) : DEFAULT_DIMENSIONS;

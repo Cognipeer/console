@@ -18,10 +18,12 @@ const MAX_KEY_ATTEMPTS = 50;
 // ── Serialization ─────────────────────────────────────────────────────────
 
 export function serializeMcpServer(record: IMcpServer): McpServerView {
-  const { _id, openApiSpec: _spec, ...rest } = record;
+  const serialized = { ...record } as Record<string, unknown>;
+  delete serialized._id;
+  delete serialized.openApiSpec;
   return {
-    ...rest,
-    id: typeof _id === 'string' ? _id : (_id?.toString() ?? ''),
+    ...serialized,
+    id: typeof record._id === 'string' ? record._id : (record._id?.toString() ?? ''),
   } as McpServerView;
 }
 
@@ -161,7 +163,7 @@ export async function createMcpServer(
   projectId: string | undefined,
   input: CreateMcpServerInput,
 ): Promise<IMcpServer> {
-  const { spec: _parsed, tools, baseUrl: specBaseUrl } = parseOpenApiSpec(input.openApiSpec);
+  const { tools, baseUrl: specBaseUrl } = parseOpenApiSpec(input.openApiSpec);
 
   const key = await generateUniqueKey(tenantDbName, projectId, input.name);
   const endpointSlug = generateEndpointSlug();

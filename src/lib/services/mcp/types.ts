@@ -1,4 +1,4 @@
-import type { IMcpServer, IMcpTool, IMcpAuthConfig, McpAuthType } from '@/lib/database';
+import type { IMcpTool, IMcpAuthConfig, McpAuthType } from '@/lib/database';
 
 // ── View types ──────────────────────────────────────────────────────────
 

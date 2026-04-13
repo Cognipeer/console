@@ -1,5 +1,6 @@
 import { Readable } from 'node:stream';
 import { finished } from 'node:stream/promises';
+import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { CookieMutation } from './types';
 
@@ -14,6 +15,7 @@ export interface NextRequest {
   readonly method: string;
   readonly nextUrl: URL;
   readonly url: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   json<T = any>(): Promise<T>;
   text(): Promise<string>;
 }
@@ -87,6 +89,7 @@ export class GatewayRequest implements NextRequest {
     this.nextUrl = new URL(absoluteUrl);
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async json<T = any>(): Promise<T> {
     if (this.rawBody === undefined || this.rawBody === null) {
       throw new SyntaxError('Unexpected end of JSON input');
@@ -255,7 +258,7 @@ async function sendWebResponse(
     if (contentType.includes('text/event-stream')) {
       reply.hijack();
       const nodeStream = Readable.fromWeb(
-        response.body as any,
+        response.body as NodeReadableStream,
       );
       nodeStream.pipe(reply.raw);
       await finished(nodeStream);
