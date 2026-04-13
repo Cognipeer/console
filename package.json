@@ -31,7 +31,7 @@
     "@langchain/aws": "^0.1.12",
     "@langchain/community": "^0.3.57",
     "@langchain/google-vertexai": "^0.2.18",
-    "@langchain/openai": "^0.6.14",
+    "@langchain/openai": "^1.4.4",
     "@mantine/charts": "^8.3.2",
     "@mantine/core": "^8.3.2",
     "@mantine/dates": "^8.3.2",
