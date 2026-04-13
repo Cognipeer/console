@@ -30,7 +30,7 @@
     "@elastic/elasticsearch": "^8.19.1",
     "@langchain/aws": "^0.1.12",
     "@langchain/community": "^0.3.57",
-    "@langchain/google-vertexai": "^0.2.18",
+    "@langchain/google-vertexai": "^2.1.26",
     "@langchain/openai": "^0.6.14",
     "@mantine/charts": "^8.3.2",
     "@mantine/core": "^8.3.2",
