@@ -1,14 +1,10 @@
 import type { NextConfig } from "next";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 const nextConfig: NextConfig = {
   serverExternalPackages: ['ioredis', 'winston', 'async_hooks', '@cognipeer/agent-sdk'],
   turbopack: {
-    root: path.resolve(__dirname, '..'),
+    root: path.resolve(process.cwd(), '..'),
   },
   experimental: {
     serverActions: {
