@@ -121,7 +121,7 @@ export function toLangChainMessages(messages: OpenAIMessage[]): BaseMessage[] {
 
     switch (message.role) {
       case 'system':
-        return new SystemMessage({ content });
+        return new SystemMessage({ content } as never);
       case 'assistant': {
         const assistantContent =
           typeof content === 'string' || Array.isArray(content)
@@ -140,7 +140,7 @@ export function toLangChainMessages(messages: OpenAIMessage[]): BaseMessage[] {
             ? { tool_calls: additionalToolCalls }
             : {},
           tool_calls: langChainToolCalls,
-        });
+        } as never);
       }
       case 'tool':
         return new ToolMessage({
@@ -158,7 +158,7 @@ export function toLangChainMessages(messages: OpenAIMessage[]): BaseMessage[] {
         return new HumanMessage({
           content,
           name: message.name,
-        });
+        } as never);
     }
   });
 }

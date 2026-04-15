@@ -1,8 +1,8 @@
 import { ChatOpenAI, OpenAIEmbeddings, AzureChatOpenAI, AzureOpenAIEmbeddings } from '@langchain/openai';
 import { ChatTogetherAI } from '@langchain/community/chat_models/togetherai';
 import { TogetherAIEmbeddings } from '@langchain/community/embeddings/togetherai';
-import { ChatOllama } from '@langchain/community/chat_models/ollama';
-import { OllamaEmbeddings } from '@langchain/community/embeddings/ollama';
+import { ChatOllama } from '@langchain/ollama';
+import { OllamaEmbeddings } from '@langchain/ollama';
 import { ChatBedrockConverse, BedrockEmbeddings } from '@langchain/aws';
 import { VertexAI, VertexAIEmbeddings } from '@langchain/google-vertexai';
 import { SimpleChatModel } from '@langchain/core/language_models/chat_models';
