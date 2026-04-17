@@ -10,14 +10,142 @@ import dayjs from 'dayjs';
 const logger = createLogger('agent-tracing');
 
 type SessionListQuery = Record<string, unknown> & {
-  startedAt?: {
-    $gte?: Date;
-    $lte?: Date;
-  };
   agentName?: string;
+  agentNameExact?: string;
   from?: string;
   to?: string;
+  includeTotal?: boolean;
+  projection?: Record<string, 0 | 1>;
+  limit?: number | string;
+  skip?: number | string;
 };
+
+const DASHBOARD_SESSION_PROJECTION = {
+  sessionId: 1,
+  agentName: 1,
+  status: 1,
+  startedAt: 1,
+  durationMs: 1,
+  totalEvents: 1,
+  totalInputTokens: 1,
+  totalOutputTokens: 1,
+  totalCachedInputTokens: 1,
+  modelsUsed: 1,
+  toolsUsed: 1,
+} as const;
+
+const THREAD_SESSION_PROJECTION = {
+  sessionId: 1,
+  agentName: 1,
+  agentVersion: 1,
+  status: 1,
+  startedAt: 1,
+  endedAt: 1,
+  durationMs: 1,
+  totalEvents: 1,
+  totalInputTokens: 1,
+  totalOutputTokens: 1,
+  totalCachedInputTokens: 1,
+  modelsUsed: 1,
+  toolsUsed: 1,
+} as const;
+
+const AGENT_OVERVIEW_SESSION_PROJECTION = {
+  sessionId: 1,
+  threadId: 1,
+  status: 1,
+  startedAt: 1,
+  durationMs: 1,
+  totalEvents: 1,
+  totalInputTokens: 1,
+  totalOutputTokens: 1,
+  totalCachedInputTokens: 1,
+  agentVersion: 1,
+  modelsUsed: 1,
+  toolsUsed: 1,
+} as const;
+
+const SESSION_LIST_PROJECTION = {
+  sessionId: 1,
+  threadId: 1,
+  agentName: 1,
+  status: 1,
+  startedAt: 1,
+  endedAt: 1,
+  durationMs: 1,
+  totalEvents: 1,
+  totalInputTokens: 1,
+  totalOutputTokens: 1,
+  totalCachedInputTokens: 1,
+} as const;
+
+const SESSION_EVENT_SUMMARY_PROJECTION = {
+  id: 1,
+  sequence: 1,
+  type: 1,
+  label: 1,
+  timestamp: 1,
+  status: 1,
+  durationMs: 1,
+  toolName: 1,
+  model: 1,
+  inputTokens: 1,
+  outputTokens: 1,
+  totalTokens: 1,
+  cachedInputTokens: 1,
+  spanId: 1,
+  parentSpanId: 1,
+} as const;
+
+function mapTracingEventSummary(event: Record<string, unknown>) {
+  return {
+    id: event.id || event._id,
+    sequence: event.sequence,
+    type: event.type,
+    label: event.label,
+    timestamp: event.timestamp,
+    status: event.status,
+    durationMs: event.durationMs,
+    toolName: event.toolName,
+    model: event.model,
+    inputTokens: event.inputTokens,
+    outputTokens: event.outputTokens,
+    totalTokens: event.totalTokens,
+    cachedInputTokens: event.cachedInputTokens,
+    spanId: event.spanId,
+    parentSpanId: event.parentSpanId,
+  };
+}
+
+function mapTracingEventDetail(event: Record<string, unknown>) {
+  return {
+    id: event.id || event._id,
+    sequence: event.sequence,
+    type: event.type,
+    label: event.label,
+    timestamp: event.timestamp,
+    status: event.status,
+    actor: event.actor,
+    metadata: event.metadata,
+    sections: event.sections,
+    model: event.model,
+    error: event.error,
+    durationMs: event.durationMs,
+    toolName: event.toolName,
+    toolExecutionId: event.toolExecutionId,
+    inputTokens: event.inputTokens,
+    outputTokens: event.outputTokens,
+    totalTokens: event.totalTokens,
+    cachedInputTokens: event.cachedInputTokens,
+    requestBytes: event.requestBytes,
+    responseBytes: event.responseBytes,
+    traceId: event.traceId,
+    spanId: event.spanId,
+    parentSpanId: event.parentSpanId,
+    actorName: event.actorName,
+    actorRole: event.actorRole,
+  };
+}
 
 export interface AgentTracingSessionSummary {
   sessionId: string;
@@ -225,8 +353,10 @@ export class AgentTracingService {
     await db.switchToTenant(tenantDbName);
 
     const { sessions } = await db.listAgentTracingSessions({
+      includeTotal: false,
       threadId,
       limit: 1000,
+      projection: THREAD_SESSION_PROJECTION,
     }, projectId);
 
     if (sessions.length === 0) {
@@ -302,27 +432,30 @@ export class AgentTracingService {
       await db.switchToTenant(tenantDbName);
 
       const query: SessionListQuery = {};
-      if (filters?.from || filters?.to) {
-        query.startedAt = {};
-        if (filters.from) query.startedAt.$gte = new Date(filters.from);
-        if (filters.to) query.startedAt.$lte = new Date(filters.to);
-      }
+      if (filters?.from) query.from = filters.from;
+      if (filters?.to) query.to = filters.to;
 
-      logger.debug('Fetching recent sessions...');
-      // Get recent sessions
-      const { sessions: recentSessions } = await db.listAgentTracingSessions({
-        ...query,
-        limit: 10,
-        skip: 0,
-      }, projectId);
+      logger.debug('Fetching tracing dashboard sessions...');
+      const [recentSessionResult, allSessions] = await Promise.all([
+        db.listAgentTracingSessions({
+          ...query,
+          includeTotal: false,
+          limit: 10,
+          projection: DASHBOARD_SESSION_PROJECTION,
+          skip: 0,
+        }, projectId),
+        db.listAgentTracingSessions({
+          ...query,
+          includeTotal: false,
+          limit: 1000,
+          projection: DASHBOARD_SESSION_PROJECTION,
+        }, projectId),
+      ]);
+
+      const recentSessions = recentSessionResult.sessions || [];
 
       logger.debug('Recent sessions count', { count: recentSessions.length });
 
-      // Aggregate analytics
-      const allSessions = await db.listAgentTracingSessions({
-        ...query,
-        limit: 1000,
-      }, projectId);
       const sessions = allSessions.sessions || [];
 
       logger.debug('Total sessions for analytics', { count: sessions.length });
@@ -620,6 +753,7 @@ export class AgentTracingService {
 
     const result = await db.listAgentTracingSessions({
       agentName: filters?.agent,
+      projection: SESSION_LIST_PROJECTION,
       status: filters?.status,
       from: filters?.from,
       to: filters?.to,
@@ -653,6 +787,7 @@ export class AgentTracingService {
     tenantDbName: string,
     projectId: string,
     sessionId: string,
+    options?: { includeEventContent?: boolean },
   ) {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
@@ -662,7 +797,13 @@ export class AgentTracingService {
       return null;
     }
 
-    const events = await db.listAgentTracingEvents(sessionId, projectId);
+    const events = await db.listAgentTracingEvents(
+      sessionId,
+      projectId,
+      options?.includeEventContent === false
+        ? { projection: SESSION_EVENT_SUMMARY_PROJECTION }
+        : undefined,
+    );
 
     return {
       session: {
@@ -690,33 +831,30 @@ export class AgentTracingService {
         eventCounts: session.eventCounts,
         errors: session.errors,
       },
-      events: events.map((e) => ({
-        id: e.id || e._id,
-        sequence: e.sequence,
-        type: e.type,
-        label: e.label,
-        timestamp: e.timestamp,
-        status: e.status,
-        actor: e.actor,
-        metadata: e.metadata,
-        sections: e.sections,
-        model: e.model,
-        error: e.error,
-        durationMs: e.durationMs,
-        toolName: e.toolName,
-        toolExecutionId: e.toolExecutionId,
-        inputTokens: e.inputTokens,
-        outputTokens: e.outputTokens,
-        totalTokens: e.totalTokens,
-        cachedInputTokens: e.cachedInputTokens,
-        requestBytes: e.requestBytes,
-        responseBytes: e.responseBytes,
-        traceId: e.traceId,
-        spanId: e.spanId,
-        parentSpanId: e.parentSpanId,
-        actorName: e.actorName,
-        actorRole: e.actorRole,
-      })),
+      events: events.map((e) => (
+        options?.includeEventContent === false
+          ? mapTracingEventSummary(e as Record<string, unknown>)
+          : mapTracingEventDetail(e as Record<string, unknown>)
+      )),
+    };
+  }
+
+  static async getSessionEventDetail(
+    tenantDbName: string,
+    projectId: string,
+    sessionId: string,
+    eventId: string,
+  ) {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+
+    const event = await db.findAgentTracingEventById(sessionId, eventId, projectId);
+    if (!event) {
+      return null;
+    }
+
+    return {
+      event: mapTracingEventDetail(event as Record<string, unknown>),
     };
   }
 
@@ -732,7 +870,11 @@ export class AgentTracingService {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
 
-    const query: SessionListQuery = { agentName };
+    const query: SessionListQuery = {
+      agentNameExact: agentName,
+      includeTotal: false,
+      projection: AGENT_OVERVIEW_SESSION_PROJECTION,
+    };
     if (filters?.from || filters?.to) {
       query.from = filters.from;
       query.to = filters.to;

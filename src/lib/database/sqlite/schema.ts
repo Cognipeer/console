@@ -216,6 +216,7 @@ export const TENANT_SCHEMA_SQL = `
     createdAt TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_tracing_events_sessionId ON agent_tracing_events(sessionId);
+  CREATE INDEX IF NOT EXISTS idx_tracing_events_session_eventId ON agent_tracing_events(sessionId, eventId);
 
   -- Models
   CREATE TABLE IF NOT EXISTS models (

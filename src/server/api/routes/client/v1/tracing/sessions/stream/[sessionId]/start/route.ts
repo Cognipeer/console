@@ -61,7 +61,10 @@ const _POST = async (
             const alreadyExists = await db.agentTracingAgentExists(agentName, auth.projectId);
             if (!alreadyExists) {
                 // We need to check the limit - get policies
-                const { total } = await db.listAgentTracingSessions({}, auth.projectId);
+                const { total } = await db.listAgentTracingSessions(
+                    { limit: 0 },
+                    auth.projectId,
+                );
                 const resourceCheck = await checkResourceQuota(
                     quotaContext,
                     'tracingSessions',

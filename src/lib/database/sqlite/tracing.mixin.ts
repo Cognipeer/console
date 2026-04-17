@@ -175,24 +175,41 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       const params: Record<string, unknown> = {};
 
       if (projectId) { clauses.push('projectId = @projectId'); params.projectId = projectId; }
-      if (filters?.agentName) { clauses.push('agentName = @agentName'); params.agentName = filters.agentName; }
+      const exactAgentName =
+        typeof filters?.agentNameExact === 'string' ? filters.agentNameExact.trim() : '';
+      if (exactAgentName) {
+        clauses.push('agentName = @agentNameExact');
+        params.agentNameExact = exactAgentName;
+      } else if (filters?.agentName) {
+        clauses.push('agentName = @agentName');
+        params.agentName = filters.agentName;
+      }
       if (filters?.status) { clauses.push('status = @status'); params.status = filters.status; }
       if (filters?.threadId) { clauses.push('threadId = @threadId'); params.threadId = filters.threadId; }
       if (filters?.from) { clauses.push('createdAt >= @from'); params.from = (filters.from as Date).toISOString(); }
       if (filters?.to) { clauses.push('createdAt <= @to'); params.to = (filters.to as Date).toISOString(); }
 
       const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
-      const limit = (filters?.limit as number) ?? 50;
-      const skip = (filters?.skip as number) ?? 0;
+      const limitValue = Number.parseInt(String(filters?.limit ?? '50'), 10);
+      const skipValue = Number.parseInt(String(filters?.skip ?? '0'), 10);
+      const limit = Number.isFinite(limitValue) ? Math.max(0, limitValue) : 50;
+      const skip = Number.isFinite(skipValue) ? Math.max(0, skipValue) : 0;
+      const includeTotal = filters?.includeTotal !== false;
 
-      const totalRow = db.prepare(`SELECT COUNT(*) as cnt FROM ${TABLES.agentTracingSessions} ${where}`).get(params) as SqliteRow;
-      const total = (totalRow?.cnt as number) ?? 0;
+      const total = includeTotal
+        ? ((db.prepare(`SELECT COUNT(*) as cnt FROM ${TABLES.agentTracingSessions} ${where}`).get(params) as SqliteRow | undefined)?.cnt as number) ?? 0
+        : 0;
 
-      const rows = db.prepare(
-        `SELECT * FROM ${TABLES.agentTracingSessions} ${where} ORDER BY createdAt DESC LIMIT @limit OFFSET @skip`,
-      ).all({ ...params, limit, skip }) as SqliteRow[];
+      const rows = limit > 0
+        ? (db.prepare(
+          `SELECT * FROM ${TABLES.agentTracingSessions} ${where} ORDER BY createdAt DESC LIMIT @limit OFFSET @skip`,
+        ).all({ ...params, limit, skip }) as SqliteRow[])
+        : [];
 
-      return { sessions: rows.map((r) => this.mapSessionRow(r)), total };
+      return {
+        sessions: rows.map((r) => this.mapSessionRow(r)),
+        total: includeTotal ? total : rows.length,
+      };
     }
 
     async listAgentTracingThreads(
@@ -294,7 +311,13 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       return { ...event, _id: id, createdAt: new Date(now) };
     }
 
-    async listAgentTracingEvents(sessionId: string, projectId?: string): Promise<IAgentTracingEvent[]> {
+    async listAgentTracingEvents(
+      sessionId: string,
+      projectId?: string,
+      _options?: {
+        projection?: Record<string, 0 | 1>;
+      },
+    ): Promise<IAgentTracingEvent[]> {
       const db = this.getTenantDb();
       let sql = `SELECT * FROM ${TABLES.agentTracingEvents} WHERE sessionId = @sessionId`;
       const params: Record<string, unknown> = { sessionId };
@@ -302,6 +325,28 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       sql += ' ORDER BY sequence ASC, createdAt ASC';
       const rows = db.prepare(sql).all(params) as SqliteRow[];
       return rows.map((r) => this.mapEventRow(r));
+    }
+
+    async findAgentTracingEventById(
+      sessionId: string,
+      eventId: string,
+      projectId?: string,
+    ): Promise<IAgentTracingEvent | null> {
+      const db = this.getTenantDb();
+      let sql = `SELECT * FROM ${TABLES.agentTracingEvents} WHERE sessionId = @sessionId AND (eventId = @eventId OR id = @eventId)`;
+      const params: Record<string, unknown> = {
+        eventId,
+        sessionId,
+      };
+
+      if (projectId) {
+        sql += ' AND projectId = @projectId';
+        params.projectId = projectId;
+      }
+
+      const row = db.prepare(sql).get(params) as SqliteRow | undefined;
+
+      return row ? this.mapEventRow(row) : null;
     }
 
     async deleteAgentTracingEvents(sessionId: string, projectId?: string): Promise<number> {

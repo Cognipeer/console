@@ -96,6 +96,7 @@ describe('GET /api/tracing/sessions/[sessionId]', () => {
       'tenant_acme',
       'project-1',
       'sess-1',
+      { includeEventContent: true },
     );
   });
 

@@ -153,7 +153,10 @@ const _POST = async (request: NextRequest) => {
         }
 
         if (!existing) {
-            const { total } = await db.listAgentTracingSessions({}, auth.projectId);
+            const { total } = await db.listAgentTracingSessions(
+                { limit: 0 },
+                auth.projectId,
+            );
             const resourceCheck = await checkResourceQuota(
                 quotaContext,
                 'tracingSessions',

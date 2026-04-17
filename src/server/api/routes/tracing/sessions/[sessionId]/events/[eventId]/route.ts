@@ -3,23 +3,22 @@ import { AgentTracingService } from '@/lib/services/agentTracing';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
 import { createLogger } from '@/lib/core/logger';
 
-const logger = createLogger('tracing-sessions');
+const logger = createLogger('tracing-session-events');
 
 /**
- * GET /api/tracing/sessions/:sessionId
- * Get session detail with events
+ * GET /api/tracing/sessions/:sessionId/events/:eventId
+ * Get a single event detail for a session
  */
 export async function GET(
   request: NextRequest,
-  { params }: { params: Promise<{ sessionId: string }> }
+  { params }: { params: Promise<{ sessionId: string; eventId: string }> },
 ) {
   try {
-    const { sessionId } = await params;
-    const includeEventContent = request.nextUrl.searchParams.get('includeEventContent') !== 'false';
+    const { eventId, sessionId } = await params;
     const tenantDbName = request.headers.get('x-tenant-db-name');
     const tenantId = request.headers.get('x-tenant-id');
     const userId = request.headers.get('x-user-id');
-    
+
     if (!tenantDbName || !tenantId || !userId) {
       return NextResponse.json({ error: 'Tenant not found' }, { status: 401 });
     }
@@ -29,27 +28,28 @@ export async function GET(
       tenantId,
       userId,
     });
-    
-    const result = await AgentTracingService.getSessionDetail(
+
+    const result = await AgentTracingService.getSessionEventDetail(
       tenantDbName,
       projectContext.projectId,
       sessionId,
-      { includeEventContent },
+      eventId,
     );
 
     if (!result) {
-      return NextResponse.json({ error: 'Session not found' }, { status: 404 });
+      return NextResponse.json({ error: 'Event not found' }, { status: 404 });
     }
 
     return NextResponse.json(result);
   } catch (error: unknown) {
-    logger.error('Session detail error', { error });
+    logger.error('Session event detail error', { error });
     if (error instanceof ProjectContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
+
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Failed to fetch session detail' },
-      { status: 500 }
+      { error: error instanceof Error ? error.message : 'Failed to fetch event detail' },
+      { status: 500 },
     );
   }
 }

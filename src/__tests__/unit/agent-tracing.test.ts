@@ -129,6 +129,14 @@ describe('AgentTracingService.getThreadDetail', () => {
     expect(result!.sessionsCount).toBe(2);
     expect(result!.totalInputTokens).toBe(150); // 100 + 50
     expect(result!.totalOutputTokens).toBe(300); // 200 + 100
+    expect(db.listAgentTracingSessions).toHaveBeenCalledWith(
+      expect.objectContaining({
+        includeTotal: false,
+        limit: 1000,
+        threadId: 'thread-1',
+      }),
+      PROJECT_ID,
+    );
   });
 
   it('computes overallStatus as error when any session has error', async () => {
@@ -260,7 +268,71 @@ describe('AgentTracingService.getSessionDetail', () => {
     await AgentTracingService.getSessionDetail(TENANT_DB, PROJECT_ID, SESSION_ID);
 
     expect(db.findAgentTracingSessionById).toHaveBeenCalledWith(SESSION_ID, PROJECT_ID);
-    expect(db.listAgentTracingEvents).toHaveBeenCalledWith(SESSION_ID, PROJECT_ID);
+    expect(db.listAgentTracingEvents).toHaveBeenCalledWith(SESSION_ID, PROJECT_ID, undefined);
+  });
+
+  it('supports summary event mode for faster initial loads', async () => {
+    db.findAgentTracingSessionById.mockResolvedValue(makeSession());
+    db.listAgentTracingEvents.mockResolvedValue([
+      {
+        _id: 'event-1',
+        sessionId: SESSION_ID,
+        tenantId: TENANT_ID,
+        sequence: 1,
+        type: 'llm_call',
+        label: 'LLM Call',
+        status: 'success',
+        timestamp: new Date(),
+      },
+    ]);
+
+    const result = await AgentTracingService.getSessionDetail(
+      TENANT_DB,
+      PROJECT_ID,
+      SESSION_ID,
+      { includeEventContent: false },
+    );
+
+    expect(result?.events[0]).not.toHaveProperty('metadata');
+    expect(db.listAgentTracingEvents).toHaveBeenCalledWith(
+      SESSION_ID,
+      PROJECT_ID,
+      expect.objectContaining({ projection: expect.any(Object) }),
+    );
+  });
+
+  it('returns a single event detail when requested', async () => {
+    db.findAgentTracingEventById.mockResolvedValue({
+      _id: 'event-1',
+      id: 'external-event-1',
+      sessionId: SESSION_ID,
+      tenantId: TENANT_ID,
+      sequence: 1,
+      type: 'llm_call',
+      label: 'LLM Call',
+      status: 'success',
+      metadata: { requestId: 'req-1' },
+    });
+
+    const result = await AgentTracingService.getSessionEventDetail(
+      TENANT_DB,
+      PROJECT_ID,
+      SESSION_ID,
+      'external-event-1',
+    );
+
+    expect(result).toEqual({
+      event: expect.objectContaining({
+        id: 'external-event-1',
+        metadata: { requestId: 'req-1' },
+        type: 'llm_call',
+      }),
+    });
+    expect(db.findAgentTracingEventById).toHaveBeenCalledWith(
+      SESSION_ID,
+      'external-event-1',
+      PROJECT_ID,
+    );
   });
 });
 
@@ -338,6 +410,36 @@ describe('AgentTracingService.getDashboardOverview', () => {
     expect(result.analytics.agents[0].name).toBe('alpha-agent');
     expect(result.analytics.agents[1].name).toBe('beta-agent');
   });
+
+  it('passes from/to filters directly to session queries', async () => {
+    db.listAgentTracingSessions.mockResolvedValue({ sessions: [], total: 0 });
+
+    await AgentTracingService.getDashboardOverview(TENANT_DB, PROJECT_ID, {
+      from: '2025-01-01T00:00:00.000Z',
+      to: '2025-01-31T23:59:59.999Z',
+    });
+
+    expect(db.listAgentTracingSessions).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        from: '2025-01-01T00:00:00.000Z',
+        includeTotal: false,
+        limit: 10,
+        to: '2025-01-31T23:59:59.999Z',
+      }),
+      PROJECT_ID,
+    );
+    expect(db.listAgentTracingSessions).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        from: '2025-01-01T00:00:00.000Z',
+        includeTotal: false,
+        limit: 1000,
+        to: '2025-01-31T23:59:59.999Z',
+      }),
+      PROJECT_ID,
+    );
+  });
 });
 
 // ── getAgentOverview ─────────────────────────────────────────────────────────
@@ -390,5 +492,13 @@ describe('AgentTracingService.getAgentOverview', () => {
     expect(result.analytics.totals.averageCachedInputTokensPerSession).toBe(8);
     expect(result.analytics.totals.averageTokensPerSession).toBe(100);
     expect(result.analytics.totals.averageDurationMs).toBe(750);
+    expect(db.listAgentTracingSessions).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentNameExact: 'my-agent',
+        includeTotal: false,
+        limit: 1000,
+      }),
+      PROJECT_ID,
+    );
   });
 });

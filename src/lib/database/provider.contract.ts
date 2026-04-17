@@ -166,9 +166,17 @@ export interface DatabaseProvider {
   createAgentTracingEvent(
     event: Omit<IAgentTracingEvent, '_id' | 'createdAt'>,
   ): Promise<IAgentTracingEvent>;
+  findAgentTracingEventById(
+    sessionId: string,
+    eventId: string,
+    projectId?: string,
+  ): Promise<IAgentTracingEvent | null>;
   listAgentTracingEvents(
     sessionId: string,
     projectId?: string,
+    options?: {
+      projection?: Record<string, 0 | 1>;
+    },
   ): Promise<IAgentTracingEvent[]>;
   deleteAgentTracingEvents(
     sessionId: string,

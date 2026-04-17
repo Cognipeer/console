@@ -383,7 +383,10 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
         }
       }
 
-      const { total: existingSessionCount } = await db.listAgentTracingSessions({}, ctx.projectId);
+      const { total: existingSessionCount } = await db.listAgentTracingSessions(
+        { limit: 0 },
+        ctx.projectId,
+      );
       const resourceCheck = await checkResourceQuota(
         quotaContext,
         'tracingSessions',
@@ -634,7 +637,10 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       if (!existing) {
-        const { total } = await db.listAgentTracingSessions({}, ctx.projectId);
+        const { total } = await db.listAgentTracingSessions(
+          { limit: 0 },
+          ctx.projectId,
+        );
         const resourceCheck = await checkResourceQuota(
           quotaContext,
           'tracingSessions',
@@ -758,7 +764,10 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
       const existing = await db.findAgentTracingSessionById(sessionId, ctx.projectId);
       const agentName = typeof payload?.agent?.name === 'string' ? payload.agent.name.trim() : '';
       if (agentName && !existing) {
-        const { total } = await db.listAgentTracingSessions({}, ctx.projectId);
+        const { total } = await db.listAgentTracingSessions(
+          { limit: 0 },
+          ctx.projectId,
+        );
         const resourceCheck = await checkResourceQuota(
           quotaContext,
           'tracingSessions',

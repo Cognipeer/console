@@ -74,10 +74,14 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { sessionId } = request.params as { sessionId: string };
+      const query = (request.query ?? {}) as Record<string, string | undefined>;
       const result = await AgentTracingService.getSessionDetail(
         session.tenantDbName,
         projectId,
         sessionId,
+        {
+          includeEventContent: query.includeEventContent !== 'false',
+        },
       );
 
       if (!result) {
@@ -90,6 +94,31 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Failed to fetch session detail',
+        });
+    }
+  }));
+
+  app.get('/tracing/sessions/:sessionId/events/:eventId', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const { eventId, sessionId } = request.params as { eventId: string; sessionId: string };
+      const result = await AgentTracingService.getSessionEventDetail(
+        session.tenantDbName,
+        projectId,
+        sessionId,
+        eventId,
+      );
+
+      if (!result) {
+        return reply.code(404).send({ error: 'Event not found' });
+      }
+
+      return reply.code(200).send(result);
+    } catch (error) {
+      logger.error('Get tracing session event detail error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({
+          error: error instanceof Error ? error.message : 'Failed to fetch event detail',
         });
     }
   }));

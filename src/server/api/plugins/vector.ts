@@ -48,6 +48,7 @@ const logger = createLogger('api:vector');
 
 type VectorProvidersQuery = {
   driver?: string;
+  includeIndexes?: string;
   status?: ProviderStatus;
 };
 
@@ -114,7 +115,35 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
         },
       );
 
-      return reply.code(200).send({ providers });
+      if (query.includeIndexes !== 'true') {
+        return reply.code(200).send({ providers });
+      }
+
+      const indexEntries = await Promise.all(
+        providers.map(async (provider) => {
+          try {
+            const indexes = await listVectorIndexes(
+              session.tenantDbName,
+              session.tenantId,
+              projectId,
+              provider.key,
+            );
+
+            return [provider.key, indexes] as const;
+          } catch (error) {
+            logger.warn('Vector provider indexes preload failed', {
+              error,
+              projectId,
+              providerKey: provider.key,
+            });
+            return [provider.key, []] as const;
+          }
+        }),
+      );
+
+      const indexesByProvider = Object.fromEntries(indexEntries);
+
+      return reply.code(200).send({ indexesByProvider, providers });
     } catch (error) {
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({ error: 'Internal server error' });

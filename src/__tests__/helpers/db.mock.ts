@@ -80,6 +80,7 @@ export function createMockDb(overrides: Partial<MockDb> = {}): MockDb {
 
     // Agent tracing events
     createAgentTracingEvent: vi.fn().mockResolvedValue({}),
+    findAgentTracingEventById: vi.fn().mockResolvedValue(null),
     listAgentTracingEvents: vi.fn().mockResolvedValue([]),
     deleteAgentTracingEvents: vi.fn().mockResolvedValue(0),
 

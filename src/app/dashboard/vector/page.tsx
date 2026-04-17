@@ -95,7 +95,7 @@ export default function VectorIndexPage() {
   const loadProvidersAndIndexes = useCallback(async () => {
     setRefreshing(true);
     try {
-      const providerResponse = await fetch('/api/vector/providers', { cache: 'no-store' });
+      const providerResponse = await fetch('/api/vector/providers?includeIndexes=true', { cache: 'no-store' });
       if (!providerResponse.ok) {
         throw new Error('Failed to load vector providers');
       }
@@ -103,37 +103,19 @@ export default function VectorIndexPage() {
   const fetchedProviders: VectorProviderView[] = providerData.providers ?? [];
       setProviders(fetchedProviders);
 
-      const indexEntries = await Promise.all(
-        fetchedProviders.map(async (provider) => {
-          try {
-            const response = await fetch(
-              `/api/vector/indexes?providerKey=${encodeURIComponent(provider.key)}`,
-              { cache: 'no-store' },
-            );
-            if (!response.ok) {
-              throw new Error('Failed to load indexes for provider');
-            }
-            const data = await response.json();
-            return [provider.key, (data.indexes ?? []) as VectorIndexRecord[]] as const;
-          } catch (error) {
-            console.error(error);
-            notifications.show({
-              color: 'red',
-              title: 'Unable to load indexes',
-              message:
-                error instanceof Error
-                  ? `${provider.label}: ${error.message}`
-                  : 'Unexpected error',
-            });
-            return [provider.key, []] as const;
-          }
-        }),
-      );
-
-  const nextIndexes: Record<string, VectorIndexRecord[]> = {};
-      indexEntries.forEach(([key, value]) => {
+      const nextIndexes: Record<string, VectorIndexRecord[]> = {};
+      Object.entries(
+        (providerData.indexesByProvider ?? {}) as Record<string, VectorIndexRecord[]>,
+      ).forEach(([key, value]) => {
         nextIndexes[key] = [...value];
       });
+
+      fetchedProviders.forEach((provider) => {
+        if (!nextIndexes[provider.key]) {
+          nextIndexes[provider.key] = [];
+        }
+      });
+
       setIndexesByProvider(nextIndexes);
     } catch (error) {
       console.error(error);

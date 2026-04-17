@@ -238,7 +238,10 @@ const _POST = async (request: NextRequest) => {
     }
 
     // ── Resource quota check (total sessions) ──────────────────────
-    const { total: existingSessionCount } = await db.listAgentTracingSessions({}, auth.projectId);
+    const { total: existingSessionCount } = await db.listAgentTracingSessions(
+      { limit: 0 },
+      auth.projectId,
+    );
     const resourceCheck = await checkResourceQuota(
       quotaContext,
       'tracingSessions',

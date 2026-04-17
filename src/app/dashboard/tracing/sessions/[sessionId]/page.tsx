@@ -174,6 +174,10 @@ interface SessionDetailResponse {
     }>;
 }
 
+interface EventDetailResponse {
+    event: SessionDetailResponse['events'][number];
+}
+
 type TracingEvent = SessionDetailResponse['events'][number];
 
 // ─── Event type → color mapping ────────────────────────────────
@@ -785,13 +789,16 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
     const [refreshing, setRefreshing] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [detail, setDetail] = useState<SessionDetailResponse | null>(null);
+    const [eventDetailError, setEventDetailError] = useState<string | null>(null);
+    const [eventDetailLoading, setEventDetailLoading] = useState(false);
+    const [eventDetailsById, setEventDetailsById] = useState<Record<string, SessionDetailResponse['events'][number]>>({});
     const [eventsView, setEventsView] = useState<'list' | 'tree'>('list');
 
     const fetchDetail = useCallback(async (isRefresh = false) => {
         try {
             if (isRefresh) setRefreshing(true); else setLoading(true);
             setError(null);
-            const response = await fetch(`/api/tracing/sessions/${sessionId}`);
+            const response = await fetch(`/api/tracing/sessions/${sessionId}?includeEventContent=false`);
             if (!response.ok) {
                 const errorData = await response.json();
                 throw new Error(errorData.error || 'Failed to fetch session detail');
@@ -827,8 +834,7 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
     const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
 
     const sortedEvents = useMemo(() => {
-        if (!detail?.events) return [] as SessionDetailResponse['events'];
-        return [...detail.events].sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0));
+        return detail?.events ?? [];
     }, [detail]);
 
     const hasSpanIds = useMemo(() => sortedEvents.some((e) => e.spanId), [sortedEvents]);
@@ -847,10 +853,68 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
         if (!hasSelection) setSelectedEventId(sortedEvents[0].id);
     }, [sortedEvents, selectedEventId]);
 
+    useEffect(() => {
+        if (!selectedEventId) {
+            setEventDetailError(null);
+            return;
+        }
+
+        if (eventDetailsById[selectedEventId]) {
+            setEventDetailError(null);
+            return;
+        }
+
+        let cancelled = false;
+
+        const loadEventDetail = async () => {
+            try {
+                setEventDetailLoading(true);
+                setEventDetailError(null);
+
+                const response = await fetch(
+                    `/api/tracing/sessions/${sessionId}/events/${encodeURIComponent(selectedEventId)}`,
+                );
+
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Failed to fetch event detail');
+                }
+
+                const data: EventDetailResponse = await response.json();
+                if (cancelled) {
+                    return;
+                }
+
+                setEventDetailsById((current) => ({
+                    ...current,
+                    [selectedEventId]: data.event,
+                }));
+            } catch (eventError) {
+                if (cancelled) {
+                    return;
+                }
+
+                setEventDetailError(
+                    eventError instanceof Error ? eventError.message : 'Unable to load event detail',
+                );
+            } finally {
+                if (!cancelled) {
+                    setEventDetailLoading(false);
+                }
+            }
+        };
+
+        void loadEventDetail();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [eventDetailsById, selectedEventId, sessionId]);
+
     const selectedEvent = useMemo(() => {
         if (!selectedEventId) return null;
-        return sortedEvents.find((e) => e.id === selectedEventId) ?? null;
-    }, [sortedEvents, selectedEventId]);
+        return eventDetailsById[selectedEventId] ?? null;
+    }, [eventDetailsById, selectedEventId]);
 
     // ── Render states ──────────────────────────────────────────
 
@@ -1060,6 +1124,17 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
                                 <ScrollArea style={{ flex: 1 }} type="auto" offsetScrollbars>
                                     <EventDetailPanel event={selectedEvent} />
                                 </ScrollArea>
+                            ) : selectedEventId && eventDetailLoading ? (
+                                <Center h={200}>
+                                    <Stack gap="xs" align="center">
+                                        <Loader size="sm" />
+                                        <Text c="dimmed" size="sm">Loading event detail...</Text>
+                                    </Stack>
+                                </Center>
+                            ) : eventDetailError ? (
+                                <Alert icon={<IconInfoCircle size={16} />} color="red" variant="light">
+                                    {eventDetailError}
+                                </Alert>
                             ) : (
                                 <Center h={200}>
                                     <Text c="dimmed">Select an event to see details.</Text>
