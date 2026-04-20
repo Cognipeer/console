@@ -61,9 +61,7 @@ interface AzureSettings {
   apiVersion: string;
 }
 
-interface OllamaCredentials {
-  // Ollama is a local service — no credentials required
-}
+type OllamaCredentials = Record<string, never>;
 
 interface OllamaSettings {
   baseUrl: string;
@@ -686,9 +684,12 @@ class CognipeerLlmModel extends SimpleChatModel {
 
   async _call(
     messages: BaseMessage[],
-    _options: this['ParsedCallOptions'],
-    _runManager?: CallbackManagerForLLMRun,
+    options: this['ParsedCallOptions'],
+    runManager?: CallbackManagerForLLMRun,
   ): Promise<string> {
+    void options;
+    void runManager;
+
     const payload = messages.map((m) => ({
       role: m._getType() === 'human' ? 'user' : m._getType() === 'ai' ? 'assistant' : m._getType(),
       content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),

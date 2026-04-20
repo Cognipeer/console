@@ -3,7 +3,7 @@
  * Business logic for agent tracing operations
  */
 
-import { getDatabase } from '@/lib/database';
+import { getDatabase, type IAgentTracingEvent } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import dayjs from 'dayjs';
 
@@ -97,7 +97,7 @@ const SESSION_EVENT_SUMMARY_PROJECTION = {
   parentSpanId: 1,
 } as const;
 
-function mapTracingEventSummary(event: Record<string, unknown>) {
+function mapTracingEventSummary(event: IAgentTracingEvent) {
   return {
     id: event.id || event._id,
     sequence: event.sequence,
@@ -117,7 +117,7 @@ function mapTracingEventSummary(event: Record<string, unknown>) {
   };
 }
 
-function mapTracingEventDetail(event: Record<string, unknown>) {
+function mapTracingEventDetail(event: IAgentTracingEvent) {
   return {
     id: event.id || event._id,
     sequence: event.sequence,
@@ -833,8 +833,8 @@ export class AgentTracingService {
       },
       events: events.map((e) => (
         options?.includeEventContent === false
-          ? mapTracingEventSummary(e as Record<string, unknown>)
-          : mapTracingEventDetail(e as Record<string, unknown>)
+          ? mapTracingEventSummary(e)
+          : mapTracingEventDetail(e)
       )),
     };
   }
@@ -854,7 +854,7 @@ export class AgentTracingService {
     }
 
     return {
-      event: mapTracingEventDetail(event as Record<string, unknown>),
+      event: mapTracingEventDetail(event),
     };
   }
 

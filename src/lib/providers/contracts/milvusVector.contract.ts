@@ -23,6 +23,99 @@ interface MilvusSettings {
   dimensions?: number;
 }
 
+interface MilvusCollectionResult {
+  value: boolean;
+}
+
+interface MilvusIndexDescription {
+  metric_type?: string;
+}
+
+interface MilvusDescribeIndexResult {
+  index_descriptions?: MilvusIndexDescription[];
+}
+
+interface MilvusListCollectionsResult {
+  data?: Array<{ name: string }>;
+}
+
+interface MilvusSearchHit {
+  id: string;
+  score?: number;
+  metadata_json?: string;
+}
+
+interface MilvusSearchResult {
+  results?: MilvusSearchHit[];
+}
+
+interface MilvusCountResult {
+  data?: {
+    count?: number | string;
+  };
+}
+
+type MilvusQueryRow = Record<string, unknown> & {
+  id?: string;
+  metadata_json?: string;
+};
+
+interface MilvusQueryResultData {
+  data?: MilvusQueryRow[];
+}
+
+interface MilvusClientLike {
+  hasCollection(input: { collection_name: string }): Promise<MilvusCollectionResult>;
+  createCollection(input: {
+    collection_name: string;
+    enable_dynamic_field: boolean;
+    fields: Array<Record<string, unknown>>;
+  }): Promise<unknown>;
+  createIndex(input: {
+    collection_name: string;
+    field_name: string;
+    index_type: string;
+    metric_type: string;
+    params: Record<string, unknown>;
+  }): Promise<unknown>;
+  loadCollection(input: { collection_name: string }): Promise<unknown>;
+  dropCollection(input: { collection_name: string }): Promise<unknown>;
+  listCollections(): Promise<MilvusListCollectionsResult>;
+  describeIndex(input: {
+    collection_name: string;
+    field_name: string;
+  }): Promise<MilvusDescribeIndexResult>;
+  upsert(input: {
+    collection_name: string;
+    data: Array<Record<string, unknown>>;
+  }): Promise<unknown>;
+  search(input: {
+    collection_name: string;
+    data: number[][];
+    anns_field: string;
+    limit: number;
+    filter?: string;
+    output_fields: string[];
+  }): Promise<MilvusSearchResult>;
+  deleteEntities(input: { collection_name: string; expr: string }): Promise<unknown>;
+  count(input: { collection_name: string }): Promise<MilvusCountResult>;
+  query(input: {
+    collection_name: string;
+    expr: string;
+    output_fields: string[];
+    limit: number;
+    offset: number;
+  }): Promise<MilvusQueryResultData>;
+}
+
+interface MilvusSdkModule {
+  MilvusClient: new (config: Record<string, unknown>) => MilvusClientLike;
+  DataType: {
+    VarChar: string | number;
+    FloatVector: string | number;
+  };
+}
+
 const DEFAULT_DIMENSIONS = 1536;
 const DEFAULT_VECTOR_FIELD = 'vector';
 
@@ -141,9 +234,9 @@ export const MilvusVectorProviderContract: ProviderContract<
       throw new Error('Milvus address is required.');
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/ban-ts-comment
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
     // @ts-ignore – @zilliz/milvus2-sdk-node is an optional peer dependency
-    const { MilvusClient, DataType } = await import('@zilliz/milvus2-sdk-node') as any;
+    const { MilvusClient, DataType } = (await import('@zilliz/milvus2-sdk-node')) as unknown as MilvusSdkModule;
 
     const clientConfig: Record<string, unknown> = {
       address: credentials.address.trim(),
@@ -193,7 +286,7 @@ export const MilvusVectorProviderContract: ProviderContract<
           await milvusClient.loadCollection({ collection_name: collectionName });
           logger?.info?.('Milvus collection created', { providerKey, collectionName });
         } else {
-          try { await milvusClient.loadCollection({ collection_name: collectionName }); } catch (_) { /* already loaded */ }
+          try { await milvusClient.loadCollection({ collection_name: collectionName }); } catch { /* already loaded */ }
         }
 
         return {
@@ -244,7 +337,7 @@ export const MilvusVectorProviderContract: ProviderContract<
             params: {},
           });
         }
-        try { await milvusClient.loadCollection({ collection_name: handle.externalId }); } catch (_) { /* already loaded */ }
+        try { await milvusClient.loadCollection({ collection_name: handle.externalId }); } catch { /* already loaded */ }
 
         const data = items.map((item) => ({
           id: item.id,
@@ -263,7 +356,7 @@ export const MilvusVectorProviderContract: ProviderContract<
       async queryVectors(handle: VectorIndexHandle, query: VectorQueryInput): Promise<VectorQueryResult> {
         const vf = (handle.metadata?.vectorField as string) ?? vectorField;
 
-        try { await milvusClient.loadCollection({ collection_name: handle.externalId }); } catch (_) { /* already loaded */ }
+        try { await milvusClient.loadCollection({ collection_name: handle.externalId }); } catch { /* already loaded */ }
 
         const result = await milvusClient.search({
           collection_name: handle.externalId,
@@ -274,9 +367,9 @@ export const MilvusVectorProviderContract: ProviderContract<
           output_fields: ['id', 'metadata_json'],
         });
 
-        const hits = result.results ?? [];
+        const hits: MilvusSearchHit[] = result.results ?? [];
         return {
-          matches: hits.map((hit: { id: string; score: number; metadata_json?: string }) => {
+          matches: hits.map((hit) => {
             let metadata: Record<string, unknown> | undefined;
             try {
               metadata = hit.metadata_json ? JSON.parse(hit.metadata_json) : undefined;
@@ -300,7 +393,7 @@ export const MilvusVectorProviderContract: ProviderContract<
         const limit = input?.limit ?? 100;
         const offset = input?.cursor ? parseInt(input.cursor, 10) : 0;
 
-        try { await milvusClient.loadCollection({ collection_name: handle.externalId }); } catch (_) { /* already loaded */ }
+        try { await milvusClient.loadCollection({ collection_name: handle.externalId }); } catch { /* already loaded */ }
 
         const countRes = await milvusClient.count({ collection_name: handle.externalId }).catch(() => null);
         const total: number | undefined = countRes?.data?.count != null ? Number(countRes.data.count) : undefined;

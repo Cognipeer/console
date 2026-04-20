@@ -7,7 +7,7 @@
 import { ObjectId } from 'mongodb';
 import type { IAgentTracingSession, IAgentTracingEvent } from '../provider.interface';
 import type { Constructor } from './types';
-import { MongoDBProviderBase, COLLECTIONS } from './base';
+import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
 
 export function TracingMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class TracingOps extends Base {
