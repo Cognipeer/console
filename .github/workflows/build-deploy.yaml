@@ -72,7 +72,7 @@ jobs:
           cache-to: type=gha,mode=max
           tags: |
             ${{ steps.ecr.outputs.registry }}/${{ secrets.LOCAL_FIRST_REPOSITORY }}:${{ steps.vars.outputs.tag }}
-            ${{ env.LOGIN_SERVER }}/${{ secrets.LOCAL_SECOND_REPOSITORY }}:${{ steps.vars.outputs.tag }}
+            ${{ secrets.LOGIN_SERVER }}/${{ secrets.LOCAL_SECOND_REPOSITORY }}:${{ steps.vars.outputs.tag }}
 
   notify:
     runs-on: ubuntu-latest
