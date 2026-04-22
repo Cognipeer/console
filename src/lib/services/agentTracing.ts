@@ -753,6 +753,7 @@ export class AgentTracingService {
 
     const result = await db.listAgentTracingSessions({
       agentName: filters?.agent,
+      query: filters?.query,
       projection: SESSION_LIST_PROJECTION,
       status: filters?.status,
       from: filters?.from,

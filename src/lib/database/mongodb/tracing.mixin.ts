@@ -695,6 +695,17 @@ export function TracingMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
         query.startedAt = startedAt;
       }
 
+      const freeText =
+        typeof filters?.query === 'string' ? filters.query.trim() : '';
+      if (freeText) {
+        const escaped = this.escapeRegex(freeText);
+        query.$or = [
+          { sessionId: { $regex: escaped, $options: 'i' } },
+          { threadId: { $regex: escaped, $options: 'i' } },
+          { agentName: { $regex: escaped, $options: 'i' } },
+        ];
+      }
+
       const limit = Math.max(0, parseInt(String(filters?.limit ?? '50'), 10) || 0);
       const skip = Math.max(0, parseInt(String(filters?.skip ?? '0'), 10) || 0);
       const includeTotal = filters?.includeTotal !== false;

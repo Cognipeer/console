@@ -189,6 +189,13 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       if (filters?.from) { clauses.push('createdAt >= @from'); params.from = (filters.from as Date).toISOString(); }
       if (filters?.to) { clauses.push('createdAt <= @to'); params.to = (filters.to as Date).toISOString(); }
 
+      const freeText =
+        typeof filters?.query === 'string' ? filters.query.trim() : '';
+      if (freeText) {
+        clauses.push('(sessionId LIKE @freeText OR threadId LIKE @freeText OR agentName LIKE @freeText)');
+        params.freeText = `%${freeText}%`;
+      }
+
       const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
       const limitValue = Number.parseInt(String(filters?.limit ?? '50'), 10);
       const skipValue = Number.parseInt(String(filters?.skip ?? '0'), 10);

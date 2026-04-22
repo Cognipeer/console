@@ -14,6 +14,7 @@ import { clientGuardrailsApiPlugin } from './plugins/client-guardrails';
 import { clientInferenceApiPlugin } from './plugins/client-inference';
 import { clientMemoryApiPlugin } from './plugins/client-memory';
 import { clientMcpApiPlugin } from './plugins/client-mcp';
+import { clientMcpConsoleApiPlugin } from './plugins/client-mcp-console';
 import { clientPromptsApiPlugin } from './plugins/client-prompts';
 import { clientRagApiPlugin } from './plugins/client-rag';
 import { clientToolsApiPlugin } from './plugins/client-tools';
@@ -205,6 +206,10 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(clientGuardrailsApiPlugin);
   await app.register(clientInferenceApiPlugin);
   await app.register(clientMemoryApiPlugin);
+  // Built-in console MCP server must register before the dynamic user MCP
+  // plugin so its static `/console/*` routes win over the parametric
+  // `/:serverKey/*` routes.
+  await app.register(clientMcpConsoleApiPlugin);
   await app.register(clientMcpApiPlugin);
   await app.register(clientPromptsApiPlugin);
   await app.register(clientRagApiPlugin);
