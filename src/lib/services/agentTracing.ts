@@ -4,6 +4,7 @@
  */
 
 import { getDatabase, type IAgentTracingEvent } from '@/lib/database';
+import type { IAgentTracingSession } from '@/lib/database/provider/types.base';
 import { createLogger } from '@/lib/core/logger';
 import dayjs from 'dayjs';
 
@@ -308,6 +309,50 @@ function buildAggregateTotals(sessions: SessionMetricsSource[]): AgentTracingAgg
   };
 }
 
+const DASHBOARD_SESSIONS_BATCH_SIZE = 1000;
+const DASHBOARD_SESSIONS_HARD_CAP = 100_000;
+
+async function fetchAllSessionsBatched(
+  db: Awaited<ReturnType<typeof getDatabase>>,
+  projectId: string,
+  baseQuery: SessionListQuery,
+  projection: Record<string, 0 | 1>,
+): Promise<IAgentTracingSession[]> {
+  const all: IAgentTracingSession[] = [];
+  let skip = 0;
+  // Loop in batches until we drain the result set or hit the safety cap.
+  while (skip < DASHBOARD_SESSIONS_HARD_CAP) {
+    const { sessions } = await db.listAgentTracingSessions({
+      ...baseQuery,
+      includeTotal: false,
+      limit: DASHBOARD_SESSIONS_BATCH_SIZE,
+      skip,
+      projection,
+    }, projectId);
+
+    if (!sessions || sessions.length === 0) {
+      break;
+    }
+
+    all.push(...(sessions as IAgentTracingSession[]));
+
+    if (sessions.length < DASHBOARD_SESSIONS_BATCH_SIZE) {
+      break;
+    }
+
+    skip += sessions.length;
+  }
+
+  if (skip >= DASHBOARD_SESSIONS_HARD_CAP) {
+    logger.warn('Dashboard analytics hit session hard cap', {
+      projectId,
+      cap: DASHBOARD_SESSIONS_HARD_CAP,
+    });
+  }
+
+  return all;
+}
+
 export class AgentTracingService {
   /**
    * List threads (grouped sessions by threadId)
@@ -436,7 +481,7 @@ export class AgentTracingService {
       if (filters?.to) query.to = filters.to;
 
       logger.debug('Fetching tracing dashboard sessions...');
-      const [recentSessionResult, allSessions] = await Promise.all([
+      const [recentSessionResult, sessions] = await Promise.all([
         db.listAgentTracingSessions({
           ...query,
           includeTotal: false,
@@ -444,19 +489,12 @@ export class AgentTracingService {
           projection: DASHBOARD_SESSION_PROJECTION,
           skip: 0,
         }, projectId),
-        db.listAgentTracingSessions({
-          ...query,
-          includeTotal: false,
-          limit: 1000,
-          projection: DASHBOARD_SESSION_PROJECTION,
-        }, projectId),
+        fetchAllSessionsBatched(db, projectId, query, DASHBOARD_SESSION_PROJECTION),
       ]);
 
       const recentSessions = recentSessionResult.sessions || [];
 
       logger.debug('Recent sessions count', { count: recentSessions.length });
-
-      const sessions = allSessions.sessions || [];
 
       logger.debug('Total sessions for analytics', { count: sessions.length });
 
@@ -873,18 +911,18 @@ export class AgentTracingService {
 
     const query: SessionListQuery = {
       agentNameExact: agentName,
-      includeTotal: false,
-      projection: AGENT_OVERVIEW_SESSION_PROJECTION,
     };
     if (filters?.from || filters?.to) {
       query.from = filters.from;
       query.to = filters.to;
     }
 
-    const { sessions } = await db.listAgentTracingSessions({
-      ...query,
-      limit: 1000,
-    }, projectId);
+    const sessions = await fetchAllSessionsBatched(
+      db,
+      projectId,
+      query,
+      AGENT_OVERVIEW_SESSION_PROJECTION,
+    );
 
     if (sessions.length === 0) {
       return {
