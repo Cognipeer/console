@@ -42,6 +42,13 @@ For the relationship between the two, see [Using the SDK](/guide/sdk-integration
 | [Agents](./agents) | `/agents` | GET |
 | [Agent Detail](./agents) | `/agents/:agentKey` | GET |
 | [Agent Responses](./agents) | `/responses` | POST |
+| [Browsers](./browser) | `/browser/browsers` | GET, POST, PATCH, DELETE |
+| [Browser Sessions](./browser) | `/browser/sessions` | GET, POST |
+| [Browser Session Events](./browser) | `/browser/sessions/:sessionId/events` | GET |
+| [Browser Actions](./browser) | `/browser/sessions/:sessionKey/actions` | POST |
+| [Browser Snapshot / Extract / Artifacts](./browser) | `/browser/sessions/:sessionKey/{snapshot,extract,screenshot,pdf}` | GET, POST |
+| [Browser MCP SSE](./browser) | `/browser/:browserKey/mcp/sse` | GET |
+| [Browser MCP Message](./browser) | `/browser/:browserKey/mcp/message` | POST |
 | [Tools](./tools) | `/tools` | GET |
 | [Tool Detail](./tools) | `/tools/:toolKey` | GET |
 | [Tool Execute](./tools) | `/tools/:toolKey/actions/:actionKey/execute` | POST |

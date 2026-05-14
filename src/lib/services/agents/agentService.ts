@@ -9,7 +9,11 @@ import { createLogger } from '@/lib/core/logger';
 import type {
     AgentInvokeResult as AgentSdkInvokeResult,
     Message as AgentSdkMessage,
+    RuntimeProfile as AgentSdkRuntimeProfile,
+    SmartState as AgentSdkSmartState,
+    ToolResponseRetentionPolicy as AgentSdkToolResponseRetentionPolicy,
     ToolInterface as AgentSdkToolInterface,
+    TraceSinkConfig as AgentSdkTraceSinkConfig,
     TraceSessionFile,
 } from '@cognipeer/agent-sdk';
 import { getDatabase, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentTracingEvent, type IAgentTracingSession, type IAgentVersion } from '@/lib/database';
@@ -22,6 +26,24 @@ import { getToolByKey, executeToolAction, logToolRequest } from '@/lib/services/
 import { resolveBrowser, createBrowserSession, buildBrowserAgentTools } from '@/lib/services/browser';
 
 const logger = createLogger('agents');
+
+const CONSOLE_AGENT_RUNTIME_PROFILE: AgentSdkRuntimeProfile = 'balanced';
+const CONSOLE_AGENT_MAX_TOOL_CALLS = 12;
+const CONSOLE_AGENT_MAX_CONTEXT_TOKENS = 48_000;
+const CONSOLE_AGENT_SUMMARY_TRIGGER_TOKENS = 32_000;
+const CONSOLE_AGENT_SUMMARY_MAX_TOKENS = 48_000;
+const CONSOLE_AGENT_SUMMARY_PROMPT_MAX_TOKENS = 8_000;
+const CONSOLE_AGENT_LAST_TURNS_TO_KEEP = 10;
+const CONSOLE_AGENT_TOOL_RESPONSE_RETENTION_BY_TOOL: Record<string, AgentSdkToolResponseRetentionPolicy> = {
+    knowledge_search: 'keep_full',
+};
+
+const CONSOLE_AGENT_TOOL_RESPONSES_CONFIG = {
+    defaultPolicy: 'summarize_archive' as const,
+    toolResponseRetentionByTool: CONSOLE_AGENT_TOOL_RESPONSE_RETENTION_BY_TOOL,
+    maxToolResponseChars: 80_000,
+    maxToolResponseTokens: 20_000,
+};
 
 type InternalTraceEvent = TraceSessionFile['events'][number] & {
     toolName?: string;
@@ -37,6 +59,67 @@ type InternalTraceEvent = TraceSessionFile['events'][number] & {
 type InternalTraceSession = Omit<TraceSessionFile, 'events'> & {
     events: InternalTraceEvent[];
 };
+
+type CreateConsoleSdkAgentInput = {
+    name: string;
+    version?: string;
+    model: unknown;
+    tools: AgentSdkToolInterface[];
+    systemPrompt?: string;
+    tracingSink: AgentSdkTraceSinkConfig;
+    threadId?: string;
+};
+
+function createConsoleAgentState(messages: AgentSdkMessage[]): AgentSdkSmartState {
+    return {
+        messages,
+        toolHistory: [],
+        toolHistoryArchived: [],
+        summaries: [],
+        summaryRecords: [],
+    };
+}
+
+function createConsoleSdkAgent(
+    createSmartAgentFn: typeof import('@cognipeer/agent-sdk').createSmartAgent,
+    input: CreateConsoleSdkAgentInput,
+) {
+    return createSmartAgentFn({
+        name: input.name,
+        version: input.version,
+        model: input.model,
+        ...(input.tools.length > 0 ? { tools: input.tools } : {}),
+        runtimeProfile: CONSOLE_AGENT_RUNTIME_PROFILE,
+        planning: {
+            mode: 'off',
+            replanPolicy: 'on_failure',
+        },
+        limits: {
+            maxToolCalls: CONSOLE_AGENT_MAX_TOOL_CALLS,
+            maxContextTokens: CONSOLE_AGENT_MAX_CONTEXT_TOKENS,
+        },
+        summarization: {
+            enable: true,
+            maxTokens: CONSOLE_AGENT_SUMMARY_MAX_TOKENS,
+            summaryTriggerTokens: CONSOLE_AGENT_SUMMARY_TRIGGER_TOKENS,
+            summaryPromptMaxTokens: CONSOLE_AGENT_SUMMARY_PROMPT_MAX_TOKENS,
+            integrityCheck: true,
+        },
+        context: {
+            policy: 'hybrid',
+            lastTurnsToKeep: CONSOLE_AGENT_LAST_TURNS_TO_KEEP,
+            toolResponsePolicy: 'summarize_archive',
+        },
+        toolResponses: CONSOLE_AGENT_TOOL_RESPONSES_CONFIG,
+        ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
+        tracing: {
+            enabled: true,
+            mode: 'batched',
+            sink: input.tracingSink,
+            ...(input.threadId ? { threadId: input.threadId } : {}),
+        },
+    });
+}
 
 // ── Tool Bridge ─────────────────────────────────────────────────────
 
@@ -806,7 +889,7 @@ export async function executeAgentChat(
     }
 
     // 5b. Build RAG retrieval tool if knowledge engine is configured
-    const { createAgent, fromLangchainModel, createTool } = await import('@cognipeer/agent-sdk');
+    const { createSmartAgent, fromLangchainModel, createTool } = await import('@cognipeer/agent-sdk');
     const { z } = await import('zod');
 
     const tools: AgentSdkToolInterface[] = [];
@@ -860,27 +943,22 @@ export async function executeAgentChat(
     const sdkModel = fromLangchainModel(lcModel);
     const tracingSink = await createInternalTracingSink(tenantDbName, tenantId, projectId);
 
-    const sdkAgent = createAgent({
+    const sdkAgent = createConsoleSdkAgent(createSmartAgent, {
         name: agent.name,
         model: sdkModel,
-        ...(tools.length > 0 ? { tools } : {}),
-        tracing: {
-            enabled: true,
-            mode: 'batched',
-            sink: tracingSink,
-            threadId: conversationId,
-        },
+        tools,
+        systemPrompt,
+        tracingSink,
+        threadId: conversationId,
+        version: resolvedVersion !== null ? String(resolvedVersion) : undefined,
     });
 
     const inputMessages: AgentSdkMessage[] = [
-        ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
         ...existingMessages,
         { role: 'user', content: userMessage },
     ];
 
-    const result: AgentSdkInvokeResult = await sdkAgent.invoke({
-        messages: inputMessages,
-    });
+    const result: AgentSdkInvokeResult = await sdkAgent.invoke(createConsoleAgentState(inputMessages));
 
     const assistantContent = result.content || '';
 
@@ -1012,7 +1090,7 @@ export async function executePlaygroundChat(
     }
 
     // Build RAG retrieval tool if knowledge engine is configured
-    const { createAgent, fromLangchainModel, createTool } = await import('@cognipeer/agent-sdk');
+    const { createSmartAgent, fromLangchainModel, createTool } = await import('@cognipeer/agent-sdk');
     const { z } = await import('zod');
 
     const playgroundTools: AgentSdkToolInterface[] = [];
@@ -1066,18 +1144,15 @@ export async function executePlaygroundChat(
     const sdkModel = fromLangchainModel(lcModel);
     const tracingSink = await createInternalTracingSink(tenantDbName, tenantId, projectId);
 
-    const sdkAgent = createAgent({
+    const sdkAgent = createConsoleSdkAgent(createSmartAgent, {
         name: agent.name,
         model: sdkModel,
-        ...(playgroundTools.length > 0 ? { tools: playgroundTools } : {}),
-        tracing: {
-            enabled: true,
-            mode: 'batched',
-            sink: tracingSink,
-        },
+        tools: playgroundTools,
+        systemPrompt,
+        tracingSink,
     });
 
-    const result: AgentSdkInvokeResult = await sdkAgent.invoke({ messages: inputMessages });
+    const result: AgentSdkInvokeResult = await sdkAgent.invoke(createConsoleAgentState(inputMessages));
     const assistantContent = result.content || '';
 
     // Output guardrail check

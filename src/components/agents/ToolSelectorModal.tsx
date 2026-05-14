@@ -113,11 +113,18 @@ export function ToolSelectorModal({
     const initial = new Set<string>();
     const initialConfigs: Record<string, Record<string, unknown>> = {};
     for (const b of value) {
+      const bindingId = `${b.source}::${b.sourceKey}`;
+      if (b.source === 'system' && b.sourceKey === 'browser_use') {
+        if (b.config) {
+          initialConfigs[bindingId] = b.config;
+        }
+        continue;
+      }
       for (const tn of b.toolNames) {
         initial.add(toKey(b.source, b.sourceKey, tn));
       }
       if (b.source === 'system' && b.config) {
-        initialConfigs[`${b.source}::${b.sourceKey}`] = b.config;
+        initialConfigs[bindingId] = b.config;
       }
     }
     setSelected(initial);
@@ -273,6 +280,23 @@ export function ToolSelectorModal({
       }
       map.get(id)!.toolNames.push(toolName);
     }
+
+    const browserUseConfig = systemConfigs['system::browser_use'];
+    const browserId =
+      typeof browserUseConfig?.browserId === 'string' ? browserUseConfig.browserId : '';
+
+    if (browserId) {
+      map.set('system::browser_use', {
+        source: 'system',
+        sourceKey: 'browser_use',
+        toolNames: ['browser_use'],
+        config: {
+          ...browserUseConfig,
+          browserId,
+        },
+      });
+    }
+
     return Array.from(map.values());
   };
 
@@ -296,38 +320,23 @@ export function ToolSelectorModal({
 
   // ── Count helpers ──────────────────────────────────────────────
 
-  const selectedCountForSource = (group: ToolSourceGroup) =>
-    group.tools.filter((t) => selected.has(toKey(group.source, group.sourceKey, t.name))).length;
+  const selectedCountForSource = (group: ToolSourceGroup) => {
+    if (group.source === 'system' && group.sourceKey === 'browser_use') {
+      return systemConfigs['system::browser_use']?.browserId ? 1 : 0;
+    }
 
-  const totalSelected = selected.size;
+    return group.tools.filter((t) => selected.has(toKey(group.source, group.sourceKey, t.name))).length;
+  };
+
+  const totalSelected =
+    selected.size + (systemConfigs['system::browser_use']?.browserId ? 1 : 0);
 
   // ── Confirm ────────────────────────────────────────────────────
 
   const handleConfirm = () => {
-    // Validate: system bindings need their required config
-    for (const key of selected) {
-      const { source, sourceKey } = parseKey(key);
-      if (source === 'system' && sourceKey === 'browser_use') {
-        const id = `${source}::${sourceKey}`;
-        const browserId = systemConfigs[id]?.browserId;
-        if (!browserId || typeof browserId !== 'string') {
-          // Skip confirm; UI will show inline picker
-          return;
-        }
-      }
-    }
     onChange(buildBindings());
     onClose();
   };
-
-  const isSystemBindingInvalid = Array.from(selected).some((key) => {
-    const { source, sourceKey } = parseKey(key);
-    if (source === 'system' && sourceKey === 'browser_use') {
-      const id = `${source}::${sourceKey}`;
-      return !systemConfigs[id]?.browserId;
-    }
-    return false;
-  });
 
   // ── Render ─────────────────────────────────────────────────────
 
@@ -416,68 +425,70 @@ export function ToolSelectorModal({
                   <Collapse in={isExpanded}>
                     <Divider />
                     <Stack gap={0} p="xs" pt={0}>
-                      {group.source === 'system' && group.sourceKey === 'browser_use' && count > 0 && (
+                      {group.source === 'system' && group.sourceKey === 'browser_use' ? (
                         <Select
                           mt="xs"
                           mb="xs"
                           label="Browser"
-                          placeholder={browsers.length === 0 ? 'No browsers available' : 'Select a browser'}
-                          description="The browser this agent will use at runtime."
+                          placeholder={browsers.length === 0 ? 'No browsers available' : 'Select a browser to add Browser Use'}
+                          description="Selecting a browser adds the Browser Use system tool to this agent."
                           data={browsers.map((b) => ({ value: b.id, label: `${b.name} (${b.key})` }))}
                           value={(systemConfigs[sourceId]?.browserId as string) ?? null}
-                          onChange={(val) => {
+                          onChange={(value) => {
                             setSystemConfigs((prev) => ({
                               ...prev,
-                              [sourceId]: { ...(prev[sourceId] ?? {}), browserId: val ?? '' },
+                              [sourceId]: { ...(prev[sourceId] ?? {}), browserId: value ?? '' },
                             }));
                           }}
-                          error={!systemConfigs[sourceId]?.browserId ? 'Browser is required' : undefined}
                           searchable
+                          clearable
                           nothingFoundMessage="No browsers"
                         />
-                      )}
-                      {/* Select all */}
-                      <Checkbox
-                        label={
-                          <Text size="xs" fw={600} c="dimmed">
-                            Select all ({group.tools.length})
-                          </Text>
-                        }
-                        checked={allSelected}
-                        indeterminate={someSelected}
-                        onChange={(e) =>
-                          toggleAllToolsInSource(group, e.currentTarget.checked)
-                        }
-                        mt="xs"
-                        mb="xs"
-                      />
-                      {group.tools.map((tool) => {
-                        const key = toKey(group.source, group.sourceKey, tool.name);
-                        return (
+                      ) : (
+                        <>
                           <Checkbox
-                            key={key}
                             label={
-                              <Group gap="xs">
-                                <IconTool size={12} />
-                                <div>
-                                  <Text size="sm">{tool.name}</Text>
-                                  {tool.description && (
-                                    <Text size="xs" c="dimmed" lineClamp={2}>
-                                      {tool.description}
-                                    </Text>
-                                  )}
-                                </div>
-                              </Group>
+                              <Text size="xs" fw={600} c="dimmed">
+                                Select all ({group.tools.length})
+                              </Text>
                             }
-                            checked={selected.has(key)}
-                            onChange={() =>
-                              toggleTool(group.source, group.sourceKey, tool.name)
+                            checked={allSelected}
+                            indeterminate={someSelected}
+                            onChange={(e) =>
+                              toggleAllToolsInSource(group, e.currentTarget.checked)
                             }
-                            mb={4}
-                            ml="md"
+                            mt="xs"
+                            mb="xs"
                           />
-                        );
-                      })}
+                          {group.tools.map((tool) => {
+                            const key = toKey(group.source, group.sourceKey, tool.name);
+                            return (
+                              <Checkbox
+                                key={key}
+                                label={
+                                  <Group gap="xs">
+                                    <IconTool size={12} />
+                                    <div>
+                                      <Text size="sm">{tool.name}</Text>
+                                      {tool.description && (
+                                        <Text size="xs" c="dimmed" lineClamp={2}>
+                                          {tool.description}
+                                        </Text>
+                                      )}
+                                    </div>
+                                  </Group>
+                                }
+                                checked={selected.has(key)}
+                                onChange={() =>
+                                  toggleTool(group.source, group.sourceKey, tool.name)
+                                }
+                                mb={4}
+                                ml="md"
+                              />
+                            );
+                          })}
+                        </>
+                      )}
                     </Stack>
                   </Collapse>
                 </Paper>
@@ -495,7 +506,7 @@ export function ToolSelectorModal({
             <Button variant="default" size="sm" onClick={onClose}>
               Cancel
             </Button>
-            <Button size="sm" onClick={handleConfirm} disabled={isSystemBindingInvalid}>
+            <Button size="sm" onClick={handleConfirm}>
               Confirm
             </Button>
           </Group>
