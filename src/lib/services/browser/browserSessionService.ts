@@ -16,8 +16,6 @@ import { browserManager } from './browserManager';
 import type {
   BrowserAction,
   BrowserActionResult,
-  BrowserAgentRunInput,
-  BrowserAgentView,
   BrowserArtifactRef,
   BrowserExtractInput,
   BrowserExtractResult,
@@ -451,4 +449,3 @@ function redactAction(action: BrowserAction): Record<string, unknown> {
   return clone;
 }
 
-export type { BrowserAgentRunInput, BrowserAgentView };

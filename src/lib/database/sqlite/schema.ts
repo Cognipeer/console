@@ -152,9 +152,12 @@ export const TENANT_SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS agent_tracing_sessions (
     id TEXT PRIMARY KEY,
     sessionId TEXT NOT NULL UNIQUE,
+    traceId TEXT,
+    rootSpanId TEXT,
     threadId TEXT,
     tenantId TEXT NOT NULL,
     projectId TEXT,
+    source TEXT,
     agent TEXT DEFAULT '{}',
     agentName TEXT,
     agentVersion TEXT,
@@ -186,6 +189,9 @@ export const TENANT_SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS agent_tracing_events (
     id TEXT PRIMARY KEY,
     sessionId TEXT NOT NULL,
+    traceId TEXT,
+    spanId TEXT,
+    parentSpanId TEXT,
     tenantId TEXT NOT NULL,
     projectId TEXT,
     eventId TEXT,
@@ -933,31 +939,6 @@ export const TENANT_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_browser_sessions_tenantId ON browser_sessions(tenantId);
   CREATE INDEX IF NOT EXISTS idx_browser_sessions_browserId ON browser_sessions(browserId);
   CREATE UNIQUE INDEX IF NOT EXISTS idx_browser_sessions_tenant_key ON browser_sessions(tenantId, sessionKey);
-
-  -- Browser agents
-  CREATE TABLE IF NOT EXISTS browser_agents (
-    id TEXT PRIMARY KEY,
-    tenantId TEXT NOT NULL,
-    projectId TEXT,
-    browserId TEXT NOT NULL,
-    key TEXT NOT NULL,
-    name TEXT NOT NULL,
-    description TEXT,
-    modelKey TEXT NOT NULL,
-    systemPrompt TEXT,
-    browserConfig TEXT DEFAULT '{}',
-    artifactBucketKey TEXT,
-    runOptions TEXT DEFAULT '{}',
-    status TEXT NOT NULL DEFAULT 'active',
-    metadata TEXT DEFAULT '{}',
-    createdBy TEXT NOT NULL,
-    updatedBy TEXT,
-    createdAt TEXT NOT NULL,
-    updatedAt TEXT NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS idx_browser_agents_tenantId ON browser_agents(tenantId);
-  CREATE INDEX IF NOT EXISTS idx_browser_agents_browserId ON browser_agents(browserId);
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_browser_agents_tenant_key ON browser_agents(tenantId, key);
 
   -- Browser session events
   CREATE TABLE IF NOT EXISTS browser_session_events (

@@ -367,12 +367,14 @@ export interface IAgentConfig {
 
 /** A single tool-source binding for an agent */
 export interface IAgentToolBinding {
-  /** Source type – 'tool' for unified tool system, 'mcp' for legacy */
-  source: 'tool' | 'mcp';
-  /** Identifier of the source (tool key or MCP server key) */
+  /** Source type – 'tool' (unified), 'mcp' (legacy), or 'system' (built-in like browser_use) */
+  source: 'tool' | 'mcp' | 'system';
+  /** Identifier of the source (tool key, MCP server key, or system tool key) */
   sourceKey: string;
   /** Action/tool names selected from that source */
   toolNames: string[];
+  /** Optional configuration for the binding (e.g. { browserId } for system browser_use) */
+  config?: Record<string, unknown>;
 }
 
 export interface IAgent {
@@ -497,8 +499,6 @@ export type BrowserActionType =
   | 'close'
   | 'error';
 
-export type BrowserAgentStatus = 'active' | 'inactive' | 'draft';
-
 export type BrowserStatus = 'active' | 'disabled';
 
 /**
@@ -585,36 +585,6 @@ export interface IBrowserSession {
   errorMessage?: string;
   /** Raw counters for fast list views. */
   eventCount?: number;
-  metadata?: Record<string, unknown>;
-  createdBy: string;
-  updatedBy?: string;
-  createdAt?: Date;
-  updatedAt?: Date;
-}
-
-export interface IBrowserAgent {
-  _id?: ObjectId | string;
-  tenantId: string;
-  projectId?: string;
-  /** Parent Browser profile that owns this agent. */
-  browserId: string;
-  key: string;
-  name: string;
-  description?: string;
-  /** Tenant model key from the model registry. */
-  modelKey: string;
-  systemPrompt?: string;
-  /** Default browser session config applied when the agent runs. */
-  browserConfig?: IBrowserSessionConfig;
-  /** Bucket where artifacts (screenshots / PDF) are uploaded. */
-  artifactBucketKey?: string;
-  /** Reasoning / planning hints (max steps, tool whitelist, etc.). */
-  runOptions?: {
-    maxSteps?: number;
-    temperature?: number;
-    runtimeProfile?: string;
-  };
-  status: BrowserAgentStatus;
   metadata?: Record<string, unknown>;
   createdBy: string;
   updatedBy?: string;

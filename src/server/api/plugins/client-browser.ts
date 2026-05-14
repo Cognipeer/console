@@ -10,35 +10,26 @@ import {
   captureSnapshot,
   closeBrowserSession,
   createBrowser,
-  createBrowserAgent,
   createBrowserSession,
   deleteBrowser,
-  deleteBrowserAgent,
   deleteBrowserSession,
   exportSessionPdf,
   extractFromBrowser,
   getBrowser,
-  getBrowserAgent,
   getBrowserSession,
-  listBrowserAgents,
   listBrowserSessionEvents,
   listBrowserSessions,
   listBrowsers,
   runBrowserAction,
-  runBrowserAgent,
   updateBrowser,
-  updateBrowserAgent,
 } from '@/lib/services/browser';
 import type {
   BrowserAction,
-  BrowserAgentRunInput,
   BrowserExtractInput,
   BrowserPdfInput,
   BrowserScreenshotInput,
-  CreateBrowserAgentInput,
   CreateBrowserInput,
   CreateBrowserSessionInput,
-  UpdateBrowserAgentInput,
   UpdateBrowserInput,
 } from '@/lib/services/browser';
 import {
@@ -348,110 +339,6 @@ export const clientBrowserApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       logger.error('Delete session failed', { error });
       return reply.code(500).send({ error: 'Internal server error' });
-    }
-  }));
-
-  // ── Agents ────────────────────────────────────────────────────────
-  app.post('/client/v1/browser/agents', withClientApiRequestContext(async (request, reply) => {
-    try {
-      const ctx = await getApiTokenContextForRequest(request);
-      const body = readJsonBody<CreateBrowserAgentInput>(request);
-      const agent = await createBrowserAgent(
-        { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
-        { ...body, createdBy: body.createdBy ?? ctx.user?.email ?? 'api-token' },
-      );
-      return reply.code(201).send({ agent });
-    } catch (error) {
-      logger.error('Create browser agent failed', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Failed to create agent',
-      });
-    }
-  }));
-
-  app.get('/client/v1/browser/agents', withClientApiRequestContext(async (request, reply) => {
-    try {
-      const ctx = await getApiTokenContextForRequest(request);
-      const query = (request.query ?? {}) as { status?: string; search?: string };
-      const agents = await listBrowserAgents(
-        { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
-        query,
-      );
-      return reply.code(200).send({ agents });
-    } catch (error) {
-      logger.error('List browser agents failed', { error });
-      return reply.code(500).send({ error: 'Internal server error' });
-    }
-  }));
-
-  app.get('/client/v1/browser/agents/:agentId', withClientApiRequestContext(async (request, reply) => {
-    try {
-      const ctx = await getApiTokenContextForRequest(request);
-      const { agentId } = request.params as { agentId: string };
-      const agent = await getBrowserAgent(
-        { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
-        agentId,
-      );
-      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
-      return reply.code(200).send({ agent });
-    } catch (error) {
-      logger.error('Get browser agent failed', { error });
-      return reply.code(500).send({ error: 'Internal server error' });
-    }
-  }));
-
-  app.patch('/client/v1/browser/agents/:agentId', withClientApiRequestContext(async (request, reply) => {
-    try {
-      const ctx = await getApiTokenContextForRequest(request);
-      const { agentId } = request.params as { agentId: string };
-      const body = readJsonBody<UpdateBrowserAgentInput>(request);
-      const agent = await updateBrowserAgent(
-        { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
-        agentId,
-        { ...body, updatedBy: body.updatedBy ?? ctx.user?.email ?? 'api-token' },
-      );
-      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
-      return reply.code(200).send({ agent });
-    } catch (error) {
-      logger.error('Update browser agent failed', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Failed to update agent',
-      });
-    }
-  }));
-
-  app.delete('/client/v1/browser/agents/:agentId', withClientApiRequestContext(async (request, reply) => {
-    try {
-      const ctx = await getApiTokenContextForRequest(request);
-      const { agentId } = request.params as { agentId: string };
-      const ok = await deleteBrowserAgent(
-        { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
-        agentId,
-      );
-      if (!ok) return reply.code(404).send({ error: 'Agent not found' });
-      return reply.code(200).send({ deleted: true });
-    } catch (error) {
-      logger.error('Delete browser agent failed', { error });
-      return reply.code(500).send({ error: 'Internal server error' });
-    }
-  }));
-
-  app.post('/client/v1/browser/agents/:agentIdOrKey/run', withClientApiRequestContext(async (request, reply) => {
-    try {
-      const ctx = await getApiTokenContextForRequest(request);
-      const { agentIdOrKey } = request.params as { agentIdOrKey: string };
-      const body = readJsonBody<BrowserAgentRunInput>(request);
-      const result = await runBrowserAgent(
-        { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
-        agentIdOrKey,
-        { ...body, createdBy: ctx.user?.email ?? 'api-token' },
-      );
-      return reply.code(200).send({ result });
-    } catch (error) {
-      logger.error('Run browser agent failed', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Failed to run agent',
-      });
     }
   }));
 };

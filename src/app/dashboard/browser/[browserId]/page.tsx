@@ -38,10 +38,12 @@ import {
   IconArrowLeft,
   IconCamera,
   IconCode,
+  IconCopy,
   IconDeviceDesktop,
   IconEdit,
   IconInfoCircle,
   IconPlayerPlay,
+  IconPlug,
   IconPlus,
   IconRefresh,
   IconTerminal,
@@ -105,7 +107,6 @@ export default function BrowserDetailPage() {
 
   const [browser, setBrowser] = useState<BrowserView | null>(null);
   const [sessions, setSessions] = useState<BrowserSessionView[]>([]);
-  const [agentCount, setAgentCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -120,6 +121,7 @@ export default function BrowserDetailPage() {
   const [creating, setCreating] = useState(false);
   const [drawerSession, setDrawerSession] = useState<BrowserSessionView | null>(null);
   const [drawerOpened, drawerHandlers] = useDisclosure(false);
+  const [mcpOpened, mcpHandlers] = useDisclosure(false);
 
   const sessionForm = useForm<CreateSessionForm>({
     initialValues: { name: '', url: '', artifactBucketKey: '', allowList: '', blockList: '' },
@@ -136,10 +138,9 @@ export default function BrowserDetailPage() {
     if (!browserId) return;
     setRefreshing(true);
     try {
-      const [browserRes, sessionsRes, agentsRes] = await Promise.all([
+      const [browserRes, sessionsRes] = await Promise.all([
         fetch(`/api/browser/browsers/${encodeURIComponent(browserId)}`, { cache: 'no-store' }),
         fetch(`/api/browser/sessions?browserId=${encodeURIComponent(browserId)}`, { cache: 'no-store' }),
-        fetch(`/api/browser/agents?browserId=${encodeURIComponent(browserId)}`, { cache: 'no-store' }),
       ]);
 
       if (!browserRes.ok) {
@@ -149,11 +150,9 @@ export default function BrowserDetailPage() {
 
       const browserData = await browserRes.json();
       const sessionsData = sessionsRes.ok ? await sessionsRes.json() : { sessions: [] };
-      const agentsData = agentsRes.ok ? await agentsRes.json() : { agents: [] };
 
       setBrowser(browserData.browser ?? null);
       setSessions(sessionsData.sessions ?? []);
-      setAgentCount((agentsData.agents ?? []).length);
     } catch (err) {
       notifications.show({
         color: 'red',
@@ -331,7 +330,6 @@ export default function BrowserDetailPage() {
         <SummaryCard label="Sessions" value={summary.total} accent="teal" />
         <SummaryCard label="Active" value={summary.active} accent="teal" />
         <SummaryCard label="Errored" value={summary.errored} accent="red" />
-        <SummaryCard label="Agents" value={agentCount} accent="indigo" />
       </SimpleGrid>
 
       <Tabs value={activeTab} onChange={(v) => setActiveTab(v ?? 'overview')} variant="outline">
@@ -357,6 +355,17 @@ export default function BrowserDetailPage() {
                   <DetailRow label="Artifact bucket" value={browser.artifactBucketKey ? <Code>{browser.artifactBucketKey}</Code> : <Text c="dimmed">—</Text>} />
                   <DetailRow label="Created" value={<Text size="sm">{formatDate(browser.createdAt)}</Text>} />
                   <DetailRow label="Updated" value={<Text size="sm">{formatDate(browser.updatedAt)}</Text>} />
+                  <Group gap="xs" mt="xs">
+                    <Button
+                      size="xs"
+                      variant="light"
+                      color="grape"
+                      leftSection={<IconPlug size={14} />}
+                      onClick={mcpHandlers.open}
+                    >
+                      Get MCP URL
+                    </Button>
+                  </Group>
                 </Stack>
               </Paper>
             </Grid.Col>
@@ -511,7 +520,78 @@ export default function BrowserDetailPage() {
         opened={drawerOpened && !!drawerSession}
         onClose={() => { drawerHandlers.close(); setDrawerSession(null); }}
       />
+
+      <McpUrlModal
+        opened={mcpOpened}
+        onClose={mcpHandlers.close}
+        browserKey={browser?.key ?? ''}
+      />
     </Stack>
+  );
+}
+
+function McpUrlModal({ opened, onClose, browserKey }: { opened: boolean; onClose: () => void; browserKey: string }) {
+  const origin = typeof window !== 'undefined' ? window.location.origin : '';
+  const sseUrl = `${origin}/api/client/v1/browser/${browserKey}/mcp/sse`;
+  const messageUrl = `${origin}/api/client/v1/browser/${browserKey}/mcp/message?sessionId=<sessionId>`;
+
+  const copy = async (value: string, label: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      notifications.show({ color: 'teal', title: 'Copied', message: `${label} copied to clipboard` });
+    } catch {
+      notifications.show({ color: 'red', title: 'Copy failed', message: 'Clipboard not available' });
+    }
+  };
+
+  return (
+    <Modal opened={opened} onClose={onClose} title="Browser MCP endpoint" size="lg">
+      <Stack gap="md">
+        <Text size="sm" c="dimmed">
+          Connect any MCP-compatible client (e.g. an external agent runtime) to this browser using
+          the URLs below. Authenticate with an API token from this project as
+          <Text component="span" ff="monospace" size="xs"> Authorization: Bearer &lt;API_TOKEN&gt;</Text>.
+          Each SSE connection owns its own browser session for its lifetime.
+        </Text>
+
+        <Stack gap={4}>
+          <Group justify="space-between">
+            <Text size="xs" fw={600} c="dimmed" tt="uppercase">SSE endpoint</Text>
+            <Tooltip label="Copy">
+              <ActionIcon variant="subtle" size="sm" onClick={() => copy(sseUrl, 'SSE URL')}>
+                <IconCopy size={14} />
+              </ActionIcon>
+            </Tooltip>
+          </Group>
+          <Code block style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{sseUrl}</Code>
+        </Stack>
+
+        <Stack gap={4}>
+          <Group justify="space-between">
+            <Text size="xs" fw={600} c="dimmed" tt="uppercase">JSON-RPC message endpoint</Text>
+            <Tooltip label="Copy">
+              <ActionIcon variant="subtle" size="sm" onClick={() => copy(messageUrl, 'Message URL')}>
+                <IconCopy size={14} />
+              </ActionIcon>
+            </Tooltip>
+          </Group>
+          <Code block style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{messageUrl}</Code>
+          <Text size="xs" c="dimmed">
+            The <Text component="span" ff="monospace" size="xs">sessionId</Text> is provided by
+            the SSE <Text component="span" ff="monospace" size="xs">endpoint</Text> event.
+          </Text>
+        </Stack>
+
+        <Alert color="grape" variant="light" icon={<IconPlug size={16} />}>
+          Tools exposed: <Text component="span" ff="monospace" size="xs">browser_navigate, browser_click, browser_hover, browser_type, browser_press, browser_wait, browser_snapshot, browser_extract, browser_screenshot, browser_close</Text>.
+          All calls are scoped to this browser and logged under its sessions.
+        </Alert>
+
+        <Group justify="flex-end">
+          <Button onClick={onClose}>Close</Button>
+        </Group>
+      </Stack>
+    </Modal>
   );
 }
 

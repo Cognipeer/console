@@ -204,17 +204,9 @@
         "/api/client/v1/browser/browsers",
         "/api/client/v1/browser/browsers/*",
         "/api/client/v1/browser/sessions",
-        "/api/client/v1/browser/sessions/*"
-      ]
-    },
-    "BROWSER_AGENTS": {
-      "name": "Browser Agents",
-      "description": "User-defined autonomous agents that drive browser sessions",
-      "endpoints": [
-        "/api/browser/agents",
-        "/api/browser/agents/*",
-        "/api/client/v1/browser/agents",
-        "/api/client/v1/browser/agents/*"
+        "/api/client/v1/browser/sessions/*",
+        "/api/client/v1/browser/*/mcp/sse",
+        "/api/client/v1/browser/*/mcp/message"
       ]
     }
   },
@@ -241,7 +233,6 @@
         "MCP_SERVERS",
         "TOOLS",
         "BROWSER_SESSIONS",
-        "BROWSER_AGENTS",
         "DASHBOARD",
         "AGENT_ORCHESTRATION"
       ],
@@ -325,7 +316,6 @@
         "MCP_SERVERS",
         "TOOLS",
         "BROWSER_SESSIONS",
-        "BROWSER_AGENTS",
         "DASHBOARD"
       ],
       "limits": {
@@ -359,7 +349,6 @@
         "MCP_SERVERS",
         "TOOLS",
         "BROWSER_SESSIONS",
-        "BROWSER_AGENTS",
         "DASHBOARD"
       ],
       "limits": {

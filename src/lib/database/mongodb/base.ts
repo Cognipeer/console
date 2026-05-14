@@ -58,7 +58,6 @@ export const COLLECTIONS = {
   modelUsageLogs: 'model_usage_logs',
   browsers: 'browsers',
   browserSessions: 'browser_sessions',
-  browserAgents: 'browser_agents',
   browserSessionEvents: 'browser_session_events',
 } as const;
 

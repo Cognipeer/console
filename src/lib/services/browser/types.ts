@@ -1,11 +1,9 @@
 import type {
   BrowserActionType,
-  BrowserAgentStatus,
   BrowserSessionStatus,
   BrowserStatus,
   IBrowser,
   IBrowserAccessRules,
-  IBrowserAgent,
   IBrowserSession,
   IBrowserSessionConfig,
   IBrowserSessionEvent,
@@ -18,10 +16,6 @@ export interface BrowserView extends Omit<IBrowser, '_id'> {
 }
 
 export interface BrowserSessionView extends Omit<IBrowserSession, '_id'> {
-  id: string;
-}
-
-export interface BrowserAgentView extends Omit<IBrowserAgent, '_id'> {
   id: string;
 }
 
@@ -65,34 +59,6 @@ export interface CreateBrowserSessionInput {
   config?: IBrowserSessionConfig;
   metadata?: Record<string, unknown>;
   createdBy: string;
-}
-
-export interface CreateBrowserAgentInput {
-  browserId: string;
-  key?: string;
-  name: string;
-  description?: string;
-  modelKey?: string;
-  systemPrompt?: string;
-  browserConfig?: IBrowserSessionConfig;
-  artifactBucketKey?: string;
-  runOptions?: IBrowserAgent['runOptions'];
-  status?: BrowserAgentStatus;
-  metadata?: Record<string, unknown>;
-  createdBy: string;
-}
-
-export interface UpdateBrowserAgentInput {
-  name?: string;
-  description?: string;
-  modelKey?: string;
-  systemPrompt?: string;
-  browserConfig?: IBrowserSessionConfig;
-  artifactBucketKey?: string;
-  runOptions?: IBrowserAgent['runOptions'];
-  status?: BrowserAgentStatus;
-  metadata?: Record<string, unknown>;
-  updatedBy?: string;
 }
 
 // ── Browser actions ─────────────────────────────────────────────────────
@@ -210,32 +176,10 @@ export interface BrowserPdfInput {
   printBackground?: boolean;
 }
 
-export interface BrowserAgentRunInput {
-  prompt: string;
-  /** Reuse an existing session by sessionKey instead of creating a new one. */
-  sessionKey?: string;
-  /** Override session config for this run. */
-  sessionConfig?: IBrowserSessionConfig;
-  /** Custom metadata applied to the spawned session. */
-  metadata?: Record<string, unknown>;
-}
-
-export interface BrowserAgentRunResult {
-  sessionKey: string;
-  sessionId: string;
-  output: string;
-  toolCalls: number;
-  durationMs: number;
-  status: 'success' | 'error';
-  errorMessage?: string;
-}
-
 export type {
   BrowserActionType as BrowserDbActionType,
-  BrowserAgentStatus,
   BrowserSessionStatus,
   IBrowserAccessRules,
-  IBrowserAgent,
   IBrowserSession,
   IBrowserSessionConfig,
   IBrowserSessionEvent,

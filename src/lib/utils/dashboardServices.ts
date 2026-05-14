@@ -188,16 +188,6 @@ const DASHBOARD_SERVICE_DEFINITIONS: DashboardServiceDefinition[] = [
     searchKeywords: ['browser', 'tarayıcı', 'playwright', 'automation', 'session', 'profile'],
   },
   {
-    id: 'browser-agents',
-    href: '/dashboard/browser-agents',
-    navLabelKey: 'browserAgents',
-    navDescriptionKey: 'browserAgentsDescription',
-    icon: IconRobot,
-    category: 'operate',
-    tags: ['browser', 'agents', 'automation'],
-    searchKeywords: ['browser agent', 'tarayıcı ajan', 'autonomous', 'agent', 'web agent'],
-  },
-  {
     id: 'alerts',
     href: '/dashboard/alerts',
     navLabelKey: 'alerts',

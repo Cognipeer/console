@@ -1,16 +1,15 @@
 /**
- * MongoDB Provider – Browser sessions & agents mixin
+ * MongoDB Provider – Browser sessions mixin
  *
- * Persists browser session metadata, browser agent definitions, and
- * fine-grained session event logs (one document per action / tool call).
- * The actual Playwright browser instances live in-memory inside the
- * `BrowserManager` service – only metadata is stored here.
+ * Persists browser session metadata and fine-grained session event logs
+ * (one document per action / tool call). The actual Playwright browser
+ * instances live in-memory inside the `BrowserManager` service – only
+ * metadata is stored here.
  */
 
 import { ObjectId } from 'mongodb';
 import type {
   IBrowser,
-  IBrowserAgent,
   IBrowserSession,
   IBrowserSessionEvent,
 } from '../provider.interface';
@@ -222,104 +221,6 @@ export function BrowserMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
       return docs.map((d) => ({ ...d, _id: toId(d._id) }) as IBrowserSession);
     }
 
-    // ── Browser Agents ────────────────────────────────────────────────
-
-    async createBrowserAgent(
-      record: Omit<IBrowserAgent, '_id' | 'createdAt' | 'updatedAt'>,
-    ): Promise<IBrowserAgent> {
-      const db = this.getTenantDb();
-      const now = new Date();
-      const doc: Omit<IBrowserAgent, '_id'> = {
-        ...record,
-        createdAt: now,
-        updatedAt: now,
-      };
-      const result = await db
-        .collection<IBrowserAgent>(COLLECTIONS.browserAgents)
-        .insertOne(doc as unknown as IBrowserAgent);
-      return { ...doc, _id: result.insertedId.toString() };
-    }
-
-    async updateBrowserAgent(
-      id: string,
-      data: Partial<Omit<IBrowserAgent, '_id' | 'tenantId' | 'createdAt'>>,
-    ): Promise<IBrowserAgent | null> {
-      const db = this.getTenantDb();
-      const payload: Partial<IBrowserAgent> = {
-        ...data,
-        updatedAt: new Date(),
-      };
-      delete payload._id;
-      delete payload.tenantId;
-      delete payload.createdAt;
-
-      const result = await db
-        .collection<IBrowserAgent>(COLLECTIONS.browserAgents)
-        .findOneAndUpdate(
-          { _id: objectId(id) },
-          { $set: payload },
-          { returnDocument: 'after' },
-        );
-      if (!result) return null;
-      return { ...result, _id: toId(result._id) } as IBrowserAgent;
-    }
-
-    async deleteBrowserAgent(id: string): Promise<boolean> {
-      const db = this.getTenantDb();
-      const result = await db
-        .collection<IBrowserAgent>(COLLECTIONS.browserAgents)
-        .deleteOne({ _id: objectId(id) });
-      return result.deletedCount > 0;
-    }
-
-    async findBrowserAgentById(id: string): Promise<IBrowserAgent | null> {
-      const db = this.getTenantDb();
-      try {
-        const record = await db
-          .collection<IBrowserAgent>(COLLECTIONS.browserAgents)
-          .findOne({ _id: objectId(id) });
-        if (!record) return null;
-        return { ...record, _id: toId(record._id) } as IBrowserAgent;
-      } catch {
-        return null;
-      }
-    }
-
-    async findBrowserAgentByKey(
-      tenantId: string,
-      key: string,
-      projectId?: string,
-    ): Promise<IBrowserAgent | null> {
-      const db = this.getTenantDb();
-      const query: Record<string, unknown> = { tenantId, key };
-      if (projectId) query.projectId = projectId;
-      const record = await db
-        .collection<IBrowserAgent>(COLLECTIONS.browserAgents)
-        .findOne(query);
-      if (!record) return null;
-      return { ...record, _id: toId(record._id) } as IBrowserAgent;
-    }
-
-    async listBrowserAgents(
-      tenantId: string,
-      filters?: { projectId?: string; browserId?: string; status?: string; search?: string },
-    ): Promise<IBrowserAgent[]> {
-      const db = this.getTenantDb();
-      const query: Record<string, unknown> = { tenantId };
-      if (filters?.projectId) query.projectId = filters.projectId;
-      if (filters?.browserId) query.browserId = filters.browserId;
-      if (filters?.status) query.status = filters.status;
-      if (filters?.search) query.name = { $regex: filters.search, $options: 'i' };
-
-      const docs = await db
-        .collection<IBrowserAgent>(COLLECTIONS.browserAgents)
-        .find(query)
-        .sort({ createdAt: -1 })
-        .toArray();
-      return docs.map((d) => ({ ...d, _id: toId(d._id) }) as IBrowserAgent);
-    }
-
-    // ── Session events (logs) ─────────────────────────────────────────
 
     async createBrowserSessionEvent(
       record: Omit<IBrowserSessionEvent, '_id' | 'createdAt'>,

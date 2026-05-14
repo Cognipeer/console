@@ -21,6 +21,7 @@ import { clientToolsApiPlugin } from './plugins/client-tools';
 import { clientTracingApiPlugin } from './plugins/client-tracing';
 import { clientVectorApiPlugin } from './plugins/client-vector';
 import { clientBrowserApiPlugin } from './plugins/client-browser';
+import { clientBrowserMcpApiPlugin } from './plugins/client-browser-mcp';
 import { browserApiPlugin } from './plugins/browser';
 import { agentsApiPlugin } from './plugins/agents';
 import { alertsApiPlugin } from './plugins/alerts';
@@ -219,6 +220,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(clientTracingApiPlugin);
   await app.register(clientVectorApiPlugin);
   await app.register(clientBrowserApiPlugin);
+  await app.register(clientBrowserMcpApiPlugin);
   await app.register(browserApiPlugin);
   await app.register(configApiPlugin);
   await app.register(dashboardApiPlugin);

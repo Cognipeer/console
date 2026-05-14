@@ -1,10 +1,9 @@
 /**
- * SQLite Provider – Browsers, Browser sessions, agents & events mixin
+ * SQLite Provider – Browsers, Browser sessions & events mixin
  */
 
 import type {
   IBrowser,
-  IBrowserAgent,
   IBrowserSession,
   IBrowserSessionEvent,
 } from '../provider.interface';
@@ -305,140 +304,6 @@ export function BrowserMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         endedAt: this.toDate(row.endedAt),
         errorMessage: (row.errorMessage as string) ?? undefined,
         eventCount: Number(row.eventCount) || 0,
-        metadata: this.parseJson(row.metadata, {}),
-        createdBy: row.createdBy as string,
-        updatedBy: (row.updatedBy as string) ?? undefined,
-        createdAt: this.toDate(row.createdAt),
-        updatedAt: this.toDate(row.updatedAt),
-      };
-    }
-
-    // ── Browser Agents ───────────────────────────────────────────────
-    async createBrowserAgent(
-      record: Omit<IBrowserAgent, '_id' | 'createdAt' | 'updatedAt'>,
-    ): Promise<IBrowserAgent> {
-      const db = this.getTenantDb();
-      const id = this.newId();
-      const now = this.now();
-      db.prepare(`
-        INSERT INTO ${TABLES.browserAgents}
-        (id, tenantId, projectId, browserId, key, name, description, modelKey,
-         systemPrompt, browserConfig, artifactBucketKey, runOptions, status, metadata,
-         createdBy, updatedBy, createdAt, updatedAt)
-        VALUES (@id, @tenantId, @projectId, @browserId, @key, @name, @description, @modelKey,
-         @systemPrompt, @browserConfig, @artifactBucketKey, @runOptions, @status, @metadata,
-         @createdBy, @updatedBy, @createdAt, @updatedAt)
-      `).run({
-        id,
-        tenantId: record.tenantId,
-        projectId: record.projectId ?? null,
-        browserId: record.browserId,
-        key: record.key,
-        name: record.name,
-        description: record.description ?? null,
-        modelKey: record.modelKey,
-        systemPrompt: record.systemPrompt ?? null,
-        browserConfig: this.toJson(record.browserConfig ?? {}),
-        artifactBucketKey: record.artifactBucketKey ?? null,
-        runOptions: this.toJson(record.runOptions ?? {}),
-        status: record.status,
-        metadata: this.toJson(record.metadata ?? {}),
-        createdBy: record.createdBy,
-        updatedBy: record.updatedBy ?? null,
-        createdAt: now,
-        updatedAt: now,
-      });
-      return { ...record, _id: id, createdAt: new Date(now), updatedAt: new Date(now) };
-    }
-
-    async updateBrowserAgent(
-      id: string,
-      data: Partial<Omit<IBrowserAgent, '_id' | 'tenantId' | 'createdAt'>>,
-    ): Promise<IBrowserAgent | null> {
-      const db = this.getTenantDb();
-      const now = this.now();
-      const sets: string[] = ['updatedAt = @updatedAt'];
-      const params: Record<string, unknown> = { id, updatedAt: now };
-      const stringFields = [
-        'key', 'name', 'description', 'modelKey', 'systemPrompt', 'artifactBucketKey',
-        'status', 'updatedBy', 'projectId', 'browserId',
-      ];
-      for (const f of stringFields) {
-        if ((data as Record<string, unknown>)[f] !== undefined) {
-          sets.push(`${f} = @${f}`);
-          params[f] = (data as Record<string, unknown>)[f] ?? null;
-        }
-      }
-      const jsonFields = ['browserConfig', 'runOptions', 'metadata'];
-      for (const f of jsonFields) {
-        if ((data as Record<string, unknown>)[f] !== undefined) {
-          sets.push(`${f} = @${f}`);
-          params[f] = this.toJson((data as Record<string, unknown>)[f] ?? null);
-        }
-      }
-      db.prepare(`UPDATE ${TABLES.browserAgents} SET ${sets.join(', ')} WHERE id = @id`).run(params);
-      return this.findBrowserAgentById(id);
-    }
-
-    async deleteBrowserAgent(id: string): Promise<boolean> {
-      const db = this.getTenantDb();
-      return db.prepare(`DELETE FROM ${TABLES.browserAgents} WHERE id = @id`).run({ id }).changes === 1;
-    }
-
-    async findBrowserAgentById(id: string): Promise<IBrowserAgent | null> {
-      const db = this.getTenantDb();
-      const row = db.prepare(`SELECT * FROM ${TABLES.browserAgents} WHERE id = @id`).get({ id }) as SqliteRow | undefined;
-      return row ? this.mapBrowserAgent(row) : null;
-    }
-
-    async findBrowserAgentByKey(
-      tenantId: string,
-      key: string,
-      projectId?: string,
-    ): Promise<IBrowserAgent | null> {
-      const db = this.getTenantDb();
-      let sql = `SELECT * FROM ${TABLES.browserAgents} WHERE tenantId = @tenantId AND key = @key`;
-      const params: Record<string, unknown> = { tenantId, key };
-      if (projectId) { sql += ' AND projectId = @projectId'; params.projectId = projectId; }
-      const row = db.prepare(sql).get(params) as SqliteRow | undefined;
-      return row ? this.mapBrowserAgent(row) : null;
-    }
-
-    async listBrowserAgents(
-      tenantId: string,
-      filters?: { projectId?: string; browserId?: string; status?: string; search?: string },
-    ): Promise<IBrowserAgent[]> {
-      const db = this.getTenantDb();
-      const conds: string[] = ['tenantId = @tenantId'];
-      const params: Record<string, unknown> = { tenantId };
-      if (filters?.projectId) { conds.push('projectId = @projectId'); params.projectId = filters.projectId; }
-      if (filters?.browserId) { conds.push('browserId = @browserId'); params.browserId = filters.browserId; }
-      if (filters?.status) { conds.push('status = @status'); params.status = filters.status; }
-      if (filters?.search) {
-        conds.push('(name LIKE @search OR key LIKE @search)');
-        params.search = this.likePattern(filters.search);
-      }
-      const rows = db.prepare(
-        `SELECT * FROM ${TABLES.browserAgents} WHERE ${conds.join(' AND ')} ORDER BY createdAt DESC`,
-      ).all(params) as SqliteRow[];
-      return rows.map((r) => this.mapBrowserAgent(r));
-    }
-
-    private mapBrowserAgent(row: SqliteRow): IBrowserAgent {
-      return {
-        _id: row.id as string,
-        tenantId: row.tenantId as string,
-        projectId: (row.projectId as string) ?? undefined,
-        browserId: row.browserId as string,
-        key: row.key as string,
-        name: row.name as string,
-        description: (row.description as string) ?? undefined,
-        modelKey: row.modelKey as string,
-        systemPrompt: (row.systemPrompt as string) ?? undefined,
-        browserConfig: this.parseJson(row.browserConfig, {}),
-        artifactBucketKey: (row.artifactBucketKey as string) ?? undefined,
-        runOptions: this.parseJson(row.runOptions, {}),
-        status: row.status as IBrowserAgent['status'],
         metadata: this.parseJson(row.metadata, {}),
         createdBy: row.createdBy as string,
         updatedBy: (row.updatedBy as string) ?? undefined,

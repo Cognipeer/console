@@ -219,12 +219,10 @@ export type {
   ToolAuthType,
   IBrowser,
   IBrowserSession,
-  IBrowserAgent,
   IBrowserSessionEvent,
   IBrowserSessionConfig,
   IBrowserAccessRules,
   BrowserStatus,
   BrowserSessionStatus,
-  BrowserAgentStatus,
   BrowserActionType,
 } from './provider.interface';

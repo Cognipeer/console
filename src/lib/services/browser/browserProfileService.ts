@@ -138,13 +138,6 @@ export async function deleteBrowser(
   if (sessions.length > 0) {
     throw new Error('Cannot delete browser with existing sessions. Delete or archive sessions first.');
   }
-  const agents = await db.listBrowserAgents(ctx.tenantId, {
-    projectId: ctx.projectId,
-    browserId: String(existing._id ?? ''),
-  });
-  if (agents.length > 0) {
-    throw new Error('Cannot delete browser with existing agents. Delete agents first.');
-  }
   return db.deleteBrowser(String(existing._id ?? ''));
 }
 

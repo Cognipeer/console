@@ -15,6 +15,7 @@ import {
   Center,
   Paper,
   TextInput,
+  Select,
   Divider,
   ThemeIcon,
 } from '@mantine/core';
@@ -24,34 +25,38 @@ import {
   IconServer,
   IconSearch,
   IconTool,
+  IconBrowser,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 
 // ── Generic tool-binding shape ──────────────────────────────────────────
 // Mirrors IAgentToolBinding from the DB but kept local so the component
-// stays self-contained.  Supports both unified 'tool' and legacy 'mcp' sources.
+// stays self-contained.  Supports unified 'tool', legacy 'mcp', and 'system' sources.
 
 export interface ToolBinding {
-  source: 'tool' | 'mcp';
+  source: 'tool' | 'mcp' | 'system';
   sourceKey: string;
   toolNames: string[];
+  config?: Record<string, unknown>;
 }
 
 // ── Source-agnostic tool source descriptor ───────────────────────────────
 
 interface ToolSourceGroup {
   /** Discriminator – matches ToolBinding.source */
-  source: 'tool' | 'mcp';
-  /** Unique key of the source (e.g. tool key or MCP server key) */
+  source: 'tool' | 'mcp' | 'system';
+  /** Unique key of the source (e.g. tool key, MCP server key, or system tool key) */
   sourceKey: string;
   /** Human-readable name */
   name: string;
   description?: string;
-  /** Source type label (OpenAPI / MCP) */
+  /** Source type label (OpenAPI / MCP / System) */
   typeLabel?: string;
   /** Available tools within this source */
   tools: { name: string; description: string }[];
 }
+
+interface BrowserOption { id: string; name: string; key: string; status: string }
 
 // ── Props ────────────────────────────────────────────────────────────────
 
@@ -85,6 +90,12 @@ export function ToolSelectorModal({
   // Selection state – keyed by "source::sourceKey::toolName"
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
+  // Per-binding config state for system tools (e.g. browser_use needs a browserId)
+  const [systemConfigs, setSystemConfigs] = useState<Record<string, Record<string, unknown>>>({});
+
+  // Browser options for the browser_use picker
+  const [browsers, setBrowsers] = useState<BrowserOption[]>([]);
+
   // ── Helpers ─────────────────────────────────────────────────────
 
   const toKey = (source: string, sourceKey: string, toolName: string) =>
@@ -100,12 +111,17 @@ export function ToolSelectorModal({
   useEffect(() => {
     if (!opened) return;
     const initial = new Set<string>();
+    const initialConfigs: Record<string, Record<string, unknown>> = {};
     for (const b of value) {
       for (const tn of b.toolNames) {
         initial.add(toKey(b.source, b.sourceKey, tn));
       }
+      if (b.source === 'system' && b.config) {
+        initialConfigs[`${b.source}::${b.sourceKey}`] = b.config;
+      }
     }
     setSelected(initial);
+    setSystemConfigs(initialConfigs);
     setSearch('');
   }, [opened, value]);
 
@@ -152,6 +168,29 @@ export function ToolSelectorModal({
         );
         allGroups.push(...mcpGroups);
       }
+
+      // System Tools (built-in, hardcoded)
+      const browsersRes = await fetch('/api/browser/browsers?status=active', { cache: 'no-store' });
+      let browserList: BrowserOption[] = [];
+      if (browsersRes.ok) {
+        const browsersData = await browsersRes.json();
+        browserList = (browsersData.browsers ?? []).map((b: { id: string; name: string; key: string; status: string }) => ({
+          id: b.id, name: b.name, key: b.key, status: b.status,
+        }));
+      }
+      setBrowsers(browserList);
+
+      const systemGroup: ToolSourceGroup = {
+        source: 'system',
+        sourceKey: 'browser_use',
+        name: 'Browser Use',
+        description: 'Drive a Playwright browser session: navigate, click, type, snapshot, screenshot, extract, close.',
+        typeLabel: 'System',
+        tools: [
+          { name: 'browser_use', description: 'Bundle of browser_navigate, browser_click, browser_type, browser_snapshot, browser_screenshot, browser_extract and more.' },
+        ],
+      };
+      allGroups.unshift(systemGroup);
 
       setSources(allGroups);
 
@@ -222,7 +261,15 @@ export function ToolSelectorModal({
       const { source, sourceKey, toolName } = parseKey(key);
       const id = `${source}::${sourceKey}`;
       if (!map.has(id)) {
-        map.set(id, { source: source as 'tool' | 'mcp', sourceKey, toolNames: [] });
+        const binding: ToolBinding = {
+          source: source as 'tool' | 'mcp' | 'system',
+          sourceKey,
+          toolNames: [],
+        };
+        if (source === 'system' && systemConfigs[id]) {
+          binding.config = systemConfigs[id];
+        }
+        map.set(id, binding);
       }
       map.get(id)!.toolNames.push(toolName);
     }
@@ -257,9 +304,30 @@ export function ToolSelectorModal({
   // ── Confirm ────────────────────────────────────────────────────
 
   const handleConfirm = () => {
+    // Validate: system bindings need their required config
+    for (const key of selected) {
+      const { source, sourceKey } = parseKey(key);
+      if (source === 'system' && sourceKey === 'browser_use') {
+        const id = `${source}::${sourceKey}`;
+        const browserId = systemConfigs[id]?.browserId;
+        if (!browserId || typeof browserId !== 'string') {
+          // Skip confirm; UI will show inline picker
+          return;
+        }
+      }
+    }
     onChange(buildBindings());
     onClose();
   };
+
+  const isSystemBindingInvalid = Array.from(selected).some((key) => {
+    const { source, sourceKey } = parseKey(key);
+    if (source === 'system' && sourceKey === 'browser_use') {
+      const id = `${source}::${sourceKey}`;
+      return !systemConfigs[id]?.browserId;
+    }
+    return false;
+  });
 
   // ── Render ─────────────────────────────────────────────────────
 
@@ -317,8 +385,8 @@ export function ToolSelectorModal({
                         ) : (
                           <IconChevronRight size={16} />
                         )}
-                        <ThemeIcon size="sm" variant="light" color="blue">
-                          <IconServer size={12} />
+                        <ThemeIcon size="sm" variant="light" color={group.source === 'system' ? 'grape' : 'blue'}>
+                          {group.source === 'system' ? <IconBrowser size={12} /> : <IconServer size={12} />}
                         </ThemeIcon>
                         <div>
                           <Text size="sm" fw={600}>
@@ -337,8 +405,8 @@ export function ToolSelectorModal({
                             {count}/{group.tools.length}
                           </Badge>
                         )}
-                        <Badge size="xs" variant="light" color="gray">
-                          {group.typeLabel || (group.source === 'tool' ? 'Tool' : 'MCP')}
+                        <Badge size="xs" variant="light" color={group.source === 'system' ? 'grape' : 'gray'}>
+                          {group.typeLabel || (group.source === 'tool' ? 'Tool' : group.source === 'mcp' ? 'MCP' : 'System')}
                         </Badge>
                       </Group>
                     </Group>
@@ -348,6 +416,26 @@ export function ToolSelectorModal({
                   <Collapse in={isExpanded}>
                     <Divider />
                     <Stack gap={0} p="xs" pt={0}>
+                      {group.source === 'system' && group.sourceKey === 'browser_use' && count > 0 && (
+                        <Select
+                          mt="xs"
+                          mb="xs"
+                          label="Browser"
+                          placeholder={browsers.length === 0 ? 'No browsers available' : 'Select a browser'}
+                          description="The browser this agent will use at runtime."
+                          data={browsers.map((b) => ({ value: b.id, label: `${b.name} (${b.key})` }))}
+                          value={(systemConfigs[sourceId]?.browserId as string) ?? null}
+                          onChange={(val) => {
+                            setSystemConfigs((prev) => ({
+                              ...prev,
+                              [sourceId]: { ...(prev[sourceId] ?? {}), browserId: val ?? '' },
+                            }));
+                          }}
+                          error={!systemConfigs[sourceId]?.browserId ? 'Browser is required' : undefined}
+                          searchable
+                          nothingFoundMessage="No browsers"
+                        />
+                      )}
                       {/* Select all */}
                       <Checkbox
                         label={
@@ -407,7 +495,7 @@ export function ToolSelectorModal({
             <Button variant="default" size="sm" onClick={onClose}>
               Cancel
             </Button>
-            <Button size="sm" onClick={handleConfirm}>
+            <Button size="sm" onClick={handleConfirm} disabled={isSystemBindingInvalid}>
               Confirm
             </Button>
           </Group>

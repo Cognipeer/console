@@ -22,9 +22,9 @@ import {
 import { useDisclosure } from '@mantine/hooks';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
-import { IconPlus, IconRefresh, IconRobot, IconSearch, IconTrash, IconWorld } from '@tabler/icons-react';
+import { IconPlus, IconRefresh, IconSearch, IconTrash, IconWorld } from '@tabler/icons-react';
 import PageHeader from '@/components/layout/PageHeader';
-import type { BrowserAgentView, BrowserSessionView, BrowserView } from '@/lib/services/browser';
+import type { BrowserSessionView, BrowserView } from '@/lib/services/browser';
 
 interface CreateForm {
   name: string;
@@ -38,13 +38,11 @@ type StatusFilter = 'all' | 'active' | 'disabled';
 interface RowMetrics {
   sessions: number;
   activeSessions: number;
-  agents: number;
 }
 
 export default function BrowsersListPage() {
   const [browsers, setBrowsers] = useState<BrowserView[]>([]);
   const [sessions, setSessions] = useState<BrowserSessionView[]>([]);
-  const [agents, setAgents] = useState<BrowserAgentView[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
@@ -60,18 +58,15 @@ export default function BrowsersListPage() {
   const load = useCallback(async () => {
     setRefreshing(true);
     try {
-      const [browsersRes, sessionsRes, agentsRes] = await Promise.all([
+      const [browsersRes, sessionsRes] = await Promise.all([
         fetch('/api/browser/browsers', { cache: 'no-store' }),
         fetch('/api/browser/sessions', { cache: 'no-store' }),
-        fetch('/api/browser/agents', { cache: 'no-store' }),
       ]);
       if (!browsersRes.ok) throw new Error('Failed to load browsers');
       const browsersData = await browsersRes.json();
       const sessionsData = sessionsRes.ok ? await sessionsRes.json() : { sessions: [] };
-      const agentsData = agentsRes.ok ? await agentsRes.json() : { agents: [] };
       setBrowsers(browsersData.browsers ?? []);
       setSessions(sessionsData.sessions ?? []);
-      setAgents(agentsData.agents ?? []);
     } catch (err) {
       notifications.show({ color: 'red', title: 'Error', message: err instanceof Error ? err.message : 'Failed' });
     } finally {
@@ -84,20 +79,15 @@ export default function BrowsersListPage() {
 
   const metricsById = useMemo(() => {
     const map = new Map<string, RowMetrics>();
-    for (const b of browsers) map.set(b.id, { sessions: 0, activeSessions: 0, agents: 0 });
+    for (const b of browsers) map.set(b.id, { sessions: 0, activeSessions: 0 });
     for (const s of sessions) {
       const m = map.get(s.browserId ?? '');
       if (!m) continue;
       m.sessions += 1;
       if (s.status === 'running' || s.status === 'idle') m.activeSessions += 1;
     }
-    for (const a of agents) {
-      const m = map.get(a.browserId ?? '');
-      if (!m) continue;
-      m.agents += 1;
-    }
     return map;
-  }, [browsers, sessions, agents]);
+  }, [browsers, sessions]);
 
   const summary = useMemo(() => {
     const active = browsers.filter((b) => b.status === 'active').length;
@@ -109,9 +99,8 @@ export default function BrowsersListPage() {
       disabled,
       sessions: sessions.length,
       activeSessions,
-      agents: agents.length,
     };
-  }, [browsers, sessions, agents]);
+  }, [browsers, sessions]);
 
   const filtered = useMemo(() => {
     const term = search.trim().toLowerCase();
@@ -189,12 +178,11 @@ export default function BrowsersListPage() {
         }
       />
 
-      <SimpleGrid cols={{ base: 2, md: 5 }}>
+      <SimpleGrid cols={{ base: 2, md: 4 }}>
         <Summary label="Browsers" value={summary.total} color="indigo" />
         <Summary label="Active" value={summary.active} color="teal" />
         <Summary label="Disabled" value={summary.disabled} color="gray" />
         <Summary label="Sessions" value={summary.sessions} hint={`${summary.activeSessions} live`} color="blue" />
-        <Summary label="Agents" value={summary.agents} color="grape" />
       </SimpleGrid>
 
       <Paper withBorder p="md" radius="lg">
@@ -241,13 +229,12 @@ export default function BrowsersListPage() {
                 <Table.Th>Status</Table.Th>
                 <Table.Th>Default Model</Table.Th>
                 <Table.Th>Sessions</Table.Th>
-                <Table.Th>Agents</Table.Th>
                 <Table.Th />
               </Table.Tr>
             </Table.Thead>
             <Table.Tbody>
               {filtered.map((b) => {
-                const m = metricsById.get(b.id) ?? { sessions: 0, activeSessions: 0, agents: 0 };
+                const m = metricsById.get(b.id) ?? { sessions: 0, activeSessions: 0 };
                 return (
                   <Table.Tr key={b.id}>
                     <Table.Td>
@@ -263,11 +250,6 @@ export default function BrowsersListPage() {
                       <Group gap={4}>
                         <Badge variant="light" color="blue">{m.sessions}</Badge>
                         {m.activeSessions > 0 && <Badge variant="light" color="teal">{m.activeSessions} live</Badge>}
-                      </Group>
-                    </Table.Td>
-                    <Table.Td>
-                      <Group gap={4}>
-                        <Badge variant="light" color="grape" leftSection={<IconRobot size={10} />}>{m.agents}</Badge>
                       </Group>
                     </Table.Td>
                     <Table.Td>

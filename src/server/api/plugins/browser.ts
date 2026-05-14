@@ -10,35 +10,26 @@ import {
   captureSnapshot,
   closeBrowserSession,
   createBrowser,
-  createBrowserAgent,
   createBrowserSession,
   deleteBrowser,
-  deleteBrowserAgent,
   deleteBrowserSession,
   exportSessionPdf,
   extractFromBrowser,
   getBrowser,
-  getBrowserAgent,
   getBrowserSession,
-  listBrowserAgents,
   listBrowserSessionEvents,
   listBrowserSessions,
   listBrowsers,
   runBrowserAction,
-  runBrowserAgent,
   updateBrowser,
-  updateBrowserAgent,
 } from '@/lib/services/browser';
 import type {
   BrowserAction,
-  BrowserAgentRunInput,
   BrowserExtractInput,
   BrowserPdfInput,
   BrowserScreenshotInput,
-  CreateBrowserAgentInput,
   CreateBrowserInput,
   CreateBrowserSessionInput,
-  UpdateBrowserAgentInput,
   UpdateBrowserInput,
 } from '@/lib/services/browser';
 import {
@@ -348,110 +339,6 @@ export const browserApiPlugin: FastifyPluginAsync = async (app) => {
       if (sendProjectContextError(reply, error)) return;
       logger.error('Delete session failed', { error });
       return reply.code(500).send({ error: 'Internal server error' });
-    }
-  }));
-
-  // ── Agents ────────────────────────────────────────────────────────
-  app.post('/browser/agents', withApiRequestContext(async (request, reply) => {
-    try {
-      const { projectId, session } = await requireProjectContextForRequest(request);
-      const body = readJsonBody<CreateBrowserAgentInput>(request);
-      const agent = await createBrowserAgent(
-        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
-        { ...body, createdBy: session.userEmail ?? session.userId },
-      );
-      return reply.code(201).send({ agent });
-    } catch (error) {
-      if (sendProjectContextError(reply, error)) return;
-      logger.error('Create agent failed', { error });
-      return reply.code(500).send({ error: error instanceof Error ? error.message : 'Failed' });
-    }
-  }));
-
-  app.get('/browser/agents', withApiRequestContext(async (request, reply) => {
-    try {
-      const { projectId, session } = await requireProjectContextForRequest(request);
-      const query = (request.query ?? {}) as { status?: string; browserId?: string; search?: string };
-      const agents = await listBrowserAgents(
-        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
-        query,
-      );
-      return reply.code(200).send({ agents });
-    } catch (error) {
-      if (sendProjectContextError(reply, error)) return;
-      logger.error('List agents failed', { error });
-      return reply.code(500).send({ error: 'Internal server error' });
-    }
-  }));
-
-  app.get('/browser/agents/:agentId', withApiRequestContext(async (request, reply) => {
-    try {
-      const { projectId, session } = await requireProjectContextForRequest(request);
-      const { agentId } = request.params as { agentId: string };
-      const agent = await getBrowserAgent(
-        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
-        agentId,
-      );
-      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
-      return reply.code(200).send({ agent });
-    } catch (error) {
-      if (sendProjectContextError(reply, error)) return;
-      logger.error('Get agent failed', { error });
-      return reply.code(500).send({ error: 'Internal server error' });
-    }
-  }));
-
-  app.patch('/browser/agents/:agentId', withApiRequestContext(async (request, reply) => {
-    try {
-      const { projectId, session } = await requireProjectContextForRequest(request);
-      const { agentId } = request.params as { agentId: string };
-      const body = readJsonBody<UpdateBrowserAgentInput>(request);
-      const agent = await updateBrowserAgent(
-        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
-        agentId,
-        { ...body, updatedBy: session.userEmail ?? session.userId },
-      );
-      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
-      return reply.code(200).send({ agent });
-    } catch (error) {
-      if (sendProjectContextError(reply, error)) return;
-      logger.error('Update agent failed', { error });
-      return reply.code(500).send({ error: error instanceof Error ? error.message : 'Failed' });
-    }
-  }));
-
-  app.delete('/browser/agents/:agentId', withApiRequestContext(async (request, reply) => {
-    try {
-      const { projectId, session } = await requireProjectContextForRequest(request);
-      const { agentId } = request.params as { agentId: string };
-      const ok = await deleteBrowserAgent(
-        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
-        agentId,
-      );
-      if (!ok) return reply.code(404).send({ error: 'Agent not found' });
-      return reply.code(200).send({ deleted: true });
-    } catch (error) {
-      if (sendProjectContextError(reply, error)) return;
-      logger.error('Delete agent failed', { error });
-      return reply.code(500).send({ error: 'Internal server error' });
-    }
-  }));
-
-  app.post('/browser/agents/:agentIdOrKey/run', withApiRequestContext(async (request, reply) => {
-    try {
-      const { projectId, session } = await requireProjectContextForRequest(request);
-      const { agentIdOrKey } = request.params as { agentIdOrKey: string };
-      const body = readJsonBody<BrowserAgentRunInput>(request);
-      const result = await runBrowserAgent(
-        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
-        agentIdOrKey,
-        { ...body, createdBy: session.userEmail ?? session.userId },
-      );
-      return reply.code(200).send({ result });
-    } catch (error) {
-      if (sendProjectContextError(reply, error)) return;
-      logger.error('Run agent failed', { error });
-      return reply.code(500).send({ error: error instanceof Error ? error.message : 'Failed' });
     }
   }));
 };

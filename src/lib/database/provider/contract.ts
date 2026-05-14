@@ -1,7 +1,6 @@
 import type {
   AgentStatus,
   AlertEventStatus,
-  BrowserAgentStatus,
   BrowserSessionStatus,
   BrowserStatus,
   GuardrailType,
@@ -13,7 +12,6 @@ import type {
   IAlertEvent,
   IAlertRule,
   IApiToken,
-  IBrowserAgent,
   IBrowser,
   IBrowserSession,
   IBrowserSessionEvent,
@@ -846,26 +844,6 @@ export interface DatabaseProvider {
       limit?: number;
     },
   ): Promise<IBrowserSession[]>;
-
-  // ── Browser Agents (tenant-specific) ──
-  createBrowserAgent(
-    record: Omit<IBrowserAgent, '_id' | 'createdAt' | 'updatedAt'>,
-  ): Promise<IBrowserAgent>;
-  updateBrowserAgent(
-    id: string,
-    data: Partial<Omit<IBrowserAgent, '_id' | 'tenantId' | 'createdAt'>>,
-  ): Promise<IBrowserAgent | null>;
-  deleteBrowserAgent(id: string): Promise<boolean>;
-  findBrowserAgentById(id: string): Promise<IBrowserAgent | null>;
-  findBrowserAgentByKey(
-    tenantId: string,
-    key: string,
-    projectId?: string,
-  ): Promise<IBrowserAgent | null>;
-  listBrowserAgents(
-    tenantId: string,
-    filters?: { projectId?: string; browserId?: string; status?: BrowserAgentStatus | string; search?: string },
-  ): Promise<IBrowserAgent[]>;
 
   // ── Browser Session Events (tenant-specific) ──
   createBrowserSessionEvent(

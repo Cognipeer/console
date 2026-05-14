@@ -67,8 +67,6 @@ export const en = {
     agentsDescription: 'Create and manage AI agents',
     browser: 'Browsers',
     browserDescription: 'Headless browser profiles for sessions and agents',
-    browserAgents: 'Browser Agents',
-    browserAgentsDescription: 'Autonomous web agents driven by browsers',
   },
   notifications: {
     logoutSuccessTitle: 'Logged Out',
@@ -119,7 +117,6 @@ export const en = {
     tools: 'Tools',
     incidents: 'Incidents',
     browser: 'Browsers',
-    'browser-agents': 'Browser Agents',
   },
   validation: {
     invalidEmail: 'Invalid email',

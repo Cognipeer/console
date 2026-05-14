@@ -19,6 +19,7 @@ import { queryRag } from '@/lib/services/rag/ragService';
 import { evaluateGuardrail } from '@/lib/services/guardrail';
 import { getMcpServerByKey, executeMcpTool } from '@/lib/services/mcp';
 import { getToolByKey, executeToolAction, logToolRequest } from '@/lib/services/tools';
+import { resolveBrowser, createBrowserSession, buildBrowserAgentTools } from '@/lib/services/browser';
 
 const logger = createLogger('agents');
 
@@ -49,7 +50,7 @@ async function buildBoundTools(
     tenantDbName: string,
     tenantId: string,
     projectId: string,
-    bindings: { source: string; sourceKey: string; toolNames: string[] }[] | undefined,
+    bindings: { source: string; sourceKey: string; toolNames: string[]; config?: Record<string, unknown> }[] | undefined,
     createToolFn: typeof import('@cognipeer/agent-sdk').createTool,
     zod: typeof import('zod').z,
 ): Promise<AgentSdkToolInterface[]> {
@@ -141,6 +142,46 @@ async function buildBoundTools(
                 });
                 tools.push(tool);
             }
+        } else if (binding.source === 'system' && binding.sourceKey === 'browser_use') {
+            // ── System tool: Browser Use ───────────────────────
+            const browserId = typeof binding.config?.browserId === 'string'
+                ? (binding.config.browserId as string)
+                : undefined;
+            if (!browserId) {
+                logger.warn('browser_use binding missing browserId, skipping');
+                continue;
+            }
+            try {
+                const browser = await resolveBrowser(
+                    { tenantDbName, tenantId, projectId },
+                    browserId,
+                );
+                if (!browser || browser.status !== 'active') {
+                    logger.warn('browser_use binding refers to inactive/missing browser', { browserId });
+                    continue;
+                }
+                const session = await createBrowserSession(
+                    { tenantDbName, tenantId, projectId },
+                    {
+                        browserId: String(browser._id ?? ''),
+                        createdBy: 'agent-runtime',
+                        metadata: { source: 'agent-system-tool', binding: 'browser_use' },
+                    },
+                );
+                const browserTools = buildBrowserAgentTools({
+                    tenantDbName,
+                    tenantId,
+                    projectId,
+                    sessionKey: session.sessionKey,
+                    createdBy: 'agent-runtime',
+                });
+                tools.push(...(browserTools as unknown as AgentSdkToolInterface[]));
+            } catch (err) {
+                logger.error('Failed to bind browser_use system tool', {
+                    browserId,
+                    error: err instanceof Error ? err.message : String(err),
+                });
+            }
         }
     }
 
@@ -183,9 +224,12 @@ async function createInternalTracingSink(
 
                 const sessionDoc: Omit<IAgentTracingSession, '_id' | 'createdAt' | 'updatedAt'> = {
                     sessionId: session.sessionId,
+                    traceId: session.traceId,
+                    rootSpanId: session.rootSpanId,
                     threadId: session.threadId,
                     tenantId,
                     projectId,
+                    source: 'custom',
                     agent: session.agent ?? {},
                     agentName: session.agent?.name ?? undefined,
                     agentVersion: session.agent?.version ?? undefined,
@@ -242,6 +286,9 @@ async function createInternalTracingSink(
 
                     const eventDoc: Omit<IAgentTracingEvent, '_id' | 'createdAt'> = {
                         sessionId: session.sessionId,
+                        traceId: event.traceId ?? undefined,
+                        spanId: event.spanId ?? undefined,
+                        parentSpanId: event.parentSpanId ?? undefined,
                         tenantId,
                         projectId,
                         id: event.id ?? undefined,

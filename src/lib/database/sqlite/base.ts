@@ -63,7 +63,6 @@ export const TABLES = {
   vectorMigrationLogs: 'vector_migration_logs',
   browsers: 'browsers',
   browserSessions: 'browser_sessions',
-  browserAgents: 'browser_agents',
   browserSessionEvents: 'browser_session_events',
 } as const;
 
@@ -176,6 +175,42 @@ export class SQLiteProviderBase {
       TABLES.quotaPolicies,
       'updatedBy',
       'updatedBy TEXT',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.agentTracingSessions,
+      'traceId',
+      'traceId TEXT',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.agentTracingSessions,
+      'rootSpanId',
+      'rootSpanId TEXT',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.agentTracingSessions,
+      'source',
+      'source TEXT',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.agentTracingEvents,
+      'traceId',
+      'traceId TEXT',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.agentTracingEvents,
+      'spanId',
+      'spanId TEXT',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.agentTracingEvents,
+      'parentSpanId',
+      'parentSpanId TEXT',
     );
   }
 
