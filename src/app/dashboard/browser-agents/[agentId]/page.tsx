@@ -176,10 +176,10 @@ export default function BrowserAgentDetailPage() {
       setBrowser(browserData.browser ?? null);
       setSessions(nextSessions);
 
-      if (liveSession) {
-        const refreshedLiveSession = nextSessions.find((session) => session.id === liveSession.id) ?? liveSession;
-        setLiveSession(refreshedLiveSession);
-      }
+      setLiveSession((current) => {
+        if (!current) return current;
+        return nextSessions.find((session) => session.id === current.id) ?? current;
+      });
     } catch (error) {
       notifications.show({
         color: 'red',
@@ -190,7 +190,7 @@ export default function BrowserAgentDetailPage() {
       setRefreshing(false);
       setLoading(false);
     }
-  }, [agentId, liveSession]);
+  }, [agentId]);
 
   useEffect(() => {
     loadAll();
