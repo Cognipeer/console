@@ -61,6 +61,9 @@ export const TABLES = {
   vectorCounters: 'vector_counters',
   vectorMigrations: 'vector_migrations',
   vectorMigrationLogs: 'vector_migration_logs',
+  browsers: 'browsers',
+  browserSessions: 'browser_sessions',
+  browserSessionEvents: 'browser_session_events',
 } as const;
 
 // ── Base class ───────────────────────────────────────────────────────
@@ -172,6 +175,42 @@ export class SQLiteProviderBase {
       TABLES.quotaPolicies,
       'updatedBy',
       'updatedBy TEXT',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.agentTracingSessions,
+      'traceId',
+      'traceId TEXT',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.agentTracingSessions,
+      'rootSpanId',
+      'rootSpanId TEXT',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.agentTracingSessions,
+      'source',
+      'source TEXT',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.agentTracingEvents,
+      'traceId',
+      'traceId TEXT',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.agentTracingEvents,
+      'spanId',
+      'spanId TEXT',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.agentTracingEvents,
+      'parentSpanId',
+      'parentSpanId TEXT',
     );
   }
 

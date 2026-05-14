@@ -15,6 +15,7 @@ import {
   Center,
   Paper,
   TextInput,
+  Select,
   Divider,
   ThemeIcon,
 } from '@mantine/core';
@@ -24,34 +25,38 @@ import {
   IconServer,
   IconSearch,
   IconTool,
+  IconBrowser,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 
 // ── Generic tool-binding shape ──────────────────────────────────────────
 // Mirrors IAgentToolBinding from the DB but kept local so the component
-// stays self-contained.  Supports both unified 'tool' and legacy 'mcp' sources.
+// stays self-contained.  Supports unified 'tool', legacy 'mcp', and 'system' sources.
 
 export interface ToolBinding {
-  source: 'tool' | 'mcp';
+  source: 'tool' | 'mcp' | 'system';
   sourceKey: string;
   toolNames: string[];
+  config?: Record<string, unknown>;
 }
 
 // ── Source-agnostic tool source descriptor ───────────────────────────────
 
 interface ToolSourceGroup {
   /** Discriminator – matches ToolBinding.source */
-  source: 'tool' | 'mcp';
-  /** Unique key of the source (e.g. tool key or MCP server key) */
+  source: 'tool' | 'mcp' | 'system';
+  /** Unique key of the source (e.g. tool key, MCP server key, or system tool key) */
   sourceKey: string;
   /** Human-readable name */
   name: string;
   description?: string;
-  /** Source type label (OpenAPI / MCP) */
+  /** Source type label (OpenAPI / MCP / System) */
   typeLabel?: string;
   /** Available tools within this source */
   tools: { name: string; description: string }[];
 }
+
+interface BrowserOption { id: string; name: string; key: string; status: string }
 
 // ── Props ────────────────────────────────────────────────────────────────
 
@@ -85,6 +90,12 @@ export function ToolSelectorModal({
   // Selection state – keyed by "source::sourceKey::toolName"
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
+  // Per-binding config state for system tools (e.g. browser_use needs a browserId)
+  const [systemConfigs, setSystemConfigs] = useState<Record<string, Record<string, unknown>>>({});
+
+  // Browser options for the browser_use picker
+  const [browsers, setBrowsers] = useState<BrowserOption[]>([]);
+
   // ── Helpers ─────────────────────────────────────────────────────
 
   const toKey = (source: string, sourceKey: string, toolName: string) =>
@@ -100,12 +111,24 @@ export function ToolSelectorModal({
   useEffect(() => {
     if (!opened) return;
     const initial = new Set<string>();
+    const initialConfigs: Record<string, Record<string, unknown>> = {};
     for (const b of value) {
+      const bindingId = `${b.source}::${b.sourceKey}`;
+      if (b.source === 'system' && b.sourceKey === 'browser_use') {
+        if (b.config) {
+          initialConfigs[bindingId] = b.config;
+        }
+        continue;
+      }
       for (const tn of b.toolNames) {
         initial.add(toKey(b.source, b.sourceKey, tn));
       }
+      if (b.source === 'system' && b.config) {
+        initialConfigs[bindingId] = b.config;
+      }
     }
     setSelected(initial);
+    setSystemConfigs(initialConfigs);
     setSearch('');
   }, [opened, value]);
 
@@ -152,6 +175,29 @@ export function ToolSelectorModal({
         );
         allGroups.push(...mcpGroups);
       }
+
+      // System Tools (built-in, hardcoded)
+      const browsersRes = await fetch('/api/browser/browsers?status=active', { cache: 'no-store' });
+      let browserList: BrowserOption[] = [];
+      if (browsersRes.ok) {
+        const browsersData = await browsersRes.json();
+        browserList = (browsersData.browsers ?? []).map((b: { id: string; name: string; key: string; status: string }) => ({
+          id: b.id, name: b.name, key: b.key, status: b.status,
+        }));
+      }
+      setBrowsers(browserList);
+
+      const systemGroup: ToolSourceGroup = {
+        source: 'system',
+        sourceKey: 'browser_use',
+        name: 'Browser Use',
+        description: 'Drive a Playwright browser session: navigate, click, type, snapshot, screenshot, extract, close.',
+        typeLabel: 'System',
+        tools: [
+          { name: 'browser_use', description: 'Bundle of browser_navigate, browser_click, browser_type, browser_snapshot, browser_screenshot, browser_extract and more.' },
+        ],
+      };
+      allGroups.unshift(systemGroup);
 
       setSources(allGroups);
 
@@ -222,10 +268,35 @@ export function ToolSelectorModal({
       const { source, sourceKey, toolName } = parseKey(key);
       const id = `${source}::${sourceKey}`;
       if (!map.has(id)) {
-        map.set(id, { source: source as 'tool' | 'mcp', sourceKey, toolNames: [] });
+        const binding: ToolBinding = {
+          source: source as 'tool' | 'mcp' | 'system',
+          sourceKey,
+          toolNames: [],
+        };
+        if (source === 'system' && systemConfigs[id]) {
+          binding.config = systemConfigs[id];
+        }
+        map.set(id, binding);
       }
       map.get(id)!.toolNames.push(toolName);
     }
+
+    const browserUseConfig = systemConfigs['system::browser_use'];
+    const browserId =
+      typeof browserUseConfig?.browserId === 'string' ? browserUseConfig.browserId : '';
+
+    if (browserId) {
+      map.set('system::browser_use', {
+        source: 'system',
+        sourceKey: 'browser_use',
+        toolNames: ['browser_use'],
+        config: {
+          ...browserUseConfig,
+          browserId,
+        },
+      });
+    }
+
     return Array.from(map.values());
   };
 
@@ -249,10 +320,16 @@ export function ToolSelectorModal({
 
   // ── Count helpers ──────────────────────────────────────────────
 
-  const selectedCountForSource = (group: ToolSourceGroup) =>
-    group.tools.filter((t) => selected.has(toKey(group.source, group.sourceKey, t.name))).length;
+  const selectedCountForSource = (group: ToolSourceGroup) => {
+    if (group.source === 'system' && group.sourceKey === 'browser_use') {
+      return systemConfigs['system::browser_use']?.browserId ? 1 : 0;
+    }
 
-  const totalSelected = selected.size;
+    return group.tools.filter((t) => selected.has(toKey(group.source, group.sourceKey, t.name))).length;
+  };
+
+  const totalSelected =
+    selected.size + (systemConfigs['system::browser_use']?.browserId ? 1 : 0);
 
   // ── Confirm ────────────────────────────────────────────────────
 
@@ -317,8 +394,8 @@ export function ToolSelectorModal({
                         ) : (
                           <IconChevronRight size={16} />
                         )}
-                        <ThemeIcon size="sm" variant="light" color="blue">
-                          <IconServer size={12} />
+                        <ThemeIcon size="sm" variant="light" color={group.source === 'system' ? 'grape' : 'blue'}>
+                          {group.source === 'system' ? <IconBrowser size={12} /> : <IconServer size={12} />}
                         </ThemeIcon>
                         <div>
                           <Text size="sm" fw={600}>
@@ -337,8 +414,8 @@ export function ToolSelectorModal({
                             {count}/{group.tools.length}
                           </Badge>
                         )}
-                        <Badge size="xs" variant="light" color="gray">
-                          {group.typeLabel || (group.source === 'tool' ? 'Tool' : 'MCP')}
+                        <Badge size="xs" variant="light" color={group.source === 'system' ? 'grape' : 'gray'}>
+                          {group.typeLabel || (group.source === 'tool' ? 'Tool' : group.source === 'mcp' ? 'MCP' : 'System')}
                         </Badge>
                       </Group>
                     </Group>
@@ -348,48 +425,70 @@ export function ToolSelectorModal({
                   <Collapse in={isExpanded}>
                     <Divider />
                     <Stack gap={0} p="xs" pt={0}>
-                      {/* Select all */}
-                      <Checkbox
-                        label={
-                          <Text size="xs" fw={600} c="dimmed">
-                            Select all ({group.tools.length})
-                          </Text>
-                        }
-                        checked={allSelected}
-                        indeterminate={someSelected}
-                        onChange={(e) =>
-                          toggleAllToolsInSource(group, e.currentTarget.checked)
-                        }
-                        mt="xs"
-                        mb="xs"
-                      />
-                      {group.tools.map((tool) => {
-                        const key = toKey(group.source, group.sourceKey, tool.name);
-                        return (
+                      {group.source === 'system' && group.sourceKey === 'browser_use' ? (
+                        <Select
+                          mt="xs"
+                          mb="xs"
+                          label="Browser"
+                          placeholder={browsers.length === 0 ? 'No browsers available' : 'Select a browser to add Browser Use'}
+                          description="Selecting a browser adds the Browser Use system tool to this agent."
+                          data={browsers.map((b) => ({ value: b.id, label: `${b.name} (${b.key})` }))}
+                          value={(systemConfigs[sourceId]?.browserId as string) ?? null}
+                          onChange={(value) => {
+                            setSystemConfigs((prev) => ({
+                              ...prev,
+                              [sourceId]: { ...(prev[sourceId] ?? {}), browserId: value ?? '' },
+                            }));
+                          }}
+                          searchable
+                          clearable
+                          nothingFoundMessage="No browsers"
+                        />
+                      ) : (
+                        <>
                           <Checkbox
-                            key={key}
                             label={
-                              <Group gap="xs">
-                                <IconTool size={12} />
-                                <div>
-                                  <Text size="sm">{tool.name}</Text>
-                                  {tool.description && (
-                                    <Text size="xs" c="dimmed" lineClamp={2}>
-                                      {tool.description}
-                                    </Text>
-                                  )}
-                                </div>
-                              </Group>
+                              <Text size="xs" fw={600} c="dimmed">
+                                Select all ({group.tools.length})
+                              </Text>
                             }
-                            checked={selected.has(key)}
-                            onChange={() =>
-                              toggleTool(group.source, group.sourceKey, tool.name)
+                            checked={allSelected}
+                            indeterminate={someSelected}
+                            onChange={(e) =>
+                              toggleAllToolsInSource(group, e.currentTarget.checked)
                             }
-                            mb={4}
-                            ml="md"
+                            mt="xs"
+                            mb="xs"
                           />
-                        );
-                      })}
+                          {group.tools.map((tool) => {
+                            const key = toKey(group.source, group.sourceKey, tool.name);
+                            return (
+                              <Checkbox
+                                key={key}
+                                label={
+                                  <Group gap="xs">
+                                    <IconTool size={12} />
+                                    <div>
+                                      <Text size="sm">{tool.name}</Text>
+                                      {tool.description && (
+                                        <Text size="xs" c="dimmed" lineClamp={2}>
+                                          {tool.description}
+                                        </Text>
+                                      )}
+                                    </div>
+                                  </Group>
+                                }
+                                checked={selected.has(key)}
+                                onChange={() =>
+                                  toggleTool(group.source, group.sourceKey, tool.name)
+                                }
+                                mb={4}
+                                ml="md"
+                              />
+                            );
+                          })}
+                        </>
+                      )}
                     </Stack>
                   </Collapse>
                 </Paper>

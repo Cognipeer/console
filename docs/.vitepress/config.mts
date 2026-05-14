@@ -99,6 +99,7 @@ export default defineConfig({
             { text: 'Chat Completions', link: '/api/chat-completions' },
             { text: 'Embeddings', link: '/api/embeddings' },
             { text: 'Agents', link: '/api/agents' },
+            { text: 'Browser', link: '/api/browser' },
             { text: 'Tools', link: '/api/tools' },
             { text: 'MCP Servers', link: '/api/mcp' },
             { text: 'Vector', link: '/api/vector' },

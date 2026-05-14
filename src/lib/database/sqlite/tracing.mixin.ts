@@ -18,20 +18,23 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
 
       db.prepare(`
         INSERT INTO ${TABLES.agentTracingSessions}
-        (id, sessionId, threadId, tenantId, projectId, agent, agentName, agentVersion, agentModel,
+        (id, sessionId, traceId, rootSpanId, threadId, tenantId, projectId, source, agent, agentName, agentVersion, agentModel,
          config, summary, status, startedAt, endedAt, durationMs, errors, modelsUsed, toolsUsed,
          eventCounts, totalEvents, totalInputTokens, totalOutputTokens, totalCachedInputTokens,
          totalBytesIn, totalBytesOut, totalRequestBytes, totalResponseBytes, createdAt, updatedAt)
-        VALUES (@id, @sessionId, @threadId, @tenantId, @projectId, @agent, @agentName, @agentVersion, @agentModel,
+        VALUES (@id, @sessionId, @traceId, @rootSpanId, @threadId, @tenantId, @projectId, @source, @agent, @agentName, @agentVersion, @agentModel,
          @config, @summary, @status, @startedAt, @endedAt, @durationMs, @errors, @modelsUsed, @toolsUsed,
          @eventCounts, @totalEvents, @totalInputTokens, @totalOutputTokens, @totalCachedInputTokens,
          @totalBytesIn, @totalBytesOut, @totalRequestBytes, @totalResponseBytes, @createdAt, @updatedAt)
       `).run({
         id,
         sessionId: session.sessionId,
+        traceId: session.traceId ?? null,
+        rootSpanId: session.rootSpanId ?? null,
         threadId: this.normalizeThreadId(session.threadId) ?? null,
         tenantId: session.tenantId,
         projectId: session.projectId ?? null,
+        source: session.source ?? null,
         agent: this.toJson(session.agent),
         agentName: session.agentName ?? null,
         agentVersion: session.agentVersion ?? null,
@@ -127,6 +130,9 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       if (projectId) { where += ' AND projectId = @projectId'; params.projectId = projectId; }
 
       if (data.threadId !== undefined) { sets.push('threadId = @threadId'); params.threadId = this.normalizeThreadId(data.threadId) ?? null; }
+      if (data.traceId !== undefined) { sets.push('traceId = @traceId'); params.traceId = data.traceId ?? null; }
+      if (data.rootSpanId !== undefined) { sets.push('rootSpanId = @rootSpanId'); params.rootSpanId = data.rootSpanId ?? null; }
+      if (data.source !== undefined) { sets.push('source = @source'); params.source = data.source ?? null; }
       if (data.agent !== undefined) { sets.push('agent = @agent'); params.agent = this.toJson(data.agent); }
       if (data.agentName !== undefined) { sets.push('agentName = @agentName'); params.agentName = data.agentName; }
       if (data.agentVersion !== undefined) { sets.push('agentVersion = @agentVersion'); params.agentVersion = data.agentVersion; }
@@ -154,7 +160,7 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
 
       const row = db.prepare(`SELECT * FROM ${TABLES.agentTracingSessions} WHERE sessionId = @sessionId`)
         .get({ sessionId }) as SqliteRow | undefined;
-      return row ? this.mapSessionRow(row) : null;
+      return row ? this.mapAgentTracingSessionRow(row) : null;
     }
 
     async findAgentTracingSessionById(sessionId: string, projectId?: string): Promise<IAgentTracingSession | null> {
@@ -163,7 +169,7 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       const params: Record<string, unknown> = { sessionId };
       if (projectId) { sql += ' AND projectId = @projectId'; params.projectId = projectId; }
       const row = db.prepare(sql).get(params) as SqliteRow | undefined;
-      return row ? this.mapSessionRow(row) : null;
+      return row ? this.mapAgentTracingSessionRow(row) : null;
     }
 
     async listAgentTracingSessions(
@@ -214,7 +220,7 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         : [];
 
       return {
-        sessions: rows.map((r) => this.mapSessionRow(r)),
+        sessions: rows.map((r) => this.mapAgentTracingSessionRow(r)),
         total: includeTotal ? total : rows.length,
       };
     }
@@ -274,17 +280,20 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
 
       db.prepare(`
         INSERT INTO ${TABLES.agentTracingEvents}
-        (id, sessionId, tenantId, projectId, eventId, type, label, sequence, timestamp, status,
+        (id, sessionId, traceId, spanId, parentSpanId, tenantId, projectId, eventId, type, label, sequence, timestamp, status,
          actor, metadata, sections, modelNames, model, error, durationMs, actorName, actorRole,
          toolName, toolExecutionId, inputTokens, outputTokens, totalTokens, cachedInputTokens,
          bytesIn, bytesOut, requestBytes, responseBytes, createdAt)
-        VALUES (@id, @sessionId, @tenantId, @projectId, @eventId, @type, @label, @sequence, @timestamp, @status,
+        VALUES (@id, @sessionId, @traceId, @spanId, @parentSpanId, @tenantId, @projectId, @eventId, @type, @label, @sequence, @timestamp, @status,
          @actor, @metadata, @sections, @modelNames, @model, @error, @durationMs, @actorName, @actorRole,
          @toolName, @toolExecutionId, @inputTokens, @outputTokens, @totalTokens, @cachedInputTokens,
          @bytesIn, @bytesOut, @requestBytes, @responseBytes, @createdAt)
       `).run({
         id,
         sessionId: event.sessionId,
+        traceId: event.traceId ?? null,
+        spanId: event.spanId ?? null,
+        parentSpanId: event.parentSpanId ?? null,
         tenantId: event.tenantId,
         projectId: event.projectId ?? null,
         eventId: event.id ?? null,
@@ -331,7 +340,7 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       if (projectId) { sql += ' AND projectId = @projectId'; params.projectId = projectId; }
       sql += ' ORDER BY sequence ASC, createdAt ASC';
       const rows = db.prepare(sql).all(params) as SqliteRow[];
-      return rows.map((r) => this.mapEventRow(r));
+      return rows.map((r) => this.mapAgentTracingEventRow(r));
     }
 
     async findAgentTracingEventById(
@@ -353,7 +362,7 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
 
       const row = db.prepare(sql).get(params) as SqliteRow | undefined;
 
-      return row ? this.mapEventRow(row) : null;
+      return row ? this.mapAgentTracingEventRow(row) : null;
     }
 
     async deleteAgentTracingEvents(sessionId: string, projectId?: string): Promise<number> {
@@ -366,13 +375,16 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
 
     // ── Row mappers ────────────────────────────────────────────────
 
-    protected mapSessionRow(r: SqliteRow): IAgentTracingSession {
+    protected mapAgentTracingSessionRow(r: SqliteRow): IAgentTracingSession {
       return {
         _id: r.id as string,
         sessionId: r.sessionId as string,
+        traceId: r.traceId as string | undefined,
+        rootSpanId: r.rootSpanId as string | undefined,
         threadId: r.threadId as string | undefined,
         tenantId: r.tenantId as string,
         projectId: r.projectId as string | undefined,
+        source: r.source as 'custom' | 'otlp' | undefined,
         agent: this.parseJson(r.agent, {}),
         agentName: r.agentName as string | undefined,
         agentVersion: r.agentVersion as string | undefined,
@@ -400,10 +412,13 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       };
     }
 
-    protected mapEventRow(r: SqliteRow): IAgentTracingEvent {
+    protected mapAgentTracingEventRow(r: SqliteRow): IAgentTracingEvent {
       return {
         _id: r.id as string,
         sessionId: r.sessionId as string,
+        traceId: r.traceId as string | undefined,
+        spanId: r.spanId as string | undefined,
+        parentSpanId: r.parentSpanId as string | undefined,
         tenantId: r.tenantId as string,
         projectId: r.projectId as string | undefined,
         id: r.eventId as string | undefined,

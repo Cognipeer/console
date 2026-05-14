@@ -2,11 +2,15 @@
   display: grid;
   grid-template-columns: minmax(18rem, 21.25rem) minmax(0, 1fr);
   gap: var(--app-space-3);
+  height: min(52rem, calc(100vh - 13rem));
+  height: min(52rem, calc(100dvh - 13rem));
   min-height: 37.5rem;
   align-items: stretch;
+  overflow: hidden;
 }
 
 .configPanel {
+  min-height: 0;
   overflow: auto;
 }
 
@@ -19,6 +23,8 @@
   flex-direction: column;
   min-width: 0;
   min-height: 37.5rem;
+  height: 100%;
+  overflow: hidden;
 }
 
 .panelHeader {
@@ -31,6 +37,7 @@
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
 }
 
 .chatEmpty {
@@ -39,6 +46,7 @@
 
 .chatScroll {
   flex: 1;
+  min-height: 0;
 }
 
 .chatBubble {
@@ -100,11 +108,15 @@
 @media (max-width: 75em) {
   .playgroundLayout {
     grid-template-columns: 1fr;
+    height: auto;
     min-height: auto;
+    overflow: visible;
   }
 
   .chatPanel {
-    min-height: 34rem;
+    height: min(34rem, calc(100vh - 8rem));
+    height: min(34rem, calc(100dvh - 8rem));
+    min-height: 28rem;
   }
 }
 

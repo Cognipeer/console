@@ -192,6 +192,22 @@
         "/api/client/v1/tools",
         "/api/client/v1/tools/*"
       ]
+    },
+    "BROWSER_SESSIONS": {
+      "name": "Browser Sessions",
+      "description": "Headless browser sessions for navigation, interaction, screenshots and PDF export",
+      "endpoints": [
+        "/api/browser/browsers",
+        "/api/browser/browsers/*",
+        "/api/browser/sessions",
+        "/api/browser/sessions/*",
+        "/api/client/v1/browser/browsers",
+        "/api/client/v1/browser/browsers/*",
+        "/api/client/v1/browser/sessions",
+        "/api/client/v1/browser/sessions/*",
+        "/api/client/v1/browser/*/mcp/sse",
+        "/api/client/v1/browser/*/mcp/message"
+      ]
     }
   },
   "licenses": {
@@ -216,6 +232,7 @@
         "CONFIG_MANAGEMENT",
         "MCP_SERVERS",
         "TOOLS",
+        "BROWSER_SESSIONS",
         "DASHBOARD",
         "AGENT_ORCHESTRATION"
       ],
@@ -298,6 +315,7 @@
         "CONFIG_MANAGEMENT",
         "MCP_SERVERS",
         "TOOLS",
+        "BROWSER_SESSIONS",
         "DASHBOARD"
       ],
       "limits": {
@@ -330,6 +348,7 @@
         "CONFIG_MANAGEMENT",
         "MCP_SERVERS",
         "TOOLS",
+        "BROWSER_SESSIONS",
         "DASHBOARD"
       ],
       "limits": {

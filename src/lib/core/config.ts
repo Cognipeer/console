@@ -123,6 +123,27 @@ export interface AppConfig {
     cacheTtlSeconds: number;
   };
 
+  browser: {
+    /** Concurrency limiter provider (in-memory or future redis). */
+    concurrencyProvider: 'memory';
+    /** Default per-tenant maximum concurrent live browser sessions. */
+    defaultMaxConcurrent: number;
+    /** Auto-close session after N ms with no activity. */
+    defaultIdleTimeoutMs: number;
+    /** Hard upper bound on session lifetime (ms). */
+    defaultMaxLifetimeMs: number;
+    /** Default Playwright headless mode. */
+    headless: boolean;
+    /** Default viewport width. */
+    viewportWidth: number;
+    /** Default viewport height. */
+    viewportHeight: number;
+    /** Reaper sweep interval (ms). */
+    reaperIntervalMs: number;
+    /** Bucket key used for browser artifacts when none is provided. */
+    defaultArtifactBucketKey: string;
+  };
+
   systemModels: {
     openai: {
       apiKey: string;
@@ -279,6 +300,18 @@ function buildConfig(source: ConfigSource): AppConfig {
 
     providerRuntime: {
       cacheTtlSeconds: int(source, 'PROVIDER_RUNTIME_CACHE_TTL_SECONDS', 300),
+    },
+
+    browser: {
+      concurrencyProvider: oneOf(source, 'BROWSER_CONCURRENCY_PROVIDER', ['memory'] as const, 'memory'),
+      defaultMaxConcurrent: int(source, 'BROWSER_DEFAULT_MAX_CONCURRENT', 10),
+      defaultIdleTimeoutMs: int(source, 'BROWSER_DEFAULT_IDLE_TIMEOUT_MS', 5 * 60 * 1000),
+      defaultMaxLifetimeMs: int(source, 'BROWSER_DEFAULT_MAX_LIFETIME_MS', 30 * 60 * 1000),
+      headless: bool(source, 'BROWSER_HEADLESS', true),
+      viewportWidth: int(source, 'BROWSER_VIEWPORT_WIDTH', 1280),
+      viewportHeight: int(source, 'BROWSER_VIEWPORT_HEIGHT', 800),
+      reaperIntervalMs: int(source, 'BROWSER_REAPER_INTERVAL_MS', 30 * 1000),
+      defaultArtifactBucketKey: str(source, 'BROWSER_DEFAULT_ARTIFACT_BUCKET', 'browser-artifacts'),
     },
 
     systemModels: {

@@ -217,4 +217,12 @@ export type {
   ToolSourceType,
   ToolStatus,
   ToolAuthType,
+  IBrowser,
+  IBrowserSession,
+  IBrowserSessionEvent,
+  IBrowserSessionConfig,
+  IBrowserAccessRules,
+  BrowserStatus,
+  BrowserSessionStatus,
+  BrowserActionType,
 } from './provider.interface';

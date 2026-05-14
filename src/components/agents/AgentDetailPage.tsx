@@ -419,12 +419,98 @@ export default function AgentDetailPage() {
     setChatInput('');
   };
 
+  const buildConfigPayload = (bindings: ToolBinding[] = toolBindings): Record<string, unknown> => {
+    const values = configForm.values;
+    const nextConfig: Record<string, unknown> = {
+      modelKey: values.modelKey,
+      temperature: values.temperature,
+      topP: values.topP,
+      maxTokens: values.maxTokens,
+      knowledgeEngineKey: values.knowledgeEngineKey || undefined,
+      inputGuardrailKey: values.inputGuardrailKey || undefined,
+      outputGuardrailKey: values.outputGuardrailKey || undefined,
+      toolBindings: bindings.length > 0 ? bindings : undefined,
+    };
+
+    if (values.promptMode === 'custom') {
+      nextConfig.systemPrompt = values.systemPrompt;
+      nextConfig.promptKey = undefined;
+    } else {
+      nextConfig.promptKey = values.promptKey;
+      nextConfig.systemPrompt = undefined;
+    }
+
+    return nextConfig;
+  };
+
+  const saveAgentConfig = async (
+    options: { notify?: boolean; bindings?: ToolBinding[] } = {},
+  ): Promise<boolean> => {
+    const notify = options.notify ?? true;
+
+    try {
+      const res = await fetch(`/api/agents/${agentId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ config: buildConfigPayload(options.bindings) }),
+      });
+
+      if (!res.ok) {
+        return false;
+      }
+
+      const data = await res.json();
+      setAgent(data.agent);
+      if (notify) {
+        notifications.show({
+          title: t('notifications.saved'),
+          message: t('notifications.savedDesc'),
+          color: 'teal',
+        });
+      }
+      return true;
+    } catch {
+      if (notify) {
+        notifications.show({
+          title: t('notifications.error'),
+          message: t('notifications.saveFailed'),
+          color: 'red',
+        });
+      }
+      return false;
+    }
+  };
+
+  const handleToolBindingsChange = async (bindings: ToolBinding[]) => {
+    setToolBindings(bindings);
+    const saved = await saveAgentConfig({ notify: false, bindings });
+    if (!saved) {
+      notifications.show({
+        title: t('notifications.error'),
+        message: 'Failed to save selected tools.',
+        color: 'red',
+      });
+    }
+  };
+
   const sendMessage = async () => {
     if (!chatInput.trim() || chatLoading) return;
 
     const message = chatInput.trim();
-    setChatInput('');
     setChatLoading(true);
+
+    const saved = await saveAgentConfig({ notify: false });
+    if (!saved) {
+      notifications.show({
+        title: t('notifications.error'),
+        message: 'Failed to save current agent configuration before chat.',
+        color: 'red',
+      });
+      setChatLoading(false);
+      return;
+    }
+
+    setChatInput('');
 
     // Optimistic update: add user message
     const updatedMessages: ChatMessage[] = [
@@ -477,49 +563,7 @@ export default function AgentDetailPage() {
   // ── Config Save ──────────────────────────────────────────────
 
   const handleSaveConfig = async () => {
-    const values = configForm.values;
-    try {
-      const newConfig: Record<string, unknown> = {
-        modelKey: values.modelKey,
-        temperature: values.temperature,
-        topP: values.topP,
-        maxTokens: values.maxTokens,
-        knowledgeEngineKey: values.knowledgeEngineKey || undefined,
-        inputGuardrailKey: values.inputGuardrailKey || undefined,
-        outputGuardrailKey: values.outputGuardrailKey || undefined,
-        toolBindings: toolBindings.length > 0 ? toolBindings : undefined,
-      };
-
-      if (values.promptMode === 'custom') {
-        newConfig.systemPrompt = values.systemPrompt;
-        newConfig.promptKey = undefined;
-      } else {
-        newConfig.promptKey = values.promptKey;
-        newConfig.systemPrompt = undefined;
-      }
-
-      const res = await fetch(`/api/agents/${agentId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ config: newConfig }),
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        setAgent(data.agent);
-        notifications.show({
-          title: t('notifications.saved'),
-          message: t('notifications.savedDesc'),
-          color: 'teal',
-        });
-      }
-    } catch {
-      notifications.show({
-        title: t('notifications.error'),
-        message: t('notifications.saveFailed'),
-        color: 'red',
-      });
-    }
+    await saveAgentConfig();
   };
 
   if (loading) {
@@ -763,7 +807,7 @@ export default function AgentDetailPage() {
                   opened={toolSelectorOpen}
                   onClose={() => setToolSelectorOpen(false)}
                   value={toolBindings}
-                  onChange={setToolBindings}
+                  onChange={handleToolBindingsChange}
                 />
 
                 {/* ── Advanced Settings (collapsible) ─────── */}

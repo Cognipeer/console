@@ -65,6 +65,8 @@ export const en = {
     toolsDescription: 'Manage tools from OpenAPI specs or MCP servers',
     agents: 'Agents',
     agentsDescription: 'Create and manage AI agents',
+    browser: 'Browsers',
+    browserDescription: 'Headless browser profiles for sessions and agents',
   },
   notifications: {
     logoutSuccessTitle: 'Logged Out',
@@ -114,6 +116,7 @@ export const en = {
     mcp: 'MCP Servers',
     tools: 'Tools',
     incidents: 'Incidents',
+    browser: 'Browsers',
   },
   validation: {
     invalidEmail: 'Invalid email',

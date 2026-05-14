@@ -354,6 +354,86 @@ describe('Provider CRUD', () => {
   });
 });
 
+// ── Agent tracing operations ─────────────────────────────────────────────
+
+describe('Agent tracing SQLite round-trip', () => {
+  const tracingSessionId = 'trace-session-1';
+  const tracingTraceId = '0123456789abcdef0123456789abcdef';
+  const tracingRootSpanId = 'abcdef0123456789';
+  const tracingEventId = 'evt_0002_test';
+  const tracingSpanId = '1111222233334444';
+  const tracingParentSpanId = tracingRootSpanId;
+
+  it('persists session and event trace identifiers', async () => {
+    await db.switchToTenant(TEST_DB_NAME);
+
+    await db.createAgentTracingSession({
+      sessionId: tracingSessionId,
+      traceId: tracingTraceId,
+      rootSpanId: tracingRootSpanId,
+      threadId: 'thread-tracing-1',
+      tenantId,
+      projectId,
+      source: 'custom',
+      agent: { name: 'Trace Agent' },
+      agentName: 'Trace Agent',
+      summary: { eventCounts: { ai_call: 1 } },
+      status: 'success',
+      startedAt: new Date('2026-01-01T00:00:00.000Z'),
+      totalEvents: 1,
+      totalInputTokens: 21,
+      totalOutputTokens: 13,
+    });
+
+    await db.updateAgentTracingSession(
+      tracingSessionId,
+      {
+        traceId: tracingTraceId,
+        rootSpanId: tracingRootSpanId,
+        source: 'custom',
+        endedAt: new Date('2026-01-01T00:00:02.000Z'),
+      },
+      projectId,
+    );
+
+    await db.createAgentTracingEvent({
+      sessionId: tracingSessionId,
+      traceId: tracingTraceId,
+      spanId: tracingSpanId,
+      parentSpanId: tracingParentSpanId,
+      tenantId,
+      projectId,
+      id: tracingEventId,
+      type: 'ai_call',
+      label: 'Assistant Response #2',
+      sequence: 2,
+      timestamp: new Date('2026-01-01T00:00:01.000Z'),
+      status: 'success',
+      actor: { scope: 'agent', role: 'assistant' },
+      sections: [{ kind: 'message', label: 'Assistant Message', role: 'assistant', content: 'ok' }],
+      model: 'gpt-4o',
+      inputTokens: 21,
+      outputTokens: 13,
+      totalTokens: 34,
+    });
+
+    const storedSession = await db.findAgentTracingSessionById(tracingSessionId, projectId);
+    const storedEvents = await db.listAgentTracingEvents(tracingSessionId, projectId);
+
+    expect(storedSession).not.toBeNull();
+    expect(storedSession?.traceId).toBe(tracingTraceId);
+    expect(storedSession?.rootSpanId).toBe(tracingRootSpanId);
+    expect(storedSession?.source).toBe('custom');
+
+    expect(storedEvents).toHaveLength(1);
+    expect(storedEvents[0]?.id).toBe(tracingEventId);
+    expect(storedEvents[0]?.type).toBe('ai_call');
+    expect(storedEvents[0]?.traceId).toBe(tracingTraceId);
+    expect(storedEvents[0]?.spanId).toBe(tracingSpanId);
+    expect(storedEvents[0]?.parentSpanId).toBe(tracingParentSpanId);
+  });
+});
+
 // ── Cross-tenant user directory ───────────────────────────────────────────
 
 describe('Cross-tenant user directory', () => {
