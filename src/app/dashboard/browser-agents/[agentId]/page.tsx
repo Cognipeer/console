@@ -130,6 +130,7 @@ export default function BrowserAgentDetailPage() {
   const [lastResult, setLastResult] = useState<BrowserAgentRunResult | null>(null);
   const [running, setRunning] = useState(false);
   const livePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const liveScreenshotUrlRef = useRef<string | null>(null);
 
   const editForm = useForm<EditAgentForm>({
     initialValues: {
@@ -197,7 +198,7 @@ export default function BrowserAgentDetailPage() {
   }, [loadAll]);
 
   useEffect(() => {
-    if (!agent) return;
+    if (!agent || !editOpened) return;
     editForm.setValues({
       name: agent.name ?? '',
       description: agent.description ?? '',
@@ -205,21 +206,23 @@ export default function BrowserAgentDetailPage() {
       systemPrompt: agent.systemPrompt ?? '',
       status: agent.status,
     });
-  }, [agent, editForm]);
+  }, [agent, editOpened]);
 
   useEffect(() => {
     if (!selectedSessionKey) return;
     const selected = sessions.find((session) => session.sessionKey === selectedSessionKey);
-    if (selected) setLiveSession(selected);
+    if (selected) {
+      setLiveSession((current) => (current?.id === selected.id ? current : selected));
+    }
   }, [selectedSessionKey, sessions]);
 
   useEffect(() => {
     return () => {
       if (livePollRef.current) clearInterval(livePollRef.current);
-      setLiveScreenshotUrl((current) => {
-        if (current) URL.revokeObjectURL(current);
-        return null;
-      });
+      if (liveScreenshotUrlRef.current) {
+        URL.revokeObjectURL(liveScreenshotUrlRef.current);
+        liveScreenshotUrlRef.current = null;
+      }
     };
   }, []);
 
@@ -269,8 +272,11 @@ export default function BrowserAgentDetailPage() {
       if (screenshotRes.ok) {
         const blob = await screenshotRes.blob();
         const objectUrl = URL.createObjectURL(blob);
+        if (liveScreenshotUrlRef.current) {
+          URL.revokeObjectURL(liveScreenshotUrlRef.current);
+        }
+        liveScreenshotUrlRef.current = objectUrl;
         setLiveScreenshotUrl((current) => {
-          if (current) URL.revokeObjectURL(current);
           return objectUrl;
         });
       }
