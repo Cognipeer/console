@@ -469,3 +469,182 @@ export interface IIncident {
   updatedAt?: Date;
 }
 
+// ── Browser session & agent types ──────────────────────────────────────────
+
+export type BrowserSessionStatus =
+  | 'pending'
+  | 'running'
+  | 'idle'
+  | 'closed'
+  | 'errored'
+  | 'expired';
+
+export type BrowserActionType =
+  | 'create'
+  | 'goto'
+  | 'click'
+  | 'hover'
+  | 'type'
+  | 'press'
+  | 'wait'
+  | 'scroll'
+  | 'extract'
+  | 'snapshot'
+  | 'screenshot'
+  | 'pdf'
+  | 'tool_call'
+  | 'agent_event'
+  | 'close'
+  | 'error';
+
+export type BrowserAgentStatus = 'active' | 'inactive' | 'draft';
+
+export type BrowserStatus = 'active' | 'disabled';
+
+/**
+ * Browser profile / configuration. A Browser is the parent container that
+ * groups browser sessions and browser agents and stores shared defaults
+ * (artifact bucket, session config, default model, …). Sessions and agents
+ * are always created **under** a Browser.
+ */
+export interface IBrowser {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  /** URL-friendly unique identifier scoped to the tenant/project. */
+  key: string;
+  name: string;
+  description?: string;
+  status: BrowserStatus;
+  /** Default Files bucket where screenshots / PDFs are persisted. */
+  artifactBucketKey?: string;
+  /** Default browser session configuration applied to spawned sessions. */
+  defaultSessionConfig?: IBrowserSessionConfig;
+  /** Default tenant model key applied when running agents under this browser. */
+  defaultModelKey?: string;
+  /** Default agent runtime knobs (maxSteps, runtimeProfile, …). */
+  defaultRunOptions?: {
+    maxSteps?: number;
+    temperature?: number;
+    runtimeProfile?: string;
+  };
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IBrowserAccessRules {
+  /** Optional list of host patterns the browser is allowed to navigate to. */
+  allowList?: string[];
+  /** Optional list of host patterns to block. Evaluated after allowList. */
+  blockList?: string[];
+}
+
+export interface IBrowserSessionConfig {
+  headless?: boolean;
+  viewport?: { width: number; height: number };
+  userAgent?: string;
+  locale?: string;
+  /** Auto-close after this many ms of inactivity. Defaults via config. */
+  idleTimeoutMs?: number;
+  /** Hard upper bound on session lifetime (ms). */
+  maxLifetimeMs?: number;
+  access?: IBrowserAccessRules;
+}
+
+export interface IBrowserSession {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  /** Parent Browser profile that owns this session. */
+  browserId: string;
+  /** Stable identifier exposed to clients. */
+  sessionKey: string;
+  name?: string;
+  agentId?: string;
+  agentKey?: string;
+  status: BrowserSessionStatus;
+  config: IBrowserSessionConfig;
+  /** Live state captured for observability — not source of truth. */
+  currentUrl?: string;
+  pageTitle?: string;
+  lastActivityAt?: Date;
+  /** Last screenshot artifact reference (file bucket / object key). */
+  lastScreenshot?: {
+    bucketKey: string;
+    fileId: string;
+    objectKey: string;
+    capturedAt: Date;
+  };
+  /** Bucket key used to persist artifacts (screenshots / PDFs). */
+  artifactBucketKey?: string;
+  startedAt?: Date;
+  endedAt?: Date;
+  errorMessage?: string;
+  /** Raw counters for fast list views. */
+  eventCount?: number;
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IBrowserAgent {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  /** Parent Browser profile that owns this agent. */
+  browserId: string;
+  key: string;
+  name: string;
+  description?: string;
+  /** Tenant model key from the model registry. */
+  modelKey: string;
+  systemPrompt?: string;
+  /** Default browser session config applied when the agent runs. */
+  browserConfig?: IBrowserSessionConfig;
+  /** Bucket where artifacts (screenshots / PDF) are uploaded. */
+  artifactBucketKey?: string;
+  /** Reasoning / planning hints (max steps, tool whitelist, etc.). */
+  runOptions?: {
+    maxSteps?: number;
+    temperature?: number;
+    runtimeProfile?: string;
+  };
+  status: BrowserAgentStatus;
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IBrowserSessionEvent {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  sessionId: string;
+  /** Sequence index for ordering within a session. */
+  sequence: number;
+  type: BrowserActionType;
+  status?: 'success' | 'error';
+  url?: string;
+  selector?: string;
+  ref?: string;
+  durationMs?: number;
+  /** Optional artifact pointer (screenshot / pdf). */
+  artifact?: {
+    bucketKey: string;
+    fileId: string;
+    objectKey: string;
+    contentType?: string;
+  };
+  /** Compact, sanitized payload (not raw HTML / large blobs). */
+  data?: Record<string, unknown>;
+  errorMessage?: string;
+  createdAt?: Date;
+}
+

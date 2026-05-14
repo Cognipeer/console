@@ -1,6 +1,9 @@
 import type {
   AgentStatus,
   AlertEventStatus,
+  BrowserAgentStatus,
+  BrowserSessionStatus,
+  BrowserStatus,
   GuardrailType,
   IAgent,
   IAgentConversation,
@@ -10,6 +13,10 @@ import type {
   IAlertEvent,
   IAlertRule,
   IApiToken,
+  IBrowserAgent,
+  IBrowser,
+  IBrowserSession,
+  IBrowserSessionEvent,
   IConfigAuditLog,
   IConfigGroup,
   IConfigItem,
@@ -792,5 +799,82 @@ export interface DatabaseProvider {
     serverKey: string,
     options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month' },
   ): Promise<IMcpRequestAggregate>;
+
+  // ── Browsers (tenant-specific) ──
+  createBrowser(
+    record: Omit<IBrowser, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IBrowser>;
+  updateBrowser(
+    id: string,
+    data: Partial<Omit<IBrowser, '_id' | 'tenantId' | 'createdAt'>>,
+  ): Promise<IBrowser | null>;
+  deleteBrowser(id: string): Promise<boolean>;
+  findBrowserById(id: string): Promise<IBrowser | null>;
+  findBrowserByKey(
+    tenantId: string,
+    key: string,
+    projectId?: string,
+  ): Promise<IBrowser | null>;
+  listBrowsers(
+    tenantId: string,
+    filters?: { projectId?: string; status?: BrowserStatus | string; search?: string },
+  ): Promise<IBrowser[]>;
+
+  // ── Browser Sessions (tenant-specific) ──
+  createBrowserSession(
+    record: Omit<IBrowserSession, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IBrowserSession>;
+  updateBrowserSession(
+    id: string,
+    data: Partial<Omit<IBrowserSession, '_id' | 'tenantId' | 'createdAt'>>,
+  ): Promise<IBrowserSession | null>;
+  deleteBrowserSession(id: string): Promise<boolean>;
+  findBrowserSessionById(id: string): Promise<IBrowserSession | null>;
+  findBrowserSessionByKey(
+    tenantId: string,
+    sessionKey: string,
+    projectId?: string,
+  ): Promise<IBrowserSession | null>;
+  listBrowserSessions(
+    tenantId: string,
+    filters?: {
+      projectId?: string;
+      browserId?: string;
+      agentId?: string;
+      status?: BrowserSessionStatus | string;
+      search?: string;
+      limit?: number;
+    },
+  ): Promise<IBrowserSession[]>;
+
+  // ── Browser Agents (tenant-specific) ──
+  createBrowserAgent(
+    record: Omit<IBrowserAgent, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IBrowserAgent>;
+  updateBrowserAgent(
+    id: string,
+    data: Partial<Omit<IBrowserAgent, '_id' | 'tenantId' | 'createdAt'>>,
+  ): Promise<IBrowserAgent | null>;
+  deleteBrowserAgent(id: string): Promise<boolean>;
+  findBrowserAgentById(id: string): Promise<IBrowserAgent | null>;
+  findBrowserAgentByKey(
+    tenantId: string,
+    key: string,
+    projectId?: string,
+  ): Promise<IBrowserAgent | null>;
+  listBrowserAgents(
+    tenantId: string,
+    filters?: { projectId?: string; browserId?: string; status?: BrowserAgentStatus | string; search?: string },
+  ): Promise<IBrowserAgent[]>;
+
+  // ── Browser Session Events (tenant-specific) ──
+  createBrowserSessionEvent(
+    record: Omit<IBrowserSessionEvent, '_id' | 'createdAt'>,
+  ): Promise<IBrowserSessionEvent>;
+  listBrowserSessionEvents(
+    sessionId: string,
+    options?: { limit?: number; skip?: number },
+  ): Promise<IBrowserSessionEvent[]>;
+  countBrowserSessionEvents(sessionId: string): Promise<number>;
 }
 

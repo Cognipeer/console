@@ -61,6 +61,10 @@ export const TABLES = {
   vectorCounters: 'vector_counters',
   vectorMigrations: 'vector_migrations',
   vectorMigrationLogs: 'vector_migration_logs',
+  browsers: 'browsers',
+  browserSessions: 'browser_sessions',
+  browserAgents: 'browser_agents',
+  browserSessionEvents: 'browser_session_events',
 } as const;
 
 // ── Base class ───────────────────────────────────────────────────────

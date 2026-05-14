@@ -56,6 +56,10 @@ export const COLLECTIONS = {
   apiTokens: 'api_tokens',
   models: 'models',
   modelUsageLogs: 'model_usage_logs',
+  browsers: 'browsers',
+  browserSessions: 'browser_sessions',
+  browserAgents: 'browser_agents',
+  browserSessionEvents: 'browser_session_events',
 } as const;
 
 // ── Base class ───────────────────────────────────────────────────────────

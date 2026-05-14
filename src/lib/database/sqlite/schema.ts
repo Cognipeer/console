@@ -879,4 +879,104 @@ export const TENANT_SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_vml_migrationKey ON vector_migration_logs(migrationKey);
   CREATE INDEX IF NOT EXISTS idx_vml_status ON vector_migration_logs(status);
+
+  -- Browsers (parent profiles)
+  CREATE TABLE IF NOT EXISTS browsers (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    artifactBucketKey TEXT,
+    defaultSessionConfig TEXT DEFAULT '{}',
+    defaultModelKey TEXT,
+    defaultRunOptions TEXT DEFAULT '{}',
+    metadata TEXT DEFAULT '{}',
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_browsers_tenantId ON browsers(tenantId);
+  CREATE INDEX IF NOT EXISTS idx_browsers_projectId ON browsers(projectId);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_browsers_tenant_key ON browsers(tenantId, key);
+
+  -- Browser sessions
+  CREATE TABLE IF NOT EXISTS browser_sessions (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    browserId TEXT NOT NULL,
+    sessionKey TEXT NOT NULL,
+    name TEXT,
+    agentId TEXT,
+    agentKey TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    config TEXT NOT NULL DEFAULT '{}',
+    currentUrl TEXT,
+    pageTitle TEXT,
+    lastActivityAt TEXT,
+    lastScreenshot TEXT,
+    artifactBucketKey TEXT,
+    startedAt TEXT,
+    endedAt TEXT,
+    errorMessage TEXT,
+    eventCount INTEGER NOT NULL DEFAULT 0,
+    metadata TEXT DEFAULT '{}',
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_browser_sessions_tenantId ON browser_sessions(tenantId);
+  CREATE INDEX IF NOT EXISTS idx_browser_sessions_browserId ON browser_sessions(browserId);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_browser_sessions_tenant_key ON browser_sessions(tenantId, sessionKey);
+
+  -- Browser agents
+  CREATE TABLE IF NOT EXISTS browser_agents (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    browserId TEXT NOT NULL,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    modelKey TEXT NOT NULL,
+    systemPrompt TEXT,
+    browserConfig TEXT DEFAULT '{}',
+    artifactBucketKey TEXT,
+    runOptions TEXT DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'active',
+    metadata TEXT DEFAULT '{}',
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_browser_agents_tenantId ON browser_agents(tenantId);
+  CREATE INDEX IF NOT EXISTS idx_browser_agents_browserId ON browser_agents(browserId);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_browser_agents_tenant_key ON browser_agents(tenantId, key);
+
+  -- Browser session events
+  CREATE TABLE IF NOT EXISTS browser_session_events (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    sessionId TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    type TEXT NOT NULL,
+    status TEXT,
+    url TEXT,
+    selector TEXT,
+    ref TEXT,
+    durationMs INTEGER,
+    artifact TEXT,
+    data TEXT,
+    errorMessage TEXT,
+    createdAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_browser_session_events_sessionId ON browser_session_events(sessionId);
+  CREATE INDEX IF NOT EXISTS idx_browser_session_events_seq ON browser_session_events(sessionId, sequence);
 `;

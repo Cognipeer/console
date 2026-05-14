@@ -192,6 +192,30 @@
         "/api/client/v1/tools",
         "/api/client/v1/tools/*"
       ]
+    },
+    "BROWSER_SESSIONS": {
+      "name": "Browser Sessions",
+      "description": "Headless browser sessions for navigation, interaction, screenshots and PDF export",
+      "endpoints": [
+        "/api/browser/browsers",
+        "/api/browser/browsers/*",
+        "/api/browser/sessions",
+        "/api/browser/sessions/*",
+        "/api/client/v1/browser/browsers",
+        "/api/client/v1/browser/browsers/*",
+        "/api/client/v1/browser/sessions",
+        "/api/client/v1/browser/sessions/*"
+      ]
+    },
+    "BROWSER_AGENTS": {
+      "name": "Browser Agents",
+      "description": "User-defined autonomous agents that drive browser sessions",
+      "endpoints": [
+        "/api/browser/agents",
+        "/api/browser/agents/*",
+        "/api/client/v1/browser/agents",
+        "/api/client/v1/browser/agents/*"
+      ]
     }
   },
   "licenses": {
@@ -216,6 +240,8 @@
         "CONFIG_MANAGEMENT",
         "MCP_SERVERS",
         "TOOLS",
+        "BROWSER_SESSIONS",
+        "BROWSER_AGENTS",
         "DASHBOARD",
         "AGENT_ORCHESTRATION"
       ],
@@ -298,6 +324,8 @@
         "CONFIG_MANAGEMENT",
         "MCP_SERVERS",
         "TOOLS",
+        "BROWSER_SESSIONS",
+        "BROWSER_AGENTS",
         "DASHBOARD"
       ],
       "limits": {
@@ -330,6 +358,8 @@
         "CONFIG_MANAGEMENT",
         "MCP_SERVERS",
         "TOOLS",
+        "BROWSER_SESSIONS",
+        "BROWSER_AGENTS",
         "DASHBOARD"
       ],
       "limits": {
