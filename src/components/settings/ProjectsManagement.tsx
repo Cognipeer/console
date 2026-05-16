@@ -1,10 +1,12 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { ActionIcon, Box, Button, Group, Modal, Stack, Text, TextInput, Textarea, Tooltip } from '@mantine/core';
 import { DataTable } from 'mantine-datatable';
 import { notifications } from '@mantine/notifications';
-import { IconEdit, IconTrash } from '@tabler/icons-react';
+import { IconEdit, IconSearch, IconTrash } from '@tabler/icons-react';
+import { TABLE_PAGE_SIZE_OPTIONS, useClientTable } from '@/hooks/useClientTable';
 
 type Project = {
   _id: string;
@@ -15,6 +17,7 @@ type Project = {
 };
 
 export default function ProjectsManagement() {
+  const router = useRouter();
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | undefined>(undefined);
   const [loading, setLoading] = useState(true);
@@ -51,6 +54,14 @@ export default function ProjectsManagement() {
   }, []);
 
   const rows = useMemo(() => projects ?? [], [projects]);
+  const projectTable = useClientTable({
+    records: rows,
+    initialPageSize: 10,
+    search: (project, query) =>
+      [project.name, project.key, project.description]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(query)),
+  });
 
   const resetForm = () => {
     setName('');
@@ -96,7 +107,8 @@ export default function ProjectsManagement() {
         const body = await res.json().catch(() => null);
         throw new Error(body?.error || 'Failed to set active project');
       }
-      window.location.reload();
+      await fetchProjects();
+      router.refresh();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to set active project';
       notifications.show({ title: 'Projects', message, color: 'red' });
@@ -105,7 +117,7 @@ export default function ProjectsManagement() {
 
   const handleManage = (projectId: string) => {
     if (!projectId) return;
-    window.location.assign(`/dashboard/projects/${encodeURIComponent(projectId)}`);
+    router.push(`/dashboard/projects/${encodeURIComponent(projectId)}`);
   };
 
   const openEditModal = (project: Project) => {
@@ -185,12 +197,31 @@ export default function ProjectsManagement() {
         <Button onClick={() => setCreateOpened(true)}>Add Project</Button>
       </Group>
 
+      <Group mb="sm" justify="space-between">
+        <TextInput
+          value={projectTable.query}
+          onChange={(event) => projectTable.setQuery(event.currentTarget.value)}
+          placeholder="Search projects"
+          leftSection={<IconSearch size={14} />}
+          w={{ base: '100%', sm: 280 }}
+        />
+        <Text size="sm" c="dimmed">
+          {projectTable.totalRecords} records
+        </Text>
+      </Group>
+
       <DataTable
         withTableBorder
         borderRadius="sm"
         striped
         highlightOnHover
-        records={rows}
+        records={projectTable.records}
+        totalRecords={projectTable.totalRecords}
+        recordsPerPage={projectTable.pageSize}
+        recordsPerPageOptions={TABLE_PAGE_SIZE_OPTIONS}
+        onRecordsPerPageChange={projectTable.setPageSize}
+        page={projectTable.page}
+        onPageChange={projectTable.setPage}
         fetching={loading}
         minHeight={200}
         noRecordsText="No projects"

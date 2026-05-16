@@ -1,16 +1,17 @@
-import crypto from 'node:crypto';
 import type { FastifyPluginAsync } from 'fastify';
 import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { checkResourceQuota } from '@/lib/quota/quotaGuard';
+import { createApiTokenSecret, getApiTokenPrefix, hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
 import {
   DEFAULT_PROJECT_KEY,
   ensureDefaultProject,
   generateUniqueProjectKey,
   listAccessibleProjects,
 } from '@/lib/services/projects/projectService';
+import type { ProjectRole } from '@/lib/database/provider/types.base';
 import {
   readJsonBody,
   requireSessionContext,
@@ -31,6 +32,10 @@ async function loadTenantUser(session: ReturnType<typeof requireSessionContext>)
   return { db, user };
 }
 
+/**
+ * Checks project existence + tenant match, then verifies the requesting user has access.
+ * Owners and admins always pass. Regular users must have a UserProject membership record.
+ */
 async function assertProjectAccess(params: {
   projectId: string;
   requireAdmin?: boolean;
@@ -46,31 +51,26 @@ async function assertProjectAccess(params: {
   }
 
   if (session.userRole === 'owner' || session.userRole === 'admin') {
-    return { db, ok: true as const, project };
+    return { db, ok: true as const, project, userProject: null };
   }
 
-  const user = await db.findUserById(session.userId);
-  if (!user) {
-    return { error: 'Unauthorized' as const, ok: false as const, status: 401 as const };
-  }
-
-  const allowedProjectIds = (user.projectIds ?? []).map(String);
-  if (!allowedProjectIds.includes(String(projectId))) {
+  const userProject = await db.findUserProject(session.userId, projectId);
+  if (!userProject) {
     return { error: 'Forbidden' as const, ok: false as const, status: 403 as const };
   }
 
-  if (requireAdmin && session.userRole !== 'project_admin') {
+  if (requireAdmin && userProject.role !== 'project_admin') {
     return { error: 'Forbidden' as const, ok: false as const, status: 403 as const };
   }
 
-  return { db, ok: true as const, project, user };
+  return { db, ok: true as const, project, userProject };
 }
 
 export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/projects', withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
-      const { user } = await loadTenantUser(session);
+      const { db, user } = await loadTenantUser(session);
 
       if (!user) {
         return reply.code(401).send({ error: 'Unauthorized' });
@@ -78,8 +78,15 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
 
       await ensureDefaultProject(session.tenantDbName, session.tenantId, session.userId);
 
+      // Collect project IDs accessible to this user
+      let projectIds: string[] | undefined;
+      if (user.role !== 'owner' && user.role !== 'admin') {
+        const memberships = await db.listUserProjectsByUser(session.userId);
+        projectIds = memberships.map((m) => m.projectId);
+      }
+
       const projects = await listAccessibleProjects(session.tenantDbName, session.tenantId, {
-        projectIds: user.projectIds,
+        projectIds,
         role: user.role,
       });
 
@@ -145,6 +152,26 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
       const db = await getDatabase();
       await db.switchToTenant(session.tenantDbName);
 
+      const existingProjects = await db.listProjects(session.tenantId);
+      const quotaCheck = await checkResourceQuota(
+        {
+          domain: 'global',
+          licenseType: session.licenseType as LicenseType,
+          projectId: existingProjects[0]?._id ? String(existingProjects[0]._id) : 'tenant',
+          tenantDbName: session.tenantDbName,
+          tenantId: session.tenantId,
+          userId: session.userId,
+        },
+        'projects',
+        existingProjects.length,
+      );
+
+      if (!quotaCheck.allowed) {
+        return reply.code(429).send({
+          error: quotaCheck.reason || 'Project quota exceeded',
+        });
+      }
+
       const project = await db.createProject({
         createdBy: session.userId,
         description: body.description as string | undefined,
@@ -164,7 +191,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/projects/active', withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
-      const { user } = await loadTenantUser(session);
+      const { db, user } = await loadTenantUser(session);
       if (!user) {
         return reply.code(401).send({ error: 'Unauthorized' });
       }
@@ -175,8 +202,15 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       await ensureDefaultProject(session.tenantDbName, session.tenantId, session.userId);
+
+      let projectIds: string[] | undefined;
+      if (user.role !== 'owner' && user.role !== 'admin') {
+        const memberships = await db.listUserProjectsByUser(session.userId);
+        projectIds = memberships.map((m) => m.projectId);
+      }
+
       const projects = await listAccessibleProjects(session.tenantDbName, session.tenantId, {
-        projectIds: user.projectIds,
+        projectIds,
         role: user.role,
       });
 
@@ -270,12 +304,17 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(500).send({ error: 'Failed to delete project' });
       }
 
+      // Clean up all membership records for this project
+      await db.deleteUserProjectsByProject(projectId);
+
       return reply.code(200).send({ success: true });
     } catch (error) {
       logger.error('Delete project error', { error });
       return reply.code(500).send({ error: 'Internal server error' });
     }
   }));
+
+  // ── Project Members ──────────────────────────────────────────────────────
 
   app.get('/projects/:projectId/members', withApiRequestContext(async (request, reply) => {
     try {
@@ -287,17 +326,49 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(access.status).send({ error: access.error });
       }
 
-      const users = await access.db.listUsers();
-      const members = users.filter((user) => {
-        if (user.role === 'owner' || user.role === 'admin') {
-          return true;
-        }
+      // Load all tenant users to enrich membership records
+      const allUsers = await access.db.listUsers();
+      const userById = new Map(allUsers.map((u) => [String(u._id), u]));
 
-        const allowed = (user.projectIds ?? []).map(String);
-        return allowed.includes(String(projectId));
-      });
+      // Owners and admins are always implicit members
+      const privileged = allUsers
+        .filter((u) => u.role === 'owner' || u.role === 'admin')
+        .map((u) => ({
+          userId: String(u._id),
+          email: u.email,
+          name: u.name,
+          role: u.role as string,
+          projectRole: null as ProjectRole | null,
+          servicePermissions: null,
+          implicit: true,
+        }));
 
-      return reply.code(200).send({ users: members });
+      // Explicit members via UserProject records
+      const memberships = await access.db.listUserProjectsByProject(projectId);
+      const explicit = memberships
+        .map((m) => {
+          const user = userById.get(m.userId);
+          if (!user) return null;
+          return {
+            userId: String(user._id),
+            email: user.email,
+            name: user.name,
+            role: user.role as string,
+            projectRole: m.role,
+            servicePermissions: m.servicePermissions ?? null,
+            implicit: false,
+          };
+        })
+        .filter(Boolean);
+
+      // Deduplicate: privileged users already covered above
+      const privilegedIds = new Set(privileged.map((p) => p.userId));
+      const members = [
+        ...privileged,
+        ...explicit.filter((m) => m && !privilegedIds.has(m.userId)),
+      ];
+
+      return reply.code(200).send({ members });
     } catch (error) {
       logger.error('List project members error', { error });
       return reply.code(500).send({ error: 'Internal server error' });
@@ -316,6 +387,11 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
 
       if (!access.ok) {
         return reply.code(access.status).send({ error: access.error });
+      }
+
+      // project_admin can only add if they are themselves a member
+      if (session.userRole === 'project_admin' && !access.userProject) {
+        return reply.code(403).send({ error: 'Forbidden' });
       }
 
       const body = readJsonBody<Record<string, unknown>>(request);
@@ -337,18 +413,18 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const nextProjectIds = new Set((target.projectIds ?? []).map(String));
-      nextProjectIds.add(String(projectId));
+      const role: ProjectRole = (body.role === 'project_admin') ? 'project_admin' : 'member';
 
-      const updated = await access.db.updateUser(String(target._id), {
-        projectIds: Array.from(nextProjectIds),
+      const userProject = await access.db.upsertUserProject({
+        tenantId: session.tenantId,
+        userId: String(target._id),
+        projectId,
+        role,
+        servicePermissions: undefined,
+        invitedBy: session.userId,
       });
 
-      if (!updated) {
-        return reply.code(500).send({ error: 'Failed to update user' });
-      }
-
-      return reply.code(200).send({ user: updated });
+      return reply.code(200).send({ userProject });
     } catch (error) {
       logger.error('Add project member error', { error });
       return reply.code(500).send({ error: 'Internal server error' });
@@ -386,16 +462,12 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'Cannot remove owners/admins from projects' });
       }
 
-      const nextProjectIds = (target.projectIds ?? []).map(String).filter((id) => id !== String(projectId));
-      const updated = await access.db.updateUser(String(target._id), {
-        projectIds: nextProjectIds,
-      });
-
-      if (!updated) {
-        return reply.code(500).send({ error: 'Failed to update user' });
+      const removed = await access.db.deleteUserProject(String(target._id), projectId);
+      if (!removed) {
+        return reply.code(404).send({ error: 'Membership not found' });
       }
 
-      return reply.code(200).send({ user: updated });
+      return reply.code(200).send({ success: true });
     } catch (error) {
       logger.error('Remove project member error', { error });
       return reply.code(500).send({ error: 'Internal server error' });
@@ -417,12 +489,12 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const body = readJsonBody<Record<string, unknown>>(request);
-      if (typeof body.userId !== 'string' || typeof body.role !== 'string') {
-        return reply.code(400).send({ error: 'userId and role are required' });
+      if (typeof body.userId !== 'string') {
+        return reply.code(400).send({ error: 'userId is required' });
       }
 
-      if (body.role !== 'user' && body.role !== 'project_admin') {
-        return reply.code(400).send({ error: 'Invalid role' });
+      if (body.role !== 'member' && body.role !== 'project_admin') {
+        return reply.code(400).send({ error: 'role must be "member" or "project_admin"' });
       }
 
       const target = await access.db.findUserById(body.userId);
@@ -434,17 +506,68 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'Cannot change role for owner/admin' });
       }
 
-      const updated = await access.db.updateUser(String(target._id), {
-        role: body.role,
-      });
-
-      if (!updated) {
-        return reply.code(500).send({ error: 'Failed to update user' });
+      const existing = await access.db.findUserProject(body.userId, projectId);
+      if (!existing) {
+        return reply.code(404).send({ error: 'Membership not found' });
       }
 
-      return reply.code(200).send({ user: updated });
+      const updated = await access.db.upsertUserProject({
+        tenantId: session.tenantId,
+        userId: body.userId,
+        projectId,
+        role: body.role as ProjectRole,
+        servicePermissions: existing.servicePermissions,
+        invitedBy: existing.invitedBy,
+      });
+
+      return reply.code(200).send({ userProject: updated });
     } catch (error) {
       logger.error('Update project member role error', { error });
+      return reply.code(500).send({ error: 'Internal server error' });
+    }
+  }));
+
+  app.patch('/projects/:projectId/members/permissions', withApiRequestContext(async (request, reply) => {
+    try {
+      const session = requireSessionContext(request);
+      if (!canManageProjects(session.userRole)) {
+        return reply.code(403).send({ error: 'Forbidden' });
+      }
+
+      const { projectId } = request.params as { projectId: string };
+      const access = await assertProjectAccess({ projectId, session });
+
+      if (!access.ok) {
+        return reply.code(access.status).send({ error: access.error });
+      }
+
+      const body = readJsonBody<Record<string, unknown>>(request);
+      if (typeof body.userId !== 'string') {
+        return reply.code(400).send({ error: 'userId is required' });
+      }
+
+      const target = await access.db.findUserById(body.userId);
+      if (!target || String(target.tenantId) !== String(session.tenantId)) {
+        return reply.code(404).send({ error: 'User not found' });
+      }
+
+      const existing = await access.db.findUserProject(body.userId, projectId);
+      if (!existing) {
+        return reply.code(404).send({ error: 'Membership not found' });
+      }
+
+      const updated = await access.db.upsertUserProject({
+        tenantId: session.tenantId,
+        userId: body.userId,
+        projectId,
+        role: existing.role,
+        servicePermissions: (body.servicePermissions as Record<string, string> | undefined) ?? {},
+        invitedBy: existing.invitedBy,
+      });
+
+      return reply.code(200).send({ userProject: updated });
+    } catch (error) {
+      logger.error('Update project member permissions error', { error });
       return reply.code(500).send({ error: 'Internal server error' });
     }
   }));
@@ -465,14 +588,15 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(200).send({ users: [] });
       }
 
+      // Users who already have an explicit membership in this project
+      const memberships = await access.db.listUserProjectsByProject(projectId);
+      const alreadyMemberIds = new Set(memberships.map((m) => m.userId));
+
       const users = await access.db.listUsers();
       const candidates = users
         .filter((user) => {
-          if (user.role === 'owner' || user.role === 'admin') {
-            return false;
-          }
-
-          return !(user.projectIds ?? []).map(String).includes(String(projectId));
+          if (user.role === 'owner' || user.role === 'admin') return false;
+          return !alreadyMemberIds.has(String(user._id));
         })
         .filter((user) => {
           const email = (user.email ?? '').toLowerCase();
@@ -492,6 +616,8 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(500).send({ error: 'Internal server error' });
     }
   }));
+
+  // ── Project API Tokens ───────────────────────────────────────────────────
 
   app.get('/projects/:projectId/tokens', withApiRequestContext(async (request, reply) => {
     try {
@@ -533,6 +659,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         createdAt: token.createdAt,
         label: token.label,
         lastUsed: token.lastUsed,
+        tokenPrefix: token.tokenPrefix,
         userId: token.userId,
       }));
 
@@ -562,12 +689,33 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const db = await getDatabase();
-      const token = `cpeer_${crypto.randomBytes(32).toString('hex')}`;
+      const existingTokens = await db.listProjectApiTokens(session.tenantId, projectId);
+      const quotaCheck = await checkResourceQuota(
+        {
+          domain: 'global',
+          licenseType: session.licenseType as LicenseType,
+          projectId,
+          tenantDbName: session.tenantDbName,
+          tenantId: session.tenantId,
+          userId: session.userId,
+        },
+        'apiTokens',
+        existingTokens.length,
+      );
+
+      if (!quotaCheck.allowed) {
+        return reply.code(429).send({
+          error: quotaCheck.reason || 'API token quota exceeded',
+        });
+      }
+
+      const token = createApiTokenSecret();
       const apiToken = await db.createApiToken({
         label: body.label.trim(),
         projectId,
         tenantId: session.tenantId,
-        token,
+        tokenHash: hashApiToken(token),
+        tokenPrefix: getApiTokenPrefix(token),
         userId: session.userId,
       });
 

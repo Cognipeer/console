@@ -1,6 +1,5 @@
 import { getDatabase, type IQuotaPolicy } from '@/lib/database';
-import type { LicenseType } from '@/lib/license/license-manager';
-import { getPlanQuotaLimits } from '@/lib/quota/planLimits';
+import { LicenseManager } from '@/lib/license/license-manager';
 import type { QuotaDomain, QuotaPolicy, QuotaPolicyInput, QuotaScope } from '@/lib/quota/types';
 
 function normalizePolicy(policy: IQuotaPolicy): QuotaPolicy {
@@ -10,8 +9,10 @@ function normalizePolicy(policy: IQuotaPolicy): QuotaPolicy {
   };
 }
 
-export async function getPlanDefaults(licenseType: LicenseType) {
-  return getPlanQuotaLimits(licenseType);
+export async function getLicenseDefaults(tenantId: string) {
+  const db = await getDatabase();
+  const tenant = await db.findTenantById(tenantId);
+  return LicenseManager.getEffectiveLicenseForTenant(tenant);
 }
 
 export interface ListQuotaPoliciesOptions {

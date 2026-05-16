@@ -5,8 +5,10 @@ import type {
   IAgent,
   IAgentConversation,
   IAgentTracingEvent,
+  IAgentTracingDashboardAggregate,
   IAgentTracingSession,
   IAgentVersion,
+  IAuditLog,
   IAlertEvent,
   IAlertRule,
   IApiToken,
@@ -91,6 +93,21 @@ export interface DatabaseProvider {
   deleteUser(id: string): Promise<boolean>;
   listUsers(): Promise<IUser[]>;
 
+  // General audit logs (tenant-specific)
+  createAuditLog(
+    log: Omit<IAuditLog, '_id' | 'createdAt'>,
+  ): Promise<IAuditLog>;
+  listAuditLogs(filters?: {
+    actorUserId?: string;
+    outcome?: IAuditLog['outcome'];
+    service?: string;
+    action?: string;
+    from?: Date;
+    to?: Date;
+    limit?: number;
+    skip?: number;
+  }): Promise<IAuditLog[]>;
+
   // Project operations (tenant-specific)
   createProject(
     project: Omit<IProject, '_id' | 'createdAt' | 'updatedAt'>,
@@ -127,11 +144,11 @@ export interface DatabaseProvider {
   listApiTokens(userId: string): Promise<IApiToken[]>;
   listTenantApiTokens(tenantId: string): Promise<IApiToken[]>;
   listProjectApiTokens(tenantId: string, projectId: string): Promise<IApiToken[]>;
-  findApiTokenByToken(token: string): Promise<IApiToken | null>;
+  findApiTokenByHash(tokenHash: string): Promise<IApiToken | null>;
   deleteApiToken(id: string, userId: string): Promise<boolean>;
   deleteTenantApiToken(id: string, tenantId: string): Promise<boolean>;
   deleteProjectApiToken(id: string, tenantId: string, projectId: string): Promise<boolean>;
-  updateTokenLastUsed(token: string): Promise<void>;
+  updateTokenLastUsedByHash(tokenHash: string): Promise<void>;
 
   // Agent Tracing Session operations (tenant-specific)
   createAgentTracingSession(
@@ -157,6 +174,10 @@ export interface DatabaseProvider {
     filters?: Record<string, unknown>,
     projectId?: string,
   ): Promise<{ sessions: IAgentTracingSession[]; total: number }>;
+  aggregateAgentTracingDashboard(
+    filters?: { from?: string; to?: string; timezone?: string },
+    projectId?: string,
+  ): Promise<IAgentTracingDashboardAggregate>;
   listAgentTracingThreads(
     filters?: Record<string, unknown>,
     projectId?: string,
@@ -763,4 +784,3 @@ export interface DatabaseProvider {
     options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month' },
   ): Promise<IMcpRequestAggregate>;
 }
-

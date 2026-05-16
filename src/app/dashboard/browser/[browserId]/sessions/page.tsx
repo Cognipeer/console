@@ -1,10 +1,11 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import {
   ActionIcon,
+  Alert,
   Badge,
   Button,
   Code,
@@ -20,8 +21,6 @@ import {
   Table,
   Text,
   TextInput,
-  Textarea,
-  Title,
   Tooltip,
 } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
@@ -30,6 +29,7 @@ import { notifications } from '@mantine/notifications';
 import {
   IconCamera,
   IconFileTypePdf,
+  IconInfoCircle,
   IconPlayerPlay,
   IconPlus,
   IconRefresh,
@@ -37,7 +37,7 @@ import {
   IconX,
 } from '@tabler/icons-react';
 import PageHeader from '@/components/layout/PageHeader';
-import type { BrowserSessionView } from '@/lib/services/browser';
+import type { BrowserSessionEventView, BrowserSessionView } from '@/lib/services/browser';
 
 interface CreateForm {
   name: string;
@@ -163,14 +163,8 @@ export default function BrowserSessionsPage() {
   return (
     <Stack gap="md" p="md">
       <Group gap="xs">
-        <Button component={Link} href={`/dashboard/browser/${browserId}/sessions`} variant="filled" size="xs">
-          Sessions
-        </Button>
-        <Button component={Link} href={`/dashboard/browser/${browserId}/agents`} variant="subtle" size="xs">
-          Agents
-        </Button>
-        <Button component={Link} href={`/dashboard/browser/${browserId}/usage`} variant="subtle" size="xs">
-          Usage
+        <Button component={Link} href={`/dashboard/browser/${browserId}`} variant="light" size="xs">
+          Browser overview
         </Button>
         <Button component={Link} href="/dashboard/browser" variant="subtle" size="xs" c="dimmed">
           ← All browsers
@@ -191,6 +185,10 @@ export default function BrowserSessionsPage() {
           </Group>
         }
       />
+
+      <Alert color="blue" variant="light" icon={<IconInfoCircle size={16} />}>
+        URLs are persisted in sanitized form and typed input is redacted before it reaches the event log. Use this view to inspect operational flow without leaking secrets.
+      </Alert>
 
       <Paper withBorder p="md">
         {loading ? (
@@ -301,6 +299,7 @@ function SessionDrawer({
   onMutated: () => void;
 }) {
   const [imgUrl, setImgUrl] = useState<string | null>(null);
+  const [events, setEvents] = useState<BrowserSessionEventView[]>([]);
   const [polling, setPolling] = useState(true);
   const [navigateUrl, setNavigateUrl] = useState('');
   const [actionLoading, setActionLoading] = useState(false);
@@ -334,6 +333,33 @@ function SessionDrawer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened, session?.sessionKey, polling]);
 
+  useEffect(() => {
+    if (!opened || !session?.id) return;
+    let cancelled = false;
+
+    const loadEvents = async () => {
+      try {
+        const res = await fetch(`/api/browser/sessions/${session.id}/events?limit=25`, {
+          cache: 'no-store',
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled) {
+          setEvents(data.events ?? []);
+        }
+      } catch {
+        if (!cancelled) {
+          setEvents([]);
+        }
+      }
+    };
+
+    void loadEvents();
+    return () => {
+      cancelled = true;
+    };
+  }, [opened, session?.id]);
+
   const runNavigate = async () => {
     if (!session || !navigateUrl) return;
     setActionLoading(true);
@@ -344,6 +370,11 @@ function SessionDrawer({
         body: JSON.stringify({ type: 'goto', url: navigateUrl }),
       });
       onMutated();
+      const eventsRes = await fetch(`/api/browser/sessions/${session.id}/events?limit=25`, { cache: 'no-store' }).catch(() => null);
+      if (eventsRes?.ok) {
+        const data = await eventsRes.json();
+        setEvents(data.events ?? []);
+      }
     } finally {
       setActionLoading(false);
     }
@@ -411,6 +442,45 @@ function SessionDrawer({
                 <Group justify="center" py="xl"><Loader size="sm" /><Text size="sm" c="dimmed">Capturing…</Text></Group>
               )}
             </ScrollArea>
+          </Paper>
+          <Paper withBorder p="md">
+            <Stack gap="sm">
+              <Group justify="space-between">
+                <Text fw={600}>Recent events</Text>
+                <Text size="xs" c="dimmed">{events.length} entries</Text>
+              </Group>
+              {events.length === 0 ? (
+                <Text size="sm" c="dimmed">No events recorded yet.</Text>
+              ) : (
+                <ScrollArea h={220}>
+                  <Stack gap="xs">
+                    {events.map((event) => (
+                      <Paper key={event.id} withBorder p="sm" radius="md">
+                        <Group justify="space-between" align="flex-start" wrap="nowrap">
+                          <Stack gap={2}>
+                            <Group gap="xs">
+                              <Badge variant="light" color={event.status === 'error' ? 'red' : 'blue'}>
+                                {event.type}
+                              </Badge>
+                              <Text size="xs" c="dimmed">#{event.sequence}</Text>
+                            </Group>
+                            <Text size="xs" c="dimmed">
+                              {event.url ?? event.selector ?? event.ref ?? 'No target'}
+                            </Text>
+                            {event.errorMessage ? (
+                              <Text size="xs" c="red">{event.errorMessage}</Text>
+                            ) : null}
+                          </Stack>
+                          <Text size="xs" c="dimmed">
+                            {event.createdAt ? new Date(event.createdAt).toLocaleTimeString() : '—'}
+                          </Text>
+                        </Group>
+                      </Paper>
+                    ))}
+                  </Stack>
+                </ScrollArea>
+              )}
+            </Stack>
           </Paper>
         </Stack>
       )}

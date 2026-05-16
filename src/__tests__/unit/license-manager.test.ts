@@ -87,3 +87,49 @@ describe('License tier escalation', () => {
     },
   );
 });
+
+// ── Offline license limits ───────────────────────────────────────────────────
+
+describe('LicenseManager.getEffectiveLicenseForTenant', () => {
+  it('uses flat limits from active offline licenses', () => {
+    const license = LicenseManager.getEffectiveLicenseForTenant({
+      _id: 'tenant-1',
+      licenseId: 'lic-1',
+      licensePayload: {
+        licenseId: 'lic-1',
+        licenseType: 'ENTERPRISE',
+        limits: {
+          maxApiTokens: 12,
+          maxProjects: 8,
+        },
+      },
+      licenseStatus: 'active',
+      licenseType: 'ENTERPRISE',
+    } as never);
+
+    expect(license.limits.maxProjects).toBe(8);
+    expect(license.limits.maxApiTokens).toBe(12);
+    expect((license.limits as Record<string, unknown>).quotas).toBeUndefined();
+  });
+
+  it('accepts legacy nested quota payloads without exposing limits.quotas', () => {
+    const license = LicenseManager.getEffectiveLicenseForTenant({
+      _id: 'tenant-1',
+      licenseId: 'lic-1',
+      licensePayload: {
+        licenseId: 'lic-1',
+        licenseType: 'ENTERPRISE',
+        limits: {
+          quotas: {
+            maxProjects: 10,
+          },
+        },
+      },
+      licenseStatus: 'active',
+      licenseType: 'ENTERPRISE',
+    } as never);
+
+    expect(license.limits.maxProjects).toBe(10);
+    expect((license.limits as Record<string, unknown>).quotas).toBeUndefined();
+  });
+});

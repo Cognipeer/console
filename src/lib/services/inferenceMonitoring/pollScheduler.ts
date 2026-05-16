@@ -5,35 +5,68 @@
  * (default 30 s) the scheduler iterates all tenants and, for each active
  * server whose last poll is older than its configured interval, fires a poll.
  *
- * IMPORTANT: The MongoDB provider is a shared singleton with mutable
- * `tenantDb` state.  To avoid cross-tenant data races we process tenants
- * ONE AT A TIME (for…of, not Promise.all across tenants).  Within a single
- * tenant we can poll multiple due servers concurrently because they all
- * target the same tenant DB.
+ * In multi-instance deployments the run is protected by the active cache
+ * provider's lock implementation. Use CACHE_PROVIDER=redis for a true
+ * cross-process lock. Tenants are still processed sequentially so one tick
+ * does not fan out across every tenant database at once.
  */
 
 import { getDatabase, getTenantDatabase } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
+import { getCache } from '@/lib/core/cache';
 import { InferenceMonitoringService } from './inferenceMonitoringService';
 
 const logger = createLogger('poll-scheduler');
 
 const CHECK_INTERVAL_MS = 30_000; // how often to scan for due servers
+const SCHEDULER_LOCK_KEY = 'scheduler:inference-monitoring-poll';
+const SCHEDULER_LOCK_TTL_SECONDS = 5 * 60;
 
 let schedulerTimer: ReturnType<typeof setInterval> | null = null;
 let running = false;
+let paused = false;
+let loggedNonDistributedLockProvider = false;
+let lastStartedAt: Date | null = null;
+let lastCompletedAt: Date | null = null;
+let lastDurationMs: number | null = null;
+let lastError: string | null = null;
+let lastLockProvider = 'unknown';
+let lastProcessedTenants = 0;
+let lastDueServers = 0;
 
-async function runOnce(): Promise<void> {
-  if (running) return; // skip if previous tick is still in progress
+async function runOnce(manual = false): Promise<{ dueServers: number; processedTenants: number }> {
+  if (paused && !manual) return { dueServers: 0, processedTenants: 0 };
+  if (running) return { dueServers: 0, processedTenants: 0 }; // skip if previous tick is still in progress
   running = true;
+  let lockToken: string | undefined;
+  const startedAt = new Date();
+  lastStartedAt = startedAt;
+  let processedTenants = 0;
+  let dueServersCount = 0;
 
   try {
+    const cache = await getCache();
+    lastLockProvider = cache.name;
+    if (cache.name !== 'redis' && !loggedNonDistributedLockProvider) {
+      loggedNonDistributedLockProvider = true;
+      logger.warn(
+        `Scheduler lock is using ${cache.name} cache provider; use CACHE_PROVIDER=redis for multi-instance deployments`,
+      );
+    }
+
+    lockToken = await cache.acquireLock(SCHEDULER_LOCK_KEY, SCHEDULER_LOCK_TTL_SECONDS);
+    if (!lockToken) {
+      logger.debug('Skipped run because another instance holds the scheduler lock');
+      return { dueServers: 0, processedTenants: 0 };
+    }
+
     // 1. Fetch all tenants from the main database (no tenant switch needed).
     const mainDb = await getDatabase();
     const tenants = await mainDb.listTenants();
 
     for (const tenant of tenants) {
       if (!tenant.dbName) continue;
+      processedTenants += 1;
 
       try {
         // 2. Switch to the tenant DB and list active servers.
@@ -50,6 +83,7 @@ async function runOnce(): Promise<void> {
         });
 
         if (dueServers.length === 0) continue;
+        dueServersCount += dueServers.length;
 
         // 3. Poll all due servers for this tenant concurrently.
         //    All of them use the same tenant DB so concurrent access is safe.
@@ -70,9 +104,27 @@ async function runOnce(): Promise<void> {
         });
       }
     }
+    lastError = null;
+    lastProcessedTenants = processedTenants;
+    lastDueServers = dueServersCount;
+    return { dueServers: dueServersCount, processedTenants };
   } catch (err) {
+    lastError = err instanceof Error ? err.message : String(err);
     logger.error('Fatal error during run', { error: err instanceof Error ? err.message : err });
+    throw err;
   } finally {
+    if (lockToken) {
+      try {
+        const cache = await getCache();
+        await cache.releaseLock(SCHEDULER_LOCK_KEY, lockToken);
+      } catch (err) {
+        logger.warn('Failed to release scheduler lock', {
+          error: err instanceof Error ? err.message : err,
+        });
+      }
+    }
+    lastCompletedAt = new Date();
+    lastDurationMs = lastCompletedAt.getTime() - startedAt.getTime();
     running = false;
   }
 }
@@ -107,4 +159,33 @@ export function stopPollScheduler(): void {
     schedulerTimer = null;
     logger.info('Stopped');
   }
+}
+
+export function pausePollScheduler(): void {
+  paused = true;
+}
+
+export function resumePollScheduler(): void {
+  paused = false;
+}
+
+export async function triggerPollSchedulerRun(): Promise<{ dueServers: number; processedTenants: number }> {
+  return runOnce(true);
+}
+
+export function getPollSchedulerStatus() {
+  return {
+    checkIntervalMs: CHECK_INTERVAL_MS,
+    distributedLock: lastLockProvider === 'redis',
+    key: 'inference-monitoring-poll',
+    lastCompletedAt,
+    lastDueServers,
+    lastDurationMs,
+    lastError,
+    lastLockProvider,
+    lastProcessedTenants,
+    lastStartedAt,
+    paused,
+    running,
+  };
 }

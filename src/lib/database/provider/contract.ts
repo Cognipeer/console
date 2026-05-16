@@ -7,8 +7,10 @@ import type {
   IAgent,
   IAgentConversation,
   IAgentTracingEvent,
+  IAgentTracingDashboardAggregate,
   IAgentTracingSession,
   IAgentVersion,
+  IAuditLog,
   IAlertEvent,
   IAlertRule,
   IApiToken,
@@ -26,6 +28,8 @@ import type {
   IIncident,
   IInferenceServer,
   IInferenceServerMetrics,
+  IJsSandboxExecution,
+  IJsSandboxRuntime,
   IMcpRequestAggregate,
   IMcpRequestLog,
   IMcpServer,
@@ -50,6 +54,11 @@ import type {
   IToolRequestAggregate,
   IToolRequestLog,
   IUser,
+  IUserProject,
+  IGroup,
+  IGroupMember,
+  IGroupProject,
+  ProjectRole,
   IVectorIndexRecord,
   IVectorMigration,
   IVectorMigrationLog,
@@ -57,6 +66,8 @@ import type {
   VectorMigrationLogStatus,
   IncidentSeverity,
   IncidentStatus,
+  JsSandboxExecutionStatus,
+  JsSandboxRuntimeStatus,
   McpServerStatus,
   MemoryItemStatus,
   MemoryScope,
@@ -100,6 +111,44 @@ export interface DatabaseProvider {
   deleteUser(id: string): Promise<boolean>;
   listUsers(): Promise<IUser[]>;
 
+  // Project membership (UserProject — replaces user.projectIds)
+  findUserProject(userId: string, projectId: string): Promise<IUserProject | null>;
+  listUserProjectsByUser(userId: string): Promise<IUserProject[]>;
+  listUserProjectsByProject(projectId: string): Promise<IUserProject[]>;
+  upsertUserProject(data: Omit<IUserProject, '_id' | 'createdAt' | 'updatedAt'>): Promise<IUserProject>;
+  deleteUserProject(userId: string, projectId: string): Promise<boolean>;
+  deleteUserProjectsByProject(projectId: string): Promise<void>;
+  deleteUserProjectsByUser(userId: string): Promise<void>;
+
+  // Groups / Teams (future — stub, not yet enforced)
+  createGroup(data: Omit<IGroup, '_id' | 'createdAt' | 'updatedAt'>): Promise<IGroup>;
+  findGroupById(id: string): Promise<IGroup | null>;
+  listGroups(tenantId: string): Promise<IGroup[]>;
+  updateGroup(id: string, data: Partial<Pick<IGroup, 'name' | 'description' | 'updatedBy'>>): Promise<IGroup | null>;
+  deleteGroup(id: string): Promise<boolean>;
+  addGroupMember(data: Omit<IGroupMember, '_id' | 'createdAt'>): Promise<IGroupMember>;
+  removeGroupMember(groupId: string, userId: string): Promise<boolean>;
+  listGroupMembers(groupId: string): Promise<IGroupMember[]>;
+  listGroupMembersByUser(userId: string): Promise<IGroupMember[]>;
+  upsertGroupProject(data: Omit<IGroupProject, '_id' | 'createdAt' | 'updatedAt'>): Promise<IGroupProject>;
+  removeGroupProject(groupId: string, projectId: string): Promise<boolean>;
+  listGroupProjectsByProject(projectId: string): Promise<IGroupProject[]>;
+
+  // General audit logs (tenant-specific)
+  createAuditLog(
+    log: Omit<IAuditLog, '_id' | 'createdAt'>,
+  ): Promise<IAuditLog>;
+  listAuditLogs(filters?: {
+    actorUserId?: string;
+    outcome?: IAuditLog['outcome'];
+    service?: string;
+    action?: string;
+    from?: Date;
+    to?: Date;
+    limit?: number;
+    skip?: number;
+  }): Promise<IAuditLog[]>;
+
   // Project operations (tenant-specific)
   createProject(
     project: Omit<IProject, '_id' | 'createdAt' | 'updatedAt'>,
@@ -136,11 +185,11 @@ export interface DatabaseProvider {
   listApiTokens(userId: string): Promise<IApiToken[]>;
   listTenantApiTokens(tenantId: string): Promise<IApiToken[]>;
   listProjectApiTokens(tenantId: string, projectId: string): Promise<IApiToken[]>;
-  findApiTokenByToken(token: string): Promise<IApiToken | null>;
+  findApiTokenByHash(tokenHash: string): Promise<IApiToken | null>;
   deleteApiToken(id: string, userId: string): Promise<boolean>;
   deleteTenantApiToken(id: string, tenantId: string): Promise<boolean>;
   deleteProjectApiToken(id: string, tenantId: string, projectId: string): Promise<boolean>;
-  updateTokenLastUsed(token: string): Promise<void>;
+  updateTokenLastUsedByHash(tokenHash: string): Promise<void>;
 
   // Agent Tracing Session operations (tenant-specific)
   createAgentTracingSession(
@@ -166,6 +215,10 @@ export interface DatabaseProvider {
     filters?: Record<string, unknown>,
     projectId?: string,
   ): Promise<{ sessions: IAgentTracingSession[]; total: number }>;
+  aggregateAgentTracingDashboard(
+    filters?: { from?: string; to?: string; timezone?: string },
+    projectId?: string,
+  ): Promise<IAgentTracingDashboardAggregate>;
   listAgentTracingThreads(
     filters?: Record<string, unknown>,
     projectId?: string,
@@ -663,6 +716,61 @@ export interface DatabaseProvider {
     options?: { limit?: number; skip?: number; from?: Date; to?: Date },
   ): Promise<IConfigAuditLog[]>;
 
+  // ── JS Sandbox runtime operations (tenant-specific) ──
+  createJsSandboxRuntime(
+    runtime: Omit<IJsSandboxRuntime, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IJsSandboxRuntime>;
+  updateJsSandboxRuntime(
+    id: string,
+    data: Partial<Omit<IJsSandboxRuntime, '_id' | 'tenantId' | 'key' | 'createdBy' | 'createdAt'>>,
+  ): Promise<IJsSandboxRuntime | null>;
+  deleteJsSandboxRuntime(id: string): Promise<boolean>;
+  findJsSandboxRuntimeById(id: string): Promise<IJsSandboxRuntime | null>;
+  findJsSandboxRuntimeByKey(
+    tenantId: string,
+    key: string,
+    projectId?: string,
+  ): Promise<IJsSandboxRuntime | null>;
+  listJsSandboxRuntimes(
+    tenantId: string,
+    filters?: {
+      projectId?: string;
+      status?: JsSandboxRuntimeStatus | string;
+      search?: string;
+    },
+  ): Promise<IJsSandboxRuntime[]>;
+  countJsSandboxRuntimes(tenantId: string, projectId?: string): Promise<number>;
+
+  // ── JS Sandbox execution logs (tenant-specific) ──
+  createJsSandboxExecution(
+    execution: Omit<IJsSandboxExecution, '_id' | 'createdAt'>,
+  ): Promise<IJsSandboxExecution>;
+  findJsSandboxExecutionById(id: string): Promise<IJsSandboxExecution | null>;
+  listJsSandboxExecutions(
+    tenantId: string,
+    filters?: {
+      projectId?: string;
+      runtimeId?: string;
+      runtimeKey?: string;
+      status?: JsSandboxExecutionStatus | string;
+      from?: Date;
+      to?: Date;
+      limit?: number;
+      skip?: number;
+    },
+  ): Promise<IJsSandboxExecution[]>;
+  countJsSandboxExecutions(
+    tenantId: string,
+    filters?: {
+      projectId?: string;
+      runtimeId?: string;
+      runtimeKey?: string;
+      status?: JsSandboxExecutionStatus | string;
+      from?: Date;
+      to?: Date;
+    },
+  ): Promise<number>;
+
   // ── Tool operations (tenant-specific) ──
   createTool(
     tool: Omit<ITool, '_id' | 'createdAt' | 'updatedAt'>,
@@ -855,4 +963,3 @@ export interface DatabaseProvider {
   ): Promise<IBrowserSessionEvent[]>;
   countBrowserSessionEvents(sessionId: string): Promise<number>;
 }
-

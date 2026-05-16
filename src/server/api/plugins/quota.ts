@@ -1,11 +1,10 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
-import type { LicenseType } from '@/lib/license/license-manager';
 import type { QuotaDomain, QuotaPolicyInput, QuotaScope } from '@/lib/quota/types';
 import {
   createQuotaPolicy,
   deleteQuotaPolicy,
-  getPlanDefaults,
+  getLicenseDefaults,
   listQuotaPolicies,
   updateQuotaPolicy,
 } from '@/lib/services/quota/quotaService';
@@ -26,14 +25,13 @@ export const quotaApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/quota/defaults', withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
-      const licenseType = session.licenseType;
 
-      if (!licenseType) {
-        return reply.code(400).send({ error: 'License type not found on request' });
-      }
-
-      const defaults = await getPlanDefaults(licenseType as LicenseType);
-      return reply.code(200).send({ defaults, licenseType });
+      const license = await getLicenseDefaults(session.tenantId);
+      return reply.code(200).send({
+        defaults: license.limits,
+        license,
+        licenseType: license.licenseType,
+      });
     } catch (error) {
       if (error instanceof Error && error.message === 'Unauthorized') {
         return reply.code(401).send({ error: 'Unauthorized' });

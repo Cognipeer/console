@@ -14,6 +14,8 @@
     "test:ui": "vitest --ui",
     "format": "prettier --log-level warn --no-error-on-unmatched-pattern --write ./src/{,*/**/,*/**/**/,*/**/**/**/}*.{js,jsx,ts}",
     "check-setup": "node scripts/check-setup.js",
+    "license:keys": "node scripts/license/generate-keypair.mjs",
+    "license:sign": "node scripts/license/sign-license.mjs",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs"

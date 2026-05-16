@@ -1,14 +1,15 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { ActionIcon, Box, Button, Group, Modal, Select, Stack, Text, Tooltip } from '@mantine/core';
+import { ActionIcon, Box, Button, Group, Modal, Select, Stack, Text, TextInput, Tooltip } from '@mantine/core';
 import { DataTable } from 'mantine-datatable';
 import { notifications } from '@mantine/notifications';
 import type { ProviderDomain } from '@/lib/database';
 import type { ProviderDescriptor } from '@/lib/providers';
 import type { ProviderConfigView } from '@/lib/services/providers/providerService';
 import ProviderConfigModal from '@/components/providers/ProviderConfigModal';
-import { IconEdit } from '@tabler/icons-react';
+import { IconEdit, IconSearch } from '@tabler/icons-react';
+import { TABLE_PAGE_SIZE_OPTIONS, useClientTable } from '@/hooks/useClientTable';
 
 type Provider = {
   _id: string;
@@ -109,6 +110,14 @@ export default function TenantProviders() {
   };
 
   const rows = useMemo(() => providers ?? [], [providers]);
+  const providerTable = useClientTable({
+    records: rows,
+    initialPageSize: 10,
+    search: (provider, query) =>
+      [provider.label, provider.key, provider.type, provider.driver, provider.status]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(query)),
+  });
 
   if (forbidden) {
     return (
@@ -132,12 +141,31 @@ export default function TenantProviders() {
         <Button onClick={() => setWizardOpen(true)}>Add Provider</Button>
       </Group>
 
+      <Group mb="sm" justify="space-between">
+        <TextInput
+          value={providerTable.query}
+          onChange={(event) => providerTable.setQuery(event.currentTarget.value)}
+          placeholder="Search providers"
+          leftSection={<IconSearch size={14} />}
+          w={{ base: '100%', sm: 280 }}
+        />
+        <Text size="sm" c="dimmed">
+          {providerTable.totalRecords} records
+        </Text>
+      </Group>
+
       <DataTable
         withTableBorder
         borderRadius="sm"
         striped
         highlightOnHover
-        records={rows}
+        records={providerTable.records}
+        totalRecords={providerTable.totalRecords}
+        recordsPerPage={providerTable.pageSize}
+        recordsPerPageOptions={TABLE_PAGE_SIZE_OPTIONS}
+        onRecordsPerPageChange={providerTable.setPageSize}
+        page={providerTable.page}
+        onPageChange={providerTable.setPage}
         fetching={loading}
         minHeight={200}
         noRecordsText="No providers"

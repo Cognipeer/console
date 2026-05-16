@@ -58,8 +58,14 @@ All application configuration is managed through the central `getConfig()` funct
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `RATE_LIMIT_PROVIDER` | Provider: `mongodb`, `memory`, `redis` | `mongodb` |
+| `RATE_LIMIT_PROVIDER` | Provider: `mongodb`, `memory`, `redis`. `memory` and `redis` require the same `CACHE_PROVIDER`. | `mongodb` |
 | `RATE_LIMIT_SYNC_INTERVAL_MS` | Sync interval for distributed counters | `5000` |
+
+### Browser Runtime
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `BROWSER_BLOCK_PRIVATE_NETWORK` | Blocks localhost, link-local, private, and reserved network egress from managed browser sessions. | `true` |
 
 ### Logging
 

@@ -7,6 +7,7 @@ import { createLogger } from '@/lib/core/logger';
 import { getDatabase, type DatabaseProvider } from '@/lib/database';
 import type { IBrowser } from '@/lib/database';
 import type { BrowserView, CreateBrowserInput, UpdateBrowserInput } from './types';
+import { matchesProjectScope } from './internals';
 
 const logger = createLogger('browser:profile-service');
 
@@ -19,6 +20,14 @@ async function withTenantDb(tenantDbName: string): Promise<DatabaseProvider> {
 function serializeBrowser(record: IBrowser): BrowserView {
   const { _id, ...rest } = record;
   return { ...rest, id: typeof _id === 'string' ? _id : _id?.toString() ?? '' };
+}
+
+function canAccessBrowser(ctx: BrowserCtx, record: IBrowser | null | undefined): record is IBrowser {
+  return Boolean(
+    record
+    && record.tenantId === ctx.tenantId
+    && matchesProjectScope(record.projectId, ctx.projectId),
+  );
 }
 
 interface BrowserCtx {
@@ -92,7 +101,7 @@ export async function getBrowser(
   const record =
     (await db.findBrowserById(idOrKey).catch(() => null)) ??
     (await db.findBrowserByKey(ctx.tenantId, idOrKey, ctx.projectId));
-  if (!record || record.tenantId !== ctx.tenantId) return null;
+  if (!canAccessBrowser(ctx, record)) return null;
   return serializeBrowser(record);
 }
 
@@ -105,7 +114,7 @@ export async function updateBrowser(
   const existing =
     (await db.findBrowserById(idOrKey).catch(() => null)) ??
     (await db.findBrowserByKey(ctx.tenantId, idOrKey, ctx.projectId));
-  if (!existing || existing.tenantId !== ctx.tenantId) return null;
+  if (!canAccessBrowser(ctx, existing)) return null;
   const updated = await db.updateBrowser(String(existing._id ?? ''), {
     name: input.name,
     description: input.description,
@@ -128,7 +137,7 @@ export async function deleteBrowser(
   const existing =
     (await db.findBrowserById(idOrKey).catch(() => null)) ??
     (await db.findBrowserByKey(ctx.tenantId, idOrKey, ctx.projectId));
-  if (!existing || existing.tenantId !== ctx.tenantId) return false;
+  if (!canAccessBrowser(ctx, existing)) return false;
   // Block delete if children exist
   const sessions = await db.listBrowserSessions(ctx.tenantId, {
     projectId: ctx.projectId,
@@ -149,6 +158,6 @@ export async function resolveBrowser(
   const record =
     (await db.findBrowserById(idOrKey).catch(() => null)) ??
     (await db.findBrowserByKey(ctx.tenantId, idOrKey, ctx.projectId));
-  if (!record || record.tenantId !== ctx.tenantId) return null;
+  if (!canAccessBrowser(ctx, record)) return null;
   return record;
 }

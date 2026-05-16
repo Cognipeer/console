@@ -2,12 +2,92 @@
  * SQLite Provider – Agent tracing operations mixin
  */
 
-import type { IAgentTracingSession, IAgentTracingEvent } from '../provider.interface';
+import type {
+  IAgentTracingDashboardAggregate,
+  IAgentTracingEvent,
+  IAgentTracingSession,
+} from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
 
 export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TBase) {
   return class TracingOps extends Base {
+    private buildAgentTracingSessionWhere(
+      filters?: Record<string, unknown>,
+      projectId?: string,
+      alias?: string,
+    ): { params: Record<string, unknown>; where: string } {
+      const clauses: string[] = [];
+      const params: Record<string, unknown> = {};
+      const column = (name: string) => (alias ? `${alias}.${name}` : name);
+      const activityDate = `COALESCE(${column('startedAt')}, ${column('createdAt')})`;
+
+      if (projectId) {
+        clauses.push(`${column('projectId')} = @projectId`);
+        params.projectId = projectId;
+      }
+      if (filters?.from) {
+        clauses.push(`${activityDate} >= @from`);
+        params.from = String(filters.from);
+      }
+      if (filters?.to) {
+        clauses.push(`${activityDate} <= @to`);
+        params.to = String(filters.to);
+      }
+
+      return {
+        params,
+        where: clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '',
+      };
+    }
+
+    private toAggregateNumber(value: unknown): number {
+      const numberValue = Number(value ?? 0);
+      return Number.isFinite(numberValue) ? numberValue : 0;
+    }
+
+    private toAggregateDate(value: unknown): Date | undefined {
+      if (!value) return undefined;
+      const date = new Date(String(value));
+      return Number.isNaN(date.getTime()) ? undefined : date;
+    }
+
+    private buildEmptyAgentTracingDashboardAggregate(): IAgentTracingDashboardAggregate {
+      return {
+        recentSessions: [],
+        recentAgents: [],
+        recentAgentsTotal: 0,
+        analytics: {
+          totals: {
+            sessionsCount: 0,
+            totalEvents: 0,
+            totalInputTokens: 0,
+            totalOutputTokens: 0,
+            totalCachedInputTokens: 0,
+            totalTokens: 0,
+            totalDurationMs: 0,
+            averageInputTokensPerSession: 0,
+            averageOutputTokensPerSession: 0,
+            averageCachedInputTokensPerSession: 0,
+            averageTokensPerSession: 0,
+            averageDurationMs: 0,
+          },
+          tools: {
+            totals: {
+              totalCalls: 0,
+              errorCalls: 0,
+              successCalls: 0,
+              errorRate: 0,
+            },
+            items: [],
+          },
+          statuses: [],
+          models: [],
+          agents: [],
+          daily: [],
+        },
+      };
+    }
 
     async createAgentTracingSession(
       session: Omit<IAgentTracingSession, '_id' | 'createdAt' | 'updatedAt'>,
@@ -192,8 +272,8 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       }
       if (filters?.status) { clauses.push('status = @status'); params.status = filters.status; }
       if (filters?.threadId) { clauses.push('threadId = @threadId'); params.threadId = filters.threadId; }
-      if (filters?.from) { clauses.push('createdAt >= @from'); params.from = (filters.from as Date).toISOString(); }
-      if (filters?.to) { clauses.push('createdAt <= @to'); params.to = (filters.to as Date).toISOString(); }
+      if (filters?.from) { clauses.push('COALESCE(startedAt, createdAt) >= @from'); params.from = String(filters.from); }
+      if (filters?.to) { clauses.push('COALESCE(startedAt, createdAt) <= @to'); params.to = String(filters.to); }
 
       const freeText =
         typeof filters?.query === 'string' ? filters.query.trim() : '';
@@ -215,13 +295,245 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
 
       const rows = limit > 0
         ? (db.prepare(
-          `SELECT * FROM ${TABLES.agentTracingSessions} ${where} ORDER BY createdAt DESC LIMIT @limit OFFSET @skip`,
+          `SELECT * FROM ${TABLES.agentTracingSessions} ${where} ORDER BY COALESCE(startedAt, createdAt) DESC LIMIT @limit OFFSET @skip`,
         ).all({ ...params, limit, skip }) as SqliteRow[])
         : [];
 
       return {
         sessions: rows.map((r) => this.mapAgentTracingSessionRow(r)),
         total: includeTotal ? total : rows.length,
+      };
+    }
+
+    async aggregateAgentTracingDashboard(
+      filters?: { from?: string; to?: string; timezone?: string },
+      projectId?: string,
+    ): Promise<IAgentTracingDashboardAggregate> {
+      const db = this.getTenantDb();
+      const { params, where } = this.buildAgentTracingSessionWhere(filters, projectId, 's');
+
+      const totalsRow = db.prepare(`
+        SELECT
+          COUNT(*) as sessionsCount,
+          COALESCE(SUM(COALESCE(s.totalEvents, 0)), 0) as totalEvents,
+          COALESCE(SUM(COALESCE(s.totalInputTokens, 0)), 0) as totalInputTokens,
+          COALESCE(SUM(COALESCE(s.totalOutputTokens, 0)), 0) as totalOutputTokens,
+          COALESCE(SUM(COALESCE(s.totalCachedInputTokens, 0)), 0) as totalCachedInputTokens,
+          COALESCE(SUM(COALESCE(s.totalInputTokens, 0) + COALESCE(s.totalOutputTokens, 0)), 0) as totalTokens,
+          COALESCE(SUM(COALESCE(s.durationMs, 0)), 0) as totalDurationMs
+        FROM ${TABLES.agentTracingSessions} s
+        ${where}
+      `).get(params) as SqliteRow | undefined;
+
+      const sessionsCount = this.toAggregateNumber(totalsRow?.sessionsCount);
+      if (sessionsCount === 0) {
+        return this.buildEmptyAgentTracingDashboardAggregate();
+      }
+
+      const totalInputTokens = this.toAggregateNumber(totalsRow?.totalInputTokens);
+      const totalOutputTokens = this.toAggregateNumber(totalsRow?.totalOutputTokens);
+      const totalCachedInputTokens = this.toAggregateNumber(totalsRow?.totalCachedInputTokens);
+      const totalTokens = this.toAggregateNumber(totalsRow?.totalTokens);
+      const totalDurationMs = this.toAggregateNumber(totalsRow?.totalDurationMs);
+
+      const totals = {
+        sessionsCount,
+        totalEvents: this.toAggregateNumber(totalsRow?.totalEvents),
+        totalInputTokens,
+        totalOutputTokens,
+        totalCachedInputTokens,
+        totalTokens,
+        totalDurationMs,
+        averageInputTokensPerSession: Math.round(totalInputTokens / sessionsCount),
+        averageOutputTokensPerSession: Math.round(totalOutputTokens / sessionsCount),
+        averageCachedInputTokensPerSession: Math.round(totalCachedInputTokens / sessionsCount),
+        averageTokensPerSession: Math.round(totalTokens / sessionsCount),
+        averageDurationMs: Math.round(totalDurationMs / sessionsCount),
+      };
+
+      const recentRows = db.prepare(`
+        SELECT
+          s.sessionId,
+          s.agentName,
+          s.status,
+          s.startedAt,
+          s.durationMs,
+          s.totalEvents,
+          s.totalInputTokens,
+          s.totalOutputTokens
+        FROM ${TABLES.agentTracingSessions} s
+        ${where}
+        ORDER BY COALESCE(s.startedAt, s.createdAt) DESC
+        LIMIT 10
+      `).all(params) as SqliteRow[];
+
+      const recentSessions = recentRows.map((row) => ({
+        sessionId: String(row.sessionId ?? ''),
+        agentName: row.agentName ? String(row.agentName) : undefined,
+        status: row.status ? String(row.status) : undefined,
+        startedAt: this.toAggregateDate(row.startedAt),
+        durationMs: this.toAggregateNumber(row.durationMs),
+        totalEvents: this.toAggregateNumber(row.totalEvents),
+        totalTokens:
+          this.toAggregateNumber(row.totalInputTokens)
+          + this.toAggregateNumber(row.totalOutputTokens),
+      }));
+
+      const statusRows = db.prepare(`
+        SELECT COALESCE(s.status, 'unknown') as status, COUNT(*) as count
+        FROM ${TABLES.agentTracingSessions} s
+        ${where}
+        GROUP BY COALESCE(s.status, 'unknown')
+        ORDER BY count DESC
+      `).all(params) as SqliteRow[];
+
+      const modelRows = db.prepare(`
+        SELECT model.value as model, COUNT(*) as sessionsCount
+        FROM ${TABLES.agentTracingSessions} s
+        JOIN json_each(CASE WHEN json_valid(s.modelsUsed) THEN s.modelsUsed ELSE '[]' END) model
+        ${where}
+        GROUP BY model.value
+        ORDER BY sessionsCount DESC
+      `).all(params) as SqliteRow[];
+
+      const toolRows = db.prepare(`
+        SELECT
+          tool.value as toolName,
+          COUNT(*) as totalCalls,
+          COALESCE(SUM(CASE WHEN s.status = 'error' THEN 1 ELSE 0 END), 0) as errorCalls
+        FROM ${TABLES.agentTracingSessions} s
+        JOIN json_each(CASE WHEN json_valid(s.toolsUsed) THEN s.toolsUsed ELSE '[]' END) tool
+        ${where}
+        GROUP BY tool.value
+        ORDER BY totalCalls DESC
+      `).all(params) as SqliteRow[];
+
+      const agentRows = db.prepare(`
+        SELECT
+          COALESCE(s.agentName, 'unknown') as name,
+          COUNT(*) as sessionsCount,
+          MAX(COALESCE(s.startedAt, s.createdAt)) as latestSessionAt,
+          COALESCE(SUM(COALESCE(s.totalEvents, 0)), 0) as totalEvents,
+          COALESCE(SUM(COALESCE(s.totalInputTokens, 0)), 0) as totalInputTokens,
+          COALESCE(SUM(COALESCE(s.totalOutputTokens, 0)), 0) as totalOutputTokens,
+          COALESCE(SUM(COALESCE(s.totalCachedInputTokens, 0)), 0) as totalCachedInputTokens,
+          COALESCE(SUM(COALESCE(s.totalInputTokens, 0) + COALESCE(s.totalOutputTokens, 0)), 0) as totalTokens,
+          COALESCE(SUM(COALESCE(s.durationMs, 0)), 0) as totalDurationMs
+        FROM ${TABLES.agentTracingSessions} s
+        ${where}
+        GROUP BY COALESCE(s.agentName, 'unknown')
+      `).all(params) as SqliteRow[];
+
+      const agents = agentRows.map((row) => {
+        const agentSessionsCount = this.toAggregateNumber(row.sessionsCount);
+        const agentInputTokens = this.toAggregateNumber(row.totalInputTokens);
+        const agentOutputTokens = this.toAggregateNumber(row.totalOutputTokens);
+        const agentCachedInputTokens = this.toAggregateNumber(row.totalCachedInputTokens);
+        const agentTokens = this.toAggregateNumber(row.totalTokens);
+        const agentDurationMs = this.toAggregateNumber(row.totalDurationMs);
+        const name = String(row.name ?? 'unknown');
+
+        return {
+          name,
+          label: name,
+          latestSessionAt: this.toAggregateDate(row.latestSessionAt),
+          latestStatus: undefined,
+          sessionsCount: agentSessionsCount,
+          totalEvents: this.toAggregateNumber(row.totalEvents),
+          totalInputTokens: agentInputTokens,
+          totalOutputTokens: agentOutputTokens,
+          totalCachedInputTokens: agentCachedInputTokens,
+          totalTokens: agentTokens,
+          averageInputTokensPerSession:
+            agentSessionsCount > 0 ? Math.round(agentInputTokens / agentSessionsCount) : 0,
+          averageOutputTokensPerSession:
+            agentSessionsCount > 0 ? Math.round(agentOutputTokens / agentSessionsCount) : 0,
+          averageCachedInputTokensPerSession:
+            agentSessionsCount > 0 ? Math.round(agentCachedInputTokens / agentSessionsCount) : 0,
+          averageTokensPerSession:
+            agentSessionsCount > 0 ? Math.round(agentTokens / agentSessionsCount) : 0,
+          averageDurationMs:
+            agentSessionsCount > 0 ? Math.round(agentDurationMs / agentSessionsCount) : 0,
+        };
+      });
+
+      const dailyRows = db.prepare(`
+        SELECT
+          substr(COALESCE(s.startedAt, s.createdAt), 1, 10) as date,
+          COUNT(*) as sessionsCount,
+          COALESCE(SUM(COALESCE(s.totalEvents, 0)), 0) as totalEvents,
+          COALESCE(SUM(COALESCE(s.totalInputTokens, 0) + COALESCE(s.totalOutputTokens, 0)), 0) as totalTokens,
+          COALESCE(SUM(COALESCE(s.durationMs, 0)), 0) as totalDurationMs
+        FROM ${TABLES.agentTracingSessions} s
+        ${where}
+        GROUP BY substr(COALESCE(s.startedAt, s.createdAt), 1, 10)
+        ORDER BY date ASC
+      `).all(params) as SqliteRow[];
+
+      const toolItems = toolRows.map((row) => {
+        const totalCalls = this.toAggregateNumber(row.totalCalls);
+        const errorCalls = this.toAggregateNumber(row.errorCalls);
+        const successCalls = Math.max(0, totalCalls - errorCalls);
+        return {
+          toolName: String(row.toolName ?? 'unknown'),
+          totalCalls,
+          errorCalls,
+          successCalls,
+          errorRate: totalCalls > 0 ? errorCalls / totalCalls : 0,
+        };
+      });
+      const toolTotals = {
+        totalCalls: toolItems.reduce((sum, item) => sum + item.totalCalls, 0),
+        errorCalls: toolItems.reduce((sum, item) => sum + item.errorCalls, 0),
+        successCalls: toolItems.reduce((sum, item) => sum + item.successCalls, 0),
+        errorRate: 0,
+      };
+      toolTotals.errorRate = toolTotals.totalCalls > 0
+        ? toolTotals.errorCalls / toolTotals.totalCalls
+        : 0;
+
+      return {
+        recentSessions,
+        recentAgents: agents
+          .slice()
+          .sort((a, b) => (b.latestSessionAt?.getTime() ?? 0) - (a.latestSessionAt?.getTime() ?? 0))
+          .slice(0, 20),
+        recentAgentsTotal: agents.length,
+        analytics: {
+          totals,
+          tools: {
+            totals: toolTotals,
+            items: toolItems,
+          },
+          statuses: statusRows.map((row) => ({
+            status: String(row.status ?? 'unknown'),
+            count: this.toAggregateNumber(row.count),
+          })),
+          models: modelRows.map((row) => ({
+            model: String(row.model ?? 'unknown'),
+            sessionsCount: this.toAggregateNumber(row.sessionsCount),
+          })),
+          agents: agents
+            .slice()
+            .sort(
+              (a, b) =>
+                b.totalTokens - a.totalTokens
+                || b.sessionsCount - a.sessionsCount
+                || a.name.localeCompare(b.name),
+            ),
+          daily: dailyRows.map((row) => {
+            const daySessionsCount = this.toAggregateNumber(row.sessionsCount);
+            const dayDurationMs = this.toAggregateNumber(row.totalDurationMs);
+            return {
+              date: String(row.date ?? ''),
+              sessionsCount: daySessionsCount,
+              totalEvents: this.toAggregateNumber(row.totalEvents),
+              totalTokens: this.toAggregateNumber(row.totalTokens),
+              averageDurationMs:
+                daySessionsCount > 0 ? Math.round(dayDurationMs / daySessionsCount) : 0,
+            };
+          }).slice(-30),
+        },
       };
     }
 

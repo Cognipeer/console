@@ -4,3 +4,4 @@ export * from './browserManager';
 export * from './browserProfileService';
 export * from './browserSessionService';
 export * from './agentTools';
+export * from './browserOperationsService';

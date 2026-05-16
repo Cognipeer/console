@@ -1,9 +1,10 @@
-import { createHash } from 'crypto';
 import { getDatabase } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { getCache } from '@/lib/core/cache';
 import { fireAndForget } from '@/lib/core/asyncTask';
 import type { ITenant, IUser, IApiToken } from '@/lib/database';
+import { LicenseManager } from '@/lib/license/license-manager';
+import { hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
 
 const logger = createLogger('api-token-auth');
 import { ensureDefaultProject } from '@/lib/services/projects/projectService';
@@ -53,8 +54,8 @@ export async function requireApiTokenFromHeader(
   const db = await getDatabase();
 
   // Cache tokenRecord + tenant to avoid 2 DB lookups per request
-  const tokenHash = createHash('sha256').update(token).digest('hex').substring(0, 16);
-  const cacheKey = `api-auth:${tokenHash}`;
+  const tokenHash = hashApiToken(token);
+  const cacheKey = `api-auth:${tokenHash.substring(0, 16)}`;
 
   interface CachedAuth { tokenRecord: IApiToken; tenant: ITenant }
   let cached: CachedAuth | undefined;
@@ -70,7 +71,7 @@ export async function requireApiTokenFromHeader(
     tokenRecord = cached.tokenRecord;
     tenant = cached.tenant;
   } else {
-    tokenRecord = await db.findApiTokenByToken(token);
+    tokenRecord = await db.findApiTokenByHash(tokenHash);
     if (!tokenRecord) {
       throw new ApiTokenAuthError('Invalid API token');
     }
@@ -86,11 +87,16 @@ export async function requireApiTokenFromHeader(
     } catch { /* best-effort cache write */ }
   }
 
+  const effectiveLicense = LicenseManager.getEffectiveLicenseForTenant(tenant);
+  tenant = {
+    ...tenant,
+    licenseType: effectiveLicense.licenseType,
+  };
+
   // Non-critical last-used timestamp update — fire and forget
   fireAndForget('token-last-used', async () => {
     const bgDb = await getDatabase();
-    await bgDb.switchToTenant(tenant.dbName);
-    await bgDb.updateTokenLastUsed(token);
+    await bgDb.updateTokenLastUsedByHash(tokenHash);
   });
 
   await db.switchToTenant(tenant.dbName);

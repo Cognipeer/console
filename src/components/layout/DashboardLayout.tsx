@@ -29,6 +29,7 @@ import {
   IconSettings,
   IconFolder,
   IconBook,
+  IconCertificate,
   IconX,
 } from '@tabler/icons-react';
 import { ReactNode, useMemo, useState } from 'react';
@@ -40,6 +41,7 @@ import ProjectSelector from '@/components/projects/ProjectSelector';
 import { DocsDrawerProvider } from '@/components/docs/DocsDrawerContext';
 import { DEFAULT_SDK_DOC, resolveSdkDoc, type SdkDocId } from '@/lib/docs/sdkDocs';
 import { getDashboardServices } from '@/lib/utils/dashboardServices';
+import type { UserServicePermissions } from '@/lib/security/rbac';
 
 interface DashboardLayoutProps {
   children: ReactNode;
@@ -48,6 +50,7 @@ interface DashboardLayoutProps {
     email: string;
     licenseType: string;
     role?: 'owner' | 'admin' | 'project_admin' | 'user';
+    servicePermissions?: UserServicePermissions;
   };
 }
 
@@ -92,19 +95,24 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
     email: t('defaultUser.email'),
     licenseType: t('defaultUser.license'),
     role: 'user' as const,
+    servicePermissions: {},
   };
 
   const isTenantAdmin = defaultUser.role === 'owner' || defaultUser.role === 'admin';
 
   const serviceItems = useMemo(
     () =>
-      getDashboardServices({ isTenantAdmin }).map((service) => ({
+      getDashboardServices({
+        isTenantAdmin,
+        role: defaultUser.role,
+        servicePermissions: defaultUser.servicePermissions,
+      }).map((service) => ({
         label: tNav(service.navLabelKey),
         description: tNav(service.navDescriptionKey),
         icon: service.icon,
         href: service.href,
       })),
-    [isTenantAdmin, tNav],
+    [defaultUser.role, defaultUser.servicePermissions, isTenantAdmin, tNav],
   );
 
   const handleNavClick = (href?: string) => {
@@ -331,6 +339,14 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
                   >
                     {tAccount('settings')}
                   </Menu.Item>
+                  {isTenantAdmin ? (
+                    <Menu.Item
+                      leftSection={<IconCertificate size={14} />}
+                      onClick={() => handleNavClick('/dashboard/license')}
+                    >
+                      {tAccount('license')}
+                    </Menu.Item>
+                  ) : null}
                   <Menu.Divider />
                   <Menu.Item
                     color="red"

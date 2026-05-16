@@ -193,6 +193,16 @@
         "/api/client/v1/tools/*"
       ]
     },
+    "AUTOMATIONS_CONTROL": {
+      "name": "Automations",
+      "description": "Inspect and control internal automations, schedulers and background maintenance jobs",
+      "endpoints": [
+        "/api/automations",
+        "/api/automations/*",
+        "/api/client/v1/automations",
+        "/api/client/v1/automations/*"
+      ]
+    },
     "BROWSER_SESSIONS": {
       "name": "Browser Sessions",
       "description": "Headless browser sessions for navigation, interaction, screenshots and PDF export",
@@ -232,6 +242,7 @@
         "CONFIG_MANAGEMENT",
         "MCP_SERVERS",
         "TOOLS",
+        "AUTOMATIONS_CONTROL",
         "BROWSER_SESSIONS",
         "DASHBOARD",
         "AGENT_ORCHESTRATION"
@@ -257,6 +268,7 @@
         "CONFIG_MANAGEMENT",
         "MCP_SERVERS",
         "TOOLS",
+        "AUTOMATIONS_CONTROL",
         "AGENT_ORCHESTRATION"
       ],
       "limits": {
@@ -283,7 +295,8 @@
         "RAG_PIPELINE",
         "CONFIG_MANAGEMENT",
         "MCP_SERVERS",
-        "TOOLS"
+        "TOOLS",
+        "AUTOMATIONS_CONTROL"
       ],
       "limits": {
         "requestsPerMonth": 100000,
@@ -315,6 +328,7 @@
         "CONFIG_MANAGEMENT",
         "MCP_SERVERS",
         "TOOLS",
+        "AUTOMATIONS_CONTROL",
         "BROWSER_SESSIONS",
         "DASHBOARD"
       ],
@@ -348,6 +362,7 @@
         "CONFIG_MANAGEMENT",
         "MCP_SERVERS",
         "TOOLS",
+        "AUTOMATIONS_CONTROL",
         "BROWSER_SESSIONS",
         "DASHBOARD"
       ],

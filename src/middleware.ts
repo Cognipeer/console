@@ -71,8 +71,12 @@ export async function middleware(request: NextRequest) {
   requestHeaders.set('x-tenant-id', payload.tenantId);
   requestHeaders.set('x-tenant-slug', payload.tenantSlug);
   requestHeaders.set('x-tenant-db-name', tenantDbName);
-  requestHeaders.set('x-license-type', payload.licenseType);
-  requestHeaders.set('x-features', JSON.stringify(payload.features));
+  const licenseExpired = payload.licenseExpiresAt
+    ? Date.parse(payload.licenseExpiresAt) <= Date.now()
+    : false;
+
+  requestHeaders.set('x-license-type', licenseExpired ? 'FREE' : payload.licenseType);
+  requestHeaders.set('x-features', JSON.stringify(licenseExpired ? [] : payload.features));
   requestHeaders.set('x-request-id', crypto.randomUUID());
 
   const response = NextResponse.next({

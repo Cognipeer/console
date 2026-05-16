@@ -1,9 +1,12 @@
 import {
   IconApi,
+  IconClipboardList,
   IconBell,
   IconBook2,
   IconBrain,
   IconBulb,
+  IconCertificate,
+  IconClock,
   IconFolder,
   IconKey,
   IconLayoutDashboard,
@@ -19,11 +22,17 @@ import {
   IconUsers,
   IconVectorBezier,
 } from '@tabler/icons-react';
+import {
+  getEffectiveServicePermission,
+  type PermissionService,
+  type UserRole,
+  type UserServicePermissions,
+} from '@/lib/security/rbac';
 
 export type DashboardServiceCategory = 'build' | 'data' | 'operate' | 'admin';
 
 export type DashboardServiceDefinition = {
-  id: string;
+  id: PermissionService | 'services-home';
   href: string;
   navLabelKey: string;
   navDescriptionKey: string;
@@ -198,6 +207,17 @@ const DASHBOARD_SERVICE_DEFINITIONS: DashboardServiceDefinition[] = [
     searchKeywords: ['alert', 'incident', 'notifications', 'threshold'],
   },
   {
+    id: 'automations',
+    href: '/dashboard/automations',
+    navLabelKey: 'automations',
+    navDescriptionKey: 'automationsDescription',
+    icon: IconClock,
+    category: 'admin',
+    tags: ['automations', 'scheduler', 'operations'],
+    searchKeywords: ['automation', 'scheduler', 'maintenance', 'jobs', 'workflow'],
+    tenantAdminOnly: true,
+  },
+  {
     id: 'members',
     href: '/dashboard/members',
     navLabelKey: 'members',
@@ -239,18 +259,59 @@ const DASHBOARD_SERVICE_DEFINITIONS: DashboardServiceDefinition[] = [
     tags: ['api', 'tokens', 'keys'],
     searchKeywords: ['token', 'api', 'key', 'anahtar'],
   },
+  {
+    id: 'audit',
+    href: '/dashboard/audit',
+    navLabelKey: 'audit',
+    navDescriptionKey: 'auditDescription',
+    icon: IconClipboardList,
+    category: 'admin',
+    tags: ['audit', 'security', 'logs'],
+    searchKeywords: ['audit', 'security', 'log', 'rbac', 'yetki'],
+    tenantAdminOnly: true,
+  },
+  {
+    id: 'license',
+    href: '/dashboard/license',
+    navLabelKey: 'license',
+    navDescriptionKey: 'licenseDescription',
+    icon: IconCertificate,
+    category: 'admin',
+    tags: ['license', 'limits', 'enterprise'],
+    searchKeywords: ['license', 'lisans', 'enterprise', 'limits'],
+    tenantAdminOnly: true,
+  },
 ];
 
 type DashboardServicesOptions = {
   isTenantAdmin?: boolean;
+  role?: UserRole;
   servicesHomeOnly?: boolean;
+  servicePermissions?: UserServicePermissions;
 };
 
 export function getDashboardServices(options: DashboardServicesOptions = {}) {
-  const { isTenantAdmin = false, servicesHomeOnly = false } = options;
+  const {
+    isTenantAdmin = false,
+    role = 'user',
+    servicesHomeOnly = false,
+    servicePermissions = {},
+  } = options;
 
   return DASHBOARD_SERVICE_DEFINITIONS.filter((service) => {
-    if (service.tenantAdminOnly && !isTenantAdmin) {
+    if (service.id !== 'services-home') {
+      const level = getEffectiveServicePermission({ role, servicePermissions }, service.id);
+      if (level === 'none') {
+        return false;
+      }
+    }
+
+    if (
+      service.tenantAdminOnly
+      && !isTenantAdmin
+      && service.id !== 'services-home'
+      && getEffectiveServicePermission({ role, servicePermissions }, service.id) !== 'admin'
+    ) {
       return false;
     }
 

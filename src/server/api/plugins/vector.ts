@@ -12,6 +12,7 @@ import {
   deleteVectorIndex,
   deleteVectors,
   getVectorIndex,
+  listProjectVectorIndexes,
   listVectorIndexes,
   listVectorProviders,
   queryVectorIndex,
@@ -196,31 +197,24 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
         new URLSearchParams(request.query as Record<string, string>),
       );
 
-      const providers = await listVectorProviders(
-        session.tenantDbName,
-        session.tenantId,
-        projectId,
-        {},
-      );
+      const [providers, projectIndexes] = await Promise.all([
+        listVectorProviders(
+          session.tenantDbName,
+          session.tenantId,
+          projectId,
+          {},
+        ),
+        listProjectVectorIndexes(session.tenantDbName, projectId),
+      ]);
 
-      const indexesByProvider = await Promise.all(
-        providers.map(async (provider) => {
-          try {
-            const indexes = await listVectorIndexes(
-              session.tenantDbName,
-              session.tenantId,
-              projectId,
-              provider.key,
-            );
-            return {
-              indexes: indexes.filter((index) => isDateInDashboardRange(index.createdAt, filter)),
-              provider,
-            };
-          } catch {
-            return { indexes: [], provider };
-          }
-        }),
-      );
+      const indexesByProvider = providers.map((provider) => ({
+        indexes: projectIndexes.filter(
+          (index) =>
+            index.providerKey === provider.key
+            && isDateInDashboardRange(index.createdAt, filter),
+        ),
+        provider,
+      }));
 
       const hasDateFilter = Boolean(filter.from || filter.to);
       const providersWithIndexes = new Set(

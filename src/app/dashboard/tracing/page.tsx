@@ -71,7 +71,7 @@ export default function AgentTracingPage() {
     }
   }, []);
 
-  const fetchDashboard = useCallback(async (isRefresh = false) => {
+  const fetchDashboard = useCallback(async (isRefresh = false, signal?: AbortSignal) => {
     try {
       if (isRefresh) setRefreshing(true);
       else setLoading(true);
@@ -79,7 +79,7 @@ export default function AgentTracingPage() {
       const params = buildDashboardDateSearchParams(dateFilter);
       params.append('timezone', timezone);
 
-      const response = await fetch(`/api/tracing/dashboard?${params}`);
+      const response = await fetch(`/api/tracing/dashboard?${params}`, { signal });
 
       if (!response.ok) {
         const errorData = await response.json();
@@ -90,15 +90,22 @@ export default function AgentTracingPage() {
       const data = (await response.json()) as DashboardData;
       setDashboardData(data);
     } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        return;
+      }
       console.error('Error fetching dashboard:', error);
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (!signal?.aborted) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   }, [dateFilter, timezone]);
 
   useEffect(() => {
-    void fetchDashboard();
+    const controller = new AbortController();
+    void fetchDashboard(false, controller.signal);
+    return () => controller.abort();
   }, [fetchDashboard]);
 
   const handleRowClick = (sessionId: string) => {

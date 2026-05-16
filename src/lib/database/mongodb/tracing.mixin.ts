@@ -5,7 +5,11 @@
  */
 
 import { ObjectId } from 'mongodb';
-import type { IAgentTracingSession, IAgentTracingEvent } from '../provider.interface';
+import type {
+  IAgentTracingDashboardAggregate,
+  IAgentTracingSession,
+  IAgentTracingEvent,
+} from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
 
@@ -14,6 +18,71 @@ export function TracingMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
     private readonly tracingIndexInit = new Map<string, Promise<void>>();
     private readonly tracingIndexesReady = new Set<string>();
     private readonly threadBackfillTasks = new Map<string, Promise<void>>();
+
+    private buildAgentTracingDashboardMatch(
+      filters?: { from?: string; to?: string },
+      projectId?: string,
+    ): Record<string, unknown> {
+      const match: Record<string, unknown> = {};
+      if (projectId) {
+        match.projectId = projectId;
+      }
+      if (filters?.from || filters?.to) {
+        const startedAt: { $gte?: Date; $lte?: Date } = {};
+        if (filters.from) startedAt.$gte = new Date(filters.from);
+        if (filters.to) startedAt.$lte = new Date(filters.to);
+        match.startedAt = startedAt;
+      }
+      return match;
+    }
+
+    private toAggregateNumber(value: unknown): number {
+      const numberValue = Number(value ?? 0);
+      return Number.isFinite(numberValue) ? numberValue : 0;
+    }
+
+    private toAggregateDate(value: unknown): Date | undefined {
+      if (!value) return undefined;
+      const date = value instanceof Date ? value : new Date(String(value));
+      return Number.isNaN(date.getTime()) ? undefined : date;
+    }
+
+    private buildEmptyAgentTracingDashboardAggregate(): IAgentTracingDashboardAggregate {
+      return {
+        recentSessions: [],
+        recentAgents: [],
+        recentAgentsTotal: 0,
+        analytics: {
+          totals: {
+            sessionsCount: 0,
+            totalEvents: 0,
+            totalInputTokens: 0,
+            totalOutputTokens: 0,
+            totalCachedInputTokens: 0,
+            totalTokens: 0,
+            totalDurationMs: 0,
+            averageInputTokensPerSession: 0,
+            averageOutputTokensPerSession: 0,
+            averageCachedInputTokensPerSession: 0,
+            averageTokensPerSession: 0,
+            averageDurationMs: 0,
+          },
+          tools: {
+            totals: {
+              totalCalls: 0,
+              errorCalls: 0,
+              successCalls: 0,
+              errorRate: 0,
+            },
+            items: [],
+          },
+          statuses: [],
+          models: [],
+          agents: [],
+          daily: [],
+        },
+      };
+    }
 
     private async ensureTracingIndexes(): Promise<void> {
       const db = this.getTenantDb();
@@ -738,6 +807,281 @@ export function TracingMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
           _id: session._id?.toString(),
         })),
         total: total ?? sessions.length,
+      };
+    }
+
+    async aggregateAgentTracingDashboard(
+      filters?: { from?: string; to?: string; timezone?: string },
+      projectId?: string,
+    ): Promise<IAgentTracingDashboardAggregate> {
+      await this.ensureTracingIndexes();
+      const db = this.getTenantDb();
+      const collection = db.collection<IAgentTracingSession>(COLLECTIONS.agentTracingSessions);
+      const match = this.buildAgentTracingDashboardMatch(filters, projectId);
+      const activityDate = { $ifNull: ['$startedAt', '$createdAt'] };
+
+      const [
+        recentSessions,
+        totalsRows,
+        statusRows,
+        modelRows,
+        toolRows,
+        agentRows,
+        dailyRows,
+      ] = await Promise.all([
+        collection
+          .find(match, {
+            projection: {
+              sessionId: 1,
+              agentName: 1,
+              status: 1,
+              startedAt: 1,
+              durationMs: 1,
+              totalEvents: 1,
+              totalInputTokens: 1,
+              totalOutputTokens: 1,
+            },
+          })
+          .sort({ startedAt: -1, createdAt: -1 })
+          .limit(10)
+          .toArray(),
+        collection.aggregate([
+          { $match: match },
+          {
+            $group: {
+              _id: null,
+              sessionsCount: { $sum: 1 },
+              totalEvents: { $sum: { $ifNull: ['$totalEvents', 0] } },
+              totalInputTokens: { $sum: { $ifNull: ['$totalInputTokens', 0] } },
+              totalOutputTokens: { $sum: { $ifNull: ['$totalOutputTokens', 0] } },
+              totalCachedInputTokens: { $sum: { $ifNull: ['$totalCachedInputTokens', 0] } },
+              totalTokens: {
+                $sum: {
+                  $add: [
+                    { $ifNull: ['$totalInputTokens', 0] },
+                    { $ifNull: ['$totalOutputTokens', 0] },
+                  ],
+                },
+              },
+              totalDurationMs: { $sum: { $ifNull: ['$durationMs', 0] } },
+            },
+          },
+        ]).toArray(),
+        collection.aggregate([
+          { $match: match },
+          { $group: { _id: { $ifNull: ['$status', 'unknown'] }, count: { $sum: 1 } } },
+          { $sort: { count: -1 } },
+        ]).toArray(),
+        collection.aggregate([
+          { $match: match },
+          { $unwind: '$modelsUsed' },
+          { $match: { modelsUsed: { $type: 'string', $ne: '' } } },
+          { $group: { _id: '$modelsUsed', sessionsCount: { $sum: 1 } } },
+          { $sort: { sessionsCount: -1 } },
+        ]).toArray(),
+        collection.aggregate([
+          { $match: match },
+          { $unwind: '$toolsUsed' },
+          { $match: { toolsUsed: { $type: 'string', $ne: '' } } },
+          {
+            $group: {
+              _id: '$toolsUsed',
+              totalCalls: { $sum: 1 },
+              errorCalls: {
+                $sum: {
+                  $cond: [{ $eq: ['$status', 'error'] }, 1, 0],
+                },
+              },
+            },
+          },
+          { $sort: { totalCalls: -1 } },
+        ]).toArray(),
+        collection.aggregate([
+          { $match: match },
+          { $sort: { startedAt: -1, createdAt: -1 } },
+          {
+            $group: {
+              _id: { $ifNull: ['$agentName', 'unknown'] },
+              latestSessionAt: { $first: activityDate },
+              latestStatus: { $first: '$status' },
+              sessionsCount: { $sum: 1 },
+              totalEvents: { $sum: { $ifNull: ['$totalEvents', 0] } },
+              totalInputTokens: { $sum: { $ifNull: ['$totalInputTokens', 0] } },
+              totalOutputTokens: { $sum: { $ifNull: ['$totalOutputTokens', 0] } },
+              totalCachedInputTokens: { $sum: { $ifNull: ['$totalCachedInputTokens', 0] } },
+              totalTokens: {
+                $sum: {
+                  $add: [
+                    { $ifNull: ['$totalInputTokens', 0] },
+                    { $ifNull: ['$totalOutputTokens', 0] },
+                  ],
+                },
+              },
+              totalDurationMs: { $sum: { $ifNull: ['$durationMs', 0] } },
+            },
+          },
+        ]).toArray(),
+        collection.aggregate([
+          { $match: match },
+          {
+            $group: {
+              _id: {
+                $dateToString: {
+                  date: activityDate,
+                  format: '%Y-%m-%d',
+                  timezone: 'UTC',
+                },
+              },
+              sessionsCount: { $sum: 1 },
+              totalEvents: { $sum: { $ifNull: ['$totalEvents', 0] } },
+              totalTokens: {
+                $sum: {
+                  $add: [
+                    { $ifNull: ['$totalInputTokens', 0] },
+                    { $ifNull: ['$totalOutputTokens', 0] },
+                  ],
+                },
+              },
+              totalDurationMs: { $sum: { $ifNull: ['$durationMs', 0] } },
+            },
+          },
+          { $sort: { _id: 1 } },
+        ]).toArray(),
+      ]);
+
+      const totalsRow = totalsRows[0];
+      const sessionsCount = this.toAggregateNumber(totalsRow?.sessionsCount);
+      if (sessionsCount === 0) {
+        return this.buildEmptyAgentTracingDashboardAggregate();
+      }
+
+      const totalInputTokens = this.toAggregateNumber(totalsRow?.totalInputTokens);
+      const totalOutputTokens = this.toAggregateNumber(totalsRow?.totalOutputTokens);
+      const totalCachedInputTokens = this.toAggregateNumber(totalsRow?.totalCachedInputTokens);
+      const totalTokens = this.toAggregateNumber(totalsRow?.totalTokens);
+      const totalDurationMs = this.toAggregateNumber(totalsRow?.totalDurationMs);
+      const totals = {
+        sessionsCount,
+        totalEvents: this.toAggregateNumber(totalsRow?.totalEvents),
+        totalInputTokens,
+        totalOutputTokens,
+        totalCachedInputTokens,
+        totalTokens,
+        totalDurationMs,
+        averageInputTokensPerSession: Math.round(totalInputTokens / sessionsCount),
+        averageOutputTokensPerSession: Math.round(totalOutputTokens / sessionsCount),
+        averageCachedInputTokensPerSession: Math.round(totalCachedInputTokens / sessionsCount),
+        averageTokensPerSession: Math.round(totalTokens / sessionsCount),
+        averageDurationMs: Math.round(totalDurationMs / sessionsCount),
+      };
+
+      const agents = agentRows.map((row) => {
+        const agentSessionsCount = this.toAggregateNumber(row.sessionsCount);
+        const agentInputTokens = this.toAggregateNumber(row.totalInputTokens);
+        const agentOutputTokens = this.toAggregateNumber(row.totalOutputTokens);
+        const agentCachedInputTokens = this.toAggregateNumber(row.totalCachedInputTokens);
+        const agentTokens = this.toAggregateNumber(row.totalTokens);
+        const agentDurationMs = this.toAggregateNumber(row.totalDurationMs);
+        const name = String(row._id ?? 'unknown');
+
+        return {
+          name,
+          label: name,
+          latestSessionAt: this.toAggregateDate(row.latestSessionAt),
+          latestStatus: row.latestStatus ? String(row.latestStatus) : undefined,
+          sessionsCount: agentSessionsCount,
+          totalEvents: this.toAggregateNumber(row.totalEvents),
+          totalInputTokens: agentInputTokens,
+          totalOutputTokens: agentOutputTokens,
+          totalCachedInputTokens: agentCachedInputTokens,
+          totalTokens: agentTokens,
+          averageInputTokensPerSession:
+            agentSessionsCount > 0 ? Math.round(agentInputTokens / agentSessionsCount) : 0,
+          averageOutputTokensPerSession:
+            agentSessionsCount > 0 ? Math.round(agentOutputTokens / agentSessionsCount) : 0,
+          averageCachedInputTokensPerSession:
+            agentSessionsCount > 0 ? Math.round(agentCachedInputTokens / agentSessionsCount) : 0,
+          averageTokensPerSession:
+            agentSessionsCount > 0 ? Math.round(agentTokens / agentSessionsCount) : 0,
+          averageDurationMs:
+            agentSessionsCount > 0 ? Math.round(agentDurationMs / agentSessionsCount) : 0,
+        };
+      });
+
+      const toolItems = toolRows.map((row) => {
+        const totalCalls = this.toAggregateNumber(row.totalCalls);
+        const errorCalls = this.toAggregateNumber(row.errorCalls);
+        const successCalls = Math.max(0, totalCalls - errorCalls);
+        return {
+          toolName: String(row._id ?? 'unknown'),
+          totalCalls,
+          errorCalls,
+          successCalls,
+          errorRate: totalCalls > 0 ? errorCalls / totalCalls : 0,
+        };
+      });
+      const toolTotals = {
+        totalCalls: toolItems.reduce((sum, item) => sum + item.totalCalls, 0),
+        errorCalls: toolItems.reduce((sum, item) => sum + item.errorCalls, 0),
+        successCalls: toolItems.reduce((sum, item) => sum + item.successCalls, 0),
+        errorRate: 0,
+      };
+      toolTotals.errorRate = toolTotals.totalCalls > 0
+        ? toolTotals.errorCalls / toolTotals.totalCalls
+        : 0;
+
+      return {
+        recentSessions: recentSessions.map((session) => ({
+          sessionId: session.sessionId,
+          agentName: session.agentName,
+          status: session.status,
+          startedAt: this.toAggregateDate(session.startedAt),
+          durationMs: this.toAggregateNumber(session.durationMs),
+          totalEvents: this.toAggregateNumber(session.totalEvents),
+          totalTokens:
+            this.toAggregateNumber(session.totalInputTokens)
+            + this.toAggregateNumber(session.totalOutputTokens),
+        })),
+        recentAgents: agents
+          .slice()
+          .sort((a, b) => (b.latestSessionAt?.getTime() ?? 0) - (a.latestSessionAt?.getTime() ?? 0))
+          .slice(0, 20),
+        recentAgentsTotal: agents.length,
+        analytics: {
+          totals,
+          tools: {
+            totals: toolTotals,
+            items: toolItems,
+          },
+          statuses: statusRows.map((row) => ({
+            status: String(row._id ?? 'unknown'),
+            count: this.toAggregateNumber(row.count),
+          })),
+          models: modelRows.map((row) => ({
+            model: String(row._id ?? 'unknown'),
+            sessionsCount: this.toAggregateNumber(row.sessionsCount),
+          })),
+          agents: agents
+            .slice()
+            .sort(
+              (a, b) =>
+                b.totalTokens - a.totalTokens
+                || b.sessionsCount - a.sessionsCount
+                || a.name.localeCompare(b.name),
+            ),
+          daily: dailyRows.map((row) => {
+            const daySessionsCount = this.toAggregateNumber(row.sessionsCount);
+            const dayDurationMs = this.toAggregateNumber(row.totalDurationMs);
+            return {
+              date: String(row._id ?? ''),
+              sessionsCount: daySessionsCount,
+              totalEvents: this.toAggregateNumber(row.totalEvents),
+              totalTokens: this.toAggregateNumber(row.totalTokens),
+              averageDurationMs:
+                daySessionsCount > 0 ? Math.round(dayDurationMs / daySessionsCount) : 0,
+            };
+          }).slice(-30),
+        },
       };
     }
 

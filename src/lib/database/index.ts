@@ -18,19 +18,16 @@ let dbProvider: DatabaseProvider | null = null;
  * The gateway uses a **singleton provider** pattern:
  * - A single `DatabaseProvider` instance is created on first call and reused
  *   for the lifetime of the process.
- * - For tenant-scoped operations (users, tokens, projects, etc.) callers must
+ * - For tenant-scoped operations (users, projects, etc.) callers must
  *   invoke `switchToTenant(tenantDbName)` **before** issuing queries. The
- *   switch is synchronous and sets the provider's active database context.
+ *   provider stores the selected tenant database in AsyncLocalStorage so
+ *   concurrent requests do not share mutable tenant state.
  *
  * ### Important caveats
  *
- * 1. **Request isolation** – Because Next.js processes requests concurrently
- *    within a single Node.js process, two requests that call `switchToTenant`
- *    with different tenants could interleave. This is safe because each
- *    `switchToTenant` call only sets the *current* database reference and all
- *    subsequent operations stay on that reference until the next switch.
- *    Always pair `getDatabase() → switchToTenant() → queries` without yielding
- *    control between the switch and the queries wherever possible.
+ * 1. **Request isolation** – `switchToTenant` writes the selected tenant DB
+ *    handle to the current async context. Calls in another request get their
+ *    own context and cannot overwrite the tenant DB used by this request.
  *
  * 2. **Singleton lifecycle** – The provider is torn down by the registered
  *    shutdown handler (`registerShutdownHandler`). Tests should call
@@ -129,8 +126,14 @@ export async function disconnectDatabase(): Promise<void> {
 export type { DatabaseProvider } from './provider.interface';
 export type {
   IUser,
+  IUserProject,
+  IGroup,
+  IGroupMember,
+  IGroupProject,
+  ProjectRole,
   ITenant,
   IProject,
+  IAuditLog,
   IApiToken,
   IAgentTracingSession,
   IAgentTracingEvent,

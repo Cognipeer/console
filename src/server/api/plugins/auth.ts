@@ -21,6 +21,7 @@ import {
   DEFAULT_PROJECT_KEY,
   ensureDefaultProject,
 } from '@/lib/services/projects/projectService';
+import { normalizeServicePermissions } from '@/lib/security/rbac';
 import {
   clearSessionCookies,
   getClientIp,
@@ -41,7 +42,6 @@ type LoginBody = {
 type RegisterBody = {
   companyName?: string;
   email?: string;
-  licenseType?: string;
   name?: string;
   password?: string;
 };
@@ -250,11 +250,13 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
           : defaultProjectId;
       }
 
+      const effectiveLicense = LicenseManager.getEffectiveLicenseForTenant(tenant);
       const token = await TokenManager.generateToken({
         email: user.email,
-        features: user.features || [],
-        licenseId: user.licenseId,
-        licenseType: user.licenseId as LicenseType,
+        features: effectiveLicense.features,
+        licenseExpiresAt: effectiveLicense.expiresAt?.toISOString(),
+        licenseId: effectiveLicense.licenseId,
+        licenseType: effectiveLicense.licenseType,
         role: user.role!,
         tenantDbName: tenant.dbName,
         tenantId: tenantIdStr,
@@ -286,11 +288,12 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         },
         user: {
           email: user.email,
-          features: user.features,
+          features: effectiveLicense.features,
           id: user._id,
-          licenseType: user.licenseId,
+          licenseType: effectiveLicense.licenseType,
           name: user.name,
           role: user.role,
+          servicePermissions: normalizeServicePermissions(user.servicePermissions),
         },
       });
     } catch (error) {
@@ -317,7 +320,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const { email, password, name, companyName, licenseType } =
+      const { email, password, name, companyName } =
         readJsonBody<RegisterBody>(request);
 
       if (!email || !password || !name || !companyName) {
@@ -347,14 +350,16 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const finalLicenseType = (licenseType as LicenseType) || 'FREE';
+      const finalLicenseType: LicenseType = 'FREE';
       const features = LicenseManager.getFeaturesForLicense(finalLicenseType);
       const dbName = `tenant_${slug}`;
 
       const tenant = await db.createTenant({
         companyName,
         dbName,
+        licenseId: 'FREE',
         licenseType: finalLicenseType,
+        licenseStatus: 'free',
         ownerId: '',
         slug,
       });
@@ -464,6 +469,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         mustChangePassword: Boolean(user.mustChangePassword),
         projectCount: (user.projectIds ?? []).length,
         role: user.role,
+        servicePermissions: normalizeServicePermissions(user.servicePermissions),
       });
     } catch (error) {
       logger.error('Session endpoint error', { error });

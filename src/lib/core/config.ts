@@ -39,6 +39,10 @@ export interface AppConfig {
 
   license: {
     enforceLicense: boolean;
+    offlinePublicKey: string;
+    offlinePublicKeyPath: string;
+    issuer: string;
+    audience: string;
   };
 
   database: {
@@ -142,6 +146,20 @@ export interface AppConfig {
     reaperIntervalMs: number;
     /** Bucket key used for browser artifacts when none is provided. */
     defaultArtifactBucketKey: string;
+    /** Block localhost/private network egress from managed browser sessions. */
+    blockPrivateNetwork: boolean;
+  };
+
+  jsSandbox: {
+    concurrencyProvider: 'memory';
+    defaultMaxConcurrent: number;
+    defaultTimeoutMs: number;
+    maxTimeoutMs: number;
+    memoryLimitMb: number;
+    maxCodeSizeBytes: number;
+    maxResultSizeBytes: number;
+    maxLogEntries: number;
+    childProcessTimeoutBufferMs: number;
   };
 
   systemModels: {
@@ -216,6 +234,10 @@ function buildConfig(source: ConfigSource): AppConfig {
 
     license: {
       enforceLicense: bool(source, 'ENFORCE_LICENSE', false),
+      offlinePublicKey: str(source, 'OFFLINE_LICENSE_PUBLIC_KEY', ''),
+      offlinePublicKeyPath: str(source, 'OFFLINE_LICENSE_PUBLIC_KEY_PATH', ''),
+      issuer: str(source, 'OFFLINE_LICENSE_ISSUER', 'cognipeer'),
+      audience: str(source, 'OFFLINE_LICENSE_AUDIENCE', 'cognipeer-console'),
     },
 
     database: {
@@ -312,6 +334,19 @@ function buildConfig(source: ConfigSource): AppConfig {
       viewportHeight: int(source, 'BROWSER_VIEWPORT_HEIGHT', 800),
       reaperIntervalMs: int(source, 'BROWSER_REAPER_INTERVAL_MS', 30 * 1000),
       defaultArtifactBucketKey: str(source, 'BROWSER_DEFAULT_ARTIFACT_BUCKET', 'browser-artifacts'),
+      blockPrivateNetwork: bool(source, 'BROWSER_BLOCK_PRIVATE_NETWORK', true),
+    },
+
+    jsSandbox: {
+      concurrencyProvider: oneOf(source, 'JS_SANDBOX_CONCURRENCY_PROVIDER', ['memory'] as const, 'memory'),
+      defaultMaxConcurrent: int(source, 'JS_SANDBOX_DEFAULT_MAX_CONCURRENT', 5),
+      defaultTimeoutMs: int(source, 'JS_SANDBOX_DEFAULT_TIMEOUT_MS', 5_000),
+      maxTimeoutMs: int(source, 'JS_SANDBOX_MAX_TIMEOUT_MS', 30_000),
+      memoryLimitMb: int(source, 'JS_SANDBOX_MEMORY_LIMIT_MB', 64),
+      maxCodeSizeBytes: int(source, 'JS_SANDBOX_MAX_CODE_SIZE_BYTES', 64 * 1024),
+      maxResultSizeBytes: int(source, 'JS_SANDBOX_MAX_RESULT_SIZE_BYTES', 512 * 1024),
+      maxLogEntries: int(source, 'JS_SANDBOX_MAX_LOG_ENTRIES', 100),
+      childProcessTimeoutBufferMs: int(source, 'JS_SANDBOX_CHILD_PROCESS_TIMEOUT_BUFFER_MS', 1_000),
     },
 
     systemModels: {
@@ -363,6 +398,15 @@ export function validateConfig(cfg: AppConfig): ConfigValidationError[] {
   }
   if (cfg.rateLimit.provider === 'redis' && !cfg.cache.redis.url) {
     errors.push({ key: 'REDIS_URL', message: 'Redis URL is required when RATE_LIMIT_PROVIDER=redis' });
+  }
+  if (
+    (cfg.rateLimit.provider === 'redis' || cfg.rateLimit.provider === 'memory')
+    && cfg.cache.provider !== cfg.rateLimit.provider
+  ) {
+    errors.push({
+      key: 'CACHE_PROVIDER',
+      message: `CACHE_PROVIDER must be ${cfg.rateLimit.provider} when RATE_LIMIT_PROVIDER=${cfg.rateLimit.provider}`,
+    });
   }
 
   return errors;

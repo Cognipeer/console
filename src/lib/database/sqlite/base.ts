@@ -9,6 +9,7 @@ import Database from 'better-sqlite3';
 import path from 'node:path';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createLogger } from '@/lib/core/logger';
 import { MAIN_SCHEMA_SQL, TENANT_SCHEMA_SQL } from './schema';
 
@@ -20,6 +21,7 @@ export const TABLES = {
   tenants: 'tenants',
   tenantUserDirectory: 'tenant_user_directory',
   users: 'users',
+  auditLogs: 'audit_logs',
   projects: 'projects',
   apiTokens: 'api_tokens',
   prompts: 'prompts',
@@ -53,6 +55,8 @@ export const TABLES = {
   configAuditLogs: 'config_audit_logs',
   mcpServers: 'mcp_servers',
   mcpRequestLogs: 'mcp_request_logs',
+  jsSandboxRuntimes: 'js_sandbox_runtimes',
+  jsSandboxExecutions: 'js_sandbox_executions',
   tools: 'tools',
   toolRequestLogs: 'tool_request_logs',
   agents: 'agents',
@@ -64,6 +68,11 @@ export const TABLES = {
   browsers: 'browsers',
   browserSessions: 'browser_sessions',
   browserSessionEvents: 'browser_session_events',
+  // ── Project membership & future groups ──────────────────────────────
+  userProjects: 'user_projects',
+  groups: 'groups',
+  groupMembers: 'group_members',
+  groupProjects: 'group_projects',
 } as const;
 
 // ── Base class ───────────────────────────────────────────────────────
@@ -73,6 +82,7 @@ export class SQLiteProviderBase {
   protected tenantDb: Database.Database | null = null;
   protected readonly dataDir: string;
   protected readonly mainDbName: string;
+  private readonly tenantContext = new AsyncLocalStorage<Database.Database>();
   /** Cache of already-opened tenant DB file handles */
   private tenantDbCache: Map<string, Database.Database> = new Map();
 
@@ -93,6 +103,7 @@ export class SQLiteProviderBase {
     this.mainDb.pragma('journal_mode = WAL');
     this.mainDb.pragma('foreign_keys = ON');
     this.mainDb.exec(MAIN_SCHEMA_SQL);
+    this.applyMainMigrations(this.mainDb);
 
     logger.info('SQLite main DB connected', { path: mainPath });
   }
@@ -103,6 +114,7 @@ export class SQLiteProviderBase {
     }
     this.tenantDbCache.clear();
     this.tenantDb = null;
+    this.tenantContext.disable();
 
     if (this.mainDb) {
       this.mainDb.close();
@@ -119,6 +131,7 @@ export class SQLiteProviderBase {
     const cached = this.tenantDbCache.get(tenantDbName);
     if (cached) {
       this.tenantDb = cached;
+      this.tenantContext.enterWith(cached);
       return;
     }
 
@@ -128,12 +141,71 @@ export class SQLiteProviderBase {
     db.pragma('foreign_keys = ON');
     db.exec(TENANT_SCHEMA_SQL);
     this.applyTenantMigrations(db);
+    this.applyTenantIndexes(db);
 
     this.tenantDbCache.set(tenantDbName, db);
     this.tenantDb = db;
+    this.tenantContext.enterWith(db);
+  }
+
+  private applyMainMigrations(db: Database.Database): void {
+    this.ensureTableColumn(
+      db,
+      TABLES.tenants,
+      'licenseId',
+      'licenseId TEXT',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.tenants,
+      'licenseKey',
+      'licenseKey TEXT',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.tenants,
+      'licenseStatus',
+      "licenseStatus TEXT NOT NULL DEFAULT 'free'",
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.tenants,
+      'licensePayload',
+      "licensePayload TEXT DEFAULT '{}'",
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.tenants,
+      'licenseActivatedAt',
+      'licenseActivatedAt TEXT',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.tenants,
+      'licenseLastVerifiedAt',
+      'licenseLastVerifiedAt TEXT',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.tenants,
+      'licenseExpiresAt',
+      'licenseExpiresAt TEXT',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.tenants,
+      'licenseError',
+      'licenseError TEXT',
+    );
   }
 
   private applyTenantMigrations(db: Database.Database): void {
+    this.ensureTableColumn(
+      db,
+      TABLES.users,
+      'servicePermissions',
+      'servicePermissions TEXT DEFAULT \'{}\'',
+    );
     this.ensureTableColumn(
       db,
       TABLES.quotaPolicies,
@@ -214,6 +286,19 @@ export class SQLiteProviderBase {
     );
   }
 
+  private applyTenantIndexes(db: Database.Database): void {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_tracing_sessions_project_startedAt
+        ON ${TABLES.agentTracingSessions}(projectId, startedAt DESC);
+      CREATE INDEX IF NOT EXISTS idx_tracing_sessions_project_createdAt
+        ON ${TABLES.agentTracingSessions}(projectId, createdAt DESC);
+      CREATE INDEX IF NOT EXISTS idx_tracing_sessions_project_status_startedAt
+        ON ${TABLES.agentTracingSessions}(projectId, status, startedAt DESC);
+      CREATE INDEX IF NOT EXISTS idx_tracing_sessions_project_agent_startedAt
+        ON ${TABLES.agentTracingSessions}(projectId, agentName, startedAt DESC);
+    `);
+  }
+
   private ensureTableColumn(
     db: Database.Database,
     tableName: string,
@@ -245,10 +330,11 @@ export class SQLiteProviderBase {
   }
 
   protected getTenantDb(): Database.Database {
-    if (!this.tenantDb) {
+    const tenantDb = this.tenantContext.getStore() ?? this.tenantDb;
+    if (!tenantDb) {
       throw new Error('Tenant database not set. Call switchToTenant() first.');
     }
-    return this.tenantDb;
+    return tenantDb;
   }
 
   /** Generate a new random ID (replaces MongoDB ObjectId). */

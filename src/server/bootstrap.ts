@@ -5,6 +5,9 @@ import { getCache, destroyCache } from '@/lib/core/cache';
 import { runtimePool } from '@/lib/core/runtimePool';
 import { drainPendingTasks } from '@/lib/core/asyncTask';
 import { registerHealthCheck } from '@/lib/core/health';
+import { listAutomations } from '@/lib/services/automations';
+import { browserManager } from '@/lib/services/browser/browserManager';
+import { reconcileOrphanedBrowserSessions } from '@/lib/services/browser/browserOperationsService';
 import { startPollScheduler } from '@/lib/services/inferenceMonitoring/pollScheduler';
 import { startAlertScheduler } from '@/lib/services/alerts/alertScheduler';
 import { ensureServerEnvLoaded } from './env';
@@ -69,6 +72,42 @@ export async function bootstrapApplication(): Promise<void> {
   registerShutdownHandler('runtime-pool', async () => {
     runtimePool.destroy();
   });
+
+  registerHealthCheck('browser-runtime', async () => {
+    const stats = browserManager.getRuntimeStats();
+    return {
+      status: stats.reaper.lastError ? 'degraded' : 'ok',
+      details: {
+        browserConnected: stats.browserConnected,
+        liveSessions: stats.liveSessions,
+        reaperError: stats.reaper.lastError,
+        reaperPaused: stats.reaper.paused,
+      },
+    };
+  });
+
+  registerHealthCheck('automations', async () => {
+    const automations = listAutomations();
+    const degraded = automations.some((automation) => automation.state === 'degraded');
+    return {
+      status: degraded ? 'degraded' : 'ok',
+      details: {
+        automations: automations.map((automation) => ({
+          key: automation.key,
+          lastError: automation.lastError,
+          state: automation.state,
+        })),
+      },
+    };
+  });
+
+  try {
+    await reconcileOrphanedBrowserSessions();
+  } catch (error) {
+    logger.warn('Browser session reconciliation failed during startup', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 
   startPollScheduler();
   startAlertScheduler();

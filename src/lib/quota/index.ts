@@ -1,5 +1,4 @@
 export * from './types';
-export { getPlanQuotaLimits } from './planLimits';
 export {
   checkQuota,
   checkResourceQuota,

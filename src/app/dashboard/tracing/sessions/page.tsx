@@ -81,13 +81,13 @@ export default function TracingSessionsPage() {
     return params;
   }, [agentFilter, dateRange, page, pageSize, query, statusFilter]);
 
-  const fetchSessions = useCallback(async (isRefresh = false) => {
+  const fetchSessions = useCallback(async (isRefresh = false, signal?: AbortSignal) => {
     try {
       if (isRefresh) setRefreshing(true);
       else setLoading(true);
 
       const params = buildQueryParams();
-      const response = await fetch(`/api/tracing/sessions?${params.toString()}`);
+      const response = await fetch(`/api/tracing/sessions?${params.toString()}`, { signal });
 
       if (!response.ok) {
         const errorData = await response.json();
@@ -98,17 +98,24 @@ export default function TracingSessionsPage() {
       setSessions(data.sessions || []);
       setTotalSessions(data.total || 0);
     } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        return;
+      }
       console.error('Failed to load sessions:', error);
       setSessions([]);
       setTotalSessions(0);
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (!signal?.aborted) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   }, [buildQueryParams]);
 
   useEffect(() => {
-    fetchSessions();
+    const controller = new AbortController();
+    fetchSessions(false, controller.signal);
+    return () => controller.abort();
   }, [fetchSessions]);
 
   const handleRefresh = () => {

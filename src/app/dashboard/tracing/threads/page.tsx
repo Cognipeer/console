@@ -91,13 +91,13 @@ export default function TracingThreadsPage() {
     return params;
   }, [threadIdFilter, agentFilter, dateRange, page, pageSize, statusFilter]);
 
-  const fetchThreads = useCallback(async (isRefresh = false) => {
+  const fetchThreads = useCallback(async (isRefresh = false, signal?: AbortSignal) => {
     try {
       if (isRefresh) setRefreshing(true);
       else setLoading(true);
 
       const params = buildQueryParams();
-      const response = await fetch(`/api/tracing/threads?${params.toString()}`);
+      const response = await fetch(`/api/tracing/threads?${params.toString()}`, { signal });
 
       if (!response.ok) {
         const errorData = await response.json();
@@ -108,17 +108,24 @@ export default function TracingThreadsPage() {
       setThreads(data.threads || []);
       setTotalThreads(data.total || 0);
     } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        return;
+      }
       console.error('Failed to load threads:', error);
       setThreads([]);
       setTotalThreads(0);
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (!signal?.aborted) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   }, [buildQueryParams]);
 
   useEffect(() => {
-    fetchThreads();
+    const controller = new AbortController();
+    fetchThreads(false, controller.signal);
+    return () => controller.abort();
   }, [fetchThreads]);
 
   const handleRefresh = () => {

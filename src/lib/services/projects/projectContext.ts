@@ -1,5 +1,5 @@
 import type { NextRequest } from '@/server/api/http';
-import { getDatabase, type IProject, type IUser } from '@/lib/database';
+import { getDatabase, type IProject, type IUser, type IUserProject } from '@/lib/database';
 import { ensureDefaultProject } from './projectService';
 
 export class ProjectContextError extends Error {
@@ -16,6 +16,8 @@ export interface ProjectContext {
   projectId: string;
   project: IProject;
   user: IUser;
+  /** Membership record for the active project. Null for owners/admins (implicit access). */
+  userProject: IUserProject | null;
 }
 
 export async function resolveProjectContext(
@@ -34,6 +36,8 @@ export async function resolveProjectContext(
     throw new ProjectContextError('Unauthorized', 401);
   }
 
+  const isPrivileged = user.role === 'owner' || user.role === 'admin';
+
   const defaultProject = await ensureDefaultProject(
     ctx.tenantDbName,
     ctx.tenantId,
@@ -43,18 +47,21 @@ export async function resolveProjectContext(
 
   let projectId = ctx.activeProjectId || defaultProjectId;
 
-  if (user.role === 'user' || user.role === 'project_admin') {
-    const allowed = (user.projectIds ?? []).map(String);
+  if (!isPrivileged) {
+    // Resolve project access via UserProject membership records
+    const memberships = await db.listUserProjectsByUser(ctx.userId);
 
-    if (allowed.length === 0) {
+    if (memberships.length === 0) {
       throw new ProjectContextError('No project assigned', 403);
     }
 
-    if (!projectId || !allowed.includes(projectId)) {
-      projectId = allowed[0];
+    const memberProjectIds = memberships.map((m) => m.projectId);
+
+    if (!projectId || !memberProjectIds.includes(projectId)) {
+      projectId = memberProjectIds[0];
     }
 
-    if (!allowed.includes(projectId)) {
+    if (!projectId || !memberProjectIds.includes(projectId)) {
       throw new ProjectContextError('Forbidden', 403);
     }
   }
@@ -68,10 +75,15 @@ export async function resolveProjectContext(
     throw new ProjectContextError('Project not found', 404);
   }
 
+  const userProject = isPrivileged
+    ? null
+    : await db.findUserProject(ctx.userId, projectId);
+
   return {
     projectId,
     project,
     user,
+    userProject,
   };
 }
 

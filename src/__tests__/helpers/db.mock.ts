@@ -9,6 +9,7 @@
 
 import { vi, type Mocked } from 'vitest';
 import type { DatabaseProvider } from '@/lib/database';
+import { hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
 
 // MockDb satisfies DatabaseProvider (callable) AND exposes .mock* assertion helpers
 export type MockDb = Mocked<DatabaseProvider>;
@@ -42,6 +43,10 @@ export function createMockDb(overrides: Partial<MockDb> = {}): MockDb {
     deleteUser: vi.fn().mockResolvedValue(true),
     listUsers: vi.fn().mockResolvedValue([]),
 
+    // Audit logs
+    createAuditLog: vi.fn().mockResolvedValue({}),
+    listAuditLogs: vi.fn().mockResolvedValue([]),
+
     // Project ops
     createProject: vi.fn().mockResolvedValue({ _id: 'proj-1', key: 'default', name: 'Default Project', tenantId: 'tenant-1', createdBy: 'user-1' }),
     updateProject: vi.fn().mockResolvedValue(null),
@@ -62,11 +67,11 @@ export function createMockDb(overrides: Partial<MockDb> = {}): MockDb {
     listApiTokens: vi.fn().mockResolvedValue([]),
     listTenantApiTokens: vi.fn().mockResolvedValue([]),
     listProjectApiTokens: vi.fn().mockResolvedValue([]),
-    findApiTokenByToken: vi.fn().mockResolvedValue(null),
+    findApiTokenByHash: vi.fn().mockResolvedValue(null),
     deleteApiToken: vi.fn().mockResolvedValue(true),
     deleteTenantApiToken: vi.fn().mockResolvedValue(true),
     deleteProjectApiToken: vi.fn().mockResolvedValue(true),
-    updateTokenLastUsed: vi.fn().mockResolvedValue(undefined),
+    updateTokenLastUsedByHash: vi.fn().mockResolvedValue(undefined),
 
     // Agent tracing sessions
     createAgentTracingSession: vi.fn().mockResolvedValue({}),
@@ -76,6 +81,40 @@ export function createMockDb(overrides: Partial<MockDb> = {}): MockDb {
     updateAgentTracingSession: vi.fn().mockResolvedValue(null),
     findAgentTracingSessionById: vi.fn().mockResolvedValue(null),
     listAgentTracingSessions: vi.fn().mockResolvedValue({ sessions: [], total: 0 }),
+    aggregateAgentTracingDashboard: vi.fn().mockResolvedValue({
+      recentSessions: [],
+      recentAgents: [],
+      recentAgentsTotal: 0,
+      analytics: {
+        totals: {
+          sessionsCount: 0,
+          totalEvents: 0,
+          totalInputTokens: 0,
+          totalOutputTokens: 0,
+          totalCachedInputTokens: 0,
+          totalTokens: 0,
+          totalDurationMs: 0,
+          averageInputTokensPerSession: 0,
+          averageOutputTokensPerSession: 0,
+          averageCachedInputTokensPerSession: 0,
+          averageTokensPerSession: 0,
+          averageDurationMs: 0,
+        },
+        tools: {
+          totals: {
+            totalCalls: 0,
+            errorCalls: 0,
+            successCalls: 0,
+            errorRate: 0,
+          },
+          items: [],
+        },
+        statuses: [],
+        models: [],
+        agents: [],
+        daily: [],
+      },
+    }),
     listAgentTracingThreads: vi.fn().mockResolvedValue({ threads: [], total: 0 }),
 
     // Agent tracing events
@@ -277,6 +316,8 @@ export const API_TOKEN_VALID = {
   tenantId: 'tenant-acme-id',
   userId: 'user-alice-id',
   token: 'sk-test-valid-token-abc123',
+  tokenHash: hashApiToken('sk-test-valid-token-abc123'),
+  tokenPrefix: 'sk-test-valid-t',
   label: 'Test Token',
   name: 'Test Token',
   projectId: 'proj-default-id',

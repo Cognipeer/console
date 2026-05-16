@@ -5,6 +5,7 @@
 import type { IUser } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES, logger } from './base';
+import { normalizeServicePermissions } from '@/lib/security/rbac';
 
 interface WithTenantOps {
   findTenantById(id: string): Promise<import('../provider.interface').ITenant | null>;
@@ -47,9 +48,9 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
 
       db.prepare(`
         INSERT INTO ${TABLES.users}
-        (id, email, emailLower, password, name, tenantId, role, projectIds, licenseId, features,
+        (id, email, emailLower, password, name, tenantId, role, projectIds, servicePermissions, licenseId, features,
          invitedBy, invitedAt, inviteAcceptedAt, mustChangePassword, createdAt, updatedAt)
-        VALUES (@id, @email, @emailLower, @password, @name, @tenantId, @role, @projectIds, @licenseId, @features,
+        VALUES (@id, @email, @emailLower, @password, @name, @tenantId, @role, @projectIds, @servicePermissions, @licenseId, @features,
          @invitedBy, @invitedAt, @inviteAcceptedAt, @mustChangePassword, @createdAt, @updatedAt)
       `).run({
         id,
@@ -60,6 +61,7 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
         tenantId: userData.tenantId,
         role: userData.role,
         projectIds: this.toJson(userData.projectIds ?? []),
+        servicePermissions: this.toJson(normalizeServicePermissions(userData.servicePermissions)),
         licenseId: userData.licenseId,
         features: this.toJson(userData.features ?? []),
         invitedBy: userData.invitedBy ?? null,
@@ -118,6 +120,10 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
       if (data.name !== undefined) { sets.push('name = @name'); params.name = data.name; }
       if (data.role !== undefined) { sets.push('role = @role'); params.role = data.role; }
       if (data.projectIds !== undefined) { sets.push('projectIds = @projectIds'); params.projectIds = this.toJson(data.projectIds); }
+      if (data.servicePermissions !== undefined) {
+        sets.push('servicePermissions = @servicePermissions');
+        params.servicePermissions = this.toJson(normalizeServicePermissions(data.servicePermissions));
+      }
       if (data.licenseId !== undefined) { sets.push('licenseId = @licenseId'); params.licenseId = data.licenseId; }
       if (data.features !== undefined) { sets.push('features = @features'); params.features = this.toJson(data.features); }
       if (data.invitedBy !== undefined) { sets.push('invitedBy = @invitedBy'); params.invitedBy = data.invitedBy; }
@@ -195,6 +201,7 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
         tenantId: r.tenantId as string,
         role: r.role as IUser['role'],
         projectIds: this.parseJson<string[]>(r.projectIds, []),
+        servicePermissions: normalizeServicePermissions(this.parseJson(r.servicePermissions, {})),
         licenseId: r.licenseId as string,
         features: this.parseJson<string[]>(r.features, []),
         invitedBy: r.invitedBy as string | undefined,

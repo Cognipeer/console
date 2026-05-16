@@ -1,17 +1,19 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { Button, Group, Text, ActionIcon, Box, Modal, CopyButton, Tooltip } from '@mantine/core';
+import { Button, Group, Text, ActionIcon, Box, Modal, CopyButton, Tooltip, TextInput } from '@mantine/core';
 import { DataTable } from 'mantine-datatable';
-import { IconKey, IconTrash, IconCopy, IconCheck } from '@tabler/icons-react';
+import { IconKey, IconTrash, IconCopy, IconCheck, IconSearch } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 import CreateTokenModal from './CreateTokenModal';
 import { useTranslations } from '@/lib/i18n';
+import { TABLE_PAGE_SIZE_OPTIONS, useClientTable } from '@/hooks/useClientTable';
 
 interface ApiToken {
   _id: string;
   label: string;
   token?: string;
+  tokenPrefix?: string;
   userId?: string;
   canDelete?: boolean;
   lastUsed?: string;
@@ -28,6 +30,14 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
   const t = useTranslations('settings.tokenManagement');
   const tNotifications = useTranslations('notifications');
   const tCommon = useTranslations('common');
+  const tokenTable = useClientTable({
+    records: tokens,
+    initialPageSize: 10,
+    search: (token, query) =>
+      [token.label, token.tokenPrefix, token.userId]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(query)),
+  });
 
   const listUrl = projectId
     ? `/api/projects/${encodeURIComponent(projectId)}/tokens`
@@ -130,13 +140,32 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
         </Button>
       </Group>
 
+      <Group mb="sm" justify="space-between">
+        <TextInput
+          value={tokenTable.query}
+          onChange={(event) => tokenTable.setQuery(event.currentTarget.value)}
+          placeholder="Search tokens"
+          leftSection={<IconSearch size={14} />}
+          w={{ base: '100%', sm: 280 }}
+        />
+        <Text size="sm" c="dimmed">
+          {tokenTable.totalRecords} records
+        </Text>
+      </Group>
+
       <DataTable
         withTableBorder
         borderRadius="sm"
         striped
         highlightOnHover
         idAccessor="_id"
-        records={tokens}
+        records={tokenTable.records}
+        totalRecords={tokenTable.totalRecords}
+        recordsPerPage={tokenTable.pageSize}
+        recordsPerPageOptions={TABLE_PAGE_SIZE_OPTIONS}
+        onRecordsPerPageChange={tokenTable.setPageSize}
+        page={tokenTable.page}
+        onPageChange={tokenTable.setPage}
         columns={[
           {
             accessor: 'label',
@@ -147,7 +176,11 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
                   {token.label}
                 </Text>
                 <Text size="xs" c="dimmed" ff="monospace">
-                  {token.token ? maskToken(token.token) : t('table.hidden')}
+                  {token.token
+                    ? maskToken(token.token)
+                    : token.tokenPrefix
+                      ? `${token.tokenPrefix}...`
+                      : t('table.hidden')}
                 </Text>
               </div>
             ),

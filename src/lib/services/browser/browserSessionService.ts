@@ -13,6 +13,7 @@ import { getConfig } from '@/lib/core/config';
 import { getDatabase, type DatabaseProvider } from '@/lib/database';
 import { uploadFile } from '@/lib/services/files';
 import { browserManager } from './browserManager';
+import { matchesProjectScope, redactTypedText, sanitizePersistedUrl } from './internals';
 import type {
   BrowserAction,
   BrowserActionResult,
@@ -49,6 +50,17 @@ function serializeEvent(record: IBrowserSessionEvent): BrowserSessionEventView {
   return { ...rest, id: typeof _id === 'string' ? _id : _id?.toString() ?? '' };
 }
 
+function canAccessSession(
+  ctx: SessionContext,
+  record: IBrowserSession | null | undefined,
+): record is IBrowserSession {
+  return Boolean(
+    record
+    && record.tenantId === ctx.tenantId
+    && matchesProjectScope(record.projectId, ctx.projectId),
+  );
+}
+
 interface SessionContext {
   tenantDbName: string;
   tenantId: string;
@@ -65,7 +77,11 @@ export async function createBrowserSession(
   const db = await withTenantDb(ctx.tenantDbName);
   // Resolve parent Browser to inherit defaults
   const browser = await db.findBrowserById(input.browserId);
-  if (!browser || browser.tenantId !== ctx.tenantId) {
+  if (
+    !browser
+    || browser.tenantId !== ctx.tenantId
+    || !matchesProjectScope(browser.projectId, ctx.projectId)
+  ) {
     throw new Error(`Browser not found: ${input.browserId}`);
   }
   if (browser.status !== 'active') {
@@ -157,7 +173,7 @@ export async function getBrowserSession(
 ): Promise<BrowserSessionView | null> {
   const db = await withTenantDb(ctx.tenantDbName);
   const record = await db.findBrowserSessionById(sessionId);
-  if (!record || record.tenantId !== ctx.tenantId) return null;
+  if (!canAccessSession(ctx, record)) return null;
   return serializeSession(record);
 }
 
@@ -167,7 +183,7 @@ async function loadSessionForKey(
 ): Promise<{ id: string; record: IBrowserSession }> {
   const db = await withTenantDb(ctx.tenantDbName);
   const record = await db.findBrowserSessionByKey(ctx.tenantId, sessionKey, ctx.projectId);
-  if (!record) throw new Error(`Browser session not found: ${sessionKey}`);
+  if (!canAccessSession(ctx, record)) throw new Error(`Browser session not found: ${sessionKey}`);
   return { id: String(record._id), record };
 }
 
@@ -189,6 +205,7 @@ async function persistEvent(
 ): Promise<BrowserSessionEventView> {
   const db = await withTenantDb(ctx.tenantDbName);
   const sequence = (await db.countBrowserSessionEvents(sessionId)) + 1;
+  const sanitizedUrl = sanitizePersistedUrl(payload.url);
   const event = await db.createBrowserSessionEvent({
     tenantId: ctx.tenantId,
     projectId: ctx.projectId,
@@ -196,7 +213,7 @@ async function persistEvent(
     sequence,
     type,
     status: payload.status,
-    url: payload.url,
+    url: sanitizedUrl,
     selector: payload.selector,
     ref: payload.ref,
     durationMs: payload.durationMs,
@@ -216,7 +233,7 @@ async function persistEvent(
     .updateBrowserSession(sessionId, {
       eventCount: sequence,
       lastActivityAt: new Date(),
-      currentUrl: payload.url,
+      currentUrl: sanitizedUrl,
     })
     .catch(() => undefined);
   return serializeEvent(event);
@@ -287,9 +304,11 @@ export async function captureSnapshot(
  * Useful for live UI polling – the UI converts the buffer to a data URL.
  */
 export async function captureLiveScreenshot(
+  ctx: SessionContext,
   sessionKey: string,
   input?: BrowserScreenshotInput,
 ): Promise<{ buffer: Buffer; contentType: string }> {
+  await loadSessionForKey(ctx, sessionKey);
   return browserManager.screenshot(sessionKey, input);
 }
 
@@ -423,7 +442,7 @@ export async function listBrowserSessionEvents(
 ): Promise<BrowserSessionEventView[]> {
   const db = await withTenantDb(ctx.tenantDbName);
   const session = await db.findBrowserSessionById(sessionId);
-  if (!session || session.tenantId !== ctx.tenantId) return [];
+  if (!canAccessSession(ctx, session)) return [];
   const events = await db.listBrowserSessionEvents(sessionId, options);
   return events.map(serializeEvent);
 }
@@ -434,18 +453,19 @@ export async function deleteBrowserSession(
 ): Promise<boolean> {
   const db = await withTenantDb(ctx.tenantDbName);
   const session = await db.findBrowserSessionById(sessionId);
-  if (!session || session.tenantId !== ctx.tenantId) return false;
+  if (!canAccessSession(ctx, session)) return false;
   // Best-effort: ensure manager-side session is closed first
   await browserManager.closeSession(session.sessionKey, 'deleted').catch(() => undefined);
   return db.deleteBrowserSession(sessionId);
 }
 
 function redactAction(action: BrowserAction): Record<string, unknown> {
-  // Redact any obviously-sensitive fields before persisting (e.g., long text).
-  const clone: Record<string, unknown> = { ...(action as object) };
-  if ('text' in clone && typeof clone.text === 'string' && clone.text.length > 200) {
-    clone.text = `${clone.text.slice(0, 200)}…`;
+  const clone: Record<string, unknown> = { ...(action as unknown as Record<string, unknown>) };
+  if (typeof clone.url === 'string') {
+    clone.url = sanitizePersistedUrl(clone.url);
+  }
+  if ('text' in clone && typeof clone.text === 'string') {
+    clone.text = redactTypedText(clone.text);
   }
   return clone;
 }
-

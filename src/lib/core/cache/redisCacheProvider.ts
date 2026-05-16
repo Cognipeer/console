@@ -6,10 +6,32 @@
  * Suitable for multi-instance / horizontal scaling.
  */
 
+import { randomUUID } from 'crypto';
 import type { CacheProvider } from './cacheProvider.interface';
 
 // ioredis is an optional dependency — only imported when this provider is used
 let Redis: typeof import('ioredis').default;
+
+const RELEASE_LOCK_SCRIPT = `
+if redis.call("get", KEYS[1]) == ARGV[1] then
+  return redis.call("del", KEYS[1])
+else
+  return 0
+end
+`;
+
+const INCREMENT_COUNTER_SCRIPT = `
+local count = redis.call("incrby", KEYS[1], ARGV[1])
+if count == tonumber(ARGV[1]) then
+  redis.call("expire", KEYS[1], ARGV[2])
+end
+local ttl = redis.call("ttl", KEYS[1])
+if ttl < 0 then
+  redis.call("expire", KEYS[1], ARGV[2])
+  ttl = tonumber(ARGV[2])
+end
+return { count, ttl }
+`;
 
 export class RedisCacheProvider implements CacheProvider {
   readonly name = 'redis';
@@ -90,6 +112,44 @@ export class RedisCacheProvider implements CacheProvider {
       }
       await pipeline.exec();
     }
+  }
+
+  async acquireLock(key: string, ttlSeconds: number): Promise<string | undefined> {
+    const ttl = Math.max(1, Math.ceil(ttlSeconds));
+    const token = randomUUID();
+    const result = await this.ensureClient().set(key, token, 'EX', ttl, 'NX');
+    return result === 'OK' ? token : undefined;
+  }
+
+  async incrementCounter(
+    key: string,
+    ttlSeconds: number,
+    amount: number = 1,
+  ): Promise<{ count: number; resetAt: Date }> {
+    const ttl = Math.max(1, Math.ceil(ttlSeconds));
+    const incrementBy = Math.max(0, Math.ceil(amount));
+    const result = await this.ensureClient().eval(
+      INCREMENT_COUNTER_SCRIPT,
+      1,
+      key,
+      String(incrementBy),
+      String(ttl),
+    );
+
+    if (!Array.isArray(result) || result.length < 2) {
+      throw new Error('Unexpected Redis counter response');
+    }
+
+    const count = Number(result[0]);
+    const remainingTtl = Number(result[1]);
+    return {
+      count,
+      resetAt: new Date(Date.now() + Math.max(1, remainingTtl) * 1000),
+    };
+  }
+
+  async releaseLock(key: string, token: string): Promise<void> {
+    await this.ensureClient().eval(RELEASE_LOCK_SCRIPT, 1, key, token);
   }
 
   async destroy(): Promise<void> {

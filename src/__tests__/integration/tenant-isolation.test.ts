@@ -53,7 +53,7 @@ describe('Tenant isolation — switchToTenant is always called', () => {
       const { NextRequest } = await import('next/server');
       const { requireApiToken } = await import('@/lib/services/apiTokenAuth');
 
-      mockDb.findApiTokenByToken.mockResolvedValue(API_TOKEN_VALID);
+      mockDb.findApiTokenByHash.mockResolvedValue(API_TOKEN_VALID);
       mockDb.findTenantById.mockResolvedValue(TENANT_ACME);
       mockDb.findUserById.mockResolvedValue(USER_ALICE);
 

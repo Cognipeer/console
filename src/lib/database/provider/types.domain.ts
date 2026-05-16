@@ -435,6 +435,79 @@ export interface IAgentConversation {
   updatedAt?: Date;
 }
 
+// ── JS Sandbox runtime types ─────────────────────────────────────────────
+
+export type JsSandboxRuntimeStatus = 'active' | 'disabled';
+export type JsSandboxEngine = 'isolated-vm';
+export type JsSandboxExecutionStatus = 'success' | 'error' | 'timeout';
+export type JsSandboxCallerType = 'dashboard' | 'api' | 'agent';
+
+export interface IJsSandboxRuntimeLimits {
+  /** Default execution timeout used when a request does not override it. */
+  defaultTimeoutMs: number;
+  /** Hard upper timeout bound accepted by the runtime. */
+  maxTimeoutMs: number;
+  /** V8 isolate memory limit in megabytes. */
+  memoryLimitMb: number;
+  /** Maximum UTF-8 source size accepted per execution. */
+  maxCodeSizeBytes: number;
+  /** Maximum serialized result size accepted per execution. */
+  maxResultSizeBytes: number;
+  /** Maximum number of captured console log entries. */
+  maxLogEntries: number;
+}
+
+export interface IJsSandboxNetworkPolicy {
+  enabled: boolean;
+  allowList?: string[];
+}
+
+export interface IJsSandboxRuntime {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name: string;
+  description?: string;
+  status: JsSandboxRuntimeStatus;
+  engine: JsSandboxEngine;
+  libraries: string[];
+  limits: IJsSandboxRuntimeLimits;
+  network: IJsSandboxNetworkPolicy;
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IJsSandboxExecutionLog {
+  stdout: string[];
+  stderr: string[];
+}
+
+export interface IJsSandboxExecution {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  runtimeId: string;
+  runtimeKey: string;
+  executionId: string;
+  status: JsSandboxExecutionStatus;
+  durationMs: number;
+  timeoutMs: number;
+  memoryLimitMb: number;
+  codeHash: string;
+  codePreview: string;
+  inputPreview?: string;
+  result?: unknown;
+  logs?: IJsSandboxExecutionLog;
+  errorMessage?: string;
+  callerType: JsSandboxCallerType;
+  callerTokenId?: string;
+  createdAt?: Date;
+}
+
 // ── Incident types ──────────────────────────────────────────────────────
 
 export type IncidentStatus = 'open' | 'acknowledged' | 'investigating' | 'resolved' | 'closed';
@@ -617,4 +690,3 @@ export interface IBrowserSessionEvent {
   errorMessage?: string;
   createdAt?: Date;
 }
-

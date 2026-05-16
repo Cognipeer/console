@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from '@/server/api/http';
 import {
+  listProjectVectorIndexes,
   listVectorProviders,
-  listVectorIndexes,
 } from '@/lib/services/vector/vectorService';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
 import {
@@ -32,31 +32,24 @@ export async function GET(request: NextRequest) {
       request.nextUrl.searchParams,
     );
 
-    const providers = await listVectorProviders(
-      tenantDbName,
-      tenantId,
-      projectContext.projectId,
-      {},
-    );
+    const [providers, projectIndexes] = await Promise.all([
+      listVectorProviders(
+        tenantDbName,
+        tenantId,
+        projectContext.projectId,
+        {},
+      ),
+      listProjectVectorIndexes(tenantDbName, projectContext.projectId),
+    ]);
 
-    const indexesByProvider = await Promise.all(
-      providers.map(async (provider) => {
-        try {
-          const indexes = await listVectorIndexes(
-            tenantDbName,
-            tenantId,
-            provider.key,
-            projectContext.projectId,
-          );
-          const scopedIndexes = indexes.filter((index) =>
-            isDateInDashboardRange(index.createdAt, filter),
-          );
-          return { provider, indexes: scopedIndexes };
-        } catch {
-          return { provider, indexes: [] };
-        }
-      }),
-    );
+    const indexesByProvider = providers.map((provider) => ({
+      provider,
+      indexes: projectIndexes.filter(
+        (index) =>
+          index.providerKey === provider.key
+          && isDateInDashboardRange(index.createdAt, filter),
+      ),
+    }));
 
     const hasDateFilter = Boolean(filter.from || filter.to);
     const providersWithIndexes = new Set(

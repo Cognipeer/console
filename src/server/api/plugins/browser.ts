@@ -5,6 +5,10 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import {
+  getBrowserErrorMessage,
+  getBrowserErrorStatus,
+} from '@/lib/services/browser/errors';
+import {
   captureLiveScreenshot,
   captureScreenshot,
   captureSnapshot,
@@ -23,15 +27,15 @@ import {
   runBrowserAction,
   updateBrowser,
 } from '@/lib/services/browser';
-import type {
-  BrowserAction,
-  BrowserExtractInput,
-  BrowserPdfInput,
-  BrowserScreenshotInput,
-  CreateBrowserInput,
-  CreateBrowserSessionInput,
-  UpdateBrowserInput,
-} from '@/lib/services/browser';
+import {
+  browserActionSchema,
+  browserExtractInputSchema,
+  browserPdfInputSchema,
+  browserScreenshotInputSchema,
+  createBrowserInputSchema,
+  createBrowserSessionInputSchema,
+  updateBrowserInputSchema,
+} from '@/lib/services/browser/validation';
 import {
   readJsonBody,
   requireProjectContextForRequest,
@@ -41,12 +45,17 @@ import {
 
 const logger = createLogger('api:browser');
 
+function sendBrowserError(reply: { code: (statusCode: number) => { send: (body: Record<string, unknown>) => unknown } }, error: unknown, fallback: string) {
+  const status = getBrowserErrorStatus(error);
+  return reply.code(status).send({ error: getBrowserErrorMessage(error, fallback) });
+}
+
 export const browserApiPlugin: FastifyPluginAsync = async (app) => {
   // ── Browsers (parent profiles) ────────────────────────────────────
   app.post('/browser/browsers', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
-      const body = readJsonBody<CreateBrowserInput>(request);
+      const body = createBrowserInputSchema.parse(readJsonBody<unknown>(request));
       const created = await createBrowser(
         { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
         { ...body, createdBy: session.userEmail ?? session.userId },
@@ -55,7 +64,7 @@ export const browserApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       if (sendProjectContextError(reply, error)) return;
       logger.error('Create browser failed', { error });
-      return reply.code(500).send({ error: error instanceof Error ? error.message : 'Failed to create' });
+      return sendBrowserError(reply, error, 'Failed to create browser');
     }
   }));
 
@@ -96,7 +105,7 @@ export const browserApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { idOrKey } = request.params as { idOrKey: string };
-      const body = readJsonBody<UpdateBrowserInput>(request);
+      const body = updateBrowserInputSchema.parse(readJsonBody<unknown>(request));
       const updated = await updateBrowser(
         { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
         idOrKey,
@@ -107,7 +116,7 @@ export const browserApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       if (sendProjectContextError(reply, error)) return;
       logger.error('Update browser failed', { error });
-      return reply.code(500).send({ error: error instanceof Error ? error.message : 'Failed' });
+      return sendBrowserError(reply, error, 'Failed to update browser');
     }
   }));
 
@@ -124,7 +133,7 @@ export const browserApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       if (sendProjectContextError(reply, error)) return;
       logger.error('Delete browser failed', { error });
-      return reply.code(400).send({ error: error instanceof Error ? error.message : 'Failed' });
+      return sendBrowserError(reply, error, 'Failed to delete browser');
     }
   }));
 
@@ -132,7 +141,7 @@ export const browserApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/browser/sessions', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
-      const body = readJsonBody<CreateBrowserSessionInput>(request);
+      const body = createBrowserSessionInputSchema.parse(readJsonBody<unknown>(request));
       const created = await createBrowserSession(
         { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
         { ...body, createdBy: session.userEmail ?? session.userId },
@@ -141,7 +150,7 @@ export const browserApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       if (sendProjectContextError(reply, error)) return;
       logger.error('Create browser session failed', { error });
-      return reply.code(500).send({ error: error instanceof Error ? error.message : 'Failed to create' });
+      return sendBrowserError(reply, error, 'Failed to create browser session');
     }
   }));
 
@@ -209,7 +218,7 @@ export const browserApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { sessionKey } = request.params as { sessionKey: string };
-      const action = readJsonBody<BrowserAction>(request);
+      const action = browserActionSchema.parse(readJsonBody<unknown>(request));
       const result = await runBrowserAction(
         { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
         sessionKey,
@@ -219,7 +228,7 @@ export const browserApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       if (sendProjectContextError(reply, error)) return;
       logger.error('Run action failed', { error });
-      return reply.code(500).send({ error: error instanceof Error ? error.message : 'Failed to run action' });
+      return sendBrowserError(reply, error, 'Failed to run browser action');
     }
   }));
 
@@ -227,7 +236,7 @@ export const browserApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { sessionKey } = request.params as { sessionKey: string };
-      const input = readJsonBody<BrowserExtractInput>(request);
+      const input = browserExtractInputSchema.parse(readJsonBody<unknown>(request));
       const result = await extractFromBrowser(
         { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
         sessionKey,
@@ -237,7 +246,7 @@ export const browserApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       if (sendProjectContextError(reply, error)) return;
       logger.error('Extract failed', { error });
-      return reply.code(500).send({ error: error instanceof Error ? error.message : 'Failed to extract' });
+      return sendBrowserError(reply, error, 'Failed to extract browser data');
     }
   }));
 
@@ -261,15 +270,21 @@ export const browserApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { sessionKey } = request.params as { sessionKey: string };
       const query = (request.query ?? {}) as { fullPage?: string };
-      const { buffer, contentType } = await captureLiveScreenshot(sessionKey, {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const { buffer, contentType } = await captureLiveScreenshot({
+        tenantDbName: session.tenantDbName,
+        tenantId: session.tenantId,
+        projectId,
+      }, sessionKey, {
         fullPage: query.fullPage === 'true',
       });
       reply.header('content-type', contentType);
       reply.header('cache-control', 'no-store');
       return reply.send(buffer);
     } catch (error) {
+      if (sendProjectContextError(reply, error)) return;
       logger.error('Live screenshot failed', { error });
-      return reply.code(500).send({ error: error instanceof Error ? error.message : 'Failed' });
+      return sendBrowserError(reply, error, 'Failed to capture live screenshot');
     }
   }));
 
@@ -277,7 +292,7 @@ export const browserApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { sessionKey } = request.params as { sessionKey: string };
-      const input = readJsonBody<BrowserScreenshotInput>(request);
+      const input = browserScreenshotInputSchema.parse(readJsonBody<unknown>(request));
       const result = await captureScreenshot(
         { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
         sessionKey,
@@ -287,7 +302,7 @@ export const browserApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       if (sendProjectContextError(reply, error)) return;
       logger.error('Persist screenshot failed', { error });
-      return reply.code(500).send({ error: error instanceof Error ? error.message : 'Failed' });
+      return sendBrowserError(reply, error, 'Failed to persist screenshot');
     }
   }));
 
@@ -295,7 +310,7 @@ export const browserApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { sessionKey } = request.params as { sessionKey: string };
-      const input = readJsonBody<BrowserPdfInput>(request);
+      const input = browserPdfInputSchema.parse(readJsonBody<unknown>(request));
       const result = await exportSessionPdf(
         { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
         sessionKey,
@@ -305,7 +320,7 @@ export const browserApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       if (sendProjectContextError(reply, error)) return;
       logger.error('PDF export failed', { error });
-      return reply.code(500).send({ error: error instanceof Error ? error.message : 'Failed' });
+      return sendBrowserError(reply, error, 'Failed to export PDF');
     }
   }));
 
@@ -321,7 +336,7 @@ export const browserApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       if (sendProjectContextError(reply, error)) return;
       logger.error('Close session failed', { error });
-      return reply.code(500).send({ error: error instanceof Error ? error.message : 'Failed' });
+      return sendBrowserError(reply, error, 'Failed to close browser session');
     }
   }));
 
@@ -338,7 +353,7 @@ export const browserApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       if (sendProjectContextError(reply, error)) return;
       logger.error('Delete session failed', { error });
-      return reply.code(500).send({ error: 'Internal server error' });
+      return sendBrowserError(reply, error, 'Failed to delete browser session');
     }
   }));
 };

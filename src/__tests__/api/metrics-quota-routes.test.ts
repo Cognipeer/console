@@ -17,14 +17,14 @@ vi.mock('@/lib/services/metrics/prometheusExporter', () => ({
 }));
 
 vi.mock('@/lib/services/quota/quotaService', () => ({
-  getPlanDefaults: vi.fn(),
+  getLicenseDefaults: vi.fn(),
 }));
 
 import { GET as getMetrics } from '@/server/api/routes/metrics/route';
 import { GET as getQuotaDefaults } from '@/server/api/routes/quota/defaults/route';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { collectPrometheusMetrics } from '@/lib/services/metrics/prometheusExporter';
-import { getPlanDefaults } from '@/lib/services/quota/quotaService';
+import { getLicenseDefaults } from '@/lib/services/quota/quotaService';
 
 const MOCK_CTX = {
   tenantId: 'tenant-1',
@@ -40,8 +40,8 @@ function makeReq(path: string, headers: Record<string, string> = {}) {
   return new NextRequest(`http://localhost${path}`, { headers });
 }
 
-function makeQuotaReq(licenseType?: string) {
-  const headers: Record<string, string> = licenseType ? { 'x-license-type': licenseType } : {};
+function makeQuotaReq(tenantId?: string) {
+  const headers: Record<string, string> = tenantId ? { 'x-tenant-id': tenantId } : {};
   return new NextRequest('http://localhost/api/quota/defaults', { headers });
 }
 
@@ -49,7 +49,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   (requireApiToken as ReturnType<typeof vi.fn>).mockResolvedValue(MOCK_CTX);
   (collectPrometheusMetrics as ReturnType<typeof vi.fn>).mockResolvedValue('# HELP model_requests_total\nmodel_requests_total 42\n');
-  (getPlanDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({ models: 10, apiTokens: 5 });
+  (getLicenseDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({
+    licenseType: 'STARTER',
+    limits: { maxModels: 10, maxApiTokens: 5 },
+  });
 });
 
 describe('GET /api/metrics', () => {
@@ -97,39 +100,42 @@ describe('GET /api/metrics', () => {
 
 describe('GET /api/quota/defaults', () => {
   it('returns quota defaults for license type 200', async () => {
-    const req = makeQuotaReq('STARTER');
+    const req = makeQuotaReq('tenant-1');
     const res = await getQuotaDefaults(req);
     const body = await res.json();
     expect(res.status).toBe(200);
     expect(body.licenseType).toBe('STARTER');
     expect(body.defaults).toBeDefined();
-    expect(body.defaults.models).toBe(10);
+    expect(body.defaults.maxModels).toBe(10);
   });
 
-  it('returns 400 when license type header missing', async () => {
+  it('returns 400 when tenant id header missing', async () => {
     const req = makeQuotaReq();
     const res = await getQuotaDefaults(req);
     expect(res.status).toBe(400);
     const body = await res.json();
-    expect(body.error).toContain('License');
+    expect(body.error).toContain('Tenant');
   });
 
-  it('passes license type to getPlanDefaults', async () => {
-    const req = makeQuotaReq('PRO');
+  it('passes tenant id to getLicenseDefaults', async () => {
+    const req = makeQuotaReq('tenant-1');
     await getQuotaDefaults(req);
-    expect(getPlanDefaults).toHaveBeenCalledWith('PRO');
+    expect(getLicenseDefaults).toHaveBeenCalledWith('tenant-1');
   });
 
-  it('returns 500 on getPlanDefaults error', async () => {
-    (getPlanDefaults as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('db error'));
-    const req = makeQuotaReq('STARTER');
+  it('returns 500 on getLicenseDefaults error', async () => {
+    (getLicenseDefaults as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('db error'));
+    const req = makeQuotaReq('tenant-1');
     const res = await getQuotaDefaults(req);
     expect(res.status).toBe(500);
   });
 
   it('returns empty defaults object gracefully', async () => {
-    (getPlanDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({});
-    const req = makeQuotaReq('FREE');
+    (getLicenseDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({
+      licenseType: 'FREE',
+      limits: {},
+    });
+    const req = makeQuotaReq('tenant-1');
     const res = await getQuotaDefaults(req);
     const body = await res.json();
     expect(res.status).toBe(200);

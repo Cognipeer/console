@@ -1,9 +1,9 @@
 import { NextResponse, type NextRequest } from '@/server/api/http';
-import crypto from 'crypto';
 import { getDatabase } from '@/lib/database';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { checkResourceQuota } from '@/lib/quota/quotaGuard';
 import { createLogger } from '@/lib/core/logger';
+import { createApiTokenSecret, getApiTokenPrefix, hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
 
 const logger = createLogger('project-tokens');
 
@@ -132,14 +132,15 @@ export async function POST(
 
     const db = await getDatabase();
 
-    const token = `cpeer_${crypto.randomBytes(32).toString('hex')}`;
+    const token = createApiTokenSecret();
 
     const apiToken = await db.createApiToken({
       userId: ctx.userId,
       tenantId: ctx.tenantId,
       projectId,
       label: body.label.trim(),
-      token,
+      tokenHash: hashApiToken(token),
+      tokenPrefix: getApiTokenPrefix(token),
     });
 
     return NextResponse.json(

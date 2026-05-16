@@ -66,14 +66,30 @@ export function TenantMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
       const now = this.now();
 
       db.prepare(`
-        INSERT INTO ${TABLES.tenants} (id, companyName, slug, dbName, licenseType, ownerId, createdAt, updatedAt)
-        VALUES (@id, @companyName, @slug, @dbName, @licenseType, @ownerId, @createdAt, @updatedAt)
+        INSERT INTO ${TABLES.tenants} (
+          id, companyName, slug, dbName, licenseType, licenseId, licenseKey,
+          licenseStatus, licensePayload, licenseActivatedAt, licenseLastVerifiedAt,
+          licenseExpiresAt, licenseError, ownerId, createdAt, updatedAt
+        )
+        VALUES (
+          @id, @companyName, @slug, @dbName, @licenseType, @licenseId, @licenseKey,
+          @licenseStatus, @licensePayload, @licenseActivatedAt, @licenseLastVerifiedAt,
+          @licenseExpiresAt, @licenseError, @ownerId, @createdAt, @updatedAt
+        )
       `).run({
         id,
         companyName: tenantData.companyName,
         slug: tenantData.slug,
         dbName: tenantData.dbName,
         licenseType: tenantData.licenseType,
+        licenseId: tenantData.licenseId ?? null,
+        licenseKey: tenantData.licenseKey ?? null,
+        licenseStatus: tenantData.licenseStatus ?? 'free',
+        licensePayload: this.toJson(tenantData.licensePayload ?? {}),
+        licenseActivatedAt: tenantData.licenseActivatedAt?.toISOString() ?? null,
+        licenseLastVerifiedAt: tenantData.licenseLastVerifiedAt?.toISOString() ?? null,
+        licenseExpiresAt: tenantData.licenseExpiresAt?.toISOString() ?? null,
+        licenseError: tenantData.licenseError ?? null,
         ownerId: tenantData.ownerId ?? null,
         createdAt: now,
         updatedAt: now,
@@ -118,6 +134,14 @@ export function TenantMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
       if (data.slug !== undefined) { sets.push('slug = @slug'); params.slug = data.slug; }
       if (data.dbName !== undefined) { sets.push('dbName = @dbName'); params.dbName = data.dbName; }
       if (data.licenseType !== undefined) { sets.push('licenseType = @licenseType'); params.licenseType = data.licenseType; }
+      if (data.licenseId !== undefined) { sets.push('licenseId = @licenseId'); params.licenseId = data.licenseId; }
+      if (data.licenseKey !== undefined) { sets.push('licenseKey = @licenseKey'); params.licenseKey = data.licenseKey; }
+      if (data.licenseStatus !== undefined) { sets.push('licenseStatus = @licenseStatus'); params.licenseStatus = data.licenseStatus; }
+      if (data.licensePayload !== undefined) { sets.push('licensePayload = @licensePayload'); params.licensePayload = this.toJson(data.licensePayload); }
+      if (data.licenseActivatedAt !== undefined) { sets.push('licenseActivatedAt = @licenseActivatedAt'); params.licenseActivatedAt = data.licenseActivatedAt?.toISOString() ?? null; }
+      if (data.licenseLastVerifiedAt !== undefined) { sets.push('licenseLastVerifiedAt = @licenseLastVerifiedAt'); params.licenseLastVerifiedAt = data.licenseLastVerifiedAt?.toISOString() ?? null; }
+      if (data.licenseExpiresAt !== undefined) { sets.push('licenseExpiresAt = @licenseExpiresAt'); params.licenseExpiresAt = data.licenseExpiresAt?.toISOString() ?? null; }
+      if (data.licenseError !== undefined) { sets.push('licenseError = @licenseError'); params.licenseError = data.licenseError; }
       if (data.ownerId !== undefined) { sets.push('ownerId = @ownerId'); params.ownerId = data.ownerId; }
 
       db.prepare(`UPDATE ${TABLES.tenants} SET ${sets.join(', ')} WHERE id = @id`).run(params);
@@ -132,6 +156,14 @@ export function TenantMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
         slug: r.slug as string,
         dbName: r.dbName as string,
         licenseType: r.licenseType as string,
+        licenseId: r.licenseId as string | null | undefined,
+        licenseKey: r.licenseKey as string | null | undefined,
+        licenseStatus: r.licenseStatus as ITenant['licenseStatus'],
+        licensePayload: this.parseJson<Record<string, unknown> | null>(r.licensePayload, {}),
+        licenseActivatedAt: this.toDate(r.licenseActivatedAt),
+        licenseLastVerifiedAt: this.toDate(r.licenseLastVerifiedAt),
+        licenseExpiresAt: this.toDate(r.licenseExpiresAt),
+        licenseError: r.licenseError as string | null | undefined,
         ownerId: r.ownerId as string | undefined,
         createdAt: this.toDate(r.createdAt),
         updatedAt: this.toDate(r.updatedAt),

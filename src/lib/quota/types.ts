@@ -1,5 +1,3 @@
-import type { LicenseType } from '@/lib/license/license-manager';
-
 // Scopes: from general to specific
 export type QuotaScope = 'tenant' | 'user' | 'token' | 'resource' | 'provider';
 
@@ -64,6 +62,9 @@ export interface QuotaPerRequestLimits {
 }
 
 export interface QuotaResourceCaps {
+  // Projects
+  maxProjects?: number;
+
   // Models
   maxModels?: number;
   
@@ -97,14 +98,6 @@ export interface QuotaLimits {
   perRequest?: QuotaPerRequestLimits;
   quotas?: QuotaResourceCaps;
   budget?: QuotaBudget;
-}
-
-export interface PlanQuotaLimits extends QuotaResourceCaps {
-  requestsPerMonth?: number;
-}
-
-export interface PlanLimitsConfig {
-  plans: Record<LicenseType, PlanQuotaLimits>;
 }
 
 export interface QuotaPolicy {

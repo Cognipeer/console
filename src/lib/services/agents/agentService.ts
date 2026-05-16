@@ -23,7 +23,7 @@ import { queryRag } from '@/lib/services/rag/ragService';
 import { evaluateGuardrail } from '@/lib/services/guardrail';
 import { getMcpServerByKey, executeMcpTool } from '@/lib/services/mcp';
 import { getToolByKey, executeToolAction, logToolRequest } from '@/lib/services/tools';
-import { resolveBrowser, createBrowserSession, buildBrowserAgentTools } from '@/lib/services/browser';
+import { resolveBrowser, createBrowserSession, buildBrowserAgentTools, closeBrowserSession } from '@/lib/services/browser';
 
 const logger = createLogger('agents');
 
@@ -136,10 +136,11 @@ async function buildBoundTools(
     bindings: { source: string; sourceKey: string; toolNames: string[]; config?: Record<string, unknown> }[] | undefined,
     createToolFn: typeof import('@cognipeer/agent-sdk').createTool,
     zod: typeof import('zod').z,
-): Promise<AgentSdkToolInterface[]> {
-    if (!bindings || bindings.length === 0) return [];
+): Promise<{ cleanupTasks: Array<() => Promise<void>>; tools: AgentSdkToolInterface[] }> {
+    if (!bindings || bindings.length === 0) return { cleanupTasks: [], tools: [] };
 
     const tools: AgentSdkToolInterface[] = [];
+    const cleanupTasks: Array<() => Promise<void>> = [];
 
     for (const binding of bindings) {
         if (binding.source === 'tool') {
@@ -259,6 +260,12 @@ async function buildBoundTools(
                     createdBy: 'agent-runtime',
                 });
                 tools.push(...(browserTools as unknown as AgentSdkToolInterface[]));
+                cleanupTasks.push(async () => {
+                    await closeBrowserSession(
+                        { tenantDbName, tenantId, projectId },
+                        session.sessionKey,
+                    ).catch(() => undefined);
+                });
             } catch (err) {
                 logger.error('Failed to bind browser_use system tool', {
                     browserId,
@@ -268,7 +275,24 @@ async function buildBoundTools(
         }
     }
 
-    return tools;
+    return { cleanupTasks, tools };
+}
+
+async function runBoundToolCleanup(
+    cleanupTasks: Array<() => Promise<void>>,
+    context: { agentKey: string; mode: 'chat' | 'playground' },
+): Promise<void> {
+    if (cleanupTasks.length === 0) return;
+
+    const results = await Promise.allSettled(cleanupTasks.map((task) => task()));
+    const failures = results.filter((result) => result.status === 'rejected').length;
+    if (failures > 0) {
+        logger.warn('Bound tool cleanup completed with failures', {
+            agentKey: context.agentKey,
+            failures,
+            mode: context.mode,
+        });
+    }
 }
 
 // ── Internal Tracing Sink ────────────────────────────────────────────
@@ -929,7 +953,14 @@ export async function executeAgentChat(
     }
 
     // 5c. Build bound tools from toolBindings (MCP, future sources)
-    const boundTools = await buildBoundTools(tenantDbName, tenantId, projectId, config.toolBindings, createTool, z);
+    const { cleanupTasks, tools: boundTools } = await buildBoundTools(
+        tenantDbName,
+        tenantId,
+        projectId,
+        config.toolBindings,
+        createTool,
+        z,
+    );
     tools.push(...boundTools);
 
     // 6. Build message history
@@ -958,76 +989,80 @@ export async function executeAgentChat(
         { role: 'user', content: userMessage },
     ];
 
-    const result: AgentSdkInvokeResult = await sdkAgent.invoke(createConsoleAgentState(inputMessages));
+    try {
+        const result: AgentSdkInvokeResult = await sdkAgent.invoke(createConsoleAgentState(inputMessages));
 
-    const assistantContent = result.content || '';
+        const assistantContent = result.content || '';
 
-    // 7b. Output guardrail check
-    if (config.outputGuardrailKey && assistantContent) {
-        const outputResult = await evaluateGuardrail({
-            tenantDbName,
-            tenantId,
-            projectId,
-            guardrailKey: config.outputGuardrailKey,
-            text: assistantContent,
-        });
-        if (!outputResult.passed && outputResult.action === 'block') {
-            const reasons = outputResult.findings.map((f) => f.category || f.type).join(', ');
-            throw new Error(`Output blocked by guardrail: ${reasons}`);
+        // 7b. Output guardrail check
+        if (config.outputGuardrailKey && assistantContent) {
+            const outputResult = await evaluateGuardrail({
+                tenantDbName,
+                tenantId,
+                projectId,
+                guardrailKey: config.outputGuardrailKey,
+                text: assistantContent,
+            });
+            if (!outputResult.passed && outputResult.action === 'block') {
+                const reasons = outputResult.findings.map((f) => f.category || f.type).join(', ');
+                throw new Error(`Output blocked by guardrail: ${reasons}`);
+            }
         }
-    }
 
-    // 8. Update conversation with new messages
-    const updatedMessages = [
-        ...(conversation.messages || []),
-        { role: 'user', content: userMessage, timestamp: now },
-        { role: 'assistant', content: assistantContent, timestamp: new Date() },
-    ];
+        // 8. Update conversation with new messages
+        const updatedMessages = [
+            ...(conversation.messages || []),
+            { role: 'user', content: userMessage, timestamp: now },
+            { role: 'assistant', content: assistantContent, timestamp: new Date() },
+        ];
 
-    await db.updateAgentConversation(conversationId, {
-        messages: updatedMessages,
-        title: conversation.title === 'New conversation' && updatedMessages.length <= 2
-            ? userMessage.substring(0, 80)
-            : conversation.title,
-    });
+        await db.updateAgentConversation(conversationId, {
+            messages: updatedMessages,
+            title: conversation.title === 'New conversation' && updatedMessages.length <= 2
+                ? userMessage.substring(0, 80)
+                : conversation.title,
+        });
 
-    logger.info('Agent chat completed', {
-        agentKey,
-        conversationId,
-        messageCount: updatedMessages.length,
-    });
+        logger.info('Agent chat completed', {
+            agentKey,
+            conversationId,
+            messageCount: updatedMessages.length,
+        });
 
-    const responseId = `resp_${conversationId}`;
-    const msgId = `msg_${Date.now().toString(36)}`;
+        const responseId = `resp_${conversationId}`;
+        const msgId = `msg_${Date.now().toString(36)}`;
 
-    return {
-        id: responseId,
-        object: 'response' as const,
-        model: agent.name,
-        output: [
-            {
-                id: msgId,
-                type: 'message' as const,
-                role: 'assistant' as const,
-                content: [
-                    {
-                        type: 'output_text' as const,
-                        text: assistantContent,
-                    },
-                ],
+        return {
+            id: responseId,
+            object: 'response' as const,
+            model: agent.name,
+            output: [
+                {
+                    id: msgId,
+                    type: 'message' as const,
+                    role: 'assistant' as const,
+                    content: [
+                        {
+                            type: 'output_text' as const,
+                            text: assistantContent,
+                        },
+                    ],
+                },
+            ],
+            status: 'completed' as const,
+            usage: {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
             },
-        ],
-        status: 'completed' as const,
-        usage: {
-            input_tokens: 0,
-            output_tokens: 0,
-            total_tokens: 0,
-        },
-        created_at: Math.floor(Date.now() / 1000),
-        previous_response_id: (conversation.messages?.length ?? 0) > 0 ? responseId : null,
-        version: resolvedVersion,
-        _conversation_messages: updatedMessages,
-    };
+            created_at: Math.floor(Date.now() / 1000),
+            previous_response_id: (conversation.messages?.length ?? 0) > 0 ? responseId : null,
+            version: resolvedVersion,
+            _conversation_messages: updatedMessages,
+        };
+    } finally {
+        await runBoundToolCleanup(cleanupTasks, { agentKey, mode: 'chat' });
+    }
 }
 
 /**
@@ -1130,7 +1165,14 @@ export async function executePlaygroundChat(
     }
 
     // Build bound tools from toolBindings (MCP, future sources)
-    const boundPlaygroundTools = await buildBoundTools(tenantDbName, tenantId, projectId, config.toolBindings, createTool, z);
+    const { cleanupTasks, tools: boundPlaygroundTools } = await buildBoundTools(
+        tenantDbName,
+        tenantId,
+        projectId,
+        config.toolBindings,
+        createTool,
+        z,
+    );
     playgroundTools.push(...boundPlaygroundTools);
 
     // Build messages (in-memory history only)
@@ -1152,25 +1194,29 @@ export async function executePlaygroundChat(
         tracingSink,
     });
 
-    const result: AgentSdkInvokeResult = await sdkAgent.invoke(createConsoleAgentState(inputMessages));
-    const assistantContent = result.content || '';
+    try {
+        const result: AgentSdkInvokeResult = await sdkAgent.invoke(createConsoleAgentState(inputMessages));
+        const assistantContent = result.content || '';
 
-    // Output guardrail check
-    if (config.outputGuardrailKey && assistantContent) {
-        const outputResult = await evaluateGuardrail({
-            tenantDbName,
-            tenantId,
-            projectId,
-            guardrailKey: config.outputGuardrailKey,
-            text: assistantContent,
-        });
-        if (!outputResult.passed && outputResult.action === 'block') {
-            const reasons = outputResult.findings.map((f) => f.category || f.type).join(', ');
-            throw new Error(`Output blocked by guardrail: ${reasons}`);
+        // Output guardrail check
+        if (config.outputGuardrailKey && assistantContent) {
+            const outputResult = await evaluateGuardrail({
+                tenantDbName,
+                tenantId,
+                projectId,
+                guardrailKey: config.outputGuardrailKey,
+                text: assistantContent,
+            });
+            if (!outputResult.passed && outputResult.action === 'block') {
+                const reasons = outputResult.findings.map((f) => f.category || f.type).join(', ');
+                throw new Error(`Output blocked by guardrail: ${reasons}`);
+            }
         }
+
+        logger.info('Playground chat completed', { agentKey });
+
+        return { content: assistantContent };
+    } finally {
+        await runBoundToolCleanup(cleanupTasks, { agentKey, mode: 'playground' });
     }
-
-    logger.info('Playground chat completed', { agentKey });
-
-    return { content: assistantContent };
 }

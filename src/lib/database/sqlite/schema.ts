@@ -13,10 +13,33 @@ export const MAIN_SCHEMA_SQL = `
     slug TEXT NOT NULL UNIQUE,
     dbName TEXT NOT NULL,
     licenseType TEXT NOT NULL DEFAULT 'FREE',
+    licenseId TEXT,
+    licenseKey TEXT,
+    licenseStatus TEXT NOT NULL DEFAULT 'free',
+    licensePayload TEXT DEFAULT '{}',
+    licenseActivatedAt TEXT,
+    licenseLastVerifiedAt TEXT,
+    licenseExpiresAt TEXT,
+    licenseError TEXT,
     ownerId TEXT,
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS api_tokens (
+    id TEXT PRIMARY KEY,
+    userId TEXT NOT NULL,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    label TEXT NOT NULL,
+    tokenHash TEXT NOT NULL UNIQUE,
+    tokenPrefix TEXT NOT NULL,
+    lastUsed TEXT,
+    createdAt TEXT NOT NULL,
+    expiresAt TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(tokenHash);
+  CREATE INDEX IF NOT EXISTS idx_api_tokens_tenant_project ON api_tokens(tenantId, projectId);
 
   CREATE TABLE IF NOT EXISTS tenant_user_directory (
     email TEXT NOT NULL,
@@ -42,6 +65,7 @@ export const TENANT_SCHEMA_SQL = `
     tenantId TEXT NOT NULL,
     role TEXT NOT NULL DEFAULT 'user',
     projectIds TEXT DEFAULT '[]',
+    servicePermissions TEXT DEFAULT '{}',
     licenseId TEXT NOT NULL DEFAULT 'FREE',
     features TEXT DEFAULT '[]',
     invitedBy TEXT,
@@ -52,6 +76,35 @@ export const TENANT_SCHEMA_SQL = `
     updatedAt TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_users_emailLower ON users(emailLower);
+
+  -- General audit logs
+  CREATE TABLE IF NOT EXISTS audit_logs (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    requestId TEXT,
+    actorType TEXT NOT NULL,
+    actorUserId TEXT,
+    actorEmail TEXT,
+    actorRole TEXT,
+    apiTokenId TEXT,
+    service TEXT NOT NULL,
+    action TEXT NOT NULL,
+    event TEXT NOT NULL,
+    method TEXT,
+    path TEXT,
+    statusCode INTEGER,
+    outcome TEXT NOT NULL,
+    ipAddress TEXT,
+    userAgent TEXT,
+    resourceType TEXT,
+    resourceId TEXT,
+    metadata TEXT DEFAULT '{}',
+    createdAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_audit_logs_createdAt ON audit_logs(createdAt);
+  CREATE INDEX IF NOT EXISTS idx_audit_logs_service ON audit_logs(service);
+  CREATE INDEX IF NOT EXISTS idx_audit_logs_actor ON audit_logs(actorUserId);
 
   -- Projects
   CREATE TABLE IF NOT EXISTS projects (
@@ -74,12 +127,13 @@ export const TENANT_SCHEMA_SQL = `
     tenantId TEXT NOT NULL,
     projectId TEXT,
     label TEXT NOT NULL,
-    token TEXT NOT NULL UNIQUE,
+    token TEXT,
+    tokenHash TEXT,
+    tokenPrefix TEXT,
     lastUsed TEXT,
     createdAt TEXT NOT NULL,
     expiresAt TEXT
   );
-  CREATE INDEX IF NOT EXISTS idx_api_tokens_token ON api_tokens(token);
 
   -- Prompts
   CREATE TABLE IF NOT EXISTS prompts (
@@ -185,6 +239,10 @@ export const TENANT_SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_tracing_sessions_sessionId ON agent_tracing_sessions(sessionId);
   CREATE INDEX IF NOT EXISTS idx_tracing_sessions_threadId ON agent_tracing_sessions(threadId);
+  CREATE INDEX IF NOT EXISTS idx_tracing_sessions_project_startedAt ON agent_tracing_sessions(projectId, startedAt DESC);
+  CREATE INDEX IF NOT EXISTS idx_tracing_sessions_project_createdAt ON agent_tracing_sessions(projectId, createdAt DESC);
+  CREATE INDEX IF NOT EXISTS idx_tracing_sessions_project_status_startedAt ON agent_tracing_sessions(projectId, status, startedAt DESC);
+  CREATE INDEX IF NOT EXISTS idx_tracing_sessions_project_agent_startedAt ON agent_tracing_sessions(projectId, agentName, startedAt DESC);
 
   CREATE TABLE IF NOT EXISTS agent_tracing_events (
     id TEXT PRIMARY KEY,
@@ -794,6 +852,56 @@ export const TENANT_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_tool_request_logs_toolKey ON tool_request_logs(toolKey);
   CREATE INDEX IF NOT EXISTS idx_tool_request_logs_createdAt ON tool_request_logs(createdAt);
 
+  -- JS Sandbox runtimes
+  CREATE TABLE IF NOT EXISTS js_sandbox_runtimes (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    engine TEXT NOT NULL DEFAULT 'isolated-vm',
+    libraries TEXT NOT NULL DEFAULT '[]',
+    limits TEXT NOT NULL DEFAULT '{}',
+    network TEXT NOT NULL DEFAULT '{}',
+    metadata TEXT DEFAULT '{}',
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_js_sandbox_runtimes_tenantId ON js_sandbox_runtimes(tenantId);
+  CREATE INDEX IF NOT EXISTS idx_js_sandbox_runtimes_projectId ON js_sandbox_runtimes(projectId);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_js_sandbox_runtimes_tenant_key ON js_sandbox_runtimes(tenantId, key);
+
+  -- JS Sandbox execution logs
+  CREATE TABLE IF NOT EXISTS js_sandbox_executions (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    runtimeId TEXT NOT NULL,
+    runtimeKey TEXT NOT NULL,
+    executionId TEXT NOT NULL,
+    status TEXT NOT NULL,
+    durationMs INTEGER NOT NULL DEFAULT 0,
+    timeoutMs INTEGER NOT NULL DEFAULT 0,
+    memoryLimitMb INTEGER NOT NULL DEFAULT 0,
+    codeHash TEXT NOT NULL,
+    codePreview TEXT NOT NULL,
+    inputPreview TEXT,
+    result TEXT,
+    logs TEXT DEFAULT '{}',
+    errorMessage TEXT,
+    callerType TEXT NOT NULL,
+    callerTokenId TEXT,
+    createdAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_js_sandbox_executions_tenantId ON js_sandbox_executions(tenantId);
+  CREATE INDEX IF NOT EXISTS idx_js_sandbox_executions_runtimeId ON js_sandbox_executions(runtimeId);
+  CREATE INDEX IF NOT EXISTS idx_js_sandbox_executions_createdAt ON js_sandbox_executions(createdAt);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_js_sandbox_executions_executionId ON js_sandbox_executions(executionId);
+
   -- MCP Servers
   CREATE TABLE IF NOT EXISTS mcp_servers (
     id TEXT PRIMARY KEY,
@@ -960,4 +1068,60 @@ export const TENANT_SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_browser_session_events_sessionId ON browser_session_events(sessionId);
   CREATE INDEX IF NOT EXISTS idx_browser_session_events_seq ON browser_session_events(sessionId, sequence);
+
+  -- Project membership (replaces user.projectIds)
+  CREATE TABLE IF NOT EXISTS user_projects (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    userId TEXT NOT NULL,
+    projectId TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'member',
+    servicePermissions TEXT DEFAULT '{}',
+    invitedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL,
+    UNIQUE(tenantId, userId, projectId)
+  );
+  CREATE INDEX IF NOT EXISTS idx_user_projects_user ON user_projects(tenantId, userId);
+  CREATE INDEX IF NOT EXISTS idx_user_projects_project ON user_projects(tenantId, projectId);
+
+  -- Groups / Teams (future)
+  CREATE TABLE IF NOT EXISTS groups (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_groups_tenant ON groups(tenantId);
+
+  CREATE TABLE IF NOT EXISTS group_members (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    groupId TEXT NOT NULL,
+    userId TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'member',
+    addedBy TEXT,
+    createdAt TEXT NOT NULL,
+    UNIQUE(tenantId, groupId, userId)
+  );
+  CREATE INDEX IF NOT EXISTS idx_group_members_group ON group_members(tenantId, groupId);
+  CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members(tenantId, userId);
+
+  CREATE TABLE IF NOT EXISTS group_projects (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    groupId TEXT NOT NULL,
+    projectId TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'member',
+    servicePermissions TEXT DEFAULT '{}',
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL,
+    UNIQUE(tenantId, groupId, projectId)
+  );
+  CREATE INDEX IF NOT EXISTS idx_group_projects_group ON group_projects(tenantId, groupId);
+  CREATE INDEX IF NOT EXISTS idx_group_projects_project ON group_projects(tenantId, projectId);
 `;

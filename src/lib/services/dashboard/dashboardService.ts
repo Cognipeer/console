@@ -4,13 +4,10 @@
  */
 
 import { getDatabase } from '@/lib/database';
-import { createLogger } from '@/lib/core/logger';
-
-const logger = createLogger('dashboard');
 import type { AgentTracingSessionSummary } from '@/lib/services/agentTracing';
 import { AgentTracingService } from '@/lib/services/agentTracing';
 import { listModels } from '@/lib/services/models/modelService';
-import { listVectorProviders, listVectorIndexes } from '@/lib/services/vector/vectorService';
+import { listProjectVectorIndexes, listVectorProviders } from '@/lib/services/vector/vectorService';
 import { isDateInDashboardRange } from '@/lib/utils/dashboardDateFilter';
 
 export interface DashboardStats {
@@ -86,15 +83,10 @@ export async function getDashboardData(
   const filteredProviders = vectorProviders.filter((provider) =>
     isDateInDashboardRange(provider.createdAt, filter),
   );
-  let totalIndexes = 0;
-  for (const provider of vectorProviders) {
-    try {
-      const indexes = await listVectorIndexes(tenantDbName, tenantId, provider.key, projectId);
-      totalIndexes += indexes.filter((index) => isDateInDashboardRange(index.createdAt, filter)).length;
-    } catch (error) {
-      logger.warn('Failed to list vector indexes for provider', { providerKey: provider.key, error });
-    }
-  }
+  const vectorIndexes = await listProjectVectorIndexes(tenantDbName, projectId);
+  const totalIndexes = vectorIndexes.filter((index) =>
+    isDateInDashboardRange(index.createdAt, filter),
+  ).length;
 
   // Fetch tracing analytics
   const tracingOverview = await AgentTracingService.getDashboardOverview(

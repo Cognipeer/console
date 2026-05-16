@@ -1,25 +1,24 @@
 import { NextResponse, type NextRequest } from '@/server/api/http';
-import { getPlanDefaults } from '@/lib/services/quota/quotaService';
-import type { LicenseType } from '@/lib/license/license-manager';
+import { getLicenseDefaults } from '@/lib/services/quota/quotaService';
 import { createLogger } from '@/lib/core/logger';
 
 const logger = createLogger('quota');
 
 export async function GET(request: NextRequest) {
   try {
-    const licenseTypeHeader = request.headers.get('x-license-type');
+    const tenantId = request.headers.get('x-tenant-id');
 
-    if (!licenseTypeHeader) {
+    if (!tenantId) {
       return NextResponse.json(
-        { error: 'License type not found on request' },
+        { error: 'Tenant not found on request' },
         { status: 400 },
       );
     }
 
-    const licenseType = licenseTypeHeader as LicenseType;
-    const defaults = await getPlanDefaults(licenseType);
+    const license = await getLicenseDefaults(tenantId);
+    const defaults = license.limits;
 
-    return NextResponse.json({ licenseType, defaults }, { status: 200 });
+    return NextResponse.json({ licenseType: license.licenseType, defaults, license }, { status: 200 });
   } catch (error) {
     logger.error('Get quota defaults error', { error });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });

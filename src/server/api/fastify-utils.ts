@@ -1,8 +1,13 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { getConfig } from '@/lib/core/config';
+import { getDatabase, type IUser } from '@/lib/database';
 import { isShuttingDown } from '@/lib/core/lifecycle';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { runWithRequestContext } from '@/lib/core/requestContext';
+import {
+  authorizeServiceRequest,
+  getPermissionServiceForPath,
+} from '@/lib/security/rbac';
 import {
   ApiTokenAuthError,
   requireApiTokenFromHeader,
@@ -23,6 +28,16 @@ export interface ApiSessionContext {
   userId: string;
   userRole: string;
   licenseType: LicenseType | string;
+}
+
+class RbacAuthorizationError extends Error {
+  status: number;
+
+  constructor(message: string, status = 403) {
+    super(message);
+    this.name = 'RbacAuthorizationError';
+    this.status = status;
+  }
 }
 
 export function getHeaderValue(
@@ -124,6 +139,60 @@ export function requireSessionContext(
   return session;
 }
 
+function getRequestPathname(request: FastifyRequest): string {
+  return new URL(request.raw.url || '/', 'http://localhost').pathname;
+}
+
+async function loadRbacUser(session: ApiSessionContext): Promise<IUser> {
+  const db = await getDatabase();
+  await db.switchToTenant(session.tenantDbName);
+  const user = await db.findUserById(session.userId);
+  if (!user) {
+    throw new RbacAuthorizationError('Unauthorized', 401);
+  }
+  return user;
+}
+
+async function enforceSessionRbac(request: FastifyRequest, session: ApiSessionContext): Promise<void> {
+  const pathname = getRequestPathname(request);
+  if (!getPermissionServiceForPath(pathname)) {
+    return;
+  }
+
+  const user = await loadRbacUser(session);
+  request.rbacUser = user;
+  const decision = authorizeServiceRequest(user, request.method, pathname);
+  if (!decision.allowed) {
+    throw new RbacAuthorizationError(
+      `Forbidden: ${decision.service} requires ${decision.required} permission`,
+      403,
+    );
+  }
+}
+
+function enforceApiTokenRbac(
+  request: FastifyRequest,
+  context: ApiTokenContext,
+): void {
+  const pathname = getRequestPathname(request);
+  if (!getPermissionServiceForPath(pathname)) {
+    return;
+  }
+
+  if (!context.user) {
+    throw new RbacAuthorizationError('API token owner is not available', 403);
+  }
+
+  request.rbacUser = context.user;
+  const decision = authorizeServiceRequest(context.user, request.method, pathname);
+  if (!decision.allowed) {
+    throw new RbacAuthorizationError(
+      `Forbidden: ${decision.service} requires ${decision.required} permission`,
+      403,
+    );
+  }
+}
+
 export function sendProjectContextError(
   reply: FastifyReply,
   error: unknown,
@@ -136,6 +205,13 @@ export function sendProjectContextError(
     return reply.code(401).send({ error: 'Unauthorized' });
   }
 
+  return null;
+}
+
+function sendRbacError(reply: FastifyReply, error: unknown) {
+  if (error instanceof RbacAuthorizationError) {
+    return reply.code(error.status).send({ error: error.message });
+  }
   return null;
 }
 
@@ -176,15 +252,27 @@ export function withApiRequestContext<
     }
 
     const session = getSessionContext(request);
-    return runWithRequestContext(
-      {
-        requestId: request.apiRequestId,
-        tenantId: session?.tenantId,
-        tenantSlug: session?.tenantSlug,
-        userId: session?.userId,
-      },
-      () => handler(request as TRequest, reply),
-    );
+
+    try {
+      if (session) {
+        await enforceSessionRbac(request, session);
+      }
+
+      return runWithRequestContext(
+        {
+          requestId: request.apiRequestId,
+          tenantId: session?.tenantId,
+          tenantSlug: session?.tenantSlug,
+          userId: session?.userId,
+        },
+        () => handler(request as TRequest, reply),
+      );
+    } catch (error) {
+      return sendRbacError(reply, error)
+        ?? reply.code(500).send({
+          error: error instanceof Error ? error.message : 'Internal server error',
+        });
+    }
   };
 }
 
@@ -233,6 +321,7 @@ export function withClientApiRequestContext<
     try {
       const apiToken = await requireApiTokenContext(request);
       request.apiTokenContext = apiToken;
+      enforceApiTokenRbac(request, apiToken);
 
       return runWithRequestContext(
         {
@@ -245,6 +334,7 @@ export function withClientApiRequestContext<
       );
     } catch (error) {
       return sendApiTokenError(reply, error)
+        ?? sendRbacError(reply, error)
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Internal server error',
         });

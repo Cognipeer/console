@@ -6,6 +6,7 @@ import { ObjectId } from 'mongodb';
 import type { IUser } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
+import { normalizeServicePermissions } from '@/lib/security/rbac';
 
 // We need access to tenant-related methods to sync the user directory.
 // The mixin chain guarantees TenantMixin is applied before UserMixin.
@@ -61,6 +62,7 @@ export function UserMixin<TBase extends Constructor<MongoDBProviderBase & WithTe
         ...userData,
         email: trimmedEmail,
         emailLower: normalizedEmail,
+        servicePermissions: normalizeServicePermissions(userData.servicePermissions),
         createdAt: now,
         updatedAt: now,
       };
@@ -114,6 +116,9 @@ export function UserMixin<TBase extends Constructor<MongoDBProviderBase & WithTe
         const trimmedEmail = payload.email.trim();
         payload.email = trimmedEmail;
         payload.emailLower = this.normalizeEmail(trimmedEmail);
+      }
+      if (payload.servicePermissions) {
+        payload.servicePermissions = normalizeServicePermissions(payload.servicePermissions);
       }
 
       payload.updatedAt = new Date();

@@ -11,6 +11,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { SQLiteProvider } from '@/lib/database/sqlite.provider';
+import { hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
 
 let db: SQLiteProvider;
 let tmpDir: string;
@@ -158,9 +159,50 @@ describe('User CRUD', () => {
     expect(updated!.name).toBe('Updated Admin');
   });
 
+  it('updates user service permissions', async () => {
+    const updated = await db.updateUser(userId, {
+      servicePermissions: { models: 'read', audit: 'admin' },
+    });
+    expect(updated).not.toBeNull();
+    expect(updated!.servicePermissions?.models).toBe('read');
+    expect(updated!.servicePermissions?.audit).toBe('admin');
+
+    const found = await db.findUserById(userId);
+    expect(found?.servicePermissions?.models).toBe('read');
+  });
+
   it('returns null for non-existent email', async () => {
     const user = await db.findUserByEmail('nobody@test.com');
     expect(user).toBeNull();
+  });
+});
+
+// ── Audit log operations ─────────────────────────────────────────────────
+
+describe('Audit logs', () => {
+  it('creates and lists audit events', async () => {
+    await db.switchToTenant(TEST_DB_NAME);
+
+    const created = await db.createAuditLog({
+      action: 'write',
+      actorEmail: 'admin@test.com',
+      actorRole: 'owner',
+      actorType: 'user',
+      actorUserId: userId,
+      event: 'POST /api/projects',
+      method: 'POST',
+      outcome: 'success',
+      path: '/api/projects',
+      service: 'projects',
+      statusCode: 201,
+      tenantId,
+    });
+
+    expect(created._id).toBeTruthy();
+
+    const logs = await db.listAuditLogs({ service: 'projects' });
+    expect(logs.length).toBeGreaterThanOrEqual(1);
+    expect(logs[0].event).toBe('POST /api/projects');
   });
 });
 
@@ -207,13 +249,16 @@ describe('Project CRUD', () => {
 
 describe('API Token CRUD', () => {
   let tokenId: string;
+  const rawToken = 'tk-test-123456';
+  const tokenHash = hashApiToken(rawToken);
 
   it('creates an API token', async () => {
     await db.switchToTenant(TEST_DB_NAME);
 
     const token = await db.createApiToken({
       label: 'Test Token',
-      token: 'tk-test-123456',
+      tokenHash,
+      tokenPrefix: rawToken.slice(0, 16),
       userId,
       tenantId,
       projectId,
@@ -225,7 +270,7 @@ describe('API Token CRUD', () => {
   });
 
   it('finds token by value', async () => {
-    const token = await db.findApiTokenByToken('tk-test-123456');
+    const token = await db.findApiTokenByHash(tokenHash);
     expect(token).not.toBeNull();
     expect(token!._id).toBe(tokenId);
   });
@@ -236,7 +281,7 @@ describe('API Token CRUD', () => {
   });
 
   it('updates token last used', async () => {
-    await db.updateTokenLastUsed(tokenId);
+    await db.updateTokenLastUsedByHash(tokenHash);
     // Just verify it doesn't throw
   });
 
@@ -244,7 +289,7 @@ describe('API Token CRUD', () => {
     const result = await db.deleteProjectApiToken(tokenId, tenantId, projectId);
     expect(result).toBe(true);
 
-    const found = await db.findApiTokenByToken('tk-test-123456');
+    const found = await db.findApiTokenByHash(tokenHash);
     expect(found).toBeNull();
   });
 });
@@ -431,6 +476,19 @@ describe('Agent tracing SQLite round-trip', () => {
     expect(storedEvents[0]?.traceId).toBe(tracingTraceId);
     expect(storedEvents[0]?.spanId).toBe(tracingSpanId);
     expect(storedEvents[0]?.parentSpanId).toBe(tracingParentSpanId);
+
+    const aggregate = await db.aggregateAgentTracingDashboard(
+      {
+        from: '2026-01-01T00:00:00.000Z',
+        to: '2026-01-01T23:59:59.999Z',
+      },
+      projectId,
+    );
+
+    expect(aggregate.analytics.totals.sessionsCount).toBe(1);
+    expect(aggregate.analytics.totals.totalTokens).toBe(34);
+    expect(aggregate.recentSessions[0]?.sessionId).toBe(tracingSessionId);
+    expect(aggregate.recentAgents[0]?.name).toBe('Trace Agent');
   });
 });
 
