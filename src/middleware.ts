@@ -76,7 +76,7 @@ export async function middleware(request: NextRequest) {
     : false;
 
   requestHeaders.set('x-license-type', licenseExpired ? 'FREE' : payload.licenseType);
-  requestHeaders.set('x-features', JSON.stringify(licenseExpired ? [] : payload.features));
+  requestHeaders.set('x-features', JSON.stringify(payload.features));
   requestHeaders.set('x-request-id', crypto.randomUUID());
 
   const response = NextResponse.next({

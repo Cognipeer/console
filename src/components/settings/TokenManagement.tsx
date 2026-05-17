@@ -1,13 +1,12 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
-import { Button, Group, Text, ActionIcon, Box, Modal, CopyButton, Tooltip, TextInput } from '@mantine/core';
-import { DataTable } from 'mantine-datatable';
-import { IconKey, IconTrash, IconCopy, IconCheck, IconSearch } from '@tabler/icons-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Button, Group, Text, Modal, CopyButton } from '@mantine/core';
+import { IconKey, IconTrash, IconCopy, IconCheck } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 import CreateTokenModal from './CreateTokenModal';
 import { useTranslations } from '@/lib/i18n';
-import { TABLE_PAGE_SIZE_OPTIONS, useClientTable } from '@/hooks/useClientTable';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 
 interface ApiToken {
   _id: string;
@@ -27,17 +26,10 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
   const [deleteModalOpened, setDeleteModalOpened] = useState(false);
   const [tokenToDelete, setTokenToDelete] = useState<ApiToken | null>(null);
   const [forbidden, setForbidden] = useState(false);
+  const [query, setQuery] = useState('');
   const t = useTranslations('settings.tokenManagement');
   const tNotifications = useTranslations('notifications');
   const tCommon = useTranslations('common');
-  const tokenTable = useClientTable({
-    records: tokens,
-    initialPageSize: 10,
-    search: (token, query) =>
-      [token.label, token.tokenPrefix, token.userId]
-        .filter(Boolean)
-        .some((value) => String(value).toLowerCase().includes(query)),
-  });
 
   const listUrl = projectId
     ? `/api/projects/${encodeURIComponent(projectId)}/tokens`
@@ -77,6 +69,16 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
     void fetchTokens();
   }, [fetchTokens]);
 
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return tokens;
+    return tokens.filter((token) =>
+      [token.label, token.tokenPrefix, token.userId]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(q)),
+    );
+  }, [tokens, query]);
+
   const handleDeleteToken = (token: ApiToken) => {
     setTokenToDelete(token);
     setDeleteModalOpened(true);
@@ -115,126 +117,126 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
     return `${token.substring(0, 8)}...${token.substring(token.length - 4)}`;
   };
 
-  return (
-    <Box p="md">
-      {forbidden ? (
+  if (forbidden) {
+    return (
+      <div className="ds-empty" style={{ padding: 48 }}>
         <Text size="sm" c="dimmed">
           {tCommon('forbidden')}
         </Text>
-      ) : (
-        <>
-      <Group justify="space-between" mb="md">
-        <div>
-          <Text size="lg" fw={600}>
-            {t('header.title')}
-          </Text>
-          <Text size="sm" c="dimmed">
-            {t('header.subtitle')}
-          </Text>
+      </div>
+    );
+  }
+
+  const columns: DataGridColumn<ApiToken>[] = [
+    {
+      key: 'label',
+      label: t('table.label'),
+      render: (token) => (
+        <div className="ds-col" style={{ gap: 2 }}>
+          <span style={{ fontSize: 13, fontWeight: 500 }}>{token.label}</span>
+          <span className="ds-faint ds-mono" style={{ fontSize: 11 }}>
+            {token.token
+              ? maskToken(token.token)
+              : token.tokenPrefix
+                ? `${token.tokenPrefix}...`
+                : t('table.hidden')}
+          </span>
         </div>
-        <Button
-          leftSection={<IconKey size={16} />}
-          onClick={() => setCreateModalOpened(true)}
-        >
-          {t('actions.create')}
-        </Button>
-      </Group>
+      ),
+    },
+    {
+      key: 'createdAt',
+      label: t('table.created'),
+      width: 140,
+      render: (token) => (
+        <span className="ds-faint" style={{ fontSize: 12 }}>
+          {new Date(token.createdAt).toLocaleDateString()}
+        </span>
+      ),
+    },
+    {
+      key: 'lastUsed',
+      label: t('table.lastUsed'),
+      width: 160,
+      render: (token) => (
+        <span className="ds-faint" style={{ fontSize: 12 }}>
+          {token.lastUsed ? new Date(token.lastUsed).toLocaleDateString() : t('table.never')}
+        </span>
+      ),
+    },
+    {
+      key: 'copy',
+      label: '',
+      width: 60,
+      align: 'right',
+      render: (token) =>
+        token.token ? (
+          <CopyButton value={token.token}>
+            {({ copied, copy }) => (
+              <Button
+                size="xs"
+                variant="subtle"
+                color={copied ? 'teal' : 'gray'}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  copy();
+                }}
+                leftSection={copied ? <IconCheck size={13} /> : <IconCopy size={13} />}
+              >
+                {copied ? t('copy.copied') : t('copy.copyToken')}
+              </Button>
+            )}
+          </CopyButton>
+        ) : null,
+    },
+  ];
 
-      <Group mb="sm" justify="space-between">
-        <TextInput
-          value={tokenTable.query}
-          onChange={(event) => tokenTable.setQuery(event.currentTarget.value)}
-          placeholder="Search tokens"
-          leftSection={<IconSearch size={14} />}
-          w={{ base: '100%', sm: 280 }}
-        />
-        <Text size="sm" c="dimmed">
-          {tokenTable.totalRecords} records
-        </Text>
-      </Group>
-
-      <DataTable
-        withTableBorder
-        borderRadius="sm"
-        striped
-        highlightOnHover
-        idAccessor="_id"
-        records={tokenTable.records}
-        totalRecords={tokenTable.totalRecords}
-        recordsPerPage={tokenTable.pageSize}
-        recordsPerPageOptions={TABLE_PAGE_SIZE_OPTIONS}
-        onRecordsPerPageChange={tokenTable.setPageSize}
-        page={tokenTable.page}
-        onPageChange={tokenTable.setPage}
-        columns={[
-          {
-            accessor: 'label',
-            title: t('table.label'),
-            render: (token) => (
-              <div>
-                <Text size="sm" fw={500}>
-                  {token.label}
-                </Text>
-                <Text size="xs" c="dimmed" ff="monospace">
-                  {token.token
-                    ? maskToken(token.token)
-                    : token.tokenPrefix
-                      ? `${token.tokenPrefix}...`
-                      : t('table.hidden')}
-                </Text>
-              </div>
-            ),
+  return (
+    <>
+      <DataGrid<ApiToken>
+        records={filtered}
+        loading={loading}
+        rowKey={(t) => String(t._id)}
+        columns={columns}
+        search={{
+          value: query,
+          onChange: setQuery,
+          placeholder: 'Search tokens',
+        }}
+        onRefresh={() => void fetchTokens()}
+        refreshing={loading}
+        toolbarRight={
+          <Button
+            color="teal"
+            size="xs"
+            leftSection={<IconKey size={13} stroke={1.7} />}
+            onClick={() => setCreateModalOpened(true)}
+          >
+            {t('actions.create')}
+          </Button>
+        }
+        empty={{
+          title: t('table.empty'),
+          primaryAction: {
+            label: t('actions.create'),
+            icon: <IconKey size={14} stroke={1.7} />,
+            onClick: () => setCreateModalOpened(true),
           },
-          {
-            accessor: 'createdAt',
-            title: t('table.created'),
-            render: (token) => new Date(token.createdAt).toLocaleDateString(),
-          },
-          {
-            accessor: 'lastUsed',
-            title: t('table.lastUsed'),
-            render: (token) =>
-              token.lastUsed ? new Date(token.lastUsed).toLocaleDateString() : t('table.never'),
-          },
-          {
-            accessor: 'actions',
-            title: t('table.actions'),
-            textAlign: 'right',
-            render: (token) => (
-              <Group gap="xs" justify="flex-end">
-                {token.token ? (
-                  <CopyButton value={token.token}>
-                    {({ copied, copy }) => (
-                      <Tooltip label={copied ? t('copy.copied') : t('copy.copyToken')}>
-                        <ActionIcon
-                          color={copied ? 'teal' : 'gray'}
-                          variant="subtle"
-                          onClick={copy}
-                        >
-                          {copied ? <IconCheck size={16} /> : <IconCopy size={16} />}
-                        </ActionIcon>
-                      </Tooltip>
-                    )}
-                  </CopyButton>
-                ) : null}
-                {token.canDelete === false ? null : (
-                  <Tooltip label={t('actions.delete')}>
-                    <ActionIcon
-                      color="red"
-                      variant="subtle"
-                      onClick={() => handleDeleteToken(token)}
-                    >
-                      <IconTrash size={16} />
-                    </ActionIcon>
-                  </Tooltip>
-                )}
-              </Group>
-            ),
-          },
-        ]}
-        fetching={loading}
-        minHeight={200}
-        noRecordsText={t('table.empty')}
+        }}
+        footerLeft={`Showing ${filtered.length} of ${tokens.length} tokens`}
+        rowActions={(token) =>
+          token.canDelete === false
+            ? []
+            : [
+                {
+                  id: 'delete',
+                  label: t('actions.delete'),
+                  icon: <IconTrash size={14} />,
+                  color: 'red',
+                  onClick: () => handleDeleteToken(token),
+                },
+              ]
+        }
       />
 
       <CreateTokenModal
@@ -273,8 +275,6 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
           </Button>
         </Group>
       </Modal>
-        </>
-      )}
-    </Box>
+    </>
   );
 }

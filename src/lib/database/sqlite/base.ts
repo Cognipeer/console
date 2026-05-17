@@ -41,6 +41,7 @@ export const TABLES = {
   inferenceServerMetrics: 'inference_server_metrics',
   guardrails: 'guardrails',
   guardrailEvalLogs: 'guardrail_evaluation_logs',
+  piiPolicies: 'pii_policies',
   alertRules: 'alert_rules',
   alertEvents: 'alert_events',
   incidents: 'incidents',
@@ -48,6 +49,8 @@ export const TABLES = {
   ragDocuments: 'rag_documents',
   ragChunks: 'rag_chunks',
   ragQueryLogs: 'rag_query_logs',
+  rerankers: 'rerankers',
+  rerankerRunLogs: 'reranker_run_logs',
   memoryStores: 'memory_stores',
   memoryItems: 'memory_items',
   configGroups: 'config_groups',
@@ -73,6 +76,9 @@ export const TABLES = {
   groups: 'groups',
   groupMembers: 'group_members',
   groupProjects: 'group_projects',
+  // ── Cluster (main database) ────────────────────────────────────────
+  nodes: 'nodes',
+  instanceAssignments: 'instance_assignments',
 } as const;
 
 // ── Base class ───────────────────────────────────────────────────────
@@ -83,6 +89,7 @@ export class SQLiteProviderBase {
   protected readonly dataDir: string;
   protected readonly mainDbName: string;
   private readonly tenantContext = new AsyncLocalStorage<Database.Database>();
+  private readonly tenantNameContext = new AsyncLocalStorage<string>();
   /** Cache of already-opened tenant DB file handles */
   private tenantDbCache: Map<string, Database.Database> = new Map();
 
@@ -132,6 +139,7 @@ export class SQLiteProviderBase {
     if (cached) {
       this.tenantDb = cached;
       this.tenantContext.enterWith(cached);
+      this.tenantNameContext.enterWith(tenantDbName);
       return;
     }
 
@@ -146,6 +154,32 @@ export class SQLiteProviderBase {
     this.tenantDbCache.set(tenantDbName, db);
     this.tenantDb = db;
     this.tenantContext.enterWith(db);
+    this.tenantNameContext.enterWith(tenantDbName);
+  }
+
+  /**
+   * Name of the tenant DB currently bound to this request context.
+   * Returns `null` when no tenant is active (request hasn't called switchToTenant).
+   */
+  getCurrentTenantDbName(): string | null {
+    return this.tenantNameContext.getStore() ?? null;
+  }
+
+  /**
+   * Defense-in-depth guard: throws if the caller's expected tenant does not
+   * match the currently bound tenant. Use this in cross-cutting code paths
+   * that operate on session-derived tenantDbName.
+   */
+  assertTenantContext(expectedTenantDbName: string): void {
+    const active = this.tenantNameContext.getStore();
+    if (!active) {
+      throw new Error(`Tenant context not initialized (expected ${expectedTenantDbName}).`);
+    }
+    if (active !== expectedTenantDbName) {
+      throw new Error(
+        `Tenant context mismatch: active=${active}, expected=${expectedTenantDbName}. Refusing to operate on the wrong tenant.`,
+      );
+    }
   }
 
   private applyMainMigrations(db: Database.Database): void {
@@ -205,6 +239,12 @@ export class SQLiteProviderBase {
       TABLES.users,
       'servicePermissions',
       'servicePermissions TEXT DEFAULT \'{}\'',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.users,
+      'passwordChangedAt',
+      'passwordChangedAt TEXT',
     );
     this.ensureTableColumn(
       db,
@@ -283,6 +323,18 @@ export class SQLiteProviderBase {
       TABLES.agentTracingEvents,
       'parentSpanId',
       'parentSpanId TEXT',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.ragModules,
+      'rerankerKey',
+      'rerankerKey TEXT',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.ragModules,
+      'rerankerOversample',
+      'rerankerOversample INTEGER',
     );
   }
 

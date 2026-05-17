@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import {
+  ActionIcon,
   Badge,
   Box,
   Button,
@@ -12,6 +13,7 @@ import {
   Group,
   JsonInput,
   Loader,
+  Menu,
   Modal,
   Pagination,
   Paper,
@@ -30,17 +32,18 @@ import {
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import {
-  IconApi,
-  IconArrowLeft,
   IconCheck,
   IconChartBar,
   IconCode,
   IconCopy,
+  IconDots,
+  IconEdit,
   IconList,
   IconPlugConnected,
   IconTrash,
 } from '@tabler/icons-react';
-import PageHeader from '@/components/layout/PageHeader';
+import DetailShell from '@/components/common/ui/DetailShell';
+import StatusBadge from '@/components/common/ui/StatusBadge';
 import type { McpServerView, McpRequestLogView } from '@/lib/services/mcp';
 
 const AUTH_LABELS: Record<string, string> = {
@@ -349,41 +352,89 @@ export default function McpDetailPage() {
     .sort((a, b) => b[1] - a[1])
     .slice(0, 5);
 
+  const headerActions = (
+    <>
+      <Button
+        variant="default"
+        size="sm"
+        leftSection={<IconEdit size={14} stroke={1.7} />}
+        onClick={() => setEditOpen(true)}
+      >
+        Edit
+      </Button>
+      <Menu withinPortal position="bottom-end" withArrow>
+        <Menu.Target>
+          <ActionIcon variant="default" radius="md" size="lg" aria-label="More">
+            <IconDots size={15} stroke={1.7} />
+          </ActionIcon>
+        </Menu.Target>
+        <Menu.Dropdown>
+          <Menu.Item
+            color="red"
+            leftSection={<IconTrash size={14} />}
+            onClick={() => setDeleteOpen(true)}
+          >
+            Delete server
+          </Menu.Item>
+        </Menu.Dropdown>
+      </Menu>
+    </>
+  );
+
   return (
     <>
-      <PageHeader
-        icon={<IconApi size={20} />}
-        title={server.name}
-        subtitle={server.description || `Key: ${server.key}`}
-        actions={
-          <Group gap="sm">
-            <Button
-              variant="default"
-              size="xs"
-              leftSection={<IconArrowLeft size={14} />}
-              onClick={() => router.push('/dashboard/mcp')}
-            >
-              Back
-            </Button>
-            <Button
-              variant="default"
-              size="xs"
-              onClick={() => setEditOpen(true)}
-            >
-              Edit
-            </Button>
-            <Button
-              color="red"
-              variant="light"
-              size="xs"
-              leftSection={<IconTrash size={14} />}
-              onClick={() => setDeleteOpen(true)}
-            >
-              Delete
-            </Button>
-          </Group>
+      <DetailShell
+        backHref="/dashboard/mcp"
+        backLabel="Back to MCP servers"
+        icon={
+          <div
+            style={{
+              width: 48,
+              height: 48,
+              borderRadius: 10,
+              background: 'var(--ds-accent-soft)',
+              color: 'var(--ds-accent)',
+              display: 'grid',
+              placeItems: 'center',
+            }}
+          >
+            <IconPlugConnected size={22} stroke={1.7} />
+          </div>
         }
-      />
+        title={
+          <>
+            <h1 className="ds-h2" style={{ margin: 0, whiteSpace: 'nowrap' }}>
+              {server.name}
+            </h1>
+            <StatusBadge
+              status={server.status === 'active' ? 'ok' : 'paused'}
+              label={server.status === 'active' ? 'Active' : 'Disabled'}
+            />
+            <span className="ds-badge ds-badge-info">
+              {server.tools?.length ?? 0} tools
+            </span>
+          </>
+        }
+        meta={
+          <>
+            <span className="ds-mono">{server.key}</span>
+            <span className="ds-faint">·</span>
+            <span>
+              auth:{' '}
+              <span className="ds-mono">
+                {AUTH_LABELS[server.upstreamAuth?.type] ?? 'None'}
+              </span>
+            </span>
+            {server.description ? (
+              <>
+                <span className="ds-faint">·</span>
+                <span>{server.description}</span>
+              </>
+            ) : null}
+          </>
+        }
+        actions={headerActions}
+      >
 
       <Tabs value={activeTab} onChange={(v) => setActiveTab(v || 'overview')}>
         <Tabs.List mb="md">
@@ -988,6 +1039,7 @@ async with sse_client(
       </Modal>
 
       </Tabs>
+      </DetailShell>
 
       <Modal
         opened={editOpen}

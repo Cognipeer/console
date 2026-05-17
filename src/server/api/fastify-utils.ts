@@ -146,9 +146,20 @@ function getRequestPathname(request: FastifyRequest): string {
 async function loadRbacUser(session: ApiSessionContext): Promise<IUser> {
   const db = await getDatabase();
   await db.switchToTenant(session.tenantDbName);
+  // Defense-in-depth: verify the active tenant context matches the session.
+  // Real providers always implement assertTenantContext; test mocks may not.
+  if (typeof db.assertTenantContext === 'function') {
+    db.assertTenantContext(session.tenantDbName);
+  }
   const user = await db.findUserById(session.userId);
   if (!user) {
     throw new RbacAuthorizationError('Unauthorized', 401);
+  }
+  // Defense-in-depth: ensure the loaded user record actually belongs to the
+  // session's tenant. (DB partitioning already enforces this, but a mis-bound
+  // mock or future refactor could break the invariant — fail loudly here.)
+  if (user.tenantId && String(user.tenantId) !== String(session.tenantId)) {
+    throw new RbacAuthorizationError('Tenant mismatch', 403);
   }
   return user;
 }
@@ -366,7 +377,7 @@ export function setSessionCookies(
 
   if (options.activeProjectId) {
     reply.setCookie('active_project_id', options.activeProjectId, {
-      httpOnly: false,
+      httpOnly: true,
       maxAge: 60 * 60 * 24 * 30,
       path: '/',
       sameSite: 'lax',

@@ -5,9 +5,21 @@ import { getCache, destroyCache } from '@/lib/core/cache';
 import { runtimePool } from '@/lib/core/runtimePool';
 import { drainPendingTasks } from '@/lib/core/asyncTask';
 import { registerHealthCheck } from '@/lib/core/health';
+import {
+  deregisterThisNode,
+  getThisNodeName,
+  listClusterNodes,
+  registerThisNode,
+} from '@/lib/core/cluster';
+import { destroyQueue, getQueue } from '@/lib/core/queue';
 import { listAutomations } from '@/lib/services/automations';
 import { browserManager } from '@/lib/services/browser/browserManager';
 import { reconcileOrphanedBrowserSessions } from '@/lib/services/browser/browserOperationsService';
+import { startBrowserQueueConsumer } from '@/lib/services/browser/browserConsumer';
+import { jsSandboxExecutorManager } from '@/lib/services/jsSandbox';
+import { startJsSandboxQueueConsumer } from '@/lib/services/jsSandbox/jsSandboxConsumer';
+import { startAgentQueueConsumer } from '@/lib/services/agents/agentConsumer';
+import { startMcpQueueConsumer } from '@/lib/services/mcp/mcpConsumer';
 import { startPollScheduler } from '@/lib/services/inferenceMonitoring/pollScheduler';
 import { startAlertScheduler } from '@/lib/services/alerts/alertScheduler';
 import { ensureServerEnvLoaded } from './env';
@@ -73,6 +85,55 @@ export async function bootstrapApplication(): Promise<void> {
     runtimePool.destroy();
   });
 
+  // Cluster + queue init. Both are safe no-ops on a single-node deployment:
+  // the registry creates a single row in the `nodes` table and the queue
+  // resolves to its in-memory driver when Redis is not configured. No
+  // existing service is migrated yet — these are opt-in for future code.
+  try {
+    await registerThisNode();
+    registerShutdownHandler('node-registry', async () => {
+      await deregisterThisNode();
+    });
+    registerHealthCheck('cluster', async () => {
+      try {
+        const nodes = await listClusterNodes();
+        const online = nodes.filter((n) => n.status === 'online').length;
+        return {
+          status: 'ok',
+          details: {
+            thisNode: getThisNodeName(),
+            online,
+            total: nodes.length,
+          },
+        };
+      } catch (error) {
+        return {
+          status: 'degraded',
+          message: error instanceof Error ? error.message : String(error),
+        };
+      }
+    });
+  } catch (error) {
+    logger.warn('Cluster node registration failed; continuing without it', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  try {
+    const queue = await getQueue();
+    registerShutdownHandler('queue', async () => {
+      await destroyQueue();
+    });
+    registerHealthCheck('queue', async () => ({
+      status: 'ok',
+      details: { provider: queue.name },
+    }));
+  } catch (error) {
+    logger.warn('Queue provider init failed; continuing without it', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
   registerHealthCheck('browser-runtime', async () => {
     const stats = browserManager.getRuntimeStats();
     return {
@@ -83,6 +144,14 @@ export async function bootstrapApplication(): Promise<void> {
         reaperError: stats.reaper.lastError,
         reaperPaused: stats.reaper.paused,
       },
+    };
+  });
+
+  registerHealthCheck('js-sandbox-runtime', async () => {
+    const stats = jsSandboxExecutorManager.getRuntimeStats();
+    return {
+      status: stats.shuttingDown ? 'degraded' : 'ok',
+      details: stats,
     };
   });
 
@@ -111,6 +180,22 @@ export async function bootstrapApplication(): Promise<void> {
 
   startPollScheduler();
   startAlertScheduler();
+
+  // Register queue consumers on every node so that whenever instance
+  // routing forwards a job to another node, that node can execute it.
+  // The consumers are no-ops for memory queue + single-node deployments.
+  try {
+    await Promise.all([
+      startAgentQueueConsumer(),
+      startMcpQueueConsumer(),
+      startJsSandboxQueueConsumer(),
+      startBrowserQueueConsumer(),
+    ]);
+  } catch (error) {
+    logger.warn('Queue consumer registration failed; cluster routing limited', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 
   logger.info('Application started', {
     cacheProvider: cfg.cache.provider,

@@ -22,7 +22,7 @@ import {
   IconRobot,
   IconInfoCircle,
 } from '@tabler/icons-react';
-import type { IGuardrail, IGuardrailPresetPolicy } from '@/lib/database';
+import type { IGuardrailPresetPolicy } from '@/lib/database';
 import { PII_CATEGORIES, MODERATION_CATEGORIES } from '@/lib/services/guardrail/constants';
 import type { PiiCategoryDefinition, ModerationCategoryDefinition } from '@/lib/services/guardrail/constants';
 

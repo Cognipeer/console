@@ -20,12 +20,14 @@ import {
   ThemeIcon,
   Tooltip,
 } from '@mantine/core';
-import PageHeader from '@/components/layout/PageHeader';
+import DetailShell from '@/components/common/ui/DetailShell';
+import StatusBadge from '@/components/common/ui/StatusBadge';
 import { notifications } from '@mantine/notifications';
 import {
   IconArrowLeft,
   IconBan,
   IconBook,
+  IconBucket,
   IconCheck,
   IconCloud,
   IconCode,
@@ -487,30 +489,89 @@ export default function FileBucketDetailPage() {
     );
   }
 
+  const providerLabel =
+    typeof bucket.provider?.label === 'string' && bucket.provider.label.trim().length > 0
+      ? bucket.provider.label.trim()
+      : undefined;
+  const providerDriver =
+    typeof bucket.provider?.driver === 'string' && bucket.provider.driver.trim().length > 0
+      ? bucket.provider.driver.trim()
+      : undefined;
+
+  const headerActions = (
+    <>
+      <Button
+        variant="default"
+        size="sm"
+        leftSection={<IconBook size={14} stroke={1.7} />}
+        onClick={() => openDocs('api-files')}
+      >
+        Docs
+      </Button>
+      <Button
+        variant="default"
+        size="sm"
+        leftSection={<IconRefresh size={14} stroke={1.7} />}
+        onClick={() => void loadBucket(true)}
+        loading={refreshing}
+      >
+        Refresh
+      </Button>
+    </>
+  );
+
   return (
-    <Stack gap="md">
-      <PageHeader
-        icon={<IconFolder size={18} />}
-        title={bucket.name}
-        subtitle={`Bucket key: ${bucket.key}`}
-        actions={
-          <>
-            <Badge color={bucket.status === 'active' ? 'green' : 'yellow'}>{bucket.status}</Badge>
-            <Button variant="default" size="xs" leftSection={<IconArrowLeft size={14} />}
-              onClick={() => router.push('/dashboard/files')}>
-              Back
-            </Button>
-            <Button onClick={() => openDocs('api-files')} variant="light" size="xs"
-              leftSection={<IconBook size={14} />}>
-              Docs
-            </Button>
-            <Button variant="light" size="xs" leftSection={<IconRefresh size={14} />}
-              onClick={() => void loadBucket(true)} loading={refreshing}>
-              Refresh
-            </Button>
-          </>
-        }
-      />
+    <DetailShell
+      backHref="/dashboard/files"
+      backLabel="Back to buckets"
+      icon={
+        <div
+          style={{
+            width: 48,
+            height: 48,
+            borderRadius: 10,
+            background: 'var(--ds-accent-soft)',
+            color: 'var(--ds-accent)',
+            display: 'grid',
+            placeItems: 'center',
+          }}
+        >
+          <IconBucket size={22} stroke={1.7} />
+        </div>
+      }
+      title={
+        <>
+          <h1 className="ds-h2" style={{ margin: 0, whiteSpace: 'nowrap' }}>
+            {bucket.name}
+          </h1>
+          <StatusBadge
+            status={bucket.status === 'active' ? 'ok' : 'paused'}
+            label={bucket.status}
+          />
+          {providerDriver ? (
+            <span className="ds-badge ds-badge-info">{providerDriver}</span>
+          ) : null}
+        </>
+      }
+      meta={
+        <>
+          <span className="ds-mono">{bucket.key}</span>
+          {providerLabel ? (
+            <>
+              <span className="ds-faint">·</span>
+              <span>provider: {providerLabel}</span>
+            </>
+          ) : null}
+          {bucket.prefix ? (
+            <>
+              <span className="ds-faint">·</span>
+              <span>prefix: <span className="ds-mono">{bucket.prefix}</span></span>
+            </>
+          ) : null}
+        </>
+      }
+      actions={headerActions}
+    >
 
       <Tabs value={activeTab} onChange={(v) => setActiveTab(v ?? 'overview')}>
         <Tabs.List mb="md">
@@ -537,6 +598,6 @@ export default function FileBucketDetailPage() {
           <UsageTab bucket={bucket} />
         </Tabs.Panel>
       </Tabs>
-    </Stack>
+    </DetailShell>
   );
 }

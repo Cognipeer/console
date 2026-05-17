@@ -1,30 +1,32 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import {
-  ActionIcon,
-  Badge,
   Button,
   Group,
-  Loader,
   Modal,
-  Paper,
-  SegmentedControl,
-  SimpleGrid,
   Stack,
-  Table,
-  Text,
   TextInput,
   Textarea,
-  Tooltip,
 } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
-import { IconPlus, IconRefresh, IconSearch, IconTrash, IconWorld } from '@tabler/icons-react';
-import PageHeader from '@/components/layout/PageHeader';
-import type { BrowserSessionView, BrowserView } from '@/lib/services/browser';
+import {
+  IconEye,
+  IconPlus,
+  IconTrash,
+  IconWorld,
+} from '@tabler/icons-react';
+import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
+import StatTile from '@/components/common/ui/StatTile';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
+import StatusBadge from '@/components/common/ui/StatusBadge';
+import type {
+  BrowserSessionView,
+  BrowserView,
+} from '@/lib/services/browser';
 
 interface CreateForm {
   name: string;
@@ -33,22 +35,22 @@ interface CreateForm {
   defaultModelKey: string;
 }
 
-type StatusFilter = 'all' | 'active' | 'disabled';
-
 interface RowMetrics {
   sessions: number;
   activeSessions: number;
 }
 
 export default function BrowsersListPage() {
+  const router = useRouter();
   const [browsers, setBrowsers] = useState<BrowserView[]>([]);
   const [sessions, setSessions] = useState<BrowserSessionView[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
-  const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [query, setQuery] = useState('');
   const [createOpened, createHandlers] = useDisclosure(false);
   const [creating, setCreating] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<BrowserView | null>(null);
 
   const form = useForm<CreateForm>({
     initialValues: { name: '', description: '', artifactBucketKey: '', defaultModelKey: '' },
@@ -64,18 +66,26 @@ export default function BrowsersListPage() {
       ]);
       if (!browsersRes.ok) throw new Error('Failed to load browsers');
       const browsersData = await browsersRes.json();
-      const sessionsData = sessionsRes.ok ? await sessionsRes.json() : { sessions: [] };
+      const sessionsData = sessionsRes.ok
+        ? await sessionsRes.json()
+        : { sessions: [] };
       setBrowsers(browsersData.browsers ?? []);
       setSessions(sessionsData.sessions ?? []);
     } catch (err) {
-      notifications.show({ color: 'red', title: 'Error', message: err instanceof Error ? err.message : 'Failed' });
+      notifications.show({
+        color: 'red',
+        title: 'Error',
+        message: err instanceof Error ? err.message : 'Failed',
+      });
     } finally {
       setRefreshing(false);
       setLoading(false);
     }
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    void load();
+  }, [load]);
 
   const metricsById = useMemo(() => {
     const map = new Map<string, RowMetrics>();
@@ -92,7 +102,9 @@ export default function BrowsersListPage() {
   const summary = useMemo(() => {
     const active = browsers.filter((b) => b.status === 'active').length;
     const disabled = browsers.filter((b) => b.status === 'disabled').length;
-    const activeSessions = sessions.filter((s) => s.status === 'running' || s.status === 'idle').length;
+    const activeSessions = sessions.filter(
+      (s) => s.status === 'running' || s.status === 'idle',
+    ).length;
     return {
       total: browsers.length,
       active,
@@ -103,17 +115,21 @@ export default function BrowsersListPage() {
   }, [browsers, sessions]);
 
   const filtered = useMemo(() => {
-    const term = search.trim().toLowerCase();
     return browsers.filter((b) => {
       if (statusFilter !== 'all' && b.status !== statusFilter) return false;
-      if (!term) return true;
-      return (
-        b.name.toLowerCase().includes(term) ||
-        b.key.toLowerCase().includes(term) ||
-        (b.description ?? '').toLowerCase().includes(term)
-      );
+      if (query) {
+        const q = query.toLowerCase();
+        if (
+          !b.name.toLowerCase().includes(q) &&
+          !b.key.toLowerCase().includes(q) &&
+          !(b.description ?? '').toLowerCase().includes(q)
+        ) {
+          return false;
+        }
+      }
+      return true;
     });
-  }, [browsers, statusFilter, search]);
+  }, [browsers, statusFilter, query]);
 
   async function handleCreate(values: CreateForm) {
     setCreating(true);
@@ -132,148 +148,220 @@ export default function BrowsersListPage() {
         const text = await res.text();
         throw new Error(text || 'Failed to create');
       }
-      notifications.show({ color: 'teal', title: 'Created', message: 'Browser created' });
+      notifications.show({
+        color: 'teal',
+        title: 'Created',
+        message: 'Browser created',
+      });
       createHandlers.close();
       form.reset();
       await load();
     } catch (err) {
-      notifications.show({ color: 'red', title: 'Error', message: err instanceof Error ? err.message : 'Failed' });
+      notifications.show({
+        color: 'red',
+        title: 'Error',
+        message: err instanceof Error ? err.message : 'Failed',
+      });
     } finally {
       setCreating(false);
     }
   }
 
-  async function handleDelete(id: string) {
-    if (!confirm('Delete this browser? Sessions and agents must be removed first.')) return;
+  async function confirmDelete() {
+    if (!deleteTarget) return;
     try {
-      const res = await fetch(`/api/browser/browsers/${id}`, { method: 'DELETE' });
+      const res = await fetch(`/api/browser/browsers/${deleteTarget.id}`, {
+        method: 'DELETE',
+      });
       if (!res.ok) {
         const text = await res.text();
         throw new Error(text || 'Failed to delete');
       }
-      notifications.show({ color: 'teal', title: 'Deleted', message: 'Browser removed' });
+      notifications.show({
+        color: 'teal',
+        title: 'Deleted',
+        message: 'Browser removed',
+      });
+      setDeleteTarget(null);
       await load();
     } catch (err) {
-      notifications.show({ color: 'red', title: 'Error', message: err instanceof Error ? err.message : 'Failed' });
+      notifications.show({
+        color: 'red',
+        title: 'Error',
+        message: err instanceof Error ? err.message : 'Failed',
+      });
     }
   }
 
+  const columns: DataGridColumn<BrowserView>[] = [
+    {
+      key: 'name',
+      label: 'Name',
+      render: (b) => (
+        <div className="ds-col" style={{ gap: 2, whiteSpace: 'nowrap' }}>
+          <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--ds-text)' }}>
+            {b.name}
+          </span>
+          {b.description ? (
+            <span className="ds-faint" style={{ fontSize: 11.5, maxWidth: 320 }}>
+              {b.description.length > 60
+                ? `${b.description.slice(0, 60)}…`
+                : b.description}
+            </span>
+          ) : (
+            <span className="ds-faint ds-mono" style={{ fontSize: 11 }}>
+              {b.key}
+            </span>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: 'key',
+      label: 'Key',
+      render: (b) => (
+        <span className="ds-mono ds-muted" style={{ fontSize: 12 }}>
+          {b.key}
+        </span>
+      ),
+    },
+    {
+      key: 'model',
+      label: 'Default model',
+      render: (b) => (
+        <span className="ds-mono ds-muted" style={{ fontSize: 12 }}>
+          {b.defaultModelKey ?? '—'}
+        </span>
+      ),
+    },
+    {
+      key: 'sessions',
+      label: 'Sessions',
+      render: (b) => {
+        const m = metricsById.get(b.id) ?? { sessions: 0, activeSessions: 0 };
+        return (
+          <div className="ds-row ds-gap-xs">
+            <span className="ds-badge">{m.sessions}</span>
+            {m.activeSessions > 0 ? (
+              <span className="ds-badge ds-badge-ok">{m.activeSessions} live</span>
+            ) : null}
+          </div>
+        );
+      },
+    },
+    {
+      key: 'status',
+      label: 'Status',
+      render: (b) => (
+        <StatusBadge status={b.status === 'active' ? 'active' : 'paused'} />
+      ),
+    },
+  ];
+
   return (
-    <Stack gap="md">
+    <PageContainer>
       <PageHeader
-        icon={<IconWorld size={20} />}
+        eyebrow="Operate · Browsers"
         title="Browsers"
         subtitle="Headless browser profiles. Create a browser, then add sessions or run agents on top of it."
         actions={
-          <Group gap="xs">
-            <Tooltip label="Refresh">
-              <ActionIcon variant="subtle" onClick={load} loading={refreshing}>
-                <IconRefresh size={16} />
-              </ActionIcon>
-            </Tooltip>
-            <Button leftSection={<IconPlus size={14} />} size="xs" onClick={createHandlers.open}>
-              Create Browser
-            </Button>
-          </Group>
+          <Button
+            color="teal"
+            size="sm"
+            leftSection={<IconPlus size={14} stroke={1.7} />}
+            onClick={createHandlers.open}
+          >
+            Create browser
+          </Button>
         }
       />
 
-      <SimpleGrid cols={{ base: 2, md: 4 }}>
-        <Summary label="Browsers" value={summary.total} color="indigo" />
-        <Summary label="Active" value={summary.active} color="teal" />
-        <Summary label="Disabled" value={summary.disabled} color="gray" />
-        <Summary label="Sessions" value={summary.sessions} hint={`${summary.activeSessions} live`} color="blue" />
-      </SimpleGrid>
+      <div className="ds-stat-grid" style={{ marginBottom: 16 }}>
+        <StatTile
+          label="Browsers"
+          icon={<IconWorld size={14} stroke={1.7} />}
+          value={summary.total}
+        />
+        <StatTile label="Active" value={summary.active} />
+        <StatTile label="Disabled" value={summary.disabled} />
+        <StatTile
+          label="Sessions"
+          value={summary.sessions}
+          delta={`${summary.activeSessions} live`}
+        />
+      </div>
 
-      <Paper withBorder p="md" radius="lg">
-        <Group justify="space-between" wrap="wrap">
-          <TextInput
-            placeholder="Search by name, key, description..."
-            leftSection={<IconSearch size={14} />}
-            value={search}
-            onChange={(e) => setSearch(e.currentTarget.value)}
-            size="xs"
-            style={{ minWidth: 280 }}
-          />
-          <SegmentedControl
-            size="xs"
-            value={statusFilter}
-            onChange={(v) => setStatusFilter(v as StatusFilter)}
-            data={[
-              { label: 'All', value: 'all' },
-              { label: 'Active', value: 'active' },
-              { label: 'Disabled', value: 'disabled' },
-            ]}
-          />
-        </Group>
-      </Paper>
+      <DataGrid<BrowserView>
+        records={filtered}
+        loading={loading}
+        rowKey={(b) => b.id}
+        onRowClick={(b) => router.push(`/dashboard/browser/${b.id}`)}
+        columns={columns}
+        search={{
+          value: query,
+          onChange: setQuery,
+          placeholder: 'Search by name, key, description…',
+        }}
+        filters={[
+          {
+            value: statusFilter,
+            onChange: setStatusFilter,
+            ariaLabel: 'Filter by status',
+            width: 140,
+            options: [
+              { value: 'all', label: 'All statuses' },
+              { value: 'active', label: 'Active' },
+              { value: 'disabled', label: 'Disabled' },
+            ],
+          },
+        ]}
+        onRefresh={load}
+        refreshing={refreshing}
+        empty={{
+          icon: <IconWorld size={26} stroke={1.7} />,
+          title: 'No browsers yet',
+          description:
+            'Create your first browser profile to start running automation sessions.',
+          primaryAction: {
+            label: 'Create your first browser',
+            icon: <IconPlus size={14} stroke={1.7} />,
+            onClick: createHandlers.open,
+          },
+        }}
+        footerLeft={`Showing ${filtered.length} of ${browsers.length} browsers`}
+        rowActions={(b) => [
+          {
+            id: 'open',
+            label: 'Open browser',
+            icon: <IconEye size={14} />,
+            onClick: () => router.push(`/dashboard/browser/${b.id}`),
+          },
+          { divider: true },
+          {
+            id: 'delete',
+            label: 'Delete',
+            icon: <IconTrash size={14} />,
+            color: 'red',
+            onClick: () => setDeleteTarget(b),
+          },
+        ]}
+      />
 
-      <Paper withBorder p="md" radius="lg">
-        {loading ? (
-          <Group justify="center" py="xl"><Loader /></Group>
-        ) : filtered.length === 0 ? (
-          <Stack align="center" py="xl">
-            <Text c="dimmed">{browsers.length === 0 ? 'No browsers yet' : 'No browsers match your filter'}</Text>
-            {browsers.length === 0 && (
-              <Button size="xs" leftSection={<IconPlus size={14} />} onClick={createHandlers.open}>
-                Create your first Browser
-              </Button>
-            )}
-          </Stack>
-        ) : (
-          <Table striped highlightOnHover verticalSpacing="sm">
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>Name</Table.Th>
-                <Table.Th>Key</Table.Th>
-                <Table.Th>Status</Table.Th>
-                <Table.Th>Default Model</Table.Th>
-                <Table.Th>Sessions</Table.Th>
-                <Table.Th />
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {filtered.map((b) => {
-                const m = metricsById.get(b.id) ?? { sessions: 0, activeSessions: 0 };
-                return (
-                  <Table.Tr key={b.id}>
-                    <Table.Td>
-                      <Link href={`/dashboard/browser/${b.id}`} style={{ fontWeight: 500 }}>{b.name}</Link>
-                      {b.description && <Text size="xs" c="dimmed" lineClamp={1}>{b.description}</Text>}
-                    </Table.Td>
-                    <Table.Td><Text size="xs" ff="monospace">{b.key}</Text></Table.Td>
-                    <Table.Td>
-                      <Badge color={b.status === 'active' ? 'teal' : 'gray'} variant="light">{b.status}</Badge>
-                    </Table.Td>
-                    <Table.Td><Text size="xs">{b.defaultModelKey ?? '—'}</Text></Table.Td>
-                    <Table.Td>
-                      <Group gap={4}>
-                        <Badge variant="light" color="blue">{m.sessions}</Badge>
-                        {m.activeSessions > 0 && <Badge variant="light" color="teal">{m.activeSessions} live</Badge>}
-                      </Group>
-                    </Table.Td>
-                    <Table.Td>
-                      <Group gap={4} justify="flex-end">
-                        <Tooltip label="Delete">
-                          <ActionIcon variant="subtle" color="red" onClick={() => handleDelete(b.id)}>
-                            <IconTrash size={14} />
-                          </ActionIcon>
-                        </Tooltip>
-                      </Group>
-                    </Table.Td>
-                  </Table.Tr>
-                );
-              })}
-            </Table.Tbody>
-          </Table>
-        )}
-      </Paper>
-
-      <Modal opened={createOpened} onClose={createHandlers.close} title="Create Browser" size="md">
+      <Modal
+        opened={createOpened}
+        onClose={createHandlers.close}
+        title="Create browser"
+        size="md"
+      >
         <form onSubmit={form.onSubmit(handleCreate)}>
           <Stack>
             <TextInput label="Name" required {...form.getInputProps('name')} />
-            <Textarea label="Description" autosize minRows={2} {...form.getInputProps('description')} />
+            <Textarea
+              label="Description"
+              autosize
+              minRows={2}
+              {...form.getInputProps('description')}
+            />
             <TextInput
               label="Default Model Key"
               description="Used as a default for browser agents under this browser"
@@ -285,24 +373,43 @@ export default function BrowsersListPage() {
               {...form.getInputProps('artifactBucketKey')}
             />
             <Group justify="flex-end">
-              <Button variant="subtle" onClick={createHandlers.close} disabled={creating}>Cancel</Button>
-              <Button type="submit" loading={creating}>Create</Button>
+              <Button
+                variant="subtle"
+                onClick={createHandlers.close}
+                disabled={creating}
+              >
+                Cancel
+              </Button>
+              <Button type="submit" loading={creating}>
+                Create
+              </Button>
             </Group>
           </Stack>
         </form>
       </Modal>
-    </Stack>
-  );
-}
 
-function Summary({ label, value, color, hint }: { label: string; value: number; color: string; hint?: string }) {
-  return (
-    <Paper withBorder p="md" radius="lg">
-      <Stack gap={2}>
-        <Text size="xs" c="dimmed" tt="uppercase">{label}</Text>
-        <Text fw={700} size="xl" c={color}>{value}</Text>
-        {hint && <Text size="xs" c="dimmed">{hint}</Text>}
-      </Stack>
-    </Paper>
+      <Modal
+        opened={deleteTarget !== null}
+        onClose={() => setDeleteTarget(null)}
+        title="Delete browser"
+        centered
+        size="sm"
+      >
+        <Stack gap="md">
+          <span>
+            Delete browser <strong>{deleteTarget?.name}</strong>? Sessions and
+            agents must be removed first.
+          </span>
+          <Group justify="flex-end">
+            <Button variant="default" onClick={() => setDeleteTarget(null)}>
+              Cancel
+            </Button>
+            <Button color="red" onClick={confirmDelete}>
+              Delete
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
+    </PageContainer>
   );
 }

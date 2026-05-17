@@ -1,31 +1,11 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import Link from 'next/link';
+import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import {
-  ActionIcon,
-  Badge,
-  Button,
-  Center,
-  CopyButton,
-  Group,
-  Loader,
-  Menu,
-  Modal,
-  Paper,
-  SimpleGrid,
-  Stack,
-  Text,
-  ThemeIcon,
-  Tooltip,
-} from '@mantine/core';
+import { Button, Group, Modal, Text } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
   IconApi,
-  IconCopy,
-  IconCheck,
-  IconDotsVertical,
   IconEdit,
   IconEye,
   IconPlayerPause,
@@ -33,14 +13,12 @@ import {
   IconPlus,
   IconTrash,
 } from '@tabler/icons-react';
-import PageHeader from '@/components/layout/PageHeader';
+import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
+import StatTile from '@/components/common/ui/StatTile';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
+import StatusBadge from '@/components/common/ui/StatusBadge';
 import CreateMcpModal from '@/components/mcp/CreateMcpModal';
 import type { McpServerView } from '@/lib/services/mcp';
-
-const STATUS_COLORS: Record<string, string> = {
-  active: 'teal',
-  disabled: 'gray',
-};
 
 const AUTH_LABELS: Record<string, string> = {
   none: 'None',
@@ -55,6 +33,8 @@ export default function McpServersPage() {
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<McpServerView | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [query, setQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<string>('all');
   const router = useRouter();
 
   const loadServers = async () => {
@@ -73,7 +53,7 @@ export default function McpServersPage() {
   };
 
   useEffect(() => {
-    loadServers();
+    void loadServers();
   }, []);
 
   const handleToggleStatus = async (s: McpServerView) => {
@@ -100,10 +80,6 @@ export default function McpServersPage() {
     }
   };
 
-  const handleDelete = (s: McpServerView) => {
-    setDeleteTarget(s);
-  };
-
   const confirmDelete = async () => {
     if (!deleteTarget) return;
     setDeleting(true);
@@ -128,199 +104,226 @@ export default function McpServersPage() {
     }
   };
 
+  const filtered = useMemo(() => {
+    return servers.filter((s) => {
+      if (statusFilter !== 'all' && s.status !== statusFilter) return false;
+      if (query) {
+        const q = query.toLowerCase();
+        if (
+          !s.name.toLowerCase().includes(q) &&
+          !(s.description ?? '').toLowerCase().includes(q) &&
+          !s.key.toLowerCase().includes(q)
+        ) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }, [servers, query, statusFilter]);
+
   const totalServers = servers.length;
   const activeServers = servers.filter((s) => s.status === 'active').length;
-  const disabledServers = totalServers - activeServers;
   const totalTools = servers.reduce((sum, s) => sum + (s.tools?.length ?? 0), 0);
+  const totalRequests = servers.reduce(
+    (sum, s) => sum + (s.totalRequests ?? 0),
+    0,
+  );
+
+  const columns: DataGridColumn<McpServerView>[] = [
+    {
+      key: 'name',
+      label: 'Name',
+      render: (s) => (
+        <div className="ds-col" style={{ gap: 2, whiteSpace: 'nowrap' }}>
+          <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--ds-text)' }}>
+            {s.name}
+          </span>
+          {s.description ? (
+            <span className="ds-faint" style={{ fontSize: 11.5, maxWidth: 320 }}>
+              {s.description.length > 60
+                ? `${s.description.slice(0, 60)}…`
+                : s.description}
+            </span>
+          ) : (
+            <span className="ds-faint ds-mono" style={{ fontSize: 11 }}>
+              {s.key}
+            </span>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: 'upstream',
+      label: 'Upstream',
+      render: (s) => (
+        <span className="ds-mono ds-muted" style={{ fontSize: 12 }}>
+          {s.upstreamBaseUrl.length > 40
+            ? `${s.upstreamBaseUrl.slice(0, 40)}…`
+            : s.upstreamBaseUrl}
+        </span>
+      ),
+    },
+    {
+      key: 'auth',
+      label: 'Auth',
+      render: (s) => (
+        <span className="ds-badge">{AUTH_LABELS[s.upstreamAuth?.type] ?? 'None'}</span>
+      ),
+    },
+    {
+      key: 'tools',
+      label: 'Tools',
+      align: 'right',
+      render: (s) => (
+        <span
+          className="ds-mono"
+          style={{ fontSize: 12.5, fontVariantNumeric: 'tabular-nums' }}
+        >
+          {s.tools?.length ?? 0}
+        </span>
+      ),
+    },
+    {
+      key: 'requests',
+      label: 'Requests',
+      align: 'right',
+      render: (s) => (
+        <span
+          className="ds-mono"
+          style={{ fontSize: 12.5, fontVariantNumeric: 'tabular-nums' }}
+        >
+          {s.totalRequests?.toLocaleString() ?? '—'}
+        </span>
+      ),
+    },
+    {
+      key: 'status',
+      label: 'Status',
+      render: (s) => (
+        <StatusBadge status={s.status === 'active' ? 'active' : 'paused'} />
+      ),
+    },
+  ];
 
   return (
-    <>
+    <PageContainer>
       <PageHeader
-        icon={<IconApi size={20} />}
+        eyebrow="Build · MCP"
         title="MCP Servers"
-        subtitle="Expose your APIs as Model Context Protocol servers. Upload an OpenAPI spec and get a unique MCP endpoint."
+        subtitle="Expose APIs as Model Context Protocol servers. Each server proxies an upstream API and exposes its endpoints as MCP tools."
         actions={
           <Button
-            leftSection={<IconPlus size={16} />}
+            color="teal"
+            size="sm"
+            leftSection={<IconPlus size={14} stroke={1.7} />}
             onClick={() => setCreateModalOpen(true)}
           >
-            New MCP Server
+            New MCP server
           </Button>
         }
       />
 
-      {loading ? (
-        <Paper withBorder radius="md">
-          <Center p="xl">
-            <Loader size="sm" />
-          </Center>
-        </Paper>
-      ) : servers.length === 0 ? (
-        <Paper withBorder radius="md">
-          <Stack align="center" p="xl" gap="sm">
-            <ThemeIcon size={56} radius="xl" variant="light" color="blue">
-              <IconApi size={28} />
-            </ThemeIcon>
-            <Text fw={600} size="lg">No MCP Servers yet</Text>
-            <Text c="dimmed" size="sm" ta="center" maw={400}>
-              Create your first MCP server by uploading an OpenAPI specification.
-              Each server gets a unique endpoint that tools and agents can consume.
-            </Text>
-            <Button
-              mt="sm"
-              leftSection={<IconPlus size={16} />}
-              onClick={() => setCreateModalOpen(true)}
-            >
-              Create your first MCP server
-            </Button>
-          </Stack>
-        </Paper>
-      ) : (
-        <Stack gap="md">
-          <SimpleGrid cols={{ base: 1, sm: 2, md: 4 }} spacing="md">
-            <Paper withBorder p="md" radius="md">
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Total Servers</Text>
-              <Text fw={700} size="xl" mt="xs">{totalServers}</Text>
-            </Paper>
-            <Paper withBorder p="md" radius="md">
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Active</Text>
-              <Text fw={700} size="xl" mt="xs" c="teal">{activeServers}</Text>
-            </Paper>
-            <Paper withBorder p="md" radius="md">
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Disabled</Text>
-              <Text fw={700} size="xl" mt="xs" c="gray">{disabledServers}</Text>
-            </Paper>
-            <Paper withBorder p="md" radius="md">
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Total Tools</Text>
-              <Text fw={700} size="xl" mt="xs">{totalTools}</Text>
-            </Paper>
-          </SimpleGrid>
+      <div className="ds-stat-grid" style={{ marginBottom: 16 }}>
+        <StatTile label="Total servers" value={totalServers} icon={<IconApi size={14} />} />
+        <StatTile label="Active" value={activeServers} />
+        <StatTile label="Tools exposed" value={totalTools} />
+        <StatTile
+          label="Total requests"
+          value={totalRequests.toLocaleString()}
+        />
+      </div>
 
-          <SimpleGrid cols={{ base: 1, md: 2 }} spacing="md">
-            {servers.map((s) => (
-              <Paper key={s.id} withBorder radius="md" p="md" style={{ opacity: s.status === 'active' ? 1 : 0.7 }}>
-                <Group justify="space-between" align="flex-start" wrap="nowrap" mb="sm">
-                  <Group gap="sm" wrap="nowrap" style={{ minWidth: 0 }}>
-                    <ThemeIcon
-                      size={34}
-                      radius="md"
-                      variant="light"
-                      color={s.status === 'active' ? 'blue' : 'gray'}
-                    >
-                      <IconApi size={18} />
-                    </ThemeIcon>
-                    <div style={{ minWidth: 0 }}>
-                      <Text
-                        fw={600}
-                        size="sm"
-                        component={Link}
-                        href={`/dashboard/mcp/${s.id}`}
-                        style={{ textDecoration: 'none', color: 'inherit' }}
-                        lineClamp={1}
-                      >
-                        {s.name}
-                      </Text>
-                      <Text size="xs" c="dimmed" lineClamp={2}>
-                        {s.description || 'No description'}
-                      </Text>
-                    </div>
-                  </Group>
-
-                  <Menu position="bottom-end" withinPortal>
-                    <Menu.Target>
-                      <ActionIcon variant="subtle" color="gray" size="sm">
-                        <IconDotsVertical size={14} />
-                      </ActionIcon>
-                    </Menu.Target>
-                    <Menu.Dropdown>
-                      <Menu.Item
-                        leftSection={<IconEye size={14} />}
-                        onClick={() => router.push(`/dashboard/mcp/${s.id}`)}
-                      >
-                        View
-                      </Menu.Item>
-                      <Menu.Item
-                        leftSection={<IconEdit size={14} />}
-                        onClick={() => router.push(`/dashboard/mcp/${s.id}`)}
-                      >
-                        Edit
-                      </Menu.Item>
-                      <Menu.Item
-                        leftSection={s.status === 'active' ? <IconPlayerPause size={14} /> : <IconPlayerPlay size={14} />}
-                        onClick={() => handleToggleStatus(s)}
-                      >
-                        {s.status === 'active' ? 'Disable' : 'Enable'}
-                      </Menu.Item>
-                      <Menu.Divider />
-                      <Menu.Item
-                        color="red"
-                        leftSection={<IconTrash size={14} />}
-                        onClick={() => handleDelete(s)}
-                      >
-                        Delete
-                      </Menu.Item>
-                    </Menu.Dropdown>
-                  </Menu>
-                </Group>
-
-                <Group gap="xs" mb="sm">
-                  <Badge size="sm" variant="light" color={STATUS_COLORS[s.status] ?? 'gray'}>
-                    {s.status === 'active' ? 'Active' : 'Disabled'}
-                  </Badge>
-                  <Badge size="sm" variant="light" color="indigo">
-                    {s.tools?.length ?? 0} tools
-                  </Badge>
-                  <Badge size="sm" variant="light" color="gray">
-                    {AUTH_LABELS[s.upstreamAuth?.type] ?? s.upstreamAuth?.type}
-                  </Badge>
-                </Group>
-
-                <Group justify="space-between" wrap="nowrap" gap="xs">
-                  <Text size="xs" c="dimmed" ff="monospace" lineClamp={1}>
-                    {s.key}
-                  </Text>
-                  <Group gap={4} wrap="nowrap">
-                    <CopyButton value={s.key}>
-                      {({ copied, copy }) => (
-                        <Tooltip label={copied ? 'Copied' : 'Copy key'}>
-                          <ActionIcon variant="subtle" color={copied ? 'teal' : 'gray'} size="sm" onClick={copy}>
-                            {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
-                          </ActionIcon>
-                        </Tooltip>
-                      )}
-                    </CopyButton>
-                    <Tooltip label="View details">
-                      <ActionIcon
-                        variant="subtle"
-                        color="gray"
-                        size="sm"
-                        onClick={() => router.push(`/dashboard/mcp/${s.id}`)}
-                      >
-                        <IconEye size={14} />
-                      </ActionIcon>
-                    </Tooltip>
-                  </Group>
-                </Group>
-              </Paper>
-            ))}
-          </SimpleGrid>
-        </Stack>
-      )}
+      <DataGrid<McpServerView>
+        records={filtered}
+        loading={loading}
+        rowKey={(s) => s.id}
+        onRowClick={(s) => router.push(`/dashboard/mcp/${s.id}`)}
+        columns={columns}
+        search={{
+          value: query,
+          onChange: setQuery,
+          placeholder: 'Filter by name, key, or description…',
+        }}
+        filters={[
+          {
+            value: statusFilter,
+            onChange: setStatusFilter,
+            ariaLabel: 'Filter by status',
+            width: 140,
+            options: [
+              { value: 'all', label: 'All statuses' },
+              { value: 'active', label: 'Active' },
+              { value: 'disabled', label: 'Disabled' },
+            ],
+          },
+        ]}
+        onRefresh={loadServers}
+        empty={{
+          icon: <IconApi size={26} stroke={1.7} />,
+          title: 'No MCP servers yet',
+          description:
+            'Create your first MCP server by providing an OpenAPI specification. Tools will be auto-generated from your API endpoints.',
+          primaryAction: {
+            label: 'Create your first MCP server',
+            icon: <IconPlus size={14} stroke={1.7} />,
+            onClick: () => setCreateModalOpen(true),
+          },
+        }}
+        footerLeft={`Showing ${filtered.length} of ${totalServers} servers`}
+        rowActions={(s) => [
+          {
+            id: 'view',
+            label: 'View',
+            icon: <IconEye size={14} />,
+            onClick: () => router.push(`/dashboard/mcp/${s.id}`),
+          },
+          {
+            id: 'edit',
+            label: 'Edit',
+            icon: <IconEdit size={14} />,
+            onClick: () => router.push(`/dashboard/mcp/${s.id}`),
+          },
+          {
+            id: 'toggle',
+            label: s.status === 'active' ? 'Disable' : 'Enable',
+            icon:
+              s.status === 'active' ? (
+                <IconPlayerPause size={14} />
+              ) : (
+                <IconPlayerPlay size={14} />
+              ),
+            onClick: () => void handleToggleStatus(s),
+          },
+          { divider: true },
+          {
+            id: 'delete',
+            label: 'Delete',
+            icon: <IconTrash size={14} />,
+            color: 'red',
+            onClick: () => setDeleteTarget(s),
+          },
+        ]}
+      />
 
       <Modal
         opened={deleteTarget !== null}
         onClose={() => setDeleteTarget(null)}
-        title="Delete MCP Server"
+        title="Delete MCP server"
         centered
         size="sm"
       >
         <Text size="sm" mb="lg">
-          Are you sure you want to delete <strong>{deleteTarget?.name}</strong>? This will remove the
-          server endpoint and all associated request logs. This action cannot be undone.
+          Are you sure you want to delete <strong>{deleteTarget?.name}</strong>? This
+          will permanently remove the server and all its associated tools. This action
+          cannot be undone.
         </Text>
         <Group justify="flex-end">
-          <Button variant="default" onClick={() => setDeleteTarget(null)}>Cancel</Button>
-          <Button color="red" loading={deleting} onClick={confirmDelete}>Delete</Button>
+          <Button variant="default" onClick={() => setDeleteTarget(null)}>
+            Cancel
+          </Button>
+          <Button color="red" loading={deleting} onClick={confirmDelete}>
+            Delete
+          </Button>
         </Group>
       </Modal>
 
@@ -332,6 +335,6 @@ export default function McpServersPage() {
           router.push(`/dashboard/mcp/${s.id}`);
         }}
       />
-    </>
+    </PageContainer>
   );
 }

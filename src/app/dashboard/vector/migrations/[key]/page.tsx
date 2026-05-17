@@ -21,12 +21,11 @@ import { notifications } from '@mantine/notifications';
 import {
   IconArrowLeft,
   IconArrowRight,
-  IconDatabaseExport,
   IconPlayerPlay,
   IconPlayerStop,
   IconTrash,
 } from '@tabler/icons-react';
-import PageHeader from '@/components/layout/PageHeader';
+import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import type { IVectorMigration, IVectorMigrationLog, VectorMigrationStatus } from '@/lib/database/provider/types.base';
 
 const POLL_INTERVAL_MS = 2500;
@@ -192,9 +191,9 @@ export default function VectorMigrationDetailPage() {
   const logsCurrentPage = Math.floor(logsOffset / LOGS_LIMIT);
 
   return (
-    <Stack gap="md">
+    <PageContainer>
       <PageHeader
-        icon={<IconDatabaseExport size={18} />}
+        eyebrow="Operate · Migration"
         title={migration.name}
         subtitle={migration.description ?? `Migration ${migration.key}`}
         actions={
@@ -411,6 +410,6 @@ export default function VectorMigrationDetailPage() {
           </Stack>
         )}
       </Paper>
-    </Stack>
+    </PageContainer>
   );
 }

@@ -10,6 +10,9 @@ import type {
   OpenApiOperation,
 } from './types';
 import { createLogger } from '@/lib/core/logger';
+import { routeInstanceCall } from '@/lib/core/cluster';
+import type { QueuePayload } from '@/lib/core/queue';
+import { mcpEntityId } from './mcpEntityId';
 
 const logger = createLogger('mcp-service');
 const SLUG_OPTIONS = { lower: true, strict: true, trim: true };
@@ -338,6 +341,22 @@ export async function aggregateMcpRequestLogs(
 // ── MCP Proxy ─────────────────────────────────────────────────────────────
 
 export async function executeMcpTool(
+  server: IMcpServer,
+  toolName: string,
+  args: Record<string, unknown>,
+): Promise<{ result: unknown; latencyMs: number }> {
+  return routeInstanceCall(
+    {
+      entityType: 'mcp',
+      entityId: mcpEntityId(server.tenantId, server.key),
+      jobName: 'invoke',
+    },
+    { server, toolName, args } as unknown as QueuePayload,
+    () => executeMcpToolLocal(server, toolName, args),
+  );
+}
+
+export async function executeMcpToolLocal(
   server: IMcpServer,
   toolName: string,
   args: Record<string, unknown>,

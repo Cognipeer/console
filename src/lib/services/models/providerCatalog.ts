@@ -30,8 +30,8 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     id: 'openai-compatible',
     label: 'OpenAI-Compatible',
     description:
-      'Any API that follows the OpenAI REST schema (e.g., Mistral, Groq, Cerebras).',
-    categories: ['llm', 'embedding'],
+      'Any API that follows the OpenAI REST schema (e.g., Mistral, Groq, Cerebras). Also supports self-hosted rerankers (BGE/Mixedbread) exposing /v1/rerank.',
+    categories: ['llm', 'embedding', 'rerank'],
     credentialFields: [
       {
         name: 'apiKey',
@@ -269,5 +269,56 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     credentialFields: [],
     defaultPricingCurrency: 'USD',
     modelIdHint: 'e.g., gemini-2.5-pro, gemini-2.5-flash',
+  },
+  {
+    id: 'cohere',
+    label: 'Cohere',
+    description:
+      'Cohere LLMs, embedding models, and dedicated rerank models (rerank-3.5, rerank-multilingual).',
+    categories: ['llm', 'embedding', 'rerank'],
+    credentialFields: [
+      {
+        name: 'apiKey',
+        label: 'API Key',
+        type: 'password',
+        required: true,
+      },
+    ],
+    defaultPricingCurrency: 'USD',
+    modelIdHint: 'e.g., rerank-v3.5, rerank-multilingual-v3.0, command-r-plus',
+  },
+  {
+    id: 'jina-ai',
+    label: 'Jina AI',
+    description:
+      'Jina AI embeddings and rerankers (jina-reranker-v2-base-multilingual).',
+    categories: ['embedding', 'rerank'],
+    credentialFields: [
+      {
+        name: 'apiKey',
+        label: 'API Key',
+        type: 'password',
+        required: true,
+      },
+    ],
+    defaultPricingCurrency: 'USD',
+    modelIdHint: 'e.g., jina-reranker-v2-base-multilingual, jina-embeddings-v3',
+  },
+  {
+    id: 'voyage-ai',
+    label: 'Voyage AI',
+    description:
+      'Voyage AI embedding and rerank models (rerank-2, rerank-2-lite).',
+    categories: ['embedding', 'rerank'],
+    credentialFields: [
+      {
+        name: 'apiKey',
+        label: 'API Key',
+        type: 'password',
+        required: true,
+      },
+    ],
+    defaultPricingCurrency: 'USD',
+    modelIdHint: 'e.g., rerank-2, rerank-2-lite, voyage-3',
   },
 ];

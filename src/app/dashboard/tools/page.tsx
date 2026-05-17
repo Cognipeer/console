@@ -1,55 +1,28 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import Link from 'next/link';
+import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import {
-  ActionIcon,
-  Badge,
-  Button,
-  Center,
-  CopyButton,
-  Group,
-  Loader,
-  Menu,
-  Modal,
-  Paper,
-  SimpleGrid,
-  Stack,
-  Text,
-  ThemeIcon,
-  Tooltip,
-} from '@mantine/core';
+import { Button, Group, Modal, Text } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
-  IconTool,
-  IconCopy,
-  IconCheck,
-  IconDotsVertical,
+  IconApi,
+  IconCloud,
   IconEdit,
   IconEye,
   IconPlayerPause,
   IconPlayerPlay,
   IconPlus,
+  IconTool,
   IconTrash,
-  IconApi,
-  IconCloud,
 } from '@tabler/icons-react';
-import PageHeader from '@/components/layout/PageHeader';
+import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
+import StatTile from '@/components/common/ui/StatTile';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
+import StatusBadge from '@/components/common/ui/StatusBadge';
 import CreateToolModal from '@/components/tools/CreateToolModal';
 import type { ToolView } from '@/lib/services/tools';
 
-const STATUS_COLORS: Record<string, string> = {
-  active: 'teal',
-  disabled: 'gray',
-};
-
-const TYPE_COLORS: Record<string, string> = {
-  openapi: 'indigo',
-  mcp: 'violet',
-};
-
-const TYPE_LABELS: Record<string, string> = {
+const TYPE_LABEL: Record<string, string> = {
   openapi: 'OpenAPI',
   mcp: 'MCP',
 };
@@ -60,6 +33,9 @@ export default function ToolsPage() {
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<ToolView | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [query, setQuery] = useState('');
+  const [typeFilter, setTypeFilter] = useState<string>('all');
+  const [statusFilter, setStatusFilter] = useState<string>('all');
   const router = useRouter();
 
   const loadTools = async () => {
@@ -78,7 +54,7 @@ export default function ToolsPage() {
   };
 
   useEffect(() => {
-    loadTools();
+    void loadTools();
   }, []);
 
   const handleToggleStatus = async (t: ToolView) => {
@@ -105,10 +81,6 @@ export default function ToolsPage() {
     }
   };
 
-  const handleDelete = (t: ToolView) => {
-    setDeleteTarget(t);
-  };
-
   const confirmDelete = async () => {
     if (!deleteTarget) return;
     setDeleting(true);
@@ -133,199 +105,226 @@ export default function ToolsPage() {
     }
   };
 
+  const filtered = useMemo(() => {
+    return tools.filter((t) => {
+      if (typeFilter !== 'all' && t.type !== typeFilter) return false;
+      if (statusFilter !== 'all' && t.status !== statusFilter) return false;
+      if (query) {
+        const q = query.toLowerCase();
+        if (
+          !t.name.toLowerCase().includes(q) &&
+          !(t.description ?? '').toLowerCase().includes(q) &&
+          !t.key.toLowerCase().includes(q)
+        ) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }, [tools, query, typeFilter, statusFilter]);
+
   const totalTools = tools.length;
   const activeTools = tools.filter((t) => t.status === 'active').length;
   const disabledTools = totalTools - activeTools;
   const totalActions = tools.reduce((sum, t) => sum + (t.actions?.length ?? 0), 0);
 
+  const columns: DataGridColumn<ToolView>[] = [
+    {
+      key: 'name',
+      label: 'Name',
+      render: (t) => (
+        <div className="ds-col" style={{ gap: 2, whiteSpace: 'nowrap' }}>
+          <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--ds-text)' }}>
+            {t.name}
+          </span>
+          {t.description ? (
+            <span className="ds-faint" style={{ fontSize: 11.5, maxWidth: 320 }}>
+              {t.description.length > 60
+                ? `${t.description.slice(0, 60)}…`
+                : t.description}
+            </span>
+          ) : (
+            <span className="ds-faint ds-mono" style={{ fontSize: 11 }}>
+              {t.key}
+            </span>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: 'type',
+      label: 'Type',
+      render: (t) => (
+        <span
+          className={`ds-badge ${t.type === 'openapi' ? 'ds-badge-info' : 'ds-badge-teal'}`}
+        >
+          {t.type === 'openapi' ? (
+            <IconApi size={10} stroke={2} />
+          ) : (
+            <IconCloud size={10} stroke={2} />
+          )}
+          {TYPE_LABEL[t.type] ?? t.type}
+        </span>
+      ),
+    },
+    {
+      key: 'actions',
+      label: 'Actions',
+      align: 'right',
+      render: (t) => (
+        <span
+          className="ds-mono"
+          style={{ fontSize: 12.5, fontVariantNumeric: 'tabular-nums' }}
+        >
+          {t.actions?.length ?? 0}
+        </span>
+      ),
+    },
+    {
+      key: 'status',
+      label: 'Status',
+      render: (t) => (
+        <StatusBadge status={t.status === 'active' ? 'active' : 'paused'} />
+      ),
+    },
+    {
+      key: 'key',
+      label: 'Key',
+      render: (t) => (
+        <span className="ds-mono ds-faint" style={{ fontSize: 12 }}>
+          {t.key}
+        </span>
+      ),
+    },
+  ];
+
   return (
-    <>
+    <PageContainer>
       <PageHeader
-        icon={<IconTool size={20} />}
+        eyebrow="Build · Tools"
         title="Tools"
         subtitle="Manage tools from OpenAPI specs or MCP servers. Tools are available for agents and direct API execution."
         actions={
           <Button
-            leftSection={<IconPlus size={16} />}
+            color="teal"
+            size="sm"
+            leftSection={<IconPlus size={14} stroke={1.7} />}
             onClick={() => setCreateModalOpen(true)}
           >
-            New Tool
+            New tool
           </Button>
         }
       />
 
-      {loading ? (
-        <Paper withBorder radius="md">
-          <Center p="xl">
-            <Loader size="sm" />
-          </Center>
-        </Paper>
-      ) : tools.length === 0 ? (
-        <Paper withBorder radius="md">
-          <Stack align="center" p="xl" gap="sm">
-            <ThemeIcon size={56} radius="xl" variant="light" color="blue">
-              <IconTool size={28} />
-            </ThemeIcon>
-            <Text fw={600} size="lg">No tools yet</Text>
-            <Text c="dimmed" size="sm" ta="center" maw={400}>
-              Add your first tool by importing an OpenAPI specification or connecting to an MCP server.
-              Tools can be used by agents or called directly via the API.
-            </Text>
-            <Button
-              mt="sm"
-              leftSection={<IconPlus size={16} />}
-              onClick={() => setCreateModalOpen(true)}
-            >
-              Create your first tool
-            </Button>
-          </Stack>
-        </Paper>
-      ) : (
-        <Stack gap="md">
-          <SimpleGrid cols={{ base: 1, sm: 2, md: 4 }} spacing="md">
-            <Paper withBorder p="md" radius="md">
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Total Tools</Text>
-              <Text fw={700} size="xl" mt="xs">{totalTools}</Text>
-            </Paper>
-            <Paper withBorder p="md" radius="md">
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Active</Text>
-              <Text fw={700} size="xl" mt="xs" c="teal">{activeTools}</Text>
-            </Paper>
-            <Paper withBorder p="md" radius="md">
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Disabled</Text>
-              <Text fw={700} size="xl" mt="xs" c="gray">{disabledTools}</Text>
-            </Paper>
-            <Paper withBorder p="md" radius="md">
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Total Actions</Text>
-              <Text fw={700} size="xl" mt="xs">{totalActions}</Text>
-            </Paper>
-          </SimpleGrid>
+      <div className="ds-stat-grid" style={{ marginBottom: 16 }}>
+        <StatTile label="Total tools" value={totalTools} icon={<IconTool size={14} />} />
+        <StatTile label="Active" value={activeTools} />
+        <StatTile label="Disabled" value={disabledTools} />
+        <StatTile label="Total actions" value={totalActions} />
+      </div>
 
-          <SimpleGrid cols={{ base: 1, md: 2 }} spacing="md">
-            {tools.map((t) => (
-              <Paper key={t.id} withBorder radius="md" p="md" style={{ opacity: t.status === 'active' ? 1 : 0.7 }}>
-                <Group justify="space-between" align="flex-start" wrap="nowrap" mb="sm">
-                  <Group gap="sm" wrap="nowrap" style={{ minWidth: 0 }}>
-                    <ThemeIcon
-                      size={34}
-                      radius="md"
-                      variant="light"
-                      color={t.type === 'openapi' ? 'indigo' : 'violet'}
-                    >
-                      {t.type === 'openapi' ? <IconApi size={18} /> : <IconCloud size={18} />}
-                    </ThemeIcon>
-                    <div style={{ minWidth: 0 }}>
-                      <Text
-                        fw={600}
-                        size="sm"
-                        component={Link}
-                        href={`/dashboard/tools/${t.id}`}
-                        style={{ textDecoration: 'none', color: 'inherit' }}
-                        lineClamp={1}
-                      >
-                        {t.name}
-                      </Text>
-                      <Text size="xs" c="dimmed" lineClamp={2}>
-                        {t.description || 'No description'}
-                      </Text>
-                    </div>
-                  </Group>
-
-                  <Menu position="bottom-end" withinPortal>
-                    <Menu.Target>
-                      <ActionIcon variant="subtle" color="gray" size="sm">
-                        <IconDotsVertical size={14} />
-                      </ActionIcon>
-                    </Menu.Target>
-                    <Menu.Dropdown>
-                      <Menu.Item
-                        leftSection={<IconEye size={14} />}
-                        onClick={() => router.push(`/dashboard/tools/${t.id}`)}
-                      >
-                        View
-                      </Menu.Item>
-                      <Menu.Item
-                        leftSection={<IconEdit size={14} />}
-                        onClick={() => router.push(`/dashboard/tools/${t.id}`)}
-                      >
-                        Edit
-                      </Menu.Item>
-                      <Menu.Item
-                        leftSection={t.status === 'active' ? <IconPlayerPause size={14} /> : <IconPlayerPlay size={14} />}
-                        onClick={() => handleToggleStatus(t)}
-                      >
-                        {t.status === 'active' ? 'Disable' : 'Enable'}
-                      </Menu.Item>
-                      <Menu.Divider />
-                      <Menu.Item
-                        color="red"
-                        leftSection={<IconTrash size={14} />}
-                        onClick={() => handleDelete(t)}
-                      >
-                        Delete
-                      </Menu.Item>
-                    </Menu.Dropdown>
-                  </Menu>
-                </Group>
-
-                <Group gap="xs" mb="sm">
-                  <Badge size="sm" variant="light" color={STATUS_COLORS[t.status] ?? 'gray'}>
-                    {t.status === 'active' ? 'Active' : 'Disabled'}
-                  </Badge>
-                  <Badge size="sm" variant="light" color={TYPE_COLORS[t.type] ?? 'gray'}>
-                    {TYPE_LABELS[t.type] ?? t.type}
-                  </Badge>
-                  <Badge size="sm" variant="light" color="blue">
-                    {t.actions?.length ?? 0} actions
-                  </Badge>
-                </Group>
-
-                <Group justify="space-between" wrap="nowrap" gap="xs">
-                  <Text size="xs" c="dimmed" ff="monospace" lineClamp={1}>
-                    {t.key}
-                  </Text>
-                  <Group gap={4} wrap="nowrap">
-                    <CopyButton value={t.key}>
-                      {({ copied, copy }) => (
-                        <Tooltip label={copied ? 'Copied' : 'Copy key'}>
-                          <ActionIcon variant="subtle" color={copied ? 'teal' : 'gray'} size="sm" onClick={copy}>
-                            {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
-                          </ActionIcon>
-                        </Tooltip>
-                      )}
-                    </CopyButton>
-                    <Tooltip label="View details">
-                      <ActionIcon
-                        variant="subtle"
-                        color="gray"
-                        size="sm"
-                        onClick={() => router.push(`/dashboard/tools/${t.id}`)}
-                      >
-                        <IconEye size={14} />
-                      </ActionIcon>
-                    </Tooltip>
-                  </Group>
-                </Group>
-              </Paper>
-            ))}
-          </SimpleGrid>
-        </Stack>
-      )}
+      <DataGrid<ToolView>
+        records={filtered}
+        loading={loading}
+        rowKey={(t) => t.id}
+        onRowClick={(t) => router.push(`/dashboard/tools/${t.id}`)}
+        columns={columns}
+        search={{
+          value: query,
+          onChange: setQuery,
+          placeholder: 'Filter by name, key, or description…',
+        }}
+        filters={[
+          {
+            value: typeFilter,
+            onChange: setTypeFilter,
+            ariaLabel: 'Filter by type',
+            width: 140,
+            options: [
+              { value: 'all', label: 'All types' },
+              { value: 'openapi', label: 'OpenAPI' },
+              { value: 'mcp', label: 'MCP' },
+            ],
+          },
+          {
+            value: statusFilter,
+            onChange: setStatusFilter,
+            ariaLabel: 'Filter by status',
+            width: 140,
+            options: [
+              { value: 'all', label: 'All statuses' },
+              { value: 'active', label: 'Active' },
+              { value: 'disabled', label: 'Disabled' },
+            ],
+          },
+        ]}
+        onRefresh={loadTools}
+        empty={{
+          icon: <IconTool size={26} stroke={1.7} />,
+          title: 'No tools yet',
+          description:
+            'Add your first tool by importing an OpenAPI specification or connecting to an MCP server. Tools can be used by agents or called directly via the API.',
+          primaryAction: {
+            label: 'Create your first tool',
+            icon: <IconPlus size={14} stroke={1.7} />,
+            onClick: () => setCreateModalOpen(true),
+          },
+        }}
+        footerLeft={`Showing ${filtered.length} of ${totalTools} tools`}
+        rowActions={(t) => [
+          {
+            id: 'view',
+            label: 'View',
+            icon: <IconEye size={14} />,
+            onClick: () => router.push(`/dashboard/tools/${t.id}`),
+          },
+          {
+            id: 'edit',
+            label: 'Edit',
+            icon: <IconEdit size={14} />,
+            onClick: () => router.push(`/dashboard/tools/${t.id}`),
+          },
+          {
+            id: 'toggle',
+            label: t.status === 'active' ? 'Disable' : 'Enable',
+            icon:
+              t.status === 'active' ? (
+                <IconPlayerPause size={14} />
+              ) : (
+                <IconPlayerPlay size={14} />
+              ),
+            onClick: () => void handleToggleStatus(t),
+          },
+          { divider: true },
+          {
+            id: 'delete',
+            label: 'Delete',
+            icon: <IconTrash size={14} />,
+            color: 'red',
+            onClick: () => setDeleteTarget(t),
+          },
+        ]}
+      />
 
       <Modal
         opened={deleteTarget !== null}
         onClose={() => setDeleteTarget(null)}
-        title="Delete Tool"
+        title="Delete tool"
         centered
         size="sm"
       >
         <Text size="sm" mb="lg">
-          Are you sure you want to delete <strong>{deleteTarget?.name}</strong>? This will remove the
-          tool and all its actions. Agents that reference this tool will no longer have access to it. This action cannot be undone.
+          Are you sure you want to delete <strong>{deleteTarget?.name}</strong>? This
+          will remove the tool and all its actions. Agents that reference this tool
+          will no longer have access to it. This action cannot be undone.
         </Text>
         <Group justify="flex-end">
-          <Button variant="default" onClick={() => setDeleteTarget(null)}>Cancel</Button>
-          <Button color="red" loading={deleting} onClick={confirmDelete}>Delete</Button>
+          <Button variant="default" onClick={() => setDeleteTarget(null)}>
+            Cancel
+          </Button>
+          <Button color="red" loading={deleting} onClick={confirmDelete}>
+            Delete
+          </Button>
         </Group>
       </Modal>
 
@@ -337,6 +336,6 @@ export default function ToolsPage() {
           router.push(`/dashboard/tools/${t.id}`);
         }}
       />
-    </>
+    </PageContainer>
   );
 }

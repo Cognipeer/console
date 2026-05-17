@@ -1,6 +1,14 @@
 # RAG Pipeline
 
-The RAG (Retrieval-Augmented Generation) service provides end-to-end document ingestion, chunking, embedding, and semantic retrieval.
+The RAG (Retrieval-Augmented Generation) service provides end-to-end document ingestion, chunking, embedding, and semantic retrieval. It surfaces in the console as **Data → Knowledge Engine**.
+
+## Knowledge Engine
+
+A *RAG module* is the configuration unit that ties a chunking strategy, an embedding model, and a vector index together. The Knowledge Engine screen lists every module configured for the active project, with counters for modules, documents indexed, and chunk count.
+
+![Knowledge Engine list](/screenshots/rag/01-rag-list.png)
+
+When the project is empty the screen shows the onboarding CTA — clicking **Create module** opens a multi-step form where you choose the source datasource, pick chunking parameters (size, overlap, splitter), select an embedding model from [Model Hub](/guide/model-hub), and point the output at a vector index (see [Vector Stores](/guide/vector-stores)).
 
 ## Architecture
 

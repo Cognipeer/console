@@ -51,7 +51,7 @@ export async function POST(request: NextRequest) {
 
     const response = NextResponse.json({ success: true }, { status: 200 });
     response.cookies.set('active_project_id', body.projectId, {
-      httpOnly: false,
+      httpOnly: true,
       secure: getConfig().nodeEnv === 'production',
       sameSite: 'lax',
       maxAge: 60 * 60 * 24 * 30,

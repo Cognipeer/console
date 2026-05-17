@@ -28,7 +28,7 @@ export default function DashboardDateFilter({
   return (
     <Group gap="xs" wrap="nowrap">
       <Select
-        size="xs"
+        size="sm"
         w={140}
         data={periodOptions}
         value={value.period}
@@ -44,7 +44,7 @@ export default function DashboardDateFilter({
         type="range"
         value={value.dateRange}
         clearable
-        size="xs"
+        size="sm"
         w={220}
         placeholder="Select date range"
         valueFormat="MMM D, YYYY"

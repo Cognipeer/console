@@ -2,11 +2,10 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { ActionIcon, Box, Button, Group, Modal, Stack, Text, TextInput, Textarea, Tooltip } from '@mantine/core';
-import { DataTable } from 'mantine-datatable';
+import { Button, Group, Modal, Stack, Text, TextInput, Textarea } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { IconEdit, IconSearch, IconTrash } from '@tabler/icons-react';
-import { TABLE_PAGE_SIZE_OPTIONS, useClientTable } from '@/hooks/useClientTable';
+import { IconEdit, IconPlus, IconStar, IconTrash } from '@tabler/icons-react';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 
 type Project = {
   _id: string;
@@ -21,6 +20,7 @@ export default function ProjectsManagement() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | undefined>(undefined);
   const [loading, setLoading] = useState(true);
+  const [sessionRole, setSessionRole] = useState<string | undefined>(undefined);
   const [createOpened, setCreateOpened] = useState(false);
   const [editOpened, setEditOpened] = useState(false);
   const [deleteOpened, setDeleteOpened] = useState(false);
@@ -30,6 +30,9 @@ export default function ProjectsManagement() {
   const [description, setDescription] = useState('');
   const [editingProject, setEditingProject] = useState<Project | null>(null);
   const [deletingProject, setDeletingProject] = useState<Project | null>(null);
+  const [query, setQuery] = useState('');
+  const isTenantAdmin = sessionRole === 'owner' || sessionRole === 'admin';
+
   const fetchProjects = async () => {
     setLoading(true);
     try {
@@ -50,18 +53,33 @@ export default function ProjectsManagement() {
   };
 
   useEffect(() => {
-    fetchProjects();
+    void fetchProjects();
   }, []);
 
-  const rows = useMemo(() => projects ?? [], [projects]);
-  const projectTable = useClientTable({
-    records: rows,
-    initialPageSize: 10,
-    search: (project, query) =>
+  useEffect(() => {
+    async function fetchSession() {
+      try {
+        const res = await fetch('/api/auth/session', { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = (await res.json()) as { role?: string };
+        setSessionRole(data.role);
+      } catch {
+        setSessionRole(undefined);
+      }
+    }
+
+    void fetchSession();
+  }, []);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return projects;
+    return projects.filter((project) =>
       [project.name, project.key, project.description]
         .filter(Boolean)
-        .some((value) => String(value).toLowerCase().includes(query)),
-  });
+        .some((value) => String(value).toLowerCase().includes(q)),
+    );
+  }, [projects, query]);
 
   const resetForm = () => {
     setName('');
@@ -183,116 +201,118 @@ export default function ProjectsManagement() {
     }
   };
 
-  return (
-    <Box p="md">
-      <Group justify="space-between" mb="md">
-        <div>
-          <Text size="lg" fw={600}>
-            Projects
-          </Text>
-          <Text size="sm" c="dimmed">
-            Create and switch projects.
-          </Text>
+  const columns: DataGridColumn<Project>[] = [
+    {
+      key: 'name',
+      label: 'Name',
+      render: (project) => (
+        <div className="ds-col" style={{ gap: 2 }}>
+          <span style={{ fontSize: 13, fontWeight: 500 }}>{project.name}</span>
+          <span className="ds-faint ds-mono" style={{ fontSize: 11 }}>{project.key}</span>
         </div>
-        <Button onClick={() => setCreateOpened(true)}>Add Project</Button>
-      </Group>
-
-      <Group mb="sm" justify="space-between">
-        <TextInput
-          value={projectTable.query}
-          onChange={(event) => projectTable.setQuery(event.currentTarget.value)}
-          placeholder="Search projects"
-          leftSection={<IconSearch size={14} />}
-          w={{ base: '100%', sm: 280 }}
-        />
-        <Text size="sm" c="dimmed">
-          {projectTable.totalRecords} records
+      ),
+    },
+    {
+      key: 'description',
+      label: 'Description',
+      render: (project) => (
+        <Text size="sm" c={project.description ? undefined : 'dimmed'}>
+          {project.description || '—'}
         </Text>
-      </Group>
+      ),
+    },
+    {
+      key: 'active',
+      label: 'Status',
+      width: 110,
+      render: (project) =>
+        String(project._id) === String(activeProjectId) ? (
+          <span className="ds-badge ds-badge-ok">
+            <span className="ds-badge-dot" />
+            Active
+          </span>
+        ) : (
+          <span className="ds-faint" style={{ fontSize: 12 }}>—</span>
+        ),
+    },
+  ];
 
-      <DataTable
-        withTableBorder
-        borderRadius="sm"
-        striped
-        highlightOnHover
-        records={projectTable.records}
-        totalRecords={projectTable.totalRecords}
-        recordsPerPage={projectTable.pageSize}
-        recordsPerPageOptions={TABLE_PAGE_SIZE_OPTIONS}
-        onRecordsPerPageChange={projectTable.setPageSize}
-        page={projectTable.page}
-        onPageChange={projectTable.setPage}
-        fetching={loading}
-        minHeight={200}
-        noRecordsText="No projects"
-        columns={[
+  return (
+    <>
+      <DataGrid<Project>
+        records={filtered}
+        loading={loading}
+        rowKey={(p) => String(p._id)}
+        onRowClick={(p) => handleManage(String(p._id))}
+        columns={columns}
+        search={{
+          value: query,
+          onChange: setQuery,
+          placeholder: 'Search projects',
+        }}
+        onRefresh={() => void fetchProjects()}
+        refreshing={loading}
+        toolbarRight={
+          isTenantAdmin ? (
+            <Button
+              color="teal"
+              size="xs"
+              leftSection={<IconPlus size={13} stroke={1.7} />}
+              onClick={() => setCreateOpened(true)}
+            >
+              Add project
+            </Button>
+          ) : undefined
+        }
+        empty={{
+          title: 'No projects',
+          description: isTenantAdmin
+            ? 'Create a project to organize your team and resources.'
+            : 'You do not have access to any projects yet.',
+          primaryAction: isTenantAdmin
+            ? {
+                label: 'Add project',
+                icon: <IconPlus size={14} stroke={1.7} />,
+                onClick: () => setCreateOpened(true),
+              }
+            : undefined,
+        }}
+        footerLeft={`Showing ${filtered.length} of ${projects.length} projects`}
+        rowActions={(project) => [
           {
-            accessor: 'name',
-            title: 'Name',
-            render: (project) => (
-              <div>
-                <Text size="sm" fw={500}>
-                  {project.name}
-                </Text>
-                <Text size="xs" c="dimmed" ff="monospace">
-                  {project.key}
-                </Text>
-              </div>
-            ),
+            id: 'manage',
+            label: isTenantAdmin ? 'Manage' : 'Open',
+            onClick: () => handleManage(String(project._id)),
           },
           {
-            accessor: 'description',
-            title: 'Description',
-            render: (project) => (
-              <Text size="sm" c={project.description ? undefined : 'dimmed'}>
-                {project.description || '—'}
-              </Text>
-            ),
+            id: 'set-active',
+            label:
+              String(project._id) === String(activeProjectId) ? 'Already active' : 'Set active',
+            icon: <IconStar size={14} />,
+            onClick: () => handleSetActive(String(project._id)),
+            disabled: String(project._id) === String(activeProjectId),
           },
-          {
-            accessor: 'actions',
-            title: 'Actions',
-            textAlign: 'right',
-            render: (project) => (
-              <Group gap="xs" justify="flex-end">
-                <Tooltip label="Edit project">
-                  <ActionIcon
-                    variant="subtle"
-                    color="gray"
-                    onClick={() => openEditModal(project)}
-                  >
-                    <IconEdit size={16} />
-                  </ActionIcon>
-                </Tooltip>
-                {project.key !== 'default' && (
-                  <Tooltip label="Delete project">
-                    <ActionIcon
-                      variant="subtle"
-                      color="red"
-                      onClick={() => openDeleteModal(project)}
-                    >
-                      <IconTrash size={16} />
-                    </ActionIcon>
-                  </Tooltip>
-                )}
-                <Button
-                  size="xs"
-                  variant="default"
-                  onClick={() => handleManage(String(project._id))}
-                >
-                  Manage
-                </Button>
-                <Button
-                  size="xs"
-                  variant={String(project._id) === String(activeProjectId) ? 'filled' : 'light'}
-                  onClick={() => handleSetActive(String(project._id))}
-                  disabled={String(project._id) === String(activeProjectId)}
-                >
-                  {String(project._id) === String(activeProjectId) ? 'Active' : 'Set active'}
-                </Button>
-              </Group>
-            ),
-          },
+          ...(isTenantAdmin
+            ? [
+                {
+                  id: 'edit',
+                  label: 'Edit',
+                  icon: <IconEdit size={14} />,
+                  onClick: () => openEditModal(project),
+                },
+              ]
+            : []),
+          ...(isTenantAdmin && project.key !== 'default'
+            ? [
+                {
+                  id: 'delete',
+                  label: 'Delete',
+                  icon: <IconTrash size={14} />,
+                  color: 'red' as const,
+                  onClick: () => openDeleteModal(project),
+                },
+              ]
+            : []),
         ]}
       />
 
@@ -416,6 +436,6 @@ export default function ProjectsManagement() {
           </Group>
         </Stack>
       </Modal>
-    </Box>
+    </>
   );
 }

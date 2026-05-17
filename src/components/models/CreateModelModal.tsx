@@ -1,20 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  Badge,
-  Button,
-  Card,
-  Checkbox,
-  Group,
-  Modal,
-  NumberInput,
-  Select,
-  Stack,
-  Text,
-  TextInput,
-  Textarea,
-} from '@mantine/core';
+import { NumberInput, Select, TextInput, Textarea } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
+import { IconBolt, IconBrain } from '@tabler/icons-react';
+import FormShell, {
+  Checklist,
+  ChipPicker,
+  FormField,
+  FormRow,
+  FormSection,
+  SummaryGroup,
+  SummaryKV,
+  ToggleList,
+  ToggleRow,
+} from '@/components/common/ui/FormShell';
 import type { ModelProviderView } from '@/lib/services/models/types';
 import type { IModel } from '@/lib/database';
 
@@ -24,11 +23,6 @@ const DEFAULT_PRICING = {
   outputTokenPer1M: 0,
   cachedTokenPer1M: 0,
 };
-
-const CATEGORIES: Array<{ value: 'llm' | 'embedding'; label: string }> = [
-  { value: 'llm', label: 'LLM' },
-  { value: 'embedding', label: 'Embedding' },
-];
 
 const CAPABILITY_KEYS = {
   categories: 'model.categories',
@@ -67,21 +61,17 @@ interface FormValues {
 }
 
 function toNumber(value: number | '' | undefined): number | undefined {
-  if (value === '' || value === undefined) {
-    return undefined;
-  }
-  if (Number.isNaN(value)) {
-    return undefined;
-  }
+  if (value === '' || value === undefined) return undefined;
+  if (Number.isNaN(value)) return undefined;
   return value;
 }
 
 function resolveProviderCategories(provider?: ModelProviderView): ModelCategory[] {
   const raw = provider?.driverCapabilities?.[CAPABILITY_KEYS.categories];
-  if (!Array.isArray(raw)) {
-    return ['llm', 'embedding'];
-  }
-  return raw.filter((item): item is ModelCategory => item === 'llm' || item === 'embedding');
+  if (!Array.isArray(raw)) return ['llm', 'embedding'];
+  return raw.filter(
+    (item): item is ModelCategory => item === 'llm' || item === 'embedding',
+  );
 }
 
 function providerSupportsToolCalls(provider?: ModelProviderView) {
@@ -98,7 +88,8 @@ export default function CreateModelModal({
   providers,
   onCreated,
 }: CreateModelModalProps) {
-  const [availableProviders, setAvailableProviders] = useState<ModelProviderView[]>(providers);
+  const [availableProviders, setAvailableProviders] =
+    useState<ModelProviderView[]>(providers);
   const [submitting, setSubmitting] = useState(false);
   const wasOpenedRef = useRef(false);
 
@@ -142,15 +133,11 @@ export default function CreateModelModal({
 
   useEffect(() => {
     setAvailableProviders(providers);
-    if (providers.length === 0) {
-      return;
-    }
-
-    // Only correct the selection if the current key is no longer valid in the new list.
-    // Read current value via form.getValues() so this effect does NOT depend on
-    // formValues.providerKey — avoids re-triggering every time user picks a provider.
+    if (providers.length === 0) return;
     const currentKey = form.getValues().providerKey;
-    const hasCurrentProvider = providers.some((provider) => provider.key === currentKey);
+    const hasCurrentProvider = providers.some(
+      (provider) => provider.key === currentKey,
+    );
     if (!currentKey || !hasCurrentProvider) {
       setFieldValue('providerKey', providers[0].key);
     }
@@ -161,12 +148,8 @@ export default function CreateModelModal({
     if (!opened) {
       if (wasOpenedRef.current) {
         reset();
-        // After reset, initialValues.providerKey may be stale (set at mount time when
-        // providers might have been empty). Force-set to current first provider.
         const firstKey = providers[0]?.key ?? '';
-        if (firstKey) {
-          setFieldValue('providerKey', firstKey);
-        }
+        if (firstKey) setFieldValue('providerKey', firstKey);
         wasOpenedRef.current = false;
       }
     } else {
@@ -175,18 +158,9 @@ export default function CreateModelModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened, providers]);
 
-  const providerOptions = useMemo(
-    () =>
-      availableProviders.map((provider) => ({
-        value: provider.key,
-        label: provider.label,
-        disabled: provider.status === 'disabled',
-      })),
-    [availableProviders],
-  );
-
   const selectedProvider = useMemo(
-    () => availableProviders.find((provider) => provider.key === formValues.providerKey),
+    () =>
+      availableProviders.find((provider) => provider.key === formValues.providerKey),
     [availableProviders, formValues.providerKey],
   );
 
@@ -196,9 +170,7 @@ export default function CreateModelModal({
   );
 
   useEffect(() => {
-    if (!selectedProvider) {
-      return;
-    }
+    if (!selectedProvider) return;
 
     const categories = resolveProviderCategories(selectedProvider);
     if (categories.length && !categories.includes(formValues.category)) {
@@ -222,13 +194,41 @@ export default function CreateModelModal({
     formValues.isMultimodal,
   ]);
 
-  const handleSubmit = form.onSubmit(async (values) => {
-    if (!values.providerKey) {
-      form.validateField('providerKey');
-      return;
-    }
+  const providerOptions = useMemo(
+    () =>
+      availableProviders.map((provider) => ({
+        value: provider.key,
+        label: provider.label,
+        disabled: provider.status === 'disabled',
+      })),
+    [availableProviders],
+  );
 
-    const provider = availableProviders.find((item) => item.key === values.providerKey);
+  const validProvider = Boolean(formValues.providerKey);
+  const validIdentity = Boolean(formValues.name && formValues.modelId);
+  const validPricing =
+    formValues.pricing.inputTokenPer1M !== '' &&
+    formValues.pricing.outputTokenPer1M !== '';
+
+  const checklist = [
+    { id: 1, label: 'Provider selected', done: validProvider },
+    { id: 2, label: 'Display name and Model ID set', done: validIdentity },
+    { id: 3, label: 'Pricing configured', done: validPricing },
+    {
+      id: 4,
+      label: 'Category chosen',
+      done: Boolean(formValues.category),
+    },
+  ];
+
+  const submit = async () => {
+    const validation = form.validate();
+    if (validation.hasErrors) return;
+    const values = form.getValues();
+
+    const provider = availableProviders.find(
+      (item) => item.key === values.providerKey,
+    );
     if (!provider) {
       notifications.show({
         color: 'red',
@@ -270,7 +270,9 @@ export default function CreateModelModal({
       });
 
       if (!response.ok) {
-        const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+        const error = await response
+          .json()
+          .catch(() => ({ error: 'Unknown error' }));
         throw new Error(error.error ?? 'Failed to create model');
       }
 
@@ -293,174 +295,293 @@ export default function CreateModelModal({
     } finally {
       setSubmitting(false);
     }
-  });
+  };
+
+  const summary = (
+    <>
+      <SummaryGroup title="Provider">
+        {selectedProvider ? (
+          <>
+            <SummaryKV label="Name" value={selectedProvider.label} />
+            <SummaryKV label="Driver" value={selectedProvider.driver} mono />
+            <SummaryKV label="Status" value={selectedProvider.status} />
+          </>
+        ) : (
+          <SummaryKV label="—" value="Select a provider" />
+        )}
+      </SummaryGroup>
+
+      <SummaryGroup title="Model">
+        <SummaryKV
+          label="Display name"
+          value={formValues.name || <span className="ds-faint">—</span>}
+        />
+        <SummaryKV
+          label="Model ID"
+          value={formValues.modelId || <span className="ds-faint">—</span>}
+          mono
+        />
+        <SummaryKV label="Category" value={formValues.category} />
+        <SummaryKV
+          label="Capabilities"
+          value={
+            [
+              formValues.supportsToolCalls ? 'tools' : null,
+              formValues.isMultimodal ? 'vision' : null,
+            ]
+              .filter(Boolean)
+              .join(' · ') || '—'
+          }
+        />
+      </SummaryGroup>
+
+      <SummaryGroup title="Pricing">
+        <SummaryKV
+          label="Input / 1M"
+          value={`${formValues.pricing.inputTokenPer1M || 0} ${formValues.pricing.currency || 'USD'}`}
+          mono
+        />
+        <SummaryKV
+          label="Output / 1M"
+          value={`${formValues.pricing.outputTokenPer1M || 0} ${formValues.pricing.currency || 'USD'}`}
+          mono
+        />
+        {formValues.pricing.cachedTokenPer1M ? (
+          <SummaryKV
+            label="Cached / 1M"
+            value={`${formValues.pricing.cachedTokenPer1M} ${formValues.pricing.currency || 'USD'}`}
+            mono
+          />
+        ) : null}
+      </SummaryGroup>
+
+      <SummaryGroup title="Pre-flight">
+        <Checklist items={checklist} />
+      </SummaryGroup>
+    </>
+  );
+
+  const noProviders = availableProviders.length === 0;
+  const canSubmit = !noProviders && validProvider && validIdentity && validPricing;
 
   return (
-    <>
-      <Modal opened={opened} onClose={onClose} title="Create Model" size="lg">
-        <form onSubmit={handleSubmit}>
-          <Stack gap="lg">
-            <Text size="sm" c="dimmed">
-              Models define the AI capabilities available to your applications. Each model is backed by a provider that handles the actual inference.
-            </Text>
-
-            <Stack gap="sm">
-              <Group align="flex-end" gap="xs">
-                <Select
-                  label="Provider"
-                  placeholder="Select a model provider"
-                  data={providerOptions}
-                  value={formValues.providerKey}
-                  onChange={(value) => {
-                    const nextKey = value ?? '';
-                    setFieldValue('providerKey', nextKey);
-                  }}
-                  searchable
-                  withAsterisk
-                  style={{ flex: 1 }}
-                />
-              </Group>
-              <Text size="xs" c="dimmed">
-                Need a new model provider? Ask a tenant admin to add one in Tenant Settings.
-              </Text>
-            </Stack>
-
-            {availableProviders.length === 0 ? (
-              <Card withBorder padding="md">
-                <Stack gap="xs">
-                  <Text size="sm" c="dimmed">
-                    No model providers configured yet. Ask a tenant admin to add one in Tenant Settings.
-                  </Text>
-                </Stack>
-              </Card>
-            ) : null}
-
-            {selectedProvider && (
-              <Card withBorder radius="md" padding="md">
-                <Stack gap={6}>
-                  <Group gap="xs">
-                    <Text fw={600}>{selectedProvider.label}</Text>
-                    <Badge
-                      color={selectedProvider.status === 'active' ? 'green' : 'yellow'}
-                      size="sm"
-                    >
-                      {selectedProvider.status}
-                    </Badge>
-                  </Group>
-                  {selectedProvider.description && (
-                    <Text size="sm" c="dimmed">
-                      {selectedProvider.description}
-                    </Text>
-                  )}
-                  <Text size="xs" c="dimmed">
-                    Driver: {selectedProvider.driver}
-                  </Text>
-                  <Text size="xs" c="dimmed">
-                    Key: {selectedProvider.key}
-                  </Text>
-                </Stack>
-              </Card>
-            )}
-
-            <Stack gap="md">
-              <Text fw={500}>Model configuration</Text>
-              <TextInput label="Name" placeholder="Friendly model name" required {...form.getInputProps('name')} />
-              <TextInput
-                label="Key"
-                placeholder="optional-model-key"
-                description="Leave blank to generate automatically."
-                {...form.getInputProps('key')}
-              />
-              <Textarea
-                label="Description"
-                placeholder="Optional description"
-                autosize
-                minRows={2}
-                {...form.getInputProps('description')}
-              />
-              <TextInput label="Model ID" placeholder="gpt-4o-mini" required {...form.getInputProps('modelId')} />
-
+    <FormShell
+      open={opened}
+      onClose={onClose}
+      icon={<IconBrain size={16} />}
+      title="Deploy model"
+      subtitle="Add a new inference endpoint backed by a configured provider."
+      summary={summary}
+      footerStatus={`${checklist.filter((c) => c.done).length} of ${checklist.length} ready`}
+      primaryAction={{
+        label: 'Create model',
+        icon: <IconBolt size={13} />,
+        loading: submitting,
+        disabled: !canSubmit,
+        onClick: submit,
+      }}
+    >
+      <FormSection
+        number={1}
+        title="Provider"
+        description="Pick the model provider that will serve this endpoint."
+        done={validProvider}
+      >
+        {noProviders ? (
+          <div
+            className="ds-card ds-card-pad"
+            style={{ background: 'var(--ds-surface-1)' }}
+          >
+            <span className="ds-muted" style={{ fontSize: 13 }}>
+              No model providers configured yet. Ask a tenant admin to add one
+              under Configure → Providers.
+            </span>
+          </div>
+        ) : (
+          <>
+            <FormField label="Provider" required>
               <Select
-                label="Category"
-                data={CATEGORIES.filter((option) => allowedCategories.includes(option.value))}
-                value={formValues.category}
-                onChange={(value) => setFieldValue('category', (value as ModelCategory) ?? 'llm')}
-                required
+                placeholder="Select a model provider"
+                data={providerOptions}
+                value={formValues.providerKey}
+                onChange={(value) => setFieldValue('providerKey', value ?? '')}
+                searchable
               />
+            </FormField>
+            {selectedProvider ? (
+              <div
+                className="ds-card ds-card-pad-sm"
+                style={{ marginTop: 12, background: 'var(--ds-surface-1)' }}
+              >
+                <div className="ds-row ds-gap-sm" style={{ marginBottom: 4 }}>
+                  <span style={{ fontWeight: 600 }}>{selectedProvider.label}</span>
+                  <span
+                    className={`ds-badge ${selectedProvider.status === 'active' ? 'ds-badge-ok' : 'ds-badge-warn'}`}
+                  >
+                    {selectedProvider.status}
+                  </span>
+                </div>
+                {selectedProvider.description ? (
+                  <div
+                    className="ds-muted"
+                    style={{ fontSize: 12, marginBottom: 4 }}
+                  >
+                    {selectedProvider.description}
+                  </div>
+                ) : null}
+                <div className="ds-faint" style={{ fontSize: 11.5 }}>
+                  driver: <span className="ds-mono">{selectedProvider.driver}</span>{' '}
+                  · key: <span className="ds-mono">{selectedProvider.key}</span>
+                </div>
+              </div>
+            ) : null}
+          </>
+        )}
+      </FormSection>
 
-              <Group align="center">
-                <Checkbox
-                  label="Supports tool calls"
-                  {...form.getInputProps('supportsToolCalls', { type: 'checkbox' })}
-                  disabled={!providerSupportsToolCalls(selectedProvider)}
-                />
-                <Checkbox
-                  label="Multimodal"
-                  {...form.getInputProps('isMultimodal', { type: 'checkbox' })}
-                  disabled={!providerSupportsMultimodal(selectedProvider)}
-                />
-              </Group>
-            </Stack>
+      <FormSection
+        number={2}
+        title="Identity"
+        description="How this model is identified across the console and SDK."
+        done={validIdentity}
+      >
+        <FormRow cols={2}>
+          <FormField label="Display name" required>
+            <TextInput
+              placeholder="Friendly model name"
+              {...form.getInputProps('name')}
+            />
+          </FormField>
+          <FormField
+            label="Key"
+            hint="Leave blank to generate from the display name."
+          >
+            <TextInput
+              placeholder="optional-model-key"
+              {...form.getInputProps('key')}
+            />
+          </FormField>
+        </FormRow>
+        <FormRow cols={2}>
+          <FormField label="Model ID" required>
+            <TextInput
+              placeholder="gpt-4o-mini"
+              {...form.getInputProps('modelId')}
+            />
+          </FormField>
+          <FormField label="Category">
+            <ChipPicker<ModelCategory>
+              options={(
+                [
+                  { value: 'llm' as const, label: 'LLM' },
+                  { value: 'embedding' as const, label: 'Embedding' },
+                ] satisfies Array<{ value: ModelCategory; label: string }>
+              ).filter((opt) => allowedCategories.includes(opt.value))}
+              value={formValues.category}
+              onChange={(v) => setFieldValue('category', v as ModelCategory)}
+            />
+          </FormField>
+        </FormRow>
+        <FormRow cols={1}>
+          <FormField label="Description" optional>
+            <Textarea
+              placeholder="Optional description"
+              autosize
+              minRows={2}
+              {...form.getInputProps('description')}
+            />
+          </FormField>
+        </FormRow>
+      </FormSection>
 
-            <Stack gap="md">
-              <Text fw={500}>Pricing</Text>
-              <Group grow>
-                <TextInput
-                  label="Currency"
-                  placeholder="USD"
-                  {...form.getInputProps('pricing.currency')}
-                />
-                <NumberInput
-                  label="Prompt price (per 1M)"
-                  min={0}
-                  {...form.getInputProps('pricing.inputTokenPer1M')}
-                />
-              </Group>
-              <Group grow>
-                <NumberInput
-                  label="Completion price (per 1M)"
-                  min={0}
-                  {...form.getInputProps('pricing.outputTokenPer1M')}
-                />
-                <NumberInput
-                  label="Cached price (per 1M)"
-                  min={0}
-                  {...form.getInputProps('pricing.cachedTokenPer1M')}
-                />
-              </Group>
-            </Stack>
+      <FormSection
+        number={3}
+        title="Capabilities"
+        description="What this model supports — determined by the provider but can be overridden."
+      >
+        <ToggleList>
+          <ToggleRow
+            label="Supports tool calls"
+            description="Allow the model to invoke registered tools via function calling."
+            checked={formValues.supportsToolCalls}
+            disabled={!providerSupportsToolCalls(selectedProvider)}
+            onChange={(v) => setFieldValue('supportsToolCalls', v)}
+          />
+          <ToggleRow
+            label="Multimodal (vision)"
+            description="Model accepts image inputs in addition to text."
+            checked={formValues.isMultimodal}
+            disabled={!providerSupportsMultimodal(selectedProvider)}
+            onChange={(v) => setFieldValue('isMultimodal', v)}
+          />
+        </ToggleList>
+      </FormSection>
 
-            <Stack gap="md">
-              <Text fw={500}>Default settings</Text>
-              <Group grow>
-                <NumberInput
-                  label="Temperature"
-                  min={0}
-                  max={2}
-                  step={0.1}
-                  placeholder="Optional"
-                  {...form.getInputProps('settings.temperature')}
-                />
-                <NumberInput
-                  label="Max tokens"
-                  min={1}
-                  placeholder="Optional"
-                  {...form.getInputProps('settings.maxTokens')}
-                />
-              </Group>
-            </Stack>
+      <FormSection
+        number={4}
+        title="Pricing"
+        description="Per-million-token pricing for accounting and routing decisions."
+        done={validPricing}
+      >
+        <FormRow cols={2}>
+          <FormField label="Currency">
+            <TextInput
+              placeholder="USD"
+              {...form.getInputProps('pricing.currency')}
+            />
+          </FormField>
+          <FormField label="Input · per 1M">
+            <NumberInput
+              min={0}
+              decimalScale={4}
+              {...form.getInputProps('pricing.inputTokenPer1M')}
+            />
+          </FormField>
+        </FormRow>
+        <FormRow cols={2}>
+          <FormField label="Output · per 1M">
+            <NumberInput
+              min={0}
+              decimalScale={4}
+              {...form.getInputProps('pricing.outputTokenPer1M')}
+            />
+          </FormField>
+          <FormField label="Cached · per 1M" optional>
+            <NumberInput
+              min={0}
+              decimalScale={4}
+              {...form.getInputProps('pricing.cachedTokenPer1M')}
+            />
+          </FormField>
+        </FormRow>
+      </FormSection>
 
-            <Group justify="flex-end">
-              <Button variant="default" onClick={onClose}>
-                Cancel
-              </Button>
-              <Button type="submit" loading={submitting} disabled={availableProviders.length === 0}>
-                Create Model
-              </Button>
-            </Group>
-          </Stack>
-        </form>
-      </Modal>
-    </>
+      <FormSection
+        number={5}
+        title="Default parameters"
+        description="Used when callers don't specify their own. Can always be overridden per-request."
+        done
+      >
+        <FormRow cols={2}>
+          <FormField label="Temperature" optional>
+            <NumberInput
+              min={0}
+              max={2}
+              step={0.1}
+              decimalScale={2}
+              placeholder="Optional"
+              {...form.getInputProps('settings.temperature')}
+            />
+          </FormField>
+          <FormField label="Max tokens" optional>
+            <NumberInput
+              min={1}
+              placeholder="Optional"
+              {...form.getInputProps('settings.maxTokens')}
+            />
+          </FormField>
+        </FormRow>
+      </FormSection>
+    </FormShell>
   );
 }

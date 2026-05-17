@@ -18,6 +18,7 @@ import {
   upsertVectors,
   deleteVectors,
 } from '@/lib/services/vector/vectorService';
+import { runReranker } from '@/lib/services/reranker';
 import type {
   CreateRagModuleRequest,
   UpdateRagModuleRequest,
@@ -211,6 +212,8 @@ export async function createRagModule(
     fileProviderKey: request.fileProviderKey,
     chunkConfig: request.chunkConfig,
     status: 'active',
+    rerankerKey: request.rerankerKey,
+    rerankerOversample: request.rerankerOversample,
     totalDocuments: 0,
     totalChunks: 0,
     metadata: request.metadata,
@@ -234,6 +237,8 @@ export async function updateRagModule(
   if (request.chunkConfig !== undefined) updates.chunkConfig = request.chunkConfig;
   if (request.status !== undefined) updates.status = request.status;
   if (request.metadata !== undefined) updates.metadata = request.metadata;
+  if (request.rerankerKey !== undefined) updates.rerankerKey = request.rerankerKey ?? undefined;
+  if (request.rerankerOversample !== undefined) updates.rerankerOversample = request.rerankerOversample ?? undefined;
   updates.updatedBy = request.updatedBy;
   return db.updateRagModule(moduleId, updates as Partial<IRagModule>);
 }
@@ -537,19 +542,24 @@ export async function queryRag(
     ? request.filter
     : undefined;
 
-  // 3. Query vector store
+  // 3. Query vector store. If reranker is configured, oversample candidates
+  //    so the reranker has more to work with.
   const topK = request.topK ?? 5;
+  const useReranker = Boolean(ragModule.rerankerKey);
+  const oversampleMultiplier = ragModule.rerankerOversample ?? 3;
+  const fetchTopK = useReranker ? Math.max(topK, topK * oversampleMultiplier) : topK;
+
   const vectorResult = await queryVectorIndex(tenantDbName, tenantId, projectId ?? '', {
     providerKey: ragModule.vectorProviderKey,
     indexKey: ragModule.vectorIndexKey,
     query: {
       vector: queryEmbedding,
-      topK,
+      topK: fetchTopK,
       filter,
     },
   });
 
-  const latencyMs = Date.now() - startTime;
+  const vectorLatencyMs = Date.now() - startTime;
 
   // 4. Hydrate chunk content from MongoDB
   const vectorIds = vectorResult.matches.map((m) => m.id).filter(Boolean);
@@ -564,7 +574,7 @@ export async function queryRag(
   }
 
   // 5. Map results
-  const matches: RagQueryMatch[] = vectorResult.matches.map((m) => ({
+  let matches: RagQueryMatch[] = vectorResult.matches.map((m) => ({
     id: m.id,
     score: m.score,
     content: chunkContentMap.get(m.id) ?? (typeof m.metadata?._content === 'string' ? m.metadata._content : undefined),
@@ -573,6 +583,58 @@ export async function queryRag(
     fileName: typeof m.metadata?._fileName === 'string' ? m.metadata._fileName : undefined,
     chunkIndex: typeof m.metadata?._chunkIndex === 'number' ? m.metadata._chunkIndex : undefined,
   }));
+
+  // 5b. Optional reranker pass.
+  let rerankLatencyMs: number | undefined;
+  if (useReranker && matches.length > 0 && ragModule.rerankerKey) {
+    try {
+      const rerankerInput = matches
+        .map((m) => ({
+          id: m.id,
+          content: m.content ?? '',
+          score: m.score,
+          metadata: m.metadata,
+        }))
+        .filter((d) => d.content.length > 0);
+      if (rerankerInput.length > 0) {
+        const rerankResult = await runReranker(
+          tenantDbName,
+          tenantId,
+          projectId,
+          ragModule.rerankerKey,
+          {
+            query: request.query,
+            documents: rerankerInput,
+            topN: topK,
+            source: 'rag',
+            ragModuleKey: request.ragModuleKey,
+          },
+        );
+        rerankLatencyMs = rerankResult.latencyMs;
+        // Re-build matches in reranker-determined order. Preserve original
+        // vector score under `vectorScore` for inspection.
+        const byId = new Map(matches.map((m) => [m.id, m]));
+        matches = rerankResult.results
+          .map((r) => {
+            const original = r.id ? byId.get(r.id) : undefined;
+            if (!original) return null;
+            return {
+              ...original,
+              score: r.score,
+              vectorScore: r.originalScore,
+            } as RagQueryMatch;
+          })
+          .filter((v): v is RagQueryMatch => v !== null);
+      }
+    } catch (err) {
+      logger.warn('Reranker failed, falling back to vector order', { error: err });
+    }
+  }
+
+  // 5c. Apply final topK (in case reranker skipped or returned more).
+  matches = matches.slice(0, topK);
+
+  const latencyMs = Date.now() - startTime;
 
   // 6. Log the query
   try {
@@ -584,6 +646,14 @@ export async function queryRag(
       topK,
       matchCount: matches.length,
       latencyMs,
+      metadata: useReranker
+        ? {
+          reranked: true,
+          rerankerKey: ragModule.rerankerKey,
+          vectorLatencyMs,
+          rerankLatencyMs,
+        }
+        : undefined,
     });
   } catch (err) {
     logger.warn('Failed to log query', { error: err });

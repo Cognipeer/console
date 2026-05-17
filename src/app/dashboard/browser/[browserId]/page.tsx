@@ -15,6 +15,7 @@ import {
   Group,
   Image,
   Loader,
+  Menu,
   Modal,
   Paper,
   ScrollArea,
@@ -35,11 +36,11 @@ import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import {
   IconAlertCircle,
-  IconArrowLeft,
   IconCamera,
   IconCode,
   IconCopy,
   IconDeviceDesktop,
+  IconDots,
   IconEdit,
   IconInfoCircle,
   IconPlayerPlay,
@@ -51,7 +52,8 @@ import {
   IconWorld,
   IconX,
 } from '@tabler/icons-react';
-import PageHeader from '@/components/layout/PageHeader';
+import DetailShell from '@/components/common/ui/DetailShell';
+import StatusBadge from '@/components/common/ui/StatusBadge';
 import type { BrowserSessionView, BrowserView } from '@/lib/services/browser';
 
 interface CreateSessionForm {
@@ -299,33 +301,102 @@ export default function BrowserDetailPage() {
     );
   }
 
+  const browserStatusVariant: 'ok' | 'paused' | 'err' | 'info' =
+    browser.status === 'active'
+      ? 'ok'
+      : browser.status === 'disabled'
+        ? 'paused'
+        : browser.status === 'errored'
+          ? 'err'
+          : 'info';
+
+  const headerActions = (
+    <>
+      <Button
+        variant="default"
+        size="sm"
+        leftSection={<IconRefresh size={14} stroke={1.7} />}
+        loading={refreshing}
+        onClick={loadAll}
+      >
+        Refresh
+      </Button>
+      <Button
+        variant="default"
+        size="sm"
+        leftSection={<IconEdit size={14} stroke={1.7} />}
+        onClick={editHandlers.open}
+      >
+        Edit
+      </Button>
+      <Menu withinPortal position="bottom-end" withArrow>
+        <Menu.Target>
+          <ActionIcon variant="default" radius="md" size="lg" aria-label="More">
+            <IconDots size={15} stroke={1.7} />
+          </ActionIcon>
+        </Menu.Target>
+        <Menu.Dropdown>
+          <Menu.Item leftSection={<IconPlug size={14} />} onClick={mcpHandlers.open}>
+            Get MCP URL
+          </Menu.Item>
+        </Menu.Dropdown>
+      </Menu>
+    </>
+  );
+
   return (
-    <Stack gap="md" p="md">
-      <Group gap="xs">
-        <Button component={Link} href="/dashboard/browser" variant="subtle" size="xs" leftSection={<IconArrowLeft size={14} />}>
-          All browsers
-        </Button>
-      </Group>
-
-      <PageHeader
-        icon={<IconWorld size={20} />}
-        title={browser.name}
-        subtitle={browser.description || 'Headless browser profile'}
-        actions={
-          <Group gap="xs">
-            <Badge color={statusColor(browser.status)} variant="light" size="lg">{browser.status}</Badge>
-            <Tooltip label="Refresh">
-              <ActionIcon variant="subtle" onClick={loadAll} loading={refreshing}>
-                <IconRefresh size={16} />
-              </ActionIcon>
-            </Tooltip>
-            <Button leftSection={<IconEdit size={14} />} variant="light" size="xs" onClick={editHandlers.open}>
-              Edit
-            </Button>
-          </Group>
-        }
-      />
-
+    <DetailShell
+      backHref="/dashboard/browser"
+      backLabel="Back to browsers"
+      icon={
+        <div
+          style={{
+            width: 48,
+            height: 48,
+            borderRadius: 10,
+            background: 'var(--ds-accent-soft)',
+            color: 'var(--ds-accent)',
+            display: 'grid',
+            placeItems: 'center',
+          }}
+        >
+          <IconWorld size={22} stroke={1.7} />
+        </div>
+      }
+      title={
+        <>
+          <h1 className="ds-h2" style={{ margin: 0, whiteSpace: 'nowrap' }}>
+            {browser.name}
+          </h1>
+          <StatusBadge status={browserStatusVariant} label={browser.status} />
+          <span className="ds-badge ds-badge-info">{summary.total} sessions</span>
+        </>
+      }
+      meta={
+        <>
+          <span className="ds-mono">{browser.key}</span>
+          {browser.defaultModelKey ? (
+            <>
+              <span className="ds-faint">·</span>
+              <span>model: <span className="ds-mono">{browser.defaultModelKey}</span></span>
+            </>
+          ) : null}
+          {browser.artifactBucketKey ? (
+            <>
+              <span className="ds-faint">·</span>
+              <span>bucket: <span className="ds-mono">{browser.artifactBucketKey}</span></span>
+            </>
+          ) : null}
+          {browser.description ? (
+            <>
+              <span className="ds-faint">·</span>
+              <span>{browser.description}</span>
+            </>
+          ) : null}
+        </>
+      }
+      actions={headerActions}
+    >
       <SimpleGrid cols={{ base: 2, md: 4 }}>
         <SummaryCard label="Sessions" value={summary.total} accent="teal" />
         <SummaryCard label="Active" value={summary.active} accent="teal" />
@@ -526,7 +597,7 @@ export default function BrowserDetailPage() {
         onClose={mcpHandlers.close}
         browserKey={browser?.key ?? ''}
       />
-    </Stack>
+    </DetailShell>
   );
 }
 

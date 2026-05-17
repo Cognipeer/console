@@ -1,6 +1,14 @@
 # Inference (LLM & Embeddings)
 
-The inference service provides OpenAI-compatible chat completion and embedding endpoints backed by multiple LLM providers.
+The inference service provides OpenAI-compatible chat completion and embedding endpoints backed by multiple LLM providers. Models are configured in [Model Hub](/guide/model-hub) and called through the runtime documented below.
+
+## Where inference is observed
+
+Operators monitor live inference through **Operate → Model Monitoring**. The page summarises every connected inference server, splitting them by status: running, errored, or queued. From here you also wire up new self-hosted endpoints (vLLM, TGI, llama.cpp, Ollama) that don't fit the cloud-provider model.
+
+![Inference monitoring](/screenshots/inference/01-inference-monitoring.png)
+
+For per-call inspection — request body, completion, token usage, tool calls — open the **Logs** tab on a model's detail page in [Model Hub](/guide/model-hub#inspecting-a-model), or query [Agent Tracing](/guide/tracing) for the full trace timeline.
 
 ## Chat Completions
 

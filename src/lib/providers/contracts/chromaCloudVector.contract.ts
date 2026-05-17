@@ -137,7 +137,7 @@ export const ChromaCloudVectorProviderContract: ProviderContract<
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/ban-ts-comment
     // @ts-ignore – chromadb is an optional peer dependency
-    const chromaModule = await import('chromadb') as any;
+    const chromaModule = await import(/* webpackIgnore: true */ 'chromadb') as any;
     const ClientClass = chromaModule.CloudClient ?? chromaModule.ChromaClient;
 
     const client: ChromaCloudClient = new ClientClass({

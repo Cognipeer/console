@@ -2,20 +2,25 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import {
-  Button,
-  Group,
   Loader,
-  Modal,
   NumberInput,
   Select,
-  Stack,
-  Switch,
-  Text,
   TextInput,
   Textarea,
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
+import { IconBrain, IconPlus } from '@tabler/icons-react';
+import FormShell, {
+  Checklist,
+  FormField,
+  FormRow,
+  FormSection,
+  SummaryGroup,
+  SummaryKV,
+  ToggleList,
+  ToggleRow,
+} from '@/components/common/ui/FormShell';
 import { useTranslations } from '@/lib/i18n';
 
 interface VectorProviderOption {
@@ -78,6 +83,8 @@ export default function CreateMemoryStoreModal({
     },
   });
 
+  const { values: formValues, setFieldValue } = form;
+
   const loadVectorProviders = useCallback(async () => {
     setLoadingProviders(true);
     try {
@@ -117,7 +124,11 @@ export default function CreateMemoryStoreModal({
     }
   }, [opened, loadVectorProviders, loadEmbeddingModels]);
 
-  const handleSubmit = async (values: FormValues) => {
+  const handleSubmit = async () => {
+    const validation = form.validate();
+    if (validation.hasErrors) return;
+    const values = form.getValues();
+
     setSubmitting(true);
     try {
       const res = await fetch('/api/memory/stores', {
@@ -168,96 +179,211 @@ export default function CreateMemoryStoreModal({
     label: m.name || m.modelId || m.key,
   }));
 
+  const validName = Boolean(formValues.name.trim());
+  const validProvider = Boolean(formValues.vectorProviderKey);
+  const validModel = Boolean(formValues.embeddingModelKey);
+  const validRetrieval =
+    formValues.defaultTopK > 0 &&
+    formValues.defaultMinScore >= 0 &&
+    formValues.defaultMinScore <= 1;
+
+  const checklist = [
+    { id: 1, label: 'Name set', done: validName },
+    { id: 2, label: 'Vector provider selected', done: validProvider },
+    { id: 3, label: 'Embedding model selected', done: validModel },
+    { id: 4, label: 'Retrieval defaults valid', done: validRetrieval },
+  ];
+
+  const canSubmit = validName && validProvider && validModel && validRetrieval;
+
+  const providerLabel =
+    providerOptions.find((o) => o.value === formValues.vectorProviderKey)?.label;
+  const modelLabel =
+    modelOptions.find((o) => o.value === formValues.embeddingModelKey)?.label;
+
+  const summary = (
+    <>
+      <SummaryGroup title="Store">
+        <SummaryKV
+          label="Name"
+          value={formValues.name || <span className="ds-faint">—</span>}
+        />
+        <SummaryKV
+          label="Provider"
+          value={providerLabel || <span className="ds-faint">—</span>}
+          mono
+        />
+        <SummaryKV
+          label="Embedding model"
+          value={modelLabel || <span className="ds-faint">—</span>}
+          mono
+        />
+      </SummaryGroup>
+
+      <SummaryGroup title="Retrieval">
+        <SummaryKV
+          label="Top K"
+          value={String(formValues.defaultTopK)}
+          mono
+        />
+        <SummaryKV
+          label="Min score"
+          value={formValues.defaultMinScore.toFixed(2)}
+          mono
+        />
+      </SummaryGroup>
+
+      <SummaryGroup title="Behavior">
+        <SummaryKV
+          label="Deduplication"
+          value={formValues.deduplication ? 'On' : 'Off'}
+        />
+        <SummaryKV
+          label="Auto-embed"
+          value={formValues.autoEmbed ? 'On' : 'Off'}
+        />
+      </SummaryGroup>
+
+      <SummaryGroup title="Pre-flight">
+        <Checklist items={checklist} />
+      </SummaryGroup>
+    </>
+  );
+
   return (
-    <Modal
-      opened={opened}
+    <FormShell
+      open={opened}
       onClose={onClose}
+      icon={<IconBrain size={16} />}
       title={t('createStore')}
-      size="lg"
+      subtitle="Configure a vector-backed long-term memory store."
+      summary={summary}
+      footerStatus={`${checklist.filter((c) => c.done).length} of ${checklist.length} ready`}
+      primaryAction={{
+        label: t('create'),
+        icon: <IconPlus size={13} />,
+        loading: submitting,
+        disabled: !canSubmit,
+        onClick: handleSubmit,
+      }}
+      secondaryAction={{
+        label: t('cancel'),
+        onClick: onClose,
+        disabled: submitting,
+      }}
     >
-      <form onSubmit={form.onSubmit(handleSubmit)}>
-        <Stack gap="md">
-          <TextInput
-            label={t('form.name')}
-            placeholder={t('form.namePlaceholder')}
-            required
-            {...form.getInputProps('name')}
-          />
+      <FormSection
+        number={1}
+        title="Identity"
+        description="How the memory store appears in dashboards and the SDK."
+        done={validName}
+      >
+        <FormRow cols={1}>
+          <FormField label={t('form.name')} required>
+            <TextInput
+              placeholder={t('form.namePlaceholder')}
+              {...form.getInputProps('name')}
+            />
+          </FormField>
+        </FormRow>
+        <FormRow cols={1}>
+          <FormField label={t('form.description')} optional>
+            <Textarea
+              placeholder={t('form.descriptionPlaceholder')}
+              autosize
+              minRows={2}
+              maxRows={4}
+              {...form.getInputProps('description')}
+            />
+          </FormField>
+        </FormRow>
+      </FormSection>
 
-          <Textarea
-            label={t('form.description')}
-            placeholder={t('form.descriptionPlaceholder')}
-            autosize
-            minRows={2}
-            maxRows={4}
-            {...form.getInputProps('description')}
-          />
-
-          <Select
+      <FormSection
+        number={2}
+        title="Backend"
+        description="Choose where vectors are stored and which model produces embeddings."
+        done={validProvider && validModel}
+      >
+        <FormRow cols={1}>
+          <FormField
             label={t('form.vectorProvider')}
-            placeholder={t('form.vectorProviderPlaceholder')}
             required
-            data={providerOptions}
-            rightSection={loadingProviders ? <Loader size={14} /> : undefined}
-            searchable
-            {...form.getInputProps('vectorProviderKey')}
-          />
+            hint={
+              loadingProviders && providerOptions.length === 0
+                ? 'Loading providers...'
+                : undefined
+            }
+          >
+            <Select
+              placeholder={t('form.vectorProviderPlaceholder')}
+              data={providerOptions}
+              rightSection={loadingProviders ? <Loader size={14} /> : undefined}
+              searchable
+              {...form.getInputProps('vectorProviderKey')}
+            />
+          </FormField>
+        </FormRow>
+        <FormRow cols={1}>
+          <FormField label={t('form.embeddingModel')} required>
+            <Select
+              placeholder={t('form.embeddingModelPlaceholder')}
+              data={modelOptions}
+              rightSection={loadingModels ? <Loader size={14} /> : undefined}
+              searchable
+              {...form.getInputProps('embeddingModelKey')}
+            />
+          </FormField>
+        </FormRow>
+      </FormSection>
 
-          <Select
-            label={t('form.embeddingModel')}
-            placeholder={t('form.embeddingModelPlaceholder')}
-            required
-            data={modelOptions}
-            rightSection={loadingModels ? <Loader size={14} /> : undefined}
-            searchable
-            {...form.getInputProps('embeddingModelKey')}
-          />
-
-          <Group grow>
+      <FormSection
+        number={3}
+        title="Retrieval defaults"
+        description="Default search parameters used when callers don't override them."
+        done={validRetrieval}
+      >
+        <FormRow cols={2}>
+          <FormField label={t('form.defaultTopK')}>
             <NumberInput
-              label={t('form.defaultTopK')}
               min={1}
               max={100}
               {...form.getInputProps('defaultTopK')}
             />
+          </FormField>
+          <FormField label={t('form.defaultMinScore')}>
             <NumberInput
-              label={t('form.defaultMinScore')}
               min={0}
               max={1}
               step={0.05}
               decimalScale={2}
               {...form.getInputProps('defaultMinScore')}
             />
-          </Group>
+          </FormField>
+        </FormRow>
+      </FormSection>
 
-          <Switch
+      <FormSection
+        number={4}
+        title="Behavior"
+        description="Operational toggles for write paths."
+        done
+      >
+        <ToggleList>
+          <ToggleRow
             label={t('form.deduplication')}
             description={t('form.deduplicationDescription')}
-            {...form.getInputProps('deduplication', { type: 'checkbox' })}
+            checked={formValues.deduplication}
+            onChange={(v) => setFieldValue('deduplication', v)}
           />
-
-          <Switch
+          <ToggleRow
             label={t('form.autoEmbed')}
             description={t('form.autoEmbedDescription')}
-            {...form.getInputProps('autoEmbed', { type: 'checkbox' })}
+            checked={formValues.autoEmbed}
+            onChange={(v) => setFieldValue('autoEmbed', v)}
           />
-
-          <Group justify="flex-end" mt="md">
-            <Button variant="default" onClick={onClose} disabled={submitting}>
-              {t('cancel')}
-            </Button>
-            <Button type="submit" loading={submitting}>
-              {t('create')}
-            </Button>
-          </Group>
-        </Stack>
-      </form>
-
-      {loadingProviders && providerOptions.length === 0 && (
-        <Text size="xs" c="dimmed" ta="center" mt="xs">
-          Loading providers...
-        </Text>
-      )}
-    </Modal>
+        </ToggleList>
+      </FormSection>
+    </FormShell>
   );
 }

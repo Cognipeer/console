@@ -6,6 +6,9 @@
  */
 
 import { createLogger } from '@/lib/core/logger';
+import { routeInstanceCall } from '@/lib/core/cluster';
+import type { QueuePayload } from '@/lib/core/queue';
+import { agentEntityId } from './agentEntityId';
 import type {
     AgentInvokeResult as AgentSdkInvokeResult,
     Message as AgentSdkMessage,
@@ -823,6 +826,21 @@ export interface AgentChatResponse {
 export async function executeAgentChat(
     request: AgentChatRequest,
 ): Promise<AgentChatResponse> {
+    return routeInstanceCall(
+        {
+            entityType: 'agent',
+            entityId: agentEntityId(request.tenantId, request.agentKey),
+            jobName: 'chat',
+        },
+        request as unknown as QueuePayload,
+        () => executeAgentChatLocal(request),
+    );
+}
+
+/** Local (non-routed) implementation. Exported so the queue consumer can call it. */
+export async function executeAgentChatLocal(
+    request: AgentChatRequest,
+): Promise<AgentChatResponse> {
     const {
         tenantDbName,
         tenantId,
@@ -1070,6 +1088,21 @@ export async function executeAgentChat(
  * History is passed in-memory from the client. Tracing still fires.
  */
 export async function executePlaygroundChat(
+    request: AgentPlaygroundChatRequest,
+): Promise<{ content: string }> {
+    return routeInstanceCall(
+        {
+            entityType: 'agent',
+            entityId: agentEntityId(request.tenantId, request.agentKey),
+            jobName: 'playground',
+        },
+        request as unknown as QueuePayload,
+        () => executePlaygroundChatLocal(request),
+    );
+}
+
+/** Local (non-routed) implementation. Exported so the queue consumer can call it. */
+export async function executePlaygroundChatLocal(
     request: AgentPlaygroundChatRequest,
 ): Promise<{ content: string }> {
     const { tenantDbName, tenantId, projectId, agentKey, userMessage, history } = request;

@@ -25,6 +25,7 @@ import type {
   IGuardrail,
   IGuardrailEvalAggregate,
   IGuardrailEvaluationLog,
+  IPiiPolicy,
   IIncident,
   IInferenceServer,
   IInferenceServerMetrics,
@@ -48,6 +49,9 @@ import type {
   IRagDocument,
   IRagModule,
   IRagQueryLog,
+  IReranker,
+  IRerankerRunLog,
+  RerankerStatus,
   ITenant,
   ITenantUserDirectoryEntry,
   ITool,
@@ -58,6 +62,10 @@ import type {
   IGroup,
   IGroupMember,
   IGroupProject,
+  IInstanceAssignment,
+  INodeRecord,
+  InstanceEntityType,
+  NodeStatus,
   ProjectRole,
   IVectorIndexRecord,
   IVectorMigration,
@@ -95,6 +103,10 @@ export interface DatabaseProvider {
 
   // Switch to tenant-specific database
   switchToTenant(tenantDbName: string): Promise<void>;
+  /** Returns the tenant DB currently bound to this request context, or null. */
+  getCurrentTenantDbName(): string | null;
+  /** Throws if the active tenant context does not match the expected tenant. */
+  assertTenantContext(expectedTenantDbName: string): void;
 
   // Cross-tenant user directory (uses main/shared database)
   registerUserInDirectory(entry: ITenantUserDirectoryEntry): Promise<void>;
@@ -503,6 +515,23 @@ export interface DatabaseProvider {
     options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month' },
   ): Promise<IGuardrailEvalAggregate>;
 
+  // ── PII policy operations (tenant-specific) ──
+  createPiiPolicy(
+    policy: Omit<IPiiPolicy, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IPiiPolicy>;
+  updatePiiPolicy(
+    id: string,
+    data: Partial<Omit<IPiiPolicy, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IPiiPolicy | null>;
+  deletePiiPolicy(id: string): Promise<boolean>;
+  findPiiPolicyById(id: string): Promise<IPiiPolicy | null>;
+  findPiiPolicyByKey(key: string, projectId?: string): Promise<IPiiPolicy | null>;
+  listPiiPolicies(filters?: {
+    projectId?: string;
+    enabled?: boolean;
+    search?: string;
+  }): Promise<IPiiPolicy[]>;
+
   // ── Alert rule operations (tenant-specific) ──
   createAlertRule(
     rule: Omit<IAlertRule, '_id' | 'createdAt' | 'updatedAt'>,
@@ -613,6 +642,31 @@ export interface DatabaseProvider {
     ragModuleKey: string,
     options?: { limit?: number; skip?: number; from?: Date; to?: Date },
   ): Promise<IRagQueryLog[]>;
+
+  // ── Reranker operations (tenant-specific) ──
+  createReranker(
+    reranker: Omit<IReranker, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IReranker>;
+  updateReranker(
+    id: string,
+    data: Partial<Omit<IReranker, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IReranker | null>;
+  deleteReranker(id: string): Promise<boolean>;
+  findRerankerById(id: string): Promise<IReranker | null>;
+  findRerankerByKey(key: string, projectId?: string): Promise<IReranker | null>;
+  listRerankers(filters?: {
+    projectId?: string;
+    status?: RerankerStatus;
+    search?: string;
+  }): Promise<IReranker[]>;
+
+  createRerankerRunLog(
+    log: Omit<IRerankerRunLog, '_id' | 'createdAt'>,
+  ): Promise<IRerankerRunLog>;
+  listRerankerRunLogs(
+    rerankerKey: string,
+    options?: { limit?: number; skip?: number; from?: Date; to?: Date },
+  ): Promise<IRerankerRunLog[]>;
 
   // ── Memory Store operations (tenant-specific) ──
   createMemoryStore(
@@ -962,4 +1016,32 @@ export interface DatabaseProvider {
     options?: { limit?: number; skip?: number },
   ): Promise<IBrowserSessionEvent[]>;
   countBrowserSessionEvents(sessionId: string): Promise<number>;
+
+  // ── Cluster: nodes (main database) ──
+  upsertNode(
+    record: Omit<INodeRecord, 'lastHeartbeatAt'> & { lastHeartbeatAt?: Date },
+  ): Promise<INodeRecord>;
+  heartbeatNode(name: string, at?: Date): Promise<void>;
+  setNodeStatus(name: string, status: NodeStatus): Promise<void>;
+  findNode(name: string): Promise<INodeRecord | null>;
+  listNodes(filters?: { status?: NodeStatus }): Promise<INodeRecord[]>;
+  markStaleNodesOffline(olderThan: Date): Promise<number>;
+  deleteNode(name: string): Promise<boolean>;
+
+  // ── Cluster: instance assignments (main database) ──
+  setInstanceAssignment(
+    assignment: Omit<IInstanceAssignment, 'updatedAt'> & { updatedAt?: Date },
+  ): Promise<IInstanceAssignment>;
+  findInstanceAssignment(
+    entityType: InstanceEntityType,
+    entityId: string,
+  ): Promise<IInstanceAssignment | null>;
+  listInstanceAssignments(filters?: {
+    entityType?: InstanceEntityType;
+    nodeName?: string;
+  }): Promise<IInstanceAssignment[]>;
+  deleteInstanceAssignment(
+    entityType: InstanceEntityType,
+    entityId: string,
+  ): Promise<boolean>;
 }

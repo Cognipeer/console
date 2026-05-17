@@ -1,12 +1,10 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Badge, Box, Button, Group, Select, Stack, Text } from '@mantine/core';
-import { DataTable } from 'mantine-datatable';
-import { IconRefresh } from '@tabler/icons-react';
+import { Badge, Text } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import type { PermissionService } from '@/lib/security/rbac';
-import { TABLE_PAGE_SIZE_OPTIONS } from '@/hooks/useClientTable';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 
 interface AuditLogRecord {
   id: string;
@@ -38,10 +36,10 @@ export default function AuditLogViewer() {
   const [logs, setLogs] = useState<AuditLogRecord[]>([]);
   const [services, setServices] = useState<PermissionServiceOption[]>([]);
   const [loading, setLoading] = useState(true);
-  const [serviceFilter, setServiceFilter] = useState<string | null>(null);
-  const [outcomeFilter, setOutcomeFilter] = useState<string | null>(null);
+  const [serviceFilter, setServiceFilter] = useState<string>('');
+  const [outcomeFilter, setOutcomeFilter] = useState<string>('');
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(25);
+  const [pageSize] = useState(25);
   const [hasNextPage, setHasNextPage] = useState(false);
 
   const serviceLabels = useMemo(
@@ -104,127 +102,122 @@ export default function AuditLogViewer() {
 
   useEffect(() => {
     setPage(1);
-  }, [outcomeFilter, pageSize, serviceFilter]);
+  }, [outcomeFilter, serviceFilter]);
+
+  const serviceOptions = useMemo(
+    () => [
+      { value: '', label: 'All services' },
+      ...services.map((service) => ({ value: service.id, label: service.label })),
+    ],
+    [services],
+  );
+
+  const outcomeOptions = [
+    { value: '', label: 'All outcomes' },
+    { value: 'success', label: 'Success' },
+    { value: 'failure', label: 'Failure' },
+    { value: 'denied', label: 'Denied' },
+  ];
+
+  const columns: DataGridColumn<AuditLogRecord>[] = [
+    {
+      key: 'createdAt',
+      label: 'Time',
+      width: 180,
+      render: (record) => (
+        <span className="ds-faint" style={{ fontSize: 12 }}>
+          {record.createdAt ? new Date(record.createdAt).toLocaleString() : '—'}
+        </span>
+      ),
+    },
+    {
+      key: 'service',
+      label: 'Service',
+      width: 170,
+      render: (record) => (
+        <Badge variant="light" color="gray">
+          {serviceLabels.get(record.service as PermissionService) ?? record.service}
+        </Badge>
+      ),
+    },
+    {
+      key: 'event',
+      label: 'Event',
+      render: (record) => (
+        <div className="ds-col" style={{ gap: 2 }}>
+          <span style={{ fontSize: 13, fontWeight: 500 }}>{record.event}</span>
+          <span className="ds-faint ds-mono" style={{ fontSize: 11 }}>{record.path}</span>
+        </div>
+      ),
+    },
+    {
+      key: 'actor',
+      label: 'Actor',
+      width: 220,
+      render: (record) => (
+        <div className="ds-col" style={{ gap: 2 }}>
+          <span style={{ fontSize: 13 }}>{record.actorEmail || record.actorType}</span>
+          <span className="ds-faint" style={{ fontSize: 11 }}>{record.actorRole || record.actorType}</span>
+        </div>
+      ),
+    },
+    {
+      key: 'outcome',
+      label: 'Outcome',
+      width: 120,
+      render: (record) => (
+        <Badge color={outcomeColor(record.outcome)} variant="light">
+          {record.outcome}
+        </Badge>
+      ),
+    },
+    {
+      key: 'statusCode',
+      label: 'Status',
+      width: 90,
+      render: (record) => (
+        <Text size="sm" ff="monospace">
+          {record.statusCode ?? '—'}
+        </Text>
+      ),
+    },
+  ];
 
   return (
-    <Box p="md">
-      <Stack gap="md">
-        <Group justify="space-between" align="flex-end">
-          <Group gap="sm" align="flex-end">
-            <Select
-              label="Service"
-              placeholder="All services"
-              clearable
-              searchable
-              value={serviceFilter}
-              data={services.map((service) => ({ value: service.id, label: service.label }))}
-              onChange={setServiceFilter}
-              w={220}
-            />
-            <Select
-              label="Outcome"
-              placeholder="All outcomes"
-              clearable
-              value={outcomeFilter}
-              data={[
-                { value: 'success', label: 'Success' },
-                { value: 'failure', label: 'Failure' },
-                { value: 'denied', label: 'Denied' },
-              ]}
-              onChange={setOutcomeFilter}
-              w={180}
-            />
-            <Select
-              label="Page size"
-              value={String(pageSize)}
-              data={TABLE_PAGE_SIZE_OPTIONS.map((value) => ({
-                value: String(value),
-                label: `${value} rows`,
-              }))}
-              onChange={(value) => setPageSize(value ? Number(value) : 25)}
-              w={140}
-            />
-          </Group>
-          <Button
-            variant="light"
-            leftSection={<IconRefresh size={16} />}
-            onClick={() => void fetchLogs()}
-          >
-            Refresh
-          </Button>
-        </Group>
-
-        <DataTable
-          withTableBorder
-          borderRadius="sm"
-          striped
-          highlightOnHover
-          fetching={loading}
-          records={logs}
-          totalRecords={(page - 1) * pageSize + logs.length + (hasNextPage ? 1 : 0)}
-          recordsPerPage={pageSize}
-          page={page}
-          onPageChange={setPage}
-          minHeight={360}
-          noRecordsText="No audit events"
-          columns={[
-            {
-              accessor: 'createdAt',
-              title: 'Time',
-              width: 180,
-              render: (record) =>
-                record.createdAt ? new Date(record.createdAt).toLocaleString() : '-',
-            },
-            {
-              accessor: 'service',
-              title: 'Service',
-              width: 170,
-              render: (record) => (
-                <Badge variant="light" color="gray">
-                  {serviceLabels.get(record.service as PermissionService) ?? record.service}
-                </Badge>
-              ),
-            },
-            {
-              accessor: 'event',
-              title: 'Event',
-              render: (record) => (
-                <div>
-                  <Text size="sm" fw={500}>{record.event}</Text>
-                  <Text size="xs" c="dimmed" lineClamp={1}>{record.path}</Text>
-                </div>
-              ),
-            },
-            {
-              accessor: 'actor',
-              title: 'Actor',
-              width: 220,
-              render: (record) => (
-                <div>
-                  <Text size="sm">{record.actorEmail || record.actorType}</Text>
-                  <Text size="xs" c="dimmed">{record.actorRole || record.actorType}</Text>
-                </div>
-              ),
-            },
-            {
-              accessor: 'outcome',
-              title: 'Outcome',
-              width: 120,
-              render: (record) => (
-                <Badge color={outcomeColor(record.outcome)} variant="light">
-                  {record.outcome}
-                </Badge>
-              ),
-            },
-            {
-              accessor: 'statusCode',
-              title: 'Status',
-              width: 90,
-              render: (record) => record.statusCode ?? '-',
-            },
-          ]}
-        />
-      </Stack>
-    </Box>
+    <DataGrid<AuditLogRecord>
+      records={logs}
+      loading={loading}
+      rowKey={(r) => r.id}
+      columns={columns}
+      filters={[
+        {
+          value: serviceFilter,
+          onChange: setServiceFilter,
+          ariaLabel: 'Service',
+          width: 200,
+          options: serviceOptions,
+        },
+        {
+          value: outcomeFilter,
+          onChange: setOutcomeFilter,
+          ariaLabel: 'Outcome',
+          width: 160,
+          options: outcomeOptions,
+        },
+      ]}
+      onRefresh={() => void fetchLogs()}
+      refreshing={loading}
+      empty={{
+        title: 'No audit events',
+        description: 'No audit events match the current filters.',
+      }}
+      pagination={{
+        page,
+        onPageChange: setPage,
+        pageSize,
+        hasMore: hasNextPage,
+      }}
+      footerLeft={`Page ${page}`}
+    />
   );
 }

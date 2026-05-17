@@ -1,30 +1,36 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import {
-  Modal,
-  Stack,
-  Button,
-  Select,
-  TextInput,
-  Textarea,
-  Switch,
-  Group,
-  Text,
-  Divider,
-  Alert,
-  Loader,
-} from '@mantine/core';
+import { Alert, Center, Loader, TextInput, Textarea } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
-import { IconAlertCircle } from '@tabler/icons-react';
+import { IconAlertCircle, IconPlug } from '@tabler/icons-react';
 import type {
   ProviderDescriptor,
   ProviderFormField,
   ProviderFormSchema,
 } from '@/lib/providers';
+import type { ProviderDomain } from '@/lib/database';
 import type { ProviderConfigView } from '@/lib/services/providers/providerService';
 import ProviderFormRenderer from './ProviderFormRenderer';
+import {
+  SERVICE_CATALOG,
+  DOMAIN_LABELS,
+  filterServiceCatalog,
+  resolveServiceCatalogEntry,
+  type ServiceCatalogEntry,
+} from '@/lib/services/serviceCatalog';
+import ServiceCard from '@/components/common/ui/ServiceCard';
+import FormShell, {
+  Checklist,
+  FormField,
+  FormRow,
+  FormSection,
+  SummaryGroup,
+  SummaryKV,
+  ToggleList,
+  ToggleRow,
+} from '@/components/common/ui/FormShell';
 
 type FormValues = Record<string, string | number | boolean | null | undefined> & {
   key: string;
@@ -57,6 +63,10 @@ export type ProviderConfigModalProps = {
   drivers: ProviderDescriptor[];
   driversLoading?: boolean;
   provider?: ProviderConfigView;
+  /** Currently selected domain (used in create mode). */
+  domain?: ProviderDomain | null;
+  /** Called when the user picks a domain in create mode. Parent should load drivers. */
+  onDomainChange?: (domain: ProviderDomain) => void;
   onSubmit: (options: ProviderConfigModalSubmitPayload) => Promise<void>;
 };
 
@@ -76,9 +86,7 @@ function partitionValues(
     metadata: {},
   };
 
-  if (!schema) {
-    return buckets;
-  }
+  if (!schema) return buckets;
 
   schema.sections.forEach((section) => {
     section.fields.forEach((field) => {
@@ -111,10 +119,8 @@ function resolveInitialFieldValue(
     if (scope === 'metadata') {
       return provider.metadata?.[field.name] ?? field.defaultValue ?? '';
     }
-    // Credentials are not returned for security; default to empty.
     return field.defaultValue ?? '';
   }
-
   return field.defaultValue ?? '';
 }
 
@@ -125,21 +131,28 @@ export default function ProviderConfigModal({
   drivers,
   driversLoading = false,
   provider,
+  domain,
+  onDomainChange,
   onSubmit,
 }: ProviderConfigModalProps) {
   const [schema, setSchema] = useState<ProviderFormSchema | null>(null);
   const [schemaLoading, setSchemaLoading] = useState(false);
   const [schemaError, setSchemaError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [selectedService, setSelectedService] =
+    useState<ServiceCatalogEntry | null>(null);
+  const [catalogQuery, setCatalogQuery] = useState('');
   const [selectedDriver, setSelectedDriver] = useState<string>(
     provider?.driver ?? drivers[0]?.id ?? '',
   );
 
-  const driverOptions = useMemo(
-    () => drivers.map((driver) => ({
-      value: driver.id,
-      label: driver.display.label,
-    })),
-    [drivers],
+  const filteredServices = useMemo(
+    () =>
+      filterServiceCatalog({
+        query: catalogQuery,
+        domain: domain ?? 'all',
+      }),
+    [catalogQuery, domain],
   );
 
   const form = useForm<FormValues>({
@@ -150,12 +163,16 @@ export default function ProviderConfigModal({
       driver: provider?.driver ?? drivers[0]?.id ?? '',
       status: provider?.status !== 'disabled',
     },
+    validate: {
+      key: (v: FormValues[keyof FormValues]) =>
+        !v || typeof v !== 'string' || !v.trim() ? 'Key is required' : null,
+      label: (v: FormValues[keyof FormValues]) =>
+        !v || typeof v !== 'string' || !v.trim() ? 'Label is required' : null,
+    },
   });
 
   useEffect(() => {
-    if (!opened) {
-      return;
-    }
+    if (!opened) return;
     setSelectedDriver(provider?.driver ?? drivers[0]?.id ?? '');
     form.setValues({
       key: provider?.key ?? '',
@@ -164,8 +181,43 @@ export default function ProviderConfigModal({
       driver: provider?.driver ?? drivers[0]?.id ?? '',
       status: provider?.status !== 'disabled',
     });
+    if (provider?.driver) {
+      setSelectedService(
+        resolveServiceCatalogEntry({
+          serviceId:
+            provider.metadata && typeof provider.metadata.serviceCatalogId === 'string'
+              ? provider.metadata.serviceCatalogId
+              : undefined,
+          driver: provider.driver,
+          domain: (provider.type ?? undefined) as ProviderDomain | undefined,
+          key: provider.key,
+          label: provider.label,
+        }) ?? null,
+      );
+    } else {
+      setSelectedService(null);
+      setCatalogQuery('');
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened, provider, drivers]);
+
+  const handlePickService = (service: ServiceCatalogEntry) => {
+    setSelectedService(service);
+    // First domain advertised by the service is used to scope the backend driver load.
+    const domainToUse: ProviderDomain = service.domains[0];
+    if (domainToUse && domainToUse !== domain) {
+      onDomainChange?.(domainToUse);
+    }
+    setSelectedDriver(service.driver);
+    // Auto-suggest label/key if user hasn't typed anything yet
+    if (!form.values.label) {
+      form.setFieldValue('label', service.name);
+    }
+    if (!form.values.key) {
+      const slug = service.id.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+      form.setFieldValue('key', slug);
+    }
+  };
 
   useEffect(() => {
     if (!opened || !selectedDriver) {
@@ -182,13 +234,9 @@ export default function ProviderConfigModal({
         const response = await fetch(
           `/api/providers/drivers/${selectedDriver}/form`,
         );
-        if (!response.ok) {
-          throw new Error('Failed to load provider form schema');
-        }
+        if (!response.ok) throw new Error('Failed to load provider form schema');
         const data = await response.json();
-        if (!aborted) {
-          setSchema(data.schema);
-        }
+        if (!aborted) setSchema(data.schema);
       } catch (error) {
         if (!aborted) {
           console.error(error);
@@ -198,22 +246,18 @@ export default function ProviderConfigModal({
           setSchema(null);
         }
       } finally {
-        if (!aborted) {
-          setSchemaLoading(false);
-        }
+        if (!aborted) setSchemaLoading(false);
       }
     }
 
-    loadSchema();
+    void loadSchema();
     return () => {
       aborted = true;
     };
   }, [opened, selectedDriver]);
 
   useEffect(() => {
-    if (!schema) {
-      return;
-    }
+    if (!schema) return;
     const fieldValues: Record<string, FormValues[keyof FormValues]> = {};
     schema.sections.forEach((section) => {
       section.fields.forEach((field) => {
@@ -231,7 +275,32 @@ export default function ProviderConfigModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [schema, provider, mode]);
 
-  const handleSubmit = async (values: FormValues) => {
+  const selectedDriverDescriptor = drivers.find(
+    (driver) => driver.id === selectedDriver,
+  );
+
+  const isCreate = mode === 'create';
+  const validService = !isCreate || Boolean(selectedService);
+  const validDriver = Boolean(selectedDriver);
+  const validIdentity = Boolean(form.values.key && form.values.label);
+  const validConfig = !schemaError && !schemaLoading;
+
+  const checklist = [
+    ...(isCreate
+      ? [{ id: 0, label: 'Service selected', done: validService }]
+      : []),
+    { id: 2, label: 'Key and label set', done: validIdentity },
+    {
+      id: 3,
+      label: schema ? 'Configuration loaded' : 'Loading configuration…',
+      done: validConfig && schema !== null,
+    },
+  ];
+
+  const handleSubmit = async () => {
+    const validation = form.validate();
+    if (validation.hasErrors) return;
+
     if (!selectedDriver) {
       notifications.show({
         color: 'red',
@@ -241,9 +310,17 @@ export default function ProviderConfigModal({
       return;
     }
 
+    const values = form.getValues();
     const buckets = partitionValues(schema, values);
 
+    setSubmitting(true);
     try {
+      const metadata = {
+        ...(provider?.metadata ?? {}),
+        ...buckets.metadata,
+        ...(selectedService ? { serviceCatalogId: selectedService.id } : {}),
+      };
+
       await onSubmit({
         providerId: provider?._id as string | undefined,
         driver: selectedDriver,
@@ -256,7 +333,7 @@ export default function ProviderConfigModal({
           },
           credentials: buckets.credentials,
           settings: buckets.settings,
-          metadata: buckets.metadata,
+          metadata,
         },
       });
       onClose();
@@ -270,105 +347,235 @@ export default function ProviderConfigModal({
         message:
           error instanceof Error ? error.message : 'Unexpected error occurred',
       });
+    } finally {
+      setSubmitting(false);
     }
   };
 
-  const modalTitle =
-    mode === 'create' ? 'Add Provider' : `Edit Provider — ${provider?.label}`;
+  const title = mode === 'create' ? 'Add provider' : 'Edit provider';
+  const subtitle =
+    mode === 'edit' && provider ? (
+      <>
+        Editing <strong style={{ color: 'var(--ds-text)' }}>{provider.label}</strong>
+      </>
+    ) : (
+      'Connect a new tenant-wide provider. Drivers expose their own configuration form.'
+    );
 
-  const selectedDriverDescriptor = drivers.find(
-    (driver) => driver.id === selectedDriver,
+  const driverLabel =
+    selectedDriverDescriptor?.display.label ?? selectedDriver ?? null;
+
+  const summary = (
+    <>
+      <SummaryGroup title="Service">
+        {selectedService ? (
+          <>
+            <div style={{ marginBottom: 12 }}>
+              <ServiceCard service={selectedService} compact />
+            </div>
+            <SummaryKV label="Driver" value={driverLabel ?? '—'} mono />
+            <SummaryKV
+              label="Domain"
+              value={DOMAIN_LABELS[selectedService.domains[0]] ?? selectedService.domains[0]}
+            />
+          </>
+        ) : (
+          <SummaryKV label="—" value="Pick a service" />
+        )}
+      </SummaryGroup>
+
+      <SummaryGroup title="Identity">
+        <SummaryKV
+          label="Key"
+          value={form.values.key || <span className="ds-faint">—</span>}
+          mono
+        />
+        <SummaryKV
+          label="Label"
+          value={form.values.label || <span className="ds-faint">—</span>}
+        />
+        <SummaryKV
+          label="Status"
+          value={
+            <span
+              className={`ds-badge ${form.values.status ? 'ds-badge-ok' : 'ds-badge-warn'}`}
+            >
+              {form.values.status ? 'active' : 'disabled'}
+            </span>
+          }
+        />
+      </SummaryGroup>
+
+      <SummaryGroup title="Pre-flight">
+        <Checklist items={checklist} />
+      </SummaryGroup>
+    </>
   );
 
+  const canSubmit =
+    !driversLoading &&
+    !schemaLoading &&
+    !schemaError &&
+    validService &&
+    validDriver &&
+    validIdentity;
+
   return (
-    <Modal
-      opened={opened}
+    <FormShell
+      open={opened}
       onClose={onClose}
-      title={modalTitle}
-      size="lg"
-      keepMounted={false}
+      icon={<IconPlug size={16} />}
+      title={title}
+      subtitle={subtitle}
+      summary={summary}
+      footerStatus={`${checklist.filter((c) => c.done).length} of ${checklist.length} ready`}
+      primaryAction={{
+        label: mode === 'create' ? 'Create provider' : 'Save changes',
+        loading: submitting,
+        disabled: !canSubmit,
+        onClick: () => void handleSubmit(),
+      }}
     >
-      <form
-        onSubmit={form.onSubmit((values) => {
-          void handleSubmit(values);
-        })}
+      {isCreate ? (
+        <FormSection
+          number={1}
+          title="Service"
+          description="Pick the service you want to connect. We'll auto-fill the right driver and form."
+          done={Boolean(selectedService)}
+        >
+          <div
+            className="ds-toolbar"
+            style={{
+              marginBottom: 12,
+              padding: 0,
+              border: 'none',
+              background: 'transparent',
+            }}
+          >
+            <div className="ds-toolbar-search" style={{ flex: 1, maxWidth: 380 }}>
+              <input
+                placeholder="Search services by name, alias, or tag…"
+                value={catalogQuery}
+                onChange={(e) => setCatalogQuery(e.target.value)}
+                aria-label="Search services"
+              />
+            </div>
+            <select
+              className="ds-select"
+              value={domain ?? 'all'}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v === 'all') {
+                  onDomainChange?.(SERVICE_CATALOG[0].domains[0]);
+                  return;
+                }
+                onDomainChange?.(v as ProviderDomain);
+              }}
+              aria-label="Filter by domain"
+              style={{ minWidth: 160 }}
+            >
+              {(['all', 'model', 'embedding', 'vector', 'file', 'datasource'] as const).map(
+                (d) => (
+                  <option key={d} value={d}>
+                    {d === 'all' ? 'All domains' : DOMAIN_LABELS[d]}
+                  </option>
+                ),
+              )}
+            </select>
+          </div>
+
+          {filteredServices.length === 0 ? (
+            <div className="ds-empty" style={{ padding: 24 }}>
+              <span className="ds-muted" style={{ fontSize: 13 }}>
+                No services match your filter.
+              </span>
+            </div>
+          ) : (
+            <div className="service-card-grid">
+              {filteredServices.map((s) => (
+                <ServiceCard
+                  key={s.id}
+                  service={s}
+                  selected={selectedService?.id === s.id}
+                  onClick={() => handlePickService(s)}
+                />
+              ))}
+            </div>
+          )}
+        </FormSection>
+      ) : null}
+
+      <FormSection
+        number={isCreate ? 2 : 1}
+        title="Identity"
+        description="How this provider is identified in the console and APIs."
+        done={validIdentity}
       >
-        <Stack gap="md">
-          <Stack gap="sm">
-            <Select
-              label="Driver"
-              placeholder={driversLoading ? 'Loading drivers…' : 'Select a provider driver'}
-              data={driverOptions}
-              value={selectedDriver}
-              onChange={(value) => setSelectedDriver(value ?? '')}
-              disabled={mode === 'edit' || driversLoading}
-              required
-            />
+        <FormRow cols={2}>
+          <FormField
+            label="Key"
+            required
+            hint={
+              mode === 'edit' ? 'Key is immutable.' : 'Used to reference the provider.'
+            }
+          >
             <TextInput
-              label="Key"
               placeholder="unique-key"
-              {...form.getInputProps('key')}
-              required
               disabled={mode === 'edit'}
+              {...form.getInputProps('key')}
             />
-            <TextInput
-              label="Label"
-              placeholder="Display name"
-              {...form.getInputProps('label')}
-              required
-            />
+          </FormField>
+          <FormField label="Label" required>
+            <TextInput placeholder="Display name" {...form.getInputProps('label')} />
+          </FormField>
+        </FormRow>
+        <FormRow cols={1}>
+          <FormField label="Description" optional>
             <Textarea
-              label="Description"
               placeholder="Optional description"
               minRows={2}
               autosize
               {...form.getInputProps('description')}
             />
-            <Switch
-              label="Active"
-              description="Inactive providers cannot be used by dependent modules."
-              {...form.getInputProps('status', { type: 'checkbox' })}
-            />
-          </Stack>
+          </FormField>
+        </FormRow>
+        <ToggleList>
+          <ToggleRow
+            label="Active"
+            description="Inactive providers cannot be used by dependent modules."
+            checked={Boolean(form.values.status)}
+            onChange={(v) => form.setFieldValue('status', v)}
+          />
+        </ToggleList>
+      </FormSection>
 
-          <Divider label="Configuration" labelPosition="left" />
+      {schemaLoading ? (
+        <FormSection number={isCreate ? 3 : 2} title="Configuration">
+          <Center py="md">
+            <Loader size="sm" color="teal" />
+          </Center>
+        </FormSection>
+      ) : null}
 
-          {selectedDriverDescriptor?.display.description && (
-            <Text size="sm" c="dimmed">
-              {selectedDriverDescriptor.display.description}
-            </Text>
-          )}
+      {schemaError ? (
+        <FormSection number={isCreate ? 3 : 2} title="Configuration">
+          <Alert
+            icon={<IconAlertCircle size={16} />}
+            color="red"
+            title="Configuration unavailable"
+          >
+            {schemaError}
+          </Alert>
+        </FormSection>
+      ) : null}
 
-          {schemaLoading && (
-            <Group justify="center" py="md">
-              <Loader size="sm" />
-            </Group>
-          )}
-
-          {schemaError && (
-            <Alert
-              icon={<IconAlertCircle size={16} />}
-              color="red"
-              title="Configuration unavailable"
-            >
-              {schemaError}
-            </Alert>
-          )}
-
-          {schema && !schemaLoading && !schemaError && (
-            <ProviderFormRenderer schema={schema} form={form} />
-          )}
-
-          <Group justify="flex-end" mt="md">
-            <Button variant="default" onClick={onClose}>
-              Cancel
-            </Button>
-            <Button type="submit" disabled={driversLoading}>
-              {mode === 'create' ? 'Create Provider' : 'Save Changes'}
-            </Button>
-          </Group>
-        </Stack>
-      </form>
-    </Modal>
+      {schema && !schemaLoading && !schemaError ? (
+        <ProviderFormRenderer
+          schema={schema}
+          form={form}
+          sectionStart={isCreate ? 3 : 2}
+        />
+      ) : null}
+    </FormShell>
   );
 }

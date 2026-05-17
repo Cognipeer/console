@@ -10,9 +10,12 @@
 import { randomUUID } from 'node:crypto';
 import { createLogger } from '@/lib/core/logger';
 import { getConfig } from '@/lib/core/config';
+import { routeInstanceCall } from '@/lib/core/cluster';
+import type { QueuePayload } from '@/lib/core/queue';
 import { getDatabase, type DatabaseProvider } from '@/lib/database';
 import { uploadFile } from '@/lib/services/files';
 import { browserManager } from './browserManager';
+import { browserEntityId } from './entityId';
 import { matchesProjectScope, redactTypedText, sanitizePersistedUrl } from './internals';
 import type {
   BrowserAction,
@@ -240,6 +243,27 @@ async function persistEvent(
 }
 
 export async function runBrowserAction(
+  ctx: SessionContext,
+  sessionKey: string,
+  action: BrowserAction,
+): Promise<BrowserActionResult> {
+  // Look up the parent browser id so the router can use the browser's
+  // assigned node. We accept a small cost of double-loading the session
+  // record (here + inside the local handler) in exchange for keeping
+  // routing decisions outside of browserManager.
+  const { record } = await loadSessionForKey(ctx, sessionKey);
+  return routeInstanceCall(
+    {
+      entityType: 'browser',
+      entityId: browserEntityId(ctx.tenantId, record.browserId),
+      jobName: 'runAction',
+    },
+    { ctx, sessionKey, action } as unknown as QueuePayload,
+    () => runBrowserActionLocal(ctx, sessionKey, action),
+  );
+}
+
+export async function runBrowserActionLocal(
   ctx: SessionContext,
   sessionKey: string,
   action: BrowserAction,

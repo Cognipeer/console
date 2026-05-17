@@ -51,6 +51,34 @@ export const MAIN_SCHEMA_SQL = `
     updatedAt TEXT NOT NULL,
     PRIMARY KEY (email, tenantId)
   );
+
+  -- Cluster node registry (system-wide)
+  CREATE TABLE IF NOT EXISTS nodes (
+    name TEXT PRIMARY KEY,
+    role TEXT NOT NULL,
+    url TEXT,
+    tags TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL,
+    lastHeartbeatAt TEXT NOT NULL,
+    startedAt TEXT NOT NULL,
+    version TEXT,
+    hostname TEXT,
+    pid INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_nodes_status ON nodes(status);
+  CREATE INDEX IF NOT EXISTS idx_nodes_heartbeat ON nodes(lastHeartbeatAt);
+
+  -- Instance → node assignments (system-wide; covers all tenants' instances)
+  CREATE TABLE IF NOT EXISTS instance_assignments (
+    entityType TEXT NOT NULL,
+    entityId TEXT NOT NULL,
+    nodeName TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'strict',
+    updatedAt TEXT NOT NULL,
+    updatedBy TEXT,
+    PRIMARY KEY (entityType, entityId)
+  );
+  CREATE INDEX IF NOT EXISTS idx_instance_assignments_node ON instance_assignments(nodeName);
 `;
 
 /** Tables used in every TENANT database. */
@@ -72,6 +100,7 @@ export const TENANT_SCHEMA_SQL = `
     invitedAt TEXT,
     inviteAcceptedAt TEXT,
     mustChangePassword INTEGER DEFAULT 0,
+    passwordChangedAt TEXT,
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   );
@@ -504,6 +533,28 @@ export const TENANT_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_guardrail_eval_guardrailId ON guardrail_evaluation_logs(guardrailId);
   CREATE INDEX IF NOT EXISTS idx_guardrail_eval_createdAt ON guardrail_evaluation_logs(createdAt);
 
+  -- PII policies (standalone service)
+  CREATE TABLE IF NOT EXISTS pii_policies (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    defaultAction TEXT NOT NULL DEFAULT 'detect',
+    categories TEXT DEFAULT '{}',
+    customPatterns TEXT DEFAULT '[]',
+    languages TEXT DEFAULT '[]',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    metadata TEXT DEFAULT '{}',
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_pii_policies_tenant_project ON pii_policies(tenantId, projectId);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_pii_policies_key ON pii_policies(tenantId, projectId, key);
+
   -- Alert rules
   CREATE TABLE IF NOT EXISTS alert_rules (
     id TEXT PRIMARY KEY,
@@ -581,6 +632,8 @@ export const TENANT_SCHEMA_SQL = `
     fileProviderKey TEXT,
     chunkConfig TEXT NOT NULL DEFAULT '{}',
     status TEXT NOT NULL DEFAULT 'active',
+    rerankerKey TEXT,
+    rerankerOversample INTEGER,
     totalDocuments INTEGER DEFAULT 0,
     totalChunks INTEGER DEFAULT 0,
     metadata TEXT DEFAULT '{}',
@@ -635,6 +688,48 @@ export const TENANT_SCHEMA_SQL = `
     metadata TEXT DEFAULT '{}',
     createdAt TEXT NOT NULL
   );
+
+  -- Rerankers (first-class service backed by configurable strategy + model)
+  CREATE TABLE IF NOT EXISTS rerankers (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    strategy TEXT NOT NULL,
+    config TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'active',
+    totalRuns INTEGER NOT NULL DEFAULT 0,
+    avgLatencyMs REAL,
+    lastUsedAt TEXT,
+    metadata TEXT DEFAULT '{}',
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_rerankers_tenant_key ON rerankers(tenantId, key);
+
+  CREATE TABLE IF NOT EXISTS reranker_run_logs (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    rerankerKey TEXT NOT NULL,
+    strategy TEXT NOT NULL,
+    modelKey TEXT,
+    query TEXT NOT NULL,
+    inputCount INTEGER NOT NULL DEFAULT 0,
+    outputCount INTEGER NOT NULL DEFAULT 0,
+    latencyMs INTEGER,
+    status TEXT NOT NULL DEFAULT 'success',
+    errorMessage TEXT,
+    source TEXT,
+    ragModuleKey TEXT,
+    metadata TEXT DEFAULT '{}',
+    createdAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_reranker_run_logs_key_createdAt ON reranker_run_logs(rerankerKey, createdAt DESC);
 
   -- Memory stores
   CREATE TABLE IF NOT EXISTS memory_stores (

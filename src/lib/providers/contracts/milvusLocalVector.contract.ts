@@ -101,7 +101,7 @@ export const MilvusLocalVectorProviderContract: ProviderContract<
     // eslint-disable-next-line @typescript-eslint/ban-ts-comment
     // @ts-ignore – @zilliz/milvus2-sdk-node is an optional peer dependency
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { MilvusClient, DataType } = await import('@zilliz/milvus2-sdk-node') as any;
+    const { MilvusClient, DataType } = await import(/* webpackIgnore: true */ '@zilliz/milvus2-sdk-node') as any;
 
     const resolvedHost = settings.host?.trim() || 'localhost';
     const resolvedPort = settings.port ?? DEFAULT_PORT;

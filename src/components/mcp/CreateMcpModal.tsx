@@ -1,21 +1,24 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
-  Button,
-  Group,
   JsonInput,
-  Modal,
   PasswordInput,
-  Select,
-  Stack,
-  Stepper,
-  Text,
   Textarea,
   TextInput,
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
+import { IconCheck, IconPlug } from '@tabler/icons-react';
+import FormShell, {
+  Checklist,
+  ChipPicker,
+  FormField,
+  FormRow,
+  FormSection,
+  SummaryGroup,
+  SummaryKV,
+} from '@/components/common/ui/FormShell';
 import type { McpServerView } from '@/lib/services/mcp';
 
 interface CreateMcpModalProps {
@@ -24,11 +27,13 @@ interface CreateMcpModalProps {
   onCreated: (server: McpServerView) => void;
 }
 
+type AuthType = 'none' | 'token' | 'header' | 'basic';
+
 interface FormValues {
   name: string;
   description: string;
   upstreamBaseUrl: string;
-  authType: 'none' | 'token' | 'header' | 'basic';
+  authType: AuthType;
   authToken: string;
   authHeaderName: string;
   authHeaderValue: string;
@@ -42,7 +47,6 @@ export default function CreateMcpModal({
   onClose,
   onCreated,
 }: CreateMcpModalProps) {
-  const [step, setStep] = useState(0);
   const [loading, setLoading] = useState(false);
 
   const form = useForm<FormValues>({
@@ -59,55 +63,38 @@ export default function CreateMcpModal({
       openApiSpec: '',
     },
     validate: (values) => {
-      if (step === 0) {
-        const errors: Partial<Record<keyof FormValues, string>> = {};
-        if (!values.name.trim()) errors.name = 'Name is required';
-        if (values.authType === 'token' && !values.authToken.trim()) {
-          errors.authToken = 'Token is required';
-        }
-        if (values.authType === 'header') {
-          if (!values.authHeaderName.trim()) errors.authHeaderName = 'Header name is required';
-          if (!values.authHeaderValue.trim()) errors.authHeaderValue = 'Header value is required';
-        }
-        if (values.authType === 'basic') {
-          if (!values.authUsername.trim()) errors.authUsername = 'Username is required';
-          if (!values.authPassword.trim()) errors.authPassword = 'Password is required';
-        }
-        return errors;
+      const errors: Partial<Record<keyof FormValues, string>> = {};
+      if (!values.name.trim()) errors.name = 'Name is required';
+      if (values.authType === 'token' && !values.authToken.trim()) {
+        errors.authToken = 'Token is required';
       }
-      if (step === 1) {
-        const errors: Partial<Record<keyof FormValues, string>> = {};
-        if (!values.openApiSpec.trim()) errors.openApiSpec = 'OpenAPI specification is required';
-        else {
-          try {
-            JSON.parse(values.openApiSpec);
-          } catch {
-            errors.openApiSpec = 'Invalid JSON format';
-          }
-        }
-        return errors;
+      if (values.authType === 'header') {
+        if (!values.authHeaderName.trim()) errors.authHeaderName = 'Header name is required';
+        if (!values.authHeaderValue.trim()) errors.authHeaderValue = 'Header value is required';
       }
-      return {};
+      if (values.authType === 'basic') {
+        if (!values.authUsername.trim()) errors.authUsername = 'Username is required';
+        if (!values.authPassword.trim()) errors.authPassword = 'Password is required';
+      }
+      if (!values.openApiSpec.trim()) {
+        errors.openApiSpec = 'OpenAPI specification is required';
+      } else {
+        try {
+          JSON.parse(values.openApiSpec);
+        } catch {
+          errors.openApiSpec = 'Invalid JSON format';
+        }
+      }
+      return errors;
     },
   });
 
   useEffect(() => {
     if (!opened) {
       form.reset();
-      setStep(0);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened]);
-
-  const handleNext = () => {
-    const validation = form.validate();
-    if (validation.hasErrors) return;
-    setStep(1);
-  };
-
-  const handleBack = () => {
-    setStep(0);
-  };
 
   const handleSubmit = async () => {
     const validation = form.validate();
@@ -115,7 +102,7 @@ export default function CreateMcpModal({
 
     setLoading(true);
     try {
-      const values = form.values;
+      const values = form.getValues();
       const upstreamAuth: Record<string, string> = { type: values.authType };
 
       if (values.authType === 'token') {
@@ -163,123 +150,211 @@ export default function CreateMcpModal({
     }
   };
 
+  const validIdentity = Boolean(form.values.name.trim());
+  const validAuth = (() => {
+    const v = form.values;
+    if (v.authType === 'token') return Boolean(v.authToken.trim());
+    if (v.authType === 'header') return Boolean(v.authHeaderName.trim() && v.authHeaderValue.trim());
+    if (v.authType === 'basic') return Boolean(v.authUsername.trim() && v.authPassword.trim());
+    return true;
+  })();
+  const validSpec = useMemo(() => {
+    const raw = form.values.openApiSpec.trim();
+    if (!raw) return false;
+    try {
+      JSON.parse(raw);
+      return true;
+    } catch {
+      return false;
+    }
+  }, [form.values.openApiSpec]);
+
+  const checklist = [
+    { id: 1, label: 'Name provided', done: validIdentity },
+    { id: 2, label: 'Authentication configured', done: validAuth },
+    { id: 3, label: 'OpenAPI spec valid JSON', done: validSpec },
+  ];
+
+  const authLabel: Record<AuthType, string> = {
+    none: 'No authentication',
+    token: 'Bearer token',
+    header: 'Custom header',
+    basic: 'Basic auth',
+  };
+
+  const summary = (
+    <>
+      <SummaryGroup title="Server">
+        <SummaryKV
+          label="Name"
+          value={form.values.name || <span className="ds-faint">—</span>}
+        />
+        <SummaryKV
+          label="Base URL"
+          value={
+            form.values.upstreamBaseUrl || (
+              <span className="ds-faint">from spec</span>
+            )
+          }
+          mono
+        />
+      </SummaryGroup>
+
+      <SummaryGroup title="Authentication">
+        <SummaryKV label="Type" value={authLabel[form.values.authType]} />
+        {form.values.authType === 'header' ? (
+          <SummaryKV
+            label="Header"
+            value={form.values.authHeaderName || <span className="ds-faint">—</span>}
+            mono
+          />
+        ) : null}
+        {form.values.authType === 'basic' ? (
+          <SummaryKV
+            label="Username"
+            value={form.values.authUsername || <span className="ds-faint">—</span>}
+            mono
+          />
+        ) : null}
+      </SummaryGroup>
+
+      <SummaryGroup title="Pre-flight">
+        <Checklist items={checklist} />
+      </SummaryGroup>
+    </>
+  );
+
+  const canSubmit = validIdentity && validAuth && validSpec;
+
   return (
-    <Modal
-      opened={opened}
+    <FormShell
+      open={opened}
       onClose={onClose}
-      title="New MCP Server"
-      centered
-      size="lg"
+      icon={<IconPlug size={16} />}
+      title="New MCP server"
+      subtitle="Expose an upstream API as MCP tools using its OpenAPI specification."
+      summary={summary}
+      footerStatus={`${checklist.filter((c) => c.done).length} of ${checklist.length} ready`}
+      primaryAction={{
+        label: 'Create server',
+        icon: <IconCheck size={13} />,
+        loading,
+        disabled: !canSubmit,
+        onClick: handleSubmit,
+      }}
     >
-      <Stepper
-        active={step}
-        size="sm"
-        mb="lg"
+      <FormSection
+        number={1}
+        title="Identity"
+        description="How this MCP server is identified across the console."
+        done={validIdentity}
       >
-        <Stepper.Step label="Details" description="Name & authentication" />
-        <Stepper.Step label="Specification" description="OpenAPI spec" />
-      </Stepper>
-
-      {step === 0 && (
-        <Stack gap="md">
-          <TextInput
-            label="Name"
-            placeholder="My API Service"
-            required
-            {...form.getInputProps('name')}
-          />
-
-          <Textarea
-            label="Description"
-            placeholder="Brief description of what this MCP server does"
-            rows={2}
-            {...form.getInputProps('description')}
-          />
-
-          <TextInput
-            label="Upstream Base URL"
-            placeholder="https://api.example.com"
-            description="Override the server URL from the OpenAPI spec (optional)"
-            {...form.getInputProps('upstreamBaseUrl')}
-          />
-
-          <Select
-            label="Authentication Type"
-            description="How to authenticate with the upstream API"
-            data={[
-              { value: 'none', label: 'No authentication' },
-              { value: 'token', label: 'Bearer Token' },
-              { value: 'header', label: 'Custom Header' },
-              { value: 'basic', label: 'Basic Auth (username/password)' },
-            ]}
-            {...form.getInputProps('authType')}
-          />
-
-          {form.values.authType === 'token' && (
-            <PasswordInput
-              label="Bearer Token"
-              placeholder="sk-..."
-              required
-              {...form.getInputProps('authToken')}
+        <FormRow cols={1}>
+          <FormField label="Name" required>
+            <TextInput
+              placeholder="My API Service"
+              {...form.getInputProps('name')}
             />
-          )}
+          </FormField>
+        </FormRow>
+        <FormRow cols={1}>
+          <FormField label="Description" optional>
+            <Textarea
+              placeholder="Brief description of what this MCP server does"
+              minRows={2}
+              autosize
+              {...form.getInputProps('description')}
+            />
+          </FormField>
+        </FormRow>
+      </FormSection>
 
-          {form.values.authType === 'header' && (
-            <>
+      <FormSection
+        number={2}
+        title="Upstream connection"
+        description="Where requests are forwarded and how they are authenticated."
+        done={validAuth}
+      >
+        <FormRow cols={1}>
+          <FormField
+            label="Upstream base URL"
+            optional
+            hint="Override the server URL from the OpenAPI spec."
+          >
+            <TextInput
+              placeholder="https://api.example.com"
+              {...form.getInputProps('upstreamBaseUrl')}
+            />
+          </FormField>
+        </FormRow>
+        <FormField label="Authentication type">
+          <ChipPicker<AuthType>
+            options={[
+              { value: 'none', label: 'None' },
+              { value: 'token', label: 'Bearer token' },
+              { value: 'header', label: 'Custom header' },
+              { value: 'basic', label: 'Basic auth' },
+            ]}
+            value={form.values.authType}
+            onChange={(v) => form.setFieldValue('authType', v as AuthType)}
+          />
+        </FormField>
+
+        {form.values.authType === 'token' ? (
+          <FormRow cols={1}>
+            <FormField label="Bearer token" required>
+              <PasswordInput
+                placeholder="sk-..."
+                {...form.getInputProps('authToken')}
+              />
+            </FormField>
+          </FormRow>
+        ) : null}
+
+        {form.values.authType === 'header' ? (
+          <FormRow cols={2}>
+            <FormField label="Header name" required>
               <TextInput
-                label="Header Name"
                 placeholder="X-API-Key"
-                required
                 {...form.getInputProps('authHeaderName')}
               />
+            </FormField>
+            <FormField label="Header value" required>
               <PasswordInput
-                label="Header Value"
                 placeholder="your-api-key"
-                required
                 {...form.getInputProps('authHeaderValue')}
               />
-            </>
-          )}
+            </FormField>
+          </FormRow>
+        ) : null}
 
-          {form.values.authType === 'basic' && (
-            <>
+        {form.values.authType === 'basic' ? (
+          <FormRow cols={2}>
+            <FormField label="Username" required>
               <TextInput
-                label="Username"
                 placeholder="admin"
-                required
                 {...form.getInputProps('authUsername')}
               />
+            </FormField>
+            <FormField label="Password" required>
               <PasswordInput
-                label="Password"
                 placeholder="••••••••"
-                required
                 {...form.getInputProps('authPassword')}
               />
-            </>
-          )}
+            </FormField>
+          </FormRow>
+        ) : null}
+      </FormSection>
 
-          <Group justify="flex-end" mt="md">
-            <Button variant="default" onClick={onClose}>
-              Cancel
-            </Button>
-            <Button onClick={handleNext}>
-              Next
-            </Button>
-          </Group>
-        </Stack>
-      )}
-
-      {step === 1 && (
-        <Stack gap="md">
-          <Text size="sm" c="dimmed">
-            Paste the OpenAPI (Swagger) specification in JSON format. All paths
-            and operations will be extracted as MCP tools automatically.
-          </Text>
-
+      <FormSection
+        number={3}
+        title="OpenAPI specification"
+        description="Paste the OpenAPI (Swagger) JSON. Paths and operations will be exposed as MCP tools automatically."
+        done={validSpec}
+      >
+        <FormField label="Specification (JSON)" required>
           <JsonInput
-            label="OpenAPI Specification"
             placeholder='{ "openapi": "3.0.0", "info": { ... }, "paths": { ... } }'
-            required
             minRows={12}
             maxRows={20}
             autosize
@@ -287,17 +362,8 @@ export default function CreateMcpModal({
             formatOnBlur
             {...form.getInputProps('openApiSpec')}
           />
-
-          <Group justify="space-between" mt="md">
-            <Button variant="default" onClick={handleBack}>
-              Back
-            </Button>
-            <Button loading={loading} onClick={handleSubmit}>
-              Create Server
-            </Button>
-          </Group>
-        </Stack>
-      )}
-    </Modal>
+        </FormField>
+      </FormSection>
+    </FormShell>
   );
 }

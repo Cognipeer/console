@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { getDatabase, type DatabaseProvider, type FileMarkdownStatus, type IFileBucketRecord, type IFileRecord, type IProviderRecord } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
+import { getConfig } from '@/lib/core/config';
 import { runtimePool, hashCredentials } from '@/lib/core/runtimePool';
 import { withResilience } from '@/lib/core/resilience';
 import {
@@ -248,7 +249,59 @@ function normalizeFileName(fileName?: string | null): string {
     if (!fileName || fileName.trim().length === 0) {
         return `${FALLBACK_FILENAME}-${randomUUID().slice(0, 8)}`;
     }
-    return fileName.trim();
+    // Strip path components and control chars (including NUL) to prevent
+    // path traversal and injection through filenames downstream.
+    const stripped = path
+        .basename(fileName.trim())
+        // eslint-disable-next-line no-control-regex
+        .replace(/[\x00-\x1f\x7f]/g, '')
+        .replace(/^\.+/, '')
+        .slice(0, 255);
+    if (stripped.length === 0) {
+        return `${FALLBACK_FILENAME}-${randomUUID().slice(0, 8)}`;
+    }
+    return stripped;
+}
+
+const FILE_UPLOAD_SAFE_MIME_RE = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/i;
+
+function normalizeMimeType(raw: string): string {
+    // Drop parameters like ";charset=utf-8" and lowercase the type/subtype.
+    return raw.split(';')[0]!.trim().toLowerCase();
+}
+
+function isMimeTypeAllowed(contentType: string | undefined, allowed: string[]): boolean {
+    if (allowed.length === 0) return true; // allowlist disabled
+    if (!contentType) return false;
+    const mime = normalizeMimeType(contentType);
+    return allowed.some((entry) => {
+        const norm = normalizeMimeType(entry);
+        if (norm.endsWith('/*')) {
+            const prefix = norm.slice(0, -1); // "image/"
+            return mime.startsWith(prefix);
+        }
+        return norm === mime;
+    });
+}
+
+function assertUploadAllowed(request: UploadFileRequest, fileBuffer: Buffer): void {
+    const cfg = getConfig();
+    const maxBytes = Math.max(1, cfg.limits.fileUploadMaxMb) * 1024 * 1024;
+    if (fileBuffer.length > maxBytes) {
+        throw new Error(
+            `File exceeds maximum allowed size of ${cfg.limits.fileUploadMaxMb} MB (got ${Math.ceil(fileBuffer.length / (1024 * 1024))} MB).`,
+        );
+    }
+    if (request.contentType !== undefined && request.contentType !== null) {
+        if (typeof request.contentType !== 'string' || !FILE_UPLOAD_SAFE_MIME_RE.test(request.contentType.split(';')[0]!.trim())) {
+            throw new Error('Invalid content-type header for upload.');
+        }
+    }
+    if (!isMimeTypeAllowed(request.contentType, cfg.limits.fileUploadAllowedMimeTypes)) {
+        throw new Error(
+            `Content type "${request.contentType ?? 'unknown'}" is not in the FILE_UPLOAD_ALLOWED_MIME_TYPES allowlist.`,
+        );
+    }
 }
 
 function generateRelativeKey(fileName: string): string {
@@ -637,6 +690,7 @@ export async function uploadFile(
     const db = await withTenantDb(tenantDbName);
 
     const fileBuffer = decodeData(request.data);
+    assertUploadAllowed(request, fileBuffer);
     const fileName = normalizeFileName(request.fileName);
     const relativeKeyHint = request.keyHint?.trim().replace(/^\/+/, '');
     const chosenRelativeKey = relativeKeyHint && relativeKeyHint.length > 0

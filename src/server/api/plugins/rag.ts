@@ -90,6 +90,8 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         name: body.name,
         vectorIndexKey: body.vectorIndexKey,
         vectorProviderKey: body.vectorProviderKey,
+        rerankerKey: typeof body.rerankerKey === 'string' && body.rerankerKey ? body.rerankerKey : undefined,
+        rerankerOversample: typeof body.rerankerOversample === 'number' ? body.rerankerOversample : undefined,
       });
 
       return reply.code(201).send({ module: ragModule });

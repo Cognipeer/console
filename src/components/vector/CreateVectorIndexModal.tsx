@@ -1,19 +1,19 @@
+'use client';
+
 import { useEffect, useMemo, useRef, useState } from 'react';
-import {
-	Badge,
-	Button,
-	Card,
-	Group,
-	Modal,
-	NumberInput,
-	Select,
-	Stack,
-	Text,
-	TextInput,
-	Textarea,
-} from '@mantine/core';
+import { NumberInput, Select, TextInput, Textarea } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
+import { IconDatabase, IconPlus } from '@tabler/icons-react';
+import FormShell, {
+	Checklist,
+	ChipPicker,
+	FormField,
+	FormRow,
+	FormSection,
+	SummaryGroup,
+	SummaryKV,
+} from '@/components/common/ui/FormShell';
 import type { VectorIndexRecord, VectorProviderView } from '@/lib/services/vector';
 
 const DEFAULT_METRIC_OPTIONS = [
@@ -21,6 +21,8 @@ const DEFAULT_METRIC_OPTIONS = [
 	{ value: 'dot', label: 'Dot Product' },
 	{ value: 'euclidean', label: 'Euclidean' },
 ];
+
+type MetricValue = 'cosine' | 'dot' | 'euclidean' | string;
 
 function resolveAllowedMetrics(provider?: VectorProviderView | null): string[] | null {
 	const raw = provider?.driverCapabilities?.['vector.metrics'];
@@ -117,25 +119,39 @@ export default function CreateVectorIndexModal({
 		[availableProviders, formValues.providerKey],
 	);
 
-				const allowedMetrics = useMemo(() => resolveAllowedMetrics(selectedProvider), [selectedProvider]);
+	const allowedMetrics = useMemo(() => resolveAllowedMetrics(selectedProvider), [selectedProvider]);
 
-		const metricOptions = useMemo(() => {
-			if (allowedMetrics && allowedMetrics.length > 0) {
-				return DEFAULT_METRIC_OPTIONS.filter((option) => allowedMetrics.includes(option.value));
+	const metricOptions = useMemo(() => {
+		if (allowedMetrics && allowedMetrics.length > 0) {
+			return DEFAULT_METRIC_OPTIONS.filter((option) => allowedMetrics.includes(option.value));
+		}
+		return DEFAULT_METRIC_OPTIONS;
+	}, [allowedMetrics]);
+
+	useEffect(() => {
+		if (allowedMetrics && allowedMetrics.length > 0) {
+			if (!allowedMetrics.includes(formValues.metric)) {
+				setFieldValue('metric', allowedMetrics[0]);
 			}
-			return DEFAULT_METRIC_OPTIONS;
-		}, [allowedMetrics]);
+		}
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [allowedMetrics, formValues.metric]);
 
-		useEffect(() => {
-			if (allowedMetrics && allowedMetrics.length > 0) {
-				if (!allowedMetrics.includes(formValues.metric)) {
-					setFieldValue('metric', allowedMetrics[0]);
-				}
-			}
-			// eslint-disable-next-line react-hooks/exhaustive-deps
-		}, [allowedMetrics, formValues.metric]);
+	const validProvider = Boolean(formValues.providerKey);
+	const validIdentity = Boolean(formValues.name);
+	const validConfig = Boolean(formValues.dimension && Number(formValues.dimension) > 0 && formValues.metric);
 
-	const handleSubmit = form.onSubmit(async (values) => {
+	const checklist = [
+		{ id: 1, label: 'Provider selected', done: validProvider },
+		{ id: 2, label: 'Name set', done: validIdentity },
+		{ id: 3, label: 'Dimension & metric configured', done: validConfig },
+	];
+
+	const submit = async () => {
+		const validation = form.validate();
+		if (validation.hasErrors) return;
+		const values = form.getValues();
+
 		if (!values.providerKey) {
 			form.validateField('providerKey');
 			return;
@@ -189,119 +205,176 @@ export default function CreateVectorIndexModal({
 		} finally {
 			setSubmitting(false);
 		}
-	});
+	};
 
-	return (
+	const noProviders = availableProviders.length === 0;
+	const canSubmit = !noProviders && validProvider && validIdentity && validConfig;
+
+	const summary = (
 		<>
-			<Modal opened={opened} onClose={onClose} title="Create Vector Index" size="lg">
-				<form onSubmit={handleSubmit}>
-					<Stack gap="lg">
-						<Text size="sm" c="dimmed">
-							Knowledge indexes store embeddings for semantic search and similarity matching. Each index is backed by a vector database provider.
-						</Text>
+			<SummaryGroup title="Provider">
+				{selectedProvider ? (
+					<>
+						<SummaryKV label="Name" value={selectedProvider.label} />
+						<SummaryKV label="Driver" value={selectedProvider.driver} mono />
+						<SummaryKV label="Status" value={selectedProvider.status} />
+					</>
+				) : (
+					<SummaryKV label="—" value="Select a provider" />
+				)}
+			</SummaryGroup>
 
-						<Stack gap="sm">
-							<Group align="flex-end" gap="xs">
-								<Select
-									label="Provider"
-									placeholder="Select a vector provider"
-									data={providerOptions}
-									value={formValues.providerKey}
-									onChange={(value) => {
-										const nextKey = value ?? '';
-										setFieldValue('providerKey', nextKey);
-										const nextProvider = availableProviders.find((item) => item.key === nextKey);
-										const capability = resolveAllowedMetrics(nextProvider);
-										if (capability && capability.length > 0) {
-											const currentMetric = formValues.metric;
-											setFieldValue('metric', capability.includes(currentMetric) ? currentMetric : capability[0]);
-										}
-									}}
-									searchable
-									withAsterisk
-									style={{ flex: 1 }}
-								/>
-							</Group>
-							<Text size="xs" c="dimmed">
-								Need a new vector provider? Ask a tenant admin to add one in Tenant Settings.
-							</Text>
-						</Stack>
+			<SummaryGroup title="Index">
+				<SummaryKV
+					label="Name"
+					value={formValues.name || <span className="ds-faint">—</span>}
+				/>
+				<SummaryKV
+					label="Dimension"
+					value={formValues.dimension ? String(formValues.dimension) : <span className="ds-faint">—</span>}
+					mono
+				/>
+				<SummaryKV label="Metric" value={formValues.metric || '—'} />
+			</SummaryGroup>
 
-						{availableProviders.length === 0 ? (
-							<Card withBorder padding="md">
-								<Stack gap="xs">
-									<Text size="sm" c="dimmed">
-										No vector providers configured yet. Ask a tenant admin to add one in Tenant Settings.
-									</Text>
-								</Stack>
-							</Card>
-						) : null}
-
-						{selectedProvider && (
-							<Card withBorder radius="md" padding="md">
-								<Stack gap={4}>
-									<Group gap="xs">
-										<Text fw={600}>{selectedProvider.label}</Text>
-										<Badge color={selectedProvider.status === 'active' ? 'green' : 'yellow'}>
-											{selectedProvider.status}
-										</Badge>
-									</Group>
-									{selectedProvider.description && (
-										<Text size="sm" c="dimmed">
-											{selectedProvider.description}
-										</Text>
-									)}
-									<Text size="xs" c="dimmed">
-										Driver: {selectedProvider.driver}
-									</Text>
-									<Text size="xs" c="dimmed">
-										Key: {selectedProvider.key}
-									</Text>
-								</Stack>
-							</Card>
-						)}
-
-						<Stack gap="md">
-							<Text fw={500}>Index configuration</Text>
-							<TextInput
-								label="Name"
-								placeholder="Knowledge base"
-								required
-								{...form.getInputProps('name')}
-							/>
-							<NumberInput
-								label="Dimension"
-								placeholder="1536"
-								required
-								{...form.getInputProps('dimension')}
-							/>
-							<Select
-								label="Metric"
-								data={metricOptions}
-								required
-								{...form.getInputProps('metric')}
-							/>
-							<Textarea
-								label="Description"
-								placeholder="Optional description stored with the index"
-								autosize
-								minRows={2}
-								{...form.getInputProps('description')}
-							/>
-						</Stack>
-
-						<Group justify="flex-end">
-							<Button variant="default" onClick={onClose}>
-								Cancel
-							</Button>
-							<Button type="submit" loading={submitting} disabled={availableProviders.length === 0}>
-								Create Index
-							</Button>
-						</Group>
-					</Stack>
-				</form>
-			</Modal>
+			<SummaryGroup title="Pre-flight">
+				<Checklist items={checklist} />
+			</SummaryGroup>
 		</>
 	);
-}
 
+	return (
+		<FormShell
+			open={opened}
+			onClose={onClose}
+			icon={<IconDatabase size={16} />}
+			title="Create vector index"
+			subtitle="Add a new embeddings index for semantic search and similarity matching."
+			summary={summary}
+			footerStatus={`${checklist.filter((c) => c.done).length} of ${checklist.length} ready`}
+			primaryAction={{
+				label: 'Create index',
+				icon: <IconPlus size={13} />,
+				loading: submitting,
+				disabled: !canSubmit,
+				onClick: submit,
+			}}
+		>
+			<FormSection
+				number={1}
+				title="Provider"
+				description="Pick the vector database that will host this index."
+				done={validProvider}
+			>
+				{noProviders ? (
+					<div
+						className="ds-card ds-card-pad"
+						style={{ background: 'var(--ds-surface-1)' }}
+					>
+						<span className="ds-muted" style={{ fontSize: 13 }}>
+							No vector providers configured yet. Ask a tenant admin to add one in Tenant Settings.
+						</span>
+					</div>
+				) : (
+					<>
+						<FormField label="Provider" required>
+							<Select
+								placeholder="Select a vector provider"
+								data={providerOptions}
+								value={formValues.providerKey}
+								onChange={(value) => {
+									const nextKey = value ?? '';
+									setFieldValue('providerKey', nextKey);
+									const nextProvider = availableProviders.find((item) => item.key === nextKey);
+									const capability = resolveAllowedMetrics(nextProvider);
+									if (capability && capability.length > 0) {
+										const currentMetric = formValues.metric;
+										setFieldValue('metric', capability.includes(currentMetric) ? currentMetric : capability[0]);
+									}
+								}}
+								searchable
+							/>
+						</FormField>
+						{selectedProvider ? (
+							<div
+								className="ds-card ds-card-pad-sm"
+								style={{ marginTop: 12, background: 'var(--ds-surface-1)' }}
+							>
+								<div className="ds-row ds-gap-sm" style={{ marginBottom: 4 }}>
+									<span style={{ fontWeight: 600 }}>{selectedProvider.label}</span>
+									<span
+										className={`ds-badge ${selectedProvider.status === 'active' ? 'ds-badge-ok' : 'ds-badge-warn'}`}
+									>
+										{selectedProvider.status}
+									</span>
+								</div>
+								{selectedProvider.description ? (
+									<div
+										className="ds-muted"
+										style={{ fontSize: 12, marginBottom: 4 }}
+									>
+										{selectedProvider.description}
+									</div>
+								) : null}
+								<div className="ds-faint" style={{ fontSize: 11.5 }}>
+									driver: <span className="ds-mono">{selectedProvider.driver}</span>{' '}
+									· key: <span className="ds-mono">{selectedProvider.key}</span>
+								</div>
+							</div>
+						) : null}
+					</>
+				)}
+			</FormSection>
+
+			<FormSection
+				number={2}
+				title="Identity"
+				description="How this index is identified across the console and API."
+				done={validIdentity}
+			>
+				<FormRow cols={1}>
+					<FormField label="Name" required>
+						<TextInput
+							placeholder="Knowledge base"
+							{...form.getInputProps('name')}
+						/>
+					</FormField>
+				</FormRow>
+				<FormRow cols={1}>
+					<FormField label="Description" optional>
+						<Textarea
+							placeholder="Optional description stored with the index"
+							autosize
+							minRows={2}
+							{...form.getInputProps('description')}
+						/>
+					</FormField>
+				</FormRow>
+			</FormSection>
+
+			<FormSection
+				number={3}
+				title="Configuration"
+				description="Vector dimensionality and similarity metric used by this index."
+				done={validConfig}
+			>
+				<FormRow cols={2}>
+					<FormField label="Dimension" required hint="Must match the embedding model output size.">
+						<NumberInput
+							placeholder="1536"
+							min={1}
+							{...form.getInputProps('dimension')}
+						/>
+					</FormField>
+					<FormField label="Metric" required>
+						<ChipPicker<MetricValue>
+							options={metricOptions.map((opt) => ({ value: opt.value, label: opt.label }))}
+							value={formValues.metric}
+							onChange={(v) => setFieldValue('metric', v as string)}
+						/>
+					</FormField>
+				</FormRow>
+			</FormSection>
+		</FormShell>
+	);
+}

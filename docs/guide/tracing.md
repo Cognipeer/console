@@ -1,6 +1,21 @@
 # Agent Tracing
 
-The tracing system records and visualizes AI agent execution sessions, including LLM calls, tool use, retrieval operations, and multi-agent workflows.
+The tracing system records and visualizes AI agent execution sessions, including LLM calls, tool use, retrieval operations, and multi-agent workflows. The console exposes this under **Operate → Agent Observability**.
+
+## Operator view
+
+The overview screen consolidates every signal you need to triage a run: total sessions and tokens for the current window, the rolling event count, tool error rate, plus per-agent breakdowns, top models, and top token consumers. Recent traffic is summarised by day so anomalies in the last week stand out.
+
+![Agent Observability overview](/screenshots/tracing/01-tracing-overview.png)
+
+The left sidebar splits the surface into four operational views:
+
+- **Overview** — the workspace-wide rollup pictured above.
+- **Agents** — one row per registered agent name, with averages and error rates so you can compare agents against each other.
+- **Sessions** — the flat session log, filterable by date, agent, status, or thread.
+- **Threads** — multi-turn conversations grouped by `threadId`; useful when reconstructing a user's full interaction.
+
+Clicking a session opens its event timeline — LLM calls, tool calls, retrieval steps, and child-agent invocations are rendered as nested spans with token usage and latency on each row.
 
 ## Concepts
 

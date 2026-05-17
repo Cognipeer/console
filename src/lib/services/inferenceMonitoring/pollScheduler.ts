@@ -14,6 +14,11 @@
 import { getDatabase, getTenantDatabase } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { getCache } from '@/lib/core/cache';
+import {
+  findInstanceAssignment,
+  getThisNodeName,
+  resolveDefaultNodeName,
+} from '@/lib/core/cluster';
 import { InferenceMonitoringService } from './inferenceMonitoringService';
 
 const logger = createLogger('poll-scheduler');
@@ -54,11 +59,14 @@ async function runOnce(manual = false): Promise<{ dueServers: number; processedT
       );
     }
 
+    // Try the global lock for the unassigned-server bucket. Servers with
+    // explicit assignments are filtered per node below regardless of who
+    // holds the lock, so each assigned server still gets exactly one
+    // poller.
     lockToken = await cache.acquireLock(SCHEDULER_LOCK_KEY, SCHEDULER_LOCK_TTL_SECONDS);
-    if (!lockToken) {
-      logger.debug('Skipped run because another instance holds the scheduler lock');
-      return { dueServers: 0, processedTenants: 0 };
-    }
+    const holdsGlobalLock = Boolean(lockToken);
+    const thisNode = getThisNodeName();
+    const defaultNode = await resolveDefaultNodeName();
 
     // 1. Fetch all tenants from the main database (no tenant switch needed).
     const mainDb = await getDatabase();
@@ -75,12 +83,28 @@ async function runOnce(manual = false): Promise<{ dueServers: number; processedT
         const servers = await tenantDb.listInferenceServers(tenantId);
 
         const now = Date.now();
-        const dueServers = servers.filter((s) => {
+        const dueServersAll = servers.filter((s) => {
           if (s.status === 'disabled') return false;
-          if (!s.lastPolledAt) return true; // never polled yet → always due
+          if (!s.lastPolledAt) return true;
           const lastPollMs = new Date(s.lastPolledAt).getTime();
           return now - lastPollMs >= s.pollIntervalSeconds * 1000;
         });
+
+        // Per-server routing: a server runs on its assigned node, or — if
+        // unassigned — on whichever node currently holds the global lock.
+        const dueServers = [] as typeof dueServersAll;
+        for (const server of dueServersAll) {
+          const assignment = await findInstanceAssignment(
+            'inference-server',
+            `${tenantId}:${server.key}`,
+          );
+          const target = assignment?.nodeName ?? defaultNode;
+          if (assignment) {
+            if (target === thisNode) dueServers.push(server);
+          } else if (holdsGlobalLock) {
+            dueServers.push(server);
+          }
+        }
 
         if (dueServers.length === 0) continue;
         dueServersCount += dueServers.length;

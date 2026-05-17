@@ -1,6 +1,14 @@
 # Prompts
 
-The prompt management service provides versioned prompt templates with environment-based deployment (dev → staging → prod), comments, and API-based resolution.
+The prompt management service provides versioned prompt templates with environment-based deployment (dev → staging → prod), comments, and API-based resolution. The operator surface lives under **Build → Prompt Studio**.
+
+## Prompt Studio
+
+The Studio catalogues every prompt in the active project. Counters at the top show how many distinct prompts exist, how many total versions are stored, how many of them have variables, and how many haven't been touched in 30 days (a soft staleness signal).
+
+![Prompt Studio list](/screenshots/prompts/01-prompts-list.png)
+
+Each row is a logical prompt — clicking it opens the version history, deployment lanes (dev / staging / prod), the rendered template with variable previews, and the discussion thread. **Create prompt** opens the editor where you author the template, declare variables, and pick an initial environment.
 
 ## Concepts
 

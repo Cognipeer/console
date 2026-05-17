@@ -1,9 +1,19 @@
 'use client';
 
-import { Modal, TextInput, Select, Button, Stack } from '@mantine/core';
+import { useState } from 'react';
+import { TextInput } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
-import { IconMail, IconUser, IconShieldCheck } from '@tabler/icons-react';
+import { IconMail, IconUser, IconUserPlus } from '@tabler/icons-react';
+import FormShell, {
+  Checklist,
+  ChipPicker,
+  FormField,
+  FormRow,
+  FormSection,
+  SummaryGroup,
+  SummaryKV,
+} from '@/components/common/ui/FormShell';
 import { useTranslations } from '@/lib/i18n';
 
 interface InviteUserModalProps {
@@ -12,16 +22,19 @@ interface InviteUserModalProps {
   onSuccess: () => void;
 }
 
+type RoleValue = 'user' | 'project_admin' | 'admin';
+
 export default function InviteUserModal({ opened, onClose, onSuccess }: InviteUserModalProps) {
   const t = useTranslations('settings.inviteModal');
   const tValidation = useTranslations('validation');
   const tNotifications = useTranslations('notifications');
+  const [submitting, setSubmitting] = useState(false);
 
   const form = useForm({
     initialValues: {
       name: '',
       email: '',
-      role: 'user',
+      role: 'user' as RoleValue,
     },
     validate: {
       name: (value) => (value.length >= 2 ? null : tValidation('nameMinLength')),
@@ -30,7 +43,24 @@ export default function InviteUserModal({ opened, onClose, onSuccess }: InviteUs
     },
   });
 
-  const handleSubmit = async (values: typeof form.values) => {
+  const values = form.values;
+  const validName = values.name.trim().length >= 2;
+  const validEmail = /^\S+@\S+$/.test(values.email);
+  const validRole = Boolean(values.role);
+
+  const checklist = [
+    { id: 1, label: t('form.name.label'), done: validName },
+    { id: 2, label: t('form.email.label'), done: validEmail },
+    { id: 3, label: t('form.role.label'), done: validRole },
+  ];
+
+  const canSubmit = validName && validEmail && validRole;
+
+  const handleSubmit = async () => {
+    const validation = form.validate();
+    if (validation.hasErrors) return;
+
+    setSubmitting(true);
     try {
       const response = await fetch('/api/users/invite', {
         method: 'POST',
@@ -61,48 +91,102 @@ export default function InviteUserModal({ opened, onClose, onSuccess }: InviteUs
         message: error instanceof Error ? error.message : t('errors.invite'),
         color: 'red',
       });
+    } finally {
+      setSubmitting(false);
     }
   };
 
+  const roleOptions: Array<{ value: RoleValue; label: string }> = [
+    { value: 'user', label: t('form.role.options.user') },
+    { value: 'project_admin', label: t('form.role.options.project_admin') },
+    { value: 'admin', label: t('form.role.options.admin') },
+  ];
+
+  const roleLabel = roleOptions.find((o) => o.value === values.role)?.label;
+
+  const summary = (
+    <>
+      <SummaryGroup title={t('title')}>
+        <SummaryKV
+          label={t('form.name.label')}
+          value={values.name || <span className="ds-faint">—</span>}
+        />
+        <SummaryKV
+          label={t('form.email.label')}
+          value={values.email || <span className="ds-faint">—</span>}
+        />
+        <SummaryKV
+          label={t('form.role.label')}
+          value={
+            roleLabel ? (
+              <span className="ds-badge ds-badge-info">{roleLabel}</span>
+            ) : (
+              <span className="ds-faint">—</span>
+            )
+          }
+        />
+      </SummaryGroup>
+      <SummaryGroup title="Pre-flight">
+        <Checklist items={checklist} />
+      </SummaryGroup>
+    </>
+  );
+
   return (
-    <Modal opened={opened} onClose={onClose} title={t('title')} size="md">
-      <form onSubmit={form.onSubmit(handleSubmit)}>
-        <Stack gap="md">
-          <TextInput
-            label={t('form.name.label')}
-            placeholder={t('form.name.placeholder')}
-            required
-            leftSection={<IconUser size={16} />}
-            {...form.getInputProps('name')}
-          />
+    <FormShell
+      open={opened}
+      onClose={onClose}
+      icon={<IconUserPlus size={16} />}
+      title={t('title')}
+      subtitle="Send an invitation email so a new teammate can join your workspace."
+      summary={summary}
+      footerStatus={`${checklist.filter((c) => c.done).length} of ${checklist.length} ready`}
+      primaryAction={{
+        label: t('form.submit'),
+        loading: submitting,
+        disabled: !canSubmit,
+        onClick: () => {
+          void handleSubmit();
+        },
+      }}
+    >
+      <FormSection
+        number={1}
+        title={t('form.name.label')}
+        description="Identify the person you are inviting."
+        done={validName && validEmail}
+      >
+        <FormRow cols={2}>
+          <FormField label={t('form.name.label')} required>
+            <TextInput
+              placeholder={t('form.name.placeholder')}
+              leftSection={<IconUser size={16} />}
+              {...form.getInputProps('name')}
+            />
+          </FormField>
+          <FormField label={t('form.email.label')} required>
+            <TextInput
+              placeholder={t('form.email.placeholder')}
+              type="email"
+              leftSection={<IconMail size={16} />}
+              {...form.getInputProps('email')}
+            />
+          </FormField>
+        </FormRow>
+      </FormSection>
 
-          <TextInput
-            label={t('form.email.label')}
-            placeholder={t('form.email.placeholder')}
-            required
-            type="email"
-            leftSection={<IconMail size={16} />}
-            {...form.getInputProps('email')}
-          />
-
-          <Select
-            label={t('form.role.label')}
-            placeholder={t('form.role.placeholder')}
-            required
-            leftSection={<IconShieldCheck size={16} />}
-            data={[
-              { value: 'user', label: t('form.role.options.user') },
-              { value: 'project_admin', label: 'Project Admin' },
-              { value: 'admin', label: t('form.role.options.admin') },
-            ]}
-            {...form.getInputProps('role')}
-          />
-
-          <Button type="submit" fullWidth>
-            {t('form.submit')}
-          </Button>
-        </Stack>
-      </form>
-    </Modal>
+      <FormSection
+        number={2}
+        title={t('form.role.label')}
+        description="Choose what the invitee will be able to do in your workspace."
+        done={validRole}
+      >
+        <ChipPicker<RoleValue>
+          options={roleOptions}
+          value={values.role}
+          onChange={(v) => form.setFieldValue('role', v as RoleValue)}
+        />
+      </FormSection>
+    </FormShell>
   );
 }

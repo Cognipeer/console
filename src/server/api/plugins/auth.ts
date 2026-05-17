@@ -46,6 +46,23 @@ type RegisterBody = {
   password?: string;
 };
 
+async function collectAccessibleProjectIds(
+  db: Awaited<ReturnType<typeof getDatabase>>,
+  userId: string,
+  legacyProjectIds?: string[],
+): Promise<string[]> {
+  const projectIds = new Set((legacyProjectIds ?? []).map(String).filter(Boolean));
+  const memberships = await db.listUserProjectsByUser(userId);
+
+  for (const membership of memberships) {
+    if (membership.projectId) {
+      projectIds.add(String(membership.projectId));
+    }
+  }
+
+  return Array.from(projectIds);
+}
+
 function sendRateLimitHeaders(
   headers: Record<string, string | undefined>,
   target: { header: (name: string, value: string) => void },
@@ -230,7 +247,11 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
       let activeProjectId = request.cookies.active_project_id;
 
       if (user.role === 'user' || user.role === 'project_admin') {
-        const allowed = (user.projectIds ?? []).map(String);
+        const allowed = await collectAccessibleProjectIds(
+          db,
+          userIdStr,
+          user.projectIds,
+        );
         if (!activeProjectId || !allowed.includes(activeProjectId)) {
           activeProjectId = allowed[0];
         }
@@ -464,10 +485,17 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(401).send({ error: 'Unauthorized' });
       }
 
+      const accessibleProjectIds = await collectAccessibleProjectIds(
+        db,
+        session.userId,
+        user.projectIds,
+      );
+
       return reply.code(200).send({
         authenticated: true,
         mustChangePassword: Boolean(user.mustChangePassword),
-        projectCount: (user.projectIds ?? []).length,
+        projectCount: accessibleProjectIds.length,
+        userId: session.userId,
         role: user.role,
         servicePermissions: normalizeServicePermissions(user.servicePermissions),
       });
@@ -522,6 +550,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
       const updated = await db.updateUser(session.userId, {
         mustChangePassword: false,
         password: hashed,
+        passwordChangedAt: new Date(),
         updatedAt: new Date(),
       });
 
@@ -537,6 +566,21 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
   });
 
   app.post('/auth/forgot-password', async (request, reply) => {
+    // Constant-time response: always wait at least this long before responding,
+    // regardless of whether the email/tenant exists. Mitigates user enumeration via timing.
+    const MIN_RESPONSE_MS = 250;
+    const startedAt = Date.now();
+    const successPayload = {
+      message: 'If that email exists, a password reset link has been sent.',
+    };
+    const finishWithSuccess = async () => {
+      const elapsed = Date.now() - startedAt;
+      if (elapsed < MIN_RESPONSE_MS) {
+        await new Promise((resolve) => setTimeout(resolve, MIN_RESPONSE_MS - elapsed));
+      }
+      return reply.code(200).send(successPayload);
+    };
+
     try {
       const { email, slug } = readJsonBody<{
         email?: string;
@@ -562,26 +606,17 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const successPayload = {
-        message: 'If that email exists, a password reset link has been sent.',
-      };
-
       const db = await getDatabase();
       const tenant = await db.findTenantBySlug(slug);
       if (!tenant) {
-        logger.warn('Password reset attempted for non-existent tenant', {
-          slug,
-        });
-        return reply.code(200).send(successPayload);
+        // Avoid logging slugs that miss to prevent log-based enumeration.
+        return finishWithSuccess();
       }
 
       await db.switchToTenant(tenant.dbName);
       const user = await db.findUserByEmail(email);
       if (!user) {
-        logger.warn('Password reset attempted for non-existent user', {
-          email: `${email.substring(0, 3)}***`,
-        });
-        return reply.code(200).send(successPayload);
+        return finishWithSuccess();
       }
 
       const secret = new TextEncoder().encode(getConfig().auth.jwtSecret);
@@ -619,7 +654,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
-      return reply.code(200).send(successPayload);
+      return finishWithSuccess();
     } catch (error) {
       logger.error('Forgot password error', { error });
       return reply.code(500).send({ error: 'Internal server error' });
@@ -628,6 +663,18 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.post('/auth/reset-password', async (request, reply) => {
     try {
+      const clientIp = getClientIp(request);
+      const rl = checkRateLimit(
+        `reset-password:${clientIp}`,
+        PASSWORD_RESET_RATE_LIMIT,
+      );
+      if (!rl.allowed) {
+        reply.header('Retry-After', String(rl.retryAfterSeconds));
+        return reply.code(429).send({
+          error: 'Too many password reset attempts. Please try again later.',
+        });
+      }
+
       const { token, newPassword } = readJsonBody<{
         token?: string;
         newPassword?: string;
@@ -652,6 +699,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         purpose?: string;
         slug?: string;
         sub?: string;
+        iat?: number;
       };
 
       try {
@@ -667,6 +715,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         payload.purpose !== 'password-reset'
         || !payload.sub
         || !payload.slug
+        || typeof payload.iat !== 'number'
       ) {
         return reply.code(400).send({ error: 'Invalid reset token' });
       }
@@ -683,10 +732,22 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'Invalid reset token' });
       }
 
+      // Single-use enforcement: token must have been issued AFTER the last
+      // password change. Any prior reset (or password change) invalidates
+      // every reset token that was outstanding before it.
+      const lastChangedAtMs = user.passwordChangedAt?.getTime() ?? 0;
+      const tokenIatMs = payload.iat * 1000;
+      if (lastChangedAtMs && tokenIatMs <= lastChangedAtMs) {
+        return reply.code(400).send({
+          error: 'Reset token has already been used or is no longer valid',
+        });
+      }
+
       const hashedPassword = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
       const updated = await db.updateUser(payload.sub, {
         mustChangePassword: false,
         password: hashedPassword,
+        passwordChangedAt: new Date(),
         updatedAt: new Date(),
       });
 

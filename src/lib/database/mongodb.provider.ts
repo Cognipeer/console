@@ -24,9 +24,11 @@ import { FileMixin } from './mongodb/file.mixin';
 import { ProviderRecordMixin } from './mongodb/provider-record.mixin';
 import { InferenceMixin } from './mongodb/inference.mixin';
 import { GuardrailMixin } from './mongodb/guardrail.mixin';
+import { PiiPolicyMixin } from './mongodb/pii-policy.mixin';
 import { AlertMixin } from './mongodb/alert.mixin';
 import { IncidentMixin } from './mongodb/incident.mixin';
 import { RagMixin } from './mongodb/rag.mixin';
+import { RerankerMixin } from './mongodb/reranker.mixin';
 import { MemoryMixin } from './mongodb/memory.mixin';
 import { ConfigMixin } from './mongodb/config.mixin';
 import { McpServerMixin } from './mongodb/mcp-server.mixin';
@@ -37,6 +39,7 @@ import { VectorMigrationMixin } from './mongodb/vector-migration.mixin';
 import { BrowserMixin } from './mongodb/browser.mixin';
 import { AuditMixin } from './mongodb/audit.mixin';
 import { UserProjectMixin } from './mongodb/user-project.mixin';
+import { ClusterMixin } from './mongodb/cluster.mixin';
 
 // ── Compose mixins in domain groups ──────────────────────────────────────
 // Order matters where there are cross-mixin dependencies.
@@ -55,7 +58,11 @@ const AIBase = VectorMixin(ModelMixin(TracingMixin(ContentBase)));
 const StorageBase = ProviderRecordMixin(FileMixin(AIBase));
 
 // Group 5 – Advanced features
-const AdvancedBase = AuditMixin(BrowserMixin(VectorMigrationMixin(AgentMixin(ToolMixin(JsSandboxMixin(McpServerMixin(ConfigMixin(MemoryMixin(RagMixin(IncidentMixin(AlertMixin(GuardrailMixin(InferenceMixin(StorageBase))))))))))))));
+const AdvancedBase = AuditMixin(BrowserMixin(VectorMigrationMixin(AgentMixin(ToolMixin(JsSandboxMixin(McpServerMixin(ConfigMixin(MemoryMixin(RerankerMixin(RagMixin(IncidentMixin(AlertMixin(PiiPolicyMixin(GuardrailMixin(InferenceMixin(StorageBase))))))))))))))));
+
+// Group 6 – Cluster (system-wide; uses main DB)
+const ClusterBase = ClusterMixin(AdvancedBase);
+
 // ── Final composed class ─────────────────────────────────────────────────
 
-export class MongoDBProvider extends AdvancedBase implements DatabaseProvider {}
+export class MongoDBProvider extends ClusterBase implements DatabaseProvider {}

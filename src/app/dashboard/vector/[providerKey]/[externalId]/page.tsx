@@ -25,7 +25,7 @@ import {
   Tooltip,
 } from '@mantine/core';
 import { AreaChart } from '@mantine/charts';
-import PageHeader from '@/components/layout/PageHeader';
+import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
@@ -575,9 +575,9 @@ export default function VectorIndexDetailPage() {
   ].join('\n');
 
   return (
-    <Stack gap="md">
+    <PageContainer>
       <PageHeader
-        icon={<IconDatabase size={18} />}
+        eyebrow="Build · Vector index"
         title={index.name}
         subtitle={`Provider ${provider.label} • Driver ${provider.driver}`}
         actions={
@@ -1212,6 +1212,6 @@ export default function VectorIndexDetailPage() {
         expectedDimension={index.dimension}
         onSubmit={handleUpsertItem}
       />
-    </Stack>
+    </PageContainer>
   );
 }

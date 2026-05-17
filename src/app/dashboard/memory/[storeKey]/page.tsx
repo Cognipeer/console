@@ -11,6 +11,7 @@ import {
   Center,
   Group,
   Loader,
+  Menu,
   Pagination,
   Paper,
   Select,
@@ -22,13 +23,14 @@ import {
   TextInput,
   Tooltip,
 } from '@mantine/core';
-import PageHeader from '@/components/layout/PageHeader';
+import DetailShell from '@/components/common/ui/DetailShell';
+import StatusBadge from '@/components/common/ui/StatusBadge';
 import AddMemoryItemModal from '@/components/memory/AddMemoryItemModal';
 import { notifications } from '@mantine/notifications';
 import {
-  IconArrowLeft,
   IconBulb,
   IconDatabase,
+  IconDots,
   IconPlus,
   IconRefresh,
   IconSearch,
@@ -99,6 +101,19 @@ function statusColor(status: string): string {
       return 'red';
     default:
       return 'gray';
+  }
+}
+
+function statusVariant(status: string): 'ok' | 'paused' | 'err' | 'info' {
+  switch (status) {
+    case 'active':
+      return 'ok';
+    case 'inactive':
+      return 'paused';
+    case 'error':
+      return 'err';
+    default:
+      return 'info';
   }
 }
 
@@ -481,50 +496,105 @@ export default function MemoryStoreDetailPage() {
     );
   }
 
+  const headerActions = (
+    <>
+      <Button
+        variant="default"
+        size="sm"
+        leftSection={<IconRefresh size={14} stroke={1.7} />}
+        loading={refreshing}
+        onClick={() => {
+          void refreshAll();
+        }}
+      >
+        Refresh
+      </Button>
+      <Menu withinPortal position="bottom-end" withArrow>
+        <Menu.Target>
+          <ActionIcon variant="default" radius="md" size="lg" aria-label="More">
+            <IconDots size={15} stroke={1.7} />
+          </ActionIcon>
+        </Menu.Target>
+        <Menu.Dropdown>
+          <Menu.Item
+            color="red"
+            leftSection={<IconTrash size={14} />}
+            disabled={deletingStore}
+            onClick={() => {
+              void handleDeleteStore();
+            }}
+          >
+            {t('deleteStore')}
+          </Menu.Item>
+        </Menu.Dropdown>
+      </Menu>
+    </>
+  );
+
   return (
     <>
-      <PageHeader
-        icon={<IconBulb size={18} />}
-        iconColor="violet"
-        title={store?.name || storeKey}
-        subtitle={store?.description || t('manageStoreDescription')}
-        actions={
-          <Group gap="xs">
-            <Button
-              variant="subtle"
-              size="xs"
-              leftSection={<IconArrowLeft size={14} />}
-              onClick={() => router.push('/dashboard/memory')}
-            >
-              {t('back')}
-            </Button>
-            <ActionIcon
-              variant="subtle"
-              size="lg"
-              loading={refreshing}
-              onClick={() => {
-                void refreshAll();
-              }}
-              aria-label="Refresh"
-            >
-              <IconRefresh size={18} />
-            </ActionIcon>
-            <Tooltip label={t('deleteStore')}>
-              <ActionIcon
-                variant="subtle"
-                color="red"
-                size="lg"
-                loading={deletingStore}
-                onClick={() => {
-                  void handleDeleteStore();
-                }}
-              >
-                <IconTrash size={18} />
-              </ActionIcon>
-            </Tooltip>
-          </Group>
+      <DetailShell
+        backHref="/dashboard/memory"
+        backLabel={t('back')}
+        icon={
+          <div
+            style={{
+              width: 48,
+              height: 48,
+              borderRadius: 10,
+              background: 'var(--ds-accent-soft)',
+              color: 'var(--ds-accent)',
+              display: 'grid',
+              placeItems: 'center',
+            }}
+          >
+            <IconBulb size={22} stroke={1.7} />
+          </div>
         }
-      />
+        title={
+          <>
+            <h1 className="ds-h2" style={{ margin: 0, whiteSpace: 'nowrap' }}>
+              {store?.name || storeKey}
+            </h1>
+            {store ? (
+              <StatusBadge status={statusVariant(store.status)} label={store.status} />
+            ) : null}
+            {store ? (
+              <span className="ds-badge ds-badge-info">
+                {store.memoryCount ?? 0} {t('memoryCount')}
+              </span>
+            ) : null}
+          </>
+        }
+        meta={
+          <>
+            <span className="ds-mono">{storeKey}</span>
+            {store?.vectorProviderKey ? (
+              <>
+                <span className="ds-faint">·</span>
+                <span>
+                  vector: <span className="ds-mono">{store.vectorProviderKey}</span>
+                </span>
+              </>
+            ) : null}
+            {store?.embeddingModelKey ? (
+              <>
+                <span className="ds-faint">·</span>
+                <span>
+                  embed: <span className="ds-mono">{store.embeddingModelKey}</span>
+                </span>
+              </>
+            ) : null}
+            {store?.description ? (
+              <>
+                <span className="ds-faint">·</span>
+                <span>{store.description}</span>
+              </>
+            ) : null}
+          </>
+        }
+        actions={headerActions}
+      >
 
       {store && (
         <SimpleGrid cols={{ base: 1, sm: 4 }} mb="lg">
@@ -916,6 +986,7 @@ export default function MemoryStoreDetailPage() {
           </Paper>
         </Tabs.Panel>
       </Tabs>
+      </DetailShell>
 
       <AddMemoryItemModal
         opened={addModalOpen}

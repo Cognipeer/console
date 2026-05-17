@@ -79,7 +79,7 @@ export async function GET(request: NextRequest) {
             const isProduction = getConfig().nodeEnv === 'production';
             if (activeProjectId) {
                 response.cookies.set('active_project_id', activeProjectId, {
-                    httpOnly: false,
+                    httpOnly: true,
                     secure: isProduction,
                     sameSite: 'lax',
                     maxAge: 60 * 60 * 24 * 30,
@@ -87,7 +87,7 @@ export async function GET(request: NextRequest) {
                 });
             } else {
                 response.cookies.set('active_project_id', '', {
-                    httpOnly: false,
+                    httpOnly: true,
                     secure: isProduction,
                     sameSite: 'lax',
                     maxAge: 0,

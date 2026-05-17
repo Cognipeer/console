@@ -22,37 +22,19 @@ import {
   Textarea,
   Title,
 } from '@mantine/core';
-import PageHeader from '@/components/layout/PageHeader';
+import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
-import { IconArrowLeft, IconBook, IconBrain, IconDeviceFloppy, IconRefresh } from '@tabler/icons-react';
+import { IconArrowLeft, IconBook, IconDeviceFloppy, IconRefresh } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
-
-interface ProviderField {
-  name: string;
-  label: string;
-  type: 'text' | 'password' | 'select';
-  required: boolean;
-  placeholder?: string;
-  description?: string;
-  options?: Array<{ label: string; value: string }>;
-}
-
-interface ProviderDefinitionDto {
-  id: string;
-  label: string;
-  description: string;
-  categories: Array<'llm' | 'embedding'>;
-  credentialFields: ProviderField[];
-  defaultPricingCurrency: string;
-  modelIdHint?: string;
-}
+import { PROVIDER_DEFINITIONS } from '@/lib/services/models/providerCatalog';
 
 interface ModelProviderOption {
   key: string;
   label: string;
   status: string;
+  driver: string;
 }
 
 interface ModelPricing {
@@ -77,8 +59,9 @@ interface ModelDetailDto {
   name: string;
   description?: string;
   key: string;
-  provider: string;
+  provider?: string;
   providerKey: string;
+  providerDriver?: string;
   category: 'llm' | 'embedding';
   modelId: string;
   isMultimodal?: boolean;
@@ -146,7 +129,6 @@ export default function EditModelPage() {
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [model, setModel] = useState<ModelDetailDto | null>(null);
-  const [providers, setProviders] = useState<ProviderDefinitionDto[]>([]);
   const [modelProviders, setModelProviders] = useState<ModelProviderOption[]>([]);
   const [vectorProviders, setVectorProviders] = useState<VectorProviderOption[]>([]);
   const [vectorIndexes, setVectorIndexes] = useState<VectorIndexOption[]>([]);
@@ -181,9 +163,18 @@ export default function EditModelPage() {
     },
   });
 
-  const provider = useMemo(
-    () => providers.find((candidate) => candidate.id === model?.provider),
-    [providers, model],
+  const selectedProvider = useMemo(
+    () =>
+      modelProviders.find((candidate) => candidate.key === form.values.providerKey) ?? null,
+    [form.values.providerKey, modelProviders],
+  );
+
+  const providerDefinition = useMemo(
+    () =>
+      PROVIDER_DEFINITIONS.find(
+        (candidate) => candidate.id === selectedProvider?.driver,
+      ) ?? null,
+    [selectedProvider?.driver],
   );
 
   const loadVectorIndexes = useCallback(async (providerKey: string) => {
@@ -261,12 +252,12 @@ export default function EditModelPage() {
       if (providerResponse.ok) {
         const providerData = await providerResponse.json();
         const rawProviders = providerData.providers ?? [];
-        setProviders(rawProviders);
         setModelProviders(
           rawProviders.map((p: Record<string, string>) => ({
             key: p.key,
             label: p.label || p.key,
             status: p.status || 'active',
+            driver: p.driver || '',
           }))
         );
       }
@@ -321,13 +312,6 @@ export default function EditModelPage() {
     loadModel(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params?.id]);
-
-  const handleCredentialChange = (field: ProviderField, value: string) => {
-    form.setFieldValue('settings', {
-      ...form.values.settings,
-      [field.name]: value,
-    });
-  };
 
   const handleSubmit = async (values: FormValues) => {
     if (!model) return;
@@ -411,9 +395,9 @@ export default function EditModelPage() {
   }
 
   return (
-    <Stack gap="md">
+    <PageContainer>
       <PageHeader
-        icon={<IconBrain size={18} />}
+        eyebrow="Build · Edit model"
         title={t('title', { name: model.name })}
         subtitle={t('subtitle')}
         actions={
@@ -505,7 +489,7 @@ export default function EditModelPage() {
               <Grid.Col span={{ base: 12, md: 6 }}>
                 <TextInput
                   label={tWizard('fields.modelId.label')}
-                  placeholder={provider?.modelIdHint || tWizard('fields.modelId.placeholder')}
+                  placeholder={providerDefinition?.modelIdHint || tWizard('fields.modelId.placeholder')}
                   required
                   {...form.getInputProps('modelId')}
                 />
@@ -563,44 +547,6 @@ export default function EditModelPage() {
                 {...form.getInputProps('supportsToolCalls', { type: 'checkbox' })}
               />
             </Group>
-
-            {provider?.credentialFields?.length ? (
-              <Card withBorder radius="md" padding="md">
-                <Stack gap="sm">
-                  <Title order={4}>{t('sections.credentials')}</Title>
-                  {provider.credentialFields.map((field) => {
-                    const value = form.values.settings?.[field.name] || '';
-
-                    if (field.type === 'select') {
-                      return (
-                        <Select
-                          key={field.name}
-                          label={field.label}
-                          placeholder={field.placeholder}
-                          data={field.options || []}
-                          required={field.required}
-                          value={value}
-                          onChange={(val) => handleCredentialChange(field, val || '')}
-                        />
-                      );
-                    }
-
-                    return (
-                      <TextInput
-                        key={field.name}
-                        type={field.type === 'password' ? 'password' : 'text'}
-                        label={field.label}
-                        placeholder={field.placeholder}
-                        description={field.description}
-                        required={field.required}
-                        value={value}
-                        onChange={(event) => handleCredentialChange(field, event.currentTarget.value)}
-                      />
-                    );
-                  })}
-                </Stack>
-              </Card>
-            ) : null}
 
             {/* Semantic Cache section - only for LLM models */}
             {model.category === 'llm' && (
@@ -713,6 +659,6 @@ export default function EditModelPage() {
           </Stack>
         </form>
       </Card>
-    </Stack>
+    </PageContainer>
   );
 }

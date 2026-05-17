@@ -1,6 +1,22 @@
 # Providers
 
-The provider system is a contract-driven abstraction that supports multiple AI service providers (OpenAI, Anthropic, Google, AWS Bedrock, Pinecone, Qdrant, etc.) through a unified interface.
+The provider system is a contract-driven abstraction that supports multiple AI service providers (OpenAI, Anthropic, Google, AWS Bedrock, Pinecone, Qdrant, etc.) through a unified interface. Provider definitions live in code; the operator-facing surface for *configuring* them is **Configure → Providers** in the console.
+
+## Operator view
+
+Every provider configuration shows up as a row in the providers screen, scoped to either the tenant or a single project. The four counter cards summarise the registry state at a glance: how many are configured, how many are active, how many are erroring, and how many distinct domains your tenant uses.
+
+![Providers list](/screenshots/providers/01-providers-list.png)
+
+Adding a new configuration is a two-step flow. The first step lists every driver that's available in this build — provider contracts are compiled in, so seeing OpenAI, Anthropic, Bedrock, Vertex AI, Ollama, ChromaDB, Qdrant, and others here means the corresponding contracts are loaded.
+
+![Add provider — service picker](/screenshots/providers/02-add-provider-domain.png)
+
+Use the **domain filter** dropdown to narrow the list — for example, when you're wiring up inference you typically only care about `model` domain contracts.
+
+![Add provider — filtered to Model domain](/screenshots/providers/03-add-provider-driver.png)
+
+After picking a driver, the dialog auto-fills the right-hand panel and renders the credential and settings fields defined by the driver's contract. The **PRE-FLIGHT** checklist on the right turns green as each requirement is satisfied; the **Create provider** action only enables once the form is valid.
 
 ## Architecture
 

@@ -50,12 +50,15 @@ export async function resolveProjectContext(
   if (!isPrivileged) {
     // Resolve project access via UserProject membership records
     const memberships = await db.listUserProjectsByUser(ctx.userId);
+    const legacyProjectIds = (user.projectIds ?? []).map(String).filter(Boolean);
+    const memberProjectIds = Array.from(new Set([
+      ...legacyProjectIds,
+      ...memberships.map((membership) => membership.projectId),
+    ]));
 
-    if (memberships.length === 0) {
+    if (memberProjectIds.length === 0) {
       throw new ProjectContextError('No project assigned', 403);
     }
-
-    const memberProjectIds = memberships.map((m) => m.projectId);
 
     if (!projectId || !memberProjectIds.includes(projectId)) {
       projectId = memberProjectIds[0];
@@ -77,7 +80,20 @@ export async function resolveProjectContext(
 
   const userProject = isPrivileged
     ? null
-    : await db.findUserProject(ctx.userId, projectId);
+    : (
+      (await db.findUserProject(ctx.userId, projectId))
+      ?? (
+        (user.projectIds ?? []).map(String).includes(projectId)
+          ? {
+              projectId,
+              role: user.role === 'project_admin' ? 'project_admin' : 'member',
+              servicePermissions: undefined,
+              tenantId: ctx.tenantId,
+              userId: ctx.userId,
+            }
+          : null
+      )
+    );
 
   return {
     projectId,

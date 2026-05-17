@@ -263,6 +263,21 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
         tenantId: session.tenantId,
       });
 
+      if (
+        body.projectId
+        && typeof body.projectId === 'string'
+        && (body.role === 'user' || body.role === 'project_admin')
+      ) {
+        await db.upsertUserProject({
+          invitedBy: session.userId,
+          projectId: body.projectId,
+          role: body.role === 'project_admin' ? 'project_admin' : 'member',
+          servicePermissions: undefined,
+          tenantId: session.tenantId,
+          userId: String(user._id),
+        });
+      }
+
       sendEmail(body.email, 'user-invitation', {
         companyName: tenant.companyName,
         email: body.email,

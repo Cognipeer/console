@@ -1,8 +1,8 @@
 import Link from 'next/link';
-import { Button, Paper, Stack } from '@mantine/core';
-import { IconExternalLink, IconBook } from '@tabler/icons-react';
+import { Button } from '@mantine/core';
+import { IconExternalLink } from '@tabler/icons-react';
 import { resolveSdkDoc } from '@/lib/docs/sdkDocs';
-import PageHeader from '@/components/layout/PageHeader';
+import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 
 type DocsPageProps = {
   searchParams?: Promise<{ doc?: string }>;
@@ -13,9 +13,9 @@ export default async function DashboardDocsPage({ searchParams }: DocsPageProps)
   const doc = resolveSdkDoc(resolvedParams?.doc);
 
   return (
-    <Stack gap="md">
+    <PageContainer>
       <PageHeader
-        icon={<IconBook size={18} />}
+        eyebrow="Learn · Documentation"
         title="Documentation"
         subtitle={doc.title}
         actions={
@@ -24,23 +24,26 @@ export default async function DashboardDocsPage({ searchParams }: DocsPageProps)
             href={doc.url}
             target="_blank"
             rel="noreferrer"
-            variant="light"
-            size="xs"
-            leftSection={<IconExternalLink size={14} />}
+            variant="default"
+            size="sm"
+            leftSection={<IconExternalLink size={14} stroke={1.7} />}
           >
             Open in new tab
           </Button>
         }
       />
 
-      <Paper withBorder radius="lg" p={0} style={{ overflow: 'hidden' }}>
+      <div
+        className="ds-card"
+        style={{ overflow: 'hidden', padding: 0 }}
+      >
         <iframe
           title={doc.title}
           src={doc.url}
-          style={{ width: '100%', height: '75vh', border: 0 }}
+          style={{ width: '100%', height: '75vh', border: 0, display: 'block' }}
           sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
         />
-      </Paper>
-    </Stack>
+      </div>
+    </PageContainer>
   );
 }

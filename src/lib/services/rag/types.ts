@@ -23,6 +23,8 @@ export interface CreateRagModuleRequest {
   fileBucketKey?: string;
   fileProviderKey?: string;
   chunkConfig: IRagChunkConfig;
+  rerankerKey?: string;
+  rerankerOversample?: number;
   metadata?: Record<string, unknown>;
   createdBy: string;
 }
@@ -35,6 +37,8 @@ export interface UpdateRagModuleRequest {
   vectorIndexKey?: string;
   chunkConfig?: IRagChunkConfig;
   status?: 'active' | 'disabled';
+  rerankerKey?: string | null;
+  rerankerOversample?: number | null;
   metadata?: Record<string, unknown>;
   updatedBy: string;
 }
@@ -59,6 +63,8 @@ export interface RagQueryRequest {
 export interface RagQueryMatch {
   id: string;
   score: number;
+  /** Pre-rerank vector similarity score. Present only when reranking was applied. */
+  vectorScore?: number;
   content?: string;
   metadata?: Record<string, unknown>;
   documentId?: string;

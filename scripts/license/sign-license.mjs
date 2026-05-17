@@ -14,7 +14,7 @@ function parseArgs(argv) {
 
 const args = parseArgs(process.argv.slice(2));
 if (!args['private-key'] || !args.payload) {
-  console.error('Usage: npm run license:sign -- --private-key ./license/private.pem --payload ./license/payload.json --out ./license/license.jwt');
+  console.error('Usage: npm run license:sign -- --private-key ./offline-license/private.pem --payload ./offline-license/payload.json --out ./offline-license/license.jwt');
   process.exit(1);
 }
 

@@ -1,35 +1,21 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import {
-  ActionIcon,
-  Badge,
-  Button,
-  Center,
-  Group,
-  Loader,
-  Paper,
-  SimpleGrid,
-  Stack,
-  Table,
-  Text,
-  ThemeIcon,
-  Tooltip,
-  Box,
-} from '@mantine/core';
+import { Button, Group, Modal, Text } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import PageHeader from '@/components/layout/PageHeader';
 import {
   IconBook2,
-  IconPlus,
-  IconRefresh,
-  IconTrash,
-  IconArrowRight,
-  IconFileText,
-  IconPuzzle,
   IconDatabase,
+  IconFileText,
+  IconPlus,
+  IconPuzzle,
+  IconTrash,
 } from '@tabler/icons-react';
+import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
+import StatTile from '@/components/common/ui/StatTile';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
+import StatusBadge from '@/components/common/ui/StatusBadge';
 import CreateRagModuleModal from '@/components/rag/CreateRagModuleModal';
 
 interface RagModuleView {
@@ -61,9 +47,9 @@ function formatDate(value?: string | Date) {
 function strategyLabel(strategy: string) {
   switch (strategy) {
     case 'recursive_character':
-      return 'Recursive Character';
+      return 'Recursive';
     case 'token':
-      return 'Token Based';
+      return 'Token';
     default:
       return strategy;
   }
@@ -75,6 +61,10 @@ export default function RagDashboardPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<RagModuleView | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [query, setQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
 
   const loadModules = useCallback(async () => {
     setRefreshing(true);
@@ -100,24 +90,33 @@ export default function RagDashboardPage() {
     void loadModules();
   }, [loadModules]);
 
-  const handleDelete = async (mod: RagModuleView) => {
-    const confirmed = window.confirm(`Delete RAG module "${mod.name}"? This cannot be undone.`);
-    if (!confirmed) return;
+  const confirmDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
     try {
-      const res = await fetch(`/api/rag/modules/${encodeURIComponent(mod.key)}`, { method: 'DELETE' });
+      const res = await fetch(
+        `/api/rag/modules/${encodeURIComponent(deleteTarget.key)}`,
+        { method: 'DELETE' },
+      );
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: 'Unknown error' }));
         throw new Error(err.error ?? 'Failed to delete module');
       }
-      notifications.show({ color: 'green', title: 'RAG module deleted', message: `${mod.name} has been removed.` });
-      setModules((prev) => prev.filter((m) => m.key !== mod.key));
+      notifications.show({
+        color: 'green',
+        title: 'RAG module deleted',
+        message: `${deleteTarget.name} has been removed.`,
+      });
+      setModules((prev) => prev.filter((m) => m.key !== deleteTarget.key));
+      setDeleteTarget(null);
     } catch (error) {
-      console.error(error);
       notifications.show({
         color: 'red',
         title: 'Unable to delete module',
         message: error instanceof Error ? error.message : 'Unexpected error',
       });
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -126,246 +125,229 @@ export default function RagDashboardPage() {
     router.push(`/dashboard/rag/${encodeURIComponent(ragModule.key as string)}`);
   };
 
+  const filtered = useMemo(() => {
+    return modules.filter((m) => {
+      if (statusFilter !== 'all' && m.status !== statusFilter) return false;
+      if (query) {
+        const q = query.toLowerCase();
+        if (
+          !m.name.toLowerCase().includes(q) &&
+          !m.key.toLowerCase().includes(q) &&
+          !(m.description ?? '').toLowerCase().includes(q)
+        ) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }, [modules, query, statusFilter]);
+
   const totalDocs = modules.reduce((sum, m) => sum + (m.totalDocuments ?? 0), 0);
   const totalChunks = modules.reduce((sum, m) => sum + (m.totalChunks ?? 0), 0);
   const activeCount = modules.filter((m) => m.status === 'active').length;
 
+  const columns: DataGridColumn<RagModuleView>[] = [
+    {
+      key: 'name',
+      label: 'Module',
+      render: (m) => (
+        <div className="ds-col" style={{ gap: 2, whiteSpace: 'nowrap' }}>
+          <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--ds-text)' }}>
+            {m.name}
+          </span>
+          <span className="ds-faint ds-mono" style={{ fontSize: 11 }}>
+            {m.key}
+          </span>
+        </div>
+      ),
+    },
+    {
+      key: 'strategy',
+      label: 'Strategy',
+      render: (m) => (
+        <span className="ds-badge">{strategyLabel(m.chunkConfig.strategy)}</span>
+      ),
+    },
+    {
+      key: 'chunk',
+      label: 'Chunk',
+      render: (m) => (
+        <span className="ds-mono ds-muted" style={{ fontSize: 12 }}>
+          {m.chunkConfig.chunkSize}/{m.chunkConfig.chunkOverlap}
+        </span>
+      ),
+    },
+    {
+      key: 'documents',
+      label: 'Documents',
+      align: 'right',
+      render: (m) => (
+        <span
+          className="ds-mono"
+          style={{ fontSize: 12.5, fontVariantNumeric: 'tabular-nums' }}
+        >
+          {m.totalDocuments ?? 0}
+        </span>
+      ),
+    },
+    {
+      key: 'chunks',
+      label: 'Chunks',
+      align: 'right',
+      render: (m) => (
+        <span
+          className="ds-mono"
+          style={{ fontSize: 12.5, fontVariantNumeric: 'tabular-nums' }}
+        >
+          {m.totalChunks ?? 0}
+        </span>
+      ),
+    },
+    {
+      key: 'status',
+      label: 'Status',
+      render: (m) => (
+        <StatusBadge status={m.status === 'active' ? 'active' : 'paused'} />
+      ),
+    },
+    {
+      key: 'created',
+      label: 'Created',
+      render: (m) => (
+        <span className="ds-faint" style={{ fontSize: 12.5 }}>
+          {formatDate(m.createdAt)}
+        </span>
+      ),
+    },
+  ];
+
   return (
-    <Stack gap="md">
+    <PageContainer>
       <PageHeader
-        icon={<IconBook2 size={18} />}
+        eyebrow="Data · Knowledge"
         title="Knowledge Engine"
         subtitle="Manage retrieval-augmented generation modules — ingest documents, query knowledge, and monitor usage."
         actions={
-          <>
-            <Button
-              variant="light"
-              size="xs"
-              leftSection={refreshing ? <Loader size={12} /> : <IconRefresh size={14} />}
-              onClick={() => void loadModules()}
-              disabled={refreshing}
-            >
-              Refresh
-            </Button>
-            <Button
-              size="xs"
-              leftSection={<IconPlus size={14} />}
-              onClick={() => setCreateModalOpen(true)}
-            >
-              Create Module
-            </Button>
-          </>
+          <Button
+            color="teal"
+            size="sm"
+            leftSection={<IconPlus size={14} stroke={1.7} />}
+            onClick={() => setCreateModalOpen(true)}
+          >
+            Create module
+          </Button>
         }
       />
 
-      {/* Stats */}
-      <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>
-        <Paper withBorder radius="lg" p="lg">
-          <Group justify="space-between">
-            <Stack gap={4}>
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
-                Total Modules
-              </Text>
-              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }}>
-                {modules.length}
-              </Text>
-            </Stack>
-            <ThemeIcon size={48} radius="xl" variant="light" color="violet">
-              <IconBook2 size={24} />
-            </ThemeIcon>
-          </Group>
-        </Paper>
-        <Paper withBorder radius="lg" p="lg">
-          <Group justify="space-between">
-            <Stack gap={4}>
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
-                Active
-              </Text>
-              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="teal">
-                {activeCount}
-              </Text>
-            </Stack>
-            <ThemeIcon size={48} radius="xl" variant="light" color="teal">
-              <IconPuzzle size={24} />
-            </ThemeIcon>
-          </Group>
-        </Paper>
-        <Paper withBorder radius="lg" p="lg">
-          <Group justify="space-between">
-            <Stack gap={4}>
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
-                Total Documents
-              </Text>
-              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }}>
-                {totalDocs}
-              </Text>
-            </Stack>
-            <ThemeIcon size={48} radius="xl" variant="light" color="cyan">
-              <IconFileText size={24} />
-            </ThemeIcon>
-          </Group>
-        </Paper>
-        <Paper withBorder radius="lg" p="lg">
-          <Group justify="space-between">
-            <Stack gap={4}>
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
-                Total Chunks
-              </Text>
-              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }}>
-                {totalChunks}
-              </Text>
-            </Stack>
-            <ThemeIcon size={48} radius="xl" variant="light" color="orange">
-              <IconDatabase size={24} />
-            </ThemeIcon>
-          </Group>
-        </Paper>
-      </SimpleGrid>
+      <div className="ds-stat-grid" style={{ marginBottom: 16 }}>
+        <StatTile
+          label="Total modules"
+          icon={<IconBook2 size={14} stroke={1.7} />}
+          value={modules.length}
+        />
+        <StatTile
+          label="Active"
+          icon={<IconPuzzle size={14} stroke={1.7} />}
+          value={activeCount}
+        />
+        <StatTile
+          label="Total documents"
+          icon={<IconFileText size={14} stroke={1.7} />}
+          value={totalDocs}
+        />
+        <StatTile
+          label="Total chunks"
+          icon={<IconDatabase size={14} stroke={1.7} />}
+          value={totalChunks}
+        />
+      </div>
 
-      {/* Modules Table */}
-      <Paper p="lg" radius="lg" withBorder>
-        <Group justify="space-between" mb="md">
-          <div>
-            <Text fw={600} size="lg">All RAG Modules</Text>
-            <Text size="sm" c="dimmed">Click on a module to view documents, run queries, and see usage</Text>
-          </div>
+      <DataGrid<RagModuleView>
+        records={filtered}
+        loading={loading}
+        rowKey={(m) => m.key}
+        onRowClick={(m) =>
+          router.push(`/dashboard/rag/${encodeURIComponent(m.key)}`)
+        }
+        columns={columns}
+        search={{
+          value: query,
+          onChange: setQuery,
+          placeholder: 'Filter by name, key, or description…',
+        }}
+        filters={[
+          {
+            value: statusFilter,
+            onChange: setStatusFilter,
+            ariaLabel: 'Filter by status',
+            width: 140,
+            options: [
+              { value: 'all', label: 'All statuses' },
+              { value: 'active', label: 'Active' },
+              { value: 'disabled', label: 'Disabled' },
+            ],
+          },
+        ]}
+        onRefresh={loadModules}
+        refreshing={refreshing}
+        empty={{
+          icon: <IconBook2 size={26} stroke={1.7} />,
+          title: 'No RAG modules yet',
+          description:
+            'Create your first RAG module to start ingesting documents and querying knowledge.',
+          primaryAction: {
+            label: 'Create module',
+            icon: <IconPlus size={14} stroke={1.7} />,
+            onClick: () => setCreateModalOpen(true),
+          },
+        }}
+        footerLeft={`Showing ${filtered.length} of ${modules.length} modules`}
+        rowActions={(m) => [
+          {
+            id: 'open',
+            label: 'Open module',
+            icon: <IconBook2 size={14} />,
+            onClick: () =>
+              router.push(`/dashboard/rag/${encodeURIComponent(m.key)}`),
+          },
+          { divider: true },
+          {
+            id: 'delete',
+            label: 'Delete',
+            icon: <IconTrash size={14} />,
+            color: 'red',
+            onClick: () => setDeleteTarget(m),
+          },
+        ]}
+      />
+
+      <Modal
+        opened={deleteTarget !== null}
+        onClose={() => setDeleteTarget(null)}
+        title="Delete RAG module"
+        centered
+        size="sm"
+      >
+        <Text size="sm" mb="lg">
+          Delete RAG module <strong>{deleteTarget?.name}</strong>? This will remove
+          the module and its index configuration. Documents in the vector index will
+          not be deleted automatically.
+        </Text>
+        <Group justify="flex-end">
+          <Button variant="default" onClick={() => setDeleteTarget(null)}>
+            Cancel
+          </Button>
+          <Button color="red" loading={deleting} onClick={confirmDelete}>
+            Delete
+          </Button>
         </Group>
-
-        {loading ? (
-          <Center py="xl">
-            <Loader size="md" color="violet" />
-          </Center>
-        ) : modules.length === 0 ? (
-          <Center py="xl">
-            <Stack gap="md" align="center">
-              <ThemeIcon size={80} radius="xl" variant="light" color="violet">
-                <IconBook2 size={40} />
-              </ThemeIcon>
-              <Stack gap={4} align="center">
-                <Text size="lg" fw={500}>No RAG Modules Yet</Text>
-                <Text size="sm" c="dimmed" ta="center" maw={400}>
-                  Create your first RAG module to start ingesting documents and querying knowledge.
-                </Text>
-              </Stack>
-              <Button
-                leftSection={<IconPlus size={16} />}
-                onClick={() => setCreateModalOpen(true)}
-                variant="gradient"
-                gradient={{ from: 'violet', to: 'cyan', deg: 90 }}
-              >
-                Create Module
-              </Button>
-            </Stack>
-          </Center>
-        ) : (
-          <Box style={{ overflow: 'hidden', borderRadius: 'var(--mantine-radius-md)' }}>
-            <Table verticalSpacing="md" horizontalSpacing="md" highlightOnHover>
-              <Table.Thead style={{ backgroundColor: 'var(--mantine-color-gray-0)' }}>
-                <Table.Tr>
-                  <Table.Th style={{ fontWeight: 600 }}>Module</Table.Th>
-                  <Table.Th style={{ fontWeight: 600 }}>Strategy</Table.Th>
-                  <Table.Th style={{ fontWeight: 600, textAlign: 'center' }}>Documents</Table.Th>
-                  <Table.Th style={{ fontWeight: 600, textAlign: 'center' }}>Chunks</Table.Th>
-                  <Table.Th style={{ fontWeight: 600 }}>Status</Table.Th>
-                  <Table.Th style={{ fontWeight: 600 }}>Created</Table.Th>
-                  <Table.Th style={{ fontWeight: 600, textAlign: 'center' }}>Actions</Table.Th>
-                </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {modules.map((mod) => {
-                  const navigateToDetail = () =>
-                    router.push(`/dashboard/rag/${encodeURIComponent(mod.key)}`);
-
-                  return (
-                    <Table.Tr
-                      key={mod.key}
-                      onClick={navigateToDetail}
-                      tabIndex={0}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigateToDetail(); }
-                      }}
-                      style={{ cursor: 'pointer', transition: 'background-color 0.15s ease' }}
-                    >
-                      <Table.Td>
-                        <Group gap="sm">
-                          <ThemeIcon size={40} radius="md" variant="light" color="violet">
-                            <IconBook2 size={20} />
-                          </ThemeIcon>
-                          <Stack gap={2}>
-                            <Text fw={600} size="sm">{mod.name}</Text>
-                            <Text size="xs" c="dimmed" ff="monospace">{mod.key}</Text>
-                          </Stack>
-                        </Group>
-                      </Table.Td>
-                      <Table.Td>
-                        <Badge variant="light" color="grape" size="sm">
-                          {strategyLabel(mod.chunkConfig.strategy)}
-                        </Badge>
-                      </Table.Td>
-                      <Table.Td>
-                        <Center>
-                          <Badge variant="filled" color="cyan" size="md" radius="sm">
-                            {mod.totalDocuments ?? 0}
-                          </Badge>
-                        </Center>
-                      </Table.Td>
-                      <Table.Td>
-                        <Center>
-                          <Badge variant="filled" color="orange" size="md" radius="sm">
-                            {mod.totalChunks ?? 0}
-                          </Badge>
-                        </Center>
-                      </Table.Td>
-                      <Table.Td>
-                        <Badge
-                          variant="light"
-                          color={mod.status === 'active' ? 'teal' : 'gray'}
-                          size="sm"
-                        >
-                          {mod.status}
-                        </Badge>
-                      </Table.Td>
-                      <Table.Td>
-                        <Text size="xs" c="dimmed">{formatDate(mod.createdAt)}</Text>
-                      </Table.Td>
-                      <Table.Td>
-                        <Group gap="xs" justify="center">
-                          <Tooltip label="View details" withArrow>
-                            <ActionIcon
-                              variant="light"
-                              color="violet"
-                              radius="md"
-                              onClick={(e) => { e.stopPropagation(); navigateToDetail(); }}
-                            >
-                              <IconArrowRight size={16} />
-                            </ActionIcon>
-                          </Tooltip>
-                          <Tooltip label="Delete module" withArrow>
-                            <ActionIcon
-                              variant="light"
-                              color="red"
-                              radius="md"
-                              onClick={(e) => { e.stopPropagation(); void handleDelete(mod); }}
-                            >
-                              <IconTrash size={16} />
-                            </ActionIcon>
-                          </Tooltip>
-                        </Group>
-                      </Table.Td>
-                    </Table.Tr>
-                  );
-                })}
-              </Table.Tbody>
-            </Table>
-          </Box>
-        )}
-      </Paper>
+      </Modal>
 
       <CreateRagModuleModal
         opened={createModalOpen}
         onClose={() => setCreateModalOpen(false)}
         onCreated={handleCreated}
       />
-    </Stack>
+    </PageContainer>
   );
 }

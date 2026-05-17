@@ -66,7 +66,6 @@ const makeEmbeddingModel = (overrides = {}) => ({
 
 const makeChatRuntime = (invokeResult?: object) => ({
   createChatModel: vi.fn().mockResolvedValue({
-    bind: vi.fn().mockReturnThis(),
     invoke: vi.fn().mockResolvedValue(invokeResult ?? { content: 'Hi there!', tool_calls: [] }),
   }),
 });
@@ -302,7 +301,6 @@ describe('handleChatCompletion', () => {
     })();
 
     const chatModel = {
-      bind: vi.fn().mockReturnThis(),
       invoke: vi.fn(),
       stream: vi.fn().mockResolvedValue(asyncIterator),
     };
@@ -328,7 +326,6 @@ describe('handleChatCompletion', () => {
     (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeLlmModel());
 
     const chatModel = {
-      bind: vi.fn().mockReturnThis(),
       invoke: vi.fn(),
       // no stream method
     };
@@ -348,12 +345,11 @@ describe('handleChatCompletion', () => {
     ).rejects.toThrow('Model provider does not support streaming responses');
   });
 
-  it('applies body overrides to the chat model via bind', async () => {
+  it('applies body overrides when creating and invoking the chat model', async () => {
     const model = makeLlmModel();
     (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(model);
 
     const chatModel = {
-      bind: vi.fn().mockReturnThis(),
       invoke: vi.fn().mockResolvedValue({ content: 'Hi', tool_calls: [] }),
     };
     const createChatModel = vi.fn().mockResolvedValue(chatModel);
@@ -364,11 +360,25 @@ describe('handleChatCompletion', () => {
 
     await handleChatCompletion({
       ...BASE_PARAMS,
-      body: { messages: [], temperature: 0.7, max_tokens: 256 },
+      body: {
+        messages: [],
+        temperature: 0.7,
+        max_tokens: 256,
+        stop: ['DONE'],
+      },
     });
 
-    expect(chatModel.bind).toHaveBeenCalledWith(
-      expect.objectContaining({ temperature: 0.7, max_tokens: 256 }),
+    expect(createChatModel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelSettings: expect.objectContaining({
+          temperature: 0.7,
+          maxTokens: 256,
+        }),
+      }),
+    );
+    expect(chatModel.invoke).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({ stop: ['DONE'] }),
     );
   });
 });

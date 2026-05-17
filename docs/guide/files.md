@@ -1,6 +1,14 @@
 # Files
 
-The file service provides multi-provider file storage with bucket management, upload/download, and automatic Markdown conversion for document processing.
+The file service provides multi-provider file storage with bucket management, upload/download, and automatic Markdown conversion for document processing. Operators interact with it through **Data → Document Store**.
+
+## Document Store
+
+Buckets are the unit of file organisation — each bucket points to a remote prefix on a configured file provider (local filesystem, S3, R2, MinIO, etc.). The list view counts total buckets, active buckets, and disabled buckets, and shows the provider/driver each bucket sits on.
+
+![Document Store list](/screenshots/files/01-files-list.png)
+
+Click a bucket row to drill into the file browser for that bucket — uploads, downloads, deletes, and bulk operations all happen there. **Create bucket** opens a form where you pick the provider, declare a prefix (used to namespace the bucket within the provider), and optionally enable on-upload Markdown conversion. The conversion step uses [`@cognipeer/to-markdown`](https://github.com/cognipeer/to-markdown) to extract text from PDFs, Office docs, and images for downstream RAG ingestion.
 
 ## Supported Providers
 

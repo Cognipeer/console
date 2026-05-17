@@ -25,20 +25,20 @@ import {
     Box,
 } from '@mantine/core';
 import {
-    IconArrowLeft,
     IconBook,
     IconInfoCircle,
     IconCopy,
     IconRefresh,
-    IconTimeline,
     IconChevronDown,
     IconChevronRight,
     IconBrandOpenSource,
     IconCode,
     IconActivity,
     IconBinaryTree,
+    IconTimeline,
 } from '@tabler/icons-react';
-import PageHeader from '@/components/layout/PageHeader';
+import DetailShell from '@/components/common/ui/DetailShell';
+import StatusBadge from '@/components/common/ui/StatusBadge';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import {
@@ -208,6 +208,15 @@ function sourceBadge(source?: string) {
             Custom
         </Badge>
     );
+}
+
+function statusVariant(status?: string) {
+    if (!status) return 'info' as const;
+    const v = status.toLowerCase();
+    if (v === 'success' || v === 'completed') return 'ok' as const;
+    if (v === 'error' || v === 'failed') return 'err' as const;
+    if (v === 'running' || v === 'in_progress' || v === 'pending') return 'info' as const;
+    return 'info' as const;
 }
 
 // ─── Section rendering ─────────────────────────────────────────
@@ -936,36 +945,81 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
 
     const { session } = detail;
 
-    return (
-        <Stack gap="md">
-            <PageHeader
-                icon={<IconTimeline size={18} />}
-                title={`Session ${session.sessionId.substring(0, 12)}...`}
-                subtitle={
-                    `Agent ${session.agentName || 'Unknown'}` +
-                    (session.agentVersion ? ` · v${session.agentVersion}` : '') +
-                    (session.agentModel ? ` · ${session.agentModel}` : '') +
-                    ` · Started ${formatRelativeTime(session.startedAt)}`
-                }
-                actions={
-                    <>
-                        <Badge size="sm" variant="filled" radius="xl" color={resolveStatusColor(session.status)}>
-                            {(session.status || 'unknown').toUpperCase()}
-                        </Badge>
-                        {sourceBadge(session.source)}
-                        <Button leftSection={<IconArrowLeft size={14} />} variant="default" size="xs" onClick={() => router.push('/dashboard/tracing/sessions')}>
-                            Back
-                        </Button>
-                        <Button onClick={() => openDocs('api-tracing')} variant="light" size="xs" leftSection={<IconBook size={14} />}>
-                            Docs
-                        </Button>
-                        <Button leftSection={<IconRefresh size={14} />} variant="light" size="xs" onClick={() => void fetchDetail(true)} loading={refreshing}>
-                            Refresh
-                        </Button>
-                    </>
-                }
-            />
+    const headerActions = (
+        <>
+            <Button onClick={() => openDocs('api-tracing')} variant="default" size="sm" leftSection={<IconBook size={14} stroke={1.7} />}>
+                Docs
+            </Button>
+            <Button leftSection={<IconRefresh size={14} stroke={1.7} />} variant="default" size="sm" onClick={() => void fetchDetail(true)} loading={refreshing}>
+                Refresh
+            </Button>
+        </>
+    );
 
+    return (
+        <DetailShell
+            backHref="/dashboard/tracing/sessions"
+            backLabel="Back to sessions"
+            icon={
+                <div
+                    style={{
+                        width: 48,
+                        height: 48,
+                        borderRadius: 10,
+                        background: 'var(--ds-accent-soft)',
+                        color: 'var(--ds-accent)',
+                        display: 'grid',
+                        placeItems: 'center',
+                    }}
+                >
+                    <IconTimeline size={22} stroke={1.7} />
+                </div>
+            }
+            title={
+                <>
+                    <h1
+                        className="ds-h2"
+                        style={{ margin: 0, whiteSpace: 'nowrap', maxWidth: 540, overflow: 'hidden', textOverflow: 'ellipsis' }}
+                    >
+                        Session {session.sessionId.substring(0, 12)}...
+                    </h1>
+                    <StatusBadge status={statusVariant(session.status)} label={(session.status || 'unknown').toUpperCase()} />
+                    {sourceBadge(session.source)}
+                    {session.totalEvents != null ? (
+                        <span className="ds-badge ds-badge-info">
+                            {formatNumber(session.totalEvents)} events
+                        </span>
+                    ) : null}
+                    {session.durationMs != null ? (
+                        <span className="ds-badge">
+                            {formatDuration(session.durationMs)}
+                        </span>
+                    ) : null}
+                </>
+            }
+            meta={
+                <>
+                    <span className="ds-mono">{session.sessionId}</span>
+                    <span className="ds-faint">·</span>
+                    <span>Agent {session.agentName || 'Unknown'}</span>
+                    {session.agentVersion ? (
+                        <>
+                            <span className="ds-faint">·</span>
+                            <span>v{session.agentVersion}</span>
+                        </>
+                    ) : null}
+                    {session.agentModel ? (
+                        <>
+                            <span className="ds-faint">·</span>
+                            <span>{session.agentModel}</span>
+                        </>
+                    ) : null}
+                    <span className="ds-faint">·</span>
+                    <span>Started {formatRelativeTime(session.startedAt)}</span>
+                </>
+            }
+            actions={headerActions}
+        >
             <Grid gutter="md" style={{ minHeight: 'calc(100vh - 320px)' }}>
                 {/* ── Left: Session info ── */}
                 <Grid.Col span={{ base: 12, xl: 3 }}>
@@ -1144,6 +1198,6 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
                     </Card>
                 </Grid.Col>
             </Grid>
-        </Stack>
+        </DetailShell>
     );
 }

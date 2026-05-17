@@ -104,6 +104,10 @@ export interface IRagModule {
   fileProviderKey?: string;
   chunkConfig: IRagChunkConfig;
   status: 'active' | 'disabled';
+  /** Optional reference to a Reranker service that re-orders vector matches before returning. */
+  rerankerKey?: string;
+  /** When reranker is enabled, fetch this many candidates from vector store before re-ranking down to topK. */
+  rerankerOversample?: number;
   totalDocuments?: number;
   totalChunks?: number;
   metadata?: Record<string, unknown>;
@@ -155,6 +159,88 @@ export interface IRagQueryLog {
   topK: number;
   matchCount: number;
   latencyMs?: number;
+  metadata?: Record<string, unknown>;
+  createdAt?: Date;
+}
+
+// ── Reranker types ──────────────────────────────────────────────────────
+
+/**
+ * Reranker strategies determine how candidate documents are re-scored.
+ * - dedicated-model: calls a model with `category: 'rerank'` (Cohere/Jina/Voyage/BGE).
+ * - llm-judge: prompts an LLM (category 'llm') with each candidate to produce a 0–1 score.
+ * - llm-listwise: prompts an LLM once with the entire candidate list and asks for a ranked order.
+ * - heuristic: keyword overlap / recency boost — no model required.
+ * - fusion: reciprocal rank fusion across input score arrays (no model). Reserved for future.
+ */
+export type RerankerStrategy =
+  | 'dedicated-model'
+  | 'llm-judge'
+  | 'llm-listwise'
+  | 'heuristic'
+  | 'fusion';
+
+export type RerankerStatus = 'active' | 'disabled';
+
+export interface IRerankerConfig {
+  /** Model key (from Model Hub) — required for dedicated-model / llm-judge / llm-listwise. */
+  modelKey?: string;
+  /** Default topN returned by the reranker. If undefined, returns the same count as input. */
+  topN?: number;
+  /** Optional score threshold — drop candidates below this normalized [0,1] score. */
+  scoreThreshold?: number;
+  /** Batch size for llm-judge mode (parallel scoring). */
+  batchSize?: number;
+  /** Temperature for LLM strategies. */
+  temperature?: number;
+  /** Custom prompt template (llm-judge / llm-listwise). Supports {{query}} and {{document}} placeholders. */
+  promptTemplate?: string;
+  /** Score normalization — 'minmax' rescales scores to [0,1]. */
+  scoreNormalization?: 'none' | 'minmax';
+  /** Heuristic config: weights for keyword overlap vs recency, etc. */
+  heuristicWeights?: {
+    keyword?: number;
+    recency?: number;
+    originalScore?: number;
+  };
+}
+
+export interface IReranker {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name: string;
+  description?: string;
+  strategy: RerankerStrategy;
+  config: IRerankerConfig;
+  status: RerankerStatus;
+  totalRuns?: number;
+  avgLatencyMs?: number;
+  lastUsedAt?: Date;
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IRerankerRunLog {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  rerankerKey: string;
+  strategy: RerankerStrategy;
+  modelKey?: string;
+  query: string;
+  inputCount: number;
+  outputCount: number;
+  latencyMs?: number;
+  status: 'success' | 'error';
+  errorMessage?: string;
+  /** Optional caller context — 'rag' for embedded use, 'api' for client v1, 'dashboard' for playground. */
+  source?: 'rag' | 'api' | 'dashboard';
+  ragModuleKey?: string;
   metadata?: Record<string, unknown>;
   createdAt?: Date;
 }
@@ -689,4 +775,68 @@ export interface IBrowserSessionEvent {
   data?: Record<string, unknown>;
   errorMessage?: string;
   createdAt?: Date;
+}
+
+// ── PII Service types ───────────────────────────────────────────────────────
+
+/**
+ * Action taken when PII is detected.
+ *  - 'detect'  → return findings, never alter text
+ *  - 'redact'  → replace match with a tag like [REDACTED_EMAIL]
+ *  - 'mask'    → partial masking, e.g. j***@gmail.com, **** **** **** 1234
+ *  - 'block'   → mark finding as blocking; caller decides what to do
+ */
+export type PiiAction = 'detect' | 'redact' | 'mask' | 'block';
+
+/** Language scope for built-in patterns. 'global' = language-independent. */
+export type PiiLanguage = 'global' | 'en' | 'tr' | 'de' | 'fr' | 'es' | 'it' | 'pt' | 'ar' | 'ja' | 'zh';
+
+/** A tenant-defined custom regex pattern. */
+export interface IPiiCustomPattern {
+  /** Stable id within the policy (uuid). */
+  id: string;
+  /** Human-readable category id (used in findings: e.g. "customer_id"). */
+  categoryId: string;
+  /** Display label (default locale). */
+  label: string;
+  /** Optional localized labels keyed by language. */
+  labels?: Partial<Record<PiiLanguage, string>>;
+  /** Regex source string (JS regex, without surrounding slashes). */
+  pattern: string;
+  /** Regex flags. 'g' is enforced by the detector regardless. */
+  flags?: string;
+  /** Languages this pattern applies to. Empty / undefined = global. */
+  languages?: PiiLanguage[];
+  /** Severity for findings produced by this pattern. */
+  severity?: 'low' | 'medium' | 'high';
+  /** Whether this pattern is enabled. */
+  enabled: boolean;
+}
+
+/**
+ * A reusable PII policy: which built-in categories are enabled,
+ * which custom patterns to run, default action and target languages.
+ */
+export interface IPiiPolicy {
+  _id?: import('mongodb').ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name: string;
+  description?: string;
+  /** Default action applied to findings from this policy. */
+  defaultAction: PiiAction;
+  /** Built-in categories toggled on/off. Keys are category ids (e.g. 'email'). */
+  categories: Record<string, boolean>;
+  /** Custom regex patterns defined per tenant. */
+  customPatterns?: IPiiCustomPattern[];
+  /** Languages to scan for. 'global' is always included. Empty = all. */
+  languages?: PiiLanguage[];
+  /** Whether the policy is enabled overall. */
+  enabled: boolean;
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
 }

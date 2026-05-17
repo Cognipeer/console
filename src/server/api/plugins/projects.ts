@@ -24,6 +24,27 @@ function canManageProjects(userRole: string): boolean {
   return userRole === 'owner' || userRole === 'admin';
 }
 
+function getLegacyProjectIds(projectIds?: string[]): string[] {
+  return (projectIds ?? []).map(String).filter(Boolean);
+}
+
+async function collectAccessibleProjectIds(
+  db: Awaited<ReturnType<typeof getDatabase>>,
+  userId: string,
+  legacyProjectIds?: string[],
+): Promise<string[]> {
+  const projectIds = new Set(getLegacyProjectIds(legacyProjectIds));
+  const memberships = await db.listUserProjectsByUser(userId);
+
+  for (const membership of memberships) {
+    if (membership.projectId) {
+      projectIds.add(String(membership.projectId));
+    }
+  }
+
+  return Array.from(projectIds);
+}
+
 async function loadTenantUser(session: ReturnType<typeof requireSessionContext>) {
   const db = await getDatabase();
   await db.switchToTenant(session.tenantDbName);
@@ -54,9 +75,31 @@ async function assertProjectAccess(params: {
     return { db, ok: true as const, project, userProject: null };
   }
 
+  const user = await db.findUserById(session.userId);
+  if (!user) {
+    return { error: 'Unauthorized' as const, ok: false as const, status: 401 as const };
+  }
+
   const userProject = await db.findUserProject(session.userId, projectId);
   if (!userProject) {
-    return { error: 'Forbidden' as const, ok: false as const, status: 403 as const };
+    const legacyAllowed = getLegacyProjectIds(user.projectIds).includes(String(projectId));
+    if (!legacyAllowed) {
+      return { error: 'Forbidden' as const, ok: false as const, status: 403 as const };
+    }
+
+    const legacyRole: ProjectRole = session.userRole === 'project_admin' ? 'project_admin' : 'member';
+    return {
+      db,
+      ok: true as const,
+      project,
+      userProject: {
+        projectId,
+        role: legacyRole,
+        servicePermissions: undefined,
+        tenantId: session.tenantId,
+        userId: session.userId,
+      },
+    };
   }
 
   if (requireAdmin && userProject.role !== 'project_admin') {
@@ -81,8 +124,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
       // Collect project IDs accessible to this user
       let projectIds: string[] | undefined;
       if (user.role !== 'owner' && user.role !== 'admin') {
-        const memberships = await db.listUserProjectsByUser(session.userId);
-        projectIds = memberships.map((m) => m.projectId);
+        projectIds = await collectAccessibleProjectIds(db, session.userId, user.projectIds);
       }
 
       const projects = await listAccessibleProjects(session.tenantDbName, session.tenantId, {
@@ -111,7 +153,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
       if ((activeCookie && !cookieIsValid) || cookieIsDefault) {
         if (activeProjectId) {
           reply.setCookie('active_project_id', activeProjectId, {
-            httpOnly: false,
+            httpOnly: true,
             maxAge: 60 * 60 * 24 * 30,
             path: '/',
             sameSite: 'lax',
@@ -205,8 +247,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
 
       let projectIds: string[] | undefined;
       if (user.role !== 'owner' && user.role !== 'admin') {
-        const memberships = await db.listUserProjectsByUser(session.userId);
-        projectIds = memberships.map((m) => m.projectId);
+        projectIds = await collectAccessibleProjectIds(db, session.userId, user.projectIds);
       }
 
       const projects = await listAccessibleProjects(session.tenantDbName, session.tenantId, {
@@ -220,7 +261,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       reply.setCookie('active_project_id', body.projectId, {
-        httpOnly: false,
+        httpOnly: true,
         maxAge: 60 * 60 * 24 * 30,
         path: '/',
         sameSite: 'lax',
@@ -359,16 +400,54 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
             implicit: false,
           };
         })
-        .filter(Boolean);
+        .filter((member): member is {
+          userId: string;
+          email: string;
+          implicit: boolean;
+          name: string;
+          projectRole: ProjectRole;
+          role: string;
+          servicePermissions: Record<string, string> | null;
+        } => member !== null);
+
+      const explicitIds = new Set(explicit.map((member) => member.userId));
+      const legacy = allUsers
+        .filter((user) => user.role !== 'owner' && user.role !== 'admin')
+        .filter((user) => getLegacyProjectIds(user.projectIds).includes(String(projectId)))
+        .filter((user) => !explicitIds.has(String(user._id)))
+        .map((user) => ({
+          userId: String(user._id),
+          email: user.email,
+          implicit: false,
+          name: user.name,
+          projectRole: user.role === 'project_admin' ? 'project_admin' : 'member',
+          role: user.role as string,
+          servicePermissions: null,
+        }));
 
       // Deduplicate: privileged users already covered above
       const privilegedIds = new Set(privileged.map((p) => p.userId));
       const members = [
         ...privileged,
+        ...legacy.filter((member) => !privilegedIds.has(member.userId)),
         ...explicit.filter((m) => m && !privilegedIds.has(m.userId)),
       ];
 
-      return reply.code(200).send({ members });
+      const isProjectAdmin = access.userProject?.role === 'project_admin';
+      const canManageProjectAccess = canManageProjects(session.userRole) || isProjectAdmin;
+
+      return reply.code(200).send({
+        capabilities: {
+          canAssignMembers: canManageProjectAccess,
+          canInviteMembers: canManageProjects(session.userRole),
+          canManagePermissions: canManageProjectAccess,
+          canManageRoles: canManageProjectAccess,
+          canRemoveMembers: canManageProjectAccess,
+          isProjectAdmin,
+          isTenantAdmin: canManageProjects(session.userRole),
+        },
+        members,
+      });
     } catch (error) {
       logger.error('List project members error', { error });
       return reply.code(500).send({ error: 'Internal server error' });
@@ -378,20 +457,11 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/projects/:projectId/members', withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
-      if (!['owner', 'admin', 'project_admin'].includes(session.userRole)) {
-        return reply.code(403).send({ error: 'Forbidden' });
-      }
-
       const { projectId } = request.params as { projectId: string };
-      const access = await assertProjectAccess({ projectId, session, requireAdmin: false });
+      const access = await assertProjectAccess({ projectId, requireAdmin: true, session });
 
       if (!access.ok) {
         return reply.code(access.status).send({ error: access.error });
-      }
-
-      // project_admin can only add if they are themselves a member
-      if (session.userRole === 'project_admin' && !access.userProject) {
-        return reply.code(403).send({ error: 'Forbidden' });
       }
 
       const body = readJsonBody<Record<string, unknown>>(request);
@@ -434,12 +504,8 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
   app.delete('/projects/:projectId/members', withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
-      if (!['owner', 'admin', 'project_admin'].includes(session.userRole)) {
-        return reply.code(403).send({ error: 'Forbidden' });
-      }
-
       const { projectId } = request.params as { projectId: string };
-      const access = await assertProjectAccess({ projectId, session, requireAdmin: false });
+      const access = await assertProjectAccess({ projectId, requireAdmin: true, session });
 
       if (!access.ok) {
         return reply.code(access.status).send({ error: access.error });
@@ -464,7 +530,20 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
 
       const removed = await access.db.deleteUserProject(String(target._id), projectId);
       if (!removed) {
-        return reply.code(404).send({ error: 'Membership not found' });
+        const nextProjectIds = getLegacyProjectIds(target.projectIds).filter((id) => id !== String(projectId));
+        const legacyAssigned = nextProjectIds.length !== getLegacyProjectIds(target.projectIds).length;
+
+        if (!legacyAssigned) {
+          return reply.code(404).send({ error: 'Membership not found' });
+        }
+
+        const updated = await access.db.updateUser(String(target._id), {
+          projectIds: nextProjectIds,
+        });
+
+        if (!updated) {
+          return reply.code(500).send({ error: 'Failed to update membership' });
+        }
       }
 
       return reply.code(200).send({ success: true });
@@ -477,12 +556,8 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
   app.patch('/projects/:projectId/members', withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
-      if (!canManageProjects(session.userRole)) {
-        return reply.code(403).send({ error: 'Forbidden' });
-      }
-
       const { projectId } = request.params as { projectId: string };
-      const access = await assertProjectAccess({ projectId, session });
+      const access = await assertProjectAccess({ projectId, requireAdmin: true, session });
 
       if (!access.ok) {
         return reply.code(access.status).send({ error: access.error });
@@ -508,7 +583,21 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
 
       const existing = await access.db.findUserProject(body.userId, projectId);
       if (!existing) {
-        return reply.code(404).send({ error: 'Membership not found' });
+        const legacyAssigned = getLegacyProjectIds(target.projectIds).includes(String(projectId));
+        if (!legacyAssigned) {
+          return reply.code(404).send({ error: 'Membership not found' });
+        }
+
+        const created = await access.db.upsertUserProject({
+          invitedBy: session.userId,
+          projectId,
+          role: body.role as ProjectRole,
+          servicePermissions: undefined,
+          tenantId: session.tenantId,
+          userId: body.userId,
+        });
+
+        return reply.code(200).send({ userProject: created });
       }
 
       const updated = await access.db.upsertUserProject({
@@ -530,12 +619,8 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
   app.patch('/projects/:projectId/members/permissions', withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
-      if (!canManageProjects(session.userRole)) {
-        return reply.code(403).send({ error: 'Forbidden' });
-      }
-
       const { projectId } = request.params as { projectId: string };
-      const access = await assertProjectAccess({ projectId, session });
+      const access = await assertProjectAccess({ projectId, requireAdmin: true, session });
 
       if (!access.ok) {
         return reply.code(access.status).send({ error: access.error });
@@ -553,7 +638,21 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
 
       const existing = await access.db.findUserProject(body.userId, projectId);
       if (!existing) {
-        return reply.code(404).send({ error: 'Membership not found' });
+        const legacyAssigned = getLegacyProjectIds(target.projectIds).includes(String(projectId));
+        if (!legacyAssigned) {
+          return reply.code(404).send({ error: 'Membership not found' });
+        }
+
+        const created = await access.db.upsertUserProject({
+          invitedBy: session.userId,
+          projectId,
+          role: target.role === 'project_admin' ? 'project_admin' : 'member',
+          servicePermissions: (body.servicePermissions as Record<string, string> | undefined) ?? {},
+          tenantId: session.tenantId,
+          userId: body.userId,
+        });
+
+        return reply.code(200).send({ userProject: created });
       }
 
       const updated = await access.db.upsertUserProject({
@@ -596,7 +695,8 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
       const candidates = users
         .filter((user) => {
           if (user.role === 'owner' || user.role === 'admin') return false;
-          return !alreadyMemberIds.has(String(user._id));
+          if (alreadyMemberIds.has(String(user._id))) return false;
+          return !getLegacyProjectIds(user.projectIds).includes(String(projectId));
         })
         .filter((user) => {
           const email = (user.email ?? '').toLowerCase();

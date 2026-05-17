@@ -1,19 +1,21 @@
 import {
   IconApi,
-  IconClipboardList,
+  IconArrowsSort,
   IconBell,
   IconBook2,
   IconBrain,
   IconBulb,
   IconCertificate,
+  IconClipboardList,
   IconClock,
+  IconCode,
+  IconCube,
   IconFolder,
   IconKey,
   IconLayoutDashboard,
   IconLock,
   IconPlug,
   IconRobot,
-  IconWorld,
   IconServerBolt,
   IconShield,
   IconSparkles,
@@ -21,13 +23,59 @@ import {
   IconTool,
   IconUsers,
   IconVectorBezier,
+  IconWorld,
+  type Icon,
 } from '@tabler/icons-react';
+import platformServicesJson from '@/config/platform-services.json';
 import {
   getEffectiveServicePermission,
   type PermissionService,
   type UserRole,
   type UserServicePermissions,
 } from '@/lib/security/rbac';
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Icon registry — JSON references icons by string name, resolved here.
+   Add a new entry to expose more Tabler icons to the platform-services.json
+   schema. Unknown names fall back to IconCube.
+   ────────────────────────────────────────────────────────────────────────── */
+
+const ICON_REGISTRY = {
+  IconApi,
+  IconArrowsSort,
+  IconBell,
+  IconBook2,
+  IconBrain,
+  IconBulb,
+  IconCertificate,
+  IconClipboardList,
+  IconClock,
+  IconCode,
+  IconFolder,
+  IconKey,
+  IconLayoutDashboard,
+  IconLock,
+  IconPlug,
+  IconRobot,
+  IconServerBolt,
+  IconShield,
+  IconSparkles,
+  IconTimeline,
+  IconTool,
+  IconUsers,
+  IconVectorBezier,
+  IconWorld,
+} satisfies Record<string, Icon>;
+
+export type PlatformIconName = keyof typeof ICON_REGISTRY;
+
+export function resolveIcon(name: string): Icon {
+  return ICON_REGISTRY[name as PlatformIconName] ?? IconCube;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Types
+   ────────────────────────────────────────────────────────────────────────── */
 
 export type DashboardServiceCategory = 'build' | 'data' | 'operate' | 'admin';
 
@@ -36,252 +84,71 @@ export type DashboardServiceDefinition = {
   href: string;
   navLabelKey: string;
   navDescriptionKey: string;
-  icon: typeof IconBrain;
+  icon: Icon;
+  /** Underlying icon name from `platform-services.json`. */
+  iconName: PlatformIconName | string;
   category: DashboardServiceCategory;
   tags: string[];
   searchKeywords: string[];
   showInServicesHome?: boolean;
   tenantAdminOnly?: boolean;
+  defaultPinned?: boolean;
+  popular?: boolean;
+  badge?: 'new';
 };
 
-const DASHBOARD_SERVICE_DEFINITIONS: DashboardServiceDefinition[] = [
-  {
-    id: 'services-home',
-    href: '/dashboard',
-    navLabelKey: 'servicesHome',
-    navDescriptionKey: 'servicesHomeDescription',
-    icon: IconLayoutDashboard,
-    category: 'operate',
-    tags: ['services', 'home'],
-    searchKeywords: ['services', 'home', 'modules', 'ana sayfa'],
-    showInServicesHome: false,
-  },
-  {
-    id: 'models',
-    href: '/dashboard/models',
-    navLabelKey: 'models',
-    navDescriptionKey: 'modelsDescription',
-    icon: IconBrain,
-    category: 'build',
-    tags: ['llm', 'providers', 'inference'],
-    searchKeywords: ['model', 'llm', 'ai', 'gpt', 'openai', 'bedrock'],
-  },
-  {
-    id: 'prompts',
-    href: '/dashboard/prompts',
-    navLabelKey: 'prompts',
-    navDescriptionKey: 'promptsDescription',
-    icon: IconSparkles,
-    category: 'build',
-    tags: ['templates', 'prompting'],
-    searchKeywords: ['prompt', 'template', 'şablon'],
-  },
-  {
-    id: 'vector',
-    href: '/dashboard/vector',
-    navLabelKey: 'vector',
-    navDescriptionKey: 'vectorDescription',
-    icon: IconVectorBezier,
-    category: 'data',
-    tags: ['indexes', 'embeddings'],
-    searchKeywords: ['vector', 'embedding', 'pinecone', 'rag'],
-  },
-  {
-    id: 'memory',
-    href: '/dashboard/memory',
-    navLabelKey: 'memory',
-    navDescriptionKey: 'memoryDescription',
-    icon: IconBulb,
-    category: 'data',
-    tags: ['semantic', 'memory', 'stores'],
-    searchKeywords: ['memory', 'semantic', 'store', 'agent memory'],
-  },
-  {
-    id: 'files',
-    href: '/dashboard/files',
-    navLabelKey: 'files',
-    navDescriptionKey: 'filesDescription',
-    icon: IconFolder,
-    category: 'data',
-    tags: ['storage', 'uploads'],
-    searchKeywords: ['file', 'dosya', 'upload', 'storage'],
-  },
-  {
-    id: 'rag',
-    href: '/dashboard/rag',
-    navLabelKey: 'rag',
-    navDescriptionKey: 'ragDescription',
-    icon: IconBook2,
-    category: 'data',
-    tags: ['knowledge', 'retrieval', 'documents'],
-    searchKeywords: ['rag', 'knowledge', 'retrieval', 'documents'],
-  },
-  {
-    id: 'agents',
-    href: '/dashboard/agents',
-    navLabelKey: 'agents',
-    navDescriptionKey: 'agentsDescription',
-    icon: IconRobot,
-    category: 'build',
-    tags: ['agents', 'orchestration'],
-    searchKeywords: ['agent', 'multi-agent', 'orchestration'],
-  },
-  {
-    id: 'config',
-    href: '/dashboard/config',
-    navLabelKey: 'config',
-    navDescriptionKey: 'configDescription',
-    icon: IconLock,
-    category: 'admin',
-    tags: ['config', 'secrets'],
-    searchKeywords: ['config', 'configuration', 'secret', 'settings'],
-  },
-  {
-    id: 'tracing',
-    href: '/dashboard/tracing',
-    navLabelKey: 'agentTracing',
-    navDescriptionKey: 'agentTracingDescription',
-    icon: IconTimeline,
-    category: 'operate',
-    tags: ['observability', 'sessions'],
-    searchKeywords: ['trace', 'agent', 'log', 'debug'],
-  },
-  {
-    id: 'inference-monitoring',
-    href: '/dashboard/inference-monitoring',
-    navLabelKey: 'inferenceMonitoring',
-    navDescriptionKey: 'inferenceMonitoringDescription',
-    icon: IconServerBolt,
-    category: 'operate',
-    tags: ['vllm', 'gpu', 'inference', 'monitoring'],
-    searchKeywords: ['inference', 'monitoring', 'vllm', 'server', 'gpu'],
-  },
-  {
-    id: 'guardrails',
-    href: '/dashboard/guardrails',
-    navLabelKey: 'guardrails',
-    navDescriptionKey: 'guardrailsDescription',
-    icon: IconShield,
-    category: 'operate',
-    tags: ['safety', 'pii', 'moderation', 'prompt injection'],
-    searchKeywords: ['guardrails', 'safety', 'moderation', 'pii'],
-  },
-  {
-    id: 'mcp',
-    href: '/dashboard/mcp',
-    navLabelKey: 'mcp',
-    navDescriptionKey: 'mcpDescription',
-    icon: IconApi,
-    category: 'build',
-    tags: ['mcp', 'servers', 'openapi'],
-    searchKeywords: ['mcp', 'openapi', 'swagger', 'tool', 'server', 'proxy', 'api'],
-  },
-  {
-    id: 'tools',
-    href: '/dashboard/tools',
-    navLabelKey: 'tools',
-    navDescriptionKey: 'toolsDescription',
-    icon: IconTool,
-    category: 'build',
-    tags: ['tools', 'actions', 'integrations'],
-    searchKeywords: ['tool', 'action', 'openapi', 'mcp', 'execute', 'api'],
-  },
-  {
-    id: 'browser',
-    href: '/dashboard/browser',
-    navLabelKey: 'browser',
-    navDescriptionKey: 'browserDescription',
-    icon: IconWorld,
-    category: 'operate',
-    tags: ['browser', 'automation', 'playwright', 'session'],
-    searchKeywords: ['browser', 'tarayıcı', 'playwright', 'automation', 'session', 'profile'],
-  },
-  {
-    id: 'alerts',
-    href: '/dashboard/alerts',
-    navLabelKey: 'alerts',
-    navDescriptionKey: 'alertsDescription',
-    icon: IconBell,
-    category: 'operate',
-    tags: ['thresholds', 'notifications', 'incidents'],
-    searchKeywords: ['alert', 'incident', 'notifications', 'threshold'],
-  },
-  {
-    id: 'automations',
-    href: '/dashboard/automations',
-    navLabelKey: 'automations',
-    navDescriptionKey: 'automationsDescription',
-    icon: IconClock,
-    category: 'admin',
-    tags: ['automations', 'scheduler', 'operations'],
-    searchKeywords: ['automation', 'scheduler', 'maintenance', 'jobs', 'workflow'],
-    tenantAdminOnly: true,
-  },
-  {
-    id: 'members',
-    href: '/dashboard/members',
-    navLabelKey: 'members',
-    navDescriptionKey: 'membersDescription',
-    icon: IconUsers,
-    category: 'admin',
-    tags: ['users', 'invite', 'roles'],
-    searchKeywords: ['members', 'users', 'invite', 'tenant', 'üyeler'],
-    tenantAdminOnly: true,
-  },
-  {
-    id: 'projects',
-    href: '/dashboard/projects',
-    navLabelKey: 'projects',
-    navDescriptionKey: 'projectsDescription',
-    icon: IconLayoutDashboard,
-    category: 'operate',
-    tags: ['workspaces', 'access'],
-    searchKeywords: ['project', 'proje'],
-  },
-  {
-    id: 'providers',
-    href: '/dashboard/providers',
-    navLabelKey: 'providers',
-    navDescriptionKey: 'providersDescription',
-    icon: IconPlug,
-    category: 'admin',
-    tags: ['providers', 'integrations'],
-    searchKeywords: ['providers', 'integrations', 'sağlayıcılar'],
-    tenantAdminOnly: true,
-  },
-  {
-    id: 'tokens',
-    href: '/dashboard/tokens',
-    navLabelKey: 'tokens',
-    navDescriptionKey: 'tokensDescription',
-    icon: IconKey,
-    category: 'admin',
-    tags: ['api', 'tokens', 'keys'],
-    searchKeywords: ['token', 'api', 'key', 'anahtar'],
-  },
-  {
-    id: 'audit',
-    href: '/dashboard/audit',
-    navLabelKey: 'audit',
-    navDescriptionKey: 'auditDescription',
-    icon: IconClipboardList,
-    category: 'admin',
-    tags: ['audit', 'security', 'logs'],
-    searchKeywords: ['audit', 'security', 'log', 'rbac', 'yetki'],
-    tenantAdminOnly: true,
-  },
-  {
-    id: 'license',
-    href: '/dashboard/license',
-    navLabelKey: 'license',
-    navDescriptionKey: 'licenseDescription',
-    icon: IconCertificate,
-    category: 'admin',
-    tags: ['license', 'limits', 'enterprise'],
-    searchKeywords: ['license', 'lisans', 'enterprise', 'limits'],
-    tenantAdminOnly: true,
-  },
-];
+/* JSON schema mirror — used internally to type the raw config. */
+interface RawPlatformServicesConfig {
+  categories: {
+    order: DashboardServiceCategory[];
+    labels: Record<DashboardServiceCategory, string>;
+  };
+  services: Array<{
+    id: string;
+    href: string;
+    icon: string;
+    category: DashboardServiceCategory;
+    navLabelKey: string;
+    navDescriptionKey: string;
+    tags?: string[];
+    searchKeywords?: string[];
+    showInServicesHome?: boolean;
+    tenantAdminOnly?: boolean;
+    defaultPinned?: boolean;
+    popular?: boolean;
+    badge?: 'new';
+  }>;
+}
+
+const RAW = platformServicesJson as RawPlatformServicesConfig;
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Public exports
+   ────────────────────────────────────────────────────────────────────────── */
+
+export const DASHBOARD_CATEGORY_LABELS: Record<DashboardServiceCategory, string> =
+  RAW.categories.labels;
+
+export const DASHBOARD_CATEGORY_ORDER: DashboardServiceCategory[] = RAW.categories.order;
+
+const DASHBOARD_SERVICE_DEFINITIONS: DashboardServiceDefinition[] = RAW.services.map(
+  (entry) => ({
+    id: entry.id as DashboardServiceDefinition['id'],
+    href: entry.href,
+    navLabelKey: entry.navLabelKey,
+    navDescriptionKey: entry.navDescriptionKey,
+    icon: resolveIcon(entry.icon),
+    iconName: entry.icon,
+    category: entry.category,
+    tags: entry.tags ?? [],
+    searchKeywords: entry.searchKeywords ?? [],
+    showInServicesHome: entry.showInServicesHome,
+    tenantAdminOnly: entry.tenantAdminOnly,
+    defaultPinned: entry.defaultPinned,
+    popular: entry.popular,
+    badge: entry.badge,
+  }),
+);
 
 type DashboardServicesOptions = {
   isTenantAdmin?: boolean;
@@ -290,7 +157,9 @@ type DashboardServicesOptions = {
   servicePermissions?: UserServicePermissions;
 };
 
-export function getDashboardServices(options: DashboardServicesOptions = {}) {
+export function getDashboardServices(
+  options: DashboardServicesOptions = {},
+): DashboardServiceDefinition[] {
   const {
     isTenantAdmin = false,
     role = 'user',
@@ -300,17 +169,19 @@ export function getDashboardServices(options: DashboardServicesOptions = {}) {
 
   return DASHBOARD_SERVICE_DEFINITIONS.filter((service) => {
     if (service.id !== 'services-home') {
-      const level = getEffectiveServicePermission({ role, servicePermissions }, service.id);
-      if (level === 'none') {
-        return false;
-      }
+      const level = getEffectiveServicePermission(
+        { role, servicePermissions },
+        service.id,
+      );
+      if (level === 'none') return false;
     }
 
     if (
-      service.tenantAdminOnly
-      && !isTenantAdmin
-      && service.id !== 'services-home'
-      && getEffectiveServicePermission({ role, servicePermissions }, service.id) !== 'admin'
+      service.tenantAdminOnly &&
+      !isTenantAdmin &&
+      service.id !== 'services-home' &&
+      getEffectiveServicePermission({ role, servicePermissions }, service.id) !==
+        'admin'
     ) {
       return false;
     }
@@ -321,4 +192,15 @@ export function getDashboardServices(options: DashboardServicesOptions = {}) {
 
     return true;
   });
+}
+
+/** All known service definitions (does not honor permissions). */
+export const ALL_DASHBOARD_SERVICES: ReadonlyArray<DashboardServiceDefinition> =
+  DASHBOARD_SERVICE_DEFINITIONS;
+
+/** Lookup by service id. */
+export function findDashboardService(
+  id: string,
+): DashboardServiceDefinition | undefined {
+  return DASHBOARD_SERVICE_DEFINITIONS.find((s) => s.id === id);
 }

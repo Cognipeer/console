@@ -16,12 +16,14 @@ import { clientConfigApiPlugin } from './plugins/client-config';
 import { clientFilesApiPlugin } from './plugins/client-files';
 import { clientGuardrailsApiPlugin } from './plugins/client-guardrails';
 import { clientInferenceApiPlugin } from './plugins/client-inference';
+import { clientJsSandboxApiPlugin } from './plugins/client-js-sandbox';
 import { clientMemoryApiPlugin } from './plugins/client-memory';
 import { clientAutomationsApiPlugin } from './plugins/client-automations';
 import { clientMcpApiPlugin } from './plugins/client-mcp';
 import { clientMcpConsoleApiPlugin } from './plugins/client-mcp-console';
 import { clientPromptsApiPlugin } from './plugins/client-prompts';
 import { clientRagApiPlugin } from './plugins/client-rag';
+import { clientRerankerApiPlugin } from './plugins/client-reranker';
 import { clientToolsApiPlugin } from './plugins/client-tools';
 import { clientTracingApiPlugin } from './plugins/client-tracing';
 import { clientVectorApiPlugin } from './plugins/client-vector';
@@ -29,6 +31,7 @@ import { clientBrowserApiPlugin } from './plugins/client-browser';
 import { clientBrowserMcpApiPlugin } from './plugins/client-browser-mcp';
 import { auditApiPlugin } from './plugins/audit';
 import { automationsApiPlugin } from './plugins/automations';
+import { clusterApiPlugin } from './plugins/cluster';
 import { browserApiPlugin } from './plugins/browser';
 import { agentsApiPlugin } from './plugins/agents';
 import { alertsApiPlugin } from './plugins/alerts';
@@ -36,8 +39,10 @@ import { configApiPlugin } from './plugins/config';
 import { dashboardApiPlugin } from './plugins/dashboard';
 import { filesApiPlugin } from './plugins/files';
 import { guardrailsApiPlugin } from './plugins/guardrails';
+import { piiApiPlugin } from './plugins/pii';
 import { healthApiPlugin } from './plugins/health';
 import { inferenceMonitoringApiPlugin } from './plugins/inference-monitoring';
+import { jsSandboxApiPlugin } from './plugins/js-sandbox';
 import { licenseApiPlugin } from './plugins/license';
 import { mcpApiPlugin } from './plugins/mcp';
 import { memoryApiPlugin } from './plugins/memory';
@@ -48,6 +53,7 @@ import { providersApiPlugin } from './plugins/providers';
 import { projectsApiPlugin } from './plugins/projects';
 import { quotaApiPlugin } from './plugins/quota';
 import { ragApiPlugin } from './plugins/rag';
+import { rerankerApiPlugin } from './plugins/reranker';
 import { tokensApiPlugin } from './plugins/tokens';
 import { toolsApiPlugin } from './plugins/tools';
 import { tracingApiPlugin } from './plugins/tracing';
@@ -63,17 +69,6 @@ const PUBLIC_API_PATHS = [
   '/api/health/ready',
 ];
 
-/**
- * Authenticated API paths that bypass license/feature endpoint checks.
- * These are core auth operations every logged-in user must access.
- */
-const LICENSE_EXEMPT_API_PATHS = [
-  '/api/auth/session',
-  '/api/auth/change-password',
-  '/api/auth/logout',
-  '/api/license',
-];
-
 const CLIENT_API_PREFIXES = ['/api/client/', '/api/models/v1/', '/api/metrics'];
 
 function getPathname(url: string | undefined): string {
@@ -82,10 +77,6 @@ function getPathname(url: string | undefined): string {
 
 function isPublicApiPath(pathname: string): boolean {
   return PUBLIC_API_PATHS.some((path) => pathname === path || pathname.startsWith(`${path}/`));
-}
-
-function isLicenseExemptPath(pathname: string): boolean {
-  return LICENSE_EXEMPT_API_PATHS.some((path) => pathname === path || pathname.startsWith(`${path}/`));
 }
 
 function isClientApiPath(pathname: string): boolean {
@@ -113,13 +104,10 @@ function buildSessionHeaders(payload: JWTPayload, requestId: string) {
   const licenseExpired = payload.licenseExpiresAt
     ? Date.parse(payload.licenseExpiresAt) <= Date.now()
     : false;
-  const effectiveFeatures = licenseExpired
-    ? LicenseManager.getDefaultFreeLicense().features
-    : payload.features;
   const effectiveLicenseType = licenseExpired ? 'FREE' : payload.licenseType;
 
   return {
-    'x-features': JSON.stringify(effectiveFeatures),
+    'x-features': JSON.stringify(LicenseManager.getFeaturesForLicense('FREE')),
     'x-license-type': effectiveLicenseType,
     'x-request-id': requestId,
     'x-tenant-db-name': tenantDbName,
@@ -272,28 +260,6 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
       });
     }
 
-    const licenseExpired = payload.licenseExpiresAt
-      ? Date.parse(payload.licenseExpiresAt) <= Date.now()
-      : false;
-    const effectiveFeatures = licenseExpired
-      ? LicenseManager.getDefaultFreeLicense().features
-      : payload.features;
-
-    if (
-      !isLicenseExemptPath(pathname)
-      && !LicenseManager.hasEndpointAccessForFeatures(effectiveFeatures, pathname)
-    ) {
-      return unauthorized(
-        reply,
-        {
-          error: 'Forbidden',
-          message: 'Your license does not have access to this feature',
-          requiredLicense: 'Please upgrade your plan',
-        },
-        403,
-      );
-    }
-
     const sessionHeaders = buildSessionHeaders(payload, requestId);
     if (!sessionHeaders) {
       return unauthorized(reply, {
@@ -320,6 +286,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(clientFilesApiPlugin);
   await app.register(clientGuardrailsApiPlugin);
   await app.register(clientInferenceApiPlugin);
+  await app.register(clientJsSandboxApiPlugin);
   await app.register(clientMemoryApiPlugin);
   // Built-in console MCP server must register before the dynamic user MCP
   // plugin so its static `/console/*` routes win over the parametric
@@ -328,19 +295,23 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(clientMcpApiPlugin);
   await app.register(clientPromptsApiPlugin);
   await app.register(clientRagApiPlugin);
+  await app.register(clientRerankerApiPlugin);
   await app.register(clientToolsApiPlugin);
   await app.register(clientTracingApiPlugin);
   await app.register(clientVectorApiPlugin);
   await app.register(clientBrowserApiPlugin);
   await app.register(clientBrowserMcpApiPlugin);
   await app.register(automationsApiPlugin);
+  await app.register(clusterApiPlugin);
   await app.register(browserApiPlugin);
   await app.register(configApiPlugin);
   await app.register(dashboardApiPlugin);
   await app.register(filesApiPlugin);
   await app.register(guardrailsApiPlugin);
+  await app.register(piiApiPlugin);
   await app.register(healthApiPlugin);
   await app.register(inferenceMonitoringApiPlugin);
+  await app.register(jsSandboxApiPlugin);
   await app.register(licenseApiPlugin);
   await app.register(mcpApiPlugin);
   await app.register(memoryApiPlugin);
@@ -351,6 +322,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(projectsApiPlugin);
   await app.register(quotaApiPlugin);
   await app.register(ragApiPlugin);
+  await app.register(rerankerApiPlugin);
   await app.register(tokensApiPlugin);
   await app.register(toolsApiPlugin);
   await app.register(tracingApiPlugin);

@@ -117,7 +117,7 @@ export const MilvusCloudVectorProviderContract: ProviderContract<
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/ban-ts-comment
     // @ts-ignore – @zilliz/milvus2-sdk-node is an optional peer dependency
-    const { MilvusClient, DataType } = await import('@zilliz/milvus2-sdk-node') as any;
+    const { MilvusClient, DataType } = await import(/* webpackIgnore: true */ '@zilliz/milvus2-sdk-node') as any;
 
     const milvusClient = new MilvusClient({
       address: credentials.address.trim(),

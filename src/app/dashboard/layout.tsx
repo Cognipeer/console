@@ -37,8 +37,16 @@ export default async function DashboardRouteLayout({ children }: DashboardRouteL
 
   // If a non-admin user has no assigned projects, do not render the dashboard at all.
   if (role === 'user' || role === 'project_admin') {
-    const assigned = (user?.projectIds ?? []).map(String).filter(Boolean);
-    if (assigned.length === 0) {
+    const assigned = new Set((user?.projectIds ?? []).map(String).filter(Boolean));
+    const memberships = await db.listUserProjectsByUser(userId);
+
+    for (const membership of memberships) {
+      if (membership.projectId) {
+        assigned.add(String(membership.projectId));
+      }
+    }
+
+    if (assigned.size === 0) {
       redirect('/no-project');
     }
   }

@@ -20,10 +20,9 @@ import {
   IconBell,
   IconBellCheck,
   IconCheck,
-  IconHistory,
 } from '@tabler/icons-react';
 import Link from 'next/link';
-import PageHeader from '@/components/layout/PageHeader';
+import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import { useTranslations } from '@/lib/i18n';
 
 interface AlertEvent {
@@ -148,12 +147,11 @@ export default function AlertHistoryPage() {
   }
 
   return (
-    <Stack gap="md">
+    <PageContainer>
       <PageHeader
-        icon={<IconHistory size={20} />}
+        eyebrow="Operate · Alert History"
         title={t('historyTitle')}
         subtitle={t('historySubtitle')}
-        iconColor="orange"
         actions={
           <Group gap="xs">
             {activeCount > 0 && (
@@ -269,6 +267,6 @@ export default function AlertHistoryPage() {
           ))}
         </Stack>
       )}
-    </Stack>
+    </PageContainer>
   );
 }

@@ -64,8 +64,18 @@ class EmailService {
     try {
       const templateContent = await fs.readFile(templatePath, 'utf-8');
       const handlebars = await getHandlebars();
-      const template = handlebars.compile(templateContent);
-      const html = template(data);
+      // noEscape: false (default) keeps {{var}} HTML-escaped, mitigating XSS
+      // when user-controlled data flows into the template. Templates with
+      // {{{var}}} (triple-brace) must not be used with untrusted data.
+      const compileOpts = { noEscape: false } as const;
+      // runtimeOpts disables prototype property/method lookup on the data
+      // object, preventing prototype-pollution-style template tricks.
+      const runtimeOpts = {
+        allowProtoPropertiesByDefault: false,
+        allowProtoMethodsByDefault: false,
+      } as const;
+      const template = handlebars.compile(templateContent, compileOpts);
+      const html = template(data, runtimeOpts);
 
       // Extract subject from template (first line should be: <!-- subject: Your Subject -->)
       const subjectMatch = templateContent.match(
@@ -74,8 +84,8 @@ class EmailService {
       const rawSubject = subjectMatch
         ? subjectMatch[1]
         : 'Notification from Cognipeer Console';
-      // Compile subject through Handlebars so template variables (e.g. {{alertName}}) are resolved
-      const subject = handlebars.compile(rawSubject)(data);
+      const subject = handlebars
+        .compile(rawSubject, compileOpts)(data, runtimeOpts);
 
       return { subject, html };
     } catch (error) {

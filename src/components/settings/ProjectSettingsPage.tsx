@@ -19,14 +19,11 @@ export default function ProjectSettingsPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | undefined>(undefined);
   const [loading, setLoading] = useState(true);
-  const [role, setRole] = useState<string | undefined>(undefined);
 
   const currentProject = useMemo(() => {
     if (!activeProjectId) return undefined;
     return projects.find((p) => String(p._id) === String(activeProjectId));
   }, [projects, activeProjectId]);
-
-  const membersReadOnly = role !== 'owner' && role !== 'admin' && role !== 'project_admin';
 
   const fetchProjects = async () => {
     setLoading(true);
@@ -47,20 +44,8 @@ export default function ProjectSettingsPage() {
     }
   };
 
-  const fetchSession = async () => {
-    try {
-      const res = await fetch('/api/auth/session', { cache: 'no-store' });
-      if (!res.ok) return;
-      const data = (await res.json()) as { role?: string };
-      setRole(data.role);
-    } catch {
-      // ignore
-    }
-  };
-
   useEffect(() => {
-    fetchProjects();
-    fetchSession();
+    void fetchProjects();
   }, []);
 
   return (
@@ -133,7 +118,7 @@ export default function ProjectSettingsPage() {
             </Tabs.List>
 
             <Tabs.Panel value="users" p="lg">
-              <ProjectMembersManager projectId={String(activeProjectId)} readOnly={membersReadOnly} />
+              <ProjectMembersManager projectId={String(activeProjectId)} />
             </Tabs.Panel>
 
             <Tabs.Panel value="providers" p="lg">

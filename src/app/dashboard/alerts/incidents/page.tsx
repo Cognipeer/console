@@ -1,6 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import {
   ActionIcon,
   Badge,
@@ -12,13 +14,9 @@ import {
   Select,
   Stack,
   Text,
-  Textarea,
   ThemeIcon,
   Tooltip,
-  Modal,
-  Timeline,
 } from '@mantine/core';
-import { useDisclosure } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
 import {
   IconArrowLeft,
@@ -27,14 +25,11 @@ import {
   IconSearch,
   IconShieldCheck,
   IconLock,
-  IconExclamationCircle,
-  IconMessage,
   IconDots,
   IconEye,
   IconFlame,
 } from '@tabler/icons-react';
-import Link from 'next/link';
-import PageHeader from '@/components/layout/PageHeader';
+import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import { useTranslations } from '@/lib/i18n';
 
 interface IncidentNote {
@@ -164,15 +159,12 @@ const STATUS_ICONS: Record<string, typeof IconAlertTriangle> = {
 };
 
 export default function IncidentsPage() {
+  const router = useRouter();
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [openCount, setOpenCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
   const [severityFilter, setSeverityFilter] = useState<string | null>(null);
-  const [selectedIncident, setSelectedIncident] = useState<Incident | null>(null);
-  const [noteContent, setNoteContent] = useState('');
-  const [noteLoading, setNoteLoading] = useState(false);
-  const [detailOpened, detailControls] = useDisclosure(false);
   const t = useTranslations('incidents');
 
   const fetchIncidents = useCallback(async () => {
@@ -216,9 +208,6 @@ export default function IncidentsPage() {
       setIncidents((prev) =>
         prev.map((inc) => (inc._id === incidentId ? data.incident : inc)),
       );
-      if (selectedIncident?._id === incidentId) {
-        setSelectedIncident(data.incident);
-      }
       if (newStatus === 'resolved' || newStatus === 'closed') {
         setOpenCount((prev) => Math.max(0, prev - 1));
       }
@@ -236,41 +225,8 @@ export default function IncidentsPage() {
     }
   };
 
-  const handleAddNote = async () => {
-    if (!selectedIncident || !noteContent.trim()) return;
-    setNoteLoading(true);
-    try {
-      const res = await fetch(`/api/alerts/incidents/${selectedIncident._id}/notes`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: noteContent }),
-      });
-      if (!res.ok) throw new Error('Failed to add note');
-      const data = await res.json();
-      setSelectedIncident(data.incident);
-      setIncidents((prev) =>
-        prev.map((inc) => (inc._id === data.incident._id ? data.incident : inc)),
-      );
-      setNoteContent('');
-      notifications.show({
-        title: t('noteAdded'),
-        message: t('noteAddedMessage'),
-        color: 'teal',
-      });
-    } catch (err) {
-      notifications.show({
-        title: t('error'),
-        message: err instanceof Error ? err.message : t('noteError'),
-        color: 'red',
-      });
-    } finally {
-      setNoteLoading(false);
-    }
-  };
-
   const openDetail = (incident: Incident) => {
-    setSelectedIncident(incident);
-    detailControls.open();
+    router.push(`/dashboard/alerts/incidents/${incident._id}`);
   };
 
   if (loading) {
@@ -282,12 +238,11 @@ export default function IncidentsPage() {
   }
 
   return (
-    <Stack gap="md">
+    <PageContainer>
       <PageHeader
-        icon={<IconExclamationCircle size={20} />}
+        eyebrow="Operate · Incidents"
         title={t('title')}
         subtitle={t('subtitle')}
-        iconColor="red"
         actions={
           <Group gap="xs">
             {openCount > 0 && (
@@ -492,240 +447,6 @@ export default function IncidentsPage() {
         </Stack>
       )}
 
-      {/* Detail Modal */}
-      <Modal
-        opened={detailOpened}
-        onClose={detailControls.close}
-        title={
-          <Group gap="xs">
-            <Text fw={700}>{t('incidentDetail')}</Text>
-            {selectedIncident && (
-              <Badge
-                size="sm"
-                color={STATUS_COLORS[selectedIncident.status] ?? 'gray'}
-                variant="light"
-              >
-                {STATUS_LABELS[selectedIncident.status] ?? selectedIncident.status}
-              </Badge>
-            )}
-          </Group>
-        }
-        size="lg"
-      >
-        {selectedIncident && (() => {
-          const mod = inferModule(selectedIncident.metric);
-          const scope = selectedIncident.metadata?.scope as Record<string, string> | undefined;
-          const operator = selectedIncident.metadata?.operator as string | undefined;
-          const windowMin = selectedIncident.metadata?.windowMinutes as number | undefined;
-          const sampleCount = selectedIncident.metadata?.sampleCount as number | undefined;
-          return (
-          <Stack gap="md">
-            {/* Summary Card */}
-            <Paper p="md" radius="md" withBorder>
-              <Stack gap="xs">
-                <Group justify="space-between">
-                  <Group gap="xs">
-                    <Text size="sm" fw={600}>{selectedIncident.ruleName}</Text>
-                    <Badge size="sm" color={MODULE_COLORS[mod]} variant="light">
-                      {MODULE_LABELS[mod] ?? mod}
-                    </Badge>
-                  </Group>
-                  <Badge
-                    size="sm"
-                    color={SEVERITY_COLORS[selectedIncident.severity]}
-                    variant="light"
-                  >
-                    {SEVERITY_LABELS[selectedIncident.severity]}
-                  </Badge>
-                </Group>
-
-                {/* Metric & Condition */}
-                <Group gap="lg" mt="xs">
-                  <div>
-                    <Text size="xs" c="dimmed" tt="uppercase" fw={600}>{t('metric')}</Text>
-                    <Text size="sm" fw={500}>
-                      {METRIC_LABELS[selectedIncident.metric] ?? selectedIncident.metric}
-                    </Text>
-                  </div>
-                  <div>
-                    <Text size="xs" c="dimmed" tt="uppercase" fw={600}>{t('actualValue')}</Text>
-                    <Text size="sm" fw={700} c="orange">
-                      {Number(selectedIncident.actualValue).toFixed(2)}
-                      {METRIC_UNITS[selectedIncident.metric] ?? ''}
-                    </Text>
-                  </div>
-                  <div>
-                    <Text size="xs" c="dimmed" tt="uppercase" fw={600}>{t('condition')}</Text>
-                    <Text size="sm" fw={500}>
-                      {OPERATOR_SYMBOLS[operator ?? 'gt'] ?? '>'}{' '}
-                      {selectedIncident.threshold}
-                      {METRIC_UNITS[selectedIncident.metric] ?? ''}
-                    </Text>
-                  </div>
-                  {windowMin && (
-                    <div>
-                      <Text size="xs" c="dimmed" tt="uppercase" fw={600}>{t('window')}</Text>
-                      <Text size="sm" fw={500}>{windowMin} min</Text>
-                    </div>
-                  )}
-                  {sampleCount != null && (
-                    <div>
-                      <Text size="xs" c="dimmed" tt="uppercase" fw={600}>{t('samples')}</Text>
-                      <Text size="sm" fw={500}>{sampleCount}</Text>
-                    </div>
-                  )}
-                </Group>
-
-                {/* Scope */}
-                {scope && (scope.modelKey || scope.serverKey || scope.guardrailKey || scope.ragModuleKey) && (
-                  <Group gap="lg" mt="xs">
-                    {scope.modelKey && (
-                      <div>
-                        <Text size="xs" c="dimmed" tt="uppercase" fw={600}>{t('model')}</Text>
-                        <Text size="sm" fw={500}>{scope.modelKey}</Text>
-                      </div>
-                    )}
-                    {scope.serverKey && (
-                      <div>
-                        <Text size="xs" c="dimmed" tt="uppercase" fw={600}>{t('server')}</Text>
-                        <Text size="sm" fw={500}>{scope.serverKey}</Text>
-                      </div>
-                    )}
-                    {scope.guardrailKey && (
-                      <div>
-                        <Text size="xs" c="dimmed" tt="uppercase" fw={600}>{t('guardrail')}</Text>
-                        <Text size="sm" fw={500}>{scope.guardrailKey}</Text>
-                      </div>
-                    )}
-                    {scope.ragModuleKey && (
-                      <div>
-                        <Text size="xs" c="dimmed" tt="uppercase" fw={600}>{t('ragModule')}</Text>
-                        <Text size="sm" fw={500}>{scope.ragModuleKey}</Text>
-                      </div>
-                    )}
-                  </Group>
-                )}
-              </Stack>
-            </Paper>
-
-            {/* Timeline */}
-            <Paper p="md" radius="md" withBorder>
-              <Stack gap="xs">
-                <Text size="xs" c="dimmed" tt="uppercase" fw={600}>{t('timeline')}</Text>
-                <Text size="xs" c="dimmed">
-                  {t('firedAt')}: {new Date(selectedIncident.firedAt).toLocaleString()}
-                </Text>
-                {selectedIncident.acknowledgedAt && (
-                  <Text size="xs" c="dimmed">
-                    {t('acknowledgedAt')}: {new Date(selectedIncident.acknowledgedAt).toLocaleString()}
-                  </Text>
-                )}
-                {selectedIncident.resolvedAt && (
-                  <Text size="xs" c="dimmed">
-                    {t('resolvedAt')}: {new Date(selectedIncident.resolvedAt).toLocaleString()}
-                    {selectedIncident.resolvedBy && ` (by ${selectedIncident.resolvedBy})`}
-                  </Text>
-                )}
-                {selectedIncident.closedAt && (
-                  <Text size="xs" c="dimmed">
-                    {t('closedAt')}: {new Date(selectedIncident.closedAt).toLocaleString()}
-                  </Text>
-                )}
-              </Stack>
-            </Paper>
-
-            {/* Status Actions */}
-            {selectedIncident.status !== 'resolved' && selectedIncident.status !== 'closed' && (
-              <Group gap="xs">
-                {selectedIncident.status === 'open' && (
-                  <Button
-                    size="xs"
-                    variant="light"
-                    color="blue"
-                    leftSection={<IconEye size={14} />}
-                    onClick={() => handleStatusChange(selectedIncident._id, 'acknowledged')}
-                  >
-                    {t('acknowledge')}
-                  </Button>
-                )}
-                {(selectedIncident.status === 'open' || selectedIncident.status === 'acknowledged') && (
-                  <Button
-                    size="xs"
-                    variant="light"
-                    color="violet"
-                    leftSection={<IconSearch size={14} />}
-                    onClick={() => handleStatusChange(selectedIncident._id, 'investigating')}
-                  >
-                    {t('investigate')}
-                  </Button>
-                )}
-                <Button
-                  size="xs"
-                  variant="light"
-                  color="green"
-                  leftSection={<IconCheck size={14} />}
-                  onClick={() => handleStatusChange(selectedIncident._id, 'resolved')}
-                >
-                  {t('resolve')}
-                </Button>
-                <Button
-                  size="xs"
-                  variant="light"
-                  color="gray"
-                  leftSection={<IconLock size={14} />}
-                  onClick={() => handleStatusChange(selectedIncident._id, 'closed')}
-                >
-                  {t('close')}
-                </Button>
-              </Group>
-            )}
-
-            {/* Notes Timeline */}
-            <Text size="sm" fw={600}>{t('notesTitle')}</Text>
-            {selectedIncident.notes.length === 0 ? (
-              <Text size="xs" c="dimmed">{t('noNotes')}</Text>
-            ) : (
-              <Timeline active={selectedIncident.notes.length - 1} bulletSize={24} lineWidth={2}>
-                {selectedIncident.notes.map((note, idx) => (
-                  <Timeline.Item
-                    key={idx}
-                    bullet={<IconMessage size={12} />}
-                    title={note.userName}
-                  >
-                    <Text size="xs" c="dimmed">
-                      {new Date(note.createdAt).toLocaleString()}
-                    </Text>
-                    <Text size="sm" mt={4}>{note.content}</Text>
-                  </Timeline.Item>
-                ))}
-              </Timeline>
-            )}
-
-            {/* Add Note */}
-            <Stack gap="xs">
-              <Textarea
-                placeholder={t('addNotePlaceholder')}
-                value={noteContent}
-                onChange={(e) => setNoteContent(e.currentTarget.value)}
-                minRows={2}
-                maxRows={4}
-              />
-              <Group justify="flex-end">
-                <Button
-                  size="xs"
-                  leftSection={<IconMessage size={14} />}
-                  onClick={handleAddNote}
-                  loading={noteLoading}
-                  disabled={!noteContent.trim()}
-                >
-                  {t('addNote')}
-                </Button>
-              </Group>
-            </Stack>
-          </Stack>
-          );
-        })()}
-      </Modal>
-    </Stack>
+    </PageContainer>
   );
 }

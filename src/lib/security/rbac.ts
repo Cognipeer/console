@@ -9,13 +9,16 @@ export type PermissionService =
   | 'memory'
   | 'files'
   | 'rag'
+  | 'reranker'
   | 'agents'
   | 'config'
   | 'tracing'
   | 'inference-monitoring'
   | 'guardrails'
+  | 'pii'
   | 'mcp'
   | 'tools'
+  | 'js-sandbox'
   | 'browser'
   | 'alerts'
   | 'automations'
@@ -62,13 +65,16 @@ export const RBAC_SERVICE_DEFINITIONS: RbacServiceDefinition[] = [
   { id: 'agents', label: 'Agents', description: 'AI agents and agent versions.', category: 'build' },
   { id: 'mcp', label: 'MCP Servers', description: 'MCP server configuration and proxy APIs.', category: 'build' },
   { id: 'tools', label: 'Tools', description: 'Tool definitions and tool execution metadata.', category: 'build' },
+  { id: 'js-sandbox', label: 'JS Sandbox', description: 'Managed JavaScript runtimes and sandboxed executions.', category: 'build' },
   { id: 'vector', label: 'Knowledge Index', description: 'Vector providers, indexes and vector operations.', category: 'data' },
   { id: 'memory', label: 'Agent Memory', description: 'Memory stores and memory items.', category: 'data' },
   { id: 'files', label: 'Document Store', description: 'File buckets and file objects.', category: 'data' },
   { id: 'rag', label: 'Knowledge Engine', description: 'RAG modules, documents and chunks.', category: 'data' },
+  { id: 'reranker', label: 'Reranker', description: 'Reranker services and run logs.', category: 'data' },
   { id: 'tracing', label: 'Agent Observability', description: 'Tracing sessions, threads and events.', category: 'operate' },
   { id: 'inference-monitoring', label: 'Model Monitoring', description: 'Inference servers and metrics.', category: 'operate' },
   { id: 'guardrails', label: 'Guardrail', description: 'Guardrail policies and evaluation logs.', category: 'operate' },
+  { id: 'pii', label: 'PII Service', description: 'PII detection, redaction and masking policies.', category: 'operate' },
   { id: 'browser', label: 'Browsers', description: 'Managed browser profiles and sessions.', category: 'operate' },
   { id: 'alerts', label: 'Alerts & Incidents', description: 'Alert rules, history and incidents.', category: 'operate' },
   { id: 'automations', label: 'Automations', description: 'Operational schedulers, maintenance jobs and runtime controls.', category: 'admin', adminService: true },
@@ -97,9 +103,11 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/client/v1/files', service: 'files' },
   { prefix: '/api/client/v1/guardrails', service: 'guardrails' },
   { prefix: '/api/client/v1/mcp', service: 'mcp' },
+  { prefix: '/api/client/v1/js-sandbox', service: 'js-sandbox' },
   { prefix: '/api/client/v1/memory', service: 'memory' },
   { prefix: '/api/client/v1/prompts', service: 'prompts' },
   { prefix: '/api/client/v1/rag', service: 'rag' },
+  { prefix: '/api/client/v1/rerank', service: 'reranker' },
   { prefix: '/api/client/v1/tools', service: 'tools' },
   { prefix: '/api/client/v1/tracing', service: 'tracing' },
   { prefix: '/api/client/v1/traces', service: 'tracing' },
@@ -123,12 +131,15 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/memory', service: 'memory' },
   { prefix: '/api/files', service: 'files' },
   { prefix: '/api/rag', service: 'rag' },
+  { prefix: '/api/reranker', service: 'reranker' },
   { prefix: '/api/agents', service: 'agents' },
   { prefix: '/api/tracing', service: 'tracing' },
   { prefix: '/api/inference-monitoring', service: 'inference-monitoring' },
   { prefix: '/api/guardrails', service: 'guardrails' },
+  { prefix: '/api/pii', service: 'pii' },
   { prefix: '/api/mcp', service: 'mcp' },
   { prefix: '/api/tools', service: 'tools' },
+  { prefix: '/api/js-sandbox', service: 'js-sandbox' },
   { prefix: '/api/browser', service: 'browser' },
   { prefix: '/api/automations', service: 'automations' },
   { prefix: '/api/alerts', service: 'alerts' },

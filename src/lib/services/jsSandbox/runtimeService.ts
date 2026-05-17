@@ -2,8 +2,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import slugify from 'slugify';
 import { createLogger } from '@/lib/core/logger';
 import { getConfig } from '@/lib/core/config';
+import { routeInstanceCall } from '@/lib/core/cluster';
+import type { QueuePayload } from '@/lib/core/queue';
 import { getDatabase, type DatabaseProvider, type IJsSandboxRuntime, type IJsSandboxRuntimeLimits } from '@/lib/database';
 import { jsSandboxExecutorManager } from './executorManager';
+import { jsSandboxEntityId } from './entityId';
 import { normalizeSandboxLibraries } from './libraries';
 import type {
   CreateJsSandboxRuntimeInput,
@@ -209,6 +212,21 @@ export async function deleteJsSandboxRuntime(
 }
 
 export async function executeJsSandboxCode(
+  ctx: JsSandboxContext,
+  input: ExecuteJsSandboxInput,
+): Promise<JsSandboxExecutionView> {
+  return routeInstanceCall(
+    {
+      entityType: 'js-sandbox',
+      entityId: jsSandboxEntityId(ctx.tenantId, input.jsRuntimeId),
+      jobName: 'execute',
+    },
+    { ctx, input } as unknown as QueuePayload,
+    () => executeJsSandboxCodeLocal(ctx, input),
+  );
+}
+
+export async function executeJsSandboxCodeLocal(
   ctx: JsSandboxContext,
   input: ExecuteJsSandboxInput,
 ): Promise<JsSandboxExecutionView> {

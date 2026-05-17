@@ -2,7 +2,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-const outDir = process.argv[2] ?? './license';
+const outDir = process.argv[2] ?? './offline-license';
 mkdirSync(outDir, { recursive: true });
 
 const { privateKey, publicKey } = generateKeyPairSync('ed25519');

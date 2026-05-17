@@ -175,7 +175,7 @@ export const PostgresVectorProviderContract: ProviderContract<
       );
     }
 
-    const { Pool } = await import('pg') as unknown as PgModule;
+    const { Pool } = await import(/* webpackIgnore: true */ 'pg') as unknown as PgModule;
     const pool: PgPool = new Pool(buildPoolConfig(credentials));
     const tableName = settings.tableName.trim();
     const dimensions = Number(settings.dimensions) > 0 ? Number(settings.dimensions) : DEFAULT_DIMENSIONS;

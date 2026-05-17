@@ -92,7 +92,7 @@ export const OramaVectorProviderContract: ProviderContract<
   },
   async createRuntime({ settings, providerKey, logger }) {
     // @ts-expect-error -- @orama/orama is an optional peer dependency
-    const orama = await import('@orama/orama') as unknown as OramaModule;
+    const orama = await import(/* webpackIgnore: true */ '@orama/orama') as unknown as OramaModule;
     const { create, insertMultiple, remove, search } = orama;
 
     const dimensions = Number(settings.defaultDimension) > 0

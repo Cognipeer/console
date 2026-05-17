@@ -34,6 +34,7 @@ export const COLLECTIONS = {
   inferenceServerMetrics: 'inference_server_metrics',
   guardrails: 'guardrails',
   guardrailEvalLogs: 'guardrail_evaluation_logs',
+  piiPolicies: 'pii_policies',
   alertRules: 'alert_rules',
   alertEvents: 'alert_events',
   incidents: 'incidents',
@@ -41,6 +42,8 @@ export const COLLECTIONS = {
   ragDocuments: 'rag_documents',
   ragChunks: 'rag_chunks',
   ragQueryLogs: 'rag_query_logs',
+  rerankers: 'rerankers',
+  rerankerRunLogs: 'reranker_run_logs',
   memoryStores: 'memory_stores',
   memoryItems: 'memory_items',
   configGroups: 'config_groups',
@@ -68,6 +71,9 @@ export const COLLECTIONS = {
   groups: 'groups',
   groupMembers: 'group_members',
   groupProjects: 'group_projects',
+  // ── Cluster (main database) ────────────────────────────────────────
+  nodes: 'nodes',
+  instanceAssignments: 'instance_assignments',
 } as const;
 
 // ── Base class ───────────────────────────────────────────────────────────
@@ -77,6 +83,7 @@ export class MongoDBProviderBase {
   protected mainDb: Db | null = null;
   protected tenantDb: Db | null = null;
   private readonly tenantContext = new AsyncLocalStorage<Db>();
+  private readonly tenantNameContext = new AsyncLocalStorage<string>();
   protected readonly uri: string;
   protected readonly mainDbName: string;
   protected readonly clientOptions?: MongoClientOptions;
@@ -127,6 +134,31 @@ export class MongoDBProviderBase {
     const tenantDb = this.client.db(tenantDbName);
     this.tenantDb = tenantDb;
     this.tenantContext.enterWith(tenantDb);
+    this.tenantNameContext.enterWith(tenantDbName);
+  }
+
+  /**
+   * Name of the tenant DB currently bound to this request context.
+   * Returns `null` when no tenant is active (request hasn't called switchToTenant).
+   */
+  getCurrentTenantDbName(): string | null {
+    return this.tenantNameContext.getStore() ?? null;
+  }
+
+  /**
+   * Defense-in-depth guard: throws if the caller's expected tenant does not
+   * match the currently bound tenant.
+   */
+  assertTenantContext(expectedTenantDbName: string): void {
+    const active = this.tenantNameContext.getStore();
+    if (!active) {
+      throw new Error(`Tenant context not initialized (expected ${expectedTenantDbName}).`);
+    }
+    if (active !== expectedTenantDbName) {
+      throw new Error(
+        `Tenant context mismatch: active=${active}, expected=${expectedTenantDbName}. Refusing to operate on the wrong tenant.`,
+      );
+    }
   }
 
   // ── Protected helpers ────────────────────────────────────────────────

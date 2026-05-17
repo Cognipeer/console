@@ -34,3 +34,100 @@
   flex: 1;
   min-width: 0;
 }
+
+/* Welcome banner ------------------------------------------------ */
+.welcomeBanner {
+  background:
+    radial-gradient(circle at top right, rgba(39, 195, 187, 0.16), transparent 55%),
+    var(--mantine-color-body);
+  border: 1px solid var(--mantine-color-gray-3);
+}
+
+:global(body[data-mantine-color-scheme='dark']) .welcomeBanner {
+  background:
+    radial-gradient(circle at top right, rgba(39, 195, 187, 0.18), transparent 55%),
+    var(--mantine-color-dark-7);
+  border-color: var(--mantine-color-dark-4);
+}
+
+.welcomeTitle {
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+
+@media (max-width: 48em) {
+  .welcomeTitle {
+    font-size: 20px;
+  }
+}
+
+.dotGridBtn {
+  display: grid;
+  grid-template-columns: repeat(3, 3px);
+  grid-template-rows: repeat(3, 3px);
+  gap: 2px;
+}
+
+.dotGridBtn > i {
+  display: block;
+  width: 3px;
+  height: 3px;
+  background: currentColor;
+  border-radius: 50%;
+}
+
+/* Pinned services cards ----------------------------------------- */
+.pinnedCard {
+  display: block;
+  text-align: left;
+  padding: 12px 14px;
+  background: var(--mantine-color-gray-0);
+  border: 1px solid var(--mantine-color-gray-3);
+  border-radius: var(--mantine-radius-md);
+  transition:
+    transform var(--app-motion-fast) ease,
+    border-color var(--app-motion-fast) ease,
+    box-shadow var(--app-motion-fast) ease,
+    background-color var(--app-motion-fast) ease;
+}
+
+:global(body[data-mantine-color-scheme='dark']) .pinnedCard {
+  background: var(--mantine-color-dark-6);
+  border-color: var(--mantine-color-dark-4);
+}
+
+.pinnedCard:hover {
+  transform: translateY(-1px);
+  border-color: var(--mantine-color-teal-4);
+  background: var(--mantine-color-body);
+  box-shadow: var(--app-shadow-xs);
+}
+
+:global(body[data-mantine-color-scheme='dark']) .pinnedCard:hover {
+  background: var(--mantine-color-dark-5);
+  border-color: var(--mantine-color-teal-7);
+}
+
+.pinnedCardBody {
+  min-width: 0;
+  flex: 1;
+}
+
+.pinnedCardAdd {
+  background: transparent;
+  border-style: dashed;
+  color: var(--mantine-color-gray-6);
+  display: grid;
+  place-items: center;
+}
+
+.pinnedCardAdd:hover {
+  color: var(--mantine-color-teal-7);
+  background: transparent;
+}
+
+.pinnedAddInner {
+  width: 100%;
+}

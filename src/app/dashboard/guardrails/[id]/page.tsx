@@ -1,9 +1,9 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import Link from 'next/link';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import {
+  ActionIcon,
   Badge,
   Box,
   Button,
@@ -13,6 +13,7 @@ import {
   Divider,
   Group,
   Loader,
+  Menu,
   Modal,
   Paper,
   Select,
@@ -27,18 +28,19 @@ import {
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import {
-  IconArrowLeft,
   IconCheck,
   IconChartBar,
   IconCode,
   IconCopy,
+  IconDots,
   IconPlayerPlay,
   IconSettings,
   IconShield,
   IconShieldOff,
   IconTrash,
 } from '@tabler/icons-react';
-import PageHeader from '@/components/layout/PageHeader';
+import DetailShell from '@/components/common/ui/DetailShell';
+import StatusBadge from '@/components/common/ui/StatusBadge';
 import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
 import GuardrailPolicyEditor from '@/components/guardrails/GuardrailPolicyEditor';
 import GuardrailEvaluatePanel from '@/components/guardrails/GuardrailEvaluatePanel';
@@ -242,41 +244,89 @@ export default function GuardrailDetailPage() {
   const typeColor = guardrail.type === 'preset' ? 'violet' : 'teal';
   const actionColor = { block: 'red', warn: 'orange', flag: 'blue' }[guardrail.action] ?? 'gray';
 
+  const headerActions = (
+    <Menu withinPortal position="bottom-end" withArrow>
+      <Menu.Target>
+        <ActionIcon variant="default" radius="md" size="lg" aria-label="More">
+          <IconDots size={15} stroke={1.7} />
+        </ActionIcon>
+      </Menu.Target>
+      <Menu.Dropdown>
+        <Menu.Item
+          color="red"
+          leftSection={<IconTrash size={14} />}
+          onClick={() => setDeleteOpen(true)}
+        >
+          Delete guardrail
+        </Menu.Item>
+      </Menu.Dropdown>
+    </Menu>
+  );
+
   return (
     <>
-      <PageHeader
-        icon={<IconShield size={20} />}
-        iconColor={typeColor}
-        title={guardrail.name}
-        subtitle={guardrail.description || `${guardrail.type} guardrail · ${guardrail.target} · ${guardrail.action}`}
-        actions={
-          <Group gap="sm">
-            <Badge variant="light" color={typeColor}>{guardrail.type}</Badge>
-            <Badge variant="light" color={actionColor}>{guardrail.action}</Badge>
-            <Badge variant="light" color={guardrail.enabled ? 'teal' : 'gray'}>
-              {guardrail.enabled ? 'Active' : 'Disabled'}
-            </Badge>
-            <Button
-              variant="subtle"
-              color="red"
-              size="xs"
-              leftSection={<IconTrash size={14} />}
-              onClick={() => setDeleteOpen(true)}
-            >
-              Delete
-            </Button>
-            <Button
-              component={Link}
-              href="/dashboard/guardrails"
-              variant="default"
-              size="xs"
-              leftSection={<IconArrowLeft size={14} />}
-            >
-              Back
-            </Button>
-          </Group>
+      <DetailShell
+        backHref="/dashboard/guardrails"
+        backLabel="Back to guardrails"
+        icon={
+          <div
+            style={{
+              width: 48,
+              height: 48,
+              borderRadius: 10,
+              background: 'var(--ds-accent-soft)',
+              color: 'var(--ds-accent)',
+              display: 'grid',
+              placeItems: 'center',
+            }}
+          >
+            <IconShield size={22} stroke={1.7} />
+          </div>
         }
-      />
+        title={
+          <>
+            <h1 className="ds-h2" style={{ margin: 0, whiteSpace: 'nowrap' }}>
+              {guardrail.name}
+            </h1>
+            <StatusBadge
+              status={guardrail.enabled ? 'ok' : 'paused'}
+              label={guardrail.enabled ? 'Active' : 'Disabled'}
+            />
+            <span className="ds-badge ds-badge-info">{guardrail.type}</span>
+            <span
+              className={`ds-badge ${
+                guardrail.action === 'block'
+                  ? 'ds-badge-err'
+                  : guardrail.action === 'warn'
+                    ? 'ds-badge-warn'
+                    : 'ds-badge-info'
+              }`}
+            >
+              {guardrail.action}
+            </span>
+          </>
+        }
+        meta={
+          <>
+            <span className="ds-mono">{guardrail.key}</span>
+            <span className="ds-faint">·</span>
+            <span>target: <span className="ds-mono">{guardrail.target}</span></span>
+            {guardrail.modelKey ? (
+              <>
+                <span className="ds-faint">·</span>
+                <span>model: <span className="ds-mono">{guardrail.modelKey}</span></span>
+              </>
+            ) : null}
+            {guardrail.description ? (
+              <>
+                <span className="ds-faint">·</span>
+                <span>{guardrail.description}</span>
+              </>
+            ) : null}
+          </>
+        }
+        actions={headerActions}
+      >
 
       <Tabs value={activeTab} onChange={(v) => setActiveTab(v ?? 'dashboard')} mt="md">
         <Tabs.List mb="md">
@@ -655,6 +705,7 @@ if not result["passed"]:
           </Stack>
         </Tabs.Panel>
       </Tabs>
+      </DetailShell>
 
       {/* Delete confirmation */}
       <Modal

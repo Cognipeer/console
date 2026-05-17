@@ -64,6 +64,7 @@ export default defineConfig({
             { text: 'Multi-Tenancy', link: '/guide/multi-tenancy' },
             { text: 'Authentication', link: '/guide/authentication' },
             { text: 'Providers', link: '/guide/providers' },
+            { text: 'Model Hub', link: '/guide/model-hub' },
             { text: 'Model Inference', link: '/guide/inference' },
             { text: 'Vector Stores', link: '/guide/vector-stores' },
             { text: 'Agent Tracing', link: '/guide/tracing' },

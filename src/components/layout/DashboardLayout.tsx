@@ -1,43 +1,32 @@
 'use client';
 
-import Image from 'next/image';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import {
   ActionIcon,
   AppShell,
-  Avatar,
   Button,
-  Divider,
   Group,
-  Menu,
-  SimpleGrid,
   Stack,
   Text,
-  ThemeIcon,
-  Tooltip,
-  UnstyledButton,
 } from '@mantine/core';
-import { useDisclosure, useMediaQuery } from '@mantine/hooks';
+import { useDisclosure } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
-import {
-  IconChevronDown,
-  IconExternalLink,
-  IconLayoutDashboard,
-  IconLogout,
-  IconSearch,
-  IconSettings,
-  IconFolder,
-  IconBook,
-  IconCertificate,
-  IconX,
-} from '@tabler/icons-react';
-import { ReactNode, useMemo, useState } from 'react';
+import { IconExternalLink, IconX } from '@tabler/icons-react';
+import { ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
 import DashboardBreadcrumbs from './DashboardBreadcrumbs';
-import { GlobalSearch, openGlobalSearch } from './GlobalSearch';
+import CommandPalette, { openCommandPalette } from './CommandPalette';
+import SlimRail from './launcher/SlimRail';
+import TopbarV2 from './launcher/TopbarV2';
+import ServiceLauncher from './launcher/ServiceLauncher';
+import ServiceSubNav, {
+  SUBNAV_CONFIG,
+  findServiceForPath,
+} from './launcher/ServiceSubNav';
+import { useLauncherState } from './launcher/useLauncherState';
+import { LauncherProvider } from './launcher/LauncherContext';
 import { useTranslations } from '@/lib/i18n';
-import classes from './DashboardLayout.module.css';
-import ProjectSelector from '@/components/projects/ProjectSelector';
+import classes from './launcher/LauncherShell.module.css';
 import { DocsDrawerProvider } from '@/components/docs/DocsDrawerContext';
 import { DEFAULT_SDK_DOC, resolveSdkDoc, type SdkDocId } from '@/lib/docs/sdkDocs';
 import { getDashboardServices } from '@/lib/utils/dashboardServices';
@@ -56,23 +45,24 @@ interface DashboardLayoutProps {
 
 export default function DashboardLayout({ children, user }: DashboardLayoutProps) {
   const router = useRouter();
+  const pathname = usePathname() ?? '';
   const [docsOpened, docsControls] = useDisclosure(false);
   const [docsDocId, setDocsDocId] = useState<SdkDocId>(DEFAULT_SDK_DOC);
-  const isMobile = useMediaQuery('(max-width: 48em)');
-  const pathname = usePathname();
+  const [launcherOpen, setLauncherOpen] = useState(false);
   const t = useTranslations('layout');
-  const tNav = useTranslations('navigation');
   const tNotifications = useTranslations('notifications');
-  const tAccount = useTranslations('account');
 
   const activeDoc = useMemo(() => resolveSdkDoc(docsDocId), [docsDocId]);
 
-  const openDocs = (docId?: SdkDocId) => {
-    setDocsDocId(docId ?? DEFAULT_SDK_DOC);
-    docsControls.open();
-  };
+  const openDocs = useCallback(
+    (docId?: SdkDocId) => {
+      setDocsDocId(docId ?? DEFAULT_SDK_DOC);
+      docsControls.open();
+    },
+    [docsControls],
+  );
 
-  const handleLogout = async () => {
+  const handleLogout = useCallback(async () => {
     try {
       await fetch('/api/auth/logout', { method: 'POST' });
       notifications.show({
@@ -88,7 +78,7 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
         color: 'red',
       });
     }
-  };
+  }, [router, tNotifications]);
 
   const defaultUser = user || {
     name: t('defaultUser.name'),
@@ -100,319 +90,210 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
 
   const isTenantAdmin = defaultUser.role === 'owner' || defaultUser.role === 'admin';
 
-  const serviceItems = useMemo(
+  const allowedServices = useMemo(
     () =>
       getDashboardServices({
         isTenantAdmin,
         role: defaultUser.role,
         servicePermissions: defaultUser.servicePermissions,
-      }).map((service) => ({
-        label: tNav(service.navLabelKey),
-        description: tNav(service.navDescriptionKey),
-        icon: service.icon,
-        href: service.href,
-      })),
-    [defaultUser.role, defaultUser.servicePermissions, isTenantAdmin, tNav],
+      }),
+    [defaultUser.role, defaultUser.servicePermissions, isTenantAdmin],
   );
 
-  const handleNavClick = (href?: string) => {
-    if (!href) return;
+  const defaultPinnedIds = useMemo(
+    () =>
+      allowedServices
+        .filter((svc) => svc.defaultPinned && svc.id !== 'services-home')
+        .map((svc) => svc.id),
+    [allowedServices],
+  );
 
-    if (href === '/dashboard/docs') {
-      openDocs(DEFAULT_SDK_DOC);
-      if (isMobile) {
-        close();
-      }
-      return;
+  const { pinned, recents, togglePin, recordVisit, hydrated } =
+    useLauncherState(defaultPinnedIds);
+
+  const pinnedServices = useMemo(
+    () =>
+      allowedServices.filter((svc) => pinned.has(svc.id) && svc.id !== 'services-home'),
+    [allowedServices, pinned],
+  );
+
+  const recentServices = useMemo(() => {
+    const byId = new Map(allowedServices.map((svc) => [svc.id as string, svc]));
+    return recents
+      .map((id) => byId.get(id))
+      .filter((svc): svc is NonNullable<typeof svc> => !!svc)
+      .filter((svc) => !pinned.has(svc.id))
+      .slice(0, 4);
+  }, [allowedServices, pinned, recents]);
+
+  const activeService = useMemo(
+    () => findServiceForPath(allowedServices, pathname),
+    [allowedServices, pathname],
+  );
+
+  useEffect(() => {
+    if (activeService) {
+      recordVisit(activeService.id);
     }
+  }, [activeService, recordVisit]);
 
-    router.push(href);
-  };
+  const hasSubnav = Boolean(activeService && SUBNAV_CONFIG[activeService.id]);
+
+  const handleNavigate = useCallback(
+    (href: string) => {
+      if (href === '/dashboard/docs') {
+        openDocs(DEFAULT_SDK_DOC);
+        return;
+      }
+      router.push(href);
+    },
+    [openDocs, router],
+  );
+
+  const docsAside = (
+    <AppShell.Aside p="md" withBorder>
+      <Stack gap="md" h="100%" style={{ minHeight: 0 }}>
+        <Group justify="space-between" align="center" wrap="nowrap">
+          <div style={{ minWidth: 0 }}>
+            <Text fw={600}>Documentation</Text>
+            <Text size="sm" c="dimmed" mt={4} lineClamp={1}>
+              {activeDoc.title}
+            </Text>
+          </div>
+          <Group gap="xs" wrap="nowrap">
+            <Button
+              component={Link}
+              href={activeDoc.url}
+              target="_blank"
+              rel="noreferrer"
+              variant="light"
+              leftSection={<IconExternalLink size={16} />}
+            >
+              Open
+            </Button>
+            <ActionIcon
+              variant="light"
+              aria-label="Close documentation"
+              onClick={docsControls.close}
+            >
+              <IconX size={16} />
+            </ActionIcon>
+          </Group>
+        </Group>
+
+        <div style={{ flex: 1, minHeight: 0 }}>
+          <iframe
+            title={activeDoc.title}
+            src={activeDoc.url}
+            style={{ width: '100%', height: '100%', border: 0, borderRadius: 12 }}
+            sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+          />
+        </div>
+      </Stack>
+    </AppShell.Aside>
+  );
+
+  const launcherContextValue = useMemo(
+    () => ({
+      pinned,
+      recents,
+      togglePin,
+      recordVisit,
+      services: allowedServices,
+      pinnedServices,
+      recentServices,
+      isTenantAdmin,
+      openLauncher: () => setLauncherOpen(true),
+    }),
+    [
+      pinned,
+      recents,
+      togglePin,
+      recordVisit,
+      allowedServices,
+      pinnedServices,
+      recentServices,
+      isTenantAdmin,
+    ],
+  );
 
   return (
     <DocsDrawerProvider value={{ openDocs }}>
-      <GlobalSearch isTenantAdmin={isTenantAdmin} />
+      <LauncherProvider value={launcherContextValue}>
+      <CommandPalette isTenantAdmin={isTenantAdmin} />
       <AppShell
-        header={{ height: 68 }}
+        header={{ height: 0 }}
         aside={{
           width: 560,
           breakpoint: 'md',
           collapsed: { desktop: !docsOpened, mobile: !docsOpened },
         }}
-        padding="md"
+        padding={0}
+        styles={{
+          main: {
+            paddingTop: 0,
+            paddingBottom: 0,
+            paddingLeft: 0,
+            paddingRight: 0,
+            height: '100vh',
+            minHeight: '100vh',
+            overflow: 'hidden',
+          },
+        }}
       >
-        <AppShell.Header className={classes.header}>
-          <Group h="100%" px="md" justify="space-between" wrap="nowrap">
-            {/* Left: Logo + Navigation */}
-            <Group gap="md" wrap="nowrap">
-              <Link href="/" className={classes.headerLogo} aria-label="Cognipeer dashboard">
-                <Image
-                  src="/images/cognipeer-logo-d.png"
-                  alt="Cognipeer logo"
-                  width={140}
-                  height={32}
-                  className={classes.logoDark}
-                  priority
-                />
-                <Image
-                  src="/images/cognipeer-logo-w.png"
-                  alt="Cognipeer logo"
-                  width={140}
-                  height={32}
-                  className={classes.logoLight}
-                  priority
-                />
-              </Link>
-
-              <Divider orientation="vertical" visibleFrom="sm" />
-
-              <Group gap="xs" visibleFrom="sm">
-                <Button
-                  variant={pathname?.startsWith('/dashboard/overview') ? 'filled' : 'subtle'}
-                  size="sm"
-                  leftSection={<IconLayoutDashboard size={16} />}
-                  onClick={() => handleNavClick('/dashboard/overview')}
-                >
-                  {tNav('dashboardOverview')}
-                </Button>
-
-                <Menu position="bottom-start" withinPortal shadow="md">
-                  <Menu.Target>
-                    <Button
-                      variant="subtle"
-                      size="sm"
-                      rightSection={<IconChevronDown size={14} />}
-                    >
-                      {tNav('services')}
-                    </Button>
-                  </Menu.Target>
-                  <Menu.Dropdown className={classes.servicesMenu}>
-                    <div className={classes.servicesGrid}>
-                      <Text size="xs" c="dimmed" tt="uppercase" fw={600} mb={8}>
-                        {tNav('servicesLabel')}
-                      </Text>
-                      <SimpleGrid cols={2} spacing="xs">
-                        {serviceItems.map((item) => (
-                          <UnstyledButton
-                            key={item.href}
-                            className={classes.servicesCard}
-                            onClick={() => handleNavClick(item.href)}
-                          >
-                            <Group gap="sm" align="flex-start" wrap="nowrap">
-                              <ThemeIcon size={34} radius="md" variant="light" color="gray">
-                                <item.icon size={18} />
-                              </ThemeIcon>
-                              <div>
-                                <Text fw={600} size="sm">
-                                  {item.label}
-                                </Text>
-                                <Text size="xs" c="dimmed" lineClamp={2}>
-                                  {item.description}
-                                </Text>
-                              </div>
-                            </Group>
-                          </UnstyledButton>
-                        ))}
-                      </SimpleGrid>
-                    </div>
-                  </Menu.Dropdown>
-                </Menu>
-              </Group>
-
-              {/* Mobile menu */}
-              <Group gap="xs" hiddenFrom="sm">
-                <ActionIcon
-                  variant={pathname?.startsWith('/dashboard/overview') ? 'filled' : 'light'}
-                  radius="md"
-                  onClick={() => handleNavClick('/dashboard/overview')}
-                  aria-label={tNav('dashboardOverview')}
-                >
-                  <IconLayoutDashboard size={18} />
-                </ActionIcon>
-
-                <Menu position="bottom-start" withinPortal shadow="md">
-                  <Menu.Target>
-                    <ActionIcon variant="light" radius="md" aria-label={tNav('services')}>
-                      <IconFolder size={18} />
-                    </ActionIcon>
-                  </Menu.Target>
-                  <Menu.Dropdown className={classes.servicesMenuMobile}>
-                    <div className={classes.servicesGrid}>
-                      <Text size="xs" c="dimmed" tt="uppercase" fw={600} mb={8}>
-                        {tNav('servicesLabel')}
-                      </Text>
-                      <Stack gap="xs">
-                        {serviceItems.map((item) => (
-                          <UnstyledButton
-                            key={item.href}
-                            className={classes.servicesCard}
-                            onClick={() => handleNavClick(item.href)}
-                          >
-                            <Group gap="sm" wrap="nowrap">
-                              <ThemeIcon size={32} radius="md" variant="light" color="gray">
-                                <item.icon size={16} />
-                              </ThemeIcon>
-                              <Text fw={500} size="sm">
-                                {item.label}
-                              </Text>
-                            </Group>
-                          </UnstyledButton>
-                        ))}
-                      </Stack>
-                    </div>
-                  </Menu.Dropdown>
-                </Menu>
-              </Group>
-            </Group>
-
-            {/* Center: Search */}
-            <UnstyledButton
-              visibleFrom="md"
-              onClick={openGlobalSearch}
-              className={classes.searchButton}
-              style={{ flex: 1, maxWidth: 400 }}
-            >
-              <Group gap="xs" wrap="nowrap">
-                <IconSearch size={16} color="var(--mantine-color-dimmed)" />
-                <Text size="sm" c="dimmed">
-                  {tNav('globalSearchPlaceholder')}
-                </Text>
-                <Text size="xs" c="dimmed" ml="auto" className={classes.searchShortcut}>
-                  ⌘K
-                </Text>
-              </Group>
-            </UnstyledButton>
-
-            {/* Mobile Search */}
-            <Tooltip label={tNav('globalSearchPlaceholder')} withArrow hiddenFrom="md">
-              <ActionIcon
-                hiddenFrom="md"
-                variant="light"
-                radius="md"
-                onClick={openGlobalSearch}
-                aria-label={tNav('globalSearchPlaceholder')}
-              >
-                <IconSearch size={18} />
-              </ActionIcon>
-            </Tooltip>
-
-            {/* Right: Project, Docs, Account */}
-            <Group gap="sm" wrap="nowrap">
-              <ProjectSelector />
-
-              <Tooltip label={tNav('docs')} withArrow>
-                <ActionIcon
-                  variant="light"
-                  radius="md"
-                  onClick={() => openDocs(DEFAULT_SDK_DOC)}
-                  aria-label={tNav('docs')}
-                >
-                  <IconBook size={18} />
-                </ActionIcon>
-              </Tooltip>
-
-              <Menu shadow="md" width={220} position="bottom-end">
-                <Menu.Target>
-                  <UnstyledButton className={classes.accountButton}>
-                    <Group gap="xs" wrap="nowrap">
-                      <Avatar color="gray" radius="xl" size="sm">
-                        {defaultUser.name.charAt(0)}
-                      </Avatar>
-                      <div className={classes.accountDetails}>
-                        <Text size="sm" fw={500} lineClamp={1}>
-                          {defaultUser.name}
-                        </Text>
-                        <Text c="dimmed" size="xs">
-                          {defaultUser.licenseType}
-                        </Text>
-                      </div>
-                      <IconChevronDown size={14} />
-                    </Group>
-                  </UnstyledButton>
-                </Menu.Target>
-
-                <Menu.Dropdown>
-                  <Menu.Label>{tAccount('menuLabel')}</Menu.Label>
-                  <Menu.Item
-                    leftSection={<IconSettings size={14} />}
-                    onClick={() => handleNavClick('/dashboard/tokens')}
-                  >
-                    {tAccount('settings')}
-                  </Menu.Item>
-                  {isTenantAdmin ? (
-                    <Menu.Item
-                      leftSection={<IconCertificate size={14} />}
-                      onClick={() => handleNavClick('/dashboard/license')}
-                    >
-                      {tAccount('license')}
-                    </Menu.Item>
-                  ) : null}
-                  <Menu.Divider />
-                  <Menu.Item
-                    color="red"
-                    leftSection={<IconLogout size={14} />}
-                    onClick={handleLogout}
-                  >
-                    {tAccount('logout')}
-                  </Menu.Item>
-                </Menu.Dropdown>
-              </Menu>
-            </Group>
-          </Group>
-        </AppShell.Header>
-
         <AppShell.Main>
-          <Stack gap="md">
-            <Group gap="sm" align="center" justify="space-between">
-              <Group gap="sm" align="center">
+          <div className={`${classes.shell} ${hasSubnav ? classes.shellWithSubnav : ''}`}>
+            <TopbarV2
+              user={defaultUser}
+              isTenantAdmin={isTenantAdmin}
+              onSearchClick={openCommandPalette}
+              onLauncherClick={() => setLauncherOpen(true)}
+              onDocsClick={() => openDocs(DEFAULT_SDK_DOC)}
+              onLogout={handleLogout}
+              onNavigate={handleNavigate}
+            />
+
+            <SlimRail
+              pinned={pinnedServices}
+              recents={recentServices}
+              activeServiceId={activeService?.id ?? null}
+              onLauncherClick={() => setLauncherOpen(true)}
+            />
+
+            {activeService && hasSubnav ? (
+              <ServiceSubNav
+                service={activeService}
+                pathname={pathname}
+                isPinned={pinned.has(activeService.id)}
+                onTogglePin={() => togglePin(activeService.id)}
+                onOpenDocs={() => openDocs(DEFAULT_SDK_DOC)}
+              />
+            ) : null}
+
+            <main className={classes.main}>
+              <div className={classes.mainBreadcrumb}>
                 <DashboardBreadcrumbs />
-              </Group>
-            </Group>
-            {children}
-          </Stack>
+              </div>
+              {children}
+            </main>
+          </div>
+
+          {hydrated ? (
+            <ServiceLauncher
+              open={launcherOpen}
+              onClose={() => setLauncherOpen(false)}
+              services={allowedServices}
+              recents={recentServices}
+              pinnedIds={pinned}
+              onTogglePin={togglePin}
+              onSelect={(svc) => router.push(svc.href)}
+            />
+          ) : null}
         </AppShell.Main>
 
-        <AppShell.Aside p="md" withBorder>
-          <Stack gap="md" h="100%" style={{ minHeight: 0 }}>
-            <Group justify="space-between" align="center" wrap="nowrap">
-              <div style={{ minWidth: 0 }}>
-                <Text fw={600}>Documentation</Text>
-                <Text size="sm" c="dimmed" mt={4} lineClamp={1}>
-                  {activeDoc.title}
-                </Text>
-              </div>
-              <Group gap="xs" wrap="nowrap">
-                <Button
-                  component={Link}
-                  href={activeDoc.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  variant="light"
-                  leftSection={<IconExternalLink size={16} />}
-                >
-                  Open
-                </Button>
-                <ActionIcon
-                  variant="light"
-                  aria-label="Close documentation"
-                  onClick={docsControls.close}
-                >
-                  <IconX size={16} />
-                </ActionIcon>
-              </Group>
-            </Group>
-
-            <div style={{ flex: 1, minHeight: 0 }}>
-              <iframe
-                title={activeDoc.title}
-                src={activeDoc.url}
-                style={{ width: '100%', height: '100%', border: 0, borderRadius: 12 }}
-                sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
-              />
-            </div>
-          </Stack>
-        </AppShell.Aside>
+        {docsAside}
       </AppShell>
+      </LauncherProvider>
     </DocsDrawerProvider>
   );
 }

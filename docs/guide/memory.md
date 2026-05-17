@@ -1,6 +1,16 @@
 # Memory
 
-The memory service provides semantic memory stores for AI agents — enabling them to remember context across conversations using vector-based storage and retrieval.
+The memory service provides semantic memory stores for AI agents — enabling them to remember context across conversations using vector-based storage and retrieval. Operators manage stores under **Data → Agent Memory**.
+
+## Agent Memory
+
+A *memory store* is the unit that binds an embedding model to a vector index — it's where individual memory items live, scoped to a project. The list view shows total stores, total memories across all stores, and how many stores are currently active.
+
+![Agent Memory list](/screenshots/memory/01-memory-list.png)
+
+Creating the first store requires two prerequisites: a vector provider configured in [Knowledge Index](/guide/vector-stores) and an embedding model deployed in [Model Hub](/guide/model-hub). The **Create First Store** flow walks you through both — it'll halt and point to the missing piece if either isn't ready.
+
+Once a store exists, every memory item carries content, free-form tags, an importance score, and an optional scope. Agents read from the store via the `search()` and `recall()` APIs documented below — `recall()` is the chat-optimised variant that respects a max-tokens budget.
 
 ## Concepts
 

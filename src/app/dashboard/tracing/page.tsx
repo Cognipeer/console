@@ -7,8 +7,6 @@ import {
   Group,
   Text,
   Button,
-  SimpleGrid,
-  Paper,
   Loader,
   Center,
   Badge,
@@ -32,7 +30,9 @@ import {
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import SessionTable from '@/components/tracing/SessionTable';
-import PageHeader from '@/components/layout/PageHeader';
+import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
+import StatTile from '@/components/common/ui/StatTile';
+import StatusBadge from '@/components/common/ui/StatusBadge';
 import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
 import CollapsibleInfo from '@/components/layout/CollapsibleInfo';
 import {
@@ -155,104 +155,61 @@ export default function AgentTracingPage() {
   const toolItems = analytics?.tools?.items || [];
   const agentAnalytics = analytics?.agents || [];
   const dailyRows = (analytics?.daily || []).slice(-7);
+  const errorRateHigh = toolTotals.errorRate > 0.1;
 
   return (
-    <Stack gap="md">
+    <PageContainer>
       {/* Header */}
       <PageHeader
-        icon={<IconActivity size={18} />}
+        eyebrow="Operate · Tracing"
         title={tNav('agentTracing')}
         subtitle={t('list.subtitle')}
         actions={
           <>
             <DashboardDateFilter value={dateFilter} onChange={setDateFilter} />
             <Button
-              variant="light"
-              size="xs"
+              variant="default"
+              size="sm"
               onClick={() => fetchDashboard(true)}
               loading={refreshing}
-              leftSection={<IconRefresh size={14} />}>
+              leftSection={<IconRefresh size={14} stroke={1.7} />}>
               Refresh
             </Button>
           </>
         }
       />
 
-      {/* Stats Cards */}
-      <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>
-        <Paper withBorder radius="lg" p="lg">
-          <Group justify="space-between">
-            <Stack gap={4}>
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
-                Total Sessions
-              </Text>
-              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }}>
-                {formatNumber(totals.sessionsCount)}
-              </Text>
-              <Text size="xs" c="dimmed">
-                Active agents: {formatNumber(recentAgentsTotal)}
-              </Text>
-            </Stack>
-            <ThemeIcon size={48} radius="xl" variant="light" color="teal">
-              <IconActivity size={24} />
-            </ThemeIcon>
-          </Group>
-        </Paper>
-        <Paper withBorder radius="lg" p="lg">
-          <Group justify="space-between">
-            <Stack gap={4}>
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
-                Total Tokens
-              </Text>
-              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="teal">
-                {formatNumber(totals.totalTokens)}
-              </Text>
-              <Text size="xs" c="dimmed">
-                Avg: {formatNumber(totals.averageTokensPerSession)}/session
-              </Text>
-            </Stack>
-            <ThemeIcon size={48} radius="xl" variant="light" color="teal">
-              <IconCpu size={24} />
-            </ThemeIcon>
-          </Group>
-        </Paper>
-        <Paper withBorder radius="lg" p="lg">
-          <Group justify="space-between">
-            <Stack gap={4}>
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
-                Total Events
-              </Text>
-              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="cyan">
-                {formatNumber(totals.totalEvents)}
-              </Text>
-              <Text size="xs" c="dimmed">
-                Avg duration: {formatDuration(totals.averageDurationMs)}
-              </Text>
-            </Stack>
-            <ThemeIcon size={48} radius="xl" variant="light" color="cyan">
-              <IconMessage size={24} />
-            </ThemeIcon>
-          </Group>
-        </Paper>
-        <Paper withBorder radius="lg" p="lg">
-          <Group justify="space-between">
-            <Stack gap={4}>
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
-                Tool Error Rate
-              </Text>
-              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c={toolTotals.errorRate > 0.1 ? 'red' : 'green'}>
-                {formatPercent(toolTotals.errorRate)}
-              </Text>
-              <Text size="xs" c="dimmed">
-                {formatNumber(toolTotals.totalCalls)} total calls
-              </Text>
-            </Stack>
-            <ThemeIcon size={48} radius="xl" variant="light" color={toolTotals.errorRate > 0.1 ? 'red' : 'green'}>
-              <IconAlertTriangle size={24} />
-            </ThemeIcon>
-          </Group>
-        </Paper>
-      </SimpleGrid>
+      {/* Stat tiles */}
+      <div className="ds-stat-grid">
+        <StatTile
+          label="Total Sessions"
+          icon={<IconActivity size={14} stroke={1.7} />}
+          value={formatNumber(totals.sessionsCount)}
+          delta={`Active agents: ${formatNumber(recentAgentsTotal)}`}
+        />
+        <StatTile
+          label="Total Tokens"
+          icon={<IconCpu size={14} stroke={1.7} />}
+          value={formatNumber(totals.totalTokens)}
+          delta={`Avg: ${formatNumber(totals.averageTokensPerSession)}/session`}
+        />
+        <StatTile
+          label="Total Events"
+          icon={<IconMessage size={14} stroke={1.7} />}
+          value={formatNumber(totals.totalEvents)}
+          delta={`Avg duration: ${formatDuration(totals.averageDurationMs)}`}
+        />
+        <StatTile
+          label="Tool Error Rate"
+          icon={<IconAlertTriangle size={14} stroke={1.7} />}
+          value={
+            <span style={{ color: errorRateHigh ? 'var(--ds-err)' : 'var(--ds-ok)' }}>
+              {formatPercent(toolTotals.errorRate)}
+            </span>
+          }
+          delta={`${formatNumber(toolTotals.totalCalls)} total calls`}
+        />
+      </div>
 
       {/* Quick Start Info Card */}
       <CollapsibleInfo
@@ -289,24 +246,24 @@ export default function AgentTracingPage() {
             Prefer HTTP? Generate an API key under{' '}
             <Anchor href="/dashboard/tokens" size="xs">API Tokens</Anchor>{' '}
             and POST your agent payloads to{' '}
-            <Text component="span" ff="monospace" size="xs" style={{ backgroundColor: 'var(--mantine-color-gray-1)', padding: '1px 4px', borderRadius: 3 }}>
+            <span className="ds-mono" style={{ background: 'var(--ds-surface-raised)', padding: '1px 4px', borderRadius: 3 }}>
               /api/client/tracing/sessions
-            </Text>
+            </span>
           </Text>
         </Stack>
       </CollapsibleInfo>
 
       {/* Analytics Section */}
-      <Paper p="lg" radius="lg" withBorder>
-        <Group justify="space-between" mb="lg">
-          <div>
-            <Text fw={600} size="lg">Workspace Analytics</Text>
-            <Text size="sm" c="dimmed">Usage summaries across all agents</Text>
+      <div className="ds-card ds-card-pad-lg">
+        <div style={{ marginBottom: 16 }}>
+          <div className="ds-h3">Workspace Analytics</div>
+          <div className="ds-muted" style={{ fontSize: 12.5, marginTop: 2 }}>
+            Usage summaries across all agents
           </div>
-        </Group>
+        </div>
 
         {/* Daily Trend */}
-        <Text fw={600} size="sm" mb="sm">Recent Trend (Last 7 Days)</Text>
+        <div className="ds-h4" style={{ marginBottom: 10 }}>Recent Trend (Last 7 Days)</div>
         <Box mb="lg" style={{ borderRadius: 'var(--mantine-radius-md)', overflow: 'hidden' }}>
           <Table verticalSpacing="sm" horizontalSpacing="md" highlightOnHover>
             <Table.Thead style={{ backgroundColor: 'var(--mantine-color-gray-0)' }}>
@@ -349,13 +306,19 @@ export default function AgentTracingPage() {
         </Box>
 
         {/* Status, Models, Tools Breakdown */}
-        <SimpleGrid cols={{ base: 1, md: 2, xl: 4 }} spacing="md">
-          <Paper withBorder p="md" radius="lg">
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
+            gap: 14,
+          }}
+        >
+          <div className="ds-card ds-card-pad">
             <Group gap="sm" mb="md">
               <ThemeIcon size={32} radius="md" variant="light" color="teal">
                 <IconChartBar size={16} />
               </ThemeIcon>
-              <Text fw={600}>Status Breakdown</Text>
+              <div className="ds-h4">Status Breakdown</div>
             </Group>
             <Stack gap={8}>
               {(analytics?.statuses || []).map((item) => (
@@ -372,13 +335,13 @@ export default function AgentTracingPage() {
                 </Text>
               )}
             </Stack>
-          </Paper>
-          <Paper withBorder p="md" radius="lg">
+          </div>
+          <div className="ds-card ds-card-pad">
             <Group gap="sm" mb="md">
               <ThemeIcon size={32} radius="md" variant="light" color="teal">
                 <IconCpu size={16} />
               </ThemeIcon>
-              <Text fw={600}>Top Models</Text>
+              <div className="ds-h4">Top Models</div>
             </Group>
             <Stack gap={8}>
               {(analytics?.models || []).slice(0, 6).map((item) => (
@@ -397,13 +360,13 @@ export default function AgentTracingPage() {
                 </Text>
               )}
             </Stack>
-          </Paper>
-          <Paper withBorder p="md" radius="lg">
+          </div>
+          <div className="ds-card ds-card-pad">
             <Group gap="sm" mb="md">
               <ThemeIcon size={32} radius="md" variant="light" color="orange">
                 <IconPlug size={16} />
               </ThemeIcon>
-              <Text fw={600}>Tool Summary</Text>
+              <div className="ds-h4">Tool Summary</div>
             </Group>
             <Stack gap={8}>
               {toolItems.slice(0, 6).map((item) => (
@@ -434,14 +397,14 @@ export default function AgentTracingPage() {
                 </Text>
               )}
             </Stack>
-          </Paper>
+          </div>
 
-          <Paper withBorder p="md" radius="lg">
+          <div className="ds-card ds-card-pad">
             <Group gap="sm" mb="md">
               <ThemeIcon size={32} radius="md" variant="light" color="blue">
                 <IconRobot size={16} />
               </ThemeIcon>
-              <Text fw={600}>Top Token Consumers</Text>
+              <div className="ds-h4">Top Token Consumers</div>
             </Group>
             <Stack gap={8}>
               {agentAnalytics.slice(0, 6).map((item: AgentTracingAgentSummary) => (
@@ -465,30 +428,28 @@ export default function AgentTracingPage() {
                 </Text>
               )}
             </Stack>
-          </Paper>
-        </SimpleGrid>
-      </Paper>
+          </div>
+        </div>
+      </div>
 
       {/* Recent Agents */}
-      <Paper p="lg" radius="lg" withBorder>
-        <Group justify="space-between" align="center" mb="md">
+      <div className="ds-card ds-card-pad-lg">
+        <div className="ds-row-between" style={{ marginBottom: 16 }}>
           <div>
             <Group gap="sm">
               <ThemeIcon size={32} radius="md" variant="light" color="teal">
                 <IconRobot size={18} />
               </ThemeIcon>
               <div>
-                <Text fw={600} size="lg">Recently Active Agents</Text>
-                <Text size="sm" c="dimmed">
+                <div className="ds-h3">Recently Active Agents</div>
+                <div className="ds-muted" style={{ fontSize: 12.5, marginTop: 2 }}>
                   Showing up to {recentAgents.length} agents by recent activity
-                </Text>
+                </div>
               </div>
             </Group>
           </div>
-          <Badge size="lg" variant="light" color="teal">
-            {formatNumber(recentAgentsTotal)} total
-          </Badge>
-        </Group>
+          <StatusBadge status="info" label={`${formatNumber(recentAgentsTotal)} total`} withDot={false} />
+        </div>
 
         {recentAgents.length === 0 ? (
           <Center py="xl">
@@ -500,17 +461,30 @@ export default function AgentTracingPage() {
             </Stack>
           </Center>
         ) : (
-          <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="md">
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
+              gap: 14,
+            }}
+          >
             {recentAgents.map((item) => {
               const statusColor = resolveStatusColor(item.latestStatus);
               return (
-                <Paper
+                <div
                   key={item.name}
-                  withBorder
-                  radius="lg"
-                  p="md"
+                  className="ds-card ds-card-pad"
                   style={{ cursor: 'pointer', transition: 'all 0.2s ease' }}
-                  onClick={() => handleAgentClick(item.name)}>
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => handleAgentClick(item.name)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      handleAgentClick(item.name);
+                    }
+                  }}>
+
                   <Stack gap={8}>
                     <Group justify="space-between" align="center">
                       <Group gap="sm">
@@ -543,19 +517,21 @@ export default function AgentTracingPage() {
                       </Text>
                     </Stack>
                   </Stack>
-                </Paper>
+                </div>
               );
             })}
-          </SimpleGrid>
+          </div>
         )}
-      </Paper>
+      </div>
 
       {/* Recent Sessions */}
-      <Paper p="lg" radius="lg" withBorder>
-        <Group justify="space-between" align="center" mb="md">
+      <div className="ds-card ds-card-pad-lg">
+        <div className="ds-row-between" style={{ marginBottom: 16 }}>
           <div>
-            <Text fw={600} size="lg">Recent Sessions</Text>
-            <Text size="sm" c="dimmed">Latest agent execution sessions</Text>
+            <div className="ds-h3">Recent Sessions</div>
+            <div className="ds-muted" style={{ fontSize: 12.5, marginTop: 2 }}>
+              Latest agent execution sessions
+            </div>
           </div>
           <Group gap="xs">
             <Button
@@ -564,14 +540,14 @@ export default function AgentTracingPage() {
               rightSection={<IconArrowUpRight size={14} />}>
               Browse Threads
             </Button>
-            <Button 
-              variant="light" 
+            <Button
+              variant="light"
               onClick={() => handleShowAllSessions()}
               rightSection={<IconArrowUpRight size={14} />}>
               Show All Sessions
             </Button>
           </Group>
-        </Group>
+        </div>
 
         <SessionTable
           sessions={recentSessions}
@@ -579,7 +555,7 @@ export default function AgentTracingPage() {
           onThreadClick={(threadId) => router.push(`/dashboard/tracing/threads/${threadId}`)}
           loading={loading}
         />
-      </Paper>
-    </Stack>
+      </div>
+    </PageContainer>
   );
 }

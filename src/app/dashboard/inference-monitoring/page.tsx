@@ -35,7 +35,7 @@ import {
 } from '@tabler/icons-react';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
-import PageHeader from '@/components/layout/PageHeader';
+import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
 import { useTranslations } from '@/lib/i18n';
 import {
@@ -243,26 +243,27 @@ export default function InferenceMonitoringPage() {
   }).length;
 
   return (
-    <Stack gap="md">
+    <PageContainer>
       <PageHeader
-        icon={<IconServerBolt size={18} />}
+        eyebrow="Operate · Inference Servers"
         title={tNav('inferenceMonitoring')}
         subtitle={t('subtitle')}
         actions={
           <>
             <DashboardDateFilter value={dateFilter} onChange={setDateFilter} />
             <Button
-              variant="light"
-              size="xs"
+              variant="default"
+              size="sm"
               onClick={() => fetchServers(true)}
               loading={refreshing}
-              leftSection={<IconRefresh size={14} />}
+              leftSection={<IconRefresh size={14} stroke={1.7} />}
             >
               Refresh
             </Button>
             <Button
-              size="xs"
-              leftSection={<IconPlus size={14} />}
+              color="teal"
+              size="sm"
+              leftSection={<IconPlus size={14} stroke={1.7} />}
               onClick={addHandlers.open}
             >
               {t('addServer')}
@@ -585,6 +586,6 @@ export default function InferenceMonitoringPage() {
           </Stack>
         </form>
       </Modal>
-    </Stack>
+    </PageContainer>
   );
 }

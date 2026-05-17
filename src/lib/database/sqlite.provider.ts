@@ -24,9 +24,11 @@ import { FileMixin } from './sqlite/file.mixin';
 import { ProviderRecordMixin } from './sqlite/provider-record.mixin';
 import { InferenceMixin } from './sqlite/inference.mixin';
 import { GuardrailMixin } from './sqlite/guardrail.mixin';
+import { PiiPolicyMixin } from './sqlite/pii-policy.mixin';
 import { AlertMixin } from './sqlite/alert.mixin';
 import { IncidentMixin } from './sqlite/incident.mixin';
 import { RagMixin } from './sqlite/rag.mixin';
+import { RerankerMixin } from './sqlite/reranker.mixin';
 import { MemoryMixin } from './sqlite/memory.mixin';
 import { ConfigMixin } from './sqlite/config.mixin';
 import { McpServerMixin } from './sqlite/mcp-server.mixin';
@@ -37,6 +39,7 @@ import { VectorMigrationMixin } from './sqlite/vector-migration.mixin';
 import { BrowserMixin } from './sqlite/browser.mixin';
 import { AuditMixin } from './sqlite/audit.mixin';
 import { UserProjectMixin } from './sqlite/user-project.mixin';
+import { ClusterMixin } from './sqlite/cluster.mixin';
 
 // ── Compose mixins in domain groups ──────────────────────────────────────
 // Order follows the MongoDB provider composition for consistency.
@@ -54,8 +57,11 @@ const AIBase = VectorMixin(ModelMixin(TracingMixin(ContentBase)));
 const StorageBase = ProviderRecordMixin(FileMixin(AIBase));
 
 // Group 5 – Advanced features
-const AdvancedBase = AuditMixin(BrowserMixin(VectorMigrationMixin(AgentMixin(ToolMixin(JsSandboxMixin(McpServerMixin(ConfigMixin(MemoryMixin(RagMixin(IncidentMixin(AlertMixin(GuardrailMixin(InferenceMixin(StorageBase))))))))))))));
+const AdvancedBase = AuditMixin(BrowserMixin(VectorMigrationMixin(AgentMixin(ToolMixin(JsSandboxMixin(McpServerMixin(ConfigMixin(MemoryMixin(RerankerMixin(RagMixin(IncidentMixin(AlertMixin(PiiPolicyMixin(GuardrailMixin(InferenceMixin(StorageBase))))))))))))))));
+
+// Group 6 – Cluster (system-wide; uses main DB)
+const ClusterBase = ClusterMixin(AdvancedBase);
 
 // ── Final composed class ─────────────────────────────────────────────────
 
-export class SQLiteProvider extends AdvancedBase implements DatabaseProvider {}
+export class SQLiteProvider extends ClusterBase implements DatabaseProvider {}

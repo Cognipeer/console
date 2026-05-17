@@ -41,9 +41,11 @@ export class GuardrailBlockError extends Error {
 }
 
 interface ChatRunnable {
-  bind(overrides: Record<string, unknown>): ChatRunnable;
-  invoke(input: unknown): Promise<AIMessage>;
-  stream?(input: unknown): AsyncIterable<AIMessageChunk> | Promise<AsyncIterable<AIMessageChunk>>;
+  invoke(input: unknown, options?: Record<string, unknown>): Promise<AIMessage>;
+  stream?(
+    input: unknown,
+    options?: Record<string, unknown>,
+  ): AsyncIterable<AIMessageChunk> | Promise<AsyncIterable<AIMessageChunk>>;
 }
 
 function ensureChatRunnable(value: unknown): ChatRunnable {
@@ -52,7 +54,7 @@ function ensureChatRunnable(value: unknown): ChatRunnable {
   }
 
   const candidate = value as Partial<ChatRunnable>;
-  if (typeof candidate.bind !== 'function' || typeof candidate.invoke !== 'function') {
+  if (typeof candidate.invoke !== 'function') {
     throw new Error('Model provider returned an invalid chat runtime.');
   }
 
@@ -190,6 +192,68 @@ function buildOverrides(body: Record<string, unknown>) {
   return overrides;
 }
 
+function asRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+
+  return { ...(value as Record<string, unknown>) };
+}
+
+function buildChatModelSettings(
+  modelSettings: unknown,
+  overrides: Record<string, unknown>,
+) {
+  const settings = asRecord(modelSettings);
+
+  if (overrides.temperature !== undefined) {
+    settings.temperature = overrides.temperature;
+  }
+
+  if (overrides.max_tokens !== undefined) {
+    settings.maxTokens = overrides.max_tokens;
+  }
+
+  if (overrides.max_completion_tokens !== undefined) {
+    settings.maxCompletionTokens = overrides.max_completion_tokens;
+  }
+
+  if (overrides.reasoning !== undefined) {
+    settings.reasoning = overrides.reasoning;
+  } else if (overrides.reasoning_effort !== undefined) {
+    settings.reasoning = {
+      ...(typeof settings.reasoning === 'object' && settings.reasoning !== null
+        ? settings.reasoning as Record<string, unknown>
+        : {}),
+      effort: overrides.reasoning_effort,
+    };
+  }
+
+  return settings;
+}
+
+function buildChatCallOptions(overrides: Record<string, unknown>) {
+  const options: Record<string, unknown> = {};
+
+  if (overrides.stop !== undefined) options.stop = overrides.stop;
+  if (overrides.tools !== undefined) options.tools = overrides.tools;
+  if (overrides.tool_choice !== undefined) options.tool_choice = overrides.tool_choice;
+  if (overrides.response_format !== undefined) {
+    options.response_format = overrides.response_format;
+  }
+  if (overrides.seed !== undefined) options.seed = overrides.seed;
+  if (overrides.modality !== undefined) {
+    options.modalities = Array.isArray(overrides.modality)
+      ? overrides.modality
+      : [overrides.modality];
+  }
+  if (overrides.max_output_tokens !== undefined) {
+    options.max_output_tokens = overrides.max_output_tokens;
+  }
+
+  return options;
+}
+
 function ensureLlmModel(model: IModel) {
   if (model.category !== 'llm') {
     throw new Error('Model is not configured for chat completions');
@@ -288,24 +352,23 @@ export async function handleChatCompletion(params: {
   const messagesInput = body.messages as Parameters<typeof toLangChainMessages>[0];
   const messages = toLangChainMessages(messagesInput);
   const overrides = buildOverrides(body);
+  const modelSettings = buildChatModelSettings(model.settings, overrides);
+  const callOptions = buildChatCallOptions(overrides);
 
   const chatModel = ensureChatRunnable(await runtime.createChatModel({
     modelId: model.modelId,
     category: model.category,
-    modelSettings: model.settings,
+    modelSettings,
     options: { streaming: Boolean(stream) },
   }));
-  const runnable = Object.keys(overrides).length
-    ? chatModel.bind(overrides)
-    : chatModel;
 
   if (stream) {
-    if (typeof runnable.stream !== 'function') {
+    if (typeof chatModel.stream !== 'function') {
       throw new Error('Model provider does not support streaming responses');
     }
 
     const asyncIterator = await withResilience(
-      () => runnable.stream!(messages) as Promise<AsyncIterable<AIMessageChunk>>,
+      () => chatModel.stream!(messages, callOptions) as Promise<AsyncIterable<AIMessageChunk>>,
       { key: `chat-stream:${model.providerKey}` },
     );
     const startedAt = Date.now();
@@ -314,7 +377,7 @@ export async function handleChatCompletion(params: {
       async start(controller) {
         let aggregatedChunk: AIMessageChunk | null = null;
         let lastUsage: TokenUsage | undefined;
-  const toolCalls: ToolCallPayload[] = [];
+        const toolCalls: ToolCallPayload[] = [];
 
         try {
           for await (const chunk of asyncIterator) {
@@ -409,9 +472,10 @@ export async function handleChatCompletion(params: {
   }
 
   const aiMessage = await withResilience(
-    () => runnable.invoke(messages),
+    () => chatModel.invoke(messages, callOptions),
     { key: `chat:${model.providerKey}` },
   );
+
   const latencyMs = Date.now() - start;
   const response = toOpenAIChatResponse(aiMessage, {
     model: model.modelId,

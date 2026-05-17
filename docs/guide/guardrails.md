@@ -1,6 +1,16 @@
 # Guardrails
 
-Guardrails provide real-time content moderation and safety checks for LLM inputs and outputs. They can detect PII, evaluate content against custom policies, and block or flag problematic content.
+Guardrails provide real-time content moderation and safety checks for LLM inputs and outputs. They can detect PII, evaluate content against custom policies, and block or flag problematic content. Operators manage them under **Operate → Guardrail**.
+
+## Operator view
+
+Each guardrail is a named policy attached to one or more models. The list view summarises the four states that matter operationally: total policies, how many are currently enabled, how many are disabled, and how many are configured to block requests (versus warn or flag).
+
+![Guardrails list](/screenshots/guardrails/01-guardrails-list.png)
+
+Filters at the top of the table narrow by **type** (PII, content moderation, prompt shield, custom prompt), by **action** (block / warn / flag / log-only), and by **status**. The **Create guardrail** flow walks you through picking a type, declaring which categories or rules to enforce, and pinning the policy to specific models or to the whole project.
+
+When a model has guardrails attached the runtime applies them at two points: before forwarding the request upstream (input guardrails) and before responding to the client (output guardrails). A blocked request short-circuits with a structured `guardrail_violation` error that includes which policy fired.
 
 ## Guardrail Types
 

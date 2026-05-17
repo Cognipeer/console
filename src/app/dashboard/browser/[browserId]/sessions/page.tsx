@@ -36,7 +36,7 @@ import {
   IconTrash,
   IconX,
 } from '@tabler/icons-react';
-import PageHeader from '@/components/layout/PageHeader';
+import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import type { BrowserSessionEventView, BrowserSessionView } from '@/lib/services/browser';
 
 interface CreateForm {
@@ -161,7 +161,7 @@ export default function BrowserSessionsPage() {
   };
 
   return (
-    <Stack gap="md" p="md">
+    <PageContainer>
       <Group gap="xs">
         <Button component={Link} href={`/dashboard/browser/${browserId}`} variant="light" size="xs">
           Browser overview
@@ -171,7 +171,7 @@ export default function BrowserSessionsPage() {
         </Button>
       </Group>
       <PageHeader
-        icon={<IconCamera size={20} />}
+        eyebrow="Operate · Browser sessions"
         title="Browser Sessions"
         subtitle="Live headless browser sessions powered by Playwright"
         actions={
@@ -283,7 +283,7 @@ export default function BrowserSessionsPage() {
         session={drawerSession}
         onMutated={loadSessions}
       />
-    </Stack>
+    </PageContainer>
   );
 }
 

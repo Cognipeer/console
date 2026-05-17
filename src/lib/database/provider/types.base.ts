@@ -146,6 +146,12 @@ export interface IUser {
   invitedAt?: Date;
   inviteAcceptedAt?: Date;
   mustChangePassword?: boolean;
+  /**
+   * Timestamp of the last password change.
+   * Used to invalidate password reset tokens issued before this moment,
+   * making reset tokens effectively single-use.
+   */
+  passwordChangedAt?: Date;
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -355,7 +361,7 @@ export interface IAgentTracingEvent {
   createdAt?: Date;
 }
 
-export type ModelCategory = 'llm' | 'embedding';
+export type ModelCategory = 'llm' | 'embedding' | 'rerank';
 
 export type ModelProviderType =
   | 'openai'

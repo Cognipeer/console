@@ -1,7 +1,6 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import Mustache from 'mustache';
 import {
@@ -27,7 +26,7 @@ import {
   ThemeIcon,
   Tooltip,
 } from '@mantine/core';
-import PageHeader from '@/components/layout/PageHeader';
+import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import { notifications } from '@mantine/notifications';
 import {
   IconArrowLeft,
@@ -73,7 +72,6 @@ export default function PromptDetailPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
   const t = useTranslations('promptDetail');
-  const tNav = useTranslations('navigation');
   const [prompt, setPrompt] = useState<PromptView | null>(null);
   const [versions, setVersions] = useState<PromptVersionView[]>([]);
   const [comments, setComments] = useState<PromptCommentView[]>([]);
@@ -279,10 +277,10 @@ export default function PromptDetailPage() {
   }
 
   return (
-    <Stack gap="md">
+    <PageContainer>
       {/* Header */}
       <PageHeader
-        icon={<IconSparkles size={18} />}
+        eyebrow="Build · Prompt"
         title={prompt.name}
         subtitle={prompt.description || `Key: ${prompt.key}`}
         actions={
@@ -709,6 +707,6 @@ export default function PromptDetailPage() {
         prompt={prompt}
         onVersionRestored={handleVersionRestored}
       />
-    </Stack>
+    </PageContainer>
   );
 }

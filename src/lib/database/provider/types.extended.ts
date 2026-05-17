@@ -250,3 +250,41 @@ export interface IMcpRequestAggregate {
     errors: number;
   }>;
 }
+
+// ── Cluster: nodes & instance assignments ────────────────────────────────
+
+export type NodeRole = 'main' | 'worker' | 'all';
+export type NodeStatus = 'online' | 'offline' | 'draining';
+
+export interface INodeRecord {
+  name: string;
+  role: NodeRole;
+  url: string | null;
+  tags: string[];
+  status: NodeStatus;
+  lastHeartbeatAt: Date;
+  startedAt: Date;
+  version: string | null;
+  hostname: string | null;
+  pid: number | null;
+}
+
+export type InstanceEntityType =
+  | 'agent'
+  | 'mcp'
+  | 'browser'
+  | 'js-sandbox'
+  | 'inference-server'
+  | 'alert-rule'
+  | 'automation';
+
+export type InstanceAssignmentMode = 'strict' | 'preferred';
+
+export interface IInstanceAssignment {
+  entityType: InstanceEntityType;
+  entityId: string;
+  nodeName: string;
+  mode: InstanceAssignmentMode;
+  updatedAt: Date;
+  updatedBy: string | null;
+}

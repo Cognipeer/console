@@ -67,6 +67,18 @@ All application configuration is managed through the central `getConfig()` funct
 |----------|-------------|---------|
 | `BROWSER_BLOCK_PRIVATE_NETWORK` | Blocks localhost, link-local, private, and reserved network egress from managed browser sessions. | `true` |
 
+### JS Sandbox Runtime
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `JS_SANDBOX_DEFAULT_MAX_CONCURRENT` | Concurrent JS executions per tenant | `5` |
+| `JS_SANDBOX_DEFAULT_TIMEOUT_MS` | Default execution timeout | `5000` |
+| `JS_SANDBOX_MAX_TIMEOUT_MS` | Maximum execution timeout | `30000` |
+| `JS_SANDBOX_MEMORY_LIMIT_MB` | V8 isolate memory limit | `64` |
+| `JS_SANDBOX_MAX_CODE_SIZE_BYTES` | Maximum submitted code size | `65536` |
+| `JS_SANDBOX_MAX_RESULT_SIZE_BYTES` | Maximum serialized result size | `524288` |
+| `JS_SANDBOX_MAX_LOG_ENTRIES` | Maximum captured console log entries | `100` |
+
 ### Logging
 
 | Variable | Description | Default |

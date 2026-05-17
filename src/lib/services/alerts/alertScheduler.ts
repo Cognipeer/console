@@ -13,6 +13,10 @@
 import { getDatabase } from '@/lib/database';
 import { getCache } from '@/lib/core/cache';
 import { createLogger } from '@/lib/core/logger';
+import {
+  findInstanceAssignment,
+  getThisNodeName,
+} from '@/lib/core/cluster';
 import { evaluateTenantAlerts } from './alertEvaluator';
 
 const logger = createLogger('alert-scheduler');
@@ -53,11 +57,11 @@ async function runOnce(manual = false): Promise<{ firedCount: number; processedT
       );
     }
 
+    // Try the global lock for unassigned rules. Rules with explicit
+    // assignments are handled per node regardless of who holds the lock.
     lockToken = await cache.acquireLock(SCHEDULER_LOCK_KEY, SCHEDULER_LOCK_TTL_SECONDS);
-    if (!lockToken) {
-      logger.debug('Skipped run because another instance holds the scheduler lock');
-      return { firedCount: 0, processedTenants: 0 };
-    }
+    const holdsGlobalLock = Boolean(lockToken);
+    const thisNode = getThisNodeName();
 
     const mainDb = await getDatabase();
     const tenants = await mainDb.listTenants();
@@ -65,14 +69,31 @@ async function runOnce(manual = false): Promise<{ firedCount: number; processedT
     for (const tenant of tenants) {
       if (!tenant.dbName) continue;
       processedTenants += 1;
+      const tenantId = String(tenant._id);
 
       try {
-        const tenantFiredCount = await evaluateTenantAlerts({
-          tenantDbName: tenant.dbName,
-          tenantId: String(tenant._id),
-          tenantSlug: tenant.slug,
-          companyName: tenant.companyName,
-        });
+        const tenantFiredCount = await evaluateTenantAlerts(
+          {
+            tenantDbName: tenant.dbName,
+            tenantId,
+            tenantSlug: tenant.slug,
+            companyName: tenant.companyName,
+          },
+          {
+            ruleFilter: async (rule) => {
+              const ruleId = String(rule._id ?? '');
+              if (!ruleId) return false;
+              const assignment = await findInstanceAssignment(
+                'alert-rule',
+                `${tenantId}:${ruleId}`,
+              );
+              if (assignment) return assignment.nodeName === thisNode;
+              // Unassigned rules: only the global-lock holder runs them,
+              // preserving the pre-cluster default.
+              return holdsGlobalLock;
+            },
+          },
+        );
 
         firedCount += tenantFiredCount;
 

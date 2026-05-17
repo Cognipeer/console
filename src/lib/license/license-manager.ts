@@ -13,7 +13,7 @@ export interface FeaturePolicy {
 
 export interface LicensePolicy {
   name: string;
-  features: string[];
+  features?: string[];
   limits: {
     requestsPerMonth: number;
     maxAgents: number;
@@ -27,10 +27,7 @@ export type LicenseType =
   | 'ENTERPRISE'
   | 'ON_PREMISE';
 
-export type OfflineLicenseLimits = QuotaResourceCaps & Pick<
-  QuotaLimits,
-  'budget' | 'perRequest' | 'rateLimit'
->;
+export type OfflineLicenseLimits = Pick<QuotaResourceCaps, 'maxProjects'>;
 
 export interface OfflineLicensePayload extends JWTPayload {
   licenseId: string;
@@ -101,57 +98,37 @@ function normalizeLimits(value: unknown): OfflineLicenseLimits | undefined {
   }
 
   const raw = value as Record<string, unknown>;
-  const { quotas, ...rest } = raw;
-  const normalized: Record<string, unknown> = { ...rest };
+  const quotas = raw.quotas && typeof raw.quotas === 'object' && !Array.isArray(raw.quotas)
+    ? raw.quotas as Record<string, unknown>
+    : undefined;
 
-  if (quotas && typeof quotas === 'object' && !Array.isArray(quotas)) {
-    Object.assign(normalized, quotas);
+  const maxProjects = quotas?.maxProjects ?? raw.maxProjects;
+  if (typeof maxProjects !== 'number' || !Number.isFinite(maxProjects)) {
+    return undefined;
   }
 
-  delete normalized.quotas;
-
-  return normalized as OfflineLicenseLimits;
+  return { maxProjects };
 }
 
 function mergeLicenseLimits(
   base: OfflineLicenseLimits,
   override?: OfflineLicenseLimits,
 ): OfflineLicenseLimits {
-  if (!override) {
+  if (!override || override.maxProjects === undefined) {
     return base;
   }
 
-  const merged: OfflineLicenseLimits = {
+  return {
     ...base,
-    ...override,
+    maxProjects: override.maxProjects,
   };
-
-  if (override.budget) {
-    merged.budget = { ...base.budget, ...override.budget };
-  }
-  if (override.perRequest) {
-    merged.perRequest = { ...base.perRequest, ...override.perRequest };
-  }
-  if (override.rateLimit) {
-    merged.rateLimit = { ...base.rateLimit, ...override.rateLimit };
-  }
-
-  return merged;
 }
 
 function toQuotaLimits(limits: OfflineLicenseLimits): QuotaLimits {
-  const {
-    budget,
-    perRequest,
-    rateLimit,
-    ...quotas
-  } = limits;
-
   return {
-    budget,
-    perRequest,
-    quotas,
-    rateLimit,
+    quotas: {
+      maxProjects: limits.maxProjects,
+    },
   };
 }
 
@@ -175,9 +152,14 @@ export class LicenseManager {
     return fs.readFileSync(cfg.offlinePublicKeyPath, 'utf8').trim();
   }
 
+  private static getAllFeatureKeys(): string[] {
+    return Object.keys(this.policyConfig.features);
+  }
+
   static getFeaturesForLicense(licenseType: LicenseType): string[] {
-    const license = this.policyConfig.licenses[licenseType];
-    return license?.features || [];
+    return this.policyConfig.licenses[licenseType]
+      ? this.getAllFeatureKeys()
+      : [];
   }
 
   static getDefaultFreeLicense(): EffectiveLicense {
@@ -209,8 +191,7 @@ export class LicenseManager {
     const licenseType = isLicenseType(payload.licenseType)
       ? payload.licenseType
       : 'FREE';
-    const features = normalizeFeatureList(payload.features)
-      ?? this.getFeaturesForLicense(licenseType);
+    const features = this.getFeaturesForLicense(licenseType);
     const limits = mergeLicenseLimits(
       this.getFreeLimits(),
       normalizeLimits(payload.limits),
@@ -300,7 +281,7 @@ export class LicenseManager {
 
     return {
       expiresAt: typeof payload.exp === 'number' ? new Date(payload.exp * 1000) : undefined,
-      features: normalizedPayload.features ?? this.getFeaturesForLicense(normalizedPayload.licenseType),
+      features: this.getFeaturesForLicense(normalizedPayload.licenseType),
       licenseId: normalizedPayload.licenseId,
       licenseType: normalizedPayload.licenseType,
       limits: mergeLicenseLimits(this.getFreeLimits(), normalizedPayload.limits),
@@ -310,9 +291,8 @@ export class LicenseManager {
     };
   }
 
-  static hasFeature(licenseType: LicenseType, featureKey: string): boolean {
-    const features = this.getFeaturesForLicense(licenseType);
-    return features.includes(featureKey);
+  static hasFeature(_licenseType: LicenseType, featureKey: string): boolean {
+    return this.getAllFeatureKeys().includes(featureKey);
   }
 
   static hasEndpointAccess(
@@ -326,10 +306,10 @@ export class LicenseManager {
   }
 
   static hasEndpointAccessForFeatures(
-    features: string[] | undefined,
+    _features: string[] | undefined,
     endpoint: string,
   ): boolean {
-    for (const featureKey of features ?? []) {
+    for (const featureKey of this.getAllFeatureKeys()) {
       const feature =
         this.policyConfig.features[
         featureKey as keyof typeof this.policyConfig.features

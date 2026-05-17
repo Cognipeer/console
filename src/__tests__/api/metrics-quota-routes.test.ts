@@ -51,7 +51,7 @@ beforeEach(() => {
   (collectPrometheusMetrics as ReturnType<typeof vi.fn>).mockResolvedValue('# HELP model_requests_total\nmodel_requests_total 42\n');
   (getLicenseDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({
     licenseType: 'STARTER',
-    limits: { maxModels: 10, maxApiTokens: 5 },
+    limits: { maxProjects: 5 },
   });
 });
 
@@ -71,14 +71,14 @@ describe('GET /api/metrics', () => {
   });
 
   it('returns 401 on invalid token', async () => {
-    (requireApiToken as ReturnType<typeof vi.fn>).mockRejectedValue(new (ApiTokenAuthError as any)('Unauthorized', 401));
+    (requireApiToken as ReturnType<typeof vi.fn>).mockRejectedValue(new ApiTokenAuthError('Unauthorized', 401));
     const req = makeReq('/api/metrics');
     const res = await getMetrics(req);
     expect(res.status).toBe(401);
   });
 
   it('returns 403 on forbidden token', async () => {
-    (requireApiToken as ReturnType<typeof vi.fn>).mockRejectedValue(new (ApiTokenAuthError as any)('Forbidden', 403));
+    (requireApiToken as ReturnType<typeof vi.fn>).mockRejectedValue(new ApiTokenAuthError('Forbidden', 403));
     const req = makeReq('/api/metrics');
     const res = await getMetrics(req);
     expect(res.status).toBe(403);
@@ -106,7 +106,7 @@ describe('GET /api/quota/defaults', () => {
     expect(res.status).toBe(200);
     expect(body.licenseType).toBe('STARTER');
     expect(body.defaults).toBeDefined();
-    expect(body.defaults.maxModels).toBe(10);
+    expect(body.defaults.maxProjects).toBe(5);
   });
 
   it('returns 400 when tenant id header missing', async () => {
