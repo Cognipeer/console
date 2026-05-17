@@ -2,18 +2,18 @@
 
 import { useRouter } from 'next/navigation';
 import {
+  IconAlertTriangle,
   IconArrowLeftRight,
+  IconBell,
   IconBook,
-  IconBuilding,
   IconDatabase,
   IconExternalLink,
   IconFolder,
+  IconHistory,
   IconLayoutDashboard,
   IconMessage,
   IconPin,
   IconPinFilled,
-  IconRobot,
-  IconRoute,
   IconServer,
   IconTimeline,
   IconUsers,
@@ -42,16 +42,8 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       matcher: (p) =>
         p === '/dashboard/tracing' ||
         (p.startsWith('/dashboard/tracing') &&
-          !p.startsWith('/dashboard/tracing/agents') &&
           !p.startsWith('/dashboard/tracing/sessions') &&
           !p.startsWith('/dashboard/tracing/threads')),
-    },
-    {
-      id: 'agents',
-      label: 'Agents',
-      href: '/dashboard/tracing/agents',
-      icon: IconRobot,
-      matcher: (p) => p.startsWith('/dashboard/tracing/agents'),
     },
     {
       id: 'sessions',
@@ -70,19 +62,14 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
   ],
   vector: [
     {
-      id: 'overview',
-      label: 'Overview',
-      href: '/dashboard/vector',
-      icon: IconLayoutDashboard,
-      matcher: (p) => p === '/dashboard/vector',
-    },
-    {
       id: 'indexes',
       label: 'Indexes',
       href: '/dashboard/vector',
       icon: IconDatabase,
       matcher: (p) =>
-        p.startsWith('/dashboard/vector/') && !p.startsWith('/dashboard/vector/migrations'),
+        p === '/dashboard/vector' ||
+        (p.startsWith('/dashboard/vector/') &&
+          !p.startsWith('/dashboard/vector/migrations')),
     },
     {
       id: 'migrations',
@@ -98,27 +85,16 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       label: 'Endpoints',
       href: '/dashboard/models',
       icon: IconServer,
-      matcher: (p) =>
-        p === '/dashboard/models' ||
-        (p.startsWith('/dashboard/models/') && !p.startsWith('/dashboard/models/new')),
-    },
-    {
-      id: 'new',
-      label: 'New endpoint',
-      href: '/dashboard/models/new',
-      icon: IconRoute,
-      matcher: (p) => p.startsWith('/dashboard/models/new'),
+      matcher: (p) => p.startsWith('/dashboard/models'),
     },
   ],
   files: [
     {
-      id: 'overview',
+      id: 'buckets',
       label: 'Buckets',
       href: '/dashboard/files',
       icon: IconFolder,
-      matcher: (p) =>
-        p === '/dashboard/files' ||
-        (p.startsWith('/dashboard/files/') && !p.startsWith('/dashboard/files/providers')),
+      matcher: (p) => p.startsWith('/dashboard/files'),
     },
   ],
   rag: [
@@ -144,21 +120,54 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       id: 'list',
       label: 'Agents',
       href: '/dashboard/agents',
-      icon: IconRobot,
+      icon: IconLayoutDashboard,
       matcher: (p) => p.startsWith('/dashboard/agents'),
     },
   ],
-  'tenant-settings': [
+  alerts: [
     {
-      id: 'overview',
-      label: 'Tenant',
-      href: '/dashboard/tenant-settings',
-      icon: IconBuilding,
+      id: 'rules',
+      label: 'Rules',
+      href: '/dashboard/alerts',
+      icon: IconBell,
       matcher: (p) =>
-        p === '/dashboard/tenant-settings' ||
-        (p.startsWith('/dashboard/tenant-settings') &&
-          !p.startsWith('/dashboard/tenant-settings/projects')),
+        p === '/dashboard/alerts' ||
+        (p.startsWith('/dashboard/alerts') &&
+          !p.startsWith('/dashboard/alerts/history') &&
+          !p.startsWith('/dashboard/alerts/incidents')),
     },
+    {
+      id: 'incidents',
+      label: 'Incidents',
+      href: '/dashboard/alerts/incidents',
+      icon: IconAlertTriangle,
+      matcher: (p) => p.startsWith('/dashboard/alerts/incidents'),
+    },
+    {
+      id: 'history',
+      label: 'History',
+      href: '/dashboard/alerts/history',
+      icon: IconHistory,
+      matcher: (p) => p.startsWith('/dashboard/alerts/history'),
+    },
+  ],
+  cluster: [
+    {
+      id: 'nodes',
+      label: 'Nodes',
+      href: '/dashboard/cluster/nodes',
+      icon: IconServer,
+      matcher: (p) => p.startsWith('/dashboard/cluster/nodes'),
+    },
+    {
+      id: 'instances',
+      label: 'Instances',
+      href: '/dashboard/cluster/instances',
+      icon: IconDatabase,
+      matcher: (p) => p.startsWith('/dashboard/cluster/instances'),
+    },
+  ],
+  'tenant-settings': [
     {
       id: 'projects',
       label: 'Projects',

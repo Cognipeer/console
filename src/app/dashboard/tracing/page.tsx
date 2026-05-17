@@ -264,46 +264,69 @@ export default function AgentTracingPage() {
 
         {/* Daily Trend */}
         <div className="ds-h4" style={{ marginBottom: 10 }}>Recent Trend (Last 7 Days)</div>
-        <Box mb="lg" style={{ borderRadius: 'var(--mantine-radius-md)', overflow: 'hidden' }}>
-          <Table verticalSpacing="sm" horizontalSpacing="md" highlightOnHover>
-            <Table.Thead style={{ backgroundColor: 'var(--mantine-color-gray-0)' }}>
-              <Table.Tr>
-                <Table.Th style={{ fontWeight: 600 }}>Date</Table.Th>
-                <Table.Th style={{ fontWeight: 600 }}>Sessions</Table.Th>
-                <Table.Th style={{ fontWeight: 600 }}>Events</Table.Th>
-                <Table.Th style={{ fontWeight: 600 }}>Tokens</Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
+        <div className="ds-tbl-wrap" style={{ marginBottom: 18 }}>
+          <table className="ds-tbl">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th style={{ textAlign: 'right' }}>Sessions</th>
+                <th style={{ textAlign: 'right' }}>Events</th>
+                <th style={{ textAlign: 'right' }}>Tokens</th>
+              </tr>
+            </thead>
+            <tbody>
               {dailyRows.length === 0 ? (
-                <Table.Tr>
-                  <Table.Td colSpan={4}>
-                    <Center c="dimmed" py="lg">
-                      No activity in the selected range.
-                    </Center>
-                  </Table.Td>
-                </Table.Tr>
+                <tr>
+                  <td colSpan={4}>
+                    <div className="ds-empty" style={{ padding: 24 }}>
+                      <span className="ds-muted" style={{ fontSize: 13 }}>
+                        No activity in the selected range.
+                      </span>
+                    </div>
+                  </td>
+                </tr>
               ) : (
                 dailyRows.map((row) => (
-                  <Table.Tr key={row.date}>
-                    <Table.Td>
-                      <Text size="sm" fw={500}>{dayjs(row.date).format('MMM D, YYYY')}</Text>
-                    </Table.Td>
-                    <Table.Td>
-                      <Badge variant="light" color="teal" size="md">{formatNumber(row.sessionsCount)}</Badge>
-                    </Table.Td>
-                    <Table.Td>
-                      <Badge variant="light" color="violet" size="md">{formatNumber(row.totalEvents)}</Badge>
-                    </Table.Td>
-                    <Table.Td>
-                      <Badge variant="light" color="blue" size="md">{formatNumber(row.totalTokens)}</Badge>
-                    </Table.Td>
-                  </Table.Tr>
+                  <tr key={row.date}>
+                    <td style={{ fontSize: 12.5, fontWeight: 500 }}>
+                      {dayjs(row.date).format('MMM D, YYYY')}
+                    </td>
+                    <td
+                      className="ds-mono"
+                      style={{
+                        textAlign: 'right',
+                        fontSize: 12.5,
+                        fontVariantNumeric: 'tabular-nums',
+                      }}
+                    >
+                      {formatNumber(row.sessionsCount)}
+                    </td>
+                    <td
+                      className="ds-mono"
+                      style={{
+                        textAlign: 'right',
+                        fontSize: 12.5,
+                        fontVariantNumeric: 'tabular-nums',
+                      }}
+                    >
+                      {formatNumber(row.totalEvents)}
+                    </td>
+                    <td
+                      className="ds-mono"
+                      style={{
+                        textAlign: 'right',
+                        fontSize: 12.5,
+                        fontVariantNumeric: 'tabular-nums',
+                      }}
+                    >
+                      {formatNumber(row.totalTokens)}
+                    </td>
+                  </tr>
                 ))
               )}
-            </Table.Tbody>
-          </Table>
-        </Box>
+            </tbody>
+          </table>
+        </div>
 
         {/* Status, Models, Tools Breakdown */}
         <div
