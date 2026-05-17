@@ -34,6 +34,10 @@ The License screen shows what the current installation is allowed to do — plan
 
 In an offline-enterprise deployment you paste the signed token here; the runtime verifies it on every startup against the bundled public key and enforces the limits described in [Licensing](/guide/licensing). **Reset to free** drops back to the bundled FREE license — useful for evaluating, not for production.
 
+## Cluster topology
+
+Multi-node deployments add a second observability surface: the node registry and the per-entity instance assignments. The [Cluster](/guide/cluster) page in **Admin → Cluster** shows every running process, the queue provider in use (in-process vs BullMQ), and which agents, MCP servers, browsers, JS runtimes, inference servers, alert rules, and automations are pinned to which node. The same data is available programmatically via `GET /api/cluster/overview` and `GET /api/cluster/instances`.
+
 ## Structured Logging
 
 All server-side code uses the Winston-based structured logger:

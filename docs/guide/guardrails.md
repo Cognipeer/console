@@ -16,10 +16,12 @@ When a model has guardrails attached the runtime applies them at two points: bef
 
 | Type | Description |
 |------|-------------|
-| PII Detection | Regex-based detection of 15 PII categories |
+| PII Detection | Wraps the [PII service](./pii.md) — references a stored PII policy by key |
 | Content Moderation | Evaluates content against moderation categories |
 | Prompt Shield | Detects prompt injection attacks |
 | Custom Prompt | LLM-based evaluation with custom rules |
+
+PII guardrails do not duplicate the detection logic — they delegate to the [PII service](./pii.md), which stays license-free even though guardrails themselves are gated. Configure the detector once as a PII policy, then attach it to one or more models through a `pii`-type guardrail.
 
 ## PII Categories
 

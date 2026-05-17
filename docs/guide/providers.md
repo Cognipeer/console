@@ -10,6 +10,8 @@ Every provider configuration shows up as a row in the providers screen, scoped t
 
 Adding a new configuration is a two-step flow. The first step lists every driver that's available in this build — provider contracts are compiled in, so seeing OpenAI, Anthropic, Bedrock, Vertex AI, Ollama, ChromaDB, Qdrant, and others here means the corresponding contracts are loaded.
 
+The cards on the picker are not hard-coded. They come from `src/config/service-catalog.json` and are filtered through `src/lib/services/serviceCatalog.ts`. Multiple catalog entries can map to the same backend driver — e.g. Anthropic, Groq, and DeepSeek all surface as separate cards but resolve to the `openai-compatible` driver. See the [Service Catalog](./service-catalog.md) guide for how to add or rebrand entries.
+
 ![Add provider — service picker](/screenshots/providers/02-add-provider-domain.png)
 
 Use the **domain filter** dropdown to narrow the list — for example, when you're wiring up inference you typically only care about `model` domain contracts.

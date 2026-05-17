@@ -79,6 +79,21 @@ All application configuration is managed through the central `getConfig()` funct
 | `JS_SANDBOX_MAX_RESULT_SIZE_BYTES` | Maximum serialized result size | `524288` |
 | `JS_SANDBOX_MAX_LOG_ENTRIES` | Maximum captured console log entries | `100` |
 
+### Cluster & Queue
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `NODE_ROLE` | Node role: `main`, `worker`, or `all` | `all` |
+| `NODE_NAME` | Unique node name (used in the cluster registry) | `<hostname>-<pid>` |
+| `CLUSTER_DEFAULT_NODE_NAME` | Default node for new instance assignments | First online node |
+| `QUEUE_PROVIDER` | Queue backend: `auto`, `memory`, `bullmq` | `auto` (bullmq when Redis is configured) |
+| `QUEUE_REDIS_URL` | Redis URL for BullMQ | Falls back to `REDIS_URL` |
+| `QUEUE_PREFIX` | BullMQ key prefix | `console:q:` |
+| `QUEUE_DEFAULT_ATTEMPTS` | Default retry attempts per job | `3` |
+| `QUEUE_DEFAULT_BACKOFF_MS` | Default backoff between retries | `1000` |
+
+See [Cluster](/guide/cluster) for the full topology / assignment model.
+
 ### Logging
 
 | Variable | Description | Default |

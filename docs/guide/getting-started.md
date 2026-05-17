@@ -138,6 +138,8 @@ The header has three controls worth knowing about up front:
 - **Project switcher** (right of centre) toggles between projects inside the same tenant. Most resources — models, prompts, RAG indices, API tokens — are scoped to the active project.
 - **Account menu** (top right) is where you flip the theme, sign out, and review license status.
 
+Press **Cmd+K** (or **Ctrl+K** on Windows/Linux) from anywhere to open the [Command Palette](/guide/command-palette) — searches across services, models, providers, agents, prompts, tools, MCP servers, vector indexes, memory stores, files, guardrails, PII policies, browsers, and more.
+
 ![Services launcher](/screenshots/getting-started/04-services-launcher.png)
 
 ### 4. Make your first API request

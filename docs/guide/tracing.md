@@ -175,6 +175,30 @@ Use these fields to connect traces across tools and dashboards:
 | `GET /api/tracing/overview` | Dashboard analytics |
 | `GET /api/tracing/agents` | Per-agent summary |
 
+## Built-in MCP — Console observability
+
+Cognipeer ships a built-in MCP server that exposes the agent observability layer to agents themselves. This is how an agent can answer questions like "summarise my last 10 runs" or "look up session `sess-…` and tell me what failed" without any external integration.
+
+The server is mounted under the client API as a normal MCP endpoint:
+
+```
+GET  /api/client/v1/mcp/console/sse
+POST /api/client/v1/mcp/console/message
+POST /api/client/v1/mcp/console/execute
+```
+
+Authentication is the same `Bearer cgt_…` token used everywhere else; the project context is resolved from the token and applied to every tool call.
+
+Tools exposed:
+
+| Tool | Purpose |
+|---|---|
+| `list_recent_sessions` | Filter by status, agent (exact/partial), or free-text search on `sessionId`/`threadId`/agent name. Capped at 100 sessions per call. |
+| `get_session` | Fetch a single session by `sessionId` including its event timeline. |
+| `get_dashboard_overview` | Rolled-up analytics for an ISO time window (sessions, tokens, top agents, top models, status distribution, daily trend). |
+
+Attach the console MCP to an agent the same way you'd attach any other MCP server — the [MCP API](../api/mcp.md) handshake (`initialize`, `tools/list`, `tools/call`) works identically.
+
 ## Analytics
 
 The `getDashboardOverview` method provides:

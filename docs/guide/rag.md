@@ -8,14 +8,16 @@ A *RAG module* is the configuration unit that ties a chunking strategy, an embed
 
 ![Knowledge Engine list](/screenshots/rag/01-rag-list.png)
 
-When the project is empty the screen shows the onboarding CTA — clicking **Create module** opens a multi-step form where you choose the source datasource, pick chunking parameters (size, overlap, splitter), select an embedding model from [Model Hub](/guide/model-hub), and point the output at a vector index (see [Vector Stores](/guide/vector-stores)).
+When the project is empty the screen shows the onboarding CTA — clicking **Create module** opens a multi-step form where you choose the source datasource, pick chunking parameters (size, overlap, splitter), select an embedding model from [Model Hub](/guide/model-hub), point the output at a vector index (see [Vector Stores](/guide/vector-stores)), and — optionally — attach a [Reranker](/guide/reranker) to re-order results before they reach the LLM.
+
+When a reranker is attached, retrieval becomes a two-stage pipeline: the vector store returns top-K candidates and the reranker scores them down to the final top-N. This is the recommended way to plug Cohere Rerank, Jina, Voyage, or any cross-encoder onto an existing RAG module without changing the embedding model or vector store.
 
 ## Architecture
 
 ```
 Document → Chunk → Embed → Vector Store
                               ↓
-Query   → Embed → Vector Search → Return Matches
+Query   → Embed → Vector Search → (Reranker?) → Return Matches
 ```
 
 ## Concepts
@@ -53,6 +55,7 @@ Query   → Embed → Vector Search → Return Matches
   "embeddingModelKey": "text-embedding-ada-002",
   "vectorProviderKey": "pinecone-prod",
   "vectorIndexKey": "support-index",
+  "rerankerKey": "support-rerank",
   "chunkConfig": {
     "strategy": "recursive",
     "chunkSize": 1000,
@@ -60,6 +63,8 @@ Query   → Embed → Vector Search → Return Matches
   }
 }
 ```
+
+`rerankerKey` is optional. When present, the matching reranker (see [Reranker](/guide/reranker)) runs after vector search and before the response is returned.
 
 ## Text Ingestion
 
