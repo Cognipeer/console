@@ -6,6 +6,7 @@
  */
 
 import { MongoClient, Db, type MongoClientOptions } from 'mongodb';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createLogger } from '@/lib/core/logger';
 
 export const logger = createLogger('mongodb');
@@ -14,6 +15,7 @@ export const logger = createLogger('mongodb');
 
 export const COLLECTIONS = {
   tenantUserDirectory: 'tenant_user_directory',
+  auditLogs: 'audit_logs',
   providers: 'providers',
   vectorIndexes: 'vector_indexes',
   fileBuckets: 'file_buckets',
@@ -32,6 +34,7 @@ export const COLLECTIONS = {
   inferenceServerMetrics: 'inference_server_metrics',
   guardrails: 'guardrails',
   guardrailEvalLogs: 'guardrail_evaluation_logs',
+  piiPolicies: 'pii_policies',
   alertRules: 'alert_rules',
   alertEvents: 'alert_events',
   incidents: 'incidents',
@@ -39,6 +42,8 @@ export const COLLECTIONS = {
   ragDocuments: 'rag_documents',
   ragChunks: 'rag_chunks',
   ragQueryLogs: 'rag_query_logs',
+  rerankers: 'rerankers',
+  rerankerRunLogs: 'reranker_run_logs',
   memoryStores: 'memory_stores',
   memoryItems: 'memory_items',
   configGroups: 'config_groups',
@@ -46,6 +51,8 @@ export const COLLECTIONS = {
   configAuditLogs: 'config_audit_logs',
   mcpServers: 'mcp_servers',
   mcpRequestLogs: 'mcp_request_logs',
+  jsSandboxRuntimes: 'js_sandbox_runtimes',
+  jsSandboxExecutions: 'js_sandbox_executions',
   tools: 'tools',
   toolRequestLogs: 'tool_request_logs',
   agents: 'agents',
@@ -59,6 +66,14 @@ export const COLLECTIONS = {
   browsers: 'browsers',
   browserSessions: 'browser_sessions',
   browserSessionEvents: 'browser_session_events',
+  // ── Project membership & future groups ──────────────────────────────
+  userProjects: 'user_projects',
+  groups: 'groups',
+  groupMembers: 'group_members',
+  groupProjects: 'group_projects',
+  // ── Cluster (main database) ────────────────────────────────────────
+  nodes: 'nodes',
+  instanceAssignments: 'instance_assignments',
 } as const;
 
 // ── Base class ───────────────────────────────────────────────────────────
@@ -67,6 +82,8 @@ export class MongoDBProviderBase {
   protected client: MongoClient | null = null;
   protected mainDb: Db | null = null;
   protected tenantDb: Db | null = null;
+  private readonly tenantContext = new AsyncLocalStorage<Db>();
+  private readonly tenantNameContext = new AsyncLocalStorage<string>();
   protected readonly uri: string;
   protected readonly mainDbName: string;
   protected readonly clientOptions?: MongoClientOptions;
@@ -99,6 +116,7 @@ export class MongoDBProviderBase {
       this.client = null;
       this.mainDb = null;
       this.tenantDb = null;
+      this.tenantContext.disable();
     }
   }
 
@@ -113,7 +131,34 @@ export class MongoDBProviderBase {
     if (!this.client) {
       throw new Error('Database client not connected. Call connect() first.');
     }
-    this.tenantDb = this.client.db(tenantDbName);
+    const tenantDb = this.client.db(tenantDbName);
+    this.tenantDb = tenantDb;
+    this.tenantContext.enterWith(tenantDb);
+    this.tenantNameContext.enterWith(tenantDbName);
+  }
+
+  /**
+   * Name of the tenant DB currently bound to this request context.
+   * Returns `null` when no tenant is active (request hasn't called switchToTenant).
+   */
+  getCurrentTenantDbName(): string | null {
+    return this.tenantNameContext.getStore() ?? null;
+  }
+
+  /**
+   * Defense-in-depth guard: throws if the caller's expected tenant does not
+   * match the currently bound tenant.
+   */
+  assertTenantContext(expectedTenantDbName: string): void {
+    const active = this.tenantNameContext.getStore();
+    if (!active) {
+      throw new Error(`Tenant context not initialized (expected ${expectedTenantDbName}).`);
+    }
+    if (active !== expectedTenantDbName) {
+      throw new Error(
+        `Tenant context mismatch: active=${active}, expected=${expectedTenantDbName}. Refusing to operate on the wrong tenant.`,
+      );
+    }
   }
 
   // ── Protected helpers ────────────────────────────────────────────────
@@ -126,10 +171,11 @@ export class MongoDBProviderBase {
   }
 
   protected getTenantDb(): Db {
-    if (!this.tenantDb) {
+    const tenantDb = this.tenantContext.getStore() ?? this.tenantDb;
+    if (!tenantDb) {
       throw new Error('Tenant database not set. Call switchToTenant() first.');
     }
-    return this.tenantDb;
+    return tenantDb;
   }
 
   protected normalizeEmail(email: string): string {

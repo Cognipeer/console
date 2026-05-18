@@ -4,54 +4,53 @@ import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import {
-  Badge,
+  ActionIcon,
   Button,
   Center,
   Code,
   CopyButton,
-  Grid,
-  Group,
   Loader,
+  Menu,
   Modal,
-  Paper,
-  Progress,
-  RingProgress,
   ScrollArea,
-  SimpleGrid,
   Stack,
-  Table,
   Tabs,
   Text,
-  ThemeIcon,
   Tooltip,
 } from '@mantine/core';
 import { AreaChart } from '@mantine/charts';
-import PageHeader from '@/components/layout/PageHeader';
-import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
 import { useDisclosure } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
 import {
   IconArrowLeft,
+  IconArrowRight,
   IconBook,
   IconBrain,
-  IconChartBar,
-  IconRefresh,
-  IconTool,
-  IconCoin,
-  IconActivity,
-  IconClockHour4,
   IconCheck,
-  IconCode,
+  IconChevronLeft,
+  IconChevronRight,
+  IconClipboard,
   IconCopy,
+  IconCpu,
+  IconDots,
+  IconExternalLink,
+  IconLayoutDashboard,
+  IconPinned,
   IconPlayerPlay,
+  IconRefresh,
+  IconSettings,
+  IconTimeline,
+  IconTool,
   IconTrash,
-  IconX,
-  IconDatabase,
 } from '@tabler/icons-react';
-import { IconEye, IconPlug, IconSettings, IconCurrencyDollar, IconTimeline } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
-import { Playground } from '@/components/playground';
+import ModelPlayground from '@/components/playground/ModelPlayground';
+import PageContainer from '@/components/common/ui/PageContainer';
+import TabsBar from '@/components/common/ui/TabsBar';
+import StatusBadge from '@/components/common/ui/StatusBadge';
+import Spark from '@/components/common/ui/Spark';
+import Toolbar from '@/components/common/ui/Toolbar';
 import {
   buildDashboardDateSearchParams,
   defaultDashboardDateFilter,
@@ -78,7 +77,9 @@ interface ModelDetailDto {
   name: string;
   description?: string;
   key: string;
-  provider: string;
+  provider?: string;
+  providerKey?: string;
+  providerDriver?: string;
   category: 'llm' | 'embedding';
   modelId: string;
   isMultimodal?: boolean;
@@ -145,17 +146,21 @@ interface UsageLogDto {
   createdAt?: string;
 }
 
-interface ProviderDefinitionDto {
-  id: string;
+interface ModelProviderDto {
+  key: string;
   label: string;
-  description: string;
-  categories: Array<'llm' | 'embedding'>;
+  driver: string;
 }
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50];
 
 function fmtCurrency(amount: number, currency = 'USD') {
-  return amount.toLocaleString(undefined, { style: 'currency', currency, minimumFractionDigits: 2, maximumFractionDigits: 4 });
+  return amount.toLocaleString(undefined, {
+    style: 'currency',
+    currency,
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4,
+  });
 }
 
 function fmtNumber(n: number) {
@@ -164,12 +169,49 @@ function fmtNumber(n: number) {
   return n.toLocaleString();
 }
 
+const PROVIDER_COLORS: Record<string, string> = {
+  openai: '#10a37f',
+  anthropic: '#cc7d4f',
+  cognipeer: '#16b3ab',
+  azure: '#0078d4',
+  aws: '#ff9900',
+  bedrock: '#ff9900',
+  google: '#ea4335',
+  vertex: '#ea4335',
+  ollama: '#7c3aed',
+  self: '#7c3aed',
+};
+
+function providerColor(key: string): string {
+  const k = (key || '').toLowerCase();
+  for (const [name, color] of Object.entries(PROVIDER_COLORS)) {
+    if (k.includes(name)) return color;
+  }
+  return '#9aa7b6';
+}
+
+function relativeDate(iso?: string) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  const diff = Date.now() - d.getTime();
+  const day = 24 * 60 * 60 * 1000;
+  if (diff < day) {
+    const hours = Math.max(1, Math.floor(diff / (60 * 60 * 1000)));
+    return `${hours}h ago`;
+  }
+  const days = Math.floor(diff / day);
+  if (days < 30) return `${days}d ago`;
+  return d.toLocaleDateString();
+}
+
+type DetailTab = 'overview' | 'playground' | 'configure' | 'logs' | 'usage';
+
 export default function ModelDetailPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
   const { openDocs } = useDocsDrawer();
   const t = useTranslations('modelDetail');
-  const tModels = useTranslations('models');
+
   const [model, setModel] = useState<ModelDetailDto | null>(null);
   const [usage, setUsage] = useState<UsageAggregateDto | null>(null);
   const [logs, setLogs] = useState<UsageLogDto[]>([]);
@@ -177,20 +219,40 @@ export default function ModelDetailPage() {
   const [logsPage, setLogsPage] = useState(1);
   const [logsPageSize, setLogsPageSize] = useState(25);
   const [hasMoreLogs, setHasMoreLogs] = useState(false);
-  const [providers, setProviders] = useState<ProviderDefinitionDto[]>([]);
+  const [providers, setProviders] = useState<ModelProviderDto[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [selectedLog, setSelectedLog] = useState<UsageLogDto | null>(null);
-  const [logModalOpened, { open: openLogModal, close: closeLogModal }] = useDisclosure(false);
+  const [logModalOpened, { open: openLogModal, close: closeLogModal }] =
+    useDisclosure(false);
   const [dateFilter, setDateFilter] = useState(defaultDashboardDateFilter);
+  const [tab, setTab] = useState<DetailTab>('overview');
+  const [logFilter, setLogFilter] = useState('');
+  const [logLevel, setLogLevel] = useState<'all' | 'error'>('all');
 
   const modelId = params?.id;
 
+  const selectedProvider = useMemo(() => {
+    if (!model?.providerKey) return null;
+    return providers.find((provider) => provider.key === model.providerKey) ?? null;
+  }, [model?.providerKey, providers]);
+
   const providerLabel = useMemo(() => {
     if (!model) return '';
-    return providers.find((provider) => provider.id === model.provider)?.label || model.provider;
-  }, [model, providers]);
+    return selectedProvider?.label || model.providerKey || model.provider || '';
+  }, [model, selectedProvider]);
+
+  const providerColorKey = useMemo(() => {
+    if (!model) return '';
+    return (
+      selectedProvider?.driver ||
+      model.providerDriver ||
+      model.providerKey ||
+      model.provider ||
+      ''
+    );
+  }, [model, selectedProvider]);
 
   const fetchDetail = async (showNotifications = false) => {
     if (!modelId) return;
@@ -203,26 +265,19 @@ export default function ModelDetailPage() {
         fetch(`/api/models/${modelId}/usage?${usageParams.toString()}`),
         fetch('/api/models/providers'),
       ]);
-
-      if (!modelResponse.ok) {
-        throw new Error('modelFailed');
-      }
-
+      if (!modelResponse.ok) throw new Error('modelFailed');
       const modelData = await modelResponse.json();
       setModel(modelData.model);
-
       if (usageResponse.ok) {
         const usageData = await usageResponse.json();
         setUsage(usageData.usage);
       } else {
         setUsage(null);
       }
-
       if (providerResponse.ok) {
         const providerData = await providerResponse.json();
         setProviders(providerData.providers ?? []);
       }
-
       if (showNotifications) {
         notifications.show({
           title: t('notifications.refreshedTitle'),
@@ -250,13 +305,14 @@ export default function ModelDetailPage() {
       const params = buildDashboardDateSearchParams(dateFilter);
       params.set('limit', String(logsPageSize));
       params.set('skip', String((logsPage - 1) * logsPageSize));
-
-      const logsResponse = await fetch(`/api/models/${modelId}/logs?${params.toString()}`);
+      const logsResponse = await fetch(
+        `/api/models/${modelId}/logs?${params.toString()}`,
+      );
       if (logsResponse.ok) {
         const logsData = await logsResponse.json();
-        const nextLogs: UsageLogDto[] = logsData.logs ?? [];
-        setLogs(nextLogs);
-        setHasMoreLogs(nextLogs.length === logsPageSize);
+        const next: UsageLogDto[] = logsData.logs ?? [];
+        setLogs(next);
+        setHasMoreLogs(next.length === logsPageSize);
       } else {
         setLogs([]);
         setHasMoreLogs(false);
@@ -273,12 +329,12 @@ export default function ModelDetailPage() {
   useEffect(() => {
     setLoading(true);
     setLogsPage(1);
-    fetchDetail();
+    void fetchDetail();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modelId, dateFilter]);
 
   useEffect(() => {
-    fetchLogs();
+    void fetchLogs();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modelId, logsPage, logsPageSize, dateFilter]);
 
@@ -290,7 +346,6 @@ export default function ModelDetailPage() {
   const costCurrency = usage?.costSummary?.currency || model?.pricing?.currency || 'USD';
   const totalCost = usage?.costSummary?.totalCost ?? 0;
 
-  // Build chart data from timeseries
   const chartData = useMemo(() => {
     if (!usage?.timeseries || usage.timeseries.length === 0) return [];
     return usage.timeseries.map((entry) => ({
@@ -301,25 +356,43 @@ export default function ModelDetailPage() {
     }));
   }, [usage]);
 
+  const sparkData = useMemo(() => {
+    if (!usage?.timeseries || usage.timeseries.length === 0) {
+      return Array.from({ length: 16 }, (_, i) =>
+        20 + Math.sin(i * 0.6) * 12 + (i / 16) * 8,
+      );
+    }
+    return usage.timeseries.map((e) => e.callCount + 1);
+  }, [usage]);
+
+  const filteredLogs = useMemo(() => {
+    return logs.filter((l) => {
+      if (logLevel === 'error' && l.status !== 'error') return false;
+      if (logFilter) {
+        const q = logFilter.toLowerCase();
+        return (
+          (l.requestId ?? '').toLowerCase().includes(q) ||
+          l.route.toLowerCase().includes(q) ||
+          (l.errorMessage ?? '').toLowerCase().includes(q)
+        );
+      }
+      return true;
+    });
+  }, [logs, logLevel, logFilter]);
+
   const handleDelete = async () => {
     if (!model || deleting) return;
-
     const confirmed = window.confirm(t('actions.deleteConfirm'));
     if (!confirmed) return;
-
     setDeleting(true);
     try {
-      const response = await fetch(`/api/models/${model._id}`, {
-        method: 'DELETE',
-      });
-
+      const response = await fetch(`/api/models/${model._id}`, { method: 'DELETE' });
       if (!response.ok) {
         const error = await response
           .json()
           .catch(() => ({ error: t('notifications.deleteErrorMessage') }));
         throw new Error(error.error ?? t('notifications.deleteErrorMessage'));
       }
-
       notifications.show({
         title: t('notifications.deleteSuccessTitle'),
         message: t('notifications.deleteSuccessMessage'),
@@ -330,9 +403,7 @@ export default function ModelDetailPage() {
       notifications.show({
         title: t('notifications.deleteErrorTitle'),
         message:
-          error instanceof Error
-            ? error.message
-            : t('notifications.deleteErrorMessage'),
+          error instanceof Error ? error.message : t('notifications.deleteErrorMessage'),
         color: 'red',
       });
     } finally {
@@ -353,7 +424,10 @@ export default function ModelDetailPage() {
       <Center py="xl">
         <Stack gap="sm" align="center">
           <Text c="dimmed">{t('errors.notFound')}</Text>
-          <Button leftSection={<IconArrowLeft size={16} />} onClick={() => router.push('/dashboard/models')}>
+          <Button
+            leftSection={<IconArrowLeft size={16} />}
+            onClick={() => router.push('/dashboard/models')}
+          >
             {t('actions.backToList')}
           </Button>
         </Stack>
@@ -361,727 +435,259 @@ export default function ModelDetailPage() {
     );
   }
 
-  const curlChat = `curl -X POST https://your-cognipeer-host/api/client/v1/chat/completions \\
-  -H "Authorization: Bearer YOUR_API_TOKEN" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "model": "${model.key}",
-    "messages": [
-      { "role": "system", "content": "You are a helpful assistant." },
-      { "role": "user",   "content": "Hello, how are you?" }
-    ],
-    "temperature": 0.7,
-    "max_tokens": 512
-  }'`;
+  const endpointBase = typeof window !== 'undefined' ? window.location.origin : '';
+  const endpointPath =
+    model.category === 'llm'
+      ? '/api/client/v1/chat/completions'
+      : '/api/client/v1/embeddings';
+  const endpointUrl = `${endpointBase}${endpointPath}`;
 
-  const curlStream = `curl -X POST https://your-cognipeer-host/api/client/v1/chat/completions \\
-  -H "Authorization: Bearer YOUR_API_TOKEN" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "model": "${model.key}",
-    "messages": [{ "role": "user", "content": "Tell me a joke" }],
-    "stream": true
-  }'`;
-
-  const curlEmbed = `curl -X POST https://your-cognipeer-host/api/client/v1/embeddings \\
-  -H "Authorization: Bearer YOUR_API_TOKEN" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "model": "${model.key}",
-    "input": "The quick brown fox jumps over the lazy dog"
-  }'`;
-
-  const sdkChat = `import ConsoleClient from '@cognipeer/console-sdk';
-
-const client = new ConsoleClient({
-  apiKey: 'YOUR_API_TOKEN',
-  baseUrl: 'https://your-cognipeer-host',
-});
-
-// Non-streaming
-const response = await client.chat.completions({
-  model: '${model.key}',
-  messages: [
-    { role: 'system', content: 'You are a helpful assistant.' },
-    { role: 'user',   content: 'Hello!' },
-  ],
-  temperature: 0.7,
-});
-
-console.log(response.choices[0].message.content);`;
-
-  const sdkStream = `import ConsoleClient from '@cognipeer/console-sdk';
-
-const client = new ConsoleClient({
-  apiKey: 'YOUR_API_TOKEN',
-  baseUrl: 'https://your-cognipeer-host',
-});
-
-// Streaming
-const stream = await client.chat.streamCompletions({
-  model: '${model.key}',
-  messages: [{ role: 'user', content: 'Tell me a story' }],
-});
-
-for await (const chunk of stream) {
-  process.stdout.write(chunk.choices[0]?.delta?.content ?? '');
-}`;
-
-  const sdkEmbed = `import ConsoleClient from '@cognipeer/console-sdk';
-
-const client = new ConsoleClient({
-  apiKey: 'YOUR_API_TOKEN',
-  baseUrl: 'https://your-cognipeer-host',
-});
-
-const response = await client.embeddings.create({
-  model: '${model.key}',
-  input: 'The quick brown fox jumps over the lazy dog',
-});
-
-console.log(response.data[0].embedding);`;
-
-  const pythonChat = `import httpx
-
-response = httpx.post(
-    "https://your-cognipeer-host/api/client/v1/chat/completions",
-    headers={"Authorization": "Bearer YOUR_API_TOKEN"},
-    json={
-        "model": "${model.key}",
-        "messages": [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user",   "content": "Hello!"},
-        ],
-        "temperature": 0.7,
-    },
-)
-
-data = response.json()
-print(data["choices"][0]["message"]["content"])`;
-
-  const pythonEmbed = `import httpx
-
-response = httpx.post(
-    "https://your-cognipeer-host/api/client/v1/embeddings",
-    headers={"Authorization": "Bearer YOUR_API_TOKEN"},
-    json={
-        "model": "${model.key}",
-        "input": "The quick brown fox jumps over the lazy dog",
-    },
-)
-
-data = response.json()
-print(data["data"][0]["embedding"][:5])  # first 5 dims`;
-
-  const openaiCompat = `from openai import OpenAI
-
-client = OpenAI(
-    api_key="YOUR_API_TOKEN",
-    base_url="https://your-cognipeer-host/api/client/v1",
-)
-
-response = client.chat.completions.create(
-    model="${model.key}",
-    messages=[{"role": "user", "content": "Hello!"}],
-)
-
-print(response.choices[0].message.content)`;
+  const tabs: Array<{ id: DetailTab; label: string; icon: React.ReactNode }> = [
+    { id: 'overview', label: 'Overview', icon: <IconLayoutDashboard size={14} stroke={1.7} /> },
+    ...(model.category === 'llm'
+      ? [{ id: 'playground' as const, label: 'Playground', icon: <IconPlayerPlay size={14} stroke={1.7} /> }]
+      : []),
+    { id: 'configure', label: 'Configure', icon: <IconSettings size={14} stroke={1.7} /> },
+    { id: 'logs', label: 'Logs', icon: <IconTimeline size={14} stroke={1.7} /> },
+    { id: 'usage', label: 'Usage', icon: <IconBook size={14} stroke={1.7} /> },
+  ];
 
   return (
-    <Stack gap="md">
-      <PageHeader
-        icon={<IconBrain size={18} />}
-        title={model.name}
-        subtitle={model.description || 'View model configuration, capabilities, and usage.'}
-        actions={
-          <>
-            <Badge color={model.category === 'llm' ? 'indigo' : 'teal'} variant="light">
-              {model.category === 'llm' ? tModels('list.badges.llm') : tModels('list.badges.embedding')}
-            </Badge>
-            <Badge color="grape" variant="light">
-              {providerLabel}
-            </Badge>
-            <Button
-              variant="default"
-              size="xs"
-              leftSection={<IconArrowLeft size={14} />}
-              onClick={() => router.push('/dashboard/models')}
-            >
-              Back
-            </Button>
-            <Button
-              onClick={() => openDocs('api-client')}
-              variant="light"
-              size="xs"
-              leftSection={<IconBook size={14} />}
-            >
-              Docs
-            </Button>
-            <Button
-              variant="light"
-              size="xs"
-              leftSection={<IconRefresh size={14} />}
-              loading={refreshing}
-              onClick={() => {
-                void fetchDetail(true);
-                void fetchLogs();
+    <PageContainer>
+      {/* Header */}
+      <header className="ds-page-header" style={{ alignItems: 'center' }}>
+        <div className="ds-row ds-gap-md" style={{ flex: 1, minWidth: 0 }}>
+          <div
+            style={{
+              width: 52,
+              height: 52,
+              borderRadius: 12,
+              background: 'var(--ds-accent-soft)',
+              color: 'var(--ds-accent)',
+              display: 'grid',
+              placeItems: 'center',
+              flexShrink: 0,
+            }}
+          >
+            {model.category === 'llm' ? (
+              <IconBrain size={26} stroke={1.7} />
+            ) : (
+              <IconCpu size={26} stroke={1.7} />
+            )}
+          </div>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                flexWrap: 'wrap',
+                marginBottom: 4,
               }}
             >
-              {t('actions.refresh')}
-            </Button>
-            <Button
-              component={Link}
-              href={`/dashboard/models/${model._id}/edit`}
-              size="xs"
-              leftSection={<IconSettings size={14} />}
+              <h1
+                className="ds-h2 ds-mono"
+                style={{ margin: 0, whiteSpace: 'nowrap' }}
+              >
+                {model.name}
+              </h1>
+              <StatusBadge status="active" />
+              <span className="ds-badge">{model.category}</span>
+              {model.isMultimodal ? (
+                <span className="ds-badge ds-badge-info">vision</span>
+              ) : null}
+              {model.supportsToolCalls ? (
+                <span className="ds-badge ds-badge-warn">tools</span>
+              ) : null}
+              {model.semanticCache?.enabled ? (
+                <span className="ds-badge ds-badge-teal">cache</span>
+              ) : null}
+            </div>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 12,
+                flexWrap: 'wrap',
+                fontSize: 12.5,
+                color: 'var(--ds-text-muted)',
+              }}
             >
-              {t('actions.edit')}
-            </Button>
+              <span className="ds-row ds-gap-xs">
+                <span
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: '50%',
+                    background: providerColor(providerColorKey),
+                    display: 'inline-block',
+                  }}
+                />
+                {providerLabel}
+              </span>
+              <span className="ds-faint">·</span>
+              <span className="ds-mono" style={{ whiteSpace: 'nowrap' }}>
+                {model.modelId}
+              </span>
+              {model.updatedAt ? (
+                <>
+                  <span className="ds-faint">·</span>
+                  <span style={{ whiteSpace: 'nowrap' }}>
+                    Updated {relativeDate(model.updatedAt)}
+                  </span>
+                </>
+              ) : null}
+            </div>
+          </div>
+        </div>
+        <div className="ds-row ds-gap-sm" style={{ flexShrink: 0 }}>
+          <Tooltip label="Pin to favorites" withArrow>
+            <ActionIcon variant="subtle" color="gray" radius="md" size="lg">
+              <IconPinned size={15} stroke={1.7} />
+            </ActionIcon>
+          </Tooltip>
+          <CopyButton value={endpointUrl} timeout={1500}>
+            {({ copied, copy }) => (
+              <Button
+                variant="default"
+                size="sm"
+                leftSection={
+                  copied ? (
+                    <IconCheck size={14} stroke={2} />
+                  ) : (
+                    <IconClipboard size={14} stroke={1.7} />
+                  )
+                }
+                onClick={copy}
+              >
+                {copied ? 'Copied' : 'Endpoint'}
+              </Button>
+            )}
+          </CopyButton>
+          {model.category === 'llm' ? (
             <Button
-              variant="light"
-              color="red"
-              size="xs"
-              leftSection={<IconTrash size={14} />}
-              loading={deleting}
-              onClick={() => void handleDelete()}
+              variant="default"
+              size="sm"
+              leftSection={<IconPlayerPlay size={13} stroke={1.7} />}
+              onClick={() => setTab('playground')}
             >
-              {t('actions.delete')}
+              Test
             </Button>
-          </>
-        }
+          ) : null}
+          <Menu withinPortal position="bottom-end" withArrow>
+            <Menu.Target>
+              <ActionIcon variant="default" radius="md" size="lg">
+                <IconDots size={15} stroke={1.7} />
+              </ActionIcon>
+            </Menu.Target>
+            <Menu.Dropdown>
+              <Menu.Item
+                component={Link}
+                href={`/dashboard/models/${model._id}/edit`}
+                leftSection={<IconSettings size={14} />}
+              >
+                {t('actions.edit')}
+              </Menu.Item>
+              <Menu.Item
+                leftSection={<IconBook size={14} />}
+                onClick={() => openDocs('api-client')}
+              >
+                Docs
+              </Menu.Item>
+              <Menu.Item
+                leftSection={<IconRefresh size={14} />}
+                onClick={() => {
+                  void fetchDetail(true);
+                  void fetchLogs();
+                }}
+              >
+                {t('actions.refresh')}
+              </Menu.Item>
+              <Menu.Divider />
+              <Menu.Item
+                color="red"
+                leftSection={<IconTrash size={14} />}
+                disabled={deleting}
+                onClick={() => void handleDelete()}
+              >
+                {t('actions.delete')}
+              </Menu.Item>
+            </Menu.Dropdown>
+          </Menu>
+        </div>
+      </header>
+
+      <TabsBar
+        items={tabs.map((t) => ({ id: t.id, label: (
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            {t.icon}
+            {t.label}
+          </span>
+        ) }))}
+        activeId={tab}
+        onChange={(id) => setTab(id as DetailTab)}
       />
 
-      <Tabs defaultValue="dashboard" keepMounted={false}>
-        <Tabs.List mb="md">
-          <Tabs.Tab value="dashboard" leftSection={<IconChartBar size={14} />}>
-            Dashboard
-          </Tabs.Tab>
-          {model.category === 'llm' && (
-            <Tabs.Tab value="playground" leftSection={<IconPlayerPlay size={14} />}>
-              Playground
-            </Tabs.Tab>
-          )}
-          <Tabs.Tab value="history" leftSection={<IconTimeline size={14} />}>
-            History
-          </Tabs.Tab>
-          <Tabs.Tab value="usage" leftSection={<IconCode size={14} />}>
-            Usage
-          </Tabs.Tab>
-        </Tabs.List>
+      {tab === 'overview' ? (
+        <OverviewTab
+          model={model}
+          usage={usage}
+          providerLabel={providerLabel}
+          totalCost={totalCost}
+          costCurrency={costCurrency}
+          successRate={successRate}
+          sparkData={sparkData}
+          chartData={chartData}
+          recentLogs={logs.slice(0, 6)}
+          endpointUrl={endpointUrl}
+          dateFilter={dateFilter}
+          setDateFilter={setDateFilter}
+          refreshing={refreshing}
+          onRefresh={() => {
+            void fetchDetail(true);
+            void fetchLogs();
+          }}
+          onOpenLog={(l) => {
+            setSelectedLog(l);
+            openLogModal();
+          }}
+        />
+      ) : null}
 
-        {/* ════════════════ Dashboard Tab ════════════════ */}
-        <Tabs.Panel value="dashboard">
-          <Stack gap="md">
-            <Group justify="flex-end">
-              <DashboardDateFilter value={dateFilter} onChange={setDateFilter} />
-            </Group>
+      {tab === 'playground' && model.category === 'llm' ? (
+        <ModelPlayground
+          modelKey={model.key}
+          defaultUser={`Hello! Tell me what you can do.`}
+        />
+      ) : null}
 
-            {/* ── Top KPI Cards ── */}
-            <SimpleGrid cols={{ base: 2, sm: 3, md: 6 }} spacing="md">
-              <KpiCard
-                icon={<IconCoin size={18} />}
-                color="green"
-                label="Total Spend"
-                value={usage ? fmtCurrency(totalCost, costCurrency) : '—'}
-                highlight
-              />
-              <KpiCard
-                icon={<IconActivity size={18} />}
-                color="blue"
-                label={t('stats.totalCalls')}
-                value={usage ? fmtNumber(usage.totalCalls) : '—'}
-              />
-              <KpiCard
-                icon={<IconCheck size={18} />}
-                color="teal"
-                label={t('stats.successRate')}
-                value={usage ? `${successRate}%` : '—'}
-              />
-              <KpiCard
-                icon={<IconDatabase size={18} />}
-                color="violet"
-                label={t('stats.totalTokens')}
-                value={usage ? fmtNumber(usage.totalTokens) : '—'}
-              />
-              <KpiCard
-                icon={<IconClockHour4 size={18} />}
-                color="orange"
-                label={t('stats.avgLatency')}
-                value={usage?.avgLatencyMs ? `${Math.round(usage.avgLatencyMs)} ms` : '—'}
-              />
-              <KpiCard
-                icon={<IconX size={18} />}
-                color="red"
-                label="Errors"
-                value={usage ? fmtNumber(usage.errorCalls) : '—'}
-              />
-            </SimpleGrid>
+      {tab === 'configure' ? (
+        <ConfigureTab model={model} onDelete={handleDelete} deleting={deleting} />
+      ) : null}
 
-            {/* ── Daily Cost Chart + Cost Breakdown ── */}
-            <Grid>
-              <Grid.Col span={{ base: 12, md: 8 }}>
-                <Paper withBorder radius="lg" p="lg" h="100%">
-                  <Group gap={8} mb="md">
-                    <ThemeIcon variant="light" color="green" radius="md">
-                      <IconCoin size={16} />
-                    </ThemeIcon>
-                    <Text fw={600}>Daily Cost & Usage</Text>
-                  </Group>
-                  {chartData.length > 0 ? (
-                    <AreaChart
-                      h={260}
-                      data={chartData}
-                      dataKey="date"
-                      series={[
-                        { name: 'Cost', color: 'green.6' },
-                      ]}
-                      curveType="monotone"
-                      withDots={false}
-                      withGradient
-                      gridAxis="xy"
-                      valueFormatter={(value) => fmtCurrency(value as number, costCurrency)}
-                      tooltipAnimationDuration={200}
-                    />
-                  ) : (
-                    <Center h={260}>
-                      <Text size="sm" c="dimmed">No daily data available yet.</Text>
-                    </Center>
-                  )}
-                </Paper>
-              </Grid.Col>
+      {tab === 'logs' ? (
+        <LogsTab
+          logs={filteredLogs}
+          loading={logsLoading}
+          page={logsPage}
+          pageSize={logsPageSize}
+          setPage={setLogsPage}
+          setPageSize={setLogsPageSize}
+          hasMore={hasMoreLogs}
+          query={logFilter}
+          setQuery={setLogFilter}
+          level={logLevel}
+          setLevel={setLogLevel}
+          onOpen={(l) => {
+            setSelectedLog(l);
+            openLogModal();
+          }}
+          tLogs={t}
+          costCurrency={costCurrency}
+        />
+      ) : null}
 
-              <Grid.Col span={{ base: 12, md: 4 }}>
-                <Stack gap="md" h="100%">
-                  {/* Cost breakdown */}
-                  <Paper withBorder radius="lg" p="lg" style={{ flex: 1 }}>
-                    <Group gap={8} mb="md">
-                      <ThemeIcon variant="light" color="blue" radius="md">
-                        <IconCurrencyDollar size={16} />
-                      </ThemeIcon>
-                      <Text fw={600}>Cost Breakdown</Text>
-                    </Group>
-                    {usage?.costSummary ? (
-                      <Stack gap="sm">
-                        <CostRow label="Input tokens" value={usage.costSummary.inputCost ?? 0} total={totalCost} currency={costCurrency} color="blue" />
-                        <CostRow label="Output tokens" value={usage.costSummary.outputCost ?? 0} total={totalCost} currency={costCurrency} color="indigo" />
-                        <CostRow label="Cached tokens" value={usage.costSummary.cachedCost ?? 0} total={totalCost} currency={costCurrency} color="cyan" />
-                        <Group justify="space-between" mt="xs" pt="xs" style={{ borderTop: '1px solid var(--mantine-color-dark-4)' }}>
-                          <Text size="sm" fw={600}>Total</Text>
-                          <Text size="sm" fw={700} c="green">{fmtCurrency(totalCost, costCurrency)}</Text>
-                        </Group>
-                      </Stack>
-                    ) : (
-                      <Center py="md">
-                        <Text size="sm" c="dimmed">No cost data yet.</Text>
-                      </Center>
-                    )}
-                  </Paper>
-
-                  {/* Pricing card */}
-                  <Paper withBorder radius="lg" p="lg" style={{ flex: 1 }}>
-                    <Group gap={8} mb="sm">
-                      <ThemeIcon variant="light" color="grape" radius="md">
-                        <IconCurrencyDollar size={16} />
-                      </ThemeIcon>
-                      <Text fw={600}>{t('pricing.title')}</Text>
-                    </Group>
-                    <Stack gap={6}>
-                      <Group justify="space-between">
-                        <Text size="sm" c="dimmed">Input</Text>
-                        <Text size="sm" fw={500}>{model.pricing.inputTokenPer1M.toLocaleString(undefined, { maximumFractionDigits: 2 })} {model.pricing.currency || 'USD'}</Text>
-                      </Group>
-                      <Group justify="space-between">
-                        <Text size="sm" c="dimmed">Output</Text>
-                        <Text size="sm" fw={500}>{model.pricing.outputTokenPer1M.toLocaleString(undefined, { maximumFractionDigits: 2 })} {model.pricing.currency || 'USD'}</Text>
-                      </Group>
-                      {model.pricing.cachedTokenPer1M ? (
-                        <Group justify="space-between">
-                          <Text size="sm" c="dimmed">Cached</Text>
-                          <Text size="sm" fw={500}>{model.pricing.cachedTokenPer1M.toLocaleString(undefined, { maximumFractionDigits: 2 })} {model.pricing.currency || 'USD'}</Text>
-                        </Group>
-                      ) : null}
-                    </Stack>
-                  </Paper>
-                </Stack>
-              </Grid.Col>
-            </Grid>
-
-            {/* ── Model Info + Settings + Cache ── */}
-            <Grid>
-              <Grid.Col span={{ base: 12, md: 4 }}>
-                <Paper withBorder radius="lg" p="lg" h="100%">
-                  <Group gap={8} mb="sm">
-                    <ThemeIcon variant="light" color="indigo" radius="md">
-                      <IconChartBar size={16} />
-                    </ThemeIcon>
-                    <Text fw={600}>{t('sections.overview')}</Text>
-                  </Group>
-                  <Stack gap={8}>
-                    <InfoRow label={t('fields.key')} value={model.key} mono />
-                    <InfoRow label={t('fields.provider')} value={providerLabel} />
-                    <InfoRow label={t('fields.modelId')} value={model.modelId} mono />
-                    <InfoRow label={t('fields.createdAt')} value={model.createdAt ? new Date(model.createdAt).toLocaleDateString() : '—'} />
-                    <InfoRow label={t('fields.updatedAt')} value={model.updatedAt ? new Date(model.updatedAt).toLocaleDateString() : '—'} />
-                  </Stack>
-                  <Group gap={8} mt="md">
-                    {model.isMultimodal ? (
-                      <Badge variant="light" color="violet" leftSection={<IconEye size={14} />}>
-                        {tModels('list.capabilities.multimodal')}
-                      </Badge>
-                    ) : null}
-                    {model.supportsToolCalls ? (
-                      <Badge variant="light" color="lime" leftSection={<IconTool size={14} />}>
-                        {tModels('list.capabilities.tools')}
-                      </Badge>
-                    ) : null}
-                    {model.semanticCache?.enabled ? (
-                      <Badge variant="light" color="cyan">
-                        {t('sections.semanticCache')}
-                      </Badge>
-                    ) : null}
-                  </Group>
-                </Paper>
-              </Grid.Col>
-
-              <Grid.Col span={{ base: 12, md: 4 }}>
-                <Paper withBorder radius="lg" p="lg" h="100%">
-                  <Group gap={8} mb="sm">
-                    <ThemeIcon variant="light" color="grape" radius="md">
-                      <IconPlug size={16} />
-                    </ThemeIcon>
-                    <Text fw={600}>{t('sections.settings')}</Text>
-                  </Group>
-                  <Stack gap={8}>
-                    {Object.entries(model.settings || {}).length > 0 ? (
-                      Object.entries(model.settings).map(([key, value]) => (
-                        <InfoRow key={key} label={key} value={typeof value === 'string' ? value : JSON.stringify(value)} />
-                      ))
-                    ) : (
-                      <Text size="sm" c="dimmed">
-                        {t('settings.empty')}
-                      </Text>
-                    )}
-                  </Stack>
-                </Paper>
-              </Grid.Col>
-
-              <Grid.Col span={{ base: 12, md: 4 }}>
-                <Paper withBorder radius="lg" p="lg" h="100%">
-                  <Group gap={8} mb="sm">
-                    <ThemeIcon variant="light" color="teal" radius="md">
-                      <IconActivity size={16} />
-                    </ThemeIcon>
-                    <Text fw={600}>Performance & Cache</Text>
-                  </Group>
-                  {usage ? (
-                    <Stack gap="sm">
-                      <Group justify="center" mb="xs">
-                        <RingProgress
-                          size={100}
-                          thickness={10}
-                          roundCaps
-                          sections={[
-                            { value: successRate, color: 'teal' },
-                            { value: 100 - successRate, color: 'red' },
-                          ]}
-                          label={
-                            <Text ta="center" size="sm" fw={700}>
-                              {successRate}%
-                            </Text>
-                          }
-                        />
-                      </Group>
-                      <Group justify="space-between">
-                        <Text size="xs" c="dimmed">Success</Text>
-                        <Text size="sm" fw={500} c="teal">{fmtNumber(usage.successCalls)}</Text>
-                      </Group>
-                      <Group justify="space-between">
-                        <Text size="xs" c="dimmed">Errors</Text>
-                        <Text size="sm" fw={500} c="red">{fmtNumber(usage.errorCalls)}</Text>
-                      </Group>
-                      {(usage.cacheHits > 0 || usage.cacheMisses > 0) && (
-                        <>
-                          <Group justify="space-between" mt="xs">
-                            <Text size="xs" c="dimmed">Cache hits</Text>
-                            <Text size="sm" fw={500}>{fmtNumber(usage.cacheHits)}</Text>
-                          </Group>
-                          <Group justify="space-between">
-                            <Text size="xs" c="dimmed">Cache hit rate</Text>
-                            <Text size="sm" fw={500}>
-                              {usage.totalCalls > 0 ? `${Math.round((usage.cacheHits / usage.totalCalls) * 100)}%` : '—'}
-                            </Text>
-                          </Group>
-                        </>
-                      )}
-                      <Group justify="space-between">
-                        <Text size="xs" c="dimmed">Tool calls</Text>
-                        <Text size="sm" fw={500}>{fmtNumber(usage.totalToolCalls)}</Text>
-                      </Group>
-                    </Stack>
-                  ) : (
-                    <Center py="md">
-                      <Text size="sm" c="dimmed">{t('stats.noUsage')}</Text>
-                    </Center>
-                  )}
-                </Paper>
-              </Grid.Col>
-            </Grid>
-          </Stack>
-        </Tabs.Panel>
-
-        {/* ════════════════ Playground Tab ════════════════ */}
-        {model.category === 'llm' && (
-          <Tabs.Panel value="playground">
-            <Playground
-              initialModelKey={model.key}
-              hideModelSelector
-              chatHeight={550}
-            />
-          </Tabs.Panel>
-        )}
-
-        {/* ════════════════ History Tab ════════════════ */}
-        <Tabs.Panel value="history">
-          <Paper withBorder radius="lg" p="lg">
-            <Group gap={8} mb="sm">
-              <ThemeIcon variant="light" color="teal" radius="md">
-                <IconTimeline size={16} />
-              </ThemeIcon>
-              <Text fw={600}>{t('sections.logs')}</Text>
-              <Badge variant="light" color="gray" size="sm" ml="auto">Page {logsPage}</Badge>
-            </Group>
-
-            <Group align="end" gap="sm" mb="md" wrap="wrap">
-              <Group gap={6}>
-                {PAGE_SIZE_OPTIONS.map((size) => (
-                  <Button
-                    key={size}
-                    size="xs"
-                    variant={logsPageSize === size ? 'filled' : 'light'}
-                    onClick={() => {
-                      setLogsPageSize(size);
-                      setLogsPage(1);
-                    }}
-                  >
-                    {size}/page
-                  </Button>
-                ))}
-              </Group>
-            </Group>
-
-            {logsLoading ? (
-              <Center py="md">
-                <Loader size="sm" />
-              </Center>
-            ) : null}
-
-            <ScrollArea type="auto">
-              <Table highlightOnHover striped>
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>{t('logs.timestamp')}</Table.Th>
-                    <Table.Th>{t('logs.route')}</Table.Th>
-                    <Table.Th>{t('logs.status')}</Table.Th>
-                    <Table.Th>{t('logs.latency')}</Table.Th>
-                    <Table.Th>{t('logs.tokens')}</Table.Th>
-                    <Table.Th>Cost</Table.Th>
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {logs.length > 0 ? (
-                    logs.map((log) => {
-                      const reqCost = model.pricing
-                        ? (log.inputTokens / 1_000_000) * model.pricing.inputTokenPer1M +
-                          (log.outputTokens / 1_000_000) * model.pricing.outputTokenPer1M
-                        : undefined;
-                      return (
-                        <Table.Tr
-                          key={log._id || `${log.route}-${log.createdAt}`}
-                          style={{ cursor: 'pointer' }}
-                          onClick={() => {
-                            setSelectedLog(log);
-                            openLogModal();
-                          }}
-                        >
-                          <Table.Td>{log.createdAt ? new Date(log.createdAt).toLocaleString() : '—'}</Table.Td>
-                          <Table.Td>{log.route}</Table.Td>
-                          <Table.Td>
-                            <Group gap={4}>
-                              <Badge color={log.status === 'success' ? 'teal' : 'red'} variant="light" size="sm">
-                                {log.status === 'success' ? t('logs.success') : t('logs.error')}
-                              </Badge>
-                              {log.cacheHit === true && (
-                                <Badge color="cyan" variant="light" size="xs">
-                                  {t('logs.cacheHit')}
-                                </Badge>
-                              )}
-                            </Group>
-                          </Table.Td>
-                          <Table.Td>{log.latencyMs ? `${Math.round(log.latencyMs)} ms` : '—'}</Table.Td>
-                          <Table.Td>
-                            {t('logs.tokenSummary', {
-                              input: log.inputTokens.toLocaleString(),
-                              output: log.outputTokens.toLocaleString(),
-                            })}
-                          </Table.Td>
-                          <Table.Td>
-                            <Text size="xs" c="dimmed">
-                              {reqCost !== undefined ? fmtCurrency(reqCost, costCurrency) : '—'}
-                            </Text>
-                          </Table.Td>
-                        </Table.Tr>
-                      );
-                    })
-                  ) : (
-                    <Table.Tr>
-                      <Table.Td colSpan={6}>
-                        <Center py="md">
-                          <Text size="sm" c="dimmed">
-                            {t('logs.empty')}
-                          </Text>
-                        </Center>
-                      </Table.Td>
-                    </Table.Tr>
-                  )}
-                </Table.Tbody>
-              </Table>
-            </ScrollArea>
-
-            <Group justify="space-between" mt="md">
-              <Button
-                variant="default"
-                size="xs"
-                disabled={logsPage <= 1 || logsLoading}
-                onClick={() => setLogsPage((prev) => Math.max(1, prev - 1))}
-              >
-                Previous
-              </Button>
-              <Text size="sm" c="dimmed">
-                Page {logsPage}
-              </Text>
-              <Button
-                variant="default"
-                size="xs"
-                disabled={!hasMoreLogs || logsLoading}
-                onClick={() => setLogsPage((prev) => prev + 1)}
-              >
-                Next
-              </Button>
-            </Group>
-          </Paper>
-        </Tabs.Panel>
-
-        {/* ════════════════ Usage Tab ════════════════ */}
-        <Tabs.Panel value="usage">
-          <Stack gap="md">
-            {/* Model key */}
-            <Paper withBorder radius="lg" p="lg">
-              <Text fw={600} mb="xs">Model Key</Text>
-              <Group gap="sm">
-                <Code fz="sm" style={{ flex: 1 }}>{model.key}</Code>
-                <CopyButton value={model.key} timeout={2000}>
-                  {({ copied, copy }) => (
-                    <Tooltip label={copied ? 'Copied' : 'Copy'} withArrow>
-                      <Button
-                        size="xs"
-                        variant={copied ? 'filled' : 'light'}
-                        color={copied ? 'teal' : 'blue'}
-                        onClick={copy}
-                        leftSection={copied ? <IconCheck size={12} /> : <IconCopy size={12} />}
-                      >
-                        {copied ? 'Copied' : 'Copy'}
-                      </Button>
-                    </Tooltip>
-                  )}
-                </CopyButton>
-              </Group>
-            </Paper>
-
-            {model.category === 'llm' ? (
-              <>
-                {/* cURL — Chat Completion */}
-                <UsageCodeBlock title="cURL — Chat Completion" code={curlChat} />
-
-                {/* cURL — Streaming */}
-                <UsageCodeBlock title="cURL — Streaming" code={curlStream} />
-
-                {/* TypeScript SDK */}
-                <UsageCodeBlock title="TypeScript SDK — Chat Completion" code={sdkChat} language="typescript" />
-
-                {/* TypeScript SDK — Streaming */}
-                <UsageCodeBlock title="TypeScript SDK — Streaming" code={sdkStream} language="typescript" />
-
-                {/* Python */}
-                <UsageCodeBlock title="Python (httpx)" code={pythonChat} language="python" />
-
-                {/* OpenAI-compatible */}
-                <UsageCodeBlock title="Python — OpenAI Compatible" code={openaiCompat} language="python" />
-              </>
-            ) : (
-              <>
-                {/* cURL — Embeddings */}
-                <UsageCodeBlock title="cURL — Embeddings" code={curlEmbed} />
-
-                {/* TypeScript SDK — Embeddings */}
-                <UsageCodeBlock title="TypeScript SDK — Embeddings" code={sdkEmbed} language="typescript" />
-
-                {/* Python — Embeddings */}
-                <UsageCodeBlock title="Python (httpx) — Embeddings" code={pythonEmbed} language="python" />
-              </>
-            )}
-
-            {/* Response format */}
-            <Paper withBorder radius="lg" p="lg">
-              <Text fw={600} mb="xs">Response Format</Text>
-              <Text size="xs" c="dimmed" mb="sm">
-                All responses follow the OpenAI-compatible format. Replace <Code fz="xs">YOUR_API_TOKEN</Code> with an API token from Settings.
-              </Text>
-              {model.category === 'llm' ? (
-                <Code block fz="xs">
-{`{
-  "id": "chatcmpl-abc123",
-  "object": "chat.completion",
-  "model": "${model.key}",
-  "choices": [
-    {
-      "index": 0,
-      "message": {
-        "role": "assistant",
-        "content": "Hello! How can I help you today?"
-      },
-      "finish_reason": "stop"
-    }
-  ],
-  "usage": {
-    "prompt_tokens": 25,
-    "completion_tokens": 12,
-    "total_tokens": 37
-  }
-}`}
-                </Code>
-              ) : (
-                <Code block fz="xs">
-{`{
-  "object": "list",
-  "model": "${model.key}",
-  "data": [
-    {
-      "object": "embedding",
-      "index": 0,
-      "embedding": [0.0023, -0.0091, 0.0154, ...]
-    }
-  ],
-  "usage": {
-    "prompt_tokens": 10,
-    "total_tokens": 10
-  }
-}`}
-                </Code>
-              )}
-            </Paper>
-          </Stack>
-        </Tabs.Panel>
-      </Tabs>
+      {tab === 'usage' ? <UsageTab model={model} /> : null}
 
       {/* Request Details Modal */}
       <Modal
@@ -1090,36 +696,33 @@ print(response.choices[0].message.content)`;
         title={t('logs.modal.title')}
         size="xl"
       >
-        {selectedLog && (
+        {selectedLog ? (
           <Stack gap="md">
-            {/* Summary info */}
-            <Paper withBorder radius="md" p="sm">
+            <div className="ds-card ds-card-pad-sm">
               <Stack gap="xs">
-                <Group gap="xs" wrap="wrap">
-                  <Badge color={selectedLog.status === 'success' ? 'teal' : 'red'} variant="light">
-                    {selectedLog.status === 'success' ? t('logs.success') : t('logs.error')}
-                  </Badge>
-                  {selectedLog.latencyMs && (
-                    <Badge variant="light" color="blue">
+                <div className="ds-row ds-gap-xs">
+                  <StatusBadge status={selectedLog.status === 'success' ? 'ok' : 'err'} />
+                  {selectedLog.latencyMs ? (
+                    <span className="ds-badge ds-badge-info">
                       {Math.round(selectedLog.latencyMs)} ms
-                    </Badge>
-                  )}
-                  {selectedLog.toolCalls !== undefined && selectedLog.toolCalls > 0 && (
-                    <Badge variant="light" color="orange" leftSection={<IconTool size={12} />}>
+                    </span>
+                  ) : null}
+                  {selectedLog.toolCalls !== undefined &&
+                  selectedLog.toolCalls > 0 ? (
+                    <span className="ds-badge ds-badge-warn">
+                      <IconTool size={10} stroke={2} />
                       {t('logs.modal.toolCalls', { count: selectedLog.toolCalls })}
-                    </Badge>
-                  )}
-                  {selectedLog.cacheHit === true && (
-                    <Badge variant="light" color="cyan">
+                    </span>
+                  ) : null}
+                  {selectedLog.cacheHit === true ? (
+                    <span className="ds-badge ds-badge-teal">
                       {t('logs.cacheHit')}
-                    </Badge>
-                  )}
-                  {selectedLog.cacheHit === false && selectedLog.status === 'success' && (
-                    <Badge variant="light" color="gray">
-                      {t('logs.cacheMiss')}
-                    </Badge>
-                  )}
-                </Group>
+                    </span>
+                  ) : null}
+                  {selectedLog.cacheHit === false && selectedLog.status === 'success' ? (
+                    <span className="ds-badge">{t('logs.cacheMiss')}</span>
+                  ) : null}
+                </div>
                 <Text size="sm">
                   <strong>{t('logs.modal.requestId')}:</strong>{' '}
                   <code>{selectedLog.requestId || '—'}</code>
@@ -1129,7 +732,9 @@ print(response.choices[0].message.content)`;
                 </Text>
                 <Text size="sm">
                   <strong>{t('logs.timestamp')}:</strong>{' '}
-                  {selectedLog.createdAt ? new Date(selectedLog.createdAt).toLocaleString() : '—'}
+                  {selectedLog.createdAt
+                    ? new Date(selectedLog.createdAt).toLocaleString()
+                    : '—'}
                 </Text>
                 <Text size="sm">
                   <strong>{t('logs.modal.tokens')}:</strong>{' '}
@@ -1140,21 +745,20 @@ print(response.choices[0].message.content)`;
                     total: selectedLog.totalTokens.toLocaleString(),
                   })}
                 </Text>
-                {selectedLog.errorMessage && (
+                {selectedLog.errorMessage ? (
                   <Text size="sm" c="red">
-                    <strong>{t('logs.modal.error')}:</strong> {selectedLog.errorMessage}
+                    <strong>{t('logs.modal.error')}:</strong>{' '}
+                    {selectedLog.errorMessage}
                   </Text>
-                )}
+                ) : null}
               </Stack>
-            </Paper>
+            </div>
 
-            {/* Request / Response tabs */}
             <Tabs defaultValue="request">
               <Tabs.List>
                 <Tabs.Tab value="request">{t('logs.modal.request')}</Tabs.Tab>
                 <Tabs.Tab value="response">{t('logs.modal.response')}</Tabs.Tab>
               </Tabs.List>
-
               <Tabs.Panel value="request" pt="sm">
                 <ScrollArea h={400} type="auto">
                   {selectedLog.providerRequest ? (
@@ -1170,7 +774,6 @@ print(response.choices[0].message.content)`;
                   )}
                 </ScrollArea>
               </Tabs.Panel>
-
               <Tabs.Panel value="response" pt="sm">
                 <ScrollArea h={400} type="auto">
                   {selectedLog.providerResponse ? (
@@ -1188,113 +791,985 @@ print(response.choices[0].message.content)`;
               </Tabs.Panel>
             </Tabs>
           </Stack>
-        )}
+        ) : null}
       </Modal>
-    </Stack>
+    </PageContainer>
   );
 }
 
-/* ── Sub-components ─────────────────────────────────────────────────────── */
+/* ───────────────────────── Overview Tab ───────────────────────── */
 
-interface KpiCardProps {
-  icon: React.ReactNode;
-  color: string;
-  label: string;
-  value: string;
-  highlight?: boolean;
+interface OverviewTabProps {
+  model: ModelDetailDto;
+  usage: UsageAggregateDto | null;
+  providerLabel: string;
+  totalCost: number;
+  costCurrency: string;
+  successRate: number;
+  sparkData: number[];
+  chartData: Array<{ date: string; Cost: number; Calls: number; Tokens: number }>;
+  recentLogs: UsageLogDto[];
+  endpointUrl: string;
+  dateFilter: ReturnType<typeof defaultDashboardDateFilter>;
+  setDateFilter: (v: ReturnType<typeof defaultDashboardDateFilter>) => void;
+  refreshing: boolean;
+  onRefresh: () => void;
+  onOpenLog: (l: UsageLogDto) => void;
 }
 
-function KpiCard({ icon, color, label, value, highlight }: KpiCardProps) {
+function OverviewTab({
+  model,
+  usage,
+  providerLabel,
+  totalCost,
+  costCurrency,
+  successRate,
+  sparkData,
+  chartData,
+  recentLogs,
+  endpointUrl,
+  dateFilter,
+  setDateFilter,
+  refreshing,
+  onRefresh,
+  onOpenLog,
+}: OverviewTabProps) {
+  const periods: Array<{ id: 'last_day' | 'last_7_days' | 'last_30_days' | 'total'; label: string }> = [
+    { id: 'last_day', label: '24h' },
+    { id: 'last_7_days', label: '7d' },
+    { id: 'last_30_days', label: '30d' },
+    { id: 'total', label: 'All' },
+  ];
+
+  const curlSample =
+    model.category === 'llm'
+      ? `curl -X POST ${endpointUrl} \\
+  -H "Authorization: Bearer YOUR_API_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "${model.key}",
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'`
+      : `curl -X POST ${endpointUrl} \\
+  -H "Authorization: Bearer YOUR_API_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "${model.key}",
+    "input": "The quick brown fox"
+  }'`;
+
   return (
-    <Paper
-      withBorder
-      radius="lg"
-      p="md"
-      style={highlight ? { borderColor: `var(--mantine-color-${color}-6)`, borderWidth: 2 } : undefined}
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: 'minmax(0, 1fr) 320px',
+        gap: 16,
+      }}
+      className="ds-detail-grid"
     >
-      <Group gap={8} mb={4}>
-        <ThemeIcon variant="light" color={color} size="sm" radius="md">
-          {icon}
-        </ThemeIcon>
-        <Text size="xs" c="dimmed" tt="uppercase" fw={500}>
-          {label}
-        </Text>
-      </Group>
-      <Text fw={700} size={highlight ? 'xl' : 'lg'}>
-        {value}
-      </Text>
-    </Paper>
+      {/* Left column */}
+      <div className="ds-col ds-gap-md">
+        {/* Performance card */}
+        <div className="ds-card ds-card-pad-lg">
+          <div className="ds-row-between" style={{ marginBottom: 14 }}>
+            <div className="ds-h3">Performance · {periodLabel(dateFilter.period)}</div>
+            <div className="ds-row ds-gap-xs">
+              {periods.map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() =>
+                    setDateFilter({ period: p.id, dateRange: [null, null] })
+                  }
+                  className={`ds-period-btn ${dateFilter.period === p.id ? 'active' : ''}`}
+                >
+                  {p.label}
+                </button>
+              ))}
+              <ActionIcon
+                variant="subtle"
+                color="gray"
+                radius="md"
+                size="md"
+                loading={refreshing}
+                onClick={onRefresh}
+                aria-label="Refresh"
+              >
+                <IconRefresh size={14} stroke={1.7} />
+              </ActionIcon>
+            </div>
+          </div>
+          <div
+            className="ds-row ds-gap-lg"
+            style={{
+              marginBottom: 18,
+              paddingBottom: 18,
+              borderBottom: '1px solid var(--ds-border-soft)',
+              flexWrap: 'wrap',
+            }}
+          >
+            <MetricBlock label="Total calls" value={fmtNumber(usage?.totalCalls ?? 0)} />
+            <MetricBlock label="Success rate" value={`${successRate}`} unit="%" />
+            <MetricBlock
+              label="Avg latency"
+              value={usage?.avgLatencyMs != null ? `${Math.round(usage.avgLatencyMs)}` : '—'}
+              unit={usage?.avgLatencyMs != null ? 'ms' : undefined}
+            />
+            <MetricBlock label="Tokens" value={fmtNumber(usage?.totalTokens ?? 0)} />
+            <MetricBlock
+              label="Spend"
+              value={totalCost > 0 ? fmtCurrency(totalCost, costCurrency) : '—'}
+            />
+            <MetricBlock label="Errors" value={fmtNumber(usage?.errorCalls ?? 0)} />
+          </div>
+          <div>
+            <div className="ds-row-between" style={{ marginBottom: 8 }}>
+              <span className="ds-muted" style={{ fontSize: 12 }}>
+                Calls per period
+              </span>
+              <span className="ds-faint" style={{ fontSize: 11 }}>
+                {chartData.length} buckets
+              </span>
+            </div>
+            {chartData.length > 1 ? (
+              <AreaChart
+                h={140}
+                data={chartData}
+                dataKey="date"
+                series={[{ name: 'Calls', color: 'teal.6' }]}
+                curveType="monotone"
+                withDots={false}
+                withGradient
+                gridAxis="x"
+                tickLine="x"
+                tooltipAnimationDuration={150}
+              />
+            ) : (
+              <Spark data={sparkData} height={120} color="var(--ds-accent)" />
+            )}
+          </div>
+        </div>
+
+        {/* Endpoint card */}
+        <div className="ds-card ds-card-pad-lg">
+          <div className="ds-row-between" style={{ marginBottom: 12 }}>
+            <div className="ds-h3">Endpoint</div>
+            <CopyButton value={curlSample} timeout={1500}>
+              {({ copied, copy }) => (
+                <Button
+                  variant="default"
+                  size="xs"
+                  leftSection={
+                    copied ? (
+                      <IconCheck size={12} stroke={2} />
+                    ) : (
+                      <IconCopy size={12} stroke={1.7} />
+                    )
+                  }
+                  onClick={copy}
+                >
+                  {copied ? 'Copied' : 'Copy curl'}
+                </Button>
+              )}
+            </CopyButton>
+          </div>
+          <Code block style={{ fontSize: 12, whiteSpace: 'pre' }}>
+            {curlSample}
+          </Code>
+        </div>
+
+        {/* Recent requests */}
+        <div className="ds-card">
+          <div className="ds-row-between" style={{ padding: '14px 18px' }}>
+            <div className="ds-h3">Recent requests</div>
+            <Button
+              variant="subtle"
+              size="xs"
+              rightSection={<IconArrowRight size={12} stroke={1.7} />}
+              component={Link}
+              href="/dashboard/tracing"
+            >
+              Open tracing
+            </Button>
+          </div>
+          {recentLogs.length === 0 ? (
+            <div className="ds-empty" style={{ padding: 36 }}>
+              <Text size="sm" c="dimmed">
+                No recent requests yet.
+              </Text>
+            </div>
+          ) : (
+            <div className="ds-tbl-wrap">
+              <table className="ds-tbl">
+                <thead>
+                  <tr>
+                    <th>Request ID</th>
+                    <th>Started</th>
+                    <th style={{ textAlign: 'right' }}>Tokens</th>
+                    <th style={{ textAlign: 'right' }}>Latency</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {recentLogs.map((l, i) => (
+                    <tr
+                      key={l._id ?? `${l.requestId}-${i}`}
+                      className="clickable"
+                      onClick={() => onOpenLog(l)}
+                    >
+                      <td
+                        className="ds-mono"
+                        style={{ fontSize: 12, color: 'var(--ds-text)' }}
+                      >
+                        {l.requestId ?? '—'}
+                      </td>
+                      <td
+                        className="ds-muted"
+                        style={{ fontSize: 12.5, whiteSpace: 'nowrap' }}
+                      >
+                        {l.createdAt ? relativeDate(l.createdAt) : '—'}
+                      </td>
+                      <td
+                        className="ds-mono"
+                        style={{
+                          textAlign: 'right',
+                          fontSize: 12,
+                          fontVariantNumeric: 'tabular-nums',
+                        }}
+                      >
+                        {fmtNumber(l.totalTokens)}
+                      </td>
+                      <td
+                        className="ds-mono"
+                        style={{
+                          textAlign: 'right',
+                          fontSize: 12,
+                          fontVariantNumeric: 'tabular-nums',
+                        }}
+                      >
+                        {l.latencyMs ? `${Math.round(l.latencyMs)}ms` : '—'}
+                      </td>
+                      <td>
+                        <StatusBadge status={l.status === 'success' ? 'ok' : 'err'} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Right column */}
+      <div className="ds-col ds-gap-md">
+        <div className="ds-card ds-card-pad-lg">
+          <div className="ds-h4" style={{ marginBottom: 12 }}>
+            Details
+          </div>
+          {[
+            ['Model ID', <span key="mid" className="ds-mono" style={{ fontSize: 12 }}>{model.modelId}</span>],
+            ['Key', <span key="k" className="ds-mono" style={{ fontSize: 12 }}>{model.key}</span>],
+            ['Provider', <span key="p">{providerLabel}</span>],
+            ['Type', <span key="t" className="ds-badge">{model.category}</span>],
+            ['Status', <StatusBadge key="s" status="active" />],
+            ['Cache', <span key="c">{model.semanticCache?.enabled ? 'On' : 'Off'}</span>],
+            ['Created', <span key="cr" className="ds-faint" style={{ fontSize: 12.5 }}>{model.createdAt ? new Date(model.createdAt).toLocaleDateString() : '—'}</span>],
+            ['Updated', <span key="up" className="ds-faint" style={{ fontSize: 12.5 }}>{relativeDate(model.updatedAt)}</span>],
+          ].map(([k, v], i) => (
+            <div
+              key={k as string}
+              className="ds-row-between"
+              style={{
+                padding: '7px 0',
+                borderTop: i ? '1px solid var(--ds-border-soft)' : 'none',
+                fontSize: 12.5,
+              }}
+            >
+              <span className="ds-muted">{k}</span>
+              <span style={{ minWidth: 0, textAlign: 'right' }}>{v}</span>
+            </div>
+          ))}
+        </div>
+
+        <div className="ds-card ds-card-pad-lg">
+          <div className="ds-h4" style={{ marginBottom: 12 }}>
+            Pricing
+          </div>
+          <Stack gap="xs">
+            <div className="ds-row-between" style={{ fontSize: 12.5 }}>
+              <span className="ds-muted">Input</span>
+              <span className="ds-mono">
+                {model.pricing.inputTokenPer1M.toFixed(2)} {model.pricing.currency || 'USD'}/1M
+              </span>
+            </div>
+            <div className="ds-row-between" style={{ fontSize: 12.5 }}>
+              <span className="ds-muted">Output</span>
+              <span className="ds-mono">
+                {model.pricing.outputTokenPer1M.toFixed(2)} {model.pricing.currency || 'USD'}/1M
+              </span>
+            </div>
+            {model.pricing.cachedTokenPer1M ? (
+              <div className="ds-row-between" style={{ fontSize: 12.5 }}>
+                <span className="ds-muted">Cached</span>
+                <span className="ds-mono">
+                  {model.pricing.cachedTokenPer1M.toFixed(2)} {model.pricing.currency || 'USD'}/1M
+                </span>
+              </div>
+            ) : null}
+          </Stack>
+        </div>
+
+        {Object.keys(model.settings || {}).length > 0 ? (
+          <div className="ds-card ds-card-pad-lg">
+            <div className="ds-h4" style={{ marginBottom: 12 }}>
+              Settings
+            </div>
+            <Stack gap="xs">
+              {Object.entries(model.settings).map(([k, v]) => (
+                <div
+                  key={k}
+                  className="ds-row-between"
+                  style={{ fontSize: 12.5 }}
+                >
+                  <span className="ds-muted">{k}</span>
+                  <span
+                    className="ds-mono"
+                    style={{
+                      maxWidth: 150,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {typeof v === 'string' ? v : JSON.stringify(v)}
+                  </span>
+                </div>
+              ))}
+            </Stack>
+          </div>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
-interface CostRowProps {
-  label: string;
-  value: number;
-  total: number;
-  currency: string;
-  color: string;
-}
-
-function CostRow({ label, value, total, currency, color }: CostRowProps) {
-  const pct = total > 0 ? Math.round((value / total) * 100) : 0;
-  return (
-    <Stack gap={2}>
-      <Group justify="space-between">
-        <Text size="xs" c="dimmed">{label}</Text>
-        <Text size="xs" fw={500}>{fmtCurrency(value, currency)} ({pct}%)</Text>
-      </Group>
-      <Progress value={pct} color={color} size="xs" radius="xl" />
-    </Stack>
-  );
-}
-
-interface InfoRowProps {
+function MetricBlock({
+  label,
+  value,
+  unit,
+}: {
   label: string;
   value: string;
-  mono?: boolean;
-}
-
-function InfoRow({ label, value, mono }: InfoRowProps) {
+  unit?: string;
+}) {
   return (
-    <Group justify="space-between" gap="sm" wrap="nowrap">
-      <Text size="xs" c="dimmed" style={{ flexShrink: 0 }}>
+    <div style={{ minWidth: 0 }}>
+      <div className="ds-muted" style={{ fontSize: 12 }}>
         {label}
-      </Text>
-      <Text size="sm" fw={500} ta="right" truncate style={mono ? { fontFamily: 'var(--mantine-font-family-monospace)' } : undefined}>
-        {value}
-      </Text>
-    </Group>
+      </div>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'baseline',
+          gap: 4,
+          marginTop: 4,
+        }}
+      >
+        <span
+          style={{
+            fontSize: 22,
+            fontWeight: 600,
+            fontVariantNumeric: 'tabular-nums',
+          }}
+        >
+          {value}
+        </span>
+        {unit ? (
+          <span className="ds-faint" style={{ fontSize: 12 }}>
+            {unit}
+          </span>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
-interface UsageCodeBlockProps {
-  title: string;
-  code: string;
-  language?: string;
+/* ───────────────────────── Configure Tab ───────────────────────── */
+
+function ConfigureTab({
+  model,
+  onDelete,
+  deleting,
+}: {
+  model: ModelDetailDto;
+  onDelete: () => void;
+  deleting: boolean;
+}) {
+  return (
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: 'minmax(0, 1fr) 280px',
+        gap: 16,
+      }}
+      className="ds-detail-grid"
+    >
+      <div className="ds-col ds-gap-md">
+        <div className="ds-card ds-card-pad-lg">
+          <div className="ds-h3" style={{ marginBottom: 4 }}>
+            General
+          </div>
+          <div
+            className="ds-muted"
+            style={{ fontSize: 12.5, marginBottom: 16 }}
+          >
+            Display name and routing identifier for this deployment.
+          </div>
+          <div className="ds-col ds-gap-md">
+            <div>
+              {/* eslint-disable-next-line jsx-a11y/label-has-associated-control */}
+              <label className="ds-eyebrow" style={{ display: 'block', marginBottom: 6 }}>
+                Display name
+              </label>
+              <input className="ds-input" defaultValue={model.name} readOnly />
+            </div>
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 1fr',
+                gap: 12,
+              }}
+            >
+              <div>
+                {/* eslint-disable-next-line jsx-a11y/label-has-associated-control */}
+              <label className="ds-eyebrow" style={{ display: 'block', marginBottom: 6 }}>
+                  Endpoint key
+                </label>
+                <input
+                  className="ds-input ds-mono"
+                  defaultValue={model.key}
+                  readOnly
+                />
+              </div>
+              <div>
+                {/* eslint-disable-next-line jsx-a11y/label-has-associated-control */}
+              <label className="ds-eyebrow" style={{ display: 'block', marginBottom: 6 }}>
+                  Model ID
+                </label>
+                <input
+                  className="ds-input ds-mono"
+                  defaultValue={model.modelId}
+                  readOnly
+                />
+              </div>
+            </div>
+            {model.description ? (
+              <div>
+                {/* eslint-disable-next-line jsx-a11y/label-has-associated-control */}
+              <label className="ds-eyebrow" style={{ display: 'block', marginBottom: 6 }}>
+                  Description
+                </label>
+                <textarea
+                  className="ds-input"
+                  rows={2}
+                  defaultValue={model.description}
+                  readOnly
+                />
+              </div>
+            ) : null}
+          </div>
+        </div>
+
+        {model.semanticCache?.enabled ? (
+          <div className="ds-card ds-card-pad-lg">
+            <div className="ds-h3" style={{ marginBottom: 4 }}>
+              Semantic cache
+            </div>
+            <div
+              className="ds-muted"
+              style={{ fontSize: 12.5, marginBottom: 16 }}
+            >
+              Reuses semantically similar prompts to reduce cost.
+            </div>
+            <Stack gap="xs">
+              <div className="ds-row-between" style={{ fontSize: 12.5 }}>
+                <span className="ds-muted">Vector provider</span>
+                <span className="ds-mono">{model.semanticCache.vectorProviderKey}</span>
+              </div>
+              <div className="ds-row-between" style={{ fontSize: 12.5 }}>
+                <span className="ds-muted">Vector index</span>
+                <span className="ds-mono">{model.semanticCache.vectorIndexKey}</span>
+              </div>
+              <div className="ds-row-between" style={{ fontSize: 12.5 }}>
+                <span className="ds-muted">Embedding model</span>
+                <span className="ds-mono">{model.semanticCache.embeddingModelKey}</span>
+              </div>
+              <div className="ds-row-between" style={{ fontSize: 12.5 }}>
+                <span className="ds-muted">Similarity threshold</span>
+                <span className="ds-mono">
+                  {model.semanticCache.similarityThreshold.toFixed(2)}
+                </span>
+              </div>
+              <div className="ds-row-between" style={{ fontSize: 12.5 }}>
+                <span className="ds-muted">TTL</span>
+                <span className="ds-mono">{model.semanticCache.ttlSeconds}s</span>
+              </div>
+            </Stack>
+          </div>
+        ) : null}
+
+        <div
+          className="ds-card ds-card-pad-lg"
+          style={{ borderColor: 'rgba(201, 59, 59, 0.2)' }}
+        >
+          <div
+            className="ds-h3"
+            style={{ marginBottom: 4, color: 'var(--ds-err)' }}
+          >
+            Danger zone
+          </div>
+          <div
+            className="ds-muted"
+            style={{ fontSize: 12.5, marginBottom: 16 }}
+          >
+            Irreversible actions for this deployment.
+          </div>
+          <div
+            className="ds-row-between"
+            style={{
+              padding: '12px 0',
+              borderTop: '1px solid var(--ds-border-soft)',
+            }}
+          >
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 500 }}>
+                Delete deployment
+              </div>
+              <div className="ds-muted" style={{ fontSize: 12 }}>
+                This cannot be undone.
+              </div>
+            </div>
+            <Button
+              variant="default"
+              color="red"
+              size="sm"
+              loading={deleting}
+              onClick={onDelete}
+              leftSection={<IconTrash size={13} stroke={1.7} />}
+              style={{ color: 'var(--ds-err)' }}
+            >
+              Delete
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      <div className="ds-col ds-gap-md">
+        <div className="ds-card ds-card-pad-lg">
+          <div className="ds-h4" style={{ marginBottom: 12 }}>
+            Save changes
+          </div>
+          <p
+            className="ds-muted"
+            style={{ fontSize: 12.5, marginBottom: 12 }}
+          >
+            Configuration is read-only here. Use the edit page to change settings.
+          </p>
+          <Button
+            component={Link}
+            href={`/dashboard/models/${model._id}/edit`}
+            color="teal"
+            fullWidth
+            leftSection={<IconSettings size={13} stroke={1.7} />}
+          >
+            Open editor
+          </Button>
+        </div>
+        <div className="ds-card ds-card-pad-lg">
+          <div className="ds-h4" style={{ marginBottom: 8 }}>
+            Help
+          </div>
+          <div
+            className="ds-muted"
+            style={{ fontSize: 12.5, lineHeight: 1.5 }}
+          >
+            Learn how routing, caching and guardrails interact for inference
+            endpoints.
+          </div>
+          <Button
+            component={Link}
+            href="/dashboard/docs"
+            variant="subtle"
+            size="xs"
+            mt="sm"
+            rightSection={<IconExternalLink size={11} stroke={1.7} />}
+            style={{ paddingLeft: 0 }}
+          >
+            Read docs
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
-function UsageCodeBlock({ title, code }: UsageCodeBlockProps) {
+/* ───────────────────────── Logs Tab ───────────────────────── */
+
+interface LogsTabProps {
+  logs: UsageLogDto[];
+  loading: boolean;
+  page: number;
+  pageSize: number;
+  setPage: (n: number) => void;
+  setPageSize: (n: number) => void;
+  hasMore: boolean;
+  query: string;
+  setQuery: (v: string) => void;
+  level: 'all' | 'error';
+  setLevel: (v: 'all' | 'error') => void;
+  onOpen: (l: UsageLogDto) => void;
+  tLogs: ReturnType<typeof useTranslations>;
+  costCurrency: string;
+}
+
+function LogsTab({
+  logs,
+  loading,
+  page,
+  pageSize,
+  setPage,
+  setPageSize,
+  hasMore,
+  query,
+  setQuery,
+  level,
+  setLevel,
+  onOpen,
+  tLogs,
+}: LogsTabProps) {
   return (
-    <Paper withBorder radius="lg" p="lg">
-      <Group justify="space-between" mb="xs">
-        <Text fw={600} size="sm">{title}</Text>
-        <CopyButton value={code} timeout={2000}>
-          {({ copied, copy }) => (
-            <Tooltip label={copied ? 'Copied' : 'Copy code'} withArrow>
+    <div className="ds-card" style={{ overflow: 'hidden' }}>
+      <Toolbar
+        searchValue={query}
+        onSearchChange={setQuery}
+        searchPlaceholder="Filter logs…"
+      >
+        <select
+          className="ds-select"
+          value={level}
+          onChange={(e) => setLevel(e.target.value as 'all' | 'error')}
+          style={{ minWidth: 120 }}
+        >
+          <option value="all">All levels</option>
+          <option value="error">Errors only</option>
+        </select>
+        <div style={{ flex: 1 }} />
+        <div className="ds-row ds-gap-xs">
+          {PAGE_SIZE_OPTIONS.map((s) => (
+            <button
+              key={s}
+              type="button"
+              className={`ds-period-btn ${pageSize === s ? 'active' : ''}`}
+              onClick={() => {
+                setPageSize(s);
+                setPage(1);
+              }}
+            >
+              {s}/page
+            </button>
+          ))}
+        </div>
+      </Toolbar>
+
+      {loading ? (
+        <Center py="xl">
+          <Loader size="sm" color="teal" />
+        </Center>
+      ) : logs.length === 0 ? (
+        <div className="ds-empty" style={{ padding: 48 }}>
+          <Text size="sm" c="dimmed">
+            {tLogs('logs.empty')}
+          </Text>
+        </div>
+      ) : (
+        <div className="ds-tbl-wrap">
+          <table className="ds-tbl">
+            <thead>
+              <tr>
+                <th>{tLogs('logs.timestamp')}</th>
+                <th>{tLogs('logs.route')}</th>
+                <th>{tLogs('logs.status')}</th>
+                <th style={{ textAlign: 'right' }}>{tLogs('logs.latency')}</th>
+                <th style={{ textAlign: 'right' }}>{tLogs('logs.tokens')}</th>
+                <th>Request ID</th>
+              </tr>
+            </thead>
+            <tbody>
+              {logs.map((l) => (
+                <tr
+                  key={l._id ?? `${l.route}-${l.createdAt}`}
+                  className="clickable"
+                  onClick={() => onOpen(l)}
+                >
+                  <td className="ds-muted" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+                    {l.createdAt ? new Date(l.createdAt).toLocaleString() : '—'}
+                  </td>
+                  <td className="ds-mono" style={{ fontSize: 12 }}>
+                    {l.route}
+                  </td>
+                  <td>
+                    <div className="ds-row ds-gap-xs">
+                      <StatusBadge status={l.status === 'success' ? 'ok' : 'err'} />
+                      {l.cacheHit === true ? (
+                        <span className="ds-badge ds-badge-teal">cache</span>
+                      ) : null}
+                    </div>
+                  </td>
+                  <td
+                    className="ds-mono"
+                    style={{
+                      textAlign: 'right',
+                      fontSize: 12,
+                      fontVariantNumeric: 'tabular-nums',
+                    }}
+                  >
+                    {l.latencyMs ? `${Math.round(l.latencyMs)}ms` : '—'}
+                  </td>
+                  <td
+                    className="ds-mono"
+                    style={{
+                      textAlign: 'right',
+                      fontSize: 12,
+                      fontVariantNumeric: 'tabular-nums',
+                    }}
+                  >
+                    {l.totalTokens.toLocaleString()}
+                  </td>
+                  <td className="ds-mono ds-faint" style={{ fontSize: 12 }}>
+                    {l.requestId ?? '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div
+        className="ds-row-between"
+        style={{
+          padding: '12px 18px',
+          borderTop: '1px solid var(--ds-border-soft)',
+          fontSize: 12.5,
+          color: 'var(--ds-text-muted)',
+        }}
+      >
+        <span>Page {page}</span>
+        <div className="ds-row ds-gap-sm">
+          <Button
+            variant="default"
+            size="xs"
+            disabled={page <= 1 || loading}
+            leftSection={<IconChevronLeft size={12} />}
+            onClick={() => setPage(Math.max(1, page - 1))}
+          >
+            Prev
+          </Button>
+          <Button
+            variant="default"
+            size="xs"
+            disabled={!hasMore || loading}
+            rightSection={<IconChevronRight size={12} />}
+            onClick={() => setPage(page + 1)}
+          >
+            Next
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ───────────────────────── Usage (code samples) Tab ───────────────────────── */
+
+function UsageTab({ model }: { model: ModelDetailDto }) {
+  const base =
+    typeof window !== 'undefined' ? window.location.origin : 'https://your-host';
+  const isLlm = model.category === 'llm';
+
+  const curl = isLlm
+    ? `curl -X POST ${base}/api/client/v1/chat/completions \\
+  -H "Authorization: Bearer YOUR_API_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "${model.key}",
+    "messages": [
+      { "role": "system", "content": "You are a helpful assistant." },
+      { "role": "user",   "content": "Hello!" }
+    ],
+    "temperature": 0.7
+  }'`
+    : `curl -X POST ${base}/api/client/v1/embeddings \\
+  -H "Authorization: Bearer YOUR_API_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "${model.key}",
+    "input": "The quick brown fox"
+  }'`;
+
+  const ts = isLlm
+    ? `import ConsoleClient from '@cognipeer/console-sdk';
+
+const client = new ConsoleClient({
+  apiKey: 'YOUR_API_TOKEN',
+  baseUrl: '${base}',
+});
+
+const response = await client.chat.completions({
+  model: '${model.key}',
+  messages: [{ role: 'user', content: 'Hello!' }],
+});
+
+console.log(response.choices[0].message.content);`
+    : `import ConsoleClient from '@cognipeer/console-sdk';
+
+const client = new ConsoleClient({
+  apiKey: 'YOUR_API_TOKEN',
+  baseUrl: '${base}',
+});
+
+const response = await client.embeddings.create({
+  model: '${model.key}',
+  input: 'The quick brown fox',
+});
+
+console.log(response.data[0].embedding);`;
+
+  const python = isLlm
+    ? `import httpx
+
+response = httpx.post(
+    "${base}/api/client/v1/chat/completions",
+    headers={"Authorization": "Bearer YOUR_API_TOKEN"},
+    json={
+        "model": "${model.key}",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    },
+)
+print(response.json()["choices"][0]["message"]["content"])`
+    : `import httpx
+
+response = httpx.post(
+    "${base}/api/client/v1/embeddings",
+    headers={"Authorization": "Bearer YOUR_API_TOKEN"},
+    json={"model": "${model.key}", "input": "The quick brown fox"},
+)
+print(response.json()["data"][0]["embedding"][:5])`;
+
+  const openai = isLlm
+    ? `from openai import OpenAI
+
+client = OpenAI(
+    api_key="YOUR_API_TOKEN",
+    base_url="${base}/api/client/v1",
+)
+
+response = client.chat.completions.create(
+    model="${model.key}",
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+print(response.choices[0].message.content)`
+    : null;
+
+  return (
+    <div className="ds-col ds-gap-md">
+      <div className="ds-card ds-card-pad-lg">
+        <div className="ds-h4" style={{ marginBottom: 8 }}>
+          Model key
+        </div>
+        <div className="ds-row ds-gap-sm">
+          <Code style={{ flex: 1, fontSize: 12 }}>{model.key}</Code>
+          <CopyButton value={model.key} timeout={1500}>
+            {({ copied, copy }) => (
               <Button
                 size="xs"
-                variant={copied ? 'filled' : 'outline'}
-                color={copied ? 'teal' : 'gray'}
-                leftSection={copied ? <IconCheck size={12} /> : <IconCopy size={12} />}
+                variant={copied ? 'filled' : 'default'}
+                color={copied ? 'teal' : undefined}
+                leftSection={
+                  copied ? (
+                    <IconCheck size={12} stroke={2} />
+                  ) : (
+                    <IconCopy size={12} stroke={1.7} />
+                  )
+                }
                 onClick={copy}
               >
                 {copied ? 'Copied' : 'Copy'}
               </Button>
-            </Tooltip>
+            )}
+          </CopyButton>
+        </div>
+      </div>
+
+      <CodeBlock title={`cURL — ${isLlm ? 'Chat completion' : 'Embeddings'}`} code={curl} />
+      <CodeBlock
+        title={`TypeScript SDK — ${isLlm ? 'Chat completion' : 'Embeddings'}`}
+        code={ts}
+      />
+      <CodeBlock
+        title={`Python (httpx) — ${isLlm ? 'Chat completion' : 'Embeddings'}`}
+        code={python}
+      />
+      {openai ? <CodeBlock title="Python — OpenAI compatible" code={openai} /> : null}
+    </div>
+  );
+}
+
+function CodeBlock({ title, code }: { title: string; code: string }) {
+  return (
+    <div className="ds-card ds-card-pad-lg">
+      <div className="ds-row-between" style={{ marginBottom: 10 }}>
+        <div className="ds-h4">{title}</div>
+        <CopyButton value={code} timeout={1500}>
+          {({ copied, copy }) => (
+            <Button
+              variant="default"
+              size="xs"
+              leftSection={
+                copied ? (
+                  <IconCheck size={12} stroke={2} />
+                ) : (
+                  <IconCopy size={12} stroke={1.7} />
+                )
+              }
+              onClick={copy}
+            >
+              {copied ? 'Copied' : 'Copy'}
+            </Button>
           )}
         </CopyButton>
-      </Group>
-      <Code block fz="xs">{code}</Code>
-    </Paper>
+      </div>
+      <Code block style={{ fontSize: 12, whiteSpace: 'pre' }}>
+        {code}
+      </Code>
+    </div>
   );
+}
+
+function periodLabel(period: string): string {
+  switch (period) {
+    case 'total':
+      return 'all time';
+    case 'last_day':
+      return 'last 24h';
+    case 'last_7_days':
+      return 'last 7 days';
+    case 'last_30_days':
+      return 'last 30 days';
+    case 'custom':
+      return 'custom range';
+    default:
+      return period;
+  }
 }

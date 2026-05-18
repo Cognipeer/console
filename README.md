@@ -102,6 +102,8 @@ Key variables:
 | `JWT_SECRET` | — | **Required**. Secret for JWT signing |
 | `MAIN_DB_NAME` | `cgate_main` | Main database name |
 | `CACHE_PROVIDER` | `memory` | Cache backend (`none`, `memory`, `redis`) |
+| `RATE_LIMIT_PROVIDER` | `mongodb` | Rate limit backend (`mongodb`, `memory`, `redis`) |
+| `BROWSER_BLOCK_PRIVATE_NETWORK` | `true` | Block private-network egress from managed browser sessions |
 | `CORS_ENABLED` | `false` | Enable CORS for client APIs |
 
 For the full configuration reference, see the [Configuration Guide](docs/guide/configuration.md).

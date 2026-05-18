@@ -4,36 +4,26 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Button,
-  Text,
   Group,
-  Stack,
-  ThemeIcon,
   Modal,
+  Select,
+  Stack,
+  Text,
   TextInput,
   Textarea,
-  Select,
-  ActionIcon,
-  Menu,
-  Table,
-  Badge,
-  VisuallyHidden,
-  UnstyledButton,
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import {
-  IconRobot,
-  IconPlus,
-  IconDotsVertical,
-  IconTrash,
   IconEye,
+  IconPlus,
+  IconRobot,
+  IconTrash,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
-import EmptyState from '@/components/common/EmptyState';
-import LoadingState from '@/components/common/LoadingState';
-import PageHeader from '@/components/layout/PageHeader';
-import SectionCard from '@/components/common/SectionCard';
-import classes from './AgentsPage.module.css';
+import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
+import StatusBadge from '@/components/common/ui/StatusBadge';
 
 interface Agent {
   _id: string;
@@ -68,6 +58,7 @@ export default function AgentsPage() {
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Agent | null>(null);
+  const [query, setQuery] = useState('');
 
   const form = useForm({
     initialValues: {
@@ -109,8 +100,8 @@ export default function AgentsPage() {
   };
 
   useEffect(() => {
-    loadAgents();
-    loadModels();
+    void loadAgents();
+    void loadModels();
   }, []);
 
   const handleCreate = async (values: typeof form.values) => {
@@ -143,12 +134,11 @@ export default function AgentsPage() {
       setCreateModalOpen(false);
       form.reset();
 
-      // Navigate to the new agent's detail page
       router.push(`/dashboard/agents/${data.agent._id}`);
-    } catch (err: any) {
+    } catch (err: unknown) {
       notifications.show({
         title: t('notifications.error'),
-        message: err.message,
+        message: err instanceof Error ? err.message : 'Error',
         color: 'red',
       });
     } finally {
@@ -169,9 +159,9 @@ export default function AgentsPage() {
           color: 'teal',
         });
         setDeleteTarget(null);
-        loadAgents();
+        void loadAgents();
       }
-    } catch (err) {
+    } catch {
       notifications.show({
         title: t('notifications.error'),
         message: t('notifications.deleteFailed'),
@@ -180,16 +170,81 @@ export default function AgentsPage() {
     }
   };
 
+  const filtered = agents.filter((a) => {
+    const q = query.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      a.name.toLowerCase().includes(q) ||
+      (a.description ?? '').toLowerCase().includes(q) ||
+      a.config.modelKey.toLowerCase().includes(q)
+    );
+  });
+
+  const columns: DataGridColumn<Agent>[] = [
+    {
+      key: 'name',
+      label: t('table.name'),
+      render: (agent) => (
+        <div className="ds-col" style={{ gap: 2 }}>
+          <span style={{ fontSize: 13, fontWeight: 500 }}>{agent.name}</span>
+          {agent.description ? (
+            <span
+              className="ds-muted"
+              style={{
+                fontSize: 11.5,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                maxWidth: 360,
+              }}
+            >
+              {agent.description}
+            </span>
+          ) : null}
+        </div>
+      ),
+    },
+    {
+      key: 'model',
+      label: t('table.model'),
+      render: (agent) => (
+        <span className="ds-mono" style={{ fontSize: 12 }}>
+          {agent.config.modelKey}
+        </span>
+      ),
+    },
+    {
+      key: 'status',
+      label: t('table.status'),
+      render: (agent) => (
+        <StatusBadge
+          status={agent.status === 'active' ? 'active' : 'paused'}
+          label={agent.status}
+        />
+      ),
+    },
+    {
+      key: 'created',
+      label: t('table.createdAt'),
+      render: (agent) => (
+        <span className="ds-faint" style={{ fontSize: 12.5 }}>
+          {new Date(agent.createdAt).toLocaleDateString()}
+        </span>
+      ),
+    },
+  ];
+
   return (
-    <>
+    <PageContainer>
       <PageHeader
-        icon={<IconRobot size={20} />}
+        eyebrow="Build · Agents"
         title={t('title')}
         subtitle={t('subtitle')}
         actions={
           <Button
-            size="xs"
-            leftSection={<IconPlus size={14} />}
+            color="teal"
+            size="sm"
+            leftSection={<IconPlus size={14} stroke={1.7} />}
             onClick={() => setCreateModalOpen(true)}
           >
             {t('createAgent')}
@@ -197,132 +252,47 @@ export default function AgentsPage() {
         }
       />
 
-      <SectionCard p={0} className={classes.tableShell}>
-        {loading ? (
-          <LoadingState label={t('loading', { defaultValue: 'Loading agents...' })} minHeight={220} />
-        ) : agents.length === 0 ? (
-          <EmptyState
-            title={t('empty.title')}
-            description={t('empty.description')}
-            icon={<IconRobot size={24} />}
-            minHeight={260}
-            action={
-              <Button
-                size="sm"
-                leftSection={<IconPlus size={14} />}
-                onClick={() => setCreateModalOpen(true)}
-              >
-                {t('createAgent')}
-              </Button>
-            }
-          />
-        ) : (
-          <Table striped highlightOnHover>
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>{t('table.name')}</Table.Th>
-                <Table.Th>{t('table.model')}</Table.Th>
-                <Table.Th>{t('table.status')}</Table.Th>
-                <Table.Th>{t('table.createdAt')}</Table.Th>
-                <Table.Th w={60}>
-                  <VisuallyHidden>Actions</VisuallyHidden>
-                </Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {agents.map((agent) => (
-                <Table.Tr
-                  key={agent._id}
-                  className={classes.agentRow}
-                  onClick={() => router.push(`/dashboard/agents/${agent._id}`)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' || event.key === ' ') {
-                      event.preventDefault();
-                      router.push(`/dashboard/agents/${agent._id}`);
-                    }
-                  }}
-                  tabIndex={0}
-                  role="button"
-                  aria-label={`${t('actions.view')} ${agent.name}`}
-                >
-                  <Table.Td>
-                    <Group gap="xs">
-                      <ThemeIcon size={28} radius="md" variant="light" color="violet">
-                        <IconRobot size={14} />
-                      </ThemeIcon>
-                      <div>
-                        <Text size="sm" fw={600}>
-                          {agent.name}
-                        </Text>
-                        {agent.description && (
-                          <Text size="xs" c="dimmed" lineClamp={1}>
-                            {agent.description}
-                          </Text>
-                        )}
-                      </div>
-                    </Group>
-                  </Table.Td>
-                  <Table.Td>
-                    <Text size="sm">{agent.config.modelKey}</Text>
-                  </Table.Td>
-                  <Table.Td>
-                    <Badge
-                      size="sm"
-                      variant="light"
-                      color={agent.status === 'active' ? 'teal' : 'gray'}
-                    >
-                      {agent.status}
-                    </Badge>
-                  </Table.Td>
-                  <Table.Td>
-                    <Text size="xs" c="dimmed">
-                      {new Date(agent.createdAt).toLocaleDateString()}
-                    </Text>
-                  </Table.Td>
-                  <Table.Td>
-                    <Menu position="bottom-end" withinPortal>
-                      <Menu.Target>
-                        <ActionIcon
-                          variant="subtle"
-                          size="sm"
-                          className={classes.agentMenuButton}
-                          aria-label={`Open actions for ${agent.name}`}
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <IconDotsVertical size={14} />
-                        </ActionIcon>
-                      </Menu.Target>
-                      <Menu.Dropdown>
-                        <Menu.Item
-                          leftSection={<IconEye size={14} />}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            router.push(`/dashboard/agents/${agent._id}`);
-                          }}
-                        >
-                          {t('actions.view')}
-                        </Menu.Item>
-                        <Menu.Item
-                          color="red"
-                          leftSection={<IconTrash size={14} />}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setDeleteTarget(agent);
-                          }}
-                        >
-                          {t('actions.delete')}
-                        </Menu.Item>
-                      </Menu.Dropdown>
-                    </Menu>
-                  </Table.Td>
-                </Table.Tr>
-              ))}
-            </Table.Tbody>
-          </Table>
-        )}
-      </SectionCard>
+      <DataGrid<Agent>
+        records={filtered}
+        loading={loading}
+        rowKey={(a) => a._id}
+        onRowClick={(a) => router.push(`/dashboard/agents/${a._id}`)}
+        columns={columns}
+        search={{
+          value: query,
+          onChange: setQuery,
+          placeholder: 'Search agents…',
+        }}
+        onRefresh={() => void loadAgents()}
+        refreshing={loading}
+        empty={{
+          icon: <IconRobot size={26} stroke={1.7} />,
+          title: t('empty.title'),
+          description: t('empty.description'),
+          primaryAction: {
+            label: t('createAgent'),
+            icon: <IconPlus size={14} stroke={1.7} />,
+            onClick: () => setCreateModalOpen(true),
+          },
+        }}
+        footerLeft={`Showing ${filtered.length} of ${agents.length} agents`}
+        rowActions={(agent) => [
+          {
+            id: 'view',
+            label: t('actions.view'),
+            icon: <IconEye size={14} />,
+            onClick: () => router.push(`/dashboard/agents/${agent._id}`),
+          },
+          {
+            id: 'delete',
+            label: t('actions.delete'),
+            icon: <IconTrash size={14} />,
+            color: 'red',
+            onClick: () => setDeleteTarget(agent),
+          },
+        ]}
+      />
 
-      {/* Create Agent Modal */}
       <Modal
         opened={createModalOpen}
         onClose={() => setCreateModalOpen(false)}
@@ -358,7 +328,7 @@ export default function AgentsPage() {
               <Button variant="default" onClick={() => setCreateModalOpen(false)}>
                 {t('createModal.cancel')}
               </Button>
-              <Button type="submit" loading={creating}>
+              <Button type="submit" color="teal" loading={creating}>
                 {t('createModal.create')}
               </Button>
             </Group>
@@ -366,7 +336,6 @@ export default function AgentsPage() {
         </form>
       </Modal>
 
-      {/* Delete Confirmation */}
       <Modal
         opened={!!deleteTarget}
         onClose={() => setDeleteTarget(null)}
@@ -374,9 +343,7 @@ export default function AgentsPage() {
         size="sm"
       >
         <Stack gap="md">
-          <Text size="sm">
-            {t('deleteModal.message')}
-          </Text>
+          <Text size="sm">{t('deleteModal.message')}</Text>
           <Group justify="flex-end">
             <Button variant="default" onClick={() => setDeleteTarget(null)}>
               {t('deleteModal.cancel')}
@@ -387,6 +354,6 @@ export default function AgentsPage() {
           </Group>
         </Stack>
       </Modal>
-    </>
+    </PageContainer>
   );
 }

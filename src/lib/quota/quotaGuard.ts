@@ -1,9 +1,11 @@
 import { getDatabase, type IQuotaPolicy } from '@/lib/database';
+import { getCache } from '@/lib/core/cache';
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import type { LicenseType } from '@/lib/license/license-manager';
+import { LicenseManager } from '@/lib/license/license-manager';
 
 const logger = createLogger('quota-guard');
-import { getPlanQuotaLimits } from '@/lib/quota/planLimits';
 import type {
   QuotaDomain,
   QuotaLimits,
@@ -108,15 +110,46 @@ function mergeLimits(base: QuotaLimits, override: QuotaLimits): QuotaLimits {
   return merged;
 }
 
+async function incrementRateLimitCounter(
+  context: QuotaContext,
+  key: string,
+  windowSeconds: number,
+  amount: number,
+): Promise<{ count: number; resetAt: Date }> {
+  const provider = getConfig().rateLimit.provider;
+
+  if (provider === 'mongodb') {
+    const db = await getDatabase();
+    await db.switchToTenant(context.tenantDbName);
+    return db.incrementRateLimit(key, windowSeconds, amount);
+  }
+
+  const cache = await getCache();
+  if (cache.name !== provider) {
+    throw new Error(
+      `RATE_LIMIT_PROVIDER=${provider} requires CACHE_PROVIDER=${provider}`,
+    );
+  }
+
+  return cache.incrementCounter(
+    `${context.tenantDbName}:${key}`,
+    windowSeconds,
+    amount,
+  );
+}
+
 export async function resolveEffectiveLimits(
   context: QuotaContext,
 ): Promise<QuotaLimits> {
-  const planDefaults = getPlanQuotaLimits(context.licenseType);
+  const db = await getDatabase();
+  const tenant = await db.findTenantById(context.tenantId);
+  const licenseDefaults = LicenseManager.getQuotaLimitsForTenant(tenant);
   let effectiveLimits: QuotaLimits = {
-    quotas: { ...planDefaults },
-    rateLimit: {
-      requests: { perMonth: planDefaults.requestsPerMonth },
-    },
+    ...licenseDefaults,
+    quotas: { ...licenseDefaults.quotas },
+    rateLimit: licenseDefaults.rateLimit
+      ? { ...licenseDefaults.rateLimit }
+      : undefined,
   };
 
   const policies = await fetchPolicies(
@@ -148,12 +181,13 @@ export async function checkQuota(
 
 export async function checkResourceQuota(
   context: QuotaContext,
-  resource: 'models' | 'vectorIndexes' | 'apiTokens' | 'users' | 'agents' | 'fileBuckets' | 'tracingSessions' | 'filesTotal',
+  resource: 'projects' | 'models' | 'vectorIndexes' | 'apiTokens' | 'users' | 'agents' | 'fileBuckets' | 'tracingSessions' | 'filesTotal',
   currentCount: number,
 ): Promise<QuotaCheckResult> {
   const effectiveLimits = await resolveEffectiveLimits(context);
 
   const quotaKeyMap: Record<typeof resource, keyof NonNullable<QuotaLimits['quotas']>> = {
+    projects: 'maxProjects',
     models: 'maxModels',
     vectorIndexes: 'maxVectorIndexes',
     apiTokens: 'maxApiTokens',
@@ -344,8 +378,6 @@ export async function checkRateLimit(
   } = { requests: 1, tokens: 0 },
 ): Promise<QuotaCheckResult> {
   const effectiveLimits = await resolveEffectiveLimits(context);
-  const db = await getDatabase();
-  await db.switchToTenant(context.tenantDbName);
 
   const rateLimit = effectiveLimits.rateLimit;
   if (!rateLimit) return { allowed: true, effectiveLimits };
@@ -378,14 +410,22 @@ export async function checkRateLimit(
     const key = keyParts.join(':');
 
     try {
-      const { count } = await db.incrementRateLimit(key, windowSeconds, incrementBy);
+      const { count } = await incrementRateLimitCounter(
+        context,
+        key,
+        windowSeconds,
+        incrementBy,
+      );
       if (count > limit) {
         errors.push(
           `Rate limit exceeded for ${type} ${windowName} (${count}/${limit})`,
         );
       }
     } catch (error) {
-      logger.error('Rate limit check failed', { error });
+      logger.error('Rate limit check failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      errors.push('Rate limit enforcement unavailable');
     }
   };
 

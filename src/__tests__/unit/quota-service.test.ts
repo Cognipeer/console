@@ -1,6 +1,6 @@
 /**
  * Unit tests — QuotaService
- * Tests: getPlanDefaults, listQuotaPolicies, createQuotaPolicy, updateQuotaPolicy, deleteQuotaPolicy
+ * Tests: getLicenseDefaults, listQuotaPolicies, createQuotaPolicy, updateQuotaPolicy, deleteQuotaPolicy
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -11,23 +11,14 @@ vi.mock('@/lib/database', () => ({
   getDatabase: vi.fn(),
 }));
 
-vi.mock('@/lib/quota/planLimits', () => ({
-  getPlanQuotaLimits: vi.fn().mockReturnValue({
-    requestsPerMonth: 10_000,
-    maxModels: 5,
-    maxVectorIndexes: 3,
-  }),
-}));
-
 import { getDatabase } from '@/lib/database';
-import { getPlanQuotaLimits } from '@/lib/quota/planLimits';
 import { createMockDb } from '../helpers/db.mock';
 import {
   listQuotaPolicies,
   createQuotaPolicy,
   updateQuotaPolicy,
   deleteQuotaPolicy,
-  getPlanDefaults,
+  getLicenseDefaults,
 } from '@/lib/services/quota/quotaService';
 import type { IQuotaPolicy } from '@/lib/database/provider.interface';
 
@@ -54,19 +45,23 @@ function makePolicy(overrides: Partial<IQuotaPolicy> = {}): IQuotaPolicy {
   };
 }
 
-// ── getPlanDefaults ───────────────────────────────────────────────────────────
+// ── getLicenseDefaults ────────────────────────────────────────────────────────
 
-describe('getPlanDefaults', () => {
-  it('delegates to getPlanQuotaLimits and returns the result', async () => {
-    const result = await getPlanDefaults('FREE');
-    expect(getPlanQuotaLimits).toHaveBeenCalledWith('FREE');
-    expect(result.requestsPerMonth).toBe(10_000);
-  });
+describe('getLicenseDefaults', () => {
+  it('returns free license defaults when tenant has no active license', async () => {
+    const db = createMockDb();
+    (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
+    db.findTenantById.mockResolvedValue({
+      _id: TENANT_ID,
+      companyName: 'Acme',
+      dbName: TENANT_DB,
+      licenseType: 'FREE',
+      slug: 'acme',
+    });
 
-  it('returns plan limits for different license types', async () => {
-    (getPlanQuotaLimits as ReturnType<typeof vi.fn>).mockReturnValueOnce({ requestsPerMonth: 100_000 });
-    const result = await getPlanDefaults('PROFESSIONAL');
-    expect(result.requestsPerMonth).toBe(100_000);
+    const result = await getLicenseDefaults(TENANT_ID);
+    expect(result.licenseType).toBe('FREE');
+    expect(result.limits.maxProjects).toBe(2);
   });
 });
 

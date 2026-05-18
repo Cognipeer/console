@@ -29,11 +29,11 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         INSERT INTO ${TABLES.ragModules}
         (id, tenantId, projectId, key, name, description,
          embeddingModelKey, vectorProviderKey, vectorIndexKey, fileBucketKey, fileProviderKey,
-         chunkConfig, status, totalDocuments, totalChunks, metadata,
+         chunkConfig, status, rerankerKey, rerankerOversample, totalDocuments, totalChunks, metadata,
          createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @key, @name, @description,
          @embeddingModelKey, @vectorProviderKey, @vectorIndexKey, @fileBucketKey, @fileProviderKey,
-         @chunkConfig, @status, @totalDocuments, @totalChunks, @metadata,
+         @chunkConfig, @status, @rerankerKey, @rerankerOversample, @totalDocuments, @totalChunks, @metadata,
          @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
@@ -49,6 +49,8 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         fileProviderKey: ragModule.fileProviderKey ?? null,
         chunkConfig: this.toJson(ragModule.chunkConfig),
         status: ragModule.status,
+        rerankerKey: ragModule.rerankerKey ?? null,
+        rerankerOversample: ragModule.rerankerOversample ?? null,
         totalDocuments: ragModule.totalDocuments ?? 0,
         totalChunks: ragModule.totalChunks ?? 0,
         metadata: this.toJson(ragModule.metadata ?? {}),
@@ -84,6 +86,8 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
       if (data.metadata !== undefined) { sets.push('metadata = @metadata'); params.metadata = this.toJson(data.metadata); }
       if (data.updatedBy !== undefined) { sets.push('updatedBy = @updatedBy'); params.updatedBy = data.updatedBy; }
       if (data.projectId !== undefined) { sets.push('projectId = @projectId'); params.projectId = data.projectId; }
+      if (data.rerankerKey !== undefined) { sets.push('rerankerKey = @rerankerKey'); params.rerankerKey = data.rerankerKey ?? null; }
+      if (data.rerankerOversample !== undefined) { sets.push('rerankerOversample = @rerankerOversample'); params.rerankerOversample = data.rerankerOversample ?? null; }
 
       db.prepare(`UPDATE ${TABLES.ragModules} SET ${sets.join(', ')} WHERE id = @id`).run(params);
       return this.findRagModuleById(id);
@@ -375,6 +379,8 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         fileProviderKey: r.fileProviderKey as string | undefined,
         chunkConfig: this.parseJson(r.chunkConfig, { strategy: 'recursive_character', chunkSize: 1000, chunkOverlap: 200 }),
         status: r.status as IRagModule['status'],
+        rerankerKey: (r.rerankerKey as string | null | undefined) ?? undefined,
+        rerankerOversample: (r.rerankerOversample as number | null | undefined) ?? undefined,
         totalDocuments: r.totalDocuments as number,
         totalChunks: r.totalChunks as number,
         metadata: this.parseJson(r.metadata, {}),

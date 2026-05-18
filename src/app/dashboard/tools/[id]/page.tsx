@@ -43,10 +43,8 @@ import {
   IconSettings,
   IconTool,
   IconTrash,
-  IconApi,
-  IconCloud,
 } from '@tabler/icons-react';
-import PageHeader from '@/components/layout/PageHeader';
+import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import type { ToolView, ToolRequestLogView } from '@/lib/services/tools';
 import type { IToolAction } from '@/lib/database';
 
@@ -668,8 +666,9 @@ export default function ToolDetailPage() {
 
   return (
     <>
+      <PageContainer>
       <PageHeader
-        icon={tool.type === 'openapi' ? <IconApi size={20} /> : <IconCloud size={20} />}
+        eyebrow="Build · Tool"
         title={tool.name}
         subtitle={tool.description || 'No description'}
         actions={
@@ -1159,6 +1158,7 @@ export default function ToolDetailPage() {
           </Paper>
         </Tabs.Panel>
       </Tabs>
+      </PageContainer>
 
       {/* ── Action Detail Modal ── */}
       <Modal

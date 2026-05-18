@@ -3,6 +3,7 @@ import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import DashboardLayout from '@/components/layout/DashboardLayout';
 import { getDatabase } from '@/lib/database';
+import { normalizeServicePermissions } from '@/lib/security/rbac';
 
 interface DashboardRouteLayoutProps {
   children: ReactNode;
@@ -18,22 +19,34 @@ export default async function DashboardRouteLayout({ children }: DashboardRouteL
     | 'project_admin'
     | 'user';
 
+  const tenantDbName = h.get('x-tenant-db-name');
+  const userId = h.get('x-user-id');
+  const tenantId = h.get('x-tenant-id');
+
+  if (!tenantDbName || !tenantId || !userId) {
+    redirect('/login');
+  }
+
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const user = await db.findUserById(userId);
+
+  if (!user) {
+    redirect('/login');
+  }
+
   // If a non-admin user has no assigned projects, do not render the dashboard at all.
   if (role === 'user' || role === 'project_admin') {
-    const tenantDbName = h.get('x-tenant-db-name');
-    const userId = h.get('x-user-id');
-    const tenantId = h.get('x-tenant-id');
+    const assigned = new Set((user?.projectIds ?? []).map(String).filter(Boolean));
+    const memberships = await db.listUserProjectsByUser(userId);
 
-    if (!tenantDbName || !tenantId || !userId) {
-      redirect('/login');
+    for (const membership of memberships) {
+      if (membership.projectId) {
+        assigned.add(String(membership.projectId));
+      }
     }
 
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    const user = await db.findUserById(userId);
-
-    const assigned = (user?.projectIds ?? []).map(String).filter(Boolean);
-    if (assigned.length === 0) {
+    if (assigned.size === 0) {
       redirect('/no-project');
     }
   }
@@ -45,6 +58,7 @@ export default async function DashboardRouteLayout({ children }: DashboardRouteL
         email,
         licenseType,
         role,
+        servicePermissions: normalizeServicePermissions(user.servicePermissions),
       }}
     >
       {children}

@@ -35,6 +35,57 @@ const requestContextFormat = winston.format((info) => {
 });
 
 /* ------------------------------------------------------------------ */
+/*  Secret redaction                                                  */
+/* ------------------------------------------------------------------ */
+
+const REDACTED = '[REDACTED]';
+const SENSITIVE_KEY_PATTERN = /^(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|authorization|bearer|cookie|set[_-]?cookie|token|jwt|encryption[_-]?key|private[_-]?key|x[_-]?api[_-]?key|aws[_-]?secret)$/i;
+const REDACT_MAX_DEPTH = 6;
+
+function redactValue(value: unknown, depth: number, seen: WeakSet<object>): unknown {
+  if (value === null || value === undefined) return value;
+  if (depth > REDACT_MAX_DEPTH) return value;
+  if (typeof value !== 'object') return value;
+  if (seen.has(value as object)) return value;
+  seen.add(value as object);
+
+  if (Array.isArray(value)) {
+    return value.map((item) => redactValue(item, depth + 1, seen));
+  }
+
+  // Preserve Error / Date / Buffer instances as-is.
+  if (value instanceof Error || value instanceof Date || Buffer.isBuffer(value)) {
+    return value;
+  }
+
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (SENSITIVE_KEY_PATTERN.test(k)) {
+      out[k] = REDACTED;
+    } else {
+      out[k] = redactValue(v, depth + 1, seen);
+    }
+  }
+  return out;
+}
+
+const redactSecretsFormat = winston.format((info) => {
+  for (const key of Object.keys(info)) {
+    // Skip Winston's well-known structural fields.
+    if (key === 'level' || key === 'message' || key === 'timestamp' || key === 'scope') continue;
+    if (SENSITIVE_KEY_PATTERN.test(key)) {
+      info[key] = REDACTED;
+      continue;
+    }
+    const value = (info as Record<string, unknown>)[key];
+    if (value && typeof value === 'object') {
+      (info as Record<string, unknown>)[key] = redactValue(value, 0, new WeakSet());
+    }
+  }
+  return info;
+});
+
+/* ------------------------------------------------------------------ */
 /*  Build format pipeline based on config                             */
 /* ------------------------------------------------------------------ */
 
@@ -43,6 +94,7 @@ function buildFormat() {
   const base = winston.format.combine(
     winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss.SSS' }),
     requestContextFormat(),
+    redactSecretsFormat(),
     winston.format.errors({ stack: true }),
   );
 

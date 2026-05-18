@@ -1,4 +1,8 @@
+import fs from 'node:fs';
+import { decodeProtectedHeader, importSPKI, jwtVerify, type JWTPayload } from 'jose';
 import { getConfig } from '@/lib/core/config';
+import type { ITenant } from '@/lib/database';
+import type { QuotaLimits, QuotaResourceCaps } from '@/lib/quota/types';
 import policies from '@/config/policies.json';
 
 export interface FeaturePolicy {
@@ -9,7 +13,7 @@ export interface FeaturePolicy {
 
 export interface LicensePolicy {
   name: string;
-  features: string[];
+  features?: string[];
   limits: {
     requestsPerMonth: number;
     maxAgents: number;
@@ -23,9 +27,33 @@ export type LicenseType =
   | 'ENTERPRISE'
   | 'ON_PREMISE';
 
-/**
- * Compiled regex cache for endpoint patterns – avoids re-compiling on every request.
- */
+export type OfflineLicenseLimits = Pick<QuotaResourceCaps, 'maxProjects'>;
+
+export interface OfflineLicensePayload extends JWTPayload {
+  licenseId: string;
+  licenseType: LicenseType;
+  customerName?: string;
+  tenantId?: string;
+  tenantSlug?: string;
+  features?: string[];
+  limits?: OfflineLicenseLimits;
+}
+
+export interface EffectiveLicense {
+  licenseId: string;
+  licenseType: LicenseType;
+  status: 'free' | 'active' | 'expired' | 'invalid';
+  source: 'free' | 'offline';
+  features: string[];
+  limits: OfflineLicenseLimits;
+  payload?: OfflineLicensePayload;
+  expiresAt?: Date;
+  error?: string;
+}
+
+const FREE_PROJECT_LIMIT = 2;
+const ALLOWED_LICENSE_ALGORITHMS = new Set(['EdDSA', 'ES256', 'RS256', 'PS256']);
+
 const endpointRegexCache = new Map<string, RegExp>();
 
 function getEndpointRegex(pattern: string): RegExp {
@@ -38,59 +66,253 @@ function getEndpointRegex(pattern: string): RegExp {
   return regex;
 }
 
+function normalizePublicKey(value: string): string {
+  return value.replace(/\\n/g, '\n').trim();
+}
+
+function isLicenseType(value: unknown): value is LicenseType {
+  return (
+    value === 'FREE'
+    || value === 'STARTER'
+    || value === 'PROFESSIONAL'
+    || value === 'ENTERPRISE'
+    || value === 'ON_PREMISE'
+  );
+}
+
+function normalizeFeatureList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  return [...new Set(
+    value
+      .filter((item): item is string => typeof item === 'string')
+      .map((item) => item.trim())
+      .filter(Boolean),
+  )];
+}
+
+function normalizeLimits(value: unknown): OfflineLicenseLimits | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const raw = value as Record<string, unknown>;
+  const quotas = raw.quotas && typeof raw.quotas === 'object' && !Array.isArray(raw.quotas)
+    ? raw.quotas as Record<string, unknown>
+    : undefined;
+
+  const maxProjects = quotas?.maxProjects ?? raw.maxProjects;
+  if (typeof maxProjects !== 'number' || !Number.isFinite(maxProjects)) {
+    return undefined;
+  }
+
+  return { maxProjects };
+}
+
+function mergeLicenseLimits(
+  base: OfflineLicenseLimits,
+  override?: OfflineLicenseLimits,
+): OfflineLicenseLimits {
+  if (!override || override.maxProjects === undefined) {
+    return base;
+  }
+
+  return {
+    ...base,
+    maxProjects: override.maxProjects,
+  };
+}
+
+function toQuotaLimits(limits: OfflineLicenseLimits): QuotaLimits {
+  return {
+    quotas: {
+      maxProjects: limits.maxProjects,
+    },
+  };
+}
+
 export class LicenseManager {
-  private static policies = policies;
+  private static policyConfig = policies;
 
-  /**
-   * On-premise / self-hosted deployments get unrestricted access by default.
-   * Override with ENFORCE_LICENSE=true to enable license checks even on-prem.
-   */
-  private static isUnrestrictedLicense(licenseType: LicenseType): boolean {
-    return licenseType === 'ON_PREMISE' && !getConfig().license.enforceLicense;
+  private static getFreeLimits(): OfflineLicenseLimits {
+    return {
+      maxProjects: FREE_PROJECT_LIMIT,
+    };
   }
 
-  /**
-   * Get features for a specific license type.
-   * On-prem: returns ALL features when unrestricted.
-   */
+  private static getPublicKeyPem(): string | null {
+    const cfg = getConfig().license;
+    if (cfg.offlinePublicKey) {
+      return normalizePublicKey(cfg.offlinePublicKey);
+    }
+    if (!cfg.offlinePublicKeyPath) {
+      return null;
+    }
+    return fs.readFileSync(cfg.offlinePublicKeyPath, 'utf8').trim();
+  }
+
+  private static getAllFeatureKeys(): string[] {
+    return Object.keys(this.policyConfig.features);
+  }
+
   static getFeaturesForLicense(licenseType: LicenseType): string[] {
-    if (this.isUnrestrictedLicense(licenseType)) {
-      return Object.keys(this.policies.features);
-    }
-    const license = this.policies.licenses[licenseType];
-    return license?.features || [];
+    return this.policyConfig.licenses[licenseType]
+      ? this.getAllFeatureKeys()
+      : [];
   }
 
-  /**
-   * Check if a license has access to a specific feature.
-   * On-prem: always true when unrestricted.
-   */
-  static hasFeature(licenseType: LicenseType, featureKey: string): boolean {
-    if (this.isUnrestrictedLicense(licenseType)) {
-      return true;
+  static getDefaultFreeLicense(): EffectiveLicense {
+    return {
+      features: this.getFeaturesForLicense('FREE'),
+      licenseId: 'FREE',
+      licenseType: 'FREE',
+      limits: this.getFreeLimits(),
+      source: 'free',
+      status: 'free',
+    };
+  }
+
+  static getEffectiveLicenseForTenant(tenant: Pick<
+    ITenant,
+    | '_id'
+    | 'licenseError'
+    | 'licenseExpiresAt'
+    | 'licenseId'
+    | 'licensePayload'
+    | 'licenseStatus'
+    | 'licenseType'
+  > | null | undefined): EffectiveLicense {
+    if (!tenant || tenant.licenseStatus !== 'active' || !tenant.licensePayload) {
+      return this.getDefaultFreeLicense();
     }
+
+    const payload = tenant.licensePayload as OfflineLicensePayload;
+    const licenseType = isLicenseType(payload.licenseType)
+      ? payload.licenseType
+      : 'FREE';
     const features = this.getFeaturesForLicense(licenseType);
-    return features.includes(featureKey);
+    const limits = mergeLicenseLimits(
+      this.getFreeLimits(),
+      normalizeLimits(payload.limits),
+    );
+    const expiresAt = tenant.licenseExpiresAt
+      ?? (typeof payload.exp === 'number' ? new Date(payload.exp * 1000) : undefined);
+
+    if (expiresAt && expiresAt.getTime() <= Date.now()) {
+      return {
+        ...this.getDefaultFreeLicense(),
+        error: 'License has expired',
+        status: 'expired',
+      };
+    }
+
+    return {
+      expiresAt,
+      features,
+      licenseId: tenant.licenseId || payload.licenseId,
+      licenseType,
+      limits,
+      payload,
+      source: 'offline',
+      status: 'active',
+    };
   }
 
-  /**
-   * Check if a license has access to a specific endpoint.
-   * On-prem: always true when unrestricted.
-   */
+  static getQuotaLimitsForTenant(tenant: ITenant | null | undefined): QuotaLimits {
+    return toQuotaLimits(this.getEffectiveLicenseForTenant(tenant).limits);
+  }
+
+  static async verifyOfflineLicenseKey(
+    licenseKey: string,
+    tenant: Pick<ITenant, '_id' | 'slug'>,
+  ): Promise<EffectiveLicense> {
+    const key = licenseKey.trim();
+    if (!key) {
+      throw new Error('License key is required');
+    }
+
+    const publicKeyPem = this.getPublicKeyPem();
+    if (!publicKeyPem) {
+      throw new Error('Offline license public key is not configured');
+    }
+
+    const header = decodeProtectedHeader(key);
+    if (!header.alg || !ALLOWED_LICENSE_ALGORITHMS.has(header.alg)) {
+      throw new Error('Unsupported license signature algorithm');
+    }
+
+    const publicKey = await importSPKI(publicKeyPem, header.alg);
+    const cfg = getConfig().license;
+    const verifyOptions = {
+      audience: cfg.audience || undefined,
+      issuer: cfg.issuer || undefined,
+    };
+    const { payload } = await jwtVerify(key, publicKey, verifyOptions);
+
+    if (!payload.licenseId || typeof payload.licenseId !== 'string') {
+      throw new Error('License payload is missing licenseId');
+    }
+    if (!isLicenseType(payload.licenseType)) {
+      throw new Error('License payload has an invalid licenseType');
+    }
+
+    const tenantId = typeof tenant._id === 'string' ? tenant._id : tenant._id?.toString();
+    const payloadTenantId = typeof payload.tenantId === 'string' ? payload.tenantId : undefined;
+    const payloadTenantSlug = typeof payload.tenantSlug === 'string' ? payload.tenantSlug : undefined;
+
+    if (!payloadTenantId && !payloadTenantSlug) {
+      throw new Error('License is not bound to a tenant');
+    }
+    if (payloadTenantId && tenantId && payloadTenantId !== tenantId) {
+      throw new Error('License tenant id does not match this tenant');
+    }
+    if (payloadTenantSlug && payloadTenantSlug !== tenant.slug) {
+      throw new Error('License tenant slug does not match this tenant');
+    }
+
+    const normalizedPayload: OfflineLicensePayload = {
+      ...payload,
+      features: normalizeFeatureList(payload.features),
+      licenseId: payload.licenseId,
+      licenseType: payload.licenseType,
+      limits: normalizeLimits(payload.limits),
+    };
+
+    return {
+      expiresAt: typeof payload.exp === 'number' ? new Date(payload.exp * 1000) : undefined,
+      features: this.getFeaturesForLicense(normalizedPayload.licenseType),
+      licenseId: normalizedPayload.licenseId,
+      licenseType: normalizedPayload.licenseType,
+      limits: mergeLicenseLimits(this.getFreeLimits(), normalizedPayload.limits),
+      payload: normalizedPayload,
+      source: 'offline',
+      status: 'active',
+    };
+  }
+
+  static hasFeature(_licenseType: LicenseType, featureKey: string): boolean {
+    return this.getAllFeatureKeys().includes(featureKey);
+  }
+
   static hasEndpointAccess(
     licenseType: LicenseType,
     endpoint: string,
   ): boolean {
-    if (this.isUnrestrictedLicense(licenseType)) {
-      return true;
-    }
+    return this.hasEndpointAccessForFeatures(
+      this.getFeaturesForLicense(licenseType),
+      endpoint,
+    );
+  }
 
-    const features = this.getFeaturesForLicense(licenseType);
-
-    for (const featureKey of features) {
+  static hasEndpointAccessForFeatures(
+    _features: string[] | undefined,
+    endpoint: string,
+  ): boolean {
+    for (const featureKey of this.getAllFeatureKeys()) {
       const feature =
-        this.policies.features[
-        featureKey as keyof typeof this.policies.features
+        this.policyConfig.features[
+        featureKey as keyof typeof this.policyConfig.features
         ];
       if (!feature) continue;
 
@@ -104,9 +326,6 @@ export class LicenseManager {
     return false;
   }
 
-  /**
-   * Match endpoint with wildcard pattern (uses cached regex).
-   */
   private static matchEndpoint(endpoint: string, pattern: string): boolean {
     if (pattern === endpoint) return true;
 
@@ -117,42 +336,25 @@ export class LicenseManager {
     return false;
   }
 
-  /**
-   * Get all feature details for a license.
-   */
   static getFeatureDetails(licenseType: LicenseType): FeaturePolicy[] {
     const featureKeys = this.getFeaturesForLicense(licenseType);
     return featureKeys
       .map(
         (key) =>
-          this.policies.features[key as keyof typeof this.policies.features],
+          this.policyConfig.features[key as keyof typeof this.policyConfig.features],
       )
       .filter(Boolean) as FeaturePolicy[];
   }
 
-  /**
-   * Get license limits.
-   * On-prem: returns unlimited when unrestricted.
-   */
-  static getLimits(licenseType: LicenseType) {
-    if (this.isUnrestrictedLicense(licenseType)) {
-      return { requestsPerMonth: Infinity, maxAgents: Infinity };
-    }
-    const license = this.policies.licenses[licenseType];
-    return license?.limits || { requestsPerMonth: 0, maxAgents: 0 };
+  static getLimits(): OfflineLicenseLimits {
+    return this.getFreeLimits();
   }
 
-  /**
-   * Get all available license types
-   */
   static getAllLicenses(): Record<LicenseType, LicensePolicy> {
-    return this.policies.licenses as Record<LicenseType, LicensePolicy>;
+    return this.policyConfig.licenses as Record<LicenseType, LicensePolicy>;
   }
 
-  /**
-   * Get all available features
-   */
   static getAllFeatures(): Record<string, FeaturePolicy> {
-    return this.policies.features as Record<string, FeaturePolicy>;
+    return this.policyConfig.features as Record<string, FeaturePolicy>;
   }
 }

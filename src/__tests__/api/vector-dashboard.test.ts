@@ -3,7 +3,7 @@ import { NextRequest } from 'next/server';
 
 vi.mock('@/lib/services/vector/vectorService', () => ({
   listVectorProviders: vi.fn(),
-  listVectorIndexes: vi.fn(),
+  listProjectVectorIndexes: vi.fn(),
 }));
 
 vi.mock('@/lib/services/projects/projectContext', () => {
@@ -23,11 +23,11 @@ vi.mock('@/lib/utils/dashboardDateFilter', () => ({
 }));
 
 import { GET } from '@/server/api/routes/vector/dashboard/route';
-import { listVectorProviders, listVectorIndexes } from '@/lib/services/vector/vectorService';
+import { listProjectVectorIndexes, listVectorProviders } from '@/lib/services/vector/vectorService';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
 
 const mockListVectorProviders = vi.mocked(listVectorProviders);
-const mockListVectorIndexes = vi.mocked(listVectorIndexes);
+const mockListProjectVectorIndexes = vi.mocked(listProjectVectorIndexes);
 const mockRequireProjectContext = vi.mocked(requireProjectContext);
 
 const mockProjectContext = {
@@ -81,7 +81,7 @@ describe('GET /api/vector/dashboard', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     mockListVectorProviders.mockResolvedValue(sampleProviders as any);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    mockListVectorIndexes.mockResolvedValue(sampleIndexes as any);
+    mockListProjectVectorIndexes.mockResolvedValue(sampleIndexes as any);
   });
 
   it('returns dashboard overview on success', async () => {
@@ -97,8 +97,7 @@ describe('GET /api/vector/dashboard', () => {
     const res = await GET(makeRequest());
     const body = await res.json();
     expect(body.overview.totalProviders).toBe(sampleProviders.length);
-    // listVectorIndexes is called once per provider, so totalIndexes = providers * indexes
-    expect(body.overview.totalIndexes).toBe(sampleProviders.length * sampleIndexes.length);
+    expect(body.overview.totalIndexes).toBe(sampleIndexes.length);
   });
 
   it('returns 401 when x-tenant-db-name is missing', async () => {
@@ -137,22 +136,17 @@ describe('GET /api/vector/dashboard', () => {
     expect(res.status).toBe(500);
   });
 
-  it('handles listVectorIndexes error gracefully (per-provider catch)', async () => {
-    // The route catches per-provider errors and returns empty indexes for that provider
-    // So the overall response is still 200
-    mockListVectorIndexes.mockRejectedValueOnce(new Error('Index error'));
+  it('returns 500 when project index listing fails', async () => {
+    mockListProjectVectorIndexes.mockRejectedValueOnce(new Error('Index error'));
     const res = await GET(makeRequest());
-    // Should still succeed because error is caught at provider level
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body).toHaveProperty('overview');
+    expect(res.status).toBe(500);
   });
 
   it('handles empty providers and indexes gracefully', async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     mockListVectorProviders.mockResolvedValueOnce([] as any);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    mockListVectorIndexes.mockResolvedValueOnce([] as any);
+    mockListProjectVectorIndexes.mockResolvedValueOnce([] as any);
     const res = await GET(makeRequest());
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -171,7 +165,7 @@ describe('GET /api/vector/dashboard', () => {
       createdAt: new Date(Date.now() - i * 1000).toISOString(),
     }));
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    mockListVectorIndexes.mockResolvedValueOnce(manyIndexes as any);
+    mockListProjectVectorIndexes.mockResolvedValueOnce(manyIndexes as any);
     const res = await GET(makeRequest());
     const body = await res.json();
     expect(body.recentIndexes.length).toBeLessThanOrEqual(5);

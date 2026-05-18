@@ -21,20 +21,6 @@ type SessionListQuery = Record<string, unknown> & {
   skip?: number | string;
 };
 
-const DASHBOARD_SESSION_PROJECTION = {
-  sessionId: 1,
-  agentName: 1,
-  status: 1,
-  startedAt: 1,
-  durationMs: 1,
-  totalEvents: 1,
-  totalInputTokens: 1,
-  totalOutputTokens: 1,
-  totalCachedInputTokens: 1,
-  modelsUsed: 1,
-  toolsUsed: 1,
-} as const;
-
 const THREAD_SESSION_PROJECTION = {
   sessionId: 1,
   agentName: 1,
@@ -234,10 +220,6 @@ type SessionMetricsSource = {
   durationMs?: number;
 };
 
-type AgentSummaryAccumulator = AgentTracingAgentSummary & {
-  totalDurationMs: number;
-};
-
 type AggregateTotalsAccumulator = {
   totalEvents: number;
   totalInputTokens: number;
@@ -309,8 +291,8 @@ function buildAggregateTotals(sessions: SessionMetricsSource[]): AgentTracingAgg
   };
 }
 
-const DASHBOARD_SESSIONS_BATCH_SIZE = 1000;
-const DASHBOARD_SESSIONS_HARD_CAP = 100_000;
+const SESSION_ANALYTICS_BATCH_SIZE = 1000;
+const SESSION_ANALYTICS_HARD_CAP = 100_000;
 
 async function fetchAllSessionsBatched(
   db: Awaited<ReturnType<typeof getDatabase>>,
@@ -321,11 +303,11 @@ async function fetchAllSessionsBatched(
   const all: IAgentTracingSession[] = [];
   let skip = 0;
   // Loop in batches until we drain the result set or hit the safety cap.
-  while (skip < DASHBOARD_SESSIONS_HARD_CAP) {
+  while (skip < SESSION_ANALYTICS_HARD_CAP) {
     const { sessions } = await db.listAgentTracingSessions({
       ...baseQuery,
       includeTotal: false,
-      limit: DASHBOARD_SESSIONS_BATCH_SIZE,
+      limit: SESSION_ANALYTICS_BATCH_SIZE,
       skip,
       projection,
     }, projectId);
@@ -336,17 +318,17 @@ async function fetchAllSessionsBatched(
 
     all.push(...(sessions as IAgentTracingSession[]));
 
-    if (sessions.length < DASHBOARD_SESSIONS_BATCH_SIZE) {
+    if (sessions.length < SESSION_ANALYTICS_BATCH_SIZE) {
       break;
     }
 
     skip += sessions.length;
   }
 
-  if (skip >= DASHBOARD_SESSIONS_HARD_CAP) {
-    logger.warn('Dashboard analytics hit session hard cap', {
+  if (skip >= SESSION_ANALYTICS_HARD_CAP) {
+    logger.warn('Session analytics hit session hard cap', {
       projectId,
-      cap: DASHBOARD_SESSIONS_HARD_CAP,
+      cap: SESSION_ANALYTICS_HARD_CAP,
     });
   }
 
@@ -476,294 +458,7 @@ export class AgentTracingService {
       const db = await getDatabase();
       await db.switchToTenant(tenantDbName);
 
-      const query: SessionListQuery = {};
-      if (filters?.from) query.from = filters.from;
-      if (filters?.to) query.to = filters.to;
-
-      logger.debug('Fetching tracing dashboard sessions...');
-      const [recentSessionResult, sessions] = await Promise.all([
-        db.listAgentTracingSessions({
-          ...query,
-          includeTotal: false,
-          limit: 10,
-          projection: DASHBOARD_SESSION_PROJECTION,
-          skip: 0,
-        }, projectId),
-        fetchAllSessionsBatched(db, projectId, query, DASHBOARD_SESSION_PROJECTION),
-      ]);
-
-      const recentSessions = recentSessionResult.sessions || [];
-
-      logger.debug('Recent sessions count', { count: recentSessions.length });
-
-      logger.debug('Total sessions for analytics', { count: sessions.length });
-
-      // If no sessions, return empty analytics
-      if (sessions.length === 0) {
-        logger.debug('No sessions found, returning empty analytics');
-        return {
-          recentSessions: [],
-          recentAgents: [],
-          recentAgentsTotal: 0,
-          analytics: {
-            totals: {
-              sessionsCount: 0,
-              totalEvents: 0,
-              totalInputTokens: 0,
-              totalOutputTokens: 0,
-              totalCachedInputTokens: 0,
-              totalTokens: 0,
-              totalDurationMs: 0,
-              averageInputTokensPerSession: 0,
-              averageOutputTokensPerSession: 0,
-              averageCachedInputTokensPerSession: 0,
-              averageTokensPerSession: 0,
-              averageDurationMs: 0,
-            },
-            tools: {
-              totals: {
-                totalCalls: 0,
-                errorCalls: 0,
-                successCalls: 0,
-                errorRate: 0,
-              },
-              items: [],
-            },
-            statuses: [],
-            models: [],
-            agents: [],
-            daily: [],
-          },
-        };
-      }
-
-      // Calculate totals
-      const totals = buildAggregateTotals(sessions);
-
-      // Tool analytics
-      const toolMap = new Map<
-        string,
-        { totalCalls: number; errorCalls: number; successCalls: number }
-      >();
-      sessions.forEach((session) => {
-        (session.toolsUsed || []).forEach((tool) => {
-          if (!toolMap.has(tool)) {
-            toolMap.set(tool, {
-              totalCalls: 0,
-              errorCalls: 0,
-              successCalls: 0,
-            });
-          }
-          const toolStats = toolMap.get(tool)!;
-          toolStats.totalCalls++;
-          if (session.status === 'error') {
-            toolStats.errorCalls++;
-          } else {
-            toolStats.successCalls++;
-          }
-        });
-      });
-
-      const toolItems = Array.from(toolMap.entries())
-        .map(([toolName, stats]) => ({
-          toolName,
-          ...stats,
-          errorRate:
-            stats.totalCalls > 0 ? stats.errorCalls / stats.totalCalls : 0,
-        }))
-        .sort((a, b) => b.totalCalls - a.totalCalls);
-
-      const toolTotals = {
-        totalCalls: toolItems.reduce((sum, t) => sum + t.totalCalls, 0),
-        errorCalls: toolItems.reduce((sum, t) => sum + t.errorCalls, 0),
-        successCalls: toolItems.reduce((sum, t) => sum + t.successCalls, 0),
-        errorRate: 0,
-      };
-
-      if (toolTotals.totalCalls > 0) {
-        toolTotals.errorRate = toolTotals.errorCalls / toolTotals.totalCalls;
-      }
-
-      // Status breakdown
-      const statusMap = new Map<string, number>();
-      sessions.forEach((session) => {
-        const status = session.status || 'unknown';
-        statusMap.set(status, (statusMap.get(status) || 0) + 1);
-      });
-
-      const statuses = Array.from(statusMap.entries())
-        .map(([status, count]) => ({
-          status,
-          count,
-        }))
-        .sort((a, b) => b.count - a.count);
-
-      // Model breakdown
-      const modelMap = new Map<string, number>();
-      sessions.forEach((session) => {
-        (session.modelsUsed || []).forEach((model) => {
-          modelMap.set(model, (modelMap.get(model) || 0) + 1);
-        });
-      });
-
-      const models = Array.from(modelMap.entries())
-        .map(([model, sessionsCount]) => ({
-          model,
-          sessionsCount,
-        }))
-        .sort((a, b) => b.sessionsCount - a.sessionsCount);
-
-      // Recent agents
-      const agentMap = new Map<string, AgentSummaryAccumulator>();
-      sessions.forEach((session) => {
-        const agentName = session.agentName || 'unknown';
-        const sessionSummary = getSessionTokenSummary(session);
-
-        if (!agentMap.has(agentName)) {
-          agentMap.set(agentName, {
-            name: agentName,
-            label: agentName,
-            latestSessionAt: session.startedAt,
-            latestStatus: session.status,
-            sessionsCount: 0,
-            totalEvents: 0,
-            totalInputTokens: 0,
-            totalOutputTokens: 0,
-            totalCachedInputTokens: 0,
-            totalTokens: 0,
-            averageInputTokensPerSession: 0,
-            averageOutputTokensPerSession: 0,
-            averageCachedInputTokensPerSession: 0,
-            averageTokensPerSession: 0,
-            averageDurationMs: 0,
-            totalDurationMs: 0,
-          });
-        }
-        const agent = agentMap.get(agentName)!;
-        agent.sessionsCount++;
-        agent.totalEvents += sessionSummary.totalEvents;
-        agent.totalInputTokens += sessionSummary.totalInputTokens;
-        agent.totalOutputTokens += sessionSummary.totalOutputTokens;
-        agent.totalCachedInputTokens += sessionSummary.totalCachedInputTokens;
-        agent.totalTokens += sessionSummary.totalTokens;
-        agent.totalDurationMs += sessionSummary.totalDurationMs;
-        if (!agent.latestSessionAt) {
-          agent.latestSessionAt = session.startedAt;
-          agent.latestStatus = session.status;
-        } else if (session.startedAt && session.startedAt > agent.latestSessionAt) {
-          agent.latestSessionAt = session.startedAt;
-          agent.latestStatus = session.status;
-        } else if (!agent.latestStatus && session.status) {
-          agent.latestStatus = session.status;
-        }
-      });
-
-      const agentSummaries = Array.from(agentMap.values()).map((agent) => ({
-        ...agent,
-        averageInputTokensPerSession:
-          agent.sessionsCount > 0
-            ? Math.round(agent.totalInputTokens / agent.sessionsCount)
-            : 0,
-        averageOutputTokensPerSession:
-          agent.sessionsCount > 0
-            ? Math.round(agent.totalOutputTokens / agent.sessionsCount)
-            : 0,
-        averageCachedInputTokensPerSession:
-          agent.sessionsCount > 0
-            ? Math.round(agent.totalCachedInputTokens / agent.sessionsCount)
-            : 0,
-        averageTokensPerSession:
-          agent.sessionsCount > 0
-            ? Math.round(agent.totalTokens / agent.sessionsCount)
-            : 0,
-        averageDurationMs:
-          agent.sessionsCount > 0
-            ? Math.round(agent.totalDurationMs / agent.sessionsCount)
-            : 0,
-      }));
-
-      const toTime = (value?: Date) => (value ? value.getTime() : 0);
-      const recentAgents = agentSummaries
-        .sort((a, b) => toTime(b.latestSessionAt) - toTime(a.latestSessionAt))
-        .slice(0, 20);
-      const agentAnalytics = agentSummaries
-        .slice()
-        .sort(
-          (a, b) =>
-            b.totalTokens - a.totalTokens
-            || b.sessionsCount - a.sessionsCount
-            || a.name.localeCompare(b.name),
-        );
-
-      // Daily trend (last 30 days window)
-      const dailyMap = new Map<
-        string,
-        {
-          sessionsCount: number;
-          totalEvents: number;
-          totalTokens: number;
-          totalDurationMs: number;
-        }
-      >();
-      sessions.forEach((session) => {
-        if (!session.startedAt) {
-          return;
-        }
-        const dateKey = dayjs(session.startedAt).format('YYYY-MM-DD');
-        if (!dailyMap.has(dateKey)) {
-          dailyMap.set(dateKey, {
-            sessionsCount: 0,
-            totalEvents: 0,
-            totalTokens: 0,
-            totalDurationMs: 0,
-          });
-        }
-        const entry = dailyMap.get(dateKey)!;
-        entry.sessionsCount += 1;
-        entry.totalEvents += session.totalEvents || 0;
-        entry.totalTokens +=
-          (session.totalInputTokens || 0) + (session.totalOutputTokens || 0);
-        entry.totalDurationMs += session.durationMs || 0;
-      });
-
-      const daily = Array.from(dailyMap.entries())
-        .sort((a, b) => dayjs(a[0]).valueOf() - dayjs(b[0]).valueOf())
-        .map(([date, stats]) => ({
-          date,
-          sessionsCount: stats.sessionsCount,
-          totalEvents: stats.totalEvents,
-          totalTokens: stats.totalTokens,
-          averageDurationMs:
-            stats.sessionsCount > 0
-              ? Math.round(stats.totalDurationMs / stats.sessionsCount)
-              : 0,
-        }))
-        .slice(-30);
-
-      return {
-        recentSessions: recentSessions.map((s) => ({
-          sessionId: s.sessionId,
-          agentName: s.agentName,
-          status: s.status,
-          startedAt: s.startedAt,
-          durationMs: s.durationMs,
-          totalEvents: s.totalEvents,
-          totalTokens: (s.totalInputTokens || 0) + (s.totalOutputTokens || 0),
-        })),
-        recentAgents,
-        recentAgentsTotal: agentMap.size,
-        analytics: {
-          totals,
-          tools: {
-            totals: toolTotals,
-            items: toolItems,
-          },
-          statuses,
-          models,
-          agents: agentAnalytics,
-          daily,
-        },
-      };
+      return await db.aggregateAgentTracingDashboard(filters, projectId);
     } catch (error) {
       logger.error('Error in getDashboardOverview', { error });
       throw error;

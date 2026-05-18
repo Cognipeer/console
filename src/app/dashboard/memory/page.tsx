@@ -1,32 +1,20 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import {
-  ActionIcon,
-  Badge,
-  Button,
-  Center,
-  Group,
-  Loader,
-  Paper,
-  Stack,
-  Table,
-  Text,
-  ThemeIcon,
-  SimpleGrid,
-  TextInput,
-} from '@mantine/core';
-import PageHeader from '@/components/layout/PageHeader';
+import { Button } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
-  IconPlus,
-  IconRefresh,
-  IconBulb,
-  IconSearch,
-  IconDatabase,
   IconBrain,
+  IconBulb,
+  IconDatabase,
+  IconEye,
+  IconPlus,
 } from '@tabler/icons-react';
+import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
+import StatTile from '@/components/common/ui/StatTile';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
+import StatusBadge from '@/components/common/ui/StatusBadge';
 import { useTranslations } from '@/lib/i18n';
 import CreateMemoryStoreModal from '@/components/memory/CreateMemoryStoreModal';
 
@@ -43,19 +31,6 @@ interface MemoryStoreItem {
   lastActivityAt?: string;
 }
 
-function statusColor(status: string): string {
-  switch (status) {
-    case 'active':
-      return 'teal';
-    case 'inactive':
-      return 'gray';
-    case 'error':
-      return 'red';
-    default:
-      return 'gray';
-  }
-}
-
 function formatDate(value?: string | Date) {
   if (!value) return '—';
   const date = value instanceof Date ? value : new Date(value);
@@ -70,15 +45,12 @@ export default function MemoryPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [createModalOpen, setCreateModalOpen] = useState(false);
-  const [search, setSearch] = useState('');
+  const [query, setQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
 
   const loadStores = useCallback(async () => {
     try {
-      const params = new URLSearchParams();
-      if (search) params.set('search', search);
-      const res = await fetch(`/api/memory/stores?${params.toString()}`, {
-        cache: 'no-store',
-      });
+      const res = await fetch('/api/memory/stores', { cache: 'no-store' });
       if (res.ok) {
         const data = await res.json();
         setStores(data.stores || []);
@@ -89,15 +61,15 @@ export default function MemoryPage() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [search]);
+  }, []);
 
   useEffect(() => {
-    loadStores();
+    void loadStores();
   }, [loadStores]);
 
   const handleRefresh = () => {
     setRefreshing(true);
-    loadStores();
+    void loadStores();
   };
 
   const handleCreated = () => {
@@ -110,194 +82,195 @@ export default function MemoryPage() {
     handleRefresh();
   };
 
+  const filtered = useMemo(() => {
+    return stores.filter((s) => {
+      if (statusFilter !== 'all' && s.status !== statusFilter) return false;
+      if (query) {
+        const q = query.toLowerCase();
+        if (
+          !s.name.toLowerCase().includes(q) &&
+          !s.key.toLowerCase().includes(q) &&
+          !(s.description ?? '').toLowerCase().includes(q)
+        ) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }, [stores, query, statusFilter]);
+
   const totalMemories = stores.reduce((sum, s) => sum + (s.memoryCount ?? 0), 0);
   const activeStores = stores.filter((s) => s.status === 'active').length;
 
+  const columns: DataGridColumn<MemoryStoreItem>[] = [
+    {
+      key: 'name',
+      label: t('storeName'),
+      render: (s) => (
+        <div className="ds-col" style={{ gap: 2, whiteSpace: 'nowrap' }}>
+          <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--ds-text)' }}>
+            {s.name}
+          </span>
+          {s.description ? (
+            <span className="ds-faint" style={{ fontSize: 11.5, maxWidth: 320 }}>
+              {s.description.length > 60
+                ? `${s.description.slice(0, 60)}…`
+                : s.description}
+            </span>
+          ) : (
+            <span className="ds-faint ds-mono" style={{ fontSize: 11 }}>
+              {s.key}
+            </span>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: 'provider',
+      label: t('vectorProvider'),
+      render: (s) => (
+        <span className="ds-mono ds-muted" style={{ fontSize: 12 }}>
+          {s.vectorProviderKey}
+        </span>
+      ),
+    },
+    {
+      key: 'embedding',
+      label: t('embeddingModel'),
+      render: (s) => (
+        <span className="ds-mono ds-muted" style={{ fontSize: 12 }}>
+          {s.embeddingModelKey}
+        </span>
+      ),
+    },
+    {
+      key: 'count',
+      label: t('memoryCount'),
+      align: 'right',
+      render: (s) => (
+        <span
+          className="ds-mono"
+          style={{ fontSize: 12.5, fontVariantNumeric: 'tabular-nums' }}
+        >
+          {s.memoryCount ?? 0}
+        </span>
+      ),
+    },
+    {
+      key: 'status',
+      label: t('status'),
+      render: (s) => (
+        <StatusBadge
+          status={
+            s.status === 'active'
+              ? 'active'
+              : s.status === 'error'
+                ? 'err'
+                : 'paused'
+          }
+        />
+      ),
+    },
+    {
+      key: 'created',
+      label: t('createdAt'),
+      render: (s) => (
+        <span className="ds-faint" style={{ fontSize: 12.5 }}>
+          {formatDate(s.createdAt)}
+        </span>
+      ),
+    },
+  ];
+
   return (
-    <>
+    <PageContainer>
       <PageHeader
-        icon={<IconBulb size={18} />}
+        eyebrow="Data · Memory"
         title={t('title')}
         subtitle={t('subtitle')}
         actions={
-          <Group gap="xs">
-            <ActionIcon
-              variant="subtle"
-              size="lg"
-              loading={refreshing}
-              onClick={handleRefresh}
-              aria-label="Refresh"
-            >
-              <IconRefresh size={18} />
-            </ActionIcon>
-            <Button
-              size="xs"
-              leftSection={<IconPlus size={14} />}
-              onClick={() => setCreateModalOpen(true)}
-            >
-              {t('createStore')}
-            </Button>
-          </Group>
+          <Button
+            color="teal"
+            size="sm"
+            leftSection={<IconPlus size={14} stroke={1.7} />}
+            onClick={() => setCreateModalOpen(true)}
+          >
+            {t('createStore')}
+          </Button>
         }
       />
 
-      {/* Stats */}
-      <SimpleGrid cols={{ base: 1, sm: 3 }} mb="lg">
-        <Paper withBorder p="md" radius="md">
-          <Group>
-            <ThemeIcon variant="light" size="lg" color="violet">
-              <IconBulb size={20} />
-            </ThemeIcon>
-            <div>
-              <Text size="xs" c="dimmed" tt="uppercase" fw={700}>
-                {t('title')}
-              </Text>
-              <Text fw={700} size="xl">
-                {stores.length}
-              </Text>
-            </div>
-          </Group>
-        </Paper>
-        <Paper withBorder p="md" radius="md">
-          <Group>
-            <ThemeIcon variant="light" size="lg" color="teal">
-              <IconDatabase size={20} />
-            </ThemeIcon>
-            <div>
-              <Text size="xs" c="dimmed" tt="uppercase" fw={700}>
-                Total Memories
-              </Text>
-              <Text fw={700} size="xl">
-                {totalMemories}
-              </Text>
-            </div>
-          </Group>
-        </Paper>
-        <Paper withBorder p="md" radius="md">
-          <Group>
-            <ThemeIcon variant="light" size="lg" color="blue">
-              <IconBrain size={20} />
-            </ThemeIcon>
-            <div>
-              <Text size="xs" c="dimmed" tt="uppercase" fw={700}>
-                Active Stores
-              </Text>
-              <Text fw={700} size="xl">
-                {activeStores}
-              </Text>
-            </div>
-          </Group>
-        </Paper>
-      </SimpleGrid>
+      <div className="ds-stat-grid" style={{ marginBottom: 16 }}>
+        <StatTile
+          label="Memory stores"
+          icon={<IconBulb size={14} stroke={1.7} />}
+          value={stores.length}
+        />
+        <StatTile
+          label="Total memories"
+          icon={<IconDatabase size={14} stroke={1.7} />}
+          value={totalMemories}
+        />
+        <StatTile
+          label="Active stores"
+          icon={<IconBrain size={14} stroke={1.7} />}
+          value={activeStores}
+        />
+      </div>
 
-      {/* Search */}
-      <TextInput
-        placeholder={t('searchPlaceholder')}
-        leftSection={<IconSearch size={16} />}
-        mb="md"
-        value={search}
-        onChange={(e) => setSearch(e.currentTarget.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') handleRefresh();
+      <DataGrid<MemoryStoreItem>
+        records={filtered}
+        loading={loading}
+        rowKey={(s) => s.key}
+        onRowClick={(s) => router.push(`/dashboard/memory/${s.key}`)}
+        columns={columns}
+        search={{
+          value: query,
+          onChange: setQuery,
+          placeholder: t('searchPlaceholder'),
         }}
+        filters={[
+          {
+            value: statusFilter,
+            onChange: setStatusFilter,
+            ariaLabel: 'Filter by status',
+            width: 140,
+            options: [
+              { value: 'all', label: 'All statuses' },
+              { value: 'active', label: 'Active' },
+              { value: 'inactive', label: 'Inactive' },
+              { value: 'error', label: 'Error' },
+            ],
+          },
+        ]}
+        onRefresh={handleRefresh}
+        refreshing={refreshing}
+        empty={{
+          icon: <IconBulb size={26} stroke={1.7} />,
+          title: t('noStores'),
+          description: t('noStoresDescription'),
+          primaryAction: {
+            label: t('createFirstStore'),
+            icon: <IconPlus size={14} stroke={1.7} />,
+            onClick: () => setCreateModalOpen(true),
+          },
+        }}
+        footerLeft={`Showing ${filtered.length} of ${stores.length} stores`}
+        rowActions={(s) => [
+          {
+            id: 'open',
+            label: 'Open store',
+            icon: <IconEye size={14} />,
+            onClick: () => router.push(`/dashboard/memory/${s.key}`),
+          },
+        ]}
       />
-
-      <Paper withBorder p="md" radius="md" mb="md">
-        <Text fw={600} mb={4}>{t('storeExplainTitle')}</Text>
-        <Text size="sm" c="dimmed">
-          {t('storeExplainText')}
-        </Text>
-      </Paper>
-
-      {/* Store table */}
-      <Paper withBorder radius="md">
-        {loading ? (
-          <Center py="xl">
-            <Loader size="md" />
-          </Center>
-        ) : stores.length === 0 ? (
-          <Stack align="center" py="xl" gap="sm">
-            <ThemeIcon variant="light" size={60} radius="xl" color="gray">
-              <IconBulb size={32} />
-            </ThemeIcon>
-            <Text fw={600} size="lg">
-              {t('noStores')}
-            </Text>
-            <Text size="sm" c="dimmed" maw={400} ta="center">
-              {t('noStoresDescription')}
-            </Text>
-            <Button
-              variant="light"
-              leftSection={<IconPlus size={14} />}
-              onClick={() => setCreateModalOpen(true)}
-            >
-              {t('createFirstStore')}
-            </Button>
-          </Stack>
-        ) : (
-          <Table highlightOnHover>
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>{t('storeName')}</Table.Th>
-                <Table.Th>{t('storeKey')}</Table.Th>
-                <Table.Th>{t('vectorProvider')}</Table.Th>
-                <Table.Th>{t('embeddingModel')}</Table.Th>
-                <Table.Th>{t('memoryCount')}</Table.Th>
-                <Table.Th>{t('status')}</Table.Th>
-                <Table.Th>{t('createdAt')}</Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {stores.map((store) => (
-                <Table.Tr
-                  key={store.key}
-                  style={{ cursor: 'pointer' }}
-                  onClick={() => router.push(`/dashboard/memory/${store.key}`)}
-                >
-                  <Table.Td>
-                    <Text fw={600} size="sm">
-                      {store.name}
-                    </Text>
-                    {store.description && (
-                      <Text size="xs" c="dimmed" lineClamp={1}>
-                        {store.description}
-                      </Text>
-                    )}
-                  </Table.Td>
-                  <Table.Td>
-                    <Text size="sm" ff="monospace">
-                      {store.key}
-                    </Text>
-                  </Table.Td>
-                  <Table.Td>
-                    <Text size="sm">{store.vectorProviderKey}</Text>
-                  </Table.Td>
-                  <Table.Td>
-                    <Text size="sm">{store.embeddingModelKey}</Text>
-                  </Table.Td>
-                  <Table.Td>
-                    <Text size="sm">{store.memoryCount ?? 0}</Text>
-                  </Table.Td>
-                  <Table.Td>
-                    <Badge size="sm" color={statusColor(store.status)} variant="light">
-                      {store.status}
-                    </Badge>
-                  </Table.Td>
-                  <Table.Td>
-                    <Text size="sm">{formatDate(store.createdAt)}</Text>
-                  </Table.Td>
-                </Table.Tr>
-              ))}
-            </Table.Tbody>
-          </Table>
-        )}
-      </Paper>
 
       <CreateMemoryStoreModal
         opened={createModalOpen}
         onClose={() => setCreateModalOpen(false)}
         onCreated={handleCreated}
       />
-    </>
+    </PageContainer>
   );
 }

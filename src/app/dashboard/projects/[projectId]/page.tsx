@@ -1,10 +1,10 @@
 'use client';
 
 import { use, useEffect, useMemo, useState } from 'react';
-import { Button, Paper, Stack, Tabs, Text } from '@mantine/core';
-import PageHeader from '@/components/layout/PageHeader';
+import { Button, Paper, Tabs, Text } from '@mantine/core';
+import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import { notifications } from '@mantine/notifications';
-import { IconArrowLeft, IconRefresh, IconUsers } from '@tabler/icons-react';
+import { IconArrowLeft, IconRefresh } from '@tabler/icons-react';
 import { useRouter } from 'next/navigation';
 import ProjectMembersManager from '@/components/projects/ProjectMembersManager';
 import ProjectProvidersManager from '@/components/projects/ProjectProvidersManager';
@@ -23,8 +23,10 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ projec
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | undefined>(undefined);
   const [loading, setLoading] = useState(true);
+  const [sessionRole, setSessionRole] = useState<string | undefined>(undefined);
 
   const ready = Boolean(activeProjectId && String(activeProjectId) === String(projectId));
+  const isTenantAdmin = sessionRole === 'owner' || sessionRole === 'admin';
 
   const currentProject = useMemo(() => {
     const found = projects.find((p) => String(p._id) === String(projectId));
@@ -71,8 +73,20 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ projec
     }
   };
 
+  const fetchSession = async () => {
+    try {
+      const res = await fetch('/api/auth/session', { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = (await res.json()) as { role?: string };
+      setSessionRole(data.role);
+    } catch {
+      setSessionRole(undefined);
+    }
+  };
+
   useEffect(() => {
-    fetchProjects();
+    void fetchProjects();
+    void fetchSession();
   }, []);
 
   useEffect(() => {
@@ -83,11 +97,11 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ projec
   }, [loading, activeProjectId, projectId]);
 
   return (
-    <Stack gap="md">
+    <PageContainer>
       <PageHeader
-        icon={<IconUsers size={18} />}
+        eyebrow="Configure · Project"
         title={currentProject?.name ?? 'Project'}
-        subtitle="Project users, providers, and quotas."
+        subtitle="Project access, providers, and quotas."
         actions={
           <>
             <Button
@@ -116,7 +130,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ projec
           <Tabs.List>
             <Tabs.Tab value="users">Users</Tabs.Tab>
             <Tabs.Tab value="providers">Providers</Tabs.Tab>
-            <Tabs.Tab value="quotas">Quotas</Tabs.Tab>
+            {isTenantAdmin ? <Tabs.Tab value="quotas">Quotas</Tabs.Tab> : null}
           </Tabs.List>
 
           <Tabs.Panel value="users" pt="md">
@@ -133,17 +147,19 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ projec
             )}
           </Tabs.Panel>
 
-          <Tabs.Panel value="quotas" pt="md">
-            {ready ? (
-              <QuotaManagement projectId={projectId} />
-            ) : (
-              <Text size="sm" c="dimmed" p="md">
-                Switching active project…
-              </Text>
-            )}
-          </Tabs.Panel>
+          {isTenantAdmin ? (
+            <Tabs.Panel value="quotas" pt="md">
+              {ready ? (
+                <QuotaManagement projectId={projectId} />
+              ) : (
+                <Text size="sm" c="dimmed" p="md">
+                  Switching active project…
+                </Text>
+              )}
+            </Tabs.Panel>
+          ) : null}
         </Tabs>
       </Paper>
-    </Stack>
+    </PageContainer>
   );
 }

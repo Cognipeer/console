@@ -1,21 +1,22 @@
 'use client';
 
 import { useEffect, useMemo } from 'react';
-import {
-  Button,
-  Divider,
-  Group,
-  Modal,
-  Select,
-  Stack,
-  Switch,
-  Text,
-  TextInput,
-  Textarea,
-} from '@mantine/core';
+import { Select, TextInput, Textarea } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { IconBucket, IconCheck } from '@tabler/icons-react';
+import FormShell, {
+  Checklist,
+  ChipPicker,
+  FormField,
+  FormRow,
+  FormSection,
+  SummaryGroup,
+  SummaryKV,
+  ToggleList,
+  ToggleRow,
+} from '@/components/common/ui/FormShell';
 import type { FileBucketView, FileProviderView } from '@/lib/services/files';
 import { ApiError, apiRequest } from '@/lib/api/client';
 
@@ -74,20 +75,20 @@ export default function CreateFileBucketModal({
     },
   });
 
-  const providerOptions = useMemo(
-    () =>
-      (providersQuery.data ?? []).map((provider) => ({
-        value: provider.key,
-        label: provider.label,
-      })),
-    [providersQuery.data],
-  );
-
   const providers = useMemo(
     () => providersQuery.data ?? [],
     [providersQuery.data],
   );
   const providersLoading = providersQuery.isPending || providersQuery.isRefetching;
+
+  const providerChipOptions = useMemo(
+    () =>
+      providers.map((provider) => ({
+        value: provider.key,
+        label: provider.label,
+      })),
+    [providers],
+  );
 
   useEffect(() => {
     if (!providersQuery.isError) {
@@ -186,93 +187,185 @@ export default function CreateFileBucketModal({
     }
   };
 
-  return (
+  const submit = () => {
+    const validation = form.validate();
+    if (validation.hasErrors) return;
+    void handleSubmit(form.getValues());
+  };
+
+  const selectedProvider = useMemo(
+    () => providers.find((p) => p.key === form.values.providerKey),
+    [providers, form.values.providerKey],
+  );
+
+  const validProvider = Boolean(form.values.providerKey);
+  const validKey =
+    form.values.key.trim().length > 0 && !/[^a-z0-9-_]/.test(form.values.key);
+  const validName = form.values.name.trim().length > 0;
+
+  const checklist = [
+    { id: 1, label: 'Storage provider selected', done: validProvider },
+    { id: 2, label: 'Bucket key & name set', done: validKey && validName },
+    { id: 3, label: 'Status configured', done: true },
+  ];
+
+  const summary = (
     <>
-      <Modal
-        opened={opened}
-        onClose={onClose}
-        title="Add Bucket"
-        size="lg"
-        keepMounted={false}
+      <SummaryGroup title="Provider">
+        {selectedProvider ? (
+          <>
+            <SummaryKV label="Name" value={selectedProvider.label} />
+            <SummaryKV label="Driver" value={selectedProvider.driver} mono />
+            <SummaryKV label="Status" value={selectedProvider.status} />
+          </>
+        ) : (
+          <SummaryKV label="—" value="Select a provider" />
+        )}
+      </SummaryGroup>
+
+      <SummaryGroup title="Bucket">
+        <SummaryKV
+          label="Key"
+          value={form.values.key || <span className="ds-faint">—</span>}
+          mono
+        />
+        <SummaryKV
+          label="Name"
+          value={form.values.name || <span className="ds-faint">—</span>}
+        />
+        <SummaryKV
+          label="Prefix"
+          value={form.values.prefix || <span className="ds-faint">default</span>}
+          mono
+        />
+        <SummaryKV
+          label="Status"
+          value={form.values.status ? 'active' : 'disabled'}
+        />
+      </SummaryGroup>
+
+      <SummaryGroup title="Pre-flight">
+        <Checklist items={checklist} />
+      </SummaryGroup>
+    </>
+  );
+
+  const noProviders = !providersLoading && providers.length === 0;
+  const canSubmit = !noProviders && validProvider && validKey && validName;
+
+  return (
+    <FormShell
+      open={opened}
+      onClose={onClose}
+      icon={<IconBucket size={16} />}
+      title="Add bucket"
+      subtitle="Group related files and map them to a storage provider."
+      summary={summary}
+      footerStatus={`${checklist.filter((c) => c.done).length} of ${checklist.length} ready`}
+      primaryAction={{
+        label: 'Create bucket',
+        icon: <IconCheck size={13} />,
+        loading: createBucketMutation.isPending,
+        disabled: !canSubmit,
+        onClick: submit,
+      }}
+    >
+      <FormSection
+        number={1}
+        title="Storage provider"
+        description="Pick the storage backend that will hold the objects in this bucket."
+        done={validProvider}
       >
-        <form
-          onSubmit={form.onSubmit((values) => {
-            void handleSubmit(values);
-          })}
-        >
-          <Stack gap="md">
-            <Text size="sm" c="dimmed">
-              Buckets group related files together and map them to a storage provider. Configure the
-              provider and prefix to control where objects are stored.
-            </Text>
+        {noProviders ? (
+          <div
+            className="ds-card ds-card-pad"
+            style={{ background: 'var(--ds-surface-1)' }}
+          >
+            <span className="ds-muted" style={{ fontSize: 13 }}>
+              No storage providers configured. Ask a tenant admin to add one
+              under Tenant Settings.
+            </span>
+          </div>
+        ) : providerChipOptions.length <= 4 ? (
+          <FormField label="Provider" required>
+            <ChipPicker<string>
+              options={providerChipOptions}
+              value={form.values.providerKey}
+              onChange={(v) => form.setFieldValue('providerKey', v as string)}
+            />
+          </FormField>
+        ) : (
+          <FormField label="Provider" required>
+            <Select
+              placeholder={providersLoading ? 'Loading providers…' : 'Select a provider'}
+              data={providerChipOptions}
+              value={form.values.providerKey}
+              onChange={(value) => form.setFieldValue('providerKey', value ?? '')}
+              searchable
+            />
+          </FormField>
+        )}
+      </FormSection>
 
-            <Stack gap="sm">
-              <Group align="flex-end" gap="xs">
-                <Select
-                  label="Provider"
-                  placeholder={providersLoading ? 'Loading providers…' : 'Select a provider'}
-                  data={providerOptions}
-                  value={form.values.providerKey}
-                  onChange={(value) => form.setFieldValue('providerKey', value ?? '')}
-                  searchable
-                  withAsterisk
-                  style={{ flex: 1 }}
-                />
-              </Group>
-              <Text size="xs" c="dimmed">
-                Need a new storage provider? Ask a tenant admin to add one in Tenant Settings.
-              </Text>
-            </Stack>
-
-            <Group grow align="flex-start">
-              <TextInput
-                label="Bucket key"
-                placeholder="documents"
-                withAsterisk
-                {...form.getInputProps('key')}
-              />
-              <TextInput
-                label="Bucket name"
-                placeholder="Customer Documents"
-                withAsterisk
-                {...form.getInputProps('name')}
-              />
-            </Group>
-
+      <FormSection
+        number={2}
+        title="Identity"
+        description="How this bucket is identified across the console and SDK."
+        done={validKey && validName}
+      >
+        <FormRow cols={2}>
+          <FormField label="Bucket key" required hint="Lowercase letters, numbers, hyphen, or underscore.">
             <TextInput
-              label="Prefix"
+              placeholder="documents"
+              {...form.getInputProps('key')}
+            />
+          </FormField>
+          <FormField label="Bucket name" required>
+            <TextInput
+              placeholder="Customer Documents"
+              {...form.getInputProps('name')}
+            />
+          </FormField>
+        </FormRow>
+        <FormRow cols={1}>
+          <FormField
+            label="Prefix"
+            optional
+            hint="Overrides the default prefix derived from the bucket key."
+          >
+            <TextInput
               placeholder="Optional path prefix"
-              description="Overrides the default prefix derived from the bucket key."
               {...form.getInputProps('prefix')}
             />
-
+          </FormField>
+        </FormRow>
+        <FormRow cols={1}>
+          <FormField label="Description" optional>
             <Textarea
-              label="Description"
               placeholder="Optional description"
               minRows={2}
               autosize
               {...form.getInputProps('description')}
             />
+          </FormField>
+        </FormRow>
+      </FormSection>
 
-            <Switch
-              label="Active"
-              description="Inactive buckets cannot be used for uploads or downloads."
-              {...form.getInputProps('status', { type: 'checkbox' })}
-            />
-
-            <Divider />
-
-            <Group justify="flex-end">
-              <Button variant="default" onClick={onClose}>
-                Cancel
-              </Button>
-              <Button type="submit" loading={createBucketMutation.isPending}>
-                Create bucket
-              </Button>
-            </Group>
-          </Stack>
-        </form>
-      </Modal>
-    </>
+      <FormSection
+        number={3}
+        title="Status"
+        description="Inactive buckets cannot be used for uploads or downloads."
+        done
+      >
+        <ToggleList>
+          <ToggleRow
+            label="Active"
+            description="Allow this bucket to accept uploads and serve downloads."
+            checked={form.values.status}
+            onChange={(v) => form.setFieldValue('status', v)}
+          />
+        </ToggleList>
+      </FormSection>
+    </FormShell>
   );
 }

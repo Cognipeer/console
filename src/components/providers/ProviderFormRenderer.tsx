@@ -1,24 +1,28 @@
 'use client';
 
 import {
-  Stack,
-  Title,
-  Text,
   TextInput,
   PasswordInput,
   NumberInput,
   Textarea,
   Select,
-  Switch,
 } from '@mantine/core';
 import type { UseFormReturnType } from '@mantine/form';
 import type { ProviderFormSchema, ProviderFormField } from '@/lib/providers';
+import {
+  FormField,
+  FormSection,
+  ToggleList,
+  ToggleRow,
+} from '@/components/common/ui/FormShell';
 
 type ProviderFormRendererProps = {
   schema: ProviderFormSchema;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   form: UseFormReturnType<any>;
   disabled?: boolean;
+  /** Section numbering offset — use to continue numbering across multiple renderers. */
+  sectionStart?: number;
 };
 
 function renderField(
@@ -27,79 +31,86 @@ function renderField(
   form: UseFormReturnType<any>,
   disabled?: boolean,
 ) {
+  if (field.type === 'switch') {
+    const inputProps = form.getInputProps(field.name, { type: 'checkbox' });
+    return (
+      <ToggleList key={field.name}>
+        <ToggleRow
+          label={field.label}
+          description={field.description}
+          checked={Boolean(inputProps.checked)}
+          onChange={(v) => inputProps.onChange?.(v)}
+          disabled={disabled}
+        />
+      </ToggleList>
+    );
+  }
+
   const commonProps = {
-    key: field.name,
-    label: field.label,
-    description: field.description,
-    withAsterisk: field.required,
     disabled,
-    style: { width: '100%' },
+    placeholder: field.placeholder,
     ...form.getInputProps(field.name),
   } as const;
 
-  switch (field.type) {
-    case 'password':
-      return <PasswordInput {...commonProps}/>;
-    case 'number':
-      return <NumberInput {...commonProps} />;
-    case 'textarea':
-      return <Textarea minRows={3} autosize {...commonProps} />;
-    case 'select':
-      return (
-        <Select
-          {...commonProps}
-          data={field.options?.map((option) => ({
-            label: option.label,
-            value: option.value,
-          })) ?? []}
-          placeholder={field.placeholder}
-        />
-      );
-    case 'switch':
-      return (
-        <Switch
-          key={field.name}
-          label={field.label}
-          description={field.description}
-          disabled={disabled}
-          {...form.getInputProps(field.name, { type: 'checkbox' })}
-        />
-      );
-    case 'text':
-    default:
-      return <TextInput placeholder={field.placeholder} {...commonProps} />;
-  }
-}
-
-export function ProviderFormRenderer({ schema, form, disabled }: ProviderFormRendererProps) {
-  if (!schema.sections.length) {
-    return null;
-  }
+  const input = (() => {
+    switch (field.type) {
+      case 'password':
+        return <PasswordInput {...commonProps} />;
+      case 'number':
+        return <NumberInput {...commonProps} />;
+      case 'textarea':
+        return <Textarea minRows={3} autosize {...commonProps} />;
+      case 'select':
+        return (
+          <Select
+            {...commonProps}
+            data={
+              field.options?.map((option) => ({
+                label: option.label,
+                value: option.value,
+              })) ?? []
+            }
+          />
+        );
+      case 'text':
+      default:
+        return <TextInput {...commonProps} />;
+    }
+  })();
 
   return (
-    <Stack gap="lg">
+    <FormField
+      key={field.name}
+      label={field.label}
+      required={field.required}
+      hint={field.description}
+    >
+      {input}
+    </FormField>
+  );
+}
+
+export function ProviderFormRenderer({
+  schema,
+  form,
+  disabled,
+  sectionStart = 1,
+}: ProviderFormRendererProps) {
+  if (!schema.sections.length) return null;
+
+  return (
+    <>
       {schema.sections.map((section, sectionIndex) => (
-        <Stack key={sectionIndex} gap="sm">
-          {(section.title || section.description) && (
-            <div>
-              {section.title && (
-                <Title order={5} mb={section.description ? 2 : 0}>
-                  {section.title}
-                </Title>
-              )}
-              {section.description && (
-                <Text size="sm" c="dimmed">
-                  {section.description}
-                </Text>
-              )}
-            </div>
-          )}
-          <Stack gap="sm">
-            {section.fields.map((field) => renderField(field, form, disabled))}
-          </Stack>
-        </Stack>
+        <FormSection
+          key={sectionIndex}
+          number={sectionStart + sectionIndex}
+          title={section.title || `Configuration ${sectionIndex + 1}`}
+          description={section.description}
+        >
+          {section.fields.map((field) => renderField(field, form, disabled))}
+        </FormSection>
       ))}
-    </Stack>
+    </>
   );
 }
 

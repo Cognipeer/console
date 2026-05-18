@@ -2,21 +2,29 @@
 
 import { useEffect, useState } from 'react';
 import {
-  Button,
-  Group,
   JsonInput,
-  Modal,
   PasswordInput,
-  SegmentedControl,
   Select,
-  Stack,
-  Stepper,
-  Text,
   Textarea,
   TextInput,
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
+import {
+  IconApi,
+  IconPlugConnected,
+  IconPlus,
+  IconTool,
+} from '@tabler/icons-react';
+import FormShell, {
+  Checklist,
+  ChipPicker,
+  FormField,
+  FormRow,
+  FormSection,
+  SummaryGroup,
+  SummaryKV,
+} from '@/components/common/ui/FormShell';
 import type { ToolView } from '@/lib/services/tools';
 
 interface CreateToolModalProps {
@@ -44,12 +52,37 @@ interface FormValues {
   authPassword: string;
 }
 
+const TYPE_OPTIONS = [
+  {
+    value: 'openapi' as const,
+    label: (
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+        <IconApi size={14} /> OpenAPI
+      </span>
+    ),
+  },
+  {
+    value: 'mcp' as const,
+    label: (
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+        <IconPlugConnected size={14} /> MCP server
+      </span>
+    ),
+  },
+];
+
+const AUTH_OPTIONS = [
+  { value: 'none', label: 'None' },
+  { value: 'token', label: 'Bearer token' },
+  { value: 'header', label: 'Custom header' },
+  { value: 'basic', label: 'Basic auth' },
+];
+
 export default function CreateToolModal({
   opened,
   onClose,
   onCreated,
 }: CreateToolModalProps) {
-  const [step, setStep] = useState(0);
   const [loading, setLoading] = useState(false);
 
   const form = useForm<FormValues>({
@@ -69,66 +102,50 @@ export default function CreateToolModal({
       authPassword: '',
     },
     validate: (values) => {
-      if (step === 0) {
-        const errors: Partial<Record<keyof FormValues, string>> = {};
-        if (!values.name.trim()) errors.name = 'Name is required';
-        if (values.authType === 'token' && !values.authToken.trim()) {
-          errors.authToken = 'Token is required';
-        }
-        if (values.authType === 'header') {
-          if (!values.authHeaderName.trim()) errors.authHeaderName = 'Header name is required';
-          if (!values.authHeaderValue.trim()) errors.authHeaderValue = 'Header value is required';
-        }
-        if (values.authType === 'basic') {
-          if (!values.authUsername.trim()) errors.authUsername = 'Username is required';
-          if (!values.authPassword.trim()) errors.authPassword = 'Password is required';
-        }
-        return errors;
+      const errors: Partial<Record<keyof FormValues, string>> = {};
+      if (!values.name.trim()) errors.name = 'Name is required';
+      if (values.authType === 'token' && !values.authToken.trim()) {
+        errors.authToken = 'Token is required';
       }
-      if (step === 1) {
-        const errors: Partial<Record<keyof FormValues, string>> = {};
-        if (values.type === 'openapi') {
-          if (!values.openApiSpec.trim()) errors.openApiSpec = 'OpenAPI specification is required';
-          else {
-            try {
-              JSON.parse(values.openApiSpec);
-            } catch {
-              errors.openApiSpec = 'Invalid JSON format';
-            }
-          }
-        } else {
-          if (!values.mcpEndpoint.trim()) errors.mcpEndpoint = 'MCP endpoint URL is required';
-          else {
-            try {
-              new URL(values.mcpEndpoint);
-            } catch {
-              errors.mcpEndpoint = 'Invalid URL format';
-            }
+      if (values.authType === 'header') {
+        if (!values.authHeaderName.trim()) errors.authHeaderName = 'Header name is required';
+        if (!values.authHeaderValue.trim()) errors.authHeaderValue = 'Header value is required';
+      }
+      if (values.authType === 'basic') {
+        if (!values.authUsername.trim()) errors.authUsername = 'Username is required';
+        if (!values.authPassword.trim()) errors.authPassword = 'Password is required';
+      }
+      if (values.type === 'openapi') {
+        if (!values.openApiSpec.trim()) errors.openApiSpec = 'OpenAPI specification is required';
+        else {
+          try {
+            JSON.parse(values.openApiSpec);
+          } catch {
+            errors.openApiSpec = 'Invalid JSON format';
           }
         }
-        return errors;
+      } else {
+        if (!values.mcpEndpoint.trim()) errors.mcpEndpoint = 'MCP endpoint URL is required';
+        else {
+          try {
+            new URL(values.mcpEndpoint);
+          } catch {
+            errors.mcpEndpoint = 'Invalid URL format';
+          }
+        }
       }
-      return {};
+      return errors;
     },
   });
 
   useEffect(() => {
     if (!opened) {
       form.reset();
-      setStep(0);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened]);
 
-  const handleNext = () => {
-    const validation = form.validate();
-    if (validation.hasErrors) return;
-    setStep(1);
-  };
-
-  const handleBack = () => {
-    setStep(0);
-  };
+  const { values: formValues, setFieldValue } = form;
 
   const handleSubmit = async () => {
     const validation = form.validate();
@@ -136,7 +153,7 @@ export default function CreateToolModal({
 
     setLoading(true);
     try {
-      const values = form.values;
+      const values = form.getValues();
       const upstreamAuth: Record<string, string> = { type: values.authType };
 
       if (values.authType === 'token') {
@@ -193,183 +210,290 @@ export default function CreateToolModal({
     }
   };
 
-  const toolType = form.values.type;
+  const validName = Boolean(formValues.name.trim());
+  const validAuth = (() => {
+    switch (formValues.authType) {
+      case 'token':
+        return Boolean(formValues.authToken.trim());
+      case 'header':
+        return Boolean(formValues.authHeaderName.trim() && formValues.authHeaderValue.trim());
+      case 'basic':
+        return Boolean(formValues.authUsername.trim() && formValues.authPassword.trim());
+      default:
+        return true;
+    }
+  })();
+
+  const validSource = (() => {
+    if (formValues.type === 'openapi') {
+      if (!formValues.openApiSpec.trim()) return false;
+      try {
+        JSON.parse(formValues.openApiSpec);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    if (!formValues.mcpEndpoint.trim()) return false;
+    try {
+      new URL(formValues.mcpEndpoint);
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+
+  const checklist = [
+    { id: 1, label: 'Tool name provided', done: validName },
+    { id: 2, label: 'Source type chosen', done: Boolean(formValues.type) },
+    { id: 3, label: 'Authentication configured', done: validAuth },
+    {
+      id: 4,
+      label:
+        formValues.type === 'openapi'
+          ? 'OpenAPI spec is valid JSON'
+          : 'MCP endpoint URL is valid',
+      done: validSource,
+    },
+  ];
+
+  const canSubmit = validName && validAuth && validSource;
+
+  const summary = (
+    <>
+      <SummaryGroup title="Tool">
+        <SummaryKV
+          label="Name"
+          value={formValues.name || <span className="ds-faint">—</span>}
+        />
+        <SummaryKV
+          label="Type"
+          value={formValues.type === 'openapi' ? 'OpenAPI' : 'MCP server'}
+        />
+        <SummaryKV
+          label="Auth"
+          value={
+            AUTH_OPTIONS.find((o) => o.value === formValues.authType)?.label ?? '—'
+          }
+        />
+      </SummaryGroup>
+
+      {formValues.type === 'openapi' ? (
+        <SummaryGroup title="OpenAPI">
+          <SummaryKV
+            label="Base URL"
+            value={
+              formValues.upstreamBaseUrl || (
+                <span className="ds-faint">From spec</span>
+              )
+            }
+            mono
+          />
+          <SummaryKV
+            label="Spec"
+            value={
+              formValues.openApiSpec
+                ? `${formValues.openApiSpec.length} chars`
+                : <span className="ds-faint">—</span>
+            }
+            mono
+          />
+        </SummaryGroup>
+      ) : (
+        <SummaryGroup title="MCP">
+          <SummaryKV
+            label="Endpoint"
+            value={formValues.mcpEndpoint || <span className="ds-faint">—</span>}
+            mono
+          />
+          <SummaryKV label="Transport" value={formValues.mcpTransport} mono />
+        </SummaryGroup>
+      )}
+
+      <SummaryGroup title="Pre-flight">
+        <Checklist items={checklist} />
+      </SummaryGroup>
+    </>
+  );
 
   return (
-    <Modal
-      opened={opened}
+    <FormShell
+      open={opened}
       onClose={onClose}
-      title="New Tool"
-      centered
-      size="lg"
+      icon={<IconTool size={16} />}
+      title="New tool"
+      subtitle="Register an upstream API or MCP server as a callable tool."
+      summary={summary}
+      footerStatus={`${checklist.filter((c) => c.done).length} of ${checklist.length} ready`}
+      primaryAction={{
+        label: 'Create tool',
+        icon: <IconPlus size={13} />,
+        loading,
+        disabled: !canSubmit,
+        onClick: handleSubmit,
+      }}
     >
-      <Stepper active={step} size="sm" mb="lg">
-        <Stepper.Step label="Details" description="Name & authentication" />
-        <Stepper.Step
-          label={toolType === 'openapi' ? 'Specification' : 'Endpoint'}
-          description={toolType === 'openapi' ? 'OpenAPI spec' : 'MCP server'}
-        />
-      </Stepper>
-
-      {step === 0 && (
-        <Stack gap="md">
-          <TextInput
-            label="Name"
-            placeholder="My API Tool"
-            required
-            {...form.getInputProps('name')}
-          />
-
-          <Textarea
-            label="Description"
-            placeholder="Brief description of what this tool does"
-            rows={2}
-            {...form.getInputProps('description')}
-          />
-
-          <div>
-            <Text size="sm" fw={500} mb={6}>
-              Source Type
-            </Text>
-            <SegmentedControl
-              fullWidth
-              data={[
-                { label: 'OpenAPI', value: 'openapi' },
-                { label: 'MCP Server', value: 'mcp' },
-              ]}
-              value={form.values.type}
-              onChange={(val) => form.setFieldValue('type', val as 'openapi' | 'mcp')}
+      <FormSection
+        number={1}
+        title="Identity"
+        description="Name and describe the tool for use across projects."
+        done={validName}
+      >
+        <FormRow cols={1}>
+          <FormField label="Name" required>
+            <TextInput
+              placeholder="My API tool"
+              {...form.getInputProps('name')}
             />
-            <Text size="xs" c="dimmed" mt={4}>
-              {toolType === 'openapi'
-                ? 'Import an OpenAPI spec to automatically generate tool actions from API endpoints.'
-                : 'Connect to an MCP server to discover and import available tools.'}
-            </Text>
-          </div>
-
-          <Select
-            label="Authentication"
-            data={[
-              { value: 'none', label: 'None' },
-              { value: 'token', label: 'Bearer Token' },
-              { value: 'header', label: 'Custom Header' },
-              { value: 'basic', label: 'Basic Auth' },
-            ]}
-            {...form.getInputProps('authType')}
-          />
-
-          {form.values.authType === 'token' && (
-            <PasswordInput
-              label="Bearer Token"
-              placeholder="sk-..."
-              required
-              {...form.getInputProps('authToken')}
+          </FormField>
+        </FormRow>
+        <FormRow cols={1}>
+          <FormField label="Description" optional>
+            <Textarea
+              placeholder="Brief description of what this tool does"
+              autosize
+              minRows={2}
+              {...form.getInputProps('description')}
             />
-          )}
+          </FormField>
+        </FormRow>
+      </FormSection>
 
-          {form.values.authType === 'header' && (
-            <>
+      <FormSection
+        number={2}
+        title="Source"
+        description="Where the tool's actions are discovered from."
+      >
+        <FormField label="Source type" required>
+          <ChipPicker<'openapi' | 'mcp'>
+            options={TYPE_OPTIONS}
+            value={formValues.type}
+            onChange={(v) => setFieldValue('type', v as 'openapi' | 'mcp')}
+          />
+        </FormField>
+        <div className="ds-muted" style={{ fontSize: 12, marginTop: 6 }}>
+          {formValues.type === 'openapi'
+            ? 'Import an OpenAPI spec to automatically generate tool actions from API endpoints.'
+            : 'Connect to an MCP server to discover and import available tools.'}
+        </div>
+      </FormSection>
+
+      <FormSection
+        number={3}
+        title="Authentication"
+        description="Credentials used when calling the upstream service."
+        done={validAuth}
+      >
+        <FormRow cols={1}>
+          <FormField label="Authentication">
+            <Select data={AUTH_OPTIONS} {...form.getInputProps('authType')} />
+          </FormField>
+        </FormRow>
+
+        {formValues.authType === 'token' && (
+          <FormRow cols={1}>
+            <FormField label="Bearer token" required>
+              <PasswordInput
+                placeholder="sk-..."
+                {...form.getInputProps('authToken')}
+              />
+            </FormField>
+          </FormRow>
+        )}
+
+        {formValues.authType === 'header' && (
+          <FormRow cols={2}>
+            <FormField label="Header name" required>
               <TextInput
-                label="Header Name"
                 placeholder="X-API-Key"
-                required
                 {...form.getInputProps('authHeaderName')}
               />
+            </FormField>
+            <FormField label="Header value" required>
               <PasswordInput
-                label="Header Value"
                 placeholder="secret-value"
-                required
                 {...form.getInputProps('authHeaderValue')}
               />
-            </>
-          )}
+            </FormField>
+          </FormRow>
+        )}
 
-          {form.values.authType === 'basic' && (
-            <>
+        {formValues.authType === 'basic' && (
+          <FormRow cols={2}>
+            <FormField label="Username" required>
+              <TextInput {...form.getInputProps('authUsername')} />
+            </FormField>
+            <FormField label="Password" required>
+              <PasswordInput {...form.getInputProps('authPassword')} />
+            </FormField>
+          </FormRow>
+        )}
+      </FormSection>
+
+      {formValues.type === 'openapi' ? (
+        <FormSection
+          number={4}
+          title="OpenAPI specification"
+          description="Paste the spec JSON and optionally override the base URL."
+          done={validSource}
+        >
+          <FormRow cols={1}>
+            <FormField
+              label="Upstream base URL"
+              optional
+              hint="Override the base URL from the OpenAPI spec servers array."
+            >
               <TextInput
-                label="Username"
-                required
-                {...form.getInputProps('authUsername')}
+                placeholder="https://api.example.com"
+                {...form.getInputProps('upstreamBaseUrl')}
               />
-              <PasswordInput
-                label="Password"
-                required
-                {...form.getInputProps('authPassword')}
+            </FormField>
+          </FormRow>
+          <FormRow cols={1}>
+            <FormField label="OpenAPI specification" required>
+              <JsonInput
+                placeholder='{"openapi": "3.0.0", ...}'
+                minRows={10}
+                maxRows={20}
+                autosize
+                formatOnBlur
+                {...form.getInputProps('openApiSpec')}
               />
-            </>
-          )}
-
-          <Group justify="flex-end">
-            <Button variant="default" onClick={onClose}>
-              Cancel
-            </Button>
-            <Button onClick={handleNext}>
-              Next
-            </Button>
-          </Group>
-        </Stack>
+            </FormField>
+          </FormRow>
+        </FormSection>
+      ) : (
+        <FormSection
+          number={4}
+          title="MCP endpoint"
+          description="Endpoint and transport for the MCP server."
+          done={validSource}
+        >
+          <FormRow cols={1}>
+            <FormField
+              label="MCP endpoint URL"
+              required
+              hint="The URL of the MCP server to discover and call tools."
+            >
+              <TextInput
+                placeholder="https://mcp-server.example.com/mcp"
+                {...form.getInputProps('mcpEndpoint')}
+              />
+            </FormField>
+          </FormRow>
+          <FormRow cols={1}>
+            <FormField label="Transport">
+              <Select
+                data={[
+                  { value: 'streamable-http', label: 'Streamable HTTP (recommended)' },
+                  { value: 'sse', label: 'SSE' },
+                ]}
+                {...form.getInputProps('mcpTransport')}
+              />
+            </FormField>
+          </FormRow>
+        </FormSection>
       )}
-
-      {step === 1 && toolType === 'openapi' && (
-        <Stack gap="md">
-          <TextInput
-            label="Upstream Base URL"
-            placeholder="https://api.example.com"
-            description="Override the base URL from the OpenAPI spec servers array (optional)"
-            {...form.getInputProps('upstreamBaseUrl')}
-          />
-
-          <JsonInput
-            label="OpenAPI Specification"
-            placeholder='{"openapi": "3.0.0", ...}'
-            required
-            minRows={10}
-            maxRows={20}
-            autosize
-            formatOnBlur
-            {...form.getInputProps('openApiSpec')}
-          />
-
-          <Group justify="space-between">
-            <Button variant="default" onClick={handleBack}>
-              Back
-            </Button>
-            <Button loading={loading} onClick={handleSubmit}>
-              Create Tool
-            </Button>
-          </Group>
-        </Stack>
-      )}
-
-      {step === 1 && toolType === 'mcp' && (
-        <Stack gap="md">
-          <TextInput
-            label="MCP Endpoint URL"
-            placeholder="https://mcp-server.example.com/mcp"
-            required
-            description="The URL of the MCP server to discover and call tools"
-            {...form.getInputProps('mcpEndpoint')}
-          />
-
-          <Select
-            label="Transport"
-            data={[
-              { value: 'streamable-http', label: 'Streamable HTTP (recommended)' },
-              { value: 'sse', label: 'SSE' },
-            ]}
-            {...form.getInputProps('mcpTransport')}
-          />
-
-          <Group justify="space-between">
-            <Button variant="default" onClick={handleBack}>
-              Back
-            </Button>
-            <Button loading={loading} onClick={handleSubmit}>
-              Create Tool
-            </Button>
-          </Group>
-        </Stack>
-      )}
-    </Modal>
+    </FormShell>
   );
 }

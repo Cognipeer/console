@@ -135,7 +135,7 @@ export const ChromaLocalVectorProviderContract: ProviderContract<
   async createRuntime({ credentials: _credentials, settings, providerKey, logger }) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/ban-ts-comment
     // @ts-ignore – chromadb is an optional peer dependency
-    const { ChromaClient } = await import('chromadb') as any;
+    const { ChromaClient } = await import(/* webpackIgnore: true */ 'chromadb') as any;
 
     const resolvedHost = settings.host?.trim() || 'localhost';
     const resolvedPort = settings.port ?? 8000;

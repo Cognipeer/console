@@ -10,7 +10,6 @@ import {
   Menu,
   Paper,
   SegmentedControl,
-  SimpleGrid,
   Stack,
   Switch,
   Text,
@@ -33,7 +32,8 @@ import {
   IconExclamationCircle,
 } from '@tabler/icons-react';
 import Link from 'next/link';
-import PageHeader from '@/components/layout/PageHeader';
+import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
+import StatTile from '@/components/common/ui/StatTile';
 import AlertRuleForm from '@/components/alerts/AlertRuleForm';
 import { useTranslations } from '@/lib/i18n';
 
@@ -247,80 +247,61 @@ export default function AlertsPage() {
   }
 
   return (
-    <Stack gap="md">
+    <PageContainer>
       <PageHeader
-        icon={<IconBell size={20} />}
+        eyebrow="Operate · Alerts"
         title={t('title')}
         subtitle={t('subtitle')}
-        iconColor="orange"
         actions={
-          <Group gap="xs">
+          <>
             <Button
               component={Link}
               href="/dashboard/alerts/incidents"
-              variant="light"
-              size="xs"
+              variant="default"
+              size="sm"
               color="red"
-              leftSection={<IconExclamationCircle size={14} />}
+              leftSection={<IconExclamationCircle size={14} stroke={1.7} />}
             >
               Incidents
             </Button>
             <Button
               component={Link}
               href="/dashboard/alerts/history"
-              variant="light"
-              size="xs"
-              leftSection={<IconHistory size={14} />}
+              variant="default"
+              size="sm"
+              leftSection={<IconHistory size={14} stroke={1.7} />}
             >
               {t('viewHistory')}
             </Button>
             <Button
-              size="xs"
-              leftSection={<IconBellPlus size={14} />}
+              color="teal"
+              size="sm"
+              leftSection={<IconBellPlus size={14} stroke={1.7} />}
               onClick={handleCreate}
             >
               {t('newRule')}
             </Button>
-          </Group>
+          </>
         }
       />
 
-      {/* Overview Stats */}
-      <SimpleGrid cols={{ base: 1, xs: 3 }}>
-        <Paper p="md" radius="md" withBorder>
-          <Group gap="sm">
-            <ThemeIcon size={36} radius="md" variant="light" color="green">
-              <IconCheck size={18} />
-            </ThemeIcon>
-            <div>
-              <Text size="xl" fw={700}>{enabledCount}</Text>
-              <Text size="xs" c="dimmed">{t('activeRules')}</Text>
-            </div>
-          </Group>
-        </Paper>
-        <Paper p="md" radius="md" withBorder>
-          <Group gap="sm">
-            <ThemeIcon size={36} radius="md" variant="light" color="gray">
-              <IconClock size={18} />
-            </ThemeIcon>
-            <div>
-              <Text size="xl" fw={700}>{disabledCount}</Text>
-              <Text size="xs" c="dimmed">{t('disabledRules')}</Text>
-            </div>
-          </Group>
-        </Paper>
-        <Paper p="md" radius="md" withBorder>
-          <Group gap="sm">
-            <ThemeIcon size={36} radius="md" variant="light" color="orange">
-              <IconAlertTriangle size={18} />
-            </ThemeIcon>
-            <div>
-              <Text size="xl" fw={700}>{recentlyFiredCount}</Text>
-              <Text size="xs" c="dimmed">{t('firedLast24h')}</Text>
-            </div>
-          </Group>
-        </Paper>
-      </SimpleGrid>
+      <div className="ds-stat-grid" style={{ marginBottom: 16 }}>
+        <StatTile
+          label={t('activeRules')}
+          value={enabledCount}
+          icon={<IconCheck size={14} stroke={1.7} />}
+        />
+        <StatTile
+          label={t('disabledRules')}
+          value={disabledCount}
+          icon={<IconClock size={14} stroke={1.7} />}
+        />
+        <StatTile
+          label={t('firedLast24h')}
+          value={recentlyFiredCount}
+          icon={<IconAlertTriangle size={14} stroke={1.7} />}
+        />
+      </div>
 
       {/* Module Filter */}
       <SegmentedControl
@@ -457,6 +438,6 @@ export default function AlertsPage() {
         ruleId={editingRule?._id}
         initialData={editingRule ? (editingRule as unknown as Record<string, unknown>) : undefined}
       />
-    </Stack>
+    </PageContainer>
   );
 }

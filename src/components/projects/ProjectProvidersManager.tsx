@@ -1,10 +1,11 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ActionIcon, Box, Button, Group, Modal, Select, Stack, Text, Tooltip } from '@mantine/core';
-import { DataTable } from 'mantine-datatable';
-import { IconTrash } from '@tabler/icons-react';
+import { Button, Modal, Select, Stack } from '@mantine/core';
+import { IconPlus, IconTrash } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
+import StatusBadge from '@/components/common/ui/StatusBadge';
 
 type Provider = {
   _id: string;
@@ -23,6 +24,23 @@ function isAssigned(provider: Provider, projectId: string) {
   }
   if (provider.projectId && String(provider.projectId) === String(projectId)) return true;
   return false;
+}
+
+function statusVariant(status: string) {
+  switch (status) {
+    case 'active':
+    case 'connected':
+    case 'ready':
+      return 'ok' as const;
+    case 'disabled':
+    case 'paused':
+      return 'paused' as const;
+    case 'error':
+    case 'failed':
+      return 'err' as const;
+    default:
+      return 'info' as const;
+  }
 }
 
 export default function ProjectProvidersManager({ projectId }: { projectId: string }) {
@@ -119,78 +137,98 @@ export default function ProjectProvidersManager({ projectId }: { projectId: stri
     }
   };
 
-  return (
-    <Box p="md">
-      <Group justify="space-between" mb="md">
-        <div>
-          <Text size="lg" fw={600}>Providers</Text>
-          <Text size="sm" c="dimmed">
-            {tenantScope
-              ? 'Manage which tenant providers are available to this project.'
-              : 'Showing providers assigned to this project.'}
-          </Text>
+  const columns: DataGridColumn<Provider>[] = [
+    {
+      key: 'label',
+      label: 'Provider',
+      render: (p) => (
+        <div className="ds-col" style={{ gap: 2 }}>
+          <span style={{ fontSize: 13, fontWeight: 500 }}>{p.label}</span>
+          <span className="ds-faint ds-mono" style={{ fontSize: 11 }}>{p.key}</span>
         </div>
-        {tenantScope && (
-          <Button
-            onClick={() => {
-              setSelectedProviderId(null);
-              setAddOpen(true);
-            }}
-            disabled={submitting || unassignedProviders.length === 0}
-          >
-            Add provider
-          </Button>
-        )}
-      </Group>
+      ),
+    },
+    {
+      key: 'type',
+      label: 'Type',
+      width: 110,
+      render: (p) => (
+        <span className="ds-badge ds-badge-info">{p.type}</span>
+      ),
+    },
+    {
+      key: 'driver',
+      label: 'Driver',
+      width: 140,
+      render: (p) => (
+        <span className="ds-mono" style={{ fontSize: 12 }}>{p.driver}</span>
+      ),
+    },
+    {
+      key: 'status',
+      label: 'Status',
+      width: 120,
+      render: (p) => <StatusBadge status={statusVariant(p.status)} label={p.status} />,
+    },
+  ];
 
-      <DataTable
-        withTableBorder
-        borderRadius="sm"
-        striped
-        highlightOnHover
-        idAccessor="_id"
-        records={tenantScope ? assignedProviders : rows}
-        fetching={loading}
-        minHeight={200}
-        noRecordsText={tenantScope ? 'No assigned providers' : 'No providers'}
-        columns={[
-          {
-            accessor: 'label',
-            title: 'Provider',
-            render: (p) => (
-              <div>
-                <Text size="sm" fw={500}>{p.label}</Text>
-                <Text size="xs" c="dimmed" ff="monospace">{p.key}</Text>
-              </div>
-            ),
-          },
-          { accessor: 'type', title: 'Type' },
-          { accessor: 'driver', title: 'Driver' },
-          { accessor: 'status', title: 'Status' },
-          ...(tenantScope
-            ? [
+  const records = tenantScope ? assignedProviders : rows;
+
+  return (
+    <>
+      <DataGrid<Provider>
+        records={records}
+        loading={loading}
+        rowKey={(p) => String(p._id)}
+        columns={columns}
+        onRefresh={() => void fetchProviders()}
+        refreshing={loading}
+        toolbarRight={
+          tenantScope ? (
+            <Button
+              color="teal"
+              size="xs"
+              leftSection={<IconPlus size={13} stroke={1.7} />}
+              onClick={() => {
+                setSelectedProviderId(null);
+                setAddOpen(true);
+              }}
+              disabled={submitting || unassignedProviders.length === 0}
+            >
+              Add provider
+            </Button>
+          ) : undefined
+        }
+        empty={{
+          title: tenantScope ? 'No assigned providers' : 'No providers',
+          description: tenantScope
+            ? 'Assign tenant providers to make them available to this project.'
+            : 'No providers are available for this project yet.',
+          primaryAction: tenantScope && unassignedProviders.length > 0
+            ? {
+                label: 'Add provider',
+                icon: <IconPlus size={14} stroke={1.7} />,
+                onClick: () => {
+                  setSelectedProviderId(null);
+                  setAddOpen(true);
+                },
+              }
+            : undefined,
+        }}
+        rowActions={
+          tenantScope
+            ? (p) => [
                 {
-                  accessor: 'actions',
-                  title: 'Actions',
-                  textAlign: 'right' as const,
-                  render: (p: Provider) => (
-                    <Group justify="flex-end">
-                      <Tooltip label="Remove">
-                        <ActionIcon
-                          color="red"
-                          variant="subtle"
-                          loading={submitting}
-                          onClick={() => setAssignment(p, false)}
-                        >
-                          <IconTrash size={16} />
-                        </ActionIcon>
-                      </Tooltip>
-                    </Group>
-                  ),
+                  id: 'remove',
+                  label: 'Remove',
+                  icon: <IconTrash size={14} />,
+                  color: 'red',
+                  onClick: () => void setAssignment(p, false),
+                  disabled: submitting,
                 },
               ]
-            : []),
-        ]}
+            : undefined
+        }
       />
 
       <Modal
@@ -212,7 +250,7 @@ export default function ProjectProvidersManager({ projectId }: { projectId: stri
             searchable
             disabled={unassignedProviders.length === 0}
           />
-          <Group justify="flex-end" gap="sm">
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
             <Button variant="default" onClick={() => setAddOpen(false)} disabled={submitting}>
               Cancel
             </Button>
@@ -228,9 +266,9 @@ export default function ProjectProvidersManager({ projectId }: { projectId: stri
             >
               Add
             </Button>
-          </Group>
+          </div>
         </Stack>
       </Modal>
-    </Box>
+    </>
   );
 }

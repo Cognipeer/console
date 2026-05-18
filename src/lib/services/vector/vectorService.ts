@@ -400,6 +400,14 @@ export async function listVectorIndexes(
   return db.listVectorIndexes({ providerKey, projectId });
 }
 
+export async function listProjectVectorIndexes(
+  tenantDbName: string,
+  projectId: string,
+): Promise<VectorIndexRecord[]> {
+  const db = await withTenantDb(tenantDbName);
+  return db.listVectorIndexes({ projectId });
+}
+
 export async function getVectorIndex(
   tenantDbName: string,
   tenantId: string,

@@ -55,6 +55,7 @@ if (errors.length > 0) {
 | `JWT_SECRET` | Must be non-empty |
 | `REDIS_URL` | Required when `CACHE_PROVIDER=redis` |
 | `REDIS_URL` | Required when `RATE_LIMIT_PROVIDER=redis` |
+| `CACHE_PROVIDER` | Must match `RATE_LIMIT_PROVIDER` when rate limiting uses `memory` or `redis` |
 
 ### `reloadConfig(): AppConfig`
 

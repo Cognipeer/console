@@ -17,7 +17,7 @@ import {
   Tooltip,
 } from '@mantine/core';
 import { useRouter } from 'next/navigation';
-import PageHeader from '@/components/layout/PageHeader';
+import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import { notifications } from '@mantine/notifications';
 import {
   IconChevronRight,
@@ -148,9 +148,9 @@ export default function ConfigPage() {
   );
 
   return (
-    <>
+    <PageContainer>
       <PageHeader
-        icon={<IconLock size={18} />}
+        eyebrow="Configure · System"
         title={t('title')}
         subtitle={t('subtitle')}
         actions={
@@ -162,11 +162,12 @@ export default function ConfigPage() {
               onClick={handleRefresh}
               aria-label="Refresh"
             >
-              <IconRefresh size={18} />
+              <IconRefresh size={18} stroke={1.7} />
             </ActionIcon>
             <Button
-              size="xs"
-              leftSection={<IconPlus size={14} />}
+              variant="default"
+              size="sm"
+              leftSection={<IconPlus size={14} stroke={1.7} />}
               onClick={() => setCreateGroupModalOpen(true)}
             >
               {t('createGroup')}
@@ -345,6 +346,6 @@ export default function ConfigPage() {
         }}
       />
 
-    </>
+    </PageContainer>
   );
 }

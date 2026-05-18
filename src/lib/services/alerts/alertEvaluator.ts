@@ -10,7 +10,7 @@ import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 
 const logger = createLogger('alert-evaluator');
-import type { IAlertEvent, AlertConditionOperator } from '@/lib/database';
+import type { IAlertEvent, IAlertRule, AlertConditionOperator } from '@/lib/database';
 import { collectMetric } from './metrics';
 import { getChannel } from './channels';
 import type { AlertContext, DispatchResult } from './channels';
@@ -53,11 +53,20 @@ export interface EvaluationContext {
  */
 export async function evaluateTenantAlerts(
   ctx: EvaluationContext,
+  options: { ruleFilter?: (rule: IAlertRule) => boolean | Promise<boolean> } = {},
 ): Promise<number> {
   const db = await getTenantDatabase(ctx.tenantDbName);
 
   // Fetch all enabled rules for this tenant
-  const rules = await db.listAlertRules(ctx.tenantId, { enabled: true });
+  const allRules = await db.listAlertRules(ctx.tenantId, { enabled: true });
+  let rules = allRules;
+  if (options.ruleFilter) {
+    const filtered: typeof allRules = [];
+    for (const rule of allRules) {
+      if (await options.ruleFilter(rule)) filtered.push(rule);
+    }
+    rules = filtered;
+  }
   if (rules.length === 0) return 0;
 
   let firedCount = 0;

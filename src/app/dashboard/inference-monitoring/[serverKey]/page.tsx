@@ -23,15 +23,15 @@ import { notifications } from '@mantine/notifications';
 import {
   IconActivity,
   IconAlertTriangle,
-  IconArrowLeft,
   IconEdit,
   IconRefresh,
-  IconServerBolt,
+  IconServer,
   IconTrash,
 } from '@tabler/icons-react';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
-import PageHeader from '@/components/layout/PageHeader';
+import DetailShell from '@/components/common/ui/DetailShell';
+import StatusBadge from '@/components/common/ui/StatusBadge';
 import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
 import { useTranslations } from '@/lib/i18n';
 import {
@@ -71,12 +71,16 @@ interface MetricsRecord {
   runningModels?: string[];
 }
 
-function statusColor(status: string): string {
+function statusVariant(status: string) {
   switch (status) {
-    case 'active': return 'teal';
-    case 'errored': return 'red';
-    case 'disabled': return 'gray';
-    default: return 'gray';
+    case 'active':
+      return 'ok' as const;
+    case 'errored':
+      return 'err' as const;
+    case 'disabled':
+      return 'paused' as const;
+    default:
+      return 'info' as const;
   }
 }
 
@@ -285,51 +289,81 @@ export default function InferenceServerDetailPage() {
   // Latest metrics snapshot
   const latest = metrics.length > 0 ? metrics[0] : null;
 
-  return (
-    <Stack gap="md">
-      <PageHeader
-        icon={<IconServerBolt size={18} />}
-        title={server.name}
-        subtitle={`${server.type.toUpperCase()} · ${server.baseUrl}`}
-        actions={
-          <>
-            <Button
-              variant="light"
-              size="xs"
-              leftSection={<IconArrowLeft size={14} />}
-              onClick={() => router.push('/dashboard/inference-monitoring')}
-            >
-              All Servers
-            </Button>
-            <Button
-              variant="light"
-              size="xs"
-              leftSection={<IconEdit size={14} />}
-              onClick={openEdit}
-            >
-              {t('editServer')}
-            </Button>
-            <Button
-              variant="light"
-              size="xs"
-              color="red"
-              leftSection={<IconTrash size={14} />}
-              onClick={deleteHandlers.open}
-            >
-              {t('deleteServer')}
-            </Button>
-            <Button
-              size="xs"
-              leftSection={<IconRefresh size={14} />}
-              onClick={handlePoll}
-              loading={polling}
-            >
-              {t('pollNow')}
-            </Button>
-          </>
-        }
-      />
+  const actions = (
+    <>
+      <Button
+        variant="default"
+        size="sm"
+        leftSection={<IconEdit size={14} stroke={1.7} />}
+        onClick={openEdit}
+      >
+        {t('editServer')}
+      </Button>
+      <Button
+        variant="default"
+        size="sm"
+        color="red"
+        leftSection={<IconTrash size={14} stroke={1.7} />}
+        onClick={deleteHandlers.open}
+      >
+        {t('deleteServer')}
+      </Button>
+      <Button
+        size="sm"
+        leftSection={<IconRefresh size={14} stroke={1.7} />}
+        onClick={handlePoll}
+        loading={polling}
+      >
+        {t('pollNow')}
+      </Button>
+    </>
+  );
 
+  return (
+    <DetailShell
+      backHref="/dashboard/inference-monitoring"
+      backLabel="Back to inference monitoring"
+      icon={
+        <div
+          style={{
+            width: 48,
+            height: 48,
+            borderRadius: 10,
+            background: 'var(--ds-accent-soft)',
+            color: 'var(--ds-accent)',
+            display: 'grid',
+            placeItems: 'center',
+          }}
+        >
+          <IconServer size={22} stroke={1.7} />
+        </div>
+      }
+      title={
+        <>
+          <h1 className="ds-h2" style={{ margin: 0, whiteSpace: 'nowrap' }}>
+            {server.name}
+          </h1>
+          <StatusBadge status={statusVariant(server.status)} label={server.status} />
+          <span className="ds-badge ds-badge-info">{server.type.toUpperCase()}</span>
+        </>
+      }
+      meta={
+        <>
+          <span className="ds-mono">{server.key}</span>
+          <span className="ds-faint">·</span>
+          <span>provider: <span className="ds-mono">{server.type}</span></span>
+          <span className="ds-faint">·</span>
+          <span className="ds-mono">{server.baseUrl}</span>
+          {server.lastPolledAt ? (
+            <>
+              <span className="ds-faint">·</span>
+              <span>Last polled {dayjs(server.lastPolledAt).fromNow()}</span>
+            </>
+          ) : null}
+        </>
+      }
+      actions={actions}
+    >
       <Group justify="flex-end">
         <DashboardDateFilter value={dateFilter} onChange={setDateFilter} />
       </Group>
@@ -337,7 +371,7 @@ export default function InferenceServerDetailPage() {
       {/* Server Status */}
       <Paper p="lg" radius="lg" withBorder>
         <Group gap="lg" align="center">
-          <Badge size="lg" variant="light" color={statusColor(server.status)}>
+          <Badge size="lg" variant="light" color={server.status === 'active' ? 'teal' : server.status === 'errored' ? 'red' : 'gray'}>
             {server.status.toUpperCase()}
           </Badge>
           {server.lastPolledAt && (
@@ -596,6 +630,6 @@ export default function InferenceServerDetailPage() {
           </Group>
         </Stack>
       </Modal>
-    </Stack>
+    </DetailShell>
   );
 }

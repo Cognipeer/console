@@ -1,0 +1,128 @@
+/* ====================================================================
+   Horizontal nav variant — context bar replaces left sub-nav
+   ==================================================================== */
+
+.app-v3 {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  grid-template-rows: 56px auto 1fr;
+  height: 100vh;
+  position: relative;
+  z-index: 1;
+}
+.app-v3 > .topbar    { grid-column: 1 / -1; grid-row: 1; }
+.app-v3 > .rail      { grid-column: 1; grid-row: 2 / 4; }
+.app-v3 > .ctxbar    { grid-column: 2; grid-row: 2; }
+.app-v3 > .main      { grid-column: 2; grid-row: 3; }
+
+/* ── Context bar ──────────────────────────────────────────────── */
+.ctxbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 24px;
+  height: 52px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--surface-raised);
+  overflow: hidden;
+}
+.ctxbar-identity {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.ctxbar-identity .icon {
+  width: 28px; height: 28px;
+  border-radius: 7px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  display: grid; place-items: center;
+}
+.ctxbar-identity .name {
+  font-size: 14.5px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+.ctxbar-identity .env {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 4px;
+  padding: 2px 8px;
+  background: var(--surface-2);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.ctxbar-divider {
+  width: 1px;
+  height: 24px;
+  background: var(--border-soft);
+  margin: 0 8px;
+  flex-shrink: 0;
+}
+
+.ctxbar-tabs {
+  display: flex;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  align-items: center;
+  height: 100%;
+}
+.ctxbar-tabs::-webkit-scrollbar { display: none; }
+
+.ctxbar-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 8px;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all var(--m-fast);
+}
+.ctxbar-tab:hover { background: var(--surface-2); color: var(--text); }
+.ctxbar-tab.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.ctxbar-tab .ctxbar-tab-badge {
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-faint);
+}
+.ctxbar-tab.active .ctxbar-tab-badge {
+  background: var(--accent);
+  color: var(--text-on-accent);
+}
+
+.ctxbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* When no service is selected (Home), ctxbar shows a simpler strip */
+.ctxbar.home {
+  background: transparent;
+  border-bottom: 1px solid var(--border-soft);
+}
+.ctxbar.home .ctxbar-identity .icon {
+  background: var(--surface-2);
+  color: var(--text-muted);
+}

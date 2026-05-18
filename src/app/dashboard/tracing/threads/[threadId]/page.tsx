@@ -26,20 +26,20 @@ import {
   SimpleGrid,
 } from '@mantine/core';
 import {
-  IconArrowLeft,
   IconClock,
   IconActivity,
   IconBrain,
   IconTool,
   IconCopy,
   IconCheck,
-  IconTimeline,
   IconInfoCircle,
+  IconTimeline,
 } from '@tabler/icons-react';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import duration from 'dayjs/plugin/duration';
-import PageHeader from '@/components/layout/PageHeader';
+import DetailShell from '@/components/common/ui/DetailShell';
+import StatusBadge from '@/components/common/ui/StatusBadge';
 import {
   formatDuration,
   formatNumber,
@@ -141,6 +141,15 @@ const isInProgressStatus = (status?: string) => {
   const value = (status || '').toLowerCase();
   return value === 'in_progress' || value === 'in-progress' || value === 'running';
 };
+
+function statusVariant(status?: string) {
+  if (!status) return 'info' as const;
+  const v = status.toLowerCase();
+  if (v === 'success' || v === 'completed') return 'ok' as const;
+  if (v === 'error' || v === 'failed') return 'err' as const;
+  if (v === 'running' || v === 'in_progress' || v === 'pending') return 'info' as const;
+  return 'info' as const;
+}
 
 const formatActor = (actor: unknown): string => {
   if (!actor) return '';
@@ -469,34 +478,74 @@ export default function ThreadDetailPage({
 
   const totalTokens = thread.totalInputTokens + thread.totalOutputTokens;
 
-  return (
-    <Stack gap="md">
-      <PageHeader
-        icon={<IconTimeline size={18} />}
-        title="Thread Detail"
-        subtitle={`Thread ${threadId.substring(0, 16)}${threadId.length > 16 ? '...' : ''}`}
-        actions={
-          <>
-            <Badge size="sm" variant="filled" radius="xl" color={resolveStatusColor(thread.status)}>
-              {thread.status.toUpperCase()}
-            </Badge>
-            {hasInProgressSession && (
-              <Badge size="sm" variant="light" radius="xl" color="blue">
-                Auto-refreshing
-              </Badge>
-            )}
-            <Button
-              leftSection={<IconArrowLeft size={14} />}
-              variant="light"
-              size="xs"
-              onClick={() => router.push('/dashboard/tracing/threads')}
-            >
-              Back to Threads
-            </Button>
-          </>
-        }
-      />
+  const headerActions = hasInProgressSession ? (
+    <Badge size="sm" variant="light" radius="xl" color="blue">
+      Auto-refreshing
+    </Badge>
+  ) : null;
 
+  return (
+    <DetailShell
+      backHref="/dashboard/tracing/threads"
+      backLabel="Back to threads"
+      icon={
+        <div
+          style={{
+            width: 48,
+            height: 48,
+            borderRadius: 10,
+            background: 'var(--ds-accent-soft)',
+            color: 'var(--ds-accent)',
+            display: 'grid',
+            placeItems: 'center',
+          }}
+        >
+          <IconTimeline size={22} stroke={1.7} />
+        </div>
+      }
+      title={
+        <>
+          <h1
+            className="ds-h2"
+            style={{ margin: 0, whiteSpace: 'nowrap', maxWidth: 540, overflow: 'hidden', textOverflow: 'ellipsis' }}
+          >
+            Thread {threadId.substring(0, 16)}{threadId.length > 16 ? '...' : ''}
+          </h1>
+          <StatusBadge status={statusVariant(thread.status)} label={thread.status.toUpperCase()} />
+          <span className="ds-badge ds-badge-info">
+            {thread.sessionsCount} sessions
+          </span>
+          {thread.totalEvents != null ? (
+            <span className="ds-badge">
+              {formatNumber(thread.totalEvents)} events
+            </span>
+          ) : null}
+          {thread.totalDurationMs != null ? (
+            <span className="ds-badge">
+              {formatDuration(thread.totalDurationMs)}
+            </span>
+          ) : null}
+        </>
+      }
+      meta={
+        <>
+          <span className="ds-mono">{threadId}</span>
+          {thread.agents.length > 0 ? (
+            <>
+              <span className="ds-faint">·</span>
+              <span>{thread.agents.join(', ')}</span>
+            </>
+          ) : null}
+          {thread.startedAt ? (
+            <>
+              <span className="ds-faint">·</span>
+              <span>Started {dayjs(thread.startedAt).format('MMM D, YYYY HH:mm:ss')}</span>
+            </>
+          ) : null}
+        </>
+      }
+      actions={headerActions}
+    >
       {/* Thread Summary Cards */}
       <Grid>
         <Grid.Col span={{ base: 12, md: 4 }}>
@@ -961,6 +1010,6 @@ export default function ThreadDetailPage({
           </Card>
         </Grid.Col>
       </Grid>
-    </Stack>
+    </DetailShell>
   );
 }

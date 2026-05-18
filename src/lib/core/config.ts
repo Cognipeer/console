@@ -39,6 +39,10 @@ export interface AppConfig {
 
   license: {
     enforceLicense: boolean;
+    offlinePublicKey: string;
+    offlinePublicKeyPath: string;
+    issuer: string;
+    audience: string;
   };
 
   database: {
@@ -112,6 +116,8 @@ export interface AppConfig {
   limits: {
     bodySize: string;
     tracingMaxBodySizeMb: number;
+    fileUploadMaxMb: number;
+    fileUploadAllowedMimeTypes: string[];
   };
 
   app: {
@@ -142,6 +148,20 @@ export interface AppConfig {
     reaperIntervalMs: number;
     /** Bucket key used for browser artifacts when none is provided. */
     defaultArtifactBucketKey: string;
+    /** Block localhost/private network egress from managed browser sessions. */
+    blockPrivateNetwork: boolean;
+  };
+
+  jsSandbox: {
+    concurrencyProvider: 'memory';
+    defaultMaxConcurrent: number;
+    defaultTimeoutMs: number;
+    maxTimeoutMs: number;
+    memoryLimitMb: number;
+    maxCodeSizeBytes: number;
+    maxResultSizeBytes: number;
+    maxLogEntries: number;
+    childProcessTimeoutBufferMs: number;
   };
 
   systemModels: {
@@ -163,6 +183,35 @@ export interface AppConfig {
       /** Full service account key JSON string */
       serviceAccountKey: string;
     };
+  };
+
+  node: {
+    /** Deployment role of this process. */
+    role: 'main' | 'worker' | 'all';
+    /** Unique name across the cluster. Defaults to hostname-pid when empty. */
+    name: string;
+    /** Public URL of this node (informational). */
+    url: string;
+    /** Free-form tags for grouping. */
+    tags: string[];
+    /** Heartbeat write interval in ms. */
+    heartbeatMs: number;
+    /** Nodes with last heartbeat older than this are marked offline. */
+    offlineAfterMs: number;
+    /** Default node name for instance assignments. Empty = first main node. */
+    defaultNodeName: string;
+  };
+
+  queue: {
+    /** auto = bullmq when Redis is configured, otherwise memory. */
+    provider: 'auto' | 'memory' | 'bullmq';
+    redis: {
+      /** Falls back to cache.redis.url when empty. */
+      url: string;
+      prefix: string;
+    };
+    defaultAttempts: number;
+    defaultBackoffMs: number;
   };
 }
 
@@ -216,6 +265,10 @@ function buildConfig(source: ConfigSource): AppConfig {
 
     license: {
       enforceLicense: bool(source, 'ENFORCE_LICENSE', false),
+      offlinePublicKey: str(source, 'OFFLINE_LICENSE_PUBLIC_KEY', ''),
+      offlinePublicKeyPath: str(source, 'OFFLINE_LICENSE_PUBLIC_KEY_PATH', ''),
+      issuer: str(source, 'OFFLINE_LICENSE_ISSUER', 'cognipeer'),
+      audience: str(source, 'OFFLINE_LICENSE_AUDIENCE', 'cognipeer-console'),
     },
 
     database: {
@@ -231,11 +284,9 @@ function buildConfig(source: ConfigSource): AppConfig {
     },
 
     auth: {
-      jwtSecret: str(source, 'JWT_SECRET', ''),
+      jwtSecret: str(source, 'JWT_SECRET', 'jwt-key-change-me'),
       jwtExpiresIn: str(source, 'JWT_EXPIRES_IN', '7d'),
-      providerEncryptionSecret:
-        str(source, 'PROVIDER_ENCRYPTION_SECRET', '') ||
-        str(source, 'JWT_SECRET', ''),
+      providerEncryptionSecret: str(source, 'PROVIDER_ENCRYPTION_SECRET', ''),
     },
 
     smtp: {
@@ -291,6 +342,10 @@ function buildConfig(source: ConfigSource): AppConfig {
     limits: {
       bodySize: str(source, 'NEXT_BODY_SIZE_LIMIT', '10mb'),
       tracingMaxBodySizeMb: int(source, 'TRACING_MAX_BODY_SIZE_MB', 10),
+      fileUploadMaxMb: int(source, 'FILE_UPLOAD_MAX_MB', 50),
+      // Empty list disables the allowlist (any MIME accepted). When non-empty,
+      // only listed types are accepted. Wildcards like "image/*" are honored.
+      fileUploadAllowedMimeTypes: list(source, 'FILE_UPLOAD_ALLOWED_MIME_TYPES', []),
     },
 
     app: {
@@ -312,6 +367,19 @@ function buildConfig(source: ConfigSource): AppConfig {
       viewportHeight: int(source, 'BROWSER_VIEWPORT_HEIGHT', 800),
       reaperIntervalMs: int(source, 'BROWSER_REAPER_INTERVAL_MS', 30 * 1000),
       defaultArtifactBucketKey: str(source, 'BROWSER_DEFAULT_ARTIFACT_BUCKET', 'browser-artifacts'),
+      blockPrivateNetwork: bool(source, 'BROWSER_BLOCK_PRIVATE_NETWORK', true),
+    },
+
+    jsSandbox: {
+      concurrencyProvider: oneOf(source, 'JS_SANDBOX_CONCURRENCY_PROVIDER', ['memory'] as const, 'memory'),
+      defaultMaxConcurrent: int(source, 'JS_SANDBOX_DEFAULT_MAX_CONCURRENT', 5),
+      defaultTimeoutMs: int(source, 'JS_SANDBOX_DEFAULT_TIMEOUT_MS', 5_000),
+      maxTimeoutMs: int(source, 'JS_SANDBOX_MAX_TIMEOUT_MS', 30_000),
+      memoryLimitMb: int(source, 'JS_SANDBOX_MEMORY_LIMIT_MB', 64),
+      maxCodeSizeBytes: int(source, 'JS_SANDBOX_MAX_CODE_SIZE_BYTES', 64 * 1024),
+      maxResultSizeBytes: int(source, 'JS_SANDBOX_MAX_RESULT_SIZE_BYTES', 512 * 1024),
+      maxLogEntries: int(source, 'JS_SANDBOX_MAX_LOG_ENTRIES', 100),
+      childProcessTimeoutBufferMs: int(source, 'JS_SANDBOX_CHILD_PROCESS_TIMEOUT_BUFFER_MS', 1_000),
     },
 
     systemModels: {
@@ -332,6 +400,26 @@ function buildConfig(source: ConfigSource): AppConfig {
         location: str(source, 'SYSTEM_VERTEX_LOCATION', 'us-central1'),
         serviceAccountKey: str(source, 'SYSTEM_VERTEX_SERVICE_ACCOUNT_KEY', ''),
       },
+    },
+
+    node: {
+      role: oneOf(source, 'NODE_ROLE', ['main', 'worker', 'all'] as const, 'all'),
+      name: str(source, 'NODE_NAME', ''),
+      url: str(source, 'NODE_URL', ''),
+      tags: list(source, 'NODE_TAGS', []),
+      heartbeatMs: int(source, 'NODE_HEARTBEAT_MS', 10_000),
+      offlineAfterMs: int(source, 'NODE_OFFLINE_AFTER_MS', 30_000),
+      defaultNodeName: str(source, 'CLUSTER_DEFAULT_NODE_NAME', ''),
+    },
+
+    queue: {
+      provider: oneOf(source, 'QUEUE_PROVIDER', ['auto', 'memory', 'bullmq'] as const, 'auto'),
+      redis: {
+        url: str(source, 'QUEUE_REDIS_URL', ''),
+        prefix: str(source, 'QUEUE_PREFIX', 'console:q:'),
+      },
+      defaultAttempts: int(source, 'QUEUE_DEFAULT_ATTEMPTS', 3),
+      defaultBackoffMs: int(source, 'QUEUE_DEFAULT_BACKOFF_MS', 1_000),
     },
   };
 }
@@ -357,12 +445,59 @@ export function validateConfig(cfg: AppConfig): ConfigValidationError[] {
   }
   if (!cfg.auth.jwtSecret) {
     errors.push({ key: 'JWT_SECRET', message: 'JWT secret is required for authentication' });
+  } else if (cfg.auth.jwtSecret.length < 32) {
+    errors.push({
+      key: 'JWT_SECRET',
+      message: 'JWT_SECRET must be at least 32 characters (use a high-entropy random value)',
+    });
+  }
+  if (!cfg.auth.providerEncryptionSecret) {
+    errors.push({
+      key: 'PROVIDER_ENCRYPTION_SECRET',
+      message: 'PROVIDER_ENCRYPTION_SECRET is required to encrypt provider credentials at rest',
+    });
+  } else if (cfg.auth.providerEncryptionSecret.length < 32) {
+    errors.push({
+      key: 'PROVIDER_ENCRYPTION_SECRET',
+      message: 'PROVIDER_ENCRYPTION_SECRET must be at least 32 characters',
+    });
+  } else if (cfg.auth.providerEncryptionSecret === cfg.auth.jwtSecret) {
+    errors.push({
+      key: 'PROVIDER_ENCRYPTION_SECRET',
+      message: 'PROVIDER_ENCRYPTION_SECRET must not equal JWT_SECRET (use independent secrets)',
+    });
   }
   if (cfg.cache.provider === 'redis' && !cfg.cache.redis.url) {
     errors.push({ key: 'REDIS_URL', message: 'Redis URL is required when CACHE_PROVIDER=redis' });
   }
   if (cfg.rateLimit.provider === 'redis' && !cfg.cache.redis.url) {
     errors.push({ key: 'REDIS_URL', message: 'Redis URL is required when RATE_LIMIT_PROVIDER=redis' });
+  }
+  if (
+    (cfg.rateLimit.provider === 'redis' || cfg.rateLimit.provider === 'memory')
+    && cfg.cache.provider !== cfg.rateLimit.provider
+  ) {
+    errors.push({
+      key: 'CACHE_PROVIDER',
+      message: `CACHE_PROVIDER must be ${cfg.rateLimit.provider} when RATE_LIMIT_PROVIDER=${cfg.rateLimit.provider}`,
+    });
+  }
+
+  // Hard-fail if request/response body logging is enabled in production.
+  // These flags expose secrets (auth headers, API keys, prompts) to logs.
+  if (cfg.nodeEnv === 'production') {
+    if (cfg.logging.logRequestBody) {
+      errors.push({
+        key: 'LOG_REQUEST_BODY',
+        message: 'LOG_REQUEST_BODY must be false in production (leaks secrets / PII into logs)',
+      });
+    }
+    if (cfg.logging.logResponseBody) {
+      errors.push({
+        key: 'LOG_RESPONSE_BODY',
+        message: 'LOG_RESPONSE_BODY must be false in production (leaks secrets / PII into logs)',
+      });
+    }
   }
 
   return errors;

@@ -3,9 +3,15 @@ import type { FastifyPluginAsync } from 'fastify';
 import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
+import type { IUser } from '@/lib/database';
 import { sendEmail } from '@/lib/email/mailer';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { checkResourceQuota } from '@/lib/quota/quotaGuard';
+import {
+  normalizeServicePermissions,
+  RBAC_SERVICE_DEFINITIONS,
+  SERVICE_PERMISSION_LEVELS,
+} from '@/lib/security/rbac';
 import { ensureDefaultProject } from '@/lib/services/projects/projectService';
 import {
   readJsonBody,
@@ -19,7 +25,43 @@ function isUserAdmin(role: string | undefined): boolean {
   return role === 'owner' || role === 'admin';
 }
 
+function serializeUser(user: IUser) {
+  return {
+    _id: user._id,
+    createdAt: user.createdAt,
+    email: user.email,
+    inviteAcceptedAt: user.inviteAcceptedAt,
+    invitedAt: user.invitedAt,
+    invitedBy: user.invitedBy,
+    name: user.name,
+    projectIds: user.projectIds ?? [],
+    role: user.role,
+    servicePermissions: normalizeServicePermissions(user.servicePermissions),
+    updatedAt: user.updatedAt,
+  };
+}
+
 export const usersApiPlugin: FastifyPluginAsync = async (app) => {
+  app.get('/users/permissions/services', withApiRequestContext(async (request, reply) => {
+    try {
+      const session = requireSessionContext(request);
+      if (!isUserAdmin(session.userRole)) {
+        return reply.code(403).send({ error: 'Forbidden' });
+      }
+
+      return reply.code(200).send({
+        levels: SERVICE_PERMISSION_LEVELS,
+        services: RBAC_SERVICE_DEFINITIONS,
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Unauthorized') {
+        return reply.code(401).send({ error: 'Unauthorized' });
+      }
+      logger.error('List permission services error', { error });
+      return reply.code(500).send({ error: 'Internal server error' });
+    }
+  }));
+
   app.get('/users', withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
@@ -31,7 +73,7 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
       await db.switchToTenant(session.tenantDbName);
 
       const users = await db.listUsers();
-      return reply.code(200).send({ users });
+      return reply.code(200).send({ users: users.map(serializeUser) });
     } catch (error) {
       if (error instanceof Error && error.message === 'Unauthorized') {
         return reply.code(401).send({ error: 'Unauthorized' });
@@ -80,6 +122,43 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
+  app.patch('/users/:id/permissions', withApiRequestContext(async (request, reply) => {
+    try {
+      const { id } = request.params as { id: string };
+      const session = requireSessionContext(request);
+      if (!isUserAdmin(session.userRole)) {
+        return reply.code(403).send({ error: 'Only owners and admins can manage permissions' });
+      }
+
+      const body = readJsonBody<{ servicePermissions?: unknown }>(request);
+      const servicePermissions = normalizeServicePermissions(body.servicePermissions);
+
+      const db = await getDatabase();
+      await db.switchToTenant(session.tenantDbName);
+
+      const target = await db.findUserById(id);
+      if (!target) {
+        return reply.code(404).send({ error: 'User not found' });
+      }
+      if (target.role === 'owner') {
+        return reply.code(403).send({ error: 'Owner permissions cannot be changed' });
+      }
+
+      const updated = await db.updateUser(id, { servicePermissions });
+      if (!updated) {
+        return reply.code(500).send({ error: 'Failed to update permissions' });
+      }
+
+      return reply.code(200).send({ user: serializeUser(updated) });
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Unauthorized') {
+        return reply.code(401).send({ error: 'Unauthorized' });
+      }
+      logger.error('Update user permissions error', { error });
+      return reply.code(500).send({ error: 'Internal server error' });
+    }
+  }));
+
   app.post('/users/invite', withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
@@ -92,6 +171,7 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
         name?: string;
         projectId?: string;
         role?: string;
+        servicePermissions?: unknown;
       }>(request);
 
       if (!body.name || !body.email || !body.role) {
@@ -179,8 +259,24 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
         password: hashedPassword,
         projectIds: initialProjectIds,
         role: body.role as 'user' | 'admin' | 'project_admin',
+        servicePermissions: normalizeServicePermissions(body.servicePermissions),
         tenantId: session.tenantId,
       });
+
+      if (
+        body.projectId
+        && typeof body.projectId === 'string'
+        && (body.role === 'user' || body.role === 'project_admin')
+      ) {
+        await db.upsertUserProject({
+          invitedBy: session.userId,
+          projectId: body.projectId,
+          role: body.role === 'project_admin' ? 'project_admin' : 'member',
+          servicePermissions: undefined,
+          tenantId: session.tenantId,
+          userId: String(user._id),
+        });
+      }
 
       sendEmail(body.email, 'user-invitation', {
         companyName: tenant.companyName,
@@ -201,6 +297,7 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
           id: user._id,
           name: user.name,
           role: user.role,
+          servicePermissions: normalizeServicePermissions(user.servicePermissions),
         },
       });
     } catch (error) {

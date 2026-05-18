@@ -2,34 +2,22 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { Button, Text, Tooltip } from '@mantine/core';
 import {
-  Card,
-  Stack,
-  Group,
-  Text,
-  TextInput,
-  Select,
-  Button,
-  Paper,
-  Badge,
-  Pagination,
-  Table,
-  Tooltip,
-  Box,
-} from '@mantine/core';
-import { DatePickerInput } from '@mantine/dates';
-import {
-  IconRefresh,
-  IconSearch,
-  IconCalendar,
-  IconAdjustments,
   IconBook,
+  IconEye,
   IconTimeline,
 } from '@tabler/icons-react';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
-import PageHeader from '@/components/layout/PageHeader';
-import { formatDuration, formatNumber, formatRelativeTime, resolveStatusColor } from '@/lib/utils/tracingUtils';
+import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
+import StatusBadge from '@/components/common/ui/StatusBadge';
+import {
+  formatDuration,
+  formatNumber,
+  formatRelativeTime,
+} from '@/lib/utils/tracingUtils';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 
 dayjs.extend(relativeTime);
@@ -64,287 +52,240 @@ export default function TracingThreadsPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
-  const [threadIdFilter, setThreadIdFilter] = useState('');
-  const [agentFilter, setAgentFilter] = useState('');
-  const [statusFilter, setStatusFilter] = useState<string | null>(null);
-  const [dateRange, setDateRange] = useState<[Date | null, Date | null]>([null, null]);
-
-  const pagination = useMemo(() => {
-    const totalPages = Math.max(1, Math.ceil(totalThreads / pageSize));
-    return { totalPages };
-  }, [totalThreads, pageSize]);
+  const [pageSize] = useState(DEFAULT_PAGE_SIZE);
+  const [query, setQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
 
   const buildQueryParams = useCallback(() => {
     const params = new URLSearchParams();
     params.set('limit', pageSize.toString());
     params.set('skip', ((page - 1) * pageSize).toString());
-
-    if (threadIdFilter) params.set('threadId', threadIdFilter.trim());
-    if (agentFilter) params.set('agent', agentFilter.trim());
-    if (statusFilter) params.set('status', statusFilter);
-
-    const [from, to] = dateRange;
-    if (from) params.set('from', dayjs(from).startOf('day').toISOString());
-    if (to) params.set('to', dayjs(to).endOf('day').toISOString());
-
+    if (query) params.set('threadId', query.trim());
+    if (statusFilter !== 'all') params.set('status', statusFilter);
     return params;
-  }, [threadIdFilter, agentFilter, dateRange, page, pageSize, statusFilter]);
+  }, [page, pageSize, query, statusFilter]);
 
-  const fetchThreads = useCallback(async (isRefresh = false) => {
-    try {
-      if (isRefresh) setRefreshing(true);
-      else setLoading(true);
+  const fetchThreads = useCallback(
+    async (isRefresh = false, signal?: AbortSignal) => {
+      try {
+        if (isRefresh) setRefreshing(true);
+        else setLoading(true);
 
-      const params = buildQueryParams();
-      const response = await fetch(`/api/tracing/threads?${params.toString()}`);
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Failed to fetch threads');
+        const params = buildQueryParams();
+        const response = await fetch(
+          `/api/tracing/threads?${params.toString()}`,
+          { signal },
+        );
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          throw new Error(errorData.error || 'Failed to fetch threads');
+        }
+        const data: ThreadsResponse = await response.json();
+        setThreads(data.threads || []);
+        setTotalThreads(data.total || 0);
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') return;
+        console.error('Failed to load threads:', error);
+        setThreads([]);
+        setTotalThreads(0);
+      } finally {
+        if (!signal?.aborted) {
+          setLoading(false);
+          setRefreshing(false);
+        }
       }
-
-      const data: ThreadsResponse = await response.json();
-      setThreads(data.threads || []);
-      setTotalThreads(data.total || 0);
-    } catch (error) {
-      console.error('Failed to load threads:', error);
-      setThreads([]);
-      setTotalThreads(0);
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, [buildQueryParams]);
+    },
+    [buildQueryParams],
+  );
 
   useEffect(() => {
-    fetchThreads();
+    const controller = new AbortController();
+    void fetchThreads(false, controller.signal);
+    return () => controller.abort();
   }, [fetchThreads]);
 
-  const handleRefresh = () => {
-    fetchThreads(true);
-  };
+  const totalPages = useMemo(
+    () => Math.max(1, Math.ceil(totalThreads / pageSize)),
+    [totalThreads, pageSize],
+  );
 
-  const handleThreadClick = (threadId: string) => {
-    router.push(`/dashboard/tracing/threads/${threadId}`);
-  };
-
-  const appliedFilters = useMemo(() => {
-    const filters: { label: string; value: string }[] = [];
-    if (threadIdFilter) filters.push({ label: 'Thread ID', value: threadIdFilter });
-    if (agentFilter) filters.push({ label: 'Agent', value: agentFilter });
-    if (statusFilter) filters.push({ label: 'Status', value: statusFilter });
-    if (dateRange[0] || dateRange[1]) {
-      const start = dateRange[0] ? dayjs(dateRange[0]).format('MMM D, YYYY') : '—';
-      const end = dateRange[1] ? dayjs(dateRange[1]).format('MMM D, YYYY') : '—';
-      filters.push({ label: 'Date Range', value: `${start} → ${end}` });
-    }
-    return filters;
-  }, [threadIdFilter, agentFilter, dateRange, statusFilter]);
+  const columns: DataGridColumn<ThreadRecord>[] = [
+    {
+      key: 'thread',
+      label: 'Thread',
+      render: (t) => (
+        <Tooltip label={t.threadId} withArrow>
+          <span className="ds-mono" style={{ fontSize: 12, color: 'var(--ds-text)' }}>
+            {t.threadId.substring(0, 8)}…
+          </span>
+        </Tooltip>
+      ),
+    },
+    {
+      key: 'sessions',
+      label: 'Sessions',
+      align: 'right',
+      render: (t) => (
+        <span
+          className="ds-mono"
+          style={{ fontSize: 12.5, fontVariantNumeric: 'tabular-nums' }}
+        >
+          {t.sessionsCount}
+        </span>
+      ),
+    },
+    {
+      key: 'agents',
+      label: 'Agents',
+      render: (t) => (
+        <div className="ds-row ds-gap-xs" style={{ flexWrap: 'wrap' }}>
+          {(t.agents ?? []).slice(0, 3).map((a) => (
+            <span key={a} className="ds-badge">
+              {a}
+            </span>
+          ))}
+          {(t.agents?.length ?? 0) > 3 ? (
+            <span className="ds-faint" style={{ fontSize: 11 }}>
+              +{t.agents.length - 3}
+            </span>
+          ) : null}
+        </div>
+      ),
+    },
+    {
+      key: 'status',
+      label: 'Latest status',
+      render: (t) => (
+        <StatusBadge
+          status={
+            t.latestStatus === 'success'
+              ? 'ok'
+              : t.latestStatus === 'error'
+                ? 'err'
+                : t.latestStatus === 'running'
+                  ? 'info'
+                  : 'paused'
+          }
+          label={(t.latestStatus || 'unknown').toUpperCase()}
+        />
+      ),
+    },
+    {
+      key: 'started',
+      label: 'Started',
+      render: (t) => (
+        <span className="ds-faint" style={{ fontSize: 12.5 }}>
+          {formatRelativeTime(t.startedAt)}
+        </span>
+      ),
+    },
+    {
+      key: 'duration',
+      label: 'Duration',
+      render: (t) => (
+        <span className="ds-mono" style={{ fontSize: 12 }}>
+          {formatDuration(t.totalDurationMs)}
+        </span>
+      ),
+    },
+    {
+      key: 'tokens',
+      label: 'Tokens',
+      align: 'right',
+      render: (t) => (
+        <span
+          className="ds-mono"
+          style={{ fontSize: 12.5, fontVariantNumeric: 'tabular-nums' }}
+        >
+          {formatNumber(
+            (t.totalInputTokens ?? 0) + (t.totalOutputTokens ?? 0),
+          )}
+        </span>
+      ),
+    },
+  ];
 
   return (
-    <Stack gap="md">
+    <PageContainer>
       <PageHeader
-        icon={<IconTimeline size={18} />}
+        eyebrow="Operate · Tracing"
         title="Thread Explorer"
-        subtitle="View threads that group multiple agent sessions together. Each thread represents a single end-to-end workflow."
+        subtitle="Aggregate view of sessions sharing the same thread ID — useful for multi-turn agent conversations."
         actions={
-          <>
-            <Button
-              onClick={() => openDocs('api-tracing')}
-              variant="light"
-              size="xs"
-              leftSection={<IconBook size={14} />}
-            >
-              Docs
-            </Button>
-            <Button
-              leftSection={<IconRefresh size={14} />}
-              variant="light"
-              size="xs"
-              onClick={handleRefresh}
-              loading={refreshing || loading}
-            >
-              Refresh
-            </Button>
-          </>
+          <Button
+            variant="default"
+            size="sm"
+            leftSection={<IconBook size={14} stroke={1.7} />}
+            onClick={() => openDocs('api-tracing')}
+          >
+            Docs
+          </Button>
         }
       />
 
-      <Card withBorder shadow="sm" p="md">
-        <Stack gap="md">
-          <Group gap="md" wrap="wrap">
-            <TextInput
-              label="Thread ID"
-              placeholder="Search by thread ID"
-              leftSection={<IconSearch size={16} />}
-              value={threadIdFilter}
-              onChange={(event) => {
-                setThreadIdFilter(event.currentTarget.value);
-                setPage(1);
-              }}
-              style={{ minWidth: 260 }}
-            />
-            <TextInput
-              label="Agent"
-              placeholder="Filter by agent name"
-              leftSection={<IconSearch size={16} />}
-              value={agentFilter}
-              onChange={(event) => {
-                setAgentFilter(event.currentTarget.value);
-                setPage(1);
-              }}
-              style={{ minWidth: 220 }}
-            />
-            <Select
-              label="Status"
-              placeholder="All statuses"
-              data={[
-                { value: 'success', label: 'Success' },
-                { value: 'error', label: 'Error' },
-                { value: 'in_progress', label: 'In Progress' },
-              ]}
-              value={statusFilter}
-              onChange={(value) => {
-                setStatusFilter(value);
-                setPage(1);
-              }}
-              clearable
-              style={{ minWidth: 180 }}
-            />
-            <DatePickerInput
-              type="range"
-              label="Date Range"
-              placeholder="Select range"
-              value={dateRange}
-              onChange={(value) => {
-                setDateRange(value as [Date | null, Date | null]);
-                setPage(1);
-              }}
-              leftSection={<IconCalendar size={16} />}
-              clearable
-              style={{ minWidth: 260 }}
-            />
-            <Select
-              label="Page size"
-              data={['25', '50', '100'].map((value) => ({ value, label: `${value} rows` }))}
-              value={pageSize.toString()}
-              onChange={(value) => {
-                setPageSize(value ? parseInt(value, 10) : DEFAULT_PAGE_SIZE);
-                setPage(1);
-              }}
-              leftSection={<IconAdjustments size={16} />}
-              style={{ minWidth: 140 }}
-            />
-          </Group>
-
-          {appliedFilters.length > 0 && (
-            <Group gap="xs">
-              {appliedFilters.map((filter) => (
-                <Badge key={`${filter.label}-${filter.value}`} variant="light" color="blue">
-                  {filter.label}: {filter.value}
-                </Badge>
-              ))}
-            </Group>
-          )}
-        </Stack>
-      </Card>
-
-      <Paper withBorder shadow="sm" p="md">
-        <Stack gap="md">
-          <Group justify="space-between" align="center">
-            <Text fw={600}>Threads</Text>
-            <Badge size="sm" variant="light">
-              {formatNumber(totalThreads)} total
-            </Badge>
-          </Group>
-
-          {loading ? (
-            <Box p="xl" style={{ textAlign: 'center' }}>
-              <Text c="dimmed">Loading threads...</Text>
-            </Box>
-          ) : threads.length === 0 ? (
-            <Box p="xl" style={{ textAlign: 'center' }}>
-              <Text c="dimmed">No threads found. Threads are created when sessions include a threadId.</Text>
-            </Box>
-          ) : (
-            <Table striped highlightOnHover>
-              <Table.Thead>
-                <Table.Tr>
-                  <Table.Th>Thread ID</Table.Th>
-                  <Table.Th>Agents</Table.Th>
-                  <Table.Th>Sessions</Table.Th>
-                  <Table.Th>Status</Table.Th>
-                  <Table.Th>Started</Table.Th>
-                  <Table.Th>Duration</Table.Th>
-                  <Table.Th>Events</Table.Th>
-                  <Table.Th>Tokens</Table.Th>
-                </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {threads.map((thread) => (
-                  <Table.Tr
-                    key={thread.threadId}
-                    onClick={() => handleThreadClick(thread.threadId)}
-                    style={{ cursor: 'pointer' }}
-                  >
-                    <Table.Td>
-                      <Tooltip label={thread.threadId}>
-                        <Text size="xs" c="dimmed" style={{ fontFamily: 'monospace' }} lineClamp={1}>
-                          {thread.threadId.length > 16
-                            ? `${thread.threadId.substring(0, 16)}...`
-                            : thread.threadId}
-                        </Text>
-                      </Tooltip>
-                    </Table.Td>
-                    <Table.Td>
-                      <Group gap={4}>
-                        {thread.agents.slice(0, 3).map((agent) => (
-                          <Badge key={agent} size="xs" variant="light" color="gray">
-                            {agent}
-                          </Badge>
-                        ))}
-                        {thread.agents.length > 3 && (
-                          <Text size="xs" c="dimmed">+{thread.agents.length - 3}</Text>
-                        )}
-                      </Group>
-                    </Table.Td>
-                    <Table.Td>
-                      <Text size="sm">{thread.sessionsCount}</Text>
-                    </Table.Td>
-                    <Table.Td>
-                      <Badge size="xs" variant="light" radius="xl" color={resolveStatusColor(thread.latestStatus)}>
-                        {(thread.latestStatus || 'unknown').toUpperCase()}
-                      </Badge>
-                    </Table.Td>
-                    <Table.Td>
-                      <Text size="sm">{formatRelativeTime(thread.startedAt)}</Text>
-                    </Table.Td>
-                    <Table.Td>
-                      <Text size="sm">{formatDuration(thread.totalDurationMs)}</Text>
-                    </Table.Td>
-                    <Table.Td>
-                      <Text size="sm">{formatNumber(thread.totalEvents)}</Text>
-                    </Table.Td>
-                    <Table.Td>
-                      <Text size="sm">{formatNumber(thread.totalInputTokens + thread.totalOutputTokens)}</Text>
-                    </Table.Td>
-                  </Table.Tr>
-                ))}
-              </Table.Tbody>
-            </Table>
-          )}
-
-          {pagination.totalPages > 1 && (
-            <Group justify="space-between" align="center">
-              <Text size="sm" c="dimmed">
-                Page {page} of {pagination.totalPages}
-              </Text>
-              <Pagination total={pagination.totalPages} value={page} onChange={setPage} />
-            </Group>
-          )}
-        </Stack>
-      </Paper>
-    </Stack>
+      <DataGrid<ThreadRecord>
+        records={threads}
+        loading={loading}
+        rowKey={(t) => t.threadId}
+        onRowClick={(t) =>
+          router.push(`/dashboard/tracing/threads/${t.threadId}`)
+        }
+        columns={columns}
+        search={{
+          value: query,
+          onChange: (v) => {
+            setQuery(v);
+            setPage(1);
+          },
+          placeholder: 'Search by thread ID…',
+        }}
+        filters={[
+          {
+            value: statusFilter,
+            onChange: (v) => {
+              setStatusFilter(v);
+              setPage(1);
+            },
+            ariaLabel: 'Filter by latest status',
+            width: 160,
+            options: [
+              { value: 'all', label: 'All statuses' },
+              { value: 'success', label: 'Success' },
+              { value: 'error', label: 'Error' },
+              { value: 'running', label: 'Running' },
+            ],
+          },
+        ]}
+        onRefresh={() => void fetchThreads(true)}
+        refreshing={refreshing}
+        empty={{
+          icon: <IconTimeline size={26} stroke={1.7} />,
+          title: 'No threads found',
+          description:
+            'Threads will appear once sessions are grouped by their thread ID.',
+        }}
+        footerLeft={
+          <Text size="xs" c="dimmed">
+            {formatNumber(totalThreads)} total · Page {page} of {totalPages}
+          </Text>
+        }
+        pagination={{
+          page,
+          onPageChange: setPage,
+          pageSize,
+          total: totalThreads,
+          hasMore: page < totalPages,
+        }}
+        rowActions={(t) => [
+          {
+            id: 'view',
+            label: 'View thread',
+            icon: <IconEye size={14} />,
+            onClick: () =>
+              router.push(`/dashboard/tracing/threads/${t.threadId}`),
+          },
+        ]}
+      />
+    </PageContainer>
   );
 }

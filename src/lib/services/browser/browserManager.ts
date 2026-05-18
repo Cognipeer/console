@@ -19,6 +19,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { lookup } from 'node:dns/promises';
+import { isIP } from 'node:net';
 import { createLogger } from '@/lib/core/logger';
 import { getConfig } from '@/lib/core/config';
 import { registerShutdownHandler } from '@/lib/core/lifecycle';
@@ -89,6 +91,8 @@ type PwPage = {
 };
 
 const logger = createLogger('browser:manager');
+const HOST_SECURITY_CACHE_TTL_MS = 5 * 60 * 1000;
+const hostSecurityCache = new Map<string, { privateNetwork: boolean; expiresAt: number }>();
 
 interface LiveSession {
   sessionKey: string;
@@ -107,6 +111,11 @@ class BrowserManager {
   private browserPromise: Promise<PwBrowser> | null = null;
   private sessions = new Map<string, LiveSession>();
   private reaperTimer: NodeJS.Timeout | null = null;
+  private reaperPaused = false;
+  private lastReaperStartedAt: Date | null = null;
+  private lastReaperCompletedAt: Date | null = null;
+  private lastReaperDurationMs: number | null = null;
+  private lastReaperError: string | null = null;
   private shuttingDown = false;
   private shutdownRegistered = false;
 
@@ -122,13 +131,35 @@ class BrowserManager {
     if (this.reaperTimer) return;
     const intervalMs = getConfig().browser.reaperIntervalMs;
     this.reaperTimer = setInterval(() => {
-      this.reapIdleSessions().catch((err) => {
+      this.runReaperCycle('timer').catch((err) => {
         logger.error('Idle reaper failed', { error: err instanceof Error ? err.message : err });
       });
     }, intervalMs);
     // Don't keep the event loop alive solely for the reaper.
     if (typeof this.reaperTimer.unref === 'function') {
       this.reaperTimer.unref();
+    }
+  }
+
+  private async runReaperCycle(trigger: 'manual' | 'timer'): Promise<number> {
+    if (this.reaperPaused && trigger !== 'manual') {
+      return 0;
+    }
+
+    const startedAt = new Date();
+    this.lastReaperStartedAt = startedAt;
+
+    try {
+      const closedCount = await this.reapIdleSessions();
+      this.lastReaperCompletedAt = new Date();
+      this.lastReaperDurationMs = this.lastReaperCompletedAt.getTime() - startedAt.getTime();
+      this.lastReaperError = null;
+      return closedCount;
+    } catch (err) {
+      this.lastReaperCompletedAt = new Date();
+      this.lastReaperDurationMs = this.lastReaperCompletedAt.getTime() - startedAt.getTime();
+      this.lastReaperError = err instanceof Error ? err.message : String(err);
+      throw err;
     }
   }
 
@@ -145,10 +176,9 @@ class BrowserManager {
     this.browserPromise = (async () => {
       let chromium: { launch(opts: Record<string, unknown>): Promise<PwBrowser> };
       try {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
         const playwright = await import('playwright');
         chromium = playwright.chromium as unknown as typeof chromium;
-      } catch (error) {
+      } catch {
         logger.error('Playwright is not installed. Install with `npm install playwright` and run `npx playwright install chromium`.');
         throw new Error(
           'Playwright is not installed in this environment. Install `playwright` and run `npx playwright install chromium`.',
@@ -223,23 +253,21 @@ class BrowserManager {
         locale: sessionConfig.locale,
       });
 
-      // Allow/block-list enforcement on every navigation/resource request.
+      // Allow/block-list and egress enforcement on every navigation/resource request.
       const access = sessionConfig.access;
-      if (access && (access.allowList?.length || access.blockList?.length)) {
-        await context.route('**/*', (route) => {
+      const blockPrivateNetwork = cfg.blockPrivateNetwork;
+      if (blockPrivateNetwork || access?.allowList?.length || access?.blockList?.length) {
+        await context.route('**/*', async (route) => {
           const url = route.request().url();
-          let host: string;
-          try {
-            host = new URL(url).hostname;
-          } catch {
-            return route.continue();
-          }
-          if (access.blockList?.some((pattern: string) => matchHost(host, pattern))) {
+          const decision = await evaluateBrowserRequestAccess(url, access, {
+            blockPrivateNetwork,
+          });
+          if (!decision.allowed) {
+            logger.debug('Browser request blocked by egress policy', {
+              reason: decision.reason,
+              urlHost: getSafeUrlHost(url),
+            });
             return route.abort();
-          }
-          if (access.allowList?.length) {
-            const allowed = access.allowList.some((pattern: string) => matchHost(host, pattern));
-            if (!allowed) return route.abort();
           }
           return route.continue();
         });
@@ -298,7 +326,7 @@ class BrowserManager {
     return true;
   }
 
-  private async reapIdleSessions(): Promise<void> {
+  private async reapIdleSessions(): Promise<number> {
     const now = Date.now();
     const expired: Array<{ key: string; reason: string }> = [];
 
@@ -317,6 +345,8 @@ class BrowserManager {
     for (const item of expired) {
       await this.closeSession(item.key, item.reason).catch(() => undefined);
     }
+
+    return expired.length;
   }
 
   // ── Action execution ──────────────────────────────────────────────
@@ -348,6 +378,13 @@ class BrowserManager {
     try {
       switch (action.type) {
         case 'goto': {
+          const decision = await evaluateBrowserRequestAccess(action.url, live.config.access, {
+            blockPrivateNetwork: getConfig().browser.blockPrivateNetwork,
+            requireHttp: true,
+          });
+          if (!decision.allowed) {
+            throw new Error(decision.reason ?? 'Browser navigation blocked by egress policy');
+          }
           await live.page.goto(action.url, {
             waitUntil: action.waitUntil ?? 'load',
             timeout: action.timeout,
@@ -518,18 +555,199 @@ class BrowserManager {
     }
     return out;
   }
+
+  pauseReaper(): void {
+    this.reaperPaused = true;
+  }
+
+  resumeReaper(): void {
+    this.reaperPaused = false;
+  }
+
+  async triggerReaper(): Promise<{ closedCount: number }> {
+    return { closedCount: await this.runReaperCycle('manual') };
+  }
+
+  getRuntimeStats(): {
+    browserConnected: boolean;
+    liveSessions: number;
+    reaper: {
+      intervalMs: number;
+      lastCompletedAt: Date | null;
+      lastDurationMs: number | null;
+      lastError: string | null;
+      lastStartedAt: Date | null;
+      paused: boolean;
+    };
+    shuttingDown: boolean;
+  } {
+    return {
+      browserConnected: this.browserPromise !== null,
+      liveSessions: this.sessions.size,
+      reaper: {
+        intervalMs: getConfig().browser.reaperIntervalMs,
+        lastCompletedAt: this.lastReaperCompletedAt,
+        lastDurationMs: this.lastReaperDurationMs,
+        lastError: this.lastReaperError,
+        lastStartedAt: this.lastReaperStartedAt,
+        paused: this.reaperPaused,
+      },
+      shuttingDown: this.shuttingDown,
+    };
+  }
+}
+
+async function evaluateBrowserRequestAccess(
+  rawUrl: string,
+  access: IBrowserSessionConfig['access'],
+  options: { blockPrivateNetwork: boolean; requireHttp?: boolean },
+): Promise<{ allowed: boolean; reason?: string }> {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return { allowed: false, reason: 'Invalid browser URL' };
+  }
+
+  const protocol = url.protocol.toLowerCase();
+  if (protocol !== 'http:' && protocol !== 'https:') {
+    if (!options.requireHttp && (protocol === 'about:' || protocol === 'data:' || protocol === 'blob:')) {
+      return { allowed: true };
+    }
+    return { allowed: false, reason: `Browser protocol is not allowed: ${protocol}` };
+  }
+
+  const host = normalizeHost(url.hostname);
+  if (!host) {
+    return { allowed: false, reason: 'Browser URL is missing a host' };
+  }
+
+  if (access?.blockList?.some((pattern: string) => matchHost(host, pattern))) {
+    return { allowed: false, reason: 'Browser host is blocked by session policy' };
+  }
+
+  if (access?.allowList?.length) {
+    const allowed = access.allowList.some((pattern: string) => matchHost(host, pattern));
+    if (!allowed) {
+      return { allowed: false, reason: 'Browser host is not allowed by session policy' };
+    }
+  }
+
+  if (options.blockPrivateNetwork && await resolvesToPrivateNetwork(host)) {
+    return { allowed: false, reason: 'Browser private-network egress is blocked' };
+  }
+
+  return { allowed: true };
+}
+
+function getSafeUrlHost(rawUrl: string): string | undefined {
+  try {
+    return normalizeHost(new URL(rawUrl).hostname);
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeHost(host: string): string {
+  return host.replace(/^\[/, '').replace(/\]$/, '').replace(/\.$/, '').toLowerCase();
+}
+
+function isLocalHostname(host: string): boolean {
+  return (
+    host === 'localhost'
+    || host.endsWith('.localhost')
+    || host === 'localhost.localdomain'
+    || host.endsWith('.local')
+    || host.endsWith('.internal')
+  );
+}
+
+async function resolvesToPrivateNetwork(host: string): Promise<boolean> {
+  if (isLocalHostname(host)) {
+    return true;
+  }
+
+  if (isIP(host)) {
+    return isPrivateIpAddress(host);
+  }
+
+  const cached = hostSecurityCache.get(host);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.privateNetwork;
+  }
+
+  let privateNetwork = true;
+  try {
+    const records = await lookup(host, { all: true, verbatim: true });
+    privateNetwork = records.some((record) => isPrivateIpAddress(record.address));
+  } catch {
+    privateNetwork = true;
+  }
+
+  hostSecurityCache.set(host, {
+    privateNetwork,
+    expiresAt: Date.now() + HOST_SECURITY_CACHE_TTL_MS,
+  });
+
+  return privateNetwork;
+}
+
+function isPrivateIpAddress(ip: string): boolean {
+  const family = isIP(ip);
+  if (family === 4) {
+    const parts = ip.split('.').map((part) => Number(part));
+    const [a, b] = parts;
+    if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+      return true;
+    }
+
+    return (
+      a === 0
+      || a === 10
+      || a === 127
+      || (a === 100 && b >= 64 && b <= 127)
+      || (a === 169 && b === 254)
+      || (a === 172 && b >= 16 && b <= 31)
+      || (a === 192 && b === 168)
+      || (a === 198 && (b === 18 || b === 19))
+      || a >= 224
+    );
+  }
+
+  if (family === 6) {
+    const normalized = ip.toLowerCase();
+    const firstGroup = Number.parseInt(normalized.split(':')[0] || '0', 16);
+    if (normalized.startsWith('::ffff:')) {
+      return isPrivateIpAddress(normalized.slice('::ffff:'.length));
+    }
+
+    return (
+      normalized === '::'
+      || normalized === '::1'
+      || (Number.isFinite(firstGroup) && (firstGroup & 0xfe00) === 0xfc00)
+      || (Number.isFinite(firstGroup) && (firstGroup & 0xffc0) === 0xfe80)
+    );
+  }
+
+  return true;
 }
 
 function matchHost(host: string, pattern: string): boolean {
-  // Glob-ish matcher: exact, *.domain.tld, or substring.
   const lowerHost = host.toLowerCase();
   const lowerPattern = pattern.trim().toLowerCase();
+  if (!lowerPattern) return false;
+  if (lowerPattern === '*') return true;
   if (lowerPattern === lowerHost) return true;
   if (lowerPattern.startsWith('*.')) {
     const suffix = lowerPattern.slice(1); // ".example.com"
     return lowerHost.endsWith(suffix);
   }
-  return lowerHost.includes(lowerPattern);
+  if (lowerPattern.includes('*')) {
+    const escaped = lowerPattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(`^${escaped.replace(/\*/g, '.*')}$`);
+    return regex.test(lowerHost);
+  }
+  return lowerHost.endsWith(`.${lowerPattern}`);
 }
 
 export const browserManager = new BrowserManager();

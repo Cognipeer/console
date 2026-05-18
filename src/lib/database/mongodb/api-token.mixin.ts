@@ -14,9 +14,11 @@ export function ApiTokenMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
     ): Promise<IApiToken> {
       const db = this.getMainDb();
       const now = new Date();
+      const storedTokenData = { ...tokenData };
+      delete storedTokenData.token;
 
       const result = await db.collection(COLLECTIONS.apiTokens).insertOne({
-        ...tokenData,
+        ...storedTokenData,
         createdAt: now,
       });
 
@@ -69,11 +71,11 @@ export function ApiTokenMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       }));
     }
 
-    async findApiTokenByToken(token: string): Promise<IApiToken | null> {
+    async findApiTokenByHash(tokenHash: string): Promise<IApiToken | null> {
       const db = this.getMainDb();
       const apiToken = await db
         .collection<IApiToken>(COLLECTIONS.apiTokens)
-        .findOne({ token });
+        .findOne({ tokenHash });
       if (!apiToken) return null;
 
       return {
@@ -110,11 +112,11 @@ export function ApiTokenMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       return result.deletedCount > 0;
     }
 
-    async updateTokenLastUsed(token: string): Promise<void> {
+    async updateTokenLastUsedByHash(tokenHash: string): Promise<void> {
       const db = this.getMainDb();
       await db
         .collection(COLLECTIONS.apiTokens)
-        .updateOne({ token }, { $set: { lastUsed: new Date() } });
+        .updateOne({ tokenHash }, { $set: { lastUsed: new Date() } });
     }
   };
 }

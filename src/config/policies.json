@@ -163,6 +163,18 @@
         "/api/client/v1/rag/*"
       ]
     },
+    "RERANKER": {
+      "name": "Reranker",
+      "description": "Re-rank retrieval results with dedicated rerank models, LLM judges, or heuristics",
+      "endpoints": [
+        "/api/reranker",
+        "/api/reranker/*",
+        "/api/client/v1/rerank",
+        "/api/client/v1/rerank/*",
+        "/api/client/v1/rerankers",
+        "/api/client/v1/rerankers/*"
+      ]
+    },
     "CONFIG_MANAGEMENT": {
       "name": "Config Management",
       "description": "Centralized secret and configuration management with encryption and audit logging",
@@ -193,6 +205,26 @@
         "/api/client/v1/tools/*"
       ]
     },
+    "JS_SANDBOX": {
+      "name": "JS Sandbox",
+      "description": "Create and execute managed JavaScript sandbox runtimes",
+      "endpoints": [
+        "/api/js-sandbox",
+        "/api/js-sandbox/*",
+        "/api/client/v1/js-sandbox",
+        "/api/client/v1/js-sandbox/*"
+      ]
+    },
+    "AUTOMATIONS_CONTROL": {
+      "name": "Automations",
+      "description": "Inspect and control internal automations, schedulers and background maintenance jobs",
+      "endpoints": [
+        "/api/automations",
+        "/api/automations/*",
+        "/api/client/v1/automations",
+        "/api/client/v1/automations/*"
+      ]
+    },
     "BROWSER_SESSIONS": {
       "name": "Browser Sessions",
       "description": "Headless browser sessions for navigation, interaction, screenshots and PDF export",
@@ -213,29 +245,6 @@
   "licenses": {
     "FREE": {
       "name": "Free Tier",
-      "features": [
-        "USER_MANAGEMENT",
-        "PROJECT_MANAGEMENT",
-        "LLM_CHAT",
-        "AGENT_TRACING",
-        "API_KEYS",
-        "MODEL_MANAGEMENT",
-        "PROMPTS",
-        "VECTOR_STORE",
-        "FILES",
-        "QUOTA_MANAGEMENT",
-        "INFERENCE_MONITORING",
-        "GUARDRAILS",
-        "ALERTS",
-        "MEMORY",
-        "RAG_PIPELINE",
-        "CONFIG_MANAGEMENT",
-        "MCP_SERVERS",
-        "TOOLS",
-        "BROWSER_SESSIONS",
-        "DASHBOARD",
-        "AGENT_ORCHESTRATION"
-      ],
       "limits": {
         "requestsPerMonth": 1000,
         "maxAgents": -1
@@ -243,22 +252,6 @@
     },
     "STARTER": {
       "name": "Starter Plan",
-      "features": [
-        "LLM_CHAT",
-        "LLM_EMBEDDINGS",
-        "AGENT_TRACING",
-        "API_KEYS",
-        "PROMPTS",
-        "QUOTA_MANAGEMENT",
-        "INFERENCE_MONITORING",
-        "ALERTS",
-        "MEMORY",
-        "RAG_PIPELINE",
-        "CONFIG_MANAGEMENT",
-        "MCP_SERVERS",
-        "TOOLS",
-        "AGENT_ORCHESTRATION"
-      ],
       "limits": {
         "requestsPerMonth": 10000,
         "maxAgents": -1
@@ -266,25 +259,6 @@
     },
     "PROFESSIONAL": {
       "name": "Professional Plan",
-      "features": [
-        "LLM_CHAT",
-        "LLM_EMBEDDINGS",
-        "AGENT_ORCHESTRATION",
-        "AGENT_TRACING",
-        "VECTOR_STORE",
-        "API_KEYS",
-        "PROMPTS",
-        "ANALYTICS",
-        "QUOTA_MANAGEMENT",
-        "INFERENCE_MONITORING",
-        "GUARDRAILS",
-        "ALERTS",
-        "MEMORY",
-        "RAG_PIPELINE",
-        "CONFIG_MANAGEMENT",
-        "MCP_SERVERS",
-        "TOOLS"
-      ],
       "limits": {
         "requestsPerMonth": 100000,
         "maxAgents": -1
@@ -292,32 +266,6 @@
     },
     "ENTERPRISE": {
       "name": "Enterprise Plan",
-      "features": [
-        "USER_MANAGEMENT",
-        "PROJECT_MANAGEMENT",
-        "LLM_CHAT",
-        "LLM_EMBEDDINGS",
-        "AGENT_ORCHESTRATION",
-        "AGENT_TRACING",
-        "MODEL_MANAGEMENT",
-        "VECTOR_STORE",
-        "FILES",
-        "WORKFLOW_AUTOMATION",
-        "ANALYTICS",
-        "API_KEYS",
-        "PROMPTS",
-        "QUOTA_MANAGEMENT",
-        "INFERENCE_MONITORING",
-        "GUARDRAILS",
-        "ALERTS",
-        "MEMORY",
-        "RAG_PIPELINE",
-        "CONFIG_MANAGEMENT",
-        "MCP_SERVERS",
-        "TOOLS",
-        "BROWSER_SESSIONS",
-        "DASHBOARD"
-      ],
       "limits": {
         "requestsPerMonth": -1,
         "maxAgents": -1
@@ -325,32 +273,6 @@
     },
     "ON_PREMISE": {
       "name": "On-Premise",
-      "features": [
-        "USER_MANAGEMENT",
-        "PROJECT_MANAGEMENT",
-        "LLM_CHAT",
-        "LLM_EMBEDDINGS",
-        "AGENT_ORCHESTRATION",
-        "AGENT_TRACING",
-        "MODEL_MANAGEMENT",
-        "VECTOR_STORE",
-        "FILES",
-        "WORKFLOW_AUTOMATION",
-        "ANALYTICS",
-        "API_KEYS",
-        "PROMPTS",
-        "QUOTA_MANAGEMENT",
-        "INFERENCE_MONITORING",
-        "GUARDRAILS",
-        "ALERTS",
-        "MEMORY",
-        "RAG_PIPELINE",
-        "CONFIG_MANAGEMENT",
-        "MCP_SERVERS",
-        "TOOLS",
-        "BROWSER_SESSIONS",
-        "DASHBOARD"
-      ],
       "limits": {
         "requestsPerMonth": -1,
         "maxAgents": -1

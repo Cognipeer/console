@@ -28,7 +28,7 @@ import {
   IconRefresh,
   IconTrash,
 } from '@tabler/icons-react';
-import PageHeader from '@/components/layout/PageHeader';
+import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import type { IVectorMigration, VectorMigrationStatus } from '@/lib/database/provider/types.base';
 import type { VectorIndexRecord, VectorProviderView } from '@/lib/services/vector';
 import CreateVectorMigrationModal from '@/components/vector/CreateVectorMigrationModal';
@@ -199,9 +199,9 @@ export default function VectorMigrationsPage() {
   }), [migrations]);
 
   return (
-    <Stack gap="md">
+    <PageContainer>
       <PageHeader
-        icon={<IconDatabaseExport size={18} />}
+        eyebrow="Operate · Vector migrations"
         title="Knowledge Index Migrator"
         subtitle="Migrate vectors between indexes as background jobs. Track batch-level progress and history."
         actions={
@@ -409,6 +409,6 @@ export default function VectorMigrationsPage() {
           router.push(`/dashboard/vector/migrations/${migration.key}`);
         }}
       />
-    </Stack>
+    </PageContainer>
   );
 }

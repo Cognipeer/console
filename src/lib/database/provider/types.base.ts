@@ -10,6 +10,11 @@ import type {
   QuotaPolicy,
   QuotaScope,
 } from '@/lib/quota/types';
+import type {
+  PermissionService,
+  ServicePermissionLevel,
+  UserServicePermissions,
+} from '@/lib/security/rbac';
 
 export interface ITenant {
   _id?: ObjectId | string;
@@ -17,6 +22,14 @@ export interface ITenant {
   slug: string;
   dbName: string;
   licenseType: string;
+  licenseId?: string | null;
+  licenseKey?: string | null;
+  licenseStatus?: 'free' | 'active' | 'expired' | 'invalid';
+  licensePayload?: Record<string, unknown> | null;
+  licenseActivatedAt?: Date | null;
+  licenseLastVerifiedAt?: Date | null;
+  licenseExpiresAt?: Date | null;
+  licenseError?: string | null;
   ownerId?: string;
   createdAt?: Date;
   updatedAt?: Date;
@@ -118,16 +131,54 @@ export interface IUser {
   password: string;
   name: string;
   tenantId: string;
+  /**
+   * Tenant-wide role.
+   * project_admin is kept for backward compat — new code uses IUserProject.role for project-level roles.
+   */
   role: 'owner' | 'admin' | 'project_admin' | 'user';
+  /** @deprecated Use IUserProject records for project access control. */
   projectIds?: string[];
+  /** Tenant-level service permission overrides (admin use only). */
+  servicePermissions?: UserServicePermissions;
   licenseId: string;
   features?: string[];
   invitedBy?: string;
   invitedAt?: Date;
   inviteAcceptedAt?: Date;
   mustChangePassword?: boolean;
+  /**
+   * Timestamp of the last password change.
+   * Used to invalidate password reset tokens issued before this moment,
+   * making reset tokens effectively single-use.
+   */
+  passwordChangedAt?: Date;
   createdAt?: Date;
   updatedAt?: Date;
+}
+
+export interface IAuditLog {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  requestId?: string;
+  actorType: 'user' | 'api_token' | 'system';
+  actorUserId?: string;
+  actorEmail?: string;
+  actorRole?: string;
+  apiTokenId?: string;
+  service: PermissionService | string;
+  action: ServicePermissionLevel | 'auth' | 'security';
+  event: string;
+  method?: string;
+  path?: string;
+  statusCode?: number;
+  outcome: 'success' | 'failure' | 'denied';
+  ipAddress?: string;
+  userAgent?: string;
+  resourceType?: string;
+  resourceId?: string;
+  metadata?: Record<string, unknown>;
+  createdAt?: Date;
 }
 
 export interface IApiToken {
@@ -136,7 +187,10 @@ export interface IApiToken {
   tenantId: string;
   projectId?: string;
   label: string;
-  token: string;
+  /** Plaintext token is only used for legacy records and immediate create responses. */
+  token?: string;
+  tokenHash?: string;
+  tokenPrefix?: string;
   lastUsed?: Date;
   createdAt?: Date;
   expiresAt?: Date;
@@ -190,6 +244,84 @@ export interface IAgentTracingSession {
   updatedAt?: Date;
 }
 
+export interface IAgentTracingSessionSummaryAggregate {
+  sessionId: string;
+  agentName?: string;
+  status?: string;
+  startedAt?: Date;
+  durationMs?: number;
+  totalEvents?: number;
+  totalTokens: number;
+}
+
+export interface IAgentTracingTokenAggregate {
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCachedInputTokens: number;
+  totalTokens: number;
+  averageInputTokensPerSession: number;
+  averageOutputTokensPerSession: number;
+  averageCachedInputTokensPerSession: number;
+  averageTokensPerSession: number;
+}
+
+export interface IAgentTracingTotalsAggregate extends IAgentTracingTokenAggregate {
+  sessionsCount: number;
+  totalEvents: number;
+  totalDurationMs: number;
+  averageDurationMs: number;
+}
+
+export interface IAgentTracingAgentAggregate extends IAgentTracingTokenAggregate {
+  name: string;
+  label: string;
+  latestSessionAt?: Date;
+  latestStatus?: string;
+  sessionsCount: number;
+  totalEvents: number;
+  averageDurationMs: number;
+}
+
+export interface IAgentTracingDashboardAggregate {
+  recentSessions: IAgentTracingSessionSummaryAggregate[];
+  recentAgents: IAgentTracingAgentAggregate[];
+  recentAgentsTotal: number;
+  analytics: {
+    totals: IAgentTracingTotalsAggregate;
+    tools: {
+      totals: {
+        totalCalls: number;
+        errorCalls: number;
+        successCalls: number;
+        errorRate: number;
+      };
+      items: Array<{
+        toolName: string;
+        totalCalls: number;
+        errorCalls: number;
+        successCalls: number;
+        errorRate: number;
+      }>;
+    };
+    statuses: Array<{
+      status: string;
+      count: number;
+    }>;
+    models: Array<{
+      model: string;
+      sessionsCount: number;
+    }>;
+    agents: IAgentTracingAgentAggregate[];
+    daily: Array<{
+      date: string;
+      sessionsCount: number;
+      totalEvents: number;
+      totalTokens: number;
+      averageDurationMs: number;
+    }>;
+  };
+}
+
 export interface IAgentTracingEvent {
   _id?: ObjectId | string;
   sessionId: string;
@@ -229,7 +361,7 @@ export interface IAgentTracingEvent {
   createdAt?: Date;
 }
 
-export type ModelCategory = 'llm' | 'embedding';
+export type ModelCategory = 'llm' | 'embedding' | 'rerank';
 
 export type ModelProviderType =
   | 'openai'
@@ -512,3 +644,66 @@ export interface IInferenceServer {
   updatedAt?: Date;
 }
 
+// ── Project Membership ────────────────────────────────────────────────────
+
+export type ProjectRole = 'project_admin' | 'member';
+
+/**
+ * Per-project membership record.
+ * Replaces the deprecated IUser.projectIds + IUser.role='project_admin' pattern.
+ * Owners and admins have implicit access to all projects — no IUserProject needed.
+ */
+export interface IUserProject {
+  _id?: ObjectId | string;
+  tenantId: string;
+  userId: string;
+  projectId: string;
+  role: ProjectRole;
+  /** Project-scoped service permission overrides — take precedence over tenant-level defaults. */
+  servicePermissions?: UserServicePermissions;
+  invitedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+// ── Groups / Teams (future) ───────────────────────────────────────────────
+
+/**
+ * A named group of users within a tenant (team, department, squad, etc.).
+ * Groups can be assigned to projects with a role, granting all group members
+ * effective access via the union of direct UserProject + GroupProject permissions.
+ */
+export interface IGroup {
+  _id?: ObjectId | string;
+  tenantId: string;
+  name: string;
+  description?: string;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+/** Membership of a user in a group. */
+export interface IGroupMember {
+  _id?: ObjectId | string;
+  tenantId: string;
+  groupId: string;
+  userId: string;
+  /** Whether the user can manage group membership. */
+  role: 'admin' | 'member';
+  addedBy?: string;
+  createdAt?: Date;
+}
+
+/** Assignment of a group to a project with a role and optional service overrides. */
+export interface IGroupProject {
+  _id?: ObjectId | string;
+  tenantId: string;
+  groupId: string;
+  projectId: string;
+  role: ProjectRole;
+  servicePermissions?: UserServicePermissions;
+  createdAt?: Date;
+  updatedAt?: Date;
+}

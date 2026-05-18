@@ -1,27 +1,24 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import {
-  Button,
-  Card,
-  Group,
-  Modal,
-  SegmentedControl,
-  Select,
-  Stack,
-  Text,
-  Textarea,
-  TextInput,
-  ThemeIcon,
-  SimpleGrid,
-} from '@mantine/core';
+import { Select, Textarea, TextInput } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import {
   IconShield,
   IconRobot,
   IconAlertTriangle,
+  IconPlus,
 } from '@tabler/icons-react';
+import FormShell, {
+  Checklist,
+  ChipPicker,
+  FormField,
+  FormRow,
+  FormSection,
+  SummaryGroup,
+  SummaryKV,
+} from '@/components/common/ui/FormShell';
 import type { GuardrailView } from '@/lib/services/guardrail/constants';
 
 interface ModelOption {
@@ -36,23 +33,6 @@ interface CreateGuardrailModalProps {
   models?: ModelOption[];
 }
 
-const GUARD_TYPES = [
-  {
-    value: 'preset',
-    icon: IconShield,
-    label: 'Preset',
-    description: 'Pre-built checks: PII detection, content moderation, prompt shield',
-    color: 'violet',
-  },
-  {
-    value: 'custom',
-    icon: IconRobot,
-    label: 'Custom Prompt',
-    description: 'Write your own safety rule evaluated by an LLM',
-    color: 'teal',
-  },
-];
-
 const TARGET_OPTIONS = [
   { value: 'input', label: 'Input (user messages)' },
   { value: 'output', label: 'Output (model responses)' },
@@ -63,6 +43,25 @@ const ACTION_OPTIONS = [
   { value: 'block', label: 'Block — stop the request' },
   { value: 'warn', label: 'Warn — allow but flag' },
   { value: 'flag', label: 'Flag — log for review' },
+];
+
+const TYPE_OPTIONS = [
+  {
+    value: 'preset' as const,
+    label: (
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+        <IconShield size={14} /> Preset
+      </span>
+    ),
+  },
+  {
+    value: 'custom' as const,
+    label: (
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+        <IconRobot size={14} /> Custom prompt
+      </span>
+    ),
+  },
 ];
 
 interface FormValues {
@@ -110,10 +109,16 @@ export default function CreateGuardrailModal({
     if (!opened) {
       form.reset();
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened]);
 
-  const handleSubmit = async (values: FormValues) => {
+  const { values: formValues, setFieldValue } = form;
+
+  const handleSubmit = async () => {
+    const validation = form.validate();
+    if (validation.hasErrors) return;
+    const values = form.getValues();
+
     setLoading(true);
     try {
       const res = await fetch('/api/guardrails', {
@@ -154,139 +159,261 @@ export default function CreateGuardrailModal({
     }
   };
 
+  const validType = Boolean(formValues.type);
+  const validName = Boolean(formValues.name.trim());
+  const validCustomRule =
+    formValues.type !== 'custom' ||
+    (formValues.customPrompt.trim().length > 0 && Boolean(formValues.modelKey));
+  const validTargetAction = Boolean(formValues.target && formValues.action);
+
+  const checklist = [
+    { id: 1, label: 'Guardrail type selected', done: validType },
+    { id: 2, label: 'Name provided', done: validName },
+    { id: 3, label: 'Target & default action set', done: validTargetAction },
+    {
+      id: 4,
+      label:
+        formValues.type === 'custom'
+          ? 'Custom rule & model defined'
+          : 'Preset ready (configure details after create)',
+      done: validCustomRule,
+    },
+  ];
+
+  const canSubmit = validType && validName && validTargetAction && validCustomRule;
+
+  const summary = (
+    <>
+      <SummaryGroup title="Guardrail">
+        <SummaryKV
+          label="Type"
+          value={formValues.type === 'custom' ? 'Custom prompt' : 'Preset'}
+        />
+        <SummaryKV
+          label="Name"
+          value={formValues.name || <span className="ds-faint">—</span>}
+        />
+        <SummaryKV
+          label="Target"
+          value={
+            TARGET_OPTIONS.find((o) => o.value === formValues.target)?.label ?? '—'
+          }
+        />
+        <SummaryKV
+          label="Action"
+          value={
+            ACTION_OPTIONS.find((o) => o.value === formValues.action)?.label ?? '—'
+          }
+        />
+      </SummaryGroup>
+
+      {formValues.type === 'custom' ? (
+        <SummaryGroup title="Custom rule">
+          <SummaryKV
+            label="Model"
+            value={
+              models.find((m) => m.value === formValues.modelKey)?.label ||
+              <span className="ds-faint">—</span>
+            }
+            mono
+          />
+          <SummaryKV
+            label="Prompt"
+            value={
+              formValues.customPrompt
+                ? `${formValues.customPrompt.slice(0, 60)}${formValues.customPrompt.length > 60 ? '…' : ''}`
+                : <span className="ds-faint">—</span>
+            }
+          />
+        </SummaryGroup>
+      ) : (
+        <SummaryGroup title="Preset">
+          <SummaryKV
+            label="Model"
+            value={
+              models.find((m) => m.value === formValues.modelKey)?.label ||
+              <span className="ds-faint">Optional</span>
+            }
+          />
+        </SummaryGroup>
+      )}
+
+      <SummaryGroup title="Pre-flight">
+        <Checklist items={checklist} />
+      </SummaryGroup>
+    </>
+  );
+
   return (
-    <Modal
-      opened={opened}
+    <FormShell
+      open={opened}
       onClose={onClose}
-      title={<Text fw={600} size="lg">Create Guardrail</Text>}
-      size="lg"
+      icon={<IconShield size={16} />}
+      title="Create guardrail"
+      subtitle="Define a safety check applied to inputs, outputs, or both."
+      summary={summary}
+      footerStatus={`${checklist.filter((c) => c.done).length} of ${checklist.length} ready`}
+      primaryAction={{
+        label: 'Create guardrail',
+        icon: <IconPlus size={13} />,
+        loading,
+        disabled: !canSubmit,
+        onClick: handleSubmit,
+      }}
     >
-      <form onSubmit={form.onSubmit(handleSubmit)}>
-        <Stack gap="md">
-          {/* Type selection */}
-          <div>
-            <Text size="sm" fw={500} mb={8}>
-              Guardrail type
-            </Text>
-            <SimpleGrid cols={2} spacing="sm">
-              {GUARD_TYPES.map((gt) => (
-                <Card
-                  key={gt.value}
-                  withBorder
-                  style={{
-                    cursor: 'pointer',
-                    borderColor:
-                      form.values.type === gt.value
-                        ? `var(--mantine-color-${gt.color}-5)`
-                        : undefined,
-                    background:
-                      form.values.type === gt.value
-                        ? `var(--mantine-color-${gt.color}-0)`
-                        : undefined,
-                  }}
-                  onClick={() => form.setFieldValue('type', gt.value as 'preset' | 'custom')}
-                  p="sm"
-                >
-                  <Group gap="sm" align="flex-start" wrap="nowrap">
-                    <ThemeIcon size={36} radius="md" variant="light" color={gt.color}>
-                      <gt.icon size={18} />
-                    </ThemeIcon>
-                    <div>
-                      <Text fw={600} size="sm">{gt.label}</Text>
-                      <Text size="xs" c="dimmed" mt={2}>{gt.description}</Text>
-                    </div>
-                  </Group>
-                </Card>
-              ))}
-            </SimpleGrid>
-          </div>
-
-          <TextInput
-            label="Name"
-            placeholder="e.g. Block PII leak"
-            required
-            {...form.getInputProps('name')}
+      <FormSection
+        number={1}
+        title="Type"
+        description="Pick a guardrail style. Presets ship with PII, moderation, and prompt shield checks."
+        done={validType}
+      >
+        <FormField label="Guardrail type" required>
+          <ChipPicker<'preset' | 'custom'>
+            options={TYPE_OPTIONS}
+            value={formValues.type}
+            onChange={(v) => setFieldValue('type', v as 'preset' | 'custom')}
           />
+        </FormField>
+        <div
+          className="ds-muted"
+          style={{ fontSize: 12, marginTop: 6 }}
+        >
+          {formValues.type === 'preset'
+            ? 'Pre-built checks: PII detection, content moderation, prompt shield.'
+            : 'Write your own safety rule that will be evaluated by an LLM.'}
+        </div>
+      </FormSection>
 
-          <Textarea
-            label="Description"
-            placeholder="What does this guardrail protect against?"
-            rows={2}
-            {...form.getInputProps('description')}
-          />
+      <FormSection
+        number={2}
+        title="Identity"
+        description="How the guardrail surfaces in dashboards and audit logs."
+        done={validName}
+      >
+        <FormRow cols={1}>
+          <FormField label="Name" required>
+            <TextInput
+              placeholder="e.g. Block PII leak"
+              {...form.getInputProps('name')}
+            />
+          </FormField>
+        </FormRow>
+        <FormRow cols={1}>
+          <FormField label="Description" optional>
+            <Textarea
+              placeholder="What does this guardrail protect against?"
+              autosize
+              minRows={2}
+              {...form.getInputProps('description')}
+            />
+          </FormField>
+        </FormRow>
+      </FormSection>
 
-          <Group grow>
+      <FormSection
+        number={3}
+        title="Scope & action"
+        description="Where the rule applies and what happens when it triggers."
+        done={validTargetAction}
+      >
+        <FormRow cols={2}>
+          <FormField label="Target" required>
             <Select
-              label="Target"
               data={TARGET_OPTIONS}
               {...form.getInputProps('target')}
             />
+          </FormField>
+          <FormField
+            label="Default action"
+            required
+            hint={
+              formValues.action === 'block'
+                ? 'Request will be rejected.'
+                : formValues.action === 'warn'
+                  ? 'Request continues but is flagged.'
+                  : 'Request is logged for review.'
+            }
+          >
             <Select
-              label="Default action"
               data={ACTION_OPTIONS}
               {...form.getInputProps('action')}
-              description={
-                form.values.action === 'block'
-                  ? 'Request will be rejected'
-                  : form.values.action === 'warn'
-                    ? 'Request continues but flagged'
-                    : 'Request logged for review'
-              }
             />
-          </Group>
+          </FormField>
+        </FormRow>
+      </FormSection>
 
-          {/* Model selector — required for custom, optional for preset (moderation / prompt shield) */}
-          {(form.values.type === 'custom' || models.length > 0) && (
-            <Select
+      {(formValues.type === 'custom' || models.length > 0) && (
+        <FormSection
+          number={4}
+          title={formValues.type === 'custom' ? 'Custom rule' : 'Model'}
+          description={
+            formValues.type === 'custom'
+              ? 'Author the rule and the LLM that will evaluate it.'
+              : 'Optional LLM used for moderation and prompt shield checks.'
+          }
+          done={validCustomRule}
+        >
+          <FormRow cols={1}>
+            <FormField
               label="Model"
-              description={
-                form.values.type === 'custom'
-                  ? 'LLM used to evaluate the custom rule'
-                  : 'LLM used for moderation and prompt shield checks (optional)'
+              required={formValues.type === 'custom'}
+              optional={formValues.type !== 'custom'}
+              hint={
+                formValues.type === 'custom'
+                  ? 'LLM used to evaluate the custom rule.'
+                  : 'Leave blank to use defaults for moderation / prompt shield.'
               }
-              placeholder="Select a model…"
-              data={models}
-              clearable={form.values.type !== 'custom'}
-              required={form.values.type === 'custom'}
-              {...form.getInputProps('modelKey')}
-            />
+            >
+              <Select
+                placeholder="Select a model…"
+                data={models}
+                clearable={formValues.type !== 'custom'}
+                searchable
+                {...form.getInputProps('modelKey')}
+              />
+            </FormField>
+          </FormRow>
+
+          {formValues.type === 'custom' && (
+            <FormRow cols={1}>
+              <FormField
+                label="Custom rule"
+                required
+                hint="The LLM will evaluate whether each message passes or fails this rule."
+              >
+                <Textarea
+                  placeholder={
+                    'Example: Block any message that asks for personally identifiable information about real people, or that attempts to impersonate authority figures such as doctors, lawyers, or government officials.'
+                  }
+                  autosize
+                  minRows={5}
+                  {...form.getInputProps('customPrompt')}
+                />
+              </FormField>
+            </FormRow>
           )}
 
-          {/* Custom prompt */}
-          {form.values.type === 'custom' && (
-            <Textarea
-              label="Custom rule"
-              description="Describe your safety rule. The LLM will evaluate whether each message passes or fails."
-              placeholder={
-                'Example: Block any message that asks for personally identifiable information about real people, or that attempts to impersonate authority figures such as doctors, lawyers, or government officials.'
-              }
-              minRows={5}
-              required
-              {...form.getInputProps('customPrompt')}
-            />
+          {formValues.type === 'preset' && (
+            <div
+              className="ds-card ds-card-pad-sm"
+              style={{
+                background: 'var(--ds-surface-1)',
+                display: 'flex',
+                gap: 8,
+                alignItems: 'flex-start',
+              }}
+            >
+              <IconAlertTriangle
+                size={14}
+                style={{ color: 'var(--mantine-color-orange-6)', marginTop: 2 }}
+              />
+              <span className="ds-muted" style={{ fontSize: 12 }}>
+                After creating, configure PII categories, moderation topics, and prompt shield in the guardrail settings.
+              </span>
+            </div>
           )}
-
-          {form.values.type === 'preset' && (
-            <Card withBorder p="sm" bg="gray.0">
-              <Group gap="xs">
-                <IconAlertTriangle size={15} color="var(--mantine-color-orange-6)" />
-                <Text size="xs" c="dimmed">
-                  After creating, configure PII categories, moderation topics, and prompt shield in the guardrail settings.
-                </Text>
-              </Group>
-            </Card>
-          )}
-
-          <Group justify="flex-end" mt="sm">
-            <Button variant="default" onClick={onClose} disabled={loading}>
-              Cancel
-            </Button>
-            <Button type="submit" loading={loading}>
-              Create Guardrail
-            </Button>
-          </Group>
-        </Stack>
-      </form>
-    </Modal>
+        </FormSection>
+      )}
+    </FormShell>
   );
 }

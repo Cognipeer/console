@@ -30,10 +30,9 @@ import {
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
-import PageHeader from '@/components/layout/PageHeader';
+import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import {
   IconArrowLeft,
-  IconBook2,
   IconCheck,
   IconClockHour4,
   IconCode,
@@ -71,6 +70,8 @@ interface RagModuleView {
     encoding?: string;
   };
   status: string;
+  rerankerKey?: string | null;
+  rerankerOversample?: number | null;
   totalDocuments?: number;
   totalChunks?: number;
   createdAt?: string;
@@ -552,9 +553,9 @@ export default function RagModuleDetailPage() {
   ].join('\n');
 
   return (
-    <Stack gap="md">
+    <PageContainer>
       <PageHeader
-        icon={<IconBook2 size={18} />}
+        eyebrow="Build · RAG module"
         title={mod.name}
         subtitle={`Key: ${mod.key} • Embedding: ${mod.embeddingModelKey} • Strategy: ${strategyLabel(mod.chunkConfig.strategy)}`}
         actions={
@@ -724,6 +725,22 @@ export default function RagModuleDetailPage() {
                     <Text size="sm">{mod.chunkConfig.encoding}</Text>
                   </Stack>
                 )}
+                <Stack gap={4}>
+                  <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Reranker</Text>
+                  {mod.rerankerKey ? (
+                    <Badge
+                      variant="light"
+                      color="teal"
+                      component="a"
+                      href={`/dashboard/reranker/${encodeURIComponent(mod.rerankerKey)}`}
+                      style={{ cursor: 'pointer' }}
+                    >
+                      {mod.rerankerKey}
+                    </Badge>
+                  ) : (
+                    <Text size="sm" c="dimmed">None (vector ranking only)</Text>
+                  )}
+                </Stack>
                 <Stack gap={4}>
                   <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Created</Text>
                   <Text size="sm">{formatDate(mod.createdAt)}</Text>
@@ -1146,6 +1163,6 @@ export default function RagModuleDetailPage() {
           setEditModalOpen(false);
         }}
       />
-    </Stack>
+    </PageContainer>
   );
 }

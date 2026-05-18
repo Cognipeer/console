@@ -1,9 +1,18 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { Button, Group, Modal, Stack, TextInput, Textarea } from '@mantine/core';
+import { TextInput, Textarea } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
+import { IconFileText } from '@tabler/icons-react';
+import FormShell, {
+	Checklist,
+	FormField,
+	FormRow,
+	FormSection,
+	SummaryGroup,
+	SummaryKV,
+} from '@/components/common/ui/FormShell';
 import type { PromptView } from '@/lib/services/prompts';
 import { useTranslations } from '@/lib/i18n';
 
@@ -57,7 +66,20 @@ export default function PromptEditorModal({
 	// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [opened, prompt]);
 
-	const handleSubmit = async (values: FormValues) => {
+	const values = form.values;
+	const validName = values.name.trim().length > 0;
+	const validTemplate = values.template.trim().length > 0;
+	const isEdit = Boolean(prompt);
+
+	const checklist = [
+		{ id: 1, label: t('editor.fields.name'), done: validName },
+		{ id: 2, label: t('editor.fields.template'), done: validTemplate },
+	];
+
+	const handleSubmit = async () => {
+		const validation = form.validate();
+		if (validation.hasErrors) return;
+
 		setSaving(true);
 		try {
 			const payload = {
@@ -98,70 +120,136 @@ export default function PromptEditorModal({
 		}
 	};
 
+	const templateLineCount = values.template ? values.template.split('\n').length : 0;
+	const templateCharCount = values.template.length;
+
+	const summary = (
+		<>
+			<SummaryGroup title={isEdit ? t('editor.titleEdit') : t('editor.titleCreate')}>
+				<SummaryKV
+					label={t('editor.fields.name')}
+					value={values.name || <span className="ds-faint">—</span>}
+				/>
+				{!isEdit ? (
+					<SummaryKV
+						label={t('editor.fields.key')}
+						value={values.key ? <span className="ds-mono">{values.key}</span> : <span className="ds-faint">auto</span>}
+						mono
+					/>
+				) : null}
+				<SummaryKV
+					label={t('editor.fields.description')}
+					value={values.description || <span className="ds-faint">—</span>}
+				/>
+				<SummaryKV
+					label={t('editor.fields.template')}
+					value={
+						validTemplate ? (
+							<span className="ds-faint">{templateLineCount} lines · {templateCharCount} chars</span>
+						) : (
+							<span className="ds-faint">—</span>
+						)
+					}
+				/>
+			</SummaryGroup>
+			<SummaryGroup title="Pre-flight">
+				<Checklist items={checklist} />
+			</SummaryGroup>
+		</>
+	);
+
 	return (
-		<Modal
-			opened={opened}
+		<FormShell
+			open={opened}
 			onClose={onClose}
-			title={prompt ? t('editor.titleEdit') : t('editor.titleCreate')}
-			size="lg"
-			centered
+			icon={<IconFileText size={16} />}
+			title={isEdit ? t('editor.titleEdit') : t('editor.titleCreate')}
+			subtitle="Author a prompt template and reuse it across your agents and integrations."
+			summary={summary}
+			footerStatus={`${checklist.filter((c) => c.done).length} of ${checklist.length} ready`}
+			primaryAction={{
+				label: isEdit ? t('editor.actions.save') : t('editor.actions.create'),
+				loading: saving,
+				disabled: !validName || !validTemplate,
+				onClick: () => {
+					void handleSubmit();
+				},
+			}}
+			secondaryAction={{
+				label: t('editor.actions.cancel'),
+				onClick: onClose,
+			}}
 		>
-			<form onSubmit={form.onSubmit(handleSubmit)}>
-				<Stack gap="md">
-					<TextInput
-						label={t('editor.fields.name')}
-						placeholder={t('editor.placeholders.name')}
-						required
-						{...form.getInputProps('name')}
-					/>
-
-					{!prompt && (
+			<FormSection
+				number={1}
+				title={t('editor.fields.name')}
+				description="How the prompt is identified across the console and the SDK."
+				done={validName}
+			>
+				<FormRow cols={isEdit ? 1 : 2}>
+					<FormField label={t('editor.fields.name')} required>
 						<TextInput
-							label={t('editor.fields.key')}
-							placeholder={t('editor.placeholders.key')}
-							description={t('editor.descriptions.key')}
-							{...form.getInputProps('key')}
+							placeholder={t('editor.placeholders.name')}
+							{...form.getInputProps('name')}
 						/>
-					)}
+					</FormField>
+					{!isEdit ? (
+						<FormField
+							label={t('editor.fields.key')}
+							hint={t('editor.descriptions.key')}
+							optional
+						>
+							<TextInput
+								placeholder={t('editor.placeholders.key')}
+								{...form.getInputProps('key')}
+							/>
+						</FormField>
+					) : null}
+				</FormRow>
+				<FormRow cols={1}>
+					<FormField label={t('editor.fields.description')} optional>
+						<Textarea
+							placeholder={t('editor.placeholders.description')}
+							minRows={2}
+							autosize
+							{...form.getInputProps('description')}
+						/>
+					</FormField>
+				</FormRow>
+			</FormSection>
 
-					<Textarea
-						label={t('editor.fields.description')}
-						placeholder={t('editor.placeholders.description')}
-						minRows={2}
-						autosize
-						{...form.getInputProps('description')}
-					/>
-
-					<Textarea
-						label={t('editor.fields.template')}
-						placeholder={t('editor.placeholders.template')}
-						minRows={8}
-						autosize
-						required
-						styles={{ input: { fontFamily: 'monospace', fontSize: 13 } }}
-						{...form.getInputProps('template')}
-					/>
-
-					<Textarea
+			<FormSection
+				number={2}
+				title={t('editor.fields.template')}
+				description="The body of your prompt. Variables and conditional blocks are supported."
+				done={validTemplate}
+			>
+				<FormRow cols={1}>
+					<FormField label={t('editor.fields.template')} required>
+						<Textarea
+							placeholder={t('editor.placeholders.template')}
+							minRows={10}
+							autosize
+							styles={{ input: { fontFamily: 'monospace', fontSize: 13 } }}
+							{...form.getInputProps('template')}
+						/>
+					</FormField>
+				</FormRow>
+				<FormRow cols={1}>
+					<FormField
 						label={t('editor.fields.versionComment')}
-						description={t('editor.descriptions.versionComment')}
-						placeholder={t('editor.placeholders.versionComment')}
-						minRows={2}
-						autosize
-						{...form.getInputProps('versionComment')}
-					/>
-
-					<Group justify="flex-end">
-						<Button variant="default" onClick={onClose}>
-							{t('editor.actions.cancel')}
-						</Button>
-						<Button type="submit" loading={saving}>
-							{prompt ? t('editor.actions.save') : t('editor.actions.create')}
-						</Button>
-					</Group>
-				</Stack>
-			</form>
-		</Modal>
+						hint={t('editor.descriptions.versionComment')}
+						optional
+					>
+						<Textarea
+							placeholder={t('editor.placeholders.versionComment')}
+							minRows={2}
+							autosize
+							{...form.getInputProps('versionComment')}
+						/>
+					</FormField>
+				</FormRow>
+			</FormSection>
+		</FormShell>
 	);
 }
-

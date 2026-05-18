@@ -1,6 +1,7 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { JWTPayload } from '@/lib/license/token-manager';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
+import type { IUser } from '@/lib/database';
 
 export interface CookieMutation {
   action: 'set' | 'delete';
@@ -27,6 +28,7 @@ declare module 'fastify' {
     apiRequestId?: string;
     apiSession?: JWTPayload;
     apiTokenContext?: ApiTokenContext;
+    rbacUser?: IUser;
   }
 
   interface FastifyReply {

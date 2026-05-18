@@ -1,8 +1,8 @@
-import crypto from 'node:crypto';
 import type { FastifyPluginAsync } from 'fastify';
 import { getDatabase } from '@/lib/database';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { checkResourceQuota } from '@/lib/quota/quotaGuard';
+import { createApiTokenSecret, getApiTokenPrefix, hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
 import {
   requireProjectContextForRequest,
   requireSessionContext,
@@ -36,6 +36,7 @@ export const tokensApiPlugin: FastifyPluginAsync = async (app) => {
           createdAt: token.createdAt,
           label: token.label,
           lastUsed: token.lastUsed,
+          tokenPrefix: token.tokenPrefix,
           userId: token.userId,
         })),
       });
@@ -80,12 +81,13 @@ export const tokensApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const token = `cpeer_${crypto.randomBytes(32).toString('hex')}`;
+      const token = createApiTokenSecret();
       const apiToken = await db.createApiToken({
         label: body.label,
         projectId,
         tenantId: session.tenantId,
-        token,
+        tokenHash: hashApiToken(token),
+        tokenPrefix: getApiTokenPrefix(token),
         userId: session.userId,
       });
 

@@ -47,6 +47,13 @@ interface RagModuleData {
     separators?: string[];
     encoding?: string;
   };
+  rerankerKey?: string | null;
+  rerankerOversample?: number | null;
+}
+
+interface RerankerOption {
+  key: string;
+  name: string;
 }
 
 interface EditRagModuleModalProps {
@@ -67,12 +74,15 @@ interface FormValues {
   chunkOverlap: number | '';
   separators: string[];
   encoding: string;
+  rerankerKey: string;
+  rerankerOversample: number | '';
 }
 
 export default function EditRagModuleModal({ opened, onClose, module, onUpdated }: EditRagModuleModalProps) {
   const [embeddingModels, setEmbeddingModels] = useState<EmbeddingModel[]>([]);
   const [vectorProviders, setVectorProviders] = useState<VectorProvider[]>([]);
   const [vectorIndexes, setVectorIndexes] = useState<VectorIndex[]>([]);
+  const [rerankers, setRerankers] = useState<RerankerOption[]>([]);
   const [submitting, setSubmitting] = useState(false);
 
   const form = useForm<FormValues>({
@@ -87,6 +97,8 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
       chunkOverlap: module.chunkConfig.chunkOverlap,
       separators: module.chunkConfig.separators ?? ['\\n\\n', '\\n', '. ', ' '],
       encoding: module.chunkConfig.encoding ?? 'cl100k_base',
+      rerankerKey: module.rerankerKey ?? '',
+      rerankerOversample: module.rerankerOversample ?? '',
     },
     validate: {
       name: (v) => (!v ? 'Name is required' : null),
@@ -128,6 +140,23 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
     }
   }, []);
 
+  const loadRerankers = useCallback(async () => {
+    try {
+      const res = await fetch('/api/reranker?status=active', { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        setRerankers(
+          (data.rerankers ?? []).map((r: Record<string, string>) => ({
+            key: r.key,
+            name: r.name,
+          })),
+        );
+      }
+    } catch (err) {
+      console.error('Failed to load rerankers', err);
+    }
+  }, []);
+
   const loadVectorIndexes = useCallback(async () => {
     if (!selectedProvider) {
       setVectorIndexes([]);
@@ -162,9 +191,12 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
         chunkOverlap: module.chunkConfig.chunkOverlap,
         separators: module.chunkConfig.separators ?? ['\\n\\n', '\\n', '. ', ' '],
         encoding: module.chunkConfig.encoding ?? 'cl100k_base',
+        rerankerKey: module.rerankerKey ?? '',
+        rerankerOversample: module.rerankerOversample ?? '',
       });
       void loadEmbeddingModels();
       void loadVectorProviders();
+      void loadRerankers();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened]);
@@ -201,6 +233,11 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
           vectorProviderKey: values.vectorProviderKey,
           vectorIndexKey: values.vectorIndexKey,
           chunkConfig,
+          rerankerKey: values.rerankerKey ? values.rerankerKey : null,
+          rerankerOversample:
+            values.rerankerOversample === ''
+              ? null
+              : Number(values.rerankerOversample),
         }),
       });
 
@@ -334,6 +371,30 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
               {...form.getInputProps('encoding')}
             />
           )}
+
+          <Group grow>
+            <Select
+              label="Reranker"
+              description="Optional. Re-orders vector matches before returning."
+              placeholder="None — use vector ranking only"
+              data={[
+                { value: '', label: 'None' },
+                ...rerankers.map((r) => ({ value: r.key, label: r.name })),
+              ]}
+              searchable
+              clearable
+              {...form.getInputProps('rerankerKey')}
+            />
+            <NumberInput
+              label="Oversample multiplier"
+              description="When reranker is set, fetch topK × N candidates from the vector store. Default: 3."
+              min={1}
+              max={20}
+              step={1}
+              disabled={!form.values.rerankerKey}
+              {...form.getInputProps('rerankerOversample')}
+            />
+          </Group>
 
           <Text size="xs" c="dimmed">
             Changing the embedding model or vector index does not automatically re-embed existing documents. Re-ingest documents after saving to apply the new configuration.

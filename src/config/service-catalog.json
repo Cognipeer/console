@@ -1,0 +1,260 @@
+{
+  "$schema": "./service-catalog.schema.json",
+  "services": [
+    {
+      "id": "openai",
+      "driver": "openai",
+      "name": "OpenAI",
+      "tagline": "GPT-4o, o1, and OpenAI embeddings",
+      "description": "Official OpenAI platform supporting GPT and embedding models with tool calling.",
+      "domains": ["model", "embedding"],
+      "color": "#10a37f",
+      "tags": ["popular", "us", "tools"],
+      "aliases": ["gpt", "chatgpt", "gpt-4", "gpt-4o", "openai api"]
+    },
+    {
+      "id": "anthropic",
+      "driver": "openai-compatible",
+      "name": "Anthropic",
+      "tagline": "Claude 4 family via OpenAI-compatible endpoint",
+      "description": "Claude Opus, Sonnet and Haiku connected through the OpenAI-compatible adapter.",
+      "domains": ["model"],
+      "color": "#cc7d4f",
+      "tags": ["popular", "tools", "long-context"],
+      "aliases": ["claude", "haiku", "sonnet", "opus"]
+    },
+    {
+      "id": "azure",
+      "driver": "azure",
+      "name": "Azure OpenAI",
+      "tagline": "OpenAI models hosted on Microsoft Azure",
+      "description": "Enterprise-managed OpenAI deployments through your Azure subscription.",
+      "domains": ["model", "embedding"],
+      "color": "#0078d4",
+      "tags": ["enterprise", "us", "eu"],
+      "aliases": ["microsoft", "openai-azure"]
+    },
+    {
+      "id": "bedrock",
+      "driver": "bedrock",
+      "name": "Amazon Bedrock",
+      "tagline": "Anthropic, AI21, Meta and more on AWS",
+      "description": "Bedrock Converse API supporting multiple foundation models from leading providers.",
+      "domains": ["model", "embedding"],
+      "color": "#ff9900",
+      "tags": ["enterprise", "us"],
+      "aliases": ["aws-bedrock", "amazon"]
+    },
+    {
+      "id": "vertex",
+      "driver": "vertex",
+      "name": "Google Vertex AI",
+      "tagline": "Gemini family and embeddings on Google Cloud",
+      "description": "Vertex AI generative and embedding models authenticated with a service account.",
+      "domains": ["model", "embedding"],
+      "color": "#ea4335",
+      "tags": ["enterprise"],
+      "aliases": ["google", "gemini", "palm", "gcp"]
+    },
+    {
+      "id": "together",
+      "driver": "together",
+      "name": "Together AI",
+      "tagline": "Hosted open-source models with tool calling",
+      "description": "Together AI APIs for Llama, Mistral and other community models.",
+      "domains": ["model", "embedding"],
+      "color": "#ec4899",
+      "tags": ["open-source", "tools"],
+      "aliases": ["llama", "mistral", "qwen"]
+    },
+    {
+      "id": "ollama",
+      "driver": "ollama",
+      "name": "Ollama",
+      "tagline": "Self-hosted models on your own hardware",
+      "description": "Run open-source models locally or on a private network through Ollama.",
+      "domains": ["model", "embedding"],
+      "color": "#7c3aed",
+      "tags": ["self-hosted", "free"],
+      "aliases": ["local", "ollama-server"]
+    },
+    {
+      "id": "openai-compatible",
+      "driver": "openai-compatible",
+      "name": "OpenAI-Compatible",
+      "tagline": "Any service exposing the OpenAI REST schema",
+      "description": "Connect Groq, DeepSeek, Mistral, vLLM and other OpenAI-compatible APIs.",
+      "domains": ["model", "embedding"],
+      "color": "#475569",
+      "tags": ["generic", "open-source"],
+      "aliases": ["groq", "deepseek", "vllm", "lmstudio", "mistral"]
+    },
+    {
+      "id": "cognipeer-llm",
+      "driver": "cognipeer-llm",
+      "name": "Cognipeer LLM",
+      "tagline": "Managed inference by Cognipeer",
+      "description": "First-party Cognipeer inference endpoints with built-in routing and caching.",
+      "domains": ["model", "embedding"],
+      "color": "#16b3ab",
+      "tags": ["managed"],
+      "aliases": ["cognipeer"]
+    },
+
+    {
+      "id": "chroma-cloud",
+      "driver": "chroma-cloud",
+      "name": "Chroma Cloud",
+      "tagline": "Hosted Chroma vector database",
+      "description": "Managed ChromaDB collections with automatic scaling.",
+      "domains": ["vector"],
+      "color": "#f97316",
+      "tags": ["managed"],
+      "aliases": ["chromadb-cloud"]
+    },
+    {
+      "id": "chroma-local",
+      "driver": "chroma-local",
+      "name": "Chroma (self-hosted)",
+      "tagline": "Self-hosted ChromaDB instance",
+      "description": "Connect to a self-managed ChromaDB cluster.",
+      "domains": ["vector"],
+      "color": "#f97316",
+      "tags": ["self-hosted"],
+      "aliases": ["chromadb"]
+    },
+    {
+      "id": "milvus-cloud",
+      "driver": "milvus-cloud",
+      "name": "Zilliz Cloud",
+      "tagline": "Managed Milvus from Zilliz",
+      "description": "Managed Milvus clusters operated by Zilliz Cloud.",
+      "domains": ["vector"],
+      "color": "#06b6d4",
+      "tags": ["managed"],
+      "aliases": ["milvus", "zilliz"]
+    },
+    {
+      "id": "milvus-local",
+      "driver": "milvus-local",
+      "name": "Milvus (self-hosted)",
+      "tagline": "Self-hosted Milvus cluster",
+      "description": "Connect to a self-managed Milvus deployment.",
+      "domains": ["vector"],
+      "color": "#06b6d4",
+      "tags": ["self-hosted"],
+      "aliases": ["milvus"]
+    },
+    {
+      "id": "elasticsearch-cloud",
+      "driver": "elasticsearch-cloud",
+      "name": "Elasticsearch Cloud",
+      "tagline": "Hosted Elasticsearch with kNN search",
+      "description": "Elasticsearch Service with vector search enabled.",
+      "domains": ["vector"],
+      "color": "#fec514",
+      "tags": ["managed"],
+      "aliases": ["elastic"]
+    },
+    {
+      "id": "elasticsearch-self-hosted",
+      "driver": "elasticsearch-self-hosted",
+      "name": "Elasticsearch (self-hosted)",
+      "tagline": "Self-managed Elasticsearch cluster",
+      "description": "Connect a self-hosted Elasticsearch deployment.",
+      "domains": ["vector"],
+      "color": "#fec514",
+      "tags": ["self-hosted"],
+      "aliases": ["elastic"]
+    },
+    {
+      "id": "azure-ai-search",
+      "driver": "azure",
+      "name": "Azure AI Search",
+      "tagline": "Vector search on Microsoft Azure",
+      "description": "Vector indexes via Azure Cognitive Search.",
+      "domains": ["vector"],
+      "color": "#0078d4",
+      "tags": ["enterprise"],
+      "aliases": ["azure-search", "cognitive-search"]
+    },
+    {
+      "id": "mongodb",
+      "driver": "mongodb",
+      "name": "MongoDB Atlas",
+      "tagline": "Atlas Vector Search on MongoDB",
+      "description": "Use MongoDB Atlas Vector Search collections.",
+      "domains": ["vector"],
+      "color": "#10b981",
+      "tags": ["managed"],
+      "aliases": ["atlas"]
+    },
+    {
+      "id": "postgres",
+      "driver": "postgres",
+      "name": "PostgreSQL (pgvector)",
+      "tagline": "Vector search on Postgres",
+      "description": "Connect to a Postgres database with the pgvector extension.",
+      "domains": ["vector"],
+      "color": "#336791",
+      "tags": ["self-hosted", "open-source"],
+      "aliases": ["pgvector", "postgresql"]
+    },
+    {
+      "id": "sqlite-vector",
+      "driver": "sqlite-vector",
+      "name": "SQLite Vector",
+      "tagline": "Local SQLite with vector extension",
+      "description": "Lightweight on-disk vector storage backed by SQLite.",
+      "domains": ["vector"],
+      "color": "#0f80cc",
+      "tags": ["self-hosted", "embedded"],
+      "aliases": ["sqlite"]
+    },
+    {
+      "id": "orama",
+      "driver": "orama",
+      "name": "Orama",
+      "tagline": "Edge-first full-text and vector search",
+      "description": "Lightweight vector + lexical search engine.",
+      "domains": ["vector"],
+      "color": "#8b5cf6",
+      "tags": ["managed", "edge"],
+      "aliases": []
+    },
+    {
+      "id": "system-default-vector",
+      "driver": "system-default",
+      "name": "System Default (S3 Vectors)",
+      "tagline": "Cognipeer-managed S3 vector storage",
+      "description": "Default vector backend powered by AWS S3 Vectors.",
+      "domains": ["vector"],
+      "color": "#475569",
+      "tags": ["managed", "default"],
+      "aliases": ["s3-vectors"]
+    },
+
+    {
+      "id": "aws-s3-files",
+      "driver": "aws-s3-files",
+      "name": "Amazon S3",
+      "tagline": "Object storage on AWS",
+      "description": "Store ingested files and artifacts in an S3 bucket.",
+      "domains": ["file"],
+      "color": "#ff9900",
+      "tags": ["managed"],
+      "aliases": ["s3"]
+    },
+    {
+      "id": "local-filesystem",
+      "driver": "local-filesystem",
+      "name": "Local filesystem",
+      "tagline": "Store files on the server disk",
+      "description": "Persist files on the same host where Cognipeer runs.",
+      "domains": ["file"],
+      "color": "#64748b",
+      "tags": ["self-hosted", "dev"],
+      "aliases": ["disk", "local"]
+    }
+  ]
+}

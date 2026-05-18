@@ -118,7 +118,7 @@ export const ElasticsearchSelfHostedVectorProviderContract: ProviderContract<
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/ban-ts-comment
     // @ts-ignore – @elastic/elasticsearch is an optional peer dependency
-    const { Client } = await import('@elastic/elasticsearch') as any;
+    const { Client } = await import(/* webpackIgnore: true */ '@elastic/elasticsearch') as any;
 
     const config: Record<string, unknown> = { node: settings.node.trim() };
 

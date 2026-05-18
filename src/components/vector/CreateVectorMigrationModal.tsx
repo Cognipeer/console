@@ -1,23 +1,18 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  Badge,
-  Button,
-  Card,
-  Divider,
-  Group,
-  Modal,
-  NumberInput,
-  Select,
-  Stack,
-  Text,
-  TextInput,
-  Textarea,
-} from '@mantine/core';
+import { NumberInput, Select, TextInput, Textarea } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
-import { IconArrowRight } from '@tabler/icons-react';
+import { IconArrowRight, IconTransfer } from '@tabler/icons-react';
+import FormShell, {
+  Checklist,
+  FormField,
+  FormRow,
+  FormSection,
+  SummaryGroup,
+  SummaryKV,
+} from '@/components/common/ui/FormShell';
 import type { VectorIndexRecord, VectorProviderView } from '@/lib/services/vector';
 import type { IVectorMigration } from '@/lib/database/provider/types.base';
 
@@ -132,7 +127,52 @@ export default function CreateVectorMigrationModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened, activeProviders]);
 
-  const handleSubmit = form.onSubmit(async (values) => {
+  const sourceProvider = useMemo(
+    () => activeProviders.find((p) => p.key === formValues.sourceProviderKey) ?? null,
+    [activeProviders, formValues.sourceProviderKey],
+  );
+  const destinationProvider = useMemo(
+    () => activeProviders.find((p) => p.key === formValues.destinationProviderKey) ?? null,
+    [activeProviders, formValues.destinationProviderKey],
+  );
+
+  const sourceIndex = useMemo(
+    () =>
+      (indexesByProvider[formValues.sourceProviderKey] ?? []).find(
+        (idx) => idx.key === formValues.sourceIndexKey,
+      ) ?? null,
+    [indexesByProvider, formValues.sourceProviderKey, formValues.sourceIndexKey],
+  );
+  const destinationIndex = useMemo(
+    () =>
+      (indexesByProvider[formValues.destinationProviderKey] ?? []).find(
+        (idx) => idx.key === formValues.destinationIndexKey,
+      ) ?? null,
+    [indexesByProvider, formValues.destinationProviderKey, formValues.destinationIndexKey],
+  );
+
+  const validIdentity = Boolean(formValues.name.trim());
+  const validSource = Boolean(formValues.sourceProviderKey && formValues.sourceIndexKey);
+  const validDestination = Boolean(
+    formValues.destinationProviderKey && formValues.destinationIndexKey,
+  );
+  const sameEndpoints =
+    formValues.sourceProviderKey === formValues.destinationProviderKey &&
+    formValues.sourceIndexKey === formValues.destinationIndexKey &&
+    Boolean(formValues.sourceIndexKey);
+
+  const checklist = [
+    { id: 1, label: 'Migration name set', done: validIdentity },
+    { id: 2, label: 'Source provider & index', done: validSource },
+    { id: 3, label: 'Destination provider & index', done: validDestination },
+    { id: 4, label: 'Source ≠ Destination', done: validSource && validDestination && !sameEndpoints },
+  ];
+
+  const submit = async () => {
+    const validation = form.validate();
+    if (validation.hasErrors) return;
+    const values = form.getValues();
+
     if (
       values.sourceProviderKey === values.destinationProviderKey &&
       values.sourceIndexKey === values.destinationIndexKey
@@ -180,44 +220,111 @@ export default function CreateVectorMigrationModal({
     } finally {
       setSubmitting(false);
     }
-  });
+  };
 
-  const sourceProvider = useMemo(
-    () => activeProviders.find((p) => p.key === formValues.sourceProviderKey) ?? null,
-    [activeProviders, formValues.sourceProviderKey],
-  );
-  const destinationProvider = useMemo(
-    () => activeProviders.find((p) => p.key === formValues.destinationProviderKey) ?? null,
-    [activeProviders, formValues.destinationProviderKey],
+  const canSubmit =
+    validIdentity && validSource && validDestination && !sameEndpoints && activeProviders.length > 0;
+
+  const summary = (
+    <>
+      <SummaryGroup title="Migration">
+        <SummaryKV
+          label="Name"
+          value={formValues.name || <span className="ds-faint">—</span>}
+        />
+        <SummaryKV
+          label="Batch size"
+          value={formValues.batchSize ? String(formValues.batchSize) : '100'}
+          mono
+        />
+      </SummaryGroup>
+
+      <SummaryGroup title="Source">
+        <SummaryKV
+          label="Provider"
+          value={sourceProvider?.label || <span className="ds-faint">—</span>}
+        />
+        <SummaryKV
+          label="Index"
+          value={sourceIndex?.name || <span className="ds-faint">—</span>}
+        />
+        {sourceProvider ? (
+          <SummaryKV label="Driver" value={sourceProvider.driver} mono />
+        ) : null}
+      </SummaryGroup>
+
+      <SummaryGroup title="Destination">
+        <SummaryKV
+          label="Provider"
+          value={destinationProvider?.label || <span className="ds-faint">—</span>}
+        />
+        <SummaryKV
+          label="Index"
+          value={destinationIndex?.name || <span className="ds-faint">—</span>}
+        />
+        {destinationProvider ? (
+          <SummaryKV label="Driver" value={destinationProvider.driver} mono />
+        ) : null}
+      </SummaryGroup>
+
+      <SummaryGroup title="Pre-flight">
+        <Checklist items={checklist} />
+      </SummaryGroup>
+    </>
   );
 
   return (
-    <Modal opened={opened} onClose={onClose} title="Create Vector Migration" size="xl">
-      <form onSubmit={handleSubmit}>
-        <Stack gap="lg">
-          <Text size="sm" c="dimmed">
-            Migrate vectors from a source index to a destination index. The migration runs as a
-            background job and can be monitored in real time.
-          </Text>
+    <FormShell
+      open={opened}
+      onClose={onClose}
+      icon={<IconTransfer size={16} />}
+      title="Create vector migration"
+      subtitle="Move vectors between indexes — runs as a background job you can monitor in real time."
+      summary={summary}
+      footerStatus={`${checklist.filter((c) => c.done).length} of ${checklist.length} ready`}
+      primaryAction={{
+        label: 'Create migration',
+        icon: <IconArrowRight size={13} />,
+        loading: submitting,
+        disabled: !canSubmit,
+        onClick: submit,
+      }}
+    >
+      <FormSection
+        number={1}
+        title="Identity"
+        description="How this migration is identified in the dashboard."
+        done={validIdentity}
+      >
+        <FormRow cols={1}>
+          <FormField label="Migration name" required>
+            <TextInput
+              placeholder="e.g. Migrate documents to new index"
+              {...form.getInputProps('name')}
+            />
+          </FormField>
+        </FormRow>
+        <FormRow cols={1}>
+          <FormField label="Description" optional>
+            <Textarea
+              placeholder="Optional description"
+              autosize
+              minRows={2}
+              {...form.getInputProps('description')}
+            />
+          </FormField>
+        </FormRow>
+      </FormSection>
 
-          <TextInput
-            label="Migration name"
-            placeholder="e.g. Migrate documents to new index"
-            {...form.getInputProps('name')}
-          />
-          <Textarea
-            label="Description"
-            placeholder="Optional description"
-            autosize
-            minRows={2}
-            {...form.getInputProps('description')}
-          />
-
-          <Divider label="Source" labelPosition="left" />
-
-          <Group grow align="flex-start">
+      <FormSection
+        number={2}
+        title="Source"
+        description="Where vectors are read from."
+        done={validSource}
+      >
+        <FormRow cols={2}>
+          <FormField label="Source provider" required>
             <Select
-              label="Source provider"
               placeholder="Select provider"
               data={providerOptions}
               value={formValues.sourceProviderKey}
@@ -225,8 +332,9 @@ export default function CreateVectorMigrationModal({
               searchable
               error={form.errors.sourceProviderKey}
             />
+          </FormField>
+          <FormField label="Source index" required>
             <Select
-              label="Source index"
               placeholder={sourceIndexOptions.length === 0 ? 'No indexes available' : 'Select index'}
               data={sourceIndexOptions}
               value={formValues.sourceIndexKey}
@@ -235,26 +343,37 @@ export default function CreateVectorMigrationModal({
               error={form.errors.sourceIndexKey}
               searchable
             />
-          </Group>
+          </FormField>
+        </FormRow>
+        {sourceProvider ? (
+          <div
+            className="ds-card ds-card-pad-sm"
+            style={{ marginTop: 12, background: 'var(--ds-surface-1)' }}
+          >
+            <div className="ds-row ds-gap-sm" style={{ marginBottom: 4 }}>
+              <span style={{ fontWeight: 600 }}>{sourceProvider.label}</span>
+              <span
+                className={`ds-badge ${sourceProvider.status === 'active' ? 'ds-badge-ok' : 'ds-badge-warn'}`}
+              >
+                {sourceProvider.status}
+              </span>
+            </div>
+            <div className="ds-faint" style={{ fontSize: 11.5 }}>
+              driver: <span className="ds-mono">{sourceProvider.driver}</span>
+            </div>
+          </div>
+        ) : null}
+      </FormSection>
 
-          {sourceProvider && (
-            <Card withBorder radius="md" p="sm" bg="dark.8">
-              <Group gap="xs">
-                <Badge size="xs" variant="light" radius="xl" color={sourceProvider.status === 'active' ? 'teal' : 'gray'}>
-                  {sourceProvider.status}
-                </Badge>
-                <Text size="xs" c="dimmed">{sourceProvider.label}</Text>
-                <Text size="xs" c="dimmed">·</Text>
-                <Text size="xs" c="dimmed">{sourceProvider.driver}</Text>
-              </Group>
-            </Card>
-          )}
-
-          <Divider label="Destination" labelPosition="left" />
-
-          <Group grow align="flex-start">
+      <FormSection
+        number={3}
+        title="Destination"
+        description="Where vectors are written to."
+        done={validDestination}
+      >
+        <FormRow cols={2}>
+          <FormField label="Destination provider" required>
             <Select
-              label="Destination provider"
               placeholder="Select provider"
               data={providerOptions}
               value={formValues.destinationProviderKey}
@@ -262,8 +381,9 @@ export default function CreateVectorMigrationModal({
               searchable
               error={form.errors.destinationProviderKey}
             />
+          </FormField>
+          <FormField label="Destination index" required>
             <Select
-              label="Destination index"
               placeholder={destinationIndexOptions.length === 0 ? 'No indexes available' : 'Select index'}
               data={destinationIndexOptions}
               value={formValues.destinationIndexKey}
@@ -272,46 +392,47 @@ export default function CreateVectorMigrationModal({
               error={form.errors.destinationIndexKey}
               searchable
             />
-          </Group>
+          </FormField>
+        </FormRow>
+        {destinationProvider ? (
+          <div
+            className="ds-card ds-card-pad-sm"
+            style={{ marginTop: 12, background: 'var(--ds-surface-1)' }}
+          >
+            <div className="ds-row ds-gap-sm" style={{ marginBottom: 4 }}>
+              <span style={{ fontWeight: 600 }}>{destinationProvider.label}</span>
+              <span
+                className={`ds-badge ${destinationProvider.status === 'active' ? 'ds-badge-ok' : 'ds-badge-warn'}`}
+              >
+                {destinationProvider.status}
+              </span>
+            </div>
+            <div className="ds-faint" style={{ fontSize: 11.5 }}>
+              driver: <span className="ds-mono">{destinationProvider.driver}</span>
+            </div>
+          </div>
+        ) : null}
+      </FormSection>
 
-          {destinationProvider && (
-            <Card withBorder radius="md" p="sm" bg="dark.8">
-              <Group gap="xs">
-                <Badge size="xs" variant="light" radius="xl" color={destinationProvider.status === 'active' ? 'teal' : 'gray'}>
-                  {destinationProvider.status}
-                </Badge>
-                <Text size="xs" c="dimmed">{destinationProvider.label}</Text>
-                <Text size="xs" c="dimmed">·</Text>
-                <Text size="xs" c="dimmed">{destinationProvider.driver}</Text>
-              </Group>
-            </Card>
-          )}
-
-          <Divider label="Options" labelPosition="left" />
-
-          <NumberInput
+      <FormSection
+        number={4}
+        title="Options"
+        description="Tuning parameters for the migration job."
+      >
+        <FormRow cols={1}>
+          <FormField
             label="Batch size"
-            description="Number of vectors to migrate per batch (default: 100)"
-            placeholder="100"
-            min={1}
-            max={10000}
-            {...form.getInputProps('batchSize')}
-          />
-
-          <Group justify="flex-end" pt="sm">
-            <Button variant="subtle" onClick={onClose} disabled={submitting}>
-              Cancel
-            </Button>
-            <Button
-              type="submit"
-              loading={submitting}
-              leftSection={<IconArrowRight size={14} />}
-            >
-              Create Migration
-            </Button>
-          </Group>
-        </Stack>
-      </form>
-    </Modal>
+            hint="Number of vectors to migrate per batch (default: 100)."
+          >
+            <NumberInput
+              placeholder="100"
+              min={1}
+              max={10000}
+              {...form.getInputProps('batchSize')}
+            />
+          </FormField>
+        </FormRow>
+      </FormSection>
+    </FormShell>
   );
 }

@@ -198,7 +198,7 @@ export const ElasticsearchVectorProviderContract: ProviderContract<
   async createRuntime({ credentials, settings, providerKey, logger }) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/ban-ts-comment
     // @ts-ignore – @elastic/elasticsearch is an optional peer dependency
-    const { Client } = await import('@elastic/elasticsearch') as any;
+    const { Client } = await import(/* webpackIgnore: true */ '@elastic/elasticsearch') as any;
     const client: EsClient = buildEsClient(credentials, settings, Client);
 
     const runtime: VectorProviderRuntime = {

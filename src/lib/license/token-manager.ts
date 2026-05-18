@@ -14,6 +14,7 @@ export interface JWTPayload {
   role: 'owner' | 'admin' | 'project_admin' | 'user';
   licenseId: string;
   licenseType: LicenseType;
+  licenseExpiresAt?: string;
   features: string[];
   iat?: number;
   exp?: number;

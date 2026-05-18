@@ -1,6 +1,42 @@
 # Monitoring & Observability
 
-Cognipeer Console provides structured logging, health checks, and usage tracking for production observability.
+Cognipeer Console provides structured logging, health checks, and usage tracking for production observability. The operator-facing surfaces for this live under **Operate → Alerts & Incidents**, **Configure → Audit Log**, and **Configure → License**.
+
+## Alerts & Incidents
+
+This is where you define threshold-based rules that trigger when a metric crosses a configured boundary. Rules are grouped by signal source — Model Hub, Model Monitoring, Guardrail, Knowledge Engine, MCP Servers — so you can target a specific subsystem.
+
+![Alerts list](/screenshots/monitoring/01-alerts-overview.png)
+
+The three counters at the top capture the operational state at a glance: how many rules are active, how many are disabled, and how many fired in the last 24 hours. From here you can either author a rule (**New Rule**), inspect open incidents that need acknowledgement (**Incidents**), or jump to the full audit timeline (**View History**).
+
+### Alert history
+
+The history view shows every firing event, who acknowledged it, and how it resolved. Filters let you scope by rule, severity, source, or date range.
+
+![Alerts history](/screenshots/monitoring/02-alerts-history.png)
+
+Each row links back to the underlying signal — for an inference alert that's a model in [Model Hub](/guide/model-hub), for a guardrail alert that's the policy in [Guardrails](/guide/guardrails) — so triage stays one click away from the configuration that triggered it.
+
+## Audit Log
+
+Every state-changing action on the console — provider edits, model deployments, prompt promotions, token issuance, license updates, member changes — is recorded in the tenant audit log.
+
+![Audit log](/screenshots/monitoring/03-audit-log.png)
+
+Columns surface the actor, the action, the resource type and ID, and the timestamp. Use the filters at the top to narrow by actor, action, or resource type when responding to a compliance question or investigating a configuration drift.
+
+## License
+
+The License screen shows what the current installation is allowed to do — plan tier, configured project budget versus active projects, expiry, and the signed license key payload.
+
+![License screen](/screenshots/monitoring/04-license.png)
+
+In an offline-enterprise deployment you paste the signed token here; the runtime verifies it on every startup against the bundled public key and enforces the limits described in [Licensing](/guide/licensing). **Reset to free** drops back to the bundled FREE license — useful for evaluating, not for production.
+
+## Cluster topology
+
+Multi-node deployments add a second observability surface: the node registry and the per-entity instance assignments. The [Cluster](/guide/cluster) page in **Admin → Cluster** shows every running process, the queue provider in use (in-process vs BullMQ), and which agents, MCP servers, browsers, JS runtimes, inference servers, alert rules, and automations are pinned to which node. The same data is available programmatically via `GET /api/cluster/overview` and `GET /api/cluster/instances`.
 
 ## Structured Logging
 

@@ -1,0 +1,158 @@
+/**
+ * Turkish translations.
+ *
+ * Strategy: extends `en` so that any untranslated UI strings fall back to
+ * English. PII service strings are fully localized. Other modules can be
+ * incrementally translated by overriding their keys here.
+ */
+
+import { en } from './en';
+
+export const tr: typeof en = {
+  ...en,
+  navigation: {
+    ...en.navigation,
+    pii: 'PII Servisi',
+    piiDescription: 'Kişisel verileri tespit edin, redakte edin ve maskeleyin',
+  },
+  breadcrumbs: {
+    ...en.breadcrumbs,
+    pii: 'PII Servisi',
+    threads: 'Konuşmalar',
+    migrations: 'Migrasyonlar',
+    edit: 'Düzenle',
+    new: 'Yeni',
+  },
+  pii: {
+    page: {
+      eyebrow: 'Operate · PII Servisi',
+      title: 'PII Servisi',
+      subtitle: 'Yeniden kullanılabilir PII politikaları tanımlayın, serbest metni tarayın, kişisel verileri redakte edin veya maskeleyin. Çoklu dil desteklidir.',
+      newPolicy: 'Yeni politika',
+      empty: {
+        title: 'Henüz PII politikası yok',
+        description: 'Metinleri e-posta, telefon, kimlik no ve diğer kişisel veriler için taramak üzere bir politika oluşturun ya da doğrudan test paneline geçin.',
+        action: 'Politika oluştur',
+      },
+      stats: {
+        total: 'Toplam politika',
+        enabled: 'Etkin',
+        disabled: 'Devre dışı',
+        languages: 'Kapsanan diller',
+      },
+      filters: {
+        all: 'Tüm durumlar',
+        enabled: 'Etkin',
+        disabled: 'Devre dışı',
+        searchPlaceholder: 'Ad, anahtar veya açıklamaya göre filtrele…',
+      },
+      columns: {
+        name: 'Ad',
+        defaultAction: 'Varsayılan aksiyon',
+        categories: 'Kategoriler',
+        languages: 'Diller',
+        status: 'Durum',
+      },
+    },
+    detail: {
+      backToList: 'PII politikalarına dön',
+      tabs: {
+        config: 'Yapılandırma',
+        test: 'Test',
+        api: 'API',
+      },
+      basics: {
+        name: 'Ad',
+        namePlaceholder: 'örn. Varsayılan PII tarama',
+        description: 'Açıklama',
+        descriptionPlaceholder: 'Bu politika ne zaman uygulanmalı…',
+        key: 'Politika anahtarı',
+        enabled: 'Politika etkin',
+        defaultAction: 'Varsayılan aksiyon',
+        languages: 'Diller',
+        languagesHelper: 'Desenleri belirli dillere kısıtlayın. Global desenler her zaman çalışır.',
+      },
+      categories: {
+        title: 'Yerleşik kategoriler',
+        subtitle: 'Hangi kategorilerin taranacağını belirleyin. Dile özgü desenler yalnızca o dil etkinleştirilmişse görünür.',
+        empty: 'Seçili dillere uygun kategori yok.',
+      },
+      customPatterns: {
+        title: 'Özel desenler',
+        subtitle: 'Yerleşik kategorilerin üzerine eklenen tenant-özel regex desenleri.',
+        addRow: 'Desen ekle',
+        categoryId: 'Kategori ID',
+        label: 'Etiket',
+        regex: 'Regex deseni',
+        flags: 'Bayraklar',
+        severity: 'Önem',
+        languages: 'Diller',
+        enabled: 'Etkin',
+        invalidRegex: 'Geçersiz regex',
+        remove: 'Kaldır',
+        emptyHint: 'Henüz özel desen yok. Tenant-özel tanımlayıcılar için bir desen ekleyin.',
+      },
+      actions: {
+        save: 'Değişiklikleri kaydet',
+        saving: 'Kaydediliyor…',
+        delete: 'Sil',
+        toggleEnable: 'Etkinleştir',
+        toggleDisable: 'Devre dışı bırak',
+      },
+    },
+    test: {
+      title: 'Test paneli',
+      subtitle: 'Herhangi bir metni yapıştırın ve mevcut yapılandırmanın neyi tespit, redakte veya maskeleyeceğini görün.',
+      input: 'Giriş metni',
+      inputPlaceholder: 'E-posta, telefon, kimlik içeren bir metin yapıştırın…',
+      runDetect: 'Tespit',
+      runRedact: 'Redakte et',
+      runMask: 'Maskele',
+      output: 'Çıktı',
+      findings: 'Bulgular',
+      noFindings: 'PII tespit edilmedi.',
+      findingsCount: '{count} bulgu',
+      severity: 'Önem',
+      category: 'Kategori',
+      value: 'Değer',
+      offset: 'Konum',
+    },
+    severity: {
+      low: 'Düşük',
+      medium: 'Orta',
+      high: 'Yüksek',
+    },
+    actions: {
+      detect: 'Yalnızca tespit',
+      redact: 'Redakte et',
+      mask: 'Maskele',
+      block: 'Engelle',
+    },
+    languages: {
+      global: 'Global',
+      en: 'İngilizce',
+      tr: 'Türkçe',
+      de: 'Almanca',
+      fr: 'Fransızca',
+      es: 'İspanyolca',
+      it: 'İtalyanca',
+      pt: 'Portekizce',
+      ar: 'Arapça',
+      ja: 'Japonca',
+      zh: 'Çince',
+    },
+    notifications: {
+      created: 'Politika oluşturuldu',
+      updated: 'Politika güncellendi',
+      deleted: 'Politika silindi',
+      saveError: 'Politika kaydedilemedi',
+      loadError: 'PII politikaları yüklenemedi',
+    },
+    deleteModal: {
+      title: 'PII politikasını sil',
+      body: '"{name}" politikası silinecek. Bu işlem geri alınamaz.',
+      confirm: 'Sil',
+      cancel: 'İptal',
+    },
+  },
+};

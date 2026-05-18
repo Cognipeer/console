@@ -1,6 +1,14 @@
 # Vector Stores
 
-The vector store service provides multi-provider vector database management with index CRUD, vector upsert/query/delete operations, and runtime pooling.
+The vector store service provides multi-provider vector database management with index CRUD, vector upsert/query/delete operations, and runtime pooling. Operators manage it through **Data → Knowledge Index**.
+
+## Knowledge Index
+
+The list view groups indices by their vector provider. Counters at the top show how many indices are deployed, how many providers are wired up, and how many providers are currently failing health checks.
+
+![Knowledge Index list](/screenshots/vector-stores/01-vector-list.png)
+
+A fresh tenant lands on the empty state — the **Create index** action only enables once at least one vector-domain provider has been registered. The **Indexes** and **Migrations** entries in the left sidebar give you flat list views; **Migrations** is where you reshape indices when you change embedding dimensions or rename keys.
 
 ## Supported Providers
 

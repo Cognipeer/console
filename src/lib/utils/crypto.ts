@@ -7,8 +7,8 @@ const AUTH_TAG_LENGTH = 16;
 
 function resolveSecret(): Buffer {
   const cfg = getConfig();
-  const secret = cfg.auth.providerEncryptionSecret;
-
+  const secret = cfg.auth.providerEncryptionSecret || cfg.auth.jwtSecret;
+  
   if (!secret) {
     throw new Error(
       'Encryption secret is not configured. Set PROVIDER_ENCRYPTION_SECRET or JWT_SECRET.',

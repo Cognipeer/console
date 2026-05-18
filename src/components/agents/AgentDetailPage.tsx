@@ -59,7 +59,7 @@ import {
 import { useTranslations } from '@/lib/i18n';
 import EmptyState from '@/components/common/EmptyState';
 import LoadingState from '@/components/common/LoadingState';
-import PageHeader from '@/components/layout/PageHeader';
+import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import SectionCard from '@/components/common/SectionCard';
 import SessionTable from '@/components/tracing/SessionTable';
 import ReactMarkdown from 'react-markdown';
@@ -575,9 +575,9 @@ export default function AgentDetailPage() {
   }
 
   return (
-    <>
+    <PageContainer>
       <PageHeader
-        icon={<IconRobot size={20} />}
+        eyebrow="Build · Agent"
         title={agent.name}
         subtitle={agent.description || agent.key}
         actions={
@@ -1456,7 +1456,7 @@ curl -X POST ${typeof window !== 'undefined' ? window.location.origin : 'https:/
           t={t}
         />
       </Modal>
-    </>
+    </PageContainer>
   );
 }
 

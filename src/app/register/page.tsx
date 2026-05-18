@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   TextInput,
@@ -10,7 +10,6 @@ import {
   Anchor,
   Stack,
   Group,
-  Select,
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
@@ -27,16 +26,6 @@ export default function RegisterPage() {
   const tValidation = useTranslations('validation');
   const tNotifications = useTranslations('notifications');
   const tCommon = useTranslations('common');
-  const licenseOptions = useMemo(
-    () => [
-      { value: 'FREE', label: t('form.license.options.free') },
-      { value: 'STARTER', label: t('form.license.options.starter') },
-      { value: 'PROFESSIONAL', label: t('form.license.options.professional') },
-      { value: 'ENTERPRISE', label: t('form.license.options.enterprise') },
-    ],
-    [t],
-  );
-
   const form = useForm({
     initialValues: {
       name: '',
@@ -44,7 +33,6 @@ export default function RegisterPage() {
       companyName: '',
       password: '',
       confirmPassword: '',
-      licenseType: 'FREE',
     },
     validate: {
       name: (value) =>
@@ -99,7 +87,6 @@ export default function RegisterPage() {
           email: values.email,
           companyName: values.companyName,
           password: values.password,
-          licenseType: values.licenseType,
         }),
       });
 
@@ -198,14 +185,6 @@ export default function RegisterPage() {
             size="md"
             autoComplete="new-password"
             {...form.getInputProps('confirmPassword')}
-          />
-
-          <Select
-            label={t('form.license.label')}
-            placeholder={t('form.license.placeholder')}
-            data={licenseOptions}
-            size="md"
-            {...form.getInputProps('licenseType')}
           />
 
           <Button

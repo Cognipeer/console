@@ -26,6 +26,7 @@ vi.mock('@/lib/services/projects/projectService', () => ({
 
 import { getDatabase } from '@/lib/database';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
+import { hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
 import {
   createMockDb,
   TENANT_ACME,
@@ -81,18 +82,18 @@ describe('requireApiToken', () => {
 
   describe('token lookup', () => {
     it('throws 401 when token is not found in database', async () => {
-      mockDb.findApiTokenByToken.mockResolvedValue(null);
+      mockDb.findApiTokenByHash.mockResolvedValue(null);
       const req = buildRequest('Bearer sk-unknown-token');
       await expect(requireApiToken(req)).rejects.toMatchObject({
         name: 'ApiTokenAuthError',
         status: 401,
         message: expect.stringMatching(/invalid api token/i),
       });
-      expect(mockDb.findApiTokenByToken).toHaveBeenCalledWith('sk-unknown-token');
+      expect(mockDb.findApiTokenByHash).toHaveBeenCalledWith(hashApiToken('sk-unknown-token'));
     });
 
     it('throws 404 when tenant is not found for the token', async () => {
-      mockDb.findApiTokenByToken.mockResolvedValue(API_TOKEN_VALID);
+      mockDb.findApiTokenByHash.mockResolvedValue(API_TOKEN_VALID);
       mockDb.findTenantById.mockResolvedValue(null);
       const req = buildRequest(`Bearer ${API_TOKEN_VALID.token}`);
       await expect(requireApiToken(req)).rejects.toMatchObject({
@@ -104,7 +105,7 @@ describe('requireApiToken', () => {
 
   describe('successful authentication', () => {
     beforeEach(() => {
-      mockDb.findApiTokenByToken.mockResolvedValue(API_TOKEN_VALID);
+      mockDb.findApiTokenByHash.mockResolvedValue(API_TOKEN_VALID);
       mockDb.findTenantById.mockResolvedValue(TENANT_ACME);
       mockDb.findUserById.mockResolvedValue(USER_ALICE);
     });
@@ -130,7 +131,7 @@ describe('requireApiToken', () => {
       const req = buildRequest(`Bearer ${API_TOKEN_VALID.token}`);
       await requireApiToken(req);
 
-      expect(mockDb.updateTokenLastUsed).toHaveBeenCalledWith(API_TOKEN_VALID.token);
+      expect(mockDb.updateTokenLastUsedByHash).toHaveBeenCalledWith(API_TOKEN_VALID.tokenHash);
     });
 
     it('resolves user via findUserById', async () => {

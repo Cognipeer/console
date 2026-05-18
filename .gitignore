@@ -30,6 +30,7 @@
 # misc
 .DS_Store
 *.pem
+/license/
 
 # debug
 npm-debug.log*
@@ -56,3 +57,5 @@ docs/.vitepress/cache/
 *.tsbuildinfo
 next-env.d.ts
 node_modules/
+
+.claude

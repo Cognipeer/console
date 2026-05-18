@@ -18,13 +18,13 @@ export default function Home() {
 
         if (response.ok) {
           // User is authenticated, redirect to dashboard
-          router.push('/dashboard');
+          router.push('/dashboard/overview');
           return;
         }
       } catch {
-        router.push('/dashboard');
+        router.push('/dashboard/overview');
       } finally {
-        router.push('/dashboard');
+        router.push('/dashboard/overview');
       }
     };
 
@@ -32,6 +32,6 @@ export default function Home() {
   }, [router]);
 
   return (
-    <LoadingState minHeight="100vh" size="lg" label="Redirecting to dashboard" />
+    <LoadingState minHeight="100vh" size="lg" label="Redirecting to overview" />
   );
 }

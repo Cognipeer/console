@@ -19,7 +19,6 @@ import {
   Tooltip,
 } from '@mantine/core';
 import {
-  IconPlayerPlay,
   IconPlayerStop,
   IconRefresh,
   IconSend,

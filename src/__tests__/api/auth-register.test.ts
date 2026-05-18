@@ -178,9 +178,12 @@ describe('POST /api/auth/register', () => {
       expect(LicenseManager.getFeaturesForLicense).toHaveBeenCalledWith('FREE');
     });
 
-    it('accepts custom licenseType', async () => {
+    it('ignores client-provided licenseType (self-service is FREE-only)', async () => {
+      // Why: the /auth/register endpoint hard-codes FREE so customers cannot
+      // self-upgrade to paid tiers. Higher tiers must be assigned out-of-band.
       await register({ ...validPayload, licenseType: 'PRO' });
-      expect(LicenseManager.getFeaturesForLicense).toHaveBeenCalledWith('PRO');
+      expect(LicenseManager.getFeaturesForLicense).toHaveBeenCalledWith('FREE');
+      expect(LicenseManager.getFeaturesForLicense).not.toHaveBeenCalledWith('PRO');
     });
   });
 

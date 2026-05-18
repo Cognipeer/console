@@ -1,10 +1,10 @@
 import { NextResponse, type NextRequest } from '@/server/api/http';
 import { getDatabase } from '@/lib/database';
-import crypto from 'crypto';
 import { ProjectContextError, requireProjectContext } from '@/lib/services/projects/projectContext';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { checkResourceQuota } from '@/lib/quota/quotaGuard';
 import { createLogger } from '@/lib/core/logger';
+import { createApiTokenSecret, getApiTokenPrefix, hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
 
 const logger = createLogger('tokens');
 
@@ -130,7 +130,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Generate a secure random token
-    const token = `cpeer_${crypto.randomBytes(32).toString('hex')}`;
+    const token = createApiTokenSecret();
 
     // Create token in database
     const apiToken = await db.createApiToken({
@@ -138,7 +138,8 @@ export async function POST(request: NextRequest) {
       tenantId,
       projectId,
       label: body.label,
-      token,
+      tokenHash: hashApiToken(token),
+      tokenPrefix: getApiTokenPrefix(token),
     });
 
     // Return the full token only once

@@ -2,28 +2,27 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import {
-  ActionIcon,
-  Badge,
-  Button,
-  Center,
-  Group,
-  Loader,
-  Paper,
-  Progress,
-  Stack,
-  Table,
-  Text,
-  Tooltip,
-  ThemeIcon,
-  SimpleGrid,
-  Box,
-} from '@mantine/core';
-import PageHeader from '@/components/layout/PageHeader';
-import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
+import { Button, Group, Modal, Text } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { IconPlus, IconRefresh, IconTrash, IconDatabase, IconServer, IconChartDots3, IconArrowRight, IconSparkles, IconChartBar, IconGitBranch, IconDatabaseExport } from '@tabler/icons-react';
-import type { VectorIndexRecord, VectorProviderView } from '@/lib/services/vector';
+import {
+  IconChartDots3,
+  IconDatabase,
+  IconDatabaseExport,
+  IconEye,
+  IconPlus,
+  IconServer,
+  IconSparkles,
+  IconTrash,
+} from '@tabler/icons-react';
+import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
+import StatTile from '@/components/common/ui/StatTile';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
+import StatusBadge from '@/components/common/ui/StatusBadge';
+import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
+import type {
+  VectorIndexRecord,
+  VectorProviderView,
+} from '@/lib/services/vector';
 import CreateVectorIndexModal from '@/components/vector/CreateVectorIndexModal';
 import {
   buildDashboardDateSearchParams,
@@ -44,15 +43,6 @@ interface VectorDashboardData {
   recentIndexes: Array<{ key: string; name: string; providerKey: string; dimension: number; metric: string; createdAt?: string }>;
 }
 
-function statusColor(status: string): string {
-  switch (status) {
-    case 'active': return 'teal';
-    case 'disabled': return 'gray';
-    case 'errored': return 'red';
-    default: return 'gray';
-  }
-}
-
 interface VectorIndexRow {
   provider: VectorProviderView;
   index: VectorIndexRecord;
@@ -65,42 +55,50 @@ function formatDate(value?: string | Date) {
   return date.toLocaleString();
 }
 
-
 export default function VectorIndexPage() {
   const router = useRouter();
   const [providers, setProviders] = useState<VectorProviderView[]>([]);
-  const [indexesByProvider, setIndexesByProvider] = useState<Record<string, VectorIndexRecord[]>>({});
+  const [indexesByProvider, setIndexesByProvider] = useState<
+    Record<string, VectorIndexRecord[]>
+  >({});
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [createModalOpen, setCreateModalOpen] = useState(false);
-  const [dashboardData, setDashboardData] = useState<VectorDashboardData | null>(null);
-  const [dashboardLoading, setDashboardLoading] = useState(true);
+  const [dashboardData, setDashboardData] = useState<VectorDashboardData | null>(
+    null,
+  );
   const [dateFilter, setDateFilter] = useState(defaultDashboardDateFilter);
+  const [deleteTarget, setDeleteTarget] = useState<VectorIndexRow | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [query, setQuery] = useState('');
+  const [providerFilter, setProviderFilter] = useState('all');
 
   const loadDashboard = useCallback(async () => {
-    setDashboardLoading(true);
     try {
       const params = buildDashboardDateSearchParams(dateFilter);
-      const res = await fetch(`/api/vector/dashboard?${params.toString()}`, { cache: 'no-store' });
+      const res = await fetch(`/api/vector/dashboard?${params.toString()}`, {
+        cache: 'no-store',
+      });
       if (res.ok) {
-        setDashboardData(await res.json() as VectorDashboardData);
+        setDashboardData((await res.json()) as VectorDashboardData);
       }
     } catch (err) {
       console.error('Failed to load vector dashboard', err);
-    } finally {
-      setDashboardLoading(false);
     }
   }, [dateFilter]);
 
   const loadProvidersAndIndexes = useCallback(async () => {
     setRefreshing(true);
     try {
-      const providerResponse = await fetch('/api/vector/providers?includeIndexes=true', { cache: 'no-store' });
+      const providerResponse = await fetch(
+        '/api/vector/providers?includeIndexes=true',
+        { cache: 'no-store' },
+      );
       if (!providerResponse.ok) {
         throw new Error('Failed to load vector providers');
       }
       const providerData = await providerResponse.json();
-  const fetchedProviders: VectorProviderView[] = providerData.providers ?? [];
+      const fetchedProviders: VectorProviderView[] = providerData.providers ?? [];
       setProviders(fetchedProviders);
 
       const nextIndexes: Record<string, VectorIndexRecord[]> = {};
@@ -109,13 +107,9 @@ export default function VectorIndexPage() {
       ).forEach(([key, value]) => {
         nextIndexes[key] = [...value];
       });
-
       fetchedProviders.forEach((provider) => {
-        if (!nextIndexes[provider.key]) {
-          nextIndexes[provider.key] = [];
-        }
+        if (!nextIndexes[provider.key]) nextIndexes[provider.key] = [];
       });
-
       setIndexesByProvider(nextIndexes);
     } catch (error) {
       console.error(error);
@@ -136,431 +130,274 @@ export default function VectorIndexPage() {
   }, [loadProvidersAndIndexes, loadDashboard]);
 
   const rows = useMemo<VectorIndexRow[]>(() => {
-    return providers.flatMap((provider) => {
-      const providerIndexes = indexesByProvider[provider.key] ?? [];
-      return providerIndexes.map((index) => ({ provider, index }));
-    });
+    return providers.flatMap((provider) =>
+      (indexesByProvider[provider.key] ?? []).map((index) => ({
+        provider,
+        index,
+      })),
+    );
   }, [providers, indexesByProvider]);
 
-  const handleDeleteIndex = async (provider: VectorProviderView, index: VectorIndexRecord) => {
-    const confirmed = window.confirm(`Delete index "${index.name}"? This cannot be undone.`);
-    if (!confirmed) return;
+  const filtered = useMemo(() => {
+    return rows.filter((r) => {
+      if (providerFilter !== 'all' && r.provider.key !== providerFilter)
+        return false;
+      if (query) {
+        const q = query.toLowerCase();
+        if (
+          !r.index.name.toLowerCase().includes(q) &&
+          !r.index.key.toLowerCase().includes(q) &&
+          !r.provider.label.toLowerCase().includes(q)
+        ) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }, [rows, query, providerFilter]);
 
+  const confirmDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
     try {
       const response = await fetch(
-  `/api/vector/indexes/${encodeURIComponent(index.key)}?providerKey=${encodeURIComponent(provider.key)}`,
+        `/api/vector/indexes/${encodeURIComponent(deleteTarget.index.key)}?providerKey=${encodeURIComponent(deleteTarget.provider.key)}`,
         { method: 'DELETE' },
       );
       if (!response.ok) {
         const error = await response.json().catch(() => ({ error: 'Unknown error' }));
         throw new Error(error.error ?? 'Failed to delete index');
       }
-
       notifications.show({
         color: 'green',
         title: 'Vector index deleted',
-        message: `${index.name} has been removed.`,
+        message: `${deleteTarget.index.name} has been removed.`,
       });
+      setDeleteTarget(null);
       await loadProvidersAndIndexes();
     } catch (error) {
-      console.error(error);
       notifications.show({
         color: 'red',
         title: 'Unable to delete index',
         message: error instanceof Error ? error.message : 'Unexpected error',
       });
+    } finally {
+      setDeleting(false);
     }
   };
 
-  const handleIndexCreated = ({ index, provider }: { index: VectorIndexRecord; provider: VectorProviderView }) => {
+  const handleIndexCreated = ({
+    index,
+    provider,
+  }: {
+    index: VectorIndexRecord;
+    provider: VectorProviderView;
+  }) => {
     setIndexesByProvider((current) => ({
       ...current,
       [provider.key]: [...(current[provider.key] ?? []), index],
     }));
-    if (!providers.find((item) => item.key === provider.key)) {
+    if (!providers.find((p) => p.key === provider.key)) {
       setProviders((current) => [...current, provider]);
     }
     setCreateModalOpen(false);
-  router.push(`/dashboard/vector/${provider.key}/${index.key}`);
+    router.push(`/dashboard/vector/${provider.key}/${index.key}`);
   };
 
+  const columns: DataGridColumn<VectorIndexRow>[] = [
+    {
+      key: 'name',
+      label: 'Index',
+      render: ({ index }) => (
+        <div className="ds-col" style={{ gap: 2, whiteSpace: 'nowrap' }}>
+          <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--ds-text)' }}>
+            {index.name}
+          </span>
+          <span className="ds-faint ds-mono" style={{ fontSize: 11 }}>
+            {index.key}
+          </span>
+        </div>
+      ),
+    },
+    {
+      key: 'provider',
+      label: 'Provider',
+      render: ({ provider }) => (
+        <div className="ds-row ds-gap-xs">
+          <StatusBadge
+            status={provider.status === 'active' ? 'active' : 'paused'}
+            label={provider.label}
+          />
+        </div>
+      ),
+    },
+    {
+      key: 'dimension',
+      label: 'Dimension',
+      align: 'right',
+      render: ({ index }) => (
+        <span className="ds-mono" style={{ fontSize: 12.5 }}>
+          {index.dimension}
+        </span>
+      ),
+    },
+    {
+      key: 'metric',
+      label: 'Metric',
+      render: ({ index }) => (
+        <span className="ds-badge">{index.metric}</span>
+      ),
+    },
+    {
+      key: 'created',
+      label: 'Created',
+      render: ({ index }) => (
+        <span className="ds-faint" style={{ fontSize: 12.5 }}>
+          {formatDate(index.createdAt)}
+        </span>
+      ),
+    },
+  ];
+
   return (
-    <Stack gap="md">
-      {/* Header */}
+    <PageContainer>
       <PageHeader
-        icon={<IconDatabase size={18} />}
+        eyebrow="Data · Vector"
         title="Knowledge Index"
         subtitle="Manage knowledge indexes across providers, inspect recent items, and launch queries."
         actions={
           <>
             <DashboardDateFilter value={dateFilter} onChange={setDateFilter} />
             <Button
-              variant="light"
-              size="xs"
-              leftSection={refreshing ? <Loader size={12} /> : <IconRefresh size={14} />}
-              onClick={() => void loadProvidersAndIndexes()}
-              disabled={refreshing}
-            >
-              Refresh
-            </Button>
-            <Button
-              variant="light"
-              size="xs"
-              leftSection={<IconDatabaseExport size={14} />}
+              variant="default"
+              size="sm"
+              leftSection={<IconDatabaseExport size={14} stroke={1.7} />}
               onClick={() => router.push('/dashboard/vector/migrations')}
             >
               Migrations
             </Button>
             <Button
-              size="xs"
-              leftSection={<IconPlus size={14} />}
+              color="teal"
+              size="sm"
+              leftSection={<IconPlus size={14} stroke={1.7} />}
               onClick={() => setCreateModalOpen(true)}
             >
-              Create Index
+              Create index
             </Button>
           </>
         }
       />
 
-      {/* Stats Cards */}
-      <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>
-        <Paper withBorder radius="lg" p="lg">
-          <Group justify="space-between">
-            <Stack gap={4}>
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
-                Total Indexes
-              </Text>
-              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }}>
-                {dashboardData?.overview.totalIndexes ?? rows.length}
-              </Text>
-            </Stack>
-            <ThemeIcon size={48} radius="xl" variant="light" color="teal">
-              <IconDatabase size={24} />
-            </ThemeIcon>
-          </Group>
-        </Paper>
-        <Paper withBorder radius="lg" p="lg">
-          <Group justify="space-between">
-            <Stack gap={4}>
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
-                Providers
-              </Text>
-              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="teal">
-                {dashboardData?.overview.totalProviders ?? providers.length}
-              </Text>
-            </Stack>
-            <ThemeIcon size={48} radius="xl" variant="light" color="teal">
-              <IconServer size={24} />
-            </ThemeIcon>
-          </Group>
-        </Paper>
-        <Paper withBorder radius="lg" p="lg">
-          <Group justify="space-between">
-            <Stack gap={4}>
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
-                Active Providers
-              </Text>
-              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c="green">
-                {dashboardData?.overview.activeProviders ?? providers.filter((p) => p.status === 'active').length}
-              </Text>
-            </Stack>
-            <ThemeIcon size={48} radius="xl" variant="light" color="green">
-              <IconSparkles size={24} />
-            </ThemeIcon>
-          </Group>
-        </Paper>
-        <Paper withBorder radius="lg" p="lg">
-          <Group justify="space-between">
-            <Stack gap={4}>
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
-                Errored Providers
-              </Text>
-              <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }} c={(dashboardData?.overview.erroredProviders ?? 0) > 0 ? 'red' : 'teal'}>
-                {dashboardData?.overview.erroredProviders ?? providers.filter((p) => p.status === 'errored').length}
-              </Text>
-            </Stack>
-            <ThemeIcon size={48} radius="xl" variant="light" color={(dashboardData?.overview.erroredProviders ?? 0) > 0 ? 'red' : 'teal'}>
-              <IconChartDots3 size={24} />
-            </ThemeIcon>
-          </Group>
-        </Paper>
-      </SimpleGrid>
+      <div className="ds-stat-grid" style={{ marginBottom: 16 }}>
+        <StatTile
+          label="Total indexes"
+          icon={<IconDatabase size={14} stroke={1.7} />}
+          value={dashboardData?.overview.totalIndexes ?? rows.length}
+        />
+        <StatTile
+          label="Providers"
+          icon={<IconServer size={14} stroke={1.7} />}
+          value={dashboardData?.overview.totalProviders ?? providers.length}
+        />
+        <StatTile
+          label="Active providers"
+          icon={<IconSparkles size={14} stroke={1.7} />}
+          value={
+            dashboardData?.overview.activeProviders ??
+            providers.filter((p) => p.status === 'active').length
+          }
+        />
+        <StatTile
+          label="Errored providers"
+          icon={<IconChartDots3 size={14} stroke={1.7} />}
+          value={
+            dashboardData?.overview.erroredProviders ??
+            providers.filter((p) => p.status === 'errored').length
+          }
+        />
+      </div>
 
-      {/* Vector Analytics Dashboard */}
-      <Paper p="lg" radius="lg" withBorder>
-        <Group justify="space-between" mb="lg">
-          <Group gap="sm">
-            <ThemeIcon size={32} radius="md" variant="light" color="teal">
-              <IconChartBar size={16} />
-            </ThemeIcon>
-            <div>
-              <Text fw={600} size="lg">Vector Analytics</Text>
-              <Text size="sm" c="dimmed">Provider health and index distribution</Text>
-            </div>
-          </Group>
-          <Button variant="subtle" size="xs" leftSection={<IconRefresh size={14} />}
-            loading={dashboardLoading} onClick={() => void loadDashboard()}>
-            Refresh
+      <DataGrid<VectorIndexRow>
+        records={filtered}
+        loading={loading}
+        rowKey={(r) => `${r.provider.key}:${r.index.key}`}
+        onRowClick={(r) =>
+          router.push(`/dashboard/vector/${r.provider.key}/${r.index.key}`)
+        }
+        columns={columns}
+        search={{
+          value: query,
+          onChange: setQuery,
+          placeholder: 'Filter by index, key, or provider…',
+        }}
+        filters={[
+          {
+            value: providerFilter,
+            onChange: setProviderFilter,
+            ariaLabel: 'Filter by provider',
+            width: 180,
+            options: [
+              { value: 'all', label: 'All providers' },
+              ...providers.map((p) => ({ value: p.key, label: p.label })),
+            ],
+          },
+        ]}
+        onRefresh={loadProvidersAndIndexes}
+        refreshing={refreshing}
+        empty={{
+          icon: <IconDatabase size={26} stroke={1.7} />,
+          title:
+            providers.length === 0 ? 'No vector providers' : 'No indexes yet',
+          description:
+            providers.length === 0
+              ? 'Configure a vector provider first to start creating indexes.'
+              : 'Create your first vector index to store and query embeddings.',
+          primaryAction: {
+            label: 'Create index',
+            icon: <IconPlus size={14} stroke={1.7} />,
+            onClick: () => setCreateModalOpen(true),
+          },
+        }}
+        footerLeft={`Showing ${filtered.length} of ${rows.length} indexes`}
+        rowActions={(r) => [
+          {
+            id: 'open',
+            label: 'View details',
+            icon: <IconEye size={14} />,
+            onClick: () =>
+              router.push(`/dashboard/vector/${r.provider.key}/${r.index.key}`),
+          },
+          { divider: true },
+          {
+            id: 'delete',
+            label: 'Delete index',
+            icon: <IconTrash size={14} />,
+            color: 'red',
+            onClick: () => setDeleteTarget(r),
+          },
+        ]}
+      />
+
+      <Modal
+        opened={deleteTarget !== null}
+        onClose={() => setDeleteTarget(null)}
+        title="Delete vector index"
+        centered
+        size="sm"
+      >
+        <Text size="sm" mb="lg">
+          Delete index <strong>{deleteTarget?.index.name}</strong>? This cannot be
+          undone.
+        </Text>
+        <Group justify="flex-end">
+          <Button variant="default" onClick={() => setDeleteTarget(null)}>
+            Cancel
+          </Button>
+          <Button color="red" loading={deleting} onClick={confirmDelete}>
+            Delete
           </Button>
         </Group>
-
-        {dashboardLoading && !dashboardData ? (
-          <Center py="xl"><Loader size="sm" color="teal" /></Center>
-        ) : (
-          <SimpleGrid cols={{ base: 1, md: 3 }} spacing="md">
-            {/* Provider Breakdown */}
-            <Paper withBorder p="md" radius="md">
-              <Group gap="sm" mb="md">
-                <ThemeIcon size={28} radius="md" variant="light" color="teal">
-                  <IconServer size={14} />
-                </ThemeIcon>
-                <Text fw={600} size="sm">Provider Breakdown</Text>
-              </Group>
-              <Stack gap={8}>
-                {(dashboardData?.providerBreakdown ?? []).length === 0 ? (
-                  <Text size="sm" c="dimmed">No providers configured</Text>
-                ) : (
-                  (dashboardData?.providerBreakdown ?? []).map((item) => {
-                    const maxCount = Math.max(...(dashboardData?.providerBreakdown ?? []).map((p) => p.indexCount), 1);
-                    return (
-                      <Stack gap={4} key={item.key}>
-                        <Group justify="space-between">
-                          <Group gap={6}>
-                            <Badge size="xs" variant="light" radius="xl"
-                              color={statusColor(item.status)}>
-                              {item.status.toUpperCase()}
-                            </Badge>
-                            <Text size="xs" fw={500} lineClamp={1}>{item.label}</Text>
-                          </Group>
-                          <Badge size="xs" variant="light" color="teal">{item.indexCount} idx</Badge>
-                        </Group>
-                        <Progress value={(item.indexCount / maxCount) * 100} size="xs" color="teal" radius="xl" />
-                      </Stack>
-                    );
-                  })
-                )}
-              </Stack>
-            </Paper>
-
-            {/* Dimension Distribution */}
-            <Paper withBorder p="md" radius="md">
-              <Group gap="sm" mb="md">
-                <ThemeIcon size={28} radius="md" variant="light" color="violet">
-                  <IconChartDots3 size={14} />
-                </ThemeIcon>
-                <Text fw={600} size="sm">Dimension Distribution</Text>
-              </Group>
-              <Stack gap={8}>
-                {(dashboardData?.dimensionDistribution ?? []).length === 0 ? (
-                  <Text size="sm" c="dimmed">No indexes yet</Text>
-                ) : (
-                  (dashboardData?.dimensionDistribution ?? []).map((item) => (
-                    <Group key={item.dimension} justify="space-between">
-                      <Text size="sm" ff="monospace">{item.dimension}d</Text>
-                      <Group gap={6}>
-                        <Badge size="sm" variant="light" color="violet">{item.count}</Badge>
-                        <Text size="xs" c="dimmed">index{item.count !== 1 ? 'es' : ''}</Text>
-                      </Group>
-                    </Group>
-                  ))
-                )}
-              </Stack>
-            </Paper>
-
-            {/* Metric Distribution + Recent Indexes */}
-            <Stack gap="md">
-              <Paper withBorder p="md" radius="md">
-                <Group gap="sm" mb="md">
-                  <ThemeIcon size={28} radius="md" variant="light" color="orange">
-                    <IconGitBranch size={14} />
-                  </ThemeIcon>
-                  <Text fw={600} size="sm">Similarity Metrics</Text>
-                </Group>
-                <Stack gap={8}>
-                  {(dashboardData?.metricDistribution ?? []).length === 0 ? (
-                    <Text size="sm" c="dimmed">No data</Text>
-                  ) : (
-                    (dashboardData?.metricDistribution ?? []).map((item) => (
-                      <Group key={item.metric} justify="space-between">
-                        <Badge size="sm" variant="light" color="orange">{item.metric}</Badge>
-                        <Text size="sm" fw={500}>{item.count}</Text>
-                      </Group>
-                    ))
-                  )}
-                </Stack>
-              </Paper>
-
-              <Paper withBorder p="md" radius="md">
-                <Group gap="sm" mb="md">
-                  <ThemeIcon size={28} radius="md" variant="light" color="cyan">
-                    <IconSparkles size={14} />
-                  </ThemeIcon>
-                  <Text fw={600} size="sm">Recently Created</Text>
-                </Group>
-                <Stack gap={6}>
-                  {(dashboardData?.recentIndexes ?? []).length === 0 ? (
-                    <Text size="sm" c="dimmed">No indexes yet</Text>
-                  ) : (
-                    (dashboardData?.recentIndexes ?? []).slice(0, 4).map((idx) => (
-                      <Group key={idx.key} justify="space-between">
-                        <Text size="xs" fw={500} lineClamp={1}>{idx.name}</Text>
-                        <Badge size="xs" variant="dot" color="teal">{idx.dimension}d</Badge>
-                      </Group>
-                    ))
-                  )}
-                </Stack>
-              </Paper>
-            </Stack>
-          </SimpleGrid>
-        )}
-      </Paper>
-
-      {/* Indexes Table */}
-      <Paper p="lg" radius="lg" withBorder>
-        <Group justify="space-between" mb="md">
-          <div>
-            <Text fw={600} size="lg">All Indexes</Text>
-            <Text size="sm" c="dimmed">Click on any row to view details and run queries</Text>
-          </div>
-        </Group>
-        
-        {loading ? (
-          <Center py="xl">
-            <Loader size="md" color="violet" />
-          </Center>
-        ) : rows.length === 0 ? (
-          <Center py="xl">
-            <Stack gap="md" align="center">
-              <ThemeIcon size={80} radius="xl" variant="light" color="teal">
-                <IconDatabase size={40} />
-              </ThemeIcon>
-              <Stack gap={4} align="center">
-                <Text size="lg" fw={500}>
-                  {providers.length === 0 ? 'No Vector Providers' : 'No Indexes Yet'}
-                </Text>
-                <Text size="sm" c="dimmed" ta="center" maw={400}>
-                  {providers.length === 0
-                    ? 'Configure a vector provider first to start creating indexes.'
-                    : 'Create your first vector index to store and query embeddings.'}
-                </Text>
-              </Stack>
-              <Button 
-                leftSection={<IconPlus size={16} />} 
-                onClick={() => setCreateModalOpen(true)}
-                variant="gradient"
-                gradient={{ from: 'teal', to: 'cyan', deg: 90 }}>
-                Create Index
-              </Button>
-            </Stack>
-          </Center>
-        ) : (
-          <Box style={{ overflow: 'hidden', borderRadius: 'var(--mantine-radius-md)' }}>
-            <Table verticalSpacing="md" horizontalSpacing="md" highlightOnHover>
-              <Table.Thead style={{ backgroundColor: 'var(--mantine-color-gray-0)' }}>
-                <Table.Tr>
-                  <Table.Th style={{ fontWeight: 600 }}>Index</Table.Th>
-                  <Table.Th style={{ fontWeight: 600 }}>Provider</Table.Th>
-                  <Table.Th style={{ fontWeight: 600, textAlign: 'center' }}>Dimension</Table.Th>
-                  <Table.Th style={{ fontWeight: 600 }}>Metric</Table.Th>
-                  <Table.Th style={{ fontWeight: 600 }}>Created</Table.Th>
-                  <Table.Th style={{ fontWeight: 600, textAlign: 'center' }}>Actions</Table.Th>
-                </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {rows.map(({ provider, index }) => {
-                  const navigateToDetail = () =>
-                    router.push(`/dashboard/vector/${provider.key}/${index.key}`);
-
-                  return (
-                    <Table.Tr
-                      key={`${provider.key}-${index.key}`}
-                      onClick={navigateToDetail}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter' || event.key === ' ') {
-                          event.preventDefault();
-                          navigateToDetail();
-                        }
-                      }}
-                      tabIndex={0}
-                      style={{ cursor: 'pointer', transition: 'background-color 0.15s ease' }}
-                    >
-                      <Table.Td>
-                        <Group gap="sm">
-                          <ThemeIcon size={40} radius="md" variant="light" color="teal">
-                            <IconDatabase size={20} />
-                          </ThemeIcon>
-                          <Stack gap={2}>
-                            <Text fw={600} size="sm">{index.name}</Text>
-                            <Text size="xs" c="dimmed" ff="monospace">
-                              {index.key}
-                            </Text>
-                          </Stack>
-                        </Group>
-                      </Table.Td>
-                      <Table.Td>
-                        <Group gap={6}>
-                          <Badge 
-                            variant="light" 
-                            color={provider.status === 'active' ? 'teal' : 'yellow'} 
-                            size="sm"
-                            leftSection={<IconServer size={10} />}>
-                            {provider.label}
-                          </Badge>
-                        </Group>
-                      </Table.Td>
-                      <Table.Td>
-                        <Center>
-                          <Badge variant="filled" color="teal" size="md" radius="sm">
-                            {index.dimension}
-                          </Badge>
-                        </Center>
-                      </Table.Td>
-                      <Table.Td>
-                        <Badge variant="light" color="gray" size="sm">
-                          {index.metric}
-                        </Badge>
-                      </Table.Td>
-                      <Table.Td>
-                        <Text size="xs" c="dimmed">{formatDate(index.createdAt)}</Text>
-                      </Table.Td>
-                      <Table.Td>
-                        <Group gap="xs" justify="center">
-                          <Tooltip label="View details" withArrow>
-                            <ActionIcon
-                              variant="light"
-                              color="violet"
-                              radius="md"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                navigateToDetail();
-                              }}
-                            >
-                              <IconArrowRight size={16} />
-                            </ActionIcon>
-                          </Tooltip>
-                          <Tooltip label="Delete index" withArrow>
-                            <ActionIcon
-                              variant="light"
-                              color="red"
-                              radius="md"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                void handleDeleteIndex(provider, index);
-                              }}
-                            >
-                              <IconTrash size={16} />
-                            </ActionIcon>
-                          </Tooltip>
-                        </Group>
-                      </Table.Td>
-                    </Table.Tr>
-                  );
-                })}
-              </Table.Tbody>
-            </Table>
-          </Box>
-        )}
-      </Paper>
+      </Modal>
 
       <CreateVectorIndexModal
         opened={createModalOpen}
@@ -568,6 +405,6 @@ export default function VectorIndexPage() {
         providers={providers}
         onCreated={handleIndexCreated}
       />
-    </Stack>
+    </PageContainer>
   );
 }

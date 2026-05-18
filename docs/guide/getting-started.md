@@ -108,11 +108,43 @@ docker run -p 3000:3000 --env-file .env.local cognipeer-console
 
 ## First Steps
 
-1. **Register** — Navigate to `/register` to create your company and admin account
-2. **Login** — Go to `/login` with your company slug, email, and password
-3. **Dashboard** — Access the management dashboard at `/dashboard`
-4. **Create an API Token** — Go to Settings → API Tokens
-5. **Make your first request**:
+The first time you open the console after `npm run dev`, you'll move through three screens before you can call the API.
+
+### 1. Create your workspace
+
+Open `http://localhost:3000/register` — the registration screen captures the four things a tenant needs: human identity, sign-in email, the company name (which becomes your tenant slug), and a password.
+
+![Register screen](/screenshots/getting-started/02-register.png)
+
+The company name is normalised into a URL-safe slug; you'll see it later in tenant-scoped routes and as the SQLite database file under `data/sqlite_new/tenant_<slug>.db`.
+
+### 2. Sign in
+
+Subsequent sessions land on `/login` and only need email + password — the tenant is resolved from the account.
+
+![Login screen](/screenshots/getting-started/01-login.png)
+
+JWT tokens are issued as a 7-day `HttpOnly` cookie so the browser never has direct access to them. The token carries the tenant ID, project list, role, and the feature flags allowed by your license.
+
+### 3. The first dashboard
+
+After login you land on the overview. This is the page you'll come back to most often — it shows recent API traffic, active sessions, knowledge index count, and Model Hub status, plus a pinned-services grid for quick navigation.
+
+![Dashboard overview after login](/screenshots/getting-started/03-dashboard-overview.png)
+
+The header has three controls worth knowing about up front:
+
+- **Services launcher** (the grid icon next to the logo) opens the full app switcher with every module grouped by category. Open it once when you're new to the console and pin the services you use most.
+- **Project switcher** (right of centre) toggles between projects inside the same tenant. Most resources — models, prompts, RAG indices, API tokens — are scoped to the active project.
+- **Account menu** (top right) is where you flip the theme, sign out, and review license status.
+
+Press **Cmd+K** (or **Ctrl+K** on Windows/Linux) from anywhere to open the [Command Palette](/guide/command-palette) — searches across services, models, providers, agents, prompts, tools, MCP servers, vector indexes, memory stores, files, guardrails, PII policies, browsers, and more.
+
+![Services launcher](/screenshots/getting-started/04-services-launcher.png)
+
+### 4. Make your first API request
+
+To actually hit `/api/client/v1/chat/completions` you need two things: a model deployed in [Model Hub](/guide/model-hub) and an API token from **Settings → API Tokens**. Once you have both:
 
 ```bash
 curl http://localhost:3000/api/client/v1/chat/completions \
@@ -123,6 +155,8 @@ curl http://localhost:3000/api/client/v1/chat/completions \
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
 ```
+
+The `model` field is the **Key** column from Model Hub — not the upstream provider's model ID. The runtime resolves the key against your project, applies guardrails and quota, then forwards to the provider.
 
 ## Project Structure
 

@@ -348,47 +348,109 @@ describe('AgentTracingService.getDashboardOverview', () => {
   });
 
   it('aggregates token usage per agent for dashboard reporting', async () => {
-    db.listAgentTracingSessions.mockImplementation(async (filters?: { limit?: number }) => {
-      const sessions = [
-        makeSession({
-          agentName: 'alpha-agent',
-          startedAt: new Date('2025-01-10T10:00:00Z'),
-          status: 'success',
-          totalEvents: 4,
-          totalInputTokens: 100,
-          totalOutputTokens: 50,
-          totalCachedInputTokens: 25,
-          durationMs: 1_000,
-        }),
-        makeSession({
-          sessionId: 'session-2',
-          agentName: 'alpha-agent',
-          startedAt: new Date('2025-01-09T10:00:00Z'),
-          status: 'error',
-          totalEvents: 2,
-          totalInputTokens: 20,
-          totalOutputTokens: 30,
-          totalCachedInputTokens: 5,
-          durationMs: 500,
-        }),
-        makeSession({
-          sessionId: 'session-3',
-          agentName: 'beta-agent',
-          startedAt: new Date('2025-01-11T10:00:00Z'),
-          status: 'success',
+    db.aggregateAgentTracingDashboard.mockResolvedValue({
+      recentSessions: [],
+      recentAgents: [
+        {
+          name: 'beta-agent',
+          label: 'beta-agent',
+          latestSessionAt: new Date('2025-01-11T10:00:00Z'),
+          latestStatus: 'success',
+          sessionsCount: 1,
           totalEvents: 1,
           totalInputTokens: 10,
           totalOutputTokens: 5,
           totalCachedInputTokens: 0,
-          durationMs: 200,
-        }),
-      ];
-
-      if (filters?.limit === 10) {
-        return { sessions: sessions.slice(0, 3), total: 3 };
-      }
-
-      return { sessions, total: sessions.length };
+          totalTokens: 15,
+          averageInputTokensPerSession: 10,
+          averageOutputTokensPerSession: 5,
+          averageCachedInputTokensPerSession: 0,
+          averageTokensPerSession: 15,
+          averageDurationMs: 200,
+        },
+        {
+          name: 'alpha-agent',
+          label: 'alpha-agent',
+          latestSessionAt: new Date('2025-01-10T10:00:00Z'),
+          latestStatus: 'success',
+          sessionsCount: 2,
+          totalEvents: 6,
+          totalInputTokens: 120,
+          totalOutputTokens: 80,
+          totalCachedInputTokens: 30,
+          totalTokens: 200,
+          averageInputTokensPerSession: 60,
+          averageOutputTokensPerSession: 40,
+          averageCachedInputTokensPerSession: 15,
+          averageTokensPerSession: 100,
+          averageDurationMs: 750,
+        },
+      ],
+      recentAgentsTotal: 2,
+      analytics: {
+        totals: {
+          sessionsCount: 3,
+          totalEvents: 7,
+          totalInputTokens: 130,
+          totalOutputTokens: 85,
+          totalCachedInputTokens: 30,
+          totalTokens: 215,
+          totalDurationMs: 1700,
+          averageInputTokensPerSession: 43,
+          averageOutputTokensPerSession: 28,
+          averageCachedInputTokensPerSession: 10,
+          averageTokensPerSession: 72,
+          averageDurationMs: 567,
+        },
+        tools: {
+          totals: {
+            totalCalls: 0,
+            errorCalls: 0,
+            successCalls: 0,
+            errorRate: 0,
+          },
+          items: [],
+        },
+        statuses: [],
+        models: [],
+        agents: [
+          {
+            name: 'alpha-agent',
+            label: 'alpha-agent',
+            latestSessionAt: new Date('2025-01-10T10:00:00Z'),
+            latestStatus: 'success',
+            sessionsCount: 2,
+            totalEvents: 6,
+            totalInputTokens: 120,
+            totalOutputTokens: 80,
+            totalCachedInputTokens: 30,
+            totalTokens: 200,
+            averageInputTokensPerSession: 60,
+            averageOutputTokensPerSession: 40,
+            averageCachedInputTokensPerSession: 15,
+            averageTokensPerSession: 100,
+            averageDurationMs: 750,
+          },
+          {
+            name: 'beta-agent',
+            label: 'beta-agent',
+            latestSessionAt: new Date('2025-01-11T10:00:00Z'),
+            latestStatus: 'success',
+            sessionsCount: 1,
+            totalEvents: 1,
+            totalInputTokens: 10,
+            totalOutputTokens: 5,
+            totalCachedInputTokens: 0,
+            totalTokens: 15,
+            averageInputTokensPerSession: 10,
+            averageOutputTokensPerSession: 5,
+            averageCachedInputTokensPerSession: 0,
+            averageTokensPerSession: 15,
+            averageDurationMs: 200,
+          },
+        ],
+        daily: [],
+      },
     });
 
     const result = await AgentTracingService.getDashboardOverview(TENANT_DB, PROJECT_ID);
@@ -411,32 +473,17 @@ describe('AgentTracingService.getDashboardOverview', () => {
     expect(result.analytics.agents[1].name).toBe('beta-agent');
   });
 
-  it('passes from/to filters directly to session queries', async () => {
-    db.listAgentTracingSessions.mockResolvedValue({ sessions: [], total: 0 });
-
+  it('passes from/to filters directly to the dashboard aggregate query', async () => {
     await AgentTracingService.getDashboardOverview(TENANT_DB, PROJECT_ID, {
       from: '2025-01-01T00:00:00.000Z',
       to: '2025-01-31T23:59:59.999Z',
     });
 
-    expect(db.listAgentTracingSessions).toHaveBeenNthCalledWith(
-      1,
-      expect.objectContaining({
+    expect(db.aggregateAgentTracingDashboard).toHaveBeenCalledWith(
+      {
         from: '2025-01-01T00:00:00.000Z',
-        includeTotal: false,
-        limit: 10,
         to: '2025-01-31T23:59:59.999Z',
-      }),
-      PROJECT_ID,
-    );
-    expect(db.listAgentTracingSessions).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({
-        from: '2025-01-01T00:00:00.000Z',
-        includeTotal: false,
-        limit: 1000,
-        to: '2025-01-31T23:59:59.999Z',
-      }),
+      },
       PROJECT_ID,
     );
   });

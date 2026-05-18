@@ -7,8 +7,10 @@ import type {
   IAgent,
   IAgentConversation,
   IAgentTracingEvent,
+  IAgentTracingDashboardAggregate,
   IAgentTracingSession,
   IAgentVersion,
+  IAuditLog,
   IAlertEvent,
   IAlertRule,
   IApiToken,
@@ -23,9 +25,12 @@ import type {
   IGuardrail,
   IGuardrailEvalAggregate,
   IGuardrailEvaluationLog,
+  IPiiPolicy,
   IIncident,
   IInferenceServer,
   IInferenceServerMetrics,
+  IJsSandboxExecution,
+  IJsSandboxRuntime,
   IMcpRequestAggregate,
   IMcpRequestLog,
   IMcpServer,
@@ -44,12 +49,24 @@ import type {
   IRagDocument,
   IRagModule,
   IRagQueryLog,
+  IReranker,
+  IRerankerRunLog,
+  RerankerStatus,
   ITenant,
   ITenantUserDirectoryEntry,
   ITool,
   IToolRequestAggregate,
   IToolRequestLog,
   IUser,
+  IUserProject,
+  IGroup,
+  IGroupMember,
+  IGroupProject,
+  IInstanceAssignment,
+  INodeRecord,
+  InstanceEntityType,
+  NodeStatus,
+  ProjectRole,
   IVectorIndexRecord,
   IVectorMigration,
   IVectorMigrationLog,
@@ -57,6 +74,8 @@ import type {
   VectorMigrationLogStatus,
   IncidentSeverity,
   IncidentStatus,
+  JsSandboxExecutionStatus,
+  JsSandboxRuntimeStatus,
   McpServerStatus,
   MemoryItemStatus,
   MemoryScope,
@@ -84,6 +103,10 @@ export interface DatabaseProvider {
 
   // Switch to tenant-specific database
   switchToTenant(tenantDbName: string): Promise<void>;
+  /** Returns the tenant DB currently bound to this request context, or null. */
+  getCurrentTenantDbName(): string | null;
+  /** Throws if the active tenant context does not match the expected tenant. */
+  assertTenantContext(expectedTenantDbName: string): void;
 
   // Cross-tenant user directory (uses main/shared database)
   registerUserInDirectory(entry: ITenantUserDirectoryEntry): Promise<void>;
@@ -99,6 +122,44 @@ export interface DatabaseProvider {
   updateUser(id: string, data: Partial<IUser>): Promise<IUser | null>;
   deleteUser(id: string): Promise<boolean>;
   listUsers(): Promise<IUser[]>;
+
+  // Project membership (UserProject — replaces user.projectIds)
+  findUserProject(userId: string, projectId: string): Promise<IUserProject | null>;
+  listUserProjectsByUser(userId: string): Promise<IUserProject[]>;
+  listUserProjectsByProject(projectId: string): Promise<IUserProject[]>;
+  upsertUserProject(data: Omit<IUserProject, '_id' | 'createdAt' | 'updatedAt'>): Promise<IUserProject>;
+  deleteUserProject(userId: string, projectId: string): Promise<boolean>;
+  deleteUserProjectsByProject(projectId: string): Promise<void>;
+  deleteUserProjectsByUser(userId: string): Promise<void>;
+
+  // Groups / Teams (future — stub, not yet enforced)
+  createGroup(data: Omit<IGroup, '_id' | 'createdAt' | 'updatedAt'>): Promise<IGroup>;
+  findGroupById(id: string): Promise<IGroup | null>;
+  listGroups(tenantId: string): Promise<IGroup[]>;
+  updateGroup(id: string, data: Partial<Pick<IGroup, 'name' | 'description' | 'updatedBy'>>): Promise<IGroup | null>;
+  deleteGroup(id: string): Promise<boolean>;
+  addGroupMember(data: Omit<IGroupMember, '_id' | 'createdAt'>): Promise<IGroupMember>;
+  removeGroupMember(groupId: string, userId: string): Promise<boolean>;
+  listGroupMembers(groupId: string): Promise<IGroupMember[]>;
+  listGroupMembersByUser(userId: string): Promise<IGroupMember[]>;
+  upsertGroupProject(data: Omit<IGroupProject, '_id' | 'createdAt' | 'updatedAt'>): Promise<IGroupProject>;
+  removeGroupProject(groupId: string, projectId: string): Promise<boolean>;
+  listGroupProjectsByProject(projectId: string): Promise<IGroupProject[]>;
+
+  // General audit logs (tenant-specific)
+  createAuditLog(
+    log: Omit<IAuditLog, '_id' | 'createdAt'>,
+  ): Promise<IAuditLog>;
+  listAuditLogs(filters?: {
+    actorUserId?: string;
+    outcome?: IAuditLog['outcome'];
+    service?: string;
+    action?: string;
+    from?: Date;
+    to?: Date;
+    limit?: number;
+    skip?: number;
+  }): Promise<IAuditLog[]>;
 
   // Project operations (tenant-specific)
   createProject(
@@ -136,11 +197,11 @@ export interface DatabaseProvider {
   listApiTokens(userId: string): Promise<IApiToken[]>;
   listTenantApiTokens(tenantId: string): Promise<IApiToken[]>;
   listProjectApiTokens(tenantId: string, projectId: string): Promise<IApiToken[]>;
-  findApiTokenByToken(token: string): Promise<IApiToken | null>;
+  findApiTokenByHash(tokenHash: string): Promise<IApiToken | null>;
   deleteApiToken(id: string, userId: string): Promise<boolean>;
   deleteTenantApiToken(id: string, tenantId: string): Promise<boolean>;
   deleteProjectApiToken(id: string, tenantId: string, projectId: string): Promise<boolean>;
-  updateTokenLastUsed(token: string): Promise<void>;
+  updateTokenLastUsedByHash(tokenHash: string): Promise<void>;
 
   // Agent Tracing Session operations (tenant-specific)
   createAgentTracingSession(
@@ -166,6 +227,10 @@ export interface DatabaseProvider {
     filters?: Record<string, unknown>,
     projectId?: string,
   ): Promise<{ sessions: IAgentTracingSession[]; total: number }>;
+  aggregateAgentTracingDashboard(
+    filters?: { from?: string; to?: string; timezone?: string },
+    projectId?: string,
+  ): Promise<IAgentTracingDashboardAggregate>;
   listAgentTracingThreads(
     filters?: Record<string, unknown>,
     projectId?: string,
@@ -450,6 +515,23 @@ export interface DatabaseProvider {
     options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month' },
   ): Promise<IGuardrailEvalAggregate>;
 
+  // ── PII policy operations (tenant-specific) ──
+  createPiiPolicy(
+    policy: Omit<IPiiPolicy, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IPiiPolicy>;
+  updatePiiPolicy(
+    id: string,
+    data: Partial<Omit<IPiiPolicy, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IPiiPolicy | null>;
+  deletePiiPolicy(id: string): Promise<boolean>;
+  findPiiPolicyById(id: string): Promise<IPiiPolicy | null>;
+  findPiiPolicyByKey(key: string, projectId?: string): Promise<IPiiPolicy | null>;
+  listPiiPolicies(filters?: {
+    projectId?: string;
+    enabled?: boolean;
+    search?: string;
+  }): Promise<IPiiPolicy[]>;
+
   // ── Alert rule operations (tenant-specific) ──
   createAlertRule(
     rule: Omit<IAlertRule, '_id' | 'createdAt' | 'updatedAt'>,
@@ -561,6 +643,31 @@ export interface DatabaseProvider {
     options?: { limit?: number; skip?: number; from?: Date; to?: Date },
   ): Promise<IRagQueryLog[]>;
 
+  // ── Reranker operations (tenant-specific) ──
+  createReranker(
+    reranker: Omit<IReranker, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IReranker>;
+  updateReranker(
+    id: string,
+    data: Partial<Omit<IReranker, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IReranker | null>;
+  deleteReranker(id: string): Promise<boolean>;
+  findRerankerById(id: string): Promise<IReranker | null>;
+  findRerankerByKey(key: string, projectId?: string): Promise<IReranker | null>;
+  listRerankers(filters?: {
+    projectId?: string;
+    status?: RerankerStatus;
+    search?: string;
+  }): Promise<IReranker[]>;
+
+  createRerankerRunLog(
+    log: Omit<IRerankerRunLog, '_id' | 'createdAt'>,
+  ): Promise<IRerankerRunLog>;
+  listRerankerRunLogs(
+    rerankerKey: string,
+    options?: { limit?: number; skip?: number; from?: Date; to?: Date },
+  ): Promise<IRerankerRunLog[]>;
+
   // ── Memory Store operations (tenant-specific) ──
   createMemoryStore(
     store: Omit<IMemoryStore, '_id' | 'createdAt' | 'updatedAt'>,
@@ -662,6 +769,61 @@ export interface DatabaseProvider {
     configKey: string,
     options?: { limit?: number; skip?: number; from?: Date; to?: Date },
   ): Promise<IConfigAuditLog[]>;
+
+  // ── JS Sandbox runtime operations (tenant-specific) ──
+  createJsSandboxRuntime(
+    runtime: Omit<IJsSandboxRuntime, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IJsSandboxRuntime>;
+  updateJsSandboxRuntime(
+    id: string,
+    data: Partial<Omit<IJsSandboxRuntime, '_id' | 'tenantId' | 'key' | 'createdBy' | 'createdAt'>>,
+  ): Promise<IJsSandboxRuntime | null>;
+  deleteJsSandboxRuntime(id: string): Promise<boolean>;
+  findJsSandboxRuntimeById(id: string): Promise<IJsSandboxRuntime | null>;
+  findJsSandboxRuntimeByKey(
+    tenantId: string,
+    key: string,
+    projectId?: string,
+  ): Promise<IJsSandboxRuntime | null>;
+  listJsSandboxRuntimes(
+    tenantId: string,
+    filters?: {
+      projectId?: string;
+      status?: JsSandboxRuntimeStatus | string;
+      search?: string;
+    },
+  ): Promise<IJsSandboxRuntime[]>;
+  countJsSandboxRuntimes(tenantId: string, projectId?: string): Promise<number>;
+
+  // ── JS Sandbox execution logs (tenant-specific) ──
+  createJsSandboxExecution(
+    execution: Omit<IJsSandboxExecution, '_id' | 'createdAt'>,
+  ): Promise<IJsSandboxExecution>;
+  findJsSandboxExecutionById(id: string): Promise<IJsSandboxExecution | null>;
+  listJsSandboxExecutions(
+    tenantId: string,
+    filters?: {
+      projectId?: string;
+      runtimeId?: string;
+      runtimeKey?: string;
+      status?: JsSandboxExecutionStatus | string;
+      from?: Date;
+      to?: Date;
+      limit?: number;
+      skip?: number;
+    },
+  ): Promise<IJsSandboxExecution[]>;
+  countJsSandboxExecutions(
+    tenantId: string,
+    filters?: {
+      projectId?: string;
+      runtimeId?: string;
+      runtimeKey?: string;
+      status?: JsSandboxExecutionStatus | string;
+      from?: Date;
+      to?: Date;
+    },
+  ): Promise<number>;
 
   // ── Tool operations (tenant-specific) ──
   createTool(
@@ -854,5 +1016,32 @@ export interface DatabaseProvider {
     options?: { limit?: number; skip?: number },
   ): Promise<IBrowserSessionEvent[]>;
   countBrowserSessionEvents(sessionId: string): Promise<number>;
-}
 
+  // ── Cluster: nodes (main database) ──
+  upsertNode(
+    record: Omit<INodeRecord, 'lastHeartbeatAt'> & { lastHeartbeatAt?: Date },
+  ): Promise<INodeRecord>;
+  heartbeatNode(name: string, at?: Date): Promise<void>;
+  setNodeStatus(name: string, status: NodeStatus): Promise<void>;
+  findNode(name: string): Promise<INodeRecord | null>;
+  listNodes(filters?: { status?: NodeStatus }): Promise<INodeRecord[]>;
+  markStaleNodesOffline(olderThan: Date): Promise<number>;
+  deleteNode(name: string): Promise<boolean>;
+
+  // ── Cluster: instance assignments (main database) ──
+  setInstanceAssignment(
+    assignment: Omit<IInstanceAssignment, 'updatedAt'> & { updatedAt?: Date },
+  ): Promise<IInstanceAssignment>;
+  findInstanceAssignment(
+    entityType: InstanceEntityType,
+    entityId: string,
+  ): Promise<IInstanceAssignment | null>;
+  listInstanceAssignments(filters?: {
+    entityType?: InstanceEntityType;
+    nodeName?: string;
+  }): Promise<IInstanceAssignment[]>;
+  deleteInstanceAssignment(
+    entityType: InstanceEntityType,
+    entityId: string,
+  ): Promise<boolean>;
+}
