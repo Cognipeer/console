@@ -1,14 +1,14 @@
 # --------------------- deps stage ---------------------
-FROM node:20-alpine@sha256:b88333c42c23fbd91596ebd7fd10de239cedab9617de04142dde7315e3bc0afa AS deps
+FROM node:22-alpine AS deps
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
-
+RUN apk add --no-cache python3 make g++
 COPY package.json package-lock.json* npm-shrinkwrap.json* ./
 
 RUN npm install --no-audit --no-fund
 
 # --------------------- builder stage ---------------------
-FROM node:20-alpine@sha256:b88333c42c23fbd91596ebd7fd10de239cedab9617de04142dde7315e3bc0afa AS builder
+FROM node:22-alpine AS builder
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 
@@ -19,7 +19,7 @@ RUN npm run build \
   && rm -rf .next/cache
 
 # --------------------- runner stage ---------------------
-FROM node:20-alpine@sha256:b88333c42c23fbd91596ebd7fd10de239cedab9617de04142dde7315e3bc0afa AS runner
+FROM node:22-alpine AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production
