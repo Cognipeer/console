@@ -16,6 +16,7 @@ import { listAutomations } from '@/lib/services/automations';
 import { browserManager } from '@/lib/services/browser/browserManager';
 import { reconcileOrphanedBrowserSessions } from '@/lib/services/browser/browserOperationsService';
 import { startBrowserQueueConsumer } from '@/lib/services/browser/browserConsumer';
+import { startCrawlerQueueConsumer, startCrawlerScheduler } from '@/lib/services/crawler';
 import { jsSandboxExecutorManager } from '@/lib/services/jsSandbox';
 import { startJsSandboxQueueConsumer } from '@/lib/services/jsSandbox/jsSandboxConsumer';
 import { startAgentQueueConsumer } from '@/lib/services/agents/agentConsumer';
@@ -180,6 +181,7 @@ export async function bootstrapApplication(): Promise<void> {
 
   startPollScheduler();
   startAlertScheduler();
+  startCrawlerScheduler();
 
   // Register queue consumers on every node so that whenever instance
   // routing forwards a job to another node, that node can execute it.
@@ -190,6 +192,7 @@ export async function bootstrapApplication(): Promise<void> {
       startMcpQueueConsumer(),
       startJsSandboxQueueConsumer(),
       startBrowserQueueConsumer(),
+      startCrawlerQueueConsumer(),
     ]);
   } catch (error) {
     logger.warn('Queue consumer registration failed; cluster routing limited', {

@@ -82,6 +82,8 @@ export const en = {
     agentsDescription: 'Create and manage AI agents',
     browser: 'Browsers',
     browserDescription: 'Headless browser profiles for sessions and agents',
+    crawler: 'Crawlers',
+    crawlerDescription: 'Web crawlers that ingest markdown into knowledge engines',
   },
   notifications: {
     logoutSuccessTitle: 'Logged Out',

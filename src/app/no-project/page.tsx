@@ -2,7 +2,14 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Button, Center, Paper, Stack, Text, Title } from '@mantine/core';
+import { Button } from '@mantine/core';
+import {
+  IconAlertTriangle,
+  IconRefresh,
+  IconLogout,
+  IconUserOff,
+} from '@tabler/icons-react';
+import AuthShell from '@/components/layout/AuthShell';
 
 export default function NoProjectPage() {
   const router = useRouter();
@@ -43,21 +50,54 @@ export default function NoProjectPage() {
   };
 
   return (
-    <Center mih="100vh" p="md">
-      <Paper shadow="sm" radius="md" withBorder p="xl" maw={520} w="100%">
-        <Stack gap="sm">
-          <Title order={2}>No project assigned</Title>
-          <Text c="dimmed">
-            Your account is not assigned to any project yet. Please contact a tenant admin to be assigned to a project.
-          </Text>
-          <Button onClick={handleCheckAccess} loading={checkingAccess}>
+    <AuthShell
+      title="No project assigned"
+      subtitle="Your account isn't assigned to any project yet."
+      highlights={[
+        {
+          icon: <IconUserOff size={13} stroke={1.7} />,
+          label: 'Ask a tenant admin to assign you to a project.',
+        },
+        {
+          icon: <IconAlertTriangle size={13} stroke={1.7} />,
+          label: 'You won’t see workspace content until then.',
+        },
+      ]}
+    >
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <p
+          style={{
+            fontSize: 13,
+            color: 'var(--ds-text-muted)',
+            margin: 0,
+            lineHeight: 1.55,
+          }}
+        >
+          Once an admin grants you project access, click refresh to continue to
+          your dashboard. Otherwise you can sign out and return later.
+        </p>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <Button
+            color="teal"
+            size="md"
+            fullWidth
+            loading={checkingAccess}
+            leftSection={<IconRefresh size={16} stroke={1.7} />}
+            onClick={handleCheckAccess}
+          >
             Refresh access
           </Button>
-          <Button variant="default" onClick={handleLogout}>
+          <Button
+            variant="default"
+            size="md"
+            fullWidth
+            leftSection={<IconLogout size={16} stroke={1.7} />}
+            onClick={handleLogout}
+          >
             Log out
           </Button>
-        </Stack>
-      </Paper>
-    </Center>
+        </div>
+      </div>
+    </AuthShell>
   );
 }

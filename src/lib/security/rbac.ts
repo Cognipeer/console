@@ -20,6 +20,7 @@ export type PermissionService =
   | 'tools'
   | 'js-sandbox'
   | 'browser'
+  | 'crawler'
   | 'alerts'
   | 'automations'
   | 'members'
@@ -76,6 +77,7 @@ export const RBAC_SERVICE_DEFINITIONS: RbacServiceDefinition[] = [
   { id: 'guardrails', label: 'Guardrail', description: 'Guardrail policies and evaluation logs.', category: 'operate' },
   { id: 'pii', label: 'PII Service', description: 'PII detection, redaction and masking policies.', category: 'operate' },
   { id: 'browser', label: 'Browsers', description: 'Managed browser profiles and sessions.', category: 'operate' },
+  { id: 'crawler', label: 'Crawler', description: 'Web crawlers that ingest markdown into knowledge engines.', category: 'data' },
   { id: 'alerts', label: 'Alerts & Incidents', description: 'Alert rules, history and incidents.', category: 'operate' },
   { id: 'automations', label: 'Automations', description: 'Operational schedulers, maintenance jobs and runtime controls.', category: 'admin', adminService: true },
   { id: 'projects', label: 'Projects', description: 'Project contexts and project-scoped access.', category: 'admin' },
@@ -98,6 +100,7 @@ const LEVEL_RANK: Record<ServicePermissionLevel, number> = {
 
 const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/client/v1/browser', service: 'browser' },
+  { prefix: '/api/client/v1/crawler', service: 'crawler' },
   { prefix: '/api/client/v1/automations', service: 'automations' },
   { prefix: '/api/client/v1/config', service: 'config' },
   { prefix: '/api/client/v1/files', service: 'files' },
@@ -141,6 +144,7 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/tools', service: 'tools' },
   { prefix: '/api/js-sandbox', service: 'js-sandbox' },
   { prefix: '/api/browser', service: 'browser' },
+  { prefix: '/api/crawler', service: 'crawler' },
   { prefix: '/api/automations', service: 'automations' },
   { prefix: '/api/alerts', service: 'alerts' },
 ];

@@ -66,6 +66,9 @@ export const COLLECTIONS = {
   browsers: 'browsers',
   browserSessions: 'browser_sessions',
   browserSessionEvents: 'browser_session_events',
+  crawlers: 'crawlers',
+  crawlJobs: 'crawl_jobs',
+  crawlResults: 'crawl_results',
   // ── Project membership & future groups ──────────────────────────────
   userProjects: 'user_projects',
   groups: 'groups',

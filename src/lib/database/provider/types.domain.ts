@@ -777,6 +777,206 @@ export interface IBrowserSessionEvent {
   createdAt?: Date;
 }
 
+// ── Crawler types ──────────────────────────────────────────────────────────
+//
+// The Crawler service ingests web pages (and downloadable files) into
+// markdown via @cognipeer/to-markdown. A Crawler is a user-defined profile
+// that holds the plan (seeds, depth, scope), HTTP settings (headers, cookies,
+// auth), an optional RAG module binding and an optional outbound webhook.
+// A CrawlJob is one execution; CrawlResult is one fetched page or file.
+
+export type CrawlerStatus = 'active' | 'disabled';
+export type CrawlerEngine = 'axios' | 'playwright' | 'auto';
+export type CrawlerWebhookEvent = 'page' | 'completed' | 'failed';
+
+export interface ICrawlerScope {
+  /** Restrict crawl to the seed domain (and its subdomains if `includeSubdomains`). */
+  sameDomainOnly: boolean;
+  includeSubdomains: boolean;
+  /** Optional host glob patterns (`docs.*.example.com`) – matched against the URL host. */
+  allowList?: string[];
+  /** Evaluated after allowList – matching hosts are skipped. */
+  blockList?: string[];
+}
+
+export interface ICrawlerCookie {
+  name: string;
+  value: string;
+  domain?: string;
+  path?: string;
+  secure?: boolean;
+  httpOnly?: boolean;
+  sameSite?: 'Strict' | 'Lax' | 'None';
+  /** Unix seconds. Omit for session cookie. */
+  expires?: number;
+}
+
+export interface ICrawlerHttpConfig {
+  userAgent?: string;
+  acceptLanguage?: string;
+  /** Per-request timeout (ms). Default 30000. */
+  timeoutMs?: number;
+  /** Concurrent in-flight requests. Default 5, capped at 16. */
+  maxConcurrency?: number;
+  /** Retry count per request. Default 2. */
+  retries?: number;
+  headers?: Record<string, string>;
+  cookies?: ICrawlerCookie[];
+  basicAuth?: { username: string; password: string };
+  bearerToken?: string;
+  /** Allow private / link-local destinations. Default false (SSRF guard). */
+  allowPrivateNetwork?: boolean;
+}
+
+export interface ICrawlerWebhookConfig {
+  url: string;
+  /** HMAC secret used to sign payloads. */
+  secret?: string;
+  events: CrawlerWebhookEvent[];
+}
+
+export interface ICrawlerRagBinding {
+  ragModuleKey: string;
+  enabled: boolean;
+}
+
+export type CrawlerScheduleMode = 'interval' | 'cron';
+
+export interface ICrawlerSchedule {
+  mode: CrawlerScheduleMode;
+  enabled: boolean;
+  /** interval mode: seconds between runs. Minimum 60. */
+  intervalSeconds?: number;
+  /** cron mode: 5- or 6-field cron expression (UTC). */
+  cron?: string;
+  /** Optional activation window. */
+  startAt?: Date;
+  endAt?: Date;
+  /** Last run start (mirror of the latest CrawlJob.startedAt). */
+  lastRunAt?: Date;
+  /** Next scheduled run (computed at write time + after every run). */
+  nextRunAt?: Date;
+}
+
+export interface ICrawler {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  /** URL-friendly unique identifier scoped to the tenant/project. */
+  key: string;
+  name: string;
+  description?: string;
+  status: CrawlerStatus;
+
+  /** Seed URLs the crawl starts from. At least 1. */
+  seeds: string[];
+  engine: CrawlerEngine;
+  /** 0..3 – capped at 3 to bound runtime. */
+  maxDepth: number;
+  /** 0 = unlimited. */
+  maxPages: number;
+  autoCrawl: boolean;
+  scope: ICrawlerScope;
+  /** MIME types treated as downloadable files (recorded but not stored in F1). */
+  downloadableMimes?: string[];
+
+  http: ICrawlerHttpConfig;
+  /** Optional markdown extractor options forwarded to @cognipeer/to-markdown. */
+  markdownOptions?: { ocr?: { enabled: boolean; languages?: string[] } };
+
+  rag?: ICrawlerRagBinding;
+  webhook?: ICrawlerWebhookConfig;
+  schedule?: ICrawlerSchedule;
+
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export type CrawlJobStatus =
+  | 'queued'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'canceled'
+  | 'partial';
+
+export type CrawlJobTrigger = 'manual' | 'api' | 'adhoc' | 'schedule';
+
+/**
+ * Frozen plan snapshot stored at run time so the job is reproducible even
+ * if the parent crawler is later edited.
+ */
+export interface ICrawlPlanSnapshot {
+  seeds: string[];
+  engine: CrawlerEngine;
+  maxDepth: number;
+  maxPages: number;
+  autoCrawl: boolean;
+  scope: ICrawlerScope;
+  http: ICrawlerHttpConfig;
+  downloadableMimes?: string[];
+  markdownOptions?: { ocr?: { enabled: boolean; languages?: string[] } };
+  rag?: ICrawlerRagBinding;
+  webhook?: ICrawlerWebhookConfig;
+}
+
+export interface ICrawlJob {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  /** Parent crawler key when triggered from a saved profile; absent for ad-hoc runs. */
+  crawlerKey?: string;
+  trigger: CrawlJobTrigger;
+  triggerActor: string;
+  planSnapshot: ICrawlPlanSnapshot;
+  status: CrawlJobStatus;
+  startedAt?: Date;
+  endedAt?: Date;
+  durationMs?: number;
+  pagesDiscovered: number;
+  pagesProcessed: number;
+  filesProcessed: number;
+  errorsCount: number;
+  limitReached?: boolean;
+  /** Per-run callback override (ad-hoc tek-shot run desteği). */
+  callbackUrl?: string;
+  errorMessage?: string;
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export type CrawlResultType = 'html' | 'file' | 'error';
+
+export interface ICrawlResult {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  jobId: string;
+  crawlerKey?: string;
+  url: string;
+  parentUrl?: string;
+  depth: number;
+  type: CrawlResultType;
+  httpStatus?: number;
+  contentType?: string;
+  title?: string;
+  description?: string;
+  /** Present when type === 'html'. */
+  bodyMarkdown?: string;
+  bytes?: number;
+  /** RAG ingest outcome (when crawler has a RAG binding). */
+  ragDocumentId?: string;
+  ragStatus?: 'pending' | 'indexed' | 'skipped' | 'failed';
+  errorMessage?: string;
+  fetchedAt?: Date;
+  createdAt?: Date;
+}
+
 // ── PII Service types ───────────────────────────────────────────────────────
 
 /**

@@ -206,6 +206,17 @@
       "searchKeywords": ["browser", "tarayıcı", "playwright", "automation", "session", "profile"]
     },
     {
+      "id": "crawler",
+      "href": "/dashboard/crawler",
+      "icon": "IconWorld",
+      "category": "data",
+      "navLabelKey": "crawler",
+      "navDescriptionKey": "crawlerDescription",
+      "tags": ["crawler", "scraping", "ingest", "rag"],
+      "searchKeywords": ["crawler", "scrape", "crawl", "web", "ingest", "markdown", "playwright"],
+      "badge": "new"
+    },
+    {
       "id": "alerts",
       "href": "/dashboard/alerts",
       "icon": "IconBell",

@@ -1,23 +1,19 @@
 'use client';
 
 import { Suspense, useState } from 'react';
+import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
-import {
-  PasswordInput,
-  Button,
-  Paper,
-  Title,
-  Text,
-  Container,
-  Stack,
-  Anchor,
-  List,
-  Center,
-  Loader,
-} from '@mantine/core';
+import { PasswordInput, Button, Center, Loader } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
-import { IconLock, IconCheck, IconAlertTriangle } from '@tabler/icons-react';
+import {
+  IconLock,
+  IconCheck,
+  IconAlertTriangle,
+  IconShieldLock,
+  IconKey,
+} from '@tabler/icons-react';
+import AuthShell from '@/components/layout/AuthShell';
 
 function ResetPasswordContent() {
   const router = useRouter();
@@ -48,49 +44,78 @@ function ResetPasswordContent() {
 
   if (!token) {
     return (
-      <Container size={420} my={80}>
-        <Paper withBorder shadow="md" p={30} radius="md">
-          <Stack align="center" gap="md">
-            <IconAlertTriangle size={48} color="var(--mantine-color-orange-6)" />
-            <Title order={3} ta="center">
-              Invalid reset link
-            </Title>
-            <Text c="dimmed" size="sm" ta="center">
-              This password reset link is invalid or has expired. Please request
-              a new one.
-            </Text>
-            <Button
-              variant="light"
-              fullWidth
-              onClick={() => router.push('/forgot-password')}
+      <AuthShell
+        title="Invalid reset link"
+        subtitle="This password reset link is invalid or has expired. Please request a new one."
+        highlights={[
+          {
+            icon: <IconAlertTriangle size={13} stroke={1.7} />,
+            label: 'Reset links expire after 1 hour.',
+          },
+          {
+            icon: <IconKey size={13} stroke={1.7} />,
+            label: 'Request a fresh link to continue.',
+          },
+        ]}
+        footer={
+          <>
+            Remember your password?{' '}
+            <Link
+              href="/login"
+              style={{
+                color: 'var(--ds-accent)',
+                fontWeight: 600,
+                textDecoration: 'none',
+              }}
             >
-              Request new link
-            </Button>
-          </Stack>
-        </Paper>
-      </Container>
+              Back to login
+            </Link>
+          </>
+        }
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <Button
+            color="teal"
+            size="md"
+            fullWidth
+            leftSection={<IconKey size={16} stroke={1.7} />}
+            onClick={() => router.push('/forgot-password')}
+          >
+            Request new link
+          </Button>
+        </div>
+      </AuthShell>
     );
   }
 
   if (success) {
     return (
-      <Container size={420} my={80}>
-        <Paper withBorder shadow="md" p={30} radius="md">
-          <Stack align="center" gap="md">
-            <IconCheck size={48} color="var(--mantine-color-green-6)" />
-            <Title order={3} ta="center">
-              Password reset successful
-            </Title>
-            <Text c="dimmed" size="sm" ta="center">
-              Your password has been updated. You can now log in with your new
-              password.
-            </Text>
-            <Button fullWidth onClick={() => router.push('/login')}>
-              Go to login
-            </Button>
-          </Stack>
-        </Paper>
-      </Container>
+      <AuthShell
+        title="Password reset successful"
+        subtitle="Your password has been updated. You can now log in with your new password."
+        highlights={[
+          {
+            icon: <IconCheck size={13} stroke={1.7} />,
+            label: 'Your password is updated.',
+          },
+          {
+            icon: <IconShieldLock size={13} stroke={1.7} />,
+            label: 'Use it to sign in next time.',
+          },
+        ]}
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <Button
+            color="teal"
+            size="md"
+            fullWidth
+            leftSection={<IconCheck size={16} stroke={1.7} />}
+            onClick={() => router.push('/login')}
+          >
+            Go to login
+          </Button>
+        </div>
+      </AuthShell>
     );
   }
 
@@ -127,58 +152,86 @@ function ResetPasswordContent() {
   };
 
   return (
-    <Container size={420} my={80}>
-      <Title ta="center" order={2}>
-        Set new password
-      </Title>
-      <Text c="dimmed" size="sm" ta="center" mt={5} mb={20}>
-        Choose a strong password for your account
-      </Text>
-
-      <Paper withBorder shadow="md" p={30} radius="md">
-        <form onSubmit={form.onSubmit(handleSubmit)}>
-          <Stack>
-            <PasswordInput
-              label="New Password"
-              placeholder="Enter new password"
-              required
-              {...form.getInputProps('newPassword')}
-            />
-            <PasswordInput
-              label="Confirm Password"
-              placeholder="Confirm new password"
-              required
-              {...form.getInputProps('confirmPassword')}
-            />
-
-            <Text size="xs" c="dimmed">
-              Password requirements:
-            </Text>
-            <List size="xs" c="dimmed" spacing={2}>
-              <List.Item>At least 8 characters</List.Item>
-              <List.Item>Uppercase and lowercase letters</List.Item>
-              <List.Item>At least one digit</List.Item>
-              <List.Item>At least one special character</List.Item>
-            </List>
-
-            <Button
-              type="submit"
-              fullWidth
-              loading={loading}
-              leftSection={<IconLock size={16} />}
-            >
-              Reset password
-            </Button>
-          </Stack>
-        </form>
-
-        <Text ta="center" mt="md" size="sm">
-          <Anchor component="button" onClick={() => router.push('/login')}>
+    <AuthShell
+      title="Set new password"
+      subtitle="Choose a strong password for your account."
+      highlights={[
+        {
+          icon: <IconShieldLock size={13} stroke={1.7} />,
+          label: 'Strong passwords protect your tenant.',
+        },
+        {
+          icon: <IconKey size={13} stroke={1.7} />,
+          label: 'Min 8 chars, mixed case + number.',
+        },
+      ]}
+      footer={
+        <>
+          Remember your password?{' '}
+          <Link
+            href="/login"
+            style={{
+              color: 'var(--ds-accent)',
+              fontWeight: 600,
+              textDecoration: 'none',
+            }}
+          >
             Back to login
-          </Anchor>
-        </Text>
-      </Paper>
-    </Container>
+          </Link>
+        </>
+      }
+    >
+      <form onSubmit={form.onSubmit(handleSubmit)}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <PasswordInput
+            label="New Password"
+            placeholder="Enter new password"
+            required
+            size="md"
+            autoComplete="new-password"
+            {...form.getInputProps('newPassword')}
+          />
+          <PasswordInput
+            label="Confirm Password"
+            placeholder="Confirm new password"
+            required
+            size="md"
+            autoComplete="new-password"
+            {...form.getInputProps('confirmPassword')}
+          />
+
+          <div
+            style={{
+              fontSize: 12.5,
+              color: 'var(--ds-text-muted)',
+              lineHeight: 1.6,
+            }}
+          >
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>
+              Password requirements:
+            </div>
+            <ul style={{ margin: 0, paddingLeft: 18 }}>
+              <li>At least 8 characters</li>
+              <li>Uppercase and lowercase letters</li>
+              <li>At least one digit</li>
+              <li>At least one special character</li>
+            </ul>
+          </div>
+
+          <Button
+            type="submit"
+            color="teal"
+            size="md"
+            fullWidth
+            loading={loading}
+            leftSection={<IconLock size={16} stroke={1.7} />}
+            mt={4}
+          >
+            Reset password
+          </Button>
+        </div>
+      </form>
+    </AuthShell>
   );
 }
 
@@ -186,11 +239,9 @@ export default function ResetPasswordPage() {
   return (
     <Suspense
       fallback={
-        <Container size={420} my={80}>
-          <Center>
-            <Loader />
-          </Center>
-        </Container>
+        <Center mih="100vh">
+          <Loader />
+        </Center>
       }
     >
       <ResetPasswordContent />

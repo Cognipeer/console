@@ -55,6 +55,7 @@ const ENTITY_LABELS: Record<InstanceEntityType, string> = {
   'inference-server': 'Inference Servers',
   'alert-rule': 'Alert Rules',
   automation: 'Automations',
+  crawler: 'Crawlers',
 };
 
 const ENTITY_ORDER: InstanceEntityType[] = [
@@ -65,6 +66,7 @@ const ENTITY_ORDER: InstanceEntityType[] = [
   'inference-server',
   'alert-rule',
   'automation',
+  'crawler',
 ];
 
 export default function ClusterInstancesPage() {

@@ -1,20 +1,18 @@
 'use client';
 
 import { useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import {
-  TextInput,
-  Button,
-  Paper,
-  Title,
-  Text,
-  Container,
-  Anchor,
-  Stack,
-} from '@mantine/core';
+import { TextInput, Button } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
-import { IconMailForward, IconCheck } from '@tabler/icons-react';
+import {
+  IconMailForward,
+  IconCheck,
+  IconMail,
+  IconClock,
+} from '@tabler/icons-react';
+import AuthShell from '@/components/layout/AuthShell';
 
 export default function ForgotPasswordPage() {
   const router = useRouter();
@@ -67,73 +65,114 @@ export default function ForgotPasswordPage() {
 
   if (submitted) {
     return (
-      <Container size={420} my={80}>
-        <Paper withBorder shadow="md" p={30} radius="md">
-          <Stack align="center" gap="md">
-            <IconCheck size={48} color="var(--mantine-color-green-6)" />
-            <Title order={3} ta="center">
-              Check your email
-            </Title>
-            <Text c="dimmed" size="sm" ta="center">
-              If an account exists with that email address, we&apos;ve sent a
-              password reset link. It will expire in 1 hour.
-            </Text>
-            <Button
-              variant="light"
-              fullWidth
-              mt="md"
-              onClick={() => router.push('/login')}
+      <AuthShell
+        title="Check your email"
+        subtitle="If an account exists with that email address, we've sent a password reset link. It will expire in 1 hour."
+        highlights={[
+          {
+            icon: <IconMail size={13} stroke={1.7} />,
+            label: "We'll email you a reset link.",
+          },
+          {
+            icon: <IconClock size={13} stroke={1.7} />,
+            label: 'Link is valid for 1 hour.',
+          },
+        ]}
+        footer={
+          <>
+            Remember your password?{' '}
+            <Link
+              href="/login"
+              style={{
+                color: 'var(--ds-accent)',
+                fontWeight: 600,
+                textDecoration: 'none',
+              }}
             >
               Back to login
-            </Button>
-          </Stack>
-        </Paper>
-      </Container>
+            </Link>
+          </>
+        }
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <p style={{ fontSize: 13, color: 'var(--ds-text-muted)', margin: 0 }}>
+            Didn&apos;t get an email? Check your spam folder, or try again with
+            the correct organization slug.
+          </p>
+          <Button
+            color="teal"
+            size="md"
+            fullWidth
+            leftSection={<IconCheck size={16} stroke={1.7} />}
+            onClick={() => router.push('/login')}
+          >
+            Back to login
+          </Button>
+        </div>
+      </AuthShell>
     );
   }
 
   return (
-    <Container size={420} my={80}>
-      <Title ta="center" order={2}>
-        Reset your password
-      </Title>
-      <Text c="dimmed" size="sm" ta="center" mt={5} mb={20}>
-        Enter your email and organization slug to receive a reset link
-      </Text>
-
-      <Paper withBorder shadow="md" p={30} radius="md">
-        <form onSubmit={form.onSubmit(handleSubmit)}>
-          <Stack>
-            <TextInput
-              label="Organization Slug"
-              placeholder="my-company"
-              required
-              {...form.getInputProps('slug')}
-            />
-            <TextInput
-              label="Email"
-              placeholder="you@example.com"
-              required
-              {...form.getInputProps('email')}
-            />
-            <Button
-              type="submit"
-              fullWidth
-              loading={loading}
-              leftSection={<IconMailForward size={16} />}
-            >
-              Send reset link
-            </Button>
-          </Stack>
-        </form>
-
-        <Text ta="center" mt="md" size="sm">
+    <AuthShell
+      title="Reset your password"
+      subtitle="Enter your email and organization slug to receive a reset link."
+      highlights={[
+        {
+          icon: <IconMail size={13} stroke={1.7} />,
+          label: "We'll email you a reset link.",
+        },
+        {
+          icon: <IconClock size={13} stroke={1.7} />,
+          label: 'Link is valid for 1 hour.',
+        },
+      ]}
+      footer={
+        <>
           Remember your password?{' '}
-          <Anchor component="button" onClick={() => router.push('/login')}>
+          <Link
+            href="/login"
+            style={{
+              color: 'var(--ds-accent)',
+              fontWeight: 600,
+              textDecoration: 'none',
+            }}
+          >
             Back to login
-          </Anchor>
-        </Text>
-      </Paper>
-    </Container>
+          </Link>
+        </>
+      }
+    >
+      <form onSubmit={form.onSubmit(handleSubmit)}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <TextInput
+            label="Organization Slug"
+            placeholder="my-company"
+            required
+            size="md"
+            {...form.getInputProps('slug')}
+          />
+          <TextInput
+            label="Email"
+            placeholder="you@example.com"
+            required
+            size="md"
+            autoComplete="email"
+            {...form.getInputProps('email')}
+          />
+          <Button
+            type="submit"
+            color="teal"
+            size="md"
+            fullWidth
+            loading={loading}
+            leftSection={<IconMailForward size={16} stroke={1.7} />}
+            mt={4}
+          >
+            Send reset link
+          </Button>
+        </div>
+      </form>
+    </AuthShell>
   );
 }
