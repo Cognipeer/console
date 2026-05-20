@@ -26,6 +26,9 @@ import {
   IconArrowRight,
   IconBook,
   IconBrain,
+  IconMicrophone,
+  IconScan,
+  IconSpeakerphone,
   IconCheck,
   IconChevronLeft,
   IconChevronRight,
@@ -46,6 +49,9 @@ import {
 import { useTranslations } from '@/lib/i18n';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 import ModelPlayground from '@/components/playground/ModelPlayground';
+import SttPlayground from '@/components/playground/SttPlayground';
+import TtsPlayground from '@/components/playground/TtsPlayground';
+import OcrPlayground from '@/components/playground/OcrPlayground';
 import PageContainer from '@/components/common/ui/PageContainer';
 import TabsBar from '@/components/common/ui/TabsBar';
 import StatusBadge from '@/components/common/ui/StatusBadge';
@@ -80,12 +86,12 @@ interface ModelDetailDto {
   provider?: string;
   providerKey?: string;
   providerDriver?: string;
-  category: 'llm' | 'embedding';
+  category: 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr';
   modelId: string;
   isMultimodal?: boolean;
   supportsToolCalls?: boolean;
   pricing: ModelPricing;
-  settings: Record<string, string>;
+  settings: Record<string, unknown>;
   semanticCache?: SemanticCacheConfigDto;
   metadata?: Record<string, unknown>;
   createdAt?: string;
@@ -439,12 +445,25 @@ export default function ModelDetailPage() {
   const endpointPath =
     model.category === 'llm'
       ? '/api/client/v1/chat/completions'
-      : '/api/client/v1/embeddings';
+      : model.category === 'embedding'
+        ? '/api/client/v1/embeddings'
+        : model.category === 'stt'
+          ? '/api/client/v1/audio/transcriptions'
+          : model.category === 'tts'
+            ? '/api/client/v1/audio/speech'
+            : model.category === 'ocr'
+              ? '/api/client/v1/ocr'
+              : '/api/client/v1/embeddings';
   const endpointUrl = `${endpointBase}${endpointPath}`;
+
+  const playgroundCategories = ['llm', 'stt', 'tts', 'ocr'] as const;
+  const hasPlayground = (playgroundCategories as readonly string[]).includes(
+    model.category,
+  );
 
   const tabs: Array<{ id: DetailTab; label: string; icon: React.ReactNode }> = [
     { id: 'overview', label: 'Overview', icon: <IconLayoutDashboard size={14} stroke={1.7} /> },
-    ...(model.category === 'llm'
+    ...(hasPlayground
       ? [{ id: 'playground' as const, label: 'Playground', icon: <IconPlayerPlay size={14} stroke={1.7} /> }]
       : []),
     { id: 'configure', label: 'Configure', icon: <IconSettings size={14} stroke={1.7} /> },
@@ -471,6 +490,12 @@ export default function ModelDetailPage() {
           >
             {model.category === 'llm' ? (
               <IconBrain size={26} stroke={1.7} />
+            ) : model.category === 'stt' ? (
+              <IconMicrophone size={26} stroke={1.7} />
+            ) : model.category === 'tts' ? (
+              <IconSpeakerphone size={26} stroke={1.7} />
+            ) : model.category === 'ocr' ? (
+              <IconScan size={26} stroke={1.7} />
             ) : (
               <IconCpu size={26} stroke={1.7} />
             )}
@@ -564,7 +589,7 @@ export default function ModelDetailPage() {
               </Button>
             )}
           </CopyButton>
-          {model.category === 'llm' ? (
+          {hasPlayground ? (
             <Button
               variant="default"
               size="sm"
@@ -658,6 +683,23 @@ export default function ModelDetailPage() {
         <ModelPlayground
           modelKey={model.key}
           defaultUser={`Hello! Tell me what you can do.`}
+        />
+      ) : null}
+
+      {tab === 'playground' && model.category === 'stt' ? (
+        <SttPlayground modelKey={model.key} />
+      ) : null}
+
+      {tab === 'playground' && model.category === 'tts' ? (
+        <TtsPlayground modelKey={model.key} />
+      ) : null}
+
+      {tab === 'playground' && model.category === 'ocr' ? (
+        <OcrPlayground
+          modelKey={model.key}
+          configuredMode={
+            (model.settings?.ocr as { mode?: 'native' | 'vlm' } | undefined)?.mode
+          }
         />
       ) : null}
 

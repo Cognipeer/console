@@ -5,6 +5,7 @@
   "license": "AGPL-3.0-only",
   "scripts": {
     "dev": "NODE_ENV=development node --import tsx src/server/index.ts --dev",
+    "dev:watch": "NODE_ENV=development node --watch --watch-path=src --import tsx src/server/index.ts --dev",
     "build": "next build",
     "start": "NODE_ENV=production node --import tsx src/server/index.ts",
     "lint": "eslint",
@@ -27,6 +28,7 @@
     "@aws-sdk/client-s3": "^3.906.0",
     "@aws-sdk/client-s3vectors": "^3.901.0",
     "@aws-sdk/client-sts": "^3.901.0",
+    "@aws-sdk/client-textract": "^3.901.0",
     "@aws-sdk/util-stream-node": "^3.370.0",
     "@azure/search-documents": "^12.2.0",
     "@cognipeer/agent-sdk": "^0.6.4",

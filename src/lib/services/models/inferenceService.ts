@@ -6,6 +6,16 @@ import type { AIMessage, AIMessageChunk } from '@langchain/core/messages';
 
 const logger = createLogger('inference');
 import { IModel } from '@/lib/database';
+import type {
+  SttRuntime,
+  SttTranscribeInput,
+  SttTranslateInput,
+  TtsRuntime,
+  TtsSynthesizeInput,
+  OcrRuntime,
+  OcrExtractInput,
+  OcrResult,
+} from '@/lib/providers';
 import { getModelByKey } from './modelService';
 import {
   toLangChainMessages,
@@ -622,5 +632,358 @@ export async function handleEmbeddingRequest(params: {
     },
     latencyMs,
     requestId,
+  };
+}
+
+// ── STT / TTS / OCR ─────────────────────────────────────────────────────────
+
+function ensureSttModel(model: IModel) {
+  if (model.category !== 'stt') {
+    throw new Error('Model is not configured for speech-to-text');
+  }
+}
+
+function ensureTtsModel(model: IModel) {
+  if (model.category !== 'tts') {
+    throw new Error('Model is not configured for text-to-speech');
+  }
+}
+
+function ensureOcrModel(model: IModel) {
+  if (model.category !== 'ocr') {
+    throw new Error('Model is not configured for OCR');
+  }
+}
+
+function getOcrMode(model: IModel): 'native' | 'vlm' {
+  const settings = (model.settings ?? {}) as Record<string, unknown>;
+  const ocrSettings = settings.ocr as Record<string, unknown> | undefined;
+  const mode = ocrSettings?.mode;
+  if (mode === 'native' || mode === 'vlm') return mode;
+  // Default: if provider supports native OCR, prefer native; else vlm.
+  return 'native';
+}
+
+function ensureSttRuntime(value: unknown): SttRuntime {
+  if (!value || typeof value !== 'object') {
+    throw new Error('Model provider returned an invalid STT runtime.');
+  }
+  const candidate = value as Partial<SttRuntime>;
+  if (typeof candidate.transcribe !== 'function') {
+    throw new Error('Model provider returned an invalid STT runtime.');
+  }
+  return candidate as SttRuntime;
+}
+
+function ensureTtsRuntime(value: unknown): TtsRuntime {
+  if (!value || typeof value !== 'object') {
+    throw new Error('Model provider returned an invalid TTS runtime.');
+  }
+  const candidate = value as Partial<TtsRuntime>;
+  if (typeof candidate.synthesize !== 'function') {
+    throw new Error('Model provider returned an invalid TTS runtime.');
+  }
+  return candidate as TtsRuntime;
+}
+
+function ensureOcrRuntime(value: unknown): OcrRuntime {
+  if (!value || typeof value !== 'object') {
+    throw new Error('Model provider returned an invalid OCR runtime.');
+  }
+  const candidate = value as Partial<OcrRuntime>;
+  if (typeof candidate.extract !== 'function') {
+    throw new Error('Model provider returned an invalid OCR runtime.');
+  }
+  return candidate as OcrRuntime;
+}
+
+export async function handleTranscriptionRequest(params: {
+  tenantDbName: string;
+  modelKey: string;
+  projectId: string;
+  input: SttTranscribeInput;
+  /** When true, calls the provider's translate() instead of transcribe(). */
+  translate?: boolean;
+  requestId?: string;
+}) {
+  const { tenantDbName, modelKey, projectId, input, translate } = params;
+  const requestId = params.requestId || crypto.randomUUID();
+  const start = Date.now();
+
+  const model = await getModelByKey(tenantDbName, modelKey, projectId);
+  if (!model) {
+    throw new Error(`Model with key ${modelKey} not found`);
+  }
+  ensureSttModel(model);
+
+  const { runtime } = await buildModelRuntime(
+    tenantDbName,
+    model.tenantId,
+    model.providerKey,
+    projectId,
+  );
+
+  if (!runtime.createSttRuntime) {
+    throw new Error('Model provider does not support speech-to-text');
+  }
+
+  const sttRuntime = ensureSttRuntime(
+    await runtime.createSttRuntime({
+      modelId: model.modelId,
+      category: model.category,
+      modelSettings: model.settings,
+    }),
+  );
+
+  const operation = translate ? sttRuntime.translate : sttRuntime.transcribe;
+  if (typeof operation !== 'function') {
+    throw new Error(
+      translate
+        ? 'Model provider does not support audio translation'
+        : 'Model provider does not support audio transcription',
+    );
+  }
+
+  const result = await withResilience(
+    () => operation.call(sttRuntime, input as SttTranscribeInput & SttTranslateInput),
+    { key: `${translate ? 'stt-translate' : 'stt'}:${model.providerKey}` },
+  );
+
+  const latencyMs = Date.now() - start;
+
+  const usage: TokenUsage = {
+    inputTokens: result.usage?.inputTokens ?? 0,
+    outputTokens: result.usage?.outputTokens ?? 0,
+    totalTokens:
+      result.usage?.totalTokens ??
+      (result.usage?.inputTokens ?? 0) + (result.usage?.outputTokens ?? 0),
+    inputSeconds: result.usage?.inputSeconds,
+  };
+
+  fireAndForget('log-stt-usage', () =>
+    logModelUsage(tenantDbName, model, {
+      requestId,
+      route: translate ? 'audio.translations' : 'audio.transcriptions',
+      status: 'success',
+      providerRequest: sanitizeForLogging({
+        model: modelKey,
+        language: input.language,
+        responseFormat: input.responseFormat,
+        audioBytes: input.audio.data.byteLength,
+      }),
+      providerResponse: sanitizeForLogging({
+        text: result.text.slice(0, 500),
+        language: result.language,
+        duration: result.duration,
+      }),
+      latencyMs,
+      usage,
+    }),
+  );
+
+  return {
+    response: {
+      text: result.text,
+      language: result.language,
+      duration: result.duration,
+      segments: result.segments,
+      words: result.words,
+      usage: result.usage,
+    },
+    rawUsage: result.usage,
+    latencyMs,
+    requestId,
+    model,
+  };
+}
+
+export async function handleSpeechRequest(params: {
+  tenantDbName: string;
+  modelKey: string;
+  projectId: string;
+  input: TtsSynthesizeInput;
+  requestId?: string;
+}) {
+  const { tenantDbName, modelKey, projectId, input } = params;
+  const requestId = params.requestId || crypto.randomUUID();
+  const start = Date.now();
+
+  const model = await getModelByKey(tenantDbName, modelKey, projectId);
+  if (!model) {
+    throw new Error(`Model with key ${modelKey} not found`);
+  }
+  ensureTtsModel(model);
+
+  const { runtime } = await buildModelRuntime(
+    tenantDbName,
+    model.tenantId,
+    model.providerKey,
+    projectId,
+  );
+
+  if (!runtime.createTtsRuntime) {
+    throw new Error('Model provider does not support text-to-speech');
+  }
+
+  const ttsRuntime = ensureTtsRuntime(
+    await runtime.createTtsRuntime({
+      modelId: model.modelId,
+      category: model.category,
+      modelSettings: model.settings,
+    }),
+  );
+
+  const result = await withResilience(
+    () => ttsRuntime.synthesize(input),
+    { key: `tts:${model.providerKey}` },
+  );
+
+  const latencyMs = Date.now() - start;
+
+  fireAndForget('log-tts-usage', () =>
+    logModelUsage(tenantDbName, model, {
+      requestId,
+      route: 'audio.speech',
+      status: 'success',
+      providerRequest: sanitizeForLogging({
+        model: modelKey,
+        voice: input.voice,
+        format: input.format,
+        speed: input.speed,
+        characterCount: input.text.length,
+      }),
+      providerResponse: sanitizeForLogging({
+        contentType: result.contentType,
+        format: result.format,
+        audioBytes: result.audio.byteLength,
+      }),
+      latencyMs,
+      usage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        inputCharacters: result.usage?.inputCharacters ?? input.text.length,
+        outputSeconds: result.usage?.outputSeconds,
+      },
+    }),
+  );
+
+  return {
+    audio: result.audio,
+    contentType: result.contentType,
+    format: result.format,
+    usage: result.usage,
+    latencyMs,
+    requestId,
+    model,
+  };
+}
+
+export async function handleOcrRequest(params: {
+  tenantDbName: string;
+  modelKey: string;
+  projectId: string;
+  input: OcrExtractInput;
+  requestId?: string;
+}) {
+  const { tenantDbName, modelKey, projectId, input } = params;
+  const requestId = params.requestId || crypto.randomUUID();
+  const start = Date.now();
+
+  const model = await getModelByKey(tenantDbName, modelKey, projectId);
+  if (!model) {
+    throw new Error(`Model with key ${modelKey} not found`);
+  }
+  ensureOcrModel(model);
+
+  const mode = getOcrMode(model);
+
+  const { runtime } = await buildModelRuntime(
+    tenantDbName,
+    model.tenantId,
+    model.providerKey,
+    projectId,
+  );
+
+  if (!runtime.createOcrRuntime) {
+    throw new Error('Model provider does not support OCR');
+  }
+
+  // The OCR factory itself decides native vs VLM based on the contract. We pass
+  // the requested mode through modelSettings.ocr.mode so VLM-only providers can
+  // refuse a native request explicitly if they wanted to.
+  const ocrSettings = {
+    ...((model.settings ?? {}) as Record<string, unknown>),
+    ocr: {
+      ...(((model.settings ?? {}) as Record<string, unknown>).ocr as
+        | Record<string, unknown>
+        | undefined),
+      mode,
+    },
+  };
+
+  const ocrRuntime = ensureOcrRuntime(
+    await runtime.createOcrRuntime({
+      modelId: model.modelId,
+      category: model.category,
+      modelSettings: ocrSettings,
+    }),
+  );
+
+  const result: OcrResult = await withResilience(
+    () => ocrRuntime.extract(input),
+    { key: `ocr:${model.providerKey}` },
+  );
+
+  const latencyMs = Date.now() - start;
+
+  const usage: TokenUsage = {
+    inputTokens: result.usage?.inputTokens ?? 0,
+    outputTokens: result.usage?.outputTokens ?? 0,
+    totalTokens:
+      result.usage?.totalTokens ??
+      (result.usage?.inputTokens ?? 0) + (result.usage?.outputTokens ?? 0),
+    pages: result.usage?.pages,
+  };
+
+  fireAndForget('log-ocr-usage', () =>
+    logModelUsage(tenantDbName, model, {
+      requestId,
+      route: 'ocr',
+      status: 'success',
+      providerRequest: sanitizeForLogging({
+        model: modelKey,
+        mode,
+        documentKind: input.document.kind,
+        documentBytes:
+          input.document.kind === 'bytes' ? input.document.data.byteLength : undefined,
+        documentUrl: input.document.kind === 'url' ? input.document.url : undefined,
+        pages: input.pages,
+        features: input.features,
+      }),
+      providerResponse: sanitizeForLogging({
+        text: result.text.slice(0, 500),
+        pageCount: result.pages?.length,
+        tableCount: result.tables?.length,
+        invokedVia: result.invokedVia,
+      }),
+      latencyMs,
+      usage,
+    }),
+  );
+
+  return {
+    response: {
+      text: result.text,
+      pages: result.pages,
+      tables: result.tables,
+      keyValuePairs: result.keyValuePairs,
+      language: result.language,
+      invokedVia: result.invokedVia ?? mode,
+      usage: result.usage,
+    },
+    latencyMs,
+    requestId,
+    model,
   };
 }

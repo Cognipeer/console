@@ -5,8 +5,8 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     id: 'openai',
     label: 'OpenAI',
     description:
-      'Official OpenAI platform supporting GPT-4.1, GPT-4o, and text-embedding models.',
-    categories: ['llm', 'embedding'],
+      'Official OpenAI platform supporting GPT-4.1, GPT-4o, text-embedding, Whisper (STT), TTS, and VLM-OCR.',
+    categories: ['llm', 'embedding', 'stt', 'tts', 'ocr'],
     credentialFields: [
       {
         name: 'apiKey',
@@ -30,8 +30,8 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     id: 'openai-compatible',
     label: 'OpenAI-Compatible',
     description:
-      'Any API that follows the OpenAI REST schema (e.g., Mistral, Groq, Cerebras). Also supports self-hosted rerankers (BGE/Mixedbread) exposing /v1/rerank.',
-    categories: ['llm', 'embedding', 'rerank'],
+      'Any API following the OpenAI REST schema (Mistral, Groq, Cerebras, Deepgram/ElevenLabs OpenAI-mode, …). Also supports /v1/rerank and /v1/audio/*.',
+    categories: ['llm', 'embedding', 'rerank', 'stt', 'tts', 'ocr'],
     credentialFields: [
       {
         name: 'apiKey',
@@ -80,8 +80,8 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     id: 'bedrock',
     label: 'Amazon Bedrock',
     description:
-      'Bedrock Converse API supporting Anthropic, AI21, and other foundation models.',
-    categories: ['llm', 'embedding'],
+      'Bedrock Converse API (Anthropic, Nova, AI21, …) and vision models for VLM-OCR.',
+    categories: ['llm', 'embedding', 'ocr'],
     credentialFields: [
       {
         name: 'accessKeyId',
@@ -123,8 +123,8 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     id: 'vertex',
     label: 'Google Vertex AI',
     description:
-      'Vertex AI generative and embedding models using service account credentials.',
-    categories: ['llm', 'embedding'],
+      'Vertex AI generative, embedding, and multimodal (Gemini) models. Gemini supports VLM-OCR.',
+    categories: ['llm', 'embedding', 'ocr'],
     credentialFields: [
       {
         name: 'projectId',
@@ -154,8 +154,8 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     id: 'azure',
     label: 'Azure OpenAI',
     description:
-      'Microsoft Azure-hosted OpenAI models with deployment-based access.',
-    categories: ['llm', 'embedding'],
+      'Microsoft Azure-hosted OpenAI models (incl. Whisper / TTS deployments) and VLM-OCR.',
+    categories: ['llm', 'embedding', 'stt', 'tts', 'ocr'],
     credentialFields: [
       {
         name: 'apiKey',
@@ -320,5 +320,139 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     ],
     defaultPricingCurrency: 'USD',
     modelIdHint: 'e.g., rerank-2, rerank-2-lite, voyage-3',
+  },
+  {
+    id: 'mistral-ocr',
+    label: 'Mistral OCR',
+    description:
+      'Mistral Document AI / OCR endpoint with native PDF and image extraction.',
+    categories: ['ocr'],
+    credentialFields: [
+      {
+        name: 'apiKey',
+        label: 'Mistral API Key',
+        type: 'password',
+        required: true,
+      },
+      {
+        name: 'baseUrl',
+        label: 'Base URL (optional)',
+        type: 'text',
+        required: false,
+        placeholder: 'https://api.mistral.ai/v1',
+      },
+    ],
+    defaultPricingCurrency: 'USD',
+    modelIdHint: 'e.g., mistral-ocr-latest',
+  },
+  {
+    id: 'azure-document-intelligence',
+    label: 'Azure Document Intelligence',
+    description:
+      'Azure Document Intelligence (Form Recognizer) — native OCR with layout, tables, and key-value extraction.',
+    categories: ['ocr'],
+    credentialFields: [
+      {
+        name: 'apiKey',
+        label: 'Azure Subscription Key',
+        type: 'password',
+        required: true,
+      },
+      {
+        name: 'endpoint',
+        label: 'Endpoint URL',
+        type: 'text',
+        required: true,
+        placeholder: 'https://<your-resource>.cognitiveservices.azure.com',
+      },
+      {
+        name: 'apiVersion',
+        label: 'API Version',
+        type: 'text',
+        required: false,
+        placeholder: '2024-11-30',
+      },
+    ],
+    defaultPricingCurrency: 'USD',
+    modelIdHint: 'e.g., prebuilt-read, prebuilt-layout, prebuilt-document, prebuilt-invoice',
+  },
+  {
+    id: 'aws-textract',
+    label: 'AWS Textract',
+    description:
+      'Amazon Textract OCR. modelId controls operation: "detect-document-text" or "analyze-document".',
+    categories: ['ocr'],
+    credentialFields: [
+      {
+        name: 'accessKeyId',
+        label: 'AWS Access Key ID',
+        type: 'text',
+        required: true,
+      },
+      {
+        name: 'secretAccessKey',
+        label: 'AWS Secret Access Key',
+        type: 'password',
+        required: true,
+      },
+      {
+        name: 'region',
+        label: 'AWS Region',
+        type: 'select',
+        required: true,
+        options: [
+          { label: 'us-east-1', value: 'us-east-1' },
+          { label: 'us-west-2', value: 'us-west-2' },
+          { label: 'eu-west-1', value: 'eu-west-1' },
+          { label: 'eu-central-1', value: 'eu-central-1' },
+          { label: 'ap-southeast-2', value: 'ap-southeast-2' },
+        ],
+      },
+      {
+        name: 'sessionToken',
+        label: 'AWS Session Token',
+        type: 'password',
+        required: false,
+      },
+    ],
+    defaultPricingCurrency: 'USD',
+    modelIdHint: 'detect-document-text | analyze-document',
+  },
+  {
+    id: 'google-document-ai',
+    label: 'Google Document AI',
+    description:
+      'Google Cloud Document AI processors (OCR, Layout, Form Parser). Requires projectId, location, and processorId.',
+    categories: ['ocr'],
+    credentialFields: [
+      {
+        name: 'serviceAccountKey',
+        label: 'Service Account JSON',
+        type: 'password',
+        required: true,
+        description: 'Service account key JSON with Document AI access.',
+      },
+      {
+        name: 'projectId',
+        label: 'GCP Project ID',
+        type: 'text',
+        required: true,
+      },
+      {
+        name: 'location',
+        label: 'Location',
+        type: 'text',
+        required: true,
+        placeholder: 'us | eu',
+      },
+      {
+        name: 'processorId',
+        label: 'Processor ID',
+        type: 'text',
+        required: true,
+      },
+    ],
+    defaultPricingCurrency: 'USD',
+    modelIdHint: 'Processor identifier acts as the model id.',
   },
 ];

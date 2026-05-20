@@ -75,6 +75,15 @@ async function requireModelProvider(
   return attachDriverCapabilities(provider);
 }
 
+const ALLOWED_MODEL_CATEGORIES: ReadonlySet<ModelCategory> = new Set([
+  'llm',
+  'embedding',
+  'rerank',
+  'stt',
+  'tts',
+  'ocr',
+]);
+
 function ensureProviderSupportsCategory(
   provider: ModelProviderView,
   category: ModelCategory,
@@ -85,7 +94,7 @@ function ensureProviderSupportsCategory(
   }
 
   const categories = rawCategories.filter((value): value is ModelCategory =>
-    value === 'llm' || value === 'embedding',
+    typeof value === 'string' && ALLOWED_MODEL_CATEGORIES.has(value as ModelCategory),
   );
 
   if (categories.length === 0) {

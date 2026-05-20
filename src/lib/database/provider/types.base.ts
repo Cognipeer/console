@@ -361,7 +361,13 @@ export interface IAgentTracingEvent {
   createdAt?: Date;
 }
 
-export type ModelCategory = 'llm' | 'embedding' | 'rerank';
+export type ModelCategory =
+  | 'llm'
+  | 'embedding'
+  | 'rerank'
+  | 'stt'
+  | 'tts'
+  | 'ocr';
 
 export type ModelProviderType =
   | 'openai'
@@ -375,6 +381,16 @@ export interface IModelPricing {
   inputTokenPer1M: number;
   outputTokenPer1M: number;
   cachedTokenPer1M?: number;
+  // STT pricing: cost per 1,000 input seconds of audio
+  inputSecondPer1K?: number;
+  // TTS streaming pricing: cost per 1,000 output seconds of audio (optional)
+  outputSecondPer1K?: number;
+  // TTS pricing: cost per 1,000,000 input characters
+  inputCharacterPer1M?: number;
+  // OCR pricing: cost per 1,000 processed pages
+  pagePer1K?: number;
+  // Image generation / vision input pricing: cost per 1,000 images
+  imagePer1K?: number;
 }
 
 export type ProviderDomain =
@@ -382,7 +398,10 @@ export type ProviderDomain =
   | 'embedding'
   | 'vector'
   | 'file'
-  | 'datasource';
+  | 'datasource'
+  | 'stt'
+  | 'tts'
+  | 'ocr';
 
 export interface IProviderRecordStatus {
   status: 'active' | 'disabled' | 'errored';
@@ -527,6 +546,15 @@ export interface ISemanticCacheConfig {
   similarityThreshold: number;
   ttlSeconds: number;
   maxCacheSize?: number;
+}
+
+export type OcrInvocationMode = 'native' | 'vlm';
+
+export interface IOcrModelSettings {
+  // 'native' uses provider's OCR runtime; 'vlm' calls a vision chat model with
+  // an extraction prompt. Stored under model.settings.ocr.
+  mode?: OcrInvocationMode;
+  prompt?: string;
 }
 
 export interface IModel {

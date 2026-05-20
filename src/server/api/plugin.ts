@@ -15,6 +15,7 @@ import { clientAgentsApiPlugin } from './plugins/client-agents';
 import { clientConfigApiPlugin } from './plugins/client-config';
 import { clientFilesApiPlugin } from './plugins/client-files';
 import { clientGuardrailsApiPlugin } from './plugins/client-guardrails';
+import { clientAudioOcrApiPlugin } from './plugins/client-audio-ocr';
 import { clientInferenceApiPlugin } from './plugins/client-inference';
 import { clientJsSandboxApiPlugin } from './plugins/client-js-sandbox';
 import { clientMemoryApiPlugin } from './plugins/client-memory';
@@ -288,6 +289,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(clientFilesApiPlugin);
   await app.register(clientGuardrailsApiPlugin);
   await app.register(clientInferenceApiPlugin);
+  await app.register(clientAudioOcrApiPlugin);
   await app.register(clientJsSandboxApiPlugin);
   await app.register(clientMemoryApiPlugin);
   // Built-in console MCP server must register before the dynamic user MCP

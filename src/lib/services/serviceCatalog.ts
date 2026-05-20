@@ -156,6 +156,9 @@ export const DOMAIN_LABELS: Record<ProviderDomain, string> = {
   vector: 'Vector',
   file: 'File',
   datasource: 'Datasource',
+  stt: 'Speech-to-Text',
+  tts: 'Text-to-Speech',
+  ocr: 'OCR',
 };
 
 /** First letter of the service name — used as the badge glyph when no icon is provided. */

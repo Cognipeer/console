@@ -1,6 +1,10 @@
 import { getDatabase, IModel, IModelPricing } from '@/lib/database';
 
 const TOKENS_PER_MILLION = 1_000_000;
+const SECONDS_PER_THOUSAND = 1_000;
+const CHARACTERS_PER_MILLION = 1_000_000;
+const PAGES_PER_THOUSAND = 1_000;
+const IMAGES_PER_THOUSAND = 1_000;
 
 export interface TokenUsage {
   inputTokens?: number;
@@ -8,6 +12,13 @@ export interface TokenUsage {
   cachedInputTokens?: number;
   totalTokens?: number;
   toolCalls?: number;
+  // Non-token units used by STT / TTS / OCR / image models. Optional and only
+  // honored when the model pricing exposes the matching per-unit rate.
+  inputSeconds?: number;
+  outputSeconds?: number;
+  inputCharacters?: number;
+  pages?: number;
+  images?: number;
 }
 
 function toRecord(value: unknown): Record<string, unknown> {
@@ -35,17 +46,38 @@ export function calculateCost(
   const cachedTokens = usage.cachedInputTokens ?? 0;
 
   const inputCost =
-    (pricing.inputTokenPer1M * inputTokens) / TOKENS_PER_MILLION;
+    ((pricing.inputTokenPer1M ?? 0) * inputTokens) / TOKENS_PER_MILLION;
   const outputCost =
-    (pricing.outputTokenPer1M * outputTokens) / TOKENS_PER_MILLION;
+    ((pricing.outputTokenPer1M ?? 0) * outputTokens) / TOKENS_PER_MILLION;
   const cachedCost =
     ((pricing.cachedTokenPer1M ?? 0) * cachedTokens) / TOKENS_PER_MILLION;
-  const totalCost = inputCost + outputCost + cachedCost;
+
+  // Non-token components. Each contributes to either inputCost or outputCost
+  // depending on direction so the existing aggregate fields stay meaningful.
+  const audioInputCost =
+    ((pricing.inputSecondPer1K ?? 0) * (usage.inputSeconds ?? 0)) /
+    SECONDS_PER_THOUSAND;
+  const audioOutputCost =
+    ((pricing.outputSecondPer1K ?? 0) * (usage.outputSeconds ?? 0)) /
+    SECONDS_PER_THOUSAND;
+  const characterInputCost =
+    ((pricing.inputCharacterPer1M ?? 0) * (usage.inputCharacters ?? 0)) /
+    CHARACTERS_PER_MILLION;
+  const pageInputCost =
+    ((pricing.pagePer1K ?? 0) * (usage.pages ?? 0)) / PAGES_PER_THOUSAND;
+  const imageInputCost =
+    ((pricing.imagePer1K ?? 0) * (usage.images ?? 0)) / IMAGES_PER_THOUSAND;
+
+  const totalInputCost =
+    inputCost + audioInputCost + characterInputCost + pageInputCost + imageInputCost;
+  const totalOutputCost = outputCost + audioOutputCost;
+
+  const totalCost = totalInputCost + totalOutputCost + cachedCost;
 
   return {
     currency,
-    inputCost,
-    outputCost,
+    inputCost: totalInputCost,
+    outputCost: totalOutputCost,
     cachedCost,
     totalCost,
   };

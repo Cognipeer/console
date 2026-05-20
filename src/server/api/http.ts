@@ -18,6 +18,9 @@ export interface NextRequest {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   json<T = any>(): Promise<T>;
   text(): Promise<string>;
+  arrayBuffer?(): Promise<ArrayBuffer>;
+  buffer?(): Promise<Buffer>;
+  formData?(): Promise<FormData>;
 }
 
 class RequestCookies {
@@ -120,6 +123,37 @@ export class GatewayRequest implements NextRequest {
     }
 
     return JSON.stringify(this.rawBody);
+  }
+
+  async buffer(): Promise<Buffer> {
+    if (this.rawBody === undefined || this.rawBody === null) {
+      return Buffer.alloc(0);
+    }
+    if (Buffer.isBuffer(this.rawBody)) {
+      return this.rawBody;
+    }
+    if (typeof this.rawBody === 'string') {
+      return Buffer.from(this.rawBody, 'utf8');
+    }
+    return Buffer.from(JSON.stringify(this.rawBody), 'utf8');
+  }
+
+  async arrayBuffer(): Promise<ArrayBuffer> {
+    const buf = await this.buffer();
+    return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
+  }
+
+  async formData(): Promise<FormData> {
+    const contentType = this.headers.get('content-type') ?? '';
+    const buf = await this.buffer();
+    // Re-construct a fetch-compatible Request so we can use the built-in
+    // formData() parser (Node 18+ via undici). Avoids pulling in busboy.
+    const req = new Request('http://internal.local/_multipart', {
+      method: 'POST',
+      headers: { 'content-type': contentType },
+      body: new Uint8Array(buf),
+    });
+    return req.formData();
   }
 }
 

@@ -2,7 +2,16 @@
 export type QuotaScope = 'tenant' | 'user' | 'token' | 'resource' | 'provider';
 
 // Domains: service areas
-export type QuotaDomain = 'global' | 'llm' | 'embedding' | 'vector' | 'file' | 'tracing';
+export type QuotaDomain =
+  | 'global'
+  | 'llm'
+  | 'embedding'
+  | 'vector'
+  | 'file'
+  | 'tracing'
+  | 'stt'
+  | 'tts'
+  | 'ocr';
 
 // Human-readable labels for UI
 export const QUOTA_SCOPE_LABELS: Record<QuotaScope, string> = {
@@ -20,6 +29,9 @@ export const QUOTA_DOMAIN_LABELS: Record<QuotaDomain, string> = {
   vector: 'Vector Store',
   file: 'Files',
   tracing: 'Agent Observability',
+  stt: 'Speech-to-Text',
+  tts: 'Text-to-Speech',
+  ocr: 'OCR / Document AI',
 };
 
 export interface QuotaRequestWindow {

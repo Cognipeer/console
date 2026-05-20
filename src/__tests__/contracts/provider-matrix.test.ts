@@ -49,7 +49,16 @@ describe('Every provider contract has valid shape', () => {
 // ── Domain checks ─────────────────────────────────────────────────────────────
 
 describe('Domain classification', () => {
-  const VALID_DOMAINS = ['vector', 'model', 'embedding', 'file'] as const;
+  const VALID_DOMAINS = [
+    'vector',
+    'model',
+    'embedding',
+    'file',
+    'datasource',
+    'stt',
+    'tts',
+    'ocr',
+  ] as const;
 
   it.each(CORE_PROVIDER_CONTRACTS.map((c) => [c.id, c]))(
     '%s — every domain value is known',
@@ -123,7 +132,7 @@ describe('Model provider capabilities', () => {
         expect(Array.isArray(caps['model.categories'])).toBe(true);
         const categories = caps['model.categories'] as string[];
         categories.forEach((cat) => {
-          expect(['llm', 'embedding']).toContain(cat);
+          expect(['llm', 'embedding', 'rerank', 'stt', 'tts', 'ocr']).toContain(cat);
         });
       }
     },

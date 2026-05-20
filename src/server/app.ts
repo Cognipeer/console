@@ -48,6 +48,37 @@ function registerBodyParsers(app: FastifyInstance): void {
     { parseAs: 'string' },
     (_request, body, done) => done(null, body),
   );
+
+  // Multipart and arbitrary binary payloads (audio uploads, OCR documents).
+  app.addContentTypeParser(
+    /^multipart\/form-data/i,
+    { parseAs: 'buffer' },
+    (_request, body, done) => done(null, body),
+  );
+
+  app.addContentTypeParser(
+    /^application\/octet-stream$/i,
+    { parseAs: 'buffer' },
+    (_request, body, done) => done(null, body),
+  );
+
+  app.addContentTypeParser(
+    /^audio\//i,
+    { parseAs: 'buffer' },
+    (_request, body, done) => done(null, body),
+  );
+
+  app.addContentTypeParser(
+    /^image\//i,
+    { parseAs: 'buffer' },
+    (_request, body, done) => done(null, body),
+  );
+
+  app.addContentTypeParser(
+    /^application\/pdf$/i,
+    { parseAs: 'buffer' },
+    (_request, body, done) => done(null, body),
+  );
 }
 
 export async function createServer(dev: boolean): Promise<FastifyInstance> {

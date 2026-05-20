@@ -10,6 +10,11 @@ import type { BaseMessage } from '@langchain/core/messages';
 import type { CallbackManagerForLLMRun } from '@langchain/core/callbacks/manager';
 import type { ProviderContract } from '../types';
 import type { ModelProviderRuntime } from '../domains/model';
+import {
+  createOpenAiSttRuntime,
+  createOpenAiTtsRuntime,
+} from './openaiAudioHelpers';
+import { createVlmOcrRuntime } from './vlmOcrHelpers';
 
 interface OpenAiCredentials {
   apiKey: string;
@@ -125,16 +130,21 @@ function parseServiceAccountKey(raw?: string) {
 export const OpenAiModelProviderContract: ProviderContract<ModelProviderRuntime, OpenAiCredentials, OpenAiSettings> = {
   id: 'openai',
   version: '1.0.0',
-  domains: ['model', 'embedding'],
+  domains: ['model', 'embedding', 'stt', 'tts', 'ocr'],
   display: {
     label: 'OpenAI',
-    description: 'Official OpenAI platform supporting GPT and embedding models.',
+    description: 'Official OpenAI platform supporting GPT, embedding, audio (Whisper/TTS) and vision (VLM-OCR) models.',
   },
   capabilities: {
-    'model.categories': ['llm', 'embedding'],
+    'model.categories': ['llm', 'embedding', 'stt', 'tts', 'ocr'],
     'model.supports.tool_calls': true,
     'model.supports.streaming': true,
     'model.supports.reasoning': true,
+    'stt.supports.timestamps': true,
+    'stt.supports.translate': true,
+    'tts.voices': ['alloy', 'ash', 'ballad', 'coral', 'echo', 'fable', 'onyx', 'nova', 'sage', 'shimmer', 'verse'],
+    'tts.formats.output': ['mp3', 'opus', 'aac', 'flac', 'wav', 'pcm'],
+    'ocr.modes': ['vlm'],
   },
   form: {
     sections: [
@@ -167,6 +177,7 @@ export const OpenAiModelProviderContract: ProviderContract<ModelProviderRuntime,
   },
   createRuntime: ({ credentials, settings }) => {
     const apiKey = ensureValue(credentials.apiKey, 'OpenAI API key is required.');
+    const audioBase = 'https://api.openai.com/v1';
 
     const runtime: ModelProviderRuntime = {
       createChatModel: (config) => {
@@ -193,6 +204,32 @@ export const OpenAiModelProviderContract: ProviderContract<ModelProviderRuntime,
             ? { organization: settings.organization }
             : undefined,
         }),
+      createSttRuntime: (config) =>
+        createOpenAiSttRuntime({
+          apiKey,
+          baseUrl: audioBase,
+          organization: settings.organization,
+          modelId: config.modelId,
+        }),
+      createTtsRuntime: (config) =>
+        createOpenAiTtsRuntime({
+          apiKey,
+          baseUrl: audioBase,
+          organization: settings.organization,
+          modelId: config.modelId,
+        }),
+      createOcrRuntime: (config) => {
+        const prompt =
+          typeof (config.modelSettings as Record<string, unknown> | undefined)?.ocr === 'object'
+            ? ((config.modelSettings as Record<string, unknown>).ocr as Record<string, unknown>)
+                .prompt
+            : undefined;
+        return createVlmOcrRuntime(
+          runtime,
+          config,
+          typeof prompt === 'string' ? prompt : undefined,
+        );
+      },
     };
 
     return runtime;
@@ -202,16 +239,17 @@ export const OpenAiModelProviderContract: ProviderContract<ModelProviderRuntime,
 export const OpenAiCompatibleModelProviderContract: ProviderContract<ModelProviderRuntime, OpenAiCompatibleCredentials, OpenAiCompatibleSettings> = {
   id: 'openai-compatible',
   version: '1.0.0',
-  domains: ['model', 'embedding'],
+  domains: ['model', 'embedding', 'stt', 'tts', 'ocr'],
   display: {
     label: 'OpenAI-Compatible',
-    description: 'Any API that follows the OpenAI REST schema (Mistral, Groq, etc.).',
+    description: 'Any API following the OpenAI REST schema (Mistral, Groq, Deepgram-OpenAI, ElevenLabs-OpenAI, …) including /v1/audio/* and VLM-based OCR.',
   },
   capabilities: {
-    'model.categories': ['llm', 'embedding'],
+    'model.categories': ['llm', 'embedding', 'stt', 'tts', 'ocr'],
     'model.supports.tool_calls': true,
     'model.supports.streaming': true,
     'model.supports.reasoning': true,
+    'ocr.modes': ['vlm'],
   },
   form: {
     sections: [
@@ -282,6 +320,32 @@ export const OpenAiCompatibleModelProviderContract: ProviderContract<ModelProvid
             organization: settings.organization,
           },
         }),
+      createSttRuntime: (config) =>
+        createOpenAiSttRuntime({
+          apiKey,
+          baseUrl,
+          organization: settings.organization,
+          modelId: config.modelId,
+        }),
+      createTtsRuntime: (config) =>
+        createOpenAiTtsRuntime({
+          apiKey,
+          baseUrl,
+          organization: settings.organization,
+          modelId: config.modelId,
+        }),
+      createOcrRuntime: (config) => {
+        const prompt =
+          typeof (config.modelSettings as Record<string, unknown> | undefined)?.ocr === 'object'
+            ? ((config.modelSettings as Record<string, unknown>).ocr as Record<string, unknown>)
+                .prompt
+            : undefined;
+        return createVlmOcrRuntime(
+          runtime,
+          config,
+          typeof prompt === 'string' ? prompt : undefined,
+        );
+      },
     };
 
     return runtime;
@@ -344,15 +408,16 @@ export const TogetherModelProviderContract: ProviderContract<ModelProviderRuntim
 export const BedrockModelProviderContract: ProviderContract<ModelProviderRuntime, BedrockCredentials, BedrockSettings> = {
   id: 'bedrock',
   version: '1.0.0',
-  domains: ['model', 'embedding'],
+  domains: ['model', 'embedding', 'ocr'],
   display: {
     label: 'Amazon Bedrock',
-    description: 'Bedrock Converse API supporting Anthropic, AI21, and other models.',
+    description: 'Bedrock Converse API (Anthropic, Nova, AI21, …) with vision support for VLM-mode OCR.',
   },
   capabilities: {
-    'model.categories': ['llm', 'embedding'],
+    'model.categories': ['llm', 'embedding', 'ocr'],
     'model.supports.tool_calls': true,
     'model.supports.streaming': true,
+    'ocr.modes': ['vlm'],
   },
   form: {
     sections: [
@@ -429,6 +494,18 @@ export const BedrockModelProviderContract: ProviderContract<ModelProviderRuntime
             sessionToken: credentials.sessionToken,
           },
         }),
+      createOcrRuntime: (config) => {
+        const prompt =
+          typeof (config.modelSettings as Record<string, unknown> | undefined)?.ocr === 'object'
+            ? ((config.modelSettings as Record<string, unknown>).ocr as Record<string, unknown>)
+                .prompt
+            : undefined;
+        return createVlmOcrRuntime(
+          runtime,
+          config,
+          typeof prompt === 'string' ? prompt : undefined,
+        );
+      },
     };
 
     return runtime;
@@ -438,16 +515,17 @@ export const BedrockModelProviderContract: ProviderContract<ModelProviderRuntime
 export const VertexModelProviderContract: ProviderContract<ModelProviderRuntime, VertexCredentials, VertexSettings> = {
   id: 'vertex',
   version: '1.0.0',
-  domains: ['model', 'embedding'],
+  domains: ['model', 'embedding', 'ocr'],
   display: {
     label: 'Google Vertex AI',
-    description: 'Vertex AI generative and embedding models using service accounts.',
+    description: 'Vertex AI generative, embedding, and Gemini multimodal models (used for VLM-mode OCR).',
   },
   capabilities: {
-    'model.categories': ['llm', 'embedding'],
+    'model.categories': ['llm', 'embedding', 'ocr'],
     'model.supports.tool_calls': true,
     'model.supports.streaming': true,
     'model.supports.multimodal': true,
+    'ocr.modes': ['vlm'],
   },
   form: {
     sections: [
@@ -510,6 +588,18 @@ export const VertexModelProviderContract: ProviderContract<ModelProviderRuntime,
           authOptions,
           ...({ project: projectId } as Record<string, unknown>),
         }),
+      createOcrRuntime: (config) => {
+        const prompt =
+          typeof (config.modelSettings as Record<string, unknown> | undefined)?.ocr === 'object'
+            ? ((config.modelSettings as Record<string, unknown>).ocr as Record<string, unknown>)
+                .prompt
+            : undefined;
+        return createVlmOcrRuntime(
+          runtime,
+          config,
+          typeof prompt === 'string' ? prompt : undefined,
+        );
+      },
     };
 
     return runtime;
@@ -521,15 +611,16 @@ export const VertexModelProviderContract: ProviderContract<ModelProviderRuntime,
 export const AzureModelProviderContract: ProviderContract<ModelProviderRuntime, AzureCredentials, AzureSettings> = {
   id: 'azure',
   version: '1.0.0',
-  domains: ['model', 'embedding'],
+  domains: ['model', 'embedding', 'stt', 'tts', 'ocr'],
   display: {
     label: 'Azure OpenAI',
-    description: 'Microsoft Azure-hosted OpenAI models with deployment-based access.',
+    description: 'Microsoft Azure-hosted OpenAI models with deployment-based access, including Whisper/TTS deployments.',
   },
   capabilities: {
-    'model.categories': ['llm', 'embedding'],
+    'model.categories': ['llm', 'embedding', 'stt', 'tts', 'ocr'],
     'model.supports.tool_calls': true,
     'model.supports.streaming': true,
+    'ocr.modes': ['vlm'],
   },
   form: {
     sections: [
@@ -606,6 +697,36 @@ export const AzureModelProviderContract: ProviderContract<ModelProviderRuntime, 
           azureOpenAIApiDeploymentName: deploymentName,
           azureOpenAIApiVersion: apiVersion,
         }),
+      createSttRuntime: (config) =>
+        createOpenAiSttRuntime({
+          apiKey,
+          baseUrl: `https://${instanceName}.openai.azure.com/openai/deployments/${deploymentName}`,
+          modelId: config.modelId,
+          extraHeaders: { 'api-key': apiKey },
+          buildUrl: (path) =>
+            `https://${instanceName}.openai.azure.com/openai/deployments/${deploymentName}${path}?api-version=${encodeURIComponent(apiVersion)}`,
+        }),
+      createTtsRuntime: (config) =>
+        createOpenAiTtsRuntime({
+          apiKey,
+          baseUrl: `https://${instanceName}.openai.azure.com/openai/deployments/${deploymentName}`,
+          modelId: config.modelId,
+          extraHeaders: { 'api-key': apiKey },
+          buildUrl: (path) =>
+            `https://${instanceName}.openai.azure.com/openai/deployments/${deploymentName}${path}?api-version=${encodeURIComponent(apiVersion)}`,
+        }),
+      createOcrRuntime: (config) => {
+        const prompt =
+          typeof (config.modelSettings as Record<string, unknown> | undefined)?.ocr === 'object'
+            ? ((config.modelSettings as Record<string, unknown>).ocr as Record<string, unknown>)
+                .prompt
+            : undefined;
+        return createVlmOcrRuntime(
+          runtime,
+          config,
+          typeof prompt === 'string' ? prompt : undefined,
+        );
+      },
     };
 
     return runtime;

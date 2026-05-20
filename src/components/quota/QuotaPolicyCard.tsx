@@ -1,13 +1,13 @@
 'use client';
 
 import { Card, Group, Text, Badge, ActionIcon, Stack, Tooltip, Box, ThemeIcon } from '@mantine/core';
-import { 
-  IconEdit, 
-  IconTrash, 
-  IconUser, 
-  IconKey, 
-  IconBuildingBank, 
-  IconServer, 
+import {
+  IconEdit,
+  IconTrash,
+  IconUser,
+  IconKey,
+  IconBuildingBank,
+  IconServer,
   IconPackage,
   IconWorld,
   IconMessageChatbot,
@@ -15,6 +15,9 @@ import {
   IconDatabase,
   IconFiles,
   IconActivity,
+  IconMicrophone,
+  IconSpeakerphone,
+  IconScan,
 } from '@tabler/icons-react';
 import type { IQuotaPolicy } from '@/lib/database/provider.interface';
 import type { QuotaDomain, QuotaScope } from '@/lib/quota/types';
@@ -43,6 +46,9 @@ const DOMAIN_ICONS: Record<QuotaDomain, React.FC<{ size?: number }>> = {
   vector: IconDatabase,
   file: IconFiles,
   tracing: IconActivity,
+  stt: IconMicrophone,
+  tts: IconSpeakerphone,
+  ocr: IconScan,
 };
 
 export function QuotaPolicyCard({ policy, onEdit, onDelete, showDomain = true, compact = false }: QuotaPolicyCardProps) {

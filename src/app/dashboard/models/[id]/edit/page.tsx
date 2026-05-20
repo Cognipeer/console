@@ -62,7 +62,7 @@ interface ModelDetailDto {
   provider?: string;
   providerKey: string;
   providerDriver?: string;
-  category: 'llm' | 'embedding';
+  category: 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr';
   modelId: string;
   isMultimodal?: boolean;
   supportsToolCalls?: boolean;

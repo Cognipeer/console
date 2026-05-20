@@ -45,18 +45,20 @@ interface ProviderField {
   options?: Array<{ label: string; value: string }>;
 }
 
+type WizardCategory = 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr';
+
 interface ProviderDefinition {
   id: string;
   label: string;
   description: string;
-  categories: Array<'llm' | 'embedding'>;
+  categories: Array<WizardCategory>;
   credentialFields: ProviderField[];
   defaultPricingCurrency: string;
   modelIdHint?: string;
 }
 
 interface FormValues {
-  category: 'llm' | 'embedding';
+  category: WizardCategory;
   provider: string;
   settings: Record<string, string>;
   name: string;
@@ -70,7 +72,12 @@ interface FormValues {
     inputTokenPer1M: number;
     outputTokenPer1M: number;
     cachedTokenPer1M: number;
+    inputSecondPer1K?: number;
+    inputCharacterPer1M?: number;
+    pagePer1K?: number;
   };
+  ocrMode?: 'native' | 'vlm';
+  ocrPrompt?: string;
 }
 
 function slugify(value: string) {
@@ -304,6 +311,10 @@ export default function NewModelPage() {
                 <Group mt="xs" gap="md">
                   <Radio value="llm" label={t('fields.category.options.llm')} size="md" />
                   <Radio value="embedding" label={t('fields.category.options.embedding')} size="md" />
+                  <Radio value="rerank" label="Rerank" size="md" />
+                  <Radio value="stt" label="Speech-to-Text" size="md" />
+                  <Radio value="tts" label="Text-to-Speech" size="md" />
+                  <Radio value="ocr" label="OCR" size="md" />
                 </Group>
               </Radio.Group>
             </Paper>
@@ -338,11 +349,25 @@ export default function NewModelPage() {
                           {provider.description}
                         </Text>
                         <Group gap={4}>
-                          {provider.categories.map((category) => (
-                            <Badge key={category} variant="light" color="gray" size="sm">
-                              {category === 'llm' ? tModels('list.badges.llm') : tModels('list.badges.embedding')}
-                            </Badge>
-                          ))}
+                          {provider.categories.map((category) => {
+                            const label =
+                              category === 'llm'
+                                ? tModels('list.badges.llm')
+                                : category === 'embedding'
+                                  ? tModels('list.badges.embedding')
+                                  : category === 'rerank'
+                                    ? 'Rerank'
+                                    : category === 'stt'
+                                      ? 'STT'
+                                      : category === 'tts'
+                                        ? 'TTS'
+                                        : 'OCR';
+                            return (
+                              <Badge key={category} variant="light" color="gray" size="sm">
+                                {label}
+                              </Badge>
+                            );
+                          })}
                         </Group>
                       </Stack>
                     </Paper>

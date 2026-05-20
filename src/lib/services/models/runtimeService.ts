@@ -23,8 +23,9 @@ export async function buildModelRuntime(
     { tenantId, key: providerKey, projectId },
   );
 
-  if (record.type !== 'model') {
-    throw new Error('Provider configuration is not a model provider.');
+  const allowedTypes = new Set(['model', 'embedding', 'stt', 'tts', 'ocr']);
+  if (!allowedTypes.has(record.type)) {
+    throw new Error('Provider configuration is not a model/audio/ocr provider.');
   }
 
   const cacheKey = `model:${tenantId}:${record.key}`;

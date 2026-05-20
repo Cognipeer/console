@@ -76,7 +76,7 @@ interface ModelsDashboardOverview {
 interface ModelTopEntry {
   key: string;
   name: string;
-  category: 'llm' | 'embedding' | 'rerank';
+  category: 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr';
   callCount: number;
   totalTokens: number;
   totalCost: number;
@@ -131,7 +131,7 @@ interface ModelDto {
   provider?: string;
   providerKey: string;
   providerDriver: string;
-  category: 'llm' | 'embedding' | 'rerank';
+  category: 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr';
   modelId: string;
   isMultimodal?: boolean;
   supportsToolCalls?: boolean;

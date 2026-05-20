@@ -30,7 +30,18 @@ const CAPABILITY_KEYS = {
   multimodal: 'model.supports.multimodal',
 } as const;
 
-type ModelCategory = 'llm' | 'embedding';
+type ModelCategory = 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr';
+
+const ALL_CATEGORIES: ReadonlyArray<{ value: ModelCategory; label: string }> = [
+  { value: 'llm', label: 'LLM' },
+  { value: 'embedding', label: 'Embedding' },
+  { value: 'rerank', label: 'Rerank' },
+  { value: 'stt', label: 'Speech-to-Text' },
+  { value: 'tts', label: 'Text-to-Speech' },
+  { value: 'ocr', label: 'OCR' },
+];
+
+type OcrMode = 'native' | 'vlm';
 
 type CreateModelModalProps = {
   opened: boolean;
@@ -53,10 +64,17 @@ interface FormValues {
     inputTokenPer1M: number | '';
     outputTokenPer1M: number | '';
     cachedTokenPer1M: number | '';
+    inputSecondPer1K: number | '';
+    inputCharacterPer1M: number | '';
+    pagePer1K: number | '';
   };
   settings: {
     temperature: number | '';
     maxTokens: number | '';
+  };
+  ocr: {
+    mode: OcrMode;
+    prompt: string;
   };
 }
 
@@ -69,9 +87,18 @@ function toNumber(value: number | '' | undefined): number | undefined {
 function resolveProviderCategories(provider?: ModelProviderView): ModelCategory[] {
   const raw = provider?.driverCapabilities?.[CAPABILITY_KEYS.categories];
   if (!Array.isArray(raw)) return ['llm', 'embedding'];
-  return raw.filter(
-    (item): item is ModelCategory => item === 'llm' || item === 'embedding',
+  return raw.filter((item): item is ModelCategory =>
+    ALL_CATEGORIES.some((c) => c.value === item),
   );
+}
+
+function resolveOcrModes(provider?: ModelProviderView): OcrMode[] {
+  const raw = provider?.driverCapabilities?.['ocr.modes'];
+  if (Array.isArray(raw)) {
+    const modes = raw.filter((m): m is OcrMode => m === 'native' || m === 'vlm');
+    if (modes.length > 0) return modes;
+  }
+  return ['vlm'];
 }
 
 function providerSupportsToolCalls(provider?: ModelProviderView) {
@@ -108,10 +135,17 @@ export default function CreateModelModal({
         inputTokenPer1M: DEFAULT_PRICING.inputTokenPer1M,
         outputTokenPer1M: DEFAULT_PRICING.outputTokenPer1M,
         cachedTokenPer1M: DEFAULT_PRICING.cachedTokenPer1M,
+        inputSecondPer1K: '',
+        inputCharacterPer1M: '',
+        pagePer1K: '',
       },
       settings: {
         temperature: '',
         maxTokens: '',
+      },
+      ocr: {
+        mode: 'vlm',
+        prompt: '',
       },
     },
     validate: {
@@ -168,6 +202,19 @@ export default function CreateModelModal({
     () => resolveProviderCategories(selectedProvider),
     [selectedProvider],
   );
+
+  const allowedOcrModes = useMemo(
+    () => resolveOcrModes(selectedProvider),
+    [selectedProvider],
+  );
+
+  useEffect(() => {
+    if (formValues.category !== 'ocr') return;
+    if (!allowedOcrModes.includes(formValues.ocr.mode)) {
+      setFieldValue('ocr.mode', allowedOcrModes[0]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allowedOcrModes, formValues.category]);
 
   useEffect(() => {
     if (!selectedProvider) return;
@@ -257,6 +304,15 @@ export default function CreateModelModal({
             inputTokenPer1M: Number(values.pricing.inputTokenPer1M ?? 0),
             outputTokenPer1M: Number(values.pricing.outputTokenPer1M ?? 0),
             cachedTokenPer1M: Number(values.pricing.cachedTokenPer1M ?? 0),
+            ...(toNumber(values.pricing.inputSecondPer1K) !== undefined
+              ? { inputSecondPer1K: toNumber(values.pricing.inputSecondPer1K) }
+              : {}),
+            ...(toNumber(values.pricing.inputCharacterPer1M) !== undefined
+              ? { inputCharacterPer1M: toNumber(values.pricing.inputCharacterPer1M) }
+              : {}),
+            ...(toNumber(values.pricing.pagePer1K) !== undefined
+              ? { pagePer1K: toNumber(values.pricing.pagePer1K) }
+              : {}),
           },
           settings: {
             ...(toNumber(values.settings.temperature) !== undefined
@@ -264,6 +320,16 @@ export default function CreateModelModal({
               : {}),
             ...(toNumber(values.settings.maxTokens) !== undefined
               ? { maxTokens: toNumber(values.settings.maxTokens) }
+              : {}),
+            ...(values.category === 'ocr'
+              ? {
+                  ocr: {
+                    mode: values.ocr.mode,
+                    ...(values.ocr.prompt.trim()
+                      ? { prompt: values.ocr.prompt.trim() }
+                      : {}),
+                  },
+                }
               : {}),
           },
         }),
@@ -471,12 +537,9 @@ export default function CreateModelModal({
           </FormField>
           <FormField label="Category">
             <ChipPicker<ModelCategory>
-              options={(
-                [
-                  { value: 'llm' as const, label: 'LLM' },
-                  { value: 'embedding' as const, label: 'Embedding' },
-                ] satisfies Array<{ value: ModelCategory; label: string }>
-              ).filter((opt) => allowedCategories.includes(opt.value))}
+              options={ALL_CATEGORIES.filter((opt) =>
+                allowedCategories.includes(opt.value),
+              )}
               value={formValues.category}
               onChange={(v) => setFieldValue('category', v as ModelCategory)}
             />
@@ -517,10 +580,58 @@ export default function CreateModelModal({
         </ToggleList>
       </FormSection>
 
+      {formValues.category === 'ocr' && (
+        <FormSection
+          number="3a"
+          title="OCR mode"
+          description="Choose between a dedicated OCR provider (native) or a vision-capable chat model (VLM)."
+          done={Boolean(formValues.ocr.mode)}
+        >
+          <FormRow cols={1}>
+            <FormField label="Invocation mode">
+              <ChipPicker<OcrMode>
+                options={(
+                  [
+                    { value: 'native' as const, label: 'Native OCR' },
+                    { value: 'vlm' as const, label: 'Vision LLM' },
+                  ] satisfies Array<{ value: OcrMode; label: string }>
+                ).filter((opt) => allowedOcrModes.includes(opt.value))}
+                value={formValues.ocr.mode}
+                onChange={(v) => setFieldValue('ocr.mode', v as OcrMode)}
+              />
+            </FormField>
+          </FormRow>
+          {formValues.ocr.mode === 'vlm' && (
+            <FormRow cols={1}>
+              <FormField
+                label="Extraction prompt"
+                optional
+                hint="Override the default OCR prompt sent to the VLM."
+              >
+                <Textarea
+                  autosize
+                  minRows={3}
+                  placeholder="Leave blank to use the default OCR prompt."
+                  {...form.getInputProps('ocr.prompt')}
+                />
+              </FormField>
+            </FormRow>
+          )}
+        </FormSection>
+      )}
+
       <FormSection
         number={4}
         title="Pricing"
-        description="Per-million-token pricing for accounting and routing decisions."
+        description={
+          formValues.category === 'stt'
+            ? 'Per-1000-second pricing for transcription input.'
+            : formValues.category === 'tts'
+              ? 'Per-1,000,000-character pricing for synthesized speech input.'
+              : formValues.category === 'ocr'
+                ? 'Per-1000-page pricing for OCR. Token fields apply when the VLM mode is used.'
+                : 'Per-million-token pricing for accounting and routing decisions.'
+        }
         done={validPricing}
       >
         <FormRow cols={2}>
@@ -530,7 +641,7 @@ export default function CreateModelModal({
               {...form.getInputProps('pricing.currency')}
             />
           </FormField>
-          <FormField label="Input · per 1M">
+          <FormField label="Input · per 1M tokens">
             <NumberInput
               min={0}
               decimalScale={4}
@@ -539,14 +650,14 @@ export default function CreateModelModal({
           </FormField>
         </FormRow>
         <FormRow cols={2}>
-          <FormField label="Output · per 1M">
+          <FormField label="Output · per 1M tokens">
             <NumberInput
               min={0}
               decimalScale={4}
               {...form.getInputProps('pricing.outputTokenPer1M')}
             />
           </FormField>
-          <FormField label="Cached · per 1M" optional>
+          <FormField label="Cached · per 1M tokens" optional>
             <NumberInput
               min={0}
               decimalScale={4}
@@ -554,6 +665,51 @@ export default function CreateModelModal({
             />
           </FormField>
         </FormRow>
+        {formValues.category === 'stt' && (
+          <FormRow cols={2}>
+            <FormField label="Audio input · per 1K seconds" optional>
+              <NumberInput
+                min={0}
+                decimalScale={4}
+                placeholder="e.g., 6.00"
+                {...form.getInputProps('pricing.inputSecondPer1K')}
+              />
+            </FormField>
+            <FormField label=" " optional>
+              <span />
+            </FormField>
+          </FormRow>
+        )}
+        {formValues.category === 'tts' && (
+          <FormRow cols={2}>
+            <FormField label="Input · per 1M characters" optional>
+              <NumberInput
+                min={0}
+                decimalScale={4}
+                placeholder="e.g., 15.00"
+                {...form.getInputProps('pricing.inputCharacterPer1M')}
+              />
+            </FormField>
+            <FormField label=" " optional>
+              <span />
+            </FormField>
+          </FormRow>
+        )}
+        {formValues.category === 'ocr' && (
+          <FormRow cols={2}>
+            <FormField label="Pages · per 1K" optional>
+              <NumberInput
+                min={0}
+                decimalScale={4}
+                placeholder="e.g., 1.50"
+                {...form.getInputProps('pricing.pagePer1K')}
+              />
+            </FormField>
+            <FormField label=" " optional>
+              <span />
+            </FormField>
+          </FormRow>
+        )}
       </FormSection>
 
       <FormSection
