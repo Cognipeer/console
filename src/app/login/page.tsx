@@ -1,19 +1,21 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
-  TextInput,
-  PasswordInput,
   Button,
-  Text,
-  Anchor,
-  Stack,
-  Group,
+  PasswordInput,
+  TextInput,
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
-import { IconLogin } from '@tabler/icons-react';
+import {
+  IconBolt,
+  IconLogin,
+  IconShieldLock,
+  IconUsers,
+} from '@tabler/icons-react';
 import LoadingState from '@/components/common/LoadingState';
 import AuthShell from '@/components/layout/AuthShell';
 import { useTranslations } from '@/lib/i18n';
@@ -28,10 +30,7 @@ export default function LoginPage() {
   const tCommon = useTranslations('common');
 
   const form = useForm({
-    initialValues: {
-      email: '',
-      password: '',
-    },
+    initialValues: { email: '', password: '' },
     validate: {
       email: (value) =>
         /^\S+@\S+$/.test(value) ? null : tValidation('invalidEmail'),
@@ -40,48 +39,40 @@ export default function LoginPage() {
     },
   });
 
-  // Check if user is already authenticated
   useEffect(() => {
     const checkAuth = async () => {
       try {
-          const response = await fetch('/api/auth/session', {
+        const response = await fetch('/api/auth/session', {
           method: 'GET',
           credentials: 'include',
           cache: 'no-store',
         });
-
         if (response.ok) {
           const data = (await response.json()) as { mustChangePassword?: boolean };
           router.push(data.mustChangePassword ? '/change-password' : '/dashboard');
           return;
         }
-        } catch {
-          setCheckingAuth(false);
+      } catch {
+        setCheckingAuth(false);
       } finally {
         setCheckingAuth(false);
       }
     };
-
-    checkAuth();
+    void checkAuth();
   }, [router]);
 
   const handleSubmit = async (values: typeof form.values) => {
     setLoading(true);
-
     try {
       const response = await fetch('/api/auth/login', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           email: values.email.trim().toLowerCase(),
           password: values.password,
         }),
       });
-
       const data = await response.json();
-
       if (!response.ok) {
         notifications.show({
           title: tNotifications('loginFailedTitle'),
@@ -90,13 +81,11 @@ export default function LoginPage() {
         });
         return;
       }
-
       notifications.show({
         title: tCommon('success'),
         message: tNotifications('loginSuccess'),
-        color: 'green',
+        color: 'teal',
       });
-
       router.push(data.mustChangePassword ? '/change-password' : '/dashboard');
     } catch {
       notifications.show({
@@ -109,7 +98,6 @@ export default function LoginPage() {
     }
   };
 
-  // Show loading state while checking authentication
   if (checkingAuth) {
     return <LoadingState minHeight="100vh" size="lg" label={tCommon('loading')} />;
   }
@@ -118,19 +106,38 @@ export default function LoginPage() {
     <AuthShell
       title={t('hero.title')}
       subtitle={t('hero.subtitle')}
+      highlights={[
+        {
+          icon: <IconBolt size={13} stroke={1.7} />,
+          label: 'Inference, agents, tracing — one console.',
+        },
+        {
+          icon: <IconShieldLock size={13} stroke={1.7} />,
+          label: 'Guardrails, PII redaction, audit logs out of the box.',
+        },
+        {
+          icon: <IconUsers size={13} stroke={1.7} />,
+          label: 'Multi-tenant, project-scoped permissions.',
+        },
+      ]}
       footer={
-        <Group justify="center">
-          <Text size="sm" c="dimmed">
-            {t('footer.cta')}{' '}
-            <Anchor href="/register" size="sm" fw={600}>
-              {t('footer.link')}
-            </Anchor>
-          </Text>
-        </Group>
+        <>
+          {t('footer.cta')}{' '}
+          <Link
+            href="/register"
+            style={{
+              color: 'var(--ds-accent)',
+              fontWeight: 600,
+              textDecoration: 'none',
+            }}
+          >
+            {t('footer.link')}
+          </Link>
+        </>
       }
     >
       <form onSubmit={form.onSubmit(handleSubmit)}>
-        <Stack gap="lg">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <TextInput
             label={t('form.email.label')}
             placeholder={t('form.email.placeholder')}
@@ -149,22 +156,31 @@ export default function LoginPage() {
             {...form.getInputProps('password')}
           />
 
-          <Anchor href="/forgot-password" size="sm" ta="right">
-            Forgot password?
-          </Anchor>
+          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+            <Link
+              href="/forgot-password"
+              style={{
+                fontSize: 12.5,
+                color: 'var(--ds-text-muted)',
+                textDecoration: 'none',
+              }}
+            >
+              Forgot password?
+            </Link>
+          </div>
 
           <Button
-            mt="xs"
             type="submit"
-            size="lg"
+            color="teal"
+            size="md"
             fullWidth
             loading={loading}
-            leftSection={<IconLogin size={20} />}
-            variant="gradient"
+            leftSection={<IconLogin size={16} stroke={1.7} />}
+            mt={4}
           >
             {t('form.submit')}
           </Button>
-        </Stack>
+        </div>
       </form>
     </AuthShell>
   );

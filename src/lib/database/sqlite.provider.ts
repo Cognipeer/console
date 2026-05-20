@@ -37,6 +37,7 @@ import { ToolMixin } from './sqlite/tool.mixin';
 import { AgentMixin } from './sqlite/agent.mixin';
 import { VectorMigrationMixin } from './sqlite/vector-migration.mixin';
 import { BrowserMixin } from './sqlite/browser.mixin';
+import { CrawlerMixin } from './sqlite/crawler.mixin';
 import { AuditMixin } from './sqlite/audit.mixin';
 import { UserProjectMixin } from './sqlite/user-project.mixin';
 import { ClusterMixin } from './sqlite/cluster.mixin';
@@ -57,7 +58,7 @@ const AIBase = VectorMixin(ModelMixin(TracingMixin(ContentBase)));
 const StorageBase = ProviderRecordMixin(FileMixin(AIBase));
 
 // Group 5 – Advanced features
-const AdvancedBase = AuditMixin(BrowserMixin(VectorMigrationMixin(AgentMixin(ToolMixin(JsSandboxMixin(McpServerMixin(ConfigMixin(MemoryMixin(RerankerMixin(RagMixin(IncidentMixin(AlertMixin(PiiPolicyMixin(GuardrailMixin(InferenceMixin(StorageBase))))))))))))))));
+const AdvancedBase = CrawlerMixin(AuditMixin(BrowserMixin(VectorMigrationMixin(AgentMixin(ToolMixin(JsSandboxMixin(McpServerMixin(ConfigMixin(MemoryMixin(RerankerMixin(RagMixin(IncidentMixin(AlertMixin(PiiPolicyMixin(GuardrailMixin(InferenceMixin(StorageBase)))))))))))))))));
 
 // Group 6 – Cluster (system-wide; uses main DB)
 const ClusterBase = ClusterMixin(AdvancedBase);

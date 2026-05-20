@@ -1,19 +1,16 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
   TextInput,
   PasswordInput,
   Button,
-  Text,
-  Anchor,
-  Stack,
-  Group,
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
-import { IconUserPlus } from '@tabler/icons-react';
+import { IconUserPlus, IconBolt, IconCheck } from '@tabler/icons-react';
 import LoadingState from '@/components/common/LoadingState';
 import AuthShell from '@/components/layout/AuthShell';
 import { useTranslations } from '@/lib/i18n';
@@ -128,19 +125,38 @@ export default function RegisterPage() {
     <AuthShell
       title={t('hero.title')}
       subtitle={t('hero.subtitle')}
+      highlights={[
+        {
+          icon: <IconCheck size={13} stroke={1.7} />,
+          label: 'Free for personal projects.',
+        },
+        {
+          icon: <IconBolt size={13} stroke={1.7} />,
+          label: 'Onboard in under a minute.',
+        },
+        {
+          icon: <IconUserPlus size={13} stroke={1.7} />,
+          label: 'Production-ready out of the box.',
+        },
+      ]}
       footer={
-        <Group justify="center">
-          <Text size="sm" c="dimmed">
-            {t('footer.cta')}{' '}
-            <Anchor href="/login" size="sm" fw={600}>
-              {t('footer.link')}
-            </Anchor>
-          </Text>
-        </Group>
+        <>
+          {t('footer.cta')}{' '}
+          <Link
+            href="/login"
+            style={{
+              color: 'var(--ds-accent)',
+              fontWeight: 600,
+              textDecoration: 'none',
+            }}
+          >
+            {t('footer.link')}
+          </Link>
+        </>
       }
     >
       <form onSubmit={form.onSubmit(handleSubmit)}>
-        <Stack gap="md">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <TextInput
             label={t('form.name.label')}
             placeholder={t('form.name.placeholder')}
@@ -188,17 +204,17 @@ export default function RegisterPage() {
           />
 
           <Button
-            mt="xs"
             type="submit"
-            size="lg"
+            color="teal"
+            size="md"
             fullWidth
             loading={loading}
-            leftSection={<IconUserPlus size={20} />}
-            variant="gradient"
+            leftSection={<IconUserPlus size={16} stroke={1.7} />}
+            mt={4}
           >
             {t('form.submit')}
           </Button>
-        </Stack>
+        </div>
       </form>
     </AuthShell>
   );

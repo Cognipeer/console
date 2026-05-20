@@ -17,6 +17,11 @@ import type {
   IBrowser,
   IBrowserSession,
   IBrowserSessionEvent,
+  ICrawler,
+  ICrawlJob,
+  ICrawlResult,
+  CrawlJobStatus,
+  CrawlerStatus,
   IConfigAuditLog,
   IConfigGroup,
   IConfigItem,
@@ -1016,6 +1021,56 @@ export interface DatabaseProvider {
     options?: { limit?: number; skip?: number },
   ): Promise<IBrowserSessionEvent[]>;
   countBrowserSessionEvents(sessionId: string): Promise<number>;
+
+  // ── Crawlers (tenant-specific) ──
+  createCrawler(
+    record: Omit<ICrawler, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<ICrawler>;
+  updateCrawler(
+    id: string,
+    data: Partial<Omit<ICrawler, '_id' | 'tenantId' | 'createdAt'>>,
+  ): Promise<ICrawler | null>;
+  deleteCrawler(id: string): Promise<boolean>;
+  findCrawlerById(id: string): Promise<ICrawler | null>;
+  findCrawlerByKey(
+    tenantId: string,
+    key: string,
+    projectId?: string,
+  ): Promise<ICrawler | null>;
+  listCrawlers(
+    tenantId: string,
+    filters?: { projectId?: string; status?: CrawlerStatus | string; search?: string },
+  ): Promise<ICrawler[]>;
+
+  // ── Crawl jobs (tenant-specific) ──
+  createCrawlJob(
+    record: Omit<ICrawlJob, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<ICrawlJob>;
+  updateCrawlJob(
+    id: string,
+    data: Partial<Omit<ICrawlJob, '_id' | 'tenantId' | 'createdAt'>>,
+  ): Promise<ICrawlJob | null>;
+  findCrawlJobById(id: string): Promise<ICrawlJob | null>;
+  listCrawlJobs(
+    tenantId: string,
+    filters?: {
+      projectId?: string;
+      crawlerKey?: string;
+      status?: CrawlJobStatus | string;
+      limit?: number;
+    },
+  ): Promise<ICrawlJob[]>;
+
+  // ── Crawl results (tenant-specific) ──
+  createCrawlResult(
+    record: Omit<ICrawlResult, '_id' | 'createdAt'>,
+  ): Promise<ICrawlResult>;
+  listCrawlResults(
+    jobId: string,
+    options?: { limit?: number; skip?: number; type?: string },
+  ): Promise<ICrawlResult[]>;
+  findCrawlResultById(id: string): Promise<ICrawlResult | null>;
+  countCrawlResults(jobId: string): Promise<number>;
 
   // ── Cluster: nodes (main database) ──
   upsertNode(

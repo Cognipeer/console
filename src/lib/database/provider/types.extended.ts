@@ -276,7 +276,8 @@ export type InstanceEntityType =
   | 'js-sandbox'
   | 'inference-server'
   | 'alert-rule'
-  | 'automation';
+  | 'automation'
+  | 'crawler';
 
 export type InstanceAssignmentMode = 'strict' | 'preferred';
 

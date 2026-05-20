@@ -14,6 +14,8 @@ export const tr: typeof en = {
     ...en.navigation,
     pii: 'PII Servisi',
     piiDescription: 'Kişisel verileri tespit edin, redakte edin ve maskeleyin',
+    crawler: 'Crawler',
+    crawlerDescription: 'Web sitelerini markdown olarak çekip knowledge engine ile birleştir',
   },
   breadcrumbs: {
     ...en.breadcrumbs,

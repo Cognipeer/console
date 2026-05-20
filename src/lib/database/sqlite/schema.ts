@@ -1164,6 +1164,94 @@ export const TENANT_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_browser_session_events_sessionId ON browser_session_events(sessionId);
   CREATE INDEX IF NOT EXISTS idx_browser_session_events_seq ON browser_session_events(sessionId, sequence);
 
+  -- Crawlers (parent profiles)
+  CREATE TABLE IF NOT EXISTS crawlers (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    seeds TEXT NOT NULL DEFAULT '[]',
+    engine TEXT NOT NULL DEFAULT 'auto',
+    maxDepth INTEGER NOT NULL DEFAULT 1,
+    maxPages INTEGER NOT NULL DEFAULT 0,
+    autoCrawl INTEGER NOT NULL DEFAULT 1,
+    scope TEXT NOT NULL DEFAULT '{}',
+    downloadableMimes TEXT DEFAULT '[]',
+    http TEXT NOT NULL DEFAULT '{}',
+    markdownOptions TEXT DEFAULT '{}',
+    rag TEXT,
+    webhook TEXT,
+    schedule TEXT,
+    metadata TEXT DEFAULT '{}',
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_crawlers_tenantId ON crawlers(tenantId);
+  CREATE INDEX IF NOT EXISTS idx_crawlers_projectId ON crawlers(projectId);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_crawlers_tenant_key ON crawlers(tenantId, key);
+
+  -- Crawl jobs
+  CREATE TABLE IF NOT EXISTS crawl_jobs (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    crawlerKey TEXT,
+    trigger TEXT NOT NULL,
+    triggerActor TEXT NOT NULL,
+    planSnapshot TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'queued',
+    startedAt TEXT,
+    endedAt TEXT,
+    durationMs INTEGER,
+    pagesDiscovered INTEGER NOT NULL DEFAULT 0,
+    pagesProcessed INTEGER NOT NULL DEFAULT 0,
+    filesProcessed INTEGER NOT NULL DEFAULT 0,
+    errorsCount INTEGER NOT NULL DEFAULT 0,
+    limitReached INTEGER NOT NULL DEFAULT 0,
+    callbackUrl TEXT,
+    errorMessage TEXT,
+    metadata TEXT DEFAULT '{}',
+    createdBy TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_crawl_jobs_tenantId ON crawl_jobs(tenantId);
+  CREATE INDEX IF NOT EXISTS idx_crawl_jobs_crawlerKey ON crawl_jobs(crawlerKey);
+  CREATE INDEX IF NOT EXISTS idx_crawl_jobs_status ON crawl_jobs(status);
+  CREATE INDEX IF NOT EXISTS idx_crawl_jobs_createdAt ON crawl_jobs(createdAt DESC);
+
+  -- Crawl results
+  CREATE TABLE IF NOT EXISTS crawl_results (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    jobId TEXT NOT NULL,
+    crawlerKey TEXT,
+    url TEXT NOT NULL,
+    parentUrl TEXT,
+    depth INTEGER NOT NULL DEFAULT 0,
+    type TEXT NOT NULL,
+    httpStatus INTEGER,
+    contentType TEXT,
+    title TEXT,
+    description TEXT,
+    bodyMarkdown TEXT,
+    bytes INTEGER,
+    ragDocumentId TEXT,
+    ragStatus TEXT,
+    errorMessage TEXT,
+    fetchedAt TEXT,
+    createdAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_crawl_results_jobId ON crawl_results(jobId);
+  CREATE INDEX IF NOT EXISTS idx_crawl_results_jobId_createdAt ON crawl_results(jobId, createdAt DESC);
+  CREATE INDEX IF NOT EXISTS idx_crawl_results_tenant_url ON crawl_results(tenantId, url);
+
   -- Project membership (replaces user.projectIds)
   CREATE TABLE IF NOT EXISTS user_projects (
     id TEXT PRIMARY KEY,

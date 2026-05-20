@@ -240,6 +240,22 @@
         "/api/client/v1/browser/*/mcp/sse",
         "/api/client/v1/browser/*/mcp/message"
       ]
+    },
+    "CRAWLER": {
+      "name": "Crawler",
+      "description": "Web crawlers that fetch pages as markdown and optionally ingest into RAG",
+      "endpoints": [
+        "/api/crawler/crawlers",
+        "/api/crawler/crawlers/*",
+        "/api/crawler/run",
+        "/api/crawler/jobs",
+        "/api/crawler/jobs/*",
+        "/api/client/v1/crawler/crawlers",
+        "/api/client/v1/crawler/crawlers/*",
+        "/api/client/v1/crawler/run",
+        "/api/client/v1/crawler/jobs",
+        "/api/client/v1/crawler/jobs/*"
+      ]
     }
   },
   "licenses": {

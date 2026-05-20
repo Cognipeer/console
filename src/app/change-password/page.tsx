@@ -2,17 +2,11 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import {
-  Button,
-  Center,
-  Paper,
-  PasswordInput,
-  Stack,
-  Text,
-  Title,
-} from '@mantine/core';
+import { Button, PasswordInput } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
+import { IconKey, IconShieldLock, IconCheck } from '@tabler/icons-react';
+import AuthShell from '@/components/layout/AuthShell';
 
 export default function ChangePasswordPage() {
   const router = useRouter();
@@ -82,38 +76,56 @@ export default function ChangePasswordPage() {
   };
 
   return (
-    <Center mih="100vh" p="md">
-      <Paper shadow="sm" radius="md" withBorder p="xl" maw={520} w="100%">
-        <Stack gap="sm">
-          <Title order={2}>Change your password</Title>
-          <Text c="dimmed">
-            You signed in with a temporary password. Please set a new password to continue.
-          </Text>
-
-          <form onSubmit={form.onSubmit(submit)}>
-            <Stack gap="sm">
-              <PasswordInput
-                label="Current password"
-                required
-                {...form.getInputProps('currentPassword')}
-              />
-              <PasswordInput
-                label="New password"
-                required
-                {...form.getInputProps('newPassword')}
-              />
-              <PasswordInput
-                label="Confirm new password"
-                required
-                {...form.getInputProps('confirmPassword')}
-              />
-              <Button type="submit" loading={loading}>
-                Update password
-              </Button>
-            </Stack>
-          </form>
-        </Stack>
-      </Paper>
-    </Center>
+    <AuthShell
+      title="Change your password"
+      subtitle="You signed in with a temporary password. Please set a new password to continue."
+      highlights={[
+        {
+          icon: <IconShieldLock size={13} stroke={1.7} />,
+          label: 'Required for new accounts.',
+        },
+        {
+          icon: <IconKey size={13} stroke={1.7} />,
+          label: "Choose a password you don't use elsewhere.",
+        },
+      ]}
+    >
+      <form onSubmit={form.onSubmit(submit)}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <PasswordInput
+            label="Current password"
+            required
+            size="md"
+            autoComplete="current-password"
+            {...form.getInputProps('currentPassword')}
+          />
+          <PasswordInput
+            label="New password"
+            required
+            size="md"
+            autoComplete="new-password"
+            {...form.getInputProps('newPassword')}
+          />
+          <PasswordInput
+            label="Confirm new password"
+            required
+            size="md"
+            autoComplete="new-password"
+            {...form.getInputProps('confirmPassword')}
+          />
+          <Button
+            type="submit"
+            color="teal"
+            size="md"
+            fullWidth
+            loading={loading}
+            leftSection={<IconCheck size={16} stroke={1.7} />}
+            mt={4}
+          >
+            Update password
+          </Button>
+        </div>
+      </form>
+    </AuthShell>
   );
 }

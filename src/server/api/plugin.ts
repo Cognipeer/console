@@ -33,6 +33,8 @@ import { auditApiPlugin } from './plugins/audit';
 import { automationsApiPlugin } from './plugins/automations';
 import { clusterApiPlugin } from './plugins/cluster';
 import { browserApiPlugin } from './plugins/browser';
+import { crawlerApiPlugin } from './plugins/crawler';
+import { clientCrawlerApiPlugin } from './plugins/client-crawler';
 import { agentsApiPlugin } from './plugins/agents';
 import { alertsApiPlugin } from './plugins/alerts';
 import { configApiPlugin } from './plugins/config';
@@ -304,6 +306,8 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(automationsApiPlugin);
   await app.register(clusterApiPlugin);
   await app.register(browserApiPlugin);
+  await app.register(crawlerApiPlugin);
+  await app.register(clientCrawlerApiPlugin);
   await app.register(configApiPlugin);
   await app.register(dashboardApiPlugin);
   await app.register(filesApiPlugin);
