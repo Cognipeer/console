@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Lexend_Deca } from "next/font/google";
+import { Lexend_Deca, JetBrains_Mono } from "next/font/google";
 import "@mantine/core/styles.css";
 import '@mantine/dates/styles.css';
 import "@mantine/notifications/styles.css";
@@ -14,7 +14,15 @@ import { theme } from "@/theme/theme";
 const lexendDeca = Lexend_Deca({
   subsets: ["latin"],
   display: "swap",
+  weight: ["300", "400", "500", "600", "700"],
   variable: "--font-lexend-deca",
+});
+
+const jetbrainsMono = JetBrains_Mono({
+  subsets: ["latin"],
+  display: "swap",
+  weight: ["400", "500", "600"],
+  variable: "--font-jetbrains-mono",
 });
 
 export const metadata: Metadata = {
@@ -28,7 +36,11 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" suppressHydrationWarning className={lexendDeca.variable}>
+    <html
+      lang="en"
+      suppressHydrationWarning
+      className={`${lexendDeca.variable} ${jetbrainsMono.variable}`}
+    >
       <head>
         <ColorSchemeScript defaultColorScheme="light" />
       </head>

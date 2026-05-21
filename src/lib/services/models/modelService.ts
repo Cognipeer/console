@@ -323,6 +323,16 @@ export async function getUsageAggregate(
   return db.aggregateModelUsage(modelKey, options, projectId);
 }
 
+// Providers that can back a model definition. 'model' covers chat/embedding
+// drivers; 'stt' | 'tts' | 'ocr' cover audio and document drivers stored as
+// their own domain (Mistral OCR, Azure DI, Textract, Google Document AI, …).
+const MODEL_PROVIDER_TYPES: ReadonlyArray<'model' | 'stt' | 'tts' | 'ocr'> = [
+  'model',
+  'stt',
+  'tts',
+  'ocr',
+];
+
 export async function listModelProviders(
   tenantDbName: string,
   tenantId: string,
@@ -332,13 +342,27 @@ export async function listModelProviders(
     driver?: string;
   },
 ): Promise<ModelProviderView[]> {
-  const providers = await listProviderConfigs(tenantDbName, tenantId, {
-    type: 'model',
-    projectId,
-    ...(filters ?? {}),
+  const results = await Promise.all(
+    MODEL_PROVIDER_TYPES.map((type) =>
+      listProviderConfigs(tenantDbName, tenantId, {
+        type,
+        projectId,
+        ...(filters ?? {}),
+      }),
+    ),
+  );
+
+  // Stable de-dup by provider key in case the same provider somehow appears in
+  // two domains (shouldn't happen — keys are unique per tenant — but guard
+  // against future schema relaxation).
+  const seen = new Set<string>();
+  const merged = results.flat().filter((p) => {
+    if (seen.has(p.key)) return false;
+    seen.add(p.key);
+    return true;
   });
 
-  return providers.map((provider) => attachDriverCapabilities(provider));
+  return merged.map((provider) => attachDriverCapabilities(provider));
 }
 
 export async function createModelProvider(

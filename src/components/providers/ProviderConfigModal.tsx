@@ -474,13 +474,23 @@ export default function ProviderConfigModal({
               aria-label="Filter by domain"
               style={{ minWidth: 160 }}
             >
-              {(['all', 'model', 'embedding', 'vector', 'file', 'datasource'] as const).map(
-                (d) => (
-                  <option key={d} value={d}>
-                    {d === 'all' ? 'All domains' : DOMAIN_LABELS[d]}
-                  </option>
-                ),
-              )}
+              {(
+                [
+                  'all',
+                  'model',
+                  'embedding',
+                  'vector',
+                  'file',
+                  'datasource',
+                  'stt',
+                  'tts',
+                  'ocr',
+                ] as const
+              ).map((d) => (
+                <option key={d} value={d}>
+                  {d === 'all' ? 'All domains' : DOMAIN_LABELS[d]}
+                </option>
+              ))}
             </select>
           </div>
 
