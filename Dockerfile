@@ -27,7 +27,9 @@ ENV PORT=3000
 ENV HOST=0.0.0.0
 ENV PLAYWRIGHT_BROWSERS_PATH=/home/nextjs/.cache/ms-playwright
 
-RUN adduser --disabled-password --uid 1001 --home /home/nextjs nextjs
+RUN adduser --disabled-password --uid 1001 --home /home/nextjs nextjs && \
+    mkdir -p /home/nextjs/.cache/ms-playwright && \
+    chown -R nextjs:nextjs /home/nextjs
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./package.json
