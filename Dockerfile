@@ -38,11 +38,16 @@ COPY --from=builder /app/public ./public
 COPY --from=builder /app/src ./src
 COPY --from=builder /app/mail-templates ./mail-templates
 
-RUN mkdir -p /app/data && chown -R nextjs:nextjs /app
-RUN rm -rf /var/cache/apk/*
-RUN npx playwright install chromium --with-deps
+RUN npx playwright install-deps chromium
+
+RUN mkdir -p /home/nextjs/.cache/ms-playwright && \
+    mkdir -p /app/data && \
+    chown -R nextjs:nextjs /home/nextjs && \
+    chown -R nextjs:nextjs /app
 
 USER nextjs
+
+RUN npx playwright install chromium
 
 EXPOSE 3000
 CMD ["npm", "start"]
