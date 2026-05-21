@@ -104,6 +104,19 @@ function getDoubleAttr(attrs: OtlpKeyValue[] | undefined, key: string): number |
   return undefined;
 }
 
+function parseJsonRecord(value: string | undefined, logContext: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : undefined;
+  } catch {
+    logger.warn('Failed to parse JSON trace attribute', logContext);
+    return undefined;
+  }
+}
+
 /** Convert nanosecond timestamp string to Date */
 function nanoToDate(nanoStr?: string): Date | undefined {
   if (!nanoStr) return undefined;
@@ -258,6 +271,10 @@ export function mapOtlpToInternalModels(
       const requestBytes = getIntAttr(span.attributes, 'cognipeer.bytes.request');
       const responseBytes = getIntAttr(span.attributes, 'cognipeer.bytes.response');
       const toolExecutionId = getStringAttr(span.attributes, 'cognipeer.tool.execution_id');
+      const toolDetails = parseJsonRecord(
+        getStringAttr(span.attributes, 'cognipeer.tool.details'),
+        { attribute: 'cognipeer.tool.details', spanId: span.spanId },
+      );
       const sectionsJson = getStringAttr(span.attributes, 'cognipeer.sections');
       const eventId = getStringAttr(span.attributes, 'cognipeer.event.id') || span.spanId;
 
@@ -333,6 +350,7 @@ export function mapOtlpToInternalModels(
         timestamp: eventStartedAt,
         status: eventStatus,
         actor: actorScope ? { scope: actorScope, name: toolName, role: actorRole } : undefined,
+        metadata: toolDetails ? { toolDetails } : undefined,
         sections,
         model,
         durationMs: eventDurationMs,

@@ -36,6 +36,7 @@ import {
     IconActivity,
     IconBinaryTree,
     IconTimeline,
+    IconTool,
 } from '@tabler/icons-react';
 import DetailShell from '@/components/common/ui/DetailShell';
 import StatusBadge from '@/components/common/ui/StatusBadge';
@@ -110,6 +111,8 @@ type SectionEntry = {
     id?: string;
     role?: string;
     tool?: string;
+    toolName?: string;
+    toolDetails?: Record<string, unknown>;
     contentType?: string;
     truncated?: boolean;
     content?: unknown;
@@ -159,6 +162,7 @@ interface SessionDetailResponse {
         error?: { message?: string } | null;
         durationMs?: number;
         toolName?: string;
+        toolDetails?: Record<string, unknown>;
         toolExecutionId?: string;
         inputTokens?: number;
         outputTokens?: number;
@@ -222,7 +226,7 @@ function statusVariant(status?: string) {
 // ─── Section rendering ─────────────────────────────────────────
 
 const SECTION_HEADER_PROPS = [
-    'label', 'title', 'kind', 'id', 'role', 'tool', 'contentType', 'truncated', 'metadata',
+    'label', 'title', 'kind', 'id', 'role', 'tool', 'toolName', 'contentType', 'truncated', 'metadata',
 ];
 
 const shouldDisplaySectionField = (value: unknown): boolean => {
@@ -254,7 +258,9 @@ const renderFieldValue = (value: unknown) => {
 const SectionCard = ({ section, index }: { section: SectionEntry; index: number }) => {
     const kind = typeof section.kind === 'string' ? section.kind : undefined;
     const role = typeof section.role === 'string' ? section.role : undefined;
-    const tool = typeof section.tool === 'string' ? section.tool : undefined;
+    const tool = typeof section.tool === 'string'
+        ? section.tool
+        : (typeof section.toolName === 'string' ? section.toolName : undefined);
     const truncated = Boolean(section.truncated);
     const identifier = typeof section.id === 'string' ? section.id : undefined;
     const contentType = typeof section.contentType === 'string' ? section.contentType : undefined;
@@ -268,7 +274,7 @@ const SectionCard = ({ section, index }: { section: SectionEntry; index: number 
     if (kind) badges.push({
         key: 'kind',
         label: humanize(kind),
-        color: kind === 'message' ? 'blue' : kind === 'tool_call' ? 'violet' : kind === 'tool_result' ? 'green' : 'gray',
+        color: kind === 'message' ? 'blue' : kind === 'tool_call' ? 'violet' : kind === 'tool_result' || kind === 'tool_response' ? 'green' : 'gray',
     });
     if (role) badges.push({
         key: 'role',
@@ -538,6 +544,74 @@ function EventTokenStats({ event }: { event: TracingEvent }) {
     );
 }
 
+function getRecord(value: unknown): Record<string, unknown> | undefined {
+    return value && typeof value === 'object' && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : undefined;
+}
+
+function ToolDetailsBlock({ event }: { event: TracingEvent }) {
+    const metadataDetails = getRecord(event.metadata?.toolDetails);
+    const details = event.toolDetails || metadataDetails;
+    if (!details) return null;
+
+    const name = typeof details.name === 'string' && details.name.trim().length > 0
+        ? details.name
+        : event.toolName;
+    const description = typeof details.description === 'string' && details.description.trim().length > 0
+        ? details.description
+        : undefined;
+    const inputSchema = details.inputSchema ?? details.schema ?? details.parameters;
+    const summaryEntries: Array<[string, unknown]> = [
+        ['Source', details.source],
+        ['Approval', getRecord(details.approval)?.required === true ? 'Required' : getRecord(details.approval) ? 'Configured' : undefined],
+        ['Cache', getRecord(details.cache)?.enabled === true ? 'Enabled' : getRecord(details.cache) ? 'Configured' : undefined],
+        ['Retry', getRecord(details.retry) ? 'Configured' : undefined],
+        ['Limit', getRecord(details.limits)?.maxExecutionsPerRun],
+    ].filter(([, value]) => value !== undefined && value !== null && String(value).trim().length > 0) as Array<[string, unknown]>;
+    const extraDetails = Object.fromEntries(
+        Object.entries(details).filter(([key, value]) => (
+            !['name', 'description', 'inputSchema', 'schema', 'parameters'].includes(key)
+            && shouldDisplaySectionField(value)
+        )),
+    );
+
+    return (
+        <Paper withBorder p="sm" radius="md">
+            <Stack gap="sm">
+                <Group gap="xs">
+                    <ThemeIcon size="sm" variant="light" color="violet"><IconTool size={14} /></ThemeIcon>
+                    <Text size="sm" fw={600}>Tool Details</Text>
+                    {name && <Badge size="xs" variant="light" color="violet">{formatToolName(name)}</Badge>}
+                </Group>
+                {description && <Text size="sm" c="dimmed">{description}</Text>}
+                {summaryEntries.length > 0 && (
+                    <SimpleGrid cols={{ base: 1, sm: Math.min(summaryEntries.length, 3) }} spacing="xs">
+                        {summaryEntries.map(([label, value]) => (
+                            <Paper key={String(label)} withBorder p="xs" radius="sm">
+                                <Text size="xs" c="dimmed" tt="uppercase" fw={600}>{label}</Text>
+                                <Text size="sm" fw={500}>{String(value)}</Text>
+                            </Paper>
+                        ))}
+                    </SimpleGrid>
+                )}
+                {inputSchema !== undefined && shouldDisplaySectionField(inputSchema) && (
+                    <Stack gap={4}>
+                        <Text size="xs" c="dimmed">Input Schema</Text>
+                        <JsonTreeViewer data={inputSchema} initialExpandLevel={2} />
+                    </Stack>
+                )}
+                {Object.keys(extraDetails).length > 0 && (
+                    <Stack gap={4}>
+                        <Text size="xs" c="dimmed">Runtime Details</Text>
+                        <JsonTreeViewer data={extraDetails} initialExpandLevel={2} />
+                    </Stack>
+                )}
+            </Stack>
+        </Paper>
+    );
+}
+
 // ─── Span identity block ──────────────────────────────────────
 
 function SpanIdentityBlock({ event }: { event: TracingEvent }) {
@@ -657,6 +731,9 @@ function EventDetailPanel({ event }: { event: TracingEvent }) {
 
             {/* Token/byte stats */}
             <EventTokenStats event={event} />
+
+            {/* Tool details */}
+            <ToolDetailsBlock event={event} />
 
             {/* Error */}
             {event.error?.message && (

@@ -8,7 +8,7 @@ export default defineConfig({
     'Multi-tenant AI platform for LLM inference, vector stores, agent tracing, RAG, and more.',
   base: docsBase,
   ignoreDeadLinks: true,
-  appearance: false,
+  appearance: 'dark',
 
   themeConfig: {
     logo: '/Console.svg',
@@ -146,9 +146,15 @@ export default defineConfig({
   head: [
     ['link', { rel: 'preconnect', href: 'https://fonts.googleapis.com' }],
     ['link', { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossorigin: '' }],
-    ['link', { rel: 'stylesheet', href: 'https://fonts.googleapis.com/css2?family=Lexend+Deca:wght@400;500;600;700;800&display=swap' }],
+    [
+      'link',
+      {
+        rel: 'stylesheet',
+        href: 'https://fonts.googleapis.com/css2?family=Lexend+Deca:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap',
+      },
+    ],
     ['link', { rel: 'icon', type: 'image/svg+xml', href: `${docsBase}Console.svg` }],
-    ['meta', { name: 'theme-color', content: '#00b5a5' }],
+    ['meta', { name: 'theme-color', content: '#0fba94' }],
     ['meta', { name: 'og:type', content: 'website' }],
     ['meta', { name: 'og:locale', content: 'en' }],
     ['meta', { name: 'og:site_name', content: 'Cognipeer Console Documentation' }],

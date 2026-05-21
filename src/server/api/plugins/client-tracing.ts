@@ -58,6 +58,7 @@ type TracingEventPayload = {
   cachedInputTokens?: number | null;
   data?: Record<string, unknown> & {
     sections?: unknown[];
+    toolDetails?: Record<string, unknown>;
   };
   durationMs?: number | null;
   error?: string | null;
@@ -80,6 +81,7 @@ type TracingEventPayload = {
   spanId?: string;
   status?: string | null;
   timestamp?: string | Date;
+  toolDetails?: Record<string, unknown>;
   toolExecutionId?: string | null;
   toolName?: string | null;
   totalTokens?: number | null;
@@ -300,6 +302,70 @@ function getEventSections(event: TracingEventPayload): Array<Record<string, unkn
     const normalized = toRecord(section);
     return normalized ? [normalized] : [];
   });
+}
+
+function normalizeToolName(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function getSectionToolName(section: Record<string, unknown>): string | undefined {
+  return normalizeToolName(section.tool)
+    || normalizeToolName(section.toolName)
+    || normalizeToolName(section.name);
+}
+
+function getEventToolDetails(
+  event: TracingEventPayload,
+  sections: Array<Record<string, unknown>> = getEventSections(event),
+): Record<string, unknown> | undefined {
+  const candidates = [
+    event.toolDetails,
+    toRecord(event.metadata?.toolDetails),
+    toRecord(event.data?.toolDetails),
+    ...sections.map((section) => toRecord(section.toolDetails) || toRecord(section.details)),
+  ];
+
+  const details = candidates.find((candidate): candidate is Record<string, unknown> => Boolean(candidate));
+  const name = normalizeToolName(details?.name)
+    || normalizeToolName(event.toolName)
+    || (event.actor?.scope === 'tool' ? normalizeToolName(event.actor?.name) : undefined)
+    || sections.map(getSectionToolName).find(Boolean);
+
+  if (!details && !name) {
+    return undefined;
+  }
+
+  return {
+    ...(details || {}),
+    ...(name && !normalizeToolName(details?.name) ? { name } : {}),
+  };
+}
+
+function collectEventToolNames(event: TracingEventPayload): string[] {
+  const names = new Set<string>();
+  const sections = getEventSections(event);
+  const toolDetails = getEventToolDetails(event, sections);
+  const directNames = [
+    normalizeToolName(event.toolName),
+    event.actor?.scope === 'tool' ? normalizeToolName(event.actor.name) : undefined,
+    normalizeToolName(toolDetails?.name),
+    ...sections.map(getSectionToolName),
+  ];
+
+  for (const name of directNames) {
+    if (name) names.add(name);
+  }
+
+  return Array.from(names);
+}
+
+function buildEventMetadata(event: TracingEventPayload, sections: Array<Record<string, unknown>>): Record<string, unknown> {
+  const metadata = { ...(event.metadata || {}) };
+  const toolDetails = getEventToolDetails(event, sections);
+  if (toolDetails) {
+    metadata.toolDetails = toolDetails;
+  }
+  return metadata;
 }
 
 function getEventUsage(event: TracingEventPayload): TracingUsage {
@@ -578,9 +644,8 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
         if (event?.model) modelsUsed.add(event.model);
         if (event?.modelName) modelsUsed.add(event.modelName);
         if (event?.metadata?.modelName) modelsUsed.add(event.metadata.modelName);
-        if (event?.toolName) toolsUsed.add(event.toolName);
-        if (event?.actor?.scope === 'tool' && event?.actor?.name) {
-          toolsUsed.add(event.actor.name);
+        for (const toolName of collectEventToolNames(event)) {
+          toolsUsed.add(toolName);
         }
       });
 
@@ -676,6 +741,8 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
 
         for (const event of events) {
           const sections = getEventSections(event);
+          const metadata = buildEventMetadata(event, sections);
+          const toolDetails = getEventToolDetails(event, sections);
           const usage = getEventUsage(event);
           const inputTokens =
             event?.inputTokens ?? usage?.inputTokens ?? usage?.input_tokens ?? undefined;
@@ -701,7 +768,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
             id: event.id ?? undefined,
             inputTokens,
             label: event.label ?? undefined,
-            metadata: event.metadata || {},
+            metadata,
             model: event.model ?? undefined,
             modelNames: event.modelNames || [],
             outputTokens,
@@ -718,7 +785,8 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
             timestamp: event.timestamp ? new Date(event.timestamp) : new Date(),
             toolExecutionId: event.toolExecutionId ?? undefined,
             toolName: event.toolName
-              || (event.actor?.scope === 'tool' ? event.actor?.name ?? undefined : undefined),
+              || (event.actor?.scope === 'tool' ? event.actor?.name ?? undefined : undefined)
+              || normalizeToolName(toolDetails?.name),
             totalTokens: event.totalTokens ?? undefined,
             traceId: typeof event.traceId === 'string' ? event.traceId : undefined,
             type: event.type ?? undefined,
@@ -883,6 +951,8 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const sections = getEventSections(event);
+      const metadata = buildEventMetadata(event, sections);
+      const toolDetails = getEventToolDetails(event, sections);
       const usage = getEventUsage(event);
       const inputTokens =
         event?.inputTokens ?? usage?.inputTokens ?? usage?.input_tokens ?? undefined;
@@ -904,9 +974,8 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
       if (event?.model) modelsUsed.add(event.model);
       if (event?.modelName) modelsUsed.add(event.modelName);
       if (event?.metadata?.modelName) modelsUsed.add(event.metadata.modelName);
-      if (event?.toolName) toolsUsed.add(event.toolName);
-      if (event?.actor?.scope === 'tool' && event?.actor?.name) {
-        toolsUsed.add(event.actor.name);
+      for (const toolName of collectEventToolNames(event)) {
+        toolsUsed.add(toolName);
       }
 
       const eventCounts = { ...(session.eventCounts || {}) };
@@ -939,7 +1008,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
           id: event.id ?? undefined,
           inputTokens,
           label: event.label ?? undefined,
-          metadata: event.metadata || {},
+          metadata,
           model: event.model ?? undefined,
           modelNames: event.modelNames || [],
           outputTokens,
@@ -956,7 +1025,8 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
           timestamp: event.timestamp ? new Date(event.timestamp) : new Date(),
           toolExecutionId: event.toolExecutionId ?? undefined,
           toolName: event.toolName
-            || (event.actor?.scope === 'tool' ? event.actor?.name ?? undefined : undefined),
+            || (event.actor?.scope === 'tool' ? event.actor?.name ?? undefined : undefined)
+            || normalizeToolName(toolDetails?.name),
           totalTokens: event.totalTokens ?? undefined,
           traceId: typeof event.traceId === 'string' ? event.traceId : undefined,
           type: event.type ?? undefined,
