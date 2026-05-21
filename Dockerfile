@@ -1,16 +1,13 @@
 # --------------------- deps stage ---------------------
-FROM node:22-alpine AS deps
+FROM node:22 AS deps
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
-RUN apk add --no-cache python3 make g++
 COPY package.json package-lock.json* npm-shrinkwrap.json* ./
 
-
 RUN npm install --no-audit --no-fund
-RUN npx playwright install --with-deps chromium
 
 # --------------------- builder stage ---------------------
-FROM node:22-alpine AS builder
+FROM node:22 AS builder
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 
@@ -21,7 +18,7 @@ RUN npm run build \
   && rm -rf .next/cache
 
 # --------------------- runner stage ---------------------
-FROM node:22-alpine AS runner
+FROM node:22 AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production
