@@ -84,6 +84,40 @@ const SESSION_EVENT_SUMMARY_PROJECTION = {
   parentSpanId: 1,
 } as const;
 
+function toRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function getSectionToolName(section: Record<string, unknown>): string | undefined {
+  const value = typeof section.tool === 'string'
+    ? section.tool
+    : (typeof section.toolName === 'string' ? section.toolName : undefined);
+  return value && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function getStoredToolDetails(event: IAgentTracingEvent): Record<string, unknown> | undefined {
+  const metadata = toRecord(event.metadata);
+  const candidates = [
+    toRecord(metadata?.toolDetails),
+    ...(event.sections || []).map((section) => toRecord(section.toolDetails) || toRecord(section.details)),
+  ];
+  const details = candidates.find((candidate): candidate is Record<string, unknown> => Boolean(candidate));
+  const name = typeof details?.name === 'string' && details.name.trim().length > 0
+    ? details.name.trim()
+    : event.toolName || (event.sections || []).map(getSectionToolName).find(Boolean);
+
+  if (!details && !name) {
+    return undefined;
+  }
+
+  return {
+    ...(details || {}),
+    ...(name && typeof details?.name !== 'string' ? { name } : {}),
+  };
+}
+
 function mapTracingEventSummary(event: IAgentTracingEvent) {
   return {
     id: event.id || event._id,
@@ -119,6 +153,7 @@ function mapTracingEventDetail(event: IAgentTracingEvent) {
     error: event.error,
     durationMs: event.durationMs,
     toolName: event.toolName,
+    toolDetails: getStoredToolDetails(event),
     toolExecutionId: event.toolExecutionId,
     inputTokens: event.inputTokens,
     outputTokens: event.outputTokens,
