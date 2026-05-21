@@ -7,6 +7,7 @@ import {
   Children,
   isValidElement,
 } from 'react';
+import { createPortal } from 'react-dom';
 import { Button, ActionIcon } from '@mantine/core';
 import { IconCheck, IconX } from '@tabler/icons-react';
 
@@ -85,9 +86,15 @@ export default function FormShell({
     };
   }, [open]);
 
-  if (!open) return null;
+  // Portal so the overlay escapes any ancestor stacking/transform context
+  // (AppShell.Main is a scroll container, so an inline `position: fixed`
+  // div would leave the topbar uncovered — see the "gap at top" report).
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
 
-  return (
+  if (!open || !mounted) return null;
+
+  return createPortal(
     <div className="form-overlay" role="dialog" aria-modal="true">
       <div className="form-header">
         <ActionIcon
@@ -157,7 +164,8 @@ export default function FormShell({
           </Button>
         ) : null}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

@@ -15,6 +15,35 @@ const tealPalette: MantineColorsTuple = [
   '#0a4a40',
 ];
 
+// Off-white neutral scale (light surfaces + text) per the DS.
+// Used by every Mantine component that pulls var(--mantine-color-gray-N).
+const grayPalette: MantineColorsTuple = [
+  '#fbfbfa', // 0 — page bg
+  '#f7f7f4', // 1
+  '#f4f4f1', // 2 — chip wash
+  '#efefea', // 3 — hairline
+  '#e8e8e3', // 4 — border
+  '#d9d9d2', // 5 — border-strong
+  '#98a1ad', // 6 — text-faint
+  '#6b7280', // 7 — text-muted
+  '#4a5260', // 8 — text-soft (body)
+  '#0c1118', // 9 — text
+];
+
+// Dark surfaces — Mantine convention is 0 = lightest text → 9 = darkest bg.
+const darkPalette: MantineColorsTuple = [
+  '#ecf1f6', // 0 — text
+  '#b4bcc7', // 1 — text-soft
+  '#8a939f', // 2 — text-muted
+  '#5a6473', // 3 — text-faint
+  '#2a323d', // 4 — border-strong
+  '#1d242d', // 5 — border
+  '#181e26', // 6 — hairline
+  '#161c24', // 7 — soft surface
+  '#11161d', // 8 — raised surface (cards, nav)
+  '#0a0e13', // 9 — page bg
+];
+
 const sharedFontStack =
   'var(--font-lexend-deca), "Lexend Deca", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
 
@@ -161,6 +190,8 @@ export const theme = createTheme({
   primaryColor: 'teal',
   colors: {
     teal: tealPalette,
+    gray: grayPalette,
+    dark: darkPalette,
   },
   // Canonical accent is teal-500 (shade 5 in the tuple).
   primaryShade: 5,
