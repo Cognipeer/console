@@ -5,12 +5,12 @@
       "id": "openai",
       "driver": "openai",
       "name": "OpenAI",
-      "tagline": "GPT-4o, o1, and OpenAI embeddings",
-      "description": "Official OpenAI platform supporting GPT and embedding models with tool calling.",
-      "domains": ["model", "embedding"],
+      "tagline": "GPT, Whisper, TTS, embeddings, and VLM-OCR",
+      "description": "Official OpenAI platform supporting GPT and embedding models, Whisper transcription, TTS speech, and vision-LLM OCR.",
+      "domains": ["model", "embedding", "stt", "tts", "ocr"],
       "color": "#10a37f",
-      "tags": ["popular", "us", "tools"],
-      "aliases": ["gpt", "chatgpt", "gpt-4", "gpt-4o", "openai api"]
+      "tags": ["popular", "us", "tools", "audio"],
+      "aliases": ["gpt", "chatgpt", "gpt-4", "gpt-4o", "openai api", "whisper", "tts"]
     },
     {
       "id": "anthropic",
@@ -27,20 +27,20 @@
       "id": "azure",
       "driver": "azure",
       "name": "Azure OpenAI",
-      "tagline": "OpenAI models hosted on Microsoft Azure",
-      "description": "Enterprise-managed OpenAI deployments through your Azure subscription.",
-      "domains": ["model", "embedding"],
+      "tagline": "OpenAI models, Whisper, TTS on Microsoft Azure",
+      "description": "Enterprise-managed OpenAI deployments — chat, embeddings, audio (Whisper / TTS), and VLM-OCR.",
+      "domains": ["model", "embedding", "stt", "tts", "ocr"],
       "color": "#0078d4",
-      "tags": ["enterprise", "us", "eu"],
-      "aliases": ["microsoft", "openai-azure"]
+      "tags": ["enterprise", "us", "eu", "audio"],
+      "aliases": ["microsoft", "openai-azure", "whisper"]
     },
     {
       "id": "bedrock",
       "driver": "bedrock",
       "name": "Amazon Bedrock",
-      "tagline": "Anthropic, AI21, Meta and more on AWS",
-      "description": "Bedrock Converse API supporting multiple foundation models from leading providers.",
-      "domains": ["model", "embedding"],
+      "tagline": "Anthropic, Nova, AI21 and more on AWS",
+      "description": "Bedrock Converse API with chat, embeddings, and vision (VLM-OCR) support.",
+      "domains": ["model", "embedding", "ocr"],
       "color": "#ff9900",
       "tags": ["enterprise", "us"],
       "aliases": ["aws-bedrock", "amazon"]
@@ -49,9 +49,9 @@
       "id": "vertex",
       "driver": "vertex",
       "name": "Google Vertex AI",
-      "tagline": "Gemini family and embeddings on Google Cloud",
-      "description": "Vertex AI generative and embedding models authenticated with a service account.",
-      "domains": ["model", "embedding"],
+      "tagline": "Gemini, embeddings, and vision OCR on Google Cloud",
+      "description": "Vertex AI generative and embedding models, plus Gemini multimodal for VLM-OCR.",
+      "domains": ["model", "embedding", "ocr"],
       "color": "#ea4335",
       "tags": ["enterprise"],
       "aliases": ["google", "gemini", "palm", "gcp"]
@@ -83,11 +83,11 @@
       "driver": "openai-compatible",
       "name": "OpenAI-Compatible",
       "tagline": "Any service exposing the OpenAI REST schema",
-      "description": "Connect Groq, DeepSeek, Mistral, vLLM and other OpenAI-compatible APIs.",
-      "domains": ["model", "embedding"],
+      "description": "Connect Groq, DeepSeek, Mistral, vLLM, Deepgram-OpenAI, ElevenLabs-OpenAI and other compatible APIs — including /v1/audio/* and VLM-based OCR.",
+      "domains": ["model", "embedding", "stt", "tts", "ocr"],
       "color": "#475569",
-      "tags": ["generic", "open-source"],
-      "aliases": ["groq", "deepseek", "vllm", "lmstudio", "mistral"]
+      "tags": ["generic", "open-source", "audio"],
+      "aliases": ["groq", "deepseek", "vllm", "lmstudio", "mistral", "deepgram", "elevenlabs"]
     },
     {
       "id": "cognipeer-llm",
@@ -255,6 +255,50 @@
       "color": "#64748b",
       "tags": ["self-hosted", "dev"],
       "aliases": ["disk", "local"]
+    },
+    {
+      "id": "mistral-ocr",
+      "driver": "mistral-ocr",
+      "name": "Mistral OCR",
+      "tagline": "Mistral Document AI / OCR",
+      "description": "Native OCR endpoint (POST /v1/ocr) with PDF and image extraction, including markdown output.",
+      "domains": ["ocr"],
+      "color": "#fa7300",
+      "tags": ["ocr", "managed"],
+      "aliases": ["mistral document", "document ai", "ocr"]
+    },
+    {
+      "id": "azure-document-intelligence",
+      "driver": "azure-document-intelligence",
+      "name": "Azure Document Intelligence",
+      "tagline": "Microsoft Document AI (formerly Form Recognizer)",
+      "description": "Native OCR with layout, table, and key-value extraction. Supports prebuilt-read, prebuilt-layout, prebuilt-document, and custom processors.",
+      "domains": ["ocr"],
+      "color": "#0078d4",
+      "tags": ["enterprise", "ocr", "tables", "forms"],
+      "aliases": ["form recognizer", "document intelligence", "azure-di", "azure-form-recognizer"]
+    },
+    {
+      "id": "aws-textract",
+      "driver": "aws-textract",
+      "name": "AWS Textract",
+      "tagline": "Amazon Textract OCR",
+      "description": "Native OCR with text, layout, tables, and forms. modelId selects detect-document-text or analyze-document.",
+      "domains": ["ocr"],
+      "color": "#ff9900",
+      "tags": ["enterprise", "ocr", "tables", "forms"],
+      "aliases": ["textract", "amazon textract"]
+    },
+    {
+      "id": "google-document-ai",
+      "driver": "google-document-ai",
+      "name": "Google Document AI",
+      "tagline": "Google Cloud Document AI processors",
+      "description": "Native OCR via Document AI processors (OCR, Layout, Form Parser). Requires projectId, location, and processorId.",
+      "domains": ["ocr"],
+      "color": "#34a853",
+      "tags": ["enterprise", "ocr", "forms"],
+      "aliases": ["document ai", "google docai", "gcp-document-ai"]
     }
   ]
 }

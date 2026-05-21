@@ -136,21 +136,17 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
       const cookieIsValid = Boolean(
         activeCookie && projects.some((project) => String(project._id) === String(activeCookie)),
       );
-      const cookieProject = cookieIsValid
-        ? projects.find((project) => String(project._id) === String(activeCookie))
-        : undefined;
-      const hasNonDefaultProjects = projects.some((project) => project.key !== DEFAULT_PROJECT_KEY);
-      const cookieIsDefault = Boolean(
-        cookieProject?.key === DEFAULT_PROJECT_KEY && hasNonDefaultProjects,
-      );
 
-      const preferredProject = cookieIsValid && !cookieIsDefault
+      // If the cookie points to an accessible project, honor it as-is — the
+      // user (or a previous fallback) explicitly selected it. Only fall back
+      // to a non-default project when there is no valid selection yet.
+      const preferredProject = cookieIsValid
         ? projects.find((project) => String(project._id) === String(activeCookie))
         : (projects.find((project) => project.key !== DEFAULT_PROJECT_KEY) ?? projects[0]);
 
       const activeProjectId = preferredProject?._id ? String(preferredProject._id) : undefined;
 
-      if ((activeCookie && !cookieIsValid) || cookieIsDefault) {
+      if (activeCookie && !cookieIsValid) {
         if (activeProjectId) {
           reply.setCookie('active_project_id', activeProjectId, {
             httpOnly: true,

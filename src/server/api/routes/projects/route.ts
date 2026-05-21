@@ -51,15 +51,7 @@ export async function GET(request: NextRequest) {
         const cookieIsValid =
             activeCookie && projects.some((p) => String(p._id) === String(activeCookie));
 
-        const cookieProject = cookieIsValid
-            ? projects.find((p) => String(p._id) === String(activeCookie))
-            : undefined;
-        const hasNonDefaultProjects = projects.some((p) => p.key !== DEFAULT_PROJECT_KEY);
-        const cookieIsDefault = Boolean(
-            cookieProject?.key === DEFAULT_PROJECT_KEY && hasNonDefaultProjects,
-        );
-
-        const preferredProject = cookieIsValid && !cookieIsDefault
+        const preferredProject = cookieIsValid
             ? projects.find((p) => String(p._id) === String(activeCookie))
             : (projects.find((p) => p.key !== DEFAULT_PROJECT_KEY) ?? projects[0]);
 
@@ -75,7 +67,7 @@ export async function GET(request: NextRequest) {
             { status: 200 },
         );
 
-        if ((activeCookie && !cookieIsValid) || cookieIsDefault) {
+        if (activeCookie && !cookieIsValid) {
             const isProduction = getConfig().nodeEnv === 'production';
             if (activeProjectId) {
                 response.cookies.set('active_project_id', activeProjectId, {
