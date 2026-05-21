@@ -25,6 +25,7 @@ ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
 ENV HOST=0.0.0.0
+ENV PLAYWRIGHT_BROWSERS_PATH=/home/nextjs/.cache/ms-playwright
 
 RUN adduser --disabled-password --uid 1001 --home /home/nextjs nextjs
 
@@ -39,8 +40,9 @@ COPY --from=builder /app/mail-templates ./mail-templates
 
 RUN mkdir -p /app/data && chown -R nextjs:nextjs /app
 RUN rm -rf /var/cache/apk/*
+RUN npx playwright install chromium --with-deps
 
-EXPOSE 3000
 USER nextjs
 
+EXPOSE 3000
 CMD ["npm", "start"]
