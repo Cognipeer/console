@@ -16,6 +16,8 @@ export const tr: typeof en = {
     piiDescription: 'Kişisel verileri tespit edin, redakte edin ve maskeleyin',
     crawler: 'Crawler',
     crawlerDescription: 'Web sitelerini markdown olarak çekip knowledge engine ile birleştir',
+    gpuFleet: 'GPU Fleet',
+    gpuFleetDescription: 'Connect GPU hosts, deploy curated models, manage pools',
   },
   breadcrumbs: {
     ...en.breadcrumbs,

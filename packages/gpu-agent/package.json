@@ -1,0 +1,35 @@
+{
+  "name": "@cognipeer/gpu-agent",
+  "version": "0.1.0",
+  "description": "Cognipeer GPU fleet agent. Runs on each GPU machine; reports inventory and applies Docker deployments on behalf of the console.",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "bin": {
+    "cognipeer-gpu-agent": "./dist/index.cjs"
+  },
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.cjs",
+    "typecheck": "tsc --noEmit",
+    "package": "bash scripts/package.sh"
+  },
+  "dependencies": {
+    "@cognipeer/gpu-fleet-protocol": "*",
+    "@types/ws": "^8.18.1",
+    "dockerode": "^4.0.2",
+    "undici": "^6.20.0",
+    "ws": "^8.20.1"
+  },
+  "devDependencies": {
+    "@types/dockerode": "^3.3.32",
+    "@types/node": "^22.10.5",
+    "tsup": "^8.4.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

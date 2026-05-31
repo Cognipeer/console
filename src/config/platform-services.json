@@ -250,6 +250,18 @@
       "tenantAdminOnly": true
     },
     {
+      "id": "gpu-fleet",
+      "href": "/dashboard/gpu-fleet",
+      "icon": "IconCpu",
+      "category": "operate",
+      "navLabelKey": "gpuFleet",
+      "navDescriptionKey": "gpuFleetDescription",
+      "tags": ["gpu", "fleet", "llm", "deployments", "hosts"],
+      "searchKeywords": ["gpu", "fleet", "host", "vllm", "ollama", "deploy", "model", "mig", "agent"],
+      "defaultPinned": true,
+      "popular": true
+    },
+    {
       "id": "members",
       "href": "/dashboard/members",
       "icon": "IconUsers",

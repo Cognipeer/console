@@ -289,3 +289,201 @@ export interface IInstanceAssignment {
   updatedAt: Date;
   updatedBy: string | null;
 }
+
+// ── GPU fleet (tenant-scoped) ────────────────────────────────────────────
+
+export type GpuHostStatus =
+  /** Created via console, awaiting first agent handshake. (legacy single-host flow) */
+  | 'pending'
+  /** Self-registered via fleet token, awaiting admin claim. */
+  | 'pending_claim'
+  | 'online'
+  | 'offline'
+  | 'draining'
+  | 'archived';
+export type GpuHostProvider = 'azure' | 'aws' | 'gcp' | 'self';
+export type GpuHostAccelerator = 'nvidia-gpu' | 'apple-silicon' | 'amd-gpu' | 'cpu';
+export type GpuHostGpuFramework = 'cuda' | 'rocm' | 'metal' | 'none';
+
+export interface IGpuHost {
+  _id?: string;
+  tenantId: string;
+  /** UUID, stable across rename. Used in agent JWT as `sub`. */
+  id: string;
+  /** Admin-facing name. Defaults to OS hostname; renamable. */
+  name: string;
+  provider: GpuHostProvider;
+  status: GpuHostStatus;
+  /** Hash of the active agent token; raw token never stored. */
+  agentTokenHash: string | null;
+  /** Token version — bumped on rotation. */
+  agentTokenVersion: number;
+  /** Hash of the pending one-time registration token (cleared after handshake). */
+  registrationTokenHash: string | null;
+  registrationTokenExpiresAt: Date | null;
+  /** Last reported inventory (snapshot JSON). */
+  inventory: Record<string, unknown> | null;
+  /** Accelerator family — derived from inventory, surfaced for fast filtering. */
+  accelerator: GpuHostAccelerator;
+  /** GPU framework available on this host. */
+  gpuFramework: GpuHostGpuFramework;
+  /** IP/hostname the console + pool proxy use to reach this host's containers. */
+  serviceAddress: string | null;
+  /** When true, admins may open remote shell sessions. Defaults to false. */
+  terminalEnabled: boolean;
+  /** Free-form labels admin attaches. */
+  labels: Record<string, string>;
+  lastHeartbeatAt: Date | null;
+  lastEventSequence: number;
+  agentVersion: string | null;
+  createdBy: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export type GpuSliceKind = 'full-gpu' | 'mig';
+
+export interface IGpuSlice {
+  _id?: string;
+  tenantId: string;
+  hostId: string;
+  /** UUID from nvidia-smi (GPU UUID for full-gpu, MIG UUID for mig slices). */
+  uuid: string;
+  gpuUuid: string;
+  migGiId: number | null;
+  migCiId: number | null;
+  kind: GpuSliceKind;
+  profile: string | null;
+  memoryMiB: number;
+  /** Deployment id currently bound to this slice (or null). */
+  assignedDeploymentId: string | null;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export type LlmDeploymentRuntime = 'vllm' | 'tgi' | 'ollama' | 'custom';
+
+export type LlmDeploymentDesiredState = 'running' | 'stopped';
+
+export type LlmDeploymentActualState =
+  | 'pending'
+  | 'pulling'
+  | 'starting'
+  | 'healthy'
+  | 'unhealthy'
+  | 'stopped'
+  | 'failed'
+  | 'draining'
+  | 'removing';
+
+export interface ILlmDeployment {
+  _id?: string;
+  tenantId: string;
+  /** Stable UUID, used as the docker container name suffix. */
+  id: string;
+  hostId: string;
+  /** Slice UUID this deployment is pinned to. May be null when draining for MIG reconfig. */
+  sliceUuid: string | null;
+  name: string;
+  runtime: LlmDeploymentRuntime;
+  image: string;
+  modelName: string;
+  args: string[];
+  env: Record<string, string>;
+  port: number;
+  healthPath: string;
+  volumes: Array<{ hostPath: string; containerPath: string; readOnly?: boolean }>;
+  restart: 'no' | 'on-failure' | 'always' | 'unless-stopped';
+  desiredState: LlmDeploymentDesiredState;
+  actualState: LlmDeploymentActualState;
+  /** Container id from the agent's last report. */
+  containerId: string | null;
+  lastHealthyAt: Date | null;
+  lastError: string | null;
+  /**
+   * When healthy, the console auto-registers an `IInferenceServer` pointing at
+   * this deployment. Storing the key here lets us tear it back down on stop.
+   */
+  inferenceServerKey: string | null;
+  createdBy: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export type GpuFleetCommandStatus = 'pending' | 'delivered' | 'completed' | 'failed';
+
+export interface IGpuFleetCommand {
+  _id?: string;
+  tenantId: string;
+  id: string;
+  hostId: string;
+  kind: string;
+  payload: Record<string, unknown>;
+  status: GpuFleetCommandStatus;
+  attempts: number;
+  lastError: string | null;
+  issuedAt: Date;
+  deliveredAt: Date | null;
+  completedAt: Date | null;
+  /** Optional reference back to the entity being mutated (deployment id, gpuUuid…). */
+  resourceRef: string | null;
+  createdBy: string;
+}
+
+export interface IGpuFleetEvent {
+  _id?: string;
+  tenantId: string;
+  hostId: string;
+  sequence: number;
+  kind: string;
+  occurredAt: Date;
+  payload: Record<string, unknown>;
+  createdAt?: Date;
+}
+
+export type AgentDistributionMode = 'console-served' | 'external-url';
+
+// ── LLM pool (load-balanced multi-host deployment) ───────────────────────
+
+export type LlmPoolAlgorithm = 'round-robin' | 'least-busy' | 'weighted-static' | 'random';
+export type LlmPoolStatus = 'active' | 'disabled';
+
+export interface ILlmPool {
+  _id?: string;
+  tenantId: string;
+  /** Pool key — used in the proxy URL: /api/internal/gpu-pool/<key>/v1/*. */
+  key: string;
+  name: string;
+  description: string | null;
+  /** Model identifier this pool serves (HF repo id or library id). */
+  modelName: string;
+  /** Library id when the pool was created from the catalog; null for custom. */
+  modelLibraryId: string | null;
+  algorithm: LlmPoolAlgorithm;
+  status: LlmPoolStatus;
+  /** Deployment ids that are members of this pool. Maintained by the ingestor. */
+  deploymentIds: string[];
+  /** Optional weights for weighted-static; keyed by deploymentId. */
+  weights: Record<string, number>;
+  /** Once auto-registration runs, these are the records the pool published. */
+  providerKey: string | null;
+  modelKey: string | null;
+  createdBy: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IGpuFleetSettings {
+  _id?: string;
+  tenantId: string;
+  /** SHA-256 hash of the tenant-wide fleet registration token. */
+  fleetTokenHash: string | null;
+  fleetTokenRotatedAt: Date | null;
+  fleetTokenRotatedBy: string | null;
+  agentDistributionMode: AgentDistributionMode;
+  /** Used when mode === 'external-url'; supports {{platform}} placeholder. */
+  agentDistributionExternalUrlTemplate: string | null;
+  terminalSessionTtlSeconds: number;
+  createdAt?: Date;
+  updatedAt?: Date;
+}

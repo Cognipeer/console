@@ -244,6 +244,30 @@ const renderSectionFieldValue = (value: unknown) => {
   return <Text size="sm">{formatted}</Text>;
 };
 
+function MetaItem({
+  icon,
+  label,
+  value,
+}: {
+  icon?: React.ReactNode;
+  label?: string;
+  value: React.ReactNode;
+}) {
+  return (
+    <Group gap={6} wrap="nowrap">
+      {icon}
+      {label ? (
+        <Text size="xs" c="dimmed">
+          {label}
+        </Text>
+      ) : null}
+      <Text size="sm" fw={500}>
+        {value}
+      </Text>
+    </Group>
+  );
+}
+
 const SectionCard = ({ section, index }: { section: SectionEntry; index: number }) => {
   const kind = typeof section.kind === 'string' ? section.kind : undefined;
   const role = typeof section.role === 'string' ? section.role : undefined;
@@ -716,56 +740,43 @@ export default function ThreadDetailPage({
                             backgroundColor: isSelected ? 'var(--mantine-color-gray-0)' : undefined,
                           }}
                         >
-                          <Stack gap="xs">
+                          <Stack gap={8}>
                             <Group gap="lg" wrap="wrap">
-                              <Group gap={4}>
-                                <IconClock size={12} color="gray" />
-                                <Text size="xs" c="dimmed">
-                                  {session.startedAt
-                                    ? dayjs(session.startedAt).format('HH:mm:ss')
-                                    : '—'}
-                                </Text>
-                              </Group>
-                              <Group gap={4}>
-                                <Text size="xs" c="dimmed">Duration:</Text>
-                                <Text size="xs">{formatDuration(session.durationMs)}</Text>
-                              </Group>
-                              <Group gap={4}>
-                                <Text size="xs" c="dimmed">Events:</Text>
-                                <Text size="xs">{formatNumber(session.totalEvents)}</Text>
-                              </Group>
-                              <Group gap={4}>
-                                <Text size="xs" c="dimmed">Tokens:</Text>
-                                <Text size="xs">{formatNumber(session.totalTokens)}</Text>
-                              </Group>
+                              <MetaItem
+                                icon={<IconClock size={14} stroke={1.7} color="var(--ds-text-faint)" />}
+                                value={session.startedAt ? dayjs(session.startedAt).format('HH:mm:ss') : '—'}
+                              />
+                              <MetaItem label="Duration" value={formatDuration(session.durationMs)} />
+                              <MetaItem label="Events" value={formatNumber(session.totalEvents)} />
+                              <MetaItem label="Tokens" value={formatNumber(session.totalTokens)} />
                             </Group>
 
                             {session.modelsUsed && session.modelsUsed.length > 0 && (
-                              <Group gap={4}>
-                                <IconBrain size={12} color="gray" />
+                              <Group gap={6} wrap="wrap">
+                                <IconBrain size={14} stroke={1.7} color="var(--ds-text-faint)" />
                                 {session.modelsUsed.map((m) => (
-                                  <Badge key={m} size="xs" variant="light" color="cyan">{m}</Badge>
+                                  <Badge key={m} size="sm" variant="light" color="cyan">{m}</Badge>
                                 ))}
                               </Group>
                             )}
 
                             {session.toolsUsed && session.toolsUsed.length > 0 && (
-                              <Group gap={4}>
-                                <IconTool size={12} color="gray" />
+                              <Group gap={6} wrap="wrap">
+                                <IconTool size={14} stroke={1.7} color="var(--ds-text-faint)" />
                                 {session.toolsUsed.map((t) => (
-                                  <Badge key={t} size="xs" variant="light" color="violet">{t}</Badge>
+                                  <Badge key={t} size="sm" variant="light" color="violet">{t}</Badge>
                                 ))}
                               </Group>
                             )}
 
                             <Group gap="xs">
                               <Tooltip label={session.sessionId}>
-                                <Text size="xs" c="dimmed" style={{ fontFamily: 'monospace' }}>
+                                <Text size="xs" c="dimmed" style={{ fontFamily: 'var(--font-mono)' }}>
                                   {session.sessionId.substring(0, 12)}...
                                 </Text>
                               </Tooltip>
                               {isSelected && (
-                                <Badge size="xs" variant="light" color="gray">
+                                <Badge size="sm" variant="light" color="gray">
                                   Selected
                                 </Badge>
                               )}

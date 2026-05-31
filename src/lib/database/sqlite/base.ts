@@ -82,6 +82,14 @@ export const TABLES = {
   // ── Cluster (main database) ────────────────────────────────────────
   nodes: 'nodes',
   instanceAssignments: 'instance_assignments',
+  // ── GPU fleet (tenant database) ───────────────────────────────────
+  gpuHosts: 'gpu_hosts',
+  gpuSlices: 'gpu_slices',
+  llmDeployments: 'llm_deployments',
+  gpuFleetCommands: 'gpu_fleet_commands',
+  gpuFleetEvents: 'gpu_fleet_events',
+  gpuFleetSettings: 'gpu_fleet_settings',
+  llmPools: 'llm_pools',
 } as const;
 
 // ── Base class ───────────────────────────────────────────────────────
@@ -339,6 +347,11 @@ export class SQLiteProviderBase {
       'rerankerOversample',
       'rerankerOversample INTEGER',
     );
+    // GPU fleet host extensions (added 2026-05-22). Safe to ensure on every boot.
+    this.ensureTableColumn(db, TABLES.gpuHosts, 'accelerator', "accelerator TEXT NOT NULL DEFAULT 'cpu'");
+    this.ensureTableColumn(db, TABLES.gpuHosts, 'gpuFramework', "gpuFramework TEXT NOT NULL DEFAULT 'none'");
+    this.ensureTableColumn(db, TABLES.gpuHosts, 'serviceAddress', 'serviceAddress TEXT');
+    this.ensureTableColumn(db, TABLES.gpuHosts, 'terminalEnabled', 'terminalEnabled INTEGER NOT NULL DEFAULT 0');
   }
 
   private applyTenantIndexes(db: Database.Database): void {

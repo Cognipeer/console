@@ -90,6 +90,20 @@ export default defineConfig({
           ],
         },
         {
+          text: 'GPU Fleet',
+          collapsed: false,
+          items: [
+            { text: 'Overview', link: '/guide/gpu-fleet/overview' },
+            { text: 'Onboarding Hosts', link: '/guide/gpu-fleet/onboarding' },
+            { text: 'Deploying Models', link: '/guide/gpu-fleet/deploying-models' },
+            { text: 'Pools & Load Balancing', link: '/guide/gpu-fleet/pools' },
+            { text: 'MIG Reconfigure', link: '/guide/gpu-fleet/mig' },
+            { text: 'Terminal Access', link: '/guide/gpu-fleet/terminal' },
+            { text: 'Troubleshooting', link: '/guide/gpu-fleet/troubleshooting' },
+            { text: 'FAQ', link: '/guide/gpu-fleet/faq' },
+          ],
+        },
+        {
           text: 'Project',
           items: [
             { text: 'Licensing', link: '/guide/licensing' },

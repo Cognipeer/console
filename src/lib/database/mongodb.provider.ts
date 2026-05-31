@@ -41,6 +41,7 @@ import { CrawlerMixin } from './mongodb/crawler.mixin';
 import { AuditMixin } from './mongodb/audit.mixin';
 import { UserProjectMixin } from './mongodb/user-project.mixin';
 import { ClusterMixin } from './mongodb/cluster.mixin';
+import { GpuFleetMixin } from './mongodb/gpu-fleet.mixin';
 
 // ── Compose mixins in domain groups ──────────────────────────────────────
 // Order matters where there are cross-mixin dependencies.
@@ -64,6 +65,9 @@ const AdvancedBase = CrawlerMixin(AuditMixin(BrowserMixin(VectorMigrationMixin(A
 // Group 6 – Cluster (system-wide; uses main DB)
 const ClusterBase = ClusterMixin(AdvancedBase);
 
+// Group 7 – GPU fleet (tenant-scoped)
+const GpuFleetBase = GpuFleetMixin(ClusterBase);
+
 // ── Final composed class ─────────────────────────────────────────────────
 
-export class MongoDBProvider extends ClusterBase implements DatabaseProvider {}
+export class MongoDBProvider extends GpuFleetBase implements DatabaseProvider {}

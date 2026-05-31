@@ -1307,4 +1307,149 @@ export const TENANT_SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_group_projects_group ON group_projects(tenantId, groupId);
   CREATE INDEX IF NOT EXISTS idx_group_projects_project ON group_projects(tenantId, projectId);
+
+  -- GPU fleet: hosts (one row per GPU machine connected to the console)
+  CREATE TABLE IF NOT EXISTS gpu_hosts (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    name TEXT NOT NULL,
+    provider TEXT NOT NULL DEFAULT 'self',
+    status TEXT NOT NULL DEFAULT 'pending',
+    accelerator TEXT NOT NULL DEFAULT 'cpu',
+    gpuFramework TEXT NOT NULL DEFAULT 'none',
+    serviceAddress TEXT,
+    terminalEnabled INTEGER NOT NULL DEFAULT 0,
+    agentTokenHash TEXT,
+    agentTokenVersion INTEGER NOT NULL DEFAULT 1,
+    registrationTokenHash TEXT,
+    registrationTokenExpiresAt TEXT,
+    inventory TEXT,
+    labels TEXT NOT NULL DEFAULT '{}',
+    lastHeartbeatAt TEXT,
+    lastEventSequence INTEGER NOT NULL DEFAULT 0,
+    agentVersion TEXT,
+    createdBy TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_gpu_hosts_tenant ON gpu_hosts(tenantId);
+  CREATE INDEX IF NOT EXISTS idx_gpu_hosts_status ON gpu_hosts(status);
+  CREATE INDEX IF NOT EXISTS idx_gpu_hosts_regtoken ON gpu_hosts(registrationTokenHash);
+  CREATE INDEX IF NOT EXISTS idx_gpu_hosts_agenttoken ON gpu_hosts(agentTokenHash);
+
+  -- GPU fleet: slices (one row per schedulable GPU partition, MIG or full-card)
+  CREATE TABLE IF NOT EXISTS gpu_slices (
+    uuid TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    hostId TEXT NOT NULL,
+    gpuUuid TEXT NOT NULL,
+    migGiId INTEGER,
+    migCiId INTEGER,
+    kind TEXT NOT NULL,
+    profile TEXT,
+    memoryMiB INTEGER NOT NULL DEFAULT 0,
+    assignedDeploymentId TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_gpu_slices_host ON gpu_slices(hostId);
+  CREATE INDEX IF NOT EXISTS idx_gpu_slices_assignment ON gpu_slices(assignedDeploymentId);
+
+  -- GPU fleet: LLM deployments (Docker containers serving a model on a slice)
+  CREATE TABLE IF NOT EXISTS llm_deployments (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    hostId TEXT NOT NULL,
+    sliceUuid TEXT,
+    name TEXT NOT NULL,
+    runtime TEXT NOT NULL,
+    image TEXT NOT NULL,
+    modelName TEXT NOT NULL,
+    args TEXT NOT NULL DEFAULT '[]',
+    env TEXT NOT NULL DEFAULT '{}',
+    port INTEGER NOT NULL,
+    healthPath TEXT NOT NULL DEFAULT '/health',
+    volumes TEXT NOT NULL DEFAULT '[]',
+    restart TEXT NOT NULL DEFAULT 'unless-stopped',
+    desiredState TEXT NOT NULL DEFAULT 'running',
+    actualState TEXT NOT NULL DEFAULT 'pending',
+    containerId TEXT,
+    lastHealthyAt TEXT,
+    lastError TEXT,
+    inferenceServerKey TEXT,
+    createdBy TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_llm_deployments_tenant ON llm_deployments(tenantId);
+  CREATE INDEX IF NOT EXISTS idx_llm_deployments_host ON llm_deployments(hostId);
+  CREATE INDEX IF NOT EXISTS idx_llm_deployments_slice ON llm_deployments(sliceUuid);
+
+  -- GPU fleet: pending commands queued for delivery via long-poll
+  CREATE TABLE IF NOT EXISTS gpu_fleet_commands (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    hostId TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    lastError TEXT,
+    issuedAt TEXT NOT NULL,
+    deliveredAt TEXT,
+    completedAt TEXT,
+    resourceRef TEXT,
+    createdBy TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_gpu_fleet_commands_host_status ON gpu_fleet_commands(hostId, status, issuedAt);
+
+  -- GPU fleet: model pools (load-balanced multi-host deployments)
+  CREATE TABLE IF NOT EXISTS llm_pools (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    modelName TEXT NOT NULL,
+    modelLibraryId TEXT,
+    algorithm TEXT NOT NULL DEFAULT 'round-robin',
+    status TEXT NOT NULL DEFAULT 'active',
+    deploymentIds TEXT NOT NULL DEFAULT '[]',
+    weights TEXT NOT NULL DEFAULT '{}',
+    providerKey TEXT,
+    modelKey TEXT,
+    createdBy TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL,
+    UNIQUE(tenantId, key)
+  );
+  CREATE INDEX IF NOT EXISTS idx_llm_pools_tenant ON llm_pools(tenantId);
+
+  -- GPU fleet: tenant-wide settings (single-row table). Holds the fleet
+  -- registration token hash plus per-tenant defaults the UI exposes.
+  CREATE TABLE IF NOT EXISTS gpu_fleet_settings (
+    tenantId TEXT PRIMARY KEY,
+    fleetTokenHash TEXT,
+    fleetTokenRotatedAt TEXT,
+    fleetTokenRotatedBy TEXT,
+    agentDistributionMode TEXT NOT NULL DEFAULT 'console-served',
+    agentDistributionExternalUrlTemplate TEXT,
+    terminalSessionTtlSeconds INTEGER NOT NULL DEFAULT 1800,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+
+  -- GPU fleet: append-only event stream from agents
+  CREATE TABLE IF NOT EXISTS gpu_fleet_events (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    hostId TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    occurredAt TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    createdAt TEXT NOT NULL,
+    UNIQUE(hostId, sequence)
+  );
+  CREATE INDEX IF NOT EXISTS idx_gpu_fleet_events_host_seq ON gpu_fleet_events(hostId, sequence DESC);
 `;

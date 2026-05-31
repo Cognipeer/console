@@ -54,6 +54,8 @@ export const en = {
     automationsDescription: 'Runtime schedulers, maintenance jobs, and control surfaces',
     cluster: 'Cluster',
     clusterDescription: 'Manage cluster nodes and assign service instances to them',
+    gpuFleet: 'GPU Fleet',
+    gpuFleetDescription: 'Onboard GPU hosts, deploy models from the curated library, manage pools',
     memory: 'Agent Memory',
     memoryDescription: 'Persistent memory stores with semantic search',
     rag: 'Knowledge Engine',

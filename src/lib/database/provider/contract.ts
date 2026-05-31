@@ -71,6 +71,15 @@ import type {
   INodeRecord,
   InstanceEntityType,
   NodeStatus,
+  IGpuHost,
+  IGpuSlice,
+  ILlmDeployment,
+  IGpuFleetCommand,
+  IGpuFleetEvent,
+  IGpuFleetSettings,
+  ILlmPool,
+  GpuHostStatus,
+  GpuFleetCommandStatus,
   ProjectRole,
   IVectorIndexRecord,
   IVectorMigration,
@@ -1099,4 +1108,78 @@ export interface DatabaseProvider {
     entityType: InstanceEntityType,
     entityId: string,
   ): Promise<boolean>;
+
+  // ── GPU fleet (tenant-scoped) ──
+  createGpuHost(
+    host: Omit<IGpuHost, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IGpuHost>;
+  updateGpuHost(
+    id: string,
+    data: Partial<Omit<IGpuHost, '_id' | 'tenantId' | 'id' | 'createdBy' | 'createdAt'>>,
+  ): Promise<IGpuHost | null>;
+  findGpuHostById(id: string): Promise<IGpuHost | null>;
+  findGpuHostByAgentTokenHash(hash: string): Promise<IGpuHost | null>;
+  findGpuHostByRegistrationTokenHash(hash: string): Promise<IGpuHost | null>;
+  listGpuHosts(filters: { tenantId: string; status?: GpuHostStatus }): Promise<IGpuHost[]>;
+  deleteGpuHost(id: string): Promise<boolean>;
+
+  upsertGpuSlice(
+    slice: Omit<IGpuSlice, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IGpuSlice>;
+  listGpuSlicesByHost(hostId: string): Promise<IGpuSlice[]>;
+  findGpuSliceByUuid(uuid: string): Promise<IGpuSlice | null>;
+  setGpuSliceAssignment(uuid: string, deploymentId: string | null): Promise<void>;
+  deleteGpuSlicesForGpu(hostId: string, gpuUuid: string): Promise<number>;
+
+  createLlmDeployment(
+    deployment: Omit<ILlmDeployment, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<ILlmDeployment>;
+  updateLlmDeployment(
+    id: string,
+    data: Partial<Omit<ILlmDeployment, '_id' | 'tenantId' | 'id' | 'createdBy' | 'createdAt'>>,
+  ): Promise<ILlmDeployment | null>;
+  findLlmDeploymentById(id: string): Promise<ILlmDeployment | null>;
+  listLlmDeploymentsByHost(hostId: string): Promise<ILlmDeployment[]>;
+  listLlmDeploymentsByTenant(tenantId: string): Promise<ILlmDeployment[]>;
+  deleteLlmDeployment(id: string): Promise<boolean>;
+  /** Cascade helpers — used by deleteGpuHost. */
+  deleteGpuSlicesForHost(hostId: string): Promise<number>;
+  deleteGpuFleetCommandsForHost(hostId: string): Promise<number>;
+  deleteGpuFleetEventsForHost(hostId: string): Promise<number>;
+
+  enqueueGpuFleetCommand(
+    command: Omit<IGpuFleetCommand, '_id'>,
+  ): Promise<IGpuFleetCommand>;
+  listPendingGpuFleetCommands(hostId: string, limit?: number): Promise<IGpuFleetCommand[]>;
+  /** All commands for a host, newest first. Includes completed + failed. */
+  listGpuFleetCommandsByHost(hostId: string, options?: { limit?: number; resourceRef?: string }): Promise<IGpuFleetCommand[]>;
+  findGpuFleetCommandById(id: string): Promise<IGpuFleetCommand | null>;
+  updateGpuFleetCommandStatus(
+    id: string,
+    status: GpuFleetCommandStatus,
+    meta?: { lastError?: string | null; deliveredAt?: Date; completedAt?: Date; attemptsDelta?: number },
+  ): Promise<void>;
+
+  appendGpuFleetEvent(
+    event: Omit<IGpuFleetEvent, '_id' | 'createdAt'>,
+  ): Promise<IGpuFleetEvent>;
+  listGpuFleetEvents(
+    hostId: string,
+    options?: { afterSequence?: number; limit?: number },
+  ): Promise<IGpuFleetEvent[]>;
+
+  getGpuFleetSettings(tenantId: string): Promise<IGpuFleetSettings | null>;
+  upsertGpuFleetSettings(
+    settings: Omit<IGpuFleetSettings, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IGpuFleetSettings>;
+
+  createLlmPool(pool: Omit<ILlmPool, '_id' | 'createdAt' | 'updatedAt'>): Promise<ILlmPool>;
+  updateLlmPool(
+    tenantId: string,
+    key: string,
+    data: Partial<Omit<ILlmPool, '_id' | 'tenantId' | 'key' | 'createdBy' | 'createdAt'>>,
+  ): Promise<ILlmPool | null>;
+  findLlmPoolByKey(tenantId: string, key: string): Promise<ILlmPool | null>;
+  listLlmPools(tenantId: string): Promise<ILlmPool[]>;
+  deleteLlmPool(tenantId: string, key: string): Promise<boolean>;
 }

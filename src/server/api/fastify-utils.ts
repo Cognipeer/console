@@ -72,6 +72,26 @@ export function readJsonBody<T>(request: FastifyRequest): T {
   return body as T;
 }
 
+/**
+ * Same as readJsonBody but never throws — returns `{}` on missing or malformed
+ * payload. Use when the handler validates field-by-field and prefers to reply
+ * with a domain-specific 400 rather than letting JSON parse errors leak out.
+ *
+ * IMPORTANT: every Fastify plugin route in this app MUST use this (or
+ * readJsonBody) instead of accessing `request.body` directly. The global
+ * JSON content-type parser keeps the body as the raw string for Next.js
+ * compatibility, so a direct `body.fleetToken` access reads from a string
+ * and silently returns undefined.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function safeReadJsonBody<T = Record<string, any>>(request: FastifyRequest): T {
+  try {
+    return readJsonBody<T>(request);
+  } catch {
+    return {} as T;
+  }
+}
+
 export function getClientIp(request: FastifyRequest): string {
   const forwarded = request.headers['x-forwarded-for'];
   if (typeof forwarded === 'string' && forwarded.trim().length > 0) {

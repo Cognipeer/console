@@ -405,26 +405,26 @@ function SpanTreeItem({
                     backgroundColor: isSelected ? 'var(--mantine-color-blue-0)' : undefined,
                 }}
             >
-                <Group gap={6} wrap="nowrap">
+                <Group gap={8} wrap="nowrap">
                     {hasChildren ? (
                         <ActionIcon
                             variant="subtle"
-                            size="xs"
+                            size="sm"
                             onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
                         >
-                            {expanded ? <IconChevronDown size={12} /> : <IconChevronRight size={12} />}
+                            {expanded ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}
                         </ActionIcon>
                     ) : (
                         <Box w={22} />
                     )}
-                    <Badge size="xs" variant="light" color={eventTypeColor(event.type)} style={{ flexShrink: 0 }}>
+                    <Badge size="sm" variant="light" color={eventTypeColor(event.type)} style={{ flexShrink: 0 }}>
                         {humanize(event.type) || 'Span'}
                     </Badge>
-                    <Text size="xs" fw={500} lineClamp={1} style={{ flex: 1 }}>
+                    <Text size="sm" fw={500} lineClamp={1} style={{ flex: 1 }}>
                         {event.label ? humanize(event.label) : humanize(event.type) || 'Event'}
                     </Text>
                     {event.status && (
-                        <Badge size="xs" variant="dot" color={resolveStatusColor(event.status)} style={{ flexShrink: 0 }}>
+                        <Badge size="sm" variant="dot" color={resolveStatusColor(event.status)} style={{ flexShrink: 0 }}>
                             {event.status}
                         </Badge>
                     )}

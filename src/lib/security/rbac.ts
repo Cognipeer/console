@@ -28,7 +28,8 @@ export type PermissionService =
   | 'providers'
   | 'tokens'
   | 'license'
-  | 'audit';
+  | 'audit'
+  | 'gpu-fleet';
 
 /**
  * Tenant-wide roles.
@@ -87,6 +88,7 @@ export const RBAC_SERVICE_DEFINITIONS: RbacServiceDefinition[] = [
   { id: 'config', label: 'Config Management', description: 'Tenant configuration and secrets.', category: 'admin', adminService: true },
   { id: 'license', label: 'License', description: 'Offline license activation and limits.', category: 'admin', adminService: true },
   { id: 'audit', label: 'Audit Log', description: 'Security and administrative audit events.', category: 'admin', adminService: true },
+  { id: 'gpu-fleet', label: 'GPU Fleet', description: 'GPU hosts, MIG slices, model deployments, and terminal access.', category: 'operate', adminService: true },
 ];
 
 const SERVICE_IDS = new Set<PermissionService>(RBAC_SERVICE_DEFINITIONS.map((service) => service.id));
@@ -147,6 +149,7 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/crawler', service: 'crawler' },
   { prefix: '/api/automations', service: 'automations' },
   { prefix: '/api/alerts', service: 'alerts' },
+  { prefix: '/api/gpu-fleet', service: 'gpu-fleet' },
 ];
 
 export function isPermissionService(value: unknown): value is PermissionService {

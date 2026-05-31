@@ -77,6 +77,14 @@ export const COLLECTIONS = {
   // ── Cluster (main database) ────────────────────────────────────────
   nodes: 'nodes',
   instanceAssignments: 'instance_assignments',
+  // ── GPU fleet (tenant database) ───────────────────────────────────
+  gpuHosts: 'gpu_hosts',
+  gpuSlices: 'gpu_slices',
+  llmDeployments: 'llm_deployments',
+  gpuFleetCommands: 'gpu_fleet_commands',
+  gpuFleetEvents: 'gpu_fleet_events',
+  gpuFleetSettings: 'gpu_fleet_settings',
+  llmPools: 'llm_pools',
 } as const;
 
 // ── Base class ───────────────────────────────────────────────────────────

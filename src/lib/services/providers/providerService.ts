@@ -208,10 +208,41 @@ export async function loadProviderRuntimeData<TCredentials = Record<string, unkn
     throw new Error('Provider configuration not found.');
   }
 
-  const credentials = decryptObject<TCredentials>(record.credentialsEnc);
+  let credentials: TCredentials;
+  try {
+    credentials = decryptObject<TCredentials>(record.credentialsEnc);
+  } catch (error) {
+    // Legacy auto-heal: an earlier version of the GPU-fleet auto-register
+    // path persisted credentialsEnc as PLAINTEXT JSON instead of running it
+    // through encryptObject. Those rows fail decrypt with the Node AES-GCM
+    // "Unsupported state or unable to authenticate data" error. When the
+    // field happens to parse as JSON with usable credentials, recover it
+    // and re-encrypt in place so subsequent loads use the proper format.
+    const recovered = tryRecoverLegacyPlaintextCredentials<TCredentials>(record.credentialsEnc);
+    if (!recovered) throw error;
+    await db
+      .updateProvider(String(record._id), {
+        credentialsEnc: encryptObject(recovered),
+      })
+      .catch(() => undefined);
+    credentials = recovered;
+  }
 
   return {
     record,
     credentials,
   };
+}
+
+function tryRecoverLegacyPlaintextCredentials<T>(value: string): T | null {
+  const trimmed = value.trim();
+  // Real ciphertext is base64 of (iv | tag | data) — it never starts with `{`.
+  if (!trimmed.startsWith('{')) return null;
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (!parsed || typeof parsed !== 'object') return null;
+    return parsed as T;
+  } catch {
+    return null;
+  }
 }

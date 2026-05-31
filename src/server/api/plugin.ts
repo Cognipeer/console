@@ -62,6 +62,10 @@ import { toolsApiPlugin } from './plugins/tools';
 import { tracingApiPlugin } from './plugins/tracing';
 import { usersApiPlugin } from './plugins/users';
 import { vectorApiPlugin } from './plugins/vector';
+import { gpuAgentApiPlugin } from './plugins/gpu-agent';
+import { gpuFleetApiPlugin } from './plugins/gpu-fleet';
+import { gpuPoolApiPlugin } from './plugins/gpu-pool';
+import { gpuTerminalApiPlugin } from './plugins/gpu-terminal';
 
 const PUBLIC_API_PATHS = [
   '/api/auth/login',
@@ -70,16 +74,38 @@ const PUBLIC_API_PATHS = [
   '/api/auth/reset-password',
   '/api/health/live',
   '/api/health/ready',
+  '/api/gpu-fleet/installer.sh',
 ];
 
-const CLIENT_API_PREFIXES = ['/api/client/', '/api/models/v1/', '/api/metrics'];
+/**
+ * Anything under here is downloadable without session auth. The GPU agent
+ * bundle tarball contains no tenant secrets; pairing requires a fleet token
+ * the agent passes back on /fleet-handshake.
+ */
+const PUBLIC_API_PREFIXES = ['/api/gpu-fleet/agent-bundle/'];
+
+const CLIENT_API_PREFIXES = ['/api/client/', '/api/models/v1/', '/api/metrics', '/api/internal/gpu-pool/'];
+
+/**
+ * Endpoints under these prefixes manage their own auth (Bearer agent tokens)
+ * and must bypass the cookie-session check below. Each handler MUST call into
+ * `authenticateAgent` itself; the global hook only short-circuits.
+ */
+const SELF_AUTH_API_PREFIXES = ['/api/gpu/agent/'];
+
+function isSelfAuthApiPath(pathname: string): boolean {
+  return SELF_AUTH_API_PREFIXES.some((path) => pathname.startsWith(path));
+}
 
 function getPathname(url: string | undefined): string {
   return new URL(url || '/', 'http://localhost').pathname;
 }
 
 function isPublicApiPath(pathname: string): boolean {
-  return PUBLIC_API_PATHS.some((path) => pathname === path || pathname.startsWith(`${path}/`));
+  if (PUBLIC_API_PATHS.some((path) => pathname === path || pathname.startsWith(`${path}/`))) {
+    return true;
+  }
+  return PUBLIC_API_PREFIXES.some((prefix) => pathname.startsWith(prefix));
 }
 
 function isClientApiPath(pathname: string): boolean {
@@ -235,6 +261,12 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
       return;
     }
 
+    if (isSelfAuthApiPath(pathname)) {
+      // gpu-agent (and similar machine-to-machine endpoints) verify their own
+      // bearer tokens. Skip the cookie-session check; the handler is on the hook.
+      return;
+    }
+
     if (clientApiRequest) {
       const authHeader = request.headers.authorization;
       if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -334,4 +366,8 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(tracingApiPlugin);
   await app.register(usersApiPlugin);
   await app.register(vectorApiPlugin);
+  await app.register(gpuAgentApiPlugin);
+  await app.register(gpuFleetApiPlugin);
+  await app.register(gpuPoolApiPlugin);
+  await app.register(gpuTerminalApiPlugin);
 };

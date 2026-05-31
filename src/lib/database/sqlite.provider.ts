@@ -41,6 +41,7 @@ import { CrawlerMixin } from './sqlite/crawler.mixin';
 import { AuditMixin } from './sqlite/audit.mixin';
 import { UserProjectMixin } from './sqlite/user-project.mixin';
 import { ClusterMixin } from './sqlite/cluster.mixin';
+import { GpuFleetMixin } from './sqlite/gpu-fleet.mixin';
 
 // ── Compose mixins in domain groups ──────────────────────────────────────
 // Order follows the MongoDB provider composition for consistency.
@@ -63,6 +64,9 @@ const AdvancedBase = CrawlerMixin(AuditMixin(BrowserMixin(VectorMigrationMixin(A
 // Group 6 – Cluster (system-wide; uses main DB)
 const ClusterBase = ClusterMixin(AdvancedBase);
 
+// Group 7 – GPU fleet (tenant-scoped)
+const GpuFleetBase = GpuFleetMixin(ClusterBase);
+
 // ── Final composed class ─────────────────────────────────────────────────
 
-export class SQLiteProvider extends ClusterBase implements DatabaseProvider {}
+export class SQLiteProvider extends GpuFleetBase implements DatabaseProvider {}
