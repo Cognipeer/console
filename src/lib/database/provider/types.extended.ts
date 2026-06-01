@@ -487,3 +487,154 @@ export interface IGpuFleetSettings {
   createdAt?: Date;
   updatedAt?: Date;
 }
+
+// =====================================================================
+// Agent Runtime Sandbox
+//
+// A self-contained subsystem, independent of the GPU fleet types above.
+// Tables are prefixed `sandbox_` and share nothing with gpu-fleet/cluster.
+// =====================================================================
+
+export type SandboxRunnerStatus = 'pending' | 'online' | 'offline' | 'pending_claim';
+
+/** A DinD (later K8s) compute node that runs sandbox containers. */
+export interface ISandboxRunner {
+  id: string;
+  tenantId: string;
+  name: string;
+  status: SandboxRunnerStatus;
+  labels: Record<string, string>;
+  /** Free-form node inventory: cpu/ram/disk + supported runtime classes. */
+  inventory: Record<string, unknown> | null;
+  agentTokenHash: string | null;
+  agentTokenVersion: number;
+  registrationTokenHash: string | null;
+  registrationTokenExpiresAt: Date | null;
+  lastSeenAt: Date | null;
+  /** Watermark of the last applied event sequence (replay protection). */
+  lastEventSequence: number;
+  terminalEnabled: boolean;
+  createdBy: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/** Reusable, admin-defined sandbox recipe. */
+export interface ISandboxTemplate {
+  id: string;
+  tenantId: string;
+  projectId: string | null;
+  key: string;
+  name: string;
+  description: string | null;
+  baseImage: string;
+  /** SandboxRuntimeKind from the wire protocol. */
+  runtime: string;
+  /** SandboxIsolation: runc | gvisor | kata. */
+  isolation: string;
+  resources: Record<string, unknown>;
+  env: Record<string, string>;
+  entrypoint: string[] | null;
+  toolboxPort: number;
+  previewPorts: Array<Record<string, unknown>>;
+  volumeMounts: Array<Record<string, unknown>>;
+  enabled: boolean;
+  createdBy: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export type SandboxInstanceState =
+  | 'pending'
+  | 'creating'
+  | 'starting'
+  | 'running'
+  | 'stopping'
+  | 'stopped'
+  | 'failed'
+  | 'deleted';
+
+export type SandboxDesiredState = 'running' | 'stopped' | 'deleted';
+
+/** A running (or desired) sandbox container. */
+export interface ISandboxInstance {
+  id: string;
+  tenantId: string;
+  projectId: string | null;
+  templateId: string;
+  runnerId: string | null;
+  name: string;
+  containerId: string | null;
+  desiredState: SandboxDesiredState;
+  actualState: SandboxInstanceState;
+  volumeId: string | null;
+  toolboxPort: number | null;
+  previewPorts: Array<Record<string, unknown>>;
+  isolation: string;
+  /** Per-instance environment variables passed to the container. */
+  env: Record<string, string>;
+  lastError: string | null;
+  lastActivityAt: Date | null;
+  createdBy: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export type SandboxCommandStatus = 'pending' | 'delivered' | 'completed' | 'failed';
+
+export interface ISandboxCommand {
+  id: string;
+  tenantId: string;
+  runnerId: string;
+  instanceId: string | null;
+  kind: string;
+  payload: Record<string, unknown>;
+  status: SandboxCommandStatus;
+  attempts: number;
+  lastError: string | null;
+  issuedAt: Date;
+  deliveredAt: Date | null;
+  completedAt: Date | null;
+  createdBy: string;
+}
+
+export interface ISandboxEvent {
+  id: string;
+  tenantId: string;
+  runnerId: string;
+  sequence: number;
+  kind: string;
+  payload: Record<string, unknown>;
+  occurredAt: Date;
+  receivedAt: Date;
+}
+
+export type SandboxStorageProviderKind = 'azure-blob' | 's3' | 'local';
+
+/** Persistent volume backed by object storage, mounted live via FUSE. */
+export interface ISandboxVolume {
+  id: string;
+  tenantId: string;
+  projectId: string | null;
+  name: string;
+  provider: SandboxStorageProviderKind;
+  /** Azure Blob container or S3 bucket. */
+  container: string;
+  prefix: string;
+  sizeBytes: number | null;
+  createdBy: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface ISandboxSettings {
+  id: string;
+  tenantId: string;
+  fleetTokenHash: string | null;
+  terminalSessionTtlSeconds: number;
+  defaultStorageProvider: string | null;
+  defaultIsolation: string | null;
+  idleReapSeconds: number;
+  createdAt: Date;
+  updatedAt: Date;
+}

@@ -57,6 +57,11 @@ import { projectsApiPlugin } from './plugins/projects';
 import { quotaApiPlugin } from './plugins/quota';
 import { ragApiPlugin } from './plugins/rag';
 import { rerankerApiPlugin } from './plugins/reranker';
+import { sandboxApiPlugin } from './plugins/sandbox';
+import { sandboxAgentApiPlugin } from './plugins/sandbox-agent';
+import { sandboxTerminalApiPlugin } from './plugins/sandbox-terminal';
+import { clientSandboxApiPlugin } from './plugins/client-sandbox';
+import { clientSandboxToolboxApiPlugin } from './plugins/client-sandbox-toolbox';
 import { tokensApiPlugin } from './plugins/tokens';
 import { toolsApiPlugin } from './plugins/tools';
 import { tracingApiPlugin } from './plugins/tracing';
@@ -91,7 +96,7 @@ const CLIENT_API_PREFIXES = ['/api/client/', '/api/models/v1/', '/api/metrics', 
  * and must bypass the cookie-session check below. Each handler MUST call into
  * `authenticateAgent` itself; the global hook only short-circuits.
  */
-const SELF_AUTH_API_PREFIXES = ['/api/gpu/agent/'];
+const SELF_AUTH_API_PREFIXES = ['/api/gpu/agent/', '/api/sandbox/agent/'];
 
 function isSelfAuthApiPath(pathname: string): boolean {
   return SELF_AUTH_API_PREFIXES.some((path) => pathname.startsWith(path));
@@ -361,6 +366,10 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(quotaApiPlugin);
   await app.register(ragApiPlugin);
   await app.register(rerankerApiPlugin);
+  await app.register(sandboxApiPlugin);
+  await app.register(sandboxAgentApiPlugin);
+  await app.register(clientSandboxApiPlugin);
+  await app.register(clientSandboxToolboxApiPlugin);
   await app.register(tokensApiPlugin);
   await app.register(toolsApiPlugin);
   await app.register(tracingApiPlugin);
@@ -370,4 +379,8 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(gpuFleetApiPlugin);
   await app.register(gpuPoolApiPlugin);
   await app.register(gpuTerminalApiPlugin);
+  // Registered after gpu-terminal so @fastify/websocket (which gpu-terminal
+  // registers unconditionally) is present; sandbox-terminal's own registration
+  // is guarded, so it still works standalone if gpu-fleet is ever removed.
+  await app.register(sandboxTerminalApiPlugin);
 };

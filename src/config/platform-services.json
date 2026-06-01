@@ -262,6 +262,18 @@
       "popular": true
     },
     {
+      "id": "sandbox",
+      "href": "/dashboard/sandbox",
+      "icon": "IconCode",
+      "category": "operate",
+      "navLabelKey": "sandbox",
+      "navDescriptionKey": "sandboxDescription",
+      "tags": ["sandbox", "runtime", "execution", "terminal", "code"],
+      "searchKeywords": ["sandbox", "runtime", "execution", "terminal", "code", "python", "node", "container", "dind"],
+      "defaultPinned": false,
+      "popular": false
+    },
+    {
       "id": "members",
       "href": "/dashboard/members",
       "icon": "IconUsers",

@@ -21,9 +21,11 @@
     "paths": {
       "@/*": ["./src/*"],
       "@cognipeer/gpu-fleet-protocol": ["./packages/gpu-fleet-protocol/src/index.ts"],
-      "@cognipeer/gpu-fleet-protocol/*": ["./packages/gpu-fleet-protocol/src/*"]
+      "@cognipeer/gpu-fleet-protocol/*": ["./packages/gpu-fleet-protocol/src/*"],
+      "@cognipeer/sandbox-protocol": ["./packages/sandbox-protocol/src/index.ts"],
+      "@cognipeer/sandbox-protocol/*": ["./packages/sandbox-protocol/src/*"]
     }
   },
   "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
-  "exclude": ["node_modules", "packages/*/dist", "packages/gpu-agent"]
+  "exclude": ["node_modules", "packages/*/dist", "packages/gpu-agent", "packages/sandbox-agent", "packages/sandbox-toolbox"]
 }

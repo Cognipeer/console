@@ -1,0 +1,22 @@
+{
+  "version": 2,
+  "templates": [
+    {
+      "key": "multi-base",
+      "name": "Cognipeer Sandbox (Python · Node · git)",
+      "description": "Single batteries-included image: Python 3.12, Node.js 22, git, curl/wget, jq, ripgrep, build tools. Good default for most agent work. Add your own template for anything special.",
+      "baseImage": "cognipeer/sandbox-base:latest",
+      "runtime": "multi",
+      "isolation": "runc",
+      "resources": { "cpuCores": 2, "memoryMb": 4096, "diskMb": 16384, "pids": 1024 },
+      "env": {},
+      "toolboxPort": 8787,
+      "previewPorts": [
+        { "port": 3000, "label": "dev server" },
+        { "port": 5173, "label": "vite" },
+        { "port": 8000, "label": "http" }
+      ],
+      "default": true
+    }
+  ]
+}

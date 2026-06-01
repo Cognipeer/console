@@ -19,6 +19,7 @@ export type PermissionService =
   | 'mcp'
   | 'tools'
   | 'js-sandbox'
+  | 'sandbox'
   | 'browser'
   | 'crawler'
   | 'alerts'
@@ -89,6 +90,7 @@ export const RBAC_SERVICE_DEFINITIONS: RbacServiceDefinition[] = [
   { id: 'license', label: 'License', description: 'Offline license activation and limits.', category: 'admin', adminService: true },
   { id: 'audit', label: 'Audit Log', description: 'Security and administrative audit events.', category: 'admin', adminService: true },
   { id: 'gpu-fleet', label: 'GPU Fleet', description: 'GPU hosts, MIG slices, model deployments, and terminal access.', category: 'operate', adminService: true },
+  { id: 'sandbox', label: 'Agent Sandbox', description: 'Agent runtime sandboxes: runners, templates, instances, volumes, and terminal access.', category: 'operate', adminService: true },
 ];
 
 const SERVICE_IDS = new Set<PermissionService>(RBAC_SERVICE_DEFINITIONS.map((service) => service.id));
@@ -109,6 +111,7 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/client/v1/guardrails', service: 'guardrails' },
   { prefix: '/api/client/v1/mcp', service: 'mcp' },
   { prefix: '/api/client/v1/js-sandbox', service: 'js-sandbox' },
+  { prefix: '/api/client/v1/sandbox', service: 'sandbox' },
   { prefix: '/api/client/v1/memory', service: 'memory' },
   { prefix: '/api/client/v1/prompts', service: 'prompts' },
   { prefix: '/api/client/v1/rag', service: 'rag' },
@@ -150,6 +153,7 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/automations', service: 'automations' },
   { prefix: '/api/alerts', service: 'alerts' },
   { prefix: '/api/gpu-fleet', service: 'gpu-fleet' },
+  { prefix: '/api/sandbox', service: 'sandbox' },
 ];
 
 export function isPermissionService(value: unknown): value is PermissionService {

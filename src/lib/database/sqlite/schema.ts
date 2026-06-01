@@ -1452,4 +1452,131 @@ export const TENANT_SCHEMA_SQL = `
     UNIQUE(hostId, sequence)
   );
   CREATE INDEX IF NOT EXISTS idx_gpu_fleet_events_host_seq ON gpu_fleet_events(hostId, sequence DESC);
+
+  -- ===== Agent Runtime Sandbox (independent of gpu fleet) =====
+  CREATE TABLE IF NOT EXISTS sandbox_runners (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL,
+    labels TEXT,
+    inventory TEXT,
+    agentTokenHash TEXT,
+    agentTokenVersion INTEGER NOT NULL DEFAULT 0,
+    registrationTokenHash TEXT,
+    registrationTokenExpiresAt TEXT,
+    lastSeenAt TEXT,
+    lastEventSequence INTEGER NOT NULL DEFAULT 0,
+    terminalEnabled INTEGER NOT NULL DEFAULT 0,
+    createdBy TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_sandbox_runners_tenant ON sandbox_runners(tenantId);
+  CREATE INDEX IF NOT EXISTS idx_sandbox_runners_agenttoken ON sandbox_runners(agentTokenHash);
+
+  CREATE TABLE IF NOT EXISTS sandbox_templates (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    baseImage TEXT NOT NULL,
+    runtime TEXT NOT NULL,
+    isolation TEXT NOT NULL,
+    resources TEXT,
+    env TEXT,
+    entrypoint TEXT,
+    toolboxPort INTEGER NOT NULL,
+    previewPorts TEXT,
+    volumeMounts TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    createdBy TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_sandbox_templates_tenant ON sandbox_templates(tenantId);
+
+  CREATE TABLE IF NOT EXISTS sandbox_instances (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    templateId TEXT NOT NULL,
+    runnerId TEXT,
+    name TEXT NOT NULL,
+    containerId TEXT,
+    desiredState TEXT NOT NULL,
+    actualState TEXT NOT NULL,
+    volumeId TEXT,
+    toolboxPort INTEGER,
+    previewPorts TEXT,
+    isolation TEXT NOT NULL,
+    env TEXT,
+    lastError TEXT,
+    lastActivityAt TEXT,
+    createdBy TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_sandbox_instances_tenant ON sandbox_instances(tenantId);
+  CREATE INDEX IF NOT EXISTS idx_sandbox_instances_runner ON sandbox_instances(runnerId);
+
+  CREATE TABLE IF NOT EXISTS sandbox_commands (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    runnerId TEXT NOT NULL,
+    instanceId TEXT,
+    kind TEXT NOT NULL,
+    payload TEXT,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    lastError TEXT,
+    issuedAt TEXT NOT NULL,
+    deliveredAt TEXT,
+    completedAt TEXT,
+    createdBy TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_sandbox_commands_runner ON sandbox_commands(runnerId, status, issuedAt);
+
+  CREATE TABLE IF NOT EXISTS sandbox_events (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    runnerId TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    occurredAt TEXT NOT NULL,
+    receivedAt TEXT NOT NULL,
+    UNIQUE(runnerId, sequence)
+  );
+  CREATE INDEX IF NOT EXISTS idx_sandbox_events_runner_seq ON sandbox_events(runnerId, sequence DESC);
+
+  CREATE TABLE IF NOT EXISTS sandbox_volumes (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    name TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    container TEXT NOT NULL,
+    prefix TEXT NOT NULL,
+    sizeBytes INTEGER,
+    createdBy TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_sandbox_volumes_tenant ON sandbox_volumes(tenantId);
+
+  CREATE TABLE IF NOT EXISTS sandbox_settings (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    fleetTokenHash TEXT,
+    terminalSessionTtlSeconds INTEGER NOT NULL DEFAULT 3600,
+    defaultStorageProvider TEXT,
+    defaultIsolation TEXT,
+    idleReapSeconds INTEGER NOT NULL DEFAULT 1800,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_sandbox_settings_tenant ON sandbox_settings(tenantId);
 `;

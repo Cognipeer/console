@@ -1,0 +1,26 @@
+{
+  "name": "@cognipeer/sandbox-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Sandbox runner agent: registers with the console, manages sandbox containers via Docker (DinD), bridges terminals. Independent of the gpu agent.",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs --out-dir dist --no-splitting",
+    "start": "node dist/index.cjs",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "dockerode": "^4.0.2",
+    "ws": "^8.20.1"
+  },
+  "devDependencies": {
+    "@cognipeer/sandbox-protocol": "*",
+    "@types/dockerode": "^3.3.32",
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.10",
+    "tsup": "^8.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.6.0"
+  }
+}

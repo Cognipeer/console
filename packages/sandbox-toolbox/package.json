@@ -1,0 +1,27 @@
+{
+  "name": "@cognipeer/sandbox-toolbox",
+  "version": "0.1.0",
+  "private": true,
+  "description": "In-sandbox daemon exposing filesystem / process / PTY over HTTP+WS. Baked into sandbox base images.",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs --out-dir dist --no-splitting",
+    "start": "node dist/index.cjs",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "fastify": "^5.8.5",
+    "@fastify/websocket": "^11.2.0",
+    "node-pty": "^1.0.0",
+    "ws": "^8.20.1"
+  },
+  "devDependencies": {
+    "@cognipeer/sandbox-protocol": "*",
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.10",
+    "tsup": "^8.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.6.0"
+  }
+}

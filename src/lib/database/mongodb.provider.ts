@@ -10,6 +10,7 @@
 import type { DatabaseProvider } from './provider.interface';
 
 // Base class & mixins
+import { SandboxMixin } from './mongodb/sandbox.mixin';
 import { MongoDBProviderBase } from './mongodb/base';
 import { TenantMixin } from './mongodb/tenant.mixin';
 import { UserMixin } from './mongodb/user.mixin';
@@ -65,8 +66,11 @@ const AdvancedBase = CrawlerMixin(AuditMixin(BrowserMixin(VectorMigrationMixin(A
 // Group 6 – Cluster (system-wide; uses main DB)
 const ClusterBase = ClusterMixin(AdvancedBase);
 
+// Sandbox runtime (tenant-scoped) — composed independently of gpu-fleet.
+const SandboxBase = SandboxMixin(ClusterBase);
+
 // Group 7 – GPU fleet (tenant-scoped)
-const GpuFleetBase = GpuFleetMixin(ClusterBase);
+const GpuFleetBase = GpuFleetMixin(SandboxBase);
 
 // ── Final composed class ─────────────────────────────────────────────────
 

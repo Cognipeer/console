@@ -288,4 +288,17 @@ export type {
   LlmPoolStatus,
   GpuFleetCommandStatus,
   AgentDistributionMode,
+  // Agent Runtime Sandbox (independent of gpu fleet)
+  ISandboxRunner,
+  ISandboxTemplate,
+  ISandboxInstance,
+  ISandboxCommand,
+  ISandboxEvent,
+  ISandboxVolume,
+  ISandboxSettings,
+  SandboxRunnerStatus,
+  SandboxInstanceState,
+  SandboxDesiredState,
+  SandboxCommandStatus,
+  SandboxStorageProviderKind,
 } from './provider.interface';

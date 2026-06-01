@@ -352,6 +352,8 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.gpuHosts, 'gpuFramework', "gpuFramework TEXT NOT NULL DEFAULT 'none'");
     this.ensureTableColumn(db, TABLES.gpuHosts, 'serviceAddress', 'serviceAddress TEXT');
     this.ensureTableColumn(db, TABLES.gpuHosts, 'terminalEnabled', 'terminalEnabled INTEGER NOT NULL DEFAULT 0');
+    // Sandbox instance per-instance env (added later). Safe to ensure on boot.
+    this.ensureTableColumn(db, 'sandbox_instances', 'env', 'env TEXT');
   }
 
   private applyTenantIndexes(db: Database.Database): void {

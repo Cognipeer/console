@@ -100,6 +100,15 @@ import type {
   RagDocumentStatus,
   ToolSourceType,
   ToolStatus,
+  ISandboxRunner,
+  ISandboxTemplate,
+  ISandboxInstance,
+  ISandboxCommand,
+  ISandboxEvent,
+  ISandboxVolume,
+  ISandboxSettings,
+  SandboxInstanceState,
+  SandboxCommandStatus,
 } from './types';
 
 export interface DatabaseProvider {
@@ -1182,4 +1191,48 @@ export interface DatabaseProvider {
   findLlmPoolByKey(tenantId: string, key: string): Promise<ILlmPool | null>;
   listLlmPools(tenantId: string): Promise<ILlmPool[]>;
   deleteLlmPool(tenantId: string, key: string): Promise<boolean>;
+
+  // ── Agent Runtime Sandbox (independent of gpu fleet) ──
+  createSandboxRunner(runner: ISandboxRunner): Promise<ISandboxRunner>;
+  getSandboxRunner(id: string): Promise<ISandboxRunner | null>;
+  listSandboxRunners(): Promise<ISandboxRunner[]>;
+  updateSandboxRunner(id: string, patch: Partial<ISandboxRunner>): Promise<ISandboxRunner | null>;
+  deleteSandboxRunner(id: string): Promise<boolean>;
+  findSandboxRunnerByAgentTokenHash(hash: string): Promise<ISandboxRunner | null>;
+
+  createSandboxTemplate(template: ISandboxTemplate): Promise<ISandboxTemplate>;
+  getSandboxTemplate(id: string): Promise<ISandboxTemplate | null>;
+  listSandboxTemplates(filters?: { projectId?: string }): Promise<ISandboxTemplate[]>;
+  updateSandboxTemplate(id: string, patch: Partial<ISandboxTemplate>): Promise<ISandboxTemplate | null>;
+  deleteSandboxTemplate(id: string): Promise<boolean>;
+
+  createSandboxInstance(instance: ISandboxInstance): Promise<ISandboxInstance>;
+  getSandboxInstance(id: string): Promise<ISandboxInstance | null>;
+  listSandboxInstances(filters?: {
+    projectId?: string;
+    runnerId?: string;
+    actualState?: SandboxInstanceState;
+  }): Promise<ISandboxInstance[]>;
+  updateSandboxInstance(id: string, patch: Partial<ISandboxInstance>): Promise<ISandboxInstance | null>;
+  deleteSandboxInstance(id: string): Promise<boolean>;
+
+  enqueueSandboxCommand(cmd: ISandboxCommand): Promise<ISandboxCommand>;
+  getSandboxCommand(id: string): Promise<ISandboxCommand | null>;
+  listPendingSandboxCommands(runnerId: string, limit: number): Promise<ISandboxCommand[]>;
+  updateSandboxCommandStatus(
+    id: string,
+    status: SandboxCommandStatus,
+    extra?: { deliveredAt?: Date; completedAt?: Date; lastError?: string; attemptsDelta?: number },
+  ): Promise<void>;
+
+  appendSandboxEvent(event: ISandboxEvent): Promise<{ inserted: boolean }>;
+
+  createSandboxVolume(volume: ISandboxVolume): Promise<ISandboxVolume>;
+  getSandboxVolume(id: string): Promise<ISandboxVolume | null>;
+  listSandboxVolumes(filters?: { projectId?: string }): Promise<ISandboxVolume[]>;
+  updateSandboxVolume(id: string, patch: Partial<ISandboxVolume>): Promise<ISandboxVolume | null>;
+  deleteSandboxVolume(id: string): Promise<boolean>;
+
+  getSandboxSettings(): Promise<ISandboxSettings | null>;
+  upsertSandboxSettings(patch: Partial<ISandboxSettings>): Promise<ISandboxSettings>;
 }
