@@ -7,8 +7,11 @@ const overlay: CSSProperties = {
   position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
   display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 900,
 };
+const backdropButton: CSSProperties = {
+  position: 'absolute', inset: 0, border: 'none', padding: 0, margin: 0, background: 'transparent', cursor: 'default',
+};
 const sheet: CSSProperties = {
-  width: '90%', maxWidth: 540, background: 'var(--ds-surface, #fff)', color: 'inherit',
+  position: 'relative', zIndex: 1, width: '90%', maxWidth: 540, background: 'var(--ds-surface, #fff)', color: 'inherit',
   borderRadius: 12, overflow: 'hidden', boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
 };
 const headerBar: CSSProperties = { padding: '14px 18px', borderBottom: '1px solid var(--ds-border, #e5e7eb)', fontWeight: 600, fontSize: 15 };
@@ -21,8 +24,9 @@ const btnPrimary: CSSProperties = { ...btn, background: 'var(--ds-accent, #2563e
 
 function Modal({ title, onClose, children, footer: foot }: { title: string; onClose: () => void; children: ReactNode; footer: ReactNode }) {
   return (
-    <div style={overlay} onClick={onClose}>
-      <div style={sheet} onClick={(e) => e.stopPropagation()}>
+    <div style={overlay}>
+      <button type="button" aria-label={`Close ${title}`} style={backdropButton} onClick={onClose} />
+      <div style={sheet}>
         <div style={headerBar}>{title}</div>
         <div style={bodyBox}>{children}</div>
         <div style={footer}>{foot}</div>
@@ -34,7 +38,7 @@ function Modal({ title, onClose, children, footer: foot }: { title: string; onCl
 function Field({ label: l, children }: { label: string; children: ReactNode }) {
   return (
     <div>
-      <label style={label}>{l}</label>
+      <div style={label}>{l}</div>
       {children}
     </div>
   );
@@ -73,7 +77,7 @@ export function RunnerModal({ onClose, onCreated }: { onClose: () => void; onCre
       </>}
     >
       <Field label="Name">
-        <input style={input} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. dind-node-1" autoFocus />
+        <input style={input} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. dind-node-1" />
       </Field>
       <p style={{ fontSize: 12, color: 'var(--ds-muted, #6b7280)', margin: 0 }}>
         After creating, a one-time registration token is shown. Start the sandbox-agent with it to bring the runner online.
@@ -104,7 +108,7 @@ export function VolumeModal({ onClose, onCreated }: { onClose: () => void; onCre
       </>}
     >
       <Field label="Name">
-        <input style={input} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. workspace-data" autoFocus />
+        <input style={input} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. workspace-data" />
       </Field>
       <Field label="Provider">
         <select style={input} value={provider} onChange={(e) => setProvider(e.target.value as 'local' | 'azure-blob' | 's3')}>
@@ -169,7 +173,7 @@ export function InstanceModal({
       </>}
     >
       <Field label="Name">
-        <input style={input} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. data-analysis-1" autoFocus />
+        <input style={input} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. data-analysis-1" />
       </Field>
       <Field label="Template">
         <select style={input} value={templateId} onChange={(e) => setTemplateId(e.target.value)}>
@@ -190,7 +194,7 @@ export function InstanceModal({
         </select>
       </Field>
       <div>
-        <label style={label}>Environment variables</label>
+        <div style={label}>Environment variables</div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           {env.map((row, i) => (
             <div key={i} style={{ display: 'flex', gap: 6 }}>
@@ -254,7 +258,7 @@ export function TemplateModal({ onClose, onCreated }: { onClose: () => void; onC
       </>}
     >
       <Field label="Key (unique)">
-        <input style={input} value={key} onChange={(e) => setKey(e.target.value)} placeholder="e.g. my-python-ml" autoFocus />
+        <input style={input} value={key} onChange={(e) => setKey(e.target.value)} placeholder="e.g. my-python-ml" />
       </Field>
       <Field label="Name">
         <input style={input} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Python + ML libs" />
@@ -289,7 +293,7 @@ export function TemplateModal({ onClose, onCreated }: { onClose: () => void; onC
         <input style={input} value={ports} onChange={(e) => setPorts(e.target.value)} placeholder="e.g. 3000, 5173, 8000" />
       </Field>
       <div>
-        <label style={label}>Default environment variables (optional)</label>
+        <div style={label}>Default environment variables (optional)</div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           {env.map((row, i) => (
             <div key={i} style={{ display: 'flex', gap: 6 }}>

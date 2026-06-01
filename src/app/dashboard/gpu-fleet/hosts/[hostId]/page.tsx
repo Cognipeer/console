@@ -224,7 +224,7 @@ export default function GpuFleetHostDetailPage() {
           <Title order={6}>Deployments ({deployments.length})</Title>
         </Group>
         {deployments.length === 0 ? (
-          <Text size="sm" c="dimmed">No deployments. Click "Deploy model" to start one.</Text>
+          <Text size="sm" c="dimmed">No deployments. Use the Deploy model action to start one.</Text>
         ) : (
           <Stack gap="xs">
             {deployments.map((d) => (

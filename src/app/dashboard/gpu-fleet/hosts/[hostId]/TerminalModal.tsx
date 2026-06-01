@@ -178,7 +178,6 @@ export default function TerminalModal({ opened, onClose, hostId, hostName, termi
                 placeholder="type a command and press Enter…"
                 value={input}
                 onChange={(e) => setInput(e.currentTarget.value)}
-                autoFocus
               />
               <Button type="submit">Send</Button>
               <Button variant="default" color="red" onClick={teardown}>

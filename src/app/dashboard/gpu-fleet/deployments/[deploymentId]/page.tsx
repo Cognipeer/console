@@ -21,7 +21,6 @@ import { notifications } from '@mantine/notifications';
 import {
   IconAlertTriangle,
   IconBox,
-  IconNetwork,
   IconPlayerPlay,
   IconRotateClockwise,
   IconTimeline,
@@ -192,7 +191,7 @@ export default function DeploymentDetailPage() {
               />
               {inferenceServer?.status === 'errored' ? (
                 <Alert color="yellow" icon={<IconAlertTriangle size={14} />} mt="xs">
-                  Console can't reach <Code>{inferenceServer.baseUrl}</Code>. In production both
+                  Console cannot reach <Code>{inferenceServer.baseUrl}</Code>. In production both
                   must be on the same VNet; in dev use a tunnel (Tailscale / ngrok) or move the
                   console alongside the host.
                 </Alert>

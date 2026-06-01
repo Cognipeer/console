@@ -121,7 +121,7 @@ export default function GpuFleetOverviewPage() {
             </Anchor>
           </Group>
           <Text size="sm" c="dimmed">
-            Agents connected via the fleet token but haven't been promoted yet. Claim them to begin issuing deployments.
+            Agents connected via the fleet token but have not been promoted yet. Claim them to begin issuing deployments.
           </Text>
         </Card>
       ) : null}

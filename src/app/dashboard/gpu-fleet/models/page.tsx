@@ -83,8 +83,8 @@ export default function GpuFleetModelsPage() {
 
       <Alert mb="md" color="blue" icon={<IconInfoCircle size={16} />}>
         <Text size="sm">
-          This page is a catalog browser. Deploying needs a host context, so you can't deploy directly from here.
-          Once you've picked a model:
+          This page is a catalog browser. Deploying needs a host context, so you cannot deploy directly from here.
+          Once you have picked a model:
         </Text>
         <Text size="sm" mt={4}>
           • <strong>Single host</strong> — open a host from the Overview → <strong>Deploy model</strong>.

@@ -4,7 +4,8 @@ import { useState, type CSSProperties, type ReactNode } from 'react';
 import CollapsibleInfo from '@/components/layout/CollapsibleInfo';
 
 const overlay: CSSProperties = { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 950 };
-const sheet: CSSProperties = { width: '92%', maxWidth: 680, background: 'var(--ds-surface, #fff)', color: 'inherit', borderRadius: 12, overflow: 'hidden', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' };
+const backdropButton: CSSProperties = { position: 'absolute', inset: 0, border: 'none', padding: 0, margin: 0, background: 'transparent', cursor: 'default' };
+const sheet: CSSProperties = { position: 'relative', zIndex: 1, width: '92%', maxWidth: 680, background: 'var(--ds-surface, #fff)', color: 'inherit', borderRadius: 12, overflow: 'hidden', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' };
 const codeBox: CSSProperties = { background: '#0b0f17', color: '#d1d5db', borderRadius: 8, padding: 12, fontFamily: 'ui-monospace, SFMono-Regular, monospace', fontSize: 12.5, whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: 0 };
 const btn: CSSProperties = { padding: '5px 12px', borderRadius: 6, border: '1px solid var(--ds-border, #d1d5db)', background: 'var(--ds-surface, #f9fafb)', cursor: 'pointer', fontSize: 12 };
 const btnPrimary: CSSProperties = { ...btn, background: 'var(--ds-accent, #2563eb)', color: '#fff', border: 'none' };
@@ -38,8 +39,9 @@ export function RunnerSetup({ token, tenantSlug, onClose }: { token: string; ten
   const command = `CONSOLE_URL=${origin} \\\n  TENANT_SLUG=${tenantSlug} \\\n  REGISTRATION_TOKEN=${token} \\\n  node scripts/sb-test-agent.mjs`;
 
   return (
-    <div style={overlay} onClick={onClose}>
-      <div style={sheet} onClick={(e) => e.stopPropagation()}>
+    <div style={overlay}>
+      <button type="button" aria-label="Close runner setup" style={backdropButton} onClick={onClose} />
+      <div style={sheet}>
         <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--ds-border, #e5e7eb)', fontWeight: 600 }}>
           Start the runner
         </div>

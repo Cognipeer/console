@@ -107,7 +107,7 @@ export default function GpuFleetSettingsPage() {
           </Text>
           <Text size="xs" c="dimmed">
             <strong>Security:</strong> if the token leaks, anyone with network access can register a host in
-            pending_claim — they can't receive commands until you claim them. When in doubt, <strong>Rotate</strong>.
+            pending_claim — they cannot receive commands until you claim them. When in doubt, <strong>Rotate</strong>.
             The old token stops working immediately; already-paired agents keep running with their own
             agent tokens.
           </Text>
@@ -132,11 +132,11 @@ export default function GpuFleetSettingsPage() {
           <Title order={5}>Agent distribution</Title>
           <Text size="sm" c="dimmed">
             Where install.sh fetches the agent tarball from. Console-served is the default and works without external
-            dependencies. Use external URL when shipping behind a CDN / blob.
+            dependencies. Use external URL when shipping behind a CDN or blob storage.
           </Text>
           <Radio.Group value={mode} onChange={(v) => setMode(v as 'console-served' | 'external-url')}>
             <Stack gap="xs">
-              <Radio value="console-served" label="Console-served (serve from this console's filesystem)" />
+              <Radio value="console-served" label="Console-served (serve from the console filesystem)" />
               <Radio value="external-url" label="External URL (Azure Blob, S3, custom CDN…)" />
             </Stack>
           </Radio.Group>

@@ -516,8 +516,8 @@ function ContainerLogInspector({ deploymentId, items, showFetchButton }: Contain
         </ScrollArea>
       ) : (
         <Text size="xs" c="dimmed">
-          No logs fetched yet. Click "Fetch latest" — the agent will tail
-          the container's stdout/stderr and post it back within a few seconds.
+          No logs fetched yet. Click Fetch latest and the agent will tail
+          the container stdout/stderr and post it back within a few seconds.
         </Text>
       )}
     </Card>

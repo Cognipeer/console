@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import {
-  Alert,
   Anchor,
   Badge,
   Button,
@@ -17,7 +16,7 @@ import {
   Title,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { IconArrowRight, IconInfoCircle, IconRocket, IconStackPush, IconTrash } from '@tabler/icons-react';
+import { IconArrowRight, IconRocket, IconStackPush, IconTrash } from '@tabler/icons-react';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import { GpuFleetApi } from '../_lib/api';
 import { formatRelative } from '../_lib/format';
