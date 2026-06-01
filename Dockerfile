@@ -3,7 +3,6 @@ FROM node:22 AS deps
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 COPY package.json package-lock.json* npm-shrinkwrap.json* ./
-
 RUN npm install --no-audit --no-fund
 
 # --------------------- builder stage ---------------------
@@ -25,8 +24,26 @@ ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
 ENV HOST=0.0.0.0
+ENV PLAYWRIGHT_BROWSERS_PATH=/home/node/.cache/ms-playwright
 
-RUN adduser --disabled-password --uid 1001 --home /home/nextjs nextjs
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+    && chmod a+r /etc/apt/keyrings/docker.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian bookworm stable" \
+       > /etc/apt/sources.list.d/docker.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
+       docker-ce-cli \
+       docker-buildx-plugin \
+       docker-compose-plugin \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npx playwright install-deps chromium
+
+RUN mkdir -p /home/node/.cache/ms-playwright && \
+    mkdir -p /app/data && \
+    chown -R node:node /home/node && \
+    chown -R node:node /app
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./package.json
@@ -37,10 +54,9 @@ COPY --from=builder /app/public ./public
 COPY --from=builder /app/src ./src
 COPY --from=builder /app/mail-templates ./mail-templates
 
-RUN mkdir -p /app/data && chown -R nextjs:nextjs /app
-RUN rm -rf /var/cache/apk/*
+USER node
+
+RUN npx playwright install chromium
 
 EXPOSE 3000
-USER nextjs
-
 CMD ["npm", "start"]
