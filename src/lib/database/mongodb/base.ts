@@ -69,6 +69,8 @@ export const COLLECTIONS = {
   crawlers: 'crawlers',
   crawlJobs: 'crawl_jobs',
   crawlResults: 'crawl_results',
+  ocrJobs: 'ocr_jobs',
+  ocrJobItems: 'ocr_job_items',
   // ── Project membership & future groups ──────────────────────────────
   userProjects: 'user_projects',
   groups: 'groups',

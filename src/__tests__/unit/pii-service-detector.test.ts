@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { detect, applyReplacements } from '@/lib/services/pii/detector';
+import { detect, applyReplacements, tokenize, detokenize } from '@/lib/services/pii/detector';
 
 describe('pii service · detector — email', () => {
   it('detects email addresses (default categories include email)', () => {
@@ -159,5 +159,50 @@ describe('pii service · applyReplacements', () => {
     const text = 'nothing sensitive here';
     const findings = detect(text, {});
     expect(applyReplacements(text, findings)).toBe(text);
+  });
+});
+
+describe('pii service · tokenize / detokenize', () => {
+  it('replaces findings with reversible tokens and round-trips back', () => {
+    const text = 'Mail me at jane@gmail.com or visit https://acme.example';
+    const findings = detect(text, { categories: { email: true, url: true } }, 'tokenize');
+    const { outputText, vault } = tokenize(text, findings);
+
+    expect(outputText).toContain('[EMAIL_1]');
+    expect(outputText).not.toContain('jane@gmail.com');
+    expect(vault['[EMAIL_1]'].value).toBe('jane@gmail.com');
+
+    // Reversing the tokenized text restores the original exactly.
+    expect(detokenize(outputText, vault)).toBe(text);
+  });
+
+  it('round-trips even when a model rewrites surrounding text (token preserved)', () => {
+    const text = 'Call 5551234567 now';
+    const findings = detect(text, { languages: ['tr'], categories: { tr_phone: true, phone: true } }, 'tokenize');
+    const { outputText, vault } = tokenize(text, findings);
+    // simulate an LLM response that echoes the token in new wording
+    const modelReply = `Sure, I will call ${Object.keys(vault)[0]} right away.`;
+    expect(detokenize(modelReply, vault)).toContain('5551234567');
+  });
+
+  it('assigns the same token to repeated identical values (dedupe)', () => {
+    const text = 'a@x.com and again a@x.com';
+    const findings = detect(text, { categories: { email: true } }, 'tokenize');
+    const { outputText, vault } = tokenize(text, findings);
+    expect(Object.keys(vault)).toHaveLength(1);
+    expect(outputText).toBe('[EMAIL_1] and again [EMAIL_1]');
+  });
+
+  it('numbers distinct values within a category sequentially', () => {
+    const text = 'a@x.com, b@y.com';
+    const findings = detect(text, { categories: { email: true } }, 'tokenize');
+    const { vault } = tokenize(text, findings);
+    expect(vault['[EMAIL_1]'].value).toBe('a@x.com');
+    expect(vault['[EMAIL_2]'].value).toBe('b@y.com');
+  });
+
+  it('leaves unknown tokens untouched on detokenize', () => {
+    expect(detokenize('hello [EMAIL_9]', {})).toBe('hello [EMAIL_9]');
+    expect(detokenize('plain text', undefined)).toBe('plain text');
   });
 });

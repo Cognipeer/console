@@ -88,6 +88,8 @@ export const en = {
     browserDescription: 'Headless browser profiles for sessions and agents',
     crawler: 'Crawlers',
     crawlerDescription: 'Web crawlers that ingest markdown into knowledge engines',
+    ocr: 'OCR Jobs',
+    ocrDescription: 'Batch OCR + extraction over files and images with summary and structured output',
   },
   notifications: {
     logoutSuccessTitle: 'Logged Out',
@@ -1887,7 +1889,7 @@ export const en = {
       tabs: {
         config: 'Configuration',
         test: 'Test',
-        api: 'API',
+        api: 'API Usage',
       },
       basics: {
         name: 'Name',
@@ -1936,7 +1938,9 @@ export const en = {
       runDetect: 'Detect',
       runRedact: 'Redact',
       runMask: 'Mask',
+      runTokenize: 'Tokenize',
       output: 'Output',
+      vault: 'Vault (token → original)',
       findings: 'Findings',
       noFindings: 'No PII detected.',
       findingsCount: '{count} finding(s)',
@@ -1955,6 +1959,7 @@ export const en = {
       redact: 'Redact',
       mask: 'Mask',
       block: 'Block',
+      tokenize: 'Tokenize (reversible)',
     },
     languages: {
       global: 'Global',

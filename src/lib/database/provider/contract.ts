@@ -22,6 +22,10 @@ import type {
   ICrawlResult,
   CrawlJobStatus,
   CrawlerStatus,
+  IOcrJob,
+  IOcrJobItem,
+  OcrJobStatus,
+  OcrJobAggregateDelta,
   IConfigAuditLog,
   IConfigGroup,
   IConfigItem,
@@ -1089,6 +1093,49 @@ export interface DatabaseProvider {
   ): Promise<ICrawlResult[]>;
   findCrawlResultById(id: string): Promise<ICrawlResult | null>;
   countCrawlResults(jobId: string): Promise<number>;
+
+  // ── OCR jobs (tenant-specific) ──
+  createOcrJob(
+    record: Omit<IOcrJob, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IOcrJob>;
+  updateOcrJob(
+    id: string,
+    data: Partial<Omit<IOcrJob, '_id' | 'tenantId' | 'createdAt'>>,
+  ): Promise<IOcrJob | null>;
+  findOcrJobById(id: string): Promise<IOcrJob | null>;
+  listOcrJobs(
+    tenantId: string,
+    filters?: {
+      projectId?: string;
+      status?: OcrJobStatus | string;
+      limit?: number;
+    },
+  ): Promise<IOcrJob[]>;
+  deleteOcrJob(id: string): Promise<boolean>;
+
+  /** Atomically increment a job's running aggregate counters/usage/cost. */
+  incrementOcrJobAggregates(
+    id: string,
+    delta: OcrJobAggregateDelta,
+    extra?: { costCurrency?: string; lastItemAt?: Date },
+  ): Promise<void>;
+
+  // ── OCR job items (tenant-specific) ──
+  createOcrJobItem(
+    record: Omit<IOcrJobItem, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IOcrJobItem>;
+  createOcrJobItems(
+    records: Array<Omit<IOcrJobItem, '_id' | 'createdAt' | 'updatedAt'>>,
+  ): Promise<IOcrJobItem[]>;
+  updateOcrJobItem(
+    id: string,
+    data: Partial<Omit<IOcrJobItem, '_id' | 'tenantId' | 'jobId' | 'createdAt'>>,
+  ): Promise<IOcrJobItem | null>;
+  findOcrJobItemById(id: string): Promise<IOcrJobItem | null>;
+  listOcrJobItems(
+    jobId: string,
+    options?: { limit?: number; skip?: number; status?: string },
+  ): Promise<IOcrJobItem[]>;
 
   // ── Cluster: nodes (main database) ──
   upsertNode(

@@ -22,6 +22,7 @@ import { clientMemoryApiPlugin } from './plugins/client-memory';
 import { clientAutomationsApiPlugin } from './plugins/client-automations';
 import { clientMcpApiPlugin } from './plugins/client-mcp';
 import { clientMcpConsoleApiPlugin } from './plugins/client-mcp-console';
+import { clientPiiApiPlugin } from './plugins/client-pii';
 import { clientPromptsApiPlugin } from './plugins/client-prompts';
 import { clientRagApiPlugin } from './plugins/client-rag';
 import { clientRerankerApiPlugin } from './plugins/client-reranker';
@@ -36,6 +37,8 @@ import { clusterApiPlugin } from './plugins/cluster';
 import { browserApiPlugin } from './plugins/browser';
 import { crawlerApiPlugin } from './plugins/crawler';
 import { clientCrawlerApiPlugin } from './plugins/client-crawler';
+import { clientOcrJobsApiPlugin } from './plugins/client-ocr-jobs';
+import { ocrJobsApiPlugin } from './plugins/ocr-jobs';
 import { agentsApiPlugin } from './plugins/agents';
 import { alertsApiPlugin } from './plugins/alerts';
 import { configApiPlugin } from './plugins/config';
@@ -334,6 +337,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   // `/:serverKey/*` routes.
   await app.register(clientMcpConsoleApiPlugin);
   await app.register(clientMcpApiPlugin);
+  await app.register(clientPiiApiPlugin);
   await app.register(clientPromptsApiPlugin);
   await app.register(clientRagApiPlugin);
   await app.register(clientRerankerApiPlugin);
@@ -347,6 +351,8 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(browserApiPlugin);
   await app.register(crawlerApiPlugin);
   await app.register(clientCrawlerApiPlugin);
+  await app.register(ocrJobsApiPlugin);
+  await app.register(clientOcrJobsApiPlugin);
   await app.register(configApiPlugin);
   await app.register(dashboardApiPlugin);
   await app.register(filesApiPlugin);

@@ -56,6 +56,7 @@ const ENTITY_LABELS: Record<InstanceEntityType, string> = {
   'alert-rule': 'Alert Rules',
   automation: 'Automations',
   crawler: 'Crawlers',
+  ocr: 'OCR Jobs',
 };
 
 const ENTITY_ORDER: InstanceEntityType[] = [
@@ -67,6 +68,7 @@ const ENTITY_ORDER: InstanceEntityType[] = [
   'alert-rule',
   'automation',
   'crawler',
+  'ocr',
 ];
 
 export default function ClusterInstancesPage() {

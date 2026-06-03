@@ -27,7 +27,7 @@ interface PiiPolicyView {
   key: string;
   name: string;
   description?: string;
-  defaultAction: 'detect' | 'redact' | 'mask' | 'block';
+  defaultAction: 'detect' | 'redact' | 'mask' | 'block' | 'tokenize';
   categories: Record<string, boolean>;
   languages?: string[];
   enabled: boolean;
@@ -39,6 +39,7 @@ const ACTION_BADGE: Record<string, string> = {
   detect: 'ds-badge-info',
   redact: 'ds-badge-warn',
   mask: 'ds-badge-teal',
+  tokenize: 'ds-badge-grape',
   block: 'ds-badge-err',
 };
 

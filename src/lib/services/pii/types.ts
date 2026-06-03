@@ -39,6 +39,21 @@ export interface PiiFinding {
   replacement: string;
 }
 
+/** A single vault entry: maps a token back to its original value. */
+export interface PiiVaultEntry {
+  /** Original (pre-tokenization) value. */
+  value: string;
+  /** Category id the value was detected as. */
+  category: string;
+}
+
+/**
+ * Token → original-value mapping returned by tokenize operations. Hold onto
+ * this and pass it back to `detokenize` to restore the original text (e.g.
+ * after a round-trip through an LLM). Keys are tokens like `[EMAIL_1]`.
+ */
+export type PiiVault = Record<string, PiiVaultEntry>;
+
 /** Result returned to API consumers (text-shaped). */
 export interface PiiScanResult {
   /** Input text length (characters). */
@@ -53,6 +68,8 @@ export interface PiiScanResult {
   action: PiiAction;
   /** Languages used for the scan. */
   languages: PiiLanguage[];
+  /** Token → original-value vault. Present only when action === 'tokenize'. */
+  vault?: PiiVault;
 }
 
 export interface PiiServicePolicyView extends Omit<IPiiPolicy, '_id'> {
@@ -96,4 +113,15 @@ export interface DetectInput {
 
 export interface RedactInput extends DetectInput {
   action?: 'redact' | 'mask';
+}
+
+/** Input for the tokenize operation (same detection options as DetectInput). */
+export type TokenizeInput = DetectInput;
+
+/** Input for the detokenize operation: tokenized text + the vault to reverse it. */
+export interface DetokenizeInput {
+  /** Text containing tokens (e.g. an LLM response that echoed `[EMAIL_1]`). */
+  text: string;
+  /** Vault returned by a prior tokenize call. */
+  vault: PiiVault;
 }

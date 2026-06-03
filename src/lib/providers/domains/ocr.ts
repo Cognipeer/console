@@ -22,6 +22,8 @@ export interface OcrExtractInput {
   features?: OcrFeature[];
   /** Free-text instruction to a VLM mode (ignored by native OCR providers). */
   prompt?: string;
+  /** Max PDF pages to rasterize for VLM OCR; 0/undefined = unlimited. */
+  pdfMaxPages?: number;
   extra?: Record<string, unknown>;
 }
 

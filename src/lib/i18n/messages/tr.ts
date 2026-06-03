@@ -16,6 +16,8 @@ export const tr: typeof en = {
     piiDescription: 'Kişisel verileri tespit edin, redakte edin ve maskeleyin',
     crawler: 'Crawler',
     crawlerDescription: 'Web sitelerini markdown olarak çekip knowledge engine ile birleştir',
+    ocr: 'OCR İşleri',
+    ocrDescription: 'Dosya ve görseller üzerinde toplu OCR + çıkarım; özet ve yapısal çıktı',
     gpuFleet: 'GPU Fleet',
     gpuFleetDescription: 'Connect GPU hosts, deploy curated models, manage pools',
   },
@@ -63,7 +65,7 @@ export const tr: typeof en = {
       tabs: {
         config: 'Yapılandırma',
         test: 'Test',
-        api: 'API',
+        api: 'API Kullanımı',
       },
       basics: {
         name: 'Ad',
@@ -112,7 +114,9 @@ export const tr: typeof en = {
       runDetect: 'Tespit',
       runRedact: 'Redakte et',
       runMask: 'Maskele',
+      runTokenize: 'Tokenize et',
       output: 'Çıktı',
+      vault: 'Kasa (token → orijinal)',
       findings: 'Bulgular',
       noFindings: 'PII tespit edilmedi.',
       findingsCount: '{count} bulgu',
@@ -131,6 +135,7 @@ export const tr: typeof en = {
       redact: 'Redakte et',
       mask: 'Maskele',
       block: 'Engelle',
+      tokenize: 'Tokenize (geri alınabilir)',
     },
     languages: {
       global: 'Global',

@@ -81,6 +81,77 @@ export const MAIN_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_instance_assignments_node ON instance_assignments(nodeName);
 `;
 
+/**
+ * OCR jobs (persistent container + per-file items). Exported separately so the
+ * boot migration can drop+recreate these tables when an older v1 schema is
+ * detected (the v1 layout had incompatible NOT NULL columns).
+ */
+export const OCR_TENANT_SCHEMA_SQL = `
+  CREATE TABLE IF NOT EXISTS ocr_jobs (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    name TEXT,
+    status TEXT NOT NULL,
+    bucketKey TEXT NOT NULL,
+    prefix TEXT,
+    ocrModelKey TEXT NOT NULL,
+    llmModelKey TEXT,
+    outputs TEXT NOT NULL,
+    summaryPrompt TEXT,
+    structuredSchema TEXT,
+    language TEXT,
+    features TEXT,
+    pdfMaxPages INTEGER,
+    callbackUrl TEXT,
+    callbackSecret TEXT,
+    callbackEvents TEXT,
+    itemsTotal INTEGER NOT NULL DEFAULT 0,
+    itemsProcessed INTEGER NOT NULL DEFAULT 0,
+    itemsFailed INTEGER NOT NULL DEFAULT 0,
+    usageInputTokens INTEGER NOT NULL DEFAULT 0,
+    usageOutputTokens INTEGER NOT NULL DEFAULT 0,
+    usageTotalTokens INTEGER NOT NULL DEFAULT 0,
+    usagePages INTEGER NOT NULL DEFAULT 0,
+    usageOcrTokens INTEGER NOT NULL DEFAULT 0,
+    usageLlmTokens INTEGER NOT NULL DEFAULT 0,
+    costOcr REAL NOT NULL DEFAULT 0,
+    costLlm REAL NOT NULL DEFAULT 0,
+    costTotal REAL NOT NULL DEFAULT 0,
+    costCurrency TEXT,
+    lastItemAt TEXT,
+    metadata TEXT,
+    createdBy TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_ocr_jobs_tenantId ON ocr_jobs(tenantId);
+  CREATE INDEX IF NOT EXISTS idx_ocr_jobs_status ON ocr_jobs(status);
+  CREATE INDEX IF NOT EXISTS idx_ocr_jobs_createdAt ON ocr_jobs(createdAt DESC);
+
+  CREATE TABLE IF NOT EXISTS ocr_job_items (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    jobId TEXT NOT NULL,
+    "index" INTEGER NOT NULL DEFAULT 0,
+    source TEXT NOT NULL,
+    fileName TEXT,
+    status TEXT NOT NULL,
+    result TEXT,
+    usage TEXT,
+    costTotal REAL,
+    costCurrency TEXT,
+    callbackStatus TEXT,
+    errorMessage TEXT,
+    startedAt TEXT,
+    endedAt TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_ocr_job_items_jobId ON ocr_job_items(jobId);
+  CREATE INDEX IF NOT EXISTS idx_ocr_job_items_jobId_index ON ocr_job_items(jobId, "index");
+`;
+
 /** Tables used in every TENANT database. */
 export const TENANT_SCHEMA_SQL = `
   -- Users
@@ -1251,6 +1322,8 @@ export const TENANT_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_crawl_results_jobId ON crawl_results(jobId);
   CREATE INDEX IF NOT EXISTS idx_crawl_results_jobId_createdAt ON crawl_results(jobId, createdAt DESC);
   CREATE INDEX IF NOT EXISTS idx_crawl_results_tenant_url ON crawl_results(tenantId, url);
+
+  ${OCR_TENANT_SCHEMA_SQL}
 
   -- Project membership (replaces user.projectIds)
   CREATE TABLE IF NOT EXISTS user_projects (

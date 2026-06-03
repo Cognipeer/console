@@ -981,12 +981,15 @@ export interface ICrawlResult {
 
 /**
  * Action taken when PII is detected.
- *  - 'detect'  → return findings, never alter text
- *  - 'redact'  → replace match with a tag like [REDACTED_EMAIL]
- *  - 'mask'    → partial masking, e.g. j***@gmail.com, **** **** **** 1234
- *  - 'block'   → mark finding as blocking; caller decides what to do
+ *  - 'detect'   → return findings, never alter text
+ *  - 'redact'   → replace match with a tag like [REDACTED_EMAIL]
+ *  - 'mask'     → partial masking, e.g. j***@gmail.com, **** **** **** 1234
+ *  - 'block'    → mark finding as blocking; caller decides what to do
+ *  - 'tokenize' → reversible masking: replace match with a unique token like
+ *                 [EMAIL_1] and return a vault so the original can be restored
+ *                 later via detokenize (e.g. round-trip around an LLM call)
  */
-export type PiiAction = 'detect' | 'redact' | 'mask' | 'block';
+export type PiiAction = 'detect' | 'redact' | 'mask' | 'block' | 'tokenize';
 
 /** Language scope for built-in patterns. 'global' = language-independent. */
 export type PiiLanguage = 'global' | 'en' | 'tr' | 'de' | 'fr' | 'es' | 'it' | 'pt' | 'ar' | 'ja' | 'zh';

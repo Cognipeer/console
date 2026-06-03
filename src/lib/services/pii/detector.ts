@@ -11,7 +11,7 @@
  */
 
 import type { PiiLanguage, IPiiCustomPattern } from '@/lib/database';
-import type { PiiFinding } from './types';
+import type { PiiFinding, PiiVault } from './types';
 import {
   PII_CATEGORIES,
   PII_CATEGORIES_BY_ID,
@@ -183,7 +183,7 @@ function resolveOverlaps(findings: PiiFinding[]): PiiFinding[] {
 export function detect(
   text: string,
   config: DetectorConfig = {},
-  actionMode: 'detect' | 'redact' | 'mask' | 'block' = 'detect',
+  actionMode: 'detect' | 'redact' | 'mask' | 'block' | 'tokenize' = 'detect',
 ): PiiFinding[] {
   if (!text) return [];
 
@@ -269,6 +269,68 @@ export function applyReplacements(text: string, findings: PiiFinding[]): string 
     cursor = f.end;
   }
   out += text.slice(cursor);
+  return out;
+}
+
+// ── Tokenization (reversible masking) ──────────────────────────────────────
+
+/** Token prefix derived from a category id, e.g. 'tr_phone' → 'TR_PHONE'. */
+function tokenPrefix(categoryId: string): string {
+  const cleaned = categoryId.toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  return cleaned || 'PII';
+}
+
+/**
+ * Replace each finding with a unique, reversible token (e.g. `[EMAIL_1]`) and
+ * build a vault mapping token → original value. Deterministic within a call:
+ * identical (category, value) pairs map to the same token and share one vault
+ * entry, so a phone number that appears twice yields a single `[PHONE_1]`.
+ *
+ * The returned `findings` carry the assigned token in their `replacement`
+ * field; `outputText` is the tokenized text. Pair with `detokenize()` to
+ * restore the original values (e.g. after an LLM round-trip).
+ */
+export function tokenize(
+  text: string,
+  findings: PiiFinding[],
+): { outputText: string; vault: PiiVault; findings: PiiFinding[] } {
+  const sorted = findings.slice().sort((a, b) => a.start - b.start);
+  const tokenByKey = new Map<string, string>();
+  const counters = new Map<string, number>();
+  const vault: PiiVault = {};
+  const tokenized: PiiFinding[] = [];
+
+  for (const f of sorted) {
+    const key = `${f.category} ${f.value}`;
+    let token = tokenByKey.get(key);
+    if (!token) {
+      const prefix = tokenPrefix(f.category);
+      const n = (counters.get(prefix) ?? 0) + 1;
+      counters.set(prefix, n);
+      token = `[${prefix}_${n}]`;
+      tokenByKey.set(key, token);
+      vault[token] = { value: f.value, category: f.category };
+    }
+    tokenized.push({ ...f, action: 'tokenize', block: false, replacement: token });
+  }
+
+  return { outputText: applyReplacements(text, tokenized), vault, findings: tokenized };
+}
+
+/**
+ * Restore original values in `text` by replacing each vault token with its
+ * stored value. Tokens are replaced longest-first to avoid prefix collisions
+ * (e.g. `[PHONE_1]` vs `[PHONE_12]`). Unknown tokens are left untouched, so a
+ * model that drops or rewrites a token simply leaves that token in place.
+ */
+export function detokenize(text: string, vault: PiiVault | undefined | null): string {
+  if (!text || !vault) return text;
+  const tokens = Object.keys(vault).sort((a, b) => b.length - a.length);
+  let out = text;
+  for (const token of tokens) {
+    if (!token) continue;
+    out = out.split(token).join(vault[token].value);
+  }
   return out;
 }
 

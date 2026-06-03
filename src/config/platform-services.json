@@ -217,6 +217,17 @@
       "badge": "new"
     },
     {
+      "id": "ocr",
+      "href": "/dashboard/ocr-jobs",
+      "icon": "IconFileText",
+      "category": "data",
+      "navLabelKey": "ocr",
+      "navDescriptionKey": "ocrDescription",
+      "tags": ["ocr", "extraction", "documents", "jobs"],
+      "searchKeywords": ["ocr", "extraction", "document", "pdf", "image", "summary", "structured", "job", "batch"],
+      "badge": "new"
+    },
+    {
       "id": "alerts",
       "href": "/dashboard/alerts",
       "icon": "IconBell",

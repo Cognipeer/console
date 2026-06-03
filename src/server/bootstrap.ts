@@ -18,6 +18,7 @@ import { reconcileOrphanedBrowserSessions } from '@/lib/services/browser/browser
 import { reconcileSandboxRuntime } from '@/lib/services/sandbox/reconcile';
 import { startBrowserQueueConsumer } from '@/lib/services/browser/browserConsumer';
 import { startCrawlerQueueConsumer, startCrawlerScheduler } from '@/lib/services/crawler';
+import { startOcrJobQueueConsumer } from '@/lib/services/ocrJobs';
 import { jsSandboxExecutorManager } from '@/lib/services/jsSandbox';
 import { startJsSandboxQueueConsumer } from '@/lib/services/jsSandbox/jsSandboxConsumer';
 import { startAgentQueueConsumer } from '@/lib/services/agents/agentConsumer';
@@ -202,6 +203,7 @@ export async function bootstrapApplication(): Promise<void> {
       startJsSandboxQueueConsumer(),
       startBrowserQueueConsumer(),
       startCrawlerQueueConsumer(),
+      startOcrJobQueueConsumer(),
     ]);
   } catch (error) {
     logger.warn('Queue consumer registration failed; cluster routing limited', {

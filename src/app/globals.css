@@ -581,6 +581,7 @@ html[data-mantine-color-scheme='dark'] .mantine-Table-tr:hover {
 .ds-badge-warn { background: rgba(201, 122, 22, 0.12); color: var(--ds-warn); }
 .ds-badge-err  { background: rgba(201, 59, 59, 0.12);  color: var(--ds-err); }
 .ds-badge-info { background: rgba(42, 111, 219, 0.12); color: var(--ds-info); }
+.ds-badge-grape { background: rgba(146, 64, 196, 0.12); color: #9240c4; }
 
 /* Stat tile */
 .ds-stat-grid {
@@ -1442,7 +1443,14 @@ textarea.ds-input { height: auto; padding: 10px 12px; line-height: 1.5; resize: 
 .form-overlay {
   position: fixed;
   inset: 0;
-  z-index: 300;
+  /* Must sit below Mantine's popover layer (--mantine-z-index-popover: 300)
+     so Select/Menu/Combobox dropdowns — which portal into the shared
+     [data-mantine-shared-portal-node] appended to <body> — render ABOVE the
+     overlay instead of behind it. At an equal z-index the overlay (appended
+     later via createPortal) wins the paint order and swallows every dropdown
+     click. 250 keeps the overlay above app chrome (topbar 50, launcher 200,
+     Mantine modal 200) while staying under popovers (300). */
+  z-index: 250;
   background: var(--ds-surface-0);
   display: flex;
   flex-direction: column;

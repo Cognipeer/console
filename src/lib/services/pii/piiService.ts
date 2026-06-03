@@ -25,15 +25,18 @@ import {
   filterCategoriesByLanguages,
   type PiiCategoryDefinition,
 } from './categories';
-import { detect, applyReplacements } from './detector';
+import { detect, applyReplacements, tokenize, detokenize } from './detector';
 import type {
   PiiFinding,
   PiiScanResult,
+  PiiVault,
   PiiServicePolicyView,
   CreatePiiPolicyInput,
   UpdatePiiPolicyInput,
   DetectInput,
   RedactInput,
+  TokenizeInput,
+  DetokenizeInput,
 } from './types';
 
 const SLUG_OPTIONS = { lower: true, strict: true, trim: true };
@@ -249,6 +252,46 @@ export function maskPii(input: DetectInput): PiiScanResult {
   return redactPii({ ...input, action: 'mask' });
 }
 
+// ── Tokenize / Detokenize (reversible masking) ────────────────────────────
+
+/**
+ * Replace detected PII with reversible tokens (e.g. `[EMAIL_1]`) and return a
+ * `vault` for restoring the originals later. Stateless: the vault is returned
+ * to the caller and never persisted. Typical use is a round-trip around an LLM
+ * call — tokenize the prompt, send it to the model, then `detokenizePii` the
+ * model's response with the same vault.
+ */
+export function tokenizePii(input: TokenizeInput): PiiScanResult & { vault: PiiVault } {
+  const findings = detect(
+    input.text,
+    {
+      categories: input.categories,
+      customPatterns: input.customPatterns,
+      languages: input.languages,
+      locale: input.locale ?? 'en',
+    },
+    'tokenize',
+  );
+  const { outputText, vault, findings: tokenized } = tokenize(input.text, findings);
+  return {
+    inputLength: input.text.length,
+    findings: tokenized,
+    outputText,
+    hasBlocking: false,
+    action: 'tokenize',
+    languages: input.languages ?? ['global'],
+    vault,
+  };
+}
+
+/**
+ * Reverse a prior tokenize call: replace each token in `input.text` with its
+ * original value from the vault. Tokens absent from the vault are left as-is.
+ */
+export function detokenizePii(input: DetokenizeInput): { outputText: string } {
+  return { outputText: detokenize(input.text, input.vault) };
+}
+
 // ── Scan with a stored policy ─────────────────────────────────────────────
 
 export async function scanWithPolicy(params: {
@@ -291,6 +334,22 @@ export async function scanWithPolicy(params: {
     },
     action,
   );
+
+  if (action === 'tokenize') {
+    const { outputText, vault, findings: tokenized } = tokenize(params.text, findings);
+    return {
+      inputLength: params.text.length,
+      findings: tokenized,
+      outputText,
+      hasBlocking: false,
+      action,
+      languages: policy.languages ?? [],
+      vault,
+      policyKey: policy.key,
+      policyName: policy.name,
+    };
+  }
+
   const outputText = action === 'detect' || action === 'block'
     ? params.text
     : applyReplacements(params.text, findings);
@@ -309,6 +368,6 @@ export async function scanWithPolicy(params: {
   };
 }
 
-export type { PiiFinding, PiiScanResult };
+export type { PiiFinding, PiiScanResult, PiiVault };
 export { PII_CATEGORIES, PII_CATEGORIES_BY_ID };
 export type { PiiCategoryDefinition };
