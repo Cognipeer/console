@@ -48,6 +48,8 @@ export const en = {
     guardrailsDescription: 'Safety policies for AI services',
     evaluations: 'Evaluations',
     evaluationsDescription: 'Offline agent & model testing with datasets and scorers',
+    analysis: 'Analysis',
+    analysisDescription: 'Conversation field extraction, quality judging & accuracy',
     pii: 'PII Service',
     piiDescription: 'Detect, redact and mask personal data',
     alerts: 'Alerts & Incidents',
