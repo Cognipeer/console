@@ -15,6 +15,7 @@ export type PermissionService =
   | 'tracing'
   | 'inference-monitoring'
   | 'guardrails'
+  | 'evaluations'
   | 'pii'
   | 'mcp'
   | 'tools'
@@ -78,6 +79,7 @@ export const RBAC_SERVICE_DEFINITIONS: RbacServiceDefinition[] = [
   { id: 'tracing', label: 'Agent Observability', description: 'Tracing sessions, threads and events.', category: 'operate' },
   { id: 'inference-monitoring', label: 'Model Monitoring', description: 'Inference servers and metrics.', category: 'operate' },
   { id: 'guardrails', label: 'Guardrail', description: 'Guardrail policies and evaluation logs.', category: 'operate' },
+  { id: 'evaluations', label: 'Evaluations', description: 'Offline agent/model evaluation: targets, datasets, suites and runs.', category: 'operate' },
   { id: 'pii', label: 'PII Service', description: 'PII detection, redaction and masking policies.', category: 'operate' },
   { id: 'browser', label: 'Browsers', description: 'Managed browser profiles and sessions.', category: 'operate' },
   { id: 'crawler', label: 'Crawler', description: 'Web crawlers that ingest markdown into knowledge engines.', category: 'data' },
@@ -148,6 +150,7 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/tracing', service: 'tracing' },
   { prefix: '/api/inference-monitoring', service: 'inference-monitoring' },
   { prefix: '/api/guardrails', service: 'guardrails' },
+  { prefix: '/api/evaluation', service: 'evaluations' },
   { prefix: '/api/pii', service: 'pii' },
   { prefix: '/api/mcp', service: 'mcp' },
   { prefix: '/api/tools', service: 'tools' },
