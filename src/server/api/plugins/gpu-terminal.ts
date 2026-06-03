@@ -29,6 +29,20 @@ import {
 import { TokenManager } from '@/lib/license/token-manager';
 
 const log = createLogger('api:gpu-terminal');
+type TerminalMessagePayload = string | Buffer | ArrayBuffer | Buffer[];
+
+function readTerminalMessage(raw: TerminalMessagePayload): string {
+  if (typeof raw === 'string') {
+    return raw;
+  }
+  if (Array.isArray(raw)) {
+    return Buffer.concat(raw).toString('utf8');
+  }
+  if (Buffer.isBuffer(raw)) {
+    return raw.toString('utf8');
+  }
+  return Buffer.from(raw).toString('utf8');
+}
 
 export const gpuTerminalApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(websocket);
@@ -57,8 +71,8 @@ export const gpuTerminalApiPlugin: FastifyPluginAsync = async (app) => {
         return;
       }
 
-      socket.on('message', (raw) => {
-        forwardFromBrowser(sessionId, raw.toString('utf8'));
+      socket.on('message', (raw: TerminalMessagePayload) => {
+        forwardFromBrowser(sessionId, readTerminalMessage(raw));
       });
       socket.on('close', () => closeSession(sessionId, 'browser-disconnected'));
       socket.on('error', (err) => {
@@ -101,8 +115,8 @@ export const gpuTerminalApiPlugin: FastifyPluginAsync = async (app) => {
         return;
       }
 
-      socket.on('message', (raw) => {
-        forwardFromAgent(sessionId, raw.toString('utf8'));
+      socket.on('message', (raw: TerminalMessagePayload) => {
+        forwardFromAgent(sessionId, readTerminalMessage(raw));
       });
       socket.on('close', () => closeSession(sessionId, 'agent-disconnected'));
       socket.on('error', (err) => {

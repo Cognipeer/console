@@ -8,9 +8,14 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { WebSocket } from 'ws';
 import { createLogger } from '@/lib/core/logger';
 import type { TerminalSandbox } from '@cognipeer/gpu-fleet-protocol';
+
+type TerminalSessionSocket = {
+  readyState: number;
+  send(data: string): void;
+  close(code?: number, reason?: string): void;
+};
 
 const log = createLogger('gpu-fleet:terminal');
 
@@ -31,8 +36,8 @@ export interface TerminalSession {
   /** Buffered frames the agent dropped while the browser hadn't joined yet. */
   pendingAgentToBrowser: string[];
   pendingBrowserToAgent: string[];
-  browserSocket: WebSocket | null;
-  agentSocket: WebSocket | null;
+  browserSocket: TerminalSessionSocket | null;
+  agentSocket: TerminalSessionSocket | null;
 }
 
 const SESSIONS = new Map<string, TerminalSession>();
@@ -92,7 +97,7 @@ export function getTerminalSession(sessionId: string): TerminalSession | null {
   return session;
 }
 
-export function attachBrowserSocket(sessionId: string, socket: WebSocket): boolean {
+export function attachBrowserSocket(sessionId: string, socket: TerminalSessionSocket): boolean {
   const session = getTerminalSession(sessionId);
   if (!session) return false;
   session.browserSocket = socket;
@@ -103,7 +108,7 @@ export function attachBrowserSocket(sessionId: string, socket: WebSocket): boole
   return true;
 }
 
-export function attachAgentSocket(sessionId: string, socket: WebSocket): boolean {
+export function attachAgentSocket(sessionId: string, socket: TerminalSessionSocket): boolean {
   const session = getTerminalSession(sessionId);
   if (!session) return false;
   session.agentSocket = socket;
