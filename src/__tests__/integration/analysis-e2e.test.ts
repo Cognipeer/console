@@ -1,0 +1,166 @@
+/**
+ * End-to-end test for the Analysis service vertical.
+ *
+ * Backed by a real SQLiteProvider in a temp directory. Exercises CRUD for
+ * definitions / conversations and a full `runDefinition` flow whose model
+ * invokers are injected (fakes) so no live model calls are made — verifying
+ * persistence, extraction/judge/accuracy aggregation, store-mode write-back,
+ * and run retrieval against the real DB layer.
+ */
+
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
+// SQLite + temp dir must be configured BEFORE getDatabase() is ever called.
+const tmpRoot = mkdtempSync(path.join(tmpdir(), 'cognipeer-analysis-e2e-'));
+process.env.DB_PROVIDER = 'sqlite';
+process.env.SQLITE_DATA_DIR = tmpRoot;
+process.env.MAIN_DB_NAME = 'analysis_e2e_main';
+
+import { reloadConfig } from '@/lib/core/config';
+import { disconnectDatabase, getDatabase } from '@/lib/database';
+import {
+  createDefinition,
+  deleteConversation,
+  getConversation,
+  getRun,
+  ingestConversations,
+  listConversations,
+  listDefinitions,
+  listRuns,
+  runDefinition,
+  updateDefinition,
+} from '@/lib/services/analysis/service';
+import type { AnalysisMessage, ModelInvoker } from '@/lib/services/analysis/types';
+
+const TENANT_DB_NAME = 'analysis_e2e_tenant';
+const TENANT_ID = 'tenant-analysis-e2e';
+const ACTOR = 'tester@example.com';
+
+/** Fake invoker factory: extraction branches on a transcript marker; judge approves. */
+const fakeBuildModelInvoker = (
+  _modelKey: string | undefined,
+  _ctx: unknown,
+  role: 'extraction' | 'judge',
+): ModelInvoker => {
+  if (role === 'judge') {
+    return async () => '{"score":0.9,"passed":true,"reasoning":"ok"}';
+  }
+  return async (messages: AnalysisMessage[]) => {
+    const text = messages.map((m) => m.content).join('\n');
+    if (text.includes('BILLING')) return '{"intent":"billing","resolved":true}';
+    return '{"intent":"support","resolved":false}';
+  };
+};
+
+beforeAll(async () => {
+  reloadConfig();
+  const db = await getDatabase();
+  await db.switchToTenant(TENANT_DB_NAME);
+});
+
+afterAll(async () => {
+  await disconnectDatabase();
+  rmSync(tmpRoot, { recursive: true, force: true });
+});
+
+describe('Analysis service — full vertical (SQLite)', () => {
+  it('persists a definition + conversations then runs extraction, judge & accuracy', async () => {
+    const definition = await createDefinition(TENANT_DB_NAME, TENANT_ID, ACTOR, {
+      name: 'Call Intent Analysis',
+      fieldSet: [
+        { key: 'intent', type: 'enum', enumValues: ['billing', 'support'], required: true },
+        { key: 'resolved', type: 'boolean' },
+      ],
+      modes: { store: true, judge: { rubric: 'Was the caller helped?' }, accuracy: true },
+      extractionModelKey: 'extract-model',
+      judgeModelKey: 'judge-model',
+    });
+    expect(definition.id).toBeTruthy();
+    expect(definition.key).toBe('call-intent-analysis');
+    expect(definition.modes.judge?.rubric).toContain('caller');
+
+    const [c1, c2] = await ingestConversations(TENANT_DB_NAME, TENANT_ID, ACTOR, [
+      {
+        name: 'Call 1',
+        transcript: [{ role: 'caller', content: 'I have a BILLING issue' }, { role: 'agent', content: 'Refunded.' }],
+        referenceFields: { intent: 'billing', resolved: true },
+      },
+      {
+        name: 'Call 2',
+        transcript: [{ role: 'caller', content: 'A SUPPORT request' }],
+        referenceFields: { intent: 'billing' }, // extracted 'support' → mismatch
+      },
+    ]);
+    expect(c1.id).toBeTruthy();
+    expect(c2.key).toBe('call-2');
+
+    const run = await runDefinition(
+      { tenantDbName: TENANT_DB_NAME, tenantId: TENANT_ID, createdBy: ACTOR, definitionKey: definition.key },
+      { buildModelInvoker: fakeBuildModelInvoker },
+    );
+
+    expect(run.status).toBe('completed');
+    expect(run.definitionKey).toBe(definition.key);
+    expect(run.aggregate?.total).toBe(2);
+    expect(run.aggregate?.completed).toBe(2);
+    expect(run.aggregate?.failed).toBe(0);
+    expect(run.aggregate?.passed).toBe(2); // both extract required intent + judge approves
+    expect(run.aggregate?.avgJudgeScore).toBeCloseTo(0.9, 5);
+    expect(run.aggregate?.avgExtractionAccuracy).toBeCloseTo(0.5, 5); // c1=1.0, c2=0.0
+    expect(run.items).toHaveLength(2);
+
+    // Run is retrievable by id with persisted per-item detail.
+    const fetched = await getRun(TENANT_DB_NAME, run.id);
+    const item1 = fetched?.items.find((i) => i.conversationKey === c1.key);
+    expect(item1?.extractedFields.intent).toBe('billing');
+    expect(item1?.accuracy?.score).toBe(1);
+    expect(item1?.judge?.passed).toBe(true);
+
+    // Store mode wrote the extracted fields back onto the conversation.
+    const storedC1 = await getConversation(TENANT_DB_NAME, c1.id);
+    expect(storedC1?.extractedFields?.intent).toBe('billing');
+    expect(storedC1?.lastAnalyzedAt).toBeTruthy();
+  });
+
+  it('lists entities and round-trips definition update / conversation delete', async () => {
+    expect((await listDefinitions(TENANT_DB_NAME)).length).toBeGreaterThanOrEqual(1);
+    expect((await listConversations(TENANT_DB_NAME)).length).toBeGreaterThanOrEqual(2);
+    expect((await listRuns(TENANT_DB_NAME)).length).toBeGreaterThanOrEqual(1);
+
+    const def = (await listDefinitions(TENANT_DB_NAME))[0];
+    const updated = await updateDefinition(TENANT_DB_NAME, def.id, ACTOR, { description: 'nightly IVR analysis' });
+    expect(updated?.description).toBe('nightly IVR analysis');
+
+    const [conv] = await ingestConversations(TENANT_DB_NAME, TENANT_ID, ACTOR, [
+      { name: 'Disposable', transcript: [{ role: 'caller', content: 'temp' }] },
+    ]);
+    expect(await deleteConversation(TENANT_DB_NAME, conv.id)).toBe(true);
+    expect(await getConversation(TENANT_DB_NAME, conv.id)).toBeNull();
+  });
+
+  it('records per-item errors when the extraction model throws', async () => {
+    const definition = await createDefinition(TENANT_DB_NAME, TENANT_ID, ACTOR, {
+      name: 'Erroring Analysis',
+      fieldSet: [{ key: 'intent', type: 'string', required: true }],
+      modes: {},
+      extractionModelKey: 'x',
+    });
+    await ingestConversations(TENANT_DB_NAME, TENANT_ID, ACTOR, [
+      { key: 'err-only-conv', transcript: [{ role: 'caller', content: 'hi' }] },
+    ]);
+
+    const run = await runDefinition(
+      { tenantDbName: TENANT_DB_NAME, tenantId: TENANT_ID, createdBy: ACTOR, definitionKey: definition.key, conversationKeys: ['err-only-conv'] },
+      { buildModelInvoker: () => async () => { throw new Error('model exploded'); } },
+    );
+
+    expect(run.status).toBe('completed');
+    expect(run.aggregate?.total).toBe(1);
+    expect(run.aggregate?.failed).toBe(1);
+    expect(run.aggregate?.completed).toBe(0);
+    expect(run.items[0].error).toMatch(/exploded/);
+  });
+});

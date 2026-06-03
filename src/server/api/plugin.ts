@@ -46,6 +46,7 @@ import { dashboardApiPlugin } from './plugins/dashboard';
 import { filesApiPlugin } from './plugins/files';
 import { guardrailsApiPlugin } from './plugins/guardrails';
 import { evaluationsApiPlugin } from './plugins/evaluations';
+import { analysisApiPlugin } from './plugins/analysis';
 import { piiApiPlugin } from './plugins/pii';
 import { healthApiPlugin } from './plugins/health';
 import { inferenceMonitoringApiPlugin } from './plugins/inference-monitoring';
@@ -359,6 +360,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(filesApiPlugin);
   await app.register(guardrailsApiPlugin);
   await app.register(evaluationsApiPlugin);
+  await app.register(analysisApiPlugin);
   await app.register(piiApiPlugin);
   await app.register(healthApiPlugin);
   await app.register(inferenceMonitoringApiPlugin);

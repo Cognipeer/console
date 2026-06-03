@@ -684,6 +684,70 @@ export const TENANT_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_eval_runs_suiteKey ON evaluation_runs(suiteKey);
   CREATE INDEX IF NOT EXISTS idx_eval_runs_createdAt ON evaluation_runs(createdAt);
 
+  -- Analysis service (conversation field extraction, judge & accuracy)
+  CREATE TABLE IF NOT EXISTS analysis_definitions (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    fieldSet TEXT DEFAULT '[]',
+    extractionInstructions TEXT,
+    modes TEXT DEFAULT '{}',
+    extractionModelKey TEXT,
+    judgeModelKey TEXT,
+    runConfig TEXT DEFAULT '{}',
+    metadata TEXT DEFAULT '{}',
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_analysis_defs_key ON analysis_definitions(key);
+
+  CREATE TABLE IF NOT EXISTS analysis_conversations (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    name TEXT,
+    description TEXT,
+    transcript TEXT DEFAULT '[]',
+    source TEXT NOT NULL DEFAULT 'imported',
+    metadata TEXT DEFAULT '{}',
+    occurredAt TEXT,
+    referenceFields TEXT,
+    extractedFields TEXT,
+    lastAnalyzedAt TEXT,
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_analysis_convos_key ON analysis_conversations(key);
+  CREATE INDEX IF NOT EXISTS idx_analysis_convos_createdAt ON analysis_conversations(createdAt);
+
+  CREATE TABLE IF NOT EXISTS analysis_runs (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    definitionKey TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    mode TEXT NOT NULL DEFAULT 'sync',
+    progress TEXT DEFAULT '{}',
+    aggregate TEXT,
+    items TEXT DEFAULT '[]',
+    error TEXT,
+    startedAt TEXT,
+    finishedAt TEXT,
+    createdBy TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_analysis_runs_definitionKey ON analysis_runs(definitionKey);
+  CREATE INDEX IF NOT EXISTS idx_analysis_runs_createdAt ON analysis_runs(createdAt);
+
   -- PII policies (standalone service)
   CREATE TABLE IF NOT EXISTS pii_policies (
     id TEXT PRIMARY KEY,

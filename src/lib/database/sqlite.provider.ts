@@ -25,6 +25,7 @@ import { ProviderRecordMixin } from './sqlite/provider-record.mixin';
 import { InferenceMixin } from './sqlite/inference.mixin';
 import { GuardrailMixin } from './sqlite/guardrail.mixin';
 import { EvaluationMixin } from './sqlite/evaluation.mixin';
+import { AnalysisMixin } from './sqlite/analysis.mixin';
 import { PiiPolicyMixin } from './sqlite/pii-policy.mixin';
 import { AlertMixin } from './sqlite/alert.mixin';
 import { IncidentMixin } from './sqlite/incident.mixin';
@@ -62,7 +63,7 @@ const AIBase = VectorMixin(ModelMixin(TracingMixin(ContentBase)));
 const StorageBase = ProviderRecordMixin(FileMixin(AIBase));
 
 // Group 5 – Advanced features
-const AdvancedBase = OcrJobMixin(CrawlerMixin(AuditMixin(BrowserMixin(VectorMigrationMixin(AgentMixin(ToolMixin(JsSandboxMixin(McpServerMixin(ConfigMixin(MemoryMixin(RerankerMixin(RagMixin(IncidentMixin(AlertMixin(PiiPolicyMixin(EvaluationMixin(GuardrailMixin(InferenceMixin(StorageBase))))))))))))))))))));
+const AdvancedBase = OcrJobMixin(CrawlerMixin(AuditMixin(BrowserMixin(VectorMigrationMixin(AgentMixin(ToolMixin(JsSandboxMixin(McpServerMixin(ConfigMixin(MemoryMixin(RerankerMixin(RagMixin(IncidentMixin(AlertMixin(PiiPolicyMixin(AnalysisMixin(EvaluationMixin(GuardrailMixin(InferenceMixin(StorageBase)))))))))))))))))))));
 
 // Group 6 – Cluster (system-wide; uses main DB)
 const ClusterBase = ClusterMixin(AdvancedBase);

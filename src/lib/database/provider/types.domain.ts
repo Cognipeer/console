@@ -189,6 +189,123 @@ export interface IEvaluationRun {
   updatedAt?: Date;
 }
 
+// ── Analysis types ───────────────────────────────────────────────────────────
+
+export type AnalysisFieldType = 'string' | 'number' | 'boolean' | 'enum';
+export type AnalysisRunStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+export type AnalysisRunMode = 'sync' | 'async';
+export type AnalysisConversationSource = 'imported' | 'platform' | 'manual';
+
+export interface IAnalysisFieldDef {
+  key: string;
+  type: AnalysisFieldType;
+  description?: string;
+  enumValues?: string[];
+  required?: boolean;
+}
+
+export interface IAnalysisModes {
+  /** Persist extracted fields back onto each conversation. */
+  store?: boolean;
+  /** Grade conversation quality against a rubric with an LLM judge. */
+  judge?: { rubric: string; threshold?: number };
+  /** Compare extracted fields against each conversation's referenceFields. */
+  accuracy?: boolean;
+}
+
+export interface IAnalysisDefinition {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name: string;
+  description?: string;
+  fieldSet: IAnalysisFieldDef[];
+  extractionInstructions?: string;
+  modes: IAnalysisModes;
+  /** Model used for field extraction. */
+  extractionModelKey?: string;
+  /** Model used to back the llm-judge mode. */
+  judgeModelKey?: string;
+  runConfig?: { concurrency?: number };
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IAnalysisTranscriptMessage {
+  role: string;
+  content: string;
+}
+
+export interface IAnalysisConversation {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name?: string;
+  description?: string;
+  transcript: IAnalysisTranscriptMessage[];
+  source: AnalysisConversationSource;
+  metadata?: Record<string, unknown>;
+  occurredAt?: Date;
+  /** Ground-truth field values for accuracy scoring. */
+  referenceFields?: Record<string, unknown>;
+  /** Latest extracted fields (store mode). */
+  extractedFields?: Record<string, unknown>;
+  lastAnalyzedAt?: Date;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IAnalysisFieldAccuracy {
+  expected: unknown;
+  actual: unknown;
+  match: boolean;
+}
+
+export interface IAnalysisItemResult {
+  conversationKey: string;
+  extractedFields: Record<string, unknown>;
+  missing: string[];
+  judge?: { score: number; passed?: boolean; reasoning?: string; error?: string };
+  accuracy?: { score: number; perField: Record<string, IAnalysisFieldAccuracy>; comparedCount: number };
+  passed: boolean;
+  error?: string;
+}
+
+export interface IAnalysisRunAggregate {
+  total: number;
+  completed: number;
+  failed: number;
+  passed: number;
+  passRate: number;
+  avgJudgeScore: number | null;
+  avgExtractionAccuracy: number | null;
+}
+
+export interface IAnalysisRun {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  definitionKey: string;
+  status: AnalysisRunStatus;
+  mode: AnalysisRunMode;
+  progress: { total: number; completed: number; failed: number };
+  aggregate?: IAnalysisRunAggregate;
+  items: IAnalysisItemResult[];
+  error?: string;
+  startedAt?: Date;
+  finishedAt?: Date;
+  createdBy: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
 export interface IInferenceServerMetrics {
   _id?: ObjectId | string;
   tenantId: string;
