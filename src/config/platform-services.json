@@ -165,6 +165,17 @@
       "badge": "new"
     },
     {
+      "id": "analysis",
+      "href": "/dashboard/analysis",
+      "icon": "IconReportAnalytics",
+      "category": "operate",
+      "navLabelKey": "analysis",
+      "navDescriptionKey": "analysisDescription",
+      "tags": ["analysis", "conversations", "extraction", "quality", "ivr"],
+      "searchKeywords": ["analysis", "conversation", "transcript", "extract", "judge", "accuracy", "ivr", "call"],
+      "badge": "new"
+    },
+    {
       "id": "pii",
       "href": "/dashboard/pii",
       "icon": "IconLock",

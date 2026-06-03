@@ -14,6 +14,8 @@ export const tr: typeof en = {
     ...en.navigation,
     evaluations: 'Değerlendirme',
     evaluationsDescription: 'Veri setleri ve skorlayıcılarla çevrimdışı agent & model testi',
+    analysis: 'Analiz',
+    analysisDescription: 'Konuşma alan çıkarımı, kalite değerlendirme ve doğruluk',
     pii: 'PII Servisi',
     piiDescription: 'Kişisel verileri tespit edin, redakte edin ve maskeleyin',
     crawler: 'Crawler',
