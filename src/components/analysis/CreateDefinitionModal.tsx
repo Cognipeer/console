@@ -53,6 +53,8 @@ export default function CreateDefinitionModal({ opened, onClose, onCreated, mode
   const [modeJudge, setModeJudge] = useState(false);
   const [judgeRubric, setJudgeRubric] = useState('');
   const [judgeModelKey, setJudgeModelKey] = useState('');
+  const [scheduleEnabled, setScheduleEnabled] = useState(false);
+  const [scheduleCron, setScheduleCron] = useState('0 2 * * *');
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -60,7 +62,8 @@ export default function CreateDefinitionModal({ opened, onClose, onCreated, mode
       setName(''); setDescription(''); setInstructions('');
       setFields([emptyField()]); setExtractionModelKey('');
       setModeStore(true); setModeAccuracy(false); setModeJudge(false);
-      setJudgeRubric(''); setJudgeModelKey(''); setError(null);
+      setJudgeRubric(''); setJudgeModelKey('');
+      setScheduleEnabled(false); setScheduleCron('0 2 * * *'); setError(null);
     }
   }, [opened]);
 
@@ -105,6 +108,7 @@ export default function CreateDefinitionModal({ opened, onClose, onCreated, mode
           modes,
           extractionModelKey,
           judgeModelKey: modeJudge ? judgeModelKey : undefined,
+          schedule: scheduleEnabled ? { cron: scheduleCron.trim(), enabled: true } : undefined,
         }),
       });
       if (!res.ok) {
@@ -160,6 +164,18 @@ export default function CreateDefinitionModal({ opened, onClose, onCreated, mode
             <Textarea label="Judge rubric" placeholder="What does a good conversation look like?" autosize minRows={2} withAsterisk value={judgeRubric} onChange={(e) => setJudgeRubric(e.currentTarget.value)} />
             <Select label="Judge model" placeholder="Select a model…" data={models} searchable withAsterisk value={judgeModelKey} onChange={(v) => setJudgeModelKey(v ?? '')} />
           </>
+        )}
+
+        <Divider label="Schedule" labelPosition="left" />
+        <Checkbox label="Run automatically on a schedule" checked={scheduleEnabled} onChange={(e) => setScheduleEnabled(e.currentTarget.checked)} />
+        {scheduleEnabled && (
+          <TextInput
+            label="Cron expression (UTC)"
+            placeholder="0 2 * * *"
+            description="Standard 5-field cron, evaluated in UTC. Example: 0 2 * * * runs at 02:00 every day."
+            value={scheduleCron}
+            onChange={(e) => setScheduleCron(e.currentTarget.value)}
+          />
         )}
 
         {error && <Text c="red" size="sm">{error}</Text>}
