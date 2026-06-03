@@ -116,6 +116,11 @@ import type {
   EvaluationTargetKind,
   EvaluationDatasetSource,
   EvaluationRunStatus,
+  IAnalysisDefinition,
+  IAnalysisConversation,
+  IAnalysisRun,
+  AnalysisConversationSource,
+  AnalysisRunStatus,
 } from './types';
 
 export interface DatabaseProvider {
@@ -610,6 +615,56 @@ export interface DatabaseProvider {
     limit?: number;
     skip?: number;
   }): Promise<IEvaluationRun[]>;
+
+  // ── Analysis operations (tenant-specific) ──
+  createAnalysisDefinition(
+    definition: Omit<IAnalysisDefinition, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IAnalysisDefinition>;
+  updateAnalysisDefinition(
+    id: string,
+    data: Partial<Omit<IAnalysisDefinition, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IAnalysisDefinition | null>;
+  deleteAnalysisDefinition(id: string): Promise<boolean>;
+  findAnalysisDefinitionById(id: string): Promise<IAnalysisDefinition | null>;
+  findAnalysisDefinitionByKey(key: string, projectId?: string): Promise<IAnalysisDefinition | null>;
+  listAnalysisDefinitions(filters?: {
+    projectId?: string;
+    search?: string;
+  }): Promise<IAnalysisDefinition[]>;
+
+  createAnalysisConversation(
+    conversation: Omit<IAnalysisConversation, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IAnalysisConversation>;
+  updateAnalysisConversation(
+    id: string,
+    data: Partial<Omit<IAnalysisConversation, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IAnalysisConversation | null>;
+  deleteAnalysisConversation(id: string): Promise<boolean>;
+  findAnalysisConversationById(id: string): Promise<IAnalysisConversation | null>;
+  findAnalysisConversationByKey(key: string, projectId?: string): Promise<IAnalysisConversation | null>;
+  listAnalysisConversations(filters?: {
+    projectId?: string;
+    source?: AnalysisConversationSource;
+    search?: string;
+    limit?: number;
+    skip?: number;
+  }): Promise<IAnalysisConversation[]>;
+
+  createAnalysisRun(
+    run: Omit<IAnalysisRun, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IAnalysisRun>;
+  updateAnalysisRun(
+    id: string,
+    data: Partial<Omit<IAnalysisRun, 'tenantId' | 'definitionKey' | 'createdBy'>>,
+  ): Promise<IAnalysisRun | null>;
+  findAnalysisRunById(id: string): Promise<IAnalysisRun | null>;
+  listAnalysisRuns(filters?: {
+    projectId?: string;
+    definitionKey?: string;
+    status?: AnalysisRunStatus;
+    limit?: number;
+    skip?: number;
+  }): Promise<IAnalysisRun[]>;
 
   // ── PII policy operations (tenant-specific) ──
   createPiiPolicy(
