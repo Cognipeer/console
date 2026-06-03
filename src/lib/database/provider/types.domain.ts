@@ -53,6 +53,261 @@ export interface IGuardrail {
   updatedAt?: Date;
 }
 
+// ── Evaluation types ─────────────────────────────────────────────────────────
+
+export type EvaluationTargetKind = 'agent' | 'model' | 'external';
+export type EvaluationRunStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+export type EvaluationRunMode = 'sync' | 'async';
+export type EvaluationDatasetSource = 'manual' | 'file' | 'generated';
+export type EvaluationScorerType = 'assertion' | 'llm-judge';
+
+export interface IEvaluationExternalTarget {
+  protocol: 'openai-chat' | 'webhook';
+  url: string;
+  headers?: Record<string, string>;
+  /** Provider key holding encrypted credentials for the external endpoint. */
+  credentialProviderKey?: string;
+  /** Dot-path used to pull the assistant text out of a webhook response. */
+  responsePath?: string;
+}
+
+export interface IEvaluationTarget {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name: string;
+  description?: string;
+  kind: EvaluationTargetKind;
+  agentKey?: string;
+  modelKey?: string;
+  external?: IEvaluationExternalTarget;
+  defaultParams?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IEvaluationDatasetItem {
+  id: string;
+  input: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
+  expected?: Record<string, unknown>;
+  tags?: string[];
+}
+
+export interface IEvaluationDataset {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name: string;
+  description?: string;
+  source: EvaluationDatasetSource;
+  items: IEvaluationDatasetItem[];
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IEvaluationScorerConfig {
+  type: EvaluationScorerType;
+  weight?: number;
+  rubric?: string;
+  threshold?: number;
+}
+
+export interface IEvaluationSuite {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name: string;
+  description?: string;
+  targetKey: string;
+  datasetKey: string;
+  scorers: IEvaluationScorerConfig[];
+  /** Model used to back any llm-judge scorers. */
+  judgeModelKey?: string;
+  runConfig?: { concurrency?: number };
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IEvaluationScore {
+  scorerType: EvaluationScorerType;
+  score: number;
+  passed: boolean;
+  weight: number;
+  detail?: Record<string, unknown>;
+  error?: string;
+}
+
+export interface IEvaluationRunItem {
+  itemId: string;
+  output?: { text: string; latencyMs?: number };
+  scores: IEvaluationScore[];
+  score: number;
+  passed: boolean;
+  latencyMs?: number;
+  error?: string;
+}
+
+export interface IEvaluationRunAggregate {
+  total: number;
+  completed: number;
+  failed: number;
+  passed: number;
+  passRate: number;
+  avgScore: number;
+  avgLatencyMs: number | null;
+}
+
+export interface IEvaluationRun {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  suiteKey: string;
+  targetKey: string;
+  datasetKey: string;
+  status: EvaluationRunStatus;
+  mode: EvaluationRunMode;
+  progress: { total: number; completed: number; failed: number };
+  aggregate?: IEvaluationRunAggregate;
+  items: IEvaluationRunItem[];
+  error?: string;
+  startedAt?: Date;
+  finishedAt?: Date;
+  createdBy: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+// ── Analysis types ───────────────────────────────────────────────────────────
+
+export type AnalysisFieldType = 'string' | 'number' | 'boolean' | 'enum';
+export type AnalysisRunStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+export type AnalysisRunMode = 'sync' | 'async';
+export type AnalysisConversationSource = 'imported' | 'platform' | 'manual';
+
+export interface IAnalysisFieldDef {
+  key: string;
+  type: AnalysisFieldType;
+  description?: string;
+  enumValues?: string[];
+  required?: boolean;
+}
+
+export interface IAnalysisModes {
+  /** Persist extracted fields back onto each conversation. */
+  store?: boolean;
+  /** Grade conversation quality against a rubric with an LLM judge. */
+  judge?: { rubric: string; threshold?: number };
+  /** Compare extracted fields against each conversation's referenceFields. */
+  accuracy?: boolean;
+}
+
+export interface IAnalysisDefinition {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name: string;
+  description?: string;
+  fieldSet: IAnalysisFieldDef[];
+  extractionInstructions?: string;
+  modes: IAnalysisModes;
+  /** Model used for field extraction. */
+  extractionModelKey?: string;
+  /** Model used to back the llm-judge mode. */
+  judgeModelKey?: string;
+  runConfig?: { concurrency?: number };
+  /** Optional cron schedule for unattended (e.g. nightly) runs. */
+  schedule?: { cron: string; enabled: boolean };
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IAnalysisTranscriptMessage {
+  role: string;
+  content: string;
+}
+
+export interface IAnalysisConversation {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name?: string;
+  description?: string;
+  transcript: IAnalysisTranscriptMessage[];
+  source: AnalysisConversationSource;
+  metadata?: Record<string, unknown>;
+  occurredAt?: Date;
+  /** Ground-truth field values for accuracy scoring. */
+  referenceFields?: Record<string, unknown>;
+  /** Latest extracted fields (store mode). */
+  extractedFields?: Record<string, unknown>;
+  lastAnalyzedAt?: Date;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IAnalysisFieldAccuracy {
+  expected: unknown;
+  actual: unknown;
+  match: boolean;
+}
+
+export interface IAnalysisItemResult {
+  conversationKey: string;
+  extractedFields: Record<string, unknown>;
+  missing: string[];
+  judge?: { score: number; passed?: boolean; reasoning?: string; error?: string };
+  accuracy?: { score: number; perField: Record<string, IAnalysisFieldAccuracy>; comparedCount: number };
+  passed: boolean;
+  error?: string;
+}
+
+export interface IAnalysisRunAggregate {
+  total: number;
+  completed: number;
+  failed: number;
+  passed: number;
+  passRate: number;
+  avgJudgeScore: number | null;
+  avgExtractionAccuracy: number | null;
+}
+
+export interface IAnalysisRun {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  definitionKey: string;
+  status: AnalysisRunStatus;
+  mode: AnalysisRunMode;
+  progress: { total: number; completed: number; failed: number };
+  aggregate?: IAnalysisRunAggregate;
+  items: IAnalysisItemResult[];
+  error?: string;
+  startedAt?: Date;
+  finishedAt?: Date;
+  createdBy: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
 export interface IInferenceServerMetrics {
   _id?: ObjectId | string;
   tenantId: string;
@@ -247,7 +502,7 @@ export interface IRerankerRunLog {
 
 // ── Alert types ─────────────────────────────────────────────────────────
 
-export type AlertModule = 'models' | 'inference' | 'guardrails' | 'rag' | 'mcp';
+export type AlertModule = 'models' | 'inference' | 'guardrails' | 'rag' | 'mcp' | 'analysis' | 'evaluation';
 
 export type AlertMetric =
   // models
@@ -270,7 +525,14 @@ export type AlertMetric =
   // mcp
   | 'mcp_error_rate'
   | 'mcp_avg_latency_ms'
-  | 'mcp_total_requests';
+  | 'mcp_total_requests'
+  // analysis (percentages, 0–100, averaged over completed runs in the window)
+  | 'analysis_pass_rate'
+  | 'analysis_avg_judge_score'
+  | 'analysis_avg_accuracy'
+  // evaluation (percentages, 0–100, averaged over completed runs in the window)
+  | 'evaluation_pass_rate'
+  | 'evaluation_avg_score';
 
 export type AlertConditionOperator = 'gt' | 'lt' | 'gte' | 'lte' | 'eq';
 

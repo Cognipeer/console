@@ -22,13 +22,15 @@ const MODULE_METRICS: Record<AlertModule, AlertMetric[]> = {
   guardrails: ['guardrail_fail_rate', 'guardrail_avg_latency_ms', 'guardrail_total_evaluations'],
   rag: ['rag_avg_latency_ms', 'rag_total_queries', 'rag_failed_documents'],
   mcp: ['mcp_error_rate', 'mcp_avg_latency_ms', 'mcp_total_requests'],
+  analysis: ['analysis_pass_rate', 'analysis_avg_judge_score', 'analysis_avg_accuracy'],
+  evaluation: ['evaluation_pass_rate', 'evaluation_avg_score'],
 };
 
 /** Supported metric names for validation */
 const VALID_METRICS: AlertMetric[] = Object.values(MODULE_METRICS).flat();
 
 /** Supported module names */
-const VALID_MODULES: AlertModule[] = ['models', 'inference', 'guardrails', 'rag', 'mcp'];
+const VALID_MODULES: AlertModule[] = ['models', 'inference', 'guardrails', 'rag', 'mcp', 'analysis', 'evaluation'];
 
 /** Supported window durations (minutes) */
 const VALID_WINDOWS = [5, 15, 30, 60];
