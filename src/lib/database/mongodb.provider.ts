@@ -25,6 +25,7 @@ import { FileMixin } from './mongodb/file.mixin';
 import { ProviderRecordMixin } from './mongodb/provider-record.mixin';
 import { InferenceMixin } from './mongodb/inference.mixin';
 import { GuardrailMixin } from './mongodb/guardrail.mixin';
+import { EvaluationMixin } from './mongodb/evaluation.mixin';
 import { PiiPolicyMixin } from './mongodb/pii-policy.mixin';
 import { AlertMixin } from './mongodb/alert.mixin';
 import { IncidentMixin } from './mongodb/incident.mixin';
@@ -62,7 +63,7 @@ const AIBase = VectorMixin(ModelMixin(TracingMixin(ContentBase)));
 const StorageBase = ProviderRecordMixin(FileMixin(AIBase));
 
 // Group 5 – Advanced features
-const AdvancedBase = OcrJobMixin(CrawlerMixin(AuditMixin(BrowserMixin(VectorMigrationMixin(AgentMixin(ToolMixin(JsSandboxMixin(McpServerMixin(ConfigMixin(MemoryMixin(RerankerMixin(RagMixin(IncidentMixin(AlertMixin(PiiPolicyMixin(GuardrailMixin(InferenceMixin(StorageBase))))))))))))))))));
+const AdvancedBase = OcrJobMixin(CrawlerMixin(AuditMixin(BrowserMixin(VectorMigrationMixin(AgentMixin(ToolMixin(JsSandboxMixin(McpServerMixin(ConfigMixin(MemoryMixin(RerankerMixin(RagMixin(IncidentMixin(AlertMixin(PiiPolicyMixin(EvaluationMixin(GuardrailMixin(InferenceMixin(StorageBase))))))))))))))))))));
 
 // Group 6 – Cluster (system-wide; uses main DB)
 const ClusterBase = ClusterMixin(AdvancedBase);

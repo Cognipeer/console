@@ -604,6 +604,86 @@ export const TENANT_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_guardrail_eval_guardrailId ON guardrail_evaluation_logs(guardrailId);
   CREATE INDEX IF NOT EXISTS idx_guardrail_eval_createdAt ON guardrail_evaluation_logs(createdAt);
 
+  -- Evaluation service (offline agent/model testing)
+  CREATE TABLE IF NOT EXISTS evaluation_targets (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    kind TEXT NOT NULL DEFAULT 'model',
+    agentKey TEXT,
+    modelKey TEXT,
+    external TEXT,
+    defaultParams TEXT DEFAULT '{}',
+    metadata TEXT DEFAULT '{}',
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_eval_targets_key ON evaluation_targets(key);
+
+  CREATE TABLE IF NOT EXISTS evaluation_datasets (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    source TEXT NOT NULL DEFAULT 'manual',
+    items TEXT DEFAULT '[]',
+    metadata TEXT DEFAULT '{}',
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_eval_datasets_key ON evaluation_datasets(key);
+
+  CREATE TABLE IF NOT EXISTS evaluation_suites (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    targetKey TEXT NOT NULL,
+    datasetKey TEXT NOT NULL,
+    scorers TEXT DEFAULT '[]',
+    judgeModelKey TEXT,
+    runConfig TEXT DEFAULT '{}',
+    metadata TEXT DEFAULT '{}',
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_eval_suites_key ON evaluation_suites(key);
+
+  CREATE TABLE IF NOT EXISTS evaluation_runs (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    suiteKey TEXT NOT NULL,
+    targetKey TEXT NOT NULL,
+    datasetKey TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    mode TEXT NOT NULL DEFAULT 'sync',
+    progress TEXT DEFAULT '{}',
+    aggregate TEXT,
+    items TEXT DEFAULT '[]',
+    error TEXT,
+    startedAt TEXT,
+    finishedAt TEXT,
+    createdBy TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_eval_runs_suiteKey ON evaluation_runs(suiteKey);
+  CREATE INDEX IF NOT EXISTS idx_eval_runs_createdAt ON evaluation_runs(createdAt);
+
   -- PII policies (standalone service)
   CREATE TABLE IF NOT EXISTS pii_policies (
     id TEXT PRIMARY KEY,
