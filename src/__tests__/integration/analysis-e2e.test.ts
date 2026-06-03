@@ -31,6 +31,7 @@ import {
   listDefinitions,
   listRuns,
   runDefinition,
+  runScheduledAnalyses,
   updateDefinition,
 } from '@/lib/services/analysis/service';
 import type { AnalysisMessage, ModelInvoker } from '@/lib/services/analysis/types';
@@ -162,5 +163,25 @@ describe('Analysis service — full vertical (SQLite)', () => {
     expect(run.aggregate?.failed).toBe(1);
     expect(run.aggregate?.completed).toBe(0);
     expect(run.items[0].error).toMatch(/exploded/);
+  });
+
+  it('persists a cron schedule and fires it via runScheduledAnalyses', async () => {
+    const definition = await createDefinition(TENANT_DB_NAME, TENANT_ID, ACTOR, {
+      name: 'Nightly Scheduled',
+      fieldSet: [{ key: 'intent', type: 'string' }],
+      modes: {},
+      extractionModelKey: 'extract-model',
+      schedule: { cron: '* * * * *', enabled: true },
+    });
+    expect(definition.schedule?.enabled).toBe(true); // round-trips through SQLite
+
+    const result = await runScheduledAnalyses(TENANT_DB_NAME, TENANT_ID, new Date(), {
+      buildModelInvoker: fakeBuildModelInvoker,
+    });
+    expect(result.fired).toContain(definition.key);
+
+    const runs = await listRuns(TENANT_DB_NAME, { definitionKey: definition.key });
+    expect(runs.length).toBeGreaterThanOrEqual(1);
+    expect(runs[0].status).toBe('completed');
   });
 });

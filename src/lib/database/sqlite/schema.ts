@@ -698,6 +698,7 @@ export const TENANT_SCHEMA_SQL = `
     extractionModelKey TEXT,
     judgeModelKey TEXT,
     runConfig TEXT DEFAULT '{}',
+    schedule TEXT,
     metadata TEXT DEFAULT '{}',
     createdBy TEXT NOT NULL,
     updatedBy TEXT,
