@@ -24,6 +24,7 @@ import type {
 import { runAnalysis } from './runner';
 import type { AnalysisConversation, AnalysisItemResult, AnalysisSpec } from './types';
 import { buildModelInvoker, type AnalysisModelContext } from './adapters';
+import { isDue } from './schedulePlanner';
 
 const SLUG_OPTIONS = { lower: true, strict: true, trim: true };
 const MAX_KEY_ATTEMPTS = 50;
@@ -77,6 +78,7 @@ export interface CreateDefinitionInput {
   extractionModelKey?: string;
   judgeModelKey?: string;
   runConfig?: { concurrency?: number };
+  schedule?: { cron: string; enabled: boolean };
   projectId?: string;
 }
 
@@ -101,6 +103,7 @@ export async function createDefinition(
     extractionModelKey: input.extractionModelKey,
     judgeModelKey: input.judgeModelKey,
     runConfig: input.runConfig,
+    schedule: input.schedule,
     createdBy,
   });
   return toView(definition);
@@ -126,7 +129,7 @@ export async function updateDefinition(
   tenantDbName: string,
   id: string,
   updatedBy: string,
-  data: Partial<Pick<IAnalysisDefinition, 'name' | 'description' | 'fieldSet' | 'extractionInstructions' | 'modes' | 'extractionModelKey' | 'judgeModelKey' | 'runConfig' | 'projectId'>>,
+  data: Partial<Pick<IAnalysisDefinition, 'name' | 'description' | 'fieldSet' | 'extractionInstructions' | 'modes' | 'extractionModelKey' | 'judgeModelKey' | 'runConfig' | 'schedule' | 'projectId'>>,
 ): Promise<WithId<IAnalysisDefinition> | null> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
@@ -328,4 +331,38 @@ export async function runDefinition(
     });
     throw err;
   }
+}
+
+/**
+ * Run every definition in a tenant whose cron schedule is due. "Due" is decided
+ * against the most recent run's timestamp so each slot fires at most once.
+ * Used by the background analysis scheduler; deps are injectable for tests.
+ */
+export async function runScheduledAnalyses(
+  tenantDbName: string,
+  tenantId: string,
+  now: Date = new Date(),
+  deps: RunDefinitionDeps = {},
+): Promise<{ fired: string[]; errors: string[] }> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const definitions = await db.listAnalysisDefinitions();
+  const fired: string[] = [];
+  const errors: string[] = [];
+  for (const def of definitions) {
+    if (!def.schedule?.enabled) continue;
+    const recent = await db.listAnalysisRuns({ definitionKey: def.key, limit: 1 });
+    const last = recent[0]?.startedAt ?? recent[0]?.createdAt ?? null;
+    if (!isDue(def.schedule, last ? new Date(last) : null, now)) continue;
+    try {
+      await runDefinition(
+        { tenantDbName, tenantId, projectId: def.projectId, createdBy: 'system', definitionKey: def.key },
+        deps,
+      );
+      fired.push(def.key);
+    } catch (err) {
+      errors.push(`${def.key}: ${(err as Error).message}`);
+    }
+  }
+  return { fired, errors };
 }

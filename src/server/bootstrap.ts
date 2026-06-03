@@ -24,6 +24,7 @@ import { startAgentQueueConsumer } from '@/lib/services/agents/agentConsumer';
 import { startMcpQueueConsumer } from '@/lib/services/mcp/mcpConsumer';
 import { startPollScheduler } from '@/lib/services/inferenceMonitoring/pollScheduler';
 import { startAlertScheduler } from '@/lib/services/alerts/alertScheduler';
+import { startAnalysisScheduler } from '@/lib/services/analysis/analysisScheduler';
 import { ensureServerEnvLoaded } from './env';
 
 const logger = createLogger('startup');
@@ -191,6 +192,7 @@ export async function bootstrapApplication(): Promise<void> {
   startPollScheduler();
   startAlertScheduler();
   startCrawlerScheduler();
+  startAnalysisScheduler();
 
   // Register queue consumers on every node so that whenever instance
   // routing forwards a job to another node, that node can execute it.

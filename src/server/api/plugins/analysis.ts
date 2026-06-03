@@ -21,6 +21,7 @@ import {
   updateDefinition,
   type CreateConversationInput,
 } from '@/lib/services/analysis/service';
+import { validateCron } from '@/lib/services/analysis/schedulePlanner';
 import {
   readJsonBody,
   requireProjectContextForRequest,
@@ -73,6 +74,16 @@ function sanitizeModes(raw: unknown): IAnalysisModes {
     }
   }
   return modes;
+}
+
+function sanitizeSchedule(raw: unknown): { schedule?: { cron: string; enabled: boolean }; error?: string } {
+  if (raw === undefined || raw === null) return {};
+  if (typeof raw !== 'object') return { error: 'schedule must be an object' };
+  const s = raw as Record<string, unknown>;
+  if (typeof s.cron !== 'string') return { error: 'schedule.cron is required' };
+  const cronError = validateCron(s.cron);
+  if (cronError) return { error: cronError };
+  return { schedule: { cron: s.cron, enabled: s.enabled !== false } };
 }
 
 function sanitizeTranscript(raw: unknown): IAnalysisTranscriptMessage[] | null {
@@ -134,6 +145,8 @@ export const analysisApiPlugin: FastifyPluginAsync = async (app) => {
       const runConfig = body.runConfig && typeof body.runConfig === 'object'
         ? { concurrency: Number((body.runConfig as Record<string, unknown>).concurrency) || undefined }
         : undefined;
+      const scheduleResult = sanitizeSchedule(body.schedule);
+      if (scheduleResult.error) return reply.code(400).send({ error: scheduleResult.error });
       const definition = await createDefinition(session.tenantDbName, session.tenantId, session.userId, {
         name: body.name.trim(),
         description: typeof body.description === 'string' ? body.description : undefined,
@@ -143,6 +156,7 @@ export const analysisApiPlugin: FastifyPluginAsync = async (app) => {
         extractionModelKey: typeof body.extractionModelKey === 'string' ? body.extractionModelKey : undefined,
         judgeModelKey: typeof body.judgeModelKey === 'string' ? body.judgeModelKey : undefined,
         runConfig,
+        schedule: scheduleResult.schedule,
         projectId,
       });
       return reply.code(201).send({ definition });
@@ -173,6 +187,8 @@ export const analysisApiPlugin: FastifyPluginAsync = async (app) => {
       if (body.fieldSet !== undefined && (!fieldSet || fieldSet.length === 0)) {
         return reply.code(400).send({ error: 'fieldSet must be a non-empty array of { key, type }' });
       }
+      const scheduleResult = sanitizeSchedule(body.schedule);
+      if (scheduleResult.error) return reply.code(400).send({ error: scheduleResult.error });
       const definition = await updateDefinition(session.tenantDbName, id, session.userId, {
         name: body.name as string | undefined,
         description: body.description as string | undefined,
@@ -181,6 +197,7 @@ export const analysisApiPlugin: FastifyPluginAsync = async (app) => {
         modes: body.modes !== undefined ? sanitizeModes(body.modes) : undefined,
         extractionModelKey: body.extractionModelKey as string | undefined,
         judgeModelKey: body.judgeModelKey as string | undefined,
+        schedule: body.schedule !== undefined ? scheduleResult.schedule : undefined,
       });
       if (!definition) return reply.code(404).send({ error: 'Definition not found' });
       return reply.code(200).send({ definition });

@@ -228,6 +228,8 @@ export interface IAnalysisDefinition {
   /** Model used to back the llm-judge mode. */
   judgeModelKey?: string;
   runConfig?: { concurrency?: number };
+  /** Optional cron schedule for unattended (e.g. nightly) runs. */
+  schedule?: { cron: string; enabled: boolean };
   metadata?: Record<string, unknown>;
   createdBy: string;
   updatedBy?: string;

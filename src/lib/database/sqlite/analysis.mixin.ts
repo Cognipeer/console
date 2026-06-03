@@ -40,9 +40,9 @@ export function AnalysisMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       db.prepare(`
         INSERT INTO ${TABLES.analysisDefinitions}
         (id, tenantId, projectId, key, name, description, fieldSet, extractionInstructions,
-         modes, extractionModelKey, judgeModelKey, runConfig, metadata, createdBy, updatedBy, createdAt, updatedAt)
+         modes, extractionModelKey, judgeModelKey, runConfig, schedule, metadata, createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @key, @name, @description, @fieldSet, @extractionInstructions,
-         @modes, @extractionModelKey, @judgeModelKey, @runConfig, @metadata, @createdBy, @updatedBy, @createdAt, @updatedAt)
+         @modes, @extractionModelKey, @judgeModelKey, @runConfig, @schedule, @metadata, @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
         tenantId: definition.tenantId,
@@ -56,6 +56,7 @@ export function AnalysisMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         extractionModelKey: definition.extractionModelKey ?? null,
         judgeModelKey: definition.judgeModelKey ?? null,
         runConfig: this.toJson(definition.runConfig ?? {}),
+        schedule: definition.schedule ? this.toJson(definition.schedule) : null,
         metadata: this.toJson(definition.metadata ?? {}),
         createdBy: definition.createdBy,
         updatedBy: definition.updatedBy ?? null,
@@ -80,6 +81,7 @@ export function AnalysisMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       if (data.extractionModelKey !== undefined) { sets.push('extractionModelKey = @extractionModelKey'); params.extractionModelKey = data.extractionModelKey; }
       if (data.judgeModelKey !== undefined) { sets.push('judgeModelKey = @judgeModelKey'); params.judgeModelKey = data.judgeModelKey; }
       if (data.runConfig !== undefined) { sets.push('runConfig = @runConfig'); params.runConfig = this.toJson(data.runConfig); }
+      if (data.schedule !== undefined) { sets.push('schedule = @schedule'); params.schedule = data.schedule ? this.toJson(data.schedule) : null; }
       if (data.metadata !== undefined) { sets.push('metadata = @metadata'); params.metadata = this.toJson(data.metadata); }
       if (data.updatedBy !== undefined) { sets.push('updatedBy = @updatedBy'); params.updatedBy = data.updatedBy; }
       if (data.projectId !== undefined) { sets.push('projectId = @projectId'); params.projectId = data.projectId; }
@@ -304,6 +306,7 @@ export function AnalysisMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         extractionModelKey: (r.extractionModelKey as string | null) ?? undefined,
         judgeModelKey: (r.judgeModelKey as string | null) ?? undefined,
         runConfig: this.parseJson(r.runConfig, {}),
+        schedule: r.schedule ? this.parseJson<{ cron: string; enabled: boolean }>(r.schedule, { cron: '', enabled: false }) : undefined,
         metadata: this.parseJson(r.metadata, {}),
         createdBy: r.createdBy as string,
         updatedBy: (r.updatedBy as string | null) ?? undefined,
