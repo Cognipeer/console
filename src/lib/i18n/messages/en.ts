@@ -46,6 +46,8 @@ export const en = {
     inferenceMonitoringDescription: 'Monitor vLLM and inference servers',
     guardrails: 'Guardrail',
     guardrailsDescription: 'Safety policies for AI services',
+    evaluations: 'Evaluations',
+    evaluationsDescription: 'Offline agent & model testing with datasets and scorers',
     pii: 'PII Service',
     piiDescription: 'Detect, redact and mask personal data',
     alerts: 'Alerts & Incidents',

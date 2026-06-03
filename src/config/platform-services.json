@@ -154,6 +154,17 @@
       "searchKeywords": ["guardrails", "safety", "moderation", "pii"]
     },
     {
+      "id": "evaluations",
+      "href": "/dashboard/evaluations",
+      "icon": "IconChecklist",
+      "category": "operate",
+      "navLabelKey": "evaluations",
+      "navDescriptionKey": "evaluationsDescription",
+      "tags": ["evaluation", "testing", "quality", "datasets", "scorers"],
+      "searchKeywords": ["evaluation", "eval", "test", "dataset", "suite", "scorer", "judge", "benchmark"],
+      "badge": "new"
+    },
+    {
       "id": "pii",
       "href": "/dashboard/pii",
       "icon": "IconLock",
