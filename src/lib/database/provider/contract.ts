@@ -109,6 +109,13 @@ import type {
   ISandboxSettings,
   SandboxInstanceState,
   SandboxCommandStatus,
+  IEvaluationTarget,
+  IEvaluationDataset,
+  IEvaluationSuite,
+  IEvaluationRun,
+  EvaluationTargetKind,
+  EvaluationDatasetSource,
+  EvaluationRunStatus,
 } from './types';
 
 export interface DatabaseProvider {
@@ -537,6 +544,72 @@ export interface DatabaseProvider {
     guardrailId: string,
     options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month' },
   ): Promise<IGuardrailEvalAggregate>;
+
+  // ── Evaluation operations (tenant-specific) ──
+  createEvaluationTarget(
+    target: Omit<IEvaluationTarget, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IEvaluationTarget>;
+  updateEvaluationTarget(
+    id: string,
+    data: Partial<Omit<IEvaluationTarget, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IEvaluationTarget | null>;
+  deleteEvaluationTarget(id: string): Promise<boolean>;
+  findEvaluationTargetById(id: string): Promise<IEvaluationTarget | null>;
+  findEvaluationTargetByKey(key: string, projectId?: string): Promise<IEvaluationTarget | null>;
+  listEvaluationTargets(filters?: {
+    projectId?: string;
+    kind?: EvaluationTargetKind;
+    search?: string;
+  }): Promise<IEvaluationTarget[]>;
+
+  createEvaluationDataset(
+    dataset: Omit<IEvaluationDataset, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IEvaluationDataset>;
+  updateEvaluationDataset(
+    id: string,
+    data: Partial<Omit<IEvaluationDataset, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IEvaluationDataset | null>;
+  deleteEvaluationDataset(id: string): Promise<boolean>;
+  findEvaluationDatasetById(id: string): Promise<IEvaluationDataset | null>;
+  findEvaluationDatasetByKey(key: string, projectId?: string): Promise<IEvaluationDataset | null>;
+  listEvaluationDatasets(filters?: {
+    projectId?: string;
+    source?: EvaluationDatasetSource;
+    search?: string;
+  }): Promise<IEvaluationDataset[]>;
+
+  createEvaluationSuite(
+    suite: Omit<IEvaluationSuite, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IEvaluationSuite>;
+  updateEvaluationSuite(
+    id: string,
+    data: Partial<Omit<IEvaluationSuite, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IEvaluationSuite | null>;
+  deleteEvaluationSuite(id: string): Promise<boolean>;
+  findEvaluationSuiteById(id: string): Promise<IEvaluationSuite | null>;
+  findEvaluationSuiteByKey(key: string, projectId?: string): Promise<IEvaluationSuite | null>;
+  listEvaluationSuites(filters?: {
+    projectId?: string;
+    targetKey?: string;
+    datasetKey?: string;
+    search?: string;
+  }): Promise<IEvaluationSuite[]>;
+
+  createEvaluationRun(
+    run: Omit<IEvaluationRun, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IEvaluationRun>;
+  updateEvaluationRun(
+    id: string,
+    data: Partial<Omit<IEvaluationRun, 'tenantId' | 'suiteKey' | 'createdBy'>>,
+  ): Promise<IEvaluationRun | null>;
+  findEvaluationRunById(id: string): Promise<IEvaluationRun | null>;
+  listEvaluationRuns(filters?: {
+    projectId?: string;
+    suiteKey?: string;
+    status?: EvaluationRunStatus;
+    limit?: number;
+    skip?: number;
+  }): Promise<IEvaluationRun[]>;
 
   // ── PII policy operations (tenant-specific) ──
   createPiiPolicy(

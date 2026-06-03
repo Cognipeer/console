@@ -53,6 +53,142 @@ export interface IGuardrail {
   updatedAt?: Date;
 }
 
+// ── Evaluation types ─────────────────────────────────────────────────────────
+
+export type EvaluationTargetKind = 'agent' | 'model' | 'external';
+export type EvaluationRunStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+export type EvaluationRunMode = 'sync' | 'async';
+export type EvaluationDatasetSource = 'manual' | 'file' | 'generated';
+export type EvaluationScorerType = 'assertion' | 'llm-judge';
+
+export interface IEvaluationExternalTarget {
+  protocol: 'openai-chat' | 'webhook';
+  url: string;
+  headers?: Record<string, string>;
+  /** Provider key holding encrypted credentials for the external endpoint. */
+  credentialProviderKey?: string;
+  /** Dot-path used to pull the assistant text out of a webhook response. */
+  responsePath?: string;
+}
+
+export interface IEvaluationTarget {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name: string;
+  description?: string;
+  kind: EvaluationTargetKind;
+  agentKey?: string;
+  modelKey?: string;
+  external?: IEvaluationExternalTarget;
+  defaultParams?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IEvaluationDatasetItem {
+  id: string;
+  input: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
+  expected?: Record<string, unknown>;
+  tags?: string[];
+}
+
+export interface IEvaluationDataset {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name: string;
+  description?: string;
+  source: EvaluationDatasetSource;
+  items: IEvaluationDatasetItem[];
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IEvaluationScorerConfig {
+  type: EvaluationScorerType;
+  weight?: number;
+  rubric?: string;
+  threshold?: number;
+}
+
+export interface IEvaluationSuite {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name: string;
+  description?: string;
+  targetKey: string;
+  datasetKey: string;
+  scorers: IEvaluationScorerConfig[];
+  /** Model used to back any llm-judge scorers. */
+  judgeModelKey?: string;
+  runConfig?: { concurrency?: number };
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IEvaluationScore {
+  scorerType: EvaluationScorerType;
+  score: number;
+  passed: boolean;
+  weight: number;
+  detail?: Record<string, unknown>;
+  error?: string;
+}
+
+export interface IEvaluationRunItem {
+  itemId: string;
+  output?: { text: string; latencyMs?: number };
+  scores: IEvaluationScore[];
+  score: number;
+  passed: boolean;
+  latencyMs?: number;
+  error?: string;
+}
+
+export interface IEvaluationRunAggregate {
+  total: number;
+  completed: number;
+  failed: number;
+  passed: number;
+  passRate: number;
+  avgScore: number;
+  avgLatencyMs: number | null;
+}
+
+export interface IEvaluationRun {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  suiteKey: string;
+  targetKey: string;
+  datasetKey: string;
+  status: EvaluationRunStatus;
+  mode: EvaluationRunMode;
+  progress: { total: number; completed: number; failed: number };
+  aggregate?: IEvaluationRunAggregate;
+  items: IEvaluationRunItem[];
+  error?: string;
+  startedAt?: Date;
+  finishedAt?: Date;
+  createdBy: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
 export interface IInferenceServerMetrics {
   _id?: ObjectId | string;
   tenantId: string;
