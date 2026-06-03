@@ -19,6 +19,8 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.vars.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,7 +35,7 @@ jobs:
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: "[Azure] Login via Service Principal"
+      - name: '[Azure] Login via Service Principal'
         uses: azure/login@v1
         with:
           creds: |
@@ -44,7 +46,7 @@ jobs:
               "subscriptionId": "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
             }
 
-      - name: "[Azure] Login to ACR"
+      - name: '[Azure] Login to ACR'
         run: az acr login --name ${{ secrets.LOGIN_SERVER }}
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -82,8 +84,9 @@ jobs:
     steps:
       - name: Fire repository_dispatch
         run: |
-          curl -X POST \
+          curl --fail-with-body -X POST \
             -H "Authorization: Bearer ${{ secrets.REPO_PAT_TO_DEPLOY }}" \
             -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
             https://api.github.com/repos/${{secrets.TENANT_REPO_ADDRESS}}/dispatches \
-            -d "{\"event_type\":\"app-released\",\"client_payload\":{\"image_tag\":\"${GITHUB_REF_NAME}\"}}"
+            -d "{\"event_type\":\"app-released\",\"client_payload\":{\"image_tag\":\"${{ needs.build.outputs.image_tag }}\",\"source_ref\":\"${GITHUB_REF_NAME}\"}}"
