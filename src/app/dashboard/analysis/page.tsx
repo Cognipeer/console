@@ -147,6 +147,7 @@ export default function AnalysisPage() {
       </Group>
     ) },
     { key: 'model', label: 'Extraction model', render: (d) => <span className="ds-mono ds-muted" style={{ fontSize: 12 }}>{d.extractionModelKey ?? '—'}</span> },
+    { key: 'schedule', label: 'Schedule', render: (d) => (d.schedule?.enabled ? <span className="ds-badge ds-badge-teal ds-mono">{d.schedule.cron}</span> : <span className="ds-faint">—</span>) },
   ];
 
   const conversationColumns: DataGridColumn<AnalysisConversationView>[] = [

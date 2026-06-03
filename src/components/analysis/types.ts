@@ -27,6 +27,7 @@ export interface AnalysisDefinitionView {
   extractionModelKey?: string;
   judgeModelKey?: string;
   runConfig?: { concurrency?: number };
+  schedule?: { cron: string; enabled: boolean };
   createdAt?: string;
 }
 
