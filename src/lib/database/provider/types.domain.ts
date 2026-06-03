@@ -500,7 +500,7 @@ export interface IRerankerRunLog {
 
 // ── Alert types ─────────────────────────────────────────────────────────
 
-export type AlertModule = 'models' | 'inference' | 'guardrails' | 'rag' | 'mcp';
+export type AlertModule = 'models' | 'inference' | 'guardrails' | 'rag' | 'mcp' | 'analysis' | 'evaluation';
 
 export type AlertMetric =
   // models
@@ -523,7 +523,14 @@ export type AlertMetric =
   // mcp
   | 'mcp_error_rate'
   | 'mcp_avg_latency_ms'
-  | 'mcp_total_requests';
+  | 'mcp_total_requests'
+  // analysis (percentages, 0–100, averaged over completed runs in the window)
+  | 'analysis_pass_rate'
+  | 'analysis_avg_judge_score'
+  | 'analysis_avg_accuracy'
+  // evaluation (percentages, 0–100, averaged over completed runs in the window)
+  | 'evaluation_pass_rate'
+  | 'evaluation_avg_score';
 
 export type AlertConditionOperator = 'gt' | 'lt' | 'gte' | 'lte' | 'eq';
 
