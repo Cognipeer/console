@@ -75,7 +75,7 @@ export const gpuTerminalApiPlugin: FastifyPluginAsync = async (app) => {
         forwardFromBrowser(sessionId, readTerminalMessage(raw));
       });
       socket.on('close', () => closeSession(sessionId, 'browser-disconnected'));
-      socket.on('error', (err) => {
+      socket.on('error', (err: Error) => {
         log.warn('browser ws error', { sessionId, error: err.message });
         closeSession(sessionId, 'browser-error');
       });
@@ -119,7 +119,7 @@ export const gpuTerminalApiPlugin: FastifyPluginAsync = async (app) => {
         forwardFromAgent(sessionId, readTerminalMessage(raw));
       });
       socket.on('close', () => closeSession(sessionId, 'agent-disconnected'));
-      socket.on('error', (err) => {
+      socket.on('error', (err: Error) => {
         log.warn('agent ws error', { sessionId, error: err.message });
         closeSession(sessionId, 'agent-error');
       });

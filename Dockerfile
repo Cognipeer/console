@@ -3,7 +3,7 @@ FROM node:22 AS deps
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 COPY package.json package-lock.json* npm-shrinkwrap.json* ./
-RUN npm install --no-audit --no-fund
+RUN npm ci --no-audit --no-fund
 
 # --------------------- builder stage ---------------------
 FROM node:22 AS builder
