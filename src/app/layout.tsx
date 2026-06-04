@@ -28,6 +28,23 @@ const jetbrainsMono = JetBrains_Mono({
 export const metadata: Metadata = {
   title: "Cognipeer Console",
   description: "Multi-tenant AI and agentic services platform",
+  icons: {
+    icon: [
+      {
+        url: '/images/cognipeer-icon.png',
+        type: 'image/png',
+        sizes: '128x128',
+      },
+    ],
+    apple: [
+      {
+        url: '/images/cognipeer-icon.png',
+        type: 'image/png',
+        sizes: '128x128',
+      },
+    ],
+    shortcut: '/images/cognipeer-icon.png',
+  },
 };
 
 export default function RootLayout({
