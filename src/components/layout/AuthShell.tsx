@@ -1,6 +1,28 @@
 'use client';
 
+import Image from 'next/image';
 import { ReactNode } from 'react';
+
+const DEFAULT_BRAND = (
+  <>
+    <Image
+      src="/images/cognipeer-icon.png"
+      alt=""
+      width={28}
+      height={28}
+      className="auth-brand-icon"
+      priority
+    />
+    <Image
+      src="/images/cognipeer-logo-d.png"
+      alt="Cognipeer"
+      width={148}
+      height={32}
+      className="auth-brand-wordmark"
+      priority
+    />
+  </>
+);
 
 interface AuthShellProps {
   title: ReactNode;
@@ -19,7 +41,7 @@ export default function AuthShell({
   title,
   subtitle,
   eyebrow,
-  brand = 'Cognipeer Console',
+  brand = DEFAULT_BRAND,
   highlights,
   children,
   footer,
@@ -30,7 +52,7 @@ export default function AuthShell({
       <div className="auth-glow auth-glow-b" aria-hidden="true" />
       <div className="auth-shell">
         <section className="auth-intro">
-          {brand ? <span className="auth-brand">{brand}</span> : null}
+          {brand ? <div className="auth-brand">{brand}</div> : null}
           {eyebrow ? <div className="ds-eyebrow">{eyebrow}</div> : null}
           <h1 className="auth-title">{title}</h1>
           <p className="auth-subtitle">{subtitle}</p>

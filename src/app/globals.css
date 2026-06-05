@@ -2413,16 +2413,26 @@ textarea.ds-input { height: auto; padding: 10px 12px; line-height: 1.5; resize: 
 .auth-brand {
   display: inline-flex;
   align-items: center;
+  gap: 12px;
   width: fit-content;
-  padding: 4px 10px;
-  background: var(--ds-surface-raised);
-  border: 1px solid var(--ds-border-soft);
-  border-radius: 999px;
-  font-size: 10.5px;
+  min-height: 32px;
+  font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--ds-accent);
+  letter-spacing: 0.08em;
+  color: var(--ds-text);
+}
+
+.auth-brand-icon {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  display: block;
+}
+
+.auth-brand-wordmark {
+  width: auto;
+  height: 32px;
+  display: block;
 }
 
 .auth-title {
