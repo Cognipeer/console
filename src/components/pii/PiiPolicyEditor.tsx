@@ -49,8 +49,8 @@ interface Props {
   onCustomPatternsChange: (next: PiiCustomPatternForm[]) => void;
   languages: string[];
   onLanguagesChange: (next: string[]) => void;
-  defaultAction: 'detect' | 'redact' | 'mask' | 'block';
-  onDefaultActionChange: (next: 'detect' | 'redact' | 'mask' | 'block') => void;
+  defaultAction: 'detect' | 'redact' | 'mask' | 'block' | 'tokenize';
+  onDefaultActionChange: (next: 'detect' | 'redact' | 'mask' | 'block' | 'tokenize') => void;
   /** Loaded category catalog from /api/pii/categories. */
   catalog: PiiCatalogEntry[];
 }
@@ -127,6 +127,7 @@ export default function PiiPolicyEditor(props: Props) {
               { value: 'detect', label: tAct('detect') },
               { value: 'redact', label: tAct('redact') },
               { value: 'mask', label: tAct('mask') },
+              { value: 'tokenize', label: tAct('tokenize') },
               { value: 'block', label: tAct('block') },
             ]}
             allowDeselect={false}

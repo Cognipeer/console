@@ -4,7 +4,6 @@ import type { ObjectId } from 'mongodb';
 
 export type GuardrailType = 'preset' | 'custom';
 export type GuardrailAction = 'block' | 'warn' | 'flag';
-export type GuardrailTarget = 'input' | 'output' | 'both';
 
 export interface IGuardrailPiiPolicy {
   enabled: boolean;
@@ -38,7 +37,6 @@ export interface IGuardrail {
   name: string;
   description?: string;
   type: GuardrailType;
-  target: GuardrailTarget;
   action: GuardrailAction;
   enabled: boolean;
   modelKey?: string;
@@ -49,6 +47,392 @@ export interface IGuardrail {
   metadata?: Record<string, unknown>;
   createdBy: string;
   updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+// ── Evaluation types ─────────────────────────────────────────────────────────
+
+export type EvaluationTargetKind = 'agent' | 'model' | 'external';
+export type EvaluationRunStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+export type EvaluationRunMode = 'sync' | 'async';
+export type EvaluationDatasetSource = 'manual' | 'file' | 'generated';
+export type EvaluationScorerType = 'assertion' | 'llm-judge' | 'semantic';
+
+export interface IEvaluationExternalTarget {
+  protocol: 'openai-chat' | 'webhook';
+  url: string;
+  headers?: Record<string, string>;
+  /** Provider key holding encrypted credentials for the external endpoint. */
+  credentialProviderKey?: string;
+  /** Dot-path used to pull the assistant text out of a webhook response. */
+  responsePath?: string;
+}
+
+export interface IEvaluationTarget {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name: string;
+  description?: string;
+  kind: EvaluationTargetKind;
+  agentKey?: string;
+  modelKey?: string;
+  external?: IEvaluationExternalTarget;
+  defaultParams?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IEvaluationDatasetItem {
+  id: string;
+  input: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
+  expected?: Record<string, unknown>;
+  tags?: string[];
+}
+
+export interface IEvaluationDataset {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name: string;
+  description?: string;
+  source: EvaluationDatasetSource;
+  items: IEvaluationDatasetItem[];
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IEvaluationScorerConfig {
+  type: EvaluationScorerType;
+  weight?: number;
+  rubric?: string;
+  threshold?: number;
+}
+
+export interface IEvaluationSuite {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name: string;
+  description?: string;
+  targetKey: string;
+  datasetKey: string;
+  scorers: IEvaluationScorerConfig[];
+  /** Model used to back any llm-judge scorers. */
+  judgeModelKey?: string;
+  /** Embedding model used to back any semantic (vector) scorers. */
+  embeddingModelKey?: string;
+  runConfig?: { concurrency?: number };
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IEvaluationScore {
+  scorerType: EvaluationScorerType;
+  score: number;
+  passed: boolean;
+  weight: number;
+  detail?: Record<string, unknown>;
+  error?: string;
+}
+
+export interface IEvaluationRunItem {
+  itemId: string;
+  output?: { text: string; latencyMs?: number };
+  scores: IEvaluationScore[];
+  score: number;
+  passed: boolean;
+  latencyMs?: number;
+  error?: string;
+}
+
+export interface IEvaluationRunAggregate {
+  total: number;
+  completed: number;
+  failed: number;
+  passed: number;
+  passRate: number;
+  avgScore: number;
+  avgLatencyMs: number | null;
+}
+
+export interface IEvaluationRun {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  suiteKey: string;
+  targetKey: string;
+  datasetKey: string;
+  status: EvaluationRunStatus;
+  mode: EvaluationRunMode;
+  progress: { total: number; completed: number; failed: number };
+  aggregate?: IEvaluationRunAggregate;
+  items: IEvaluationRunItem[];
+  error?: string;
+  startedAt?: Date;
+  finishedAt?: Date;
+  createdBy: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+// ── Red-team (adversarial agent testing) types ───────────────────────────────
+
+export type RedTeamTargetKind = 'agent' | 'model';
+export type RedTeamRunStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+export type RedTeamRunMode = 'sync' | 'async';
+export type RedTeamOutcome = 'safe' | 'vulnerable' | 'needs_review';
+export type RedTeamSeverity = 'low' | 'medium' | 'high' | 'critical';
+
+/** Decision-policy overrides; mirrors the engine's DecisionPolicyConfig. */
+export interface IRedTeamPolicyConfig {
+  deterministicConfidence?: number;
+  reviewBand?: [number, number];
+  maxJudgeVariance?: number;
+}
+
+/**
+ * A red-team campaign: what to attack (agent/model), which probes to run, and
+ * how to judge. Probes and detectors are code-defined (built-in catalog), so a
+ * campaign only stores the selection — there is no separate dataset entity.
+ */
+export interface IRedTeamCampaign {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name: string;
+  description?: string;
+  targetKind: RedTeamTargetKind;
+  agentKey?: string;
+  modelKey?: string;
+  /** Selected built-in probe keys; empty selects the whole catalog. */
+  probeKeys: string[];
+  /** Model backing any llm-judge detectors (required if probes use them). */
+  judgeModelKey?: string;
+  runConfig?: { concurrency?: number };
+  policy?: IRedTeamPolicyConfig;
+  /** Optional cron schedule for unattended (e.g. nightly) regression scans. */
+  schedule?: { cron: string; enabled: boolean };
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IRedTeamSignal {
+  detectorKey: string;
+  kind: string;
+  hit: boolean;
+  score: number;
+  confidence: number;
+  gate?: 'safe';
+  rationale: string;
+  modelRef?: string;
+  error?: string;
+}
+
+export interface IRedTeamTurn {
+  user: string;
+  assistant: string;
+}
+
+/** Optional human-in-the-loop override of a machine verdict. */
+export interface IRedTeamReview {
+  outcome: RedTeamOutcome;
+  note?: string;
+  reviewedBy: string;
+  reviewedAt: Date;
+}
+
+export interface IRedTeamAttemptResult {
+  probeKey: string;
+  attemptId: string;
+  family: string;
+  category: string;
+  severity: RedTeamSeverity;
+  outcome: RedTeamOutcome;
+  decidedBy: string;
+  confidence: number;
+  transcript: IRedTeamTurn[];
+  signals: IRedTeamSignal[];
+  latencyMs?: number;
+  error?: string;
+  review?: IRedTeamReview;
+}
+
+export interface IRedTeamCategoryBreakdown {
+  total: number;
+  vulnerable: number;
+  needsReview: number;
+}
+
+export interface IRedTeamAggregate {
+  total: number;
+  completed: number;
+  failed: number;
+  vulnerable: number;
+  safe: number;
+  needsReview: number;
+  attackSuccessRate: number;
+  resilienceScore: number;
+  bySeverity: Record<string, number>;
+  byCategory: Record<string, IRedTeamCategoryBreakdown>;
+  avgLatencyMs: number | null;
+}
+
+export interface IRedTeamRun {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  campaignKey: string;
+  targetKind: RedTeamTargetKind;
+  /** agentKey or modelKey of the target under test (for display). */
+  targetRef: string;
+  status: RedTeamRunStatus;
+  mode: RedTeamRunMode;
+  progress: { total: number; completed: number; failed: number };
+  aggregate?: IRedTeamAggregate;
+  attempts: IRedTeamAttemptResult[];
+  error?: string;
+  startedAt?: Date;
+  finishedAt?: Date;
+  createdBy: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+// ── Analysis types ───────────────────────────────────────────────────────────
+
+export type AnalysisFieldType = 'string' | 'number' | 'boolean' | 'enum';
+export type AnalysisRunStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+export type AnalysisRunMode = 'sync' | 'async';
+export type AnalysisConversationSource = 'imported' | 'platform' | 'manual';
+
+export interface IAnalysisFieldDef {
+  key: string;
+  type: AnalysisFieldType;
+  description?: string;
+  enumValues?: string[];
+  required?: boolean;
+}
+
+export interface IAnalysisModes {
+  /** Persist extracted fields back onto each conversation. */
+  store?: boolean;
+  /** Grade conversation quality against a rubric with an LLM judge. */
+  judge?: { rubric: string; threshold?: number };
+  /** Compare extracted fields against each conversation's referenceFields. */
+  accuracy?: boolean;
+}
+
+export interface IAnalysisDefinition {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name: string;
+  description?: string;
+  fieldSet: IAnalysisFieldDef[];
+  extractionInstructions?: string;
+  modes: IAnalysisModes;
+  /** Model used for field extraction. */
+  extractionModelKey?: string;
+  /** Model used to back the llm-judge mode. */
+  judgeModelKey?: string;
+  runConfig?: { concurrency?: number };
+  /** Optional cron schedule for unattended (e.g. nightly) runs. */
+  schedule?: { cron: string; enabled: boolean };
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IAnalysisTranscriptMessage {
+  role: string;
+  content: string;
+}
+
+export interface IAnalysisConversation {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name?: string;
+  description?: string;
+  transcript: IAnalysisTranscriptMessage[];
+  source: AnalysisConversationSource;
+  /** Free-form tags for grouping/filtering conversations (e.g. by campaign, channel). */
+  tags?: string[];
+  metadata?: Record<string, unknown>;
+  occurredAt?: Date;
+  /** Ground-truth field values for accuracy scoring. */
+  referenceFields?: Record<string, unknown>;
+  /** Latest extracted fields (store mode). */
+  extractedFields?: Record<string, unknown>;
+  lastAnalyzedAt?: Date;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IAnalysisFieldAccuracy {
+  expected: unknown;
+  actual: unknown;
+  match: boolean;
+}
+
+export interface IAnalysisItemResult {
+  conversationKey: string;
+  extractedFields: Record<string, unknown>;
+  missing: string[];
+  judge?: { score: number; passed?: boolean; reasoning?: string; error?: string };
+  accuracy?: { score: number; perField: Record<string, IAnalysisFieldAccuracy>; comparedCount: number };
+  passed: boolean;
+  error?: string;
+}
+
+export interface IAnalysisRunAggregate {
+  total: number;
+  completed: number;
+  failed: number;
+  passed: number;
+  passRate: number;
+  avgJudgeScore: number | null;
+  avgExtractionAccuracy: number | null;
+}
+
+export interface IAnalysisRun {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  definitionKey: string;
+  status: AnalysisRunStatus;
+  mode: AnalysisRunMode;
+  progress: { total: number; completed: number; failed: number };
+  aggregate?: IAnalysisRunAggregate;
+  items: IAnalysisItemResult[];
+  error?: string;
+  startedAt?: Date;
+  finishedAt?: Date;
+  createdBy: string;
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -247,7 +631,7 @@ export interface IRerankerRunLog {
 
 // ── Alert types ─────────────────────────────────────────────────────────
 
-export type AlertModule = 'models' | 'inference' | 'guardrails' | 'rag' | 'mcp';
+export type AlertModule = 'models' | 'inference' | 'guardrails' | 'rag' | 'mcp' | 'analysis' | 'evaluation';
 
 export type AlertMetric =
   // models
@@ -270,7 +654,14 @@ export type AlertMetric =
   // mcp
   | 'mcp_error_rate'
   | 'mcp_avg_latency_ms'
-  | 'mcp_total_requests';
+  | 'mcp_total_requests'
+  // analysis (percentages, 0–100, averaged over completed runs in the window)
+  | 'analysis_pass_rate'
+  | 'analysis_avg_judge_score'
+  | 'analysis_avg_accuracy'
+  // evaluation (percentages, 0–100, averaged over completed runs in the window)
+  | 'evaluation_pass_rate'
+  | 'evaluation_avg_score';
 
 export type AlertConditionOperator = 'gt' | 'lt' | 'gte' | 'lte' | 'eq';
 
@@ -434,8 +825,35 @@ export interface IToolRequestAggregate {
 
 export type AgentStatus = 'active' | 'inactive' | 'draft';
 
+/** How an agent is backed: a native model-config agent, or a connected external endpoint. */
+export type AgentKind = 'native' | 'external';
+
+/** Wire protocol used to reach an external (connected) agent. */
+export type ExternalAgentProtocol = 'a2a' | 'openai-chat' | 'openai-responses';
+
+/**
+ * Connection settings for a connected (external) agent. The agent is invoked over
+ * HTTP using the selected protocol instead of being run through the local agent-sdk.
+ */
+export interface IExternalAgentConnection {
+  protocol: ExternalAgentProtocol;
+  /** Endpoint URL — OpenAI base URL, A2A agent endpoint, or an explicit responses URL. */
+  url: string;
+  /** Model id sent in the request body (openai-chat / openai-responses). */
+  model?: string;
+  /** Static headers added to every outbound request. */
+  headers?: Record<string, string>;
+  /** Inline bearer token / API key, AES-encrypted at rest. Never returned to clients. */
+  apiKeyEnc?: string;
+  /** Provider key holding encrypted credentials for the endpoint (alternative to inline key). */
+  credentialProviderKey?: string;
+  /** Dot-path used to pull the assistant text out of a non-standard JSON response. */
+  responsePath?: string;
+}
+
 export interface IAgentConfig {
-  modelKey: string;
+  /** Required for native agents; omitted/empty for connected (external) agents. */
+  modelKey?: string;
   systemPrompt?: string;
   promptKey?: string;
   temperature?: number;
@@ -449,6 +867,10 @@ export interface IAgentConfig {
   outputGuardrailKey?: string;
   /** Bound tools from various sources (tools, MCP servers legacy) */
   toolBindings?: IAgentToolBinding[];
+  /** Agent backing kind. Defaults to 'native' when omitted. */
+  kind?: AgentKind;
+  /** Connection settings — present only when kind === 'external'. */
+  connection?: IExternalAgentConnection;
 }
 
 /** A single tool-source binding for an agent */
@@ -981,12 +1403,15 @@ export interface ICrawlResult {
 
 /**
  * Action taken when PII is detected.
- *  - 'detect'  → return findings, never alter text
- *  - 'redact'  → replace match with a tag like [REDACTED_EMAIL]
- *  - 'mask'    → partial masking, e.g. j***@gmail.com, **** **** **** 1234
- *  - 'block'   → mark finding as blocking; caller decides what to do
+ *  - 'detect'   → return findings, never alter text
+ *  - 'redact'   → replace match with a tag like [REDACTED_EMAIL]
+ *  - 'mask'     → partial masking, e.g. j***@gmail.com, **** **** **** 1234
+ *  - 'block'    → mark finding as blocking; caller decides what to do
+ *  - 'tokenize' → reversible masking: replace match with a unique token like
+ *                 [EMAIL_1] and return a vault so the original can be restored
+ *                 later via detokenize (e.g. round-trip around an LLM call)
  */
-export type PiiAction = 'detect' | 'redact' | 'mask' | 'block';
+export type PiiAction = 'detect' | 'redact' | 'mask' | 'block' | 'tokenize';
 
 /** Language scope for built-in patterns. 'global' = language-independent. */
 export type PiiLanguage = 'global' | 'en' | 'tr' | 'de' | 'fr' | 'es' | 'it' | 'pt' | 'ar' | 'ja' | 'zh';

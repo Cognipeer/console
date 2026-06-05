@@ -25,8 +25,19 @@ import {
 } from './openaiAdapter';
 
 import { logModelUsage, TokenUsage } from './usageLogger';
+import {
+  MAX_ROUTING_DEPTH,
+  buildDeciderMessages,
+  evaluateRules,
+  extractRoutingSignals,
+  getDynamicRoutingConfig,
+  parseDeciderLabel,
+  publicSignals,
+} from './dynamicRouting';
+import type { IDynamicRoutingConfig, IModelUsageRouting } from '@/lib/database';
 import { buildModelRuntime } from './runtimeService';
 import { isSemanticCacheEnabled, lookupCache, storeInCache } from './semanticCacheService';
+import { evaluateGuardrail } from '@/lib/services/guardrail';
 
 const encoder = new TextEncoder();
 
@@ -47,6 +58,73 @@ export class GuardrailBlockError extends Error {
     this.guardrailKey = guardrailKey;
     this.action = action;
     this.findings = findings;
+  }
+}
+
+// ── Model guardrail enforcement ───────────────────────────────────────────
+// A guardrail attached to a model runs on every chat completion. The direction
+// is decided by the slot it is bound to: `inputGuardrailKey` checks the user
+// message before the model is called, `outputGuardrailKey` checks the assistant
+// response (non-streaming only). Blocking guardrails throw GuardrailBlockError.
+
+function guardrailContentToText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) =>
+        typeof part === 'string'
+          ? part
+          : part && typeof part === 'object' && 'text' in part
+            ? String((part as { text?: unknown }).text ?? '')
+            : '',
+      )
+      .filter(Boolean)
+      .join(' ');
+  }
+  return '';
+}
+
+function extractLatestUserText(messages: unknown): string {
+  if (!Array.isArray(messages)) return '';
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i] as { role?: string; content?: unknown };
+    if (msg?.role === 'user') return guardrailContentToText(msg.content);
+  }
+  return '';
+}
+
+function extractAssistantText(response: unknown): string {
+  const choices = (response as { choices?: Array<{ message?: { content?: unknown } }> })?.choices;
+  return guardrailContentToText(choices?.[0]?.message?.content);
+}
+
+async function enforceModelGuardrail(params: {
+  tenantDbName: string;
+  tenantId: string;
+  projectId: string;
+  guardrailKey: string;
+  text: string;
+  phase: 'input' | 'output';
+}): Promise<void> {
+  if (!params.text.trim()) return;
+  const result = await evaluateGuardrail({
+    tenantDbName: params.tenantDbName,
+    tenantId: params.tenantId,
+    projectId: params.projectId,
+    guardrailKey: params.guardrailKey,
+    text: params.text,
+  });
+  if (!result.passed && result.action === 'block') {
+    const reasons = result.findings
+      .map((f) => f.category || f.type)
+      .filter(Boolean)
+      .join(', ');
+    throw new GuardrailBlockError(
+      `${params.phase === 'input' ? 'Input' : 'Output'} blocked by guardrail "${result.guardrailName}"${reasons ? `: ${reasons}` : ''}`,
+      result.guardrailKey,
+      result.action,
+      result.findings,
+    );
   }
 }
 
@@ -276,6 +354,210 @@ function ensureEmbeddingModel(model: IModel) {
   }
 }
 
+/**
+ * Unified result shape for chat completions. A single object (not a union) so
+ * callers can probe `stream` / `response` / `usage` without narrowing — exactly
+ * how every existing call site already uses it. `routing` is present only on
+ * Dynamic LLM responses.
+ */
+export interface ChatCompletionOutcome {
+  response?: Record<string, unknown>;
+  usage?: TokenUsage;
+  latencyMs?: number;
+  requestId: string;
+  cacheHit?: boolean;
+  stream?: ReadableStream<Uint8Array>;
+  routing?: IModelUsageRouting;
+}
+
+// ── Dynamic LLM resolution ────────────────────────────────────────────────
+// Resolves a Dynamic LLM router to a concrete child model and invokes it via
+// `handleChatCompletion` (recursively, depth-guarded). The router records its
+// own decision row (route 'chat.completions.router') with the full routing
+// metadata; the child + any decider model log their real usage independently,
+// so cost is never double-counted (router pricing is zero).
+async function resolveDynamicCompletion(args: {
+  tenantDbName: string;
+  tenantId?: string;
+  projectId: string;
+  body: ChatCompletionRequestBody;
+  stream?: boolean;
+  router: IModel;
+  config: IDynamicRoutingConfig;
+  depth: number;
+}): Promise<ChatCompletionOutcome> {
+  const { tenantDbName, tenantId, projectId, body, stream, router, config, depth } = args;
+  const start = Date.now();
+  const routerRequestId =
+    typeof body.request_id === 'string' && body.request_id.length > 0
+      ? body.request_id
+      : crypto.randomUUID();
+
+  const signals = extractRoutingSignals(body);
+
+  let chosenModelKey = config.defaultModelKey;
+  let decision: IModelUsageRouting['decision'] = 'default';
+  let matchedRuleLabel: string | undefined;
+  let deciderLabel: string | undefined;
+  let deciderModelKey: string | undefined;
+  let deciderLatencyMs: number | undefined;
+  let reason = 'No rule matched; used default model';
+
+  if (config.strategy === 'rule-based') {
+    const rule = evaluateRules(config.rules ?? [], signals);
+    if (rule) {
+      chosenModelKey = rule.targetModelKey;
+      decision = 'rule';
+      matchedRuleLabel = rule.label;
+      reason = `Matched rule "${rule.label}"`;
+    }
+  } else if (config.strategy === 'model-based' && config.decider) {
+    deciderModelKey = config.decider.modelKey;
+    const deciderStart = Date.now();
+    try {
+      const deciderResult = (await handleChatCompletion({
+        tenantDbName,
+        tenantId,
+        modelKey: config.decider.modelKey,
+        projectId,
+        body: {
+          messages: buildDeciderMessages(config.decider, signals),
+          temperature: 0,
+          max_tokens: 16,
+        },
+        _routingDepth: depth + 1,
+      })) as { response?: unknown };
+      deciderLatencyMs = Date.now() - deciderStart;
+      const text = extractAssistantText(deciderResult.response);
+      const label = parseDeciderLabel(text, config.decider.labels);
+      if (label) {
+        chosenModelKey = label.targetModelKey;
+        decision = 'model';
+        deciderLabel = label.label;
+        reason = `Decider "${config.decider.modelKey}" classified as "${label.label}"`;
+      } else {
+        reason = `Decider returned an unrecognized label "${text.slice(0, 40)}"; used default model`;
+      }
+    } catch (error) {
+      deciderLatencyMs = Date.now() - deciderStart;
+      reason = `Decider failed (${error instanceof Error ? error.message : 'error'}); used default model`;
+    }
+  }
+
+  // Never route back to the router itself (would loop until the depth cap).
+  if (chosenModelKey === router.key) {
+    chosenModelKey = config.defaultModelKey === router.key ? '' : config.defaultModelKey;
+  }
+
+  const runChild = (childKey: string) =>
+    handleChatCompletion({
+      tenantDbName,
+      tenantId,
+      modelKey: childKey,
+      projectId,
+      body,
+      stream,
+      _routingDepth: depth + 1,
+    });
+
+  const buildRouting = (
+    chosen: string,
+    decisionValue: IModelUsageRouting['decision'],
+    reasonValue: string,
+  ): IModelUsageRouting => ({
+    routerKey: router.key,
+    routerModelDbId: router._id ? String(router._id) : undefined,
+    strategy: config.strategy,
+    decision: decisionValue,
+    chosenModelKey: chosen,
+    matchedRuleLabel,
+    deciderLabel,
+    deciderModelKey,
+    deciderLatencyMs,
+    reason: reasonValue,
+    signals: publicSignals(signals),
+  });
+
+  const logDecision = (
+    routing: IModelUsageRouting,
+    status: 'success' | 'error',
+    usage: TokenUsage,
+    errorMessage?: string,
+  ) => {
+    fireAndForget('log-router-decision', () =>
+      logModelUsage(tenantDbName, router, {
+        requestId: routerRequestId,
+        route: 'chat.completions.router',
+        status,
+        providerRequest: sanitizeForLogging({
+          model: router.key,
+          messages: body.messages,
+          signals: routing.signals,
+        }),
+        providerResponse: sanitizeForLogging({
+          chosenModelKey: routing.chosenModelKey,
+          decision: routing.decision,
+          reason: routing.reason,
+        }),
+        errorMessage,
+        latencyMs: Date.now() - start,
+        usage,
+        routing,
+      }),
+    );
+  };
+
+  let finalModelKey = chosenModelKey;
+  let finalDecision: IModelUsageRouting['decision'] = decision;
+  let finalReason = reason;
+  let childResult: ChatCompletionOutcome;
+
+  try {
+    if (!chosenModelKey) throw new Error('No target model resolved for dynamic router');
+    childResult = await runChild(chosenModelKey);
+  } catch (primaryError) {
+    if (config.fallbackModelKey && config.fallbackModelKey !== chosenModelKey) {
+      finalModelKey = config.fallbackModelKey;
+      finalDecision = 'fallback';
+      finalReason = `${reason}; primary "${chosenModelKey || '(none)'}" failed, fell back to "${config.fallbackModelKey}"`;
+      try {
+        childResult = await runChild(config.fallbackModelKey);
+      } catch (fallbackError) {
+        logDecision(
+          buildRouting(finalModelKey, finalDecision, finalReason),
+          'error',
+          {},
+          fallbackError instanceof Error ? fallbackError.message : 'error',
+        );
+        throw fallbackError;
+      }
+    } else {
+      logDecision(
+        buildRouting(chosenModelKey, decision, reason),
+        'error',
+        {},
+        primaryError instanceof Error ? primaryError.message : 'error',
+      );
+      throw primaryError;
+    }
+  }
+
+  const routing = buildRouting(finalModelKey, finalDecision, finalReason);
+
+  // Streaming children return { stream, requestId }; non-streaming return
+  // { response, usage, ... }. Mirror the child's token usage onto the router
+  // row for traffic accounting (router pricing is zero, so cost never doubles).
+  routing.childRequestId = childResult.requestId;
+
+  if (stream) {
+    logDecision(routing, 'success', {});
+    return { ...childResult, routing };
+  }
+
+  logDecision(routing, 'success', childResult.usage ?? {});
+  return { ...childResult, routing };
+}
+
 export async function handleChatCompletion(params: {
   tenantDbName: string;
   tenantId?: string;
@@ -283,7 +565,9 @@ export async function handleChatCompletion(params: {
   projectId: string;
   body: ChatCompletionRequestBody;
   stream?: boolean;
-}) {
+  /** Internal: recursion depth when a Dynamic LLM resolves to another model. */
+  _routingDepth?: number;
+}): Promise<ChatCompletionOutcome> {
   const { tenantDbName, tenantId, modelKey, projectId, body, stream } = params;
 
   if (!Array.isArray(body?.messages)) {
@@ -301,7 +585,41 @@ export async function handleChatCompletion(params: {
     throw new Error(`Model with key ${modelKey} not found`);
   }
 
+  // Dynamic LLM: this model owns no provider — it routes to a concrete child
+  // model. Resolve and recurse before any provider/runtime work happens.
+  const dynamicConfig = getDynamicRoutingConfig(model);
+  if (dynamicConfig) {
+    const depth = params._routingDepth ?? 0;
+    if (depth >= MAX_ROUTING_DEPTH) {
+      throw new Error(
+        `Dynamic routing depth exceeded (${MAX_ROUTING_DEPTH}) resolving model "${modelKey}"`,
+      );
+    }
+    return resolveDynamicCompletion({
+      tenantDbName,
+      tenantId,
+      projectId,
+      body,
+      stream,
+      router: model,
+      config: dynamicConfig,
+      depth,
+    });
+  }
+
   ensureLlmModel(model);
+
+  // Input guardrail: check the latest user message before calling the model.
+  if (model.inputGuardrailKey) {
+    await enforceModelGuardrail({
+      tenantDbName,
+      tenantId: model.tenantId,
+      projectId,
+      guardrailKey: model.inputGuardrailKey,
+      text: extractLatestUserText(body.messages),
+      phase: 'input',
+    });
+  }
 
   // Semantic cache: check for cached response before calling the model
   const cacheEnabled = !stream && tenantId && isSemanticCacheEnabled(model);
@@ -515,6 +833,19 @@ export async function handleChatCompletion(params: {
       cacheHit: false,
     }),
   );
+
+  // Output guardrail: check the assistant response before returning it
+  // (non-streaming only — streamed responses can't be inspected up front).
+  if (model.outputGuardrailKey) {
+    await enforceModelGuardrail({
+      tenantDbName,
+      tenantId: model.tenantId,
+      projectId,
+      guardrailKey: model.outputGuardrailKey,
+      text: extractAssistantText(response),
+      phase: 'output',
+    });
+  }
 
   // Semantic cache: store the response for future lookups
   if (cacheEnabled && tenantId && model.semanticCache) {

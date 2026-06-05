@@ -1,5 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify';
-import type { AgentStatus, IAgentConfig } from '@/lib/database';
+import type { AgentStatus, IAgent, IAgentConfig } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
   createAgentRecord,
@@ -11,6 +11,7 @@ import {
   listAgents,
   listAgentVersions,
   listConversations,
+  prepareConnectionForStorage,
   publishAgent,
   updateAgentRecord,
 } from '@/lib/services/agents';
@@ -23,6 +24,47 @@ import {
 
 const logger = createLogger('api:agents');
 
+/**
+ * Strip secret material (encrypted inline API keys) from an agent before it
+ * leaves the API. The presence of a key is surfaced as `connection.hasApiKey`.
+ */
+function redactAgent<T extends IAgent>(agent: T): T {
+  const connection = agent.config?.connection;
+  if (!connection) return agent;
+  const { apiKeyEnc, ...rest } = connection;
+  return {
+    ...agent,
+    config: {
+      ...agent.config,
+      connection: { ...rest, hasApiKey: Boolean(apiKeyEnc) },
+    },
+  } as unknown as T;
+}
+
+/**
+ * Normalize an incoming agent config. For connected (external) agents the
+ * connection is validated and its inline API key encrypted; native agents must
+ * carry a modelKey. Throws (Error) on invalid input — callers map to 400.
+ */
+function normalizeAgentConfig(rawConfig: unknown): IAgentConfig {
+  if (!rawConfig || typeof rawConfig !== 'object') {
+    throw new Error('Agent config is required');
+  }
+  const cfg = rawConfig as Record<string, unknown>;
+
+  if (cfg.kind === 'external') {
+    return {
+      kind: 'external',
+      connection: prepareConnectionForStorage(cfg.connection),
+    };
+  }
+
+  if (typeof cfg.modelKey !== 'string' || !cfg.modelKey) {
+    throw new Error('Model configuration is required');
+  }
+  return cfg as IAgentConfig;
+}
+
 export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/agents', withApiRequestContext(async (request, reply) => {
     try {
@@ -34,7 +76,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         status: query.status as AgentStatus | undefined,
       });
 
-      return reply.code(200).send({ agents });
+      return reply.code(200).send({ agents: agents.map(redactAgent) });
     } catch (error) {
       logger.error('List agents error', { error });
       return sendProjectContextError(reply, error)
@@ -46,19 +88,18 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const body = readJsonBody<Record<string, unknown>>(request);
-      const config = body.config;
 
       if (typeof body.name !== 'string') {
         return reply.code(400).send({ error: 'Agent name is required' });
       }
 
-      if (
-        !config
-        || typeof config !== 'object'
-        || !('modelKey' in config)
-        || typeof (config as { modelKey?: unknown }).modelKey !== 'string'
-      ) {
-        return reply.code(400).send({ error: 'Model configuration is required' });
+      let config: IAgentConfig;
+      try {
+        config = normalizeAgentConfig(body.config);
+      } catch (validationError) {
+        return reply.code(400).send({
+          error: validationError instanceof Error ? validationError.message : 'Invalid agent config',
+        });
       }
 
       const agent = await createAgentRecord(
@@ -67,13 +108,13 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         projectId,
         session.userId,
         {
-          config: config as IAgentConfig,
+          config,
           description: body.description as string | undefined,
           name: body.name,
         },
       );
 
-      return reply.code(201).send({ agent });
+      return reply.code(201).send({ agent: redactAgent(agent) });
     } catch (error) {
       logger.error('Create agent error', { error });
       return sendProjectContextError(reply, error)
@@ -92,7 +133,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Agent not found' });
       }
 
-      return reply.code(200).send({ agent });
+      return reply.code(200).send({ agent: redactAgent(agent) });
     } catch (error) {
       logger.error('Get agent error', { error });
       return sendProjectContextError(reply, error)
@@ -105,13 +146,42 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       const { session } = await requireProjectContextForRequest(request);
       const { agentId } = request.params as { agentId: string };
       const body = readJsonBody<Record<string, unknown>>(request);
+
+      if (body.config && typeof body.config === 'object') {
+        const cfg = body.config as Record<string, unknown>;
+        if (cfg.kind === 'external') {
+          // Connected-agent config: validate connection & preserve the stored
+          // API key when the client edits without resending it.
+          const conn = { ...((cfg.connection as Record<string, unknown>) ?? {}) };
+          if (!conn.apiKey && !conn.apiKeyEnc) {
+            const existing = await getAgentById(session.tenantDbName, agentId);
+            const existingEnc = existing?.config?.connection?.apiKeyEnc;
+            if (existingEnc) conn.apiKeyEnc = existingEnc;
+          }
+          try {
+            body.config = { kind: 'external', connection: prepareConnectionForStorage(conn) };
+          } catch (validationError) {
+            return reply.code(400).send({
+              error: validationError instanceof Error ? validationError.message : 'Invalid agent config',
+            });
+          }
+        } else {
+          // Guard: never let a native-shaped config silently clobber a stored
+          // connected agent's connection (e.g. a stray playground auto-save).
+          const existing = await getAgentById(session.tenantDbName, agentId);
+          if (existing?.config?.kind === 'external') {
+            delete body.config;
+          }
+        }
+      }
+
       const agent = await updateAgentRecord(session.tenantDbName, agentId, body, session.userId);
 
       if (!agent) {
         return reply.code(404).send({ error: 'Agent not found' });
       }
 
-      return reply.code(200).send({ agent });
+      return reply.code(200).send({ agent: redactAgent(agent) });
     } catch (error) {
       logger.error('Update agent error', { error });
       return sendProjectContextError(reply, error)

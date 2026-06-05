@@ -11,6 +11,8 @@
  *   POST   /api/pii/detect                                – ad-hoc detection (no persistence)
  *   POST   /api/pii/redact                                – ad-hoc redact ([REDACTED_X])
  *   POST   /api/pii/mask                                  – ad-hoc partial mask
+ *   POST   /api/pii/tokenize                              – ad-hoc reversible mask ([EMAIL_1] + vault)
+ *   POST   /api/pii/detokenize                            – restore originals from a vault
  *   POST   /api/pii/scan                                  – scan with stored policy
  */
 
@@ -22,14 +24,17 @@ import {
   createPiiPolicy,
   deletePiiPolicy,
   detectPii,
+  detokenizePii,
   getCategoryCatalog,
   getPiiPolicy,
   listPiiPolicies,
   maskPii,
   redactPii,
   scanWithPolicy,
+  tokenizePii,
   updatePiiPolicy,
 } from '@/lib/services/pii';
+import type { PiiVault } from '@/lib/services/pii';
 import {
   parseBooleanQuery,
   readJsonBody,
@@ -41,7 +46,8 @@ import {
 
 const logger = createLogger('api:pii');
 
-const VALID_ACTIONS: PiiAction[] = ['detect', 'redact', 'mask', 'block'];
+const VALID_ACTIONS: PiiAction[] = ['detect', 'redact', 'mask', 'block', 'tokenize'];
+const ACTIONS_HINT = 'detect, redact, mask, block, or tokenize';
 const VALID_LANGS: PiiLanguage[] = ['global', 'en', 'tr', 'de', 'fr', 'es', 'it', 'pt', 'ar', 'ja', 'zh'];
 
 function parseLanguages(input: unknown): PiiLanguage[] | undefined {
@@ -112,7 +118,7 @@ export const piiApiPlugin: FastifyPluginAsync = async (app) => {
       }
       const defaultAction = (body.defaultAction as PiiAction) ?? 'detect';
       if (!VALID_ACTIONS.includes(defaultAction)) {
-        return reply.code(400).send({ error: 'defaultAction must be detect, redact, mask, or block' });
+        return reply.code(400).send({ error: `defaultAction must be ${ACTIONS_HINT}` });
       }
       const categories = (body.categories as Record<string, boolean> | undefined)
         ?? buildDefaultPolicyCategories();
@@ -164,7 +170,7 @@ export const piiApiPlugin: FastifyPluginAsync = async (app) => {
       const { id } = request.params as { id: string };
       const body = readJsonBody<Record<string, unknown>>(request);
       if (body.defaultAction !== undefined && !VALID_ACTIONS.includes(body.defaultAction as PiiAction)) {
-        return reply.code(400).send({ error: 'defaultAction must be detect, redact, mask, or block' });
+        return reply.code(400).send({ error: `defaultAction must be ${ACTIONS_HINT}` });
       }
       const policy = await updatePiiPolicy(session.tenantDbName, id, session.userId, {
         name: body.name as string | undefined,
@@ -200,8 +206,8 @@ export const piiApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  // ── Ad-hoc detect/redact/mask (no policy needed) ──
-  for (const op of ['detect', 'redact', 'mask'] as const) {
+  // ── Ad-hoc detect/redact/mask/tokenize (no policy needed) ──
+  for (const op of ['detect', 'redact', 'mask', 'tokenize'] as const) {
     app.post(`/pii/${op}`, withApiRequestContext(async (request, reply) => {
       try {
         requireSessionContext(request);
@@ -222,7 +228,9 @@ export const piiApiPlugin: FastifyPluginAsync = async (app) => {
           ? detectPii(payload)
           : op === 'redact'
             ? redactPii(payload)
-            : maskPii(payload);
+            : op === 'mask'
+              ? maskPii(payload)
+              : tokenizePii(payload);
         return reply.code(200).send(result);
       } catch (error) {
         logger.error(`PII ${op} error`, { error });
@@ -231,6 +239,26 @@ export const piiApiPlugin: FastifyPluginAsync = async (app) => {
       }
     }));
   }
+
+  // ── Detokenize: reverse a prior tokenize using its vault ──
+  app.post('/pii/detokenize', withApiRequestContext(async (request, reply) => {
+    try {
+      requireSessionContext(request);
+      const body = readJsonBody<Record<string, unknown>>(request);
+      if (typeof body.text !== 'string') {
+        return reply.code(400).send({ error: 'text is required' });
+      }
+      if (typeof body.vault !== 'object' || body.vault === null || Array.isArray(body.vault)) {
+        return reply.code(400).send({ error: 'vault is required (object returned by /pii/tokenize)' });
+      }
+      const result = detokenizePii({ text: body.text, vault: body.vault as PiiVault });
+      return reply.code(200).send(result);
+    } catch (error) {
+      logger.error('PII detokenize error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: error instanceof Error ? error.message : 'Internal error' });
+    }
+  }));
 
   // ── Scan with stored policy ──
   app.post('/pii/scan', withApiRequestContext(async (request, reply) => {
@@ -246,7 +274,7 @@ export const piiApiPlugin: FastifyPluginAsync = async (app) => {
       const policyKey = (body.policy_key ?? body.policyKey) as string;
       const actionOverride = body.action as PiiAction | undefined;
       if (actionOverride !== undefined && !VALID_ACTIONS.includes(actionOverride)) {
-        return reply.code(400).send({ error: 'action must be detect, redact, mask, or block' });
+        return reply.code(400).send({ error: `action must be ${ACTIONS_HINT}` });
       }
       const result = await scanWithPolicy({
         tenantDbName: session.tenantDbName,

@@ -14,6 +14,8 @@ import { InferenceServerCollector } from './inferenceServerCollector';
 import { GuardrailCollector } from './guardrailCollector';
 import { RagCollector } from './ragCollector';
 import { McpCollector } from './mcpCollector';
+import { AnalysisCollector } from './analysisCollector';
+import { EvaluationCollector } from './evaluationCollector';
 
 const collectors: IMetricCollector[] = [];
 
@@ -40,5 +42,7 @@ register(new InferenceServerCollector());
 register(new GuardrailCollector());
 register(new RagCollector());
 register(new McpCollector());
+register(new AnalysisCollector());
+register(new EvaluationCollector());
 
 export type { IMetricCollector, MetricQuery, MetricResult } from './types';

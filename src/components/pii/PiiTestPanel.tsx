@@ -25,7 +25,7 @@ interface Finding {
   end: number;
   label: string;
   message: string;
-  action: 'detect' | 'redact' | 'mask' | 'block';
+  action: 'detect' | 'redact' | 'mask' | 'block' | 'tokenize';
   block: boolean;
   replacement: string;
 }
@@ -34,6 +34,7 @@ interface ScanResult {
   findings: Finding[];
   outputText: string;
   inputLength: number;
+  vault?: Record<string, { value: string; category: string }>;
 }
 
 interface Props {
@@ -49,10 +50,10 @@ export default function PiiTestPanel({ categories, customPatterns, languages }: 
 
   const [text, setText] = useState('');
   const [result, setResult] = useState<ScanResult | null>(null);
-  const [activeAction, setActiveAction] = useState<'detect' | 'redact' | 'mask' | null>(null);
+  const [activeAction, setActiveAction] = useState<'detect' | 'redact' | 'mask' | 'tokenize' | null>(null);
   const [running, setRunning] = useState(false);
 
-  const run = async (action: 'detect' | 'redact' | 'mask') => {
+  const run = async (action: 'detect' | 'redact' | 'mask' | 'tokenize') => {
     if (!text.trim()) return;
     setRunning(true);
     setActiveAction(action);
@@ -130,6 +131,15 @@ export default function PiiTestPanel({ categories, customPatterns, languages }: 
         >
           {t('runMask')}
         </Button>
+        <Button
+          variant={activeAction === 'tokenize' ? 'filled' : 'light'}
+          color="grape"
+          loading={running && activeAction === 'tokenize'}
+          onClick={() => void run('tokenize')}
+          disabled={!text.trim()}
+        >
+          {t('runTokenize')}
+        </Button>
       </Group>
 
       {result && (
@@ -143,6 +153,30 @@ export default function PiiTestPanel({ categories, customPatterns, languages }: 
               {result.outputText || ' '}
             </Code>
           </Paper>
+
+          {result.vault && Object.keys(result.vault).length > 0 && (
+            <Paper p="md" withBorder radius="sm">
+              <Text size="sm" fw={600} mb="xs">{t('vault')}</Text>
+              <Table striped highlightOnHover withColumnBorders verticalSpacing="xs" fz="xs">
+                <Table.Thead>
+                  <Table.Tr>
+                    <Table.Th>Token</Table.Th>
+                    <Table.Th>{t('value')}</Table.Th>
+                    <Table.Th>{t('category')}</Table.Th>
+                  </Table.Tr>
+                </Table.Thead>
+                <Table.Tbody>
+                  {Object.entries(result.vault).map(([token, entry]) => (
+                    <Table.Tr key={token}>
+                      <Table.Td><Code>{token}</Code></Table.Td>
+                      <Table.Td>{entry.value}</Table.Td>
+                      <Table.Td>{entry.category}</Table.Td>
+                    </Table.Tr>
+                  ))}
+                </Table.Tbody>
+              </Table>
+            </Paper>
+          )}
 
           <Paper p="md" withBorder radius="sm">
             <Text size="sm" fw={600} mb="xs">{t('findings')}</Text>

@@ -1,4 +1,4 @@
-import type { IGuardrail, GuardrailAction, GuardrailTarget, GuardrailType } from '@/lib/database';
+import type { IGuardrail, GuardrailAction, GuardrailType } from '@/lib/database';
 
 // ── PII Category definitions ─────────────────────────────────────────────
 
@@ -184,7 +184,6 @@ export interface CreateGuardrailInput {
   name: string;
   description?: string;
   type: GuardrailType;
-  target: GuardrailTarget;
   action: GuardrailAction;
   enabled?: boolean;
   modelKey?: string;
@@ -196,7 +195,6 @@ export interface CreateGuardrailInput {
 export interface UpdateGuardrailInput {
   name?: string;
   description?: string;
-  target?: GuardrailTarget;
   action?: GuardrailAction;
   enabled?: boolean;
   modelKey?: string;
@@ -212,7 +210,6 @@ export interface GuardrailView {
   name: string;
   description?: string;
   type: GuardrailType;
-  target: GuardrailTarget;
   action: GuardrailAction;
   enabled: boolean;
   modelKey?: string;

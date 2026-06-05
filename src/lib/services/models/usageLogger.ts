@@ -1,4 +1,4 @@
-import { getDatabase, IModel, IModelPricing } from '@/lib/database';
+import { getDatabase, IModel, IModelPricing, IModelUsageRouting } from '@/lib/database';
 
 const TOKENS_PER_MILLION = 1_000_000;
 const SECONDS_PER_THOUSAND = 1_000;
@@ -96,6 +96,7 @@ export async function logModelUsage(
     latencyMs?: number;
     usage: TokenUsage;
     cacheHit?: boolean;
+    routing?: IModelUsageRouting;
   },
 ) {
   const db = await getDatabase();
@@ -134,5 +135,6 @@ export async function logModelUsage(
     toolCalls: usage.toolCalls ?? 0,
     cacheHit: payload.cacheHit,
     pricingSnapshot,
+    routing: payload.routing,
   });
 }

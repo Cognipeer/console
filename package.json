@@ -17,6 +17,7 @@
     "test:coverage": "vitest run --coverage",
     "test:ui": "vitest --ui",
     "test:endpoints": "tsx scripts/check-endpoint-coverage.ts",
+    "test:smoke": "node --import tsx scripts/smoke/run.ts",
     "test:flake": "tsx scripts/flake-hunter.ts",
     "format": "prettier --log-level warn --no-error-on-unmatched-pattern --write ./src/{,*/**/,*/**/**/,*/**/**/**/}*.{js,jsx,ts}",
     "check-setup": "node scripts/check-setup.js",
@@ -52,6 +53,7 @@
     "@mantine/hooks": "^8.3.2",
     "@mantine/notifications": "^8.3.2",
     "@mantine/spotlight": "^8.3.2",
+    "@napi-rs/canvas": "^0.1.100",
     "@tabler/icons-react": "^3.35.0",
     "@tanstack/react-query": "^5.90.2",
     "@tanstack/react-query-devtools": "^5.90.2",
@@ -79,6 +81,7 @@
     "mustache": "^4.2.0",
     "next": "^15.5.18",
     "nodemailer": "^8.0.5",
+    "pdf-to-img": "^6.1.0",
     "pg": "^8.20.0",
     "playwright": "^1.49.1",
     "postcss": "^8.5.14",
@@ -92,7 +95,8 @@
     "recharts": "^3.7.0",
     "remark-gfm": "^4.0.1",
     "slugify": "^1.6.6",
-    "winston": "^3.19.0"
+    "winston": "^3.19.0",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",

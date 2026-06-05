@@ -54,12 +54,6 @@ interface ModelOption {
   label: string;
 }
 
-const TARGET_OPTIONS = [
-  { value: 'input', label: 'Input only' },
-  { value: 'output', label: 'Output only' },
-  { value: 'both', label: 'Both (input & output)' },
-];
-
 const ACTION_OPTIONS = [
   { value: 'block', label: 'Block — reject the request' },
   { value: 'warn', label: 'Warn — pass with a warning' },
@@ -94,7 +88,6 @@ export default function GuardrailDetailPage() {
     initialValues: {
       name: '',
       description: '',
-      target: 'both',
       action: 'block',
       modelKey: '',
       enabled: true,
@@ -127,7 +120,6 @@ export default function GuardrailDetailPage() {
       form.setValues({
         name: g.name,
         description: g.description ?? '',
-        target: g.target,
         action: g.action,
         modelKey: g.modelKey ?? '',
         enabled: g.enabled,
@@ -309,8 +301,6 @@ export default function GuardrailDetailPage() {
         meta={
           <>
             <span className="ds-mono">{guardrail.key}</span>
-            <span className="ds-faint">·</span>
-            <span>target: <span className="ds-mono">{guardrail.target}</span></span>
             {guardrail.modelKey ? (
               <>
                 <span className="ds-faint">·</span>
@@ -365,10 +355,6 @@ export default function GuardrailDetailPage() {
                   <Group justify="space-between" wrap="nowrap">
                     <Text size="sm" c="dimmed">Type</Text>
                     <Badge variant="light" color={typeColor}>{guardrail.type}</Badge>
-                  </Group>
-                  <Group justify="space-between" wrap="nowrap">
-                    <Text size="sm" c="dimmed">Target</Text>
-                    <Text size="sm">{guardrail.target}</Text>
                   </Group>
                   <Group justify="space-between" wrap="nowrap">
                     <Text size="sm" c="dimmed">Default Action</Text>
@@ -443,20 +429,12 @@ export default function GuardrailDetailPage() {
                   />
                 </Group>
 
-                <Group align="flex-start" grow wrap="nowrap">
-                  <Select
-                    label="Target"
-                    description="Which direction to check"
-                    data={TARGET_OPTIONS}
-                    {...form.getInputProps('target')}
-                  />
-                  <Select
-                    label="Default Action"
-                    description="What happens on a violation"
-                    data={ACTION_OPTIONS}
-                    {...form.getInputProps('action')}
-                  />
-                </Group>
+                <Select
+                  label="Default Action"
+                  description="What happens on a violation. Direction (input/output) is set where the guardrail is attached."
+                  data={ACTION_OPTIONS}
+                  {...form.getInputProps('action')}
+                />
 
                 {guardrail.type === 'custom' && (
                   <Select

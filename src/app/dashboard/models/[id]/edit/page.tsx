@@ -69,7 +69,16 @@ interface ModelDetailDto {
   pricing: ModelPricing;
   settings: Record<string, string>;
   semanticCache?: SemanticCacheConfig;
+  inputGuardrailKey?: string;
+  outputGuardrailKey?: string;
   metadata?: Record<string, unknown>;
+}
+
+interface GuardrailOption {
+  key: string;
+  name: string;
+  type: 'preset' | 'custom';
+  action: string;
 }
 
 function slugify(value: string) {
@@ -102,6 +111,8 @@ interface FormValues {
   semanticCacheEmbeddingModelKey: string;
   semanticCacheSimilarityThreshold: number;
   semanticCacheTtlSeconds: number;
+  inputGuardrailKey: string;
+  outputGuardrailKey: string;
 }
 
 interface VectorProviderOption {
@@ -133,6 +144,7 @@ export default function EditModelPage() {
   const [vectorProviders, setVectorProviders] = useState<VectorProviderOption[]>([]);
   const [vectorIndexes, setVectorIndexes] = useState<VectorIndexOption[]>([]);
   const [embeddingModels, setEmbeddingModels] = useState<EmbeddingModelOption[]>([]);
+  const [guardrails, setGuardrails] = useState<GuardrailOption[]>([]);
 
   const form = useForm<FormValues>({
     initialValues: {
@@ -156,6 +168,8 @@ export default function EditModelPage() {
       semanticCacheEmbeddingModelKey: '',
       semanticCacheSimilarityThreshold: 0.92,
       semanticCacheTtlSeconds: 3600,
+      inputGuardrailKey: '',
+      outputGuardrailKey: '',
     },
     validate: {
       name: (value) => (!value ? tWizard('validation.name') : null),
@@ -204,11 +218,12 @@ export default function EditModelPage() {
 
     setRefreshing(!loading);
     try {
-      const [modelResponse, providerResponse, vectorProviderResponse, embeddingModelsResponse] = await Promise.all([
+      const [modelResponse, providerResponse, vectorProviderResponse, embeddingModelsResponse, guardrailsResponse] = await Promise.all([
         fetch(`/api/models/${modelId}`),
         fetch('/api/models/providers'),
         fetch('/api/vector/providers'),
         fetch('/api/models?category=embedding'),
+        fetch('/api/guardrails?enabled=true'),
       ]);
 
       if (!modelResponse.ok) {
@@ -247,6 +262,8 @@ export default function EditModelPage() {
         semanticCacheEmbeddingModelKey: cache?.embeddingModelKey || '',
         semanticCacheSimilarityThreshold: cache?.similarityThreshold ?? 0.92,
         semanticCacheTtlSeconds: cache?.ttlSeconds ?? 3600,
+        inputGuardrailKey: nextModel.inputGuardrailKey || '',
+        outputGuardrailKey: nextModel.outputGuardrailKey || '',
       });
 
       if (providerResponse.ok) {
@@ -279,6 +296,20 @@ export default function EditModelPage() {
             key: m.key,
             name: m.name,
           })),
+        );
+      }
+
+      if (guardrailsResponse.ok) {
+        const gData = await guardrailsResponse.json();
+        setGuardrails(
+          (gData.guardrails ?? []).map(
+            (g: { key: string; name: string; type: 'preset' | 'custom'; action: string }) => ({
+              key: g.key,
+              name: g.name,
+              type: g.type,
+              action: g.action,
+            }),
+          ),
         );
       }
 
@@ -346,6 +377,8 @@ export default function EditModelPage() {
             similarityThreshold: values.semanticCacheSimilarityThreshold,
             ttlSeconds: values.semanticCacheTtlSeconds,
           },
+          inputGuardrailKey: values.inputGuardrailKey || '',
+          outputGuardrailKey: values.outputGuardrailKey || '',
         }),
       });
 
@@ -643,6 +676,61 @@ export default function EditModelPage() {
                         </Grid.Col>
                       </Grid>
                     </Stack>
+                  )}
+                </Stack>
+              </Card>
+            )}
+
+            {/* Guardrails section - only for LLM models */}
+            {model.category === 'llm' && (
+              <Card withBorder radius="md" padding="md">
+                <Stack gap="sm">
+                  <Title order={4}>Guardrails</Title>
+                  <Text size="sm" c="dimmed">
+                    Safety checks that run automatically on every request to this model. The input
+                    guardrail checks the user message before the model is called; the output
+                    guardrail checks the response before it is returned (non-streaming only).
+                  </Text>
+                  {guardrails.length === 0 ? (
+                    <Text size="sm" c="dimmed">
+                      No guardrails defined yet.{' '}
+                      <Link href="/dashboard/guardrails" style={{ color: 'var(--mantine-color-teal-6)' }}>
+                        Create one first.
+                      </Link>
+                    </Text>
+                  ) : (
+                    <Grid>
+                      <Grid.Col span={{ base: 12, md: 6 }}>
+                        <Select
+                          label="Input guardrail"
+                          description="Checks the user message"
+                          placeholder="None — no input check"
+                          data={guardrails.map((g) => ({
+                            value: g.key,
+                            label: `${g.name} [${g.type} · ${g.action}]`,
+                          }))}
+                          value={form.values.inputGuardrailKey || null}
+                          onChange={(val) => form.setFieldValue('inputGuardrailKey', val || '')}
+                          clearable
+                          searchable
+                        />
+                      </Grid.Col>
+                      <Grid.Col span={{ base: 12, md: 6 }}>
+                        <Select
+                          label="Output guardrail"
+                          description="Checks the model response"
+                          placeholder="None — no output check"
+                          data={guardrails.map((g) => ({
+                            value: g.key,
+                            label: `${g.name} [${g.type} · ${g.action}]`,
+                          }))}
+                          value={form.values.outputGuardrailKey || null}
+                          onChange={(val) => form.setFieldValue('outputGuardrailKey', val || '')}
+                          clearable
+                          searchable
+                        />
+                      </Grid.Col>
+                    </Grid>
                   )}
                 </Stack>
               </Card>

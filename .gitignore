@@ -19,6 +19,8 @@
 
 # testing
 /coverage
+scripts/smoke/reports/
+tests/e2e/reports/
 
 # next.js
 /.next/
@@ -60,3 +62,4 @@ next-env.d.ts
 node_modules/
 
 .claude
+tests/e2e/reports/

@@ -7,7 +7,7 @@ import {
   useState,
 } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import {
   Button,
   Center,
@@ -21,6 +21,7 @@ import { notifications } from '@mantine/notifications';
 import {
   IconActivity,
   IconAlertTriangle,
+  IconArrowsSplit,
   IconBolt,
   IconBrain,
   IconChartBar,
@@ -42,12 +43,17 @@ import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import StatTile from '@/components/common/ui/StatTile';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
+import { useTableControls } from '@/components/common/ui/useTableControls';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import { useTranslations } from '@/lib/i18n';
 import type { ModelProviderView } from '@/lib/services/models/types';
 import CreateModelModal from '@/components/models/CreateModelModal';
+import CreateDynamicModelModal, {
+  type CandidateModel,
+  type DynamicModelInit,
+} from '@/components/models/CreateDynamicModelModal';
 import ModelGuardrailModal from '@/components/models/ModelGuardrailModal';
-import type { IModel } from '@/lib/database';
+import type { IDynamicRoutingConfig, IModel } from '@/lib/database';
 import {
   buildDashboardDateSearchParams,
   defaultDashboardDateFilter,
@@ -102,6 +108,15 @@ function fmtNum(n: number): string {
   return String(n);
 }
 
+/** A Dynamic LLM is a virtual `llm` model carrying a routing config. */
+function dynamicConfigOf(m: { settings?: Record<string, unknown> }): IDynamicRoutingConfig | null {
+  const dyn = m.settings?.dynamic;
+  if (dyn && typeof dyn === 'object' && typeof (dyn as { strategy?: unknown }).strategy === 'string') {
+    return dyn as IDynamicRoutingConfig;
+  }
+  return null;
+}
+
 function fmtPct(rate: number): string {
   return `${(rate * 100).toFixed(1)}%`;
 }
@@ -141,7 +156,22 @@ interface ModelDto {
   updatedAt?: string;
 }
 
-type CategoryFilter = 'all' | 'llm' | 'embedding' | 'multimodal';
+type ModelCategory = 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr';
+type CategoryFilter = 'all' | ModelCategory;
+type CapabilityFilter = 'all' | 'multimodal' | 'tools';
+
+const MODEL_TYPE_KEYS: ModelCategory[] = ['llm', 'embedding', 'rerank', 'stt', 'tts', 'ocr'];
+
+/** Human-readable labels for each model category — kept in sync with the left sub-nav. */
+const TYPE_LABELS: Record<CategoryFilter, string> = {
+  all: 'All models',
+  llm: 'LLM',
+  embedding: 'Embedding',
+  rerank: 'Rerank',
+  stt: 'Speech-to-Text',
+  tts: 'Text-to-Speech',
+  ocr: 'OCR',
+};
 
 export default function ModelsPage() {
   const [models, setModels] = useState<ModelDto[]>([]);
@@ -150,11 +180,13 @@ export default function ModelsPage() {
   const [dashboardData, setDashboardData] = useState<ModelsDashboardData | null>(null);
   const [dashboardLoading, setDashboardLoading] = useState(true);
   const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [dynamicModalOpen, setDynamicModalOpen] = useState(false);
+  const [dynamicEdit, setDynamicEdit] = useState<DynamicModelInit | null>(null);
   const [guardrailModel, setGuardrailModel] = useState<ModelDto | null>(null);
   const [deletingModelId, setDeletingModelId] = useState<string | null>(null);
   const [dateFilter, setDateFilter] = useState(defaultDashboardDateFilter);
 
-  const [tab, setTab] = useState<CategoryFilter>('all');
+  const [capability, setCapability] = useState<CapabilityFilter>('all');
   const [query, setQuery] = useState('');
   const [providerFilter, setProviderFilter] = useState<string>('all');
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -162,6 +194,14 @@ export default function ModelsPage() {
   const t = useTranslations('models');
   const tNav = useTranslations('navigation');
   const router = useRouter();
+  const searchParams = useSearchParams();
+
+  // The model type is driven by the left sub-nav via the `?type=` query param.
+  const typeParam = searchParams.get('type');
+  const activeType: CategoryFilter =
+    typeParam && MODEL_TYPE_KEYS.includes(typeParam as ModelCategory)
+      ? (typeParam as ModelCategory)
+      : 'all';
 
   const loadModels = useCallback(async () => {
     setLoading(true);
@@ -256,11 +296,32 @@ export default function ModelsPage() {
     return { all: models.length, llm, embedding, multimodal };
   }, [models]);
 
+  // Routing targets: real LLM models only (a router can't target another router).
+  const dynamicCandidates = useMemo<CandidateModel[]>(
+    () =>
+      models
+        .filter((m) => m.category === 'llm' && !dynamicConfigOf(m))
+        .map((m) => ({ key: m.key, name: m.name })),
+    [models],
+  );
+
+  const openDynamicCreate = () => {
+    setDynamicEdit(null);
+    setDynamicModalOpen(true);
+  };
+
+  const openDynamicEdit = (m: ModelDto) => {
+    const dynamic = dynamicConfigOf(m);
+    if (!dynamic) return;
+    setDynamicEdit({ _id: m._id, name: m.name, description: m.description, key: m.key, dynamic });
+    setDynamicModalOpen(true);
+  };
+
   const filtered = useMemo(() => {
     return models.filter((m) => {
-      if (tab === 'llm' && m.category !== 'llm') return false;
-      if (tab === 'embedding' && m.category !== 'embedding') return false;
-      if (tab === 'multimodal' && !m.isMultimodal) return false;
+      if (activeType !== 'all' && m.category !== activeType) return false;
+      if (capability === 'multimodal' && !m.isMultimodal) return false;
+      if (capability === 'tools' && !m.supportsToolCalls) return false;
       if (providerFilter !== 'all' && m.providerKey !== providerFilter) return false;
       if (query) {
         const q = query.toLowerCase();
@@ -273,7 +334,11 @@ export default function ModelsPage() {
       }
       return true;
     });
-  }, [models, tab, query, providerFilter]);
+  }, [models, activeType, capability, query, providerFilter]);
+
+  const modelsCtl = useTableControls(filtered, {
+    filterKey: `${activeType}|${capability}|${query}|${providerFilter}`,
+  });
 
   const handleDeleteModel = async (model: ModelDto) => {
     const confirmed = window.confirm(t('actions.deleteConfirm'));
@@ -309,19 +374,20 @@ export default function ModelsPage() {
     void loadDashboard();
   };
 
-  const tabs = [
-    { id: 'all', label: 'All', count: counts.all },
-    { id: 'llm', label: 'LLM', count: counts.llm },
-    { id: 'embedding', label: 'Embedding', count: counts.embedding },
-    { id: 'multimodal', label: 'Multimodal', count: counts.multimodal },
-  ];
-
   return (
     <PageContainer>
       <PageHeader
-        eyebrow="Build · Models"
-        title={tNav('models')}
-        subtitle={`Manage inference endpoints across providers. ${models.length} deployed in this project.`}
+        eyebrow={
+          activeType === 'all'
+            ? 'Build · Models'
+            : `Build · Models · ${TYPE_LABELS[activeType]}`
+        }
+        title={activeType === 'all' ? tNav('models') : TYPE_LABELS[activeType]}
+        subtitle={
+          activeType === 'all'
+            ? `Manage inference endpoints across providers. ${models.length} deployed in this project.`
+            : `${TYPE_LABELS[activeType]} endpoints · ${filtered.length} of ${models.length} models.`
+        }
         actions={
           <>
             <DashboardDateFilter value={dateFilter} onChange={setDateFilter} />
@@ -333,6 +399,14 @@ export default function ModelsPage() {
               href="/dashboard/providers"
             >
               Browse providers
+            </Button>
+            <Button
+              variant="default"
+              size="sm"
+              leftSection={<IconArrowsSplit size={14} stroke={1.7} />}
+              onClick={openDynamicCreate}
+            >
+              Dynamic LLM
             </Button>
             <Button
               color="teal"
@@ -372,19 +446,28 @@ export default function ModelsPage() {
 
       <div style={{ marginBottom: 16 }}>
         <DataGrid<ModelDto>
-          records={filtered}
+          records={modelsCtl.records}
           loading={loading}
           rowKey={(m) => m._id}
+          pagination={modelsCtl.pagination}
           onRowClick={(m) => router.push(`/dashboard/models/${m._id}`)}
-          tabs={tabs}
-          activeTab={tab}
-          onTabChange={(id) => setTab(id as CategoryFilter)}
           search={{
             value: query,
             onChange: setQuery,
             placeholder: 'Filter by name, key, or model id…',
           }}
           filters={[
+            {
+              value: capability,
+              onChange: (v) => setCapability(v as CapabilityFilter),
+              ariaLabel: 'Filter by capability',
+              width: 150,
+              options: [
+                { value: 'all', label: 'All capabilities' },
+                { value: 'multimodal', label: 'Multimodal' },
+                { value: 'tools', label: 'Tool calls' },
+              ],
+            },
             {
               value: providerFilter,
               onChange: setProviderFilter,
@@ -424,7 +507,7 @@ export default function ModelsPage() {
               onClick: () => setCreateModalOpen(true),
             },
           }}
-          footerLeft={`Showing ${filtered.length} of ${models.length} models`}
+          footerLeft={`Showing ${modelsCtl.records.length} of ${filtered.length} models`}
           columns={modelColumns(t, providerLookup, usageByKey, dashboardData)}
           rowActions={(m) => [
             {
@@ -437,7 +520,10 @@ export default function ModelsPage() {
               id: 'edit',
               label: t('actions.edit'),
               icon: <IconEdit size={14} />,
-              onClick: () => router.push(`/dashboard/models/${m._id}/edit`),
+              onClick: () =>
+                dynamicConfigOf(m)
+                  ? openDynamicEdit(m)
+                  : router.push(`/dashboard/models/${m._id}/edit`),
             },
             { divider: true },
             {
@@ -710,7 +796,19 @@ export default function ModelsPage() {
         opened={createModalOpen}
         onClose={() => setCreateModalOpen(false)}
         providers={providers}
+        defaultCategory={activeType === 'all' ? undefined : activeType}
         onCreated={handleModelCreated}
+      />
+
+      <CreateDynamicModelModal
+        opened={dynamicModalOpen}
+        onClose={() => setDynamicModalOpen(false)}
+        candidates={dynamicCandidates}
+        editModel={dynamicEdit}
+        onSaved={() => {
+          void loadModels();
+          void loadDashboard();
+        }}
       />
 
       {guardrailModel ? (
@@ -821,7 +919,13 @@ function modelColumns(
       label: 'Type',
       render: (m) => (
         <div className="ds-row ds-gap-xs">
-          <span className="ds-badge">{m.category}</span>
+          {dynamicConfigOf(m) ? (
+            <span className="ds-badge ds-badge-teal" title="Dynamic LLM router">
+              dynamic
+            </span>
+          ) : (
+            <span className="ds-badge">{m.category}</span>
+          )}
           {m.isMultimodal ? (
             <span className="ds-badge ds-badge-info" title={t('list.capabilities.multimodal')}>
               vision

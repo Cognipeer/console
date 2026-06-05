@@ -18,12 +18,19 @@ import { reconcileOrphanedBrowserSessions } from '@/lib/services/browser/browser
 import { reconcileSandboxRuntime } from '@/lib/services/sandbox/reconcile';
 import { startBrowserQueueConsumer } from '@/lib/services/browser/browserConsumer';
 import { startCrawlerQueueConsumer, startCrawlerScheduler } from '@/lib/services/crawler';
+import { startOcrJobQueueConsumer } from '@/lib/services/ocrJobs';
+import { startDatasetGenerationConsumer } from '@/lib/services/evaluation/datasetGenerationConsumer';
+import { startRedTeamQueueConsumer } from '@/lib/services/redteam/campaignConsumer';
+import { startEvaluationRunQueueConsumer } from '@/lib/services/evaluation/evaluationRunConsumer';
+import { startAnalysisRunQueueConsumer } from '@/lib/services/analysis/analysisRunConsumer';
 import { jsSandboxExecutorManager } from '@/lib/services/jsSandbox';
 import { startJsSandboxQueueConsumer } from '@/lib/services/jsSandbox/jsSandboxConsumer';
 import { startAgentQueueConsumer } from '@/lib/services/agents/agentConsumer';
 import { startMcpQueueConsumer } from '@/lib/services/mcp/mcpConsumer';
 import { startPollScheduler } from '@/lib/services/inferenceMonitoring/pollScheduler';
 import { startAlertScheduler } from '@/lib/services/alerts/alertScheduler';
+import { startAnalysisScheduler } from '@/lib/services/analysis/analysisScheduler';
+import { startRedTeamScheduler } from '@/lib/services/redteam/redTeamScheduler';
 import { ensureServerEnvLoaded } from './env';
 
 const logger = createLogger('startup');
@@ -191,6 +198,8 @@ export async function bootstrapApplication(): Promise<void> {
   startPollScheduler();
   startAlertScheduler();
   startCrawlerScheduler();
+  startAnalysisScheduler();
+  startRedTeamScheduler();
 
   // Register queue consumers on every node so that whenever instance
   // routing forwards a job to another node, that node can execute it.
@@ -202,6 +211,11 @@ export async function bootstrapApplication(): Promise<void> {
       startJsSandboxQueueConsumer(),
       startBrowserQueueConsumer(),
       startCrawlerQueueConsumer(),
+      startOcrJobQueueConsumer(),
+      startDatasetGenerationConsumer(),
+      startRedTeamQueueConsumer(),
+      startEvaluationRunQueueConsumer(),
+      startAnalysisRunQueueConsumer(),
     ]);
   } catch (error) {
     logger.warn('Queue consumer registration failed; cluster routing limited', {

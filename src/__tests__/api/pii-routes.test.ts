@@ -34,6 +34,8 @@ vi.mock('@/lib/services/pii', () => ({
   listPiiPolicies: vi.fn(),
   maskPii: vi.fn(),
   redactPii: vi.fn(),
+  tokenizePii: vi.fn(),
+  detokenizePii: vi.fn(),
   scanWithPolicy: vi.fn(),
   updatePiiPolicy: vi.fn(),
 }));
@@ -63,6 +65,8 @@ import {
   listPiiPolicies,
   maskPii,
   redactPii,
+  tokenizePii,
+  detokenizePii,
   scanWithPolicy,
 } from '@/lib/services/pii';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
@@ -119,6 +123,16 @@ beforeEach(() => {
     action: 'mask',
     languages: ['global'],
   });
+  (tokenizePii as ReturnType<typeof vi.fn>).mockReturnValue({
+    inputLength: 17,
+    findings: [],
+    outputText: '[EMAIL_1]',
+    hasBlocking: false,
+    action: 'tokenize',
+    languages: ['global'],
+    vault: { '[EMAIL_1]': { value: 'a@b.com', category: 'email' } },
+  });
+  (detokenizePii as ReturnType<typeof vi.fn>).mockReturnValue({ outputText: 'a@b.com' });
   (scanWithPolicy as ReturnType<typeof vi.fn>).mockResolvedValue({
     inputLength: 17,
     findings: [],
@@ -239,6 +253,60 @@ describe('POST /api/pii/mask', () => {
     });
     expect(res.statusCode).toBe(200);
     expect(maskPii).toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/pii/tokenize', () => {
+  it('returns tokenized output with a vault', async () => {
+    const app = await createFastifyApiTestApp(piiApiPlugin);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/pii/tokenize',
+      headers: { ...HEADERS, 'content-type': 'application/json' },
+      payload: { text: 'a@b.com' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(tokenizePii).toHaveBeenCalled();
+    const body = parseJsonBody<{ outputText: string; vault: Record<string, unknown> }>(res.body);
+    expect(body.vault['[EMAIL_1]']).toBeDefined();
+  });
+});
+
+describe('POST /api/pii/detokenize', () => {
+  it('rejects when text is missing', async () => {
+    const app = await createFastifyApiTestApp(piiApiPlugin);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/pii/detokenize',
+      headers: { ...HEADERS, 'content-type': 'application/json' },
+      payload: { vault: {} },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('rejects when vault is missing or not an object', async () => {
+    const app = await createFastifyApiTestApp(piiApiPlugin);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/pii/detokenize',
+      headers: { ...HEADERS, 'content-type': 'application/json' },
+      payload: { text: '[EMAIL_1]', vault: [] },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('restores the original text from the vault', async () => {
+    const app = await createFastifyApiTestApp(piiApiPlugin);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/pii/detokenize',
+      headers: { ...HEADERS, 'content-type': 'application/json' },
+      payload: { text: '[EMAIL_1]', vault: { '[EMAIL_1]': { value: 'a@b.com', category: 'email' } } },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(detokenizePii).toHaveBeenCalled();
+    const body = parseJsonBody<{ outputText: string }>(res.body);
+    expect(body.outputText).toBe('a@b.com');
   });
 });
 

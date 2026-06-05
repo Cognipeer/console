@@ -1,22 +1,19 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import {
-  Button,
-  Group,
-  Modal,
-  Select,
-  Stack,
-  Switch,
-  Text,
-  TextInput,
-  Textarea,
-  ThemeIcon,
-} from '@mantine/core';
+import { Select, Switch, TextInput, Textarea } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
-import { IconEdit } from '@tabler/icons-react';
+import { IconCheck, IconEdit } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import FormShell, {
+  Checklist,
+  FormField,
+  FormRow,
+  FormSection,
+  SummaryGroup,
+  SummaryKV,
+} from '@/components/common/ui/FormShell';
 
 interface ConfigItem {
   _id: string;
@@ -119,79 +116,82 @@ export default function EditConfigItemModal({
     [form.values, item, onUpdated, t],
   );
 
+  const v = form.values;
+  const validName = v.name.trim().length > 0;
+  const validValue = v.value !== '';
+  const checklist = [
+    { id: 'name', label: 'Name provided', done: validName },
+    { id: 'value', label: 'Value provided', done: validValue },
+  ];
+
+  const summary = (
+    <SummaryGroup title={t('editItem')}>
+      <SummaryKV label={t('itemKey')} value={item?.key || '—'} mono />
+      <SummaryKV label={t('itemName')} value={v.name || '—'} />
+      <SummaryKV label={t('valueType')} value={v.valueType} />
+      <SummaryKV label={t('isSecret')} value={v.isSecret ? 'yes' : 'no'} />
+      <Checklist items={checklist} />
+    </SummaryGroup>
+  );
+
   return (
-    <Modal
-      opened={opened}
+    <FormShell
+      open={opened}
       onClose={onClose}
-      title={
-        <Group gap="xs">
-          <ThemeIcon variant="light" color="violet" size="sm">
-            <IconEdit size={14} />
-          </ThemeIcon>
-          <Text fw={600}>{t('editItem')}</Text>
-        </Group>
-      }
-      size="lg"
+      icon={<IconEdit size={16} />}
+      title={t('editItem')}
+      subtitle={item?.key}
+      summary={summary}
+      footerStatus={`${checklist.filter((c) => c.done).length} of ${checklist.length} ready`}
+      primaryAction={{
+        label: t('save'),
+        icon: <IconCheck size={13} />,
+        loading,
+        disabled: !validName || !validValue,
+        onClick: () => form.onSubmit(handleSubmit)(),
+      }}
     >
-      <form onSubmit={form.onSubmit(handleSubmit)}>
-        <Stack gap="md">
-          <TextInput label={t('itemName')} required {...form.getInputProps('name')} />
+      <FormSection number={1} title="Identity" done={validName}>
+        <FormRow cols={2}>
+          <FormField label={t('itemName')} required>
+            <TextInput {...form.getInputProps('name')} />
+          </FormField>
+          <FormField label={t('itemKey')} hint="Item key cannot be changed">
+            <TextInput value={item?.key || ''} readOnly />
+          </FormField>
+        </FormRow>
+        <FormField label={t('description')} optional>
+          <Textarea autosize minRows={2} {...form.getInputProps('description')} />
+        </FormField>
+      </FormSection>
 
-          <TextInput
-            label={t('itemKey')}
-            value={item?.key || ''}
-            readOnly
-            description="Item key cannot be changed"
-          />
+      <FormSection number={2} title={t('value')} done={validValue}>
+        <FormField label={t('value')} required>
+          <Textarea autosize minRows={2} {...form.getInputProps('value')} />
+        </FormField>
+        <FormRow cols={2}>
+          <FormField label={t('valueType')}>
+            <Select
+              data={[
+                { value: 'string', label: 'String' },
+                { value: 'number', label: 'Number' },
+                { value: 'boolean', label: 'Boolean' },
+                { value: 'json', label: 'JSON' },
+              ]}
+              {...form.getInputProps('valueType')}
+            />
+          </FormField>
+          <FormField label={t('isSecret')} hint="Encrypt the value at rest. Secret values are masked in the UI.">
+            <Switch mt={6} {...form.getInputProps('isSecret', { type: 'checkbox' })} />
+          </FormField>
+        </FormRow>
+      </FormSection>
 
-          <Textarea
-            label={t('description')}
-            autosize
-            minRows={2}
-            {...form.getInputProps('description')}
-          />
-
-          <Textarea
-            label={t('value')}
-            required
-            autosize
-            minRows={2}
-            {...form.getInputProps('value')}
-          />
-
-          <Select
-            label={t('valueType')}
-            data={[
-              { value: 'string', label: 'String' },
-              { value: 'number', label: 'Number' },
-              { value: 'boolean', label: 'Boolean' },
-              { value: 'json', label: 'JSON' },
-            ]}
-            {...form.getInputProps('valueType')}
-          />
-
-          <Switch
-            label={t('isSecret')}
-            description="Encrypt the value at rest. Secret values are masked in the UI."
-            {...form.getInputProps('isSecret', { type: 'checkbox' })}
-          />
-
-          <TextInput
-            label={t('tags')}
-            placeholder="Comma separated: api, credentials"
-            {...form.getInputProps('tags')}
-          />
-
-          <Group justify="flex-end" mt="md">
-            <Button variant="default" onClick={onClose}>
-              {t('cancel')}
-            </Button>
-            <Button type="submit" loading={loading}>
-              {t('save')}
-            </Button>
-          </Group>
-        </Stack>
-      </form>
-    </Modal>
+      <FormSection number={3} title={t('tags')}>
+        <FormField label={t('tags')} optional>
+          <TextInput placeholder="Comma separated: api, credentials" {...form.getInputProps('tags')} />
+        </FormField>
+      </FormSection>
+    </FormShell>
   );
 }

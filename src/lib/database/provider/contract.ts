@@ -22,6 +22,10 @@ import type {
   ICrawlResult,
   CrawlJobStatus,
   CrawlerStatus,
+  IOcrJob,
+  IOcrJobItem,
+  OcrJobStatus,
+  OcrJobAggregateDelta,
   IConfigAuditLog,
   IConfigGroup,
   IConfigItem,
@@ -109,6 +113,21 @@ import type {
   ISandboxSettings,
   SandboxInstanceState,
   SandboxCommandStatus,
+  IEvaluationTarget,
+  IEvaluationDataset,
+  IEvaluationSuite,
+  IEvaluationRun,
+  EvaluationTargetKind,
+  EvaluationDatasetSource,
+  EvaluationRunStatus,
+  IRedTeamCampaign,
+  IRedTeamRun,
+  RedTeamRunStatus,
+  IAnalysisDefinition,
+  IAnalysisConversation,
+  IAnalysisRun,
+  AnalysisConversationSource,
+  AnalysisRunStatus,
 } from './types';
 
 export interface DatabaseProvider {
@@ -537,6 +556,156 @@ export interface DatabaseProvider {
     guardrailId: string,
     options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month' },
   ): Promise<IGuardrailEvalAggregate>;
+
+  // ── Evaluation operations (tenant-specific) ──
+  createEvaluationTarget(
+    target: Omit<IEvaluationTarget, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IEvaluationTarget>;
+  updateEvaluationTarget(
+    id: string,
+    data: Partial<Omit<IEvaluationTarget, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IEvaluationTarget | null>;
+  deleteEvaluationTarget(id: string): Promise<boolean>;
+  findEvaluationTargetById(id: string): Promise<IEvaluationTarget | null>;
+  findEvaluationTargetByKey(key: string, projectId?: string): Promise<IEvaluationTarget | null>;
+  listEvaluationTargets(filters?: {
+    projectId?: string;
+    kind?: EvaluationTargetKind;
+    search?: string;
+  }): Promise<IEvaluationTarget[]>;
+
+  createEvaluationDataset(
+    dataset: Omit<IEvaluationDataset, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IEvaluationDataset>;
+  updateEvaluationDataset(
+    id: string,
+    data: Partial<Omit<IEvaluationDataset, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IEvaluationDataset | null>;
+  deleteEvaluationDataset(id: string): Promise<boolean>;
+  findEvaluationDatasetById(id: string): Promise<IEvaluationDataset | null>;
+  findEvaluationDatasetByKey(key: string, projectId?: string): Promise<IEvaluationDataset | null>;
+  listEvaluationDatasets(filters?: {
+    projectId?: string;
+    source?: EvaluationDatasetSource;
+    search?: string;
+  }): Promise<IEvaluationDataset[]>;
+
+  createEvaluationSuite(
+    suite: Omit<IEvaluationSuite, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IEvaluationSuite>;
+  updateEvaluationSuite(
+    id: string,
+    data: Partial<Omit<IEvaluationSuite, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IEvaluationSuite | null>;
+  deleteEvaluationSuite(id: string): Promise<boolean>;
+  findEvaluationSuiteById(id: string): Promise<IEvaluationSuite | null>;
+  findEvaluationSuiteByKey(key: string, projectId?: string): Promise<IEvaluationSuite | null>;
+  listEvaluationSuites(filters?: {
+    projectId?: string;
+    targetKey?: string;
+    datasetKey?: string;
+    search?: string;
+  }): Promise<IEvaluationSuite[]>;
+
+  createEvaluationRun(
+    run: Omit<IEvaluationRun, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IEvaluationRun>;
+  updateEvaluationRun(
+    id: string,
+    data: Partial<Omit<IEvaluationRun, 'tenantId' | 'suiteKey' | 'createdBy'>>,
+  ): Promise<IEvaluationRun | null>;
+  findEvaluationRunById(id: string): Promise<IEvaluationRun | null>;
+  listEvaluationRuns(filters?: {
+    projectId?: string;
+    suiteKey?: string;
+    status?: EvaluationRunStatus;
+    limit?: number;
+    skip?: number;
+  }): Promise<IEvaluationRun[]>;
+
+  // ── Red-team operations (tenant-specific) ──
+  createRedTeamCampaign(
+    campaign: Omit<IRedTeamCampaign, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IRedTeamCampaign>;
+  updateRedTeamCampaign(
+    id: string,
+    data: Partial<Omit<IRedTeamCampaign, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IRedTeamCampaign | null>;
+  deleteRedTeamCampaign(id: string): Promise<boolean>;
+  findRedTeamCampaignById(id: string): Promise<IRedTeamCampaign | null>;
+  findRedTeamCampaignByKey(key: string, projectId?: string): Promise<IRedTeamCampaign | null>;
+  listRedTeamCampaigns(filters?: {
+    projectId?: string;
+    targetKind?: IRedTeamCampaign['targetKind'];
+    search?: string;
+  }): Promise<IRedTeamCampaign[]>;
+
+  createRedTeamRun(
+    run: Omit<IRedTeamRun, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IRedTeamRun>;
+  updateRedTeamRun(
+    id: string,
+    data: Partial<Omit<IRedTeamRun, 'tenantId' | 'campaignKey' | 'createdBy'>>,
+  ): Promise<IRedTeamRun | null>;
+  findRedTeamRunById(id: string): Promise<IRedTeamRun | null>;
+  listRedTeamRuns(filters?: {
+    projectId?: string;
+    campaignKey?: string;
+    status?: RedTeamRunStatus;
+    limit?: number;
+    skip?: number;
+  }): Promise<IRedTeamRun[]>;
+
+  // ── Analysis operations (tenant-specific) ──
+  createAnalysisDefinition(
+    definition: Omit<IAnalysisDefinition, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IAnalysisDefinition>;
+  updateAnalysisDefinition(
+    id: string,
+    data: Partial<Omit<IAnalysisDefinition, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IAnalysisDefinition | null>;
+  deleteAnalysisDefinition(id: string): Promise<boolean>;
+  findAnalysisDefinitionById(id: string): Promise<IAnalysisDefinition | null>;
+  findAnalysisDefinitionByKey(key: string, projectId?: string): Promise<IAnalysisDefinition | null>;
+  listAnalysisDefinitions(filters?: {
+    projectId?: string;
+    search?: string;
+  }): Promise<IAnalysisDefinition[]>;
+
+  createAnalysisConversation(
+    conversation: Omit<IAnalysisConversation, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IAnalysisConversation>;
+  updateAnalysisConversation(
+    id: string,
+    data: Partial<Omit<IAnalysisConversation, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IAnalysisConversation | null>;
+  deleteAnalysisConversation(id: string): Promise<boolean>;
+  findAnalysisConversationById(id: string): Promise<IAnalysisConversation | null>;
+  findAnalysisConversationByKey(key: string, projectId?: string): Promise<IAnalysisConversation | null>;
+  listAnalysisConversations(filters?: {
+    projectId?: string;
+    source?: AnalysisConversationSource;
+    tag?: string;
+    search?: string;
+    limit?: number;
+    skip?: number;
+  }): Promise<IAnalysisConversation[]>;
+
+  createAnalysisRun(
+    run: Omit<IAnalysisRun, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IAnalysisRun>;
+  updateAnalysisRun(
+    id: string,
+    data: Partial<Omit<IAnalysisRun, 'tenantId' | 'definitionKey' | 'createdBy'>>,
+  ): Promise<IAnalysisRun | null>;
+  findAnalysisRunById(id: string): Promise<IAnalysisRun | null>;
+  listAnalysisRuns(filters?: {
+    projectId?: string;
+    definitionKey?: string;
+    status?: AnalysisRunStatus;
+    limit?: number;
+    skip?: number;
+  }): Promise<IAnalysisRun[]>;
 
   // ── PII policy operations (tenant-specific) ──
   createPiiPolicy(
@@ -1089,6 +1258,53 @@ export interface DatabaseProvider {
   ): Promise<ICrawlResult[]>;
   findCrawlResultById(id: string): Promise<ICrawlResult | null>;
   countCrawlResults(jobId: string): Promise<number>;
+
+  // ── OCR jobs (tenant-specific) ──
+  createOcrJob(
+    record: Omit<IOcrJob, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IOcrJob>;
+  updateOcrJob(
+    id: string,
+    data: Partial<Omit<IOcrJob, '_id' | 'tenantId' | 'createdAt'>>,
+  ): Promise<IOcrJob | null>;
+  findOcrJobById(id: string): Promise<IOcrJob | null>;
+  listOcrJobs(
+    tenantId: string,
+    filters?: {
+      projectId?: string;
+      status?: OcrJobStatus | string;
+      limit?: number;
+    },
+  ): Promise<IOcrJob[]>;
+  deleteOcrJob(id: string): Promise<boolean>;
+
+  /**
+   * Atomically increment a job's running aggregate counters/usage/cost and
+   * return the post-increment job, so callers can detect completion
+   * (itemsProcessed + itemsFailed === itemsTotal) exactly once.
+   */
+  incrementOcrJobAggregates(
+    id: string,
+    delta: OcrJobAggregateDelta,
+    extra?: { costCurrency?: string; lastItemAt?: Date },
+  ): Promise<IOcrJob | null>;
+
+  // ── OCR job items (tenant-specific) ──
+  createOcrJobItem(
+    record: Omit<IOcrJobItem, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IOcrJobItem>;
+  createOcrJobItems(
+    records: Array<Omit<IOcrJobItem, '_id' | 'createdAt' | 'updatedAt'>>,
+  ): Promise<IOcrJobItem[]>;
+  updateOcrJobItem(
+    id: string,
+    data: Partial<Omit<IOcrJobItem, '_id' | 'tenantId' | 'jobId' | 'createdAt'>>,
+  ): Promise<IOcrJobItem | null>;
+  findOcrJobItemById(id: string): Promise<IOcrJobItem | null>;
+  listOcrJobItems(
+    jobId: string,
+    options?: { limit?: number; skip?: number; status?: string },
+  ): Promise<IOcrJobItem[]>;
 
   // ── Cluster: nodes (main database) ──
   upsertNode(

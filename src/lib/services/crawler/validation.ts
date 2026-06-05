@@ -67,6 +67,9 @@ const markdownOptionsSchema = z.object({
 
 const engineSchema = z.enum(['axios', 'playwright', 'auto']);
 
+/** Dispatch mode for a run: block (`sync`) or enqueue + callback (`async`). */
+const runModeSchema = z.enum(['sync', 'async']);
+
 export const createCrawlerInputSchema = z.object({
   key: z.string().min(1).max(120).regex(/^[a-z0-9][a-z0-9_-]*$/i, 'lowercase letters, numbers, dash, underscore').optional(),
   name: z.string().min(1).max(200),
@@ -112,6 +115,8 @@ export const runCrawlerOptionsSchema = z.object({
   /** Legacy alias for urls — preserved so existing callers keep working. */
   seeds: z.array(z.string().url()).max(500).optional(),
   callbackUrl: z.string().url().optional(),
+  /** Run mode. Omit to use the API default (`async`). */
+  mode: runModeSchema.optional(),
   metadata: z.record(z.unknown()).optional(),
 });
 
@@ -124,6 +129,8 @@ export const crawlerUrlsBodySchema = z.object({
 export const crawlOnContainerSchema = z.object({
   urls: z.array(z.string().url()).min(1).max(500),
   callbackUrl: z.string().url().optional(),
+  /** Run mode. Omit to use the API default (`async`). */
+  mode: runModeSchema.optional(),
   metadata: z.record(z.unknown()).optional(),
 });
 
@@ -140,6 +147,8 @@ export const adhocCrawlInputSchema = z.object({
   rag: ragSchema.optional(),
   webhook: webhookSchema.optional(),
   callbackUrl: z.string().url().optional(),
+  /** Run mode. Omit to use the API default (`async`). */
+  mode: runModeSchema.optional(),
   metadata: z.record(z.unknown()).optional(),
 });
 

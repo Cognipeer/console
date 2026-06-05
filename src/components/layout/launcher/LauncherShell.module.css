@@ -28,7 +28,7 @@
   z-index: 50;
 }
 
-:global(body[data-mantine-color-scheme='dark']) .topbar {
+:global(:root[data-mantine-color-scheme='dark']) .topbar {
   background-color: var(--ds-surface-raised);
   border-bottom: 1px solid var(--ds-border-soft);
 }
@@ -55,11 +55,11 @@
   display: none;
 }
 
-:global(body[data-mantine-color-scheme='dark']) .logoDark {
+:global(:root[data-mantine-color-scheme='dark']) .logoDark {
   display: none;
 }
 
-:global(body[data-mantine-color-scheme='dark']) .logoLight {
+:global(:root[data-mantine-color-scheme='dark']) .logoLight {
   display: block;
 }
 
@@ -170,8 +170,8 @@
   line-height: 1;
 }
 
-:global(body[data-mantine-color-scheme='dark']) .kbd,
-:global(body[data-mantine-color-scheme='dark']) .kbdKey {
+:global(:root[data-mantine-color-scheme='dark']) .kbd,
+:global(:root[data-mantine-color-scheme='dark']) .kbdKey {
   background: var(--ds-surface-1);
   color: var(--ds-text-faint);
   border-color: var(--ds-border-soft);
@@ -187,7 +187,7 @@
   background: var(--mantine-color-gray-1);
 }
 
-:global(body[data-mantine-color-scheme='dark']) .accountBtn:hover {
+:global(:root[data-mantine-color-scheme='dark']) .accountBtn:hover {
   background: var(--mantine-color-dark-5);
 }
 
@@ -442,7 +442,7 @@
   cursor: pointer;
 }
 
-:global(body[data-mantine-color-scheme='dark']) .launcherBackdrop {
+:global(:root[data-mantine-color-scheme='dark']) .launcherBackdrop {
   background: rgba(0, 0, 0, 0.55);
 }
 
@@ -480,7 +480,7 @@
   animation: launcherSlideIn 0.22s cubic-bezier(0.3, 0.7, 0.4, 1);
 }
 
-:global(body[data-mantine-color-scheme='dark']) .launcher {
+:global(:root[data-mantine-color-scheme='dark']) .launcher {
   background: var(--mantine-color-dark-7);
   border-color: var(--mantine-color-dark-4);
 }
@@ -493,7 +493,7 @@
   border-bottom: 1px solid var(--mantine-color-gray-3);
 }
 
-:global(body[data-mantine-color-scheme='dark']) .launcherHeader {
+:global(:root[data-mantine-color-scheme='dark']) .launcherHeader {
   border-bottom-color: var(--mantine-color-dark-4);
 }
 
@@ -510,7 +510,7 @@
   color: var(--mantine-color-gray-6);
 }
 
-:global(body[data-mantine-color-scheme='dark']) .launcherSearch {
+:global(:root[data-mantine-color-scheme='dark']) .launcherSearch {
   background: var(--mantine-color-dark-6);
   border-color: var(--mantine-color-dark-4);
 }
@@ -524,7 +524,7 @@
   outline: none;
 }
 
-:global(body[data-mantine-color-scheme='dark']) .launcherSearch input {
+:global(:root[data-mantine-color-scheme='dark']) .launcherSearch input {
   color: var(--mantine-color-gray-1);
 }
 
@@ -545,7 +545,7 @@
   gap: 2px;
 }
 
-:global(body[data-mantine-color-scheme='dark']) .launcherSidebar {
+:global(:root[data-mantine-color-scheme='dark']) .launcherSidebar {
   background: var(--mantine-color-dark-8);
   border-right-color: var(--mantine-color-dark-4);
 }
@@ -569,7 +569,7 @@
     color var(--app-motion-fast) ease;
 }
 
-:global(body[data-mantine-color-scheme='dark']) .launcherCat {
+:global(:root[data-mantine-color-scheme='dark']) .launcherCat {
   color: var(--mantine-color-gray-3);
 }
 
@@ -578,7 +578,7 @@
   color: var(--mantine-color-gray-9);
 }
 
-:global(body[data-mantine-color-scheme='dark']) .launcherCat:hover {
+:global(:root[data-mantine-color-scheme='dark']) .launcherCat:hover {
   background: var(--mantine-color-dark-6);
   color: var(--mantine-color-white);
 }
@@ -588,7 +588,7 @@
   color: var(--mantine-color-teal-7);
 }
 
-:global(body[data-mantine-color-scheme='dark']) .launcherCatActive {
+:global(:root[data-mantine-color-scheme='dark']) .launcherCatActive {
   background: rgba(22, 179, 171, 0.2);
   color: var(--mantine-color-teal-3);
 }
@@ -620,7 +620,7 @@
   margin: 10px 8px;
 }
 
-:global(body[data-mantine-color-scheme='dark']) .launcherSidebarDivider {
+:global(:root[data-mantine-color-scheme='dark']) .launcherSidebarDivider {
   background: var(--mantine-color-dark-4);
 }
 
@@ -661,7 +661,7 @@
     border-color var(--app-motion-fast) ease;
 }
 
-:global(body[data-mantine-color-scheme='dark']) .chip {
+:global(:root[data-mantine-color-scheme='dark']) .chip {
   background: var(--mantine-color-dark-6);
   border-color: var(--mantine-color-dark-4);
   color: var(--mantine-color-gray-2);
@@ -672,7 +672,7 @@
   border-color: var(--mantine-color-gray-4);
 }
 
-:global(body[data-mantine-color-scheme='dark']) .chip:hover {
+:global(:root[data-mantine-color-scheme='dark']) .chip:hover {
   background: var(--mantine-color-dark-5);
   border-color: var(--mantine-color-dark-3);
 }
@@ -687,7 +687,7 @@
   place-items: center;
 }
 
-:global(body[data-mantine-color-scheme='dark']) .chipIcon {
+:global(:root[data-mantine-color-scheme='dark']) .chipIcon {
   background: rgba(22, 179, 171, 0.2);
   color: var(--mantine-color-teal-3);
 }
@@ -716,7 +716,7 @@
     box-shadow var(--app-motion-fast) ease;
 }
 
-:global(body[data-mantine-color-scheme='dark']) .svcCard {
+:global(:root[data-mantine-color-scheme='dark']) .svcCard {
   background: var(--mantine-color-dark-6);
   border-color: var(--mantine-color-dark-4);
 }
@@ -728,7 +728,7 @@
   box-shadow: var(--app-shadow-xs);
 }
 
-:global(body[data-mantine-color-scheme='dark']) .svcCard:hover {
+:global(:root[data-mantine-color-scheme='dark']) .svcCard:hover {
   background: var(--mantine-color-dark-5);
   border-color: var(--mantine-color-dark-3);
 }
@@ -744,7 +744,7 @@
   flex-shrink: 0;
 }
 
-:global(body[data-mantine-color-scheme='dark']) .svcCardIcon {
+:global(:root[data-mantine-color-scheme='dark']) .svcCardIcon {
   background: rgba(22, 179, 171, 0.2);
   color: var(--mantine-color-teal-3);
 }
@@ -767,7 +767,7 @@
   color: var(--mantine-color-gray-9);
 }
 
-:global(body[data-mantine-color-scheme='dark']) .svcCardName {
+:global(:root[data-mantine-color-scheme='dark']) .svcCardName {
   color: var(--mantine-color-gray-1);
 }
 
@@ -813,7 +813,7 @@
   color: var(--mantine-color-gray-9);
 }
 
-:global(body[data-mantine-color-scheme='dark']) .svcPin:hover {
+:global(:root[data-mantine-color-scheme='dark']) .svcPin:hover {
   background: var(--mantine-color-dark-4);
   color: var(--mantine-color-white);
 }
@@ -832,7 +832,7 @@
   color: var(--mantine-color-gray-5);
 }
 
-:global(body[data-mantine-color-scheme='dark']) .launcherFooter {
+:global(:root[data-mantine-color-scheme='dark']) .launcherFooter {
   border-top-color: var(--mantine-color-dark-4);
 }
 

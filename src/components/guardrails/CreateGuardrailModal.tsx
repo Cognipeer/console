@@ -33,12 +33,6 @@ interface CreateGuardrailModalProps {
   models?: ModelOption[];
 }
 
-const TARGET_OPTIONS = [
-  { value: 'input', label: 'Input (user messages)' },
-  { value: 'output', label: 'Output (model responses)' },
-  { value: 'both', label: 'Both' },
-];
-
 const ACTION_OPTIONS = [
   { value: 'block', label: 'Block — stop the request' },
   { value: 'warn', label: 'Warn — allow but flag' },
@@ -68,7 +62,6 @@ interface FormValues {
   name: string;
   description: string;
   type: 'preset' | 'custom';
-  target: 'input' | 'output' | 'both';
   action: 'block' | 'warn' | 'flag';
   modelKey: string;
   customPrompt: string;
@@ -87,7 +80,6 @@ export default function CreateGuardrailModal({
       name: '',
       description: '',
       type: 'preset',
-      target: 'input',
       action: 'block',
       modelKey: '',
       customPrompt: '',
@@ -128,7 +120,6 @@ export default function CreateGuardrailModal({
           name: values.name,
           description: values.description || undefined,
           type: values.type,
-          target: values.target,
           action: values.action,
           modelKey: values.modelKey || undefined,
           customPrompt: values.type === 'custom' ? values.customPrompt : undefined,
@@ -164,12 +155,12 @@ export default function CreateGuardrailModal({
   const validCustomRule =
     formValues.type !== 'custom' ||
     (formValues.customPrompt.trim().length > 0 && Boolean(formValues.modelKey));
-  const validTargetAction = Boolean(formValues.target && formValues.action);
+  const validAction = Boolean(formValues.action);
 
   const checklist = [
     { id: 1, label: 'Guardrail type selected', done: validType },
     { id: 2, label: 'Name provided', done: validName },
-    { id: 3, label: 'Target & default action set', done: validTargetAction },
+    { id: 3, label: 'Default action set', done: validAction },
     {
       id: 4,
       label:
@@ -180,7 +171,7 @@ export default function CreateGuardrailModal({
     },
   ];
 
-  const canSubmit = validType && validName && validTargetAction && validCustomRule;
+  const canSubmit = validType && validName && validAction && validCustomRule;
 
   const summary = (
     <>
@@ -192,12 +183,6 @@ export default function CreateGuardrailModal({
         <SummaryKV
           label="Name"
           value={formValues.name || <span className="ds-faint">—</span>}
-        />
-        <SummaryKV
-          label="Target"
-          value={
-            TARGET_OPTIONS.find((o) => o.value === formValues.target)?.label ?? '—'
-          }
         />
         <SummaryKV
           label="Action"
@@ -250,7 +235,7 @@ export default function CreateGuardrailModal({
       onClose={onClose}
       icon={<IconShield size={16} />}
       title="Create guardrail"
-      subtitle="Define a safety check applied to inputs, outputs, or both."
+      subtitle="Define a safety check. Attach it as an input or output guardrail on a model or agent."
       summary={summary}
       footerStatus={`${checklist.filter((c) => c.done).length} of ${checklist.length} ready`}
       primaryAction={{
@@ -312,17 +297,11 @@ export default function CreateGuardrailModal({
 
       <FormSection
         number={3}
-        title="Scope & action"
-        description="Where the rule applies and what happens when it triggers."
-        done={validTargetAction}
+        title="Action"
+        description="What happens when the rule triggers. The direction (input vs output) is chosen where the guardrail is attached to a model or agent."
+        done={validAction}
       >
-        <FormRow cols={2}>
-          <FormField label="Target" required>
-            <Select
-              data={TARGET_OPTIONS}
-              {...form.getInputProps('target')}
-            />
-          </FormField>
+        <FormRow cols={1}>
           <FormField
             label="Default action"
             required

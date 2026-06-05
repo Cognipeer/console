@@ -152,6 +152,9 @@ export const clientCrawlerApiPlugin: FastifyPluginAsync = async (app) => {
           urls: body.urls,
           seeds: body.seeds,
           callbackUrl: body.callbackUrl,
+          // External integrations default to async: enqueue, return the jobId,
+          // and notify via callbackUrl. Pass `"mode":"sync"` to block instead.
+          mode: body.mode ?? 'async',
           metadata: body.metadata,
           trigger: 'api',
           triggerActor: actorFromCtx(ctx),
@@ -228,6 +231,7 @@ export const clientCrawlerApiPlugin: FastifyPluginAsync = async (app) => {
         {
           urls: body.urls,
           callbackUrl: body.callbackUrl,
+          mode: body.mode ?? 'async',
           metadata: body.metadata,
           trigger: 'api',
           triggerActor: actorFromCtx(ctx),
@@ -246,7 +250,7 @@ export const clientCrawlerApiPlugin: FastifyPluginAsync = async (app) => {
       const body = adhocCrawlInputSchema.parse(readJsonBody<unknown>(request));
       const result = await runAdhocCrawl(
         { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: projectOf(ctx) },
-        { ...body, triggerActor: actorFromCtx(ctx) },
+        { ...body, mode: body.mode ?? 'async', triggerActor: actorFromCtx(ctx) },
       );
       return reply.code(202).send(result);
     } catch (error) {

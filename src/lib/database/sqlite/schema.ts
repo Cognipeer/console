@@ -81,6 +81,77 @@ export const MAIN_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_instance_assignments_node ON instance_assignments(nodeName);
 `;
 
+/**
+ * OCR jobs (persistent container + per-file items). Exported separately so the
+ * boot migration can drop+recreate these tables when an older v1 schema is
+ * detected (the v1 layout had incompatible NOT NULL columns).
+ */
+export const OCR_TENANT_SCHEMA_SQL = `
+  CREATE TABLE IF NOT EXISTS ocr_jobs (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    name TEXT,
+    status TEXT NOT NULL,
+    bucketKey TEXT NOT NULL,
+    prefix TEXT,
+    ocrModelKey TEXT NOT NULL,
+    llmModelKey TEXT,
+    outputs TEXT NOT NULL,
+    summaryPrompt TEXT,
+    structuredSchema TEXT,
+    language TEXT,
+    features TEXT,
+    pdfMaxPages INTEGER,
+    callbackUrl TEXT,
+    callbackSecret TEXT,
+    callbackEvents TEXT,
+    itemsTotal INTEGER NOT NULL DEFAULT 0,
+    itemsProcessed INTEGER NOT NULL DEFAULT 0,
+    itemsFailed INTEGER NOT NULL DEFAULT 0,
+    usageInputTokens INTEGER NOT NULL DEFAULT 0,
+    usageOutputTokens INTEGER NOT NULL DEFAULT 0,
+    usageTotalTokens INTEGER NOT NULL DEFAULT 0,
+    usagePages INTEGER NOT NULL DEFAULT 0,
+    usageOcrTokens INTEGER NOT NULL DEFAULT 0,
+    usageLlmTokens INTEGER NOT NULL DEFAULT 0,
+    costOcr REAL NOT NULL DEFAULT 0,
+    costLlm REAL NOT NULL DEFAULT 0,
+    costTotal REAL NOT NULL DEFAULT 0,
+    costCurrency TEXT,
+    lastItemAt TEXT,
+    metadata TEXT,
+    createdBy TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_ocr_jobs_tenantId ON ocr_jobs(tenantId);
+  CREATE INDEX IF NOT EXISTS idx_ocr_jobs_status ON ocr_jobs(status);
+  CREATE INDEX IF NOT EXISTS idx_ocr_jobs_createdAt ON ocr_jobs(createdAt DESC);
+
+  CREATE TABLE IF NOT EXISTS ocr_job_items (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    jobId TEXT NOT NULL,
+    "index" INTEGER NOT NULL DEFAULT 0,
+    source TEXT NOT NULL,
+    fileName TEXT,
+    status TEXT NOT NULL,
+    result TEXT,
+    usage TEXT,
+    costTotal REAL,
+    costCurrency TEXT,
+    callbackStatus TEXT,
+    errorMessage TEXT,
+    startedAt TEXT,
+    endedAt TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_ocr_job_items_jobId ON ocr_job_items(jobId);
+  CREATE INDEX IF NOT EXISTS idx_ocr_job_items_jobId_index ON ocr_job_items(jobId, "index");
+`;
+
 /** Tables used in every TENANT database. */
 export const TENANT_SCHEMA_SQL = `
   -- Users
@@ -360,6 +431,7 @@ export const TENANT_SCHEMA_SQL = `
     toolCalls INTEGER DEFAULT 0,
     cacheHit INTEGER DEFAULT 0,
     pricingSnapshot TEXT,
+    routing TEXT,
     createdAt TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_model_usage_modelKey ON model_usage_logs(modelKey);
@@ -498,7 +570,6 @@ export const TENANT_SCHEMA_SQL = `
     name TEXT NOT NULL,
     description TEXT,
     type TEXT NOT NULL DEFAULT 'preset',
-    target TEXT NOT NULL DEFAULT 'both',
     action TEXT NOT NULL DEFAULT 'block',
     enabled INTEGER NOT NULL DEFAULT 1,
     modelKey TEXT,
@@ -532,6 +603,198 @@ export const TENANT_SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_guardrail_eval_guardrailId ON guardrail_evaluation_logs(guardrailId);
   CREATE INDEX IF NOT EXISTS idx_guardrail_eval_createdAt ON guardrail_evaluation_logs(createdAt);
+
+  -- Evaluation service (offline agent/model testing)
+  CREATE TABLE IF NOT EXISTS evaluation_targets (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    kind TEXT NOT NULL DEFAULT 'model',
+    agentKey TEXT,
+    modelKey TEXT,
+    external TEXT,
+    defaultParams TEXT DEFAULT '{}',
+    metadata TEXT DEFAULT '{}',
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_eval_targets_key ON evaluation_targets(key);
+
+  CREATE TABLE IF NOT EXISTS evaluation_datasets (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    source TEXT NOT NULL DEFAULT 'manual',
+    items TEXT DEFAULT '[]',
+    metadata TEXT DEFAULT '{}',
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_eval_datasets_key ON evaluation_datasets(key);
+
+  CREATE TABLE IF NOT EXISTS evaluation_suites (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    targetKey TEXT NOT NULL,
+    datasetKey TEXT NOT NULL,
+    scorers TEXT DEFAULT '[]',
+    judgeModelKey TEXT,
+    runConfig TEXT DEFAULT '{}',
+    metadata TEXT DEFAULT '{}',
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_eval_suites_key ON evaluation_suites(key);
+
+  CREATE TABLE IF NOT EXISTS evaluation_runs (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    suiteKey TEXT NOT NULL,
+    targetKey TEXT NOT NULL,
+    datasetKey TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    mode TEXT NOT NULL DEFAULT 'sync',
+    progress TEXT DEFAULT '{}',
+    aggregate TEXT,
+    items TEXT DEFAULT '[]',
+    error TEXT,
+    startedAt TEXT,
+    finishedAt TEXT,
+    createdBy TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_eval_runs_suiteKey ON evaluation_runs(suiteKey);
+  CREATE INDEX IF NOT EXISTS idx_eval_runs_createdAt ON evaluation_runs(createdAt);
+
+  -- Red-team service (adversarial agent/model testing)
+  CREATE TABLE IF NOT EXISTS redteam_campaigns (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    targetKind TEXT NOT NULL DEFAULT 'agent',
+    agentKey TEXT,
+    modelKey TEXT,
+    probeKeys TEXT DEFAULT '[]',
+    judgeModelKey TEXT,
+    runConfig TEXT DEFAULT '{}',
+    policy TEXT DEFAULT '{}',
+    schedule TEXT DEFAULT '{}',
+    metadata TEXT DEFAULT '{}',
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_redteam_campaigns_key ON redteam_campaigns(key);
+
+  CREATE TABLE IF NOT EXISTS redteam_runs (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    campaignKey TEXT NOT NULL,
+    targetKind TEXT NOT NULL DEFAULT 'agent',
+    targetRef TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    mode TEXT NOT NULL DEFAULT 'async',
+    progress TEXT DEFAULT '{}',
+    aggregate TEXT,
+    attempts TEXT DEFAULT '[]',
+    error TEXT,
+    startedAt TEXT,
+    finishedAt TEXT,
+    createdBy TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_redteam_runs_campaignKey ON redteam_runs(campaignKey);
+  CREATE INDEX IF NOT EXISTS idx_redteam_runs_createdAt ON redteam_runs(createdAt);
+
+  -- Analysis service (conversation field extraction, judge & accuracy)
+  CREATE TABLE IF NOT EXISTS analysis_definitions (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    fieldSet TEXT DEFAULT '[]',
+    extractionInstructions TEXT,
+    modes TEXT DEFAULT '{}',
+    extractionModelKey TEXT,
+    judgeModelKey TEXT,
+    runConfig TEXT DEFAULT '{}',
+    schedule TEXT,
+    metadata TEXT DEFAULT '{}',
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_analysis_defs_key ON analysis_definitions(key);
+
+  CREATE TABLE IF NOT EXISTS analysis_conversations (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    name TEXT,
+    description TEXT,
+    transcript TEXT DEFAULT '[]',
+    source TEXT NOT NULL DEFAULT 'imported',
+    tags TEXT DEFAULT '[]',
+    metadata TEXT DEFAULT '{}',
+    occurredAt TEXT,
+    referenceFields TEXT,
+    extractedFields TEXT,
+    lastAnalyzedAt TEXT,
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_analysis_convos_key ON analysis_conversations(key);
+  CREATE INDEX IF NOT EXISTS idx_analysis_convos_createdAt ON analysis_conversations(createdAt);
+
+  CREATE TABLE IF NOT EXISTS analysis_runs (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    definitionKey TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    mode TEXT NOT NULL DEFAULT 'sync',
+    progress TEXT DEFAULT '{}',
+    aggregate TEXT,
+    items TEXT DEFAULT '[]',
+    error TEXT,
+    startedAt TEXT,
+    finishedAt TEXT,
+    createdBy TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_analysis_runs_definitionKey ON analysis_runs(definitionKey);
+  CREATE INDEX IF NOT EXISTS idx_analysis_runs_createdAt ON analysis_runs(createdAt);
 
   -- PII policies (standalone service)
   CREATE TABLE IF NOT EXISTS pii_policies (
@@ -1251,6 +1514,8 @@ export const TENANT_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_crawl_results_jobId ON crawl_results(jobId);
   CREATE INDEX IF NOT EXISTS idx_crawl_results_jobId_createdAt ON crawl_results(jobId, createdAt DESC);
   CREATE INDEX IF NOT EXISTS idx_crawl_results_tenant_url ON crawl_results(tenantId, url);
+
+  ${OCR_TENANT_SCHEMA_SQL}
 
   -- Project membership (replaces user.projectIds)
   CREATE TABLE IF NOT EXISTS user_projects (

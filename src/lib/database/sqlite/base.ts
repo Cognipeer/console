@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createLogger } from '@/lib/core/logger';
-import { MAIN_SCHEMA_SQL, TENANT_SCHEMA_SQL } from './schema';
+import { MAIN_SCHEMA_SQL, TENANT_SCHEMA_SQL, OCR_TENANT_SCHEMA_SQL } from './schema';
 
 export const logger = createLogger('sqlite');
 
@@ -41,6 +41,15 @@ export const TABLES = {
   inferenceServerMetrics: 'inference_server_metrics',
   guardrails: 'guardrails',
   guardrailEvalLogs: 'guardrail_evaluation_logs',
+  evaluationTargets: 'evaluation_targets',
+  evaluationDatasets: 'evaluation_datasets',
+  evaluationSuites: 'evaluation_suites',
+  evaluationRuns: 'evaluation_runs',
+  redTeamCampaigns: 'redteam_campaigns',
+  redTeamRuns: 'redteam_runs',
+  analysisDefinitions: 'analysis_definitions',
+  analysisConversations: 'analysis_conversations',
+  analysisRuns: 'analysis_runs',
   piiPolicies: 'pii_policies',
   alertRules: 'alert_rules',
   alertEvents: 'alert_events',
@@ -74,6 +83,8 @@ export const TABLES = {
   crawlers: 'crawlers',
   crawlJobs: 'crawl_jobs',
   crawlResults: 'crawl_results',
+  ocrJobs: 'ocr_jobs',
+  ocrJobItems: 'ocr_job_items',
   // ── Project membership & future groups ──────────────────────────────
   userProjects: 'user_projects',
   groups: 'groups',
@@ -354,6 +365,38 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.gpuHosts, 'terminalEnabled', 'terminalEnabled INTEGER NOT NULL DEFAULT 0');
     // Sandbox instance per-instance env (added later). Safe to ensure on boot.
     this.ensureTableColumn(db, 'sandbox_instances', 'env', 'env TEXT');
+    // OCR jobs v2: the container model replaced the v1 batch layout (which had
+    // incompatible NOT NULL columns like `mode`). Drop+recreate the brand-new
+    // tables when an old schema is detected; additive columns otherwise.
+    this.migrateOcrJobsSchema(db);
+    // OCR usage split aggregates (added later). Safe to ensure on boot.
+    this.ensureTableColumn(db, 'ocr_jobs', 'usageOcrTokens', 'usageOcrTokens INTEGER NOT NULL DEFAULT 0');
+    this.ensureTableColumn(db, 'ocr_jobs', 'usageLlmTokens', 'usageLlmTokens INTEGER NOT NULL DEFAULT 0');
+    this.ensureTableColumn(db, 'ocr_jobs', 'costOcr', 'costOcr REAL NOT NULL DEFAULT 0');
+    this.ensureTableColumn(db, 'ocr_jobs', 'costLlm', 'costLlm REAL NOT NULL DEFAULT 0');
+    // Red-team campaign cron schedule (added with the scheduler). Safe on boot.
+    this.ensureTableColumn(db, TABLES.redTeamCampaigns, 'schedule', "schedule TEXT DEFAULT '{}'");
+    // Dynamic LLM routing decision metadata on usage logs (added with the
+    // Dynamic LLM router). Safe to ensure on boot.
+    this.ensureTableColumn(db, TABLES.modelUsageLogs, 'routing', 'routing TEXT');
+    // Analysis conversation tags for grouping/filtering (added later). Safe on boot.
+    this.ensureTableColumn(db, TABLES.analysisConversations, 'tags', "tags TEXT DEFAULT '[]'");
+  }
+
+  private migrateOcrJobsSchema(db: Database.Database): void {
+    const exists = db
+      .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='ocr_jobs'`)
+      .get() as { name?: unknown } | undefined;
+    if (exists) {
+      const columns = db.prepare(`PRAGMA table_info(ocr_jobs)`).all() as Array<{ name?: unknown }>;
+      const names = new Set(columns.map((c) => String(c.name)));
+      const isV1 = names.has('mode') || !names.has('bucketKey');
+      if (isV1) {
+        db.exec(`DROP TABLE IF EXISTS ocr_job_items; DROP TABLE IF EXISTS ocr_jobs;`);
+        db.exec(OCR_TENANT_SCHEMA_SQL);
+        logger.info('OCR jobs schema migrated to v2 (drop+recreate)');
+      }
+    }
   }
 
   private applyTenantIndexes(db: Database.Database): void {

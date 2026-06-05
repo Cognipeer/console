@@ -23,7 +23,7 @@ interface PiiPolicyView {
   key: string;
 }
 
-type DefaultAction = 'detect' | 'redact' | 'mask' | 'block';
+type DefaultAction = 'detect' | 'redact' | 'mask' | 'block' | 'tokenize';
 
 interface Props {
   opened: boolean;
@@ -185,6 +185,7 @@ export default function CreatePiiPolicyModal({ opened, onClose, onCreated }: Pro
             { value: 'detect', label: tAct('detect') },
             { value: 'redact', label: tAct('redact') },
             { value: 'mask', label: tAct('mask') },
+            { value: 'tokenize', label: tAct('tokenize') },
             { value: 'block', label: tAct('block') },
           ]}
           value={defaultAction}

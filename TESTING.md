@@ -15,9 +15,10 @@ Tek hedef: **uygulamanın her zaman stabil olduğundan emin olmak**. Bu rehber t
 | L5 | Provider Contract | `src/__tests__/contracts/**` | sn | Vector/model/file driver şekil + form uyumu |
 | L6 | E2E *(TBD)* | `tests/e2e/**` | dk | Playwright kritik user journey'leri |
 | L7 | AI-driven | `src/__tests__/ai/**` | dk | LLM judge ile davranışsal regresyon (guardrail, agent, prompt kalite) |
-| L8 | Smoke *(TBD)* | `scripts/smoke/**` | dk | `docker compose up` + sağlık + 1 kritik akış |
+| L8 | Smoke | `scripts/smoke/**` | dk | Gerçek sunucuyu HTTP üzerinden ayağa kaldırır, yeni tenant kaydı yapar, **tüm modülleri uçtan uca** test eder (bağımlılık yok) |
+| L9 | Real E2E + Load | `tests/e2e/**` | dk | **Docker**'da çalışan konsolu **gerçek LLM** (Azure OpenAI) ile sürer; semantik sonuçları doğrular + **load testi** |
 
-> `(TBD)` katmanları henüz yok ama mimari yer ayrıldı. İlk versiyon için L1-L5 ve L7 ayağa kaldırıldı.
+> `(TBD)` katmanları henüz yok ama mimari yer ayrıldı. İlk versiyon için L1-L5, L7, L8 ve L9 ayağa kaldırıldı.
 
 ---
 
@@ -30,8 +31,13 @@ npm run test:coverage       # Coverage raporu (lib/services, providers, license,
 npm run test:ui             # Vitest UI
 npm run test:endpoints      # Endpoint coverage gate (yeni endpoint için test var mı?)
 npm run test:flake          # Tüm suite'i 3x koşar, flake yakalar (FLAKE_RUNS=5 ile değiştir)
+npm run test:smoke          # L8 — gerçek sunucuyu ayağa kaldırıp tüm modülleri uçtan uca test eder
+npm run test:e2e:docker     # L9 — Docker'da gerçek LLM ile uçtan uca + load testi (tests/e2e/.env gerekir)
+npm run test:load           # L9 — sadece load testi
 npm run lint                # ESLint
 ```
+
+> L9 detayları: [`tests/e2e/README.md`](tests/e2e/README.md). `tests/e2e/.env` içine `AZURE_OPENAI_URL` ve `AZURE_PROJECT_API_KEY` koymanız yeterli.
 
 CI'da nightly olarak ek:
 ```bash
@@ -165,7 +171,7 @@ Nightly (cron):
 5. npm test                          (full suite, JUDGE_BACKEND=... ile L7 dahil)
 6. PARITY_SKIP_MONGODB= npm test     (MongoDB parity)
 7. npm run test:flake -- FLAKE_RUNS=5
-8. Smoke compose up + critical journey (L8)
+8. npm run test:smoke                (L8 — boot + signup + all modules end-to-end)
 ```
 
 ---

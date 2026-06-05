@@ -154,6 +154,39 @@
       "searchKeywords": ["guardrails", "safety", "moderation", "pii"]
     },
     {
+      "id": "evaluations",
+      "href": "/dashboard/evaluations",
+      "icon": "IconChecklist",
+      "category": "operate",
+      "navLabelKey": "evaluations",
+      "navDescriptionKey": "evaluationsDescription",
+      "tags": ["evaluation", "testing", "quality", "datasets", "scorers"],
+      "searchKeywords": ["evaluation", "eval", "test", "dataset", "suite", "scorer", "judge", "benchmark"],
+      "badge": "new"
+    },
+    {
+      "id": "redteam",
+      "href": "/dashboard/redteam",
+      "icon": "IconShield",
+      "category": "operate",
+      "navLabelKey": "redteam",
+      "navDescriptionKey": "redteamDescription",
+      "tags": ["redteam", "security", "adversarial", "jailbreak", "prompt-injection"],
+      "searchKeywords": ["red team", "redteam", "security", "adversarial", "jailbreak", "prompt injection", "garak", "vulnerability", "probe", "owasp"],
+      "badge": "new"
+    },
+    {
+      "id": "analysis",
+      "href": "/dashboard/analysis",
+      "icon": "IconReportAnalytics",
+      "category": "operate",
+      "navLabelKey": "analysis",
+      "navDescriptionKey": "analysisDescription",
+      "tags": ["analysis", "conversations", "extraction", "quality", "ivr"],
+      "searchKeywords": ["analysis", "conversation", "transcript", "extract", "judge", "accuracy", "ivr", "call"],
+      "badge": "new"
+    },
+    {
       "id": "pii",
       "href": "/dashboard/pii",
       "icon": "IconLock",
@@ -214,6 +247,17 @@
       "navDescriptionKey": "crawlerDescription",
       "tags": ["crawler", "scraping", "ingest", "rag"],
       "searchKeywords": ["crawler", "scrape", "crawl", "web", "ingest", "markdown", "playwright"],
+      "badge": "new"
+    },
+    {
+      "id": "ocr",
+      "href": "/dashboard/ocr-jobs",
+      "icon": "IconFileText",
+      "category": "data",
+      "navLabelKey": "ocr",
+      "navDescriptionKey": "ocrDescription",
+      "tags": ["ocr", "extraction", "documents", "jobs"],
+      "searchKeywords": ["ocr", "extraction", "document", "pdf", "image", "summary", "structured", "job", "batch"],
       "badge": "new"
     },
     {

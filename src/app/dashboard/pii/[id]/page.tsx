@@ -1,12 +1,11 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
   Button,
   Center,
   Code,
-  CopyButton,
   Group,
   Loader,
   Modal,
@@ -16,12 +15,9 @@ import {
   Text,
   Textarea,
   TextInput,
-  Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
-  IconCheck,
-  IconCopy,
   IconPlayerPlay,
   IconShieldLock,
   IconShieldOff,
@@ -35,6 +31,7 @@ import PiiPolicyEditor, {
   type PiiCustomPatternForm,
 } from '@/components/pii/PiiPolicyEditor';
 import PiiTestPanel from '@/components/pii/PiiTestPanel';
+import PiiApiUsage from '@/components/pii/PiiApiUsage';
 import { useLocale, useTranslations } from '@/lib/i18n';
 
 interface PolicyView {
@@ -42,7 +39,7 @@ interface PolicyView {
   key: string;
   name: string;
   description?: string;
-  defaultAction: 'detect' | 'redact' | 'mask' | 'block';
+  defaultAction: 'detect' | 'redact' | 'mask' | 'block' | 'tokenize';
   categories: Record<string, boolean>;
   customPatterns?: PiiCustomPatternForm[];
   languages?: string[];
@@ -149,16 +146,6 @@ export default function PiiPolicyDetailPage() {
       return changed ? next : prev;
     });
   }, [catalog, defaultCategories]);
-
-  const curlSnippet = useMemo(() => {
-    if (!policy) return '';
-    return [
-      `curl -X POST '$BASE_URL/api/pii/scan' \\`,
-      `  -H 'Authorization: Bearer $TOKEN' \\`,
-      `  -H 'Content-Type: application/json' \\`,
-      `  -d '${JSON.stringify({ policy_key: policy.key, text: 'Sample text', locale }, null, 0)}'`,
-    ].join('\n');
-  }, [policy, locale]);
 
   const save = async () => {
     if (!policy) return;
@@ -374,23 +361,11 @@ export default function PiiPolicyDetailPage() {
       ) : null}
 
       {activeTab === 'api' ? (
-        <Stack gap="md">
-          <Paper p="md" withBorder radius="sm">
-            <Group justify="space-between" mb="xs">
-              <Text size="sm" fw={600}>POST /api/pii/scan</Text>
-              <CopyButton value={curlSnippet}>
-                {({ copied, copy }) => (
-                  <Tooltip label={copied ? 'Copied' : 'Copy'}>
-                    <Button variant="default" size="xs" leftSection={copied ? <IconCheck size={12} /> : <IconCopy size={12} />} onClick={copy}>
-                      cURL
-                    </Button>
-                  </Tooltip>
-                )}
-              </CopyButton>
-            </Group>
-            <Code block style={{ fontSize: 12, whiteSpace: 'pre-wrap' }}>{curlSnippet}</Code>
-          </Paper>
-        </Stack>
+        <PiiApiUsage
+          policyKey={policy.key}
+          policyName={policy.name}
+          defaultAction={defaultAction}
+        />
       ) : null}
 
       <Modal opened={deleteOpen} onClose={() => setDeleteOpen(false)} title={t('deleteModal.title')} centered size="sm">

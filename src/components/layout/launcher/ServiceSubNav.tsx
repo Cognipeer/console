@@ -1,22 +1,37 @@
 'use client';
 
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import {
   IconAlertTriangle,
   IconArrowLeftRight,
+  IconArrowsSort,
   IconBell,
   IconBook,
+  IconBrain,
+  IconChecklist,
+  IconClipboardText,
+  IconCode,
   IconDatabase,
   IconExternalLink,
   IconFolder,
   IconHistory,
   IconLayoutDashboard,
   IconMessage,
+  IconMessages,
+  IconMicrophone,
   IconPin,
   IconPinFilled,
+  IconPlayerPlay,
+  IconReportAnalytics,
+  IconRobot,
+  IconScan,
   IconServer,
+  IconShield,
+  IconStack2,
   IconTimeline,
   IconUsers,
+  IconVector,
+  IconVolume,
 } from '@tabler/icons-react';
 import { ActionIcon, Text, Tooltip } from '@mantine/core';
 import type { DashboardServiceDefinition } from '@/lib/utils/dashboardServices';
@@ -29,10 +44,110 @@ export interface SubNavItem {
   href: string;
   icon: typeof IconLayoutDashboard;
   badge?: number | string;
-  matcher?: (pathname: string) => boolean;
+  matcher?: (pathname: string, search: URLSearchParams) => boolean;
 }
 
+/** Model categories surfaced as their own sub-nav entries under the Models service. */
+const MODEL_TYPE_KEYS = ['llm', 'embedding', 'rerank', 'stt', 'tts', 'ocr'];
+
 export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
+  evaluations: [
+    {
+      id: 'targets',
+      label: 'Targets',
+      href: '/dashboard/evaluations',
+      icon: IconRobot,
+      matcher: (p) =>
+        p === '/dashboard/evaluations' ||
+        (p.startsWith('/dashboard/evaluations') &&
+          !p.startsWith('/dashboard/evaluations/datasets') &&
+          !p.startsWith('/dashboard/evaluations/suites') &&
+          !p.startsWith('/dashboard/evaluations/runs') &&
+          !p.startsWith('/dashboard/evaluations/api')),
+    },
+    {
+      id: 'datasets',
+      label: 'Datasets',
+      href: '/dashboard/evaluations/datasets',
+      icon: IconDatabase,
+      matcher: (p) => p.startsWith('/dashboard/evaluations/datasets'),
+    },
+    {
+      id: 'suites',
+      label: 'Suites',
+      href: '/dashboard/evaluations/suites',
+      icon: IconChecklist,
+      matcher: (p) => p.startsWith('/dashboard/evaluations/suites'),
+    },
+    {
+      id: 'runs',
+      label: 'Runs',
+      href: '/dashboard/evaluations/runs',
+      icon: IconPlayerPlay,
+      matcher: (p) => p.startsWith('/dashboard/evaluations/runs'),
+    },
+    {
+      id: 'api',
+      label: 'API',
+      href: '/dashboard/evaluations/api',
+      icon: IconCode,
+      matcher: (p) => p.startsWith('/dashboard/evaluations/api'),
+    },
+  ],
+  redteam: [
+    {
+      id: 'campaigns',
+      label: 'Campaigns',
+      href: '/dashboard/redteam',
+      icon: IconShield,
+      matcher: (p) =>
+        p === '/dashboard/redteam' ||
+        (p.startsWith('/dashboard/redteam') &&
+          !p.startsWith('/dashboard/redteam/runs') &&
+          !p.startsWith('/dashboard/redteam/api')),
+    },
+    {
+      id: 'runs',
+      label: 'Scans',
+      href: '/dashboard/redteam/runs',
+      icon: IconPlayerPlay,
+      matcher: (p) => p.startsWith('/dashboard/redteam/runs'),
+    },
+    {
+      id: 'api',
+      label: 'API',
+      href: '/dashboard/redteam/api',
+      icon: IconCode,
+      matcher: (p) => p.startsWith('/dashboard/redteam/api'),
+    },
+  ],
+  analysis: [
+    {
+      id: 'definitions',
+      label: 'Definitions',
+      href: '/dashboard/analysis',
+      icon: IconClipboardText,
+      matcher: (p) =>
+        p === '/dashboard/analysis' ||
+        (p.startsWith('/dashboard/analysis') &&
+          !p.startsWith('/dashboard/analysis/conversations') &&
+          !p.startsWith('/dashboard/analysis/runs')),
+    },
+    {
+      id: 'conversations',
+      label: 'Conversations',
+      href: '/dashboard/analysis/conversations',
+      icon: IconMessages,
+      matcher: (p) => p.startsWith('/dashboard/analysis/conversations'),
+    },
+    {
+      id: 'runs',
+      label: 'Runs',
+      href: '/dashboard/analysis/runs',
+      icon: IconReportAnalytics,
+      matcher: (p) => p.startsWith('/dashboard/analysis/runs'),
+    },
+  ],
   tracing: [
     {
       id: 'overview',
@@ -81,11 +196,56 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
   ],
   models: [
     {
-      id: 'list',
-      label: 'Endpoints',
+      id: 'all',
+      label: 'All models',
       href: '/dashboard/models',
-      icon: IconServer,
-      matcher: (p) => p.startsWith('/dashboard/models'),
+      icon: IconStack2,
+      // Active on the list with no type filter and on every model detail/edit page.
+      matcher: (p, s) =>
+        p.startsWith('/dashboard/models') &&
+        !MODEL_TYPE_KEYS.includes(s.get('type') ?? ''),
+    },
+    {
+      id: 'llm',
+      label: 'LLM',
+      href: '/dashboard/models?type=llm',
+      icon: IconBrain,
+      matcher: (p, s) => p === '/dashboard/models' && s.get('type') === 'llm',
+    },
+    {
+      id: 'embedding',
+      label: 'Embedding',
+      href: '/dashboard/models?type=embedding',
+      icon: IconVector,
+      matcher: (p, s) => p === '/dashboard/models' && s.get('type') === 'embedding',
+    },
+    {
+      id: 'rerank',
+      label: 'Rerank',
+      href: '/dashboard/models?type=rerank',
+      icon: IconArrowsSort,
+      matcher: (p, s) => p === '/dashboard/models' && s.get('type') === 'rerank',
+    },
+    {
+      id: 'stt',
+      label: 'Speech-to-Text',
+      href: '/dashboard/models?type=stt',
+      icon: IconMicrophone,
+      matcher: (p, s) => p === '/dashboard/models' && s.get('type') === 'stt',
+    },
+    {
+      id: 'tts',
+      label: 'Text-to-Speech',
+      href: '/dashboard/models?type=tts',
+      icon: IconVolume,
+      matcher: (p, s) => p === '/dashboard/models' && s.get('type') === 'tts',
+    },
+    {
+      id: 'ocr',
+      label: 'OCR',
+      href: '/dashboard/models?type=ocr',
+      icon: IconScan,
+      matcher: (p, s) => p === '/dashboard/models' && s.get('type') === 'ocr',
     },
   ],
   files: [
@@ -203,6 +363,8 @@ export default function ServiceSubNav({
   items,
 }: ServiceSubNavProps) {
   const router = useRouter();
+  const rawSearchParams = useSearchParams();
+  const searchParams = new URLSearchParams(rawSearchParams?.toString() ?? '');
   const tNav = useTranslations('navigation');
   const ServiceIcon = service.icon;
   const navItems = items ?? SUBNAV_CONFIG[service.id] ?? [];
@@ -242,7 +404,7 @@ export default function ServiceSubNav({
         {navItems.map((item) => {
           const ItemIcon = item.icon;
           const active = item.matcher
-            ? item.matcher(pathname)
+            ? item.matcher(pathname, searchParams)
             : pathname === item.href;
           return (
             <button

@@ -9,7 +9,7 @@
 import crypto from 'node:crypto';
 import { createLogger } from '@/lib/core/logger';
 import { routeInstanceCall, queueNameFor } from '@/lib/core/cluster';
-import type { QueuePayload } from '@/lib/core/queue';
+import { getQueue, type QueuePayload } from '@/lib/core/queue';
 import { getDatabase, type DatabaseProvider } from '@/lib/database';
 import type {
   ICrawler,
@@ -365,7 +365,7 @@ export async function runCrawler(
   });
 
   const jobId = String(job._id);
-  await dispatchRun(ctx, crawler.key, jobId);
+  await dispatchRun(ctx, crawler.key, jobId, options.mode ?? 'sync');
   return { jobId, status: 'queued' };
 }
 
@@ -410,16 +410,41 @@ export async function runAdhocCrawl(
 
   const jobId = String(job._id);
   // Ad-hoc has no crawlerKey – route via auto channel
-  await dispatchRun(ctx, undefined, jobId);
+  await dispatchRun(ctx, undefined, jobId, input.mode ?? 'sync');
   return { jobId, status: 'queued' };
 }
 
+/**
+ * Route a queued job to its worker.
+ *
+ *  - `async`: fire-and-forget. Publish onto the crawler queue and return
+ *    immediately; the queue consumer (registered on every node at bootstrap)
+ *    runs `runCrawlJobLocal` in the background. The caller only ever sees the
+ *    `queued` job — progress and completion arrive via polling and the
+ *    callbackUrl/webhook. This keeps the HTTP request (and the dashboard
+ *    button behind it) from blocking for the whole crawl.
+ *  - `sync`: block until the crawl finishes. Uses `routeInstanceCall` so the
+ *    work still lands on the assigned node in a cluster, but the call does not
+ *    return until the run is done. Kept as the default for programmatic
+ *    callers (and tests) that read results straight back.
+ */
 async function dispatchRun(
   ctx: CrawlerContext,
   crawlerKey: string | undefined,
   jobId: string,
+  mode: 'sync' | 'async',
 ): Promise<void> {
   const payload = { ctx, jobId } as unknown as QueuePayload;
+
+  if (mode === 'async') {
+    const queue = await getQueue();
+    await queue.publish(queueNameFor('crawler'), 'crawler.run', payload, {
+      attempts: 1,
+    });
+    logger.info('Crawl job enqueued (async)', { jobId, crawlerKey });
+    return;
+  }
+
   if (crawlerKey) {
     await routeInstanceCall(
       {

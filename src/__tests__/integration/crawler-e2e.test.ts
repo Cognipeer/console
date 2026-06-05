@@ -62,6 +62,7 @@ import {
   removeCrawlerUrls,
   runAdhocCrawl,
   runCrawler,
+  startCrawlerQueueConsumer,
 } from '@/lib/services/crawler';
 
 let originServer: Server;
@@ -401,6 +402,49 @@ describe('crawler e2e — list job + result response shape', () => {
       expect((r as unknown as { _id?: unknown })._id).toBeUndefined();
     }
   });
+});
+
+describe('crawler e2e — async run (enqueue + background consumer)', () => {
+  it('returns immediately as queued, then the queue consumer finishes it', async () => {
+    // The async path publishes onto the crawler queue; the consumer (the same
+    // one bootstrap registers in production) drains it in the background.
+    await startCrawlerQueueConsumer();
+
+    const ctx = { tenantDbName: TENANT_DB_NAME, tenantId: TENANT_ID };
+    const result = await runAdhocCrawl(ctx, {
+      seeds: [`${originUrl}/about`],
+      engine: 'axios',
+      maxDepth: 0,
+      maxPages: 1,
+      autoCrawl: false,
+      http: { allowPrivateNetwork: true },
+      mode: 'async',
+      triggerActor: ACTOR,
+    });
+    expect(result.jobId).toBeTruthy();
+    // The dispatch reports the job as queued (it is enqueued, not run inline).
+    expect(result.status).toBe('queued');
+
+    // The consumer drains the in-memory queue on a 25ms timer and a localhost
+    // crawl is ~1ms, so we don't race it for the transient `queued` state —
+    // instead we prove the job is picked up and finished off the request path.
+    const deadline = Date.now() + 10_000;
+    let job = await getCrawlJob(ctx, result.jobId);
+    while (Date.now() < deadline) {
+      job = await getCrawlJob(ctx, result.jobId);
+      if (job && ['succeeded', 'failed', 'partial', 'canceled'].includes(job.status)) {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+
+    expect(job?.status).toBe('succeeded');
+    expect(job?.pagesProcessed).toBe(1);
+
+    const results = await listCrawlJobResults(ctx, result.jobId);
+    expect(results[0]?.url).toBe(`${originUrl}/about`);
+    expect(results[0]?.bodyMarkdown).toMatch(/ABOUT_MARKER/);
+  }, 20_000);
 });
 
 describe('crawler e2e — schedule planner integration', () => {

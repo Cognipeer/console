@@ -24,6 +24,7 @@ import { notifications } from '@mantine/notifications';
 import {
   IconArrowLeft,
   IconArrowRight,
+  IconArrowsSplit,
   IconBook,
   IconBrain,
   IconMicrophone,
@@ -61,6 +62,7 @@ import {
   buildDashboardDateSearchParams,
   defaultDashboardDateFilter,
 } from '@/lib/utils/dashboardDateFilter';
+import type { IDynamicRoutingConfig } from '@/lib/database';
 
 interface ModelPricing {
   currency?: string;
@@ -93,9 +95,18 @@ interface ModelDetailDto {
   pricing: ModelPricing;
   settings: Record<string, unknown>;
   semanticCache?: SemanticCacheConfigDto;
+  inputGuardrailKey?: string;
+  outputGuardrailKey?: string;
   metadata?: Record<string, unknown>;
   createdAt?: string;
   updatedAt?: string;
+}
+
+interface GuardrailLite {
+  key: string;
+  name: string;
+  type: 'preset' | 'custom';
+  action: string;
 }
 
 interface CostSummary {
@@ -134,6 +145,20 @@ interface UsageAggregateDto {
   timeseries?: UsageTimeseriesEntry[];
 }
 
+interface RoutingInfoDto {
+  routerKey: string;
+  strategy: 'rule-based' | 'model-based';
+  decision: 'rule' | 'model' | 'default' | 'fallback';
+  chosenModelKey: string;
+  matchedRuleLabel?: string;
+  deciderLabel?: string;
+  deciderModelKey?: string;
+  deciderLatencyMs?: number;
+  reason: string;
+  signals?: Record<string, unknown>;
+  childRequestId?: string;
+}
+
 interface UsageLogDto {
   _id?: string;
   requestId?: string;
@@ -147,6 +172,7 @@ interface UsageLogDto {
   errorMessage?: string;
   toolCalls?: number;
   cacheHit?: boolean;
+  routing?: RoutingInfoDto;
   providerRequest?: Record<string, unknown>;
   providerResponse?: Record<string, unknown>;
   createdAt?: string;
@@ -210,7 +236,16 @@ function relativeDate(iso?: string) {
   return d.toLocaleDateString();
 }
 
-type DetailTab = 'overview' | 'playground' | 'configure' | 'logs' | 'usage';
+type DetailTab = 'overview' | 'playground' | 'routing' | 'configure' | 'logs' | 'usage';
+
+/** Reads the routing config off a model when it is a Dynamic LLM. */
+function dynamicConfigOf(model: { settings?: Record<string, unknown> } | null): IDynamicRoutingConfig | null {
+  const dyn = model?.settings?.dynamic;
+  if (dyn && typeof dyn === 'object' && typeof (dyn as { strategy?: unknown }).strategy === 'string') {
+    return dyn as IDynamicRoutingConfig;
+  }
+  return null;
+}
 
 export default function ModelDetailPage() {
   const params = useParams<{ id: string }>();
@@ -226,6 +261,7 @@ export default function ModelDetailPage() {
   const [logsPageSize, setLogsPageSize] = useState(25);
   const [hasMoreLogs, setHasMoreLogs] = useState(false);
   const [providers, setProviders] = useState<ModelProviderDto[]>([]);
+  const [guardrails, setGuardrails] = useState<GuardrailLite[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -266,10 +302,11 @@ export default function ModelDetailPage() {
     try {
       const usageParams = buildDashboardDateSearchParams(dateFilter);
       usageParams.set('groupBy', 'day');
-      const [modelResponse, usageResponse, providerResponse] = await Promise.all([
+      const [modelResponse, usageResponse, providerResponse, guardrailResponse] = await Promise.all([
         fetch(`/api/models/${modelId}`),
         fetch(`/api/models/${modelId}/usage?${usageParams.toString()}`),
         fetch('/api/models/providers'),
+        fetch('/api/guardrails?enabled=true'),
       ]);
       if (!modelResponse.ok) throw new Error('modelFailed');
       const modelData = await modelResponse.json();
@@ -283,6 +320,10 @@ export default function ModelDetailPage() {
       if (providerResponse.ok) {
         const providerData = await providerResponse.json();
         setProviders(providerData.providers ?? []);
+      }
+      if (guardrailResponse.ok) {
+        const guardrailData = await guardrailResponse.json();
+        setGuardrails(guardrailData.guardrails ?? []);
       }
       if (showNotifications) {
         notifications.show({
@@ -456,15 +497,21 @@ export default function ModelDetailPage() {
               : '/api/client/v1/embeddings';
   const endpointUrl = `${endpointBase}${endpointPath}`;
 
+  const dynamic = dynamicConfigOf(model);
+  const isDynamic = Boolean(dynamic);
+
+  // A Dynamic LLM has no real provider runtime, so its playground would error.
   const playgroundCategories = ['llm', 'stt', 'tts', 'ocr'] as const;
-  const hasPlayground = (playgroundCategories as readonly string[]).includes(
-    model.category,
-  );
+  const hasPlayground =
+    !isDynamic && (playgroundCategories as readonly string[]).includes(model.category);
 
   const tabs: Array<{ id: DetailTab; label: string; icon: React.ReactNode }> = [
     { id: 'overview', label: 'Overview', icon: <IconLayoutDashboard size={14} stroke={1.7} /> },
     ...(hasPlayground
       ? [{ id: 'playground' as const, label: 'Playground', icon: <IconPlayerPlay size={14} stroke={1.7} /> }]
+      : []),
+    ...(isDynamic
+      ? [{ id: 'routing' as const, label: 'Routing', icon: <IconArrowsSplit size={14} stroke={1.7} /> }]
       : []),
     { id: 'configure', label: 'Configure', icon: <IconSettings size={14} stroke={1.7} /> },
     { id: 'logs', label: 'Logs', icon: <IconTimeline size={14} stroke={1.7} /> },
@@ -517,7 +564,11 @@ export default function ModelDetailPage() {
                 {model.name}
               </h1>
               <StatusBadge status="active" />
-              <span className="ds-badge">{model.category}</span>
+              {isDynamic ? (
+                <span className="ds-badge ds-badge-teal">dynamic</span>
+              ) : (
+                <span className="ds-badge">{model.category}</span>
+              )}
               {model.isMultimodal ? (
                 <span className="ds-badge ds-badge-info">vision</span>
               ) : null}
@@ -703,8 +754,19 @@ export default function ModelDetailPage() {
         />
       ) : null}
 
+      {tab === 'routing' && dynamic ? (
+        <RoutingTab
+          config={dynamic}
+          logs={logs}
+          onOpenLog={(l) => {
+            setSelectedLog(l);
+            openLogModal();
+          }}
+        />
+      ) : null}
+
       {tab === 'configure' ? (
-        <ConfigureTab model={model} onDelete={handleDelete} deleting={deleting} />
+        <ConfigureTab model={model} guardrails={guardrails} onDelete={handleDelete} deleting={deleting} />
       ) : null}
 
       {tab === 'logs' ? (
@@ -792,6 +854,18 @@ export default function ModelDetailPage() {
                     <strong>{t('logs.modal.error')}:</strong>{' '}
                     {selectedLog.errorMessage}
                   </Text>
+                ) : null}
+                {selectedLog.routing ? (
+                  <>
+                    <Text size="sm">
+                      <strong>Routed to:</strong>{' '}
+                      <code>{selectedLog.routing.chosenModelKey}</code>{' '}
+                      <span className="ds-badge ds-badge-info">{selectedLog.routing.decision}</span>
+                    </Text>
+                    <Text size="sm" c="dimmed">
+                      {selectedLog.routing.reason}
+                    </Text>
+                  </>
                 ) : null}
               </Stack>
             </div>
@@ -1241,13 +1315,37 @@ function MetricBlock({
 
 function ConfigureTab({
   model,
+  guardrails,
   onDelete,
   deleting,
 }: {
   model: ModelDetailDto;
+  guardrails: GuardrailLite[];
   onDelete: () => void;
   deleting: boolean;
 }) {
+  const inputGuardrail = guardrails.find((g) => g.key === model.inputGuardrailKey);
+  const outputGuardrail = guardrails.find((g) => g.key === model.outputGuardrailKey);
+
+  const renderGuardrail = (
+    key: string | undefined,
+    resolved: GuardrailLite | undefined,
+  ) => {
+    if (!key) return <span className="ds-faint">None</span>;
+    return (
+      <span className="ds-row ds-gap-xs" style={{ justifyContent: 'flex-end' }}>
+        <span>{resolved?.name ?? key}</span>
+        {resolved ? (
+          <span className={`ds-badge ${resolved.action === 'block' ? 'ds-badge-err' : resolved.action === 'warn' ? 'ds-badge-warn' : 'ds-badge-info'}`}>
+            {resolved.action}
+          </span>
+        ) : (
+          <span className="ds-badge ds-badge-warn">missing</span>
+        )}
+      </span>
+    );
+  };
+
   return (
     <div
       style={{
@@ -1361,6 +1459,37 @@ function ConfigureTab({
           </div>
         ) : null}
 
+        {model.category === 'llm' ? (
+          <div className="ds-card ds-card-pad-lg">
+            <div className="ds-row-between" style={{ marginBottom: 4 }}>
+              <div className="ds-h3">Guardrails</div>
+              <Button
+                component={Link}
+                href={`/dashboard/models/${model._id}/edit`}
+                variant="subtle"
+                size="xs"
+                leftSection={<IconSettings size={12} stroke={1.7} />}
+                style={{ paddingInline: 8 }}
+              >
+                Edit
+              </Button>
+            </div>
+            <div className="ds-muted" style={{ fontSize: 12.5, marginBottom: 16 }}>
+              Safety checks applied automatically on every request to this model.
+            </div>
+            <Stack gap="xs">
+              <div className="ds-row-between" style={{ fontSize: 12.5 }}>
+                <span className="ds-muted">Input guardrail</span>
+                {renderGuardrail(model.inputGuardrailKey, inputGuardrail)}
+              </div>
+              <div className="ds-row-between" style={{ fontSize: 12.5 }}>
+                <span className="ds-muted">Output guardrail</span>
+                {renderGuardrail(model.outputGuardrailKey, outputGuardrail)}
+              </div>
+            </Stack>
+          </div>
+        ) : null}
+
         <div
           className="ds-card ds-card-pad-lg"
           style={{ borderColor: 'rgba(201, 59, 59, 0.2)' }}
@@ -1451,6 +1580,191 @@ function ConfigureTab({
             Read docs
           </Button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/* ───────────────────────── Routing Tab (Dynamic LLM) ───────────────────────── */
+
+function RoutingTab({
+  config,
+  logs,
+  onOpenLog,
+}: {
+  config: IDynamicRoutingConfig;
+  logs: UsageLogDto[];
+  onOpenLog: (l: UsageLogDto) => void;
+}) {
+  const decisions = logs.filter((l) => l.routing);
+
+  return (
+    <div
+      style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 320px', gap: 16 }}
+      className="ds-detail-grid"
+    >
+      {/* Left: decision log */}
+      <div className="ds-card">
+        <div className="ds-row-between" style={{ padding: '14px 18px' }}>
+          <div className="ds-h3">Routing decisions</div>
+          <span className="ds-faint" style={{ fontSize: 12 }}>
+            {decisions.length} recent
+          </span>
+        </div>
+        {decisions.length === 0 ? (
+          <div className="ds-empty" style={{ padding: 36 }}>
+            <Text size="sm" c="dimmed">
+              No routing decisions recorded yet. Send a request to this model key to see how it
+              routes.
+            </Text>
+          </div>
+        ) : (
+          <div className="ds-tbl-wrap">
+            <table className="ds-tbl">
+              <thead>
+                <tr>
+                  <th>When</th>
+                  <th>Routed to</th>
+                  <th>Decision</th>
+                  <th>Reason</th>
+                  <th style={{ textAlign: 'right' }}>Latency</th>
+                </tr>
+              </thead>
+              <tbody>
+                {decisions.map((l, i) => (
+                  <tr
+                    key={l._id ?? `${l.requestId}-${i}`}
+                    className="clickable"
+                    onClick={() => onOpenLog(l)}
+                  >
+                    <td className="ds-muted" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+                      {l.createdAt ? relativeDate(l.createdAt) : '—'}
+                    </td>
+                    <td className="ds-mono" style={{ fontSize: 12 }}>
+                      {l.routing?.chosenModelKey ?? '—'}
+                    </td>
+                    <td>
+                      <span
+                        className={`ds-badge ${
+                          l.routing?.decision === 'fallback' ? 'ds-badge-warn' : 'ds-badge-info'
+                        }`}
+                      >
+                        {l.routing?.decision}
+                        {l.routing?.matchedRuleLabel ? ` · ${l.routing.matchedRuleLabel}` : ''}
+                        {l.routing?.deciderLabel ? ` · ${l.routing.deciderLabel}` : ''}
+                      </span>
+                    </td>
+                    <td className="ds-muted" style={{ fontSize: 12, maxWidth: 260 }}>
+                      <span
+                        style={{
+                          display: 'inline-block',
+                          maxWidth: 260,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {l.routing?.reason}
+                      </span>
+                    </td>
+                    <td
+                      className="ds-mono"
+                      style={{ textAlign: 'right', fontSize: 12, fontVariantNumeric: 'tabular-nums' }}
+                    >
+                      {l.latencyMs ? `${Math.round(l.latencyMs)}ms` : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Right: config summary */}
+      <div className="ds-col ds-gap-md">
+        <div className="ds-card ds-card-pad-lg">
+          <div className="ds-h4" style={{ marginBottom: 12 }}>
+            Configuration
+          </div>
+          <Stack gap="xs">
+            <div className="ds-row-between" style={{ fontSize: 12.5 }}>
+              <span className="ds-muted">Strategy</span>
+              <span className="ds-badge">{config.strategy}</span>
+            </div>
+            <div className="ds-row-between" style={{ fontSize: 12.5 }}>
+              <span className="ds-muted">Default</span>
+              <span className="ds-mono">{config.defaultModelKey}</span>
+            </div>
+            <div className="ds-row-between" style={{ fontSize: 12.5 }}>
+              <span className="ds-muted">Fallback</span>
+              <span className="ds-mono">{config.fallbackModelKey || '—'}</span>
+            </div>
+          </Stack>
+        </div>
+
+        {config.strategy === 'rule-based' ? (
+          <div className="ds-card ds-card-pad-lg">
+            <div className="ds-h4" style={{ marginBottom: 12 }}>
+              Rules ({config.rules?.length ?? 0})
+            </div>
+            <Stack gap="sm">
+              {(config.rules ?? []).map((rule, i) => (
+                <div
+                  key={i}
+                  style={{
+                    fontSize: 12.5,
+                    borderTop: i ? '1px solid var(--ds-border-soft)' : 'none',
+                    paddingTop: i ? 8 : 0,
+                  }}
+                >
+                  <div className="ds-row-between">
+                    <span style={{ fontWeight: 500 }}>{rule.label || `rule ${i + 1}`}</span>
+                    <span className="ds-mono ds-faint">→ {rule.targetModelKey}</span>
+                  </div>
+                  <div className="ds-faint" style={{ fontSize: 11.5, marginTop: 2 }}>
+                    {(rule.matchType ?? 'all') === 'any' ? 'any of: ' : 'all of: '}
+                    {rule.conditions
+                      .map((c) => `${c.signal} ${c.operator}${c.value !== undefined ? ` ${c.value}` : ''}`)
+                      .join(' , ')}
+                  </div>
+                </div>
+              ))}
+            </Stack>
+          </div>
+        ) : (
+          <div className="ds-card ds-card-pad-lg">
+            <div className="ds-h4" style={{ marginBottom: 12 }}>
+              Decider
+            </div>
+            <div className="ds-row-between" style={{ fontSize: 12.5, marginBottom: 8 }}>
+              <span className="ds-muted">Model</span>
+              <span className="ds-mono">{config.decider?.modelKey}</span>
+            </div>
+            <Stack gap="sm">
+              {(config.decider?.labels ?? []).map((label, i) => (
+                <div
+                  key={i}
+                  style={{
+                    fontSize: 12.5,
+                    borderTop: i ? '1px solid var(--ds-border-soft)' : 'none',
+                    paddingTop: i ? 8 : 0,
+                  }}
+                >
+                  <div className="ds-row-between">
+                    <span style={{ fontWeight: 500 }}>{label.label}</span>
+                    <span className="ds-mono ds-faint">→ {label.targetModelKey}</span>
+                  </div>
+                  {label.description ? (
+                    <div className="ds-faint" style={{ fontSize: 11.5, marginTop: 2 }}>
+                      {label.description}
+                    </div>
+                  ) : null}
+                </div>
+              ))}
+            </Stack>
+          </div>
+        )}
       </div>
     </div>
   );

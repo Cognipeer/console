@@ -599,7 +599,7 @@ function DeployModelModal({ opened, onClose, host, slices, onDeployed }: DeployM
             />
 
             {selectedRuntime === 'vllm' ? (
-              <Card withBorder padding="sm" style={{ background: 'var(--mantine-color-gray-0)' }}>
+              <Card withBorder padding="sm" style={{ background: 'var(--mantine-color-default-hover)' }}>
                 <Group justify="space-between" mb={advancedOpen ? 'sm' : 0}>
                   <Group gap="xs">
                     <IconAdjustments size={14} />

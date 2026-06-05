@@ -193,12 +193,12 @@ export default function DeploymentTimelineDrawer({ opened, onClose, deploymentId
           ) : null}
 
           {deployment.lastError ? (
-            <Card withBorder padding="sm" style={{ borderColor: 'var(--mantine-color-red-4)' }}>
+            <Card withBorder padding="sm" style={{ borderColor: 'var(--mantine-color-red-outline)' }}>
               <Group gap="xs" mb={4}>
-                <IconAlertTriangle size={14} color="var(--mantine-color-red-7)" />
+                <IconAlertTriangle size={14} color="var(--mantine-color-red-light-color)" />
                 <Text size="sm" fw={600} c="red">Last error</Text>
               </Group>
-              <Code block style={{ whiteSpace: 'pre-wrap', fontSize: 11, background: 'var(--mantine-color-red-0)' }}>
+              <Code block style={{ whiteSpace: 'pre-wrap', fontSize: 11, background: 'var(--mantine-color-red-light)' }}>
                 {deployment.lastError}
               </Code>
             </Card>

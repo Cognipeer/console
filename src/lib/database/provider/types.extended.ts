@@ -1,7 +1,6 @@
 import type { ObjectId } from 'mongodb';
 import type {
   GuardrailAction,
-  GuardrailTarget,
   GuardrailType,
 } from './types.domain';
 // ── Memory types ─────────────────────────────────────────────────────────
@@ -73,7 +72,8 @@ export interface IGuardrailEvaluationLog {
   guardrailKey: string;
   guardrailName: string;
   guardrailType: GuardrailType;
-  target: GuardrailTarget;
+  /** Phase the evaluation ran in — decided by the binding slot, not the guardrail. */
+  target: 'input' | 'output';
   action: GuardrailAction;
   passed: boolean;
   findings: Array<{
@@ -277,7 +277,8 @@ export type InstanceEntityType =
   | 'inference-server'
   | 'alert-rule'
   | 'automation'
-  | 'crawler';
+  | 'crawler'
+  | 'ocr';
 
 export type InstanceAssignmentMode = 'strict' | 'preferred';
 
@@ -637,4 +638,138 @@ export interface ISandboxSettings {
   idleReapSeconds: number;
   createdAt: Date;
   updatedAt: Date;
+}
+
+// ── OCR jobs (persistent container + per-file extraction) ──────────────────
+
+/**
+ * An OCR Job is a persistent "container": it holds the extraction rules
+ * (models, outputs, schema), a storage area (bucket + prefix) and an optional
+ * callback. Files are sent to it over time; each file becomes an item that is
+ * processed independently via per-item queue fan-out.
+ */
+export type OcrJobStatus = 'active' | 'paused' | 'archived';
+
+export type OcrJobItemStatus = 'pending' | 'running' | 'succeeded' | 'failed';
+
+/** Which outputs to collect per file. `full_text` is always produced. */
+export type OcrOutputKind = 'full_text' | 'summary' | 'structured';
+
+/** Per-file delivery mode when sending files to a job. */
+export type OcrJobMode = 'sync' | 'async';
+
+/** Per-file webhook events plus the job-level completion signal. */
+export type OcrJobWebhookEvent = 'item.succeeded' | 'item.failed' | 'job.completed';
+
+export type OcrJobItemCallbackStatus = 'delivered' | 'failed' | 'skipped';
+
+/**
+ * Per-item input source. `bucket` references a Document Store object (the
+ * default at scale); `inline` carries base64 bytes (small/ad-hoc); `url`
+ * points at a remote file.
+ */
+export type OcrJobItemSource =
+  | { kind: 'inline'; data: string; fileName?: string; contentType?: string }
+  | { kind: 'bucket'; bucketKey: string; objectKey: string }
+  | { kind: 'url'; url: string; contentType?: string };
+
+export interface IOcrJob {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  name?: string;
+  status: OcrJobStatus;
+  // ── Storage (files land here) ──
+  /** File bucket key where uploaded documents are stored. */
+  bucketKey: string;
+  /** Prefix namespacing this job's files (e.g. `ocr-jobs/<id>/`). */
+  prefix?: string;
+  // ── Rules ──
+  /** Registered model key with category 'ocr'. */
+  ocrModelKey: string;
+  /** Registered LLM model key; required when outputs include summary/structured. */
+  llmModelKey?: string;
+  outputs: OcrOutputKind[];
+  /** Optional free-text instruction (or stored prompt) used for summarization. */
+  summaryPrompt?: string;
+  /** JSON schema passed to the LLM as response_format for structured extraction. */
+  structuredSchema?: Record<string, unknown>;
+  language?: string;
+  features?: string[];
+  /** Max PDF pages to rasterize for VLM OCR; 0/undefined = unlimited. */
+  pdfMaxPages?: number;
+  // ── Callback ──
+  callbackUrl?: string;
+  callbackSecret?: string;
+  callbackEvents?: OcrJobWebhookEvent[];
+  // ── Running aggregates ──
+  itemsTotal: number;
+  itemsProcessed: number;
+  itemsFailed: number;
+  usageInputTokens?: number;
+  usageOutputTokens?: number;
+  usageTotalTokens?: number;
+  usagePages?: number;
+  /** Token/cost split by stage for detailed usage reporting. */
+  usageOcrTokens?: number;
+  usageLlmTokens?: number;
+  costOcr?: number;
+  costLlm?: number;
+  costTotal?: number;
+  costCurrency?: string;
+  lastItemAt?: Date;
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IOcrJobItemResult {
+  fullText?: string;
+  summary?: string;
+  structured?: Record<string, unknown>;
+  pages?: number;
+}
+
+export interface IOcrJobItem {
+  _id?: ObjectId | string;
+  tenantId: string;
+  jobId: string;
+  index: number;
+  source: OcrJobItemSource;
+  fileName?: string;
+  status: OcrJobItemStatus;
+  result?: IOcrJobItemResult;
+  usage?: {
+    ocr?: Record<string, unknown>;
+    llm?: Record<string, unknown>;
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+    pages?: number;
+  };
+  costTotal?: number;
+  costCurrency?: string;
+  callbackStatus?: OcrJobItemCallbackStatus;
+  errorMessage?: string;
+  startedAt?: Date;
+  endedAt?: Date;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+/** Atomic aggregate increments applied to a job as items complete. */
+export interface OcrJobAggregateDelta {
+  itemsTotal?: number;
+  itemsProcessed?: number;
+  itemsFailed?: number;
+  usageInputTokens?: number;
+  usageOutputTokens?: number;
+  usageTotalTokens?: number;
+  usagePages?: number;
+  usageOcrTokens?: number;
+  usageLlmTokens?: number;
+  costOcr?: number;
+  costLlm?: number;
+  costTotal?: number;
 }

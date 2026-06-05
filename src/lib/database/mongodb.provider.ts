@@ -25,6 +25,9 @@ import { FileMixin } from './mongodb/file.mixin';
 import { ProviderRecordMixin } from './mongodb/provider-record.mixin';
 import { InferenceMixin } from './mongodb/inference.mixin';
 import { GuardrailMixin } from './mongodb/guardrail.mixin';
+import { EvaluationMixin } from './mongodb/evaluation.mixin';
+import { RedTeamMixin } from './mongodb/redteam.mixin';
+import { AnalysisMixin } from './mongodb/analysis.mixin';
 import { PiiPolicyMixin } from './mongodb/pii-policy.mixin';
 import { AlertMixin } from './mongodb/alert.mixin';
 import { IncidentMixin } from './mongodb/incident.mixin';
@@ -39,6 +42,7 @@ import { AgentMixin } from './mongodb/agent.mixin';
 import { VectorMigrationMixin } from './mongodb/vector-migration.mixin';
 import { BrowserMixin } from './mongodb/browser.mixin';
 import { CrawlerMixin } from './mongodb/crawler.mixin';
+import { OcrJobMixin } from './mongodb/ocr-jobs.mixin';
 import { AuditMixin } from './mongodb/audit.mixin';
 import { UserProjectMixin } from './mongodb/user-project.mixin';
 import { ClusterMixin } from './mongodb/cluster.mixin';
@@ -61,7 +65,16 @@ const AIBase = VectorMixin(ModelMixin(TracingMixin(ContentBase)));
 const StorageBase = ProviderRecordMixin(FileMixin(AIBase));
 
 // Group 5 – Advanced features
-const AdvancedBase = CrawlerMixin(AuditMixin(BrowserMixin(VectorMigrationMixin(AgentMixin(ToolMixin(JsSandboxMixin(McpServerMixin(ConfigMixin(MemoryMixin(RerankerMixin(RagMixin(IncidentMixin(AlertMixin(PiiPolicyMixin(GuardrailMixin(InferenceMixin(StorageBase)))))))))))))))));
+// Split into intermediate steps (rather than one deeply-nested call) so no
+// single expression is deep enough to trip esbuild/tsc's parser nesting limit.
+// Application order (inner → outer) is preserved exactly.
+const CoreServicesBase = GuardrailMixin(InferenceMixin(StorageBase));
+const EvalAnalysisBase = RedTeamMixin(AnalysisMixin(EvaluationMixin(CoreServicesBase)));
+const AlertingBase = IncidentMixin(AlertMixin(PiiPolicyMixin(EvalAnalysisBase)));
+const KnowledgeBase = MemoryMixin(RerankerMixin(RagMixin(AlertingBase)));
+const PlatformBase = JsSandboxMixin(McpServerMixin(ConfigMixin(KnowledgeBase)));
+const ToolingBase = VectorMigrationMixin(AgentMixin(ToolMixin(PlatformBase)));
+const AdvancedBase = OcrJobMixin(CrawlerMixin(AuditMixin(BrowserMixin(ToolingBase))));
 
 // Group 6 – Cluster (system-wide; uses main DB)
 const ClusterBase = ClusterMixin(AdvancedBase);

@@ -21,9 +21,9 @@ export function GuardrailMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
 
       db.prepare(`
         INSERT INTO ${TABLES.guardrails}
-        (id, tenantId, projectId, key, name, description, type, target, action, enabled,
+        (id, tenantId, projectId, key, name, description, type, action, enabled,
          modelKey, policy, customPrompt, metadata, createdBy, updatedBy, createdAt, updatedAt)
-        VALUES (@id, @tenantId, @projectId, @key, @name, @description, @type, @target, @action, @enabled,
+        VALUES (@id, @tenantId, @projectId, @key, @name, @description, @type, @action, @enabled,
          @modelKey, @policy, @customPrompt, @metadata, @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
@@ -33,7 +33,6 @@ export function GuardrailMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         name: guardrail.name,
         description: guardrail.description ?? null,
         type: guardrail.type,
-        target: guardrail.target,
         action: guardrail.action,
         enabled: this.toBoolInt(guardrail.enabled),
         modelKey: guardrail.modelKey ?? null,
@@ -61,7 +60,6 @@ export function GuardrailMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       if (data.name !== undefined) { sets.push('name = @name'); params.name = data.name; }
       if (data.description !== undefined) { sets.push('description = @description'); params.description = data.description; }
       if (data.type !== undefined) { sets.push('type = @type'); params.type = data.type; }
-      if (data.target !== undefined) { sets.push('target = @target'); params.target = data.target; }
       if (data.action !== undefined) { sets.push('action = @action'); params.action = data.action; }
       if (data.enabled !== undefined) { sets.push('enabled = @enabled'); params.enabled = this.toBoolInt(data.enabled); }
       if (data.modelKey !== undefined) { sets.push('modelKey = @modelKey'); params.modelKey = data.modelKey; }
@@ -230,7 +228,6 @@ export function GuardrailMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         name: r.name as string,
         description: r.description as string | undefined,
         type: r.type as IGuardrail['type'],
-        target: r.target as IGuardrail['target'],
         action: r.action as IGuardrail['action'],
         enabled: this.fromBoolInt(r.enabled),
         modelKey: r.modelKey as string | undefined,

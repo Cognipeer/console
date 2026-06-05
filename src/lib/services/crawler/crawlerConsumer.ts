@@ -1,10 +1,16 @@
 /**
  * Crawler queue consumer – registered on every node at bootstrap.
  *
- * On single-node deployments using the in-memory queue this is a no-op
- * because `routeInstanceCall` short-circuits to the local handler. On
- * multi-node BullMQ deployments this is what executes runs forwarded
- * to a specific node.
+ * Drains the crawler queue and runs each job via `runCrawlJobLocal`. It is
+ * the executor for:
+ *   - async runs (the default for the HTTP API / dashboard): the service
+ *     `publish()`es the job and returns immediately, and this consumer picks
+ *     it up — including on single-node in-memory deployments;
+ *   - multi-node BullMQ sync runs forwarded to a specific node via
+ *     `routeInstanceCall`.
+ *
+ * For single-node sync runs the service short-circuits to the local handler
+ * directly, so this consumer isn't involved.
  */
 
 import { createLogger } from '@/lib/core/logger';

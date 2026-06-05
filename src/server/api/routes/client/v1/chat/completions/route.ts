@@ -205,10 +205,11 @@ const _POST = async (request: NextRequest) => {
 
     // Fire-and-forget budget usage update when we have non-streaming usage.
     if (result.usage) {
+      const usage = result.usage;
       getModelByKey(auth.tenantDbName, modelKey, auth.projectId)
         .then((model) => {
           if (!model) return;
-          const cost = calculateCost(model.pricing, result.usage);
+          const cost = calculateCost(model.pricing, usage);
           if (cost.currency !== 'USD' || !Number.isFinite(cost.totalCost) || cost.totalCost <= 0) {
             return;
           }

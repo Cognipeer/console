@@ -383,6 +383,142 @@ describe('handleChatCompletion', () => {
   });
 });
 
+// ---- Dynamic LLM routing (router resolution + decision logging) ----
+describe('handleChatCompletion · Dynamic LLM', () => {
+  const makeRouter = (dynamic: object) =>
+    makeLlmModel({
+      _id: 'router-id',
+      key: 'router',
+      name: 'Smart router',
+      providerKey: 'dynamic',
+      providerDriver: 'dynamic',
+      modelId: 'dynamic-router',
+      settings: { dynamic },
+    });
+
+  const big = makeLlmModel({ _id: 'big-id', key: 'big', providerKey: 'p-big' });
+  const small = makeLlmModel({ _id: 'small-id', key: 'small', providerKey: 'p-small' });
+
+  // getModelByKey resolves whichever model the (recursive) call asks for.
+  const wireModels = (router: object) => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_db: string, key: string) =>
+        key === 'router' ? router : key === 'big' ? big : key === 'small' ? small : null,
+    );
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (isSemanticCacheEnabled as ReturnType<typeof vi.fn>).mockReturnValue(false);
+    (lookupCache as ReturnType<typeof vi.fn>).mockResolvedValue({ hit: false, response: null });
+    (logModelUsage as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({ runtime: makeChatRuntime() });
+    (toOpenAIChatResponse as ReturnType<typeof vi.fn>).mockReturnValue({
+      id: 'chatcmpl-child',
+      choices: [{ message: { content: 'child answer' } }],
+    });
+  });
+
+  it('rule-based: routes to the matching rule target and logs the decision', async () => {
+    const router = makeRouter({
+      strategy: 'rule-based',
+      defaultModelKey: 'small',
+      rules: [
+        {
+          label: 'complex',
+          targetModelKey: 'big',
+          matchType: 'all',
+          conditions: [{ signal: 'inputTokensEst', operator: 'gt', value: 5 }],
+        },
+      ],
+    });
+    wireModels(router);
+
+    const result = await handleChatCompletion({
+      ...BASE_PARAMS,
+      modelKey: 'router',
+      body: { messages: [{ role: 'user', content: 'x'.repeat(400) }] },
+    });
+
+    // Child response is returned, annotated with routing metadata.
+    expect(result.response).toMatchObject({ id: 'chatcmpl-child' });
+    expect(result.routing?.decision).toBe('rule');
+    expect(result.routing?.chosenModelKey).toBe('big');
+
+    // A router decision row was logged on the 'chat.completions.router' route.
+    const routerLog = (logModelUsage as ReturnType<typeof vi.fn>).mock.calls.find(
+      (c) => c[2]?.route === 'chat.completions.router',
+    );
+    expect(routerLog).toBeTruthy();
+    expect(routerLog?.[2]?.routing?.chosenModelKey).toBe('big');
+  });
+
+  it('rule-based: falls back to the default model when no rule matches', async () => {
+    const router = makeRouter({
+      strategy: 'rule-based',
+      defaultModelKey: 'small',
+      rules: [
+        {
+          label: 'huge',
+          targetModelKey: 'big',
+          matchType: 'all',
+          conditions: [{ signal: 'inputTokensEst', operator: 'gt', value: 100000 }],
+        },
+      ],
+    });
+    wireModels(router);
+
+    const result = await handleChatCompletion({
+      ...BASE_PARAMS,
+      modelKey: 'router',
+      body: { messages: [{ role: 'user', content: 'short' }] },
+    });
+
+    expect(result.routing?.decision).toBe('default');
+    expect(result.routing?.chosenModelKey).toBe('small');
+  });
+
+  it('uses the fallback model when the chosen model errors', async () => {
+    const router = makeRouter({
+      strategy: 'rule-based',
+      defaultModelKey: 'big',
+      fallbackModelKey: 'small',
+      rules: [
+        {
+          label: 'always',
+          targetModelKey: 'big',
+          matchType: 'all',
+          conditions: [{ signal: 'messageCount', operator: 'gte', value: 1 }],
+        },
+      ],
+    });
+    wireModels(router);
+
+    // 'big' (providerKey p-big) fails to invoke; 'small' succeeds.
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_db: string, _tid: string, providerKey: string) => ({
+        runtime: {
+          createChatModel: vi.fn().mockResolvedValue({
+            invoke:
+              providerKey === 'p-big'
+                ? vi.fn().mockRejectedValue(new Error('primary down'))
+                : vi.fn().mockResolvedValue({ content: 'ok', tool_calls: [] }),
+          }),
+        },
+      }),
+    );
+
+    const result = await handleChatCompletion({
+      ...BASE_PARAMS,
+      modelKey: 'router',
+      body: { messages: [{ role: 'user', content: 'hi' }] },
+    });
+
+    expect(result.routing?.decision).toBe('fallback');
+    expect(result.routing?.chosenModelKey).toBe('small');
+  });
+});
+
 // ---- handleEmbeddingRequest ----
 describe('handleEmbeddingRequest', () => {
   beforeEach(() => {

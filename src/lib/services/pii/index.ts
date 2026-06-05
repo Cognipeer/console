@@ -11,6 +11,8 @@ export {
   detectPii,
   redactPii,
   maskPii,
+  tokenizePii,
+  detokenizePii,
   scanWithPolicy,
   PII_CATEGORIES,
   PII_CATEGORIES_BY_ID,
@@ -22,10 +24,14 @@ export type {
   PiiServicePolicyView,
   PiiFinding,
   PiiScanResult,
+  PiiVault,
+  PiiVaultEntry,
   DetectInput,
   RedactInput,
+  TokenizeInput,
+  DetokenizeInput,
 } from './types';
 
 export type { PiiCategoryDefinition } from './categories';
 
-export { detect, applyReplacements } from './detector';
+export { detect, applyReplacements, tokenize, detokenize } from './detector';
