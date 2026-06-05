@@ -51,6 +51,10 @@ export const ENTERPRISE_API_RULES: EnterpriseApiRule[] = [
     module: 'cluster',
     prefixes: ['/api/cluster/'],
   },
+  {
+    module: 'prompt-optimizer',
+    prefixes: ['/api/prompt-optimizer/'],
+  },
 ];
 
 export interface EnterpriseDenial {

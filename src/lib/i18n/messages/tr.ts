@@ -26,6 +26,8 @@ export const tr: typeof en = {
     ocrDescription: 'Dosya ve görseller üzerinde toplu OCR + çıkarım; özet ve yapısal çıktı',
     gpuFleet: 'GPU Fleet',
     gpuFleetDescription: 'Connect GPU hosts, deploy curated models, manage pools',
+    promptOptimizer: 'Prompt Optimizer',
+    promptOptimizerDescription: 'Bir promptu hedefe göre iyileştir: varyant üret, test edip puanla, en iyisini yayınla',
   },
   breadcrumbs: {
     ...en.breadcrumbs,

@@ -324,6 +324,20 @@
       "enterpriseModule": "sandbox"
     },
     {
+      "id": "prompt-optimizer",
+      "href": "/dashboard/prompt-optimizer",
+      "icon": "IconSparkles",
+      "category": "operate",
+      "navLabelKey": "promptOptimizer",
+      "navDescriptionKey": "promptOptimizerDescription",
+      "tags": ["prompt", "optimization", "evaluation", "agents"],
+      "searchKeywords": ["prompt", "optimizer", "optimize", "tuning", "variant", "evaluation", "judge", "goal"],
+      "defaultPinned": false,
+      "popular": false,
+      "requiresEnterprise": true,
+      "enterpriseModule": "prompt-optimizer"
+    },
+    {
       "id": "members",
       "href": "/dashboard/members",
       "icon": "IconUsers",

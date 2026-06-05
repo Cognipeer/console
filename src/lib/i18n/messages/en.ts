@@ -64,6 +64,8 @@ export const en = {
     gpuFleetDescription: 'Onboard GPU hosts, deploy models from the curated library, manage pools',
     sandbox: 'Agent Sandbox',
     sandboxDescription: 'Remote, API-driven runtime sandboxes for code, files, terminals and previews',
+    promptOptimizer: 'Prompt Optimizer',
+    promptOptimizerDescription: 'Iteratively improve a prompt toward a goal: generate variants, test and score them, promote the best',
     memory: 'Agent Memory',
     memoryDescription: 'Persistent memory stores with semantic search',
     rag: 'Knowledge Engine',

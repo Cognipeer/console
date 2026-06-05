@@ -29,6 +29,7 @@ describe('getEnterpriseModuleForPath', () => {
     expect(getEnterpriseModuleForPath('/api/gpu-fleet/pools')).toBe('gpu-fleet');
     expect(getEnterpriseModuleForPath('/api/sandbox/runners')).toBe('sandbox');
     expect(getEnterpriseModuleForPath('/api/cluster/overview')).toBe('cluster');
+    expect(getEnterpriseModuleForPath('/api/prompt-optimizer/runs')).toBe('prompt-optimizer');
   });
 
   it('does not gate community paths', () => {
