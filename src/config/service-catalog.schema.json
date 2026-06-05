@@ -1,0 +1,85 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://cognipeer.com/schemas/service-catalog.schema.json",
+  "title": "Cognipeer Service Catalog",
+  "description": "Third-party provider integrations displayed in the Add Provider picker.",
+  "type": "object",
+  "required": ["services"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "services": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/service" }
+    }
+  },
+  "definitions": {
+    "domain": {
+      "type": "string",
+      "enum": ["model", "embedding", "vector", "file", "datasource", "stt", "tts", "ocr"]
+    },
+    "tag": {
+      "type": "string",
+      "description": "Free-form tag. Reserved values render special badges: popular, managed, self-hosted, default, dev, edge, embedded, generic, free, open-source, long-context, tools, eu, us, enterprise."
+    },
+    "service": {
+      "type": "object",
+      "required": [
+        "id",
+        "driver",
+        "name",
+        "tagline",
+        "description",
+        "domains",
+        "color"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique catalog id (e.g. 'openai', 'chroma-cloud').",
+          "pattern": "^[a-z0-9-]+$"
+        },
+        "driver": {
+          "type": "string",
+          "description": "Backend driver id from src/lib/providers/contracts.",
+          "pattern": "^[a-z0-9-]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Display name shown on the card."
+        },
+        "tagline": {
+          "type": "string",
+          "description": "Short pitch (≤ 80 chars) shown under the name.",
+          "maxLength": 120
+        },
+        "description": {
+          "type": "string",
+          "description": "Longer description shown on the detail page."
+        },
+        "domains": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/definitions/domain" }
+        },
+        "color": {
+          "type": "string",
+          "description": "Brand swatch color (hex).",
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "tags": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/tag" },
+          "default": []
+        },
+        "aliases": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Extra search terms / brand aliases.",
+          "default": []
+        }
+      }
+    }
+  }
+}

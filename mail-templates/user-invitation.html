@@ -1,0 +1,146 @@
+<!-- subject: You've been invited to join {{companyName}} on Cognipeer Console -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Join {{companyName}}</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: #ffffff;
+            border-radius: 8px;
+            padding: 40px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .logo {
+            font-size: 28px;
+            font-weight: bold;
+            color: #0969ff;
+            margin-bottom: 10px;
+        }
+        h1 {
+            color: #0969ff;
+            font-size: 24px;
+            margin-bottom: 20px;
+        }
+        .info-box {
+            background-color: #f0f7ff;
+            border-left: 4px solid #0969ff;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 4px;
+        }
+        .credentials {
+            background-color: #fff9e6;
+            border-left: 4px solid #ffc107;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 4px;
+        }
+        .credentials code {
+            background-color: #ffe0b2;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+        }
+        .footer {
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #e0e0e0;
+            text-align: center;
+            color: #666;
+            font-size: 14px;
+        }
+        .button {
+            display: inline-block;
+            padding: 12px 30px;
+            background-color: #0969ff;
+            color: #ffffff;
+            text-decoration: none;
+            border-radius: 6px;
+            margin: 20px 0;
+            font-weight: 500;
+        }
+        .alert {
+            background-color: #fff3cd;
+            border: 1px solid #ffc107;
+            color: #856404;
+            padding: 12px;
+            border-radius: 4px;
+            margin: 15px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo">🚀 Cognipeer Console</div>
+        </div>
+        
+        <h1>You've been invited! 🎉</h1>
+        
+        <p>Hi {{name}},</p>
+        
+        <p>You've been invited to join <strong>{{companyName}}</strong> on Cognipeer Console. Your team is waiting for you!</p>
+        
+        <div class="info-box">
+            <strong>Organization Details:</strong><br>
+            <strong>Company:</strong> {{companyName}}<br>
+            <strong>Company Slug:</strong> {{slug}}
+        </div>
+
+        <div class="credentials">
+            <strong>⚠️ Your Login Credentials:</strong><br><br>
+            <strong>Email:</strong> {{email}}<br>
+            <strong>Temporary Password:</strong> <code>{{tempPassword}}</code><br><br>
+            <small>Please change your password after your first login.</small>
+        </div>
+
+        <div class="alert">
+            <strong>Important:</strong> When logging in, you'll need to enter your company slug: <strong>{{slug}}</strong>
+        </div>
+        
+        <div style="text-align: center;">
+            <a href="{{loginUrl}}" class="button">Accept Invitation & Login</a>
+        </div>
+        
+        <p>Once logged in, you'll have access to:</p>
+        <ul>
+            <li>🤖 LLM Chat Services</li>
+            <li>🔄 Agent Orchestration</li>
+            <li>📊 Vector Store & Embeddings</li>
+            <li>⚡ Workflow Automation</li>
+            <li>📈 Analytics & Monitoring</li>
+        </ul>
+
+        <p><strong>How to Login:</strong></p>
+        <ol>
+            <li>Go to the login page</li>
+            <li>Enter company slug: <code>{{slug}}</code></li>
+            <li>Enter your email: <code>{{email}}</code></li>
+            <li>Enter the temporary password provided above</li>
+            <li>You'll be prompted to change your password</li>
+        </ol>
+        
+        <p>If you have any questions, please reach out to your team administrator.</p>
+        
+        <div class="footer">
+            <p>This invitation was sent via Cognipeer Console by {{inviterName}} from {{companyName}}.</p>
+            <p>&copy; 2025 Cognipeer. All rights reserved.</p>
+        </div>
+    </div>
+</body>
+</html>

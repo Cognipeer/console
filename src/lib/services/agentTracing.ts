@@ -1,0 +1,869 @@
+/**
+ * Agent Tracing Service
+ * Business logic for agent tracing operations
+ */
+
+import { getDatabase, type IAgentTracingEvent } from '@/lib/database';
+import type { IAgentTracingSession } from '@/lib/database/provider/types.base';
+import { createLogger } from '@/lib/core/logger';
+import dayjs from 'dayjs';
+
+const logger = createLogger('agent-tracing');
+
+type SessionListQuery = Record<string, unknown> & {
+  agentName?: string;
+  agentNameExact?: string;
+  from?: string;
+  to?: string;
+  includeTotal?: boolean;
+  projection?: Record<string, 0 | 1>;
+  limit?: number | string;
+  skip?: number | string;
+};
+
+const THREAD_SESSION_PROJECTION = {
+  sessionId: 1,
+  agentName: 1,
+  agentVersion: 1,
+  status: 1,
+  startedAt: 1,
+  endedAt: 1,
+  durationMs: 1,
+  totalEvents: 1,
+  totalInputTokens: 1,
+  totalOutputTokens: 1,
+  totalCachedInputTokens: 1,
+  modelsUsed: 1,
+  toolsUsed: 1,
+} as const;
+
+const AGENT_OVERVIEW_SESSION_PROJECTION = {
+  sessionId: 1,
+  threadId: 1,
+  status: 1,
+  startedAt: 1,
+  durationMs: 1,
+  totalEvents: 1,
+  totalInputTokens: 1,
+  totalOutputTokens: 1,
+  totalCachedInputTokens: 1,
+  agentVersion: 1,
+  modelsUsed: 1,
+  toolsUsed: 1,
+} as const;
+
+const SESSION_LIST_PROJECTION = {
+  sessionId: 1,
+  threadId: 1,
+  agentName: 1,
+  status: 1,
+  startedAt: 1,
+  endedAt: 1,
+  durationMs: 1,
+  totalEvents: 1,
+  totalInputTokens: 1,
+  totalOutputTokens: 1,
+  totalCachedInputTokens: 1,
+} as const;
+
+const SESSION_EVENT_SUMMARY_PROJECTION = {
+  id: 1,
+  sequence: 1,
+  type: 1,
+  label: 1,
+  timestamp: 1,
+  status: 1,
+  durationMs: 1,
+  toolName: 1,
+  model: 1,
+  inputTokens: 1,
+  outputTokens: 1,
+  totalTokens: 1,
+  cachedInputTokens: 1,
+  spanId: 1,
+  parentSpanId: 1,
+} as const;
+
+function toRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function getSectionToolName(section: Record<string, unknown>): string | undefined {
+  const value = typeof section.tool === 'string'
+    ? section.tool
+    : (typeof section.toolName === 'string' ? section.toolName : undefined);
+  return value && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function getStoredToolDetails(event: IAgentTracingEvent): Record<string, unknown> | undefined {
+  const metadata = toRecord(event.metadata);
+  const candidates = [
+    toRecord(metadata?.toolDetails),
+    ...(event.sections || []).map((section) => toRecord(section.toolDetails) || toRecord(section.details)),
+  ];
+  const details = candidates.find((candidate): candidate is Record<string, unknown> => Boolean(candidate));
+  const name = typeof details?.name === 'string' && details.name.trim().length > 0
+    ? details.name.trim()
+    : event.toolName || (event.sections || []).map(getSectionToolName).find(Boolean);
+
+  if (!details && !name) {
+    return undefined;
+  }
+
+  return {
+    ...(details || {}),
+    ...(name && typeof details?.name !== 'string' ? { name } : {}),
+  };
+}
+
+function mapTracingEventSummary(event: IAgentTracingEvent) {
+  return {
+    id: event.id || event._id,
+    sequence: event.sequence,
+    type: event.type,
+    label: event.label,
+    timestamp: event.timestamp,
+    status: event.status,
+    durationMs: event.durationMs,
+    toolName: event.toolName,
+    model: event.model,
+    inputTokens: event.inputTokens,
+    outputTokens: event.outputTokens,
+    totalTokens: event.totalTokens,
+    cachedInputTokens: event.cachedInputTokens,
+    spanId: event.spanId,
+    parentSpanId: event.parentSpanId,
+  };
+}
+
+function mapTracingEventDetail(event: IAgentTracingEvent) {
+  return {
+    id: event.id || event._id,
+    sequence: event.sequence,
+    type: event.type,
+    label: event.label,
+    timestamp: event.timestamp,
+    status: event.status,
+    actor: event.actor,
+    metadata: event.metadata,
+    sections: event.sections,
+    model: event.model,
+    error: event.error,
+    durationMs: event.durationMs,
+    toolName: event.toolName,
+    toolDetails: getStoredToolDetails(event),
+    toolExecutionId: event.toolExecutionId,
+    inputTokens: event.inputTokens,
+    outputTokens: event.outputTokens,
+    totalTokens: event.totalTokens,
+    cachedInputTokens: event.cachedInputTokens,
+    requestBytes: event.requestBytes,
+    responseBytes: event.responseBytes,
+    traceId: event.traceId,
+    spanId: event.spanId,
+    parentSpanId: event.parentSpanId,
+    actorName: event.actorName,
+    actorRole: event.actorRole,
+  };
+}
+
+export interface AgentTracingSessionSummary {
+  sessionId: string;
+  agentName?: string;
+  status?: string;
+  startedAt?: Date;
+  durationMs?: number;
+  totalEvents?: number;
+  totalTokens: number;
+}
+
+export interface AgentTracingTokenSummary {
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCachedInputTokens: number;
+  totalTokens: number;
+  averageInputTokensPerSession: number;
+  averageOutputTokensPerSession: number;
+  averageCachedInputTokensPerSession: number;
+  averageTokensPerSession: number;
+}
+
+export interface AgentTracingAggregateTotals extends AgentTracingTokenSummary {
+  sessionsCount: number;
+  totalEvents: number;
+  totalDurationMs: number;
+  averageDurationMs: number;
+}
+
+export interface AgentTracingAgentSummary extends AgentTracingTokenSummary {
+  name: string;
+  label: string;
+  latestSessionAt?: Date;
+  latestStatus?: string;
+  sessionsCount: number;
+  totalEvents: number;
+  averageDurationMs: number;
+}
+
+export interface DashboardOverview {
+  recentSessions: AgentTracingSessionSummary[];
+  recentAgents: AgentTracingAgentSummary[];
+  recentAgentsTotal: number;
+  analytics: {
+    totals: AgentTracingAggregateTotals;
+    tools: {
+      totals: {
+        totalCalls: number;
+        errorCalls: number;
+        successCalls: number;
+        errorRate: number;
+      };
+      items: Array<{
+        toolName: string;
+        totalCalls: number;
+        errorCalls: number;
+        successCalls: number;
+        errorRate: number;
+      }>;
+    };
+    statuses: Array<{
+      status: string;
+      count: number;
+    }>;
+    models: Array<{
+      model: string;
+      sessionsCount: number;
+    }>;
+    agents: AgentTracingAgentSummary[];
+    daily: Array<{
+      date: string;
+      sessionsCount: number;
+      totalEvents: number;
+      totalTokens: number;
+      averageDurationMs: number;
+    }>;
+  };
+}
+
+type SessionMetricsSource = {
+  totalEvents?: number;
+  totalInputTokens?: number;
+  totalOutputTokens?: number;
+  totalCachedInputTokens?: number;
+  durationMs?: number;
+};
+
+type AggregateTotalsAccumulator = {
+  totalEvents: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCachedInputTokens: number;
+  totalTokens: number;
+  totalDurationMs: number;
+};
+
+function getSessionTokenSummary(session: SessionMetricsSource) {
+  const totalInputTokens = session.totalInputTokens || 0;
+  const totalOutputTokens = session.totalOutputTokens || 0;
+  const totalCachedInputTokens = session.totalCachedInputTokens || 0;
+
+  return {
+    totalEvents: session.totalEvents || 0,
+    totalInputTokens,
+    totalOutputTokens,
+    totalCachedInputTokens,
+    totalTokens: totalInputTokens + totalOutputTokens,
+    totalDurationMs: session.durationMs || 0,
+  };
+}
+
+function buildAggregateTotals(sessions: SessionMetricsSource[]): AgentTracingAggregateTotals {
+  const totals = sessions.reduce<AggregateTotalsAccumulator>(
+    (aggregate, session) => {
+      const sessionSummary = getSessionTokenSummary(session);
+
+      aggregate.totalEvents += sessionSummary.totalEvents;
+      aggregate.totalInputTokens += sessionSummary.totalInputTokens;
+      aggregate.totalOutputTokens += sessionSummary.totalOutputTokens;
+      aggregate.totalCachedInputTokens += sessionSummary.totalCachedInputTokens;
+      aggregate.totalTokens += sessionSummary.totalTokens;
+      aggregate.totalDurationMs += sessionSummary.totalDurationMs;
+
+      return aggregate;
+    },
+    {
+      totalEvents: 0,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalCachedInputTokens: 0,
+      totalTokens: 0,
+      totalDurationMs: 0,
+    },
+  );
+
+  const sessionsCount = sessions.length;
+
+  return {
+    sessionsCount,
+    totalEvents: totals.totalEvents,
+    totalInputTokens: totals.totalInputTokens,
+    totalOutputTokens: totals.totalOutputTokens,
+    totalCachedInputTokens: totals.totalCachedInputTokens,
+    totalTokens: totals.totalTokens,
+    totalDurationMs: totals.totalDurationMs,
+    averageInputTokensPerSession:
+      sessionsCount > 0 ? Math.round(totals.totalInputTokens / sessionsCount) : 0,
+    averageOutputTokensPerSession:
+      sessionsCount > 0 ? Math.round(totals.totalOutputTokens / sessionsCount) : 0,
+    averageCachedInputTokensPerSession:
+      sessionsCount > 0 ? Math.round(totals.totalCachedInputTokens / sessionsCount) : 0,
+    averageTokensPerSession:
+      sessionsCount > 0 ? Math.round(totals.totalTokens / sessionsCount) : 0,
+    averageDurationMs:
+      sessionsCount > 0 ? Math.round(totals.totalDurationMs / sessionsCount) : 0,
+  };
+}
+
+const SESSION_ANALYTICS_BATCH_SIZE = 1000;
+const SESSION_ANALYTICS_HARD_CAP = 100_000;
+
+async function fetchAllSessionsBatched(
+  db: Awaited<ReturnType<typeof getDatabase>>,
+  projectId: string,
+  baseQuery: SessionListQuery,
+  projection: Record<string, 0 | 1>,
+): Promise<IAgentTracingSession[]> {
+  const all: IAgentTracingSession[] = [];
+  let skip = 0;
+  // Loop in batches until we drain the result set or hit the safety cap.
+  while (skip < SESSION_ANALYTICS_HARD_CAP) {
+    const { sessions } = await db.listAgentTracingSessions({
+      ...baseQuery,
+      includeTotal: false,
+      limit: SESSION_ANALYTICS_BATCH_SIZE,
+      skip,
+      projection,
+    }, projectId);
+
+    if (!sessions || sessions.length === 0) {
+      break;
+    }
+
+    all.push(...(sessions as IAgentTracingSession[]));
+
+    if (sessions.length < SESSION_ANALYTICS_BATCH_SIZE) {
+      break;
+    }
+
+    skip += sessions.length;
+  }
+
+  if (skip >= SESSION_ANALYTICS_HARD_CAP) {
+    logger.warn('Session analytics hit session hard cap', {
+      projectId,
+      cap: SESSION_ANALYTICS_HARD_CAP,
+    });
+  }
+
+  return all;
+}
+
+export class AgentTracingService {
+  /**
+   * List threads (grouped sessions by threadId)
+   */
+  static async listThreads(
+    tenantDbName: string,
+    projectId: string,
+    filters?: {
+      threadId?: string;
+      agent?: string;
+      status?: string;
+      from?: string;
+      to?: string;
+      limit?: string;
+      skip?: string;
+    },
+  ) {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+
+    const result = await db.listAgentTracingThreads({
+      threadId: filters?.threadId,
+      agentName: filters?.agent,
+      status: filters?.status,
+      from: filters?.from,
+      to: filters?.to,
+      limit: filters?.limit || '50',
+      skip: filters?.skip || '0',
+    }, projectId);
+
+    return result;
+  }
+
+  /**
+   * Get thread detail - all sessions belonging to a threadId, with aggregated stats
+   */
+  static async getThreadDetail(
+    tenantDbName: string,
+    projectId: string,
+    threadId: string,
+  ) {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+
+    const { sessions } = await db.listAgentTracingSessions({
+      includeTotal: false,
+      threadId,
+      limit: 1000,
+      projection: THREAD_SESSION_PROJECTION,
+    }, projectId);
+
+    if (sessions.length === 0) {
+      return null;
+    }
+
+    const sorted = sessions
+      .slice()
+      .sort(
+        (a, b) =>
+          new Date(a.startedAt || 0).getTime() -
+          new Date(b.startedAt || 0).getTime(),
+      );
+
+    const agents = [...new Set(sorted.map((s) => s.agentName).filter(Boolean))] as string[];
+    const statuses = sorted.map((s) => s.status || 'unknown');
+    const hasError = statuses.includes('error');
+    const allDone = statuses.every((s) => s === 'success' || s === 'error' || s === 'completed');
+    const overallStatus = hasError ? 'error' : allDone ? 'success' : 'in_progress';
+
+    const totalInputTokens = sorted.reduce((sum, s) => sum + (s.totalInputTokens || 0), 0);
+    const totalOutputTokens = sorted.reduce((sum, s) => sum + (s.totalOutputTokens || 0), 0);
+    const totalCachedInputTokens = sorted.reduce((sum, s) => sum + (s.totalCachedInputTokens || 0), 0);
+    const totalEvents = sorted.reduce((sum, s) => sum + (s.totalEvents || 0), 0);
+    const totalDurationMs = sorted.reduce((sum, s) => sum + (s.durationMs || 0), 0);
+    const modelsUsed = [...new Set(sorted.flatMap((s) => s.modelsUsed || []))];
+    const toolsUsed = [...new Set(sorted.flatMap((s) => s.toolsUsed || []))];
+
+    return {
+      threadId,
+      status: overallStatus,
+      agents,
+      sessionsCount: sorted.length,
+      startedAt: sorted[0]?.startedAt,
+      endedAt: sorted[sorted.length - 1]?.endedAt,
+      totalDurationMs,
+      totalEvents,
+      totalInputTokens,
+      totalOutputTokens,
+      totalCachedInputTokens,
+      modelsUsed,
+      toolsUsed,
+      sessions: sorted.map((s) => ({
+        sessionId: s.sessionId,
+        agentName: s.agentName,
+        agentVersion: s.agentVersion,
+        status: s.status,
+        startedAt: s.startedAt,
+        endedAt: s.endedAt,
+        durationMs: s.durationMs,
+        totalEvents: s.totalEvents,
+        totalTokens: (s.totalInputTokens || 0) + (s.totalOutputTokens || 0),
+        totalInputTokens: s.totalInputTokens,
+        totalOutputTokens: s.totalOutputTokens,
+        modelsUsed: s.modelsUsed,
+        toolsUsed: s.toolsUsed,
+      })),
+    };
+  }
+
+  /**
+   * Get dashboard overview with analytics
+   */
+  static async getDashboardOverview(
+    tenantDbName: string,
+    projectId: string,
+    filters?: { from?: string; to?: string; timezone?: string },
+  ): Promise<DashboardOverview> {
+    try {
+      logger.debug('Getting dashboard overview', { tenantDbName, filters });
+
+      const db = await getDatabase();
+      await db.switchToTenant(tenantDbName);
+
+      return await db.aggregateAgentTracingDashboard(filters, projectId);
+    } catch (error) {
+      logger.error('Error in getDashboardOverview', { error });
+      throw error;
+    }
+  }
+
+  /**
+   * List sessions with filters
+   */
+  static async listSessions(
+    tenantDbName: string,
+    projectId: string,
+    filters?: {
+      query?: string;
+      agent?: string;
+      status?: string;
+      from?: string;
+      to?: string;
+      limit?: string;
+      skip?: string;
+    },
+  ) {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+
+    const result = await db.listAgentTracingSessions({
+      agentName: filters?.agent,
+      query: filters?.query,
+      projection: SESSION_LIST_PROJECTION,
+      status: filters?.status,
+      from: filters?.from,
+      to: filters?.to,
+      limit: filters?.limit || '50',
+      skip: filters?.skip || '0',
+    }, projectId);
+
+    return {
+      sessions: result.sessions.map((s) => ({
+        sessionId: s.sessionId,
+        threadId: s.threadId,
+        agentName: s.agentName,
+        status: s.status,
+        startedAt: s.startedAt,
+        endedAt: s.endedAt,
+        durationMs: s.durationMs,
+        totalEvents: s.totalEvents,
+        totalTokens: (s.totalInputTokens || 0) + (s.totalOutputTokens || 0),
+        totalInputTokens: s.totalInputTokens,
+        totalOutputTokens: s.totalOutputTokens,
+        totalCachedInputTokens: s.totalCachedInputTokens,
+      })),
+      total: result.total,
+    };
+  }
+
+  /**
+   * Get session detail with events
+   */
+  static async getSessionDetail(
+    tenantDbName: string,
+    projectId: string,
+    sessionId: string,
+    options?: { includeEventContent?: boolean },
+  ) {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+
+    const session = await db.findAgentTracingSessionById(sessionId, projectId);
+    if (!session) {
+      return null;
+    }
+
+    const events = await db.listAgentTracingEvents(
+      sessionId,
+      projectId,
+      options?.includeEventContent === false
+        ? { projection: SESSION_EVENT_SUMMARY_PROJECTION }
+        : undefined,
+    );
+
+    return {
+      session: {
+        sessionId: session.sessionId,
+        threadId: session.threadId,
+        traceId: session.traceId,
+        rootSpanId: session.rootSpanId,
+        source: session.source,
+        agentName: session.agentName,
+        agentVersion: session.agentVersion,
+        agentModel: session.agentModel,
+        status: session.status,
+        startedAt: session.startedAt,
+        endedAt: session.endedAt,
+        durationMs: session.durationMs,
+        totalEvents: session.totalEvents,
+        totalInputTokens: session.totalInputTokens,
+        totalOutputTokens: session.totalOutputTokens,
+        totalCachedInputTokens: session.totalCachedInputTokens,
+        totalBytesIn: session.totalBytesIn,
+        totalBytesOut: session.totalBytesOut,
+        summary: session.summary,
+        modelsUsed: session.modelsUsed,
+        toolsUsed: session.toolsUsed,
+        eventCounts: session.eventCounts,
+        errors: session.errors,
+      },
+      events: events.map((e) => (
+        options?.includeEventContent === false
+          ? mapTracingEventSummary(e)
+          : mapTracingEventDetail(e)
+      )),
+    };
+  }
+
+  static async getSessionEventDetail(
+    tenantDbName: string,
+    projectId: string,
+    sessionId: string,
+    eventId: string,
+  ) {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+
+    const event = await db.findAgentTracingEventById(sessionId, eventId, projectId);
+    if (!event) {
+      return null;
+    }
+
+    return {
+      event: mapTracingEventDetail(event),
+    };
+  }
+
+  /**
+   * Get agent overview with analytics
+   */
+  static async getAgentOverview(
+    tenantDbName: string,
+    projectId: string,
+    agentName: string,
+    filters?: { from?: string; to?: string; timezone?: string },
+  ) {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+
+    const query: SessionListQuery = {
+      agentNameExact: agentName,
+    };
+    if (filters?.from || filters?.to) {
+      query.from = filters.from;
+      query.to = filters.to;
+    }
+
+    const sessions = await fetchAllSessionsBatched(
+      db,
+      projectId,
+      query,
+      AGENT_OVERVIEW_SESSION_PROJECTION,
+    );
+
+    if (sessions.length === 0) {
+      return {
+        agent: {
+          name: agentName,
+          label: agentName,
+          latestStatus: null,
+          latestVersion: null,
+          latestSessionAt: null,
+          versions: [],
+          sessionsCount: 0,
+        },
+        recentSessions: [],
+        analytics: {
+          totals: {
+            sessionsCount: 0,
+            totalEvents: 0,
+            totalInputTokens: 0,
+            totalOutputTokens: 0,
+            totalCachedInputTokens: 0,
+            totalTokens: 0,
+            totalDurationMs: 0,
+            averageInputTokensPerSession: 0,
+            averageOutputTokensPerSession: 0,
+            averageCachedInputTokensPerSession: 0,
+            averageTokensPerSession: 0,
+            averageDurationMs: 0,
+          },
+          tools: {
+            totals: {
+              totalCalls: 0,
+              errorCalls: 0,
+              successCalls: 0,
+              errorRate: 0,
+            },
+            items: [],
+          },
+          statuses: [],
+          models: [],
+          versions: [],
+          daily: [],
+        },
+      };
+    }
+
+    const sortedSessions = sessions
+      .slice()
+      .sort(
+        (a, b) =>
+          new Date(b.startedAt || 0).getTime() -
+          new Date(a.startedAt || 0).getTime(),
+      );
+
+    const totals = buildAggregateTotals(sessions);
+
+    const recentSessions = sortedSessions.slice(0, 10).map((s) => ({
+      sessionId: s.sessionId,
+      threadId: s.threadId,
+      status: s.status,
+      startedAt: s.startedAt,
+      durationMs: s.durationMs,
+      totalEvents: s.totalEvents,
+      totalTokens: (s.totalInputTokens || 0) + (s.totalOutputTokens || 0),
+    }));
+
+    // Agent info
+    const latestSession = sortedSessions[0];
+    const agent = {
+      name: agentName,
+      label: agentName,
+      latestStatus: latestSession?.status || null,
+      latestVersion: latestSession?.agentVersion || null,
+      latestSessionAt: latestSession?.startedAt || null,
+      versions: Array.from(
+        new Set(sortedSessions.map((s) => s.agentVersion).filter(Boolean)),
+      ),
+      sessionsCount: sessions.length,
+    };
+
+    // Status breakdown
+    const statusMap = new Map<string, number>();
+    sortedSessions.forEach((session) => {
+      const status = session.status || 'unknown';
+      statusMap.set(status, (statusMap.get(status) || 0) + 1);
+    });
+    const statuses = Array.from(statusMap.entries())
+      .map(([status, count]) => ({ status, count }))
+      .sort((a, b) => b.count - a.count);
+
+    // Versions breakdown
+    const versionMap = new Map<string, number>();
+    sortedSessions.forEach((session) => {
+      const version = session.agentVersion || 'unknown';
+      versionMap.set(version, (versionMap.get(version) || 0) + 1);
+    });
+    const versions = Array.from(versionMap.entries())
+      .map(([version, sessionsCount]) => ({
+        version: version === 'unknown' ? null : version,
+        sessionsCount,
+      }))
+      .sort((a, b) => b.sessionsCount - a.sessionsCount);
+
+    // Model usage
+    const modelMap = new Map<string, number>();
+    sortedSessions.forEach((session) => {
+      (session.modelsUsed || []).forEach((model) => {
+        modelMap.set(model, (modelMap.get(model) || 0) + 1);
+      });
+    });
+    const models = Array.from(modelMap.entries())
+      .map(([model, sessionsCount]) => ({ model, sessionsCount }))
+      .sort((a, b) => b.sessionsCount - a.sessionsCount);
+
+    // Tool analytics
+    const toolMap = new Map<
+      string,
+      { totalCalls: number; errorCalls: number; successCalls: number }
+    >();
+    sortedSessions.forEach((session) => {
+      (session.toolsUsed || []).forEach((tool) => {
+        if (!toolMap.has(tool)) {
+          toolMap.set(tool, { totalCalls: 0, errorCalls: 0, successCalls: 0 });
+        }
+        const toolStats = toolMap.get(tool)!;
+        toolStats.totalCalls++;
+        if (session.status === 'error') {
+          toolStats.errorCalls++;
+        } else {
+          toolStats.successCalls++;
+        }
+      });
+    });
+
+    const toolItems = Array.from(toolMap.entries())
+      .map(([toolName, stats]) => ({
+        toolName,
+        ...stats,
+        errorRate:
+          stats.totalCalls > 0 ? stats.errorCalls / stats.totalCalls : 0,
+      }))
+      .sort((a, b) => b.totalCalls - a.totalCalls);
+
+    const toolTotals = {
+      totalCalls: toolItems.reduce((sum, t) => sum + t.totalCalls, 0),
+      errorCalls: toolItems.reduce((sum, t) => sum + t.errorCalls, 0),
+      successCalls: toolItems.reduce((sum, t) => sum + t.successCalls, 0),
+      errorRate: 0,
+    };
+    if (toolTotals.totalCalls > 0) {
+      toolTotals.errorRate = toolTotals.errorCalls / toolTotals.totalCalls;
+    }
+
+    // Daily trend
+    const dailyMap = new Map<
+      string,
+      {
+        sessionsCount: number;
+        totalEvents: number;
+        totalTokens: number;
+        totalDurationMs: number;
+      }
+    >();
+    sortedSessions.forEach((session) => {
+      if (!session.startedAt) {
+        return;
+      }
+      const dateKey = dayjs(session.startedAt).format('YYYY-MM-DD');
+      if (!dailyMap.has(dateKey)) {
+        dailyMap.set(dateKey, {
+          sessionsCount: 0,
+          totalEvents: 0,
+          totalTokens: 0,
+          totalDurationMs: 0,
+        });
+      }
+      const entry = dailyMap.get(dateKey)!;
+      entry.sessionsCount += 1;
+      entry.totalEvents += session.totalEvents || 0;
+      entry.totalTokens +=
+        (session.totalInputTokens || 0) + (session.totalOutputTokens || 0);
+      entry.totalDurationMs += session.durationMs || 0;
+    });
+
+    const daily = Array.from(dailyMap.entries())
+      .sort((a, b) => dayjs(a[0]).valueOf() - dayjs(b[0]).valueOf())
+      .map(([date, stats]) => ({
+        date,
+        sessionsCount: stats.sessionsCount,
+        totalEvents: stats.totalEvents,
+        totalTokens: stats.totalTokens,
+        averageDurationMs:
+          stats.sessionsCount > 0
+            ? Math.round(stats.totalDurationMs / stats.sessionsCount)
+            : 0,
+      }))
+      .slice(-30);
+
+    return {
+      agent,
+      recentSessions,
+      analytics: {
+        totals,
+        tools: {
+          totals: toolTotals,
+          items: toolItems,
+        },
+        statuses,
+        models,
+        versions,
+        daily,
+      },
+    };
+  }
+}

@@ -1,0 +1,1314 @@
+/**
+ * Agent Service
+ *
+ * Business logic for agent CRUD and chat orchestration.
+ * Uses agent-sdk for runtime execution with automatic tracing.
+ */
+
+import { createLogger } from '@/lib/core/logger';
+import { routeInstanceCall } from '@/lib/core/cluster';
+import type { QueuePayload } from '@/lib/core/queue';
+import { agentEntityId } from './agentEntityId';
+import type {
+    AgentInvokeResult as AgentSdkInvokeResult,
+    Message as AgentSdkMessage,
+    RuntimeProfile as AgentSdkRuntimeProfile,
+    SmartState as AgentSdkSmartState,
+    ToolResponseRetentionPolicy as AgentSdkToolResponseRetentionPolicy,
+    ToolInterface as AgentSdkToolInterface,
+    TraceSinkConfig as AgentSdkTraceSinkConfig,
+    TraceSessionFile,
+} from '@cognipeer/agent-sdk';
+import { getDatabase, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentTracingEvent, type IAgentTracingSession, type IAgentVersion } from '@/lib/database';
+import { getModelByKey } from '@/lib/services/models/modelService';
+import { buildModelRuntime } from '@/lib/services/models/runtimeService';
+import { queryRag } from '@/lib/services/rag/ragService';
+import { evaluateGuardrail } from '@/lib/services/guardrail';
+import { getMcpServerByKey, executeMcpTool } from '@/lib/services/mcp';
+import { getToolByKey, executeToolAction, logToolRequest } from '@/lib/services/tools';
+import { resolveBrowser, createBrowserSession, buildBrowserAgentTools, closeBrowserSession } from '@/lib/services/browser';
+import { invokeExternalAgent } from './externalAgent';
+
+const logger = createLogger('agents');
+
+const CONSOLE_AGENT_RUNTIME_PROFILE: AgentSdkRuntimeProfile = 'balanced';
+const CONSOLE_AGENT_MAX_TOOL_CALLS = 12;
+const CONSOLE_AGENT_MAX_CONTEXT_TOKENS = 48_000;
+const CONSOLE_AGENT_SUMMARY_TRIGGER_TOKENS = 32_000;
+const CONSOLE_AGENT_SUMMARY_MAX_TOKENS = 48_000;
+const CONSOLE_AGENT_SUMMARY_PROMPT_MAX_TOKENS = 8_000;
+const CONSOLE_AGENT_LAST_TURNS_TO_KEEP = 10;
+const CONSOLE_AGENT_TOOL_RESPONSE_RETENTION_BY_TOOL: Record<string, AgentSdkToolResponseRetentionPolicy> = {
+    knowledge_search: 'keep_full',
+};
+
+const CONSOLE_AGENT_TOOL_RESPONSES_CONFIG = {
+    defaultPolicy: 'summarize_archive' as const,
+    toolResponseRetentionByTool: CONSOLE_AGENT_TOOL_RESPONSE_RETENTION_BY_TOOL,
+    maxToolResponseChars: 80_000,
+    maxToolResponseTokens: 20_000,
+};
+
+type InternalTraceEvent = TraceSessionFile['events'][number] & {
+    toolName?: string;
+    usage?: Record<string, unknown>;
+    metadata?: Record<string, unknown> & { usage?: Record<string, unknown> };
+    sections?: unknown[];
+    data?: { sections?: unknown[] };
+    modelNames?: string[];
+    bytesIn?: number | null;
+    bytesOut?: number | null;
+};
+
+type InternalTraceSession = Omit<TraceSessionFile, 'events'> & {
+    events: InternalTraceEvent[];
+};
+
+type CreateConsoleSdkAgentInput = {
+    name: string;
+    version?: string;
+    model: unknown;
+    tools: AgentSdkToolInterface[];
+    systemPrompt?: string;
+    tracingSink: AgentSdkTraceSinkConfig;
+    threadId?: string;
+};
+
+function createConsoleAgentState(messages: AgentSdkMessage[]): AgentSdkSmartState {
+    return {
+        messages,
+        toolHistory: [],
+        toolHistoryArchived: [],
+        summaries: [],
+        summaryRecords: [],
+    };
+}
+
+function createConsoleSdkAgent(
+    createSmartAgentFn: typeof import('@cognipeer/agent-sdk').createSmartAgent,
+    input: CreateConsoleSdkAgentInput,
+) {
+    return createSmartAgentFn({
+        name: input.name,
+        version: input.version,
+        model: input.model,
+        ...(input.tools.length > 0 ? { tools: input.tools } : {}),
+        runtimeProfile: CONSOLE_AGENT_RUNTIME_PROFILE,
+        planning: {
+            mode: 'off',
+            replanPolicy: 'on_failure',
+        },
+        limits: {
+            maxToolCalls: CONSOLE_AGENT_MAX_TOOL_CALLS,
+            maxContextTokens: CONSOLE_AGENT_MAX_CONTEXT_TOKENS,
+        },
+        summarization: {
+            enable: true,
+            maxTokens: CONSOLE_AGENT_SUMMARY_MAX_TOKENS,
+            summaryTriggerTokens: CONSOLE_AGENT_SUMMARY_TRIGGER_TOKENS,
+            summaryPromptMaxTokens: CONSOLE_AGENT_SUMMARY_PROMPT_MAX_TOKENS,
+            integrityCheck: true,
+        },
+        context: {
+            policy: 'hybrid',
+            lastTurnsToKeep: CONSOLE_AGENT_LAST_TURNS_TO_KEEP,
+            toolResponsePolicy: 'summarize_archive',
+        },
+        toolResponses: CONSOLE_AGENT_TOOL_RESPONSES_CONFIG,
+        ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
+        tracing: {
+            enabled: true,
+            mode: 'batched',
+            sink: input.tracingSink,
+            ...(input.threadId ? { threadId: input.threadId } : {}),
+        },
+    });
+}
+
+// ── Tool Bridge ─────────────────────────────────────────────────────
+
+/**
+ * Converts IAgentToolBinding entries into agent-sdk ToolInterface instances.
+ * Supports two source types:
+ *   - 'tool'  – unified tool system (OpenAPI / MCP sources)
+ *   - 'mcp'   – legacy direct MCP server bindings (backward compat)
+ */
+async function buildBoundTools(
+    tenantDbName: string,
+    tenantId: string,
+    projectId: string,
+    bindings: { source: string; sourceKey: string; toolNames: string[]; config?: Record<string, unknown> }[] | undefined,
+    createToolFn: typeof import('@cognipeer/agent-sdk').createTool,
+    zod: typeof import('zod').z,
+): Promise<{ cleanupTasks: Array<() => Promise<void>>; tools: AgentSdkToolInterface[] }> {
+    if (!bindings || bindings.length === 0) return { cleanupTasks: [], tools: [] };
+
+    const tools: AgentSdkToolInterface[] = [];
+    const cleanupTasks: Array<() => Promise<void>> = [];
+
+    for (const binding of bindings) {
+        if (binding.source === 'tool') {
+            // ── Unified tool system ──────────────────────────────
+            const toolRecord = await getToolByKey(tenantDbName, binding.sourceKey);
+            if (!toolRecord || toolRecord.status !== 'active') {
+                logger.warn('Skipping inactive/missing tool', { key: binding.sourceKey });
+                continue;
+            }
+
+            for (const actionName of binding.toolNames) {
+                const action = toolRecord.actions.find(
+                    (a) => a.key === actionName || a.name === actionName,
+                );
+                if (!action) {
+                    logger.warn('Tool action not found, skipping', {
+                        tool: binding.sourceKey,
+                        action: actionName,
+                    });
+                    continue;
+                }
+
+                const tool = createToolFn({
+                    name: action.name,
+                    description: action.description || `Call ${action.name} on ${toolRecord.name}`,
+                    schema: zod.object({}).passthrough(),
+                    func: async (args: Record<string, unknown>) => {
+                        try {
+                            const { result, latencyMs } = await executeToolAction(toolRecord, action.key, args);
+                            logToolRequest(
+                                tenantDbName, tenantId, toolRecord.projectId,
+                                toolRecord.key, action.key, action.name,
+                                'success', latencyMs,
+                                args,
+                                typeof result === 'object' ? (result as Record<string, unknown>) : { value: result },
+                                undefined,
+                                'agent',
+                            );
+                            return typeof result === 'string' ? result : JSON.stringify(result);
+                        } catch (execError) {
+                            const errorMessage = execError instanceof Error ? execError.message : 'Failed to execute tool action';
+                            logToolRequest(
+                                tenantDbName, tenantId, toolRecord.projectId,
+                                toolRecord.key, action.key, action.name,
+                                'error', 0,
+                                args,
+                                undefined,
+                                errorMessage,
+                                'agent',
+                            );
+                            throw execError;
+                        }
+                    },
+                });
+                tools.push(tool);
+            }
+        } else if (binding.source === 'mcp') {
+            // ── Legacy MCP server bindings ───────────────────────
+            const server = await getMcpServerByKey(tenantDbName, binding.sourceKey);
+            if (!server || server.status !== 'active') {
+                logger.warn('Skipping inactive/missing MCP server', { key: binding.sourceKey });
+                continue;
+            }
+
+            for (const toolName of binding.toolNames) {
+                const mcpToolDef = server.tools.find((t) => t.name === toolName);
+                if (!mcpToolDef) {
+                    logger.warn('MCP tool not found, skipping', {
+                        server: binding.sourceKey,
+                        tool: toolName,
+                    });
+                    continue;
+                }
+
+                const tool = createToolFn({
+                    name: mcpToolDef.name,
+                    description: mcpToolDef.description || `Call ${mcpToolDef.name} on ${server.name}`,
+                    schema: zod.object({}).passthrough(),
+                    func: async (args: Record<string, unknown>) => {
+                        const { result } = await executeMcpTool(server, toolName, args);
+                        return typeof result === 'string' ? result : JSON.stringify(result);
+                    },
+                });
+                tools.push(tool);
+            }
+        } else if (binding.source === 'system' && binding.sourceKey === 'browser_use') {
+            // ── System tool: Browser Use ───────────────────────
+            const browserId = typeof binding.config?.browserId === 'string'
+                ? (binding.config.browserId as string)
+                : undefined;
+            if (!browserId) {
+                logger.warn('browser_use binding missing browserId, skipping');
+                continue;
+            }
+            try {
+                const browser = await resolveBrowser(
+                    { tenantDbName, tenantId, projectId },
+                    browserId,
+                );
+                if (!browser || browser.status !== 'active') {
+                    logger.warn('browser_use binding refers to inactive/missing browser', { browserId });
+                    continue;
+                }
+                const session = await createBrowserSession(
+                    { tenantDbName, tenantId, projectId },
+                    {
+                        browserId: String(browser._id ?? ''),
+                        createdBy: 'agent-runtime',
+                        metadata: { source: 'agent-system-tool', binding: 'browser_use' },
+                    },
+                );
+                const browserTools = buildBrowserAgentTools({
+                    tenantDbName,
+                    tenantId,
+                    projectId,
+                    sessionKey: session.sessionKey,
+                    createdBy: 'agent-runtime',
+                });
+                tools.push(...(browserTools as unknown as AgentSdkToolInterface[]));
+                cleanupTasks.push(async () => {
+                    await closeBrowserSession(
+                        { tenantDbName, tenantId, projectId },
+                        session.sessionKey,
+                    ).catch(() => undefined);
+                });
+            } catch (err) {
+                logger.error('Failed to bind browser_use system tool', {
+                    browserId,
+                    error: err instanceof Error ? err.message : String(err),
+                });
+            }
+        }
+    }
+
+    return { cleanupTasks, tools };
+}
+
+async function runBoundToolCleanup(
+    cleanupTasks: Array<() => Promise<void>>,
+    context: { agentKey: string; mode: 'chat' | 'playground' },
+): Promise<void> {
+    if (cleanupTasks.length === 0) return;
+
+    const results = await Promise.allSettled(cleanupTasks.map((task) => task()));
+    const failures = results.filter((result) => result.status === 'rejected').length;
+    if (failures > 0) {
+        logger.warn('Bound tool cleanup completed with failures', {
+            agentKey: context.agentKey,
+            failures,
+            mode: context.mode,
+        });
+    }
+}
+
+// ── Internal Tracing Sink ────────────────────────────────────────────
+
+/**
+ * Creates a customSink that saves trace sessions directly to the database,
+ * bypassing the HTTP tracing endpoint and its API-token authentication.
+ * This is used for internal agent executions (dashboard playground & client API chat).
+ */
+async function createInternalTracingSink(
+    tenantDbName: string,
+    tenantId: string,
+    projectId: string,
+) {
+    const { customSink } = await import('@cognipeer/agent-sdk');
+
+    return customSink({
+        onSession: async (session: InternalTraceSession) => {
+            try {
+                const db = await getDatabase();
+                await db.switchToTenant(tenantDbName);
+
+                const events = Array.isArray(session.events) ? session.events : [];
+
+                // Extract models and tools used
+                const modelsUsed = new Set<string>();
+                const toolsUsed = new Set<string>();
+                for (const event of events) {
+                    if (event?.model) modelsUsed.add(event.model);
+                    if (event?.toolName) toolsUsed.add(event.toolName);
+                    if (event?.actor?.scope === 'tool' && event?.actor?.name) {
+                        toolsUsed.add(event.actor.name);
+                    }
+                }
+                if (session?.agent?.model) modelsUsed.add(session.agent.model);
+
+                const sessionDoc: Omit<IAgentTracingSession, '_id' | 'createdAt' | 'updatedAt'> = {
+                    sessionId: session.sessionId,
+                    traceId: session.traceId,
+                    rootSpanId: session.rootSpanId,
+                    threadId: session.threadId,
+                    tenantId,
+                    projectId,
+                    source: 'custom',
+                    agent: session.agent ?? {},
+                    agentName: session.agent?.name ?? undefined,
+                    agentVersion: session.agent?.version ?? undefined,
+                    agentModel: session.agent?.model ?? undefined,
+                    config: session.config ?? {},
+                    summary: session.summary ?? {},
+                    status: session.status || 'unknown',
+                    startedAt: session.startedAt ? new Date(session.startedAt) : new Date(),
+                    endedAt: session.endedAt ? new Date(session.endedAt) : undefined,
+                    durationMs: session.durationMs ?? undefined,
+                    errors: session.errors ?? [],
+                    modelsUsed: Array.from(modelsUsed),
+                    toolsUsed: Array.from(toolsUsed),
+                    eventCounts: session.summary?.eventCounts ?? {},
+                    totalEvents: events.length,
+                    totalInputTokens: session.summary?.totalInputTokens ?? 0,
+                    totalOutputTokens: session.summary?.totalOutputTokens ?? 0,
+                    totalCachedInputTokens: session.summary?.totalCachedInputTokens ?? 0,
+                    totalBytesIn: session.summary?.totalBytesIn ?? undefined,
+                    totalBytesOut: session.summary?.totalBytesOut ?? undefined,
+                };
+
+                // Upsert session
+                const existing = await db.findAgentTracingSessionById(session.sessionId, projectId);
+                if (existing) {
+                    await db.updateAgentTracingSession(session.sessionId, sessionDoc, projectId);
+                } else {
+                    await db.createAgentTracingSession(sessionDoc);
+                }
+
+                // Replace events
+                await db.deleteAgentTracingEvents(session.sessionId, projectId);
+                for (const event of events) {
+                    const sections = (Array.isArray(event?.sections)
+                        ? event.sections
+                        : Array.isArray(event?.data?.sections)
+                            ? event.data.sections
+                            : []) as Array<Record<string, unknown>>;
+
+                    const usage = event?.usage || event?.metadata?.usage || {};
+                        const inputTokens = toOptionalNumber(
+                            event?.inputTokens ?? usage?.inputTokens ?? usage?.input_tokens,
+                        );
+                        const outputTokens = toOptionalNumber(
+                            event?.outputTokens ?? usage?.outputTokens ?? usage?.output_tokens,
+                        );
+                        const cachedInputTokens = toOptionalNumber(
+                            event?.cachedInputTokens ??
+                            usage?.cachedInputTokens ??
+                            usage?.cached_input_tokens ??
+                            usage?.cacheReadInputTokens ??
+                            usage?.cache_read_input_tokens,
+                        );
+
+                    const eventDoc: Omit<IAgentTracingEvent, '_id' | 'createdAt'> = {
+                        sessionId: session.sessionId,
+                        traceId: event.traceId ?? undefined,
+                        spanId: event.spanId ?? undefined,
+                        parentSpanId: event.parentSpanId ?? undefined,
+                        tenantId,
+                        projectId,
+                        id: event.id ?? undefined,
+                        type: event.type ?? undefined,
+                        label: event.label ?? undefined,
+                        sequence: event.sequence ?? 0,
+                        timestamp: event.timestamp ? new Date(event.timestamp) : new Date(),
+                        status: event.status ?? undefined,
+                        actor: event.actor ?? {},
+                        metadata: event.metadata ?? {},
+                        sections,
+                        modelNames: event.modelNames ?? [],
+                        model: event.model ?? undefined,
+                        error: event.error ?? undefined,
+                        durationMs: event.durationMs ?? undefined,
+                        actorName: event.actor?.name ?? undefined,
+                        actorRole: event.actor?.role ?? event.actor?.scope ?? undefined,
+                        toolName:
+                            event.toolName ??
+                            (event.actor?.scope === 'tool' ? event.actor?.name : undefined),
+                        toolExecutionId: event.toolExecutionId ?? undefined,
+                        inputTokens,
+                        outputTokens,
+                        cachedInputTokens,
+                        totalTokens: event.totalTokens ?? undefined,
+                        bytesIn: event.bytesIn ?? undefined,
+                        bytesOut: event.bytesOut ?? undefined,
+                        requestBytes: event.requestBytes ?? undefined,
+                        responseBytes: event.responseBytes ?? undefined,
+                    };
+
+                    await db.createAgentTracingEvent(eventDoc);
+                }
+
+                logger.info('Internal tracing session saved', {
+                    sessionId: session.sessionId,
+                    agentName: session.agent?.name,
+                    eventsCount: events.length,
+                });
+            } catch (err) {
+                logger.error('Failed to save internal tracing session', { error: err });
+            }
+        },
+    });
+}
+
+    function toOptionalNumber(value: unknown): number | undefined {
+        if (value === null || value === undefined || value === '') {
+            return undefined;
+        }
+
+        const normalized = typeof value === 'number' ? value : Number(value);
+        return Number.isFinite(normalized) ? normalized : undefined;
+    }
+
+// ── Utility ──────────────────────────────────────────────────────────
+
+function generateAgentKey(name: string): string {
+    const slug = name
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-|-$/g, '');
+    const suffix = Math.random().toString(36).substring(2, 8);
+    return `${slug}-${suffix}`;
+}
+
+// ── Agent CRUD ───────────────────────────────────────────────────────
+
+export async function createAgentRecord(
+    tenantDbName: string,
+    tenantId: string,
+    projectId: string,
+    userId: string,
+    data: {
+        name: string;
+        description?: string;
+        config: IAgent['config'];
+        status?: IAgent['status'];
+    },
+): Promise<IAgent> {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+
+    const key = generateAgentKey(data.name);
+
+    // Verify uniqueness
+    const existing = await db.findAgentByKey(key, projectId);
+    if (existing) {
+        throw new Error(`Agent key "${key}" already exists`);
+    }
+
+    const agent = await db.createAgent({
+        tenantId,
+        projectId,
+        key,
+        name: data.name,
+        description: data.description,
+        config: data.config,
+        status: data.status || 'active',
+        createdBy: userId,
+    });
+
+    logger.info('Agent created', { key, projectId });
+    return agent;
+}
+
+export async function updateAgentRecord(
+    tenantDbName: string,
+    agentId: string,
+    data: Partial<Omit<IAgent, 'tenantId' | 'key' | 'createdBy'>>,
+    userId: string,
+): Promise<IAgent | null> {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+    return db.updateAgent(agentId, { ...data, updatedBy: userId });
+}
+
+export async function deleteAgentRecord(
+    tenantDbName: string,
+    agentId: string,
+): Promise<boolean> {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+    return db.deleteAgent(agentId);
+}
+
+export async function getAgentById(
+    tenantDbName: string,
+    agentId: string,
+): Promise<IAgent | null> {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+    return db.findAgentById(agentId);
+}
+
+export async function getAgentByKey(
+    tenantDbName: string,
+    key: string,
+    projectId?: string,
+): Promise<IAgent | null> {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+    return db.findAgentByKey(key, projectId);
+}
+
+export async function listAgents(
+    tenantDbName: string,
+    filters?: { projectId?: string; status?: IAgent['status']; search?: string },
+): Promise<IAgent[]> {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+    return db.listAgents(filters);
+}
+
+export async function countAgents(
+    tenantDbName: string,
+    projectId?: string,
+): Promise<number> {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+    return db.countAgents(projectId);
+}
+
+// ── Agent Publish & Versioning ───────────────────────────────────────
+
+/**
+ * Publishes the current agent config as a new immutable version.
+ * After publishing, API/SDK calls will use this version by default.
+ */
+export async function publishAgent(
+    tenantDbName: string,
+    agentId: string,
+    userId: string,
+    changelog?: string,
+): Promise<IAgentVersion> {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+
+    const agent = await db.findAgentById(agentId);
+    if (!agent) throw new Error(`Agent "${agentId}" not found`);
+
+    // Keep versioning monotonic even if agent.latestVersion was not persisted
+    // correctly in older SQLite writes.
+    const latestPublishedSnapshot = await db.findLatestAgentVersion(String(agent._id));
+    const latestKnownVersion = Math.max(
+      agent.latestVersion ?? 0,
+      agent.publishedVersion ?? 0,
+      latestPublishedSnapshot?.version ?? 0,
+    );
+    const nextVersion = latestKnownVersion + 1;
+
+    const version = await db.createAgentVersion({
+        tenantId: agent.tenantId,
+        projectId: agent.projectId,
+        agentId: String(agent._id),
+        agentKey: agent.key,
+        version: nextVersion,
+        snapshot: {
+            name: agent.name,
+            description: agent.description,
+            config: agent.config,
+            status: agent.status,
+        },
+        changelog,
+        publishedBy: userId,
+    });
+
+    // Update agent with latest published version
+    await db.updateAgent(agentId, {
+        publishedVersion: nextVersion,
+        latestVersion: nextVersion,
+        updatedBy: userId,
+    });
+
+    logger.info('Agent published', {
+        agentId,
+        agentKey: agent.key,
+        version: nextVersion,
+    });
+
+    return version;
+}
+
+export async function getAgentVersion(
+    tenantDbName: string,
+    agentId: string,
+    version: number,
+): Promise<IAgentVersion | null> {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+    return db.findAgentVersion(agentId, version);
+}
+
+export async function listAgentVersions(
+    tenantDbName: string,
+    agentId: string,
+    options?: { limit?: number; skip?: number },
+): Promise<{ versions: IAgentVersion[]; total: number }> {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+    return db.listAgentVersions(agentId, options);
+}
+
+/**
+ * Resolves the agent config to use for execution.
+ * - If a specific version is requested, returns that version's config.
+ * - For API/SDK calls (not playground), uses the published version.
+ * - Falls back to current agent config if no version is published (backward compat).
+ */
+export async function resolveAgentConfig(
+    tenantDbName: string,
+    agentKey: string,
+    projectId?: string,
+    requestedVersion?: number,
+): Promise<{
+    agent: IAgent;
+    config: IAgent['config'];
+    resolvedVersion: number | null;
+    agentName: string;
+    agentDescription?: string;
+}> {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+
+    const agent = await db.findAgentByKey(agentKey, projectId);
+    if (!agent) throw new Error(`Agent "${agentKey}" not found`);
+
+    // If a specific version is requested
+    if (requestedVersion !== undefined && requestedVersion !== null) {
+        const version = await db.findAgentVersion(String(agent._id), requestedVersion);
+        if (!version) {
+            throw new Error(`Version ${requestedVersion} not found for agent "${agentKey}"`);
+        }
+        return {
+            agent,
+            config: version.snapshot.config,
+            resolvedVersion: version.version,
+            agentName: version.snapshot.name,
+            agentDescription: version.snapshot.description,
+        };
+    }
+
+    // Use published version if available
+    if (agent.publishedVersion) {
+        const version = await db.findAgentVersion(
+            String(agent._id),
+            agent.publishedVersion,
+        );
+        if (version) {
+            return {
+                agent,
+                config: version.snapshot.config,
+                resolvedVersion: version.version,
+                agentName: version.snapshot.name,
+                agentDescription: version.snapshot.description,
+            };
+        }
+    }
+
+    // Fallback to current config (never published or version data missing)
+    return {
+        agent,
+        config: agent.config,
+        resolvedVersion: null,
+        agentName: agent.name,
+        agentDescription: agent.description,
+    };
+}
+
+// ── Conversation CRUD ────────────────────────────────────────────────
+
+export async function createConversation(
+    tenantDbName: string,
+    tenantId: string,
+    projectId: string,
+    userId: string,
+    agentKey: string,
+    title?: string,
+): Promise<IAgentConversation> {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+
+    return db.createAgentConversation({
+        tenantId,
+        projectId,
+        agentKey,
+        title: title || 'New conversation',
+        messages: [],
+        createdBy: userId,
+    });
+}
+
+export async function getConversationById(
+    tenantDbName: string,
+    conversationId: string,
+): Promise<IAgentConversation | null> {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+    return db.findAgentConversationById(conversationId);
+}
+
+export async function listConversations(
+    tenantDbName: string,
+    agentKey: string,
+    filters?: { projectId?: string; limit?: number; skip?: number },
+): Promise<IAgentConversation[]> {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+    return db.listAgentConversations(agentKey, filters);
+}
+
+export async function deleteConversation(
+    tenantDbName: string,
+    conversationId: string,
+): Promise<boolean> {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+    return db.deleteAgentConversation(conversationId);
+}
+
+// ── Agent Chat Execution ─────────────────────────────────────────────
+
+export interface AgentChatRequest {
+    tenantDbName: string;
+    tenantId: string;
+    projectId: string;
+    agentKey: string;
+    conversationId: string;
+    userMessage: string;
+    userId: string;
+    /** Request a specific published version (API/SDK) */
+    version?: number;
+    /** When true, use the published version (default for API/SDK calls) */
+    usePublished?: boolean;
+}
+
+/** Ephemeral (playground) chat — no DB conversation required */
+export interface AgentPlaygroundChatRequest {
+    tenantDbName: string;
+    tenantId: string;
+    projectId: string;
+    agentKey: string;
+    userMessage: string;
+    /** Previous messages for context (in-memory only) */
+    history?: Array<{ role: string; content: string }>;
+}
+
+/** OpenAI Responses API–compatible output content item */
+export interface ResponseOutputText {
+    type: 'output_text';
+    text: string;
+}
+
+/** OpenAI Responses API–compatible output message */
+export interface ResponseOutputMessage {
+    id: string;
+    type: 'message';
+    role: 'assistant';
+    content: ResponseOutputText[];
+}
+
+/** OpenAI Responses API–compatible usage */
+export interface ResponseUsage {
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+}
+
+/** OpenAI Responses API–compatible response shape */
+export interface AgentChatResponse {
+    id: string;
+    object: 'response';
+    model: string;
+    output: ResponseOutputMessage[];
+    status: 'completed' | 'failed';
+    usage: ResponseUsage;
+    created_at: number;
+    previous_response_id: string | null;
+    /** Version used for this response (null if not versioned) */
+    version: number | null;
+    /** Conversation messages for dashboard playgrounds */
+    _conversation_messages?: Array<{ role: string; content: string; timestamp: Date }>;
+}
+
+export async function executeAgentChat(
+    request: AgentChatRequest,
+): Promise<AgentChatResponse> {
+    return routeInstanceCall(
+        {
+            entityType: 'agent',
+            entityId: agentEntityId(request.tenantId, request.agentKey),
+            jobName: 'chat',
+        },
+        request as unknown as QueuePayload,
+        () => executeAgentChatLocal(request),
+    );
+}
+
+/** Local (non-routed) implementation. Exported so the queue consumer can call it. */
+export async function executeAgentChatLocal(
+    request: AgentChatRequest,
+): Promise<AgentChatResponse> {
+    const {
+        tenantDbName,
+        tenantId,
+        projectId,
+        agentKey,
+        conversationId,
+        userMessage,
+    } = request;
+
+    // 1. Load agent config (use published version for API/SDK calls)
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+
+    let resolvedVersion: number | null = null;
+    let agent: IAgent;
+    let config: IAgentConfig;
+
+    if (request.usePublished || request.version !== undefined) {
+        // Resolve from published version
+        const resolved = await resolveAgentConfig(
+            tenantDbName,
+            agentKey,
+            projectId,
+            request.version,
+        );
+        agent = resolved.agent;
+        config = resolved.config;
+        resolvedVersion = resolved.resolvedVersion;
+    } else {
+        // Playground-style: use current draft config
+        const foundAgent = await db.findAgentByKey(agentKey, projectId);
+        if (!foundAgent) throw new Error(`Agent "${agentKey}" not found`);
+        agent = foundAgent;
+        config = foundAgent.config;
+    }
+
+    // 2. Load conversation
+    const conversation = await db.findAgentConversationById(conversationId);
+    if (!conversation) throw new Error(`Conversation "${conversationId}" not found`);
+
+    // 2b. Connected (external) agent — invoke over HTTP, skip local runtime.
+    if (config.kind === 'external' && config.connection) {
+        const now = new Date();
+        const history = (conversation.messages || []).map((m) => ({ role: m.role, content: m.content }));
+        const { content: assistantContent } = await invokeExternalAgent(
+            config.connection,
+            [...history, { role: 'user', content: userMessage }],
+            { tenantDbName, tenantId, projectId },
+        );
+
+        const updatedMessages = [
+            ...(conversation.messages || []),
+            { role: 'user', content: userMessage, timestamp: now },
+            { role: 'assistant', content: assistantContent, timestamp: new Date() },
+        ];
+        await db.updateAgentConversation(conversationId, {
+            messages: updatedMessages,
+            title: conversation.title === 'New conversation' && updatedMessages.length <= 2
+                ? userMessage.substring(0, 80)
+                : conversation.title,
+        });
+
+        const responseId = `resp_${conversationId}`;
+        const msgId = `msg_${Date.now().toString(36)}`;
+        return {
+            id: responseId,
+            object: 'response' as const,
+            model: agent.name,
+            output: [
+                {
+                    id: msgId,
+                    type: 'message' as const,
+                    role: 'assistant' as const,
+                    content: [{ type: 'output_text' as const, text: assistantContent }],
+                },
+            ],
+            status: 'completed' as const,
+            usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+            created_at: Math.floor(Date.now() / 1000),
+            previous_response_id: (conversation.messages?.length ?? 0) > 0 ? responseId : null,
+            version: resolvedVersion,
+            _conversation_messages: updatedMessages,
+        };
+    }
+
+    // 3. Resolve model
+    if (!config.modelKey) throw new Error('Agent has no model configured');
+    const model = await getModelByKey(tenantDbName, config.modelKey, projectId);
+    if (!model) throw new Error(`Model "${config.modelKey}" not found`);
+    if (model.category !== 'llm') throw new Error('Configured model is not compatible with chat');
+
+    // 4. Build LangChain model runtime
+    const { runtime } = await buildModelRuntime(
+        tenantDbName,
+        tenantId,
+        model.providerKey,
+        projectId,
+    );
+
+    if (!runtime.createChatModel) {
+        throw new Error('Provider runtime does not support chat model creation');
+    }
+
+    const lcModel = runtime.createChatModel({
+        modelId: model.modelId,
+        category: model.category,
+        modelSettings: {
+            temperature: config.temperature ?? 0.7,
+            top_p: config.topP,
+            max_tokens: config.maxTokens,
+        },
+    });
+
+    // 5. Resolve system prompt
+    let systemPrompt = config.systemPrompt;
+    if (!systemPrompt && config.promptKey) {
+        const prompt = await db.findPromptByKey(config.promptKey, projectId);
+        if (prompt) systemPrompt = prompt.template;
+    }
+
+    // 5a. Input guardrail check
+    if (config.inputGuardrailKey) {
+        const inputResult = await evaluateGuardrail({
+            tenantDbName,
+            tenantId,
+            projectId,
+            guardrailKey: config.inputGuardrailKey,
+            text: userMessage,
+        });
+        if (!inputResult.passed && inputResult.action === 'block') {
+            const reasons = inputResult.findings.map((f) => f.category || f.type).join(', ');
+            throw new Error(`Input blocked by guardrail: ${reasons}`);
+        }
+    }
+
+    // 5b. Build RAG retrieval tool if knowledge engine is configured
+    const { createSmartAgent, fromLangchainModel, createTool } = await import('@cognipeer/agent-sdk');
+    const { z } = await import('zod');
+
+    const tools: AgentSdkToolInterface[] = [];
+    if (config.knowledgeEngineKey) {
+        const ragModuleKey = config.knowledgeEngineKey;
+        const ragTool = createTool({
+            name: 'knowledge_search',
+            description: 'PRIMARY retrieval tool. For factual, product, policy, API, docs, or troubleshooting questions, call this tool BEFORE drafting the final answer. Use the user question (or a focused rewrite) as query. If results are empty/insufficient, then answer briefly with uncertainty.',
+            schema: z.object({ query: z.string().describe('The search query') }),
+            func: async (args: { query: string }) => {
+                // Use undefined projectId for tenant-wide lookup;
+                // the user explicitly configured this RAG module on the agent.
+                const result = await queryRag(tenantDbName, tenantId, undefined, {
+                    ragModuleKey,
+                    query: args.query,
+                    topK: 5,
+                });
+                return result.matches
+                    .map((m) => m.content)
+                    .filter(Boolean)
+                    .join('\n\n---\n\n');
+            },
+        });
+        tools.push(ragTool);
+    }
+
+    if (config.knowledgeEngineKey) {
+        const knowledgeSearchInstruction = [
+            'Knowledge-base-first policy:',
+            '- For user questions that are factual, documentation, API, setup, troubleshooting, or product-behavior related, call `knowledge_search` first.',
+            '- Do not provide a final answer before at least one `knowledge_search` attempt unless the request is purely conversational.',
+            '- After retrieval, answer using the retrieved content; if retrieval is empty, say you are not fully certain and provide the best concise answer.',
+        ].join('\n');
+        systemPrompt = systemPrompt
+            ? `${knowledgeSearchInstruction}\n\n${systemPrompt}`
+            : knowledgeSearchInstruction;
+    }
+
+    // 5c. Build bound tools from toolBindings (MCP, future sources)
+    const { cleanupTasks, tools: boundTools } = await buildBoundTools(
+        tenantDbName,
+        tenantId,
+        projectId,
+        config.toolBindings,
+        createTool,
+        z,
+    );
+    tools.push(...boundTools);
+
+    // 6. Build message history
+    const now = new Date();
+    const existingMessages: AgentSdkMessage[] = (conversation.messages || []).map((m) => ({
+        role: m.role,
+        content: m.content,
+    }));
+
+    // 7. Create agent-sdk instance and invoke
+    const sdkModel = fromLangchainModel(lcModel);
+    const tracingSink = await createInternalTracingSink(tenantDbName, tenantId, projectId);
+
+    const sdkAgent = createConsoleSdkAgent(createSmartAgent, {
+        name: agent.name,
+        model: sdkModel,
+        tools,
+        systemPrompt,
+        tracingSink,
+        threadId: conversationId,
+        version: resolvedVersion !== null ? String(resolvedVersion) : undefined,
+    });
+
+    const inputMessages: AgentSdkMessage[] = [
+        ...existingMessages,
+        { role: 'user', content: userMessage },
+    ];
+
+    try {
+        const result: AgentSdkInvokeResult = await sdkAgent.invoke(createConsoleAgentState(inputMessages));
+
+        const assistantContent = result.content || '';
+
+        // 7b. Output guardrail check
+        if (config.outputGuardrailKey && assistantContent) {
+            const outputResult = await evaluateGuardrail({
+                tenantDbName,
+                tenantId,
+                projectId,
+                guardrailKey: config.outputGuardrailKey,
+                text: assistantContent,
+            });
+            if (!outputResult.passed && outputResult.action === 'block') {
+                const reasons = outputResult.findings.map((f) => f.category || f.type).join(', ');
+                throw new Error(`Output blocked by guardrail: ${reasons}`);
+            }
+        }
+
+        // 8. Update conversation with new messages
+        const updatedMessages = [
+            ...(conversation.messages || []),
+            { role: 'user', content: userMessage, timestamp: now },
+            { role: 'assistant', content: assistantContent, timestamp: new Date() },
+        ];
+
+        await db.updateAgentConversation(conversationId, {
+            messages: updatedMessages,
+            title: conversation.title === 'New conversation' && updatedMessages.length <= 2
+                ? userMessage.substring(0, 80)
+                : conversation.title,
+        });
+
+        logger.info('Agent chat completed', {
+            agentKey,
+            conversationId,
+            messageCount: updatedMessages.length,
+        });
+
+        const responseId = `resp_${conversationId}`;
+        const msgId = `msg_${Date.now().toString(36)}`;
+
+        return {
+            id: responseId,
+            object: 'response' as const,
+            model: agent.name,
+            output: [
+                {
+                    id: msgId,
+                    type: 'message' as const,
+                    role: 'assistant' as const,
+                    content: [
+                        {
+                            type: 'output_text' as const,
+                            text: assistantContent,
+                        },
+                    ],
+                },
+            ],
+            status: 'completed' as const,
+            usage: {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+            },
+            created_at: Math.floor(Date.now() / 1000),
+            previous_response_id: (conversation.messages?.length ?? 0) > 0 ? responseId : null,
+            version: resolvedVersion,
+            _conversation_messages: updatedMessages,
+        };
+    } finally {
+        await runBoundToolCleanup(cleanupTasks, { agentKey, mode: 'chat' });
+    }
+}
+
+/**
+ * Ephemeral playground chat — runs agent without DB conversation storage.
+ * History is passed in-memory from the client. Tracing still fires.
+ */
+export async function executePlaygroundChat(
+    request: AgentPlaygroundChatRequest,
+): Promise<{ content: string }> {
+    return routeInstanceCall(
+        {
+            entityType: 'agent',
+            entityId: agentEntityId(request.tenantId, request.agentKey),
+            jobName: 'playground',
+        },
+        request as unknown as QueuePayload,
+        () => executePlaygroundChatLocal(request),
+    );
+}
+
+/** Local (non-routed) implementation. Exported so the queue consumer can call it. */
+export async function executePlaygroundChatLocal(
+    request: AgentPlaygroundChatRequest,
+): Promise<{ content: string }> {
+    const { tenantDbName, tenantId, projectId, agentKey, userMessage, history } = request;
+
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+
+    const agent = await db.findAgentByKey(agentKey, projectId);
+    if (!agent) throw new Error(`Agent "${agentKey}" not found`);
+
+    const { config } = agent;
+
+    // Connected (external) agent — invoke over HTTP, skip local runtime.
+    if (config.kind === 'external' && config.connection) {
+        const { content } = await invokeExternalAgent(
+            config.connection,
+            [...(history || []), { role: 'user', content: userMessage }],
+            { tenantDbName, tenantId, projectId },
+        );
+        logger.info('Connected agent playground chat completed', { agentKey });
+        return { content };
+    }
+
+    // Resolve model
+    if (!config.modelKey) throw new Error('Agent has no model configured');
+    const model = await getModelByKey(tenantDbName, config.modelKey, projectId);
+    if (!model) throw new Error(`Model "${config.modelKey}" not found`);
+    if (model.category !== 'llm') throw new Error('Configured model is not compatible with chat');
+
+    const { runtime } = await buildModelRuntime(tenantDbName, tenantId, model.providerKey, projectId);
+    if (!runtime.createChatModel) {
+        throw new Error('Provider runtime does not support chat model creation');
+    }
+
+    const lcModel = runtime.createChatModel({
+        modelId: model.modelId,
+        category: model.category,
+        modelSettings: {
+            temperature: config.temperature ?? 0.7,
+            top_p: config.topP,
+            max_tokens: config.maxTokens,
+        },
+    });
+
+    // Resolve system prompt
+    let systemPrompt = config.systemPrompt;
+    if (!systemPrompt && config.promptKey) {
+        const prompt = await db.findPromptByKey(config.promptKey, projectId);
+        if (prompt) systemPrompt = prompt.template;
+    }
+
+    // Input guardrail check
+    if (config.inputGuardrailKey) {
+        const inputResult = await evaluateGuardrail({
+            tenantDbName,
+            tenantId,
+            projectId,
+            guardrailKey: config.inputGuardrailKey,
+            text: userMessage,
+        });
+        if (!inputResult.passed && inputResult.action === 'block') {
+            const reasons = inputResult.findings.map((f) => f.category || f.type).join(', ');
+            throw new Error(`Input blocked by guardrail: ${reasons}`);
+        }
+    }
+
+    // Build RAG retrieval tool if knowledge engine is configured
+    const { createSmartAgent, fromLangchainModel, createTool } = await import('@cognipeer/agent-sdk');
+    const { z } = await import('zod');
+
+    const playgroundTools: AgentSdkToolInterface[] = [];
+    if (config.knowledgeEngineKey) {
+        const ragModuleKey = config.knowledgeEngineKey;
+        const ragTool = createTool({
+            name: 'knowledge_search',
+            description: 'PRIMARY retrieval tool. For factual, product, policy, API, docs, or troubleshooting questions, call this tool BEFORE drafting the final answer. Use the user question (or a focused rewrite) as query. If results are empty/insufficient, then answer briefly with uncertainty.',
+            schema: z.object({ query: z.string().describe('The search query') }),
+            func: async (args: { query: string }) => {
+                // Use undefined projectId for tenant-wide lookup;
+                // the user explicitly configured this RAG module on the agent.
+                const result = await queryRag(tenantDbName, tenantId, undefined, {
+                    ragModuleKey,
+                    query: args.query,
+                    topK: 5,
+                });
+                return result.matches
+                    .map((m) => m.content)
+                    .filter(Boolean)
+                    .join('\n\n---\n\n');
+            },
+        });
+        playgroundTools.push(ragTool);
+    }
+
+    if (config.knowledgeEngineKey) {
+        const knowledgeSearchInstruction = [
+            'Knowledge-base-first policy:',
+            '- For user questions that are factual, documentation, API, setup, troubleshooting, or product-behavior related, call `knowledge_search` first.',
+            '- Do not provide a final answer before at least one `knowledge_search` attempt unless the request is purely conversational.',
+            '- After retrieval, answer using the retrieved content; if retrieval is empty, say you are not fully certain and provide the best concise answer.',
+        ].join('\n');
+        systemPrompt = systemPrompt
+            ? `${knowledgeSearchInstruction}\n\n${systemPrompt}`
+            : knowledgeSearchInstruction;
+    }
+
+    // Build bound tools from toolBindings (MCP, future sources)
+    const { cleanupTasks, tools: boundPlaygroundTools } = await buildBoundTools(
+        tenantDbName,
+        tenantId,
+        projectId,
+        config.toolBindings,
+        createTool,
+        z,
+    );
+    playgroundTools.push(...boundPlaygroundTools);
+
+    // Build messages (in-memory history only)
+    const inputMessages: AgentSdkMessage[] = [
+        ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
+        ...(history || []),
+        { role: 'user', content: userMessage },
+    ];
+
+    // Create agent-sdk instance and invoke (tracing enabled)
+    const sdkModel = fromLangchainModel(lcModel);
+    const tracingSink = await createInternalTracingSink(tenantDbName, tenantId, projectId);
+
+    const sdkAgent = createConsoleSdkAgent(createSmartAgent, {
+        name: agent.name,
+        model: sdkModel,
+        tools: playgroundTools,
+        systemPrompt,
+        tracingSink,
+    });
+
+    try {
+        const result: AgentSdkInvokeResult = await sdkAgent.invoke(createConsoleAgentState(inputMessages));
+        const assistantContent = result.content || '';
+
+        // Output guardrail check
+        if (config.outputGuardrailKey && assistantContent) {
+            const outputResult = await evaluateGuardrail({
+                tenantDbName,
+                tenantId,
+                projectId,
+                guardrailKey: config.outputGuardrailKey,
+                text: assistantContent,
+            });
+            if (!outputResult.passed && outputResult.action === 'block') {
+                const reasons = outputResult.findings.map((f) => f.category || f.type).join(', ');
+                throw new Error(`Output blocked by guardrail: ${reasons}`);
+            }
+        }
+
+        logger.info('Playground chat completed', { agentKey });
+
+        return { content: assistantContent };
+    } finally {
+        await runBoundToolCleanup(cleanupTasks, { agentKey, mode: 'playground' });
+    }
+}

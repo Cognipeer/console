@@ -1,0 +1,392 @@
+{
+  "$schema": "./platform-services.schema.json",
+  "categories": {
+    "order": ["operate", "build", "data", "admin"],
+    "labels": {
+      "build": "Build",
+      "data": "Data",
+      "operate": "Operate",
+      "admin": "Admin"
+    }
+  },
+  "services": [
+    {
+      "id": "services-home",
+      "href": "/dashboard",
+      "icon": "IconLayoutDashboard",
+      "category": "operate",
+      "navLabelKey": "servicesHome",
+      "navDescriptionKey": "servicesHomeDescription",
+      "tags": ["services", "home"],
+      "searchKeywords": ["services", "home", "modules", "ana sayfa"],
+      "showInServicesHome": false
+    },
+    {
+      "id": "models",
+      "href": "/dashboard/models",
+      "icon": "IconBrain",
+      "category": "build",
+      "navLabelKey": "models",
+      "navDescriptionKey": "modelsDescription",
+      "tags": ["llm", "providers", "inference"],
+      "searchKeywords": ["model", "llm", "ai", "gpt", "openai", "bedrock"],
+      "defaultPinned": true,
+      "popular": true
+    },
+    {
+      "id": "prompts",
+      "href": "/dashboard/prompts",
+      "icon": "IconSparkles",
+      "category": "build",
+      "navLabelKey": "prompts",
+      "navDescriptionKey": "promptsDescription",
+      "tags": ["templates", "prompting"],
+      "searchKeywords": ["prompt", "template", "şablon"],
+      "defaultPinned": true,
+      "popular": true
+    },
+    {
+      "id": "vector",
+      "href": "/dashboard/vector",
+      "icon": "IconVectorBezier",
+      "category": "data",
+      "navLabelKey": "vector",
+      "navDescriptionKey": "vectorDescription",
+      "tags": ["indexes", "embeddings"],
+      "searchKeywords": ["vector", "embedding", "pinecone", "rag"],
+      "defaultPinned": true,
+      "popular": true
+    },
+    {
+      "id": "memory",
+      "href": "/dashboard/memory",
+      "icon": "IconBulb",
+      "category": "data",
+      "navLabelKey": "memory",
+      "navDescriptionKey": "memoryDescription",
+      "tags": ["semantic", "memory", "stores"],
+      "searchKeywords": ["memory", "semantic", "store", "agent memory"]
+    },
+    {
+      "id": "files",
+      "href": "/dashboard/files",
+      "icon": "IconFolder",
+      "category": "data",
+      "navLabelKey": "files",
+      "navDescriptionKey": "filesDescription",
+      "tags": ["storage", "uploads"],
+      "searchKeywords": ["file", "dosya", "upload", "storage"]
+    },
+    {
+      "id": "rag",
+      "href": "/dashboard/rag",
+      "icon": "IconBook2",
+      "category": "data",
+      "navLabelKey": "rag",
+      "navDescriptionKey": "ragDescription",
+      "tags": ["knowledge", "retrieval", "documents"],
+      "searchKeywords": ["rag", "knowledge", "retrieval", "documents"],
+      "defaultPinned": true,
+      "popular": true
+    },
+    {
+      "id": "reranker",
+      "href": "/dashboard/reranker",
+      "icon": "IconArrowsSort",
+      "category": "data",
+      "navLabelKey": "reranker",
+      "navDescriptionKey": "rerankerDescription",
+      "tags": ["rerank", "retrieval", "ranking"],
+      "searchKeywords": ["rerank", "cohere", "jina", "voyage", "cross-encoder"],
+      "badge": "new"
+    },
+    {
+      "id": "agents",
+      "href": "/dashboard/agents",
+      "icon": "IconRobot",
+      "category": "build",
+      "navLabelKey": "agents",
+      "navDescriptionKey": "agentsDescription",
+      "tags": ["agents", "orchestration"],
+      "searchKeywords": ["agent", "multi-agent", "orchestration"],
+      "defaultPinned": true,
+      "popular": true
+    },
+    {
+      "id": "config",
+      "href": "/dashboard/config",
+      "icon": "IconLock",
+      "category": "admin",
+      "navLabelKey": "config",
+      "navDescriptionKey": "configDescription",
+      "tags": ["config", "secrets"],
+      "searchKeywords": ["config", "configuration", "secret", "settings"]
+    },
+    {
+      "id": "tracing",
+      "href": "/dashboard/tracing",
+      "icon": "IconTimeline",
+      "category": "operate",
+      "navLabelKey": "agentTracing",
+      "navDescriptionKey": "agentTracingDescription",
+      "tags": ["observability", "sessions"],
+      "searchKeywords": ["trace", "agent", "log", "debug"],
+      "popular": true
+    },
+    {
+      "id": "inference-monitoring",
+      "href": "/dashboard/inference-monitoring",
+      "icon": "IconServerBolt",
+      "category": "operate",
+      "navLabelKey": "inferenceMonitoring",
+      "navDescriptionKey": "inferenceMonitoringDescription",
+      "tags": ["vllm", "gpu", "inference", "monitoring"],
+      "searchKeywords": ["inference", "monitoring", "vllm", "server", "gpu"]
+    },
+    {
+      "id": "guardrails",
+      "href": "/dashboard/guardrails",
+      "icon": "IconShield",
+      "category": "operate",
+      "navLabelKey": "guardrails",
+      "navDescriptionKey": "guardrailsDescription",
+      "tags": ["safety", "pii", "moderation", "prompt injection"],
+      "searchKeywords": ["guardrails", "safety", "moderation", "pii"]
+    },
+    {
+      "id": "evaluations",
+      "href": "/dashboard/evaluations",
+      "icon": "IconChecklist",
+      "category": "operate",
+      "navLabelKey": "evaluations",
+      "navDescriptionKey": "evaluationsDescription",
+      "tags": ["evaluation", "testing", "quality", "datasets", "scorers"],
+      "searchKeywords": ["evaluation", "eval", "test", "dataset", "suite", "scorer", "judge", "benchmark"],
+      "badge": "new"
+    },
+    {
+      "id": "redteam",
+      "href": "/dashboard/redteam",
+      "icon": "IconShield",
+      "category": "operate",
+      "navLabelKey": "redteam",
+      "navDescriptionKey": "redteamDescription",
+      "tags": ["redteam", "security", "adversarial", "jailbreak", "prompt-injection"],
+      "searchKeywords": ["red team", "redteam", "security", "adversarial", "jailbreak", "prompt injection", "garak", "vulnerability", "probe", "owasp"],
+      "badge": "new"
+    },
+    {
+      "id": "analysis",
+      "href": "/dashboard/analysis",
+      "icon": "IconReportAnalytics",
+      "category": "operate",
+      "navLabelKey": "analysis",
+      "navDescriptionKey": "analysisDescription",
+      "tags": ["analysis", "conversations", "extraction", "quality", "ivr"],
+      "searchKeywords": ["analysis", "conversation", "transcript", "extract", "judge", "accuracy", "ivr", "call"],
+      "badge": "new"
+    },
+    {
+      "id": "pii",
+      "href": "/dashboard/pii",
+      "icon": "IconLock",
+      "category": "operate",
+      "navLabelKey": "pii",
+      "navDescriptionKey": "piiDescription",
+      "tags": ["pii", "redaction", "masking", "gdpr", "kvkk", "privacy"],
+      "searchKeywords": ["pii", "redact", "mask", "kvkk", "gdpr", "kişisel veri"],
+      "badge": "new"
+    },
+    {
+      "id": "mcp",
+      "href": "/dashboard/mcp",
+      "icon": "IconApi",
+      "category": "build",
+      "navLabelKey": "mcp",
+      "navDescriptionKey": "mcpDescription",
+      "tags": ["mcp", "servers", "openapi"],
+      "searchKeywords": ["mcp", "openapi", "swagger", "tool", "server", "proxy", "api"]
+    },
+    {
+      "id": "tools",
+      "href": "/dashboard/tools",
+      "icon": "IconTool",
+      "category": "build",
+      "navLabelKey": "tools",
+      "navDescriptionKey": "toolsDescription",
+      "tags": ["tools", "actions", "integrations"],
+      "searchKeywords": ["tool", "action", "openapi", "mcp", "execute", "api"],
+      "defaultPinned": true
+    },
+    {
+      "id": "js-sandbox",
+      "href": "/dashboard/js-sandbox",
+      "icon": "IconCode",
+      "category": "build",
+      "navLabelKey": "jsSandbox",
+      "navDescriptionKey": "jsSandboxDescription",
+      "tags": ["javascript", "sandbox", "runtime"],
+      "searchKeywords": ["javascript", "js", "sandbox", "runtime", "code", "execute"]
+    },
+    {
+      "id": "browser",
+      "href": "/dashboard/browser",
+      "icon": "IconWorld",
+      "category": "operate",
+      "navLabelKey": "browser",
+      "navDescriptionKey": "browserDescription",
+      "tags": ["browser", "automation", "playwright", "session"],
+      "searchKeywords": ["browser", "tarayıcı", "playwright", "automation", "session", "profile"]
+    },
+    {
+      "id": "crawler",
+      "href": "/dashboard/crawler",
+      "icon": "IconWorld",
+      "category": "data",
+      "navLabelKey": "crawler",
+      "navDescriptionKey": "crawlerDescription",
+      "tags": ["crawler", "scraping", "ingest", "rag"],
+      "searchKeywords": ["crawler", "scrape", "crawl", "web", "ingest", "markdown", "playwright"],
+      "badge": "new"
+    },
+    {
+      "id": "ocr",
+      "href": "/dashboard/ocr-jobs",
+      "icon": "IconFileText",
+      "category": "data",
+      "navLabelKey": "ocr",
+      "navDescriptionKey": "ocrDescription",
+      "tags": ["ocr", "extraction", "documents", "jobs"],
+      "searchKeywords": ["ocr", "extraction", "document", "pdf", "image", "summary", "structured", "job", "batch"],
+      "badge": "new"
+    },
+    {
+      "id": "alerts",
+      "href": "/dashboard/alerts",
+      "icon": "IconBell",
+      "category": "operate",
+      "navLabelKey": "alerts",
+      "navDescriptionKey": "alertsDescription",
+      "tags": ["thresholds", "notifications", "incidents"],
+      "searchKeywords": ["alert", "incident", "notifications", "threshold"],
+      "badge": "new"
+    },
+    {
+      "id": "automations",
+      "href": "/dashboard/automations",
+      "icon": "IconClock",
+      "category": "admin",
+      "navLabelKey": "automations",
+      "navDescriptionKey": "automationsDescription",
+      "tags": ["automations", "scheduler", "operations"],
+      "searchKeywords": ["automation", "scheduler", "maintenance", "jobs", "workflow"],
+      "tenantAdminOnly": true
+    },
+    {
+      "id": "cluster",
+      "href": "/dashboard/cluster",
+      "icon": "IconServer",
+      "category": "admin",
+      "navLabelKey": "cluster",
+      "navDescriptionKey": "clusterDescription",
+      "tags": ["cluster", "nodes", "scaling"],
+      "searchKeywords": ["cluster", "nodes", "worker", "node", "scaling", "instance", "kümeleme"],
+      "tenantAdminOnly": true,
+      "requiresEnterprise": true,
+      "enterpriseModule": "cluster"
+    },
+    {
+      "id": "gpu-fleet",
+      "href": "/dashboard/gpu-fleet",
+      "icon": "IconCpu",
+      "category": "operate",
+      "navLabelKey": "gpuFleet",
+      "navDescriptionKey": "gpuFleetDescription",
+      "tags": ["gpu", "fleet", "llm", "deployments", "hosts"],
+      "searchKeywords": ["gpu", "fleet", "host", "vllm", "ollama", "deploy", "model", "mig", "agent"],
+      "defaultPinned": true,
+      "popular": true,
+      "requiresEnterprise": true,
+      "enterpriseModule": "gpu-fleet"
+    },
+    {
+      "id": "sandbox",
+      "href": "/dashboard/sandbox",
+      "icon": "IconCode",
+      "category": "operate",
+      "navLabelKey": "sandbox",
+      "navDescriptionKey": "sandboxDescription",
+      "tags": ["sandbox", "runtime", "execution", "terminal", "code"],
+      "searchKeywords": ["sandbox", "runtime", "execution", "terminal", "code", "python", "node", "container", "dind"],
+      "defaultPinned": false,
+      "popular": false,
+      "requiresEnterprise": true,
+      "enterpriseModule": "sandbox"
+    },
+    {
+      "id": "members",
+      "href": "/dashboard/members",
+      "icon": "IconUsers",
+      "category": "admin",
+      "navLabelKey": "members",
+      "navDescriptionKey": "membersDescription",
+      "tags": ["users", "invite", "roles"],
+      "searchKeywords": ["members", "users", "invite", "tenant", "üyeler"],
+      "tenantAdminOnly": true
+    },
+    {
+      "id": "projects",
+      "href": "/dashboard/projects",
+      "icon": "IconLayoutDashboard",
+      "category": "operate",
+      "navLabelKey": "projects",
+      "navDescriptionKey": "projectsDescription",
+      "tags": ["workspaces", "access"],
+      "searchKeywords": ["project", "proje"]
+    },
+    {
+      "id": "providers",
+      "href": "/dashboard/providers",
+      "icon": "IconPlug",
+      "category": "admin",
+      "navLabelKey": "providers",
+      "navDescriptionKey": "providersDescription",
+      "tags": ["providers", "integrations"],
+      "searchKeywords": ["providers", "integrations", "sağlayıcılar"],
+      "tenantAdminOnly": true
+    },
+    {
+      "id": "tokens",
+      "href": "/dashboard/tokens",
+      "icon": "IconKey",
+      "category": "admin",
+      "navLabelKey": "tokens",
+      "navDescriptionKey": "tokensDescription",
+      "tags": ["api", "tokens", "keys"],
+      "searchKeywords": ["token", "api", "key", "anahtar"],
+      "defaultPinned": true
+    },
+    {
+      "id": "audit",
+      "href": "/dashboard/audit",
+      "icon": "IconClipboardList",
+      "category": "admin",
+      "navLabelKey": "audit",
+      "navDescriptionKey": "auditDescription",
+      "tags": ["audit", "security", "logs"],
+      "searchKeywords": ["audit", "security", "log", "rbac", "yetki"],
+      "tenantAdminOnly": true
+    },
+    {
+      "id": "license",
+      "href": "/dashboard/license",
+      "icon": "IconCertificate",
+      "category": "admin",
+      "navLabelKey": "license",
+      "navDescriptionKey": "licenseDescription",
+      "tags": ["license", "limits", "enterprise"],
+      "searchKeywords": ["license", "lisans", "enterprise", "limits"],
+      "tenantAdminOnly": true
+    }
+  ]
+}

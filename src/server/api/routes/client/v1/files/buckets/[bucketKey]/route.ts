@@ -1,0 +1,53 @@
+import { NextResponse, type NextRequest } from '@/server/api/http';
+import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
+import { getFileBucket } from '@/lib/services/files';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('client-file-buckets');
+
+/**
+ * GET /api/client/v1/files/buckets/:bucketKey
+ * Get file bucket details
+ */
+export async function GET(
+  request: NextRequest,
+  { params }: { params: Promise<{ bucketKey: string }> },
+) {
+  try {
+    const { tenantDbName, tenantId, projectId } = await requireApiToken(request);
+    const { bucketKey } = await params;
+
+    if (!bucketKey) {
+      return NextResponse.json(
+        { error: 'Bucket key is required' },
+        { status: 400 },
+      );
+    }
+
+    const bucket = await getFileBucket(tenantDbName, tenantId, projectId, bucketKey);
+
+    if (!bucket) {
+      return NextResponse.json(
+        { error: 'Bucket not found' },
+        { status: 404 },
+      );
+    }
+
+    return NextResponse.json({ bucket });
+  } catch (error) {
+    logger.error('Get bucket error', { error });
+
+    if (error instanceof ApiTokenAuthError) {
+      return NextResponse.json(
+        { error: error.message },
+        { status: error.status },
+      );
+    }
+
+    const message = error instanceof Error ? error.message : 'Failed to get bucket';
+    return NextResponse.json(
+      { error: message },
+      { status: 500 },
+    );
+  }
+}

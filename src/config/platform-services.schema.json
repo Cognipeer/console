@@ -1,0 +1,141 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://cognipeer.com/schemas/platform-services.schema.json",
+  "title": "Cognipeer Platform Services",
+  "description": "Top-level console modules exposed in the launcher, sidebar and breadcrumbs.",
+  "type": "object",
+  "required": ["categories", "services"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "categories": {
+      "type": "object",
+      "required": ["order", "labels"],
+      "additionalProperties": false,
+      "properties": {
+        "order": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/definitions/category" }
+        },
+        "labels": {
+          "type": "object",
+          "required": ["build", "data", "operate", "admin"],
+          "additionalProperties": false,
+          "properties": {
+            "build": { "type": "string" },
+            "data": { "type": "string" },
+            "operate": { "type": "string" },
+            "admin": { "type": "string" }
+          }
+        }
+      }
+    },
+    "services": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/service" }
+    }
+  },
+  "definitions": {
+    "category": {
+      "type": "string",
+      "enum": ["build", "data", "operate", "admin"]
+    },
+    "iconName": {
+      "type": "string",
+      "description": "Tabler icon component name. Must be registered in ICON_REGISTRY in src/lib/utils/dashboardServices.ts.",
+      "enum": [
+        "IconApi",
+        "IconArrowsSort",
+        "IconBell",
+        "IconBook2",
+        "IconBrain",
+        "IconBulb",
+        "IconCertificate",
+        "IconClipboardList",
+        "IconClock",
+        "IconCode",
+        "IconCube",
+        "IconFileText",
+        "IconFolder",
+        "IconKey",
+        "IconLayoutDashboard",
+        "IconLock",
+        "IconPlug",
+        "IconRobot",
+        "IconServerBolt",
+        "IconShield",
+        "IconSparkles",
+        "IconTimeline",
+        "IconTool",
+        "IconUsers",
+        "IconVectorBezier",
+        "IconWorld"
+      ]
+    },
+    "service": {
+      "type": "object",
+      "required": ["id", "href", "icon", "category", "navLabelKey", "navDescriptionKey"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique service id. Must match a PermissionService key or be 'services-home'.",
+          "pattern": "^[a-z0-9-]+$"
+        },
+        "href": {
+          "type": "string",
+          "description": "Destination path. Must start with /dashboard.",
+          "pattern": "^/dashboard"
+        },
+        "icon": { "$ref": "#/definitions/iconName" },
+        "category": { "$ref": "#/definitions/category" },
+        "navLabelKey": {
+          "type": "string",
+          "description": "i18n key under the 'navigation' namespace."
+        },
+        "navDescriptionKey": {
+          "type": "string",
+          "description": "i18n key under the 'navigation' namespace for the short description."
+        },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "searchKeywords": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "showInServicesHome": {
+          "type": "boolean",
+          "description": "Set to false to hide from the services home grid (default true)."
+        },
+        "tenantAdminOnly": {
+          "type": "boolean",
+          "description": "Restrict the entry to tenant admins."
+        },
+        "defaultPinned": {
+          "type": "boolean",
+          "description": "Pin to the slim rail by default for new users."
+        },
+        "popular": {
+          "type": "boolean",
+          "description": "Highlighted in the launcher's Popular section."
+        },
+        "badge": {
+          "type": "string",
+          "enum": ["new"],
+          "description": "Optional badge displayed next to the service name."
+        },
+        "requiresEnterprise": {
+          "type": "boolean",
+          "description": "Service is gated to the ENTERPRISE license tier. In the community build it is absent (shown as an upgrade placeholder); in the enterprise build it is available only when a valid license is active."
+        },
+        "enterpriseModule": {
+          "type": "string",
+          "description": "Name of the closed-source overlay module that provides this service (e.g. 'gpu-fleet', 'sandbox', 'cluster'). Present only on enterprise-gated entries."
+        }
+      }
+    }
+  }
+}

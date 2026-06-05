@@ -1,0 +1,442 @@
+{
+  "$schema": "./gpu-model-library.schema.json",
+  "version": 2,
+  "_meta": {
+    "lastVerifiedAt": "2026-05-22",
+    "notes": "All image tags + HF model IDs verified against upstream releases. Update this file whenever an upstream project ships a new stable. Keep one or two known-stable entries per modality at the top so the marketplace card grid stays useful even if the cutting-edge entries drift."
+  },
+  "models": [
+    {
+      "id": "qwen3-32b",
+      "displayName": "Qwen 3 32B",
+      "vendor": "Alibaba",
+      "license": "apache-2.0",
+      "modality": "llm",
+      "tags": ["chat", "tool-use", "long-context", "multilingual"],
+      "hfRepo": "Qwen/Qwen3-32B",
+      "contextLength": 131072,
+      "requirements": {
+        "minVramGiB": 64,
+        "recommendedVramGiB": 80,
+        "computeCapability": "8.0+",
+        "quantization": ["fp16", "awq", "gptq-int4"]
+      },
+      "supportedPlatforms": ["nvidia-gpu"],
+      "runtimes": {
+        "vllm": {
+          "image": "vllm/vllm-openai:v0.21.0",
+          "args": ["--model", "Qwen/Qwen3-32B", "--tensor-parallel-size", "{{gpuCount}}", "--max-model-len", "32768"],
+          "port": 8000,
+          "healthPath": "/v1/models",
+          "openaiCompatible": true,
+          "secretEnv": ["HUGGING_FACE_HUB_TOKEN"]
+        }
+      }
+    },
+    {
+      "id": "qwen3-8b",
+      "displayName": "Qwen 3 8B",
+      "vendor": "Alibaba",
+      "license": "apache-2.0",
+      "modality": "llm",
+      "tags": ["chat", "tool-use", "small", "local"],
+      "hfRepo": "Qwen/Qwen3-8B",
+      "contextLength": 131072,
+      "requirements": {
+        "minVramGiB": 16,
+        "recommendedVramGiB": 24,
+        "computeCapability": "7.5+",
+        "quantization": ["fp16", "awq"]
+      },
+      "supportedPlatforms": ["nvidia-gpu", "apple-silicon"],
+      "runtimes": {
+        "vllm": {
+          "image": "vllm/vllm-openai:v0.21.0",
+          "_meta": "Args tuned for T4-class (16 GB) hardware: 8K context + 0.85 mem util keeps Qwen 7B FP16 + KV cache under 16 GB. Loosen on A100/H100.",
+          "args": [
+            "--model", "Qwen/Qwen3-8B",
+            "--max-model-len", "8192",
+            "--gpu-memory-utilization", "0.85",
+            "--dtype", "auto",
+            "--enforce-eager"
+          ],
+          "port": 8000,
+          "healthPath": "/v1/models",
+          "openaiCompatible": true,
+          "secretEnv": ["HUGGING_FACE_HUB_TOKEN"]
+        },
+        "ollama": {
+          "image": "ollama/ollama:0.24.0",
+          "args": [],
+          "env": { "OLLAMA_MODELS": "qwen3:8b" },
+          "port": 11434,
+          "healthPath": "/api/tags",
+          "openaiCompatible": true,
+          "openaiBasePath": "/v1"
+        }
+      }
+    },
+    {
+      "id": "llama-4-scout-17b",
+      "displayName": "Llama 4 Scout (17B × 16 MoE)",
+      "vendor": "Meta",
+      "license": "llama-4-community",
+      "modality": "llm",
+      "tags": ["chat", "tool-use", "long-context", "moe"],
+      "hfRepo": "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+      "contextLength": 10485760,
+      "requirements": {
+        "minVramGiB": 80,
+        "recommendedVramGiB": 160,
+        "computeCapability": "8.0+",
+        "quantization": ["fp16", "awq"]
+      },
+      "supportedPlatforms": ["nvidia-gpu"],
+      "runtimes": {
+        "vllm": {
+          "image": "vllm/vllm-openai:v0.21.0",
+          "args": ["--model", "meta-llama/Llama-4-Scout-17B-16E-Instruct", "--tensor-parallel-size", "{{gpuCount}}"],
+          "port": 8000,
+          "healthPath": "/v1/models",
+          "openaiCompatible": true,
+          "secretEnv": ["HUGGING_FACE_HUB_TOKEN"]
+        }
+      }
+    },
+    {
+      "id": "deepseek-v3-2",
+      "displayName": "DeepSeek V3.2",
+      "vendor": "DeepSeek",
+      "license": "deepseek",
+      "modality": "llm",
+      "tags": ["chat", "reasoning", "moe", "tool-use"],
+      "hfRepo": "deepseek-ai/DeepSeek-V3.2",
+      "contextLength": 131072,
+      "requirements": {
+        "minVramGiB": 80,
+        "recommendedVramGiB": 320,
+        "computeCapability": "8.0+",
+        "quantization": ["fp16", "awq"]
+      },
+      "supportedPlatforms": ["nvidia-gpu"],
+      "runtimes": {
+        "vllm": {
+          "image": "vllm/vllm-openai:v0.21.0",
+          "args": ["--model", "deepseek-ai/DeepSeek-V3.2", "--tensor-parallel-size", "{{gpuCount}}", "--trust-remote-code"],
+          "port": 8000,
+          "healthPath": "/v1/models",
+          "openaiCompatible": true,
+          "secretEnv": ["HUGGING_FACE_HUB_TOKEN"]
+        }
+      }
+    },
+    {
+      "id": "deepseek-r1",
+      "displayName": "DeepSeek R1 (Reasoning)",
+      "vendor": "DeepSeek",
+      "license": "mit",
+      "modality": "llm",
+      "tags": ["reasoning", "math", "code", "chain-of-thought"],
+      "hfRepo": "deepseek-ai/DeepSeek-R1",
+      "contextLength": 131072,
+      "requirements": {
+        "minVramGiB": 80,
+        "recommendedVramGiB": 320,
+        "computeCapability": "8.0+",
+        "quantization": ["fp16", "awq"]
+      },
+      "supportedPlatforms": ["nvidia-gpu"],
+      "runtimes": {
+        "vllm": {
+          "image": "vllm/vllm-openai:v0.21.0",
+          "args": ["--model", "deepseek-ai/DeepSeek-R1", "--tensor-parallel-size", "{{gpuCount}}", "--trust-remote-code"],
+          "port": 8000,
+          "healthPath": "/v1/models",
+          "openaiCompatible": true,
+          "secretEnv": ["HUGGING_FACE_HUB_TOKEN"]
+        }
+      }
+    },
+    {
+      "id": "mistral-large-2",
+      "displayName": "Mistral Large 2",
+      "vendor": "Mistral AI",
+      "license": "mistral-research",
+      "modality": "llm",
+      "tags": ["chat", "tool-use", "multilingual", "european"],
+      "hfRepo": "mistralai/Mistral-Large-2-Instruct",
+      "contextLength": 131072,
+      "requirements": {
+        "minVramGiB": 80,
+        "recommendedVramGiB": 240,
+        "computeCapability": "8.0+",
+        "quantization": ["fp16", "awq"]
+      },
+      "supportedPlatforms": ["nvidia-gpu"],
+      "runtimes": {
+        "vllm": {
+          "image": "vllm/vllm-openai:v0.21.0",
+          "args": ["--model", "mistralai/Mistral-Large-2-Instruct", "--tensor-parallel-size", "{{gpuCount}}"],
+          "port": 8000,
+          "healthPath": "/v1/models",
+          "openaiCompatible": true,
+          "secretEnv": ["HUGGING_FACE_HUB_TOKEN"]
+        }
+      }
+    },
+    {
+      "id": "gemma-3-4b",
+      "displayName": "Gemma 3 4B",
+      "vendor": "Google",
+      "license": "gemma",
+      "modality": "llm",
+      "tags": ["chat", "small", "multilingual", "t4-friendly"],
+      "hfRepo": "google/gemma-3-4b-it",
+      "contextLength": 131072,
+      "requirements": {
+        "minVramGiB": 10,
+        "recommendedVramGiB": 16,
+        "computeCapability": "7.5+",
+        "quantization": ["fp16", "awq"]
+      },
+      "supportedPlatforms": ["nvidia-gpu"],
+      "_meta": "Fits comfortably on a single T4 (16GB) or RTX A4000.",
+      "runtimes": {
+        "vllm": {
+          "image": "vllm/vllm-openai:v0.21.0",
+          "args": ["--model", "google/gemma-3-4b-it", "--max-model-len", "32768"],
+          "port": 8000,
+          "healthPath": "/v1/models",
+          "openaiCompatible": true,
+          "secretEnv": ["HUGGING_FACE_HUB_TOKEN"]
+        }
+      }
+    },
+    {
+      "id": "gemma-3-27b",
+      "displayName": "Gemma 3 27B",
+      "vendor": "Google",
+      "license": "gemma",
+      "modality": "llm",
+      "tags": ["chat", "enterprise", "multimodal"],
+      "hfRepo": "google/gemma-3-27b-it",
+      "contextLength": 131072,
+      "requirements": {
+        "minVramGiB": 56,
+        "recommendedVramGiB": 80,
+        "computeCapability": "8.0+",
+        "quantization": ["fp16", "awq"]
+      },
+      "supportedPlatforms": ["nvidia-gpu"],
+      "runtimes": {
+        "vllm": {
+          "image": "vllm/vllm-openai:v0.21.0",
+          "args": ["--model", "google/gemma-3-27b-it", "--tensor-parallel-size", "{{gpuCount}}"],
+          "port": 8000,
+          "healthPath": "/v1/models",
+          "openaiCompatible": true,
+          "secretEnv": ["HUGGING_FACE_HUB_TOKEN"]
+        }
+      }
+    },
+    {
+      "id": "llama-3-1-8b-ollama",
+      "displayName": "Llama 3.1 8B (Ollama, local-friendly)",
+      "vendor": "Meta",
+      "license": "llama-3.1-community",
+      "modality": "llm",
+      "tags": ["chat", "small", "local", "mac-friendly"],
+      "hfRepo": "meta-llama/Llama-3.1-8B-Instruct",
+      "contextLength": 131072,
+      "requirements": {
+        "minVramGiB": 8,
+        "recommendedVramGiB": 16,
+        "computeCapability": "7.0+",
+        "quantization": ["fp16", "q4_K_M"]
+      },
+      "supportedPlatforms": ["nvidia-gpu", "apple-silicon", "cpu"],
+      "runtimes": {
+        "ollama": {
+          "image": "ollama/ollama:0.24.0",
+          "args": [],
+          "env": { "OLLAMA_MODELS": "llama3.1:8b-instruct" },
+          "port": 11434,
+          "healthPath": "/api/tags",
+          "openaiCompatible": true,
+          "openaiBasePath": "/v1"
+        }
+      }
+    },
+    {
+      "id": "bge-large-en-v1.5",
+      "displayName": "BGE Large EN v1.5 (embeddings)",
+      "vendor": "BAAI",
+      "license": "mit",
+      "modality": "embedding",
+      "tags": ["english", "general-purpose"],
+      "hfRepo": "BAAI/bge-large-en-v1.5",
+      "dimension": 1024,
+      "requirements": {
+        "minVramGiB": 2,
+        "recommendedVramGiB": 4,
+        "computeCapability": "7.0+",
+        "quantization": ["fp16"]
+      },
+      "supportedPlatforms": ["nvidia-gpu", "cpu"],
+      "_meta": "TEI images are linux/amd64 only — not arm64. Apple Silicon excluded.",
+      "runtimes": {
+        "tei": {
+          "image": "ghcr.io/huggingface/text-embeddings-inference:cuda-1.9.3",
+          "args": ["--model-id", "BAAI/bge-large-en-v1.5"],
+          "port": 80,
+          "healthPath": "/health",
+          "openaiCompatible": true,
+          "openaiBasePath": "/v1"
+        },
+        "tei-cpu": {
+          "image": "ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.3",
+          "args": ["--model-id", "BAAI/bge-large-en-v1.5"],
+          "port": 80,
+          "healthPath": "/health",
+          "openaiCompatible": true,
+          "openaiBasePath": "/v1"
+        }
+      }
+    },
+    {
+      "id": "bge-m3",
+      "displayName": "BGE-M3 (multilingual embeddings)",
+      "vendor": "BAAI",
+      "license": "mit",
+      "modality": "embedding",
+      "tags": ["multilingual", "long-doc", "turkish"],
+      "hfRepo": "BAAI/bge-m3",
+      "dimension": 1024,
+      "requirements": {
+        "minVramGiB": 4,
+        "recommendedVramGiB": 8,
+        "computeCapability": "7.0+",
+        "quantization": ["fp16"]
+      },
+      "supportedPlatforms": ["nvidia-gpu", "cpu"],
+      "_meta": "TEI images are linux/amd64 only — not arm64. Apple Silicon excluded.",
+      "runtimes": {
+        "tei": {
+          "image": "ghcr.io/huggingface/text-embeddings-inference:cuda-1.9.3",
+          "args": ["--model-id", "BAAI/bge-m3"],
+          "port": 80,
+          "healthPath": "/health",
+          "openaiCompatible": true,
+          "openaiBasePath": "/v1"
+        },
+        "tei-cpu": {
+          "image": "ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.3",
+          "args": ["--model-id", "BAAI/bge-m3"],
+          "port": 80,
+          "healthPath": "/health",
+          "openaiCompatible": true,
+          "openaiBasePath": "/v1"
+        }
+      }
+    },
+    {
+      "id": "whisper-large-v3-speaches",
+      "displayName": "Whisper Large v3 (Speaches)",
+      "vendor": "OpenAI · Speaches",
+      "license": "mit",
+      "modality": "stt",
+      "tags": ["multilingual", "long-form", "openai-compatible"],
+      "hfRepo": "Systran/faster-whisper-large-v3",
+      "requirements": {
+        "minVramGiB": 8,
+        "recommendedVramGiB": 16,
+        "computeCapability": "7.0+",
+        "quantization": ["fp16", "int8"]
+      },
+      "supportedPlatforms": ["nvidia-gpu", "apple-silicon", "cpu"],
+      "runtimes": {
+        "speaches": {
+          "image": "ghcr.io/speaches-ai/speaches:0.8.3-cuda",
+          "args": [],
+          "env": {
+            "WHISPER__MODEL": "Systran/faster-whisper-large-v3",
+            "WHISPER__COMPUTE_TYPE": "float16",
+            "HF_HUB_ENABLE_HF_TRANSFER": "1"
+          },
+          "port": 8000,
+          "healthPath": "/health",
+          "openaiCompatible": true,
+          "openaiBasePath": "/v1"
+        },
+        "speaches-cpu": {
+          "image": "ghcr.io/speaches-ai/speaches:0.8.3-cpu",
+          "args": [],
+          "env": {
+            "WHISPER__MODEL": "Systran/faster-whisper-large-v3",
+            "WHISPER__COMPUTE_TYPE": "int8",
+            "HF_HUB_ENABLE_HF_TRANSFER": "1"
+          },
+          "port": 8000,
+          "healthPath": "/health",
+          "openaiCompatible": true,
+          "openaiBasePath": "/v1"
+        }
+      }
+    },
+    {
+      "id": "speaches-tts-kokoro",
+      "displayName": "Speaches TTS (Kokoro · multilingual)",
+      "vendor": "Speaches",
+      "license": "mit",
+      "modality": "tts",
+      "tags": ["multilingual", "openai-compatible", "low-resource"],
+      "hfRepo": "hexgrad/Kokoro-82M",
+      "requirements": {
+        "minVramGiB": 2,
+        "recommendedVramGiB": 4,
+        "computeCapability": "7.0+",
+        "quantization": ["fp16"]
+      },
+      "supportedPlatforms": ["nvidia-gpu", "apple-silicon", "cpu"],
+      "runtimes": {
+        "speaches": {
+          "image": "ghcr.io/speaches-ai/speaches:0.8.3-cuda",
+          "args": [],
+          "env": {
+            "HF_HUB_ENABLE_HF_TRANSFER": "1"
+          },
+          "port": 8000,
+          "healthPath": "/health",
+          "openaiCompatible": true,
+          "openaiBasePath": "/v1"
+        }
+      }
+    },
+    {
+      "id": "paddleocr-server",
+      "displayName": "PaddleOCR v3 (multilingual)",
+      "vendor": "PaddlePaddle",
+      "license": "apache-2.0",
+      "modality": "ocr",
+      "tags": ["multilingual", "layout", "tables"],
+      "hfRepo": null,
+      "languages": ["en", "tr", "ch", "fr", "de", "es", "it", "pt", "ja", "ko", "ru", "ar"],
+      "requirements": {
+        "minVramGiB": 4,
+        "recommendedVramGiB": 8,
+        "computeCapability": "7.0+",
+        "quantization": ["fp16"]
+      },
+      "supportedPlatforms": ["nvidia-gpu", "cpu"],
+      "runtimes": {
+        "paddleocr-server": {
+          "image": "jarvis1tube/paddleocr-server:gpu",
+          "args": [],
+          "port": 8080,
+          "healthPath": "/health",
+          "openaiCompatible": false
+        }
+      }
+    }
+  ]
+}

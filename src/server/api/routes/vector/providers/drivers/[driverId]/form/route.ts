@@ -1,0 +1,42 @@
+import { NextResponse, type NextRequest } from '@/server/api/http';
+import { providerRegistry } from '@/lib/providers';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('vector-drivers');
+
+interface RouteContext {
+  params: Promise<{
+    driverId: string;
+  }>;
+}
+
+export async function GET(
+  _request: NextRequest,
+  context: RouteContext,
+) {
+  try {
+  const { driverId } = await context.params;
+    const schema = providerRegistry.getFormSchema(driverId);
+    const descriptor = providerRegistry
+      .listDescriptors('vector')
+      .find((item) => item.id === driverId);
+
+    return NextResponse.json(
+      {
+        driverId,
+        schema,
+        descriptor,
+      },
+      { status: 200 },
+    );
+  } catch (error) {
+    logger.error('Get vector provider driver form error', { error });
+    return NextResponse.json(
+      {
+        error:
+          error instanceof Error ? error.message : 'Failed to load form schema',
+      },
+      { status: 404 },
+    );
+  }
+}

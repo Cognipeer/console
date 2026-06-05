@@ -1,0 +1,33 @@
+.tableShell {
+  overflow: hidden;
+}
+
+.agentRow {
+  cursor: pointer;
+}
+
+.agentMenuButton:focus-visible,
+.agentRow:focus-visible,
+.primaryCardButton:focus-visible {
+  box-shadow: var(--app-focus-ring);
+}
+
+.primaryCardButton {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid var(--app-border-soft);
+  border-radius: var(--mantine-radius-lg);
+  padding: var(--app-space-2);
+  transition:
+    transform var(--app-motion-base) ease,
+    box-shadow var(--app-motion-base) ease,
+    border-color var(--app-motion-fast) ease,
+    background-color var(--app-motion-fast) ease;
+}
+
+.primaryCardButton:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--app-shadow-xs);
+  border-color: rgba(22, 179, 171, 0.24);
+}

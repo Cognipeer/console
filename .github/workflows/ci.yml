@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - fix/npm-audit
+
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm run test
+
+      - name: Build
+        run: npm run build
+
+      - name: Docker builder parity
+        run: docker build --target builder .
+
+      - name: Build docs
+        run: npm run docs:build
+
+      - name: Production dependency audit
+        run: npm audit --omit=dev --audit-level=high
+        continue-on-error: true
+
+      - name: License summary
+        run: npx license-checker --production --summary

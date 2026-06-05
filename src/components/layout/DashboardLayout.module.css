@@ -1,0 +1,335 @@
+.navbar {
+  background-color: var(--mantine-color-body);
+  border-right: 1px solid var(--mantine-color-gray-3);
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.header {
+  background-color: var(--mantine-color-body);
+  border-bottom: 1px solid var(--mantine-color-gray-3);
+}
+
+:global(body[data-mantine-color-scheme='dark']) .header {
+  background-color: var(--mantine-color-dark-8);
+  border-bottom: 1px solid var(--mantine-color-dark-4);
+}
+
+.headerLogo {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+  flex-shrink: 0;
+}
+
+.servicesMenu {
+  width: 520px;
+  max-width: 90vw;
+}
+
+.servicesMenuMobile {
+  width: 280px;
+}
+
+.servicesGrid {
+  padding: var(--app-space-2);
+}
+
+.servicesCard {
+  border-radius: var(--mantine-radius-md);
+  padding: 0.625rem;
+  transition:
+    background-color var(--app-motion-fast) ease,
+    box-shadow var(--app-motion-fast) ease,
+    transform var(--app-motion-fast) ease;
+  cursor: pointer;
+}
+
+.servicesCard:hover {
+  background-color: var(--mantine-color-gray-0);
+  box-shadow: var(--app-shadow-xs);
+  transform: translateY(-1px);
+}
+
+.servicesCard:focus-visible {
+  box-shadow: var(--app-focus-ring);
+}
+
+:global(body[data-mantine-color-scheme='dark']) .servicesCard:hover {
+  background-color: var(--mantine-color-dark-5);
+}
+
+.accountButton {
+  border-radius: var(--mantine-radius-md);
+  padding: 0.25rem 0.5rem;
+  transition: background-color var(--app-motion-fast) ease;
+}
+
+.accountButton:hover {
+  background-color: var(--mantine-color-gray-0);
+}
+
+.accountButton:focus-visible {
+  box-shadow: var(--app-focus-ring);
+}
+
+:global(body[data-mantine-color-scheme='dark']) .accountButton:hover {
+  background-color: var(--mantine-color-dark-5);
+}
+
+.accountDetails {
+  display: none;
+}
+
+@media (min-width: 62em) {
+  .accountDetails {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+}
+
+.searchButton {
+  background-color: var(--mantine-color-gray-0);
+  border: 1px solid var(--mantine-color-gray-3);
+  border-radius: var(--mantine-radius-md);
+  padding: 0.5rem 0.75rem;
+  transition:
+    background-color var(--app-motion-fast) ease,
+    border-color var(--app-motion-fast) ease,
+    box-shadow var(--app-motion-fast) ease;
+  cursor: pointer;
+}
+
+.searchButton:hover {
+  background-color: var(--mantine-color-gray-1);
+  border-color: var(--mantine-color-gray-4);
+}
+
+:global(body[data-mantine-color-scheme='dark']) .searchButton {
+  background-color: var(--mantine-color-dark-6);
+  border-color: var(--mantine-color-dark-4);
+}
+
+:global(body[data-mantine-color-scheme='dark']) .searchButton:hover {
+  background-color: var(--mantine-color-dark-5);
+  border-color: var(--mantine-color-dark-3);
+}
+
+.searchShortcut {
+  font-family: monospace;
+  background-color: var(--mantine-color-gray-1);
+  padding: 0.125rem 0.375rem;
+  border-radius: var(--mantine-radius-sm);
+  font-size: 0.6875rem;
+}
+
+.searchButton:focus-visible,
+.collapseControl:focus-visible,
+.menuLink:focus-visible {
+  box-shadow: var(--app-focus-ring);
+}
+
+:global(body[data-mantine-color-scheme='dark']) .searchShortcut {
+  background-color: var(--mantine-color-dark-5);
+}
+
+:global(body[data-mantine-color-scheme='dark']) .navbar {
+  background-color: var(--mantine-color-dark-8);
+  border-right: 1px solid var(--mantine-color-dark-4);
+}
+
+.logoRow {
+  align-items: center;
+  min-height: 56px;
+  width: 100%;
+}
+
+.logoInner {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+}
+
+.logoInner[data-opened='true'] {
+  justify-content: flex-start;
+}
+
+.logoLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  text-decoration: none;
+}
+
+.logoDark {
+  display: block;
+}
+
+.logoLight {
+  display: none;
+}
+
+:global(body[data-mantine-color-scheme='dark']) .logoDark {
+  display: none;
+}
+
+:global(body[data-mantine-color-scheme='dark']) .logoLight {
+  display: block;
+}
+
+.collapseControl {
+  position: absolute;
+  top: 20px;
+  right: -14px;
+  background: var(--mantine-color-gray-0);
+  border: 1px solid var(--mantine-color-gray-3);
+  color: var(--mantine-color-gray-7);
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease,
+    border-color 120ms ease;
+  flex-shrink: 0;
+}
+
+.collapseControl:hover {
+  background: var(--mantine-color-gray-1);
+  border-color: var(--mantine-color-gray-4);
+  color: var(--mantine-color-gray-7);
+}
+
+:global(body[data-mantine-color-scheme='dark']) .collapseControl {
+  background: var(--mantine-color-dark-6);
+  border-color: var(--mantine-color-dark-4);
+  color: var(--mantine-color-gray-2);
+}
+
+:global(body[data-mantine-color-scheme='dark']) .collapseControl:hover {
+  background: var(--mantine-color-dark-5);
+  border-color: var(--mantine-color-dark-3);
+}
+
+.menuLink {
+  display: block;
+  line-height: 1;
+  padding: 8px 12px;
+  border-radius: var(--mantine-radius-md);
+  border-left: 4px solid transparent;
+  text-decoration: none;
+  color: var(--text-color);
+  font-weight: 500;
+  margin-bottom: 4px;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+
+.menuLink:hover {
+  color: var(--text-color);
+  background-color: var(--mantine-color-gray-0);
+}
+
+:global(body[data-mantine-color-scheme='dark']) .menuLink:hover {
+  background-color: var(--mantine-color-dark-5);
+}
+
+.menuLink[data-active] {
+  background-color: var(--mantine-color-gray-0);
+  border-left: 4px solid var(--mantine-primary-color-6);
+  color: var(--text-color);
+}
+
+:global(body[data-mantine-color-scheme='dark']) .menuLink[data-active] {
+  background-color: var(--mantine-color-dark-5);
+}
+
+.mainLink:hover {
+  background-color: var(--mantine-color-gray-0);
+  color: var(--text-color);
+}
+
+:global(body[data-mantine-color-scheme='dark']) .mainLink:hover {
+  background-color: var(--mantine-color-dark-6);
+}
+
+.mainLink[data-active] {
+  background-color: var(--mantine-color-gray-0);
+  color: var(--text-color) !important;
+}
+
+:global(body[data-mantine-color-scheme='dark']) .mainLink[data-active] {
+  background-color: var(--mantine-color-dark-5) !important;
+}
+
+.menuLinkCollapsed {
+  height: 36px;
+  width: 51px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 !important;
+  border: none !important;
+}
+
+.searchButton {
+  width: 100%;
+  font-weight: 500;
+}
+
+.searchShortcut {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  color: var(--mantine-color-gray-6);
+}
+
+.collapsedSearch {
+  width: 51px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sidebarContent {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-2);
+}
+
+.navLinks {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.navLinks .mantine-ScrollArea-viewport {
+  padding: 0 !important;
+}
+
+.footer {
+  border-top: 1px solid var(--mantine-color-gray-3);
+  padding-top: var(--app-space-2);
+  margin-top: auto;
+}
+
+:global(body[data-mantine-color-scheme='dark']) .footer {
+  border-top: 1px solid var(--mantine-color-dark-4);
+}
+
+.recentTitle {
+  color: var(--text-color);
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+}
