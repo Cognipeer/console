@@ -132,7 +132,7 @@ export function OcrJobMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
       id: string,
       delta: OcrJobAggregateDelta,
       extra?: { costCurrency?: string; lastItemAt?: Date },
-    ): Promise<void> {
+    ): Promise<IOcrJob | null> {
       const db = this.getTenantDb();
       const sets: string[] = ['updatedAt = @updatedAt'];
       const params: Record<string, unknown> = { id, updatedAt: this.now() };
@@ -151,6 +151,7 @@ export function OcrJobMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
       if (extra?.costCurrency) { sets.push('costCurrency = @costCurrency'); params.costCurrency = extra.costCurrency; }
       if (extra?.lastItemAt) { sets.push('lastItemAt = @lastItemAt'); params.lastItemAt = new Date(extra.lastItemAt).toISOString(); }
       db.prepare(`UPDATE ${TABLES.ocrJobs} SET ${sets.join(', ')} WHERE id = @id`).run(params);
+      return this.findOcrJobById(id);
     }
 
     async findOcrJobById(id: string): Promise<IOcrJob | null> {

@@ -393,6 +393,90 @@ export interface IModelPricing {
   imagePer1K?: number;
 }
 
+// ── Dynamic LLM routing ───────────────────────────────────────────────────
+// A "Dynamic LLM" is a virtual model (category 'llm', providerKey/Driver
+// 'dynamic') that owns no real provider. Its config lives under
+// `model.settings.dynamic` so it persists as JSON in both DB providers without
+// a schema migration. At call time the inference layer resolves it to a real
+// child model — by rules (signal thresholds) or by a decider model — and
+// recurses through `handleChatCompletion` against the chosen key.
+
+export type DynamicRoutingStrategy = 'rule-based' | 'model-based';
+
+/** Signals computed from the chat request, available to rule conditions. */
+export type DynamicRoutingSignal =
+  | 'inputTokensEst' // estimated prompt tokens (chars/4 across all messages)
+  | 'messageCount' // number of messages in the conversation
+  | 'lastUserLength' // character length of the latest user message
+  | 'hasTools' // request supplies tools / tool_choice
+  | 'hasResponseFormat' // request requests a structured response_format
+  | 'hasImages' // any message carries image content (multimodal)
+  | 'keyword'; // regex / substring match on the latest user message
+
+export type DynamicRoutingOperator =
+  // numeric signals
+  | 'gt' | 'gte' | 'lt' | 'lte' | 'eq' | 'neq'
+  // boolean signals
+  | 'isTrue' | 'isFalse'
+  // keyword (text) signal
+  | 'contains' | 'matches';
+
+export interface IDynamicRoutingCondition {
+  signal: DynamicRoutingSignal;
+  operator: DynamicRoutingOperator;
+  value?: string | number | boolean;
+}
+
+export interface IDynamicRoutingRule {
+  label: string;
+  targetModelKey: string;
+  /** How to combine conditions. Defaults to 'all'. */
+  matchType?: 'all' | 'any';
+  conditions: IDynamicRoutingCondition[];
+}
+
+export interface IDynamicDeciderLabel {
+  label: string;
+  description: string;
+  targetModelKey: string;
+}
+
+export interface IDynamicDeciderConfig {
+  /** Model key of the classifier that decides the route. */
+  modelKey: string;
+  /** Optional override of the default classification system prompt. */
+  promptOverride?: string;
+  labels: IDynamicDeciderLabel[];
+}
+
+export interface IDynamicRoutingConfig {
+  strategy: DynamicRoutingStrategy;
+  /** Used when no rule matches / the decider returns an unknown label. */
+  defaultModelKey: string;
+  /** Used when the chosen model errors. */
+  fallbackModelKey?: string;
+  /** rule-based strategy: ordered rules, first match wins. */
+  rules?: IDynamicRoutingRule[];
+  /** model-based strategy: decider model + label→model mapping. */
+  decider?: IDynamicDeciderConfig;
+}
+
+/** Decision metadata recorded on the router's own usage-log row. */
+export interface IModelUsageRouting {
+  routerKey: string;
+  routerModelDbId?: string;
+  strategy: DynamicRoutingStrategy;
+  decision: 'rule' | 'model' | 'default' | 'fallback';
+  chosenModelKey: string;
+  matchedRuleLabel?: string;
+  deciderLabel?: string;
+  deciderModelKey?: string;
+  deciderLatencyMs?: number;
+  reason: string;
+  signals?: Record<string, unknown>;
+  childRequestId?: string;
+}
+
 export type ProviderDomain =
   | 'model'
   | 'embedding'
@@ -611,6 +695,8 @@ export interface IModelUsageLog {
   toolCalls?: number;
   cacheHit?: boolean;
   pricingSnapshot?: IModelPricing & IModelUsageCostSnapshot;
+  /** Present on Dynamic LLM router rows (route 'chat.completions.router'). */
+  routing?: IModelUsageRouting;
   createdAt?: Date;
 }
 

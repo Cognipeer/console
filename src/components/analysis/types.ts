@@ -43,6 +43,7 @@ export interface AnalysisConversationView {
   description?: string;
   transcript: AnalysisTranscriptMessageView[];
   source: 'imported' | 'platform' | 'manual';
+  tags?: string[];
   metadata?: Record<string, unknown>;
   occurredAt?: string;
   referenceFields?: Record<string, unknown>;

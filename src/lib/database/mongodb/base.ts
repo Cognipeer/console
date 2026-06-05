@@ -38,6 +38,8 @@ export const COLLECTIONS = {
   evaluationDatasets: 'evaluation_datasets',
   evaluationSuites: 'evaluation_suites',
   evaluationRuns: 'evaluation_runs',
+  redTeamCampaigns: 'redteam_campaigns',
+  redTeamRuns: 'redteam_runs',
   analysisDefinitions: 'analysis_definitions',
   analysisConversations: 'analysis_conversations',
   analysisRuns: 'analysis_runs',

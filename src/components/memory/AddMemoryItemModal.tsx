@@ -2,19 +2,19 @@
 
 import { useEffect, useRef, useState } from 'react';
 import type { MemoryScope } from '@/lib/database';
-import {
-  Button,
-  Group,
-  Modal,
-  NumberInput,
-  Select,
-  Stack,
-  TextInput,
-  Textarea,
-} from '@mantine/core';
+import { NumberInput, Select, TextInput, Textarea } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
+import { IconCheck, IconBraces } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import FormShell, {
+  Checklist,
+  FormField,
+  FormRow,
+  FormSection,
+  SummaryGroup,
+  SummaryKV,
+} from '@/components/common/ui/FormShell';
 
 interface AddMemoryItemModalProps {
   opened: boolean;
@@ -147,28 +147,55 @@ export default function AddMemoryItemModal({
     }
   };
 
+  const v = form.values;
+  const validContent = v.content.trim().length > 0;
+  const validScope = v.scope === 'global' || v.scopeId.trim().length > 0;
+  const checklist = [
+    { id: 'content', label: 'Content provided', done: validContent },
+    { id: 'scope', label: v.scope === 'global' ? 'Global scope' : 'Context id provided', done: validScope },
+  ];
+
+  const summary = (
+    <SummaryGroup title={t('addMemoryTitle')}>
+      <SummaryKV label={t('scope')} value={v.scope} />
+      <SummaryKV label={t('memorySource')} value={v.source} />
+      <SummaryKV label={t('importance')} value={v.importance.toFixed(2)} />
+      <Checklist items={checklist} />
+    </SummaryGroup>
+  );
+
   return (
-    <Modal
-      opened={opened}
+    <FormShell
+      open={opened}
       onClose={onClose}
+      icon={<IconBraces size={16} />}
       title={t('addMemoryTitle')}
-      size="lg"
+      summary={summary}
+      footerStatus={`${checklist.filter((c) => c.done).length} of ${checklist.length} ready`}
+      primaryAction={{
+        label: t('addMemory'),
+        icon: <IconCheck size={13} />,
+        loading: submitting,
+        disabled: !validContent || !validScope,
+        onClick: () => form.onSubmit(handleSubmit)(),
+      }}
     >
-      <form onSubmit={form.onSubmit(handleSubmit)}>
-        <Stack gap="md">
+      <FormSection number={1} title={t('content')} done={validContent}>
+        <FormField label={t('content')} required>
           <Textarea
-            label={t('content')}
             placeholder={t('contentPlaceholder')}
             autosize
             minRows={4}
             maxRows={8}
-            required
             {...form.getInputProps('content')}
           />
+        </FormField>
+      </FormSection>
 
-          <Group grow align="flex-start">
+      <FormSection number={2} title={t('scope')} done={validScope}>
+        <FormRow cols={2}>
+          <FormField label={t('scope')}>
             <Select
-              label={t('scope')}
               data={[
                 { value: 'global', label: t('scopes.global') },
                 { value: 'user', label: t('scopes.user') },
@@ -178,25 +205,24 @@ export default function AddMemoryItemModal({
               allowDeselect={false}
               {...form.getInputProps('scope')}
             />
-
+          </FormField>
+          <FormField label={t('scopeId')} required={v.scope !== 'global'}>
             <TextInput
-              label={t('scopeId')}
               placeholder={t('scopeIdPlaceholder')}
-              disabled={form.values.scope === 'global'}
-              required={form.values.scope !== 'global'}
+              disabled={v.scope === 'global'}
               {...form.getInputProps('scopeId')}
             />
-          </Group>
+          </FormField>
+        </FormRow>
+      </FormSection>
 
-          <Group grow align="flex-start">
-            <TextInput
-              label={t('tags')}
-              placeholder={t('tagsPlaceholder')}
-              {...form.getInputProps('tags')}
-            />
-
+      <FormSection number={3} title="Metadata">
+        <FormRow cols={2}>
+          <FormField label={t('tags')} optional>
+            <TextInput placeholder={t('tagsPlaceholder')} {...form.getInputProps('tags')} />
+          </FormField>
+          <FormField label={t('memorySource')}>
             <Select
-              label={t('memorySource')}
               placeholder={t('sourcePlaceholder')}
               data={[
                 { value: 'chat', label: t('sources.chat') },
@@ -207,10 +233,10 @@ export default function AddMemoryItemModal({
               allowDeselect={false}
               {...form.getInputProps('source')}
             />
-          </Group>
-
+          </FormField>
+        </FormRow>
+        <FormField label={t('importance')}>
           <NumberInput
-            label={t('importance')}
             min={0}
             max={1}
             step={0.1}
@@ -218,17 +244,8 @@ export default function AddMemoryItemModal({
             clampBehavior="strict"
             {...form.getInputProps('importance')}
           />
-
-          <Group justify="flex-end">
-            <Button variant="default" onClick={onClose} disabled={submitting}>
-              {t('cancel')}
-            </Button>
-            <Button type="submit" loading={submitting}>
-              {t('addMemory')}
-            </Button>
-          </Group>
-        </Stack>
-      </form>
-    </Modal>
+        </FormField>
+      </FormSection>
+    </FormShell>
   );
 }

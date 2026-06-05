@@ -10,6 +10,11 @@ FROM node:22 AS builder
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 
+# When set to 1 (e.g. by docker-compose.e2e.yml) the build skips the strict
+# type/lint gate. Defaults to empty → normal strict production build.
+ARG E2E_BUILD=
+ENV E2E_BUILD=${E2E_BUILD}
+
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 

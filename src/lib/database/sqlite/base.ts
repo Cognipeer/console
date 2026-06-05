@@ -45,6 +45,8 @@ export const TABLES = {
   evaluationDatasets: 'evaluation_datasets',
   evaluationSuites: 'evaluation_suites',
   evaluationRuns: 'evaluation_runs',
+  redTeamCampaigns: 'redteam_campaigns',
+  redTeamRuns: 'redteam_runs',
   analysisDefinitions: 'analysis_definitions',
   analysisConversations: 'analysis_conversations',
   analysisRuns: 'analysis_runs',
@@ -372,6 +374,13 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, 'ocr_jobs', 'usageLlmTokens', 'usageLlmTokens INTEGER NOT NULL DEFAULT 0');
     this.ensureTableColumn(db, 'ocr_jobs', 'costOcr', 'costOcr REAL NOT NULL DEFAULT 0');
     this.ensureTableColumn(db, 'ocr_jobs', 'costLlm', 'costLlm REAL NOT NULL DEFAULT 0');
+    // Red-team campaign cron schedule (added with the scheduler). Safe on boot.
+    this.ensureTableColumn(db, TABLES.redTeamCampaigns, 'schedule', "schedule TEXT DEFAULT '{}'");
+    // Dynamic LLM routing decision metadata on usage logs (added with the
+    // Dynamic LLM router). Safe to ensure on boot.
+    this.ensureTableColumn(db, TABLES.modelUsageLogs, 'routing', 'routing TEXT');
+    // Analysis conversation tags for grouping/filtering (added later). Safe on boot.
+    this.ensureTableColumn(db, TABLES.analysisConversations, 'tags', "tags TEXT DEFAULT '[]'");
   }
 
   private migrateOcrJobsSchema(db: Database.Database): void {

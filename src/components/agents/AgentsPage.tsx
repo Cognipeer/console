@@ -3,19 +3,19 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import {
+  Badge,
   Button,
   Group,
+  Menu,
   Modal,
-  Select,
   Stack,
   Text,
-  TextInput,
-  Textarea,
 } from '@mantine/core';
-import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import {
+  IconChevronDown,
   IconEye,
+  IconPlugConnected,
   IconPlus,
   IconRobot,
   IconTrash,
@@ -24,6 +24,8 @@ import { useTranslations } from '@/lib/i18n';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
+import CreateAgentModal from './CreateAgentModal';
+import ConnectAgentModal from './ConnectAgentModal';
 
 interface Agent {
   _id: string;
@@ -31,7 +33,9 @@ interface Agent {
   name: string;
   description?: string;
   config: {
-    modelKey: string;
+    modelKey?: string;
+    kind?: 'native' | 'external';
+    connection?: { protocol?: string };
     systemPrompt?: string;
     promptKey?: string;
     temperature?: number;
@@ -49,28 +53,24 @@ interface Model {
   category: string;
 }
 
+interface Provider {
+  _id?: string;
+  key: string;
+  label?: string;
+  name?: string;
+}
+
 export default function AgentsPage() {
   const router = useRouter();
   const t = useTranslations('agents');
   const [agents, setAgents] = useState<Agent[]>([]);
   const [models, setModels] = useState<Model[]>([]);
+  const [providers, setProviders] = useState<Provider[]>([]);
   const [loading, setLoading] = useState(true);
   const [createModalOpen, setCreateModalOpen] = useState(false);
-  const [creating, setCreating] = useState(false);
+  const [connectModalOpen, setConnectModalOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Agent | null>(null);
   const [query, setQuery] = useState('');
-
-  const form = useForm({
-    initialValues: {
-      name: '',
-      description: '',
-      modelKey: '',
-    },
-    validate: {
-      name: (v) => (!v.trim() ? t('validation.nameRequired') : null),
-      modelKey: (v) => (!v ? t('validation.modelRequired') : null),
-    },
-  });
 
   const loadAgents = async () => {
     setLoading(true);
@@ -99,51 +99,28 @@ export default function AgentsPage() {
     }
   };
 
+  const loadProviders = async () => {
+    try {
+      const res = await fetch('/api/providers?scope=tenant', { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        setProviders(data.providers ?? []);
+      }
+    } catch (err) {
+      console.error('Failed to load providers', err);
+    }
+  };
+
   useEffect(() => {
     void loadAgents();
     void loadModels();
+    void loadProviders();
   }, []);
 
-  const handleCreate = async (values: typeof form.values) => {
-    setCreating(true);
-    try {
-      const res = await fetch('/api/agents', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: values.name,
-          description: values.description,
-          config: {
-            modelKey: values.modelKey,
-            temperature: 0.7,
-          },
-        }),
-      });
-
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || 'Failed to create agent');
-      }
-
-      const data = await res.json();
-      notifications.show({
-        title: t('notifications.created'),
-        message: t('notifications.createdDesc', { name: values.name }),
-        color: 'teal',
-      });
-      setCreateModalOpen(false);
-      form.reset();
-
-      router.push(`/dashboard/agents/${data.agent._id}`);
-    } catch (err: unknown) {
-      notifications.show({
-        title: t('notifications.error'),
-        message: err instanceof Error ? err.message : 'Error',
-        color: 'red',
-      });
-    } finally {
-      setCreating(false);
-    }
+  const handleCreated = (agentId: string) => {
+    setCreateModalOpen(false);
+    setConnectModalOpen(false);
+    router.push(`/dashboard/agents/${agentId}`);
   };
 
   const handleDelete = async () => {
@@ -176,7 +153,8 @@ export default function AgentsPage() {
     return (
       a.name.toLowerCase().includes(q) ||
       (a.description ?? '').toLowerCase().includes(q) ||
-      a.config.modelKey.toLowerCase().includes(q)
+      (a.config.modelKey ?? '').toLowerCase().includes(q) ||
+      (a.config.connection?.protocol ?? '').toLowerCase().includes(q)
     );
   });
 
@@ -186,7 +164,19 @@ export default function AgentsPage() {
       label: t('table.name'),
       render: (agent) => (
         <div className="ds-col" style={{ gap: 2 }}>
-          <span style={{ fontSize: 13, fontWeight: 500 }}>{agent.name}</span>
+          <Group gap={6} wrap="nowrap">
+            <span style={{ fontSize: 13, fontWeight: 500 }}>{agent.name}</span>
+            {agent.config.kind === 'external' ? (
+              <Badge
+                size="xs"
+                variant="light"
+                color="violet"
+                leftSection={<IconPlugConnected size={10} />}
+              >
+                {t('connectedBadge')}
+              </Badge>
+            ) : null}
+          </Group>
           {agent.description ? (
             <span
               className="ds-muted"
@@ -209,7 +199,9 @@ export default function AgentsPage() {
       label: t('table.model'),
       render: (agent) => (
         <span className="ds-mono" style={{ fontSize: 12 }}>
-          {agent.config.modelKey}
+          {agent.config.kind === 'external'
+            ? (agent.config.connection?.protocol ?? 'external')
+            : (agent.config.modelKey ?? '—')}
         </span>
       ),
     },
@@ -241,14 +233,42 @@ export default function AgentsPage() {
         title={t('title')}
         subtitle={t('subtitle')}
         actions={
-          <Button
-            color="teal"
-            size="sm"
-            leftSection={<IconPlus size={14} stroke={1.7} />}
-            onClick={() => setCreateModalOpen(true)}
-          >
-            {t('createAgent')}
-          </Button>
+          <Menu position="bottom-end" withinPortal>
+            <Menu.Target>
+              <Button
+                color="teal"
+                size="sm"
+                leftSection={<IconPlus size={14} stroke={1.7} />}
+                rightSection={<IconChevronDown size={14} />}
+              >
+                {t('createAgent')}
+              </Button>
+            </Menu.Target>
+            <Menu.Dropdown>
+              <Menu.Item
+                leftSection={<IconRobot size={15} />}
+                onClick={() => setCreateModalOpen(true)}
+              >
+                <div className="ds-col" style={{ gap: 1 }}>
+                  <span style={{ fontSize: 13, fontWeight: 500 }}>{t('createAgent')}</span>
+                  <span className="ds-muted" style={{ fontSize: 11 }}>
+                    {t('createAgentDesc')}
+                  </span>
+                </div>
+              </Menu.Item>
+              <Menu.Item
+                leftSection={<IconPlugConnected size={15} />}
+                onClick={() => setConnectModalOpen(true)}
+              >
+                <div className="ds-col" style={{ gap: 1 }}>
+                  <span style={{ fontSize: 13, fontWeight: 500 }}>{t('connectAgent')}</span>
+                  <span className="ds-muted" style={{ fontSize: 11 }}>
+                    {t('connectAgentDesc')}
+                  </span>
+                </div>
+              </Menu.Item>
+            </Menu.Dropdown>
+          </Menu>
         }
       />
 
@@ -293,48 +313,19 @@ export default function AgentsPage() {
         ]}
       />
 
-      <Modal
+      <CreateAgentModal
         opened={createModalOpen}
         onClose={() => setCreateModalOpen(false)}
-        title={t('createModal.title')}
-        size="md"
-      >
-        <form onSubmit={form.onSubmit(handleCreate)}>
-          <Stack gap="md">
-            <TextInput
-              label={t('createModal.name')}
-              placeholder={t('createModal.namePlaceholder')}
-              required
-              {...form.getInputProps('name')}
-            />
-            <Textarea
-              label={t('createModal.description')}
-              placeholder={t('createModal.descriptionPlaceholder')}
-              rows={2}
-              {...form.getInputProps('description')}
-            />
-            <Select
-              label={t('createModal.model')}
-              placeholder={t('createModal.modelPlaceholder')}
-              required
-              data={models.map((m) => ({
-                value: m.key,
-                label: `${m.name} (${m.modelId})`,
-              }))}
-              searchable
-              {...form.getInputProps('modelKey')}
-            />
-            <Group justify="flex-end">
-              <Button variant="default" onClick={() => setCreateModalOpen(false)}>
-                {t('createModal.cancel')}
-              </Button>
-              <Button type="submit" color="teal" loading={creating}>
-                {t('createModal.create')}
-              </Button>
-            </Group>
-          </Stack>
-        </form>
-      </Modal>
+        models={models}
+        onCreated={handleCreated}
+      />
+
+      <ConnectAgentModal
+        opened={connectModalOpen}
+        onClose={() => setConnectModalOpen(false)}
+        providers={providers.map((p) => ({ key: p.key, label: p.label || p.name || p.key }))}
+        onCreated={handleCreated}
+      />
 
       <Modal
         opened={!!deleteTarget}

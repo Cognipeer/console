@@ -165,6 +165,67 @@ describe('Analysis service — full vertical (SQLite)', () => {
     expect(run.items[0].error).toMatch(/exploded/);
   });
 
+  it('ingests tags, filters by tag, and honours run selection strategies', async () => {
+    const PROJECT = 'sel-test';
+    const definition = await createDefinition(TENANT_DB_NAME, TENANT_ID, ACTOR, {
+      name: 'Selection Strategies',
+      fieldSet: [{ key: 'intent', type: 'string' }],
+      modes: {},
+      extractionModelKey: 'extract-model',
+      projectId: PROJECT,
+    });
+
+    await ingestConversations(
+      TENANT_DB_NAME,
+      TENANT_ID,
+      ACTOR,
+      [
+        { key: 'sel-1', transcript: [{ role: 'caller', content: 'BILLING' }], tags: ['vip', 'march'] },
+        { key: 'sel-2', transcript: [{ role: 'caller', content: 'BILLING' }], tags: ['vip'] },
+        { key: 'sel-3', transcript: [{ role: 'caller', content: 'hi' }] },
+        { key: 'sel-4', transcript: [{ role: 'caller', content: 'hi' }] },
+      ],
+      PROJECT,
+    );
+
+    // Tags round-trip and the tag filter narrows the corpus.
+    const vip = await listConversations(TENANT_DB_NAME, { projectId: PROJECT, tag: 'vip' });
+    expect(vip.map((c) => c.key).sort()).toEqual(['sel-1', 'sel-2']);
+    const tagged = await listConversations(TENANT_DB_NAME, { projectId: PROJECT });
+    expect(tagged.find((c) => c.key === 'sel-1')?.tags).toEqual(['vip', 'march']);
+
+    const deps = { buildModelInvoker: fakeBuildModelInvoker };
+
+    // tag selection → only the 2 vip conversations.
+    const tagRun = await runDefinition(
+      { tenantDbName: TENANT_DB_NAME, tenantId: TENANT_ID, projectId: PROJECT, createdBy: ACTOR, definitionKey: definition.key, selection: { strategy: 'tag', tag: 'vip' } },
+      deps,
+    );
+    expect(tagRun.aggregate?.total).toBe(2);
+
+    // random sample of 1 → exactly 1 conversation analyzed.
+    const randomRun = await runDefinition(
+      { tenantDbName: TENANT_DB_NAME, tenantId: TENANT_ID, projectId: PROJECT, createdBy: ACTOR, definitionKey: definition.key, selection: { strategy: 'random', sampleSize: 1 } },
+      deps,
+    );
+    expect(randomRun.aggregate?.total).toBe(1);
+
+    // explicit keys → exactly those.
+    const keysRun = await runDefinition(
+      { tenantDbName: TENANT_DB_NAME, tenantId: TENANT_ID, projectId: PROJECT, createdBy: ACTOR, definitionKey: definition.key, selection: { strategy: 'keys', conversationKeys: ['sel-3'] } },
+      deps,
+    );
+    expect(keysRun.aggregate?.total).toBe(1);
+    expect(keysRun.items[0].conversationKey).toBe('sel-3');
+
+    // all → the whole project corpus (store mode off, so all 4 remain unanalyzed too).
+    const allRun = await runDefinition(
+      { tenantDbName: TENANT_DB_NAME, tenantId: TENANT_ID, projectId: PROJECT, createdBy: ACTOR, definitionKey: definition.key, selection: { strategy: 'all' } },
+      deps,
+    );
+    expect(allRun.aggregate?.total).toBe(4);
+  });
+
   it('persists a cron schedule and fires it via runScheduledAnalyses', async () => {
     const definition = await createDefinition(TENANT_DB_NAME, TENANT_ID, ACTOR, {
       name: 'Nightly Scheduled',

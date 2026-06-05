@@ -50,7 +50,6 @@ function makeGuardrail(overrides: Partial<IGuardrail> = {}): IGuardrail {
     key: 'my-guardrail',
     name: 'My Guardrail',
     type: 'preset',
-    target: 'input',
     action: 'block',
     enabled: true,
     createdBy: USER_ID,
@@ -146,7 +145,6 @@ describe('createGuardrail', () => {
     const result = await createGuardrail(TENANT_DB, TENANT_ID, USER_ID, {
       name: 'My Guardrail',
       type: 'preset',
-      target: 'input',
       action: 'block',
       projectId: PROJECT_ID,
     });
@@ -160,7 +158,6 @@ describe('createGuardrail', () => {
     await createGuardrail(TENANT_DB, TENANT_ID, USER_ID, {
       name: 'Auto Policy',
       type: 'preset',
-      target: 'input',
       action: 'warn',
     });
 
@@ -178,7 +175,6 @@ describe('createGuardrail', () => {
     await createGuardrail(TENANT_DB, TENANT_ID, USER_ID, {
       name: 'Custom Guardrail',
       type: 'custom',
-      target: 'input',
       action: 'block',
       customPrompt: 'Check for hate speech',
     });

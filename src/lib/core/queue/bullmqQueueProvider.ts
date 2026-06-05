@@ -166,11 +166,28 @@ export class BullMQQueueProvider implements QueueProvider {
     return this.connection;
   }
 
+  /**
+   * BullMQ forbids ':' in queue NAMES — that character is reserved for the
+   * Redis key namespace and is applied via the `prefix` option (see
+   * `bullPrefix()`), not the name. So the queue name must stay colon-free:
+   * the configured key prefix goes to `prefix`, and the per-node channel
+   * suffix uses '__' instead of ':'.
+   */
   private bullmqName(logicalQueueName: string, nodeName: string): string {
     if (!nodeName || nodeName === AUTO_NODE) {
-      return `${this.cfg.prefix}${logicalQueueName}`;
+      return logicalQueueName;
     }
-    return `${this.cfg.prefix}${logicalQueueName}:${nodeName}`;
+    return `${logicalQueueName}__${nodeName}`;
+  }
+
+  /**
+   * The Redis key-namespace prefix passed to BullMQ. A trailing ':' is stripped
+   * because BullMQ inserts its own ':' between prefix and name. Returns
+   * undefined when no prefix is configured so BullMQ keeps its default.
+   */
+  private bullPrefix(): string | undefined {
+    const p = (this.cfg.prefix ?? '').replace(/:+$/, '');
+    return p.length > 0 ? p : undefined;
   }
 
   private resolveBullMQQueueName(logicalQueueName: string, targetNode?: string): string {
@@ -195,7 +212,7 @@ export class BullMQQueueProvider implements QueueProvider {
   private getOrCreateQueue(bullmqQueueName: string): Queue {
     const existing = this.queues.get(bullmqQueueName);
     if (existing) return existing;
-    const queue = new Queue(bullmqQueueName, { connection: this.connectionOptions() });
+    const queue = new Queue(bullmqQueueName, { connection: this.connectionOptions(), prefix: this.bullPrefix() });
     this.queues.set(bullmqQueueName, queue);
     return queue;
   }
@@ -206,7 +223,7 @@ export class BullMQQueueProvider implements QueueProvider {
     if (!this.subscriberConnection) {
       throw new Error('BullMQ subscriber connection not initialized');
     }
-    const events = new QueueEvents(bullmqQueueName, { connection: this.subscriberConnection });
+    const events = new QueueEvents(bullmqQueueName, { connection: this.subscriberConnection, prefix: this.bullPrefix() });
     this.events.set(bullmqQueueName, events);
     return events;
   }
@@ -232,6 +249,7 @@ export class BullMQQueueProvider implements QueueProvider {
       {
         concurrency,
         connection: this.connectionOptions(),
+        prefix: this.bullPrefix(),
       },
     );
 

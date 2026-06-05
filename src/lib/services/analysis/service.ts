@@ -28,7 +28,12 @@ import { isDue } from './schedulePlanner';
 
 const SLUG_OPTIONS = { lower: true, strict: true, trim: true };
 const MAX_KEY_ATTEMPTS = 50;
-const MAX_RUN_CONVERSATIONS = 500;
+/**
+ * Hard ceiling on how many conversations a single run may cover. Configurable
+ * via ANALYSIS_MAX_RUN_CONVERSATIONS (default 5000) — a high-but-bounded cap so
+ * one run can't accidentally fan out an unbounded number of model calls.
+ */
+const MAX_RUN_CONVERSATIONS = Math.max(1, Number(process.env.ANALYSIS_MAX_RUN_CONVERSATIONS ?? 5000) || 5000);
 
 export type WithId<T> = Omit<T, '_id'> & { id: string };
 
@@ -151,6 +156,7 @@ export interface CreateConversationInput {
   description?: string;
   transcript: IAnalysisTranscriptMessage[];
   source?: AnalysisConversationSource;
+  tags?: string[];
   metadata?: Record<string, unknown>;
   occurredAt?: Date;
   referenceFields?: Record<string, unknown>;
@@ -173,6 +179,7 @@ async function createOneConversation(
     description: input.description,
     transcript: input.transcript,
     source: input.source ?? 'imported',
+    tags: input.tags && input.tags.length > 0 ? input.tags : undefined,
     metadata: input.metadata,
     occurredAt: input.occurredAt,
     referenceFields: input.referenceFields,
@@ -199,7 +206,7 @@ export async function ingestConversations(
 
 export async function listConversations(
   tenantDbName: string,
-  filters?: { projectId?: string; source?: AnalysisConversationSource; search?: string; limit?: number; skip?: number },
+  filters?: { projectId?: string; source?: AnalysisConversationSource; tag?: string; search?: string; limit?: number; skip?: number },
 ): Promise<WithId<IAnalysisConversation>[]> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
@@ -241,40 +248,144 @@ export interface RunDefinitionDeps {
   buildModelInvoker?: typeof buildModelInvoker;
 }
 
-export async function runDefinition(
-  params: { tenantDbName: string; tenantId: string; projectId?: string; createdBy: string; definitionKey: string; conversationKeys?: string[] },
-  deps: RunDefinitionDeps = {},
-): Promise<WithId<IAnalysisRun>> {
-  const { tenantDbName, tenantId, projectId, createdBy, definitionKey, conversationKeys } = params;
+/**
+ * How a run picks which conversations to cover:
+ *   - all        : the recent corpus (optionally filtered by tag)
+ *   - tag        : conversations carrying a given tag
+ *   - random     : a random sample of `sampleSize` from the corpus (optionally tag-filtered)
+ *   - unanalyzed : only conversations never analyzed yet (lastAnalyzedAt unset)
+ *   - keys       : an explicit list of conversation keys
+ */
+export type RunSelectionStrategy = 'all' | 'tag' | 'random' | 'unanalyzed' | 'keys';
+
+export interface RunSelection {
+  strategy: RunSelectionStrategy;
+  tag?: string;
+  sampleSize?: number;
+  conversationKeys?: string[];
+}
+
+export interface RunDefinitionParams {
+  tenantDbName: string;
+  tenantId: string;
+  projectId?: string;
+  createdBy: string;
+  definitionKey: string;
+  /** @deprecated prefer `selection`; kept for back-compat (treated as a keys selection). */
+  conversationKeys?: string[];
+  selection?: RunSelection;
+}
+
+/** Deterministic-free shuffle (app code, not a workflow) — Fisher–Yates. */
+function shuffle<T>(items: T[]): T[] {
+  const arr = items.slice();
+  for (let i = arr.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+/** Resolve the conversations a run will cover from its selection strategy. */
+async function selectConversations(
+  db: Awaited<ReturnType<typeof getDatabase>>,
+  projectId: string | undefined,
+  selection: RunSelection | undefined,
+  legacyKeys: string[] | undefined,
+): Promise<IAnalysisConversation[]> {
+  // Back-compat: an explicit key list (old callers) maps to a keys selection.
+  const sel: RunSelection = selection ?? (legacyKeys && legacyKeys.length > 0
+    ? { strategy: 'keys', conversationKeys: legacyKeys }
+    : { strategy: 'all' });
+
+  if (sel.strategy === 'keys') {
+    const keys = sel.conversationKeys ?? [];
+    const found = await Promise.all(keys.map((k) => db.findAnalysisConversationByKey(k, projectId)));
+    return found.filter((c): c is IAnalysisConversation => c !== null).slice(0, MAX_RUN_CONVERSATIONS);
+  }
+
+  if (sel.strategy === 'random') {
+    const candidates = await db.listAnalysisConversations({ projectId, tag: sel.tag, limit: MAX_RUN_CONVERSATIONS });
+    const size = Math.max(1, Math.min(sel.sampleSize ?? candidates.length, candidates.length));
+    return shuffle(candidates).slice(0, size);
+  }
+
+  if (sel.strategy === 'unanalyzed') {
+    const candidates = await db.listAnalysisConversations({ projectId, tag: sel.tag, limit: MAX_RUN_CONVERSATIONS });
+    return candidates.filter((c) => !c.lastAnalyzedAt).slice(0, MAX_RUN_CONVERSATIONS);
+  }
+
+  // 'all' or 'tag'
+  return db.listAnalysisConversations({ projectId, tag: sel.tag, limit: MAX_RUN_CONVERSATIONS });
+}
+
+/**
+ * Resolve definition + conversations, guard against a concurrent run, create a
+ * pending run. Returns the run AND the concrete conversation keys it resolved —
+ * the caller must run exactly those (so a `random`/`unanalyzed` selection is
+ * sampled once, not re-sampled at execution time).
+ */
+async function createPendingRun(
+  params: RunDefinitionParams,
+  mode: IAnalysisRun['mode'],
+): Promise<{ run: WithId<IAnalysisRun>; conversationKeys: string[] }> {
+  const { tenantDbName, tenantId, projectId, createdBy, definitionKey, conversationKeys, selection } = params;
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
 
   const definition = await db.findAnalysisDefinitionByKey(definitionKey, projectId);
   if (!definition) throw new Error(`Analysis definition "${definitionKey}" not found`);
 
-  // Select conversations: explicit keys, or the most recent corpus.
-  let convos: IAnalysisConversation[];
-  if (conversationKeys && conversationKeys.length > 0) {
-    const found = await Promise.all(conversationKeys.map((k) => db.findAnalysisConversationByKey(k, projectId)));
-    convos = found.filter((c): c is IAnalysisConversation => c !== null);
-  } else {
-    convos = await db.listAnalysisConversations({ projectId, limit: MAX_RUN_CONVERSATIONS });
+  const convos = await selectConversations(db, projectId, selection, conversationKeys);
+  if (convos.length === 0) {
+    throw new Error('No conversations to analyze — ingest conversations first (Conversations tab → Ingest).');
+  }
+
+  // Guard against duplicate/concurrent runs. Both 'pending' (enqueued, not yet
+  // started) and recently-'running' rows count — a pending run with no
+  // startedAt is treated as fresh so two near-simultaneous triggers can't both
+  // pass the guard.
+  const [running, pending] = await Promise.all([
+    db.listAnalysisRuns({ projectId, definitionKey: definition.key, status: 'running', limit: 1 }),
+    db.listAnalysisRuns({ projectId, definitionKey: definition.key, status: 'pending', limit: 1 }),
+  ]);
+  const recentStart = running[0]?.startedAt ? new Date(running[0].startedAt).getTime() : 0;
+  const runningInFlight = running.length > 0 && Date.now() - recentStart < 60 * 60 * 1000;
+  const pendingInFlight = pending.length > 0 && Date.now() - new Date(pending[0].createdAt ?? Date.now()).getTime() < 60 * 60 * 1000;
+  if (runningInFlight || pendingInFlight) {
+    throw new Error(`A run for definition "${definition.key}" is already in progress`);
   }
 
   const run = await db.createAnalysisRun({
     tenantId,
     projectId,
     definitionKey: definition.key,
-    status: 'running',
-    mode: 'sync',
+    status: 'pending',
+    mode,
     progress: { total: convos.length, completed: 0, failed: 0 },
     items: [],
     createdBy,
-    startedAt: new Date(),
   });
-  const runId = toView(run).id;
+  return { run: toView(run), conversationKeys: convos.map((c) => c.key) };
+}
+
+/** Execute an already-created analysis run to completion. Throws on fatal error. */
+export async function executeRun(
+  params: RunDefinitionParams & { runId: string },
+  deps: RunDefinitionDeps = {},
+): Promise<WithId<IAnalysisRun>> {
+  const { tenantDbName, tenantId, projectId, createdBy, definitionKey, conversationKeys, selection, runId } = params;
+  void createdBy;
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
 
   try {
+    const definition = await db.findAnalysisDefinitionByKey(definitionKey, projectId);
+    if (!definition) throw new Error(`Analysis definition "${definitionKey}" not found`);
+    const convos = await selectConversations(db, projectId, selection, conversationKeys);
+
+    await db.updateAnalysisRun(runId, { status: 'running', startedAt: new Date() });
+
     const ctx: AnalysisModelContext = { tenantDbName, tenantId, projectId: projectId ?? '' };
     const makeInvoker = deps.buildModelInvoker ?? buildModelInvoker;
 
@@ -290,12 +401,31 @@ export async function runDefinition(
       occurredAt: c.occurredAt?.toISOString(),
     }));
 
+    // Persist incremental progress so the dashboard can show step-by-step
+    // results live (throttled to avoid hammering the DB on large corpora).
+    const partial: AnalysisItemResult[] = [];
+    let lastFlush = 0;
     const result = await runAnalysis({
       conversations,
       spec,
       invokeExtraction: makeInvoker(definition.extractionModelKey, ctx, 'extraction'),
       invokeJudge: definition.modes.judge ? makeInvoker(definition.judgeModelKey, ctx, 'judge') : undefined,
       config: { concurrency: definition.runConfig?.concurrency },
+      onItem: (item) => {
+        partial.push(item);
+        const now = Date.now();
+        if (now - lastFlush >= 1500) {
+          lastFlush = now;
+          const completed = partial.filter((p) => !p.error).length;
+          const failed = partial.filter((p) => p.error).length;
+          void db
+            .updateAnalysisRun(runId, {
+              progress: { total: conversations.length, completed, failed },
+              items: partial.map(toRunItem),
+            })
+            .catch(() => {});
+        }
+      },
     });
 
     const updated = await db.updateAnalysisRun(runId, {
@@ -322,7 +452,7 @@ export async function runDefinition(
       );
     }
 
-    return toView(updated ?? run);
+    return toView(updated ?? (await db.findAnalysisRunById(runId))!);
   } catch (err) {
     await db.updateAnalysisRun(runId, {
       status: 'failed',
@@ -331,6 +461,24 @@ export async function runDefinition(
     });
     throw err;
   }
+}
+
+/** Synchronous run (tests / scheduler / CI): create + execute, blocks to completion. */
+export async function runDefinition(params: RunDefinitionParams, deps: RunDefinitionDeps = {}): Promise<WithId<IAnalysisRun>> {
+  const { run, conversationKeys } = await createPendingRun(params, 'sync');
+  // Execute exactly the resolved keys (selection already sampled once).
+  return executeRun({ ...params, selection: undefined, conversationKeys, runId: run.id }, deps);
+}
+
+/**
+ * Create a pending run and return it immediately for the caller to enqueue.
+ * Also returns the resolved conversation keys so the queued job executes
+ * exactly those (a `random` sample is fixed at enqueue time, not re-sampled).
+ */
+export async function createAsyncRun(
+  params: RunDefinitionParams,
+): Promise<{ run: WithId<IAnalysisRun>; conversationKeys: string[] }> {
+  return createPendingRun(params, 'async');
 }
 
 /**

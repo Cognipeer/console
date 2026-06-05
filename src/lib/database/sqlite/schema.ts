@@ -431,6 +431,7 @@ export const TENANT_SCHEMA_SQL = `
     toolCalls INTEGER DEFAULT 0,
     cacheHit INTEGER DEFAULT 0,
     pricingSnapshot TEXT,
+    routing TEXT,
     createdAt TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_model_usage_modelKey ON model_usage_logs(modelKey);
@@ -569,7 +570,6 @@ export const TENANT_SCHEMA_SQL = `
     name TEXT NOT NULL,
     description TEXT,
     type TEXT NOT NULL DEFAULT 'preset',
-    target TEXT NOT NULL DEFAULT 'both',
     action TEXT NOT NULL DEFAULT 'block',
     enabled INTEGER NOT NULL DEFAULT 1,
     modelKey TEXT,
@@ -684,6 +684,52 @@ export const TENANT_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_eval_runs_suiteKey ON evaluation_runs(suiteKey);
   CREATE INDEX IF NOT EXISTS idx_eval_runs_createdAt ON evaluation_runs(createdAt);
 
+  -- Red-team service (adversarial agent/model testing)
+  CREATE TABLE IF NOT EXISTS redteam_campaigns (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    targetKind TEXT NOT NULL DEFAULT 'agent',
+    agentKey TEXT,
+    modelKey TEXT,
+    probeKeys TEXT DEFAULT '[]',
+    judgeModelKey TEXT,
+    runConfig TEXT DEFAULT '{}',
+    policy TEXT DEFAULT '{}',
+    schedule TEXT DEFAULT '{}',
+    metadata TEXT DEFAULT '{}',
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_redteam_campaigns_key ON redteam_campaigns(key);
+
+  CREATE TABLE IF NOT EXISTS redteam_runs (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    campaignKey TEXT NOT NULL,
+    targetKind TEXT NOT NULL DEFAULT 'agent',
+    targetRef TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    mode TEXT NOT NULL DEFAULT 'async',
+    progress TEXT DEFAULT '{}',
+    aggregate TEXT,
+    attempts TEXT DEFAULT '[]',
+    error TEXT,
+    startedAt TEXT,
+    finishedAt TEXT,
+    createdBy TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_redteam_runs_campaignKey ON redteam_runs(campaignKey);
+  CREATE INDEX IF NOT EXISTS idx_redteam_runs_createdAt ON redteam_runs(createdAt);
+
   -- Analysis service (conversation field extraction, judge & accuracy)
   CREATE TABLE IF NOT EXISTS analysis_definitions (
     id TEXT PRIMARY KEY,
@@ -716,6 +762,7 @@ export const TENANT_SCHEMA_SQL = `
     description TEXT,
     transcript TEXT DEFAULT '[]',
     source TEXT NOT NULL DEFAULT 'imported',
+    tags TEXT DEFAULT '[]',
     metadata TEXT DEFAULT '{}',
     occurredAt TEXT,
     referenceFields TEXT,

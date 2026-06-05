@@ -165,6 +165,17 @@
       "badge": "new"
     },
     {
+      "id": "redteam",
+      "href": "/dashboard/redteam",
+      "icon": "IconShield",
+      "category": "operate",
+      "navLabelKey": "redteam",
+      "navDescriptionKey": "redteamDescription",
+      "tags": ["redteam", "security", "adversarial", "jailbreak", "prompt-injection"],
+      "searchKeywords": ["red team", "redteam", "security", "adversarial", "jailbreak", "prompt injection", "garak", "vulnerability", "probe", "owasp"],
+      "badge": "new"
+    },
+    {
       "id": "analysis",
       "href": "/dashboard/analysis",
       "icon": "IconReportAnalytics",

@@ -130,9 +130,9 @@ export function AnalysisMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       const now = this.now();
       db.prepare(`
         INSERT INTO ${TABLES.analysisConversations}
-        (id, tenantId, projectId, key, name, description, transcript, source, metadata,
+        (id, tenantId, projectId, key, name, description, transcript, source, tags, metadata,
          occurredAt, referenceFields, extractedFields, lastAnalyzedAt, createdBy, updatedBy, createdAt, updatedAt)
-        VALUES (@id, @tenantId, @projectId, @key, @name, @description, @transcript, @source, @metadata,
+        VALUES (@id, @tenantId, @projectId, @key, @name, @description, @transcript, @source, @tags, @metadata,
          @occurredAt, @referenceFields, @extractedFields, @lastAnalyzedAt, @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
@@ -143,6 +143,7 @@ export function AnalysisMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         description: conversation.description ?? null,
         transcript: this.toJson(conversation.transcript ?? []),
         source: conversation.source,
+        tags: this.toJson(conversation.tags ?? []),
         metadata: this.toJson(conversation.metadata ?? {}),
         occurredAt: toIso(conversation.occurredAt),
         referenceFields: conversation.referenceFields !== undefined ? this.toJson(conversation.referenceFields) : null,
@@ -167,6 +168,7 @@ export function AnalysisMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       if (data.description !== undefined) { sets.push('description = @description'); params.description = data.description; }
       if (data.transcript !== undefined) { sets.push('transcript = @transcript'); params.transcript = this.toJson(data.transcript); }
       if (data.source !== undefined) { sets.push('source = @source'); params.source = data.source; }
+      if (data.tags !== undefined) { sets.push('tags = @tags'); params.tags = this.toJson(data.tags ?? []); }
       if (data.metadata !== undefined) { sets.push('metadata = @metadata'); params.metadata = this.toJson(data.metadata); }
       if (data.occurredAt !== undefined) { sets.push('occurredAt = @occurredAt'); params.occurredAt = toIso(data.occurredAt); }
       if (data.referenceFields !== undefined) { sets.push('referenceFields = @referenceFields'); params.referenceFields = this.toJson(data.referenceFields); }
@@ -198,12 +200,15 @@ export function AnalysisMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       return row ? this.mapAnalysisConversationRow(row) : null;
     }
 
-    async listAnalysisConversations(filters?: { projectId?: string; source?: AnalysisConversationSource; search?: string; limit?: number; skip?: number }): Promise<IAnalysisConversation[]> {
+    async listAnalysisConversations(filters?: { projectId?: string; source?: AnalysisConversationSource; tag?: string; search?: string; limit?: number; skip?: number }): Promise<IAnalysisConversation[]> {
       const db = this.getTenantDb();
       const clauses: string[] = [];
       const params: Record<string, unknown> = {};
       if (filters?.projectId !== undefined) { clauses.push('projectId = @projectId'); params.projectId = filters.projectId; }
       if (filters?.source !== undefined) { clauses.push('source = @source'); params.source = filters.source; }
+      // tags stored as a JSON array string; match the quoted token (exact tag).
+      // JSON.stringify('a') === '"a"', so the LIKE pattern becomes %"a"%.
+      if (filters?.tag) { clauses.push('tags LIKE @tag'); params.tag = `%${JSON.stringify(filters.tag)}%`; }
       if (filters?.search) { clauses.push('(name LIKE @search OR description LIKE @search OR key LIKE @search)'); params.search = this.likePattern(filters.search); }
       const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
       const limit = filters?.limit ?? 100;
@@ -325,6 +330,7 @@ export function AnalysisMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         description: (r.description as string | null) ?? undefined,
         transcript: this.parseJson<IAnalysisTranscriptMessage[]>(r.transcript, []),
         source: r.source as AnalysisConversationSource,
+        tags: this.parseJson<string[]>(r.tags, []),
         metadata: this.parseJson(r.metadata, {}),
         occurredAt: r.occurredAt ? this.toDate(r.occurredAt) : undefined,
         referenceFields: r.referenceFields ? this.parseJson<Record<string, unknown>>(r.referenceFields, {}) : undefined,

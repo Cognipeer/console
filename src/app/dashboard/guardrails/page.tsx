@@ -16,6 +16,7 @@ import {
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import StatTile from '@/components/common/ui/StatTile';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
+import { useTableControls } from '@/components/common/ui/useTableControls';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import CreateGuardrailModal from '@/components/guardrails/CreateGuardrailModal';
 import type { GuardrailView } from '@/lib/services/guardrail/constants';
@@ -24,12 +25,6 @@ interface ModelOption {
   value: string;
   label: string;
 }
-
-const TARGET_LABELS: Record<string, string> = {
-  input: 'Input',
-  output: 'Output',
-  both: 'Both',
-};
 
 const ACTION_LABELS: Record<string, string> = {
   block: 'Block',
@@ -158,6 +153,10 @@ export default function GuardrailsPage() {
     });
   }, [guardrails, query, typeFilter, actionFilter, enabledFilter]);
 
+  const grCtl = useTableControls(filtered, {
+    filterKey: `${query}|${typeFilter}|${actionFilter}|${enabledFilter}`,
+  });
+
   const total = guardrails.length;
   const enabled = guardrails.filter((g) => g.enabled).length;
   const blockCount = guardrails.filter((g) => g.action === 'block').length;
@@ -204,13 +203,6 @@ export default function GuardrailsPage() {
         <span className={`ds-badge ${g.type === 'preset' ? 'ds-badge-info' : 'ds-badge-teal'}`}>
           {g.type === 'preset' ? 'Preset' : 'Custom'}
         </span>
-      ),
-    },
-    {
-      key: 'target',
-      label: 'Target',
-      render: (g) => (
-        <span className="ds-badge">{TARGET_LABELS[g.target] ?? g.target}</span>
       ),
     },
     {
@@ -270,11 +262,12 @@ export default function GuardrailsPage() {
       </div>
 
       <DataGrid<GuardrailView>
-        records={filtered}
+        records={grCtl.records}
         loading={loading}
         rowKey={(g) => g.id}
         onRowClick={(g) => router.push(`/dashboard/guardrails/${g.id}`)}
         columns={columns}
+        pagination={grCtl.pagination}
         search={{
           value: query,
           onChange: setQuery,
@@ -329,7 +322,7 @@ export default function GuardrailsPage() {
             onClick: () => setCreateModalOpen(true),
           },
         }}
-        footerLeft={`Showing ${filtered.length} of ${total} guardrails`}
+        footerLeft={`Showing ${grCtl.records.length} of ${filtered.length} guardrails`}
         rowActions={(g) => [
           {
             id: 'view',

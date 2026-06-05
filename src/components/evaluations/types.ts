@@ -23,6 +23,14 @@ export interface EvalTargetView {
   createdAt?: string;
 }
 
+export interface EvalDatasetGenerationMeta {
+  status: 'pending' | 'running' | 'ready' | 'failed';
+  requested: number;
+  source: 'rag' | 'text' | 'file';
+  generated?: number;
+  error?: string;
+}
+
 export interface EvalDatasetView {
   id: string;
   key: string;
@@ -31,10 +39,11 @@ export interface EvalDatasetView {
   source: 'manual' | 'file' | 'generated';
   items: EvalDatasetItemView[];
   createdAt?: string;
+  metadata?: { generation?: EvalDatasetGenerationMeta } & Record<string, unknown>;
 }
 
 export interface EvalScorerView {
-  type: 'assertion' | 'llm-judge';
+  type: 'assertion' | 'llm-judge' | 'semantic';
   weight?: number;
   rubric?: string;
   threshold?: number;
@@ -49,12 +58,13 @@ export interface EvalSuiteView {
   datasetKey: string;
   scorers: EvalScorerView[];
   judgeModelKey?: string;
+  embeddingModelKey?: string;
   runConfig?: { concurrency?: number };
   createdAt?: string;
 }
 
 export interface EvalScoreView {
-  scorerType: 'assertion' | 'llm-judge';
+  scorerType: 'assertion' | 'llm-judge' | 'semantic';
   score: number;
   passed: boolean;
   weight: number;

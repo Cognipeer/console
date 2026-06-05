@@ -55,6 +55,8 @@ import {
   IconRocket,
   IconGitBranch,
   IconArrowsExchange,
+  IconPlugConnected,
+  IconPencil,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import EmptyState from '@/components/common/EmptyState';
@@ -65,6 +67,7 @@ import SessionTable from '@/components/tracing/SessionTable';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { ToolSelectorModal, type ToolBinding } from './ToolSelectorModal';
+import ConnectAgentModal from './ConnectAgentModal';
 import classes from './AgentDetailPage.module.css';
 
 interface Agent {
@@ -73,7 +76,7 @@ interface Agent {
   name: string;
   description?: string;
   config: {
-    modelKey: string;
+    modelKey?: string;
     systemPrompt?: string;
     promptKey?: string;
     temperature?: number;
@@ -83,6 +86,16 @@ interface Agent {
     inputGuardrailKey?: string;
     outputGuardrailKey?: string;
     toolBindings?: ToolBinding[];
+    kind?: 'native' | 'external';
+    connection?: {
+      protocol?: string;
+      url?: string;
+      model?: string;
+      responsePath?: string;
+      credentialProviderKey?: string;
+      hasApiKey?: boolean;
+      headers?: Record<string, string>;
+    };
   };
   status: string;
   publishedVersion?: number | null;
@@ -165,6 +178,8 @@ export default function AgentDetailPage() {
   const [prompts, setPrompts] = useState<Prompt[]>([]);
   const [ragModules, setRagModules] = useState<RagModule[]>([]);
   const [guardrails, setGuardrails] = useState<Guardrail[]>([]);
+  const [providers, setProviders] = useState<Array<{ key: string; label?: string; name?: string }>>([]);
+  const [editConnectionOpen, setEditConnectionOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<string | null>('playground');
 
@@ -303,6 +318,18 @@ export default function AgentDetailPage() {
     }
   };
 
+  const loadProviders = async () => {
+    try {
+      const res = await fetch('/api/providers?scope=tenant', { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        setProviders(data.providers ?? []);
+      }
+    } catch (err) {
+      console.error('Failed to load providers', err);
+    }
+  };
+
   const loadTracingSessions = useCallback(async (isRefresh = false) => {
     if (!agent) return;
     if (isRefresh) setTracingRefreshing(true);
@@ -395,7 +422,7 @@ export default function AgentDetailPage() {
   useEffect(() => {
     (async () => {
       setLoading(true);
-      await Promise.all([loadAgent(), loadModels(), loadPrompts(), loadRagModules(), loadGuardrails()]);
+      await Promise.all([loadAgent(), loadModels(), loadPrompts(), loadRagModules(), loadGuardrails(), loadProviders()]);
       setLoading(false);
     })();
   }, [loadAgent]);
@@ -499,15 +526,19 @@ export default function AgentDetailPage() {
     const message = chatInput.trim();
     setChatLoading(true);
 
-    const saved = await saveAgentConfig({ notify: false });
-    if (!saved) {
-      notifications.show({
-        title: t('notifications.error'),
-        message: 'Failed to save current agent configuration before chat.',
-        color: 'red',
-      });
-      setChatLoading(false);
-      return;
+    // Connected agents have no editable config; never auto-save (it would
+    // overwrite the stored connection with an empty native config).
+    if (agent?.config?.kind !== 'external') {
+      const saved = await saveAgentConfig({ notify: false });
+      if (!saved) {
+        notifications.show({
+          title: t('notifications.error'),
+          message: 'Failed to save current agent configuration before chat.',
+          color: 'red',
+        });
+        setChatLoading(false);
+        return;
+      }
     }
 
     setChatInput('');
@@ -574,30 +605,41 @@ export default function AgentDetailPage() {
     return <EmptyState title={t('notFound')} description="The selected agent could not be loaded." minHeight={400} />;
   }
 
+  const isConnected = agent.config?.kind === 'external';
+  const connection = agent.config?.connection;
+
   return (
     <PageContainer>
       <PageHeader
-        eyebrow="Build · Agent"
+        eyebrow={isConnected ? 'Build · Connected Agent' : 'Build · Agent'}
         title={agent.name}
         subtitle={agent.description || agent.key}
         actions={
           <Group gap="sm">
-            {agent.publishedVersion ? (
-              <Badge size="sm" variant="light" color="teal" leftSection={<IconRocket size={12} />}>
-                {t('publish.publishedVersion', { version: agent.publishedVersion })}
+            {isConnected ? (
+              <Badge size="sm" variant="light" color="violet" leftSection={<IconPlugConnected size={12} />}>
+                {connection?.protocol ?? t('connectedBadge')}
               </Badge>
             ) : (
-              <Badge size="sm" variant="light" color="gray">
-                {t('publish.neverPublished')}
-              </Badge>
+              <>
+                {agent.publishedVersion ? (
+                  <Badge size="sm" variant="light" color="teal" leftSection={<IconRocket size={12} />}>
+                    {t('publish.publishedVersion', { version: agent.publishedVersion })}
+                  </Badge>
+                ) : (
+                  <Badge size="sm" variant="light" color="gray">
+                    {t('publish.neverPublished')}
+                  </Badge>
+                )}
+                <Button
+                  size="xs"
+                  leftSection={<IconRocket size={14} />}
+                  onClick={() => setPublishModalOpen(true)}
+                >
+                  {t('publish.button')}
+                </Button>
+              </>
             )}
-            <Button
-              size="xs"
-              leftSection={<IconRocket size={14} />}
-              onClick={() => setPublishModalOpen(true)}
-            >
-              {t('publish.button')}
-            </Button>
           </Group>
         }
       />
@@ -607,9 +649,11 @@ export default function AgentDetailPage() {
           <Tabs.Tab value="playground" leftSection={<IconMessageCircle size={14} />}>
             {t('tabs.playground')}
           </Tabs.Tab>
-          <Tabs.Tab value="versions" leftSection={<IconGitBranch size={14} />}>
-            {t('tabs.versions')}
-          </Tabs.Tab>
+          {!isConnected ? (
+            <Tabs.Tab value="versions" leftSection={<IconGitBranch size={14} />}>
+              {t('tabs.versions')}
+            </Tabs.Tab>
+          ) : null}
           <Tabs.Tab value="traces" leftSection={<IconTimeline size={14} />}>
             {t('tabs.traces')}
           </Tabs.Tab>
@@ -633,6 +677,54 @@ export default function AgentDetailPage() {
                   {t('config.title')}
                 </Text>
 
+                {isConnected ? (
+                  <Stack gap="sm">
+                    <div>
+                      <Text size="xs" c="dimmed">{t('connectModal.protocol')}</Text>
+                      <Text size="sm" fw={500}>{connection?.protocol ?? '—'}</Text>
+                    </div>
+                    <div>
+                      <Text size="xs" c="dimmed">{t('connectModal.url')}</Text>
+                      <Text size="sm" className="ds-mono" style={{ wordBreak: 'break-all' }}>
+                        {connection?.url ?? '—'}
+                      </Text>
+                    </div>
+                    {connection?.model ? (
+                      <div>
+                        <Text size="xs" c="dimmed">{t('connectModal.model')}</Text>
+                        <Text size="sm" className="ds-mono">{connection.model}</Text>
+                      </div>
+                    ) : null}
+                    <div>
+                      <Text size="xs" c="dimmed">{t('connectModal.authSection')}</Text>
+                      <Text size="sm">
+                        {connection?.hasApiKey
+                          ? t('connectModal.apiKey')
+                          : connection?.credentialProviderKey
+                            ? `${t('connectModal.credentialProvider')}: ${connection.credentialProviderKey}`
+                            : '—'}
+                      </Text>
+                    </div>
+                    {connection?.responsePath ? (
+                      <div>
+                        <Text size="xs" c="dimmed">{t('connectModal.responsePath')}</Text>
+                        <Text size="sm" className="ds-mono">{connection.responsePath}</Text>
+                      </div>
+                    ) : null}
+                    <Text size="xs" c="dimmed" fs="italic" mt="xs">
+                      {t('connectModal.subtitle')}
+                    </Text>
+                    <Button
+                      variant="light"
+                      size="xs"
+                      leftSection={<IconPencil size={14} />}
+                      onClick={() => setEditConnectionOpen(true)}
+                    >
+                      {t('connectModal.editButton')}
+                    </Button>
+                  </Stack>
+                ) : (
+                <>
                 <Select
                   label={t('config.model')}
                   placeholder={t('config.modelPlaceholder')}
@@ -871,6 +963,8 @@ export default function AgentDetailPage() {
                 <Button onClick={handleSaveConfig} size="sm" fullWidth>
                   {t('config.save')}
                 </Button>
+                </>
+                )}
               </Stack>
             </Paper>
 
@@ -1456,6 +1550,19 @@ curl -X POST ${typeof window !== 'undefined' ? window.location.origin : 'https:/
           t={t}
         />
       </Modal>
+
+      {isConnected ? (
+        <ConnectAgentModal
+          opened={editConnectionOpen}
+          onClose={() => setEditConnectionOpen(false)}
+          providers={providers.map((p) => ({ key: p.key, label: p.label || p.name || p.key }))}
+          editAgent={agent}
+          onCreated={() => {
+            setEditConnectionOpen(false);
+            void loadAgent();
+          }}
+        />
+      ) : null}
     </PageContainer>
   );
 }

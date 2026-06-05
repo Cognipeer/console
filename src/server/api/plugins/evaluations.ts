@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer';
 import type { FastifyPluginAsync } from 'fastify';
 import type {
   EvaluationTargetKind,
@@ -5,6 +6,9 @@ import type {
   IEvaluationDatasetItem,
 } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
+import type { DatasetGenerationSource } from '@/lib/services/evaluation/datasetGeneration';
+import { enqueueDatasetGeneration } from '@/lib/services/evaluation/datasetGenerationJob';
+import { convertFileToText } from '@/lib/services/rag/ragService';
 import {
   createDataset,
   createSuite,
@@ -20,11 +24,11 @@ import {
   listRuns,
   listSuites,
   listTargets,
-  runSuite,
   updateDataset,
   updateSuite,
   updateTarget,
 } from '@/lib/services/evaluation/service';
+import { enqueueSuiteRun } from '@/lib/services/evaluation/evaluationRunJob';
 import {
   readJsonBody,
   requireProjectContextForRequest,
@@ -36,7 +40,7 @@ import {
 const logger = createLogger('api:evaluations');
 
 const VALID_KINDS: EvaluationTargetKind[] = ['agent', 'model', 'external'];
-const VALID_SCORERS = ['assertion', 'llm-judge'];
+const VALID_SCORERS = ['assertion', 'llm-judge', 'semantic'];
 
 function internalError(reply: import('fastify').FastifyReply, error: unknown) {
   return (
@@ -189,6 +193,78 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
+  // Generate a Q&A dataset from a RAG module's documents, pasted text, or an
+  // uploaded file, then persist it as a `generated` dataset.
+  app.post('/evaluation/datasets/generate', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const body = readJsonBody<Record<string, unknown>>(request);
+
+      if (typeof body.name !== 'string' || body.name.trim() === '') {
+        return reply.code(400).send({ error: 'name is required' });
+      }
+      if (typeof body.generationModelKey !== 'string' || body.generationModelKey === '') {
+        return reply.code(400).send({ error: 'generationModelKey is required' });
+      }
+      const sourceType = body.sourceType;
+      if (sourceType !== 'rag' && sourceType !== 'text' && sourceType !== 'file') {
+        return reply.code(400).send({ error: 'sourceType must be "rag", "text", or "file"' });
+      }
+
+      let source: DatasetGenerationSource;
+      if (sourceType === 'rag') {
+        if (typeof body.ragModuleKey !== 'string' || body.ragModuleKey === '') {
+          return reply.code(400).send({ error: 'ragModuleKey is required for sourceType "rag"' });
+        }
+        source = {
+          type: 'rag',
+          ragModuleKey: body.ragModuleKey,
+          maxChunks: typeof body.maxChunks === 'number' ? body.maxChunks : undefined,
+        };
+      } else if (sourceType === 'text') {
+        if (typeof body.text !== 'string' || body.text.trim() === '') {
+          return reply.code(400).send({ error: 'text is required for sourceType "text"' });
+        }
+        source = { type: 'text', text: body.text };
+      } else {
+        if (typeof body.fileData !== 'string' || typeof body.fileName !== 'string') {
+          return reply.code(400).send({ error: 'fileName and fileData are required for sourceType "file"' });
+        }
+        const payload = body.fileData.startsWith('data:')
+          ? body.fileData.slice(body.fileData.indexOf(',') + 1)
+          : body.fileData;
+        const buffer = Buffer.from(payload, 'base64');
+        const text = await convertFileToText(
+          body.fileName,
+          buffer,
+          typeof body.contentType === 'string' ? body.contentType : undefined,
+        );
+        source = { type: 'text', text };
+      }
+
+      // Enqueue async generation; returns a pending dataset immediately so the
+      // request never blocks on the (potentially long) model calls.
+      const dataset = await enqueueDatasetGeneration({
+        tenantDbName: session.tenantDbName,
+        tenantId: session.tenantId,
+        projectId,
+        createdBy: session.userId,
+        name: body.name.trim(),
+        description: typeof body.description === 'string' ? body.description : undefined,
+        generationModelKey: body.generationModelKey,
+        source,
+        sourceKind: sourceType,
+        count: typeof body.count === 'number' && body.count > 0 ? body.count : 10,
+        language: typeof body.language === 'string' ? body.language : undefined,
+      });
+
+      return reply.code(202).send({ dataset, status: 'pending' });
+    } catch (error) {
+      logger.error('Generate evaluation dataset error', { error });
+      return sendProjectContextError(reply, error) ?? internalError(reply, error);
+    }
+  }));
+
   app.get('/evaluation/datasets/:id', withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
@@ -271,6 +347,7 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
         datasetKey: body.datasetKey,
         scorers,
         judgeModelKey: typeof body.judgeModelKey === 'string' ? body.judgeModelKey : undefined,
+        embeddingModelKey: typeof body.embeddingModelKey === 'string' ? body.embeddingModelKey : undefined,
         runConfig,
         projectId,
       });
@@ -309,6 +386,7 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
         datasetKey: body.datasetKey as string | undefined,
         scorers: scorers ?? undefined,
         judgeModelKey: body.judgeModelKey as string | undefined,
+        embeddingModelKey: body.embeddingModelKey as string | undefined,
       });
       if (!suite) return reply.code(404).send({ error: 'Suite not found' });
       return reply.code(200).send({ suite });
@@ -336,18 +414,24 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { key } = request.params as { key: string };
-      const run = await runSuite({
+      // Enqueue + return immediately (status 'pending'); the queue consumer runs
+      // it in the background so the dashboard never blocks on a long run. The UI
+      // polls the run detail endpoint to watch progress.
+      const run = await enqueueSuiteRun({
         tenantDbName: session.tenantDbName,
         tenantId: session.tenantId,
         projectId,
         createdBy: session.userId,
         suiteKey: key,
       });
-      return reply.code(201).send({ run });
+      return reply.code(202).send({ run });
     } catch (error) {
       logger.error('Run evaluation suite error', { error });
       if (error instanceof Error && error.message.toLowerCase().includes('not found')) {
         return reply.code(404).send({ error: error.message });
+      }
+      if (error instanceof Error && error.message.toLowerCase().includes('already in progress')) {
+        return reply.code(409).send({ error: error.message });
       }
       return internalError(reply, error);
     }

@@ -125,6 +125,9 @@ async function runOnce(manual = false): Promise<{
                 {
                   trigger: 'schedule',
                   triggerActor: 'system:scheduler',
+                  // Don't block the scheduler tick on the crawl — enqueue and
+                  // move on; completion is surfaced via the job record/webhook.
+                  mode: 'async',
                 },
               );
             } catch (err) {

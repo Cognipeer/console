@@ -140,10 +140,10 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         INSERT INTO ${TABLES.modelUsageLogs}
         (id, tenantId, projectId, modelKey, modelId, requestId, route, status,
          providerRequest, providerResponse, errorMessage, latencyMs,
-         inputTokens, outputTokens, cachedInputTokens, totalTokens, toolCalls, cacheHit, pricingSnapshot, createdAt)
+         inputTokens, outputTokens, cachedInputTokens, totalTokens, toolCalls, cacheHit, pricingSnapshot, routing, createdAt)
         VALUES (@id, @tenantId, @projectId, @modelKey, @modelId, @requestId, @route, @status,
          @providerRequest, @providerResponse, @errorMessage, @latencyMs,
-         @inputTokens, @outputTokens, @cachedInputTokens, @totalTokens, @toolCalls, @cacheHit, @pricingSnapshot, @createdAt)
+         @inputTokens, @outputTokens, @cachedInputTokens, @totalTokens, @toolCalls, @cacheHit, @pricingSnapshot, @routing, @createdAt)
       `).run({
         id,
         tenantId: log.tenantId,
@@ -164,6 +164,7 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         toolCalls: log.toolCalls ?? 0,
         cacheHit: this.toBoolInt(log.cacheHit),
         pricingSnapshot: log.pricingSnapshot ? this.toJson(log.pricingSnapshot) : null,
+        routing: log.routing ? this.toJson(log.routing) : null,
         createdAt: now,
       });
 
@@ -327,6 +328,7 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         toolCalls: (r.toolCalls as number) ?? 0,
         cacheHit: this.fromBoolInt(r.cacheHit),
         pricingSnapshot: r.pricingSnapshot ? this.parseJson(r.pricingSnapshot, undefined) : undefined,
+        routing: r.routing ? this.parseJson(r.routing, undefined) : undefined,
         createdAt: this.toDate(r.createdAt),
       };
     }

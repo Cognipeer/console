@@ -3,14 +3,16 @@
  * target output, returning one ScoreResult per scorer.
  */
 
-import type { DatasetItem, JudgeInvoker, ScorerConfig, ScorerType, ScoreResult, TargetOutput } from '../types';
+import type { DatasetItem, EmbedInvoker, JudgeInvoker, ScorerConfig, ScorerType, ScoreResult, TargetOutput } from '../types';
 import { scoreAssertion } from './assertionScorer';
 import { scoreLlmJudge } from './llmJudgeScorer';
+import { scoreSemantic } from './semanticScorer';
 
-export const SUPPORTED_SCORERS: ScorerType[] = ['assertion', 'llm-judge'];
+export const SUPPORTED_SCORERS: ScorerType[] = ['assertion', 'llm-judge', 'semantic'];
 
 export interface ScorerDeps {
   invokeJudge?: JudgeInvoker;
+  invokeEmbed?: EmbedInvoker;
 }
 
 export async function runScorers(
@@ -38,6 +40,19 @@ export async function runScorers(
           results.push(await scoreLlmJudge(item, output, config, deps.invokeJudge));
         }
         break;
+      case 'semantic':
+        if (!deps.invokeEmbed) {
+          results.push({
+            scorerType: 'semantic',
+            score: 0,
+            passed: false,
+            weight: config.weight ?? 1,
+            error: 'no embed invoker configured',
+          });
+        } else {
+          results.push(await scoreSemantic(item, output, config, deps.invokeEmbed));
+        }
+        break;
       default: {
         // Exhaustiveness guard — a new ScorerConfig variant must be handled.
         const _never: never = config;
@@ -50,3 +65,4 @@ export async function runScorers(
 
 export { scoreAssertion } from './assertionScorer';
 export { scoreLlmJudge, buildJudgePrompt, parseJudgeResponse, normaliseScore } from './llmJudgeScorer';
+export { scoreSemantic, cosineSimilarity } from './semanticScorer';

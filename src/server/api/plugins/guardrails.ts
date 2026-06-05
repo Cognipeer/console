@@ -1,5 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify';
-import type { GuardrailAction, GuardrailTarget, GuardrailType } from '@/lib/database';
+import type { GuardrailAction, GuardrailType } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
 import {
@@ -43,7 +43,6 @@ type EvaluationsQuery = {
 };
 
 const VALID_ACTIONS: GuardrailAction[] = ['block', 'warn', 'flag'];
-const VALID_TARGETS: GuardrailTarget[] = ['input', 'output', 'both'];
 const VALID_TYPES: GuardrailType[] = ['preset', 'custom'];
 
 export const guardrailsApiPlugin: FastifyPluginAsync = async (app) => {
@@ -96,10 +95,6 @@ export const guardrailsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'action must be "block", "warn", or "flag"' });
       }
 
-      if (body.target !== undefined && !VALID_TARGETS.includes(body.target as GuardrailTarget)) {
-        return reply.code(400).send({ error: 'target must be "input", "output", or "both"' });
-      }
-
       if (body.type === 'custom' && (typeof body.customPrompt !== 'string' || body.customPrompt.trim() === '')) {
         return reply.code(400).send({ error: 'customPrompt is required for custom guardrails' });
       }
@@ -117,7 +112,6 @@ export const guardrailsApiPlugin: FastifyPluginAsync = async (app) => {
           name: body.name.trim(),
           policy: body.policy as Record<string, unknown> | undefined,
           projectId,
-          target: (body.target as GuardrailTarget | undefined) ?? 'input',
           type: body.type as GuardrailType,
         },
       );
@@ -203,10 +197,6 @@ export const guardrailsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'action must be "block", "warn", or "flag"' });
       }
 
-      if (body.target !== undefined && !VALID_TARGETS.includes(body.target as GuardrailTarget)) {
-        return reply.code(400).send({ error: 'target must be "input", "output", or "both"' });
-      }
-
       const guardrail = await updateGuardrail(session.tenantDbName, id, session.userId, {
         action: body.action as GuardrailAction | undefined,
         customPrompt: body.customPrompt as string | undefined,
@@ -215,7 +205,6 @@ export const guardrailsApiPlugin: FastifyPluginAsync = async (app) => {
         modelKey: body.modelKey as string | undefined,
         name: body.name as string | undefined,
         policy: body.policy as Record<string, unknown> | undefined,
-        target: body.target as GuardrailTarget | undefined,
       });
 
       if (!guardrail) {

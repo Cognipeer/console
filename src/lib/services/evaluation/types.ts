@@ -75,6 +75,9 @@ export type TargetInvoker = (item: DatasetItem) => Promise<TargetOutput>;
 /** Injected: how to call a judge model. Returns the raw completion text. */
 export type JudgeInvoker = (messages: EvalMessage[]) => Promise<string>;
 
+/** Injected: how to embed a batch of texts. Returns one vector per input. */
+export type EmbedInvoker = (texts: string[]) => Promise<number[][]>;
+
 // ── Scorer configs (discriminated union) ──────────────────────────────
 
 export interface AssertionScorerConfig {
@@ -92,7 +95,14 @@ export interface LlmJudgeScorerConfig {
   threshold?: number;
 }
 
-export type ScorerConfig = AssertionScorerConfig | LlmJudgeScorerConfig;
+export interface SemanticScorerConfig {
+  type: 'semantic';
+  weight?: number;
+  /** Pass threshold on the cosine similarity in [0..1] (default 0.75). */
+  threshold?: number;
+}
+
+export type ScorerConfig = AssertionScorerConfig | LlmJudgeScorerConfig | SemanticScorerConfig;
 export type ScorerType = ScorerConfig['type'];
 
 // ── Results ────────────────────────────────────────────────────────────

@@ -70,6 +70,21 @@ export type CrawlerView = Omit<ICrawler, '_id'> & { id: string };
 export type CrawlJobView = Omit<ICrawlJob, '_id'> & { id: string };
 export type CrawlResultView = Omit<ICrawlResult, '_id'> & { id: string };
 
+/**
+ * Dispatch mode for a run.
+ *
+ *  - `sync`  : block until the crawl finishes (the call returns once every
+ *              page has been processed). Default at the service layer so
+ *              programmatic callers and tests keep their existing semantics.
+ *  - `async` : fire-and-forget — enqueue the job, return immediately with
+ *              `status: 'queued'`, and let the queue consumer run it in the
+ *              background. Completion is surfaced by polling the job record
+ *              and/or the `callbackUrl` webhook. This is what the HTTP API
+ *              (and therefore the dashboard UI) uses so the request returns
+ *              right away instead of hanging for the whole crawl.
+ */
+export type CrawlRunMode = 'sync' | 'async';
+
 export interface RunCrawlerOptions {
   /** URLs to crawl for this run. Overrides the container's saved URL list. */
   urls?: string[];
@@ -77,6 +92,8 @@ export interface RunCrawlerOptions {
   seeds?: string[];
   /** Override webhook receiver for this specific run. */
   callbackUrl?: string;
+  /** Sync (block) or async (enqueue + callback). Defaults to `sync`. */
+  mode?: CrawlRunMode;
   trigger?: ICrawlJob['trigger'];
   triggerActor: string;
   metadata?: Record<string, unknown>;
@@ -95,6 +112,8 @@ export interface AdhocCrawlInput {
   rag?: ICrawlerRagBinding;
   webhook?: ICrawlerWebhookConfig;
   callbackUrl?: string;
+  /** Sync (block) or async (enqueue + callback). Defaults to `sync`. */
+  mode?: CrawlRunMode;
   triggerActor: string;
   metadata?: Record<string, unknown>;
 }

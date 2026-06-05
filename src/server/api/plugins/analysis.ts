@@ -17,18 +17,20 @@ import {
   listConversations,
   listDefinitions,
   listRuns,
-  runDefinition,
   updateDefinition,
   type CreateConversationInput,
 } from '@/lib/services/analysis/service';
+import { enqueueDefinitionRun } from '@/lib/services/analysis/analysisRunJob';
 import { validateCron } from '@/lib/services/analysis/schedulePlanner';
 import {
   readJsonBody,
+  safeReadJsonBody,
   requireProjectContextForRequest,
   requireSessionContext,
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
+import type { RunSelection, RunSelectionStrategy } from '@/lib/services/analysis/service';
 
 const logger = createLogger('api:analysis');
 
@@ -98,18 +100,51 @@ function sanitizeTranscript(raw: unknown): IAnalysisTranscriptMessage[] | null {
   return messages;
 }
 
-function toConversationInput(raw: Record<string, unknown>): CreateConversationInput | null {
+function sanitizeTags(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const tags = raw
+    .filter((t): t is string => typeof t === 'string')
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0);
+  // de-dupe, preserve order
+  const seen = new Set<string>();
+  const unique = tags.filter((t) => (seen.has(t) ? false : (seen.add(t), true)));
+  return unique.length > 0 ? unique : undefined;
+}
+
+function toConversationInput(raw: Record<string, unknown>, defaultTags?: string[]): CreateConversationInput | null {
   const transcript = sanitizeTranscript(raw.transcript);
   if (!transcript) return null;
+  const ownTags = sanitizeTags(raw.tags);
+  const merged = sanitizeTags([...(defaultTags ?? []), ...(ownTags ?? [])]);
   return {
     key: typeof raw.key === 'string' ? raw.key : undefined,
     name: typeof raw.name === 'string' ? raw.name : undefined,
     description: typeof raw.description === 'string' ? raw.description : undefined,
     transcript,
     source: raw.source === 'platform' || raw.source === 'manual' ? raw.source : 'imported',
+    tags: merged,
     metadata: raw.metadata && typeof raw.metadata === 'object' ? (raw.metadata as Record<string, unknown>) : undefined,
     occurredAt: typeof raw.occurredAt === 'string' ? new Date(raw.occurredAt) : undefined,
     referenceFields: raw.referenceFields && typeof raw.referenceFields === 'object' ? (raw.referenceFields as Record<string, unknown>) : undefined,
+  };
+}
+
+const VALID_SELECTION_STRATEGIES: RunSelectionStrategy[] = ['all', 'tag', 'random', 'unanalyzed', 'keys'];
+
+function sanitizeSelection(raw: unknown): RunSelection | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const s = raw as Record<string, unknown>;
+  if (typeof s.strategy !== 'string' || !VALID_SELECTION_STRATEGIES.includes(s.strategy as RunSelectionStrategy)) return undefined;
+  const conversationKeys = Array.isArray(s.conversationKeys)
+    ? (s.conversationKeys as unknown[]).filter((k): k is string => typeof k === 'string')
+    : undefined;
+  const sampleSize = Number(s.sampleSize);
+  return {
+    strategy: s.strategy as RunSelectionStrategy,
+    tag: typeof s.tag === 'string' && s.tag.trim() ? s.tag.trim() : undefined,
+    sampleSize: Number.isFinite(sampleSize) && sampleSize > 0 ? Math.floor(sampleSize) : undefined,
+    conversationKeys,
   };
 }
 
@@ -224,11 +259,12 @@ export const analysisApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/analysis/conversations', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
-      const query = (request.query ?? {}) as { search?: string; limit?: string; skip?: string };
+      const query = (request.query ?? {}) as { search?: string; tag?: string; limit?: string; skip?: string };
       const conversations = await listConversations(session.tenantDbName, {
         projectId,
         search: query.search,
-        limit: query.limit ? Math.min(Number.parseInt(query.limit, 10), 500) : undefined,
+        tag: query.tag,
+        limit: query.limit ? Math.min(Number.parseInt(query.limit, 10), 10000) : 5000,
         skip: query.skip ? Number.parseInt(query.skip, 10) : undefined,
       });
       return reply.code(200).send({ conversations });
@@ -241,10 +277,13 @@ export const analysisApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const body = readJsonBody<Record<string, unknown>>(request);
+      // Optional top-level `tags` applies to every conversation in the batch
+      // (merged with any per-conversation tags) — handy for the ingest modal.
+      const defaultTags = sanitizeTags(body.tags);
       const rawList = Array.isArray(body.conversations) ? body.conversations : [body];
       const inputs: CreateConversationInput[] = [];
       for (const raw of rawList) {
-        const input = toConversationInput(raw as Record<string, unknown>);
+        const input = toConversationInput(raw as Record<string, unknown>, defaultTags);
         if (!input) {
           return reply.code(400).send({ error: 'each conversation needs a transcript array of { role, content }' });
         }
@@ -291,23 +330,36 @@ export const analysisApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { key } = request.params as { key: string };
-      const body = readJsonBody<Record<string, unknown>>(request);
+      // Body is optional (a bare "run everything" POST sends none), so use the
+      // non-throwing reader — readJsonBody would 500 on an empty body.
+      const body = safeReadJsonBody<Record<string, unknown>>(request);
+      const selection = sanitizeSelection(body.selection);
       const conversationKeys = Array.isArray(body.conversationKeys)
         ? (body.conversationKeys as unknown[]).filter((k): k is string => typeof k === 'string')
         : undefined;
-      const run = await runDefinition({
+      // Enqueue + return immediately (status 'pending'); the queue consumer runs
+      // it in the background so the dashboard never blocks. The UI polls the run
+      // detail endpoint to watch progress.
+      const run = await enqueueDefinitionRun({
         tenantDbName: session.tenantDbName,
         tenantId: session.tenantId,
         projectId,
         createdBy: session.userId,
         definitionKey: key,
+        selection,
         conversationKeys,
       });
-      return reply.code(201).send({ run });
+      return reply.code(202).send({ run });
     } catch (error) {
       logger.error('Run analysis definition error', { error });
       if (error instanceof Error && error.message.toLowerCase().includes('not found')) {
         return reply.code(404).send({ error: error.message });
+      }
+      if (error instanceof Error && error.message.toLowerCase().includes('no conversations')) {
+        return reply.code(400).send({ error: error.message });
+      }
+      if (error instanceof Error && error.message.toLowerCase().includes('already in progress')) {
+        return reply.code(409).send({ error: error.message });
       }
       return internalError(reply, error);
     }

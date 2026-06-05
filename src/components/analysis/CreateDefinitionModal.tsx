@@ -1,21 +1,27 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ActionIcon,
+  Alert,
   Button,
   Checkbox,
-  Divider,
   Group,
-  Modal,
   Select,
   Stack,
-  Text,
   Textarea,
   TextInput,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { IconPlus, IconTrash } from '@tabler/icons-react';
+import { IconCheck, IconClipboardText, IconPlus, IconTrash } from '@tabler/icons-react';
+import FormShell, {
+  Checklist,
+  FormField,
+  FormRow,
+  FormSection,
+  SummaryGroup,
+  SummaryKV,
+} from '@/components/common/ui/FormShell';
 import type { AnalysisDefinitionView, AnalysisFieldType, ModelOption } from './types';
 
 interface CreateDefinitionModalProps {
@@ -23,6 +29,8 @@ interface CreateDefinitionModalProps {
   onClose: () => void;
   onCreated: (definition: AnalysisDefinitionView) => void;
   models?: ModelOption[];
+  /** When set, the modal edits this definition (PATCH) instead of creating one. */
+  editing?: AnalysisDefinitionView | null;
 }
 
 interface FieldRow {
@@ -41,7 +49,8 @@ const TYPE_OPTIONS = [
 
 const emptyField = (): FieldRow => ({ key: '', type: 'string', required: false, enumValues: '' });
 
-export default function CreateDefinitionModal({ opened, onClose, onCreated, models = [] }: CreateDefinitionModalProps) {
+export default function CreateDefinitionModal({ opened, onClose, onCreated, models = [], editing = null }: CreateDefinitionModalProps) {
+  const isEdit = Boolean(editing);
   const [loading, setLoading] = useState(false);
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
@@ -64,7 +73,33 @@ export default function CreateDefinitionModal({ opened, onClose, onCreated, mode
       setModeStore(true); setModeAccuracy(false); setModeJudge(false);
       setJudgeRubric(''); setJudgeModelKey('');
       setScheduleEnabled(false); setScheduleCron('0 2 * * *'); setError(null);
+      return;
     }
+    if (editing) {
+      setName(editing.name ?? '');
+      setDescription(editing.description ?? '');
+      setInstructions(editing.extractionInstructions ?? '');
+      setFields(
+        editing.fieldSet.length > 0
+          ? editing.fieldSet.map((f) => ({
+              key: f.key,
+              type: f.type,
+              required: Boolean(f.required),
+              enumValues: (f.enumValues ?? []).join(', '),
+            }))
+          : [emptyField()],
+      );
+      setExtractionModelKey(editing.extractionModelKey ?? '');
+      setModeStore(Boolean(editing.modes.store));
+      setModeAccuracy(Boolean(editing.modes.accuracy));
+      setModeJudge(Boolean(editing.modes.judge));
+      setJudgeRubric(editing.modes.judge?.rubric ?? '');
+      setJudgeModelKey(editing.judgeModelKey ?? '');
+      setScheduleEnabled(Boolean(editing.schedule?.enabled));
+      setScheduleCron(editing.schedule?.cron || '0 2 * * *');
+      setError(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened]);
 
   const updateField = (idx: number, patch: Partial<FieldRow>) => {
@@ -97,26 +132,29 @@ export default function CreateDefinitionModal({ opened, onClose, onCreated, mode
         accuracy: modeAccuracy || undefined,
         judge: modeJudge ? { rubric: judgeRubric.trim() } : undefined,
       };
-      const res = await fetch('/api/analysis/definitions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: name.trim(),
-          description: description || undefined,
-          fieldSet,
-          extractionInstructions: instructions || undefined,
-          modes,
-          extractionModelKey,
-          judgeModelKey: modeJudge ? judgeModelKey : undefined,
-          schedule: scheduleEnabled ? { cron: scheduleCron.trim(), enabled: true } : undefined,
-        }),
-      });
+      const res = await fetch(
+        isEdit ? `/api/analysis/definitions/${editing!.id}` : '/api/analysis/definitions',
+        {
+          method: isEdit ? 'PATCH' : 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: name.trim(),
+            description: description || undefined,
+            fieldSet,
+            extractionInstructions: instructions || undefined,
+            modes,
+            extractionModelKey,
+            judgeModelKey: modeJudge ? judgeModelKey : undefined,
+            schedule: scheduleEnabled ? { cron: scheduleCron.trim(), enabled: true } : { enabled: false, cron: scheduleCron.trim() },
+          }),
+        },
+      );
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || 'Failed to create definition');
+        throw new Error(data.error || `Failed to ${isEdit ? 'update' : 'create'} definition`);
       }
       const data = await res.json();
-      notifications.show({ title: 'Definition created', message: `"${data.definition.name}" was created`, color: 'teal' });
+      notifications.show({ title: isEdit ? 'Definition updated' : 'Definition created', message: `"${data.definition.name}" was ${isEdit ? 'updated' : 'created'}`, color: 'teal' });
       onCreated(data.definition);
       onClose();
     } catch (err) {
@@ -126,13 +164,63 @@ export default function CreateDefinitionModal({ opened, onClose, onCreated, mode
     }
   };
 
-  return (
-    <Modal opened={opened} onClose={onClose} title="New analysis definition" centered size="xl">
-      <Stack gap="md">
-        <TextInput label="Name" placeholder="e.g. Call intent & resolution" withAsterisk value={name} onChange={(e) => setName(e.currentTarget.value)} />
-        <Textarea label="Description" placeholder="What does this analysis capture?" autosize minRows={1} value={description} onChange={(e) => setDescription(e.currentTarget.value)} />
+  const namedFields = useMemo(() => fields.filter((f) => f.key.trim()), [fields]);
+  const validName = name.trim().length > 0;
+  const validFields = namedFields.length > 0;
+  const validModel = Boolean(extractionModelKey);
+  const validJudge = !modeJudge || (judgeRubric.trim().length > 0 && Boolean(judgeModelKey));
+  const canSubmit = validName && validFields && validModel && validJudge;
 
-        <Divider label="Fields to extract" labelPosition="left" />
+  const modeLabels = ['extract', modeStore ? 'store' : null, modeAccuracy ? 'accuracy' : null, modeJudge ? 'judge' : null]
+    .filter(Boolean).join(', ');
+
+  const checklist = [
+    { id: 'name', label: 'Name provided', done: validName },
+    { id: 'fields', label: `${namedFields.length} field(s) defined`, done: validFields },
+    { id: 'model', label: 'Extraction model selected', done: validModel },
+    { id: 'judge', label: modeJudge ? 'Judge rubric + model set' : 'Judge mode off', done: validJudge },
+  ];
+
+  const summary = (
+    <SummaryGroup title="Definition">
+      <SummaryKV label="Name" value={name || '—'} />
+      <SummaryKV label="Fields" value={String(namedFields.length)} />
+      <SummaryKV label="Modes" value={modeLabels} />
+      <SummaryKV label="Model" value={extractionModelKey || '—'} />
+      <SummaryKV label="Schedule" value={scheduleEnabled ? scheduleCron : 'manual'} />
+      <Checklist items={checklist} />
+    </SummaryGroup>
+  );
+
+  return (
+    <FormShell
+      open={opened}
+      onClose={onClose}
+      icon={<IconClipboardText size={16} />}
+      title={isEdit ? 'Edit analysis definition' : 'New analysis definition'}
+      subtitle="Declare the fields to extract from conversations and which modes to apply."
+      summary={summary}
+      footerStatus={`${checklist.filter((c) => c.done).length} of ${checklist.length} ready`}
+      primaryAction={{
+        label: isEdit ? 'Save changes' : 'Create definition',
+        icon: <IconCheck size={13} />,
+        loading,
+        disabled: !canSubmit,
+        onClick: () => void handleSubmit(),
+      }}
+    >
+      <FormSection number={1} title="Identity" done={validName}>
+        <FormRow cols={1}>
+          <FormField label="Name" required>
+            <TextInput placeholder="e.g. Call intent & resolution" value={name} onChange={(e) => setName(e.currentTarget.value)} />
+          </FormField>
+          <FormField label="Description" optional>
+            <Textarea placeholder="What does this analysis capture?" autosize minRows={1} value={description} onChange={(e) => setDescription(e.currentTarget.value)} />
+          </FormField>
+        </FormRow>
+      </FormSection>
+
+      <FormSection number={2} title="Fields to extract" done={validFields}>
         <Stack gap="xs">
           {fields.map((f, idx) => (
             <Group key={idx} align="flex-end" gap="xs" wrap="nowrap">
@@ -151,39 +239,44 @@ export default function CreateDefinitionModal({ opened, onClose, onCreated, mode
             Add field
           </Button>
         </Stack>
+      </FormSection>
 
-        <Textarea label="Extraction instructions" placeholder="Extra guidance for the extractor (optional)" autosize minRows={1} value={instructions} onChange={(e) => setInstructions(e.currentTarget.value)} />
-        <Select label="Extraction model" placeholder="Select a model…" data={models} searchable withAsterisk value={extractionModelKey} onChange={(v) => setExtractionModelKey(v ?? '')} />
+      <FormSection number={3} title="Extraction" done={validModel}>
+        <FormField label="Extraction instructions" optional>
+          <Textarea placeholder="Extra guidance for the extractor (optional)" autosize minRows={1} value={instructions} onChange={(e) => setInstructions(e.currentTarget.value)} />
+        </FormField>
+        <FormField label="Extraction model" required>
+          <Select placeholder="Select a model…" data={models} searchable value={extractionModelKey} onChange={(v) => setExtractionModelKey(v ?? '')} />
+        </FormField>
+      </FormSection>
 
-        <Divider label="Modes" labelPosition="left" />
-        <Checkbox label="Store — write extracted fields back onto each conversation" checked={modeStore} onChange={(e) => setModeStore(e.currentTarget.checked)} />
-        <Checkbox label="Accuracy — compare extracted fields against each conversation's reference fields" checked={modeAccuracy} onChange={(e) => setModeAccuracy(e.currentTarget.checked)} />
-        <Checkbox label="Judge — grade conversation quality against a rubric" checked={modeJudge} onChange={(e) => setModeJudge(e.currentTarget.checked)} />
+      <FormSection number={4} title="Modes" done={validJudge}>
+        <Stack gap="xs">
+          <Checkbox label="Store — write extracted fields back onto each conversation" checked={modeStore} onChange={(e) => setModeStore(e.currentTarget.checked)} />
+          <Checkbox label="Accuracy — compare extracted fields against each conversation's reference fields" checked={modeAccuracy} onChange={(e) => setModeAccuracy(e.currentTarget.checked)} />
+          <Checkbox label="Judge — grade conversation quality against a rubric" checked={modeJudge} onChange={(e) => setModeJudge(e.currentTarget.checked)} />
+        </Stack>
         {modeJudge && (
           <>
-            <Textarea label="Judge rubric" placeholder="What does a good conversation look like?" autosize minRows={2} withAsterisk value={judgeRubric} onChange={(e) => setJudgeRubric(e.currentTarget.value)} />
-            <Select label="Judge model" placeholder="Select a model…" data={models} searchable withAsterisk value={judgeModelKey} onChange={(v) => setJudgeModelKey(v ?? '')} />
+            <FormField label="Judge rubric" required>
+              <Textarea placeholder="What does a good conversation look like?" autosize minRows={2} value={judgeRubric} onChange={(e) => setJudgeRubric(e.currentTarget.value)} />
+            </FormField>
+            <FormField label="Judge model" required>
+              <Select placeholder="Select a model…" data={models} searchable value={judgeModelKey} onChange={(v) => setJudgeModelKey(v ?? '')} />
+            </FormField>
           </>
         )}
+      </FormSection>
 
-        <Divider label="Schedule" labelPosition="left" />
+      <FormSection number={5} title="Schedule">
         <Checkbox label="Run automatically on a schedule" checked={scheduleEnabled} onChange={(e) => setScheduleEnabled(e.currentTarget.checked)} />
         {scheduleEnabled && (
-          <TextInput
-            label="Cron expression (UTC)"
-            placeholder="0 2 * * *"
-            description="Standard 5-field cron, evaluated in UTC. Example: 0 2 * * * runs at 02:00 every day."
-            value={scheduleCron}
-            onChange={(e) => setScheduleCron(e.currentTarget.value)}
-          />
+          <FormField label="Cron expression (UTC)" hint="Standard 5-field cron, evaluated in UTC. Example: 0 2 * * * runs at 02:00 every day.">
+            <TextInput placeholder="0 2 * * *" value={scheduleCron} onChange={(e) => setScheduleCron(e.currentTarget.value)} />
+          </FormField>
         )}
-
-        {error && <Text c="red" size="sm">{error}</Text>}
-        <Group justify="flex-end" mt="sm">
-          <Button variant="default" onClick={onClose}>Cancel</Button>
-          <Button color="teal" loading={loading} onClick={handleSubmit}>Create definition</Button>
-        </Group>
-      </Stack>
-    </Modal>
+        {error && <Alert color="red" variant="light" mt="sm">{error}</Alert>}
+      </FormSection>
+    </FormShell>
   );
 }

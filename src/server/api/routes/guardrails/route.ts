@@ -8,7 +8,7 @@ import {
   buildDefaultPresetPolicy,
 } from '@/lib/services/guardrail';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
-import type { GuardrailType, GuardrailAction, GuardrailTarget } from '@/lib/database';
+import type { GuardrailType, GuardrailAction } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 
 const logger = createLogger('guardrails');
@@ -101,11 +101,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'action must be "block", "warn", or "flag"' }, { status: 400 });
     }
 
-    const validTargets: GuardrailTarget[] = ['input', 'output', 'both'];
-    if (body.target && !validTargets.includes(body.target)) {
-      return NextResponse.json({ error: 'target must be "input", "output", or "both"' }, { status: 400 });
-    }
-
     if (body.type === 'custom' && (!body.customPrompt || !body.customPrompt.trim())) {
       return NextResponse.json({ error: 'customPrompt is required for custom guardrails' }, { status: 400 });
     }
@@ -114,7 +109,6 @@ export async function POST(request: NextRequest) {
       name: body.name.trim(),
       description: body.description?.trim(),
       type: body.type,
-      target: body.target ?? 'input',
       action: body.action ?? 'block',
       enabled: body.enabled ?? true,
       modelKey: body.modelKey,

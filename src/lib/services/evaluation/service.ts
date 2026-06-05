@@ -22,7 +22,7 @@ import type {
 } from '@/lib/database';
 import { runEvaluation } from './runner';
 import type { DatasetItem, RunItemResult, ScorerConfig } from './types';
-import { buildJudgeInvoker, buildTargetInvoker, type EvaluationModelContext } from './adapters';
+import { buildEmbedInvoker, buildJudgeInvoker, buildTargetInvoker, type EvaluationModelContext } from './adapters';
 
 const SLUG_OPTIONS = { lower: true, strict: true, trim: true };
 const MAX_KEY_ATTEMPTS = 50;
@@ -55,6 +55,9 @@ async function generateUniqueKey(desired: string, exists: (key: string) => Promi
 function mapScorer(config: IEvaluationScorerConfig): ScorerConfig {
   if (config.type === 'llm-judge') {
     return { type: 'llm-judge', weight: config.weight, rubric: config.rubric ?? '', threshold: config.threshold };
+  }
+  if (config.type === 'semantic') {
+    return { type: 'semantic', weight: config.weight, threshold: config.threshold };
   }
   return { type: 'assertion', weight: config.weight };
 }
@@ -158,6 +161,7 @@ export interface CreateDatasetInput {
   source?: EvaluationDatasetSource;
   items?: IEvaluationDatasetItem[];
   projectId?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export async function createDataset(
@@ -177,6 +181,7 @@ export async function createDataset(
     description: input.description,
     source: input.source ?? 'manual',
     items: input.items ?? [],
+    metadata: input.metadata,
     createdBy,
   });
   return toView(dataset);
@@ -202,7 +207,7 @@ export async function updateDataset(
   tenantDbName: string,
   id: string,
   updatedBy: string,
-  data: Partial<Pick<IEvaluationDataset, 'name' | 'description' | 'source' | 'items' | 'projectId'>>,
+  data: Partial<Pick<IEvaluationDataset, 'name' | 'description' | 'source' | 'items' | 'projectId' | 'metadata'>>,
 ): Promise<WithId<IEvaluationDataset> | null> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
@@ -225,6 +230,7 @@ export interface CreateSuiteInput {
   datasetKey: string;
   scorers: IEvaluationScorerConfig[];
   judgeModelKey?: string;
+  embeddingModelKey?: string;
   runConfig?: { concurrency?: number };
   projectId?: string;
 }
@@ -248,6 +254,7 @@ export async function createSuite(
     datasetKey: input.datasetKey,
     scorers: input.scorers,
     judgeModelKey: input.judgeModelKey,
+    embeddingModelKey: input.embeddingModelKey,
     runConfig: input.runConfig,
     createdBy,
   });
@@ -274,7 +281,7 @@ export async function updateSuite(
   tenantDbName: string,
   id: string,
   updatedBy: string,
-  data: Partial<Pick<IEvaluationSuite, 'name' | 'description' | 'targetKey' | 'datasetKey' | 'scorers' | 'judgeModelKey' | 'runConfig' | 'projectId'>>,
+  data: Partial<Pick<IEvaluationSuite, 'name' | 'description' | 'targetKey' | 'datasetKey' | 'scorers' | 'judgeModelKey' | 'embeddingModelKey' | 'runConfig' | 'projectId'>>,
 ): Promise<WithId<IEvaluationSuite> | null> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
@@ -309,12 +316,19 @@ export async function getRun(tenantDbName: string, id: string): Promise<WithId<I
 export interface RunSuiteDeps {
   buildTargetInvoker?: typeof buildTargetInvoker;
   buildJudgeInvoker?: typeof buildJudgeInvoker;
+  buildEmbedInvoker?: typeof buildEmbedInvoker;
 }
 
-export async function runSuite(
-  params: { tenantDbName: string; tenantId: string; projectId?: string; createdBy: string; suiteKey: string },
-  deps: RunSuiteDeps = {},
-): Promise<WithId<IEvaluationRun>> {
+export interface RunSuiteParams {
+  tenantDbName: string;
+  tenantId: string;
+  projectId?: string;
+  createdBy: string;
+  suiteKey: string;
+}
+
+/** Resolve suite/target/dataset, guard against a concurrent run, create a pending run. */
+async function createPendingRun(params: RunSuiteParams, mode: IEvaluationRun['mode']): Promise<WithId<IEvaluationRun>> {
   const { tenantDbName, tenantId, projectId, createdBy, suiteKey } = params;
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
@@ -326,13 +340,14 @@ export async function runSuite(
   const dataset = await db.findEvaluationDatasetByKey(suite.datasetKey, projectId);
   if (!dataset) throw new Error(`Evaluation dataset "${suite.datasetKey}" not found`);
 
-  const items: DatasetItem[] = dataset.items.map((it) => ({
-    id: it.id,
-    input: it.input,
-    expected: it.expected as DatasetItem['expected'],
-    tags: it.tags,
-  }));
-  const scorers: ScorerConfig[] = suite.scorers.map(mapScorer);
+  // Guard against duplicate/concurrent runs of the same suite. Reject if a
+  // recent run is still in progress; stale 'running' rows (>1h, from a hard
+  // crash) are ignored so a suite can never get permanently locked.
+  const inFlight = await db.listEvaluationRuns({ projectId, suiteKey: suite.key, status: 'running', limit: 1 });
+  const recentStart = inFlight[0]?.startedAt ? new Date(inFlight[0].startedAt).getTime() : 0;
+  if (inFlight.length > 0 && Date.now() - recentStart < 60 * 60 * 1000) {
+    throw new Error(`A run for suite "${suite.key}" is already in progress`);
+  }
 
   const run = await db.createEvaluationRun({
     tenantId,
@@ -340,27 +355,80 @@ export async function runSuite(
     suiteKey: suite.key,
     targetKey: target.key,
     datasetKey: dataset.key,
-    status: 'running',
-    mode: 'sync',
-    progress: { total: items.length, completed: 0, failed: 0 },
+    status: 'pending',
+    mode,
+    progress: { total: dataset.items.length, completed: 0, failed: 0 },
     items: [],
     createdBy,
-    startedAt: new Date(),
   });
-  const runId = toView(run).id;
+  return toView(run);
+}
+
+/**
+ * Execute an already-created run to completion. Loads suite/target/dataset
+ * fresh (so the queue payload stays tiny), marks the run running, drives the
+ * engine, and persists the result. Throws on a fatal error so the queue can
+ * record/retry; per-item errors never abort.
+ */
+export async function executeRun(
+  params: RunSuiteParams & { runId: string },
+  deps: RunSuiteDeps = {},
+): Promise<WithId<IEvaluationRun>> {
+  const { tenantDbName, tenantId, projectId, createdBy, suiteKey, runId } = params;
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
 
   try {
-    const ctx: EvaluationModelContext = { tenantDbName, tenantId, projectId: projectId ?? '' };
+    const suite = await db.findEvaluationSuiteByKey(suiteKey, projectId);
+    if (!suite) throw new Error(`Evaluation suite "${suiteKey}" not found`);
+    const target = await db.findEvaluationTargetByKey(suite.targetKey, projectId);
+    if (!target) throw new Error(`Evaluation target "${suite.targetKey}" not found`);
+    const dataset = await db.findEvaluationDatasetByKey(suite.datasetKey, projectId);
+    if (!dataset) throw new Error(`Evaluation dataset "${suite.datasetKey}" not found`);
+
+    const items: DatasetItem[] = dataset.items.map((it) => ({
+      id: it.id,
+      input: it.input,
+      expected: it.expected as DatasetItem['expected'],
+      tags: it.tags,
+    }));
+    const scorers: ScorerConfig[] = suite.scorers.map(mapScorer);
+
+    await db.updateEvaluationRun(runId, { status: 'running', startedAt: new Date() });
+
+    const ctx: EvaluationModelContext = { tenantDbName, tenantId, projectId: projectId ?? '', userId: createdBy };
     const makeTarget = deps.buildTargetInvoker ?? buildTargetInvoker;
     const makeJudge = deps.buildJudgeInvoker ?? buildJudgeInvoker;
+    const makeEmbed = deps.buildEmbedInvoker ?? buildEmbedInvoker;
     const needJudge = scorers.some((s) => s.type === 'llm-judge');
+    const needEmbed = scorers.some((s) => s.type === 'semantic');
 
+    // Persist incremental progress so the dashboard can show step-by-step
+    // results live (throttled to avoid hammering the DB on large datasets).
+    const partial: RunItemResult[] = [];
+    let lastFlush = 0;
     const result = await runEvaluation({
       items,
       scorers,
       invokeTarget: makeTarget(target, ctx),
       invokeJudge: needJudge ? makeJudge(suite.judgeModelKey, ctx) : undefined,
+      invokeEmbed: needEmbed ? makeEmbed(suite.embeddingModelKey, ctx) : undefined,
       config: { concurrency: suite.runConfig?.concurrency },
+      onItem: (item) => {
+        partial.push(item);
+        const now = Date.now();
+        if (now - lastFlush >= 1500) {
+          lastFlush = now;
+          const completed = partial.filter((p) => !p.error).length;
+          const failed = partial.filter((p) => p.error).length;
+          void db
+            .updateEvaluationRun(runId, {
+              progress: { total: items.length, completed, failed },
+              items: partial.map(toRunItem),
+            })
+            .catch(() => {});
+        }
+      },
     });
 
     const updated = await db.updateEvaluationRun(runId, {
@@ -374,7 +442,7 @@ export async function runSuite(
       items: result.items.map(toRunItem),
       finishedAt: new Date(),
     });
-    return toView(updated ?? run);
+    return toView(updated ?? (await db.findEvaluationRunById(runId))!);
   } catch (err) {
     await db.updateEvaluationRun(runId, {
       status: 'failed',
@@ -383,4 +451,15 @@ export async function runSuite(
     });
     throw err;
   }
+}
+
+/** Synchronous run (tests / client API): create + execute, blocks to completion. */
+export async function runSuite(params: RunSuiteParams, deps: RunSuiteDeps = {}): Promise<WithId<IEvaluationRun>> {
+  const run = await createPendingRun(params, 'sync');
+  return executeRun({ ...params, runId: run.id }, deps);
+}
+
+/** Create a pending run and return it immediately for the caller to enqueue. */
+export async function createAsyncRun(params: RunSuiteParams): Promise<WithId<IEvaluationRun>> {
+  return createPendingRun(params, 'async');
 }

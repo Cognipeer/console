@@ -1,7 +1,6 @@
 import type { ObjectId } from 'mongodb';
 import type {
   GuardrailAction,
-  GuardrailTarget,
   GuardrailType,
 } from './types.domain';
 // ── Memory types ─────────────────────────────────────────────────────────
@@ -73,7 +72,8 @@ export interface IGuardrailEvaluationLog {
   guardrailKey: string;
   guardrailName: string;
   guardrailType: GuardrailType;
-  target: GuardrailTarget;
+  /** Phase the evaluation ran in — decided by the binding slot, not the guardrail. */
+  target: 'input' | 'output';
   action: GuardrailAction;
   passed: boolean;
   findings: Array<{
@@ -658,8 +658,8 @@ export type OcrOutputKind = 'full_text' | 'summary' | 'structured';
 /** Per-file delivery mode when sending files to a job. */
 export type OcrJobMode = 'sync' | 'async';
 
-/** Per-file webhook events. */
-export type OcrJobWebhookEvent = 'item.succeeded' | 'item.failed';
+/** Per-file webhook events plus the job-level completion signal. */
+export type OcrJobWebhookEvent = 'item.succeeded' | 'item.failed' | 'job.completed';
 
 export type OcrJobItemCallbackStatus = 'delivered' | 'failed' | 'skipped';
 

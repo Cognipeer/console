@@ -18,6 +18,11 @@ export {
   executePlaygroundChat,
 } from './agentService';
 
+export {
+  invokeExternalAgent,
+  prepareConnectionForStorage,
+} from './externalAgent';
+
 export type {
   AgentChatRequest,
   AgentChatResponse,

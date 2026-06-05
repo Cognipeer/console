@@ -3,6 +3,7 @@ import { createLogger } from '@/lib/core/logger';
 import { getCache } from '@/lib/core/cache';
 import {
   getDatabase,
+  IDynamicRoutingConfig,
   IModel,
   IModelUsageAggregate,
   IModelUsageLog,
@@ -201,6 +202,95 @@ export async function createModel(
 
   const created = await db.createModel(newModel);
   return created;
+}
+
+// ── Dynamic LLM models ──────────────────────────────────────────────────────
+// A Dynamic LLM is a virtual `llm` model that owns no provider. Its routing
+// config lives under `settings.dynamic`, so it persists as JSON without a
+// schema migration and shows up in every existing LLM model picker. Creation
+// bypasses provider validation (there is no real provider to validate).
+
+export const DYNAMIC_PROVIDER_KEY = 'dynamic';
+
+export interface CreateDynamicModelInput {
+  name: string;
+  description?: string;
+  key?: string;
+  dynamic: IDynamicRoutingConfig;
+  metadata?: Record<string, unknown>;
+}
+
+/** Validates a routing config; throws with a descriptive message if invalid. */
+export function validateDynamicConfig(config: IDynamicRoutingConfig | undefined): void {
+  if (!config || typeof config !== 'object') {
+    throw new Error('Dynamic routing config is required');
+  }
+  if (config.strategy !== 'rule-based' && config.strategy !== 'model-based') {
+    throw new Error('strategy must be "rule-based" or "model-based"');
+  }
+  if (!config.defaultModelKey) {
+    throw new Error('defaultModelKey is required');
+  }
+  if (config.strategy === 'rule-based') {
+    if (!Array.isArray(config.rules) || config.rules.length === 0) {
+      throw new Error('rule-based routing requires at least one rule');
+    }
+    for (const rule of config.rules) {
+      if (!rule.targetModelKey) throw new Error('every rule needs a targetModelKey');
+      if (!Array.isArray(rule.conditions) || rule.conditions.length === 0) {
+        throw new Error(`rule "${rule.label || '(unnamed)'}" needs at least one condition`);
+      }
+    }
+  }
+  if (config.strategy === 'model-based') {
+    if (!config.decider?.modelKey) {
+      throw new Error('model-based routing requires a decider.modelKey');
+    }
+    if (!Array.isArray(config.decider.labels) || config.decider.labels.length === 0) {
+      throw new Error('the decider needs at least one label');
+    }
+    for (const label of config.decider.labels) {
+      if (!label.label) throw new Error('every decider label needs a label name');
+      if (!label.targetModelKey) throw new Error(`decider label "${label.label}" needs a targetModelKey`);
+    }
+  }
+}
+
+export async function createDynamicModel(
+  tenantDbName: string,
+  tenantId: string,
+  projectId: string,
+  userId: string,
+  payload: CreateDynamicModelInput,
+): Promise<IModel> {
+  validateDynamicConfig(payload.dynamic);
+
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+
+  const keyCandidate = payload.key || payload.name;
+  const key = await generateUniqueKey(tenantDbName, projectId, keyCandidate);
+
+  const newModel: Omit<IModel, '_id' | 'createdAt' | 'updatedAt'> = {
+    tenantId,
+    projectId,
+    name: payload.name,
+    description: payload.description,
+    key,
+    providerKey: DYNAMIC_PROVIDER_KEY,
+    providerDriver: DYNAMIC_PROVIDER_KEY,
+    category: 'llm',
+    modelId: 'dynamic-router',
+    pricing: { currency: 'USD', inputTokenPer1M: 0, outputTokenPer1M: 0, cachedTokenPer1M: 0 },
+    settings: { dynamic: payload.dynamic },
+    isMultimodal: false,
+    supportsToolCalls: true,
+    metadata: payload.metadata || {},
+    createdBy: userId,
+    updatedBy: userId,
+  };
+
+  return db.createModel(newModel);
 }
 
 export async function updateModel(

@@ -88,6 +88,8 @@ export default defineConfig({
             { text: 'Deployment', link: '/guide/deployment' },
             { text: 'Cluster', link: '/guide/cluster' },
             { text: 'Monitoring', link: '/guide/monitoring' },
+            { text: 'Smoke Testing', link: '/guide/smoke-testing' },
+            { text: 'E2E & Load Testing', link: '/guide/e2e-testing' },
           ],
         },
         {

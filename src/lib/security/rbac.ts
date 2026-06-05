@@ -16,6 +16,7 @@ export type PermissionService =
   | 'inference-monitoring'
   | 'guardrails'
   | 'evaluations'
+  | 'redteam'
   | 'analysis'
   | 'pii'
   | 'mcp'
@@ -81,6 +82,7 @@ export const RBAC_SERVICE_DEFINITIONS: RbacServiceDefinition[] = [
   { id: 'inference-monitoring', label: 'Model Monitoring', description: 'Inference servers and metrics.', category: 'operate' },
   { id: 'guardrails', label: 'Guardrail', description: 'Guardrail policies and evaluation logs.', category: 'operate' },
   { id: 'evaluations', label: 'Evaluations', description: 'Offline agent/model evaluation: targets, datasets, suites and runs.', category: 'operate' },
+  { id: 'redteam', label: 'Red Team', description: 'Adversarial agent/model testing: probes, campaigns and vulnerability scans.', category: 'operate' },
   { id: 'analysis', label: 'Conversation Analysis', description: 'Conversation field extraction, quality judging and accuracy scoring.', category: 'operate' },
   { id: 'pii', label: 'PII Service', description: 'PII detection, redaction and masking policies.', category: 'operate' },
   { id: 'browser', label: 'Browsers', description: 'Managed browser profiles and sessions.', category: 'operate' },
@@ -116,6 +118,8 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/client/v1/config', service: 'config' },
   { prefix: '/api/client/v1/files', service: 'files' },
   { prefix: '/api/client/v1/guardrails', service: 'guardrails' },
+  { prefix: '/api/client/v1/evaluation', service: 'evaluations' },
+  { prefix: '/api/client/v1/redteam', service: 'redteam' },
   { prefix: '/api/client/v1/pii', service: 'pii' },
   { prefix: '/api/client/v1/mcp', service: 'mcp' },
   { prefix: '/api/client/v1/js-sandbox', service: 'js-sandbox' },
@@ -153,6 +157,7 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/inference-monitoring', service: 'inference-monitoring' },
   { prefix: '/api/guardrails', service: 'guardrails' },
   { prefix: '/api/evaluation', service: 'evaluations' },
+  { prefix: '/api/redteam', service: 'redteam' },
   { prefix: '/api/analysis', service: 'analysis' },
   { prefix: '/api/pii', service: 'pii' },
   { prefix: '/api/mcp', service: 'mcp' },

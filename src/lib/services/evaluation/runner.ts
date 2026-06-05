@@ -6,6 +6,7 @@
 
 import type {
   DatasetItem,
+  EmbedInvoker,
   JudgeInvoker,
   RunAggregate,
   RunConfig,
@@ -22,13 +23,14 @@ export interface RunEvaluationParams {
   scorers: ScorerConfig[];
   invokeTarget: TargetInvoker;
   invokeJudge?: JudgeInvoker;
+  invokeEmbed?: EmbedInvoker;
   config?: RunConfig;
   /** Progress hook, invoked once per completed item. */
   onItem?: (result: RunItemResult, index: number) => void;
 }
 
 export async function runEvaluation(params: RunEvaluationParams): Promise<RunResult> {
-  const { items, scorers, invokeTarget, invokeJudge, config, onItem } = params;
+  const { items, scorers, invokeTarget, invokeJudge, invokeEmbed, config, onItem } = params;
   const concurrency = Math.max(1, config?.concurrency ?? 4);
   const results = new Array<RunItemResult>(items.length);
 
@@ -38,7 +40,7 @@ export async function runEvaluation(params: RunEvaluationParams): Promise<RunRes
       const index = cursor;
       cursor += 1;
       if (index >= items.length) return;
-      const result = await runItem(items[index], scorers, invokeTarget, invokeJudge);
+      const result = await runItem(items[index], scorers, invokeTarget, invokeJudge, invokeEmbed);
       results[index] = result;
       onItem?.(result, index);
     }
@@ -55,11 +57,12 @@ async function runItem(
   scorers: ScorerConfig[],
   invokeTarget: TargetInvoker,
   invokeJudge: JudgeInvoker | undefined,
+  invokeEmbed: EmbedInvoker | undefined,
 ): Promise<RunItemResult> {
   const started = Date.now();
   try {
     const output = await invokeTarget(item);
-    const scores = await runScorers(item, output, scorers, { invokeJudge });
+    const scores = await runScorers(item, output, scorers, { invokeJudge, invokeEmbed });
     const { score, passed } = combine(scores);
     return {
       itemId: item.id,

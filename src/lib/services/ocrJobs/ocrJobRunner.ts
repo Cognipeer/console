@@ -10,7 +10,7 @@
 
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase, type DatabaseProvider } from '@/lib/database';
-import type { IOcrJobItem, IOcrJobItemResult } from '@/lib/database';
+import type { IOcrJob, IOcrJobItem, IOcrJobItemResult } from '@/lib/database';
 import {
   handleChatCompletion,
   handleOcrRequest,
@@ -243,7 +243,7 @@ export async function processOcrItem(ctx: OcrJobContext, itemId: string): Promis
       endedAt: new Date(),
     });
 
-    await db.incrementOcrJobAggregates(
+    const afterJob = await db.incrementOcrJobAggregates(
       item.jobId,
       {
         itemsProcessed: 1,
@@ -269,12 +269,14 @@ export async function processOcrItem(ctx: OcrJobContext, itemId: string): Promis
       await db.updateOcrJobItem(itemId, { callbackStatus: delivered ? 'delivered' : 'failed' });
     }
 
+    await maybeFireJobCompleted(afterJob);
+
     logger.info('OCR item succeeded', { itemId, jobId: item.jobId, durationMs: Date.now() - startedAt });
     return updated ?? item;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await db.updateOcrJobItem(itemId, { status: 'failed', errorMessage: message, endedAt: new Date() });
-    await db.incrementOcrJobAggregates(item.jobId, { itemsFailed: 1 }, { lastItemAt: new Date() });
+    const afterJob = await db.incrementOcrJobAggregates(item.jobId, { itemsFailed: 1 }, { lastItemAt: new Date() });
     const delivered = await sendOcrJobWebhook({
       job,
       event: 'item.failed',
@@ -283,9 +285,41 @@ export async function processOcrItem(ctx: OcrJobContext, itemId: string): Promis
     if (job.callbackUrl) {
       await db.updateOcrJobItem(itemId, { callbackStatus: delivered ? 'delivered' : 'failed' });
     }
+    await maybeFireJobCompleted(afterJob);
     logger.error('OCR item failed', { itemId, jobId: item.jobId, error: message });
     return null;
   }
+}
+
+/**
+ * Fire the job-level `job.completed` webhook exactly once, when the last item
+ * settles. Because `incrementOcrJobAggregates` applies the counter atomically
+ * and returns the post-increment job, only the worker that observes
+ * `itemsProcessed + itemsFailed === itemsTotal` triggers the callback.
+ */
+async function maybeFireJobCompleted(job: IOcrJob | null): Promise<void> {
+  if (!job) return;
+  const total = job.itemsTotal ?? 0;
+  if (total <= 0) return;
+  if (job.itemsProcessed + job.itemsFailed !== total) return;
+  await sendOcrJobWebhook({
+    job,
+    event: 'job.completed',
+    data: {
+      jobId: job._id ? String(job._id) : '',
+      itemsTotal: total,
+      itemsProcessed: job.itemsProcessed,
+      itemsFailed: job.itemsFailed,
+      cost: job.costTotal ?? 0,
+      currency: job.costCurrency,
+      usage: {
+        inputTokens: job.usageInputTokens,
+        outputTokens: job.usageOutputTokens,
+        totalTokens: job.usageTotalTokens,
+        pages: job.usagePages,
+      },
+    },
+  }).catch(() => false);
 }
 
 function accumulateLlm(

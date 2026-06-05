@@ -25,6 +25,7 @@ import { ProviderRecordMixin } from './sqlite/provider-record.mixin';
 import { InferenceMixin } from './sqlite/inference.mixin';
 import { GuardrailMixin } from './sqlite/guardrail.mixin';
 import { EvaluationMixin } from './sqlite/evaluation.mixin';
+import { RedTeamMixin } from './sqlite/redteam.mixin';
 import { AnalysisMixin } from './sqlite/analysis.mixin';
 import { PiiPolicyMixin } from './sqlite/pii-policy.mixin';
 import { AlertMixin } from './sqlite/alert.mixin';
@@ -63,7 +64,16 @@ const AIBase = VectorMixin(ModelMixin(TracingMixin(ContentBase)));
 const StorageBase = ProviderRecordMixin(FileMixin(AIBase));
 
 // Group 5 – Advanced features
-const AdvancedBase = OcrJobMixin(CrawlerMixin(AuditMixin(BrowserMixin(VectorMigrationMixin(AgentMixin(ToolMixin(JsSandboxMixin(McpServerMixin(ConfigMixin(MemoryMixin(RerankerMixin(RagMixin(IncidentMixin(AlertMixin(PiiPolicyMixin(AnalysisMixin(EvaluationMixin(GuardrailMixin(InferenceMixin(StorageBase)))))))))))))))))))));
+// Split into intermediate steps (rather than one deeply-nested call) so no
+// single expression is deep enough to trip esbuild/tsc's parser nesting limit.
+// Application order (inner → outer) is preserved exactly.
+const CoreServicesBase = GuardrailMixin(InferenceMixin(StorageBase));
+const EvalAnalysisBase = RedTeamMixin(AnalysisMixin(EvaluationMixin(CoreServicesBase)));
+const AlertingBase = IncidentMixin(AlertMixin(PiiPolicyMixin(EvalAnalysisBase)));
+const KnowledgeBase = MemoryMixin(RerankerMixin(RagMixin(AlertingBase)));
+const PlatformBase = JsSandboxMixin(McpServerMixin(ConfigMixin(KnowledgeBase)));
+const ToolingBase = VectorMigrationMixin(AgentMixin(ToolMixin(PlatformBase)));
+const AdvancedBase = OcrJobMixin(CrawlerMixin(AuditMixin(BrowserMixin(ToolingBase))));
 
 // Group 6 – Cluster (system-wide; uses main DB)
 const ClusterBase = ClusterMixin(AdvancedBase);

@@ -1,19 +1,22 @@
 /**
  * Live invokers that bridge the pure evaluation engine to the platform model
- * runtime. `model` targets (and the llm-judge) call `handleChatCompletion`.
- * `agent` and `external` targets are recognised but not yet wired — they throw
- * a descriptive error, which the runner records as a per-item failure rather
- * than aborting the whole run.
+ * runtime. `model` targets (and the llm-judge) call `handleChatCompletion`;
+ * `agent` targets call `executeAgentChat`; semantic scorers embed via
+ * `handleEmbeddingRequest`. `external` targets are recognised but not yet wired
+ * — they throw a descriptive error, which the runner records as a per-item
+ * failure rather than aborting the whole run.
  */
 
-import { handleChatCompletion } from '@/lib/services/models/inferenceService';
+import { handleChatCompletion, handleEmbeddingRequest } from '@/lib/services/models/inferenceService';
 import type { IEvaluationTarget } from '@/lib/database';
-import type { DatasetItem, JudgeInvoker, TargetInvoker, TargetOutput } from './types';
+import type { DatasetItem, EmbedInvoker, JudgeInvoker, TargetInvoker, TargetOutput } from './types';
 
 export interface EvaluationModelContext {
   tenantDbName: string;
   tenantId: string;
   projectId: string;
+  /** Actor running the suite — required for agent targets. */
+  userId?: string;
 }
 
 interface ChatLikeResponse {
@@ -43,6 +46,26 @@ async function invokeModel(
   return { text: extractAssistantText(result.response), latencyMs: result.latencyMs, raw: result.response };
 }
 
+/** Pull the assistant text out of an agent chat (Responses-shaped) result. */
+export function extractAgentText(response: unknown): string {
+  const output = (response as { output?: Array<{ content?: Array<{ text?: unknown; type?: string }> }> })?.output;
+  if (!Array.isArray(output)) return '';
+  const parts: string[] = [];
+  for (const message of output) {
+    for (const part of message?.content ?? []) {
+      if (typeof part?.text === 'string') parts.push(part.text);
+    }
+  }
+  return parts.join('').trim();
+}
+
+/** The last user turn (falling back to a join of all turns) drives an agent. */
+function toUserMessage(item: DatasetItem): string {
+  const lastUser = [...item.input].reverse().find((m) => m.role === 'user');
+  if (lastUser) return lastUser.content;
+  return item.input.map((m) => m.content).join('\n');
+}
+
 export function buildTargetInvoker(target: IEvaluationTarget, ctx: EvaluationModelContext): TargetInvoker {
   return async (item: DatasetItem): Promise<TargetOutput> => {
     if (target.kind === 'model') {
@@ -52,9 +75,59 @@ export function buildTargetInvoker(target: IEvaluationTarget, ctx: EvaluationMod
       return { text, latencyMs, raw };
     }
     if (target.kind === 'agent') {
-      throw new Error('agent evaluation targets are not yet supported (model targets only in this release)');
+      if (!target.agentKey) throw new Error(`Evaluation target "${target.key}" has no agentKey configured`);
+      // Lazy import: the agent runtime pulls in a heavy module graph (rag /
+      // document conversion) that we only want loaded when an agent target
+      // actually runs — not at evaluation-engine import time.
+      const { createConversation, executeAgentChat } = await import('@/lib/services/agents/agentService');
+      const userId = ctx.userId ?? 'evaluation';
+      // Each item runs in its own fresh conversation so cases never bleed into
+      // each other. `executeAgentChat` requires an existing conversation, so we
+      // create one first (the id is DB-generated, not synthesised).
+      const conversation = await createConversation(
+        ctx.tenantDbName,
+        ctx.tenantId,
+        ctx.projectId,
+        userId,
+        target.agentKey,
+        `Eval ${target.key} · ${item.id}`,
+      );
+      const started = Date.now();
+      const response = await executeAgentChat({
+        tenantDbName: ctx.tenantDbName,
+        tenantId: ctx.tenantId,
+        projectId: ctx.projectId,
+        agentKey: target.agentKey,
+        conversationId: String(conversation._id),
+        userMessage: toUserMessage(item),
+        userId,
+        usePublished: true,
+      });
+      return { text: extractAgentText(response), latencyMs: Date.now() - started, raw: response };
     }
     throw new Error('external evaluation targets are not yet supported (model targets only in this release)');
+  };
+}
+
+export function buildEmbedInvoker(embeddingModelKey: string | undefined, ctx: EvaluationModelContext): EmbedInvoker {
+  return async (texts) => {
+    if (!embeddingModelKey) {
+      throw new Error('embeddingModelKey is required when a suite uses semantic scorers');
+    }
+    const result = (await handleEmbeddingRequest({
+      tenantDbName: ctx.tenantDbName,
+      modelKey: embeddingModelKey,
+      projectId: ctx.projectId,
+      body: { input: texts },
+    })) as { response?: { data?: Array<{ embedding?: number[] }> } };
+    const data = result.response?.data;
+    if (!data || data.length < texts.length) {
+      throw new Error('embedding provider returned fewer vectors than requested');
+    }
+    return data.map((d) => {
+      if (!d.embedding) throw new Error('missing embedding in provider response');
+      return d.embedding;
+    });
   };
 }
 

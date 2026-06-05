@@ -120,6 +120,9 @@ import type {
   EvaluationTargetKind,
   EvaluationDatasetSource,
   EvaluationRunStatus,
+  IRedTeamCampaign,
+  IRedTeamRun,
+  RedTeamRunStatus,
   IAnalysisDefinition,
   IAnalysisConversation,
   IAnalysisRun,
@@ -620,6 +623,39 @@ export interface DatabaseProvider {
     skip?: number;
   }): Promise<IEvaluationRun[]>;
 
+  // ── Red-team operations (tenant-specific) ──
+  createRedTeamCampaign(
+    campaign: Omit<IRedTeamCampaign, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IRedTeamCampaign>;
+  updateRedTeamCampaign(
+    id: string,
+    data: Partial<Omit<IRedTeamCampaign, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IRedTeamCampaign | null>;
+  deleteRedTeamCampaign(id: string): Promise<boolean>;
+  findRedTeamCampaignById(id: string): Promise<IRedTeamCampaign | null>;
+  findRedTeamCampaignByKey(key: string, projectId?: string): Promise<IRedTeamCampaign | null>;
+  listRedTeamCampaigns(filters?: {
+    projectId?: string;
+    targetKind?: IRedTeamCampaign['targetKind'];
+    search?: string;
+  }): Promise<IRedTeamCampaign[]>;
+
+  createRedTeamRun(
+    run: Omit<IRedTeamRun, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IRedTeamRun>;
+  updateRedTeamRun(
+    id: string,
+    data: Partial<Omit<IRedTeamRun, 'tenantId' | 'campaignKey' | 'createdBy'>>,
+  ): Promise<IRedTeamRun | null>;
+  findRedTeamRunById(id: string): Promise<IRedTeamRun | null>;
+  listRedTeamRuns(filters?: {
+    projectId?: string;
+    campaignKey?: string;
+    status?: RedTeamRunStatus;
+    limit?: number;
+    skip?: number;
+  }): Promise<IRedTeamRun[]>;
+
   // ── Analysis operations (tenant-specific) ──
   createAnalysisDefinition(
     definition: Omit<IAnalysisDefinition, '_id' | 'createdAt' | 'updatedAt'>,
@@ -649,6 +685,7 @@ export interface DatabaseProvider {
   listAnalysisConversations(filters?: {
     projectId?: string;
     source?: AnalysisConversationSource;
+    tag?: string;
     search?: string;
     limit?: number;
     skip?: number;
@@ -1241,12 +1278,16 @@ export interface DatabaseProvider {
   ): Promise<IOcrJob[]>;
   deleteOcrJob(id: string): Promise<boolean>;
 
-  /** Atomically increment a job's running aggregate counters/usage/cost. */
+  /**
+   * Atomically increment a job's running aggregate counters/usage/cost and
+   * return the post-increment job, so callers can detect completion
+   * (itemsProcessed + itemsFailed === itemsTotal) exactly once.
+   */
   incrementOcrJobAggregates(
     id: string,
     delta: OcrJobAggregateDelta,
     extra?: { costCurrency?: string; lastItemAt?: Date },
-  ): Promise<void>;
+  ): Promise<IOcrJob | null>;
 
   // ── OCR job items (tenant-specific) ──
   createOcrJobItem(

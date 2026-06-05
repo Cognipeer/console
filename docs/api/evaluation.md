@@ -151,6 +151,100 @@ GET /api/evaluation/runs?suiteKey=faq-accuracy&limit=50
 GET /api/evaluation/runs/:id
 ```
 
+## Client API (token-authenticated)
+
+For CI / automation there is a second, **API-token-authenticated** surface under
+`/api/client/v1/evaluation/*`. Authenticate with `Authorization: Bearer <token>`
+(create one in **Settings → API Tokens**); calls are scoped to the token's
+project and gated by the `evaluations` permission. Fields are **snake_case**,
+like the other client modules.
+
+This surface is read- and trigger-oriented: you **discover** suites, **run** one,
+and **read** results. Authoring targets, datasets and suites stays on the
+session-authenticated dashboard surface above.
+
+### List suites
+
+```http
+GET /api/client/v1/evaluation/suites
+```
+
+```json
+{
+  "suites": [
+    {
+      "key": "faq-accuracy",
+      "name": "FAQ Accuracy",
+      "target_key": "gpt-target",
+      "dataset_key": "faq-set",
+      "judge_model_key": "judge-1",
+      "scorers": [{ "type": "assertion" }, { "type": "llm-judge", "rubric": "…" }],
+      "created_at": "…"
+    }
+  ]
+}
+```
+
+### Run a suite
+
+Runs the suite synchronously over its dataset and returns the scored result. The
+suite, its target and its dataset must already exist.
+
+```http
+POST /api/client/v1/evaluation/suites/{key}/run
+```
+
+```json
+{
+  "run": {
+    "id": "run_abc123",
+    "suite_key": "faq-accuracy",
+    "target_key": "gpt-target",
+    "dataset_key": "faq-set",
+    "status": "completed",
+    "aggregate": {
+      "total": 24, "completed": 24, "failed": 0, "passed": 22,
+      "pass_rate": 0.9167, "avg_score": 0.94, "avg_latency_ms": 812
+    },
+    "items": [
+      {
+        "item_id": "q1", "passed": true, "score": 1, "latency_ms": 640,
+        "output_text": "…",
+        "scores": [{ "scorer_type": "assertion", "score": 1, "passed": true, "weight": 1 }]
+      }
+    ],
+    "started_at": "…", "finished_at": "…"
+  }
+}
+```
+
+### List / get runs
+
+`/runs` returns summaries (aggregate only); fetch a single run by id for the
+full per-item breakdown.
+
+```http
+GET /api/client/v1/evaluation/runs?suite_key=faq-accuracy&limit=20
+GET /api/client/v1/evaluation/runs/{id}
+```
+
+### CI example
+
+```js
+const BASE = 'https://your-cognipeer-host';
+const headers = { Authorization: `Bearer ${process.env.COGNIPEER_API_TOKEN}` };
+
+const { run } = await fetch(
+  `${BASE}/api/client/v1/evaluation/suites/faq-accuracy/run`,
+  { method: 'POST', headers },
+).then((r) => r.json());
+
+if ((run.aggregate?.pass_rate ?? 0) < 0.9) {
+  console.error(`Evaluation gate failed: ${run.aggregate.passed}/${run.aggregate.total}`);
+  process.exit(1);
+}
+```
+
 ## Alerting
 
 Run aggregates feed the alert system through the `evaluation` module:

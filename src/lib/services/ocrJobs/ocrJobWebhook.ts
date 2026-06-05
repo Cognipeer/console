@@ -14,7 +14,7 @@ const log = createLogger('ocr-job:webhook');
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_ATTEMPTS = 3;
-const DEFAULT_EVENTS: OcrJobWebhookEvent[] = ['item.succeeded', 'item.failed'];
+const DEFAULT_EVENTS: OcrJobWebhookEvent[] = ['item.succeeded', 'item.failed', 'job.completed'];
 
 export interface OcrWebhookPayload<T = unknown> {
   id: string;

@@ -5,7 +5,7 @@ import {
   deleteGuardrail,
 } from '@/lib/services/guardrail';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
-import type { GuardrailAction, GuardrailTarget } from '@/lib/database';
+import type { GuardrailAction } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 
 const logger = createLogger('guardrails');
@@ -60,15 +60,9 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
       return NextResponse.json({ error: 'action must be "block", "warn", or "flag"' }, { status: 400 });
     }
 
-    const validTargets: GuardrailTarget[] = ['input', 'output', 'both'];
-    if (body.target && !validTargets.includes(body.target)) {
-      return NextResponse.json({ error: 'target must be "input", "output", or "both"' }, { status: 400 });
-    }
-
     const guardrail = await updateGuardrail(tenantDbName, id, userId, {
       name: body.name,
       description: body.description,
-      target: body.target,
       action: body.action,
       enabled: body.enabled,
       modelKey: body.modelKey,

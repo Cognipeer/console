@@ -125,11 +125,12 @@ export function AnalysisMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       return doc as unknown as IAnalysisConversation | null;
     }
 
-    async listAnalysisConversations(filters?: { projectId?: string; source?: AnalysisConversationSource; search?: string; limit?: number; skip?: number }): Promise<IAnalysisConversation[]> {
+    async listAnalysisConversations(filters?: { projectId?: string; source?: AnalysisConversationSource; tag?: string; search?: string; limit?: number; skip?: number }): Promise<IAnalysisConversation[]> {
       const db = this.getTenantDb();
       const filter: Record<string, unknown> = {};
       if (filters?.projectId !== undefined) filter.projectId = filters.projectId;
       if (filters?.source !== undefined) filter.source = filters.source;
+      if (filters?.tag) filter.tags = filters.tag;
       if (filters?.search) {
         filter.$or = [
           { name: { $regex: filters.search, $options: 'i' } },

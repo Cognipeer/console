@@ -205,6 +205,9 @@ export const crawlerApiPlugin: FastifyPluginAsync = async (app) => {
           urls: body.urls,
           seeds: body.seeds,
           callbackUrl: body.callbackUrl,
+          // Dashboard runs default to async so the button returns immediately;
+          // pass `"mode":"sync"` to block for the full crawl.
+          mode: body.mode ?? 'async',
           metadata: body.metadata,
           trigger: 'manual',
           triggerActor: session.userEmail ?? session.userId,
@@ -232,6 +235,7 @@ export const crawlerApiPlugin: FastifyPluginAsync = async (app) => {
         {
           urls: body.urls,
           callbackUrl: body.callbackUrl,
+          mode: body.mode ?? 'async',
           metadata: body.metadata,
           trigger: 'manual',
           triggerActor: session.userEmail ?? session.userId,
@@ -251,7 +255,7 @@ export const crawlerApiPlugin: FastifyPluginAsync = async (app) => {
       const body = adhocCrawlInputSchema.parse(readJsonBody<unknown>(request));
       const result = await runAdhocCrawl(
         { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
-        { ...body, triggerActor: session.userEmail ?? session.userId },
+        { ...body, mode: body.mode ?? 'async', triggerActor: session.userEmail ?? session.userId },
       );
       return reply.code(202).send(result);
     } catch (error) {

@@ -27,6 +27,7 @@ import { evaluateGuardrail } from '@/lib/services/guardrail';
 import { getMcpServerByKey, executeMcpTool } from '@/lib/services/mcp';
 import { getToolByKey, executeToolAction, logToolRequest } from '@/lib/services/tools';
 import { resolveBrowser, createBrowserSession, buildBrowserAgentTools, closeBrowserSession } from '@/lib/services/browser';
+import { invokeExternalAgent } from './externalAgent';
 
 const logger = createLogger('agents');
 
@@ -881,7 +882,53 @@ export async function executeAgentChatLocal(
     const conversation = await db.findAgentConversationById(conversationId);
     if (!conversation) throw new Error(`Conversation "${conversationId}" not found`);
 
+    // 2b. Connected (external) agent — invoke over HTTP, skip local runtime.
+    if (config.kind === 'external' && config.connection) {
+        const now = new Date();
+        const history = (conversation.messages || []).map((m) => ({ role: m.role, content: m.content }));
+        const { content: assistantContent } = await invokeExternalAgent(
+            config.connection,
+            [...history, { role: 'user', content: userMessage }],
+            { tenantDbName, tenantId, projectId },
+        );
+
+        const updatedMessages = [
+            ...(conversation.messages || []),
+            { role: 'user', content: userMessage, timestamp: now },
+            { role: 'assistant', content: assistantContent, timestamp: new Date() },
+        ];
+        await db.updateAgentConversation(conversationId, {
+            messages: updatedMessages,
+            title: conversation.title === 'New conversation' && updatedMessages.length <= 2
+                ? userMessage.substring(0, 80)
+                : conversation.title,
+        });
+
+        const responseId = `resp_${conversationId}`;
+        const msgId = `msg_${Date.now().toString(36)}`;
+        return {
+            id: responseId,
+            object: 'response' as const,
+            model: agent.name,
+            output: [
+                {
+                    id: msgId,
+                    type: 'message' as const,
+                    role: 'assistant' as const,
+                    content: [{ type: 'output_text' as const, text: assistantContent }],
+                },
+            ],
+            status: 'completed' as const,
+            usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+            created_at: Math.floor(Date.now() / 1000),
+            previous_response_id: (conversation.messages?.length ?? 0) > 0 ? responseId : null,
+            version: resolvedVersion,
+            _conversation_messages: updatedMessages,
+        };
+    }
+
     // 3. Resolve model
+    if (!config.modelKey) throw new Error('Agent has no model configured');
     const model = await getModelByKey(tenantDbName, config.modelKey, projectId);
     if (!model) throw new Error(`Model "${config.modelKey}" not found`);
     if (model.category !== 'llm') throw new Error('Configured model is not compatible with chat');
@@ -1115,7 +1162,19 @@ export async function executePlaygroundChatLocal(
 
     const { config } = agent;
 
+    // Connected (external) agent — invoke over HTTP, skip local runtime.
+    if (config.kind === 'external' && config.connection) {
+        const { content } = await invokeExternalAgent(
+            config.connection,
+            [...(history || []), { role: 'user', content: userMessage }],
+            { tenantDbName, tenantId, projectId },
+        );
+        logger.info('Connected agent playground chat completed', { agentKey });
+        return { content };
+    }
+
     // Resolve model
+    if (!config.modelKey) throw new Error('Agent has no model configured');
     const model = await getModelByKey(tenantDbName, config.modelKey, projectId);
     if (!model) throw new Error(`Model "${config.modelKey}" not found`);
     if (model.category !== 'llm') throw new Error('Configured model is not compatible with chat');

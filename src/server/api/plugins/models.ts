@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify';
 import {
+  createDynamicModel,
   createModel,
   createModelProvider,
   deleteModel,
@@ -10,6 +11,7 @@ import {
   listUsageLogs,
   updateModel,
 } from '@/lib/services/models/modelService';
+import type { IDynamicRoutingConfig } from '@/lib/database';
 import type { UpdateModelInput } from '@/lib/services/models/types';
 import {
   type IModel,
@@ -477,6 +479,57 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   });
 
+  app.post('/models/dynamic', async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const body = readJsonBody<Record<string, unknown>>(request);
+
+      if (!body.name || typeof body.name !== 'string') {
+        return reply.code(400).send({ error: 'name is required' });
+      }
+      const dynamic = body.dynamic as IDynamicRoutingConfig | undefined;
+      if (!dynamic || typeof dynamic !== 'object') {
+        return reply.code(400).send({ error: 'dynamic routing config is required' });
+      }
+
+      const existingModels = await listModels(session.tenantDbName, projectId, {});
+      const quotaContext: QuotaContext = {
+        domain: 'llm',
+        licenseType: session.licenseType as LicenseType,
+        projectId,
+        tenantDbName: session.tenantDbName,
+        tenantId: session.tenantId,
+        userId: session.userId,
+      };
+      const quotaCheck = await checkResourceQuota(quotaContext, 'models', existingModels.length);
+      if (!quotaCheck.allowed) {
+        return reply.code(429).send({ error: quotaCheck.reason ?? 'Model quota exceeded' });
+      }
+
+      const model = await createDynamicModel(
+        session.tenantDbName,
+        session.tenantId,
+        projectId,
+        session.userId,
+        {
+          name: body.name,
+          description: body.description as string | undefined,
+          key: body.key as string | undefined,
+          dynamic,
+          metadata: body.metadata as Record<string, unknown> | undefined,
+        },
+      );
+
+      return reply.code(201).send({ model: sanitizeModel(model) });
+    } catch (error) {
+      logger.error('Create dynamic model error', { error });
+      return sendProjectError(reply, error)
+        ?? reply.code(400).send({
+          error: error instanceof Error ? error.message : 'Internal error',
+        });
+    }
+  });
+
   app.get('/models/:id/logs', async (request, reply) => {
     try {
       const { id } = request.params as { id: string };
@@ -589,11 +642,14 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
       if (body.isMultimodal !== undefined) updates.isMultimodal = body.isMultimodal;
       if (body.supportsToolCalls !== undefined) updates.supportsToolCalls = body.supportsToolCalls;
       if (body.semanticCache !== undefined) updates.semanticCache = body.semanticCache;
+      // Pass the value through as-is (incl. empty string) so clearing a
+      // guardrail persists — `|| undefined` would skip the DB write and the
+      // previous binding would stick. Empty string reads as "no guardrail".
       if (body.inputGuardrailKey !== undefined) {
-        updates.inputGuardrailKey = (body.inputGuardrailKey as string) || undefined;
+        updates.inputGuardrailKey = body.inputGuardrailKey as string;
       }
       if (body.outputGuardrailKey !== undefined) {
-        updates.outputGuardrailKey = (body.outputGuardrailKey as string) || undefined;
+        updates.outputGuardrailKey = body.outputGuardrailKey as string;
       }
       if (body.metadata !== undefined) updates.metadata = body.metadata;
       if (body.providerKey !== undefined) updates.providerKey = body.providerKey as string;

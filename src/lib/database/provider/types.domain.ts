@@ -4,7 +4,6 @@ import type { ObjectId } from 'mongodb';
 
 export type GuardrailType = 'preset' | 'custom';
 export type GuardrailAction = 'block' | 'warn' | 'flag';
-export type GuardrailTarget = 'input' | 'output' | 'both';
 
 export interface IGuardrailPiiPolicy {
   enabled: boolean;
@@ -38,7 +37,6 @@ export interface IGuardrail {
   name: string;
   description?: string;
   type: GuardrailType;
-  target: GuardrailTarget;
   action: GuardrailAction;
   enabled: boolean;
   modelKey?: string;
@@ -59,7 +57,7 @@ export type EvaluationTargetKind = 'agent' | 'model' | 'external';
 export type EvaluationRunStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
 export type EvaluationRunMode = 'sync' | 'async';
 export type EvaluationDatasetSource = 'manual' | 'file' | 'generated';
-export type EvaluationScorerType = 'assertion' | 'llm-judge';
+export type EvaluationScorerType = 'assertion' | 'llm-judge' | 'semantic';
 
 export interface IEvaluationExternalTarget {
   protocol: 'openai-chat' | 'webhook';
@@ -132,6 +130,8 @@ export interface IEvaluationSuite {
   scorers: IEvaluationScorerConfig[];
   /** Model used to back any llm-judge scorers. */
   judgeModelKey?: string;
+  /** Embedding model used to back any semantic (vector) scorers. */
+  embeddingModelKey?: string;
   runConfig?: { concurrency?: number };
   metadata?: Record<string, unknown>;
   createdBy: string;
@@ -181,6 +181,133 @@ export interface IEvaluationRun {
   progress: { total: number; completed: number; failed: number };
   aggregate?: IEvaluationRunAggregate;
   items: IEvaluationRunItem[];
+  error?: string;
+  startedAt?: Date;
+  finishedAt?: Date;
+  createdBy: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+// ── Red-team (adversarial agent testing) types ───────────────────────────────
+
+export type RedTeamTargetKind = 'agent' | 'model';
+export type RedTeamRunStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+export type RedTeamRunMode = 'sync' | 'async';
+export type RedTeamOutcome = 'safe' | 'vulnerable' | 'needs_review';
+export type RedTeamSeverity = 'low' | 'medium' | 'high' | 'critical';
+
+/** Decision-policy overrides; mirrors the engine's DecisionPolicyConfig. */
+export interface IRedTeamPolicyConfig {
+  deterministicConfidence?: number;
+  reviewBand?: [number, number];
+  maxJudgeVariance?: number;
+}
+
+/**
+ * A red-team campaign: what to attack (agent/model), which probes to run, and
+ * how to judge. Probes and detectors are code-defined (built-in catalog), so a
+ * campaign only stores the selection — there is no separate dataset entity.
+ */
+export interface IRedTeamCampaign {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name: string;
+  description?: string;
+  targetKind: RedTeamTargetKind;
+  agentKey?: string;
+  modelKey?: string;
+  /** Selected built-in probe keys; empty selects the whole catalog. */
+  probeKeys: string[];
+  /** Model backing any llm-judge detectors (required if probes use them). */
+  judgeModelKey?: string;
+  runConfig?: { concurrency?: number };
+  policy?: IRedTeamPolicyConfig;
+  /** Optional cron schedule for unattended (e.g. nightly) regression scans. */
+  schedule?: { cron: string; enabled: boolean };
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IRedTeamSignal {
+  detectorKey: string;
+  kind: string;
+  hit: boolean;
+  score: number;
+  confidence: number;
+  gate?: 'safe';
+  rationale: string;
+  modelRef?: string;
+  error?: string;
+}
+
+export interface IRedTeamTurn {
+  user: string;
+  assistant: string;
+}
+
+/** Optional human-in-the-loop override of a machine verdict. */
+export interface IRedTeamReview {
+  outcome: RedTeamOutcome;
+  note?: string;
+  reviewedBy: string;
+  reviewedAt: Date;
+}
+
+export interface IRedTeamAttemptResult {
+  probeKey: string;
+  attemptId: string;
+  family: string;
+  category: string;
+  severity: RedTeamSeverity;
+  outcome: RedTeamOutcome;
+  decidedBy: string;
+  confidence: number;
+  transcript: IRedTeamTurn[];
+  signals: IRedTeamSignal[];
+  latencyMs?: number;
+  error?: string;
+  review?: IRedTeamReview;
+}
+
+export interface IRedTeamCategoryBreakdown {
+  total: number;
+  vulnerable: number;
+  needsReview: number;
+}
+
+export interface IRedTeamAggregate {
+  total: number;
+  completed: number;
+  failed: number;
+  vulnerable: number;
+  safe: number;
+  needsReview: number;
+  attackSuccessRate: number;
+  resilienceScore: number;
+  bySeverity: Record<string, number>;
+  byCategory: Record<string, IRedTeamCategoryBreakdown>;
+  avgLatencyMs: number | null;
+}
+
+export interface IRedTeamRun {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  campaignKey: string;
+  targetKind: RedTeamTargetKind;
+  /** agentKey or modelKey of the target under test (for display). */
+  targetRef: string;
+  status: RedTeamRunStatus;
+  mode: RedTeamRunMode;
+  progress: { total: number; completed: number; failed: number };
+  aggregate?: IRedTeamAggregate;
+  attempts: IRedTeamAttemptResult[];
   error?: string;
   startedAt?: Date;
   finishedAt?: Date;
@@ -251,6 +378,8 @@ export interface IAnalysisConversation {
   description?: string;
   transcript: IAnalysisTranscriptMessage[];
   source: AnalysisConversationSource;
+  /** Free-form tags for grouping/filtering conversations (e.g. by campaign, channel). */
+  tags?: string[];
   metadata?: Record<string, unknown>;
   occurredAt?: Date;
   /** Ground-truth field values for accuracy scoring. */
@@ -696,8 +825,35 @@ export interface IToolRequestAggregate {
 
 export type AgentStatus = 'active' | 'inactive' | 'draft';
 
+/** How an agent is backed: a native model-config agent, or a connected external endpoint. */
+export type AgentKind = 'native' | 'external';
+
+/** Wire protocol used to reach an external (connected) agent. */
+export type ExternalAgentProtocol = 'a2a' | 'openai-chat' | 'openai-responses';
+
+/**
+ * Connection settings for a connected (external) agent. The agent is invoked over
+ * HTTP using the selected protocol instead of being run through the local agent-sdk.
+ */
+export interface IExternalAgentConnection {
+  protocol: ExternalAgentProtocol;
+  /** Endpoint URL — OpenAI base URL, A2A agent endpoint, or an explicit responses URL. */
+  url: string;
+  /** Model id sent in the request body (openai-chat / openai-responses). */
+  model?: string;
+  /** Static headers added to every outbound request. */
+  headers?: Record<string, string>;
+  /** Inline bearer token / API key, AES-encrypted at rest. Never returned to clients. */
+  apiKeyEnc?: string;
+  /** Provider key holding encrypted credentials for the endpoint (alternative to inline key). */
+  credentialProviderKey?: string;
+  /** Dot-path used to pull the assistant text out of a non-standard JSON response. */
+  responsePath?: string;
+}
+
 export interface IAgentConfig {
-  modelKey: string;
+  /** Required for native agents; omitted/empty for connected (external) agents. */
+  modelKey?: string;
   systemPrompt?: string;
   promptKey?: string;
   temperature?: number;
@@ -711,6 +867,10 @@ export interface IAgentConfig {
   outputGuardrailKey?: string;
   /** Bound tools from various sources (tools, MCP servers legacy) */
   toolBindings?: IAgentToolBinding[];
+  /** Agent backing kind. Defaults to 'native' when omitted. */
+  kind?: AgentKind;
+  /** Connection settings — present only when kind === 'external'. */
+  connection?: IExternalAgentConnection;
 }
 
 /** A single tool-source binding for an agent */

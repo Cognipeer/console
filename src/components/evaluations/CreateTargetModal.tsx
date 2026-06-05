@@ -1,10 +1,18 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Alert, Button, Group, Modal, Select, Stack, Textarea, TextInput } from '@mantine/core';
+import { Alert, Select, Textarea, TextInput } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
-import { IconInfoCircle } from '@tabler/icons-react';
+import { IconCheck, IconInfoCircle, IconRobot } from '@tabler/icons-react';
+import FormShell, {
+  Checklist,
+  FormField,
+  FormRow,
+  FormSection,
+  SummaryGroup,
+  SummaryKV,
+} from '@/components/common/ui/FormShell';
 import type { EvalTargetView, ModelOption } from './types';
 
 interface CreateTargetModalProps {
@@ -12,6 +20,8 @@ interface CreateTargetModalProps {
   onClose: () => void;
   onCreated: (target: EvalTargetView) => void;
   models?: ModelOption[];
+  /** When set, the modal edits this target (PATCH) instead of creating one. */
+  editing?: EvalTargetView | null;
 }
 
 interface FormValues {
@@ -28,8 +38,12 @@ const KIND_OPTIONS = [
   { value: 'external', label: 'External — an HTTP endpoint' },
 ];
 
-export default function CreateTargetModal({ opened, onClose, onCreated, models = [] }: CreateTargetModalProps) {
+const KIND_LABEL: Record<string, string> = { model: 'Model', agent: 'Agent', external: 'External' };
+
+export default function CreateTargetModal({ opened, onClose, onCreated, models = [], editing = null }: CreateTargetModalProps) {
   const [loading, setLoading] = useState(false);
+  const [agents, setAgents] = useState<{ value: string; label: string }[]>([]);
+  const isEdit = Boolean(editing);
   const form = useForm<FormValues>({
     initialValues: { name: '', description: '', kind: 'model', modelKey: '', agentKey: '' },
     validate: {
@@ -40,7 +54,30 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
   });
 
   useEffect(() => {
-    if (!opened) form.reset();
+    if (!opened) {
+      form.reset();
+      return;
+    }
+    if (editing) {
+      form.setValues({
+        name: editing.name ?? '',
+        description: editing.description ?? '',
+        kind: editing.kind,
+        modelKey: editing.modelKey ?? '',
+        agentKey: editing.agentKey ?? '',
+      });
+    }
+    void (async () => {
+      try {
+        const res = await fetch('/api/agents', { cache: 'no-store' });
+        if (res.ok) {
+          const data = await res.json();
+          setAgents(((data.agents ?? []) as Array<{ key: string; name: string }>).map((a) => ({ value: a.key, label: a.name })));
+        }
+      } catch {
+        /* non-fatal — agent dropdown stays empty */
+      }
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened]);
 
@@ -49,59 +86,102 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
     const v = form.getValues();
     setLoading(true);
     try {
-      const res = await fetch('/api/evaluation/targets', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: v.name.trim(),
-          description: v.description || undefined,
-          kind: v.kind,
-          modelKey: v.kind === 'model' ? v.modelKey : undefined,
-          agentKey: v.kind === 'agent' ? v.agentKey.trim() : undefined,
-        }),
-      });
+      const payload = {
+        name: v.name.trim(),
+        description: v.description || undefined,
+        modelKey: v.kind === 'model' ? v.modelKey : undefined,
+        agentKey: v.kind === 'agent' ? v.agentKey.trim() : undefined,
+      };
+      const res = await fetch(
+        isEdit ? `/api/evaluation/targets/${editing!.id}` : '/api/evaluation/targets',
+        {
+          method: isEdit ? 'PATCH' : 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(isEdit ? payload : { ...payload, kind: v.kind }),
+        },
+      );
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || 'Failed to create target');
+        throw new Error(data.error || `Failed to ${isEdit ? 'update' : 'create'} target`);
       }
       const data = await res.json();
-      notifications.show({ title: 'Target created', message: `"${data.target.name}" was created`, color: 'teal' });
+      notifications.show({ title: isEdit ? 'Target updated' : 'Target created', message: `"${data.target.name}" was ${isEdit ? 'updated' : 'created'}`, color: 'teal' });
       onCreated(data.target);
       onClose();
     } catch (err) {
-      notifications.show({ title: 'Error', message: err instanceof Error ? err.message : 'Failed to create target', color: 'red' });
+      notifications.show({ title: 'Error', message: err instanceof Error ? err.message : `Failed to ${isEdit ? 'update' : 'create'} target`, color: 'red' });
     } finally {
       setLoading(false);
     }
   };
 
-  const kind = form.getValues().kind;
+  const v = form.getValues();
+  const kind = v.kind;
+  const validName = v.name.trim().length > 0;
+  const validRef = kind === 'model' ? Boolean(v.modelKey) : kind === 'agent' ? v.agentKey.trim().length > 0 : true;
+  const canSubmit = validName && validRef;
+
+  const checklist = [
+    { id: 'name', label: 'Name provided', done: validName },
+    { id: 'ref', label: kind === 'external' ? 'External endpoint (coming soon)' : `${KIND_LABEL[kind]} selected`, done: validRef },
+  ];
+
+  const summary = (
+    <SummaryGroup title="Target">
+      <SummaryKV label="Name" value={v.name || '—'} />
+      <SummaryKV label="Kind" value={KIND_LABEL[kind]} />
+      <SummaryKV label={kind === 'agent' ? 'Agent' : 'Model'} value={(kind === 'agent' ? v.agentKey : v.modelKey) || '—'} />
+      <Checklist items={checklist} />
+    </SummaryGroup>
+  );
 
   return (
-    <Modal opened={opened} onClose={onClose} title="New evaluation target" centered size="lg">
-      <Stack gap="md">
-        <TextInput label="Name" placeholder="e.g. GPT-4o production model" withAsterisk {...form.getInputProps('name')} />
-        <Textarea label="Description" placeholder="What is this target?" autosize minRows={2} {...form.getInputProps('description')} />
-        <Select label="Kind" data={KIND_OPTIONS} withAsterisk {...form.getInputProps('kind')} />
+    <FormShell
+      open={opened}
+      onClose={onClose}
+      icon={<IconRobot size={16} />}
+      title={isEdit ? 'Edit evaluation target' : 'New evaluation target'}
+      subtitle="Define the agent, model, or endpoint under test."
+      summary={summary}
+      footerStatus={`${checklist.filter((c) => c.done).length} of ${checklist.length} ready`}
+      primaryAction={{
+        label: isEdit ? 'Save changes' : 'Create target',
+        icon: <IconCheck size={13} />,
+        loading,
+        disabled: !canSubmit,
+        onClick: () => void handleSubmit(),
+      }}
+    >
+      <FormSection number={1} title="Identity" done={validName}>
+        <FormRow cols={1}>
+          <FormField label="Name" required>
+            <TextInput placeholder="e.g. GPT-4o production model" {...form.getInputProps('name')} />
+          </FormField>
+          <FormField label="Description" optional>
+            <Textarea placeholder="What is this target?" autosize minRows={2} {...form.getInputProps('description')} />
+          </FormField>
+        </FormRow>
+      </FormSection>
+
+      <FormSection number={2} title="Target" done={validRef}>
+        <FormField label="Kind" required hint={isEdit ? 'Kind cannot be changed after creation.' : undefined}>
+          <Select data={KIND_OPTIONS} disabled={isEdit} {...form.getInputProps('kind')} />
+        </FormField>
 
         {kind === 'model' && (
-          <Select
-            label="Model"
-            placeholder="Select a model…"
-            data={models}
-            searchable
-            withAsterisk
-            {...form.getInputProps('modelKey')}
-          />
+          <FormField label="Model" required>
+            <Select placeholder="Select a model…" data={models} searchable {...form.getInputProps('modelKey')} />
+          </FormField>
         )}
         {kind === 'agent' && (
-          <TextInput label="Agent key" placeholder="agent key" withAsterisk {...form.getInputProps('agentKey')} />
-        )}
-        {kind === 'agent' && (
-          <Alert color="yellow" variant="light" icon={<IconInfoCircle size={16} />}>
-            Agent targets can be created now; live agent execution lands in a follow-up — runs against agent targets are
-            recorded as per-item errors for now.
-          </Alert>
+          <FormField label="Agent" required>
+            <Select
+              placeholder={agents.length ? 'Select an agent…' : 'No registered agents found'}
+              data={agents}
+              searchable
+              {...form.getInputProps('agentKey')}
+            />
+          </FormField>
         )}
         {kind === 'external' && (
           <Alert color="yellow" variant="light" icon={<IconInfoCircle size={16} />}>
@@ -109,12 +189,7 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
             recorded as per-item errors until the adapter ships.
           </Alert>
         )}
-
-        <Group justify="flex-end" mt="sm">
-          <Button variant="default" onClick={onClose}>Cancel</Button>
-          <Button color="teal" loading={loading} onClick={handleSubmit}>Create target</Button>
-        </Group>
-      </Stack>
-    </Modal>
+      </FormSection>
+    </FormShell>
   );
 }

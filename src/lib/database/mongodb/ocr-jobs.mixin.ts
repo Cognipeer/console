@@ -94,7 +94,7 @@ export function OcrJobMixin<TBase extends Constructor<MongoDBProviderBase>>(Base
       id: string,
       delta: OcrJobAggregateDelta,
       extra?: { costCurrency?: string; lastItemAt?: Date },
-    ): Promise<void> {
+    ): Promise<IOcrJob | null> {
       const db = this.getTenantDb();
       const inc: Record<string, number> = {};
       for (const [k, v] of Object.entries(delta)) {
@@ -105,7 +105,11 @@ export function OcrJobMixin<TBase extends Constructor<MongoDBProviderBase>>(Base
       if (extra?.lastItemAt) set.lastItemAt = extra.lastItemAt;
       const update: Record<string, unknown> = { $set: set };
       if (Object.keys(inc).length > 0) update.$inc = inc;
-      await db.collection<IOcrJob>(COLLECTIONS.ocrJobs).updateOne({ _id: objectId(id) }, update);
+      const result = await db
+        .collection<IOcrJob>(COLLECTIONS.ocrJobs)
+        .findOneAndUpdate({ _id: objectId(id) }, update, { returnDocument: 'after' });
+      if (!result) return null;
+      return { ...result, _id: toId(result._id) } as IOcrJob;
     }
 
     // ── OCR job items ────────────────────────────────────────────────

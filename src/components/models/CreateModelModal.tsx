@@ -47,6 +47,8 @@ type CreateModelModalProps = {
   opened: boolean;
   onClose: () => void;
   providers: ModelProviderView[];
+  /** Pre-selects this category when the modal opens (e.g. from a type-filtered list). */
+  defaultCategory?: ModelCategory;
   onCreated: (options: { model: IModel; provider: ModelProviderView }) => void;
 };
 
@@ -113,6 +115,7 @@ export default function CreateModelModal({
   opened,
   onClose,
   providers,
+  defaultCategory,
   onCreated,
 }: CreateModelModalProps) {
   const [availableProviders, setAvailableProviders] =
@@ -188,6 +191,10 @@ export default function CreateModelModal({
       }
     } else {
       wasOpenedRef.current = true;
+      // Honour the category the user was filtering by, when the provider supports it.
+      if (defaultCategory) {
+        setFieldValue('category', defaultCategory);
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened, providers]);

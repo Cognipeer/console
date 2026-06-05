@@ -17,6 +17,7 @@ import {
   reingestDocument,
   updateRagModule,
 } from '@/lib/services/rag/ragService';
+import { answerWithRag, type RagAnswerRequest } from '@/lib/services/rag/ragAnswerService';
 import {
   readJsonBody,
   requireProjectContextForRequest,
@@ -330,6 +331,40 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ result });
     } catch (error) {
       logger.error('Query RAG module error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({
+          error: error instanceof Error ? error.message : 'Internal error',
+        });
+    }
+  }));
+
+  // Q&A: retrieve relevant chunks and synthesize a grounded, cited answer.
+  app.post('/rag/modules/:key/answer', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const { key } = request.params as { key: string };
+      const body = readJsonBody<Record<string, unknown>>(request);
+
+      if (typeof body.question !== 'string' || body.question === '') {
+        return reply.code(400).send({ error: 'question is required' });
+      }
+      if (typeof body.answerModelKey !== 'string' || body.answerModelKey === '') {
+        return reply.code(400).send({ error: 'answerModelKey is required' });
+      }
+
+      const result = await answerWithRag(session.tenantDbName, session.tenantId, projectId, {
+        ragModuleKey: key,
+        question: body.question,
+        answerModelKey: body.answerModelKey,
+        history: body.history as RagAnswerRequest['history'],
+        topK: body.topK as number | undefined,
+        retrieval: body.retrieval as RagAnswerRequest['retrieval'],
+        generation: body.generation as RagAnswerRequest['generation'],
+      });
+
+      return reply.code(200).send({ result });
+    } catch (error) {
+      logger.error('Answer RAG module error', { error });
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Internal error',

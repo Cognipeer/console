@@ -9,5 +9,5 @@
 export * from './types';
 export { runEvaluation } from './runner';
 export type { RunEvaluationParams } from './runner';
-export { runScorers, SUPPORTED_SCORERS, scoreAssertion, scoreLlmJudge } from './scorers';
+export { runScorers, SUPPORTED_SCORERS, scoreAssertion, scoreLlmJudge, scoreSemantic, cosineSimilarity } from './scorers';
 export type { ScorerDeps } from './scorers';

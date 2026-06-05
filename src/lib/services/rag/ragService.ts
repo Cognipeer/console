@@ -446,6 +446,37 @@ function extractMarkdownContent(conversion: unknown): string | undefined {
  * Converts the file to markdown/text using @cognipeer/to-markdown, then
  * delegates to ingestDocument for chunking + embedding + vector upsert.
  */
+/**
+ * Convert an uploaded file buffer to plain text/markdown without ingesting it.
+ * Shares the same conversion rules as `ingestFile` so callers that only need
+ * the extracted text (e.g. dataset generation) don't have to re-implement it.
+ */
+export async function convertFileToText(
+  fileName: string,
+  fileData: Buffer,
+  contentType?: string,
+): Promise<string> {
+  const isPlainText = (
+    contentType?.startsWith('text/') ||
+    fileName.endsWith('.txt') ||
+    fileName.endsWith('.md') ||
+    fileName.endsWith('.csv') ||
+    fileName.endsWith('.json') ||
+    fileName.endsWith('.xml') ||
+    fileName.endsWith('.html') ||
+    fileName.endsWith('.htm')
+  );
+  if (isPlainText) return fileData.toString('utf-8');
+  const conversion = await convertToMarkdown(fileData, { fileName });
+  const markdown = extractMarkdownContent(conversion);
+  if (!markdown || markdown.trim().length === 0) {
+    throw new Error(
+      `Failed to convert "${fileName}" to text. The file format may not be supported.`,
+    );
+  }
+  return markdown;
+}
+
 export async function ingestFile(
   tenantDbName: string,
   tenantId: string,

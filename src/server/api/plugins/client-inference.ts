@@ -294,13 +294,14 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       if (result.usage) {
+        const usage = result.usage;
         void getModelByKey(auth.tenantDbName, modelKey, auth.projectId)
           .then((model) => {
             if (!model) {
               return undefined;
             }
 
-            const cost = calculateCost(model.pricing, result.usage);
+            const cost = calculateCost(model.pricing, usage);
             if (
               cost.currency !== 'USD'
               || !Number.isFinite(cost.totalCost)
