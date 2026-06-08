@@ -112,6 +112,7 @@ export async function createGuardrail(
     name: input.name,
     description: input.description,
     type: input.type,
+    target: input.target ?? 'input',
     action: input.action,
     enabled: input.enabled ?? true,
     modelKey: input.modelKey,

@@ -184,6 +184,7 @@ export interface CreateGuardrailInput {
   name: string;
   description?: string;
   type: GuardrailType;
+  target?: IGuardrail['target'];
   action: GuardrailAction;
   enabled?: boolean;
   modelKey?: string;
@@ -210,6 +211,7 @@ export interface GuardrailView {
   name: string;
   description?: string;
   type: GuardrailType;
+  target: IGuardrail['target'];
   action: GuardrailAction;
   enabled: boolean;
   modelKey?: string;

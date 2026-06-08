@@ -30,18 +30,6 @@ declare module 'fastify' {
     apiTokenContext?: ApiTokenContext;
     rbacUser?: IUser;
   }
-
-  interface FastifyReply {
-    setCookie(
-      name: string,
-      value: string,
-      options?: CookieMutation['options'],
-    ): FastifyReply;
-    clearCookie(
-      name: string,
-      options?: CookieMutation['options'],
-    ): FastifyReply;
-  }
 }
 
 export type RouteInvocation = (

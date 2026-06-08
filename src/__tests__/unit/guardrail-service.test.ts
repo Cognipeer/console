@@ -50,6 +50,7 @@ function makeGuardrail(overrides: Partial<IGuardrail> = {}): IGuardrail {
     key: 'my-guardrail',
     name: 'My Guardrail',
     type: 'preset',
+    target: 'input',
     action: 'block',
     enabled: true,
     createdBy: USER_ID,

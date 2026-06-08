@@ -12,6 +12,7 @@ import type { GuardrailType, GuardrailAction } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 
 const logger = createLogger('guardrails');
+const validTargets = ['input', 'output'] as const;
 
 export async function GET(request: NextRequest) {
   try {
@@ -101,6 +102,10 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'action must be "block", "warn", or "flag"' }, { status: 400 });
     }
 
+    if (body.target && !validTargets.includes(body.target)) {
+      return NextResponse.json({ error: 'target must be "input" or "output"' }, { status: 400 });
+    }
+
     if (body.type === 'custom' && (!body.customPrompt || !body.customPrompt.trim())) {
       return NextResponse.json({ error: 'customPrompt is required for custom guardrails' }, { status: 400 });
     }
@@ -109,6 +114,7 @@ export async function POST(request: NextRequest) {
       name: body.name.trim(),
       description: body.description?.trim(),
       type: body.type,
+      target: body.target ?? 'input',
       action: body.action ?? 'block',
       enabled: body.enabled ?? true,
       modelKey: body.modelKey,

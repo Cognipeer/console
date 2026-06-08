@@ -3,6 +3,7 @@ import type { ObjectId } from 'mongodb';
 // ── Guardrail types ────────────────────────────────────────────────────────
 
 export type GuardrailType = 'preset' | 'custom';
+export type GuardrailTarget = 'input' | 'output';
 export type GuardrailAction = 'block' | 'warn' | 'flag';
 
 export interface IGuardrailPiiPolicy {
@@ -37,6 +38,7 @@ export interface IGuardrail {
   name: string;
   description?: string;
   type: GuardrailType;
+  target: GuardrailTarget;
   action: GuardrailAction;
   enabled: boolean;
   modelKey?: string;

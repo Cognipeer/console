@@ -348,7 +348,7 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
     async findEvaluationRunById(id: string): Promise<IEvaluationRun | null> {
       const db = this.getTenantDb();
       const row = db.prepare(`SELECT * FROM ${TABLES.evaluationRuns} WHERE id = @id`).get({ id }) as SqliteRow | undefined;
-      return row ? this.mapRunRow(row) : null;
+      return row ? this.mapEvaluationRunRow(row) : null;
     }
 
     async listEvaluationRuns(filters?: { projectId?: string; suiteKey?: string; status?: EvaluationRunStatus; limit?: number; skip?: number }): Promise<IEvaluationRun[]> {
@@ -364,7 +364,7 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       const rows = db.prepare(
         `SELECT * FROM ${TABLES.evaluationRuns} ${where} ORDER BY createdAt DESC LIMIT ${limit} OFFSET ${skip}`,
       ).all(params) as SqliteRow[];
-      return rows.map((r) => this.mapRunRow(r));
+      return rows.map((r) => this.mapEvaluationRunRow(r));
     }
 
     // ── Row mappers ──────────────────────────────────────────────────
@@ -429,7 +429,7 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       };
     }
 
-    protected mapRunRow(r: SqliteRow): IEvaluationRun {
+    protected mapEvaluationRunRow(r: SqliteRow): IEvaluationRun {
       const aggregate = this.parseJson<IEvaluationRunAggregate | null>(r.aggregate, null);
       return {
         _id: r.id as string,

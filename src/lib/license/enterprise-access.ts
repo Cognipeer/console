@@ -97,8 +97,8 @@ export function checkEnterpriseApiAccess(
   if (!getConfig().license.enforceLicense) {
     return null;
   }
-  const module = getEnterpriseModuleForPath(pathname);
-  if (!module) {
+  const enterpriseModule = getEnterpriseModuleForPath(pathname);
+  if (!enterpriseModule) {
     return null;
   }
   // buildSessionHeaders already collapses an expired license to FREE, so the
@@ -114,8 +114,8 @@ export function checkEnterpriseApiAccess(
     status: 402,
     body: {
       error: 'Payment Required',
-      message: `The "${module}" module requires an active ENTERPRISE license.`,
-      module,
+      message: `The "${enterpriseModule}" module requires an active ENTERPRISE license.`,
+      module: enterpriseModule,
       requiresEnterprise: true,
     },
   };
