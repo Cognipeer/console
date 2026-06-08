@@ -55,6 +55,15 @@ export const ENTERPRISE_API_RULES: EnterpriseApiRule[] = [
     module: 'prompt-optimizer',
     prefixes: ['/api/prompt-optimizer/'],
   },
+  {
+    // LDAP directory integration: the admin CONFIG surface is enterprise-gated.
+    // The login path itself is /auth/login (not under /api/ldap), so it is never
+    // gated here — authentication must work to issue a session. A non-enterprise
+    // tenant therefore cannot configure LDAP (402), and with no config the
+    // external-auth seam simply skips to local password.
+    module: 'ldap',
+    prefixes: ['/api/ldap/'],
+  },
 ];
 
 export interface EnterpriseDenial {

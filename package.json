@@ -71,6 +71,7 @@
     "isolated-vm": "^6.1.2",
     "jose": "^6.1.0",
     "langchain": "^1.4.0",
+    "ldapts": "^7.4.0",
     "mantine-datatable": "^8.2.0",
     "mime-types": "^2.1.35",
     "mongodb": "^6.20.0",

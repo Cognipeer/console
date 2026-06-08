@@ -22,6 +22,7 @@ import {
   ensureDefaultProject,
 } from '@/lib/services/projects/projectService';
 import { normalizeServicePermissions } from '@/lib/security/rbac';
+import { tryExternalAuthenticate } from '@/enterprise/external-auth';
 import {
   clearSessionCookies,
   getClientIp,
@@ -115,21 +116,41 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         }
 
         await db.switchToTenant(tenant.dbName);
-        user =
-          (await db.findUserByEmail(normalizedEmail))
-          || (await db.findUserByEmail(email));
 
-        if (!user) {
+        // External directory (LDAP/SSO, enterprise overlay) gets first refusal
+        // when the tenant has it configured. 'skip' falls through to the local
+        // email + bcrypt path; 'fail' is a rejected external login (no fallback).
+        const external = await tryExternalAuthenticate({
+          email: normalizedEmail,
+          password,
+          tenant,
+        });
+
+        if (external.outcome === 'fail') {
           return reply
             .code(401)
             .send({ error: 'Invalid email or password' });
         }
 
-        const isPasswordValid = await bcrypt.compare(password, user.password);
-        if (!isPasswordValid) {
-          return reply
-            .code(401)
-            .send({ error: 'Invalid email or password' });
+        if (external.outcome === 'pass') {
+          user = external.user;
+        } else {
+          user =
+            (await db.findUserByEmail(normalizedEmail))
+            || (await db.findUserByEmail(email));
+
+          if (!user) {
+            return reply
+              .code(401)
+              .send({ error: 'Invalid email or password' });
+          }
+
+          const isPasswordValid = await bcrypt.compare(password, user.password);
+          if (!isPasswordValid) {
+            return reply
+              .code(401)
+              .send({ error: 'Invalid email or password' });
+          }
         }
       } else {
         const tenantEntries = await db.listTenantsForUser(normalizedEmail);
