@@ -142,6 +142,15 @@ export interface IUser {
   servicePermissions?: UserServicePermissions;
   licenseId: string;
   features?: string[];
+  /**
+   * Identity source for this user. Defaults to 'local' (email + bcrypt
+   * password). External directory users (LDAP/SSO) are provisioned just-in-time
+   * on first login and skip the local password path; their `password` field
+   * holds an unusable placeholder. Set by the enterprise external-auth seam.
+   */
+  authProvider?: 'local' | 'ldap' | 'oidc' | 'saml';
+  /** Stable identifier from the external directory (e.g. LDAP entry DN). */
+  externalId?: string;
   invitedBy?: string;
   invitedAt?: Date;
   inviteAcceptedAt?: Date;
