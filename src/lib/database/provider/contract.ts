@@ -177,11 +177,16 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   deleteUserProjectsByProject(projectId: string): Promise<void>;
   deleteUserProjectsByUser(userId: string): Promise<void>;
 
-  // Groups / Teams (future — stub, not yet enforced)
+  // Groups / Teams (tenant + project scoped access grants)
   createGroup(data: Omit<IGroup, '_id' | 'createdAt' | 'updatedAt'>): Promise<IGroup>;
   findGroupById(id: string): Promise<IGroup | null>;
+  /** Look up a directory-sourced group by its stable external id (e.g. LDAP DN). */
+  findGroupByExternalId(externalId: string): Promise<IGroup | null>;
   listGroups(tenantId: string): Promise<IGroup[]>;
-  updateGroup(id: string, data: Partial<Pick<IGroup, 'name' | 'description' | 'updatedBy'>>): Promise<IGroup | null>;
+  updateGroup(
+    id: string,
+    data: Partial<Pick<IGroup, 'name' | 'description' | 'updatedBy' | 'tenantRole' | 'servicePermissions' | 'source' | 'externalId'>>,
+  ): Promise<IGroup | null>;
   deleteGroup(id: string): Promise<boolean>;
   addGroupMember(data: Omit<IGroupMember, '_id' | 'createdAt'>): Promise<IGroupMember>;
   removeGroupMember(groupId: string, userId: string): Promise<boolean>;
@@ -190,6 +195,10 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   upsertGroupProject(data: Omit<IGroupProject, '_id' | 'createdAt' | 'updatedAt'>): Promise<IGroupProject>;
   removeGroupProject(groupId: string, projectId: string): Promise<boolean>;
   listGroupProjectsByProject(projectId: string): Promise<IGroupProject[]>;
+  listGroupProjectsByGroup(groupId: string): Promise<IGroupProject[]>;
+  /** Cascade helpers used when a group is deleted. */
+  deleteGroupMembersByGroup(groupId: string): Promise<void>;
+  deleteGroupProjectsByGroup(groupId: string): Promise<void>;
 
   // General audit logs (tenant-specific)
   createAuditLog(

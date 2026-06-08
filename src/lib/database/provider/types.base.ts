@@ -13,6 +13,7 @@ import type {
 import type {
   PermissionService,
   ServicePermissionLevel,
+  UserRole,
   UserServicePermissions,
 } from '@/lib/security/rbac';
 
@@ -789,18 +790,33 @@ export interface IUserProject {
   updatedAt?: Date;
 }
 
-// ── Groups / Teams (future) ───────────────────────────────────────────────
+// ── Groups / Teams ─────────────────────────────────────────────────────────
+
+/** Origin of a group or membership record. LDAP-sourced rows are reconciled
+ *  on each directory login and must not be hand-edited in the console. */
+export type GroupSource = 'local' | 'ldap';
 
 /**
  * A named group of users within a tenant (team, department, squad, etc.).
- * Groups can be assigned to projects with a role, granting all group members
- * effective access via the union of direct UserProject + GroupProject permissions.
+ *
+ * A group grants its members access at two levels, unioned with the member's
+ * direct grants (highest permission wins):
+ *   - tenant-wide: `tenantRole` + `servicePermissions` (e.g. make members admin)
+ *   - per-project: via IGroupProject assignments
  */
 export interface IGroup {
   _id?: ObjectId | string;
   tenantId: string;
   name: string;
   description?: string;
+  /** Tenant-wide role granted to every member (unioned with their own role). */
+  tenantRole?: UserRole;
+  /** Tenant-level service permission grants applied to every member. */
+  servicePermissions?: UserServicePermissions;
+  /** Where the group came from. Defaults to 'local'. */
+  source?: GroupSource;
+  /** Stable external identifier for directory-sourced groups (e.g. LDAP group DN). */
+  externalId?: string;
   createdBy: string;
   updatedBy?: string;
   createdAt?: Date;
@@ -815,6 +831,9 @@ export interface IGroupMember {
   userId: string;
   /** Whether the user can manage group membership. */
   role: 'admin' | 'member';
+  /** Where the membership came from. LDAP-sourced rows are reconciled on
+   *  directory login; local rows are never touched by the sync. Defaults to 'local'. */
+  source?: GroupSource;
   addedBy?: string;
   createdAt?: Date;
 }

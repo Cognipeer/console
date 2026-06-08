@@ -91,7 +91,13 @@ export function UserProjectMixin<TBase extends Constructor<MongoDBProviderBase>>
     async createGroup(data: Omit<IGroup, '_id' | 'createdAt' | 'updatedAt'>): Promise<IGroup> {
       const db = this.getTenantDb();
       const now = new Date();
-      const payload = { ...data, createdAt: now, updatedAt: now };
+      const payload = {
+        ...data,
+        source: data.source ?? 'local',
+        servicePermissions: normalizeServicePermissions(data.servicePermissions),
+        createdAt: now,
+        updatedAt: now,
+      };
       const result = await db.collection<IGroup>(COLLECTIONS.groups).insertOne(payload);
       return { ...payload, _id: result.insertedId.toString() };
     }
@@ -103,7 +109,16 @@ export function UserProjectMixin<TBase extends Constructor<MongoDBProviderBase>>
         ? await db.collection<IGroup>(COLLECTIONS.groups).findOne({ _id: oid as unknown as IGroup['_id'] })
         : null;
       if (!doc) return null;
-      return { ...doc, _id: doc._id?.toString() };
+      return this.mapGroup(doc);
+    }
+
+    async findGroupByExternalId(externalId: string): Promise<IGroup | null> {
+      const db = this.getTenantDb();
+      const doc = await db.collection<IGroup>(COLLECTIONS.groups)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .findOne({ externalId } as any);
+      if (!doc) return null;
+      return this.mapGroup(doc);
     }
 
     async listGroups(tenantId: string): Promise<IGroup[]> {
@@ -113,20 +128,36 @@ export function UserProjectMixin<TBase extends Constructor<MongoDBProviderBase>>
         .find({ tenantId } as any)
         .sort({ name: 1 })
         .toArray();
-      return docs.map((d) => ({ ...d, _id: d._id?.toString() }));
+      return docs.map((d) => this.mapGroup(d));
     }
 
-    async updateGroup(id: string, data: Partial<Pick<IGroup, 'name' | 'description' | 'updatedBy'>>): Promise<IGroup | null> {
+    async updateGroup(
+      id: string,
+      data: Partial<Pick<IGroup, 'name' | 'description' | 'updatedBy' | 'tenantRole' | 'servicePermissions' | 'source' | 'externalId'>>,
+    ): Promise<IGroup | null> {
       const db = this.getTenantDb();
       const oid = ObjectId.isValid(id) ? new ObjectId(id) : null;
       if (!oid) return null;
+      const patch: Record<string, unknown> = { ...data, updatedAt: new Date() };
+      if (data.servicePermissions !== undefined) {
+        patch.servicePermissions = normalizeServicePermissions(data.servicePermissions);
+      }
       const result = await db.collection<IGroup>(COLLECTIONS.groups).findOneAndUpdate(
         { _id: oid as unknown as IGroup['_id'] },
-        { $set: { ...data, updatedAt: new Date() } },
+        { $set: patch },
         { returnDocument: 'after' },
       );
       if (!result) return null;
-      return { ...result, _id: result._id?.toString() };
+      return this.mapGroup(result);
+    }
+
+    private mapGroup(doc: IGroup & { _id?: unknown }): IGroup {
+      return {
+        ...doc,
+        _id: doc._id?.toString(),
+        source: doc.source ?? 'local',
+        servicePermissions: normalizeServicePermissions(doc.servicePermissions),
+      };
     }
 
     async deleteGroup(id: string): Promise<boolean> {
@@ -142,7 +173,7 @@ export function UserProjectMixin<TBase extends Constructor<MongoDBProviderBase>>
     async addGroupMember(data: Omit<IGroupMember, '_id' | 'createdAt'>): Promise<IGroupMember> {
       const db = this.getTenantDb();
       const now = new Date();
-      const payload = { ...data, createdAt: now };
+      const payload = { ...data, source: data.source ?? 'local', createdAt: now };
       await db.collection<IGroupMember>(COLLECTIONS.groupMembers).replaceOne(
         { tenantId: data.tenantId, groupId: data.groupId, userId: data.userId },
         payload,
@@ -199,12 +230,32 @@ export function UserProjectMixin<TBase extends Constructor<MongoDBProviderBase>>
     async listGroupProjectsByProject(projectId: string): Promise<IGroupProject[]> {
       const db = this.getTenantDb();
       const docs = await db.collection<IGroupProject>(COLLECTIONS.groupProjects).find({ projectId }).toArray();
-      return docs.map((d) => ({
+      return docs.map((d) => this.mapGroupProject(d));
+    }
+
+    async listGroupProjectsByGroup(groupId: string): Promise<IGroupProject[]> {
+      const db = this.getTenantDb();
+      const docs = await db.collection<IGroupProject>(COLLECTIONS.groupProjects).find({ groupId }).toArray();
+      return docs.map((d) => this.mapGroupProject(d));
+    }
+
+    async deleteGroupMembersByGroup(groupId: string): Promise<void> {
+      const db = this.getTenantDb();
+      await db.collection(COLLECTIONS.groupMembers).deleteMany({ groupId });
+    }
+
+    async deleteGroupProjectsByGroup(groupId: string): Promise<void> {
+      const db = this.getTenantDb();
+      await db.collection(COLLECTIONS.groupProjects).deleteMany({ groupId });
+    }
+
+    private mapGroupProject(d: IGroupProject & { _id?: unknown }): IGroupProject {
+      return {
         ...d,
         _id: d._id?.toString(),
         servicePermissions: normalizeServicePermissions(d.servicePermissions),
         role: d.role as ProjectRole,
-      }));
+      };
     }
   };
 }

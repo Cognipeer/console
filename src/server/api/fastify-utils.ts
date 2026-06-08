@@ -7,6 +7,7 @@ import { runWithRequestContext } from '@/lib/core/requestContext';
 import {
   authorizeServiceRequest,
   getPermissionServiceForPath,
+  type GroupTenantGrant,
 } from '@/lib/security/rbac';
 import {
   ApiTokenAuthError,
@@ -184,6 +185,36 @@ async function loadRbacUser(session: ApiSessionContext): Promise<IUser> {
   return user;
 }
 
+/**
+ * Loads the tenant-level grants of every group the user belongs to. These are
+ * unioned with the user's own role/permissions at authorization time, so group
+ * membership can only ever raise access. Resolved per request (not baked into
+ * the session) so group edits take effect immediately without re-login.
+ */
+async function loadGroupTenantGrants(
+  db: Awaited<ReturnType<typeof getDatabase>>,
+  userId: string,
+): Promise<GroupTenantGrant[]> {
+  // Defensive: a provider without group support (or a partial test double) must
+  // never break the authorization gate — treat a missing/empty result as "no
+  // group grants" rather than throwing.
+  const memberships = typeof db.listGroupMembersByUser === 'function'
+    ? await db.listGroupMembersByUser(userId)
+    : [];
+  if (!Array.isArray(memberships) || memberships.length === 0) return [];
+
+  const grants: GroupTenantGrant[] = [];
+  for (const membership of memberships) {
+    const group = await db.findGroupById(String(membership.groupId));
+    if (!group) continue;
+    const hasServiceGrant = group.servicePermissions && Object.keys(group.servicePermissions).length > 0;
+    if (group.tenantRole || hasServiceGrant) {
+      grants.push({ tenantRole: group.tenantRole, servicePermissions: group.servicePermissions });
+    }
+  }
+  return grants;
+}
+
 async function enforceSessionRbac(request: FastifyRequest, session: ApiSessionContext): Promise<void> {
   const pathname = getRequestPathname(request);
   if (!getPermissionServiceForPath(pathname)) {
@@ -192,7 +223,10 @@ async function enforceSessionRbac(request: FastifyRequest, session: ApiSessionCo
 
   const user = await loadRbacUser(session);
   request.rbacUser = user;
-  const decision = authorizeServiceRequest(user, request.method, pathname);
+  // db is already switched to the session tenant by loadRbacUser.
+  const db = await getDatabase();
+  const groupGrants = await loadGroupTenantGrants(db, String(user._id));
+  const decision = authorizeServiceRequest(user, request.method, pathname, groupGrants);
   if (!decision.allowed) {
     throw new RbacAuthorizationError(
       `Forbidden: ${decision.service} requires ${decision.required} permission`,

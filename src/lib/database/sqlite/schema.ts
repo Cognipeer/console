@@ -172,6 +172,8 @@ export const TENANT_SCHEMA_SQL = `
     inviteAcceptedAt TEXT,
     mustChangePassword INTEGER DEFAULT 0,
     passwordChangedAt TEXT,
+    authProvider TEXT NOT NULL DEFAULT 'local',
+    externalId TEXT,
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   );
@@ -1533,18 +1535,23 @@ export const TENANT_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_user_projects_user ON user_projects(tenantId, userId);
   CREATE INDEX IF NOT EXISTS idx_user_projects_project ON user_projects(tenantId, projectId);
 
-  -- Groups / Teams (future)
+  -- Groups / Teams (tenant + project scoped access grants)
   CREATE TABLE IF NOT EXISTS groups (
     id TEXT PRIMARY KEY,
     tenantId TEXT NOT NULL,
     name TEXT NOT NULL,
     description TEXT,
+    tenantRole TEXT,
+    servicePermissions TEXT DEFAULT '{}',
+    source TEXT NOT NULL DEFAULT 'local',
+    externalId TEXT,
     createdBy TEXT NOT NULL,
     updatedBy TEXT,
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_groups_tenant ON groups(tenantId);
+  CREATE INDEX IF NOT EXISTS idx_groups_externalId ON groups(tenantId, externalId);
 
   CREATE TABLE IF NOT EXISTS group_members (
     id TEXT PRIMARY KEY,
@@ -1552,6 +1559,7 @@ export const TENANT_SCHEMA_SQL = `
     groupId TEXT NOT NULL,
     userId TEXT NOT NULL,
     role TEXT NOT NULL DEFAULT 'member',
+    source TEXT NOT NULL DEFAULT 'local',
     addedBy TEXT,
     createdAt TEXT NOT NULL,
     UNIQUE(tenantId, groupId, userId)
