@@ -152,7 +152,7 @@ describe('GET /api/crawler/jobs and /jobs/:id/results return id + status on the 
       method: 'POST',
       url: `/api/crawler/crawlers/${crawler.key}/crawl`,
       headers: { ...REQUEST_HEADERS, 'content-type': 'application/json' },
-      payload: JSON.stringify({ urls: [originUrl] }),
+      payload: JSON.stringify({ urls: [originUrl], mode: 'sync' }),
     });
     expect(crawlRes.statusCode).toBe(202);
     const { jobId } = parseJsonBody<{ jobId: string; status: string }>(crawlRes.body);

@@ -178,7 +178,7 @@ export function RedTeamMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
     async findRedTeamRunById(id: string): Promise<IRedTeamRun | null> {
       const db = this.getTenantDb();
       const row = db.prepare(`SELECT * FROM ${TABLES.redTeamRuns} WHERE id = @id`).get({ id }) as SqliteRow | undefined;
-      return row ? this.mapRunRow(row) : null;
+      return row ? this.mapRedTeamRunRow(row) : null;
     }
 
     async listRedTeamRuns(filters?: { projectId?: string; campaignKey?: string; status?: RedTeamRunStatus; limit?: number; skip?: number }): Promise<IRedTeamRun[]> {
@@ -194,7 +194,7 @@ export function RedTeamMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       const rows = db.prepare(
         `SELECT * FROM ${TABLES.redTeamRuns} ${where} ORDER BY createdAt DESC LIMIT ${limit} OFFSET ${skip}`,
       ).all(params) as SqliteRow[];
-      return rows.map((r) => this.mapRunRow(r));
+      return rows.map((r) => this.mapRedTeamRunRow(r));
     }
 
     // ── Row mappers ──────────────────────────────────────────────────
@@ -223,7 +223,7 @@ export function RedTeamMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       };
     }
 
-    protected mapRunRow(r: SqliteRow): IRedTeamRun {
+    protected mapRedTeamRunRow(r: SqliteRow): IRedTeamRun {
       const aggregate = this.parseJson<IRedTeamAggregate | null>(r.aggregate, null);
       return {
         _id: r.id as string,
