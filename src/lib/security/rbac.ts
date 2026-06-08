@@ -141,6 +141,7 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/models/v1', service: 'models' },
   { prefix: '/api/audit', service: 'audit' },
   { prefix: '/api/users', service: 'members' },
+  { prefix: '/api/groups', service: 'members' },
   { prefix: '/api/license', service: 'license' },
   { prefix: '/api/providers', service: 'providers' },
   { prefix: '/api/config', service: 'config' },
@@ -321,6 +322,55 @@ export function getEffectiveServicePermission(
   return explicit ?? getRoleDefaultPermission(user.role, service);
 }
 
+/**
+ * A group's tenant-level grant as seen by the permission resolver: a tenant
+ * role and/or explicit service-permission overrides applied to every member.
+ */
+export interface GroupTenantGrant {
+  tenantRole?: UserRole;
+  servicePermissions?: UserServicePermissions | null;
+}
+
+/**
+ * Effective tenant-level service permission for a user, unioned with the
+ * tenant-level grants of every group they belong to. Highest level wins, so a
+ * group can only ever raise a user's access, never lower it.
+ */
+export function getEffectiveServicePermissionWithGroups(
+  user: RbacUserLike,
+  groupGrants: GroupTenantGrant[],
+  service: PermissionService,
+): ServicePermissionLevel {
+  let best = getEffectiveServicePermission(user, service);
+  if (LEVEL_RANK[best] === LEVEL_RANK.admin) return best;
+
+  for (const grant of groupGrants) {
+    const level = getEffectiveServicePermission(
+      { role: grant.tenantRole, servicePermissions: grant.servicePermissions },
+      service,
+    );
+    if (LEVEL_RANK[level] > LEVEL_RANK[best]) best = level;
+  }
+  return best;
+}
+
+/** Merge several service-permission maps, keeping the highest level per service. */
+export function mergeServicePermissions(
+  maps: Array<UserServicePermissions | null | undefined>,
+): UserServicePermissions {
+  const merged: UserServicePermissions = {};
+  for (const map of maps) {
+    const normalized = normalizeServicePermissions(map);
+    for (const [service, level] of Object.entries(normalized) as Array<[PermissionService, ServicePermissionLevel]>) {
+      const current = merged[service];
+      if (!current || LEVEL_RANK[level] > LEVEL_RANK[current]) {
+        merged[service] = level;
+      }
+    }
+  }
+  return merged;
+}
+
 export function hasServicePermission(
   user: RbacUserLike,
   service: PermissionService,
@@ -333,6 +383,7 @@ export function authorizeServiceRequest(
   user: RbacUserLike,
   method: string,
   pathname: string,
+  groupGrants: GroupTenantGrant[] = [],
 ): { allowed: true; service: PermissionService | null; required?: ServicePermissionLevel } | {
   allowed: false;
   service: PermissionService;
@@ -345,7 +396,7 @@ export function authorizeServiceRequest(
   }
 
   const required = getRequiredPermissionLevel(method, service);
-  const current = getEffectiveServicePermission(user, service);
+  const current = getEffectiveServicePermissionWithGroups(user, groupGrants, service);
   if (LEVEL_RANK[current] >= LEVEL_RANK[required]) {
     return { allowed: true, service, required };
   }

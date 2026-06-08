@@ -49,9 +49,9 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
       db.prepare(`
         INSERT INTO ${TABLES.users}
         (id, email, emailLower, password, name, tenantId, role, projectIds, servicePermissions, licenseId, features,
-         invitedBy, invitedAt, inviteAcceptedAt, mustChangePassword, passwordChangedAt, createdAt, updatedAt)
+         invitedBy, invitedAt, inviteAcceptedAt, mustChangePassword, passwordChangedAt, authProvider, externalId, createdAt, updatedAt)
         VALUES (@id, @email, @emailLower, @password, @name, @tenantId, @role, @projectIds, @servicePermissions, @licenseId, @features,
-         @invitedBy, @invitedAt, @inviteAcceptedAt, @mustChangePassword, @passwordChangedAt, @createdAt, @updatedAt)
+         @invitedBy, @invitedAt, @inviteAcceptedAt, @mustChangePassword, @passwordChangedAt, @authProvider, @externalId, @createdAt, @updatedAt)
       `).run({
         id,
         email: trimmedEmail,
@@ -69,6 +69,8 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
         inviteAcceptedAt: userData.inviteAcceptedAt?.toISOString() ?? null,
         mustChangePassword: this.toBoolInt(userData.mustChangePassword),
         passwordChangedAt: userData.passwordChangedAt?.toISOString() ?? now,
+        authProvider: userData.authProvider ?? 'local',
+        externalId: userData.externalId ?? null,
         createdAt: now,
         updatedAt: now,
       });
@@ -135,6 +137,8 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
         sets.push('passwordChangedAt = @passwordChangedAt');
         params.passwordChangedAt = data.passwordChangedAt?.toISOString() ?? null;
       }
+      if (data.authProvider !== undefined) { sets.push('authProvider = @authProvider'); params.authProvider = data.authProvider; }
+      if (data.externalId !== undefined) { sets.push('externalId = @externalId'); params.externalId = data.externalId ?? null; }
 
       db.prepare(`UPDATE ${TABLES.users} SET ${sets.join(', ')} WHERE id = @id`).run(params);
 
@@ -214,6 +218,8 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
         inviteAcceptedAt: this.toDate(r.inviteAcceptedAt),
         mustChangePassword: this.fromBoolInt(r.mustChangePassword),
         passwordChangedAt: this.toDate(r.passwordChangedAt),
+        authProvider: ((r.authProvider as string) || 'local') as IUser['authProvider'],
+        externalId: (r.externalId as string | null) ?? undefined,
         createdAt: this.toDate(r.createdAt),
         updatedAt: this.toDate(r.updatedAt),
       };

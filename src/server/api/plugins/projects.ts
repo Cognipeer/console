@@ -12,6 +12,8 @@ import {
   listAccessibleProjects,
 } from '@/lib/services/projects/projectService';
 import type { ProjectRole } from '@/lib/database/provider/types.base';
+import type { UserServicePermissions } from '@/lib/security/rbac';
+import { mergeServicePermissions } from '@/lib/security/rbac';
 import {
   readJsonBody,
   requireSessionContext,
@@ -42,7 +44,55 @@ async function collectAccessibleProjectIds(
     }
   }
 
+  // Projects inherited through group membership.
+  const groupMemberships = await db.listGroupMembersByUser(userId);
+  for (const groupMembership of groupMemberships) {
+    const groupProjects = await db.listGroupProjectsByGroup(String(groupMembership.groupId));
+    for (const groupProject of groupProjects) {
+      if (groupProject.projectId) {
+        projectIds.add(String(groupProject.projectId));
+      }
+    }
+  }
+
   return Array.from(projectIds);
+}
+
+/**
+ * Resolves the strongest project role + merged service overrides a user has for
+ * a project, unioning direct UserProject membership, legacy projectIds, and any
+ * group→project assignment the user inherits. Returns null when none apply.
+ */
+async function resolveProjectMembership(
+  db: Awaited<ReturnType<typeof getDatabase>>,
+  params: { userId: string; userRole: string; projectId: string; legacyProjectIds?: string[] },
+): Promise<{ role: ProjectRole; servicePermissions?: UserServicePermissions } | null> {
+  const { userId, userRole, projectId, legacyProjectIds } = params;
+  const sources: Array<{ role: ProjectRole; servicePermissions?: UserServicePermissions | null }> = [];
+
+  const direct = await db.findUserProject(userId, projectId);
+  if (direct) {
+    sources.push({ role: direct.role, servicePermissions: direct.servicePermissions });
+  } else if (getLegacyProjectIds(legacyProjectIds).includes(String(projectId))) {
+    sources.push({ role: userRole === 'project_admin' ? 'project_admin' : 'member' });
+  }
+
+  const groupMemberships = await db.listGroupMembersByUser(userId);
+  if (groupMemberships.length > 0) {
+    const groupIds = new Set(groupMemberships.map((m) => String(m.groupId)));
+    const groupProjects = await db.listGroupProjectsByProject(projectId);
+    for (const groupProject of groupProjects) {
+      if (groupIds.has(String(groupProject.groupId))) {
+        sources.push({ role: groupProject.role, servicePermissions: groupProject.servicePermissions });
+      }
+    }
+  }
+
+  if (sources.length === 0) return null;
+
+  const role: ProjectRole = sources.some((s) => s.role === 'project_admin') ? 'project_admin' : 'member';
+  const servicePermissions = mergeServicePermissions(sources.map((s) => s.servicePermissions));
+  return { role, servicePermissions };
 }
 
 async function loadTenantUser(session: ReturnType<typeof requireSessionContext>) {
@@ -80,33 +130,34 @@ async function assertProjectAccess(params: {
     return { error: 'Unauthorized' as const, ok: false as const, status: 401 as const };
   }
 
-  const userProject = await db.findUserProject(session.userId, projectId);
-  if (!userProject) {
-    const legacyAllowed = getLegacyProjectIds(user.projectIds).includes(String(projectId));
-    if (!legacyAllowed) {
-      return { error: 'Forbidden' as const, ok: false as const, status: 403 as const };
-    }
+  // Effective access unions direct membership, legacy projectIds and groups.
+  const membership = await resolveProjectMembership(db, {
+    userId: session.userId,
+    userRole: session.userRole,
+    projectId,
+    legacyProjectIds: user.projectIds,
+  });
 
-    const legacyRole: ProjectRole = session.userRole === 'project_admin' ? 'project_admin' : 'member';
-    return {
-      db,
-      ok: true as const,
-      project,
-      userProject: {
-        projectId,
-        role: legacyRole,
-        servicePermissions: undefined,
-        tenantId: session.tenantId,
-        userId: session.userId,
-      },
-    };
-  }
-
-  if (requireAdmin && userProject.role !== 'project_admin') {
+  if (!membership) {
     return { error: 'Forbidden' as const, ok: false as const, status: 403 as const };
   }
 
-  return { db, ok: true as const, project, userProject };
+  if (requireAdmin && membership.role !== 'project_admin') {
+    return { error: 'Forbidden' as const, ok: false as const, status: 403 as const };
+  }
+
+  return {
+    db,
+    ok: true as const,
+    project,
+    userProject: {
+      projectId,
+      role: membership.role,
+      servicePermissions: membership.servicePermissions,
+      tenantId: session.tenantId,
+      userId: session.userId,
+    },
+  };
 }
 
 export const projectsApiPlugin: FastifyPluginAsync = async (app) => {

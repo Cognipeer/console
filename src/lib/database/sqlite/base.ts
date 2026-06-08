@@ -381,6 +381,17 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.modelUsageLogs, 'routing', 'routing TEXT');
     // Analysis conversation tags for grouping/filtering (added later). Safe on boot.
     this.ensureTableColumn(db, TABLES.analysisConversations, 'tags', "tags TEXT DEFAULT '[]'");
+    // Group tenant-level grants + directory-sync provenance (added with user
+    // groups). Safe to ensure on boot for tenants created before the feature.
+    this.ensureTableColumn(db, TABLES.groups, 'tenantRole', 'tenantRole TEXT');
+    this.ensureTableColumn(db, TABLES.groups, 'servicePermissions', "servicePermissions TEXT DEFAULT '{}'");
+    this.ensureTableColumn(db, TABLES.groups, 'source', "source TEXT NOT NULL DEFAULT 'local'");
+    this.ensureTableColumn(db, TABLES.groups, 'externalId', 'externalId TEXT');
+    this.ensureTableColumn(db, TABLES.groupMembers, 'source', "source TEXT NOT NULL DEFAULT 'local'");
+    // External identity provenance on users (LDAP/SSO JIT provisioning). Added
+    // with directory auth; safe to ensure on boot for pre-existing tenants.
+    this.ensureTableColumn(db, TABLES.users, 'authProvider', "authProvider TEXT NOT NULL DEFAULT 'local'");
+    this.ensureTableColumn(db, TABLES.users, 'externalId', 'externalId TEXT');
   }
 
   private migrateOcrJobsSchema(db: Database.Database): void {
