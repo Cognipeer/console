@@ -26,6 +26,10 @@ const nextConfig: NextConfig = {
     'pg',
     '@orama/orama',
     'mongodb',
+    // Server-only LDAP client (enterprise LDAP integration). Node-only deps;
+    // keep it out of the Next.js bundle so `next build` doesn't try to resolve
+    // it (it is imported only by the enterprise overlay's auth plugin).
+    'ldapts',
   ],
   turbopack: {
     root: path.resolve(process.cwd(), '..'),
