@@ -152,6 +152,122 @@ export const OCR_TENANT_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_ocr_job_items_jobId_index ON ocr_job_items(jobId, "index");
 `;
 
+/**
+ * Batch API (OpenAI-compatible async bulk inference). One row per batch plus
+ * one row per submitted request line.
+ */
+export const BATCH_TENANT_SCHEMA_SQL = `
+  CREATE TABLE IF NOT EXISTS batch_jobs (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    endpoint TEXT NOT NULL,
+    status TEXT NOT NULL,
+    completionWindow TEXT,
+    inputFile TEXT,
+    outputFile TEXT,
+    errorMessage TEXT,
+    itemsTotal INTEGER NOT NULL DEFAULT 0,
+    itemsSucceeded INTEGER NOT NULL DEFAULT 0,
+    itemsFailed INTEGER NOT NULL DEFAULT 0,
+    itemsCancelled INTEGER NOT NULL DEFAULT 0,
+    usageInputTokens INTEGER NOT NULL DEFAULT 0,
+    usageOutputTokens INTEGER NOT NULL DEFAULT 0,
+    usageTotalTokens INTEGER NOT NULL DEFAULT 0,
+    metadata TEXT,
+    createdBy TEXT NOT NULL,
+    startedAt TEXT,
+    completedAt TEXT,
+    cancelledAt TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_batch_jobs_tenantId ON batch_jobs(tenantId);
+  CREATE INDEX IF NOT EXISTS idx_batch_jobs_status ON batch_jobs(status);
+  CREATE INDEX IF NOT EXISTS idx_batch_jobs_createdAt ON batch_jobs(createdAt DESC);
+
+  CREATE TABLE IF NOT EXISTS batch_job_items (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    batchId TEXT NOT NULL,
+    "index" INTEGER NOT NULL DEFAULT 0,
+    customId TEXT,
+    requestBody TEXT NOT NULL,
+    status TEXT NOT NULL,
+    responseStatusCode INTEGER,
+    responseBody TEXT,
+    errorMessage TEXT,
+    usage TEXT,
+    startedAt TEXT,
+    endedAt TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_batch_job_items_batchId ON batch_job_items(batchId);
+  CREATE INDEX IF NOT EXISTS idx_batch_job_items_batchId_index ON batch_job_items(batchId, "index");
+  CREATE INDEX IF NOT EXISTS idx_batch_job_items_batchId_status ON batch_job_items(batchId, status);
+`;
+
+
+/** Realtime API: named realtime models + per-connection session logs. */
+export const REALTIME_TENANT_SCHEMA_SQL = `
+  CREATE TABLE IF NOT EXISTS realtime_models (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    chatModelKey TEXT NOT NULL,
+    instructions TEXT,
+    temperature REAL,
+    maxOutputTokens INTEGER,
+    sttModelKey TEXT,
+    inputAudioFormat TEXT,
+    ttsModelKey TEXT,
+    voice TEXT,
+    ttsFormat TEXT,
+    turnSilenceMs INTEGER,
+    turnSilenceThreshold REAL,
+    greeting TEXT,
+    metadata TEXT,
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_realtime_models_key ON realtime_models(tenantId, key);
+  CREATE INDEX IF NOT EXISTS idx_realtime_models_tenantId ON realtime_models(tenantId);
+
+  CREATE TABLE IF NOT EXISTS realtime_sessions (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    sessionId TEXT NOT NULL,
+    realtimeModelKey TEXT,
+    chatModelKey TEXT,
+    transport TEXT NOT NULL,
+    status TEXT NOT NULL,
+    responseCount INTEGER NOT NULL DEFAULT 0,
+    inputAudioSeconds REAL NOT NULL DEFAULT 0,
+    usageInputTokens INTEGER NOT NULL DEFAULT 0,
+    usageOutputTokens INTEGER NOT NULL DEFAULT 0,
+    usageTotalTokens INTEGER NOT NULL DEFAULT 0,
+    firstTokenLatencyMs INTEGER,
+    errorMessage TEXT,
+    clientInfo TEXT,
+    startedAt TEXT NOT NULL,
+    endedAt TEXT,
+    durationMs INTEGER,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_realtime_sessions_tenantId ON realtime_sessions(tenantId);
+  CREATE INDEX IF NOT EXISTS idx_realtime_sessions_startedAt ON realtime_sessions(startedAt DESC);
+  CREATE INDEX IF NOT EXISTS idx_realtime_sessions_modelKey ON realtime_sessions(tenantId, realtimeModelKey);
+`;
+
 /** Tables used in every TENANT database. */
 export const TENANT_SCHEMA_SQL = `
   -- Users
@@ -731,6 +847,26 @@ export const TENANT_SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_redteam_runs_campaignKey ON redteam_runs(campaignKey);
   CREATE INDEX IF NOT EXISTS idx_redteam_runs_createdAt ON redteam_runs(createdAt);
+
+  CREATE TABLE IF NOT EXISTS redteam_custom_probes (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    family TEXT NOT NULL DEFAULT 'custom',
+    category TEXT NOT NULL,
+    severity TEXT NOT NULL DEFAULT 'medium',
+    attempts TEXT DEFAULT '[]',
+    detectors TEXT DEFAULT '{}',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_redteam_custom_probes_key ON redteam_custom_probes(key);
 
   -- Analysis service (conversation field extraction, judge & accuracy)
   CREATE TABLE IF NOT EXISTS analysis_definitions (
@@ -1519,6 +1655,10 @@ export const TENANT_SCHEMA_SQL = `
 
   ${OCR_TENANT_SCHEMA_SQL}
 
+  ${BATCH_TENANT_SCHEMA_SQL}
+
+  ${REALTIME_TENANT_SCHEMA_SQL}
+
   -- Project membership (replaces user.projectIds)
   CREATE TABLE IF NOT EXISTS user_projects (
     id TEXT PRIMARY KEY,
@@ -1551,7 +1691,6 @@ export const TENANT_SCHEMA_SQL = `
     updatedAt TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_groups_tenant ON groups(tenantId);
-  CREATE INDEX IF NOT EXISTS idx_groups_externalId ON groups(tenantId, externalId);
 
   CREATE TABLE IF NOT EXISTS group_members (
     id TEXT PRIMARY KEY,

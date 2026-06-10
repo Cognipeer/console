@@ -10,6 +10,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import Database from 'better-sqlite3';
 import { SQLiteProvider } from '@/lib/database/sqlite.provider';
 import { hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
 
@@ -105,6 +106,43 @@ describe('Tenant switching', () => {
   it('switches to tenant database', async () => {
     await db.switchToTenant(TEST_DB_NAME);
     // No error means success
+  });
+
+  it('upgrades legacy groups schema before creating externalId index', async () => {
+    const legacyTenantDbName = 'tenant_legacy_groups';
+    const legacyTenantPath = path.join(tmpDir, `${legacyTenantDbName}.db`);
+    const legacyDb = new Database(legacyTenantPath);
+
+    legacyDb.exec(`
+      CREATE TABLE groups (
+        id TEXT PRIMARY KEY,
+        tenantId TEXT NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT,
+        tenantRole TEXT,
+        servicePermissions TEXT DEFAULT '{}',
+        source TEXT NOT NULL DEFAULT 'local',
+        createdBy TEXT NOT NULL,
+        updatedBy TEXT,
+        createdAt TEXT NOT NULL,
+        updatedAt TEXT NOT NULL
+      );
+    `);
+    legacyDb.close();
+
+    await expect(db.switchToTenant(legacyTenantDbName)).resolves.toBeUndefined();
+
+    const migratedDb = new Database(legacyTenantPath, { readonly: true });
+    const groupColumns = migratedDb
+      .prepare(`PRAGMA table_info(groups)`)
+      .all() as Array<{ name: string }>;
+    const groupIndexes = migratedDb
+      .prepare(`PRAGMA index_list(groups)`)
+      .all() as Array<{ name: string }>;
+    migratedDb.close();
+
+    expect(groupColumns.some((column) => column.name === 'externalId')).toBe(true);
+    expect(groupIndexes.some((index) => index.name === 'idx_groups_externalId')).toBe(true);
   });
 
   it('throws without connect', async () => {

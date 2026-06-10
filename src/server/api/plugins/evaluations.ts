@@ -10,6 +10,7 @@ import type { DatasetGenerationSource } from '@/lib/services/evaluation/datasetG
 import { enqueueDatasetGeneration } from '@/lib/services/evaluation/datasetGenerationJob';
 import { convertFileToText } from '@/lib/services/rag/ragService';
 import {
+  compareRuns,
   createDataset,
   createSuite,
   createTarget,
@@ -460,6 +461,20 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
       const run = await getRun(session.tenantDbName, id);
       if (!run) return reply.code(404).send({ error: 'Run not found' });
       return reply.code(200).send({ run });
+    } catch (error) {
+      return internalError(reply, error);
+    }
+  }));
+
+  app.get('/evaluation/runs/:id/compare', withApiRequestContext(async (request, reply) => {
+    try {
+      const session = requireSessionContext(request);
+      const { id } = request.params as { id: string };
+      const { baseline } = (request.query ?? {}) as { baseline?: string };
+      if (!baseline) return reply.code(400).send({ error: 'baseline run id is required' });
+      const comparison = await compareRuns(session.tenantDbName, id, baseline);
+      if (!comparison) return reply.code(404).send({ error: 'Run or baseline not found' });
+      return reply.code(200).send({ comparison });
     } catch (error) {
       return internalError(reply, error);
     }

@@ -26,6 +26,13 @@ import type {
   IOcrJobItem,
   OcrJobStatus,
   OcrJobAggregateDelta,
+  IBatchJob,
+  IBatchJobItem,
+  BatchJobStatus,
+  BatchJobAggregateDelta,
+  IRealtimeModel,
+  IRealtimeSessionLog,
+  RealtimeSessionLogDelta,
   IConfigAuditLog,
   IConfigGroup,
   IConfigItem,
@@ -122,6 +129,7 @@ import type {
   EvaluationRunStatus,
   IRedTeamCampaign,
   IRedTeamRun,
+  IRedTeamCustomProbe,
   RedTeamRunStatus,
   IAnalysisDefinition,
   IAnalysisConversation,
@@ -667,6 +675,21 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     limit?: number;
     skip?: number;
   }): Promise<IRedTeamRun[]>;
+
+  createRedTeamCustomProbe(
+    probe: Omit<IRedTeamCustomProbe, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IRedTeamCustomProbe>;
+  updateRedTeamCustomProbe(
+    id: string,
+    data: Partial<Omit<IRedTeamCustomProbe, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IRedTeamCustomProbe | null>;
+  deleteRedTeamCustomProbe(id: string): Promise<boolean>;
+  findRedTeamCustomProbeById(id: string): Promise<IRedTeamCustomProbe | null>;
+  findRedTeamCustomProbeByKey(key: string, projectId?: string): Promise<IRedTeamCustomProbe | null>;
+  listRedTeamCustomProbes(filters?: {
+    projectId?: string;
+    search?: string;
+  }): Promise<IRedTeamCustomProbe[]>;
 
   // ── Analysis operations (tenant-specific) ──
   createAnalysisDefinition(
@@ -1317,6 +1340,91 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     jobId: string,
     options?: { limit?: number; skip?: number; status?: string },
   ): Promise<IOcrJobItem[]>;
+
+  // ── Batch API: jobs (tenant-specific) ──
+  createBatchJob(
+    record: Omit<IBatchJob, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IBatchJob>;
+  updateBatchJob(
+    id: string,
+    data: Partial<Omit<IBatchJob, '_id' | 'tenantId' | 'createdAt'>>,
+  ): Promise<IBatchJob | null>;
+  findBatchJobById(id: string): Promise<IBatchJob | null>;
+  listBatchJobs(
+    tenantId: string,
+    filters?: {
+      projectId?: string;
+      status?: BatchJobStatus | string;
+      limit?: number;
+    },
+  ): Promise<IBatchJob[]>;
+  deleteBatchJob(id: string): Promise<boolean>;
+  /**
+   * Atomically apply per-item deltas to the batch aggregates so concurrent
+   * item completions never lose updates. The runner finalizes the batch when
+   * (itemsSucceeded + itemsFailed + itemsCancelled === itemsTotal).
+   */
+  incrementBatchJobAggregates(
+    id: string,
+    delta: BatchJobAggregateDelta,
+  ): Promise<IBatchJob | null>;
+
+  // ── Batch API: items (tenant-specific) ──
+  createBatchJobItems(
+    records: Array<Omit<IBatchJobItem, '_id' | 'createdAt' | 'updatedAt'>>,
+  ): Promise<IBatchJobItem[]>;
+  updateBatchJobItem(
+    id: string,
+    data: Partial<Omit<IBatchJobItem, '_id' | 'tenantId' | 'batchId' | 'createdAt'>>,
+  ): Promise<IBatchJobItem | null>;
+  findBatchJobItemById(id: string): Promise<IBatchJobItem | null>;
+  listBatchJobItems(
+    batchId: string,
+    options?: { limit?: number; skip?: number; status?: string },
+  ): Promise<IBatchJobItem[]>;
+
+  // ── Realtime: named models (tenant-specific) ──
+  createRealtimeModel(
+    record: Omit<IRealtimeModel, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IRealtimeModel>;
+  updateRealtimeModel(
+    id: string,
+    data: Partial<Omit<IRealtimeModel, '_id' | 'tenantId' | 'createdAt'>>,
+  ): Promise<IRealtimeModel | null>;
+  findRealtimeModelById(id: string): Promise<IRealtimeModel | null>;
+  findRealtimeModelByKey(key: string, projectId?: string): Promise<IRealtimeModel | null>;
+  listRealtimeModels(
+    tenantId: string,
+    filters?: { projectId?: string; status?: string; limit?: number },
+  ): Promise<IRealtimeModel[]>;
+  deleteRealtimeModel(id: string): Promise<boolean>;
+
+  // ── Realtime: session logs (tenant-specific) ──
+  createRealtimeSessionLog(
+    record: Omit<IRealtimeSessionLog, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IRealtimeSessionLog>;
+  updateRealtimeSessionLog(
+    id: string,
+    data: Partial<Omit<IRealtimeSessionLog, '_id' | 'tenantId' | 'createdAt'>>,
+  ): Promise<IRealtimeSessionLog | null>;
+  /** Atomically bump usage/response counters as the conversation progresses. */
+  incrementRealtimeSessionLog(
+    id: string,
+    delta: RealtimeSessionLogDelta,
+  ): Promise<IRealtimeSessionLog | null>;
+  listRealtimeSessionLogs(
+    tenantId: string,
+    filters?: {
+      projectId?: string;
+      realtimeModelKey?: string;
+      transport?: string;
+      status?: string;
+      from?: Date;
+      to?: Date;
+      limit?: number;
+      skip?: number;
+    },
+  ): Promise<IRealtimeSessionLog[]>;
 
   // ── Cluster: nodes (main database) ──
   upsertNode(

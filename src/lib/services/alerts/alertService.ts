@@ -24,13 +24,14 @@ const MODULE_METRICS: Record<AlertModule, AlertMetric[]> = {
   mcp: ['mcp_error_rate', 'mcp_avg_latency_ms', 'mcp_total_requests'],
   analysis: ['analysis_pass_rate', 'analysis_avg_judge_score', 'analysis_avg_accuracy'],
   evaluation: ['evaluation_pass_rate', 'evaluation_avg_score'],
+  redteam: ['redteam_attack_success_rate', 'redteam_resilience_score'],
 };
 
 /** Supported metric names for validation */
 const VALID_METRICS: AlertMetric[] = Object.values(MODULE_METRICS).flat();
 
 /** Supported module names */
-const VALID_MODULES: AlertModule[] = ['models', 'inference', 'guardrails', 'rag', 'mcp', 'analysis', 'evaluation'];
+const VALID_MODULES: AlertModule[] = ['models', 'inference', 'guardrails', 'rag', 'mcp', 'analysis', 'evaluation', 'redteam'];
 
 /** Supported window durations (minutes) */
 const VALID_WINDOWS = [5, 15, 30, 60];

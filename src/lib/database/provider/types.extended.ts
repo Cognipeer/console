@@ -278,7 +278,8 @@ export type InstanceEntityType =
   | 'alert-rule'
   | 'automation'
   | 'crawler'
-  | 'ocr';
+  | 'ocr'
+  | 'batch';
 
 export type InstanceAssignmentMode = 'strict' | 'preferred';
 
@@ -772,4 +773,186 @@ export interface OcrJobAggregateDelta {
   costOcr?: number;
   costLlm?: number;
   costTotal?: number;
+}
+
+// ── Batch API (OpenAI-compatible async bulk inference) ─────────────────────
+
+/**
+ * A Batch is a one-shot bulk inference job: a set of chat-completion or
+ * embedding requests submitted together (inline or as a JSONL file in a
+ * Document Store bucket) and executed asynchronously via per-item queue
+ * fan-out. Mirrors the OpenAI `/v1/batches` lifecycle.
+ */
+export type BatchJobStatus =
+  | 'validating'
+  | 'in_progress'
+  | 'completed'
+  | 'failed'
+  | 'cancelling'
+  | 'cancelled';
+
+/** Target route each line of the batch is executed against. */
+export type BatchJobEndpoint = '/v1/chat/completions' | '/v1/embeddings';
+
+export type BatchJobItemStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+
+/** Reference to a JSONL object in a Document Store bucket. */
+export interface BatchFileRef {
+  bucketKey: string;
+  objectKey: string;
+}
+
+export interface IBatchJob {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  endpoint: BatchJobEndpoint;
+  status: BatchJobStatus;
+  /** Informational (OpenAI compat); items run as soon as workers are free. */
+  completionWindow?: string;
+  /** Where the input JSONL came from (absent for inline submissions). */
+  inputFile?: BatchFileRef;
+  /**
+   * Output JSONL destination. `bucketKey` is set at submission when the
+   * caller requested a file; `objectKey` is filled in by the finalizer.
+   */
+  outputFile?: { bucketKey: string; objectKey?: string };
+  /** Batch-level failure reason (validation/finalization errors). */
+  errorMessage?: string;
+  itemsTotal: number;
+  itemsSucceeded: number;
+  itemsFailed: number;
+  itemsCancelled: number;
+  usageInputTokens: number;
+  usageOutputTokens: number;
+  usageTotalTokens: number;
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  startedAt?: Date;
+  completedAt?: Date;
+  cancelledAt?: Date;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IBatchJobItem {
+  _id?: ObjectId | string;
+  tenantId: string;
+  batchId: string;
+  /** Original line position in the submitted input (0-based). */
+  index: number;
+  /** Caller-supplied correlation id (OpenAI `custom_id`). */
+  customId?: string;
+  /** Request body of this line (chat-completion or embedding payload). */
+  requestBody: Record<string, unknown>;
+  status: BatchJobItemStatus;
+  /** HTTP-equivalent status of the executed request (200 on success). */
+  responseStatusCode?: number;
+  responseBody?: Record<string, unknown>;
+  errorMessage?: string;
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+  };
+  startedAt?: Date;
+  endedAt?: Date;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+/** Atomic aggregate increments applied to a batch as items complete. */
+export interface BatchJobAggregateDelta {
+  itemsTotal?: number;
+  itemsSucceeded?: number;
+  itemsFailed?: number;
+  itemsCancelled?: number;
+  usageInputTokens?: number;
+  usageOutputTokens?: number;
+  usageTotalTokens?: number;
+}
+
+// ── Realtime API (named realtime models + session logs) ────────────────────
+
+/**
+ * A Realtime Model is a named, reusable session preset: which chat model
+ * answers, which STT model transcribes committed audio, which TTS model and
+ * voice speak the answers, plus turn-detection settings for telephony
+ * bridges. Clients connect with `?model=<key>` and get the whole bundle.
+ */
+export type RealtimeModelStatus = 'active' | 'disabled';
+
+export interface IRealtimeModel {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  /** Stable identifier clients connect with (`?model=<key>`). */
+  key: string;
+  name: string;
+  description?: string;
+  status: RealtimeModelStatus;
+  /** Chat model key responses are generated with. */
+  chatModelKey: string;
+  instructions?: string;
+  temperature?: number;
+  maxOutputTokens?: number;
+  /** STT model key for committed audio (optional — text-only otherwise). */
+  sttModelKey?: string;
+  /** Audio MIME type of appended input chunks (default audio/webm). */
+  inputAudioFormat?: string;
+  /** TTS model key; when set, responses are also synthesized to audio. */
+  ttsModelKey?: string;
+  voice?: string;
+  ttsFormat?: string;
+  // ── Turn detection (telephony bridges) ──
+  /** Silence duration that ends a caller turn, in ms (default 700). */
+  turnSilenceMs?: number;
+  /** RMS energy threshold (0..1) below which a frame counts as silence. */
+  turnSilenceThreshold?: number;
+  /** Greeting spoken/sent when a telephony call connects. */
+  greeting?: string;
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export type RealtimeSessionTransport = 'websocket' | 'twilio';
+export type RealtimeSessionLogStatus = 'active' | 'ended' | 'error';
+
+/** One realtime connection, recorded for the observability dashboard. */
+export interface IRealtimeSessionLog {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  /** RealtimeSession id (rt_*). */
+  sessionId: string;
+  realtimeModelKey?: string;
+  chatModelKey?: string;
+  transport: RealtimeSessionTransport;
+  status: RealtimeSessionLogStatus;
+  responseCount: number;
+  inputAudioSeconds: number;
+  usageInputTokens: number;
+  usageOutputTokens: number;
+  usageTotalTokens: number;
+  /** Time from response.create to the first streamed delta (last response). */
+  firstTokenLatencyMs?: number;
+  errorMessage?: string;
+  clientInfo?: Record<string, unknown>;
+  startedAt: Date;
+  endedAt?: Date;
+  durationMs?: number;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+/** Atomic counters applied to a session log as the conversation progresses. */
+export interface RealtimeSessionLogDelta {
+  responseCount?: number;
+  inputAudioSeconds?: number;
+  usageInputTokens?: number;
+  usageOutputTokens?: number;
+  usageTotalTokens?: number;
 }

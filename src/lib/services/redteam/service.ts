@@ -16,12 +16,16 @@ import type {
   IRedTeamAttemptResult,
   IRedTeamAggregate,
   IRedTeamSignal,
+  IRedTeamCustomProbe,
+  IRedTeamCustomAttempt,
+  IRedTeamCustomDetectors,
   RedTeamOutcome,
   RedTeamSeverity,
   RedTeamTargetKind,
 } from '@/lib/database';
 import { runRedTeam } from './runner';
-import { buildProbes } from './probes';
+import { buildProbes, CUSTOM_PROBE_PREFIX, validateCustomProbe, CustomProbeError } from './probes';
+import { compareRedTeamRuns, type RedTeamComparison } from './compare';
 import {
   buildAttackerInvoker,
   buildJudgeInvoker,
@@ -232,6 +236,139 @@ export async function getRun(tenantDbName: string, id: string): Promise<WithId<I
   return record ? toView(record) : null;
 }
 
+/**
+ * Diff a run against a baseline run. Both must exist; the baseline is typically
+ * an earlier completed scan of the same campaign. Returns null if either run is
+ * missing.
+ */
+export async function compareRuns(
+  tenantDbName: string,
+  runId: string,
+  baselineRunId: string,
+): Promise<RedTeamComparison | null> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const [current, baseline] = await Promise.all([
+    db.findRedTeamRunById(runId),
+    db.findRedTeamRunById(baselineRunId),
+  ]);
+  if (!current || !baseline) return null;
+  return compareRedTeamRuns(baseline, current);
+}
+
+// ── OWASP overview (compliance posture across completed scans) ─────────────────
+
+export interface RedTeamOverviewCategory {
+  category: string;
+  total: number;
+  vulnerable: number;
+  needsReview: number;
+  /** (total - vulnerable) / total, in [0, 1]. */
+  resilience: number;
+}
+
+export interface RedTeamOverviewTrendPoint {
+  runId: string;
+  campaignKey: string;
+  finishedAt?: Date;
+  resilienceScore: number;
+  attackSuccessRate: number;
+  vulnerable: number;
+}
+
+export interface RedTeamOverview {
+  /** Completed scans considered in the rollup. */
+  scans: number;
+  totalAttempts: number;
+  completed: number;
+  vulnerable: number;
+  needsReview: number;
+  attackSuccessRate: number;
+  resilienceScore: number;
+  bySeverity: Record<string, number>;
+  byCategory: RedTeamOverviewCategory[];
+  /** Recent completed scans, oldest → newest (for a resilience trend line). */
+  trend: RedTeamOverviewTrendPoint[];
+  latestRunAt?: Date;
+}
+
+/**
+ * Roll up completed scans into an OWASP-category compliance posture. Each
+ * category aggregates attempts across every recent completed run (honouring HITL
+ * review overrides already baked into the persisted aggregate), so the result
+ * answers "how resilient is this project, per OWASP risk?".
+ */
+export async function getOverview(
+  tenantDbName: string,
+  filters?: { projectId?: string; limit?: number },
+): Promise<RedTeamOverview> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const runs = await db.listRedTeamRuns({
+    projectId: filters?.projectId,
+    status: 'completed',
+    limit: filters?.limit ?? 100,
+  });
+
+  const byCategory = new Map<string, RedTeamOverviewCategory>();
+  const bySeverity: Record<string, number> = { low: 0, medium: 0, high: 0, critical: 0 };
+  let totalAttempts = 0;
+  let completed = 0;
+  let vulnerable = 0;
+  let needsReview = 0;
+
+  for (const run of runs) {
+    const agg = run.aggregate;
+    if (!agg) continue;
+    totalAttempts += agg.total;
+    completed += agg.completed;
+    vulnerable += agg.vulnerable;
+    needsReview += agg.needsReview;
+    for (const sev of Object.keys(bySeverity)) bySeverity[sev] += agg.bySeverity?.[sev] ?? 0;
+    for (const [cat, bucket] of Object.entries(agg.byCategory ?? {})) {
+      const entry = byCategory.get(cat) ?? { category: cat, total: 0, vulnerable: 0, needsReview: 0, resilience: 1 };
+      entry.total += bucket.total;
+      entry.vulnerable += bucket.vulnerable;
+      entry.needsReview += bucket.needsReview;
+      byCategory.set(cat, entry);
+    }
+  }
+
+  const categories = [...byCategory.values()].map((c) => ({
+    ...c,
+    resilience: c.total > 0 ? (c.total - c.vulnerable) / c.total : 1,
+  }));
+  // Worst posture first so the dashboard surfaces the riskiest categories on top.
+  categories.sort((a, b) => a.resilience - b.resilience || b.vulnerable - a.vulnerable);
+
+  const trend: RedTeamOverviewTrendPoint[] = runs
+    .filter((r) => r.aggregate)
+    .slice(0, 20)
+    .map((r) => ({
+      runId: typeof r._id === 'string' ? r._id : String(r._id ?? ''),
+      campaignKey: r.campaignKey,
+      finishedAt: r.finishedAt,
+      resilienceScore: r.aggregate!.resilienceScore,
+      attackSuccessRate: r.aggregate!.attackSuccessRate,
+      vulnerable: r.aggregate!.vulnerable,
+    }))
+    .reverse();
+
+  return {
+    scans: runs.length,
+    totalAttempts,
+    completed,
+    vulnerable,
+    needsReview,
+    attackSuccessRate: completed > 0 ? vulnerable / completed : 0,
+    resilienceScore: completed > 0 ? 1 - vulnerable / completed : 1,
+    bySeverity,
+    byCategory: categories,
+    trend,
+    latestRunAt: runs[0]?.finishedAt,
+  };
+}
+
 export interface RunCampaignDeps {
   buildTargetInvoker?: typeof buildTargetInvoker;
   buildJudgeInvoker?: typeof buildJudgeInvoker;
@@ -265,7 +402,8 @@ export async function executeRun(
   await db.switchToTenant(tenantDbName);
 
   try {
-    const probes = buildProbes(resolveProbeKeys(campaign, options));
+    const customProbes = await db.listRedTeamCustomProbes({ projectId });
+    const probes = buildProbes(resolveProbeKeys(campaign, options), customProbes);
     const judgeModelKey = options?.judgeModelKey ?? campaign.judgeModelKey;
     const ctx: RedTeamModelContext = { tenantDbName, tenantId, projectId: projectId ?? '', userId: createdBy };
     const makeTarget = deps.buildTargetInvoker ?? buildTargetInvoker;
@@ -375,7 +513,8 @@ async function createPendingRun(
     throw new Error(`A run for campaign "${campaign.key}" is already in progress`);
   }
 
-  const probeCount = buildProbes(resolveProbeKeys(campaign, params.options)).reduce((n, p) => n + p.generate().length, 0);
+  const customProbes = await db.listRedTeamCustomProbes({ projectId });
+  const probeCount = buildProbes(resolveProbeKeys(campaign, params.options), customProbes).reduce((n, p) => n + p.generate().length, 0);
   const run = await db.createRedTeamRun({
     tenantId,
     projectId,
@@ -405,6 +544,106 @@ export async function createAsyncRun(params: CreateRunParams): Promise<{ campaig
   const { campaign, run } = await createPendingRun(params, 'async');
   return { campaign, run: toView(run) };
 }
+
+// ── Custom probes ────────────────────────────────────────────────────────────
+
+export interface CustomProbeInput {
+  name: string;
+  description?: string;
+  family?: string;
+  category: string;
+  severity: RedTeamSeverity;
+  attempts: IRedTeamCustomAttempt[];
+  detectors: IRedTeamCustomDetectors;
+  enabled?: boolean;
+  projectId?: string;
+}
+
+/** Generate a unique `custom:`-prefixed key from a desired name. */
+async function generateUniqueProbeKey(desired: string, exists: (key: string) => Promise<boolean>): Promise<string> {
+  const base = slugify(desired?.trim() || 'probe', SLUG_OPTIONS) || 'probe';
+  let candidate = `${CUSTOM_PROBE_PREFIX}${base}`;
+  let attempt = 0;
+  while (attempt < MAX_KEY_ATTEMPTS) {
+    if (!(await exists(candidate))) return candidate;
+    attempt += 1;
+    candidate = `${CUSTOM_PROBE_PREFIX}${base}-${attempt}`;
+  }
+  throw new Error(`Could not generate a unique key for "${desired}"`);
+}
+
+export async function createCustomProbe(
+  tenantDbName: string,
+  tenantId: string,
+  createdBy: string,
+  input: CustomProbeInput,
+): Promise<WithId<IRedTeamCustomProbe>> {
+  // Fail loudly on an unrunnable definition before it reaches a campaign.
+  validateCustomProbe({ attempts: input.attempts, detectors: input.detectors });
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const key = await generateUniqueProbeKey(input.name, async (k) => !!(await db.findRedTeamCustomProbeByKey(k, input.projectId)));
+  const probe = await db.createRedTeamCustomProbe({
+    tenantId,
+    projectId: input.projectId,
+    key,
+    name: input.name,
+    description: input.description ?? '',
+    family: input.family || 'custom',
+    category: input.category,
+    severity: input.severity,
+    attempts: input.attempts,
+    detectors: input.detectors,
+    enabled: input.enabled ?? true,
+    createdBy,
+  });
+  return toView(probe);
+}
+
+export async function listCustomProbes(
+  tenantDbName: string,
+  filters?: { projectId?: string; search?: string },
+): Promise<WithId<IRedTeamCustomProbe>[]> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  return (await db.listRedTeamCustomProbes(filters)).map(toView);
+}
+
+export async function getCustomProbe(tenantDbName: string, id: string): Promise<WithId<IRedTeamCustomProbe> | null> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const record = await db.findRedTeamCustomProbeById(id);
+  return record ? toView(record) : null;
+}
+
+export async function updateCustomProbe(
+  tenantDbName: string,
+  id: string,
+  updatedBy: string,
+  data: Partial<Pick<IRedTeamCustomProbe, 'name' | 'description' | 'family' | 'category' | 'severity' | 'attempts' | 'detectors' | 'enabled' | 'projectId'>>,
+): Promise<WithId<IRedTeamCustomProbe> | null> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  // Validate the resulting definition when the attempts / detectors change.
+  if (data.attempts !== undefined || data.detectors !== undefined) {
+    const existing = await db.findRedTeamCustomProbeById(id);
+    if (!existing) return null;
+    validateCustomProbe({
+      attempts: data.attempts ?? existing.attempts,
+      detectors: data.detectors ?? existing.detectors,
+    });
+  }
+  const updated = await db.updateRedTeamCustomProbe(id, { ...data, updatedBy });
+  return updated ? toView(updated) : null;
+}
+
+export async function deleteCustomProbe(tenantDbName: string, id: string): Promise<boolean> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  return db.deleteRedTeamCustomProbe(id);
+}
+
+export { CustomProbeError };
 
 // ── HITL review ──────────────────────────────────────────────────────────────
 

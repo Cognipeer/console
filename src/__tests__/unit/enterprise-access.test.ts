@@ -46,25 +46,17 @@ describe('getEnterpriseModuleForPath', () => {
 });
 
 describe('checkEnterpriseApiAccess', () => {
-  it('is a no-op when ENFORCE_LICENSE is off', () => {
-    setConfigSource(sourceWith({ ENFORCE_LICENSE: 'false' }));
-    expect(checkEnterpriseApiAccess('/api/gpu-fleet/hosts', 'FREE')).toBeNull();
-  });
-
-  it('denies FREE on an enterprise path when enforcing', () => {
-    setConfigSource(sourceWith({ ENFORCE_LICENSE: 'true' }));
+  it('denies FREE on an enterprise path', () => {
     const denial = checkEnterpriseApiAccess('/api/gpu-fleet/hosts', 'FREE');
     expect(denial?.status).toBe(402);
     expect(denial?.body.module).toBe('gpu-fleet');
   });
 
-  it('allows ENTERPRISE on an enterprise path when enforcing', () => {
-    setConfigSource(sourceWith({ ENFORCE_LICENSE: 'true' }));
+  it('allows ENTERPRISE on an enterprise path', () => {
     expect(checkEnterpriseApiAccess('/api/gpu-fleet/hosts', 'ENTERPRISE')).toBeNull();
   });
 
-  it('never gates community paths even when enforcing', () => {
-    setConfigSource(sourceWith({ ENFORCE_LICENSE: 'true' }));
+  it('never gates community paths', () => {
     expect(checkEnterpriseApiAccess('/api/models', 'FREE')).toBeNull();
   });
 });

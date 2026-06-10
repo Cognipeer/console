@@ -11,6 +11,9 @@ import type {
   IRedTeamRun,
   IRedTeamAttemptResult,
   IRedTeamAggregate,
+  IRedTeamCustomProbe,
+  IRedTeamCustomAttempt,
+  IRedTeamCustomDetectors,
   RedTeamRunStatus,
 } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
@@ -197,7 +200,115 @@ export function RedTeamMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       return rows.map((r) => this.mapRedTeamRunRow(r));
     }
 
+    // ── Custom probes ────────────────────────────────────────────────
+
+    async createRedTeamCustomProbe(
+      probe: Omit<IRedTeamCustomProbe, '_id' | 'createdAt' | 'updatedAt'>,
+    ): Promise<IRedTeamCustomProbe> {
+      const db = this.getTenantDb();
+      const id = this.newId();
+      const now = this.now();
+      db.prepare(`
+        INSERT INTO ${TABLES.redTeamCustomProbes}
+        (id, tenantId, projectId, key, name, description, family, category, severity,
+         attempts, detectors, enabled, createdBy, updatedBy, createdAt, updatedAt)
+        VALUES (@id, @tenantId, @projectId, @key, @name, @description, @family, @category, @severity,
+         @attempts, @detectors, @enabled, @createdBy, @updatedBy, @createdAt, @updatedAt)
+      `).run({
+        id,
+        tenantId: probe.tenantId,
+        projectId: probe.projectId ?? null,
+        key: probe.key,
+        name: probe.name,
+        description: probe.description ?? null,
+        family: probe.family,
+        category: probe.category,
+        severity: probe.severity,
+        attempts: this.toJson(probe.attempts ?? []),
+        detectors: this.toJson(probe.detectors ?? {}),
+        enabled: probe.enabled === false ? 0 : 1,
+        createdBy: probe.createdBy,
+        updatedBy: probe.updatedBy ?? null,
+        createdAt: now,
+        updatedAt: now,
+      });
+      return { ...probe, _id: id, createdAt: new Date(now), updatedAt: new Date(now) };
+    }
+
+    async updateRedTeamCustomProbe(
+      id: string,
+      data: Partial<Omit<IRedTeamCustomProbe, 'tenantId' | 'key' | 'createdBy'>>,
+    ): Promise<IRedTeamCustomProbe | null> {
+      const db = this.getTenantDb();
+      const sets: string[] = ['updatedAt = @updatedAt'];
+      const params: Record<string, unknown> = { id, updatedAt: this.now() };
+      if (data.name !== undefined) { sets.push('name = @name'); params.name = data.name; }
+      if (data.description !== undefined) { sets.push('description = @description'); params.description = data.description; }
+      if (data.family !== undefined) { sets.push('family = @family'); params.family = data.family; }
+      if (data.category !== undefined) { sets.push('category = @category'); params.category = data.category; }
+      if (data.severity !== undefined) { sets.push('severity = @severity'); params.severity = data.severity; }
+      if (data.attempts !== undefined) { sets.push('attempts = @attempts'); params.attempts = this.toJson(data.attempts); }
+      if (data.detectors !== undefined) { sets.push('detectors = @detectors'); params.detectors = this.toJson(data.detectors); }
+      if (data.enabled !== undefined) { sets.push('enabled = @enabled'); params.enabled = data.enabled ? 1 : 0; }
+      if (data.updatedBy !== undefined) { sets.push('updatedBy = @updatedBy'); params.updatedBy = data.updatedBy; }
+      if (data.projectId !== undefined) { sets.push('projectId = @projectId'); params.projectId = data.projectId; }
+      db.prepare(`UPDATE ${TABLES.redTeamCustomProbes} SET ${sets.join(', ')} WHERE id = @id`).run(params);
+      return this.findRedTeamCustomProbeById(id);
+    }
+
+    async deleteRedTeamCustomProbe(id: string): Promise<boolean> {
+      const db = this.getTenantDb();
+      return db.prepare(`DELETE FROM ${TABLES.redTeamCustomProbes} WHERE id = @id`).run({ id }).changes === 1;
+    }
+
+    async findRedTeamCustomProbeById(id: string): Promise<IRedTeamCustomProbe | null> {
+      const db = this.getTenantDb();
+      const row = db.prepare(`SELECT * FROM ${TABLES.redTeamCustomProbes} WHERE id = @id`).get({ id }) as SqliteRow | undefined;
+      return row ? this.mapCustomProbeRow(row) : null;
+    }
+
+    async findRedTeamCustomProbeByKey(key: string, projectId?: string): Promise<IRedTeamCustomProbe | null> {
+      const db = this.getTenantDb();
+      const clauses = ['key = @key'];
+      const params: Record<string, unknown> = { key };
+      if (projectId !== undefined) { clauses.push('projectId = @projectId'); params.projectId = projectId; }
+      const row = db.prepare(`SELECT * FROM ${TABLES.redTeamCustomProbes} WHERE ${clauses.join(' AND ')}`).get(params) as SqliteRow | undefined;
+      return row ? this.mapCustomProbeRow(row) : null;
+    }
+
+    async listRedTeamCustomProbes(filters?: { projectId?: string; search?: string }): Promise<IRedTeamCustomProbe[]> {
+      const db = this.getTenantDb();
+      const clauses: string[] = [];
+      const params: Record<string, unknown> = {};
+      if (filters?.projectId !== undefined) { clauses.push('projectId = @projectId'); params.projectId = filters.projectId; }
+      if (filters?.search) { clauses.push('(name LIKE @search OR description LIKE @search OR key LIKE @search)'); params.search = this.likePattern(filters.search); }
+      const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+      const rows = db.prepare(`SELECT * FROM ${TABLES.redTeamCustomProbes} ${where} ORDER BY createdAt DESC`).all(params) as SqliteRow[];
+      return rows.map((r) => this.mapCustomProbeRow(r));
+    }
+
     // ── Row mappers ──────────────────────────────────────────────────
+
+    protected mapCustomProbeRow(r: SqliteRow): IRedTeamCustomProbe {
+      return {
+        _id: r.id as string,
+        tenantId: r.tenantId as string,
+        projectId: (r.projectId as string | null) ?? undefined,
+        key: r.key as string,
+        name: r.name as string,
+        description: (r.description as string | null) ?? '',
+        family: r.family as string,
+        category: r.category as string,
+        severity: r.severity as IRedTeamCustomProbe['severity'],
+        attempts: this.parseJson<IRedTeamCustomAttempt[]>(r.attempts, []),
+        detectors: this.parseJson<IRedTeamCustomDetectors>(r.detectors, {}),
+        enabled: (r.enabled as number) !== 0,
+        createdBy: r.createdBy as string,
+        updatedBy: (r.updatedBy as string | null) ?? undefined,
+        createdAt: this.toDate(r.createdAt),
+        updatedAt: this.toDate(r.updatedAt),
+      };
+    }
 
     protected mapCampaignRow(r: SqliteRow): IRedTeamCampaign {
       return {

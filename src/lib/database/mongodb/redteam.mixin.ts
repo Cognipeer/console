@@ -9,6 +9,7 @@ import { ObjectId } from 'mongodb';
 import type {
   IRedTeamCampaign,
   IRedTeamRun,
+  IRedTeamCustomProbe,
   RedTeamRunStatus,
 } from '../provider.interface';
 import type { Constructor } from './types';
@@ -124,6 +125,67 @@ export function RedTeamMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
         .limit(filters?.limit ?? 50)
         .toArray();
       return docs as unknown as IRedTeamRun[];
+    }
+
+    // ── Custom probes ────────────────────────────────────────────────
+
+    async createRedTeamCustomProbe(
+      probe: Omit<IRedTeamCustomProbe, '_id' | 'createdAt' | 'updatedAt'>,
+    ): Promise<IRedTeamCustomProbe> {
+      const db = this.getTenantDb();
+      const now = new Date();
+      const doc = { ...probe, createdAt: now, updatedAt: now };
+      const result = await db.collection(COLLECTIONS.redTeamCustomProbes).insertOne(doc);
+      return { ...doc, _id: result.insertedId.toString() };
+    }
+
+    async updateRedTeamCustomProbe(
+      id: string,
+      data: Partial<Omit<IRedTeamCustomProbe, 'tenantId' | 'key' | 'createdBy'>>,
+    ): Promise<IRedTeamCustomProbe | null> {
+      const db = this.getTenantDb();
+      const updateData: Record<string, unknown> = { ...data, updatedAt: new Date() };
+      delete updateData._id;
+      const result = await db
+        .collection<IRedTeamCustomProbe>(COLLECTIONS.redTeamCustomProbes)
+        .findOneAndUpdate({ _id: new ObjectId(id) }, { $set: updateData }, { returnDocument: 'after' });
+      if (!result) return null;
+      return { ...result, _id: result._id?.toString() } as IRedTeamCustomProbe;
+    }
+
+    async deleteRedTeamCustomProbe(id: string): Promise<boolean> {
+      const db = this.getTenantDb();
+      const result = await db.collection(COLLECTIONS.redTeamCustomProbes).deleteOne({ _id: new ObjectId(id) });
+      return result.deletedCount === 1;
+    }
+
+    async findRedTeamCustomProbeById(id: string): Promise<IRedTeamCustomProbe | null> {
+      const db = this.getTenantDb();
+      const doc = await db.collection(COLLECTIONS.redTeamCustomProbes).findOne({ _id: new ObjectId(id) });
+      return doc as unknown as IRedTeamCustomProbe | null;
+    }
+
+    async findRedTeamCustomProbeByKey(key: string, projectId?: string): Promise<IRedTeamCustomProbe | null> {
+      const db = this.getTenantDb();
+      const filter: Record<string, unknown> = { key };
+      if (projectId !== undefined) filter.projectId = projectId;
+      const doc = await db.collection(COLLECTIONS.redTeamCustomProbes).findOne(filter);
+      return doc as unknown as IRedTeamCustomProbe | null;
+    }
+
+    async listRedTeamCustomProbes(filters?: { projectId?: string; search?: string }): Promise<IRedTeamCustomProbe[]> {
+      const db = this.getTenantDb();
+      const filter: Record<string, unknown> = {};
+      if (filters?.projectId !== undefined) filter.projectId = filters.projectId;
+      if (filters?.search) {
+        filter.$or = [
+          { name: { $regex: filters.search, $options: 'i' } },
+          { description: { $regex: filters.search, $options: 'i' } },
+          { key: { $regex: filters.search, $options: 'i' } },
+        ];
+      }
+      const docs = await db.collection(COLLECTIONS.redTeamCustomProbes).find(filter).sort({ createdAt: -1 }).toArray();
+      return docs as unknown as IRedTeamCustomProbe[];
     }
   };
 }

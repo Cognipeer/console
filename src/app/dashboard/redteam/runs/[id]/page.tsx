@@ -9,6 +9,7 @@ import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer'
 import StatTile from '@/components/common/ui/StatTile';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import { useTableControls } from '@/components/common/ui/useTableControls';
+import RedTeamRunCompare from '@/components/redteam/RedTeamRunCompare';
 import type { RedTeamAttemptView, RedTeamOutcome, RedTeamRunView } from '@/components/redteam/types';
 
 const RUN_STATUS_BADGE: Record<string, string> = {
@@ -201,6 +202,8 @@ export default function RedTeamRunDetailPage() {
           { id: 'review', label: 'Review / override', onClick: () => openReview(a) },
         ]}
       />
+
+      <RedTeamRunCompare run={run} />
 
       <Modal opened={reviewing !== null} onClose={() => setReviewing(null)} title="Review verdict" centered size="lg">
         {reviewing ? (

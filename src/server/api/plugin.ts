@@ -13,6 +13,10 @@ import { recordAuditLog } from '@/lib/services/audit';
 import { applyCorsHeaders } from './cors';
 import { authApiPlugin } from './plugins/auth';
 import { clientAgentsApiPlugin } from './plugins/client-agents';
+import { clientBatchesApiPlugin } from './plugins/client-batches';
+import { clientModerationsApiPlugin } from './plugins/client-moderations';
+import { clientSpendApiPlugin } from './plugins/client-spend';
+import { clientRealtimeApiPlugin } from './plugins/client-realtime';
 import { clientConfigApiPlugin } from './plugins/client-config';
 import { clientFilesApiPlugin } from './plugins/client-files';
 import { clientGuardrailsApiPlugin } from './plugins/client-guardrails';
@@ -66,6 +70,7 @@ import { projectsApiPlugin } from './plugins/projects';
 import { quotaApiPlugin } from './plugins/quota';
 import { ragApiPlugin } from './plugins/rag';
 import { rerankerApiPlugin } from './plugins/reranker';
+import { realtimeApiPlugin } from './plugins/realtime';
 import { tokensApiPlugin } from './plugins/tokens';
 import { toolsApiPlugin } from './plugins/tools';
 import { tracingApiPlugin } from './plugins/tracing';
@@ -281,6 +286,12 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
     }
 
     if (clientApiRequest) {
+      // Realtime websocket: browsers cannot set headers on WS upgrades, so
+      // the handler authenticates itself (Authorization header or ?api_key=)
+      // and closes the socket with 4401 on failure.
+      if (pathname.startsWith('/api/client/v1/realtime')) {
+        return;
+      }
       const authHeader = request.headers.authorization;
       if (!authHeader || !authHeader.startsWith('Bearer ')) {
         return unauthorized(reply, {
@@ -320,9 +331,9 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
     request.apiContextHeaders = sessionHeaders;
 
     // ── Enterprise license guard (runtime gate, layer 2) ───────────────────
-    // No-op in the community edition (enterprise routes don't exist) and when
-    // ENFORCE_LICENSE is off. In the enterprise edition this turns a FREE
-    // tenant hitting an enterprise route into a clean 402.
+    // No-op in the community edition (enterprise routes don't exist). In the
+    // enterprise edition this turns a FREE tenant hitting an enterprise route
+    // into a clean 402.
     const enterpriseDenial = checkEnterpriseApiAccess(
       pathname,
       payload.licenseType,
@@ -342,6 +353,10 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(auditApiPlugin);
   await app.register(authApiPlugin);
   await app.register(clientAgentsApiPlugin);
+  await app.register(clientBatchesApiPlugin);
+  await app.register(clientModerationsApiPlugin);
+  await app.register(clientSpendApiPlugin);
+  await app.register(clientRealtimeApiPlugin);
   await app.register(clientAutomationsApiPlugin);
   await app.register(clientConfigApiPlugin);
   await app.register(clientFilesApiPlugin);
@@ -395,6 +410,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(quotaApiPlugin);
   await app.register(ragApiPlugin);
   await app.register(rerankerApiPlugin);
+  await app.register(realtimeApiPlugin);
   await app.register(tokensApiPlugin);
   await app.register(toolsApiPlugin);
   await app.register(tracingApiPlugin);

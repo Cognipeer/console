@@ -72,6 +72,8 @@ export const en = {
     ragDescription: 'Knowledge base and document retrieval',
     reranker: 'Reranker',
     rerankerDescription: 'Re-rank retrieval results with a dedicated model or LLM',
+    realtime: 'Realtime',
+    realtimeDescription: 'Realtime voice & chat sessions over WebSocket, with telephony bridges',
     config: 'Config Management',
     configDescription: 'Secrets and configuration management',
     members: 'Members',

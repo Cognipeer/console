@@ -100,7 +100,7 @@ export default function PiiTestPanel({ categories, customPatterns, languages }: 
         onChange={(e) => setText(e.currentTarget.value)}
         minRows={6}
         autosize
-        styles={{ input: { fontFamily: 'var(--ds-font-mono, monospace)', fontSize: 13 } }}
+        styles={{ input: { fontFamily: 'var(--font-mono, monospace)', fontSize: 13 } }}
       />
 
       <Group>
@@ -206,7 +206,7 @@ export default function PiiTestPanel({ categories, customPatterns, languages }: 
                           {tSev(f.severity)}
                         </Badge>
                       </Table.Td>
-                      <Table.Td style={{ fontFamily: 'var(--ds-font-mono, monospace)', maxWidth: 320, wordBreak: 'break-all' }}>
+                      <Table.Td style={{ fontFamily: 'var(--font-mono, monospace)', maxWidth: 320, wordBreak: 'break-all' }}>
                         {f.value}
                       </Table.Td>
                       <Table.Td>

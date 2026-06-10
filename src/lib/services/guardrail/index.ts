@@ -25,3 +25,15 @@ export type {
   ModerationCategoryDefinition,
   PromptShieldIssueDefinition,
 } from './types';
+
+export {
+  ModerationRequestError,
+  normalizeModerationInput,
+  resolveModerationGuardrailKey,
+  runModeration,
+} from './moderationApi';
+export type {
+  ModerationContext,
+  ModerationResponse,
+  ModerationResult,
+} from './moderationApi';

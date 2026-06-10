@@ -7,10 +7,50 @@ export type RedTeamRunStatus = 'pending' | 'running' | 'completed' | 'failed' | 
 
 export interface ProbeCatalogView {
   key: string;
+  name: string;
   family: string;
   category: string;
   severity: string;
   description: string;
+  custom?: boolean;
+}
+
+export interface CustomProbeAttemptView {
+  id: string;
+  turns: string[];
+  system?: string;
+  canary?: string;
+  forbiddenPatterns?: string[];
+  refusalExpected?: boolean;
+  adaptive?: boolean;
+  objective?: string;
+}
+
+export interface CustomProbeJudgeView {
+  lens: string;
+  rubric: string;
+  threshold?: number;
+}
+
+export interface CustomProbeDetectorsView {
+  refusal?: boolean;
+  pattern?: boolean;
+  judges?: CustomProbeJudgeView[];
+}
+
+export interface CustomProbeView {
+  id: string;
+  key: string;
+  name: string;
+  description: string;
+  family: string;
+  category: string;
+  severity: RedTeamSeverity;
+  attempts: CustomProbeAttemptView[];
+  detectors: CustomProbeDetectorsView;
+  enabled?: boolean;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface RedTeamCampaignView {
@@ -101,4 +141,56 @@ export interface RedTeamRunView {
 export interface SelectOption {
   value: string;
   label: string;
+}
+
+export interface RedTeamOverviewCategoryView {
+  category: string;
+  total: number;
+  vulnerable: number;
+  needsReview: number;
+  resilience: number;
+}
+
+export interface RedTeamOverviewTrendView {
+  runId: string;
+  campaignKey: string;
+  finishedAt?: string;
+  resilienceScore: number;
+  attackSuccessRate: number;
+  vulnerable: number;
+}
+
+export interface RedTeamOverviewView {
+  scans: number;
+  totalAttempts: number;
+  completed: number;
+  vulnerable: number;
+  needsReview: number;
+  attackSuccessRate: number;
+  resilienceScore: number;
+  bySeverity: Record<string, number>;
+  byCategory: RedTeamOverviewCategoryView[];
+  trend: RedTeamOverviewTrendView[];
+  latestRunAt?: string;
+}
+
+export type ComparisonStatus = 'regressed' | 'fixed' | 'unchanged' | 'added' | 'removed';
+
+export interface RedTeamComparisonAttemptView {
+  key: string;
+  probeKey: string;
+  attemptId: string;
+  category: string;
+  severity: string;
+  baseline?: RedTeamOutcome;
+  current?: RedTeamOutcome;
+  status: ComparisonStatus;
+}
+
+export interface RedTeamComparisonView {
+  baselineRunId: string;
+  runId: string;
+  summary: Record<ComparisonStatus, number>;
+  deltas: { attackSuccessRate: number; resilienceScore: number; vulnerable: number };
+  changes: RedTeamComparisonAttemptView[];
 }

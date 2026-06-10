@@ -34,6 +34,7 @@ export type PermissionService =
   | 'tokens'
   | 'license'
   | 'audit'
+  | 'realtime'
   | 'gpu-fleet'
   | 'cluster';
 
@@ -79,6 +80,7 @@ export const RBAC_SERVICE_DEFINITIONS: RbacServiceDefinition[] = [
   { id: 'files', label: 'Document Store', description: 'File buckets and file objects.', category: 'data' },
   { id: 'rag', label: 'Knowledge Engine', description: 'RAG modules, documents and chunks.', category: 'data' },
   { id: 'reranker', label: 'Reranker', description: 'Reranker services and run logs.', category: 'data' },
+  { id: 'realtime', label: 'Realtime', description: 'Realtime models, live sessions and telephony bridges.', category: 'build' },
   { id: 'tracing', label: 'Agent Observability', description: 'Tracing sessions, threads and events.', category: 'operate' },
   { id: 'inference-monitoring', label: 'Model Monitoring', description: 'Inference servers and metrics.', category: 'operate' },
   { id: 'guardrails', label: 'Guardrail', description: 'Guardrail policies and evaluation logs.', category: 'operate' },
@@ -120,6 +122,7 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/client/v1/config', service: 'config' },
   { prefix: '/api/client/v1/files', service: 'files' },
   { prefix: '/api/client/v1/guardrails', service: 'guardrails' },
+  { prefix: '/api/client/v1/moderations', service: 'guardrails' },
   { prefix: '/api/client/v1/evaluation', service: 'evaluations' },
   { prefix: '/api/client/v1/redteam', service: 'redteam' },
   { prefix: '/api/client/v1/pii', service: 'pii' },
@@ -135,7 +138,11 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/client/v1/traces', service: 'tracing' },
   { prefix: '/api/client/v1/vector', service: 'vector' },
   { prefix: '/api/client/v1/agents', service: 'agents' },
+  { prefix: '/api/client/v1/batches', service: 'models' },
+  { prefix: '/api/client/v1/spend', service: 'models' },
+  { prefix: '/api/client/v1/budgets', service: 'models' },
   { prefix: '/api/client/v1/chat', service: 'models' },
+  { prefix: '/api/client/v1/realtime', service: 'realtime' },
   { prefix: '/api/client/v1/responses', service: 'models' },
   { prefix: '/api/client/v1/embeddings', service: 'models' },
   { prefix: '/api/models/v1', service: 'models' },
@@ -155,6 +162,7 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/files', service: 'files' },
   { prefix: '/api/rag', service: 'rag' },
   { prefix: '/api/reranker', service: 'reranker' },
+  { prefix: '/api/realtime', service: 'realtime' },
   { prefix: '/api/agents', service: 'agents' },
   { prefix: '/api/tracing', service: 'tracing' },
   { prefix: '/api/inference-monitoring', service: 'inference-monitoring' },
