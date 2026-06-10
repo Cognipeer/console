@@ -6,9 +6,10 @@
  * the queue; the caller navigates to the run detail page, which polls.
  */
 
-import { useEffect, useMemo, useState } from 'react';
-import { Button, Group, Modal, MultiSelect, NumberInput, Select, Stack, Text } from '@mantine/core';
+import { useEffect, useState } from 'react';
+import { Button, Group, Modal, NumberInput, Select, Stack, Text } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import ProbePicker from './ProbePicker';
 import type { ProbeCatalogView, RedTeamCampaignView, SelectOption } from './types';
 
 interface Props {
@@ -20,8 +21,6 @@ interface Props {
   /** Called with the new run id once the scan is enqueued. */
   onStarted: (runId: string) => void;
 }
-
-const SEVERITY_ORDER: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
 
 export default function RunScanModal({ opened, campaign, probes, models, onClose, onStarted }: Props) {
   const [maxTurns, setMaxTurns] = useState<number | ''>('');
@@ -37,14 +36,6 @@ export default function RunScanModal({ opened, campaign, probes, models, onClose
     setProbeKeys(campaign.probeKeys ?? []);
     setJudgeModelKey(campaign.judgeModelKey ?? null);
   }, [opened, campaign]);
-
-  const probeOptions = useMemo(
-    () =>
-      [...probes]
-        .sort((a, b) => (SEVERITY_ORDER[a.severity] ?? 9) - (SEVERITY_ORDER[b.severity] ?? 9))
-        .map((p) => ({ value: p.key, label: `${p.key} · ${p.severity}` })),
-    [probes],
-  );
 
   const start = async () => {
     if (!campaign) return;
@@ -103,15 +94,16 @@ export default function RunScanModal({ opened, campaign, probes, models, onClose
             />
           </Group>
 
-          <MultiSelect
-            label="Probes"
-            description="Which probes to run this scan. Empty runs the campaign's full selection."
-            searchable
-            data={probeOptions}
-            value={probeKeys}
-            onChange={setProbeKeys}
-            placeholder="Campaign default"
-          />
+          <div>
+            <Text size="sm" fw={500}>Probes</Text>
+            <Text size="xs" c="dimmed" mb={6}>Which probes to run this scan. Clear all to use the campaign&apos;s default selection.</Text>
+            <ProbePicker
+              probes={probes}
+              value={probeKeys}
+              onChange={setProbeKeys}
+              emptyHint="No probes selected — the campaign's default selection will run."
+            />
+          </div>
 
           <Select
             label="Judge / attacker model"

@@ -38,15 +38,10 @@ export interface AppConfig {
   nodeEnv: string;
 
   license: {
-    enforceLicense: boolean;
     offlinePublicKey: string;
     offlinePublicKeyPath: string;
     issuer: string;
     audience: string;
-    /** Deployment-wide signed ENTERPRISE license (JWT). On-prem enterprise edition. */
-    deploymentKey: string;
-    /** If set, the deployment license must be bound to this tenant slug. */
-    tenantSlug: string;
     /** Days after `exp` that an expired license still activates (with a warning). */
     graceDays: number;
   };
@@ -270,13 +265,10 @@ function buildConfig(source: ConfigSource): AppConfig {
     nodeEnv,
 
     license: {
-      enforceLicense: bool(source, 'ENFORCE_LICENSE', false),
       offlinePublicKey: str(source, 'OFFLINE_LICENSE_PUBLIC_KEY', ''),
       offlinePublicKeyPath: str(source, 'OFFLINE_LICENSE_PUBLIC_KEY_PATH', ''),
       issuer: str(source, 'OFFLINE_LICENSE_ISSUER', 'cognipeer'),
       audience: str(source, 'OFFLINE_LICENSE_AUDIENCE', 'cognipeer-console'),
-      deploymentKey: str(source, 'LICENSE_KEY', ''),
-      tenantSlug: str(source, 'LICENSE_TENANT_SLUG', ''),
       graceDays: int(source, 'LICENSE_GRACE_DAYS', 14),
     },
 

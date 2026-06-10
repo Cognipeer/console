@@ -21,6 +21,7 @@ import type {
   EvaluationDatasetSource,
 } from '@/lib/database';
 import { runEvaluation } from './runner';
+import { compareEvaluationRuns, type EvalComparison } from './compare';
 import type { DatasetItem, RunItemResult, ScorerConfig } from './types';
 import { buildEmbedInvoker, buildJudgeInvoker, buildTargetInvoker, type EvaluationModelContext } from './adapters';
 
@@ -311,6 +312,25 @@ export async function getRun(tenantDbName: string, id: string): Promise<WithId<I
   await db.switchToTenant(tenantDbName);
   const record = await db.findEvaluationRunById(id);
   return record ? toView(record) : null;
+}
+
+/**
+ * Diff a run against a baseline run (typically an earlier run of the same
+ * suite). Returns null if either run is missing.
+ */
+export async function compareRuns(
+  tenantDbName: string,
+  runId: string,
+  baselineRunId: string,
+): Promise<EvalComparison | null> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const [current, baseline] = await Promise.all([
+    db.findEvaluationRunById(runId),
+    db.findEvaluationRunById(baselineRunId),
+  ]);
+  if (!current || !baseline) return null;
+  return compareEvaluationRuns(baseline, current);
 }
 
 export interface RunSuiteDeps {

@@ -112,3 +112,23 @@ export interface ModelOption {
   value: string;
   label: string;
 }
+
+export type EvalComparisonStatus = 'regressed' | 'fixed' | 'unchanged' | 'added' | 'removed';
+
+export interface EvalComparisonItemView {
+  itemId: string;
+  baselinePassed?: boolean;
+  currentPassed?: boolean;
+  baselineScore?: number;
+  currentScore?: number;
+  scoreDelta?: number;
+  status: EvalComparisonStatus;
+}
+
+export interface EvalComparisonView {
+  baselineRunId: string;
+  runId: string;
+  summary: Record<EvalComparisonStatus, number>;
+  deltas: { passRate: number; avgScore: number };
+  changes: EvalComparisonItemView[];
+}

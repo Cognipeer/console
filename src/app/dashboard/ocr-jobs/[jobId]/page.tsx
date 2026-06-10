@@ -43,8 +43,8 @@ const preStyle: React.CSSProperties = {
 
 function MetricRow({ label, value }: { label: string; value: React.ReactNode }) {
   return (
-    <Group justify="space-between" style={{ padding: '6px 0', borderBottom: '1px solid var(--ds-border-subtle)' }}>
-      <span style={{ color: 'var(--ds-text-subtle)' }}>{label}</span>
+    <Group justify="space-between" style={{ padding: '6px 0', borderBottom: '1px solid var(--ds-border-soft)' }}>
+      <span style={{ color: 'var(--ds-text-muted)' }}>{label}</span>
       <strong>{value}</strong>
     </Group>
   );
@@ -206,7 +206,7 @@ export default function OcrJobDetailPage() {
               <Group justify="flex-end">
                 <Button leftSection={<IconSend size={15} />} loading={sending} disabled={job?.status !== 'active'} onClick={() => void handleSend()}>Send to job</Button>
               </Group>
-              {job && job.status !== 'active' && <span style={{ color: 'var(--ds-text-subtle)' }}>Job is {job.status}; resume it to send documents.</span>}
+              {job && job.status !== 'active' && <span style={{ color: 'var(--ds-text-muted)' }}>Job is {job.status}; resume it to send documents.</span>}
             </Stack>
           </div>
 
@@ -259,7 +259,7 @@ export default function OcrJobDetailPage() {
         {/* ── API ── */}
         <Tabs.Panel value="api" pt="md">
           <Stack gap="md">
-            <span style={{ color: 'var(--ds-text-subtle)' }}>
+            <span style={{ color: 'var(--ds-text-muted)' }}>
               Integrate with this job using a project API token (send as <Code>Authorization: Bearer $TOKEN</Code>). The job id is <Code>{jobId}</Code>.
             </span>
 
@@ -299,7 +299,7 @@ curl "${apiBase}/export?format=jsonl" -H "Authorization: Bearer $COGNIPEER_API_T
 
             <div>
               <strong>Webhook (per document)</strong>
-              <span style={{ color: 'var(--ds-text-subtle)', display: 'block', marginBottom: 6 }}>
+              <span style={{ color: 'var(--ds-text-muted)', display: 'block', marginBottom: 6 }}>
                 When a callback URL is configured, each document POSTs an HMAC-signed payload (<Code>x-cognipeer-signature: t=&lt;ts&gt;,v1=&lt;hmac&gt;</Code>):
               </span>
               <CodeBlock code={`{
@@ -325,7 +325,7 @@ curl "${apiBase}/export?format=jsonl" -H "Authorization: Bearer $COGNIPEER_API_T
               <StatusBadge status={STATUS_BADGE[viewItem.status] ?? viewItem.status} label={viewItem.status} />
               <span>{num(viewItem.usage?.totalTokens)} tokens · {formatCost(viewItem.costTotal, viewItem.costCurrency)}</span>
             </Group>
-            {viewItem.errorMessage && <div style={{ color: 'var(--ds-danger)' }}>{viewItem.errorMessage}</div>}
+            {viewItem.errorMessage && <div style={{ color: 'var(--ds-err)' }}>{viewItem.errorMessage}</div>}
             {viewItem.result && (
               <Tabs defaultValue={viewItem.result.fullText !== undefined ? 'text' : viewItem.result.summary !== undefined ? 'summary' : 'structured'}>
                 <Tabs.List>

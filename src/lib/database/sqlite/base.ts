@@ -47,6 +47,7 @@ export const TABLES = {
   evaluationRuns: 'evaluation_runs',
   redTeamCampaigns: 'redteam_campaigns',
   redTeamRuns: 'redteam_runs',
+  redTeamCustomProbes: 'redteam_custom_probes',
   analysisDefinitions: 'analysis_definitions',
   analysisConversations: 'analysis_conversations',
   analysisRuns: 'analysis_runs',
@@ -85,6 +86,10 @@ export const TABLES = {
   crawlResults: 'crawl_results',
   ocrJobs: 'ocr_jobs',
   ocrJobItems: 'ocr_job_items',
+  batchJobs: 'batch_jobs',
+  batchJobItems: 'batch_job_items',
+  realtimeModels: 'realtime_models',
+  realtimeSessions: 'realtime_sessions',
   // ── Project membership & future groups ──────────────────────────────
   userProjects: 'user_projects',
   groups: 'groups',
@@ -412,6 +417,8 @@ export class SQLiteProviderBase {
 
   private applyTenantIndexes(db: Database.Database): void {
     db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_groups_externalId
+        ON ${TABLES.groups}(tenantId, externalId);
       CREATE INDEX IF NOT EXISTS idx_tracing_sessions_project_startedAt
         ON ${TABLES.agentTracingSessions}(projectId, startedAt DESC);
       CREATE INDEX IF NOT EXISTS idx_tracing_sessions_project_createdAt

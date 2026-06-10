@@ -5,8 +5,8 @@
  * (FormShell overlay), matching the rest of the console's create screens.
  */
 
-import { useEffect, useMemo, useState } from 'react';
-import { MultiSelect, SegmentedControl, Select, Switch, TextInput, Textarea } from '@mantine/core';
+import { useEffect, useState } from 'react';
+import { SegmentedControl, Select, Switch, TextInput, Textarea } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconShield } from '@tabler/icons-react';
 import FormShell, {
@@ -16,6 +16,7 @@ import FormShell, {
   SummaryGroup,
   SummaryKV,
 } from '@/components/common/ui/FormShell';
+import ProbePicker from './ProbePicker';
 import type { ProbeCatalogView, RedTeamCampaignView, RedTeamTargetKind, SelectOption } from './types';
 
 interface Props {
@@ -27,8 +28,6 @@ interface Props {
   probes: ProbeCatalogView[];
   onSaved: (campaign?: RedTeamCampaignView) => void;
 }
-
-const SEVERITY_ORDER: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
 
 export default function CreateCampaignModal({ opened, editing, onClose, agents, models, probes, onSaved }: Props) {
   const [name, setName] = useState('');
@@ -54,14 +53,6 @@ export default function CreateCampaignModal({ opened, editing, onClose, agents, 
     setScheduleEnabled(editing?.schedule?.enabled ?? false);
     setCron(editing?.schedule?.cron ?? '0 3 * * *');
   }, [opened, editing]);
-
-  const probeOptions = useMemo(
-    () =>
-      [...probes]
-        .sort((a, b) => (SEVERITY_ORDER[a.severity] ?? 9) - (SEVERITY_ORDER[b.severity] ?? 9))
-        .map((p) => ({ value: p.key, label: `${p.key} · ${p.severity} · ${p.category}` })),
-    [probes],
-  );
 
   const targetRef = targetKind === 'agent' ? agentKey : modelKey;
   const validIdentity = name.trim().length > 0;
@@ -161,8 +152,13 @@ export default function CreateCampaignModal({ opened, editing, onClose, agents, 
       </FormSection>
 
       <FormSection number={3} title="Probes & judge" done={probeKeys.length > 0 || Boolean(judgeModelKey)}>
-        <FormField label="Probes" optional hint="Leave empty to run the entire built-in catalog.">
-          <MultiSelect searchable data={probeOptions} value={probeKeys} onChange={setProbeKeys} placeholder="All probes" />
+        <FormField label="Probes" optional hint="Leave empty to run the entire built-in catalog. Custom probes must be selected explicitly.">
+          <ProbePicker
+            probes={probes}
+            value={probeKeys}
+            onChange={setProbeKeys}
+            emptyHint="No probes selected — the entire built-in catalog will run."
+          />
         </FormField>
         <FormField label="Judge / attacker model" optional hint="Powers the LLM-judge detectors AND the adaptive multi-turn attacker that escalates across turns. Strongly recommended.">
           <Select searchable clearable data={models} value={judgeModelKey} onChange={setJudgeModelKey} placeholder="Select a judge model" />

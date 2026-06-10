@@ -35,6 +35,9 @@ const MODULE_OPTIONS = [
   { value: 'guardrails', label: 'Guardrails' },
   { value: 'rag', label: 'RAG' },
   { value: 'mcp', label: 'MCP Servers' },
+  { value: 'evaluation', label: 'Evaluation' },
+  { value: 'analysis', label: 'Analysis' },
+  { value: 'redteam', label: 'Red Team' },
 ];
 
 const MODULE_METRICS: Record<string, Array<{ value: string; label: string }>> = {
@@ -63,6 +66,19 @@ const MODULE_METRICS: Record<string, Array<{ value: string; label: string }>> = 
     { value: 'mcp_error_rate', label: 'Error Rate (%)' },
     { value: 'mcp_avg_latency_ms', label: 'Avg Latency (ms)' },
     { value: 'mcp_total_requests', label: 'Total Requests' },
+  ],
+  evaluation: [
+    { value: 'evaluation_pass_rate', label: 'Pass Rate (%)' },
+    { value: 'evaluation_avg_score', label: 'Average Score (%)' },
+  ],
+  analysis: [
+    { value: 'analysis_pass_rate', label: 'Pass Rate (%)' },
+    { value: 'analysis_avg_judge_score', label: 'Average Judge Score (%)' },
+    { value: 'analysis_avg_accuracy', label: 'Average Accuracy (%)' },
+  ],
+  redteam: [
+    { value: 'redteam_attack_success_rate', label: 'Attack Success Rate (%)' },
+    { value: 'redteam_resilience_score', label: 'Resilience Score (%)' },
   ],
 };
 

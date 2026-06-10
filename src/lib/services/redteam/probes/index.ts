@@ -4,7 +4,9 @@
  * Probe instances ready for the runner.
  */
 
+import type { IRedTeamCustomProbe } from '@/lib/database';
 import type { Probe } from '../types';
+import { buildCustomProbe, isCustomProbeKey } from './customProbe';
 import { createPromptInjectionProbe } from './promptInjection';
 import { createJailbreakProbe } from './jailbreak';
 import { createSensitiveInfoProbe } from './sensitiveInfoDisclosure';
@@ -33,33 +35,64 @@ export const BUILTIN_PROBE_KEYS = Object.keys(PROBE_REGISTRY);
 /** Catalog metadata for UI / API listing, without instantiating detectors twice. */
 export interface ProbeCatalogEntry {
   key: string;
+  /** Friendly display label (built-ins reuse the key; custom probes their name). */
+  name: string;
   family: string;
   category: string;
   severity: string;
   description: string;
+  /** True for user-authored probes (built-ins are false / omitted). */
+  custom?: boolean;
 }
 
-export function listProbeCatalog(): ProbeCatalogEntry[] {
-  return BUILTIN_PROBE_KEYS.map((key) => {
-    const probe = PROBE_REGISTRY[key]();
-    return {
-      key: probe.key,
-      family: probe.family,
-      category: probe.category,
-      severity: probe.severity,
-      description: probe.description,
-    };
-  });
+function catalogEntry(probe: Probe, custom = false, name?: string): ProbeCatalogEntry {
+  return {
+    key: probe.key,
+    name: name ?? probe.key,
+    family: probe.family,
+    category: probe.category,
+    severity: probe.severity,
+    description: probe.description,
+    custom,
+  };
+}
+
+/**
+ * Catalog metadata for the built-in probes plus any supplied custom definitions.
+ * Custom probes that fail validation are skipped (a half-authored draft should
+ * not break the picker), so only runnable probes are advertised.
+ */
+export function listProbeCatalog(customProbes: IRedTeamCustomProbe[] = []): ProbeCatalogEntry[] {
+  const builtins = BUILTIN_PROBE_KEYS.map((key) => catalogEntry(PROBE_REGISTRY[key](), false));
+  const custom = customProbes
+    .filter((def) => def.enabled !== false)
+    .map((def) => {
+      try {
+        return catalogEntry(buildCustomProbe(def), true, def.name);
+      } catch {
+        return null;
+      }
+    })
+    .filter((e): e is ProbeCatalogEntry => e !== null);
+  return [...builtins, ...custom];
 }
 
 /**
  * Resolve probe keys into configured Probe instances. Unknown keys throw so a
  * misconfigured campaign fails loudly rather than silently scanning nothing.
- * Passing no keys (or undefined) selects every built-in probe.
+ * Passing no keys (or undefined) selects every built-in probe (never custom —
+ * custom probes are opt-in and must be selected explicitly). Any `custom:`-keyed
+ * selection is resolved against `customProbes`.
  */
-export function buildProbes(keys?: string[]): Probe[] {
+export function buildProbes(keys?: string[], customProbes: IRedTeamCustomProbe[] = []): Probe[] {
   const selected = keys && keys.length > 0 ? keys : BUILTIN_PROBE_KEYS;
+  const customByKey = new Map(customProbes.map((def) => [def.key, def]));
   return selected.map((key) => {
+    if (isCustomProbeKey(key)) {
+      const def = customByKey.get(key);
+      if (!def) throw new Error(`Unknown red-team probe: "${key}"`);
+      return buildCustomProbe(def);
+    }
     const factory = PROBE_REGISTRY[key];
     if (!factory) throw new Error(`Unknown red-team probe: "${key}"`);
     return factory();
@@ -77,3 +110,4 @@ export {
   createPiiGenerationProbe,
   createDataExtractionProbe,
 };
+export { buildCustomProbe, validateCustomProbe, CustomProbeError, CUSTOM_PROBE_PREFIX, isCustomProbeKey } from './customProbe';

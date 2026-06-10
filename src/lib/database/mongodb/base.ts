@@ -40,6 +40,7 @@ export const COLLECTIONS = {
   evaluationRuns: 'evaluation_runs',
   redTeamCampaigns: 'redteam_campaigns',
   redTeamRuns: 'redteam_runs',
+  redTeamCustomProbes: 'redteam_custom_probes',
   analysisDefinitions: 'analysis_definitions',
   analysisConversations: 'analysis_conversations',
   analysisRuns: 'analysis_runs',
@@ -80,6 +81,10 @@ export const COLLECTIONS = {
   crawlResults: 'crawl_results',
   ocrJobs: 'ocr_jobs',
   ocrJobItems: 'ocr_job_items',
+  batchJobs: 'batch_jobs',
+  batchJobItems: 'batch_job_items',
+  realtimeModels: 'realtime_models',
+  realtimeSessions: 'realtime_sessions',
   // ── Project membership & future groups ──────────────────────────────
   userProjects: 'user_projects',
   groups: 'groups',

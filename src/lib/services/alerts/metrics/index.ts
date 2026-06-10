@@ -16,6 +16,7 @@ import { RagCollector } from './ragCollector';
 import { McpCollector } from './mcpCollector';
 import { AnalysisCollector } from './analysisCollector';
 import { EvaluationCollector } from './evaluationCollector';
+import { RedTeamCollector } from './redTeamCollector';
 
 const collectors: IMetricCollector[] = [];
 
@@ -44,5 +45,6 @@ register(new RagCollector());
 register(new McpCollector());
 register(new AnalysisCollector());
 register(new EvaluationCollector());
+register(new RedTeamCollector());
 
 export type { IMetricCollector, MetricQuery, MetricResult } from './types';

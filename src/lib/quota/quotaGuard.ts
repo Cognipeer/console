@@ -607,3 +607,80 @@ export async function checkBudget(
 
   return { allowed: true, effectiveLimits };
 }
+
+// ── Budget usage introspection (read-only) ────────────────────────────────
+
+export interface BudgetWindowUsage {
+  /** Configured limit in USD, or null when no limit applies. */
+  limitUsd: number | null;
+  /** Spend consumed in the current window, in USD. */
+  usedUsd: number;
+  /** Remaining headroom in USD, or null when unlimited. */
+  remainingUsd: number | null;
+}
+
+export interface BudgetUsage {
+  /** False when no budget limits are configured for this context. */
+  configured: boolean;
+  perDay: BudgetWindowUsage;
+  perMonth: BudgetWindowUsage;
+  alertThresholds?: number[];
+}
+
+/** Mirrors the counter key scheme used by `checkBudget`. */
+function budgetCounterKey(context: QuotaContext, windowName: 'perDay' | 'perMonth'): string {
+  const keyParts = ['budget', context.domain, 'usd_cents', windowName];
+  if (context.providerKey) keyParts.push(`prov:${context.providerKey}`);
+  if (context.resourceKey) keyParts.push(`res:${context.resourceKey}`);
+  if (context.userId) keyParts.push(`user:${context.userId}`);
+  else if (context.tokenId) keyParts.push(`token:${context.tokenId}`);
+  else keyParts.push(`tenant:${context.tenantId}`);
+  return keyParts.join(':');
+}
+
+/**
+ * Read the current budget consumption for a context without incrementing the
+ * counters. Used by the spend/budget reporting surface.
+ */
+export async function getBudgetUsage(context: QuotaContext): Promise<BudgetUsage> {
+  const effectiveLimits = await resolveEffectiveLimits(context);
+  const db = await getDatabase();
+  await db.switchToTenant(context.tenantDbName);
+
+  const budget = effectiveLimits.budget;
+
+  const readWindow = async (
+    windowName: 'perDay' | 'perMonth',
+    limitUsd: number | undefined,
+  ): Promise<BudgetWindowUsage> => {
+    const windowSeconds = windowName === 'perDay' ? 86400 : 2592000;
+    let usedUsd = 0;
+    try {
+      const current = await db.incrementRateLimit(
+        budgetCounterKey(context, windowName),
+        windowSeconds,
+        0,
+      );
+      usedUsd = current.count / 100;
+    } catch (error) {
+      logger.error('Budget usage read failed', { error });
+    }
+    const hasLimit = limitUsd !== undefined && limitUsd !== -1;
+    return {
+      limitUsd: hasLimit ? limitUsd : null,
+      usedUsd,
+      remainingUsd: hasLimit ? Math.max(0, limitUsd - usedUsd) : null,
+    };
+  };
+
+  return {
+    configured: Boolean(
+      budget
+      && ((budget.dailySpendLimit !== undefined && budget.dailySpendLimit !== -1)
+        || (budget.monthlySpendLimit !== undefined && budget.monthlySpendLimit !== -1)),
+    ),
+    perDay: await readWindow('perDay', budget?.dailySpendLimit),
+    perMonth: await readWindow('perMonth', budget?.monthlySpendLimit),
+    alertThresholds: budget?.alertThresholds,
+  };
+}

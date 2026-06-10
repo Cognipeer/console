@@ -223,7 +223,7 @@ export default function PiiPolicyEditor(props: Props) {
                         onChange={(e) => updatePattern(p.id, { pattern: e.currentTarget.value })}
                         style={{ minWidth: 260, flex: 1 }}
                         error={p.pattern && !valid ? t('detail.customPatterns.invalidRegex') : undefined}
-                        styles={{ input: { fontFamily: 'var(--ds-font-mono, monospace)' } }}
+                        styles={{ input: { fontFamily: 'var(--font-mono, monospace)' } }}
                       />
                       <TextInput
                         label={t('detail.customPatterns.flags')}

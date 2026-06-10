@@ -13,7 +13,6 @@
  *
  * Adding a newly-split module = add ONE entry to ENTERPRISE_API_RULES.
  */
-import { getConfig } from '@/lib/core/config';
 import { LicenseManager, isEnterpriseLicenseType, type LicenseType } from './license-manager';
 
 export interface EnterpriseApiRule {
@@ -94,18 +93,15 @@ export function getEnterpriseModuleForPath(pathname: string): string | null {
  * and the effective license is not an active ENTERPRISE license, or null when
  * the request may proceed.
  *
- * Enforcement is governed by `license.enforceLicense` (env `ENFORCE_LICENSE`):
- * the enterprise edition ships with it ON; local development can leave it OFF
- * to work without a signed license.
+ * Always enforced. In the community edition the gated routes do not exist
+ * (404 before this guard), so this only ever bites in the enterprise edition,
+ * where a tenant unlocks the modules via /dashboard/license.
  */
 export function checkEnterpriseApiAccess(
   pathname: string,
   effectiveLicenseType: LicenseType | string | undefined,
   expiresAt?: Date | string | number | null,
 ): EnterpriseDenial | null {
-  if (!getConfig().license.enforceLicense) {
-    return null;
-  }
   const enterpriseModule = getEnterpriseModuleForPath(pathname);
   if (!enterpriseModule) {
     return null;

@@ -9,20 +9,30 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import { BUILTIN_PROBE_KEYS, listProbeCatalog } from '@/lib/services/redteam/probes';
+import type { IRedTeamCustomAttempt, IRedTeamCustomDetectors, RedTeamSeverity } from '@/lib/database';
 import { validateCron } from '@/lib/services/redteam/schedulePlanner';
 import { runCalibration } from '@/lib/services/redteam/calibration/calibrationRunner';
 import { enqueueCampaignRun } from '@/lib/services/redteam/campaignJob';
 import { buildJudgeInvoker, type RedTeamModelContext } from '@/lib/services/redteam/adapters';
 import type { IRedTeamCampaign } from '@/lib/database';
 import {
+  compareRuns,
   createCampaign,
+  createCustomProbe,
   deleteCampaign,
+  deleteCustomProbe,
   getCampaign,
+  getCustomProbe,
+  getOverview,
   getRun,
   listCampaigns,
+  listCustomProbes,
   listRuns,
   reviewAttempt,
   updateCampaign,
+  updateCustomProbe,
+  CustomProbeError,
+  type CustomProbeInput,
   type RunOptions,
 } from '@/lib/services/redteam/service';
 import type { RedTeamOutcome, RedTeamTargetKind } from '@/lib/database';
@@ -46,15 +56,25 @@ function internalError(reply: import('fastify').FastifyReply, error: unknown) {
   );
 }
 
-/** Validate probe keys against the built-in catalog. Returns null if invalid. */
-function sanitizeProbeKeys(raw: unknown): string[] | null {
+/**
+ * Validate probe keys against the built-in catalog plus the tenant's custom
+ * probe keys. Returns null if any key is unknown.
+ */
+function sanitizeProbeKeys(raw: unknown, customKeys: string[] = []): string[] | null {
   if (raw === undefined) return [];
   if (!Array.isArray(raw)) return null;
   const keys = raw.filter((k): k is string => typeof k === 'string');
   if (keys.length !== raw.length) return null;
-  const unknown = keys.find((k) => !BUILTIN_PROBE_KEYS.includes(k));
+  const allowed = new Set([...BUILTIN_PROBE_KEYS, ...customKeys]);
+  const unknown = keys.find((k) => !allowed.has(k));
   if (unknown) return null;
   return keys;
+}
+
+/** Load the tenant's custom probe selection keys (for validating campaigns). */
+async function loadCustomProbeKeys(tenantDbName: string, projectId?: string): Promise<string[]> {
+  const probes = await listCustomProbes(tenantDbName, { projectId });
+  return probes.map((p) => p.key);
 }
 
 type ScheduleResult = { schedule: IRedTeamCampaign['schedule'] } | { error: string };
@@ -73,7 +93,7 @@ function sanitizeSchedule(raw: unknown): ScheduleResult {
 type RunOptionsResult = { options: RunOptions } | { error: string };
 
 /** Validate the per-run scan overrides from a request body. */
-function sanitizeRunOptions(body: Record<string, unknown>): RunOptionsResult {
+function sanitizeRunOptions(body: Record<string, unknown>, customKeys: string[] = []): RunOptionsResult {
   const options: RunOptions = {};
   if (body.maxTurns !== undefined) {
     const n = Number(body.maxTurns);
@@ -88,7 +108,8 @@ function sanitizeRunOptions(body: Record<string, unknown>): RunOptionsResult {
   if (body.probeKeys !== undefined) {
     if (!Array.isArray(body.probeKeys)) return { error: 'probeKeys must be an array' };
     const keys = body.probeKeys.filter((k): k is string => typeof k === 'string');
-    const unknown = keys.find((k) => !BUILTIN_PROBE_KEYS.includes(k));
+    const allowed = new Set([...BUILTIN_PROBE_KEYS, ...customKeys]);
+    const unknown = keys.find((k) => !allowed.has(k));
     if (unknown) return { error: `unknown probe: ${unknown}` };
     options.probeKeys = keys;
   }
@@ -98,12 +119,106 @@ function sanitizeRunOptions(body: Record<string, unknown>): RunOptionsResult {
   return { options };
 }
 
+const VALID_SEVERITIES: RedTeamSeverity[] = ['low', 'medium', 'high', 'critical'];
+const VALID_OWASP_CATEGORIES = [
+  'LLM01-prompt-injection',
+  'LLM02-insecure-output-handling',
+  'LLM04-model-dos',
+  'LLM05-supply-chain',
+  'LLM06-sensitive-information-disclosure',
+  'LLM07-system-prompt-leakage',
+  'LLM08-excessive-agency',
+  'LLM09-overreliance',
+];
+
+type CustomProbeResult = { input: Omit<CustomProbeInput, 'projectId'> } | { error: string };
+
+/** Validate and normalise a custom-probe request body. */
+function sanitizeCustomProbe(body: Record<string, unknown>): CustomProbeResult {
+  if (typeof body.name !== 'string' || body.name.trim() === '') return { error: 'name is required' };
+  if (typeof body.category !== 'string' || !VALID_OWASP_CATEGORIES.includes(body.category)) {
+    return { error: `category must be one of: ${VALID_OWASP_CATEGORIES.join(', ')}` };
+  }
+  if (!VALID_SEVERITIES.includes(body.severity as RedTeamSeverity)) {
+    return { error: 'severity must be "low", "medium", "high", or "critical"' };
+  }
+  if (!Array.isArray(body.attempts) || body.attempts.length === 0) {
+    return { error: 'attempts must be a non-empty array' };
+  }
+  const attempts: IRedTeamCustomAttempt[] = [];
+  for (let i = 0; i < body.attempts.length; i += 1) {
+    const a = body.attempts[i] as Record<string, unknown>;
+    if (!a || typeof a !== 'object') return { error: `attempt ${i + 1} must be an object` };
+    const turns = Array.isArray(a.turns) ? a.turns.filter((t): t is string => typeof t === 'string' && t.trim() !== '') : [];
+    if (turns.length === 0) return { error: `attempt ${i + 1} needs at least one non-empty turn` };
+    attempts.push({
+      id: typeof a.id === 'string' && a.id.trim() ? a.id : `attempt-${i + 1}`,
+      turns,
+      system: typeof a.system === 'string' ? a.system : undefined,
+      canary: typeof a.canary === 'string' ? a.canary : undefined,
+      forbiddenPatterns: Array.isArray(a.forbiddenPatterns)
+        ? a.forbiddenPatterns.filter((p): p is string => typeof p === 'string')
+        : undefined,
+      refusalExpected: typeof a.refusalExpected === 'boolean' ? a.refusalExpected : undefined,
+      adaptive: typeof a.adaptive === 'boolean' ? a.adaptive : undefined,
+      objective: typeof a.objective === 'string' ? a.objective : undefined,
+    });
+  }
+  const rawDetectors = (body.detectors ?? {}) as Record<string, unknown>;
+  const judges = Array.isArray(rawDetectors.judges)
+    ? rawDetectors.judges
+        .map((j) => j as Record<string, unknown>)
+        .filter((j) => typeof j.lens === 'string' && typeof j.rubric === 'string')
+        .map((j) => ({
+          lens: j.lens as string,
+          rubric: j.rubric as string,
+          threshold: typeof j.threshold === 'number' ? j.threshold : undefined,
+        }))
+    : [];
+  const detectors: IRedTeamCustomDetectors = {
+    refusal: rawDetectors.refusal !== false,
+    pattern: rawDetectors.pattern !== false,
+    judges,
+  };
+  if (!detectors.refusal && !detectors.pattern && judges.length === 0) {
+    return { error: 'select at least one detector (refusal, pattern, or a judge lens)' };
+  }
+  return {
+    input: {
+      name: body.name.trim(),
+      description: typeof body.description === 'string' ? body.description : undefined,
+      family: typeof body.family === 'string' && body.family.trim() ? body.family.trim() : undefined,
+      category: body.category,
+      severity: body.severity as RedTeamSeverity,
+      attempts,
+      detectors,
+      enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
+    },
+  };
+}
+
 export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
-  // ── Probe catalog ──────────────────────────────────────────────────
+  // ── Probe catalog (built-in + tenant custom probes) ────────────────
   app.get('/redteam/probes', withApiRequestContext(async (request, reply) => {
     try {
-      requireSessionContext(request);
-      return reply.code(200).send({ probes: listProbeCatalog() });
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const customProbes = await listCustomProbes(session.tenantDbName, { projectId });
+      return reply.code(200).send({ probes: listProbeCatalog(customProbes) });
+    } catch (error) {
+      return internalError(reply, error);
+    }
+  }));
+
+  // ── OWASP overview ─────────────────────────────────────────────────
+  app.get('/redteam/overview', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const query = (request.query ?? {}) as { limit?: string };
+      const overview = await getOverview(session.tenantDbName, {
+        projectId,
+        limit: query.limit ? Math.min(Number.parseInt(query.limit, 10), 500) : undefined,
+      });
+      return reply.code(200).send({ overview });
     } catch (error) {
       return internalError(reply, error);
     }
@@ -161,9 +276,10 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
       if (body.targetKind === 'model' && typeof body.modelKey !== 'string') {
         return reply.code(400).send({ error: 'modelKey is required for model campaigns' });
       }
-      const probeKeys = sanitizeProbeKeys(body.probeKeys);
+      const customKeys = await loadCustomProbeKeys(session.tenantDbName, projectId);
+      const probeKeys = sanitizeProbeKeys(body.probeKeys, customKeys);
       if (!probeKeys) {
-        return reply.code(400).send({ error: `probeKeys must be a subset of: ${BUILTIN_PROBE_KEYS.join(', ')}` });
+        return reply.code(400).send({ error: 'probeKeys must reference built-in or existing custom probes' });
       }
       const runConfig = body.runConfig && typeof body.runConfig === 'object'
         ? { concurrency: Number((body.runConfig as Record<string, unknown>).concurrency) || undefined }
@@ -207,9 +323,14 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
       const session = requireSessionContext(request);
       const { id } = request.params as { id: string };
       const body = readJsonBody<Record<string, unknown>>(request);
-      const probeKeys = body.probeKeys !== undefined ? sanitizeProbeKeys(body.probeKeys) : undefined;
-      if (body.probeKeys !== undefined && !probeKeys) {
-        return reply.code(400).send({ error: `probeKeys must be a subset of: ${BUILTIN_PROBE_KEYS.join(', ')}` });
+      let probeKeys: string[] | null | undefined;
+      if (body.probeKeys !== undefined) {
+        const existing = await getCampaign(session.tenantDbName, id);
+        const customKeys = await loadCustomProbeKeys(session.tenantDbName, existing?.projectId);
+        probeKeys = sanitizeProbeKeys(body.probeKeys, customKeys);
+        if (!probeKeys) {
+          return reply.code(400).send({ error: 'probeKeys must reference built-in or existing custom probes' });
+        }
       }
       let schedule: IRedTeamCampaign['schedule'] | undefined;
       if (body.schedule !== undefined) {
@@ -255,7 +376,8 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { key } = request.params as { key: string };
       const body = readJsonBody<Record<string, unknown>>(request);
-      const optionsResult = sanitizeRunOptions(body);
+      const customKeys = await loadCustomProbeKeys(session.tenantDbName, projectId);
+      const optionsResult = sanitizeRunOptions(body, customKeys);
       if ('error' in optionsResult) return reply.code(400).send({ error: optionsResult.error });
       const run = await enqueueCampaignRun({
         tenantDbName: session.tenantDbName,
@@ -307,6 +429,21 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
+  // ── Baseline comparison ────────────────────────────────────────────
+  app.get('/redteam/runs/:id/compare', withApiRequestContext(async (request, reply) => {
+    try {
+      const session = requireSessionContext(request);
+      const { id } = request.params as { id: string };
+      const { baseline } = (request.query ?? {}) as { baseline?: string };
+      if (!baseline) return reply.code(400).send({ error: 'baseline run id is required' });
+      const comparison = await compareRuns(session.tenantDbName, id, baseline);
+      if (!comparison) return reply.code(404).send({ error: 'Run or baseline not found' });
+      return reply.code(200).send({ comparison });
+    } catch (error) {
+      return internalError(reply, error);
+    }
+  }));
+
   // ── HITL review ────────────────────────────────────────────────────
   app.post('/redteam/runs/:id/attempts/:attemptId/review', withApiRequestContext(async (request, reply) => {
     try {
@@ -325,6 +462,77 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ run });
     } catch (error) {
       logger.error('Review red-team attempt error', { error });
+      return internalError(reply, error);
+    }
+  }));
+
+  // ── Custom probes ──────────────────────────────────────────────────
+  app.get('/redteam/custom-probes', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const query = (request.query ?? {}) as { search?: string };
+      const probes = await listCustomProbes(session.tenantDbName, { projectId, search: query.search });
+      return reply.code(200).send({ probes });
+    } catch (error) {
+      return internalError(reply, error);
+    }
+  }));
+
+  app.post('/redteam/custom-probes', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const body = readJsonBody<Record<string, unknown>>(request);
+      const result = sanitizeCustomProbe(body);
+      if ('error' in result) return reply.code(400).send({ error: result.error });
+      const probe = await createCustomProbe(session.tenantDbName, session.tenantId, session.userId, {
+        ...result.input,
+        projectId,
+      });
+      return reply.code(201).send({ probe });
+    } catch (error) {
+      if (error instanceof CustomProbeError) return reply.code(400).send({ error: error.message });
+      logger.error('Create custom probe error', { error });
+      return internalError(reply, error);
+    }
+  }));
+
+  app.get('/redteam/custom-probes/:id', withApiRequestContext(async (request, reply) => {
+    try {
+      const session = requireSessionContext(request);
+      const { id } = request.params as { id: string };
+      const probe = await getCustomProbe(session.tenantDbName, id);
+      if (!probe) return reply.code(404).send({ error: 'Custom probe not found' });
+      return reply.code(200).send({ probe });
+    } catch (error) {
+      return internalError(reply, error);
+    }
+  }));
+
+  app.patch('/redteam/custom-probes/:id', withApiRequestContext(async (request, reply) => {
+    try {
+      const session = requireSessionContext(request);
+      const { id } = request.params as { id: string };
+      const body = readJsonBody<Record<string, unknown>>(request);
+      const result = sanitizeCustomProbe(body);
+      if ('error' in result) return reply.code(400).send({ error: result.error });
+      const probe = await updateCustomProbe(session.tenantDbName, id, session.userId, result.input);
+      if (!probe) return reply.code(404).send({ error: 'Custom probe not found' });
+      return reply.code(200).send({ probe });
+    } catch (error) {
+      if (error instanceof CustomProbeError) return reply.code(400).send({ error: error.message });
+      logger.error('Update custom probe error', { error });
+      return internalError(reply, error);
+    }
+  }));
+
+  app.delete('/redteam/custom-probes/:id', withApiRequestContext(async (request, reply) => {
+    try {
+      const session = requireSessionContext(request);
+      const { id } = request.params as { id: string };
+      const deleted = await deleteCustomProbe(session.tenantDbName, id);
+      if (!deleted) return reply.code(404).send({ error: 'Custom probe not found' });
+      return reply.code(200).send({ success: true });
+    } catch (error) {
       return internalError(reply, error);
     }
   }));

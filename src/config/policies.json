@@ -132,7 +132,9 @@
         "/api/guardrails",
         "/api/guardrails/*",
         "/api/client/v1/guardrails",
-        "/api/client/v1/guardrails/*"
+        "/api/client/v1/guardrails/*",
+        "/api/client/v1/moderations",
+        "/api/client/v1/moderations/*"
       ]
     },
     "ALERTS": {
@@ -255,6 +257,34 @@
         "/api/client/v1/crawler/run",
         "/api/client/v1/crawler/jobs",
         "/api/client/v1/crawler/jobs/*"
+      ]
+    },
+    "BATCH_API": {
+      "name": "Batch API",
+      "description": "OpenAI-compatible asynchronous bulk inference (chat completions and embeddings)",
+      "endpoints": [
+        "/api/client/v1/batches",
+        "/api/client/v1/batches/*"
+      ]
+    },
+    "SPEND_BUDGETS": {
+      "name": "Spend & Budgets",
+      "description": "Spend reporting and budget management on top of usage logs and quota policies",
+      "endpoints": [
+        "/api/client/v1/spend",
+        "/api/client/v1/spend/*",
+        "/api/client/v1/budgets",
+        "/api/client/v1/budgets/*"
+      ]
+    },
+    "REALTIME_API": {
+      "name": "Realtime API",
+      "description": "WebSocket realtime sessions: streaming chat with optional voice round-trip (STT/TTS)",
+      "endpoints": [
+        "/api/realtime",
+        "/api/realtime/*",
+        "/api/client/v1/realtime",
+        "/api/client/v1/realtime/*"
       ]
     }
   },

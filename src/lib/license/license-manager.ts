@@ -393,8 +393,8 @@ export class LicenseManager {
 
   /**
    * Runtime gate helper. True when the license is an active ENTERPRISE license
-   * that has not passed its expiry + grace window. Used by the API guard and
-   * the enterprise-overlay boot check. `expiresAt` of `undefined` = perpetual.
+   * that has not passed its expiry + grace window. Used by the API guard.
+   * `expiresAt` of `undefined` = perpetual.
    */
   static isEnterpriseActive(
     licenseType: LicenseType | string | undefined,
@@ -417,82 +417,4 @@ export class LicenseManager {
     const graceMs = Math.max(0, getConfig().license.graceDays) * 86_400_000;
     return Date.now() <= expiryMs + graceMs;
   }
-
-  /**
-   * Verify the deployment-wide signed license (env `LICENSE_KEY`). Used by the
-   * enterprise overlay at boot to decide whether to activate enterprise
-   * modules. Never throws — returns a structured status so boot can degrade to
-   * FREE with a clear log line.
-   */
-  static async verifyDeploymentLicense(): Promise<DeploymentLicenseStatus> {
-    const cfg = getConfig().license;
-    const key = cfg.deploymentKey.trim();
-    if (!key) {
-      return { active: false, reason: 'no-key' };
-    }
-
-    const publicKeyPem = this.getPublicKeyPem();
-    if (!publicKeyPem) {
-      return { active: false, reason: 'no-public-key' };
-    }
-
-    try {
-      const header = decodeProtectedHeader(key);
-      if (!header.alg || !ALLOWED_LICENSE_ALGORITHMS.has(header.alg)) {
-        return { active: false, reason: 'invalid-signature' };
-      }
-      const publicKey = await importSPKI(publicKeyPem, header.alg);
-      // jose enforces `exp` itself and throws JWTExpired. To support the grace
-      // window we widen its clock tolerance by graceDays, then classify ok vs
-      // grace ourselves; anything beyond exp+grace still throws → 'expired'.
-      const graceSeconds = Math.max(0, cfg.graceDays) * 86_400;
-      const { payload } = await jwtVerify(key, publicKey, {
-        audience: cfg.audience || undefined,
-        issuer: cfg.issuer || undefined,
-        clockTolerance: graceSeconds,
-      });
-
-      if (!isEnterpriseLicenseType(payload.licenseType)) {
-        return { active: false, reason: 'not-enterprise' };
-      }
-      if (cfg.tenantSlug && payload.tenantSlug !== cfg.tenantSlug) {
-        return { active: false, reason: 'tenant-mismatch' };
-      }
-
-      const expiresAt = typeof payload.exp === 'number'
-        ? new Date(payload.exp * 1000)
-        : undefined;
-      const expired = expiresAt ? expiresAt.getTime() <= Date.now() : false;
-      return {
-        active: true,
-        reason: expired ? 'grace' : 'ok',
-        expiresAt,
-        licenseId: typeof payload.licenseId === 'string' ? payload.licenseId : undefined,
-        tenantSlug: typeof payload.tenantSlug === 'string' ? payload.tenantSlug : undefined,
-      };
-    } catch (err) {
-      if ((err as { code?: string })?.code === 'ERR_JWT_EXPIRED') {
-        return { active: false, reason: 'expired' };
-      }
-      return { active: false, reason: 'invalid-signature' };
-    }
-  }
-}
-
-export type DeploymentLicenseReason =
-  | 'ok'
-  | 'grace'
-  | 'no-key'
-  | 'no-public-key'
-  | 'invalid-signature'
-  | 'not-enterprise'
-  | 'tenant-mismatch'
-  | 'expired';
-
-export interface DeploymentLicenseStatus {
-  active: boolean;
-  reason: DeploymentLicenseReason;
-  expiresAt?: Date;
-  licenseId?: string;
-  tenantSlug?: string;
 }

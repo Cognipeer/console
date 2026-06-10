@@ -18,6 +18,7 @@ import { reconcileOrphanedBrowserSessions } from '@/lib/services/browser/browser
 import { startBrowserQueueConsumer } from '@/lib/services/browser/browserConsumer';
 import { startCrawlerQueueConsumer, startCrawlerScheduler } from '@/lib/services/crawler';
 import { startOcrJobQueueConsumer } from '@/lib/services/ocrJobs';
+import { startBatchQueueConsumer } from '@/lib/services/batch';
 import { startDatasetGenerationConsumer } from '@/lib/services/evaluation/datasetGenerationConsumer';
 import { startRedTeamQueueConsumer } from '@/lib/services/redteam/campaignConsumer';
 import { startEvaluationRunQueueConsumer } from '@/lib/services/evaluation/evaluationRunConsumer';
@@ -217,6 +218,7 @@ export async function bootstrapApplication(): Promise<void> {
       startBrowserQueueConsumer(),
       startCrawlerQueueConsumer(),
       startOcrJobQueueConsumer(),
+      startBatchQueueConsumer(),
       startDatasetGenerationConsumer(),
       startRedTeamQueueConsumer(),
       startEvaluationRunQueueConsumer(),

@@ -8,6 +8,7 @@ import {
   IconBell,
   IconBook,
   IconBrain,
+  IconBug,
   IconChecklist,
   IconClipboardText,
   IconCode,
@@ -16,6 +17,7 @@ import {
   IconFolder,
   IconHistory,
   IconLayoutDashboard,
+  IconSparkles,
   IconMessage,
   IconMessages,
   IconMicrophone,
@@ -96,6 +98,13 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
   ],
   redteam: [
     {
+      id: 'overview',
+      label: 'Overview',
+      href: '/dashboard/redteam/overview',
+      icon: IconReportAnalytics,
+      matcher: (p) => p.startsWith('/dashboard/redteam/overview'),
+    },
+    {
       id: 'campaigns',
       label: 'Campaigns',
       href: '/dashboard/redteam',
@@ -104,6 +113,8 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
         p === '/dashboard/redteam' ||
         (p.startsWith('/dashboard/redteam') &&
           !p.startsWith('/dashboard/redteam/runs') &&
+          !p.startsWith('/dashboard/redteam/probes') &&
+          !p.startsWith('/dashboard/redteam/overview') &&
           !p.startsWith('/dashboard/redteam/api')),
     },
     {
@@ -112,6 +123,13 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       href: '/dashboard/redteam/runs',
       icon: IconPlayerPlay,
       matcher: (p) => p.startsWith('/dashboard/redteam/runs'),
+    },
+    {
+      id: 'probes',
+      label: 'Probes',
+      href: '/dashboard/redteam/probes',
+      icon: IconBug,
+      matcher: (p) => p.startsWith('/dashboard/redteam/probes'),
     },
     {
       id: 'api',
@@ -273,6 +291,29 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       href: '/dashboard/reranker',
       icon: IconBook,
       matcher: (p) => p.startsWith('/dashboard/reranker'),
+    },
+  ],
+  realtime: [
+    {
+      id: 'models',
+      label: 'Realtime models',
+      href: '/dashboard/realtime',
+      icon: IconLayoutDashboard,
+      matcher: (p) => p === '/dashboard/realtime' || p.startsWith('/dashboard/realtime/models'),
+    },
+    {
+      id: 'playground',
+      label: 'Playground',
+      href: '/dashboard/realtime/playground',
+      icon: IconSparkles,
+      matcher: (p) => p.startsWith('/dashboard/realtime/playground'),
+    },
+    {
+      id: 'sessions',
+      label: 'Sessions',
+      href: '/dashboard/realtime/sessions',
+      icon: IconTimeline,
+      matcher: (p) => p.startsWith('/dashboard/realtime/sessions'),
     },
   ],
   agents: [

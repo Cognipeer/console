@@ -1,7 +1,12 @@
 {
   "$schema": "./platform-services.schema.json",
   "categories": {
-    "order": ["operate", "build", "data", "admin"],
+    "order": [
+      "operate",
+      "build",
+      "data",
+      "admin"
+    ],
     "labels": {
       "build": "Build",
       "data": "Data",
@@ -17,8 +22,16 @@
       "category": "operate",
       "navLabelKey": "servicesHome",
       "navDescriptionKey": "servicesHomeDescription",
-      "tags": ["services", "home"],
-      "searchKeywords": ["services", "home", "modules", "ana sayfa"],
+      "tags": [
+        "services",
+        "home"
+      ],
+      "searchKeywords": [
+        "services",
+        "home",
+        "modules",
+        "ana sayfa"
+      ],
       "showInServicesHome": false
     },
     {
@@ -28,8 +41,19 @@
       "category": "build",
       "navLabelKey": "models",
       "navDescriptionKey": "modelsDescription",
-      "tags": ["llm", "providers", "inference"],
-      "searchKeywords": ["model", "llm", "ai", "gpt", "openai", "bedrock"],
+      "tags": [
+        "llm",
+        "providers",
+        "inference"
+      ],
+      "searchKeywords": [
+        "model",
+        "llm",
+        "ai",
+        "gpt",
+        "openai",
+        "bedrock"
+      ],
       "defaultPinned": true,
       "popular": true
     },
@@ -40,8 +64,15 @@
       "category": "build",
       "navLabelKey": "prompts",
       "navDescriptionKey": "promptsDescription",
-      "tags": ["templates", "prompting"],
-      "searchKeywords": ["prompt", "template", "şablon"],
+      "tags": [
+        "templates",
+        "prompting"
+      ],
+      "searchKeywords": [
+        "prompt",
+        "template",
+        "\u015fablon"
+      ],
       "defaultPinned": true,
       "popular": true
     },
@@ -52,8 +83,16 @@
       "category": "data",
       "navLabelKey": "vector",
       "navDescriptionKey": "vectorDescription",
-      "tags": ["indexes", "embeddings"],
-      "searchKeywords": ["vector", "embedding", "pinecone", "rag"],
+      "tags": [
+        "indexes",
+        "embeddings"
+      ],
+      "searchKeywords": [
+        "vector",
+        "embedding",
+        "pinecone",
+        "rag"
+      ],
       "defaultPinned": true,
       "popular": true
     },
@@ -64,8 +103,17 @@
       "category": "data",
       "navLabelKey": "memory",
       "navDescriptionKey": "memoryDescription",
-      "tags": ["semantic", "memory", "stores"],
-      "searchKeywords": ["memory", "semantic", "store", "agent memory"]
+      "tags": [
+        "semantic",
+        "memory",
+        "stores"
+      ],
+      "searchKeywords": [
+        "memory",
+        "semantic",
+        "store",
+        "agent memory"
+      ]
     },
     {
       "id": "files",
@@ -74,8 +122,16 @@
       "category": "data",
       "navLabelKey": "files",
       "navDescriptionKey": "filesDescription",
-      "tags": ["storage", "uploads"],
-      "searchKeywords": ["file", "dosya", "upload", "storage"]
+      "tags": [
+        "storage",
+        "uploads"
+      ],
+      "searchKeywords": [
+        "file",
+        "dosya",
+        "upload",
+        "storage"
+      ]
     },
     {
       "id": "rag",
@@ -84,8 +140,17 @@
       "category": "data",
       "navLabelKey": "rag",
       "navDescriptionKey": "ragDescription",
-      "tags": ["knowledge", "retrieval", "documents"],
-      "searchKeywords": ["rag", "knowledge", "retrieval", "documents"],
+      "tags": [
+        "knowledge",
+        "retrieval",
+        "documents"
+      ],
+      "searchKeywords": [
+        "rag",
+        "knowledge",
+        "retrieval",
+        "documents"
+      ],
       "defaultPinned": true,
       "popular": true
     },
@@ -96,8 +161,42 @@
       "category": "data",
       "navLabelKey": "reranker",
       "navDescriptionKey": "rerankerDescription",
-      "tags": ["rerank", "retrieval", "ranking"],
-      "searchKeywords": ["rerank", "cohere", "jina", "voyage", "cross-encoder"],
+      "tags": [
+        "rerank",
+        "retrieval",
+        "ranking"
+      ],
+      "searchKeywords": [
+        "rerank",
+        "cohere",
+        "jina",
+        "voyage",
+        "cross-encoder"
+      ],
+      "badge": "new"
+    },
+    {
+      "id": "realtime",
+      "href": "/dashboard/realtime",
+      "icon": "IconHeadset",
+      "category": "build",
+      "navLabelKey": "realtime",
+      "navDescriptionKey": "realtimeDescription",
+      "tags": [
+        "realtime",
+        "voice",
+        "websocket",
+        "telephony"
+      ],
+      "searchKeywords": [
+        "realtime",
+        "voice",
+        "websocket",
+        "twilio",
+        "stt",
+        "tts",
+        "playground"
+      ],
       "badge": "new"
     },
     {
@@ -107,8 +206,15 @@
       "category": "build",
       "navLabelKey": "agents",
       "navDescriptionKey": "agentsDescription",
-      "tags": ["agents", "orchestration"],
-      "searchKeywords": ["agent", "multi-agent", "orchestration"],
+      "tags": [
+        "agents",
+        "orchestration"
+      ],
+      "searchKeywords": [
+        "agent",
+        "multi-agent",
+        "orchestration"
+      ],
       "defaultPinned": true,
       "popular": true
     },
@@ -119,8 +225,16 @@
       "category": "admin",
       "navLabelKey": "config",
       "navDescriptionKey": "configDescription",
-      "tags": ["config", "secrets"],
-      "searchKeywords": ["config", "configuration", "secret", "settings"]
+      "tags": [
+        "config",
+        "secrets"
+      ],
+      "searchKeywords": [
+        "config",
+        "configuration",
+        "secret",
+        "settings"
+      ]
     },
     {
       "id": "tracing",
@@ -129,8 +243,16 @@
       "category": "operate",
       "navLabelKey": "agentTracing",
       "navDescriptionKey": "agentTracingDescription",
-      "tags": ["observability", "sessions"],
-      "searchKeywords": ["trace", "agent", "log", "debug"],
+      "tags": [
+        "observability",
+        "sessions"
+      ],
+      "searchKeywords": [
+        "trace",
+        "agent",
+        "log",
+        "debug"
+      ],
       "popular": true
     },
     {
@@ -140,8 +262,19 @@
       "category": "operate",
       "navLabelKey": "inferenceMonitoring",
       "navDescriptionKey": "inferenceMonitoringDescription",
-      "tags": ["vllm", "gpu", "inference", "monitoring"],
-      "searchKeywords": ["inference", "monitoring", "vllm", "server", "gpu"]
+      "tags": [
+        "vllm",
+        "gpu",
+        "inference",
+        "monitoring"
+      ],
+      "searchKeywords": [
+        "inference",
+        "monitoring",
+        "vllm",
+        "server",
+        "gpu"
+      ]
     },
     {
       "id": "guardrails",
@@ -150,8 +283,18 @@
       "category": "operate",
       "navLabelKey": "guardrails",
       "navDescriptionKey": "guardrailsDescription",
-      "tags": ["safety", "pii", "moderation", "prompt injection"],
-      "searchKeywords": ["guardrails", "safety", "moderation", "pii"]
+      "tags": [
+        "safety",
+        "pii",
+        "moderation",
+        "prompt injection"
+      ],
+      "searchKeywords": [
+        "guardrails",
+        "safety",
+        "moderation",
+        "pii"
+      ]
     },
     {
       "id": "evaluations",
@@ -160,8 +303,23 @@
       "category": "operate",
       "navLabelKey": "evaluations",
       "navDescriptionKey": "evaluationsDescription",
-      "tags": ["evaluation", "testing", "quality", "datasets", "scorers"],
-      "searchKeywords": ["evaluation", "eval", "test", "dataset", "suite", "scorer", "judge", "benchmark"],
+      "tags": [
+        "evaluation",
+        "testing",
+        "quality",
+        "datasets",
+        "scorers"
+      ],
+      "searchKeywords": [
+        "evaluation",
+        "eval",
+        "test",
+        "dataset",
+        "suite",
+        "scorer",
+        "judge",
+        "benchmark"
+      ],
       "badge": "new"
     },
     {
@@ -171,8 +329,25 @@
       "category": "operate",
       "navLabelKey": "redteam",
       "navDescriptionKey": "redteamDescription",
-      "tags": ["redteam", "security", "adversarial", "jailbreak", "prompt-injection"],
-      "searchKeywords": ["red team", "redteam", "security", "adversarial", "jailbreak", "prompt injection", "garak", "vulnerability", "probe", "owasp"],
+      "tags": [
+        "redteam",
+        "security",
+        "adversarial",
+        "jailbreak",
+        "prompt-injection"
+      ],
+      "searchKeywords": [
+        "red team",
+        "redteam",
+        "security",
+        "adversarial",
+        "jailbreak",
+        "prompt injection",
+        "garak",
+        "vulnerability",
+        "probe",
+        "owasp"
+      ],
       "badge": "new"
     },
     {
@@ -182,8 +357,23 @@
       "category": "operate",
       "navLabelKey": "analysis",
       "navDescriptionKey": "analysisDescription",
-      "tags": ["analysis", "conversations", "extraction", "quality", "ivr"],
-      "searchKeywords": ["analysis", "conversation", "transcript", "extract", "judge", "accuracy", "ivr", "call"],
+      "tags": [
+        "analysis",
+        "conversations",
+        "extraction",
+        "quality",
+        "ivr"
+      ],
+      "searchKeywords": [
+        "analysis",
+        "conversation",
+        "transcript",
+        "extract",
+        "judge",
+        "accuracy",
+        "ivr",
+        "call"
+      ],
       "badge": "new"
     },
     {
@@ -193,8 +383,22 @@
       "category": "operate",
       "navLabelKey": "pii",
       "navDescriptionKey": "piiDescription",
-      "tags": ["pii", "redaction", "masking", "gdpr", "kvkk", "privacy"],
-      "searchKeywords": ["pii", "redact", "mask", "kvkk", "gdpr", "kişisel veri"],
+      "tags": [
+        "pii",
+        "redaction",
+        "masking",
+        "gdpr",
+        "kvkk",
+        "privacy"
+      ],
+      "searchKeywords": [
+        "pii",
+        "redact",
+        "mask",
+        "kvkk",
+        "gdpr",
+        "ki\u015fisel veri"
+      ],
       "badge": "new"
     },
     {
@@ -204,8 +408,20 @@
       "category": "build",
       "navLabelKey": "mcp",
       "navDescriptionKey": "mcpDescription",
-      "tags": ["mcp", "servers", "openapi"],
-      "searchKeywords": ["mcp", "openapi", "swagger", "tool", "server", "proxy", "api"]
+      "tags": [
+        "mcp",
+        "servers",
+        "openapi"
+      ],
+      "searchKeywords": [
+        "mcp",
+        "openapi",
+        "swagger",
+        "tool",
+        "server",
+        "proxy",
+        "api"
+      ]
     },
     {
       "id": "tools",
@@ -214,8 +430,19 @@
       "category": "build",
       "navLabelKey": "tools",
       "navDescriptionKey": "toolsDescription",
-      "tags": ["tools", "actions", "integrations"],
-      "searchKeywords": ["tool", "action", "openapi", "mcp", "execute", "api"],
+      "tags": [
+        "tools",
+        "actions",
+        "integrations"
+      ],
+      "searchKeywords": [
+        "tool",
+        "action",
+        "openapi",
+        "mcp",
+        "execute",
+        "api"
+      ],
       "defaultPinned": true
     },
     {
@@ -225,8 +452,19 @@
       "category": "build",
       "navLabelKey": "jsSandbox",
       "navDescriptionKey": "jsSandboxDescription",
-      "tags": ["javascript", "sandbox", "runtime"],
-      "searchKeywords": ["javascript", "js", "sandbox", "runtime", "code", "execute"]
+      "tags": [
+        "javascript",
+        "sandbox",
+        "runtime"
+      ],
+      "searchKeywords": [
+        "javascript",
+        "js",
+        "sandbox",
+        "runtime",
+        "code",
+        "execute"
+      ]
     },
     {
       "id": "browser",
@@ -235,8 +473,20 @@
       "category": "operate",
       "navLabelKey": "browser",
       "navDescriptionKey": "browserDescription",
-      "tags": ["browser", "automation", "playwright", "session"],
-      "searchKeywords": ["browser", "tarayıcı", "playwright", "automation", "session", "profile"]
+      "tags": [
+        "browser",
+        "automation",
+        "playwright",
+        "session"
+      ],
+      "searchKeywords": [
+        "browser",
+        "taray\u0131c\u0131",
+        "playwright",
+        "automation",
+        "session",
+        "profile"
+      ]
     },
     {
       "id": "crawler",
@@ -245,8 +495,21 @@
       "category": "data",
       "navLabelKey": "crawler",
       "navDescriptionKey": "crawlerDescription",
-      "tags": ["crawler", "scraping", "ingest", "rag"],
-      "searchKeywords": ["crawler", "scrape", "crawl", "web", "ingest", "markdown", "playwright"],
+      "tags": [
+        "crawler",
+        "scraping",
+        "ingest",
+        "rag"
+      ],
+      "searchKeywords": [
+        "crawler",
+        "scrape",
+        "crawl",
+        "web",
+        "ingest",
+        "markdown",
+        "playwright"
+      ],
       "badge": "new"
     },
     {
@@ -256,8 +519,23 @@
       "category": "data",
       "navLabelKey": "ocr",
       "navDescriptionKey": "ocrDescription",
-      "tags": ["ocr", "extraction", "documents", "jobs"],
-      "searchKeywords": ["ocr", "extraction", "document", "pdf", "image", "summary", "structured", "job", "batch"],
+      "tags": [
+        "ocr",
+        "extraction",
+        "documents",
+        "jobs"
+      ],
+      "searchKeywords": [
+        "ocr",
+        "extraction",
+        "document",
+        "pdf",
+        "image",
+        "summary",
+        "structured",
+        "job",
+        "batch"
+      ],
       "badge": "new"
     },
     {
@@ -267,8 +545,17 @@
       "category": "operate",
       "navLabelKey": "alerts",
       "navDescriptionKey": "alertsDescription",
-      "tags": ["thresholds", "notifications", "incidents"],
-      "searchKeywords": ["alert", "incident", "notifications", "threshold"],
+      "tags": [
+        "thresholds",
+        "notifications",
+        "incidents"
+      ],
+      "searchKeywords": [
+        "alert",
+        "incident",
+        "notifications",
+        "threshold"
+      ],
       "badge": "new"
     },
     {
@@ -278,8 +565,18 @@
       "category": "admin",
       "navLabelKey": "automations",
       "navDescriptionKey": "automationsDescription",
-      "tags": ["automations", "scheduler", "operations"],
-      "searchKeywords": ["automation", "scheduler", "maintenance", "jobs", "workflow"],
+      "tags": [
+        "automations",
+        "scheduler",
+        "operations"
+      ],
+      "searchKeywords": [
+        "automation",
+        "scheduler",
+        "maintenance",
+        "jobs",
+        "workflow"
+      ],
       "tenantAdminOnly": true
     },
     {
@@ -289,8 +586,20 @@
       "category": "admin",
       "navLabelKey": "cluster",
       "navDescriptionKey": "clusterDescription",
-      "tags": ["cluster", "nodes", "scaling"],
-      "searchKeywords": ["cluster", "nodes", "worker", "node", "scaling", "instance", "kümeleme"],
+      "tags": [
+        "cluster",
+        "nodes",
+        "scaling"
+      ],
+      "searchKeywords": [
+        "cluster",
+        "nodes",
+        "worker",
+        "node",
+        "scaling",
+        "instance",
+        "k\u00fcmeleme"
+      ],
       "tenantAdminOnly": true,
       "requiresEnterprise": true,
       "enterpriseModule": "cluster"
@@ -302,8 +611,24 @@
       "category": "operate",
       "navLabelKey": "gpuFleet",
       "navDescriptionKey": "gpuFleetDescription",
-      "tags": ["gpu", "fleet", "llm", "deployments", "hosts"],
-      "searchKeywords": ["gpu", "fleet", "host", "vllm", "ollama", "deploy", "model", "mig", "agent"],
+      "tags": [
+        "gpu",
+        "fleet",
+        "llm",
+        "deployments",
+        "hosts"
+      ],
+      "searchKeywords": [
+        "gpu",
+        "fleet",
+        "host",
+        "vllm",
+        "ollama",
+        "deploy",
+        "model",
+        "mig",
+        "agent"
+      ],
       "defaultPinned": true,
       "popular": true,
       "requiresEnterprise": true,
@@ -316,8 +641,24 @@
       "category": "operate",
       "navLabelKey": "sandbox",
       "navDescriptionKey": "sandboxDescription",
-      "tags": ["sandbox", "runtime", "execution", "terminal", "code"],
-      "searchKeywords": ["sandbox", "runtime", "execution", "terminal", "code", "python", "node", "container", "dind"],
+      "tags": [
+        "sandbox",
+        "runtime",
+        "execution",
+        "terminal",
+        "code"
+      ],
+      "searchKeywords": [
+        "sandbox",
+        "runtime",
+        "execution",
+        "terminal",
+        "code",
+        "python",
+        "node",
+        "container",
+        "dind"
+      ],
       "defaultPinned": false,
       "popular": false,
       "requiresEnterprise": true,
@@ -330,8 +671,22 @@
       "category": "operate",
       "navLabelKey": "promptOptimizer",
       "navDescriptionKey": "promptOptimizerDescription",
-      "tags": ["prompt", "optimization", "evaluation", "agents"],
-      "searchKeywords": ["prompt", "optimizer", "optimize", "tuning", "variant", "evaluation", "judge", "goal"],
+      "tags": [
+        "prompt",
+        "optimization",
+        "evaluation",
+        "agents"
+      ],
+      "searchKeywords": [
+        "prompt",
+        "optimizer",
+        "optimize",
+        "tuning",
+        "variant",
+        "evaluation",
+        "judge",
+        "goal"
+      ],
       "defaultPinned": false,
       "popular": false,
       "requiresEnterprise": true,
@@ -344,8 +699,18 @@
       "category": "admin",
       "navLabelKey": "members",
       "navDescriptionKey": "membersDescription",
-      "tags": ["users", "invite", "roles"],
-      "searchKeywords": ["members", "users", "invite", "tenant", "üyeler"],
+      "tags": [
+        "users",
+        "invite",
+        "roles"
+      ],
+      "searchKeywords": [
+        "members",
+        "users",
+        "invite",
+        "tenant",
+        "\u00fcyeler"
+      ],
       "tenantAdminOnly": true
     },
     {
@@ -355,8 +720,14 @@
       "category": "operate",
       "navLabelKey": "projects",
       "navDescriptionKey": "projectsDescription",
-      "tags": ["workspaces", "access"],
-      "searchKeywords": ["project", "proje"]
+      "tags": [
+        "workspaces",
+        "access"
+      ],
+      "searchKeywords": [
+        "project",
+        "proje"
+      ]
     },
     {
       "id": "providers",
@@ -365,8 +736,15 @@
       "category": "admin",
       "navLabelKey": "providers",
       "navDescriptionKey": "providersDescription",
-      "tags": ["providers", "integrations"],
-      "searchKeywords": ["providers", "integrations", "sağlayıcılar"],
+      "tags": [
+        "providers",
+        "integrations"
+      ],
+      "searchKeywords": [
+        "providers",
+        "integrations",
+        "sa\u011flay\u0131c\u0131lar"
+      ],
       "tenantAdminOnly": true
     },
     {
@@ -376,8 +754,17 @@
       "category": "admin",
       "navLabelKey": "tokens",
       "navDescriptionKey": "tokensDescription",
-      "tags": ["api", "tokens", "keys"],
-      "searchKeywords": ["token", "api", "key", "anahtar"],
+      "tags": [
+        "api",
+        "tokens",
+        "keys"
+      ],
+      "searchKeywords": [
+        "token",
+        "api",
+        "key",
+        "anahtar"
+      ],
       "defaultPinned": true
     },
     {
@@ -387,8 +774,18 @@
       "category": "admin",
       "navLabelKey": "audit",
       "navDescriptionKey": "auditDescription",
-      "tags": ["audit", "security", "logs"],
-      "searchKeywords": ["audit", "security", "log", "rbac", "yetki"],
+      "tags": [
+        "audit",
+        "security",
+        "logs"
+      ],
+      "searchKeywords": [
+        "audit",
+        "security",
+        "log",
+        "rbac",
+        "yetki"
+      ],
       "tenantAdminOnly": true
     },
     {
@@ -398,8 +795,17 @@
       "category": "admin",
       "navLabelKey": "license",
       "navDescriptionKey": "licenseDescription",
-      "tags": ["license", "limits", "enterprise"],
-      "searchKeywords": ["license", "lisans", "enterprise", "limits"],
+      "tags": [
+        "license",
+        "limits",
+        "enterprise"
+      ],
+      "searchKeywords": [
+        "license",
+        "lisans",
+        "enterprise",
+        "limits"
+      ],
       "tenantAdminOnly": true
     }
   ]

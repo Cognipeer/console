@@ -11,6 +11,7 @@ import { useRouter } from 'next/navigation';
 import { Button, Group, Modal, Text } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
+  IconBug,
   IconPencil,
   IconPlayerPlay,
   IconPlus,
@@ -23,16 +24,25 @@ import StatTile from '@/components/common/ui/StatTile';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import { useTableControls } from '@/components/common/ui/useTableControls';
 import CreateCampaignModal from '@/components/redteam/CreateCampaignModal';
+import CreateCustomProbeModal from '@/components/redteam/CreateCustomProbeModal';
 import RunScanModal from '@/components/redteam/RunScanModal';
 import RedTeamApiUsage from '@/components/redteam/RedTeamApiUsage';
 import type {
+  CustomProbeView,
   ProbeCatalogView,
   RedTeamCampaignView,
   RedTeamRunView,
   SelectOption,
 } from '@/components/redteam/types';
 
-export type RedTeamSection = 'campaigns' | 'runs' | 'api';
+export type RedTeamSection = 'campaigns' | 'runs' | 'probes' | 'api';
+
+const SEVERITY_BADGE: Record<string, string> = {
+  critical: 'ds-badge-err',
+  high: 'ds-badge-warn',
+  medium: 'ds-badge-info',
+  low: 'ds-badge',
+};
 
 const RUN_STATUS_BADGE: Record<string, string> = {
   completed: 'ds-badge-teal',
@@ -57,6 +67,7 @@ export default function RedTeamWorkspace({ section }: { section: RedTeamSection 
   const [campaigns, setCampaigns] = useState<RedTeamCampaignView[]>([]);
   const [runs, setRuns] = useState<RedTeamRunView[]>([]);
   const [probes, setProbes] = useState<ProbeCatalogView[]>([]);
+  const [customProbes, setCustomProbes] = useState<CustomProbeView[]>([]);
   const [agents, setAgents] = useState<SelectOption[]>([]);
   const [models, setModels] = useState<SelectOption[]>([]);
   const [loading, setLoading] = useState(true);
@@ -66,20 +77,26 @@ export default function RedTeamWorkspace({ section }: { section: RedTeamSection 
   const [campaignModal, setCampaignModal] = useState(false);
   const [deleteItem, setDeleteItem] = useState<{ id: string; name: string } | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [probeModal, setProbeModal] = useState(false);
+  const [editingProbe, setEditingProbe] = useState<CustomProbeView | null>(null);
+  const [deleteProbe, setDeleteProbe] = useState<{ id: string; name: string } | null>(null);
+  const [deletingProbe, setDeletingProbe] = useState(false);
 
   const loadAll = async () => {
     setRefreshing(true);
     try {
-      const [cRes, rRes, pRes, aRes, mRes] = await Promise.all([
+      const [cRes, rRes, pRes, cpRes, aRes, mRes] = await Promise.all([
         fetch('/api/redteam/campaigns', { cache: 'no-store' }),
         fetch('/api/redteam/runs', { cache: 'no-store' }),
         fetch('/api/redteam/probes', { cache: 'no-store' }),
+        fetch('/api/redteam/custom-probes', { cache: 'no-store' }),
         fetch('/api/agents', { cache: 'no-store' }),
         fetch('/api/models?category=llm', { cache: 'no-store' }),
       ]);
       if (cRes.ok) setCampaigns((await cRes.json()).campaigns ?? []);
       if (rRes.ok) setRuns((await rRes.json()).runs ?? []);
       if (pRes.ok) setProbes((await pRes.json()).probes ?? []);
+      if (cpRes.ok) setCustomProbes((await cpRes.json()).probes ?? []);
       if (aRes.ok) {
         setAgents(((await aRes.json()).agents ?? []).map((a: { key: string; name: string }) => ({ value: a.key, label: a.name })));
       }
@@ -128,6 +145,22 @@ export default function RedTeamWorkspace({ section }: { section: RedTeamSection 
     }
   };
 
+  const confirmDeleteProbe = async () => {
+    if (!deleteProbe) return;
+    setDeletingProbe(true);
+    try {
+      const res = await fetch(`/api/redteam/custom-probes/${deleteProbe.id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Failed to delete');
+      notifications.show({ title: 'Deleted', message: `"${deleteProbe.name}" was deleted`, color: 'red' });
+      setDeleteProbe(null);
+      await loadAll();
+    } catch (err) {
+      notifications.show({ title: 'Error', message: err instanceof Error ? err.message : 'Failed to delete', color: 'red' });
+    } finally {
+      setDeletingProbe(false);
+    }
+  };
+
   const totalVulnerable = runs.reduce((n, r) => n + (r.aggregate?.vulnerable ?? 0), 0);
   const lastResilience = runs.find((r) => r.aggregate)?.aggregate?.resilienceScore;
 
@@ -138,6 +171,10 @@ export default function RedTeamWorkspace({ section }: { section: RedTeamSection 
   const runsCtl = useTableControls(runs, {
     searchText: (r) => `${r.campaignKey} ${r.status}`,
     searchPlaceholder: 'Filter by campaign or status…',
+  });
+  const probesCtl = useTableControls(customProbes, {
+    searchText: (p) => `${p.name} ${p.key} ${p.category} ${p.severity}`,
+    searchPlaceholder: 'Filter by name, category, or severity…',
   });
 
   const campaignColumns: DataGridColumn<RedTeamCampaignView>[] = [
@@ -174,13 +211,44 @@ export default function RedTeamWorkspace({ section }: { section: RedTeamSection 
     { key: 'created', label: 'Started', render: (r) => <span className="ds-faint" style={{ fontSize: 12 }}>{fmtDate(r.startedAt ?? r.createdAt)}</span> },
   ];
 
+  const customProbeColumns: DataGridColumn<CustomProbeView>[] = [
+    { key: 'name', label: 'Name', render: (p) => (
+      <div className="ds-col" style={{ gap: 2 }}>
+        <span style={{ fontWeight: 500, color: 'var(--ds-text)' }}>{p.name}</span>
+        <span className="ds-faint ds-mono" style={{ fontSize: 11 }}>{p.key}</span>
+      </div>
+    ) },
+    { key: 'category', label: 'OWASP category', render: (p) => <span className="ds-mono ds-muted" style={{ fontSize: 12 }}>{p.category}</span> },
+    { key: 'severity', label: 'Severity', render: (p) => <span className={`ds-badge ${SEVERITY_BADGE[p.severity] ?? ''}`}>{p.severity}</span> },
+    { key: 'attempts', label: 'Attempts', render: (p) => <span>{p.attempts.length}</span> },
+    { key: 'detectors', label: 'Detectors', render: (p) => {
+      const parts: string[] = [];
+      if (p.detectors.refusal) parts.push('refusal');
+      if (p.detectors.pattern) parts.push('pattern');
+      if (p.detectors.judges?.length) parts.push(`${p.detectors.judges.length} judge`);
+      return <span className="ds-faint" style={{ fontSize: 12 }}>{parts.join(' · ') || '—'}</span>;
+    } },
+    { key: 'enabled', label: 'Status', render: (p) => (
+      <span className={`ds-badge ${p.enabled === false ? 'ds-badge' : 'ds-badge-teal'}`}>{p.enabled === false ? 'disabled' : 'enabled'}</span>
+    ) },
+  ];
+
   const actionButton = useMemo(() => {
-    if (section !== 'campaigns') return null;
-    return (
-      <Button color="teal" size="sm" leftSection={<IconPlus size={14} stroke={1.7} />} onClick={() => setCampaignModal(true)}>
-        New campaign
-      </Button>
-    );
+    if (section === 'campaigns') {
+      return (
+        <Button color="teal" size="sm" leftSection={<IconPlus size={14} stroke={1.7} />} onClick={() => setCampaignModal(true)}>
+          New campaign
+        </Button>
+      );
+    }
+    if (section === 'probes') {
+      return (
+        <Button color="teal" size="sm" leftSection={<IconPlus size={14} stroke={1.7} />} onClick={() => { setEditingProbe(null); setProbeModal(true); }}>
+          New custom probe
+        </Button>
+      );
+    }
+    return null;
   }, [section]);
 
   return (
@@ -251,6 +319,32 @@ export default function RedTeamWorkspace({ section }: { section: RedTeamSection 
         />
       )}
 
+      {section === 'probes' && (
+        <DataGrid<CustomProbeView>
+          records={probesCtl.records}
+          loading={loading}
+          rowKey={(p) => p.id}
+          columns={customProbeColumns}
+          search={probesCtl.search}
+          pagination={probesCtl.pagination}
+          footerLeft={probesCtl.footerLeft('custom probes')}
+          onRefresh={loadAll}
+          refreshing={refreshing}
+          onRowClick={(p) => { setEditingProbe(p); setProbeModal(true); }}
+          empty={{
+            icon: <IconBug size={26} stroke={1.7} />,
+            title: 'No custom probes yet',
+            description: 'Author your own adversarial probes (attacks + detectors) to extend the built-in catalog. They become selectable in any campaign.',
+            primaryAction: { label: 'New custom probe', icon: <IconPlus size={14} />, onClick: () => { setEditingProbe(null); setProbeModal(true); } },
+          }}
+          rowActions={(p) => [
+            { id: 'edit', label: 'Edit', icon: <IconPencil size={14} />, onClick: () => { setEditingProbe(p); setProbeModal(true); } },
+            { divider: true },
+            { id: 'delete', label: 'Delete', icon: <IconTrash size={14} />, color: 'red', onClick: () => setDeleteProbe({ id: p.id, name: p.name }) },
+          ]}
+        />
+      )}
+
       {section === 'api' && <RedTeamApiUsage campaignKey={campaigns[0]?.key} />}
 
       <Modal opened={deleteItem !== null} onClose={() => setDeleteItem(null)} title="Delete" centered size="sm">
@@ -280,6 +374,23 @@ export default function RedTeamWorkspace({ section }: { section: RedTeamSection 
         onClose={() => setScanCampaign(null)}
         onStarted={(runId) => router.push(`/dashboard/redteam/runs/${runId}`)}
       />
+
+      <CreateCustomProbeModal
+        opened={probeModal}
+        editing={editingProbe}
+        onClose={() => { setProbeModal(false); setEditingProbe(null); }}
+        onSaved={() => { void loadAll(); }}
+      />
+
+      <Modal opened={deleteProbe !== null} onClose={() => setDeleteProbe(null)} title="Delete custom probe" centered size="sm">
+        <Text size="sm" mb="lg">
+          Delete <strong>{deleteProbe?.name}</strong>? Campaigns referencing it will fail until the reference is removed.
+        </Text>
+        <Group justify="flex-end">
+          <Button variant="default" onClick={() => setDeleteProbe(null)}>Cancel</Button>
+          <Button color="red" loading={deletingProbe} onClick={confirmDeleteProbe}>Delete</Button>
+        </Group>
+      </Modal>
     </PageContainer>
   );
 }

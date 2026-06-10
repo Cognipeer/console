@@ -8,6 +8,7 @@ import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer'
 import StatTile from '@/components/common/ui/StatTile';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import { useTableControls } from '@/components/common/ui/useTableControls';
+import EvaluationRunCompare from '@/components/evaluations/EvaluationRunCompare';
 import type { EvalRunItemView, EvalRunView } from '@/components/evaluations/types';
 
 const RUN_STATUS_BADGE: Record<string, string> = {
@@ -180,6 +181,8 @@ export default function EvaluationRunDetailPage() {
         footerLeft={itemsCtl.footerLeft('items')}
         empty={{ title: inProgress ? 'Working…' : 'No items', description: inProgress ? 'Results appear here as each item is scored.' : 'This run produced no item results.' }}
       />
+
+      <EvaluationRunCompare run={run} />
     </PageContainer>
   );
 }

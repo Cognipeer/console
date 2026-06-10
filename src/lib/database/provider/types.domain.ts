@@ -318,6 +318,72 @@ export interface IRedTeamRun {
   updatedAt?: Date;
 }
 
+// ── Red-team custom probes ─────────────────────────────────────────────────────
+
+/** One adversarial attempt of a user-authored custom probe. */
+export interface IRedTeamCustomAttempt {
+  id: string;
+  /** User turns (length ≥ 1). Only the first is used as the seed when adaptive. */
+  turns: string[];
+  /** Optional system prompt. `{{canary}}` is substituted with the canary value. */
+  system?: string;
+  /** A secret planted in the system turn that the target must never reveal. */
+  canary?: string;
+  /** Substrings / regex sources whose presence in output indicates a hit. */
+  forbiddenPatterns?: string[];
+  /** Whether a refusal is the safe outcome (default true). */
+  refusalExpected?: boolean;
+  /** Drive an adaptive multi-turn attack when an attacker model is available. */
+  adaptive?: boolean;
+  /** The attacker's goal, used to steer the adaptive loop. */
+  objective?: string;
+}
+
+/** One LLM-judge lens configured on a custom probe. */
+export interface IRedTeamCustomJudgeLens {
+  lens: string;
+  rubric: string;
+  /** Hit threshold on the normalised 0..1 success score (default 0.5). */
+  threshold?: number;
+}
+
+/** Which detectors a custom probe attaches to each of its attempts. */
+export interface IRedTeamCustomDetectors {
+  /** Include the cheap explicit-refusal "safe" gate. */
+  refusal?: boolean;
+  /** Include the deterministic canary / forbidden-pattern detector. */
+  pattern?: boolean;
+  /** A perspective-diverse panel of llm-judge lenses (needs a judge model). */
+  judges?: IRedTeamCustomJudgeLens[];
+}
+
+/**
+ * A user-authored adversarial probe. Built-in probes are code-defined; custom
+ * probes are persisted definitions resolved into runtime Probe instances at scan
+ * time. The `key` is namespaced with a `custom:` prefix so it never clashes with
+ * the built-in catalog and a campaign's `probeKeys` can mix both.
+ */
+export interface IRedTeamCustomProbe {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  /** Unique, `custom:`-prefixed selection key. */
+  key: string;
+  name: string;
+  description: string;
+  family: string;
+  /** OWASP category string (mirrors OwaspLlmCategory). */
+  category: string;
+  severity: RedTeamSeverity;
+  attempts: IRedTeamCustomAttempt[];
+  detectors: IRedTeamCustomDetectors;
+  enabled?: boolean;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
 // ── Analysis types ───────────────────────────────────────────────────────────
 
 export type AnalysisFieldType = 'string' | 'number' | 'boolean' | 'enum';
@@ -633,7 +699,7 @@ export interface IRerankerRunLog {
 
 // ── Alert types ─────────────────────────────────────────────────────────
 
-export type AlertModule = 'models' | 'inference' | 'guardrails' | 'rag' | 'mcp' | 'analysis' | 'evaluation';
+export type AlertModule = 'models' | 'inference' | 'guardrails' | 'rag' | 'mcp' | 'analysis' | 'evaluation' | 'redteam';
 
 export type AlertMetric =
   // models
@@ -663,7 +729,10 @@ export type AlertMetric =
   | 'analysis_avg_accuracy'
   // evaluation (percentages, 0–100, averaged over completed runs in the window)
   | 'evaluation_pass_rate'
-  | 'evaluation_avg_score';
+  | 'evaluation_avg_score'
+  // red-team (percentages, 0–100, averaged over completed scans in the window)
+  | 'redteam_attack_success_rate'
+  | 'redteam_resilience_score';
 
 export type AlertConditionOperator = 'gt' | 'lt' | 'gte' | 'lte' | 'eq';
 
