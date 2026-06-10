@@ -115,7 +115,7 @@
     "eslint-config-next": "15.5.15",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-prettier": "^5.5.4",
-    "msw": "^2.12.10",
+    "msw": "^2.14.6",
     "prettier": "^3.6.2",
     "tailwindcss": "^4",
     "tsx": "^4.20.5",
