@@ -21,6 +21,9 @@ export interface OpenAiAudioClientOptions {
   buildUrl?: (path: '/audio/transcriptions' | '/audio/translations' | '/audio/speech') => string;
 }
 
+/** Fallback when the caller doesn't pick a voice — supported by every OpenAI-style TTS model. */
+const DEFAULT_TTS_VOICE = 'alloy';
+
 const FORMAT_TO_MIME: Record<TtsOutputFormat, string> = {
   mp3: 'audio/mpeg',
   opus: 'audio/ogg',
@@ -250,7 +253,7 @@ export function createOpenAiTtsRuntime(opts: OpenAiAudioClientOptions): TtsRunti
     const body: Record<string, unknown> = {
       model: opts.modelId,
       input: input.text,
-      voice: input.voice,
+      voice: input.voice || DEFAULT_TTS_VOICE,
       response_format: format,
     };
     if (typeof input.speed === 'number') body.speed = input.speed;

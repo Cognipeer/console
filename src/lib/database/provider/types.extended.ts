@@ -891,8 +891,10 @@ export interface IRealtimeModel {
   name: string;
   description?: string;
   status: RealtimeModelStatus;
-  /** Chat model key responses are generated with. */
-  chatModelKey: string;
+  /** Chat model key responses are generated with (unless `agentKey` is set). */
+  chatModelKey?: string;
+  /** Agent key responses are generated with (takes precedence over `chatModelKey`). */
+  agentKey?: string;
   instructions?: string;
   temperature?: number;
   maxOutputTokens?: number;

@@ -76,10 +76,6 @@ const _POST = async (request: NextRequest) => {
   if (!body.input || typeof body.input !== 'string') {
     return badRequest('`input` text is required');
   }
-  if (!body.voice || typeof body.voice !== 'string') {
-    return badRequest('`voice` is required');
-  }
-
   const requestedFormat: TtsOutputFormat | undefined =
     typeof body.response_format === 'string' &&
     (VALID_FORMATS as string[]).includes(body.response_format)
@@ -119,7 +115,8 @@ const _POST = async (request: NextRequest) => {
 
   const input: TtsSynthesizeInput = {
     text: body.input,
-    voice: body.voice,
+    // Optional — the provider runtime falls back to its default voice.
+    voice: typeof body.voice === 'string' && body.voice ? body.voice : undefined,
     format: requestedFormat,
     speed: typeof body.speed === 'number' ? body.speed : undefined,
     instructions:

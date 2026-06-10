@@ -283,7 +283,6 @@ export const dashboardApiPlugin: FastifyPluginAsync = async (app) => {
       const voice = typeof body.voice === 'string' ? body.voice : '';
       if (!modelKey) return reply.code(400).send({ error: '`model` is required' });
       if (!text) return reply.code(400).send({ error: '`input` text is required' });
-      if (!voice) return reply.code(400).send({ error: '`voice` is required' });
 
       const responseFormat: TtsOutputFormat | undefined =
         typeof body.response_format === 'string' &&
@@ -293,7 +292,7 @@ export const dashboardApiPlugin: FastifyPluginAsync = async (app) => {
 
       const input: TtsSynthesizeInput = {
         text,
-        voice,
+        voice: voice || undefined,
         format: responseFormat,
         speed: typeof body.speed === 'number' ? body.speed : undefined,
         instructions: typeof body.instructions === 'string' ? body.instructions : undefined,
