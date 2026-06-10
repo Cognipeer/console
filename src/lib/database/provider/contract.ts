@@ -30,9 +30,6 @@ import type {
   IBatchJobItem,
   BatchJobStatus,
   BatchJobAggregateDelta,
-  IRealtimeModel,
-  IRealtimeSessionLog,
-  RealtimeSessionLogDelta,
   IConfigAuditLog,
   IConfigGroup,
   IConfigItem,
@@ -1382,49 +1379,6 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     batchId: string,
     options?: { limit?: number; skip?: number; status?: string },
   ): Promise<IBatchJobItem[]>;
-
-  // ── Realtime: named models (tenant-specific) ──
-  createRealtimeModel(
-    record: Omit<IRealtimeModel, '_id' | 'createdAt' | 'updatedAt'>,
-  ): Promise<IRealtimeModel>;
-  updateRealtimeModel(
-    id: string,
-    data: Partial<Omit<IRealtimeModel, '_id' | 'tenantId' | 'createdAt'>>,
-  ): Promise<IRealtimeModel | null>;
-  findRealtimeModelById(id: string): Promise<IRealtimeModel | null>;
-  findRealtimeModelByKey(key: string, projectId?: string): Promise<IRealtimeModel | null>;
-  listRealtimeModels(
-    tenantId: string,
-    filters?: { projectId?: string; status?: string; limit?: number },
-  ): Promise<IRealtimeModel[]>;
-  deleteRealtimeModel(id: string): Promise<boolean>;
-
-  // ── Realtime: session logs (tenant-specific) ──
-  createRealtimeSessionLog(
-    record: Omit<IRealtimeSessionLog, '_id' | 'createdAt' | 'updatedAt'>,
-  ): Promise<IRealtimeSessionLog>;
-  updateRealtimeSessionLog(
-    id: string,
-    data: Partial<Omit<IRealtimeSessionLog, '_id' | 'tenantId' | 'createdAt'>>,
-  ): Promise<IRealtimeSessionLog | null>;
-  /** Atomically bump usage/response counters as the conversation progresses. */
-  incrementRealtimeSessionLog(
-    id: string,
-    delta: RealtimeSessionLogDelta,
-  ): Promise<IRealtimeSessionLog | null>;
-  listRealtimeSessionLogs(
-    tenantId: string,
-    filters?: {
-      projectId?: string;
-      realtimeModelKey?: string;
-      transport?: string;
-      status?: string;
-      from?: Date;
-      to?: Date;
-      limit?: number;
-      skip?: number;
-    },
-  ): Promise<IRealtimeSessionLog[]>;
 
   // ── Cluster: nodes (main database) ──
   upsertNode(

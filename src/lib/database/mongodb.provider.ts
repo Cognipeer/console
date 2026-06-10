@@ -43,7 +43,6 @@ import { BrowserMixin } from './mongodb/browser.mixin';
 import { CrawlerMixin } from './mongodb/crawler.mixin';
 import { OcrJobMixin } from './mongodb/ocr-jobs.mixin';
 import { BatchJobMixin } from './mongodb/batch.mixin';
-import { RealtimeMixin } from './mongodb/realtime.mixin';
 import { AuditMixin } from './mongodb/audit.mixin';
 import { UserProjectMixin } from './mongodb/user-project.mixin';
 import { ClusterMixin } from './mongodb/cluster.mixin';
@@ -76,7 +75,7 @@ const KnowledgeBase = MemoryMixin(RerankerMixin(RagMixin(AlertingBase)));
 const PlatformBase = JsSandboxMixin(McpServerMixin(ConfigMixin(KnowledgeBase)));
 const ToolingBase = VectorMigrationMixin(AgentMixin(ToolMixin(PlatformBase)));
 const AdvancedBase = OcrJobMixin(CrawlerMixin(AuditMixin(BrowserMixin(ToolingBase))));
-const BulkBase = RealtimeMixin(BatchJobMixin(AdvancedBase));
+const BulkBase = BatchJobMixin(AdvancedBase);
 
 // Group 6 – Cluster (system-wide; uses main DB). Single-node node registry
 // stays in the community edition; cluster orchestration/admin is enterprise.

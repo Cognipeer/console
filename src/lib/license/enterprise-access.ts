@@ -63,6 +63,14 @@ export const ENTERPRISE_API_RULES: EnterpriseApiRule[] = [
     module: 'ldap',
     prefixes: ['/api/ldap/'],
   },
+  {
+    // Realtime voice/chat: admin model CRUD under /api/realtime, client session
+    // surface under /api/client/v1/realtime. The websocket upgrade itself is
+    // public (auth handled in-handler), so it never reaches this guard; the
+    // HTTP CRUD + REST endpoints are gated here.
+    module: 'realtime',
+    prefixes: ['/api/realtime/', '/api/client/v1/realtime/'],
+  },
 ];
 
 export interface EnterpriseDenial {

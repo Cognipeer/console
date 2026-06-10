@@ -197,7 +197,9 @@
         "tts",
         "playground"
       ],
-      "badge": "new"
+      "badge": "new",
+      "requiresEnterprise": true,
+      "enterpriseModule": "realtime"
     },
     {
       "id": "agents",
