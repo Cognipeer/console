@@ -236,6 +236,37 @@ export const OpenAiModelProviderContract: ProviderContract<ModelProviderRuntime,
   },
 };
 
+/**
+ * Azure's OpenAI-compatible v1 endpoint (`https://<resource>.openai.azure.com/openai/v1`)
+ * does not route `/audio/*` operations by the `model` body field — audio only
+ * works deployment-scoped (`/openai/deployments/<deployment>/audio/*`), and
+ * those endpoints authenticate with the `api-key` header rather than a Bearer
+ * token. When the base URL points at Azure, rewrite audio URLs accordingly,
+ * treating the model id as the deployment name.
+ */
+const AZURE_AUDIO_API_VERSION = '2025-03-01-preview';
+
+function azureAudioOverrides(
+  baseUrl: string,
+  modelId: string,
+  apiKey: string,
+):
+  | {
+      buildUrl: (path: '/audio/transcriptions' | '/audio/translations' | '/audio/speech') => string;
+      extraHeaders: Record<string, string>;
+    }
+  | undefined {
+  const match = baseUrl.match(
+    /^(https:\/\/[^/]+\.(?:openai\.azure\.com|cognitiveservices\.azure\.com))\/openai(?:\/v1)?\/?$/i,
+  );
+  if (!match) return undefined;
+  return {
+    buildUrl: (path) =>
+      `${match[1]}/openai/deployments/${encodeURIComponent(modelId)}${path}?api-version=${AZURE_AUDIO_API_VERSION}`,
+    extraHeaders: { 'api-key': apiKey },
+  };
+}
+
 export const OpenAiCompatibleModelProviderContract: ProviderContract<ModelProviderRuntime, OpenAiCompatibleCredentials, OpenAiCompatibleSettings> = {
   id: 'openai-compatible',
   version: '1.0.0',
@@ -326,6 +357,7 @@ export const OpenAiCompatibleModelProviderContract: ProviderContract<ModelProvid
           baseUrl,
           organization: settings.organization,
           modelId: config.modelId,
+          ...azureAudioOverrides(baseUrl, config.modelId, apiKey),
         }),
       createTtsRuntime: (config) =>
         createOpenAiTtsRuntime({
@@ -333,6 +365,7 @@ export const OpenAiCompatibleModelProviderContract: ProviderContract<ModelProvid
           baseUrl,
           organization: settings.organization,
           modelId: config.modelId,
+          ...azureAudioOverrides(baseUrl, config.modelId, apiKey),
         }),
       createOcrRuntime: (config) => {
         const prompt =

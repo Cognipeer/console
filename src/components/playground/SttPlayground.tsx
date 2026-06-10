@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Alert,
   Badge,
@@ -24,6 +24,7 @@ import {
   IconLanguage,
   IconMicrophone,
   IconPlayerPlay,
+  IconPlayerStop,
   IconRefresh,
   IconX,
 } from '@tabler/icons-react';
@@ -67,7 +68,57 @@ export default function SttPlayground({ modelKey }: SttPlaygroundProps) {
   const [result, setResult] = useState<SttResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [latency, setLatency] = useState<number | null>(null);
+  const [recording, setRecording] = useState(false);
+  const [recordSeconds, setRecordSeconds] = useState(0);
   const resetRef = useRef<() => void>(() => {});
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const recorderChunksRef = useRef<Blob[]>([]);
+  const recordTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stopRecording = useCallback(() => {
+    if (recorderRef.current && recorderRef.current.state !== 'inactive') {
+      recorderRef.current.stop();
+    }
+    recorderRef.current = null;
+  }, []);
+
+  useEffect(() => stopRecording, [stopRecording]);
+
+  const startRecording = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      recorderChunksRef.current = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) recorderChunksRef.current.push(e.data);
+      };
+      recorder.onstop = () => {
+        stream.getTracks().forEach((t) => t.stop());
+        if (recordTimerRef.current) {
+          clearInterval(recordTimerRef.current);
+          recordTimerRef.current = null;
+        }
+        setRecording(false);
+        const chunks = recorderChunksRef.current;
+        recorderChunksRef.current = [];
+        if (chunks.length === 0) return;
+        const blob = new Blob(chunks, { type: 'audio/webm' });
+        setFile(new File([blob], `mic-recording-${Date.now()}.webm`, { type: 'audio/webm' }));
+        resetRef.current?.();
+      };
+      recorder.start();
+      recorderRef.current = recorder;
+      setRecordSeconds(0);
+      recordTimerRef.current = setInterval(() => setRecordSeconds((s) => s + 1), 1000);
+      setRecording(true);
+    } catch (error) {
+      notifications.show({
+        color: 'red',
+        title: 'Microphone unavailable',
+        message: error instanceof Error ? error.message : 'Could not access the microphone.',
+      });
+    }
+  }, []);
 
   const run = async () => {
     if (!file) {
@@ -142,21 +193,37 @@ export default function SttPlayground({ modelKey }: SttPlaygroundProps) {
             )}
           </Group>
 
-          <FileButton
-            resetRef={resetRef}
-            accept="audio/*"
-            onChange={setFile}
-          >
-            {(props) => (
-              <Button
-                {...props}
-                variant="default"
-                leftSection={<IconFileUpload size={16} />}
-              >
-                {file ? 'Replace audio file' : 'Choose audio file'}
-              </Button>
-            )}
-          </FileButton>
+          <Group gap="xs">
+            <FileButton
+              resetRef={resetRef}
+              accept="audio/*"
+              onChange={setFile}
+            >
+              {(props) => (
+                <Button
+                  {...props}
+                  variant="default"
+                  disabled={recording}
+                  leftSection={<IconFileUpload size={16} />}
+                >
+                  {file ? 'Replace audio file' : 'Choose audio file'}
+                </Button>
+              )}
+            </FileButton>
+            <Button
+              variant={recording ? 'filled' : 'default'}
+              color={recording ? 'red' : undefined}
+              leftSection={
+                recording ? <IconPlayerStop size={16} /> : <IconMicrophone size={16} />
+              }
+              onClick={() => {
+                if (recording) stopRecording();
+                else void startRecording();
+              }}
+            >
+              {recording ? `Stop recording (${formatTime(recordSeconds)})` : 'Record from microphone'}
+            </Button>
+          </Group>
 
           <Group grow>
             <TextInput

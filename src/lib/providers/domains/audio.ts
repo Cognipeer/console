@@ -87,7 +87,8 @@ export type TtsOutputFormat =
 
 export interface TtsSynthesizeInput {
   text: string;
-  voice: string;
+  /** Voice name. Optional — the provider runtime falls back to its default voice. */
+  voice?: string;
   format?: TtsOutputFormat;
   /** Playback speed multiplier (1.0 = normal). */
   speed?: number;

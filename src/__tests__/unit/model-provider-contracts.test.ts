@@ -177,6 +177,63 @@ describe('openai-compatible provider', () => {
       ),
     ).toThrow('Base URL is required');
   });
+
+  it('routes audio operations deployment-scoped when baseUrl is Azure', async () => {
+    const azureRuntime = OpenAiCompatibleModelProviderContract.createRuntime(
+      makeCtx(
+        { apiKey: 'azure-key' },
+        { baseUrl: 'https://my-res.openai.azure.com/openai/v1' },
+      ) as never,
+    ) as unknown as ModelProviderRuntime;
+
+    const calls: Array<{ url: string; headers: Record<string, string> }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: unknown, init?: RequestInit) => {
+      calls.push({ url: String(url), headers: (init?.headers ?? {}) as Record<string, string> });
+      return new Response(JSON.stringify({ text: 'ok' }), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }));
+    try {
+      const stt = await azureRuntime.createSttRuntime!({ modelId: 'gpt-4o-transcribe', category: 'stt' });
+      await (stt as { transcribe: (input: unknown) => Promise<unknown> }).transcribe({
+        audio: { data: Buffer.from('audio'), fileName: 'a.wav', contentType: 'audio/wav' },
+      });
+      const tts = await azureRuntime.createTtsRuntime!({ modelId: 'gpt-4o-mini-tts', category: 'tts' });
+      await (tts as { synthesize: (input: unknown) => Promise<unknown> }).synthesize({
+        text: 'hi',
+        voice: 'alloy',
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+
+    expect(calls[0].url).toBe(
+      'https://my-res.openai.azure.com/openai/deployments/gpt-4o-transcribe/audio/transcriptions?api-version=2025-03-01-preview',
+    );
+    expect(calls[0].headers['api-key']).toBe('azure-key');
+    expect(calls[1].url).toBe(
+      'https://my-res.openai.azure.com/openai/deployments/gpt-4o-mini-tts/audio/speech?api-version=2025-03-01-preview',
+    );
+  });
+
+  it('keeps plain baseUrl audio routing for non-Azure hosts', async () => {
+    const calls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: unknown) => {
+      calls.push(String(url));
+      return new Response(JSON.stringify({ text: 'ok' }), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }));
+    try {
+      const stt = await runtime.createSttRuntime!({ modelId: 'whisper-1', category: 'stt' });
+      await (stt as { transcribe: (input: unknown) => Promise<unknown> }).transcribe({
+        audio: { data: Buffer.from('audio'), fileName: 'a.wav', contentType: 'audio/wav' },
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(calls[0]).toBe('https://api.custom.com/v1/audio/transcriptions');
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════

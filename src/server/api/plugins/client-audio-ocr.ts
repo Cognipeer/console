@@ -512,12 +512,6 @@ export const clientAudioOcrApiPlugin: FastifyPluginAsync = async (app) => {
             error: { message: '`input` text is required', type: 'invalid_request_error' },
           });
         }
-        if (!voice) {
-          return reply.code(400).send({
-            error: { message: '`voice` is required', type: 'invalid_request_error' },
-          });
-        }
-
         const responseFormat =
           typeof body.response_format === 'string' &&
           (VALID_TTS_FORMATS as string[]).includes(body.response_format)
@@ -526,7 +520,8 @@ export const clientAudioOcrApiPlugin: FastifyPluginAsync = async (app) => {
 
         const input: TtsSynthesizeInput = {
           text,
-          voice,
+          // Optional — the provider runtime falls back to its default voice.
+          voice: voice || undefined,
           format: responseFormat,
           speed: typeof body.speed === 'number' ? body.speed : undefined,
           instructions:

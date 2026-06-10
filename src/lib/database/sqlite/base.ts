@@ -397,6 +397,9 @@ export class SQLiteProviderBase {
     // with directory auth; safe to ensure on boot for pre-existing tenants.
     this.ensureTableColumn(db, TABLES.users, 'authProvider', "authProvider TEXT NOT NULL DEFAULT 'local'");
     this.ensureTableColumn(db, TABLES.users, 'externalId', 'externalId TEXT');
+    // Realtime models can generate responses through an agent instead of a
+    // raw chat model (added later). Safe to ensure on boot.
+    this.ensureTableColumn(db, TABLES.realtimeModels, 'agentKey', 'agentKey TEXT');
   }
 
   private migrateOcrJobsSchema(db: Database.Database): void {
