@@ -7,6 +7,7 @@ import {
   IconArrowsSort,
   IconBell,
   IconBook,
+  IconBox,
   IconBrain,
   IconBug,
   IconChecklist,
@@ -28,6 +29,7 @@ import {
   IconRobot,
   IconScan,
   IconServer,
+  IconSettings,
   IconShield,
   IconStack2,
   IconTimeline,
@@ -53,6 +55,14 @@ export interface SubNavItem {
 const MODEL_TYPE_KEYS = ['llm', 'embedding', 'rerank', 'stt', 'tts', 'ocr'];
 
 export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
+  sandbox: [
+    { id: 'overview', label: 'Overview', href: '/dashboard/sandbox', icon: IconLayoutDashboard, matcher: (p) => p === '/dashboard/sandbox' },
+    { id: 'instances', label: 'Sandboxes', href: '/dashboard/sandbox/instances', icon: IconBox, matcher: (p) => p.startsWith('/dashboard/sandbox/instances') },
+    { id: 'templates', label: 'Templates', href: '/dashboard/sandbox/templates', icon: IconCode, matcher: (p) => p.startsWith('/dashboard/sandbox/templates') },
+    { id: 'volumes', label: 'Volumes', href: '/dashboard/sandbox/volumes', icon: IconDatabase, matcher: (p) => p.startsWith('/dashboard/sandbox/volumes') },
+    { id: 'playground', label: 'Playground', href: '/dashboard/sandbox/playground', icon: IconPlayerPlay, matcher: (p) => p.startsWith('/dashboard/sandbox/playground') },
+    { id: 'settings', label: 'Settings', href: '/dashboard/sandbox/settings', icon: IconSettings, matcher: (p) => p.startsWith('/dashboard/sandbox/settings') },
+  ],
   evaluations: [
     {
       id: 'targets',
