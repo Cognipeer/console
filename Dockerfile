@@ -43,6 +43,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
        docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/*
 
+# kubectl — used by the in-app sandbox onboarding to detect the cluster, check
+# RBAC and provision a shared DinD when running on Kubernetes.
+RUN curl -fsSLo /usr/local/bin/kubectl \
+      "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/$(dpkg --print-architecture)/kubectl" \
+    && chmod +x /usr/local/bin/kubectl
+
 RUN npx playwright install-deps chromium
 
 RUN mkdir -p /home/node/.cache/ms-playwright && \
@@ -57,6 +63,8 @@ COPY --from=builder /app/tsconfig.json ./tsconfig.json
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/src ./src
+COPY --from=builder /app/docker ./docker
+COPY --from=builder /app/scripts ./scripts
 COPY --from=builder /app/mail-templates ./mail-templates
 
 USER node
