@@ -40,8 +40,7 @@ src/__tests__/
 vitest.config.ts
 test-tracing.sh
 
-# Scripts
-scripts/
+
 
 # E2E test material (never ship; never bake secrets)
 tests/
