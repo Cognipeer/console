@@ -165,6 +165,25 @@ export class MongoDBProviderBase {
   }
 
   /**
+   * Run `fn` with the tenant DB bound for its entire (sync + async) execution
+   * via a real AsyncLocalStorage scope. `switchToTenant` uses `enterWith`,
+   * whose binding does NOT propagate to the caller's continuation after an
+   * `await` — so a caller that does not establish a tenant scope at request
+   * top falls back to the process-global `this.tenantDb`, which a concurrent
+   * request for another tenant can overwrite (cross-tenant data leakage).
+   * `runWithTenant` is immune to both problems.
+   */
+  async runWithTenant<T>(tenantDbName: string, fn: () => T | Promise<T>): Promise<T> {
+    if (!this.client) {
+      throw new Error('Database client not connected. Call connect() first.');
+    }
+    const tenantDb = this.client.db(tenantDbName);
+    return this.tenantContext.run(tenantDb, () =>
+      this.tenantNameContext.run(tenantDbName, () => fn()),
+    );
+  }
+
+  /**
    * Name of the tenant DB currently bound to this request context.
    * Returns `null` when no tenant is active (request hasn't called switchToTenant).
    */

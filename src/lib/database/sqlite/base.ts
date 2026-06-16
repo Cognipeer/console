@@ -185,6 +185,24 @@ export class SQLiteProviderBase {
   }
 
   /**
+   * Run `fn` with the tenant DB bound for its entire (sync + async) execution
+   * via a real AsyncLocalStorage scope — immune to the `enterWith`
+   * across-`await` binding loss and to process-global overwrites by concurrent
+   * requests for other tenants. See the MongoDB provider for the rationale.
+   */
+  async runWithTenant<T>(tenantDbName: string, fn: () => T | Promise<T>): Promise<T> {
+    // Ensure the tenant DB is opened/cached and the global fallback is warm.
+    await this.switchToTenant(tenantDbName);
+    const db = this.tenantDbCache.get(tenantDbName);
+    if (!db) {
+      throw new Error(`Tenant database not available: ${tenantDbName}`);
+    }
+    return this.tenantContext.run(db, () =>
+      this.tenantNameContext.run(tenantDbName, () => fn()),
+    );
+  }
+
+  /**
    * Name of the tenant DB currently bound to this request context.
    * Returns `null` when no tenant is active (request hasn't called switchToTenant).
    */
