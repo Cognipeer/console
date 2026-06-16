@@ -395,7 +395,23 @@ export function withClientApiRequestContext<
           tenantSlug: apiToken.tenantSlug,
           userId: apiToken.user?._id ? String(apiToken.user._id) : undefined,
         },
-        () => handler(request as TRequest, reply),
+        async () => {
+          // Bind the tenant DB for the whole handler execution so every nested
+          // query resolves to the token's tenant. Without this, client-API
+          // (token) requests never establish a tenant scope at request top and
+          // fall back to the process-global tenant binding, which a concurrent
+          // request for another tenant can overwrite — causing cross-tenant
+          // reads/writes (e.g. sandbox rows landing in the wrong tenant DB).
+          // Mirrors the cookie/RBAC path, which binds the tenant per request.
+          const db = await getDatabase();
+          if (typeof db.runWithTenant === 'function') {
+            return db.runWithTenant(apiToken.tenantDbName, () =>
+              handler(request as TRequest, reply),
+            );
+          }
+          await db.switchToTenant(apiToken.tenantDbName);
+          return handler(request as TRequest, reply);
+        },
       );
     } catch (error) {
       return sendApiTokenError(reply, error)

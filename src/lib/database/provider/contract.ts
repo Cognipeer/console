@@ -157,6 +157,15 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   getCurrentTenantDbName(): string | null;
   /** Throws if the active tenant context does not match the expected tenant. */
   assertTenantContext(expectedTenantDbName: string): void;
+  /**
+   * Run `fn` with the given tenant DB bound for its entire (sync + async)
+   * execution via a real AsyncLocalStorage scope. Unlike `switchToTenant`
+   * (which relies on `enterWith` and can lose the binding across an `await`
+   * boundary in the caller's continuation), this guarantees every nested query
+   * resolves to the correct tenant even under concurrent requests for different
+   * tenants. Optional so partial test doubles need not implement it.
+   */
+  runWithTenant?<T>(tenantDbName: string, fn: () => T | Promise<T>): Promise<T>;
 
   // Cross-tenant user directory (uses main/shared database)
   registerUserInDirectory(entry: ITenantUserDirectoryEntry): Promise<void>;
