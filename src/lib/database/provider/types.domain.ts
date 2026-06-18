@@ -1203,6 +1203,10 @@ export interface IBrowserSessionConfig {
   idleTimeoutMs?: number;
   /** Hard upper bound on session lifetime (ms). */
   maxLifetimeMs?: number;
+  /** Default per-action timeout (click/hover/type/snapshot). Defaults via config. */
+  actionTimeoutMs?: number;
+  /** Default navigation timeout (goto). Defaults via config. */
+  navigationTimeoutMs?: number;
   access?: IBrowserAccessRules;
 }
 

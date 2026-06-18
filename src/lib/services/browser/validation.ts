@@ -32,6 +32,8 @@ const sessionConfigSchema = z.object({
   locale: optionalTrimmedString(64),
   idleTimeoutMs: z.number().int().min(1_000).max(24 * 60 * 60 * 1_000).optional(),
   maxLifetimeMs: z.number().int().min(1_000).max(7 * 24 * 60 * 60 * 1_000).optional(),
+  actionTimeoutMs: z.number().int().min(1).max(120_000).optional(),
+  navigationTimeoutMs: z.number().int().min(1).max(300_000).optional(),
   access: accessRulesSchema.optional(),
 }).strict();
 

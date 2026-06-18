@@ -86,12 +86,16 @@ type PwPage = {
   evaluate(fn: () => unknown): Promise<unknown>;
   screenshot(options?: Record<string, unknown>): Promise<Buffer>;
   pdf(options?: Record<string, unknown>): Promise<Buffer>;
+  setDefaultTimeout(ms: number): void;
+  setDefaultNavigationTimeout(ms: number): void;
   close(): Promise<void>;
   isClosed(): boolean;
 };
 
 const logger = createLogger('browser:manager');
 const HOST_SECURITY_CACHE_TTL_MS = 5 * 60 * 1000;
+/** How long to wait for an aria `ref` before falling back to a CSS selector. */
+const REF_PROBE_TIMEOUT_MS = 2_000;
 const hostSecurityCache = new Map<string, { privateNetwork: boolean; expiresAt: number }>();
 
 interface LiveSession {
@@ -244,6 +248,8 @@ class BrowserManager {
         locale: input.config?.locale,
         idleTimeoutMs: input.config?.idleTimeoutMs ?? cfg.defaultIdleTimeoutMs,
         maxLifetimeMs: input.config?.maxLifetimeMs ?? cfg.defaultMaxLifetimeMs,
+        actionTimeoutMs: input.config?.actionTimeoutMs ?? cfg.defaultActionTimeoutMs,
+        navigationTimeoutMs: input.config?.navigationTimeoutMs ?? cfg.defaultNavigationTimeoutMs,
         access: input.config?.access,
       };
 
@@ -274,6 +280,13 @@ class BrowserManager {
       }
 
       const page = await context.newPage();
+
+      // Bound every action/navigation so a stale element or a never-settling
+      // page fails fast instead of blocking for Playwright's 30s default.
+      page.setDefaultTimeout(sessionConfig.actionTimeoutMs ?? cfg.defaultActionTimeoutMs);
+      page.setDefaultNavigationTimeout(
+        sessionConfig.navigationTimeoutMs ?? cfg.defaultNavigationTimeoutMs,
+      );
 
       const live: LiveSession = {
         sessionKey,
@@ -360,7 +373,26 @@ class BrowserManager {
     return live;
   }
 
-  private resolveLocator(live: LiveSession, ref?: string, selector?: string): PwLocator {
+  private async resolveLocator(
+    live: LiveSession,
+    ref?: string,
+    selector?: string,
+  ): Promise<PwLocator> {
+    // An aria `ref` is bound to the *last* `ariaSnapshot()`. If the page has
+    // navigated or mutated since, the ref is stale and any action against it
+    // would auto-wait for the full action timeout before failing. When a CSS
+    // `selector` is also supplied we probe the ref briefly and fall back to the
+    // selector instead of blocking — this is the common "click waits forever"
+    // case where a once-valid ref no longer matches anything.
+    if (ref && selector) {
+      const byRef = live.page.locator(`aria-ref=${ref}`);
+      try {
+        await byRef.waitFor({ state: 'attached', timeout: REF_PROBE_TIMEOUT_MS });
+        return byRef;
+      } catch {
+        return live.page.locator(selector);
+      }
+    }
     if (ref) {
       // Playwright's aria-ref engine resolves the markers emitted by
       // `ariaSnapshot()` back to the original element.
@@ -392,17 +424,17 @@ class BrowserManager {
           break;
         }
         case 'click': {
-          const loc = this.resolveLocator(live, action.ref, action.selector);
+          const loc = await this.resolveLocator(live, action.ref, action.selector);
           await loc.click({ button: action.button, timeout: action.timeout });
           break;
         }
         case 'hover': {
-          const loc = this.resolveLocator(live, action.ref, action.selector);
+          const loc = await this.resolveLocator(live, action.ref, action.selector);
           await loc.hover({ timeout: action.timeout });
           break;
         }
         case 'type': {
-          const loc = this.resolveLocator(live, action.ref, action.selector);
+          const loc = await this.resolveLocator(live, action.ref, action.selector);
           if (action.clear) {
             await loc.fill('');
           }
@@ -410,7 +442,7 @@ class BrowserManager {
           break;
         }
         case 'press': {
-          const loc = this.resolveLocator(live, action.ref, action.selector);
+          const loc = await this.resolveLocator(live, action.ref, action.selector);
           await loc.press(action.key);
           break;
         }
@@ -424,7 +456,7 @@ class BrowserManager {
         }
         case 'scroll': {
           if (action.selector || action.ref) {
-            const loc = this.resolveLocator(live, action.ref, action.selector);
+            const loc = await this.resolveLocator(live, action.ref, action.selector);
             await loc.scrollIntoViewIfNeeded();
           } else {
             const x = action.x ?? 0;
@@ -459,7 +491,7 @@ class BrowserManager {
   async extract(sessionKey: string, input: BrowserExtractInput): Promise<BrowserExtractResult> {
     const live = this.requireSession(sessionKey);
     try {
-      const loc = this.resolveLocator(live, input.ref, input.selector);
+      const loc = await this.resolveLocator(live, input.ref, input.selector);
       const mode = input.mode ?? 'text';
 
       const readOne = async (target: PwLocator): Promise<string> => {
@@ -500,7 +532,7 @@ class BrowserManager {
 
     let buffer: Buffer;
     if (input.selector || input.ref) {
-      const loc = this.resolveLocator(live, input.ref, input.selector);
+      const loc = await this.resolveLocator(live, input.ref, input.selector);
       buffer = await loc.screenshot(opts);
     } else {
       buffer = await live.page.screenshot(opts);
@@ -521,12 +553,16 @@ class BrowserManager {
 
   async captureAriaSnapshot(liveOrKey: LiveSession | string): Promise<string> {
     const live = typeof liveOrKey === 'string' ? this.requireSession(liveOrKey) : liveOrKey;
+    // Bound the snapshot so it can't stall the action result on a page that
+    // never settles. `setDefaultTimeout` covers it, but be explicit here since
+    // this runs after every action.
+    const timeout = live.config.actionTimeoutMs ?? getConfig().browser.defaultActionTimeoutMs;
     try {
-      return await live.page.locator('html').ariaSnapshot({ ref: true });
+      return await live.page.locator('html').ariaSnapshot({ ref: true, timeout });
     } catch {
       // Older Playwright versions may not support `ref: true`. Fall back.
       try {
-        return await live.page.locator('html').ariaSnapshot();
+        return await live.page.locator('html').ariaSnapshot({ timeout });
       } catch {
         return '';
       }

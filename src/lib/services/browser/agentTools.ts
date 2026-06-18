@@ -12,6 +12,7 @@ import {
   captureScreenshot,
   captureSnapshot,
   closeBrowserSession,
+  exportSessionPdf,
   extractFromBrowser,
   runBrowserAction,
 } from './browserSessionService';
@@ -78,16 +79,18 @@ export function buildBrowserAgentTools(ctx: ToolBindCtx) {
   const clickTool = createTool({
     name: 'browser_click',
     description:
-      'Click a clickable element identified by either an aria reference (preferred, from a previous snapshot) or a CSS selector.',
+      'Click a clickable element identified by either an aria reference (preferred, from a previous snapshot) or a CSS selector. When both are given, a stale ref falls back to the selector. Optional `timeout` (ms) bounds the wait.',
     schema: z.object({
       ref: z.string().optional(),
       selector: z.string().optional(),
+      timeout: z.number().int().min(1).max(120_000).optional(),
     }),
     func: wrap(ctx, 'browser_click', async (input) =>
       runBrowserAction(sessionCtx, ctx.sessionKey, {
         type: 'click',
         ref: input.ref,
         selector: input.selector,
+        timeout: input.timeout,
       }),
     ),
   });
@@ -210,6 +213,23 @@ export function buildBrowserAgentTools(ctx: ToolBindCtx) {
     ),
   });
 
+  const pdfTool = createTool({
+    name: 'browser_pdf',
+    description:
+      'Render the current page to a PDF, persist it to the session bucket, and return a download URL. Only works in headless mode.',
+    schema: z.object({
+      format: z.enum(['A4', 'Letter', 'Legal', 'A3', 'A5']).optional(),
+      landscape: z.boolean().optional(),
+      printBackground: z.boolean().optional(),
+    }),
+    func: wrap(ctx, 'browser_pdf', async (input) =>
+      exportSessionPdf(sessionCtx, ctx.sessionKey, {
+        ...input,
+        createdBy: ctx.createdBy,
+      }),
+    ),
+  });
+
   const closeTool = createTool({
     name: 'browser_close',
     description:
@@ -230,6 +250,7 @@ export function buildBrowserAgentTools(ctx: ToolBindCtx) {
     snapshotTool,
     extractTool,
     screenshotTool,
+    pdfTool,
     closeTool,
   ];
 }

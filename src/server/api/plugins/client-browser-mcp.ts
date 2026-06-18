@@ -70,10 +70,14 @@ const BROWSER_TOOL_DESCRIPTORS: BrowserToolDescriptor[] = [
   {
     name: 'browser_click',
     description:
-      'Click a clickable element identified by either an aria reference (preferred, from a previous snapshot) or a CSS selector.',
+      'Click a clickable element identified by either an aria reference (preferred, from a previous snapshot) or a CSS selector. When both are given, a stale ref falls back to the selector. Optional `timeout` (ms) bounds the wait.',
     inputSchema: {
       type: 'object',
-      properties: { ref: { type: 'string' }, selector: { type: 'string' } },
+      properties: {
+        ref: { type: 'string' },
+        selector: { type: 'string' },
+        timeout: { type: 'number' },
+      },
     },
   },
   {
@@ -157,6 +161,19 @@ const BROWSER_TOOL_DESCRIPTORS: BrowserToolDescriptor[] = [
         fullPage: { type: 'boolean' },
         selector: { type: 'string' },
         ref: { type: 'string' },
+      },
+    },
+  },
+  {
+    name: 'browser_pdf',
+    description:
+      'Render the current page to a PDF, persist it to the session bucket, and return a download URL. Only works in headless mode.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        format: { type: 'string', enum: ['A4', 'Letter', 'Legal', 'A3', 'A5'] },
+        landscape: { type: 'boolean' },
+        printBackground: { type: 'boolean' },
       },
     },
   },

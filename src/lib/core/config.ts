@@ -139,6 +139,10 @@ export interface AppConfig {
     defaultIdleTimeoutMs: number;
     /** Hard upper bound on session lifetime (ms). */
     defaultMaxLifetimeMs: number;
+    /** Default per-action timeout (click/hover/type/snapshot) in ms. */
+    defaultActionTimeoutMs: number;
+    /** Default navigation timeout (goto) in ms. */
+    defaultNavigationTimeoutMs: number;
     /** Default Playwright headless mode. */
     headless: boolean;
     /** Default viewport width. */
@@ -363,6 +367,8 @@ function buildConfig(source: ConfigSource): AppConfig {
       defaultMaxConcurrent: int(source, 'BROWSER_DEFAULT_MAX_CONCURRENT', 10),
       defaultIdleTimeoutMs: int(source, 'BROWSER_DEFAULT_IDLE_TIMEOUT_MS', 5 * 60 * 1000),
       defaultMaxLifetimeMs: int(source, 'BROWSER_DEFAULT_MAX_LIFETIME_MS', 30 * 60 * 1000),
+      defaultActionTimeoutMs: int(source, 'BROWSER_DEFAULT_ACTION_TIMEOUT_MS', 15 * 1000),
+      defaultNavigationTimeoutMs: int(source, 'BROWSER_DEFAULT_NAVIGATION_TIMEOUT_MS', 30 * 1000),
       headless: bool(source, 'BROWSER_HEADLESS', true),
       viewportWidth: int(source, 'BROWSER_VIEWPORT_WIDTH', 1280),
       viewportHeight: int(source, 'BROWSER_VIEWPORT_HEIGHT', 800),
