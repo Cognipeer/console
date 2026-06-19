@@ -48,6 +48,7 @@ import StatusBadge from '@/components/common/ui/StatusBadge';
 import { useTranslations } from '@/lib/i18n';
 import type { ModelProviderView } from '@/lib/services/models/types';
 import CreateModelModal from '@/components/models/CreateModelModal';
+import ModelProviderModal from '@/components/models/ModelProviderModal';
 import CreateDynamicModelModal, {
   type CandidateModel,
   type DynamicModelInit,
@@ -180,6 +181,7 @@ export default function ModelsPage() {
   const [dashboardData, setDashboardData] = useState<ModelsDashboardData | null>(null);
   const [dashboardLoading, setDashboardLoading] = useState(true);
   const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [providerModalOpen, setProviderModalOpen] = useState(false);
   const [dynamicModalOpen, setDynamicModalOpen] = useState(false);
   const [dynamicEdit, setDynamicEdit] = useState<DynamicModelInit | null>(null);
   const [guardrailModel, setGuardrailModel] = useState<ModelDto | null>(null);
@@ -275,6 +277,14 @@ export default function ModelsPage() {
       current.some((p) => p.key === provider.key) ? current : [...current, provider],
     );
     void loadModels();
+  };
+
+  const handleProviderCreated = (provider: ModelProviderView) => {
+    setProviders((current) =>
+      current.some((p) => p.key === provider.key) ? current : [...current, provider],
+    );
+    // Chain straight into model creation so the freshly-added provider is ready to pick.
+    setCreateModalOpen(true);
   };
 
   const providerLookup = useMemo(() => {
@@ -393,6 +403,14 @@ export default function ModelsPage() {
             <DashboardDateFilter value={dateFilter} onChange={setDateFilter} />
             <Button
               variant="default"
+              size="sm"
+              leftSection={<IconPlug size={14} stroke={1.7} />}
+              onClick={() => setProviderModalOpen(true)}
+            >
+              Add provider
+            </Button>
+            <Button
+              variant="subtle"
               size="sm"
               leftSection={<IconExternalLink size={14} stroke={1.7} />}
               component={Link}
@@ -792,12 +810,19 @@ export default function ModelsPage() {
         )}
       </div>
 
+      <ModelProviderModal
+        opened={providerModalOpen}
+        onClose={() => setProviderModalOpen(false)}
+        onCreated={handleProviderCreated}
+      />
+
       <CreateModelModal
         opened={createModalOpen}
         onClose={() => setCreateModalOpen(false)}
         providers={providers}
         defaultCategory={activeType === 'all' ? undefined : activeType}
         onCreated={handleModelCreated}
+        onAddProvider={() => setProviderModalOpen(true)}
       />
 
       <CreateDynamicModelModal

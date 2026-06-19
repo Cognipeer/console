@@ -66,7 +66,11 @@ async function requireModelProvider(
   );
 
   if (!provider) {
-    throw new Error('Model provider configuration not found.');
+    throw new Error(
+      `Model provider "${providerKey}" is not available in this project. ` +
+        'Create a provider for this project from the Models page, or assign an ' +
+        'existing tenant provider to the project from its Providers tab.',
+    );
   }
 
   if (provider.type !== 'model') {
