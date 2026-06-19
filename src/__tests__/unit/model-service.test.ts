@@ -262,7 +262,7 @@ describe('createModel - provider validation', () => {
         pricing: { currency: 'USD', inputTokenPer1M: 5, outputTokenPer1M: 15, cachedTokenPer1M: 0 },
         settings: {},
       }),
-    ).rejects.toThrow('Model provider configuration not found.');
+    ).rejects.toThrow('is not available in this project');
   });
 
   it('throws when provider type is not model', async () => {

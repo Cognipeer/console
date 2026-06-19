@@ -39,6 +39,16 @@ For the relationship between the two, see [Using the SDK](/guide/sdk-integration
 |--------|-----------|---------|
 | [Chat Completions](./chat-completions) | `/chat/completions` | POST |
 | [Embeddings](./embeddings) | `/embeddings` | POST |
+| [Moderations](./moderations) | `/moderations` | POST |
+| [Audio](./audio) | `/audio/{speech,transcriptions,translations}` | POST |
+| [OCR (sync)](./ocr) | `/ocr` | POST |
+| [OCR Jobs (async)](./ocr) | `/ocr-jobs`, `/ocr-jobs/:id/*` | GET, POST, PATCH, DELETE |
+| [Batches](./batch) | `/batches`, `/batches/:id/{cancel,items,results}` | GET, POST |
+| [Spend Report](./spend) | `/spend/report` | GET |
+| [Budgets](./spend) | `/budgets`, `/budgets/:id`, `/budgets/status` | GET, POST, PATCH, DELETE |
+| [Automations](./automations) | `/automations`, `/automations/:key/{run,pause,resume}` | GET, POST |
+| [Crawler](./crawler) | `/crawler/crawlers`, `/crawler/jobs/*`, `/crawler/run` | GET, POST, PATCH, DELETE |
+| [Red Team](./redteam) | `/redteam/{probes,campaigns,runs}`, `/redteam/campaigns/:key/scan` | GET, POST |
 | [Agents](./agents) | `/agents` | GET |
 | [Agent Detail](./agents) | `/agents/:agentKey` | GET |
 | [Agent Responses](./agents) | `/responses` | POST |

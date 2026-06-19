@@ -173,12 +173,12 @@ export default function ProviderConfigModal({
 
   useEffect(() => {
     if (!opened) return;
-    setSelectedDriver(provider?.driver ?? drivers[0]?.id ?? '');
+    setSelectedDriver(provider?.driver ?? '');
     form.setValues({
       key: provider?.key ?? '',
       label: provider?.label ?? '',
       description: provider?.description ?? '',
-      driver: provider?.driver ?? drivers[0]?.id ?? '',
+      driver: provider?.driver ?? '',
       status: provider?.status !== 'disabled',
     });
     if (provider?.driver) {
@@ -198,8 +198,12 @@ export default function ProviderConfigModal({
       setSelectedService(null);
       setCatalogQuery('');
     }
+    // Intentionally NOT depending on `drivers`: picking a service triggers a
+    // domain change that reloads `drivers`, and re-running this reset would wipe
+    // the user's in-progress selection (driver, auto-filled key/label) — forcing
+    // them to pick the service twice. Initialization only happens on open/provider.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [opened, provider, drivers]);
+  }, [opened, provider]);
 
   const handlePickService = (service: ServiceCatalogEntry) => {
     setSelectedService(service);

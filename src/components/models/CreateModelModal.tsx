@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { NumberInput, Select, TextInput, Textarea } from '@mantine/core';
+import { Button, NumberInput, Select, TextInput, Textarea } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { IconBolt, IconBrain } from '@tabler/icons-react';
@@ -50,6 +50,8 @@ type CreateModelModalProps = {
   /** Pre-selects this category when the modal opens (e.g. from a type-filtered list). */
   defaultCategory?: ModelCategory;
   onCreated: (options: { model: IModel; provider: ModelProviderView }) => void;
+  /** Opens the "Add provider" flow when no provider is available for this project. */
+  onAddProvider?: () => void;
 };
 
 interface FormValues {
@@ -117,6 +119,7 @@ export default function CreateModelModal({
   providers,
   defaultCategory,
   onCreated,
+  onAddProvider,
 }: CreateModelModalProps) {
   const [availableProviders, setAvailableProviders] =
     useState<ModelProviderView[]>(providers);
@@ -466,9 +469,24 @@ export default function CreateModelModal({
             style={{ background: 'var(--ds-surface-1)' }}
           >
             <span className="ds-muted" style={{ fontSize: 13 }}>
-              No model providers configured yet. Ask a tenant admin to add one
-              under Configure → Providers.
+              No model providers are available in this project yet. Add one for
+              this project, or assign an existing tenant provider to it from the
+              project&apos;s Providers tab.
             </span>
+            {onAddProvider ? (
+              <div style={{ marginTop: 12 }}>
+                <Button
+                  size="xs"
+                  color="teal"
+                  onClick={() => {
+                    onClose();
+                    onAddProvider();
+                  }}
+                >
+                  Add provider
+                </Button>
+              </div>
+            ) : null}
           </div>
         ) : (
           <>
