@@ -25,9 +25,13 @@ export default function ModelPlayground({
   const [system, setSystem] = useState(defaultSystem);
   const [user, setUser] = useState(defaultUser);
   const [output, setOutput] = useState('');
+  const [reasoning, setReasoning] = useState('');
+  const [reasoningOpen, setReasoningOpen] = useState(true);
   const [running, setRunning] = useState(false);
   const [temperature, setTemperature] = useState(0.2);
-  const [maxTokens, setMaxTokens] = useState(512);
+  // Reasoning models spend a large share of the budget on the thinking trace
+  // before emitting any answer, so default generously and allow a high ceiling.
+  const [maxTokens, setMaxTokens] = useState(1024);
   const [topP, setTopP] = useState(1);
   const [responseFormat, setResponseFormat] = useState<'text' | 'json_object'>(
     'text',
@@ -41,11 +45,14 @@ export default function ModelPlayground({
     if (!user.trim() || running) return;
     setRunning(true);
     setOutput('');
+    setReasoning('');
+    setReasoningOpen(true);
     setStats(null);
     const abort = new AbortController();
     abortRef.current = abort;
     const t0 = performance.now();
     let full = '';
+    let fullReasoning = '';
 
     try {
       const messages: Array<{ role: string; content: string }> = [];
@@ -88,10 +95,18 @@ export default function ModelPlayground({
           if (data === '[DONE]') continue;
           try {
             const parsed = JSON.parse(data);
-            const delta = parsed.choices?.[0]?.delta?.content ?? '';
+            const choiceDelta = parsed.choices?.[0]?.delta ?? {};
+            const reasoningDelta = extractReasoningDelta(choiceDelta);
+            if (reasoningDelta) {
+              fullReasoning += reasoningDelta;
+              setReasoning(fullReasoning);
+            }
+            const delta = choiceDelta.content ?? '';
             if (delta) {
               full += delta;
               setOutput(full);
+              // Collapse the thinking trace once the final answer starts.
+              if (fullReasoning) setReasoningOpen(false);
             }
           } catch {
             /* skip */
@@ -120,6 +135,7 @@ export default function ModelPlayground({
 
   const clear = () => {
     setOutput('');
+    setReasoning('');
     setStats(null);
   };
 
@@ -261,6 +277,54 @@ export default function ModelPlayground({
           </CopyButton>
         </div>
         <div className="ds-playground-output">
+          {reasoning ? (
+            <div
+              style={{
+                marginBottom: output ? 12 : 0,
+                borderLeft: '2px solid var(--ds-accent, #7c3aed)',
+                paddingLeft: 10,
+              }}
+            >
+              <button
+                type="button"
+                onClick={() => setReasoningOpen((v) => !v)}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 4,
+                  background: 'none',
+                  border: 'none',
+                  padding: 0,
+                  cursor: 'pointer',
+                  color: 'var(--ds-accent, #7c3aed)',
+                  fontSize: 11.5,
+                  fontWeight: 600,
+                  letterSpacing: 0.3,
+                  textTransform: 'uppercase',
+                }}
+              >
+                {running && !output ? 'Thinking…' : 'Reasoning'}
+                <span style={{ fontSize: 10 }}>{reasoningOpen ? '▾' : '▸'}</span>
+              </button>
+              {reasoningOpen ? (
+                <div
+                  className="ds-faint"
+                  style={{
+                    fontSize: 12,
+                    lineHeight: 1.55,
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                    marginTop: 6,
+                  }}
+                >
+                  {reasoning}
+                  {running && !output ? (
+                    <span className="ds-playground-cursor" aria-hidden="true" />
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
           {output ? (
             <div
               style={{
@@ -275,7 +339,7 @@ export default function ModelPlayground({
                 <span className="ds-playground-cursor" aria-hidden="true" />
               ) : null}
             </div>
-          ) : (
+          ) : !reasoning ? (
             <div
               className="ds-faint"
               style={{ fontSize: 13, fontStyle: 'italic' }}
@@ -284,7 +348,7 @@ export default function ModelPlayground({
                 ? 'Waiting for first token…'
                 : 'Click "Run" to send a request.'}
             </div>
-          )}
+          ) : null}
         </div>
       </div>
 
@@ -305,7 +369,7 @@ export default function ModelPlayground({
           label="Max tokens"
           value={maxTokens}
           min={64}
-          max={4096}
+          max={16384}
           step={64}
           onChange={setMaxTokens}
           format={(v) => String(Math.round(v))}
@@ -384,4 +448,34 @@ function approxTokens(text: string): number {
   if (!text) return 0;
   // Rough heuristic: ~4 chars/token
   return Math.max(1, Math.round(text.length / 4));
+}
+
+/**
+ * Reasoning models stream their chain-of-thought as `delta.reasoning_content`
+ * (OpenAI-compatible) — and some emit `delta.reasoning` as a string or object.
+ * Normalize to a plain string delta.
+ */
+function extractReasoningDelta(delta: Record<string, unknown>): string {
+  const reasoningContent = delta.reasoning_content;
+  if (typeof reasoningContent === 'string') return reasoningContent;
+
+  const reasoning = delta.reasoning;
+  if (typeof reasoning === 'string') return reasoning;
+  if (reasoning && typeof reasoning === 'object') {
+    const r = reasoning as Record<string, unknown>;
+    if (typeof r.text === 'string') return r.text;
+    if (typeof r.summary === 'string') return r.summary;
+    if (Array.isArray(r.summary)) {
+      return r.summary
+        .map((s) =>
+          typeof s === 'string'
+            ? s
+            : s && typeof s === 'object' && typeof (s as Record<string, unknown>).text === 'string'
+              ? ((s as Record<string, unknown>).text as string)
+              : '',
+        )
+        .join('');
+    }
+  }
+  return '';
 }

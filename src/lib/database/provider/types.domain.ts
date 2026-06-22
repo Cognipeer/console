@@ -1006,6 +1006,8 @@ export interface IAgentConversation {
   messages: Array<{
     role: string;
     content: string;
+    /** Reasoning / "thinking" trace for assistant messages from reasoning models. */
+    reasoning?: string;
     timestamp: Date;
   }>;
   metadata?: Record<string, unknown>;

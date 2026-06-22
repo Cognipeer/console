@@ -84,6 +84,32 @@ function createConsoleAgentState(messages: AgentSdkMessage[]): AgentSdkSmartStat
     };
 }
 
+/**
+ * Reasoning ("thinking") models expose their chain-of-thought separately from the
+ * final answer. The agent SDK keeps it on the assistant message's
+ * `additional_kwargs.reasoning_content` (our SDK LangChain integration maps the
+ * OpenAI-compatible `reasoning_content` field there). Pull the reasoning trace from
+ * the final assistant message so callers can surface it alongside the answer.
+ */
+function extractAgentReasoning(result: AgentSdkInvokeResult): string | undefined {
+    const messages = (result.messages ?? []) as Array<{
+        getType?: () => string;
+        _getType?: () => string;
+        additional_kwargs?: Record<string, unknown>;
+    }>;
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+        const msg = messages[i];
+        const type = msg?.getType?.() ?? msg?._getType?.();
+        if (type && type !== 'ai') continue;
+        const reasoning = msg?.additional_kwargs?.['reasoning_content'];
+        if (typeof reasoning === 'string' && reasoning.length > 0) {
+            return reasoning;
+        }
+        if (type === 'ai') break;
+    }
+    return undefined;
+}
+
 function createConsoleSdkAgent(
     createSmartAgentFn: typeof import('@cognipeer/agent-sdk').createSmartAgent,
     input: CreateConsoleSdkAgentInput,
@@ -801,6 +827,15 @@ export interface ResponseOutputMessage {
     content: ResponseOutputText[];
 }
 
+/** OpenAI Responses API–compatible reasoning ("thinking") output item */
+export interface ResponseReasoningItem {
+    id: string;
+    type: 'reasoning';
+    summary: Array<{ type: 'summary_text'; text: string }>;
+}
+
+export type ResponseOutputItem = ResponseReasoningItem | ResponseOutputMessage;
+
 /** OpenAI Responses API–compatible usage */
 export interface ResponseUsage {
     input_tokens: number;
@@ -813,7 +848,7 @@ export interface AgentChatResponse {
     id: string;
     object: 'response';
     model: string;
-    output: ResponseOutputMessage[];
+    output: ResponseOutputItem[];
     status: 'completed' | 'failed';
     usage: ResponseUsage;
     created_at: number;
@@ -821,7 +856,7 @@ export interface AgentChatResponse {
     /** Version used for this response (null if not versioned) */
     version: number | null;
     /** Conversation messages for dashboard playgrounds */
-    _conversation_messages?: Array<{ role: string; content: string; timestamp: Date }>;
+    _conversation_messages?: Array<{ role: string; content: string; reasoning?: string; timestamp: Date }>;
 }
 
 export async function executeAgentChat(
@@ -1058,6 +1093,7 @@ export async function executeAgentChatLocal(
         const result: AgentSdkInvokeResult = await sdkAgent.invoke(createConsoleAgentState(inputMessages));
 
         const assistantContent = result.content || '';
+        const assistantReasoning = extractAgentReasoning(result);
 
         // 7b. Output guardrail check
         if (config.outputGuardrailKey && assistantContent) {
@@ -1078,7 +1114,12 @@ export async function executeAgentChatLocal(
         const updatedMessages = [
             ...(conversation.messages || []),
             { role: 'user', content: userMessage, timestamp: now },
-            { role: 'assistant', content: assistantContent, timestamp: new Date() },
+            {
+                role: 'assistant',
+                content: assistantContent,
+                ...(assistantReasoning ? { reasoning: assistantReasoning } : {}),
+                timestamp: new Date(),
+            },
         ];
 
         await db.updateAgentConversation(conversationId, {
@@ -1096,12 +1137,28 @@ export async function executeAgentChatLocal(
 
         const responseId = `resp_${conversationId}`;
         const msgId = `msg_${Date.now().toString(36)}`;
+        const reasoningId = `rs_${Date.now().toString(36)}`;
 
         return {
             id: responseId,
             object: 'response' as const,
             model: agent.name,
             output: [
+                // OpenAI Responses convention: reasoning item precedes the message.
+                ...(assistantReasoning
+                    ? [
+                          {
+                              id: reasoningId,
+                              type: 'reasoning' as const,
+                              summary: [
+                                  {
+                                      type: 'summary_text' as const,
+                                      text: assistantReasoning,
+                                  },
+                              ],
+                          },
+                      ]
+                    : []),
                 {
                     id: msgId,
                     type: 'message' as const,
@@ -1136,7 +1193,7 @@ export async function executeAgentChatLocal(
  */
 export async function executePlaygroundChat(
     request: AgentPlaygroundChatRequest,
-): Promise<{ content: string }> {
+): Promise<{ content: string; reasoning?: string }> {
     return routeInstanceCall(
         {
             entityType: 'agent',
@@ -1151,7 +1208,7 @@ export async function executePlaygroundChat(
 /** Local (non-routed) implementation. Exported so the queue consumer can call it. */
 export async function executePlaygroundChatLocal(
     request: AgentPlaygroundChatRequest,
-): Promise<{ content: string }> {
+): Promise<{ content: string; reasoning?: string }> {
     const { tenantDbName, tenantId, projectId, agentKey, userMessage, history } = request;
 
     const db = await getDatabase();
@@ -1289,6 +1346,7 @@ export async function executePlaygroundChatLocal(
     try {
         const result: AgentSdkInvokeResult = await sdkAgent.invoke(createConsoleAgentState(inputMessages));
         const assistantContent = result.content || '';
+        const assistantReasoning = extractAgentReasoning(result);
 
         // Output guardrail check
         if (config.outputGuardrailKey && assistantContent) {
@@ -1307,7 +1365,10 @@ export async function executePlaygroundChatLocal(
 
         logger.info('Playground chat completed', { agentKey });
 
-        return { content: assistantContent };
+        return {
+            content: assistantContent,
+            ...(assistantReasoning ? { reasoning: assistantReasoning } : {}),
+        };
     } finally {
         await runBoundToolCleanup(cleanupTasks, { agentKey, mode: 'playground' });
     }

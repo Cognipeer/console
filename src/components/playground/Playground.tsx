@@ -7,6 +7,7 @@ import {
   Box,
   Button,
   Center,
+  Collapse,
   Group,
   Loader,
   Paper,
@@ -17,8 +18,12 @@ import {
   Textarea,
   ThemeIcon,
   Tooltip,
+  UnstyledButton,
 } from '@mantine/core';
 import {
+  IconBrain,
+  IconChevronDown,
+  IconChevronRight,
   IconPlayerStop,
   IconRefresh,
   IconSend,
@@ -40,6 +45,8 @@ export interface ModelOption {
 export interface PlaygroundMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
+  /** Reasoning / "thinking" trace emitted by reasoning models alongside content */
+  reasoning?: string;
 }
 
 export interface PlaygroundProps {
@@ -77,6 +84,7 @@ export function Playground({
   const [inputValue, setInputValue] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [streamingContent, setStreamingContent] = useState('');
+  const [streamingReasoning, setStreamingReasoning] = useState('');
   const abortControllerRef = useRef<AbortController | null>(null);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -155,6 +163,7 @@ export function Playground({
     setInputValue('');
     setIsGenerating(true);
     setStreamingContent('');
+    setStreamingReasoning('');
 
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
@@ -189,6 +198,7 @@ export function Playground({
 
       const decoder = new TextDecoder();
       let fullContent = '';
+      let fullReasoning = '';
 
       while (true) {
         const { done, value } = await reader.read();
@@ -204,7 +214,13 @@ export function Playground({
 
             try {
               const parsed = JSON.parse(data);
-              const delta = parsed.choices?.[0]?.delta?.content ?? '';
+              const choiceDelta = parsed.choices?.[0]?.delta ?? {};
+              const reasoningDelta = extractReasoningDelta(choiceDelta);
+              if (reasoningDelta) {
+                fullReasoning += reasoningDelta;
+                setStreamingReasoning(fullReasoning);
+              }
+              const delta = choiceDelta.content ?? '';
               if (delta) {
                 fullContent += delta;
                 setStreamingContent(fullContent);
@@ -217,8 +233,15 @@ export function Playground({
       }
 
       // Add completed assistant message
-      if (fullContent) {
-        setMessages((prev) => [...prev, { role: 'assistant', content: fullContent }]);
+      if (fullContent || fullReasoning) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: 'assistant',
+            content: fullContent,
+            reasoning: fullReasoning || undefined,
+          },
+        ]);
       }
     } catch (error) {
       if ((error as Error).name !== 'AbortError') {
@@ -232,6 +255,7 @@ export function Playground({
     } finally {
       setIsGenerating(false);
       setStreamingContent('');
+      setStreamingReasoning('');
       abortControllerRef.current = null;
       inputRef.current?.focus();
     }
@@ -241,11 +265,13 @@ export function Playground({
     abortControllerRef.current?.abort();
     setIsGenerating(false);
     setStreamingContent('');
+    setStreamingReasoning('');
   };
 
   const clearConversation = () => {
     setMessages([]);
     setStreamingContent('');
+    setStreamingReasoning('');
     inputRef.current?.focus();
   };
 
@@ -337,7 +363,7 @@ export function Playground({
         >
           <ScrollArea h={chatHeight} ref={scrollAreaRef} type="auto" offsetScrollbars>
             <Stack gap={0} p="sm">
-              {messages.length === 0 && !streamingContent ? (
+              {messages.length === 0 && !streamingContent && !streamingReasoning ? (
                 <Center py="xl">
                   <Stack gap="xs" align="center">
                     <ThemeIcon variant="light" color="gray" size="xl" radius="xl">
@@ -356,9 +382,13 @@ export function Playground({
                   {messages.map((msg, idx) => (
                     <MessageBubble key={idx} message={msg} />
                   ))}
-                  {streamingContent && (
+                  {(streamingContent || streamingReasoning) && (
                     <MessageBubble
-                      message={{ role: 'assistant', content: streamingContent }}
+                      message={{
+                        role: 'assistant',
+                        content: streamingContent,
+                        reasoning: streamingReasoning || undefined,
+                      }}
                       isStreaming
                     />
                   )}
@@ -426,6 +456,11 @@ interface MessageBubbleProps {
 function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system';
+  const hasReasoning = !isUser && !isSystem && Boolean(message.reasoning?.trim());
+  // While streaming, keep the thinking trace open; collapse it once the answer arrives.
+  const [reasoningOpen, setReasoningOpen] = useState(
+    Boolean(isStreaming && !message.content),
+  );
 
   return (
     <Box
@@ -453,14 +488,81 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
           <Loader size={12} />
         )}
       </Group>
-      <Text
-        size="sm"
-        style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}
-      >
-        {message.content}
-      </Text>
+
+      {hasReasoning && (
+        <Box mb={message.content ? 6 : 0}>
+          <UnstyledButton
+            onClick={() => setReasoningOpen((v) => !v)}
+            style={{ display: 'flex', alignItems: 'center', gap: 4 }}
+          >
+            <IconBrain size={13} style={{ color: 'var(--mantine-color-violet-6)' }} />
+            <Text size="xs" c="violet.6" fw={500}>
+              {isStreaming && !message.content ? 'Thinking…' : 'Reasoning'}
+            </Text>
+            {reasoningOpen ? (
+              <IconChevronDown size={12} style={{ color: 'var(--mantine-color-violet-6)' }} />
+            ) : (
+              <IconChevronRight size={12} style={{ color: 'var(--mantine-color-violet-6)' }} />
+            )}
+          </UnstyledButton>
+          <Collapse in={reasoningOpen}>
+            <Text
+              size="xs"
+              c="dimmed"
+              mt={4}
+              pl="xs"
+              style={{
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+                borderLeft: '2px solid var(--mantine-color-violet-2)',
+              }}
+            >
+              {message.reasoning}
+            </Text>
+          </Collapse>
+        </Box>
+      )}
+
+      {message.content && (
+        <Text
+          size="sm"
+          style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}
+        >
+          {message.content}
+        </Text>
+      )}
     </Box>
   );
+}
+
+/**
+ * Reasoning models stream their chain-of-thought as `delta.reasoning_content`
+ * (OpenAI-compatible) — and some emit `delta.reasoning` either as a plain string
+ * or as `{ summary?: string|[], text?: string }`. Normalize to a string delta.
+ */
+function extractReasoningDelta(delta: Record<string, unknown>): string {
+  const reasoningContent = delta.reasoning_content;
+  if (typeof reasoningContent === 'string') return reasoningContent;
+
+  const reasoning = delta.reasoning;
+  if (typeof reasoning === 'string') return reasoning;
+  if (reasoning && typeof reasoning === 'object') {
+    const r = reasoning as Record<string, unknown>;
+    if (typeof r.text === 'string') return r.text;
+    if (typeof r.summary === 'string') return r.summary;
+    if (Array.isArray(r.summary)) {
+      return r.summary
+        .map((s) =>
+          typeof s === 'string'
+            ? s
+            : s && typeof s === 'object' && typeof (s as Record<string, unknown>).text === 'string'
+              ? ((s as Record<string, unknown>).text as string)
+              : '',
+        )
+        .join('');
+    }
+  }
+  return '';
 }
 
 export default Playground;

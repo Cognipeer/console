@@ -254,6 +254,34 @@ function extractUsage(message: AIMessage | AIMessageChunk): UsageMetrics {
   };
 }
 
+/**
+ * Reasoning ("thinking") models emit their chain-of-thought separately from the
+ * final answer. Over the OpenAI-compatible Chat Completions wire this arrives as
+ * `delta.reasoning_content` / `message.reasoning_content`, which LangChain stores
+ * under `additional_kwargs.reasoning_content` (string) — and for the Responses /
+ * o-series shape under `additional_kwargs.reasoning` (object). We surface both so
+ * downstream consumers (playground, SDK, agents) can render the thinking stream.
+ */
+function extractReasoning(message: { additional_kwargs?: unknown }): {
+  reasoningContent?: string;
+  reasoning?: unknown;
+} {
+  const additional =
+    (message.additional_kwargs as Record<string, unknown> | undefined) || {};
+
+  const rawReasoningContent = additional['reasoning_content'];
+  const reasoningContent =
+    typeof rawReasoningContent === 'string' && rawReasoningContent.length > 0
+      ? rawReasoningContent
+      : undefined;
+
+  const rawReasoning = additional['reasoning'];
+  const reasoning =
+    rawReasoning !== undefined && rawReasoning !== null ? rawReasoning : undefined;
+
+  return { reasoningContent, reasoning };
+}
+
 export function toOpenAIChatResponse(
   message: AIMessage,
   options: ChatTransformOptions,
@@ -314,6 +342,14 @@ export function toOpenAIChatResponse(
     annotations,
   };
 
+  const { reasoningContent, reasoning } = extractReasoning(message);
+  if (reasoningContent !== undefined) {
+    assistantMessage.reasoning_content = reasoningContent;
+  }
+  if (reasoning !== undefined) {
+    assistantMessage.reasoning = reasoning;
+  }
+
   if (normalizedToolCalls) {
     assistantMessage.tool_calls = normalizedToolCalls;
   }
@@ -347,6 +383,14 @@ export function toOpenAIStreamChunk(
     delta.content = chunk.content;
   } else if (Array.isArray(chunk.content)) {
     delta.content = chunk.content;
+  }
+
+  const { reasoningContent, reasoning } = extractReasoning(chunk);
+  if (reasoningContent !== undefined) {
+    delta.reasoning_content = reasoningContent;
+  }
+  if (reasoning !== undefined) {
+    delta.reasoning = reasoning;
   }
 
   const chunkWithTools = chunk as AIMessageChunk & { tool_calls?: unknown };

@@ -146,6 +146,24 @@ describe('toOpenAIChatResponse', () => {
     const b = toOpenAIChatResponse(msg, baseOptions);
     expect(a.id).not.toBe(b.id);
   });
+
+  it('surfaces reasoning_content from additional_kwargs on the message', () => {
+    const msg = new AIMessage({
+      content: 'The answer is 42.',
+      additional_kwargs: { reasoning_content: 'Thought about it carefully.' },
+    });
+    const result = toOpenAIChatResponse(msg, baseOptions);
+    const message = result.choices[0].message as Record<string, unknown>;
+    expect(message.reasoning_content).toBe('Thought about it carefully.');
+    expect(message.content).toBe('The answer is 42.');
+  });
+
+  it('omits reasoning_content when the model does not emit it', () => {
+    const msg = makeAIMessage('plain answer');
+    const result = toOpenAIChatResponse(msg, baseOptions);
+    const message = result.choices[0].message as Record<string, unknown>;
+    expect('reasoning_content' in message).toBe(false);
+  });
 });
 
 // ── toOpenAIStreamChunk ───────────────────────────────────────────────────────
@@ -172,6 +190,25 @@ describe('toOpenAIStreamChunk', () => {
     const chunk = new AIMessageChunk({ content: 'y' });
     const result = toOpenAIStreamChunk(chunk, { model: 'gpt-4o' });
     expect(result.usage).toBeUndefined();
+  });
+
+  it('surfaces reasoning_content from additional_kwargs in the delta', () => {
+    const chunk = new AIMessageChunk({
+      content: '',
+      additional_kwargs: { reasoning_content: 'Let me think…' },
+    });
+    const result = toOpenAIStreamChunk(chunk, { model: 'gpt-4o', stream: true });
+    expect(
+      (result.choices[0].delta as Record<string, unknown>).reasoning_content,
+    ).toBe('Let me think…');
+  });
+
+  it('omits reasoning_content when not present', () => {
+    const chunk = new AIMessageChunk({ content: 'hi' });
+    const result = toOpenAIStreamChunk(chunk, { model: 'gpt-4o' });
+    expect(
+      'reasoning_content' in (result.choices[0].delta as Record<string, unknown>),
+    ).toBe(false);
   });
 });
 
