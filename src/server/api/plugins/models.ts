@@ -33,6 +33,7 @@ import { createLogger } from '@/lib/core/logger';
 import {
   readJsonBody,
   requireProjectContextForRequest,
+  withApiRequestContext,
 } from '../fastify-utils';
 
 const logger = createLogger('api:models');
@@ -123,7 +124,7 @@ function buildDate(value?: string): Date | undefined {
 }
 
 export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
-  app.get('/models/providers/drivers', async (request, reply) => {
+  app.get('/models/providers/drivers', withApiRequestContext(async (request, reply) => {
     try {
       const query = (request.query ?? {}) as { domain?: ProviderDomain };
       const drivers = providerRegistry.listDescriptors(query.domain ?? 'model');
@@ -132,9 +133,9 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
       logger.error('List model provider drivers error', { error });
       return reply.code(500).send({ error: 'Internal server error' });
     }
-  });
+  }));
 
-  app.get('/models/providers/drivers/:driverId/form', async (request, reply) => {
+  app.get('/models/providers/drivers/:driverId/form', withApiRequestContext(async (request, reply) => {
     try {
       const { driverId } = request.params as { driverId: string };
       const schema = providerRegistry.getFormSchema(driverId);
@@ -154,9 +155,9 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
           error instanceof Error ? error.message : 'Failed to load form schema',
       });
     }
-  });
+  }));
 
-  app.get('/models/providers', async (request, reply) => {
+  app.get('/models/providers', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const query = (request.query ?? {}) as {
@@ -180,9 +181,9 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
       return sendProjectError(reply, error)
         ?? reply.code(500).send({ error: 'Internal server error' });
     }
-  });
+  }));
 
-  app.post('/models/providers', async (request, reply) => {
+  app.post('/models/providers', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const body = readJsonBody<Record<string, unknown>>(request);
@@ -220,9 +221,9 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
           error: error instanceof Error ? error.message : 'Internal server error',
         });
     }
-  });
+  }));
 
-  app.get('/models/dashboard', async (request, reply) => {
+  app.get('/models/dashboard', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const searchParams = new URLSearchParams(
@@ -371,9 +372,9 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
           error: error instanceof Error ? error.message : 'Internal error',
         });
     }
-  });
+  }));
 
-  app.get('/models', async (request, reply) => {
+  app.get('/models', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const query = (request.query ?? {}) as ModelQuery;
@@ -405,9 +406,9 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
           error: error instanceof Error ? error.message : 'Internal error',
         });
     }
-  });
+  }));
 
-  app.post('/models', async (request, reply) => {
+  app.post('/models', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const body = readJsonBody<Record<string, unknown>>(request);
@@ -477,9 +478,9 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
           error: error instanceof Error ? error.message : 'Internal error',
         });
     }
-  });
+  }));
 
-  app.post('/models/dynamic', async (request, reply) => {
+  app.post('/models/dynamic', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const body = readJsonBody<Record<string, unknown>>(request);
@@ -528,9 +529,9 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
           error: error instanceof Error ? error.message : 'Internal error',
         });
     }
-  });
+  }));
 
-  app.get('/models/:id/logs', async (request, reply) => {
+  app.get('/models/:id/logs', withApiRequestContext(async (request, reply) => {
     try {
       const { id } = request.params as { id: string };
       const { projectId, session } = await requireProjectContextForRequest(request);
@@ -564,9 +565,9 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
           error: error instanceof Error ? error.message : 'Internal error',
         });
     }
-  });
+  }));
 
-  app.get('/models/:id/usage', async (request, reply) => {
+  app.get('/models/:id/usage', withApiRequestContext(async (request, reply) => {
     try {
       const { id } = request.params as { id: string };
       const { projectId, session } = await requireProjectContextForRequest(request);
@@ -599,9 +600,9 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
           error: error instanceof Error ? error.message : 'Internal error',
         });
     }
-  });
+  }));
 
-  app.get('/models/:id', async (request, reply) => {
+  app.get('/models/:id', withApiRequestContext(async (request, reply) => {
     try {
       const { id } = request.params as { id: string };
       const { projectId, session } = await requireProjectContextForRequest(request);
@@ -619,9 +620,9 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
           error: error instanceof Error ? error.message : 'Internal error',
         });
     }
-  });
+  }));
 
-  app.put('/models/:id', async (request, reply) => {
+  app.put('/models/:id', withApiRequestContext(async (request, reply) => {
     try {
       const { id } = request.params as { id: string };
       const { projectId, session } = await requireProjectContextForRequest(request);
@@ -681,9 +682,9 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
           error: error instanceof Error ? error.message : 'Internal error',
         });
     }
-  });
+  }));
 
-  app.delete('/models/:id', async (request, reply) => {
+  app.delete('/models/:id', withApiRequestContext(async (request, reply) => {
     try {
       const { id } = request.params as { id: string };
       const { projectId, session } = await requireProjectContextForRequest(request);
@@ -701,5 +702,5 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
           error: error instanceof Error ? error.message : 'Internal error',
         });
     }
-  });
+  }));
 };
