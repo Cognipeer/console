@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+
 vi.mock('@/lib/services/models/modelService', () => ({
   getModelById: vi.fn(),
   listUsageLogs: vi.fn(),
@@ -28,6 +30,8 @@ import {
 } from '@/lib/services/models/modelService';
 import { resolveProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
 import { modelsApiPlugin } from '@/server/api/plugins/models';
+import { getDatabase } from '@/lib/database';
+import { createMockDb } from '../helpers/db.mock';
 import {
   createFastifyApiTestApp,
   parseJsonBody,
@@ -54,6 +58,12 @@ describe('GET /api/models/:id/logs and /usage', () => {
       user: { _id: 'user-1', role: 'owner', projectIds: ['project-1'] },
     });
     (getModelById as ReturnType<typeof vi.fn>).mockResolvedValue(mockModel);
+    // Models routes are wrapped in withApiRequestContext, which loads the
+    // RBAC user from the DB and binds the tenant per request. Provide a mock
+    // DB so the owner passes RBAC and runWithTenant passes through.
+    const rbacDb = createMockDb();
+    rbacDb.findUserById.mockResolvedValue({ _id: 'user-1', role: 'owner', tenantId: 'tenant-1' } as never);
+    (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(rbacDb);
     app = await createFastifyApiTestApp(modelsApiPlugin);
   });
 

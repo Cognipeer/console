@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
 import { NextRequest } from 'next/server';
 
 const mockListDescriptors = vi.hoisted(() => vi.fn().mockReturnValue([]));
@@ -17,6 +19,8 @@ import { GET as vectorDriversGET } from '@/server/api/routes/vector/providers/dr
 import { GET as vectorDriverFormGET } from '@/server/api/routes/vector/providers/drivers/[driverId]/form/route';
 import { GET as filesDriversGET } from '@/server/api/routes/files/providers/drivers/route';
 import { modelsApiPlugin } from '@/server/api/plugins/models';
+import { getDatabase } from '@/lib/database';
+import { createMockDb } from '../helpers/db.mock';
 import {
   createFastifyApiTestApp,
   parseJsonBody,
@@ -99,6 +103,9 @@ describe('provider driver routes', () => {
       vi.clearAllMocks();
       mockListDescriptors.mockReturnValue([mockDrivers[1]]);
       mockGetFormSchema.mockReturnValue(mockSchema);
+      const rbacDb = createMockDb();
+      rbacDb.findUserById.mockResolvedValue({ _id: 'user-1', role: 'owner', tenantId: 'tenant-1' } as never);
+      (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(rbacDb);
       app = await createFastifyApiTestApp(modelsApiPlugin);
     });
 
