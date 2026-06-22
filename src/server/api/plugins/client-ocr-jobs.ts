@@ -42,6 +42,7 @@ import type {
   OcrJobWebhookEvent,
   OcrOutputKind,
 } from '@/lib/database';
+import { getDatabase } from '@/lib/database';
 import { readJsonBody, requireApiTokenContext } from '../fastify-utils';
 
 const logger = createLogger('api:client-ocr-jobs');
@@ -79,7 +80,17 @@ function withClientContext(
         tenantSlug: auth.tenantSlug,
         userId: auth.user?._id ? String(auth.user._id) : undefined,
       },
-      () => handler(request, reply, auth),
+      async () => {
+        // Bind the tenant DB for the whole request via AsyncLocalStorage so
+        // downstream model/provider lookups can't fall back to the process-global
+        // tenant DB that a concurrent request for another tenant overwrote. See
+        // withOpenAiClientContext (client-inference.ts) for the full rationale.
+        const db = await getDatabase();
+        if (auth.tenantDbName && typeof db.runWithTenant === 'function') {
+          return db.runWithTenant(auth.tenantDbName, () => handler(request, reply, auth));
+        }
+        return handler(request, reply, auth);
+      },
     );
   };
 }

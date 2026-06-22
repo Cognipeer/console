@@ -4,6 +4,7 @@ import type { LicenseType } from '@/lib/license/license-manager';
 import { createLogger } from '@/lib/core/logger';
 import { isShuttingDown } from '@/lib/core/lifecycle';
 import { runWithRequestContext } from '@/lib/core/requestContext';
+import { getDatabase } from '@/lib/database';
 import {
   ApiTokenAuthError,
   type ApiTokenContext,
@@ -105,7 +106,19 @@ function withClientContext<TRequest extends FastifyRequest = FastifyRequest>(
         tenantSlug: auth.tenantSlug,
         userId: auth.user?._id ? String(auth.user._id) : undefined,
       },
-      () => handler(request as TRequest, reply, auth),
+      async () => {
+        // Bind the tenant DB for the whole request via AsyncLocalStorage so
+        // downstream model/provider lookups can't fall back to the process-global
+        // tenant DB that a concurrent request for another tenant overwrote. See
+        // withOpenAiClientContext for the full rationale.
+        const db = await getDatabase();
+        if (auth.tenantDbName && typeof db.runWithTenant === 'function') {
+          return db.runWithTenant(auth.tenantDbName, () =>
+            handler(request as TRequest, reply, auth),
+          );
+        }
+        return handler(request as TRequest, reply, auth);
+      },
     );
   };
 }
