@@ -6,6 +6,7 @@ import type { LicenseType } from '@/lib/license/license-manager';
 import { createLogger } from '@/lib/core/logger';
 import { isShuttingDown } from '@/lib/core/lifecycle';
 import { runWithRequestContext } from '@/lib/core/requestContext';
+import { getDatabase } from '@/lib/database';
 import {
   ApiTokenAuthError,
   type ApiTokenContext,
@@ -183,7 +184,22 @@ function withOpenAiClientContext<
         tenantSlug: auth.tenantSlug,
         userId: auth.user?._id ? String(auth.user._id) : undefined,
       },
-      () => handler(request as TRequest, reply, auth),
+      async () => {
+        // Bind the tenant DB for the entire request via a real AsyncLocalStorage
+        // scope. `requireApiTokenContext` only calls `switchToTenant` (enterWith +
+        // process-global), whose binding does NOT survive `await` boundaries — so
+        // downstream `getTenantDb()` reads can fall back to the global tenant DB
+        // that a concurrent request for another tenant has overwritten, making
+        // model/provider lookups intermittently resolve against the wrong tenant
+        // ("Provider configuration not found."). `runWithTenant` is immune.
+        const db = await getDatabase();
+        if (auth.tenantDbName && typeof db.runWithTenant === 'function') {
+          return db.runWithTenant(auth.tenantDbName, () =>
+            handler(request as TRequest, reply, auth),
+          );
+        }
+        return handler(request as TRequest, reply, auth);
+      },
     );
   };
 }
