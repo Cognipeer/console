@@ -46,6 +46,7 @@ import {
   IconTrash,
   IconCalendar,
   IconRefresh,
+  IconBrain,
   IconChevronDown,
   IconChevronRight,
   IconSettings,
@@ -121,6 +122,8 @@ interface AgentVersion {
 interface ChatMessage {
   role: string;
   content: string;
+  /** Reasoning / "thinking" trace for assistant messages from reasoning models. */
+  reasoning?: string;
 }
 
 interface Model {
@@ -568,7 +571,13 @@ export default function AgentDetailPage() {
       const data = await res.json();
       setChatMessages([
         ...updatedMessages,
-        { role: 'assistant', content: data.content },
+        {
+          role: 'assistant',
+          content: data.content,
+          ...(typeof data.reasoning === 'string' && data.reasoning
+            ? { reasoning: data.reasoning }
+            : {}),
+        },
       ]);
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : 'Unknown error';
@@ -1037,6 +1046,9 @@ export default function AgentDetailPage() {
                             >
                               {msg.role === 'assistant' ? (
                                 <Box className={classes.chatMarkdown}>
+                                  {msg.reasoning ? (
+                                    <ReasoningDisclosure reasoning={msg.reasoning} />
+                                  ) : null}
                                   <ReactMarkdown remarkPlugins={[remarkGfm]}>
                                     {msg.content}
                                   </ReactMarkdown>
@@ -1708,4 +1720,42 @@ function computeJsonDiff(
   }
 
   return diffs;
+}
+
+/** Collapsible "thinking" trace shown above an assistant reply from a reasoning model. */
+function ReasoningDisclosure({ reasoning }: { reasoning: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Box mb="xs">
+      <UnstyledButton
+        onClick={() => setOpen((v) => !v)}
+        style={{ display: 'flex', alignItems: 'center', gap: 4 }}
+      >
+        <IconBrain size={13} color="var(--mantine-color-violet-6)" />
+        <Text size="xs" fw={500} c="violet.6">
+          Reasoning
+        </Text>
+        {open ? (
+          <IconChevronDown size={12} color="var(--mantine-color-violet-6)" />
+        ) : (
+          <IconChevronRight size={12} color="var(--mantine-color-violet-6)" />
+        )}
+      </UnstyledButton>
+      <Collapse in={open}>
+        <Text
+          size="xs"
+          c="dimmed"
+          mt={4}
+          pl="xs"
+          style={{
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+            borderLeft: '2px solid var(--mantine-color-violet-2)',
+          }}
+        >
+          {reasoning}
+        </Text>
+      </Collapse>
+    </Box>
+  );
 }
