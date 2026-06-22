@@ -330,7 +330,22 @@ export function withApiRequestContext<
           tenantSlug: session?.tenantSlug,
           userId: session?.userId,
         },
-        () => handler(request as TRequest, reply),
+        async () => {
+          // Bind the tenant DB for the whole handler execution so every nested
+          // query resolves to this session's tenant. Without this, cookie/RBAC
+          // (dashboard) requests never establish a tenant scope at request top
+          // and fall back to the process-global tenant binding, which a
+          // concurrent request for another tenant can overwrite — causing
+          // cross-tenant reads/writes (e.g. a provider/model landing in the
+          // wrong tenant DB). Mirrors the client-API (token) path above.
+          const db = await getDatabase();
+          if (session?.tenantDbName && typeof db.runWithTenant === 'function') {
+            return db.runWithTenant(session.tenantDbName, () =>
+              handler(request as TRequest, reply),
+            );
+          }
+          return handler(request as TRequest, reply);
+        },
       );
     } catch (error) {
       return sendRbacError(reply, error)

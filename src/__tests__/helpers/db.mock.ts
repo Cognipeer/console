@@ -74,6 +74,11 @@ function buildPrimers(): Record<string, Mock> {
     listTenants: vi.fn().mockResolvedValue([]),
     updateTenant: vi.fn().mockResolvedValue(null),
     switchToTenant: vi.fn().mockResolvedValue(undefined),
+    // Passthrough so handlers wrapped in runWithTenant actually execute (the
+    // real impl binds the tenant scope then invokes fn). Without this primer
+    // the Proxy auto-mock would return a no-op fn that never calls fn(),
+    // leaving the handler unrun and the route returning an empty 200.
+    runWithTenant: vi.fn(<T>(_tenantDbName: string, fn: () => T | Promise<T>) => fn()),
 
     // Cross-tenant user directory
     registerUserInDirectory: vi.fn().mockResolvedValue(undefined),
