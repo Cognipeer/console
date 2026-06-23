@@ -422,8 +422,8 @@ async function resolveDynamicCompletion(args: {
         projectId,
         body: {
           messages: buildDeciderMessages(config.decider, signals),
-          temperature: 0,
-          max_tokens: 16,
+          temperature: 1,
+          max_tokens: 256,
         },
         _routingDepth: depth + 1,
       })) as { response?: unknown };
