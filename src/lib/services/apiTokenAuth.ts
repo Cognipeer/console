@@ -87,6 +87,16 @@ export async function requireApiTokenFromHeader(
     } catch { /* best-effort cache write */ }
   }
 
+  // Reject expired tokens. Checked on every request (not cached on the token
+  // record alone) so an expiry that elapses within the auth-cache window still
+  // takes effect on the next call.
+  if (tokenRecord.expiresAt) {
+    const expiresAtMs = new Date(tokenRecord.expiresAt).getTime();
+    if (Number.isFinite(expiresAtMs) && expiresAtMs <= Date.now()) {
+      throw new ApiTokenAuthError('API token has expired');
+    }
+  }
+
   const effectiveLicense = LicenseManager.getEffectiveLicenseForTenant(tenant);
   tenant = {
     ...tenant,

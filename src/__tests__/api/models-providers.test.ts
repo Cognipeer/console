@@ -135,4 +135,24 @@ describe('/api/models/providers', () => {
     });
     expect(res.statusCode).toBe(400);
   });
+
+  it('returns 409 (not 500) when the provider key already exists', async () => {
+    (createModelProvider as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error('Provider with key "openai-1" already exists.'),
+    );
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/models/providers',
+      headers: HEADERS,
+      payload: JSON.stringify({
+        key: 'openai-1',
+        label: 'OpenAI Main',
+        driver: 'openai',
+        credentials: {},
+      }),
+    });
+    expect(res.statusCode).toBe(409);
+    const body = parseJsonBody<{ error: string }>(res.body);
+    expect(body.error).toMatch(/already exists/i);
+  });
 });

@@ -29,6 +29,7 @@ import {
   getSessionContext,
   readJsonBody,
   setSessionCookies,
+  withApiRequestContext,
 } from '../fastify-utils';
 
 const logger = createLogger('api:auth');
@@ -491,15 +492,16 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
     return reply.code(200).send({ message: 'Logged out successfully' });
   });
 
-  app.get('/auth/session', async (request, reply) => {
+  app.get('/auth/session', withApiRequestContext(async (request, reply) => {
     try {
       const session = getSessionContext(request);
       if (!session) {
         return reply.code(401).send({ error: 'Unauthorized' });
       }
 
+      // Tenant DB is bound for the whole handler by withApiRequestContext
+      // (runWithTenant) — no manual switchToTenant needed.
       const db = await getDatabase();
-      await db.switchToTenant(session.tenantDbName);
 
       const user = await db.findUserById(session.userId);
       if (!user || String(user.tenantId) !== String(session.tenantId)) {
@@ -524,9 +526,9 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
       logger.error('Session endpoint error', { error });
       return reply.code(500).send({ error: 'Internal server error' });
     }
-  });
+  }));
 
-  app.post('/auth/change-password', async (request, reply) => {
+  app.post('/auth/change-password', withApiRequestContext(async (request, reply) => {
     try {
       const session = getSessionContext(request);
       if (!session) {
@@ -551,8 +553,8 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
+      // Tenant DB is bound by withApiRequestContext (runWithTenant).
       const db = await getDatabase();
-      await db.switchToTenant(session.tenantDbName);
 
       const user = await db.findUserById(session.userId);
       if (!user || String(user.tenantId) !== String(session.tenantId)) {
@@ -584,7 +586,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
       logger.error('Change password error', { error });
       return reply.code(500).send({ error: 'Internal server error' });
     }
-  });
+  }));
 
   app.post('/auth/forgot-password', async (request, reply) => {
     // Constant-time response: always wait at least this long before responding,

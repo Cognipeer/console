@@ -161,3 +161,130 @@ describeForEachProvider('User + Project + UserProject', (getDb) => {
     expect(await db.listUserProjectsByUser(String(user._id))).toHaveLength(0);
   });
 });
+
+describeForEachProvider('Provider + Model CRUD + malformed-id safety', (getDb) => {
+  let slug: string;
+  let dbName: string;
+  let tenantId: string;
+  let projectId: string;
+
+  beforeEach(async () => {
+    slug = `acme-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    dbName = `tenant_${slug}`;
+    const db = getDb();
+    const tenant = await db.createTenant({
+      companyName: 'Acme',
+      slug,
+      dbName,
+      licenseType: 'FREE',
+      ownerId: 'pending',
+    });
+    tenantId = String(tenant._id);
+    await db.switchToTenant(dbName);
+    const project = await db.createProject({
+      tenantId,
+      key: 'project-a',
+      name: 'Project A',
+      createdBy: 'tester',
+    });
+    projectId = String(project._id);
+  });
+
+  it('creates, finds, updates and deletes a provider by id', async () => {
+    const db = getDb();
+    const provider = await db.createProvider({
+      key: 'my-openai',
+      driver: 'openai',
+      type: 'model',
+      label: 'My OpenAI',
+      tenantId,
+      projectIds: [projectId],
+      credentialsEnc: JSON.stringify({ apiKey: 'sk-test' }),
+      settings: {},
+      status: 'active',
+      createdBy: 'tester',
+    });
+    const id = String(provider._id);
+
+    expect((await db.findProviderById(id))?.key).toBe('my-openai');
+    expect((await db.updateProvider(id, { label: 'Renamed' }))?.label).toBe('Renamed');
+    expect(await db.deleteProvider(id)).toBe(true);
+  });
+
+  // Regression: malformed (non-ObjectId) ids must resolve to "not found" on BOTH
+  // backends — never throw a BSONError. On Mongo (SaaS) an unguarded
+  // `new ObjectId(id)` would 500; SQLite (on-prem) returns null. They must match.
+  it('treats a malformed provider id as not-found (no throw) on every backend', async () => {
+    const db = getDb();
+    await expect(db.findProviderById('not-a-valid-id')).resolves.toBeNull();
+    await expect(db.updateProvider('not-a-valid-id', { label: 'x' })).resolves.toBeNull();
+    await expect(db.deleteProvider('not-a-valid-id')).resolves.toBe(false);
+  });
+
+  it('creates, finds, updates and deletes a model by id', async () => {
+    const db = getDb();
+    const model = await db.createModel({
+      key: 'gpt-4o',
+      name: 'GPT-4o',
+      providerKey: 'openai',
+      providerDriver: 'openai',
+      category: 'llm',
+      modelId: 'gpt-4o',
+      projectId,
+      tenantId,
+      settings: {},
+      pricing: { inputTokenPer1M: 0, outputTokenPer1M: 0 },
+    });
+    const id = String(model._id);
+
+    expect((await db.findModelById(id))?.key).toBe('gpt-4o');
+    expect((await db.updateModel(id, { name: 'GPT-4o v2' }))?.name).toBe('GPT-4o v2');
+    expect(await db.deleteModel(id)).toBe(true);
+  });
+
+  it('treats a malformed model id as not-found (no throw) on every backend', async () => {
+    const db = getDb();
+    await expect(db.findModelById('not-a-valid-id')).resolves.toBeNull();
+    await expect(db.updateModel('not-a-valid-id', { name: 'x' })).resolves.toBeNull();
+    await expect(db.deleteModel('not-a-valid-id')).resolves.toBe(false);
+  });
+
+  // Regression: a duplicate provider key must be rejected at the DB layer on
+  // BOTH backends (SQLite has idx_providers_key; Mongo gets the same unique
+  // index lazily). This closes the concurrent-create race window.
+  it('rejects a duplicate provider key at the DB layer on every backend', async () => {
+    const db = getDb();
+    const base = {
+      key: 'dup-openai',
+      driver: 'openai',
+      type: 'model' as const,
+      label: 'A',
+      tenantId,
+      projectIds: [projectId],
+      credentialsEnc: JSON.stringify({ apiKey: 'sk' }),
+      settings: {},
+      status: 'active' as const,
+      createdBy: 'tester',
+    };
+    await db.createProvider(base);
+    await expect(db.createProvider({ ...base, label: 'B' })).rejects.toBeTruthy();
+  });
+
+  it('rejects a duplicate model key at the DB layer on every backend', async () => {
+    const db = getDb();
+    const base = {
+      key: 'dup-gpt',
+      name: 'GPT',
+      providerKey: 'openai',
+      providerDriver: 'openai',
+      category: 'llm' as const,
+      modelId: 'gpt-4o',
+      projectId,
+      tenantId,
+      settings: {},
+      pricing: { inputTokenPer1M: 0, outputTokenPer1M: 0 },
+    };
+    await db.createModel(base);
+    await expect(db.createModel({ ...base, name: 'GPT2' })).rejects.toBeTruthy();
+  });
+});

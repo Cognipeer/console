@@ -107,9 +107,12 @@ describe('auth misc routes', () => {
       expect(body.mustChangePassword).toBe(true);
     });
 
-    it('switches to tenant database before user lookup', async () => {
+    it('binds the tenant database (runWithTenant) before user lookup', async () => {
       await session(validHeaders);
-      expect(db.switchToTenant).toHaveBeenCalledWith('tenant_acme');
+      // The session wrapper binds the tenant for the whole handler via
+      // runWithTenant (immune to the concurrent process-global race) rather
+      // than a bare switchToTenant.
+      expect(db.runWithTenant).toHaveBeenCalledWith('tenant_acme', expect.any(Function));
     });
 
     it('returns 500 on unexpected error', async () => {

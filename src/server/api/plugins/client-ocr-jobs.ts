@@ -12,9 +12,7 @@
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { createLogger } from '@/lib/core/logger';
-import { isShuttingDown } from '@/lib/core/lifecycle';
-import { runWithRequestContext } from '@/lib/core/requestContext';
-import { ApiTokenAuthError, type ApiTokenContext } from '@/lib/services/apiTokenAuth';
+import { type ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import {
   checkBudget,
   checkPerRequestLimits,
@@ -42,57 +40,15 @@ import type {
   OcrJobWebhookEvent,
   OcrOutputKind,
 } from '@/lib/database';
-import { getDatabase } from '@/lib/database';
-import { readJsonBody, requireApiTokenContext } from '../fastify-utils';
+import { readJsonBody, withOpenAiApiRequestContext } from '../fastify-utils';
 
 const logger = createLogger('api:client-ocr-jobs');
 
 const VALID_OUTPUTS: OcrOutputKind[] = ['full_text', 'summary', 'structured'];
 const VALID_EVENTS: OcrJobWebhookEvent[] = ['item.succeeded', 'item.failed'];
 
-function unauthorizedPayload(message = 'Invalid API token') {
-  return { error: { message, type: 'invalid_request_error' } };
-}
 function quotaExceededPayload(message = 'Quota exceeded') {
   return { error: { message, type: 'rate_limit_error' } };
-}
-
-function withClientContext(
-  handler: (request: FastifyRequest, reply: FastifyReply, auth: ApiTokenContext) => Promise<unknown> | unknown,
-) {
-  return async (request: FastifyRequest, reply: FastifyReply) => {
-    if (isShuttingDown()) {
-      return reply.code(503).header('Retry-After', '5').send({ error: { message: 'Service is shutting down', type: 'server_error' } });
-    }
-    let auth: ApiTokenContext;
-    try {
-      auth = await requireApiTokenContext(request);
-      request.apiTokenContext = auth;
-    } catch (error) {
-      if (error instanceof ApiTokenAuthError) return reply.code(401).send(unauthorizedPayload(error.message));
-      logger.error('OCR jobs auth error', { error });
-      return reply.code(401).send(unauthorizedPayload());
-    }
-    return runWithRequestContext(
-      {
-        requestId: request.apiRequestId,
-        tenantId: auth.tenantId,
-        tenantSlug: auth.tenantSlug,
-        userId: auth.user?._id ? String(auth.user._id) : undefined,
-      },
-      async () => {
-        // Bind the tenant DB for the whole request via AsyncLocalStorage so
-        // downstream model/provider lookups can't fall back to the process-global
-        // tenant DB that a concurrent request for another tenant overwrote. See
-        // withOpenAiClientContext (client-inference.ts) for the full rationale.
-        const db = await getDatabase();
-        if (auth.tenantDbName && typeof db.runWithTenant === 'function') {
-          return db.runWithTenant(auth.tenantDbName, () => handler(request, reply, auth));
-        }
-        return handler(request, reply, auth);
-      },
-    );
-  };
 }
 
 async function runQuotaGuard(auth: ApiTokenContext, modelKey: string): Promise<string | null> {
@@ -293,7 +249,7 @@ function notFound(reply: FastifyReply) {
 
 export const clientOcrJobsApiPlugin: FastifyPluginAsync = async (app) => {
   // ── Create job (container) ────────────────────────────────────────
-  app.post('/client/v1/ocr-jobs', withClientContext(async (request, reply, auth) => {
+  app.post('/client/v1/ocr-jobs', withOpenAiApiRequestContext(async (request, reply, auth) => {
     try {
       const input = buildCreateInput(readJsonBody<Record<string, unknown>>(request));
       const job = await createOcrJob(ctxFromAuth(auth), input);
@@ -305,20 +261,20 @@ export const clientOcrJobsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.get('/client/v1/ocr-jobs', withClientContext(async (request, reply, auth) => {
+  app.get('/client/v1/ocr-jobs', withOpenAiApiRequestContext(async (request, reply, auth) => {
     const query = (request.query ?? {}) as { status?: string; limit?: string };
     const jobs = await listOcrJobs(ctxFromAuth(auth), { status: query.status, limit: query.limit ? Number(query.limit) : undefined });
     return reply.code(200).send({ jobs: jobs.map(serializeJob) });
   }));
 
-  app.get('/client/v1/ocr-jobs/:id', withClientContext(async (request, reply, auth) => {
+  app.get('/client/v1/ocr-jobs/:id', withOpenAiApiRequestContext(async (request, reply, auth) => {
     const { id } = request.params as { id: string };
     const job = await getOcrJob(auth, id);
     if (!job) return notFound(reply);
     return reply.code(200).send({ job: serializeJob(job) });
   }));
 
-  app.patch('/client/v1/ocr-jobs/:id', withClientContext(async (request, reply, auth) => {
+  app.patch('/client/v1/ocr-jobs/:id', withOpenAiApiRequestContext(async (request, reply, auth) => {
     try {
       const { id } = request.params as { id: string };
       const body = readJsonBody<Record<string, unknown>>(request);
@@ -345,7 +301,7 @@ export const clientOcrJobsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.delete('/client/v1/ocr-jobs/:id', withClientContext(async (request, reply, auth) => {
+  app.delete('/client/v1/ocr-jobs/:id', withOpenAiApiRequestContext(async (request, reply, auth) => {
     const { id } = request.params as { id: string };
     const ok = await deleteOcrJob(auth, id);
     if (!ok) return notFound(reply);
@@ -353,7 +309,7 @@ export const clientOcrJobsApiPlugin: FastifyPluginAsync = async (app) => {
   }));
 
   // ── Send files to a job ───────────────────────────────────────────
-  app.post('/client/v1/ocr-jobs/:id/files', withClientContext(async (request, reply, auth) => {
+  app.post('/client/v1/ocr-jobs/:id/files', withOpenAiApiRequestContext(async (request, reply, auth) => {
     try {
       const { id } = request.params as { id: string };
       const job = await getOcrJob(auth, id);
@@ -374,14 +330,14 @@ export const clientOcrJobsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.post('/client/v1/ocr-jobs/:id/pause', withClientContext(async (request, reply, auth) => {
+  app.post('/client/v1/ocr-jobs/:id/pause', withOpenAiApiRequestContext(async (request, reply, auth) => {
     const { id } = request.params as { id: string };
     const job = await setOcrJobStatus(auth, id, 'paused');
     if (!job) return notFound(reply);
     return reply.code(200).send({ job: serializeJob(job) });
   }));
 
-  app.post('/client/v1/ocr-jobs/:id/resume', withClientContext(async (request, reply, auth) => {
+  app.post('/client/v1/ocr-jobs/:id/resume', withOpenAiApiRequestContext(async (request, reply, auth) => {
     const { id } = request.params as { id: string };
     const job = await setOcrJobStatus(auth, id, 'active');
     if (!job) return notFound(reply);
@@ -389,7 +345,7 @@ export const clientOcrJobsApiPlugin: FastifyPluginAsync = async (app) => {
   }));
 
   // ── Items ─────────────────────────────────────────────────────────
-  app.get('/client/v1/ocr-jobs/:id/items', withClientContext(async (request, reply, auth) => {
+  app.get('/client/v1/ocr-jobs/:id/items', withOpenAiApiRequestContext(async (request, reply, auth) => {
     const { id } = request.params as { id: string };
     const { limit, skip, status } = (request.query ?? {}) as { limit?: string; skip?: string; status?: string };
     const items = await getOcrJobItems(auth, id, { limit: limit ? Number(limit) : undefined, skip: skip ? Number(skip) : undefined, status });
@@ -397,7 +353,7 @@ export const clientOcrJobsApiPlugin: FastifyPluginAsync = async (app) => {
     return reply.code(200).send({ items: items.map(serializeItem) });
   }));
 
-  app.get('/client/v1/ocr-jobs/:id/items/:itemId', withClientContext(async (request, reply, auth) => {
+  app.get('/client/v1/ocr-jobs/:id/items/:itemId', withOpenAiApiRequestContext(async (request, reply, auth) => {
     const { id, itemId } = request.params as { id: string; itemId: string };
     const item = await getOcrJobItem(auth, id, itemId);
     if (!item) return notFound(reply);
@@ -405,7 +361,7 @@ export const clientOcrJobsApiPlugin: FastifyPluginAsync = async (app) => {
   }));
 
   // ── Usage (aggregate token + cost) ────────────────────────────────
-  app.get('/client/v1/ocr-jobs/:id/usage', withClientContext(async (request, reply, auth) => {
+  app.get('/client/v1/ocr-jobs/:id/usage', withOpenAiApiRequestContext(async (request, reply, auth) => {
     const { id } = request.params as { id: string };
     const job = await getOcrJob(auth, id);
     if (!job) return notFound(reply);
@@ -429,7 +385,7 @@ export const clientOcrJobsApiPlugin: FastifyPluginAsync = async (app) => {
   }));
 
   // ── Export ────────────────────────────────────────────────────────
-  app.get('/client/v1/ocr-jobs/:id/export', withClientContext(async (request, reply, auth) => {
+  app.get('/client/v1/ocr-jobs/:id/export', withOpenAiApiRequestContext(async (request, reply, auth) => {
     const { id } = request.params as { id: string };
     const { format: formatRaw } = (request.query ?? {}) as { format?: string };
     const format = (formatRaw ?? 'json').toLowerCase();

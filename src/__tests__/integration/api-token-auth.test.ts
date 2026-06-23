@@ -103,6 +103,41 @@ describe('requireApiToken', () => {
     });
   });
 
+  describe('token expiry', () => {
+    it('throws 401 when the token has an expiresAt in the past', async () => {
+      // Distinct token value so the auth cache cannot serve a non-expired entry.
+      const expiredToken = {
+        ...API_TOKEN_VALID,
+        token: 'sk-test-expired-token-xyz789',
+        expiresAt: new Date(Date.now() - 60_000),
+      };
+      mockDb.findApiTokenByHash.mockResolvedValue(expiredToken);
+      mockDb.findTenantById.mockResolvedValue(TENANT_ACME);
+
+      const req = buildRequest(`Bearer ${expiredToken.token}`);
+      await expect(requireApiToken(req)).rejects.toMatchObject({
+        name: 'ApiTokenAuthError',
+        status: 401,
+        message: expect.stringMatching(/expired/i),
+      });
+    });
+
+    it('authenticates when expiresAt is in the future', async () => {
+      const futureToken = {
+        ...API_TOKEN_VALID,
+        token: 'sk-test-future-token-xyz789',
+        expiresAt: new Date(Date.now() + 3_600_000),
+      };
+      mockDb.findApiTokenByHash.mockResolvedValue(futureToken);
+      mockDb.findTenantById.mockResolvedValue(TENANT_ACME);
+      mockDb.findUserById.mockResolvedValue(USER_ALICE);
+
+      const req = buildRequest(`Bearer ${futureToken.token}`);
+      const ctx = await requireApiToken(req);
+      expect(ctx.tenantId).toBe(TENANT_ACME._id);
+    });
+  });
+
   describe('successful authentication', () => {
     beforeEach(() => {
       mockDb.findApiTokenByHash.mockResolvedValue(API_TOKEN_VALID);

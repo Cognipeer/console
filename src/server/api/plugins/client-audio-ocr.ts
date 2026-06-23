@@ -1,14 +1,8 @@
 import crypto from 'node:crypto';
-import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { createLogger } from '@/lib/core/logger';
-import { isShuttingDown } from '@/lib/core/lifecycle';
-import { runWithRequestContext } from '@/lib/core/requestContext';
-import { getDatabase } from '@/lib/database';
-import {
-  ApiTokenAuthError,
-  type ApiTokenContext,
-} from '@/lib/services/apiTokenAuth';
+import { type ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import {
   handleOcrRequest,
   handleSpeechRequest,
@@ -21,7 +15,7 @@ import {
   checkPerRequestLimits,
   checkRateLimit,
 } from '@/lib/quota/quotaGuard';
-import { readJsonBody, requireApiTokenContext } from '../fastify-utils';
+import { readJsonBody, withOpenAiApiRequestContext } from '../fastify-utils';
 import type {
   OcrExtractInput,
   OcrFeature,
@@ -53,10 +47,6 @@ const VALID_TTS_FORMATS: TtsOutputFormat[] = [
   'pcm',
 ];
 
-function unauthorizedPayload(message = 'Invalid API token') {
-  return { error: { message, type: 'invalid_request_error' } };
-}
-
 function quotaExceededPayload(message = 'Quota exceeded') {
   return { error: { message, type: 'rate_limit_error' } };
 }
@@ -70,57 +60,6 @@ function sanitize(value: unknown, max = 20_000) {
   } catch {
     return '[unserializable]';
   }
-}
-
-function withClientContext<TRequest extends FastifyRequest = FastifyRequest>(
-  handler: (
-    request: TRequest,
-    reply: FastifyReply,
-    auth: ApiTokenContext,
-  ) => Promise<unknown> | unknown,
-) {
-  return async (request: FastifyRequest, reply: FastifyReply) => {
-    if (isShuttingDown()) {
-      return reply
-        .code(503)
-        .header('Retry-After', '5')
-        .send({ error: { message: 'Service is shutting down', type: 'server_error' } });
-    }
-
-    let auth: ApiTokenContext;
-    try {
-      auth = await requireApiTokenContext(request);
-      request.apiTokenContext = auth;
-    } catch (error) {
-      if (error instanceof ApiTokenAuthError) {
-        return reply.code(401).send(unauthorizedPayload(error.message));
-      }
-      logger.error('Audio/OCR auth error', { error });
-      return reply.code(401).send(unauthorizedPayload());
-    }
-
-    return runWithRequestContext(
-      {
-        requestId: request.apiRequestId,
-        tenantId: auth.tenantId,
-        tenantSlug: auth.tenantSlug,
-        userId: auth.user?._id ? String(auth.user._id) : undefined,
-      },
-      async () => {
-        // Bind the tenant DB for the whole request via AsyncLocalStorage so
-        // downstream model/provider lookups can't fall back to the process-global
-        // tenant DB that a concurrent request for another tenant overwrote. See
-        // withOpenAiClientContext for the full rationale.
-        const db = await getDatabase();
-        if (auth.tenantDbName && typeof db.runWithTenant === 'function') {
-          return db.runWithTenant(auth.tenantDbName, () =>
-            handler(request as TRequest, reply, auth),
-          );
-        }
-        return handler(request as TRequest, reply, auth);
-      },
-    );
-  };
 }
 
 function getContentType(request: FastifyRequest): string {
@@ -382,7 +321,7 @@ export const clientAudioOcrApiPlugin: FastifyPluginAsync = async (app) => {
   // ─── POST /client/v1/audio/transcriptions ───────────────────────────
   app.post(
     '/client/v1/audio/transcriptions',
-    withClientContext(async (request, reply, auth) => {
+    withOpenAiApiRequestContext(async (request, reply, auth) => {
       const startedAt = Date.now();
       let modelKey = '';
       try {
@@ -436,7 +375,7 @@ export const clientAudioOcrApiPlugin: FastifyPluginAsync = async (app) => {
   // ─── POST /client/v1/audio/translations ─────────────────────────────
   app.post(
     '/client/v1/audio/translations',
-    withClientContext(async (request, reply, auth) => {
+    withOpenAiApiRequestContext(async (request, reply, auth) => {
       const startedAt = Date.now();
       let modelKey = '';
       try {
@@ -498,7 +437,7 @@ export const clientAudioOcrApiPlugin: FastifyPluginAsync = async (app) => {
   // ─── POST /client/v1/audio/speech ───────────────────────────────────
   app.post(
     '/client/v1/audio/speech',
-    withClientContext(async (request, reply, auth) => {
+    withOpenAiApiRequestContext(async (request, reply, auth) => {
       const startedAt = Date.now();
       let modelKey = '';
       try {
@@ -590,7 +529,7 @@ export const clientAudioOcrApiPlugin: FastifyPluginAsync = async (app) => {
   // ─── POST /client/v1/ocr ────────────────────────────────────────────
   app.post(
     '/client/v1/ocr',
-    withClientContext(async (request, reply, auth) => {
+    withOpenAiApiRequestContext(async (request, reply, auth) => {
       const startedAt = Date.now();
       let modelKey = '';
       try {

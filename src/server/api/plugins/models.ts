@@ -216,6 +216,11 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(201).send({ provider });
     } catch (error) {
       logger.error('Create model provider error', { error });
+      // A duplicate provider key is a client conflict, not a server error —
+      // mirror the generic POST /providers route which returns 409.
+      if (error instanceof Error && error.message.includes('already exists')) {
+        return reply.code(409).send({ error: error.message });
+      }
       return sendProjectError(reply, error)
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Internal server error',

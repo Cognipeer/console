@@ -117,6 +117,26 @@ describe('createProviderConfig', () => {
     ).rejects.toThrow('Provider with key "openai-main" already exists.');
   });
 
+  it('maps a concurrent duplicate-key insert (race) to an "already exists" error', async () => {
+    // Pre-check passes (no existing), but the insert loses the race and the DB
+    // rejects with a unique-constraint violation.
+    db.findProviderByKey.mockResolvedValue(null);
+    db.createProvider.mockRejectedValue(
+      Object.assign(new Error('E11000 duplicate key error'), { code: 11000 }),
+    );
+
+    await expect(
+      createProviderConfig(TENANT_DB, TENANT_ID, {
+        key: 'openai-main',
+        type: 'model',
+        driver: 'openai',
+        label: 'OpenAI',
+        credentials: {},
+        createdBy: USER_ID,
+      }),
+    ).rejects.toThrow('Provider with key "openai-main" already exists.');
+  });
+
   it('defaults status to active when not provided', async () => {
     db.findProviderByKey.mockResolvedValue(null);
     db.createProvider.mockResolvedValue(makeProviderRecord());
@@ -187,6 +207,36 @@ describe('updateProviderConfig', () => {
     });
 
     expect(encryptObject).not.toHaveBeenCalled();
+  });
+
+  it('preserves the existing API key when an unrelated credential field is edited (no key wipe)', async () => {
+    // Existing provider has an encrypted apiKey; decryptObject mock returns it.
+    db.findProviderById.mockResolvedValue(makeProviderRecord());
+    (decryptObject as ReturnType<typeof vi.fn>).mockReturnValueOnce({ apiKey: 'secret-key-123' });
+    db.updateProvider.mockResolvedValue(makeProviderRecord());
+
+    // User edits baseUrl and leaves the apiKey field blank (UI re-inits secrets to '').
+    await updateProviderConfig(TENANT_DB, 'prov-1', {
+      credentials: { baseUrl: 'https://proxy.example.com', apiKey: '' },
+    });
+
+    // Blank apiKey must NOT wipe the stored one; baseUrl is merged in.
+    expect(encryptObject).toHaveBeenCalledWith({
+      apiKey: 'secret-key-123',
+      baseUrl: 'https://proxy.example.com',
+    });
+  });
+
+  it('overwrites the API key only when a non-empty value is supplied', async () => {
+    db.findProviderById.mockResolvedValue(makeProviderRecord());
+    (decryptObject as ReturnType<typeof vi.fn>).mockReturnValueOnce({ apiKey: 'old-key' });
+    db.updateProvider.mockResolvedValue(makeProviderRecord());
+
+    await updateProviderConfig(TENANT_DB, 'prov-1', {
+      credentials: { apiKey: 'new-key' },
+    });
+
+    expect(encryptObject).toHaveBeenCalledWith({ apiKey: 'new-key' });
   });
 
   it('updates status when provided', async () => {

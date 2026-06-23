@@ -385,25 +385,117 @@ export function sendApiTokenError(
   return null;
 }
 
+/** Error envelope styles for the client (token) API. */
+export type ClientApiErrorStyle = 'json' | 'openai';
+
+export interface ClientApiContextOptions {
+  /**
+   * Response envelope on error. `'json'` → `{ error: string }` (the default,
+   * used by most client routes). `'openai'` → `{ error: { message, type } }`
+   * for OpenAI-SDK-compatible routes (chat/completions, embeddings, audio).
+   */
+  errorStyle?: ClientApiErrorStyle;
+  /**
+   * Enforce API-token RBAC for paths that map to a permission service. Defaults
+   * to `true`. Only set `false` for routes that are intentionally open to any
+   * valid token regardless of the token owner's service permissions. (RBAC is a
+   * no-op for paths with no permission-service mapping, so leaving it on is
+   * safe and is what closes accidental bypasses.)
+   */
+  rbac?: boolean;
+}
+
+function openAiErrorBody(message: string, type: string) {
+  return { error: { message, type } };
+}
+
+/**
+ * Single error responder for the client (token) API. Maps the well-known error
+ * types to the right status + envelope so every token route reports failures
+ * identically. Returns the reply (never null) so callers can `return` it.
+ */
+function sendClientApiError(
+  reply: FastifyReply,
+  error: unknown,
+  style: ClientApiErrorStyle,
+) {
+  if (error instanceof ApiTokenAuthError) {
+    if (style === 'openai') {
+      // OpenAI SDKs treat auth failures as 401 regardless of the finer status.
+      return reply.code(401).send(openAiErrorBody(error.message, 'invalid_request_error'));
+    }
+    return reply.code(error.status).send({ error: error.message });
+  }
+
+  if (error instanceof RbacAuthorizationError) {
+    if (style === 'openai') {
+      return reply.code(error.status).send(openAiErrorBody(error.message, 'permission_error'));
+    }
+    return reply.code(error.status).send({ error: error.message });
+  }
+
+  if (style === 'openai') {
+    return reply.code(500).send(openAiErrorBody('Internal server error', 'server_error'));
+  }
+  return reply
+    .code(500)
+    .send({ error: error instanceof Error ? error.message : 'Internal server error' });
+}
+
+/**
+ * THE canonical wrapper for every API-token ("client") route. It is the single
+ * source of truth for the token request lifecycle:
+ *   1. shutdown guard (503),
+ *   2. authenticate the Bearer token → ApiTokenContext (stored on the request),
+ *   3. enforce API-token RBAC (unless `rbac: false`; no-op for unmapped paths),
+ *   4. bind the tenant DB for the WHOLE handler via `runWithTenant` (immune to
+ *      the cross-tenant process-global race under concurrent load),
+ *   5. uniform error responses (`errorStyle`).
+ * The resolved `auth` context is passed as the handler's third argument.
+ *
+ * Do not hand-roll this per plugin — pass options instead. Local clones drift
+ * (e.g. silently skipping RBAC on chat/embeddings/ocr-jobs).
+ */
 export function withClientApiRequestContext<
   TRequest extends FastifyRequest = FastifyRequest,
 >(
-  handler: (request: TRequest, reply: FastifyReply) => Promise<unknown> | unknown,
+  handler: (
+    request: TRequest,
+    reply: FastifyReply,
+    auth: ApiTokenContext,
+  ) => Promise<unknown> | unknown,
+  options: ClientApiContextOptions = {},
 ) {
+  const errorStyle: ClientApiErrorStyle = options.errorStyle ?? 'json';
+  const enforceRbac = options.rbac ?? true;
+
   return async (request: FastifyRequest, reply: FastifyReply) => {
     if (isShuttingDown()) {
+      if (errorStyle === 'openai') {
+        return reply
+          .code(503)
+          .header('Retry-After', '5')
+          .send(openAiErrorBody('Service is shutting down', 'server_error'));
+      }
       return reply
         .code(503)
         .header('Retry-After', '5')
         .send({ error: 'Service is shutting down' });
     }
 
+    let apiToken: ApiTokenContext;
     try {
-      const apiToken = await requireApiTokenContext(request);
+      apiToken = await requireApiTokenContext(request);
       request.apiTokenContext = apiToken;
-      enforceApiTokenRbac(request, apiToken);
+      if (enforceRbac) {
+        enforceApiTokenRbac(request, apiToken);
+      }
+    } catch (error) {
+      return sendClientApiError(reply, error, errorStyle);
+    }
 
-      return runWithRequestContext(
+    try {
+      return await runWithRequestContext(
         {
           requestId: request.apiRequestId,
           tenantId: apiToken.tenantId,
@@ -416,26 +508,41 @@ export function withClientApiRequestContext<
           // (token) requests never establish a tenant scope at request top and
           // fall back to the process-global tenant binding, which a concurrent
           // request for another tenant can overwrite — causing cross-tenant
-          // reads/writes (e.g. sandbox rows landing in the wrong tenant DB).
-          // Mirrors the cookie/RBAC path, which binds the tenant per request.
+          // reads/writes. Mirrors the cookie/RBAC path.
           const db = await getDatabase();
           if (typeof db.runWithTenant === 'function') {
             return db.runWithTenant(apiToken.tenantDbName, () =>
-              handler(request as TRequest, reply),
+              handler(request as TRequest, reply, apiToken),
             );
           }
           await db.switchToTenant(apiToken.tenantDbName);
-          return handler(request as TRequest, reply);
+          return handler(request as TRequest, reply, apiToken);
         },
       );
     } catch (error) {
-      return sendApiTokenError(reply, error)
-        ?? sendRbacError(reply, error)
-        ?? reply.code(500).send({
-          error: error instanceof Error ? error.message : 'Internal server error',
-        });
+      return sendClientApiError(reply, error, errorStyle);
     }
   };
+}
+
+/**
+ * Convenience for OpenAI-SDK-compatible token routes (chat/completions,
+ * embeddings, audio/*, ocr). Identical to {@link withClientApiRequestContext}
+ * but emits the OpenAI `{ error: { message, type } }` envelope. RBAC stays on
+ * by default (no-op for paths without a permission service) — this is what
+ * closes the historical bypasses on the routes that DO map to a service.
+ */
+export function withOpenAiApiRequestContext<
+  TRequest extends FastifyRequest = FastifyRequest,
+>(
+  handler: (
+    request: TRequest,
+    reply: FastifyReply,
+    auth: ApiTokenContext,
+  ) => Promise<unknown> | unknown,
+  options: Omit<ClientApiContextOptions, 'errorStyle'> = {},
+) {
+  return withClientApiRequestContext(handler, { ...options, errorStyle: 'openai' });
 }
 
 export function clearSessionCookies(reply: FastifyReply): void {
