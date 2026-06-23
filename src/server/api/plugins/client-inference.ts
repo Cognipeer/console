@@ -1,16 +1,9 @@
 import crypto from 'node:crypto';
 import { Readable } from 'node:stream';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
-import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { createLogger } from '@/lib/core/logger';
-import { isShuttingDown } from '@/lib/core/lifecycle';
-import { runWithRequestContext } from '@/lib/core/requestContext';
-import { getDatabase } from '@/lib/database';
-import {
-  ApiTokenAuthError,
-  type ApiTokenContext,
-} from '@/lib/services/apiTokenAuth';
 import {
   GuardrailBlockError,
   handleChatCompletion,
@@ -28,7 +21,7 @@ import {
 } from '@/lib/quota/quotaGuard';
 import {
   readJsonBody,
-  requireApiTokenContext,
+  withOpenAiApiRequestContext,
 } from '../fastify-utils';
 
 const logger = createLogger('api:client-inference');
@@ -52,10 +45,6 @@ type EmbeddingRequest = {
   model?: string;
   request_id?: string;
 };
-
-function unauthorizedPayload(message = 'Invalid API token') {
-  return { error: { message, type: 'invalid_request_error' } };
-}
 
 function quotaExceededPayload(message = 'Quota exceeded') {
   return { error: { message, type: 'rate_limit_error' } };
@@ -147,65 +136,8 @@ function invalidJson(reply: FastifyReply) {
   });
 }
 
-function withOpenAiClientContext<
-  TRequest extends FastifyRequest = FastifyRequest,
->(
-  handler: (
-    request: TRequest,
-    reply: FastifyReply,
-    auth: ApiTokenContext,
-  ) => Promise<unknown> | unknown,
-) {
-  return async (request: FastifyRequest, reply: FastifyReply) => {
-    if (isShuttingDown()) {
-      return reply
-        .code(503)
-        .header('Retry-After', '5')
-        .send({ error: { message: 'Service is shutting down', type: 'server_error' } });
-    }
-
-    let auth: ApiTokenContext;
-    try {
-      auth = await requireApiTokenContext(request);
-      request.apiTokenContext = auth;
-    } catch (error) {
-      if (error instanceof ApiTokenAuthError) {
-        return reply.code(401).send(unauthorizedPayload(error.message));
-      }
-
-      logger.error('Client inference auth error', { error });
-      return reply.code(401).send(unauthorizedPayload());
-    }
-
-    return runWithRequestContext(
-      {
-        requestId: request.apiRequestId,
-        tenantId: auth.tenantId,
-        tenantSlug: auth.tenantSlug,
-        userId: auth.user?._id ? String(auth.user._id) : undefined,
-      },
-      async () => {
-        // Bind the tenant DB for the entire request via a real AsyncLocalStorage
-        // scope. `requireApiTokenContext` only calls `switchToTenant` (enterWith +
-        // process-global), whose binding does NOT survive `await` boundaries — so
-        // downstream `getTenantDb()` reads can fall back to the global tenant DB
-        // that a concurrent request for another tenant has overwritten, making
-        // model/provider lookups intermittently resolve against the wrong tenant
-        // ("Provider configuration not found."). `runWithTenant` is immune.
-        const db = await getDatabase();
-        if (auth.tenantDbName && typeof db.runWithTenant === 'function') {
-          return db.runWithTenant(auth.tenantDbName, () =>
-            handler(request as TRequest, reply, auth),
-          );
-        }
-        return handler(request as TRequest, reply, auth);
-      },
-    );
-  };
-}
-
 export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
-  app.post('/client/v1/chat/completions', withOpenAiClientContext(async (request, reply, auth) => {
+  app.post('/client/v1/chat/completions', withOpenAiApiRequestContext(async (request, reply, auth) => {
     const startedAt = Date.now();
     let body: ChatCompletionRequest = {};
     let modelKey = '';
@@ -393,7 +325,7 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.post('/client/v1/embeddings', withOpenAiClientContext(async (request, reply, auth) => {
+  app.post('/client/v1/embeddings', withOpenAiApiRequestContext(async (request, reply, auth) => {
     const startedAt = Date.now();
     let body: EmbeddingRequest = {};
     let modelKey = '';
