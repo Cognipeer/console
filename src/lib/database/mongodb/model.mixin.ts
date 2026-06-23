@@ -4,7 +4,7 @@
  * Includes model CRUD, usage logging, and usage aggregation.
  */
 
-import { ObjectId } from 'mongodb';
+import { ObjectId, type Filter } from 'mongodb';
 import type {
   IModel,
   IModelUsageLog,
@@ -14,15 +14,40 @@ import type {
   ModelProviderType,
 } from '../provider.interface';
 import type { Constructor } from './types';
-import { MongoDBProviderBase, COLLECTIONS } from './base';
+import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
 
 export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class ModelOps extends Base {
+    private modelIndexesReady = new Set<string>();
+
     // ── Model CRUD ───────────────────────────────────────────────────
+
+    /**
+     * Best-effort: create the unique `key` index so duplicate model keys fail
+     * at the DB layer (matching the SQLite schema's `idx_models_key`). Never
+     * throws — pre-existing duplicates are logged and the index is skipped.
+     */
+    private async ensureModelIndexes(): Promise<void> {
+      const db = this.getTenantDb();
+      const dbName = db.databaseName;
+      if (this.modelIndexesReady.has(dbName)) return;
+      this.modelIndexesReady.add(dbName);
+      try {
+        await db
+          .collection(COLLECTIONS.models)
+          .createIndex({ key: 1 }, { unique: true, name: 'uniq_model_key' });
+      } catch (error) {
+        logger.warn('Could not ensure unique model key index (pre-existing duplicates?)', {
+          dbName,
+          error,
+        });
+      }
+    }
 
     async createModel(
       model: Omit<IModel, '_id' | 'createdAt' | 'updatedAt'>,
     ): Promise<IModel> {
+      await this.ensureModelIndexes();
       const db = this.getTenantDb();
       const now = new Date();
       const pricing = {
@@ -70,10 +95,15 @@ export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
         updateData.provider = data.providerDriver as ModelProviderType;
       }
 
+      // Malformed ids must resolve to "not found", never throw a BSONError
+      // (matches the SQLite provider used on-prem).
+      const idFilter: Filter<IModel> = ObjectId.isValid(id)
+        ? { _id: new ObjectId(id) }
+        : { _id: id };
       const result = await db
         .collection<IModel>(COLLECTIONS.models)
         .findOneAndUpdate(
-          { _id: new ObjectId(id) },
+          idFilter,
           { $set: updateData },
           { returnDocument: 'after' },
         );
@@ -90,9 +120,12 @@ export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
 
     async deleteModel(id: string): Promise<boolean> {
       const db = this.getTenantDb();
+      const idFilter: Filter<IModel> = ObjectId.isValid(id)
+        ? { _id: new ObjectId(id) }
+        : { _id: id };
       const result = await db
-        .collection(COLLECTIONS.models)
-        .deleteOne({ _id: new ObjectId(id) });
+        .collection<IModel>(COLLECTIONS.models)
+        .deleteOne(idFilter);
       return result.deletedCount === 1;
     }
 
@@ -140,7 +173,9 @@ export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
 
     async findModelById(id: string, projectId?: string): Promise<IModel | null> {
       const db = this.getTenantDb();
-      const query: Record<string, unknown> = { _id: new ObjectId(id) };
+      const query: Record<string, unknown> = {
+        _id: ObjectId.isValid(id) ? new ObjectId(id) : id,
+      };
       if (projectId) {
         query.projectId = projectId;
       }

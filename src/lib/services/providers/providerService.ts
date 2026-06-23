@@ -53,6 +53,21 @@ async function withTenantDb(tenantDbName: string) {
   return db;
 }
 
+/**
+ * True when a DB write failed because a unique constraint was violated —
+ * MongoDB duplicate-key (E11000) or SQLite `UNIQUE constraint failed`. Used to
+ * turn a concurrent-create race (two requests passing the pre-check, both
+ * inserting) into a clean 409 instead of a 500.
+ */
+function isDuplicateKeyError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const code = (error as { code?: unknown }).code;
+  if (code === 11000) return true; // MongoDB
+  if (typeof code === 'string' && code.startsWith('SQLITE_CONSTRAINT')) return true;
+  const message = (error as { message?: unknown }).message;
+  return typeof message === 'string' && /unique constraint/i.test(message);
+}
+
 export async function createProviderConfig(
   tenantDbName: string,
   tenantId: string,
@@ -66,22 +81,32 @@ export async function createProviderConfig(
     throw new Error(`Provider with key "${payload.key}" already exists.`);
   }
 
-  const record = await db.createProvider({
-    tenantId,
-    projectIds: payload.projectId ? [payload.projectId] : undefined,
-    key: payload.key,
-    type: payload.type,
-    driver: payload.driver,
-    label: payload.label,
-    description: payload.description,
-    status: payload.status ?? 'active',
-    credentialsEnc: encryptObject(payload.credentials),
-    settings: payload.settings ?? {},
-    capabilitiesOverride: payload.capabilitiesOverride ?? undefined,
-    metadata: payload.metadata ?? undefined,
-    createdBy: payload.createdBy,
-    updatedBy: payload.createdBy,
-  });
+  let record: IProviderRecord;
+  try {
+    record = await db.createProvider({
+      tenantId,
+      projectIds: payload.projectId ? [payload.projectId] : undefined,
+      key: payload.key,
+      type: payload.type,
+      driver: payload.driver,
+      label: payload.label,
+      description: payload.description,
+      status: payload.status ?? 'active',
+      credentialsEnc: encryptObject(payload.credentials),
+      settings: payload.settings ?? {},
+      capabilitiesOverride: payload.capabilitiesOverride ?? undefined,
+      metadata: payload.metadata ?? undefined,
+      createdBy: payload.createdBy,
+      updatedBy: payload.createdBy,
+    });
+  } catch (error) {
+    // Lost the create race: another request inserted the same key between the
+    // findProviderByKey check above and this insert. Surface it as a conflict.
+    if (isDuplicateKeyError(error)) {
+      throw new Error(`Provider with key "${payload.key}" already exists.`);
+    }
+    throw error;
+  }
 
   return sanitize(record);
 }
@@ -123,7 +148,24 @@ export async function updateProviderConfig(
   }
 
   if (payload.credentials !== undefined) {
-    updates.credentialsEnc = encryptObject(payload.credentials);
+    // Merge incoming credentials over the existing decrypted set instead of
+    // replacing wholesale. A blank/undefined value means "leave this field
+    // unchanged" — the edit UI re-initialises secret fields (e.g. apiKey) to
+    // '' because the backend never returns the secret, so a wholesale replace
+    // would silently wipe the API key whenever an unrelated field (baseUrl,
+    // region, …) is edited.
+    const existing = await db.findProviderById(providerId);
+    const current = existing?.credentialsEnc
+      ? (decryptObject(existing.credentialsEnc) as Record<string, unknown>)
+      : {};
+    const merged: Record<string, unknown> = { ...current };
+    for (const [field, value] of Object.entries(payload.credentials)) {
+      if (value === '' || value === undefined || value === null) {
+        continue;
+      }
+      merged[field] = value;
+    }
+    updates.credentialsEnc = encryptObject(merged);
   }
 
   if (payload.updatedBy) {

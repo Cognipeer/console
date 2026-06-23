@@ -449,6 +449,38 @@ export class SQLiteProviderBase {
       CREATE INDEX IF NOT EXISTS idx_tracing_sessions_project_agent_startedAt
         ON ${TABLES.agentTracingSessions}(projectId, agentName, startedAt DESC);
     `);
+
+    // Enforce unique provider/model keys at the DB layer so a concurrent
+    // create race cannot insert duplicates (matches the MongoDB unique
+    // indexes). The base schema creates these as plain indexes; upgrade them
+    // in place, best-effort — skipped if pre-existing duplicates would violate
+    // the constraint, and never leaving the table without an index.
+    this.upgradeToUniqueIndex(db, 'idx_models_key', TABLES.models, '(key)');
+    this.upgradeToUniqueIndex(db, 'idx_providers_key', TABLES.providers, '(key)');
+  }
+
+  private upgradeToUniqueIndex(
+    db: Database.Database,
+    indexName: string,
+    tableName: string,
+    columns: string,
+  ): void {
+    const uniqueName = `${indexName}_uniq`;
+    const already = db
+      .prepare(`SELECT 1 FROM sqlite_master WHERE type='index' AND name=?`)
+      .get(uniqueName);
+    if (already) return;
+    try {
+      db.exec(
+        `CREATE UNIQUE INDEX IF NOT EXISTS ${uniqueName} ON ${tableName}${columns};` +
+          `DROP INDEX IF EXISTS ${indexName};`,
+      );
+    } catch (error) {
+      logger.warn(`Could not upgrade ${indexName} to unique (pre-existing duplicates?)`, {
+        tableName,
+        error,
+      });
+    }
   }
 
   private ensureTableColumn(

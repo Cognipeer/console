@@ -7,15 +7,43 @@
 import { ObjectId, type Filter } from 'mongodb';
 import type { IProviderRecord, ProviderDomain } from '../provider.interface';
 import type { Constructor } from './types';
-import { MongoDBProviderBase, COLLECTIONS } from './base';
+import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
 
 export function ProviderRecordMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class ProviderRecordOps extends Base {
+    // Per-tenant-DB memo so the unique-index ensure runs at most once per
+    // process per database, regardless of success.
+    private providerIndexesReady = new Set<string>();
+
     // ── Provider CRUD ────────────────────────────────────────────────
+
+    /**
+     * Best-effort: create the unique (tenantId, key) index so concurrent
+     * duplicate creates fail at the DB layer (matching the SQLite schema's
+     * `idx_providers_key`). Never throws — if pre-existing duplicates block the
+     * index it is logged and skipped so provider creation still works.
+     */
+    private async ensureProviderIndexes(): Promise<void> {
+      const db = this.getTenantDb();
+      const dbName = db.databaseName;
+      if (this.providerIndexesReady.has(dbName)) return;
+      this.providerIndexesReady.add(dbName);
+      try {
+        await db
+          .collection(COLLECTIONS.providers)
+          .createIndex({ tenantId: 1, key: 1 }, { unique: true, name: 'uniq_provider_tenant_key' });
+      } catch (error) {
+        logger.warn('Could not ensure unique provider key index (pre-existing duplicates?)', {
+          dbName,
+          error,
+        });
+      }
+    }
 
     async createProvider(
       provider: Omit<IProviderRecord, '_id' | 'createdAt' | 'updatedAt'>,
     ): Promise<IProviderRecord> {
+      await this.ensureProviderIndexes();
       const db = this.getTenantDb();
       const now = new Date();
       const document: Omit<IProviderRecord, '_id'> & {
@@ -42,11 +70,16 @@ export function ProviderRecordMixin<TBase extends Constructor<MongoDBProviderBas
       data: Partial<Omit<IProviderRecord, 'tenantId' | 'key'>>,
     ): Promise<IProviderRecord | null> {
       const db = this.getTenantDb();
-      const objectId = new ObjectId(id);
+      // A malformed (non-ObjectId) id must resolve to "not found", never throw a
+      // BSONError. Mirror the string-id fallback used by the project/prompt
+      // mixins so behaviour matches the SQLite provider (on-prem) exactly.
+      const idFilter: Filter<IProviderRecord> = ObjectId.isValid(id)
+        ? { _id: new ObjectId(id) }
+        : { _id: id };
 
       const existing = await db
         .collection<IProviderRecord>(COLLECTIONS.providers)
-        .findOne({ _id: objectId });
+        .findOne(idFilter);
 
       if (!existing) {
         return null;
@@ -63,7 +96,7 @@ export function ProviderRecordMixin<TBase extends Constructor<MongoDBProviderBas
       const result = await db
         .collection<IProviderRecord>(COLLECTIONS.providers)
         .findOneAndUpdate(
-          { _id: objectId },
+          idFilter,
           { $set: payload },
           { returnDocument: 'after' },
         );
@@ -80,9 +113,12 @@ export function ProviderRecordMixin<TBase extends Constructor<MongoDBProviderBas
 
     async findProviderById(id: string): Promise<IProviderRecord | null> {
       const db = this.getTenantDb();
+      const idFilter: Filter<IProviderRecord> = ObjectId.isValid(id)
+        ? { _id: new ObjectId(id) }
+        : { _id: id };
       const provider = await db
         .collection<IProviderRecord>(COLLECTIONS.providers)
-        .findOne({ _id: new ObjectId(id) });
+        .findOne(idFilter);
 
       if (!provider) {
         return null;
@@ -162,9 +198,12 @@ export function ProviderRecordMixin<TBase extends Constructor<MongoDBProviderBas
 
     async deleteProvider(id: string): Promise<boolean> {
       const db = this.getTenantDb();
+      const idFilter: Filter<IProviderRecord> = ObjectId.isValid(id)
+        ? { _id: new ObjectId(id) }
+        : { _id: id };
       const result = await db
         .collection<IProviderRecord>(COLLECTIONS.providers)
-        .deleteOne({ _id: new ObjectId(id) });
+        .deleteOne(idFilter);
 
       return result.deletedCount > 0;
     }
