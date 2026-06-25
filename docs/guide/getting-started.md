@@ -162,15 +162,17 @@ The `model` field is the **Key** column from Model Hub — not the upstream prov
 
 ```
 src/
-├── app/                    # Next.js App Router
-│   ├── api/
-│   │   ├── auth/           # Login, register, password
-│   │   ├── client/v1/      # Client-facing API (API token auth)
-│   │   ├── dashboard/      # Dashboard internal APIs
-│   │   └── health/         # Health check endpoints
+├── app/                    # Next.js App Router (UI pages only)
 │   ├── dashboard/          # Dashboard UI pages
 │   ├── login/              # Login page
 │   └── register/           # Registration page
+├── server/                 # Custom Fastify server
+│   ├── index.ts            # Entry point (npm start / npm run dev)
+│   ├── app.ts              # Fastify + Next.js wiring
+│   ├── bootstrap.ts        # Startup bootstrap (core init, schedulers)
+│   └── api/routes/         # Client + dashboard API routes
+│       ├── client/v1/      # Client-facing API (API token auth)
+│       └── health/         # Health check endpoints (live/ready)
 ├── components/             # React components (Mantine UI)
 ├── config/                 # Feature policies, plan limits
 ├── lib/
@@ -182,8 +184,8 @@ src/
 │   ├── quota/              # Quota enforcement
 │   ├── services/           # Domain services
 │   └── utils/              # Shared utilities
-├── middleware.ts            # Global auth & CORS middleware
-└── instrumentation.ts       # Startup bootstrap
+├── middleware.ts            # Global auth & security-header middleware
+└── instrumentation.ts       # Next.js hook → server/bootstrap
 ```
 
 ## Useful Commands

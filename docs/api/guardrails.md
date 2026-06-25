@@ -13,8 +13,7 @@ POST /api/client/v1/guardrails/evaluate
 ```json
 {
   "guardrail_key": "pii-checker",
-  "text": "My email is john@example.com and my phone is 555-0100",
-  "target": "input"
+  "text": "My email is john@example.com and my phone is 555-0100"
 }
 ```
 
@@ -24,7 +23,6 @@ POST /api/client/v1/guardrails/evaluate
 |-------|------|----------|-------------|
 | `guardrail_key` | string | Yes | Key of the guardrail to evaluate |
 | `text` | string | Yes | Content to evaluate |
-| `target` | string | No | `input`, `output`, or `both` (default: `input`) |
 
 ### Response
 

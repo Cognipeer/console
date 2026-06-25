@@ -45,14 +45,16 @@ POST /api/js-sandbox/runtimes
   "status": "active",
   "libraries": ["std:collections", "std:math"],
   "limits": {
-    "timeoutMs": 3000,
+    "defaultTimeoutMs": 3000,
+    "maxTimeoutMs": 10000,
     "memoryLimitMb": 128,
+    "maxCodeSizeBytes": 65536,
     "maxResultSizeBytes": 65536,
     "maxLogEntries": 200
   },
   "network": {
-    "allowList": [],
-    "denyList": ["*"]
+    "enabled": false,
+    "allowList": []
   },
   "metadata": {}
 }
@@ -100,14 +102,14 @@ Same body as above but `jsRuntimeId` is taken from the path.
 ```json
 {
   "execution": {
-    "id": "exe_…",
+    "id": "exec_…",
     "runtimeId": "rt_…",
     "runtimeKey": "report-shaper",
     "status": "success",
     "result": { "EU": [...], "US": [...] },
     "logs": { "stdout": [], "stderr": [] },
     "durationMs": 12,
-    "startedAt": "2026-05-18T10:00:00.000Z"
+    "createdAt": "2026-05-18T10:00:00.000Z"
   }
 }
 ```
@@ -149,7 +151,7 @@ GET /api/js-sandbox/executions?runtimeKey=report-shaper&status=success&from=2026
 GET /api/js-sandbox/executions/:id
 ```
 
-Returns the full execution including `code`, `input`, `result`, captured logs.
+Returns the execution including truncated `codePreview` and `inputPreview` (not the full `code`/`input`), `result`, and captured logs.
 
 ## Client API (token-authenticated)
 
@@ -164,7 +166,7 @@ The execute response is flattened (compared to the dashboard surface):
 ```json
 {
   "status": "success",
-  "executionId": "exe_…",
+  "executionId": "exec_…",
   "runtimeKey": "report-shaper",
   "result": { ... },
   "logs": { "stdout": [], "stderr": [] },

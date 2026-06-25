@@ -4,6 +4,10 @@ The PII service detects, redacts, masks, reversibly tokenizes, and (optionally) 
 
 Operators manage policies under **Operate → PII**. Agents and external clients consume it either through stored policies or through ad-hoc detect/redact/mask/tokenize calls.
 
+![PII policies](/screenshots/pii/01-policies-list.png)
+
+The policy list shows total / enabled / disabled counts and the languages covered, with each row carrying its default action, the number of enabled categories, the scanned languages, and an enabled/paused status toggle. **New policy** opens the editor.
+
 ## Concepts
 
 - **Category** — a built-in PII class (`email`, `phone`, `creditCard`, `iban`, `nationalId`, `passport`, `address`, `ipAddress`, `url`, `socialHandle`, `apiKey`, `cryptoWallet`, `birthDate`, `swift`). Each category ships with multi-language detectors.

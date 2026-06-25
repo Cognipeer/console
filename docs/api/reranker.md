@@ -100,21 +100,21 @@ For SDKs and existing Cohere-rerank consumers, the client surface mirrors `https
 
 ```http
 GET /api/client/v1/rerankers
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 ### Get
 
 ```http
 GET /api/client/v1/rerank/:key
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 ### Run
 
 ```http
 POST /api/client/v1/rerank/:key
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 ```json

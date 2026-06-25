@@ -13,7 +13,7 @@ The landing page summarises everything deployed in the active project: total end
 What to look for on this screen:
 
 - **Total models / LLM / Embedding / Multimodal** counters reflect the active project only. Switch projects from the header pill (top right) to see another scope.
-- The **status column** mirrors what the runtime sees. A model marked `Active` is the only state that will accept inference requests; anything else returns a 4xx from `/v1/chat/completions`.
+- The **status badge** in the table is a hardcoded "Active" indicator — models do not carry a status field. When a request names a model key the runtime can't resolve, it throws and the call surfaces as an HTTP 500 from `/v1/chat/completions`.
 - **Calls, Avg latency, Spend, Pricing** are sourced from the rolling tracing window. The default is "Total" but the date-range picker above the table narrows the report.
 - **Browse providers** jumps to the provider list (described below). **Create Model** opens the deployment dialog described in [Deploy a model](#deploy-a-model).
 
@@ -67,7 +67,7 @@ The page is organised in tabs:
 The `Endpoint` panel exposes the canonical `curl` snippet:
 
 ```bash
-curl -X POST http://localhost:3030/api/client/v1/chat/completions \
+curl -X POST http://localhost:3000/api/client/v1/chat/completions \
   -H "Authorization: Bearer YOUR_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -99,7 +99,7 @@ When a client calls `/api/client/v1/chat/completions` with `model: "gpt-4o-mini"
 
 1. Authenticate the API token and resolve the tenant + project.
 2. Look up the **key** `gpt-4o-mini` in the active project's Model Hub.
-3. Check `status === 'active'`; otherwise return `400 model_unavailable`.
+3. If the key cannot be resolved to a model definition, the runtime throws and the request returns HTTP 500.
 4. Pull the linked provider configuration, decrypt credentials, and instantiate the provider runtime (see [Providers](/guide/providers)).
 5. Apply input guardrails, forward the request using the model's `modelId`, then apply output guardrails before responding.
 6. Persist tracing and usage records, including the pricing snapshot from the model definition.

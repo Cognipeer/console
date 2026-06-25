@@ -128,7 +128,7 @@ The fixed `categories` / `category_scores` maps always include every moderation 
 
 ```bash
 curl -X POST https://gateway.example.com/api/client/v1/moderations \
-  -H "Authorization: Bearer cgt_your_token" \
+  -H "Authorization: Bearer cpeer_your_token" \
   -H "Content-Type: application/json" \
   -d '{
     "input": "Text to classify",

@@ -388,6 +388,13 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.gpuHosts, 'terminalEnabled', 'terminalEnabled INTEGER NOT NULL DEFAULT 0');
     // Sandbox instance per-instance env (added later). Safe to ensure on boot.
     this.ensureTableColumn(db, 'sandbox_instances', 'env', 'env TEXT');
+    this.ensureTableColumn(db, 'sandbox_instances', 'persist', 'persist INTEGER NOT NULL DEFAULT 0');
+    this.ensureTableColumn(db, 'sandbox_instances', 'blockNetwork', 'blockNetwork INTEGER NOT NULL DEFAULT 0');
+    this.ensureTableColumn(db, 'sandbox_instances', 'resources', 'resources TEXT');
+    this.ensureTableColumn(db, 'sandbox_templates', 'idleReapSeconds', 'idleReapSeconds INTEGER');
+    this.ensureTableColumn(db, 'sandbox_volumes', 'bucketKey', 'bucketKey TEXT');
+    this.ensureTableColumn(db, 'sandbox_snapshots', 'blockNetwork', 'blockNetwork INTEGER NOT NULL DEFAULT 0');
+    this.ensureTableColumn(db, 'sandbox_snapshots', 'resources', 'resources TEXT');
     // OCR jobs v2: the container model replaced the v1 batch layout (which had
     // incompatible NOT NULL columns like `mode`). Drop+recreate the brand-new
     // tables when an old schema is detected; additive columns otherwise.

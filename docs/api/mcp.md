@@ -26,7 +26,7 @@ Returns MCP server metadata and its available tools.
     "key": "tavily-search",
     "name": "Tavily Search",
     "status": "active",
-    "toolCount": 2,
+    "totalRequests": 42,
     "createdAt": "2026-01-20T12:00:00.000Z"
   },
   "tools": [
@@ -238,7 +238,7 @@ If no `sessionId` query parameter is provided to the message endpoint, responses
 
 ```bash
 curl -X POST https://gateway.example.com/api/client/v1/mcp/tavily-search/message \
-  -H "Authorization: Bearer cgt_your_token" \
+  -H "Authorization: Bearer cpeer_your_token" \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}'
 ```

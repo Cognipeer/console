@@ -105,14 +105,45 @@ POST /api/analysis/definitions/:key/run
 ```
 
 ```json
-{ "conversationKeys": ["call-1042", "call-1043"] }
+{
+  "selection": {
+    "strategy": "keys",
+    "conversationKeys": ["call-1042", "call-1043"]
+  }
+}
 ```
 
-Omit `conversationKeys` to analyze the most recent corpus (up to 500
-conversations). Extraction runs per conversation with bounded concurrency, then
-optional judge and accuracy; the run is persisted with an aggregate.
+The request body must include a `selection` object describing which
+conversations to analyze:
 
-#### Response
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `strategy` | string | yes | One of `all \| tag \| random \| unanalyzed \| keys`. |
+| `tag` | string | when `strategy: tag` | Tag to filter conversations by. |
+| `sampleSize` | number | when `strategy: random` | Number of conversations to sample. |
+| `conversationKeys` | string[] | when `strategy: keys` | Explicit conversation keys to run. |
+
+The run is **asynchronous**: it is enqueued and returns immediately with HTTP
+`202 Accepted` and a `pending` run. Extraction then runs per conversation with
+bounded concurrency, followed by optional judge and accuracy; the run is
+persisted with an aggregate once it finishes. Poll `GET /api/analysis/runs/:id`
+to watch it complete.
+
+#### Response — `202 Accepted`
+
+```json
+{
+  "run": {
+    "id": "…",
+    "definitionKey": "call-intent-resolution",
+    "status": "pending",
+    "aggregate": null,
+    "items": []
+  }
+}
+```
+
+Once completed, the run's `aggregate` and `items` are populated:
 
 ```json
 {
@@ -163,4 +194,5 @@ quality drops on the nightly run.
 |---|---|
 | 400 | Missing `name`, empty/invalid `fieldSet`, enum without `enumValues`, bad cron, transcript missing `role`/`content`. |
 | 404 | Definition / conversation / run not found (or unknown definition `key` on run). |
+| 409 | A run for this definition is already in progress. |
 | 500 | Internal error. |

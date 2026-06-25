@@ -112,10 +112,10 @@ If a guardrail blocks the request:
 |--------|-------------|
 | 400 | Missing `model` or `messages`, guardrail block |
 | 401 | Invalid API token |
-| 404 | Model not found |
-| 422 | Model is not an LLM (wrong category) |
+| 500 | Model not found |
+| 500 | Model is not configured for chat completions |
 | 429 | Rate limit or quota exceeded |
-| 503 | Provider circuit breaker open |
+| 500 | Provider error (circuit breaker / upstream) |
 
 ## Examples
 
@@ -123,7 +123,7 @@ If a guardrail blocks the request:
 
 ```bash
 curl -X POST https://gateway.example.com/api/client/v1/chat/completions \
-  -H "Authorization: Bearer cgt_your_token" \
+  -H "Authorization: Bearer cpeer_your_token" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-4",
@@ -138,7 +138,7 @@ import requests
 
 response = requests.post(
     "https://gateway.example.com/api/client/v1/chat/completions",
-    headers={"Authorization": "Bearer cgt_your_token"},
+    headers={"Authorization": "Bearer cpeer_your_token"},
     json={
         "model": "gpt-4",
         "messages": [{"role": "user", "content": "Hello"}]
@@ -153,7 +153,7 @@ print(response.json())
 const response = await fetch('https://gateway.example.com/api/client/v1/chat/completions', {
   method: 'POST',
   headers: {
-    'Authorization': 'Bearer cgt_your_token',
+    'Authorization': 'Bearer cpeer_your_token',
     'Content-Type': 'application/json',
   },
   body: JSON.stringify({

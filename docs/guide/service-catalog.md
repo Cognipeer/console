@@ -9,6 +9,10 @@ The Console UI is driven by two declarative JSON files. Together they define whi
 
 Both files are schema-validated (`service-catalog.schema.json` and `platform-services.schema.json` sit next to them). Validation runs as part of the build — invalid entries fail the type-check, not at runtime.
 
+The `platform-services.json` entries are what the **service launcher** (the *Services* button in the header) renders — grouped by category, with `NEW` badges, "Recently visited", and search:
+
+![Service launcher](/screenshots/service-catalog/01-services-launcher.png)
+
 ## service-catalog.json
 
 Each entry describes one external service Cognipeer knows how to talk to:

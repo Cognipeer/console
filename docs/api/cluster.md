@@ -96,7 +96,7 @@ PUT /api/cluster/assignments/:entityType/:entityId
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `nodeName` | string | yes | Must exist in the cluster registry (404 otherwise). |
+| `nodeName` | string | yes | Must exist in the cluster registry. |
 | `mode` | `strict \| preferred` | no | Defaults to `strict`. |
 
 #### Response

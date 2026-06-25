@@ -121,7 +121,7 @@ POST /api/client/v1/vector/providers/:providerKey/indexes/:externalId/upsert
 ```
 
 ```json
-{ "upserted": 2 }
+{ "success": true }
 ```
 
 ### Query Vectors
@@ -161,7 +161,7 @@ DELETE /api/client/v1/vector/providers/:providerKey/indexes/:externalId/vectors
 ```
 
 ```json
-{ "deleted": 2 }
+{ "success": true }
 ```
 
 ## Errors

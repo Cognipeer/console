@@ -1,6 +1,6 @@
 # Runtime Pool Module
 
-The runtime pool (`src/lib/core/runtimePool.ts`) is an LRU cache for provider SDK client instances. It avoids recreating LangChain, OpenAI, and other SDK clients on every request while automatically invalidating entries when credentials change.
+The runtime pool (`src/lib/core/runtimePool.ts`) is a TTL-based cache for provider SDK client instances. It avoids recreating LangChain, OpenAI, and other SDK clients on every request while automatically invalidating entries when credentials change.
 
 ## Why
 

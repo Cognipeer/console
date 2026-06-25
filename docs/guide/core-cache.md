@@ -68,6 +68,13 @@ interface CacheProvider {
   del(key: string): Promise<void>;
   has(key: string): Promise<boolean>;
   clear(): Promise<void>;
+  incrementCounter(
+    key: string,
+    ttlSeconds: number,
+    amount?: number,
+  ): Promise<{ count: number; resetAt: Date }>;
+  acquireLock(key: string, ttlSeconds: number): Promise<string | undefined>;
+  releaseLock(key: string, token: string): Promise<void>;
   destroy(): Promise<void>;
 }
 ```

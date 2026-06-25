@@ -64,16 +64,16 @@ Returns multiple embedding objects indexed by position.
 |--------|-------------|
 | 400 | Missing `model` or `input` |
 | 401 | Invalid API token |
-| 404 | Model not found |
-| 422 | Model is not an embedding model (wrong category) |
+| 500 | Model not found |
+| 500 | Model is not configured for embeddings |
 | 429 | Rate limit or quota exceeded |
-| 503 | Provider circuit breaker open |
+| 500 | Provider error (circuit breaker / upstream) |
 
 ## Example
 
 ```bash
 curl -X POST https://gateway.example.com/api/client/v1/embeddings \
-  -H "Authorization: Bearer cgt_your_token" \
+  -H "Authorization: Bearer cpeer_your_token" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "text-embedding-ada-002",

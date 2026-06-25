@@ -13,6 +13,16 @@ Two related "operate" services for measuring AI quality offline:
 They are independent services that share the same architectural shape and plug
 into the same alerting pipeline.
 
+**Evaluation** lives under **Operate → Evaluations**, organised into Targets, Datasets, Suites, and Runs:
+
+![Evaluations](/screenshots/evaluation/01-evaluations.png)
+
+**Analysis** lives under **Operate → Analysis**, organised into Definitions, Conversations, and Runs:
+
+![Conversation Analysis](/screenshots/evaluation/02-analysis.png)
+
+Both screens above show the empty state of a fresh project; the primary button (**New target** / **New definition**) bootstraps the first object.
+
 ## Architecture
 
 Both services are built in the same four layers, each independently testable:

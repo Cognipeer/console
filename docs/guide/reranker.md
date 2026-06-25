@@ -4,6 +4,10 @@ Rerankers re-order a candidate set of documents by relevance to a query. They si
 
 Operators manage rerankers under **Data → Reranker**. Each reranker is project-scoped, has a unique key, and persists usage stats (`totalRuns`, `avgLatencyMs`, `lastUsedAt`) for monitoring.
 
+![Reranker list](/screenshots/reranker/01-reranker.png)
+
+The landing page tracks total / active reranker counts and total runs, with a row per reranker showing its strategy, backing model, run count, and average latency. **Create reranker** opens the form where you pick a strategy (below) and bind the backing model or judge.
+
 ## Strategies
 
 The reranker abstraction supports five strategies. Pick one based on latency budget, quality target, and whether you already have a dedicated rerank model.

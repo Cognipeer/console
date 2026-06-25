@@ -8,10 +8,9 @@ The overview screen consolidates every signal you need to triage a run: total se
 
 ![Agent Observability overview](/screenshots/tracing/01-tracing-overview.png)
 
-The left sidebar splits the surface into four operational views:
+The left sidebar splits the surface into three operational views:
 
 - **Overview** — the workspace-wide rollup pictured above.
-- **Agents** — one row per registered agent name, with averages and error rates so you can compare agents against each other.
 - **Sessions** — the flat session log, filterable by date, agent, status, or thread.
 - **Threads** — multi-turn conversations grouped by `threadId`; useful when reconstructing a user's full interaction.
 
@@ -172,8 +171,8 @@ Use these fields to connect traces across tools and dashboards:
 | `GET /api/tracing/sessions/:sessionId` | Session detail with events |
 | `GET /api/tracing/threads` | Group sessions by thread |
 | `GET /api/tracing/threads/:threadId` | Thread detail |
-| `GET /api/tracing/overview` | Dashboard analytics |
-| `GET /api/tracing/agents` | Per-agent summary |
+| `GET /api/tracing/dashboard` | Dashboard analytics |
+| `GET /api/tracing/agents/:agentName/overview` | Per-agent summary |
 
 ## Built-in MCP — Console observability
 
@@ -187,7 +186,7 @@ POST /api/client/v1/mcp/console/message
 POST /api/client/v1/mcp/console/execute
 ```
 
-Authentication is the same `Bearer cgt_…` token used everywhere else; the project context is resolved from the token and applied to every tool call.
+Authentication is the same `Bearer cpeer_…` token used everywhere else; the project context is resolved from the token and applied to every tool call.
 
 Tools exposed:
 

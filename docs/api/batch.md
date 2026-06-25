@@ -2,7 +2,7 @@
 
 OpenAI-compatible asynchronous bulk inference. Submit many chat-completion or embedding requests together and execute them asynchronously via per-item queue fan-out, then poll for status and download results as JSONL.
 
-All endpoints are API-token authenticated (`Authorization: Bearer cgt_…`) and use snake_case request/response fields, mirroring OpenAI's `/v1/batches` surface.
+All endpoints are API-token authenticated (`Authorization: Bearer cpeer_…`) and use snake_case request/response fields, mirroring OpenAI's `/v1/batches` surface.
 
 ## Supported endpoints
 
@@ -211,7 +211,7 @@ Create a batch:
 
 ```bash
 curl -X POST https://gateway.example.com/api/client/v1/batches \
-  -H "Authorization: Bearer cgt_your_token" \
+  -H "Authorization: Bearer cpeer_your_token" \
   -H "Content-Type: application/json" \
   -d '{
     "endpoint": "/v1/chat/completions",
@@ -226,7 +226,7 @@ Poll for completion:
 
 ```bash
 curl https://gateway.example.com/api/client/v1/batches/665f... \
-  -H "Authorization: Bearer cgt_your_token"
+  -H "Authorization: Bearer cpeer_your_token"
 # -> { "status": "completed", "request_counts": { "total": 2, "completed": 2, ... } }
 ```
 
@@ -234,5 +234,5 @@ Download results (JSONL):
 
 ```bash
 curl https://gateway.example.com/api/client/v1/batches/665f.../results \
-  -H "Authorization: Bearer cgt_your_token"
+  -H "Authorization: Bearer cpeer_your_token"
 ```

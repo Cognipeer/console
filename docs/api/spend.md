@@ -2,10 +2,10 @@
 
 Cost control for a project: read what was spent (rolled up from the per-model usage logs) and manage budget policies that the quota guard enforces on the live inference, batch, and embedding paths.
 
-All endpoints live under `/api/client/v1` and are authenticated with a `cgt_` API token:
+All endpoints live under `/api/client/v1` and are authenticated with a `cpeer_` API token:
 
 ```
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 Budgets are stored as quota policies with `limits.budget` set, so a budget created here is enforced by the same guard (`checkBudget`) that protects the sync inference and batch paths. The spend report is the read side — it never enforces anything.
@@ -16,7 +16,7 @@ Budgets are stored as quota policies with `limits.budget` set, so a budget creat
 
 ```http
 GET /api/client/v1/spend/report?from=2026-05-01&to=2026-06-01&group_by=day&model=gpt-4o
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 Rolls the per-model usage logs into totals, a per-model breakdown, and a merged timeseries for the calling token's project.
@@ -77,7 +77,7 @@ A budget is a quota policy with a daily and/or monthly USD spend limit. Use `-1`
 
 ```http
 GET /api/client/v1/budgets/status?domain=llm&model=gpt-4o&scope=token
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 Returns current usage versus the configured limits for each window (day / month), keyed the same way enforcement counts spend.
@@ -107,7 +107,7 @@ When a window has no configured limit, `limit_usd` and `remaining_usd` are `null
 
 ```http
 GET /api/client/v1/budgets
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 Returns every quota policy in the project that has a daily or monthly spend limit set (other quota policies are filtered out).
@@ -143,7 +143,7 @@ Returns every quota policy in the project that has a daily or monthly spend limi
 
 ```http
 POST /api/client/v1/budgets
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 Content-Type: application/json
 ```
 
@@ -185,7 +185,7 @@ Requires an **owner** or **admin** API token (otherwise 403). At least one of `d
 
 ```http
 PATCH /api/client/v1/budgets/:budgetId
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 Content-Type: application/json
 ```
 
@@ -207,7 +207,7 @@ Requires an **owner** or **admin** token. Only the supplied fields are changed; 
 
 ```http
 DELETE /api/client/v1/budgets/:budgetId
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 Requires an **owner** or **admin** token.
@@ -237,7 +237,7 @@ Create a budget, then check its status:
 ```bash
 # Create a tenant-wide monthly cap with alerts at 80% and 100%
 curl -X POST https://your-console.example.com/api/client/v1/budgets \
-  -H "Authorization: Bearer cgt_…" \
+  -H "Authorization: Bearer cpeer_…" \
   -H "Content-Type: application/json" \
   -d '{
         "label": "Prod LLM cap",
@@ -249,9 +249,9 @@ curl -X POST https://your-console.example.com/api/client/v1/budgets \
 
 # Current usage vs limits for this token's LLM spend
 curl https://your-console.example.com/api/client/v1/budgets/status?domain=llm \
-  -H "Authorization: Bearer cgt_…"
+  -H "Authorization: Bearer cpeer_…"
 
 # Spend report grouped by day for May
 curl "https://your-console.example.com/api/client/v1/spend/report?from=2026-05-01&to=2026-06-01&group_by=day" \
-  -H "Authorization: Bearer cgt_…"
+  -H "Authorization: Bearer cpeer_…"
 ```

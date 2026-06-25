@@ -122,10 +122,31 @@ DELETE /api/evaluation/suites/:id
 POST /api/evaluation/suites/:key/run
 ```
 
-Loads the suite, target, and dataset, executes the target over every item with
-bounded concurrency, scores each output, persists the run, and returns it.
+This dashboard-surface run is **asynchronous**: it loads the suite, target, and
+dataset, enqueues the run, and returns immediately with HTTP `202 Accepted` and a
+`pending` run. The background worker then executes the target over every item
+with bounded concurrency, scores each output, and persists the result. Poll
+`GET /api/evaluation/runs/:id` to watch it finish.
 
-#### Response
+> The token-authenticated client surface
+> (`POST /api/client/v1/evaluation/suites/{key}/run`, below) stays
+> **synchronous** and returns `201` with the completed run.
+
+#### Response — `202 Accepted`
+
+```json
+{
+  "run": {
+    "id": "…",
+    "suiteKey": "faq-accuracy",
+    "status": "pending",
+    "aggregate": null,
+    "items": []
+  }
+}
+```
+
+Once completed, the run carries its aggregate and per-item scores:
 
 ```json
 {
@@ -144,12 +165,30 @@ bounded concurrency, scores each output, persists the run, and returns it.
 A target/judge error on an item is recorded on that item (`error`) and counted
 in `aggregate.failed`; it does not abort the run.
 
+### Generate a dataset
+
+```http
+POST /api/evaluation/datasets/generate
+```
+
+Synthesizes dataset items (e.g. from a prompt or seed) and returns the generated
+dataset.
+
 ### List / get runs
 
 ```http
 GET /api/evaluation/runs?suiteKey=faq-accuracy&limit=50
 GET /api/evaluation/runs/:id
 ```
+
+### Compare runs
+
+```http
+GET /api/evaluation/runs/:id/compare?baseline=<runId>
+```
+
+Returns a per-item and aggregate diff between run `:id` and the `baseline` run,
+for tracking regressions across runs of the same suite.
 
 ## Client API (token-authenticated)
 

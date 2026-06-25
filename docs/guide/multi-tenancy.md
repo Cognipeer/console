@@ -68,6 +68,18 @@ Each tenant has:
 | `licenseType` | Active license tier |
 | `ownerId` | Owner user ID |
 
+## Projects & Members
+
+Inside a tenant, work is scoped into **projects** and access is granted to **members**. Both are managed from the dashboard.
+
+Projects (**Configure → Projects**) carry the active-project context that every feature reads — switching the header project pill changes the scope of models, vector stores, agents, and usage:
+
+![Projects](/screenshots/multi-tenancy/01-projects.png)
+
+Members (**Configure → Members**) lists the tenant's users and pending invitations, each with a role (`owner`, `user`, …) and status (`active`, `invited`). The **Groups** tab manages group-based tenant/project grants:
+
+![Members](/screenshots/multi-tenancy/02-members.png)
+
 ## Database Abstraction
 
 All database access goes through the abstraction layer — never import MongoDB directly:
