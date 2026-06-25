@@ -34,8 +34,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-# A few ubiquitous Python libs so simple data tasks work out of the box.
-RUN pip install --no-cache-dir requests rich
+# A few ubiquitous Python libs so simple data tasks work out of the box,
+# plus the office/document stack agents use to generate xlsx/pptx/docx and
+# parse PDFs (replaces the old node-execution office libraries).
+RUN pip install --no-cache-dir \
+      requests \
+      rich \
+      pandas \
+      openpyxl \
+      python-pptx \
+      python-docx \
+      pdfplumber
 
 # Common global npm helpers (kept light).
 RUN npm install -g --no-fund --no-audit tsx typescript 2>/dev/null || true

@@ -540,6 +540,8 @@ export interface ISandboxTemplate {
   toolboxPort: number;
   previewPorts: Array<Record<string, unknown>>;
   volumeMounts: Array<Record<string, unknown>>;
+  /** Idle window (seconds) before reaping a sandbox of this template; null = use the tenant/config default. */
+  idleReapSeconds: number | null;
   enabled: boolean;
   createdBy: string;
   createdAt: Date;
@@ -575,6 +577,17 @@ export interface ISandboxInstance {
   isolation: string;
   /** Per-instance environment variables passed to the container. */
   env: Record<string, string>;
+  /**
+   * Persistent sandbox: the control plane keeps it alive across node/daemon
+   * failures (boot reconcile recreates the container and re-mounts the same
+   * volume) and exempts it from the idle reaper. Ephemeral boxes (`false`) are
+   * reaped on idle and not recreated.
+   */
+  persist: boolean;
+  /** Block all outbound network access from the sandbox container. */
+  blockNetwork: boolean;
+  /** Per-instance resource limit override ({cpuCores,memoryMb,diskMb,pids}); null = use the template's. */
+  resources: Record<string, unknown> | null;
   lastError: string | null;
   lastActivityAt: Date | null;
   createdBy: string;
@@ -613,7 +626,14 @@ export interface ISandboxEvent {
 
 export type SandboxStorageProviderKind = 'azure-blob' | 's3' | 'local';
 
-/** Persistent volume backed by object storage, mounted live via FUSE. */
+/**
+ * Persistent volume backed by object storage. Volumes are created from a file
+ * **bucket** (see `bucketKey`): the bucket's storage provider supplies the
+ * concrete object-store coordinates (`provider`/`container`) and credentials,
+ * so the volume rides the same proven storage layer as the files module. The
+ * agent mounts it live via FUSE; the console can read/write objects under
+ * `prefix` directly through the bucket's provider runtime (no container needed).
+ */
 export interface ISandboxVolume {
   id: string;
   tenantId: string;
@@ -623,7 +643,55 @@ export interface ISandboxVolume {
   /** Azure Blob container or S3 bucket. */
   container: string;
   prefix: string;
+  /** File-bucket this volume is backed by (resolves provider + credentials). */
+  bucketKey: string | null;
   sizeBytes: number | null;
+  createdBy: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/** What a snapshot captures and where it lives. */
+export type SandboxSnapshotKind = 'snapshot' | 'backup';
+
+/** Lifecycle of a snapshot as it is committed and (optionally) exported. */
+export type SandboxSnapshotStatus = 'committing' | 'exporting' | 'ready' | 'failed';
+
+/**
+ * A point-in-time capture of a sandbox container filesystem (`docker commit`).
+ * A `snapshot` lives only as a local image on its runner; a `backup` has also
+ * been exported to object storage so it survives the runner and can be
+ * re-imported elsewhere. Snapshots are the primitive behind resume, fork and
+ * file-level backup.
+ */
+export interface ISandboxSnapshot {
+  id: string;
+  tenantId: string;
+  projectId: string | null;
+  /** Source instance (may have been deleted since the snapshot was taken). */
+  instanceId: string | null;
+  /** Template the source used; needed to rebuild a spec on restore/fork. */
+  templateId: string | null;
+  /** Runner holding the local image (null once only the export remains). */
+  runnerId: string | null;
+  name: string;
+  description: string | null;
+  kind: SandboxSnapshotKind;
+  /** Local docker image tag/ref the snapshot was committed to. */
+  imageRef: string;
+  /** Storage location of the exported image tarball (when kind='backup'). */
+  storageProvider: SandboxStorageProviderKind | null;
+  storageContainer: string | null;
+  storageKey: string | null;
+  /** Source volume captured alongside the image (for fork volume copy). */
+  volumeId: string | null;
+  /** Network policy captured at snapshot time; launches from here default to it. */
+  blockNetwork: boolean;
+  /** Resource override captured at snapshot time ({cpuCores,memoryMb,diskMb}); null = template's. */
+  resources: Record<string, unknown> | null;
+  sizeBytes: number | null;
+  status: SandboxSnapshotStatus;
+  lastError: string | null;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;

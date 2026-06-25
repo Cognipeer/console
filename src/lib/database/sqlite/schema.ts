@@ -1904,6 +1904,7 @@ export const TENANT_SCHEMA_SQL = `
     toolboxPort INTEGER NOT NULL,
     previewPorts TEXT,
     volumeMounts TEXT,
+    idleReapSeconds INTEGER,
     enabled INTEGER NOT NULL DEFAULT 1,
     createdBy TEXT NOT NULL,
     createdAt TEXT NOT NULL,
@@ -1926,6 +1927,9 @@ export const TENANT_SCHEMA_SQL = `
     previewPorts TEXT,
     isolation TEXT NOT NULL,
     env TEXT,
+    persist INTEGER NOT NULL DEFAULT 0,
+    blockNetwork INTEGER NOT NULL DEFAULT 0,
+    resources TEXT,
     lastError TEXT,
     lastActivityAt TEXT,
     createdBy TEXT NOT NULL,
@@ -1973,12 +1977,40 @@ export const TENANT_SCHEMA_SQL = `
     provider TEXT NOT NULL,
     container TEXT NOT NULL,
     prefix TEXT NOT NULL,
+    bucketKey TEXT,
     sizeBytes INTEGER,
     createdBy TEXT NOT NULL,
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_sandbox_volumes_tenant ON sandbox_volumes(tenantId);
+
+  CREATE TABLE IF NOT EXISTS sandbox_snapshots (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    instanceId TEXT,
+    templateId TEXT,
+    runnerId TEXT,
+    name TEXT NOT NULL,
+    description TEXT,
+    kind TEXT NOT NULL,
+    imageRef TEXT NOT NULL,
+    storageProvider TEXT,
+    storageContainer TEXT,
+    storageKey TEXT,
+    volumeId TEXT,
+    blockNetwork INTEGER NOT NULL DEFAULT 0,
+    resources TEXT,
+    sizeBytes INTEGER,
+    status TEXT NOT NULL,
+    lastError TEXT,
+    createdBy TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_sandbox_snapshots_tenant ON sandbox_snapshots(tenantId);
+  CREATE INDEX IF NOT EXISTS idx_sandbox_snapshots_instance ON sandbox_snapshots(instanceId);
 
   CREATE TABLE IF NOT EXISTS sandbox_settings (
     id TEXT PRIMARY KEY,
