@@ -2,7 +2,7 @@
 
 OpenAI-compatible audio endpoints for text-to-speech, speech-to-text transcription, and translation to English.
 
-All endpoints share the base path `/api/client/v1` and require a Bearer API token (`cgt_...`).
+All endpoints share the base path `/api/client/v1` and require a Bearer API token (`cpeer_...`).
 
 ## Speech (Text-to-Speech)
 
@@ -49,7 +49,7 @@ Raw audio bytes. The `Content-Type` header reflects the produced audio format, a
 
 ```bash
 curl -X POST https://gateway.example.com/api/client/v1/audio/speech \
-  -H "Authorization: Bearer cgt_your_token" \
+  -H "Authorization: Bearer cpeer_your_token" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "tts-1",
@@ -121,7 +121,7 @@ The exact shape depends on `response_format` (e.g. `verbose_json` adds segment/w
 
 ```bash
 curl -X POST https://gateway.example.com/api/client/v1/audio/transcriptions \
-  -H "Authorization: Bearer cgt_your_token" \
+  -H "Authorization: Bearer cpeer_your_token" \
   -F model="whisper-1" \
   -F file="@speech.mp3" \
   -F response_format="json"
@@ -168,7 +168,7 @@ JSON containing the English text and a `request_id`:
 
 ```bash
 curl -X POST https://gateway.example.com/api/client/v1/audio/translations \
-  -H "Authorization: Bearer cgt_your_token" \
+  -H "Authorization: Bearer cpeer_your_token" \
   -F model="whisper-1" \
   -F file="@speech_fr.mp3" \
   -F response_format="json"

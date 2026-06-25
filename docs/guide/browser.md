@@ -6,6 +6,10 @@ It replaces the previous standalone "Browser Agent" feature. Console-managed age
 
 Operators manage browsers under **Operate → Browser**.
 
+![Browser profiles](/screenshots/browser/01-browser-sessions.png)
+
+The landing page lists browser profiles with their active/disabled and live-session counts. From a new tenant it shows the empty state above — **Create browser** registers the first profile, after which sessions and per-browser MCP endpoints become available.
+
 ## Concepts
 
 - **Browser profile** — long-lived container with defaults for session config, the artifact bucket where screenshots/PDFs land, and a default model (used by extract/LLM-driven actions). Persisted in `browsers`.

@@ -5,7 +5,7 @@ Save reusable web crawler profiles, manage their seed URLs, trigger runs, and re
 All endpoints live under `/api/client/v1/crawler/*` and require a Bearer token:
 
 ```http
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 A **crawler** is a saved container that holds crawl configuration (engine, depth/page limits, scope filters, HTTP options, RAG binding, webhook, schedule). Running a crawler — or starting an ad-hoc run — enqueues a **job**, and each fetched page or file is stored as a **result** (extracted as Markdown for HTML).
@@ -354,7 +354,7 @@ Requests cancellation of a `queued`/`running` job. Returns `{ "ok": true }`, or 
 ```bash
 # 1. Create a crawler
 curl -X POST https://console.cognipeer.com/api/client/v1/crawler/crawlers \
-  -H "Authorization: Bearer cgt_…" \
+  -H "Authorization: Bearer cpeer_…" \
   -H "Content-Type: application/json" \
   -d '{
         "name": "Docs site",
@@ -367,16 +367,16 @@ curl -X POST https://console.cognipeer.com/api/client/v1/crawler/crawlers \
 
 # 2. Run it (async)
 curl -X POST https://console.cognipeer.com/api/client/v1/crawler/crawlers/docs-site/run \
-  -H "Authorization: Bearer cgt_…" \
+  -H "Authorization: Bearer cpeer_…" \
   -H "Content-Type: application/json" \
   -d '{ "mode": "async" }'
 # → { "jobId": "6660…", "status": "queued" }
 
 # 3. Poll the job
 curl https://console.cognipeer.com/api/client/v1/crawler/jobs/6660… \
-  -H "Authorization: Bearer cgt_…"
+  -H "Authorization: Bearer cpeer_…"
 
 # 4. Read the crawled pages as Markdown
 curl "https://console.cognipeer.com/api/client/v1/crawler/jobs/6660…/results?type=html" \
-  -H "Authorization: Bearer cgt_…"
+  -H "Authorization: Bearer cpeer_…"
 ```

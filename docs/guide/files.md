@@ -43,13 +43,13 @@ Authorization: Bearer <token>
 ### Upload File
 
 ```
-POST /api/client/v1/files/buckets/:bucketKey/upload
+POST /api/client/v1/files/buckets/:bucketKey/objects
 Authorization: Bearer <token>
 Content-Type: multipart/form-data
 ```
 
 ```bash
-curl -X POST .../api/client/v1/files/buckets/my-bucket/upload \
+curl -X POST .../api/client/v1/files/buckets/my-bucket/objects \
   -H "Authorization: Bearer <token>" \
   -F "file=@document.pdf"
 ```
@@ -57,14 +57,14 @@ curl -X POST .../api/client/v1/files/buckets/my-bucket/upload \
 ### Download File
 
 ```
-GET /api/client/v1/files/buckets/:bucketKey/files/:fileId/download
+GET /api/client/v1/files/buckets/:bucketKey/objects/:objectKey/download
 Authorization: Bearer <token>
 ```
 
 ### List Files
 
 ```
-GET /api/client/v1/files/buckets/:bucketKey/files
+GET /api/client/v1/files/buckets/:bucketKey/objects
 Authorization: Bearer <token>
 ```
 

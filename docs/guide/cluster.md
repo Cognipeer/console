@@ -10,6 +10,10 @@ Single-process deployments get all of this for free — the registry has one nod
 
 Operators manage the cluster under **Admin → Cluster** (tenant-admin gated). The dashboard lists nodes, their heartbeat status, and the assignable instances across every tenant.
 
+![Cluster nodes](/screenshots/cluster/01-cluster-overview.png)
+
+The **Nodes** tab shows total / online / offline / draining counts and a row per registered process — its role, status, last heartbeat, and version. Processes heartbeat every 10 seconds; the **Instances** tab is where you pin entities to a specific node.
+
 ## Topology
 
 A process picks one of three roles via `NODE_ROLE`:

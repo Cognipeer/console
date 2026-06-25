@@ -84,11 +84,15 @@ These paths skip authentication:
 
 For programmatic access, tenants create API tokens through the dashboard. These tokens authenticate requests to `/api/client/v1/*` endpoints.
 
+Tokens are managed under **Configure → API Tokens**. Each row shows the label, creation date, and last-used timestamp; the full secret is shown only once at creation time:
+
+![API Tokens](/screenshots/authentication/01-api-tokens.png)
+
 ### Usage
 
 ```bash
 curl -X POST https://gateway.example.com/api/client/v1/chat/completions \
-  -H "Authorization: Bearer cgt_abc123..." \
+  -H "Authorization: Bearer cpeer_abc123..." \
   -H "Content-Type: application/json" \
   -d '{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}'
 ```

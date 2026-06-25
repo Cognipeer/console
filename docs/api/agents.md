@@ -72,12 +72,14 @@ GET /api/client/v1/agents/:agentKey
 
 Invoke an agent using the OpenAI Responses API format. The agent is identified by the `model` field.
 
-Two equivalent endpoints are available:
+Two endpoints are available, and they are **not** equivalent — they differ in which agent version they execute:
 
 ```
-POST /api/client/v1/responses
-POST /api/client/v1/agents/responses
+POST /api/client/v1/agents/responses   # runs the PUBLISHED agent version
+POST /api/client/v1/responses           # runs the DRAFT agent version
 ```
+
+Use `/api/client/v1/agents/responses` for production traffic against the published version, and `/api/client/v1/responses` to test the current draft.
 
 ### Request
 

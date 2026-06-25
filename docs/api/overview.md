@@ -17,7 +17,7 @@ All client API endpoints require a Bearer token in the `Authorization` header:
 
 ```bash
 curl -X POST https://gateway.example.com/api/client/v1/chat/completions \
-  -H "Authorization: Bearer cgt_your_token_here" \
+  -H "Authorization: Bearer cpeer_your_token_here" \
   -H "Content-Type: application/json" \
   -d '{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}'
 ```

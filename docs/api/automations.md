@@ -2,7 +2,7 @@
 
 Automations are the platform's background schedulers and maintenance jobs (alert evaluation, inference-server polling, and browser-session housekeeping). This client surface lets you inspect their live state and metrics, trigger an immediate run, or pause/resume the ones that support it.
 
-All endpoints are under `/api/client/v1` and require a `Bearer cgt_…` API token.
+All endpoints are under `/api/client/v1` and require a `Bearer cpeer_…` API token.
 
 ## Automation keys
 
@@ -78,7 +78,7 @@ The `metrics` keys depend on the automation:
 
 ```http
 GET /api/client/v1/automations
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 Returns every automation and its current state.
@@ -100,7 +100,7 @@ Returns every automation and its current state.
 
 ```http
 GET /api/client/v1/automations/:key
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 | Param | In | Notes |
@@ -117,7 +117,7 @@ Authorization: Bearer cgt_…
 
 ```http
 POST /api/client/v1/automations/:key/run
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 Triggers an immediate run of the automation and waits for it to finish before responding. No request body is required.
@@ -136,7 +136,7 @@ The returned `automation` reflects the freshly updated `lastStartedAt`, `lastCom
 
 ```http
 POST /api/client/v1/automations/:key/pause
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 Pauses the automation's scheduler so it will not run on its cadence until resumed. In-flight runs are not interrupted. No request body is required. Only valid for automations with `supportsPause: true`; calling it on `browser-session-reconciliation` returns an error.
@@ -151,7 +151,7 @@ Pauses the automation's scheduler so it will not run on its cadence until resume
 
 ```http
 POST /api/client/v1/automations/:key/resume
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 Resumes a paused scheduler so it runs on its cadence again. No request body is required. Only valid for pausable automations; calling it on `browser-session-reconciliation` returns an error.
@@ -176,15 +176,15 @@ Resumes a paused scheduler so it runs on its cadence again. No request body is r
 ```bash
 # List automations
 curl https://your-console/api/client/v1/automations \
-  -H "Authorization: Bearer cgt_your_token"
+  -H "Authorization: Bearer cpeer_your_token"
 
 # Trigger an immediate alert-evaluation run
 curl -X POST https://your-console/api/client/v1/automations/alert-evaluation/run \
-  -H "Authorization: Bearer cgt_your_token"
+  -H "Authorization: Bearer cpeer_your_token"
 
 # Pause and resume the inference poll scheduler
 curl -X POST https://your-console/api/client/v1/automations/inference-monitoring-poll/pause \
-  -H "Authorization: Bearer cgt_your_token"
+  -H "Authorization: Bearer cpeer_your_token"
 curl -X POST https://your-console/api/client/v1/automations/inference-monitoring-poll/resume \
-  -H "Authorization: Bearer cgt_your_token"
+  -H "Authorization: Bearer cpeer_your_token"
 ```

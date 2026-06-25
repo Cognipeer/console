@@ -79,6 +79,7 @@ export default defineConfig({
             { text: 'Memory', link: '/guide/memory' },
             { text: 'File Storage', link: '/guide/files' },
             { text: 'JS Sandbox', link: '/guide/js-sandbox' },
+            { text: 'Agent Sandbox', link: '/guide/sandbox' },
             { text: 'Browser Automation', link: '/guide/browser' },
           ],
         },

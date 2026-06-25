@@ -11,7 +11,7 @@ The CORS module (`src/lib/core/cors.ts`) provides configurable Cross-Origin Reso
 
 ## Usage
 
-The CORS module is applied in `src/middleware.ts` for all `/api/client/*` paths:
+CORS is applied for the client API surface by the Fastify API plugin (`src/server/api/plugin.ts`, via `src/server/api/cors.ts`):
 
 ```typescript
 import { applyCors, handleCorsPreflightIfNeeded } from '@/lib/core/cors';
@@ -59,7 +59,7 @@ CORS_ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com
 # Allow all subdomains
 CORS_ALLOWED_ORIGINS=*.example.com
 
-# Allow all origins (empty list = wildcard mode when CORS_ENABLED=true)
+# Empty list = no origins allowed (CORS headers are not emitted)
 CORS_ALLOWED_ORIGINS=
 ```
 
@@ -68,7 +68,7 @@ CORS_ALLOWED_ORIGINS=
 | CORS_ENABLED | Origin Match | Result |
 |-------------|-------------|--------|
 | `false` | — | No CORS headers |
-| `true` | No list configured | All origins allowed |
+| `true` | No list configured (empty) | No CORS headers |
 | `true` | Origin in list | CORS headers added |
 | `true` | Origin not in list | No CORS headers |
 

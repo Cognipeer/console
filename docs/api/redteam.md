@@ -2,7 +2,7 @@
 
 Adversarial safety scanning for your agents and models. A campaign drives a set of probes (prompt injection, jailbreak, data extraction, …) against a target, an LLM judge decides each attempt, and the run reports an attack-success / resilience score per OWASP-LLM category — so a CI pipeline can fail when an agent regresses on safety.
 
-The client surface (`/api/client/v1/redteam/*`) is read-and-trigger only: it lists the built-in probe catalog and configured campaigns, launches scans, and reads runs. Authoring campaigns and custom probes stays on the dashboard surface (`/api/redteam/*`). All client endpoints are API-token authenticated with a `cgt_` bearer token and are scoped to the token's project.
+The client surface (`/api/client/v1/redteam/*`) is read-and-trigger only: it lists the built-in probe catalog and configured campaigns, launches scans, and reads runs. Authoring campaigns and custom probes stays on the dashboard surface (`/api/redteam/*`). All client endpoints are API-token authenticated with a `cpeer_` bearer token and are scoped to the token's project.
 
 ```
 GET  /api/client/v1/redteam/probes               – built-in probe catalog
@@ -23,7 +23,7 @@ GET  /api/client/v1/redteam/runs/:id             – one run + per-attempt verdi
 
 ```http
 GET /api/client/v1/redteam/probes
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 Returns the built-in probe catalog. `custom` is `false` for every entry here (custom probes are not advertised on the client surface).
@@ -57,13 +57,13 @@ Returns the built-in probe catalog. `custom` is `false` for every entry here (cu
 
 Built-in probe keys: `prompt-injection`, `encoding-injection`, `jailbreak`, `sensitive-info-disclosure`, `pii-generation`, `data-extraction`, `insecure-output-handling`, `excessive-agency`, `overreliance-hallucination`.
 
-OWASP-LLM categories used by the catalog: `LLM01-prompt-injection`, `LLM02-insecure-output-handling`, `LLM04-model-dos`, `LLM05-supply-chain`, `LLM06-sensitive-information-disclosure`, `LLM07-system-prompt-leakage`, `LLM08-excessive-agency`, `LLM09-overreliance`.
+OWASP-LLM categories used by the catalog: `LLM01-prompt-injection`, `LLM02-insecure-output-handling`, `LLM06-sensitive-information-disclosure`, `LLM08-excessive-agency`, `LLM09-overreliance`.
 
 ### List campaigns
 
 ```http
 GET /api/client/v1/redteam/campaigns
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 Lists the campaigns configured in the token's project.
@@ -100,7 +100,7 @@ Lists the campaigns configured in the token's project.
 
 ```http
 POST /api/client/v1/redteam/campaigns/:key/scan
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 Enqueues an asynchronous scan for the campaign identified by `:key` and returns immediately with a `pending` run. No request body is required. Poll the run-detail endpoint to watch it finish.
@@ -134,7 +134,7 @@ If a scan for the same campaign is already running, the request is rejected with
 
 ```http
 GET /api/client/v1/redteam/runs?campaign_key=nightly-agent-scan&limit=20
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 Returns run summaries (no per-attempt detail), newest first.
@@ -185,7 +185,7 @@ Returns run summaries (no per-attempt detail), newest first.
 
 ```http
 GET /api/client/v1/redteam/runs/:id
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 Returns the run summary plus `progress`, any fatal `error`, and the per-attempt verdicts.
@@ -252,10 +252,10 @@ Returns the run summary plus `progress`, any fatal `error`, and the per-attempt 
 # Launch a scan and capture the run id
 RUN_ID=$(curl -s -X POST \
   https://api.cognipeer.com/api/client/v1/redteam/campaigns/nightly-agent-scan/scan \
-  -H "Authorization: Bearer cgt_your_token" | jq -r '.run.id')
+  -H "Authorization: Bearer cpeer_your_token" | jq -r '.run.id')
 
 # Poll until it finishes, then read the resilience score
 curl -s https://api.cognipeer.com/api/client/v1/redteam/runs/$RUN_ID \
-  -H "Authorization: Bearer cgt_your_token" \
+  -H "Authorization: Bearer cpeer_your_token" \
   | jq '{status: .run.status, resilience: .run.aggregate.resilienceScore, vulnerable: .run.aggregate.vulnerable}'
 ```

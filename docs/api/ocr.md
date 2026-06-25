@@ -5,13 +5,13 @@ Extract text, tables, and structured data from documents. Two surfaces ship with
 - **Synchronous OCR** (`POST /api/client/v1/ocr`) — extract a single document in one request and get the result back inline.
 - **OCR Jobs** (`/api/client/v1/ocr-jobs/*`) — a persistent, async batch container. Send files over time, process them via queue fan-out, and collect full-text / summary / structured output with token and cost accounting plus optional per-file callbacks.
 
-All routes are API-token authenticated with a `Bearer cgt_…` token. Base path: `/api/client/v1`.
+All routes are API-token authenticated with a `Bearer cpeer_…` token. Base path: `/api/client/v1`.
 
 ## Synchronous OCR
 
 ```http
 POST /api/client/v1/ocr
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 Accepts either `multipart/form-data` (upload a file) or `application/json` (URL or base64 document).
@@ -37,7 +37,7 @@ Accepts either `multipart/form-data` (upload a file) or `application/json` (URL 
 
 ```bash
 curl -X POST https://gateway.example.com/api/client/v1/ocr \
-  -H "Authorization: Bearer cgt_your_token" \
+  -H "Authorization: Bearer cpeer_your_token" \
   -F "model=mistral-ocr" \
   -F "file=@invoice.pdf" \
   -F "pages=1,2" \
@@ -100,7 +100,7 @@ Items added with `mode: "sync"` are processed before the response returns (HTTP 
 
 ```http
 POST /api/client/v1/ocr-jobs
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 Content-Type: application/json
 ```
 
@@ -153,7 +153,7 @@ Content-Type: application/json
 
 ```http
 GET /api/client/v1/ocr-jobs?status=active&limit=50
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 Optional query params: `status`, `limit`. Returns `{ "jobs": [ <job>, … ] }` using the same job shape as above.
@@ -162,7 +162,7 @@ Optional query params: `status`, `limit`. Returns `{ "jobs": [ <job>, … ] }` u
 
 ```http
 GET /api/client/v1/ocr-jobs/:id
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 Returns `{ "job": <job> }`. The job object carries live progress (`items_total`, `items_processed`, `items_failed`) and rolling `usage`/`cost` totals, so this doubles as the status endpoint. Returns `404` if not found.
@@ -171,7 +171,7 @@ Returns `{ "job": <job> }`. The job object carries live progress (`items_total`,
 
 ```http
 PATCH /api/client/v1/ocr-jobs/:id
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 Content-Type: application/json
 ```
 
@@ -198,7 +198,7 @@ Returns `{ "job": <job> }`, or `404` if not found.
 
 ```http
 DELETE /api/client/v1/ocr-jobs/:id
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 Returns `{ "ok": true }`, or `404` if not found.
@@ -207,7 +207,7 @@ Returns `{ "ok": true }`, or `404` if not found.
 
 ```http
 POST /api/client/v1/ocr-jobs/:id/files
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 Accepts `multipart/form-data` or `application/json`. At least one file is required.
@@ -257,7 +257,7 @@ For convenience an item may instead use a top-level `bucket: { bucketKey, object
 
 ```http
 POST /api/client/v1/ocr-jobs/:id/pause
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 Sets the job status to `paused` and returns `{ "job": <job> }`. Returns `404` if not found.
@@ -266,7 +266,7 @@ Sets the job status to `paused` and returns `{ "job": <job> }`. Returns `404` if
 
 ```http
 POST /api/client/v1/ocr-jobs/:id/resume
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 Sets the job status back to `active` and returns `{ "job": <job> }`. Returns `404` if not found.
@@ -275,7 +275,7 @@ Sets the job status back to `active` and returns `{ "job": <job> }`. Returns `40
 
 ```http
 GET /api/client/v1/ocr-jobs/:id/items?limit=50&skip=0&status=succeeded
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 Optional query params: `limit`, `skip`, `status`. Returns `{ "items": [ <item>, … ] }`. Returns `404` if the job is not found.
@@ -284,7 +284,7 @@ Optional query params: `limit`, `skip`, `status`. Returns `{ "items": [ <item>, 
 
 ```http
 GET /api/client/v1/ocr-jobs/:id/items/:itemId
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 Returns a single item:
@@ -312,7 +312,7 @@ Returns `404` if the item is not found.
 
 ```http
 GET /api/client/v1/ocr-jobs/:id/usage
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 Aggregate token and cost accounting for the job:
@@ -343,7 +343,7 @@ Returns `404` if the job is not found.
 
 ```http
 GET /api/client/v1/ocr-jobs/:id/export?format=json
-Authorization: Bearer cgt_…
+Authorization: Bearer cpeer_…
 ```
 
 Downloads all items in the requested `format` (default `json`) as an attachment:
@@ -373,7 +373,7 @@ Synchronous extraction of a single file:
 
 ```bash
 curl -X POST https://gateway.example.com/api/client/v1/ocr \
-  -H "Authorization: Bearer cgt_your_token" \
+  -H "Authorization: Bearer cpeer_your_token" \
   -F "model=mistral-ocr" \
   -F "file=@invoice.pdf" \
   -F "features=text,tables"
@@ -384,21 +384,21 @@ Batch job: create, add files, then poll status:
 ```bash
 # 1. Create a job
 curl -X POST https://gateway.example.com/api/client/v1/ocr-jobs \
-  -H "Authorization: Bearer cgt_your_token" \
+  -H "Authorization: Bearer cpeer_your_token" \
   -H "Content-Type: application/json" \
   -d '{ "name": "Invoices Q2", "ocr_model": "mistral-ocr", "bucket_key": "invoices", "outputs": ["full_text", "summary"] }'
 
 # 2. Add files (async)
 curl -X POST https://gateway.example.com/api/client/v1/ocr-jobs/<id>/files \
-  -H "Authorization: Bearer cgt_your_token" \
+  -H "Authorization: Bearer cpeer_your_token" \
   -F "files=@invoice1.pdf" \
   -F "files=@invoice2.pdf"
 
 # 3. Check status / progress
 curl https://gateway.example.com/api/client/v1/ocr-jobs/<id> \
-  -H "Authorization: Bearer cgt_your_token"
+  -H "Authorization: Bearer cpeer_your_token"
 
 # 4. Export results
 curl "https://gateway.example.com/api/client/v1/ocr-jobs/<id>/export?format=jsonl" \
-  -H "Authorization: Bearer cgt_your_token" -o results.jsonl
+  -H "Authorization: Bearer cpeer_your_token" -o results.jsonl
 ```

@@ -18,8 +18,8 @@ docker build -t cognipeer-console:latest .
 The Dockerfile uses a multi-stage build:
 
 1. **deps** — Install npm dependencies (cached layer)
-2. **builder** — Build Next.js standalone output
-3. **runner** — Minimal Alpine image with non-root user
+2. **builder** — Build the Next.js application
+3. **runner** — `node:22` image running as a non-root user (`node`)
 
 ### Run
 
@@ -155,15 +155,17 @@ securityContext:
 
 ```bash
 npm run build
-node .next/standalone/server.js
+npm start
 ```
+
+`npm start` runs the custom Fastify server (`src/server/index.ts`) with `NODE_ENV=production`.
 
 ### Process Manager
 
 With PM2:
 
 ```bash
-pm2 start .next/standalone/server.js --name cognipeer-console -i max
+pm2 start npm --name cognipeer-console -- start
 ```
 
 ## Environment Configuration

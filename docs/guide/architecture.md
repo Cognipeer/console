@@ -106,7 +106,7 @@ The infrastructure layer (`src/lib/core/`) provides cross-cutting concerns that 
 | [Request Context](/guide/core-request-context) | Per-request AsyncLocalStorage propagation |
 | [Cache](/guide/core-cache) | Provider-based caching (none / memory / Redis) |
 | [Resilience](/guide/core-resilience) | Retry with exponential back-off + circuit breaker |
-| [Runtime Pool](/guide/core-runtime-pool) | LRU cache for provider SDK client instances |
+| [Runtime Pool](/guide/core-runtime-pool) | TTL cache for provider SDK client instances |
 | [Async Tasks](/guide/core-async-tasks) | Fire-and-forget background operations |
 | [Health Checks](/guide/core-health) | Subsystem health registry for readiness probes |
 | [Lifecycle](/guide/core-lifecycle) | Graceful shutdown with ordered handler teardown |
@@ -114,7 +114,7 @@ The infrastructure layer (`src/lib/core/`) provides cross-cutting concerns that 
 
 ## Bootstrap Sequence
 
-The application bootstrap is managed by `src/instrumentation.ts` (Next.js instrumentation hook):
+The application bootstrap is managed by `src/server/bootstrap.ts`, invoked from the `src/instrumentation.ts` Next.js instrumentation hook:
 
 ```
 1. Validate config (getConfig + validateConfig)

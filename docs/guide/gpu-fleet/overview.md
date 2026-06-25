@@ -9,6 +9,10 @@ GPU Fleet, kendi GPU makinelerini console üzerinden uçtan uca yönetmeni sağl
 - Her host'ta UI'dan **terminal** aç (host shell / sandbox / container exec).
 - Health, agent durumu, deployment durumu — hepsi tek pane'de.
 
+![GPU Fleet genel görünüm](/screenshots/gpu-fleet/01-fleet-overview.png)
+
+**Operate → GPU Fleet** altında; üst sekmeler Overview / Onboarding / Model Marketplace / Pools / Settings. Overview, host/online/offline/pending-claim ve toplam GPU sayaçlarını, her host için durum + heartbeat + agent sürümü kartını gösterir. **Onboard hosts** yeni makine ekler.
+
 ## Mimari özet
 
 ```

@@ -42,7 +42,7 @@ Each provider contract declares which domains it supports:
 | `model` | `ModelProviderRuntime` | Chat completions, embeddings |
 | `vector` | `VectorProviderRuntime` | Index CRUD, vector upsert/query/delete |
 | `file` | `FileProviderRuntime` | Bucket management, upload/download |
-| `datasource` | `DatasourceProviderRuntime` | External data connections |
+| `datasource` | _(no runtime interface)_ | Domain value for external data connections; no runtime is instantiated |
 
 ## Contract Structure
 
@@ -61,7 +61,7 @@ interface ProviderContract<TRuntime, TCredentials, TSettings> {
 ### Example Contract
 
 ```typescript
-// src/lib/providers/contracts/openai.ts
+// src/lib/providers/contracts/modelContracts.ts
 export const openaiContract: ProviderContract<...> = {
   id: 'openai',
   version: '1.0.0',
@@ -98,7 +98,7 @@ import { providerRegistry } from '@/lib/providers/registry';
 const drivers = providerRegistry.listDescriptors('vector');
 
 // Get form schema for UI rendering
-const schema = providerRegistry.getFormSchema('pinecone');
+const schema = providerRegistry.getFormSchema('postgres');
 
 // Create runtime instance
 const runtime = providerRegistry.createRuntime('openai', context);
@@ -113,7 +113,7 @@ Contracts are auto-registered from `CORE_PROVIDER_CONTRACTS` on first access (la
 ```typescript
 // List available vector drivers
 const drivers = await listVectorDrivers();
-// Returns: [{ id: 'pinecone', display: {...} }, { id: 'qdrant', ... }]
+// Returns: [{ id: 'sqlite-vector', display: {...} }, { id: 'postgres', ... }]
 ```
 
 ### 2. Configuration
@@ -122,10 +122,10 @@ const drivers = await listVectorDrivers();
 // Create a provider config for a tenant
 await createVectorProvider({
   tenantDbName, tenantId, projectId,
-  driver: 'pinecone',
+  driver: 'postgres',
   name: 'Production Vectors',
-  credentials: { apiKey: 'pk-...' },
-  settings: { environment: 'gcp-starter' },
+  credentials: { connectionString: 'postgres://...' },
+  settings: { schema: 'public' },
 });
 ```
 
@@ -193,7 +193,7 @@ Provider configs are stored in the tenant database as `IProviderRecord`:
 | `key` | Unique provider key per tenant |
 | `type` | Provider domain |
 | `driver` | Contract ID |
-| `name` | Display name |
+| `label` | Display name |
 | `credentialsEnc` | Encrypted credentials |
 | `settings` | Provider-specific settings |
-| `status` | `active` or `inactive` |
+| `status` | `active`, `disabled`, or `errored` |

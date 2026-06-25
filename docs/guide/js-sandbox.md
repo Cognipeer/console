@@ -4,6 +4,10 @@ The JS Sandbox lets agents and external clients run arbitrary JavaScript in an i
 
 Operators manage runtimes under **Build → JS Sandbox**. Each runtime is a stored configuration (libraries, limits, network policy); executions reference a runtime by id or key.
 
+![JS Sandbox runtimes](/screenshots/js-sandbox/01-runtimes-list.png)
+
+The list summarises every runtime in the active project: total / active / disabled counts, the library catalog size, and per-runtime cards showing the isolation mode, memory ceiling, default timeout, and enabled libraries. **New Runtime** opens the create form.
+
 ## Concepts
 
 - **Runtime** — a project-scoped configuration. Pins the allowed standard libraries, the per-execution timeout, memory ceiling, and network policy. Stored in `js_sandbox_runtimes`.

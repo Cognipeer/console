@@ -11,7 +11,7 @@ The core infrastructure layer (`src/lib/core/`) provides production-ready cross-
 | Request Context | `@/lib/core/requestContext` | Per-request AsyncLocalStorage |
 | Cache | `@/lib/core/cache` | Provider-based caching (none/memory/Redis) |
 | Resilience | `@/lib/core/resilience` | Retry + circuit breaker for external calls |
-| Runtime Pool | `@/lib/core/runtimePool` | LRU cache for provider SDK instances |
+| Runtime Pool | `@/lib/core/runtimePool` | TTL cache for provider SDK instances |
 | Async Tasks | `@/lib/core/asyncTask` | Fire-and-forget background operations |
 | Health | `@/lib/core/health` | Health check registry |
 | Lifecycle | `@/lib/core/lifecycle` | Graceful shutdown management |
@@ -23,13 +23,13 @@ The core infrastructure layer (`src/lib/core/`) provides production-ready cross-
 
 2. **No silent fallbacks** — If Redis is configured and unavailable, operations fail explicitly rather than silently falling back to memory.
 
-3. **Singleton lifecycle** — Core modules are initialized once at startup via `src/instrumentation.ts` and destroyed during graceful shutdown.
+3. **Singleton lifecycle** — Core modules are initialized once at startup via `src/server/bootstrap.ts` (invoked by the `src/instrumentation.ts` Next.js hook) and destroyed during graceful shutdown.
 
 4. **Mandatory rules** — See [AGENTS.md](https://github.com/Cognipeer/cognipeer-console/blob/main/AGENTS.md) for the full list of core infrastructure rules.
 
 ## Initialization Order
 
-The bootstrap sequence in `src/instrumentation.ts`:
+The bootstrap sequence in `src/server/bootstrap.ts`:
 
 ```typescript
 // 1. Config validation

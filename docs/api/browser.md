@@ -154,6 +154,7 @@ The browser MCP server exposes the Browser Use-compatible tools:
 - `browser_snapshot`
 - `browser_extract`
 - `browser_screenshot`
+- `browser_pdf` (renders the current page to PDF)
 - `browser_close`
 
 ## Relationship To Console Agents

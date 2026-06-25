@@ -4,7 +4,7 @@ The inference service provides OpenAI-compatible chat completion and embedding e
 
 ## Where inference is observed
 
-Operators monitor live inference through **Operate → Model Monitoring**. The page summarises every connected inference server, splitting them by status: running, errored, or queued. From here you also wire up new self-hosted endpoints (vLLM, TGI, llama.cpp, Ollama) that don't fit the cloud-provider model.
+Operators monitor live inference through **Operate → Model Monitoring**. The page summarises every connected inference server, splitting them by status: `active`, `disabled`, or `errored`. From here you also wire up new self-hosted endpoints (vLLM, TGI, llama.cpp, Ollama) that don't fit the cloud-provider model.
 
 ![Inference monitoring](/screenshots/inference/01-inference-monitoring.png)
 
@@ -177,7 +177,5 @@ Models are configured in the dashboard with:
 |--------|---------|
 | 400 | Missing model key or invalid request body |
 | 401 | Invalid or missing API token |
-| 403 | Feature not available in license |
-| 404 | Model not found |
-| 422 | Model category mismatch |
-| 503 | Provider circuit breaker is open |
+| 429 | Quota, rate limit, or budget exceeded |
+| 500 | Provider/internal error (includes unresolved model, category mismatch, and circuit-breaker-open) |

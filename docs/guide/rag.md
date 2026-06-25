@@ -53,7 +53,7 @@ Query   → Embed → Vector Search → (Reranker?) → Return Matches
   "name": "Support Knowledge Base",
   "key": "support-kb",
   "embeddingModelKey": "text-embedding-ada-002",
-  "vectorProviderKey": "pinecone-prod",
+  "vectorProviderKey": "vectors-prod",
   "vectorIndexKey": "support-index",
   "rerankerKey": "support-rerank",
   "chunkConfig": {
@@ -69,14 +69,15 @@ Query   → Embed → Vector Search → (Reranker?) → Return Matches
 ## Text Ingestion
 
 ```
-POST /api/client/v1/rag/modules/:moduleKey/ingest
+POST /api/client/v1/rag/modules/:key/ingest
 Authorization: Bearer <token>
 ```
 
 ```json
 {
-  "title": "Product FAQ",
+  "fileName": "product-faq.txt",
   "content": "Long document text here...",
+  "contentType": "text/plain",
   "metadata": { "source": "docs", "version": "2.0" }
 }
 ```
@@ -98,7 +99,7 @@ Submit a file for automatic processing:
 ## Querying
 
 ```
-POST /api/client/v1/rag/modules/:moduleKey/query
+POST /api/client/v1/rag/modules/:key/query
 Authorization: Bearer <token>
 ```
 

@@ -2,6 +2,10 @@
 
 The Command Palette is the global, keyboard-driven launcher mounted across every dashboard route. It replaced the older `GlobalSearch` and `PageHeader` components — both are gone and shouldn't be referenced.
 
+![Command palette](/screenshots/command-palette/01-command-palette.png)
+
+Typing filters services and their instances in real time; `↑`/`↓` navigate and `↵` opens the highlighted result.
+
 ## Opening it
 
 | Shortcut | Behavior |

@@ -138,8 +138,13 @@ The gateway registers these health checks at startup:
 
 | Name | What It Checks |
 |------|---------------|
-| `mongodb` | Database ping response |
+| `sqlite` / `mongodb` | Database ping response (depends on `DB_PROVIDER`) |
 | `cache` | Cache read/write roundtrip |
+| `cluster` | Node registry / online node count |
+| `queue` | Queue provider availability |
+| `browser-runtime` | Managed browser session runtime |
+| `js-sandbox-runtime` | JS sandbox executor runtime |
+| `automations` | Background automation/scheduler state |
 
 ## Configuration
 

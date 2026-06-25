@@ -17,8 +17,8 @@ Providers are registered through the contract system:
 | Provider | ID | Description |
 |----------|-----|-------------|
 | **SQLite Vector** | `sqlite-vector` | Local brute-force similarity search using SQLite. No external dependencies. |
-| Pinecone | `pinecone` | Managed vector database |
-| Qdrant | `qdrant` | Open-source vector database |
+| Postgres | `postgres` | Postgres/pgvector-backed vector storage |
+| Azure AI Search | `azure-ai-search` | Managed vector search on Azure AI Search |
 | AWS S3 Vectors | `aws-s3-vectors` | S3-based vector storage |
 
 Additional providers can be added via the provider contract mechanism.
@@ -80,10 +80,10 @@ Authorization: Bearer <token>
 
 ```json
 {
-  "driver": "pinecone",
+  "driver": "postgres",
   "name": "Production Vectors",
-  "credentials": { "apiKey": "pk-..." },
-  "settings": { "environment": "gcp-starter" }
+  "credentials": { "connectionString": "postgres://..." },
+  "settings": { "schema": "public" }
 }
 ```
 

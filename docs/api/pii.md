@@ -12,7 +12,7 @@ Send a Bearer token in the `Authorization` header (see [overview](./overview.md)
 
 ```bash
 curl -X POST https://gateway.example.com/api/client/v1/pii/tokenize \
-  -H "Authorization: Bearer cgt_your_token_here" \
+  -H "Authorization: Bearer cpeer_your_token_here" \
   -H "Content-Type: application/json" \
   -d '{ "policy_key": "support-intake", "text": "..." }'
 ```

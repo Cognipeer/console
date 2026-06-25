@@ -31,15 +31,16 @@ GET /api/alerts/incidents
       "_id": "inc_abc123",
       "ruleId": "rule_xyz",
       "ruleName": "High Error Rate",
-      "metric": "model_usage_error_rate",
+      "metric": "error_rate",
       "threshold": 5,
       "actualValue": 12.3,
       "severity": "critical",
       "status": "open",
+      "firedAt": "2026-03-01T10:00:00.000Z",
+      "alertEventId": "evt_def456",
+      "projectId": "proj_123",
+      "tenantId": "tenant_1",
       "notes": [],
-      "statusHistory": [
-        { "status": "open", "changedBy": "system", "changedAt": "2026-03-01T10:00:00.000Z" }
-      ],
       "createdAt": "2026-03-01T10:00:00.000Z",
       "updatedAt": "2026-03-01T10:00:00.000Z"
     }
@@ -62,22 +63,23 @@ GET /api/alerts/incidents/:incidentId
     "_id": "inc_abc123",
     "ruleId": "rule_xyz",
     "ruleName": "High Error Rate",
-    "metric": "model_usage_error_rate",
+    "metric": "error_rate",
     "threshold": 5,
     "actualValue": 12.3,
     "severity": "critical",
     "status": "acknowledged",
+    "firedAt": "2026-03-01T10:00:00.000Z",
+    "alertEventId": "evt_def456",
+    "projectId": "proj_123",
+    "tenantId": "tenant_1",
+    "acknowledgedAt": "2026-03-01T10:15:00.000Z",
     "notes": [
       {
         "userId": "user_1",
-        "userEmail": "admin@example.com",
+        "userName": "Admin User",
         "content": "Investigating upstream provider issues",
         "createdAt": "2026-03-01T10:30:00.000Z"
       }
-    ],
-    "statusHistory": [
-      { "status": "open", "changedBy": "system", "changedAt": "2026-03-01T10:00:00.000Z" },
-      { "status": "acknowledged", "changedBy": "user_1", "changedAt": "2026-03-01T10:15:00.000Z" }
     ],
     "createdAt": "2026-03-01T10:00:00.000Z",
     "updatedAt": "2026-03-01T10:15:00.000Z"
@@ -113,11 +115,19 @@ PATCH /api/alerts/incidents/:incidentId
 
 ```
 open → acknowledged → investigating → resolved → closed
-  ↑                                      │
-  └──────────── reopen ──────────────────┘
+  │                                      │          │
+  ├──────────── resolved ────────────────┤          │
+  ├──────────── closed ──────────────────┼──────────┤
+  └──────────── reopen (open) ◄──────────┴──────────┘
 ```
 
-Resolved incidents may be reopened back to `open` if the issue recurs.
+In addition to the linear path, an incident may go directly from `open` to
+`resolved` or `closed`, and a `resolved` or `closed` incident may be reopened back
+to `open` if the issue recurs.
+
+There is no `statusHistory` array. Transitions are tracked via the timestamp
+fields `acknowledgedAt`, `resolvedAt`, `closedAt`, and the `resolvedBy` actor,
+which are set as the incident moves through its lifecycle.
 
 ## Add Note
 
