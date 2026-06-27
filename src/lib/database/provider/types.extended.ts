@@ -542,6 +542,8 @@ export interface ISandboxTemplate {
   volumeMounts: Array<Record<string, unknown>>;
   /** Idle window (seconds) before reaping a sandbox of this template; null = use the tenant/config default. */
   idleReapSeconds: number | null;
+  /** Number of pre-started "warm" sandboxes kept ready for instant launch (0/null = off). */
+  warmPoolSize: number | null;
   enabled: boolean;
   createdBy: string;
   createdAt: Date;
@@ -588,6 +590,10 @@ export interface ISandboxInstance {
   blockNetwork: boolean;
   /** Per-instance resource limit override ({cpuCores,memoryMb,diskMb,pids}); null = use the template's. */
   resources: Record<string, unknown> | null;
+  /** True while this is an unassigned pre-warmed pool container (hidden from users). */
+  warm: boolean;
+  /** Which warm pool this belongs to: `template:<id>` or `snapshot:<id>` (null when not pooled). */
+  warmKey: string | null;
   lastError: string | null;
   lastActivityAt: Date | null;
   createdBy: string;
@@ -689,6 +695,8 @@ export interface ISandboxSnapshot {
   blockNetwork: boolean;
   /** Resource override captured at snapshot time ({cpuCores,memoryMb,diskMb}); null = template's. */
   resources: Record<string, unknown> | null;
+  /** Pre-started "warm" sandboxes kept ready to resume from this snapshot (0/null = off; only for volume-less snapshots). */
+  warmPoolSize: number | null;
   sizeBytes: number | null;
   status: SandboxSnapshotStatus;
   lastError: string | null;

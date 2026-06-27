@@ -392,6 +392,10 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, 'sandbox_instances', 'blockNetwork', 'blockNetwork INTEGER NOT NULL DEFAULT 0');
     this.ensureTableColumn(db, 'sandbox_instances', 'resources', 'resources TEXT');
     this.ensureTableColumn(db, 'sandbox_templates', 'idleReapSeconds', 'idleReapSeconds INTEGER');
+    this.ensureTableColumn(db, 'sandbox_templates', 'warmPoolSize', 'warmPoolSize INTEGER');
+    this.ensureTableColumn(db, 'sandbox_instances', 'warm', 'warm INTEGER NOT NULL DEFAULT 0');
+    this.ensureTableColumn(db, 'sandbox_instances', 'warmKey', 'warmKey TEXT');
+    this.ensureTableColumn(db, 'sandbox_snapshots', 'warmPoolSize', 'warmPoolSize INTEGER');
     this.ensureTableColumn(db, 'sandbox_volumes', 'bucketKey', 'bucketKey TEXT');
     this.ensureTableColumn(db, 'sandbox_snapshots', 'blockNetwork', 'blockNetwork INTEGER NOT NULL DEFAULT 0');
     this.ensureTableColumn(db, 'sandbox_snapshots', 'resources', 'resources TEXT');
