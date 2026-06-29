@@ -429,6 +429,9 @@ export class SQLiteProviderBase {
     // Realtime models can generate responses through an agent instead of a
     // raw chat model (added later). Safe to ensure on boot.
     this.ensureTableColumn(db, TABLES.realtimeModels, 'agentKey', 'agentKey TEXT');
+    // Per-project sandbox resource defaults (added with port preview + resource
+    // limits). Safe to ensure on boot for tenants created before the feature.
+    this.ensureTableColumn(db, 'sandbox_settings', 'projectResourceDefaults', 'projectResourceDefaults TEXT');
   }
 
   private migrateOcrJobsSchema(db: Database.Database): void {

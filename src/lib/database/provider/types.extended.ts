@@ -713,6 +713,13 @@ export interface ISandboxSettings {
   defaultStorageProvider: string | null;
   defaultIsolation: string | null;
   idleReapSeconds: number;
+  /**
+   * Per-project default resource limits for new sandboxes, keyed by projectId.
+   * Each value is a partial `{cpuCores,memoryMb,diskMb,pids}`. Falls back to the
+   * platform default (SANDBOX_DEFAULT_*) and is clamped to the hard cap
+   * (SANDBOX_MAX_*). Empty/absent = use the platform default for every project.
+   */
+  projectResourceDefaults?: Record<string, Record<string, number>> | null;
   createdAt: Date;
   updatedAt: Date;
 }
