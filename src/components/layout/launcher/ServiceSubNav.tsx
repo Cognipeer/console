@@ -4,6 +4,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import {
   IconAlertTriangle,
   IconArrowLeftRight,
+  IconArrowsSplit,
   IconArrowsSort,
   IconBell,
   IconBook,
@@ -231,7 +232,8 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       // Active on the list with no type filter and on every model detail/edit page.
       matcher: (p, s) =>
         p.startsWith('/dashboard/models') &&
-        !MODEL_TYPE_KEYS.includes(s.get('type') ?? ''),
+        !MODEL_TYPE_KEYS.includes(s.get('type') ?? '') &&
+        s.get('create') !== 'dynamic',
     },
     {
       id: 'llm',
@@ -239,6 +241,13 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       href: '/dashboard/models?type=llm',
       icon: IconBrain,
       matcher: (p, s) => p === '/dashboard/models' && s.get('type') === 'llm',
+    },
+    {
+      id: 'dynamic-llm',
+      label: 'Dynamic LLM',
+      href: '/dashboard/models?create=dynamic',
+      icon: IconArrowsSplit,
+      matcher: (p, s) => p === '/dashboard/models' && s.get('create') === 'dynamic',
     },
     {
       id: 'embedding',

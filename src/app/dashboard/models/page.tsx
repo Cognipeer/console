@@ -21,7 +21,6 @@ import { notifications } from '@mantine/notifications';
 import {
   IconActivity,
   IconAlertTriangle,
-  IconArrowsSplit,
   IconBolt,
   IconBrain,
   IconChartBar,
@@ -204,6 +203,13 @@ export default function ModelsPage() {
     typeParam && MODEL_TYPE_KEYS.includes(typeParam as ModelCategory)
       ? (typeParam as ModelCategory)
       : 'all';
+  const dynamicCreateRequested = searchParams.get('create') === 'dynamic';
+
+  useEffect(() => {
+    if (!dynamicCreateRequested) return;
+    setDynamicEdit(null);
+    setDynamicModalOpen(true);
+  }, [dynamicCreateRequested]);
 
   const loadModels = useCallback(async () => {
     setLoading(true);
@@ -315,11 +321,6 @@ export default function ModelsPage() {
     [models],
   );
 
-  const openDynamicCreate = () => {
-    setDynamicEdit(null);
-    setDynamicModalOpen(true);
-  };
-
   const openDynamicEdit = (m: ModelDto) => {
     const dynamic = dynamicConfigOf(m);
     if (!dynamic) return;
@@ -384,6 +385,16 @@ export default function ModelsPage() {
     void loadDashboard();
   };
 
+  const closeDynamicModal = () => {
+    setDynamicModalOpen(false);
+    if (!dynamicCreateRequested) return;
+
+    const nextParams = new URLSearchParams(searchParams.toString());
+    nextParams.delete('create');
+    const queryString = nextParams.toString();
+    router.replace(queryString ? `/dashboard/models?${queryString}` : '/dashboard/models');
+  };
+
   return (
     <PageContainer>
       <PageHeader
@@ -402,14 +413,6 @@ export default function ModelsPage() {
           <>
             <DashboardDateFilter value={dateFilter} onChange={setDateFilter} />
             <Button
-              variant="default"
-              size="sm"
-              leftSection={<IconPlug size={14} stroke={1.7} />}
-              onClick={() => setProviderModalOpen(true)}
-            >
-              Add provider
-            </Button>
-            <Button
               variant="subtle"
               size="sm"
               leftSection={<IconExternalLink size={14} stroke={1.7} />}
@@ -417,14 +420,6 @@ export default function ModelsPage() {
               href="/dashboard/providers"
             >
               Browse providers
-            </Button>
-            <Button
-              variant="default"
-              size="sm"
-              leftSection={<IconArrowsSplit size={14} stroke={1.7} />}
-              onClick={openDynamicCreate}
-            >
-              Dynamic LLM
             </Button>
             <Button
               color="teal"
@@ -827,7 +822,7 @@ export default function ModelsPage() {
 
       <CreateDynamicModelModal
         opened={dynamicModalOpen}
-        onClose={() => setDynamicModalOpen(false)}
+        onClose={closeDynamicModal}
         candidates={dynamicCandidates}
         editModel={dynamicEdit}
         onSaved={() => {
