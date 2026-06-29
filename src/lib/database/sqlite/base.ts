@@ -432,6 +432,10 @@ export class SQLiteProviderBase {
     // Per-project sandbox resource defaults (added with port preview + resource
     // limits). Safe to ensure on boot for tenants created before the feature.
     this.ensureTableColumn(db, 'sandbox_settings', 'projectResourceDefaults', 'projectResourceDefaults TEXT');
+    // Per-sandbox preview toggles (enabled + public/private). Safe to ensure on
+    // boot; default enabled=on, public=off (private behind login).
+    this.ensureTableColumn(db, 'sandbox_instances', 'previewEnabled', 'previewEnabled INTEGER NOT NULL DEFAULT 1');
+    this.ensureTableColumn(db, 'sandbox_instances', 'previewPublic', 'previewPublic INTEGER NOT NULL DEFAULT 0');
   }
 
   private migrateOcrJobsSchema(db: Database.Database): void {

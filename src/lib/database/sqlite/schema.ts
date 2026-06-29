@@ -1930,6 +1930,8 @@ export const TENANT_SCHEMA_SQL = `
     env TEXT,
     persist INTEGER NOT NULL DEFAULT 0,
     blockNetwork INTEGER NOT NULL DEFAULT 0,
+    previewEnabled INTEGER NOT NULL DEFAULT 1,
+    previewPublic INTEGER NOT NULL DEFAULT 0,
     resources TEXT,
     warm INTEGER NOT NULL DEFAULT 0,
     warmKey TEXT,

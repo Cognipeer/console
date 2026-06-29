@@ -48,7 +48,8 @@ Fields:
 5. **Resources** — vCPU / memory (MB) / disk (MB) for this sandbox. Leave a field **blank** to inherit the project default, then the platform default (see [Resource limits](#resource-limits)). Values above the operator cap are clamped on launch.
 6. **Persistent** — when checked, the sandbox survives restarts and is **exempt from idle cleanup**. Ephemeral sandboxes are reaped once idle (see [Idle reaping](#settings)).
 7. **Block all network access** — when checked, all outbound traffic from the container is blocked (preview ports are also disabled).
-8. **Environment variables** — per-sandbox env, merged over the template's defaults.
+8. **Enable port preview** / **Allow public share links** — turn preview on (default) and choose public (session-less share links) vs private (login-only). Both are also editable later from the Preview tab.
+9. **Environment variables** — per-sandbox env, merged over the template's defaults.
 
 Submitting calls `POST /api/sandbox/instances`, which records the sandbox in `pending`, picks a runner, and enqueues a `create-sandbox` command. The runner pulls/starts the container and reports back; the row flips to `Started`.
 
@@ -89,7 +90,12 @@ How it works — and why it needs **no ingress, DNS, or subdomain change**:
 
 Previewing requires the sandbox to be **running** and network **not** blocked. WebSocket upgrades (e.g. Vite HMR) are not proxied — the app still renders; only live-reload over WS is unavailable.
 
-The same proxy is available on the token API for agents: `GET /api/client/v1/sandbox/sandboxes/:id` returns the previewable `ports` (with proxy URLs), and `POST …/:id/preview-tokens` mints a share link.
+**Per-sandbox toggles** (top of the Preview tab, set at create time or live afterwards):
+
+- **Preview enabled** — turn preview on/off for this sandbox. When off, both the authenticated proxy and any share links are refused (applied instantly, no restart).
+- **Public access** — when on, session-less **share links** can be issued; when off the preview is **private**, reachable only through the authenticated proxy (a logged-in project member). Toggling public off immediately revokes already-minted share links. Public links additionally need `SANDBOX_PREVIEW_SECRET` on the server.
+
+The same controls are on the token API for agents: `GET /api/client/v1/sandbox/sandboxes/:id` returns `preview.{enabled,public,ports,sharingEnabled}`, `PATCH …/:id/preview` toggles `{enabled,public}`, and `POST …/:id/preview-tokens` mints a share link (only when the sandbox is enabled + public). Both flags are also accepted on create (`previewEnabled`, `previewPublic`).
 
 ### Terminal
 
@@ -198,7 +204,8 @@ Every screen above is backed by the `/api/sandbox/*` admin API (cookie-authentic
 | `POST /api/sandbox/instances/:id/exec` | Run a shell command, return exit/stdout/stderr |
 | `POST /api/sandbox/instances/:id/code` | Run a code block (`python`/`javascript`/`typescript`/`bash`) |
 | `POST /api/sandbox/instances/:id/terminal` | Open a terminal session (returns a WebSocket path) |
-| `GET /api/sandbox/instances/:id/preview` | List previewable ports + proxy URLs |
+| `GET /api/sandbox/instances/:id/preview` | Preview state: enabled/public + previewable ports |
+| `PATCH /api/sandbox/instances/:id/preview` | Toggle preview `{enabled, public}` |
 | `ALL /api/sandbox/instances/:id/preview/:port/*` | Proxy to a port inside the sandbox (authenticated) |
 | `POST /api/sandbox/instances/:id/preview-tokens` | Mint a session-less share link for a port |
 | `ALL /api/sandbox/preview/:token/*` | Public preview proxy (signed token, no session) |

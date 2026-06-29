@@ -588,6 +588,17 @@ export interface ISandboxInstance {
   persist: boolean;
   /** Block all outbound network access from the sandbox container. */
   blockNetwork: boolean;
+  /**
+   * Port preview enabled for this sandbox. When false, the preview proxy (and
+   * share links) refuse access regardless of running state. Defaults to true.
+   */
+  previewEnabled?: boolean;
+  /**
+   * Allow public (session-less, signed share-link) preview access. When false,
+   * preview is private — reachable only through the authenticated proxy (login).
+   * Public links additionally require SANDBOX_PREVIEW_SECRET. Defaults to false.
+   */
+  previewPublic?: boolean;
   /** Per-instance resource limit override ({cpuCores,memoryMb,diskMb,pids}); null = use the template's. */
   resources: Record<string, unknown> | null;
   /** True while this is an unassigned pre-warmed pool container (hidden from users). */
