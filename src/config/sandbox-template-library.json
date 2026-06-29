@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "templates": [
     {
       "key": "multi-base",
@@ -8,13 +8,14 @@
       "baseImage": "cognipeer/sandbox-base:latest",
       "runtime": "multi",
       "isolation": "runc",
-      "resources": { "cpuCores": 2, "memoryMb": 4096, "diskMb": 16384, "pids": 1024 },
+      "resources": {},
       "env": {},
       "toolboxPort": 8787,
       "previewPorts": [
         { "port": 3000, "label": "dev server" },
         { "port": 5173, "label": "vite" },
-        { "port": 8000, "label": "http" }
+        { "port": 8000, "label": "http" },
+        { "port": 8080, "label": "app" }
       ],
       "default": true
     }

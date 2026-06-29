@@ -2024,6 +2024,7 @@ export const TENANT_SCHEMA_SQL = `
     defaultStorageProvider TEXT,
     defaultIsolation TEXT,
     idleReapSeconds INTEGER NOT NULL DEFAULT 1800,
+    projectResourceDefaults TEXT,
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   );

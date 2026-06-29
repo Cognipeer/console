@@ -45,7 +45,7 @@ Fields:
 2. **Name** — a human label; if omitted, one is generated.
 3. **Template** — the base image and runtime to launch (e.g. *Python 3.12*, *Node.js 22*, or the multi-runtime *Cognipeer Sandbox* base).
 4. **Volume** *(optional)* — attach a persistent volume mounted at `/workspace`. `None` means an ephemeral workspace that disappears when the container is removed.
-5. **Resources** — override the template's vCPU / memory (MB) / disk (MB) limits for this sandbox.
+5. **Resources** — vCPU / memory (MB) / disk (MB) for this sandbox. Leave a field **blank** to inherit the project default, then the platform default (see [Resource limits](#resource-limits)). Values above the operator cap are clamped on launch.
 6. **Persistent** — when checked, the sandbox survives restarts and is **exempt from idle cleanup**. Ephemeral sandboxes are reaped once idle (see [Idle reaping](#settings)).
 7. **Block all network access** — when checked, all outbound traffic from the container is blocked (preview ports are also disabled).
 8. **Environment variables** — per-sandbox env, merged over the template's defaults.
@@ -62,7 +62,7 @@ The **Resources** column shows the effective vCPU / memory / disk limits, **Upti
 
 ## Inspect a sandbox
 
-Clicking a row opens the detail screen, organised into four tabs.
+Clicking a row opens the detail screen, organised into tabs: **Overview**, **Metrics**, **Preview**, **Terminal**, and **Filesystem**.
 
 ### Overview
 
@@ -75,6 +75,21 @@ The overview is the operational summary: name, UUID, region, class (Container), 
 ![Sandbox detail — metrics](/screenshots/sandbox/06-instance-metrics.png)
 
 Live container stats sampled from the runner: uptime, CPU percentage, and memory used against the limit. If the runner cannot report stats, the panel says so rather than showing stale numbers.
+
+### Preview
+
+The Preview tab reaches a web service you start **inside** the sandbox — a dev server, a built app, an API — from your browser. This makes the dev-agent loop work end to end: an agent writes code, starts `npm run dev` (or `python -m http.server`, `vite`, …), and you open the result; once it's right, the agent commits and pushes to git (the sandbox has full network egress unless you blocked it).
+
+How it works — and why it needs **no ingress, DNS, or subdomain change**:
+
+- Preview ports are published to ephemeral host ports when the container starts. The default published set is `3000, 5173, 8000, 8080` plus any ports declared on the template (override with `SANDBOX_PREVIEW_PORTS`).
+- A request to `/api/sandbox/instances/:id/preview/:port/*` is proxied — riding the **console's existing origin** under a path — to that port inside the sandbox. **Open** launches it in a new tab (authenticated by your dashboard session).
+- HTML responses get a `<base href>` injected so a dev server emitting relative asset URLs renders correctly under the sub-path. For apps that hardcode absolute root paths, configure their base path (Vite `base`, Next `basePath`, CRA `PUBLIC_URL`).
+- **Share link** issues a short-lived, signed, **session-less** URL (`/api/sandbox/preview/<token>/`) so you can hand a running app to someone without a dashboard login. Sharing is enabled by setting `SANDBOX_PREVIEW_SECRET`; links default to a 24-hour TTL.
+
+Previewing requires the sandbox to be **running** and network **not** blocked. WebSocket upgrades (e.g. Vite HMR) are not proxied — the app still renders; only live-reload over WS is unavailable.
+
+The same proxy is available on the token API for agents: `GET /api/client/v1/sandbox/sandboxes/:id` returns the previewable `ports` (with proxy URLs), and `POST …/:id/preview-tokens` mints a share link.
 
 ### Terminal
 
@@ -133,6 +148,17 @@ Switch between **Code**, **Shell**, and **API** modes, choose the language (Pyth
 
 The reaper scans on a fixed interval and skips any sandbox that has a live terminal session, so an interactive session won't be pulled out from under you.
 
+### Resource limits
+
+New sandboxes default to **0.5 vCPU / 1 GB RAM / 1 GB disk**. The effective limit for a launch is resolved in layers — first defined wins per field, then clamped to the operator hard cap:
+
+1. **Per-sandbox** — the Resources fields in the create dialog (or `resources` in the API).
+2. **Per-project** — the **Project resource defaults** card on the Settings page (stored against the active project).
+3. **Platform default** — `SANDBOX_DEFAULT_CPU` / `_MEMORY_MB` / `_DISK_MB` / `_PIDS` (env), falling back to the built-in `0.5 / 1024 / 1024 / 512`.
+4. **Hard cap** — `SANDBOX_MAX_CPU` / `_MEMORY_MB` / `_DISK_MB` / `_PIDS` (env). Operator-owned; the UI and token API can never exceed it. `0`/unset = unbounded.
+
+CPU and memory are always enforced by the container engine. **Disk** (`diskMb`) is enforced only when `SANDBOX_DISK_QUOTA=on` **and** the Docker storage driver supports `--storage-opt size` (overlay2 on xfs pquota, or btrfs); otherwise it is tracked and shown but advisory.
+
 ## Runtime architecture
 
 A sandbox is driven by a **runner**. The console never blocks on container work — it enqueues a command and reconciles state from the events the runner reports back.
@@ -172,6 +198,11 @@ Every screen above is backed by the `/api/sandbox/*` admin API (cookie-authentic
 | `POST /api/sandbox/instances/:id/exec` | Run a shell command, return exit/stdout/stderr |
 | `POST /api/sandbox/instances/:id/code` | Run a code block (`python`/`javascript`/`typescript`/`bash`) |
 | `POST /api/sandbox/instances/:id/terminal` | Open a terminal session (returns a WebSocket path) |
+| `GET /api/sandbox/instances/:id/preview` | List previewable ports + proxy URLs |
+| `ALL /api/sandbox/instances/:id/preview/:port/*` | Proxy to a port inside the sandbox (authenticated) |
+| `POST /api/sandbox/instances/:id/preview-tokens` | Mint a session-less share link for a port |
+| `ALL /api/sandbox/preview/:token/*` | Public preview proxy (signed token, no session) |
+| `GET PUT /api/sandbox/resource-config` | Read / set the active project's resource defaults |
 | `POST /api/sandbox/instances/:id/snapshot` · `/fork` | Capture / clone |
 | `POST /api/sandbox/instances/:id/volume` · `DELETE …` | Attach / detach a volume |
 | `GET POST /api/sandbox/templates` · `/templates/seed` | Manage templates |
@@ -192,12 +223,19 @@ Beyond the in-app [Settings](#settings), a few environment variables tune the ru
 | `SANDBOX_SNAPSHOT_CONTAINER` | `cognipeer-sandbox` | Default object-storage container for snapshot backups. |
 | `SANDBOX_BASE_IMAGE` | — | Override the base image used for the multi-runtime template. |
 | `SANDBOX_CONSOLE_URL` | `http://localhost:$PORT` | Callback URL advertised to console-managed runners. |
+| `SANDBOX_PREVIEW_PORTS` | `3000,5173,8000,8080` | Ports published for preview (comma list; `a-b` ranges allowed). |
+| `SANDBOX_PREVIEW_PROXY_HOST` | auto | Host the published ports are reached at. Auto-derived from `DOCKER_HOST` (`tcp://host:…` → `host`), else `127.0.0.1`. Set when the console can't reach the engine host directly. |
+| `SANDBOX_PREVIEW_SECRET` | — | HMAC secret enabling session-less **share links**. Unset = sharing disabled (authenticated preview still works). |
+| `SANDBOX_DEFAULT_CPU` / `_MEMORY_MB` / `_DISK_MB` / `_PIDS` | `0.5` / `1024` / `1024` / `512` | Platform default resource limits for new sandboxes. |
+| `SANDBOX_MAX_CPU` / `_MEMORY_MB` / `_DISK_MB` / `_PIDS` | — | Hard upper bound per field (`0`/unset = unbounded). Clamps every launch. |
+| `SANDBOX_DISK_QUOTA` | `off` | `on` enforces `diskMb` via `--storage-opt size` (needs xfs-pquota / btrfs); otherwise disk is advisory. |
 
 ## Security & tenant isolation
 
 - Every request is bound to the calling tenant's database for the full async execution, preventing cross-tenant reads under concurrency.
 - Runner agents authenticate with hashed tokens: a one-time **registration token** (`sbref_…`) exchanged at handshake for a long-lived **agent token** (`sbat_…`), compared in constant time and rotatable from the UI.
 - **Block network access** removes outbound connectivity for a sandbox; the isolation level (`runc`, `gvisor`, …) governs container-to-host isolation.
+- **Preview share links** are HMAC-signed capability tokens scoped to a single instance + port with a short TTL — anyone with the link reaches only that one port, and only until it expires. Sharing is off unless `SANDBOX_PREVIEW_SECRET` is set. The authenticated preview proxy stays bound to the caller's session and project.
 
 ## Where to go next
 
