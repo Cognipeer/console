@@ -40,7 +40,7 @@
     "@langchain/core": "^1.1.46",
     "@langchain/google-vertexai": "^2.1.26",
     "@langchain/langgraph-sdk": "^1.9.2",
-    "@langchain/ollama": "^1.2.6",
+    "@langchain/ollama": "^1.2.7",
     "@langchain/openai": "^1.4.4",
     "@mantine/charts": "^8.3.2",
     "@mantine/core": "^8.3.2",
