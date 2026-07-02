@@ -13,6 +13,7 @@
 
 import { createLogger } from '@/lib/core/logger';
 import { withResilience } from '@/lib/core/resilience';
+import { safeFetch } from '@/lib/security/outboundFetch';
 import { loadProviderRuntimeData } from '@/lib/services/providers/providerService';
 import type { IModel } from '@/lib/database';
 
@@ -215,7 +216,7 @@ async function callOpenAICompatibleRerank(input: {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (input.apiKey) headers.Authorization = `Bearer ${input.apiKey}`;
   const response = await withResilience(
-    () => fetch(url, { method: 'POST', headers, body: JSON.stringify(body) }),
+    () => safeFetch(url, { method: 'POST', headers, body: JSON.stringify(body) }),
     { key: 'rerank:openai-compatible' },
   );
   if (!response.ok) {

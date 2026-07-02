@@ -18,6 +18,8 @@ const MODULE_LABELS: Record<string, string> = {
   'gpu-fleet': 'GPU Fleet',
   sandbox: 'Agent Sandbox',
   cluster: 'Cluster (multi-node)',
+  'prompt-optimizer': 'Prompt Optimizer',
+  realtime: 'Realtime',
 };
 
 export function EnterpriseUpsell({ module }: EnterpriseUpsellProps) {

@@ -73,6 +73,16 @@ const METRIC_LABELS: Record<string, string> = {
   rag_avg_latency_ms: 'Avg Latency',
   rag_total_queries: 'Total Queries',
   rag_failed_documents: 'Failed Docs',
+  mcp_error_rate: 'Error Rate',
+  mcp_avg_latency_ms: 'Avg Latency',
+  mcp_total_requests: 'Total Requests',
+  evaluation_pass_rate: 'Pass Rate',
+  evaluation_avg_score: 'Avg Score',
+  analysis_pass_rate: 'Pass Rate',
+  analysis_avg_judge_score: 'Avg Judge Score',
+  analysis_avg_accuracy: 'Avg Accuracy',
+  redteam_attack_success_rate: 'Attack Success Rate',
+  redteam_resilience_score: 'Resilience Score',
 };
 
 const METRIC_UNITS: Record<string, string> = {
@@ -89,6 +99,16 @@ const METRIC_UNITS: Record<string, string> = {
   rag_avg_latency_ms: 'ms',
   rag_total_queries: '',
   rag_failed_documents: '',
+  mcp_error_rate: '%',
+  mcp_avg_latency_ms: 'ms',
+  mcp_total_requests: '',
+  evaluation_pass_rate: '%',
+  evaluation_avg_score: '%',
+  analysis_pass_rate: '%',
+  analysis_avg_judge_score: '%',
+  analysis_avg_accuracy: '%',
+  redteam_attack_success_rate: '%',
+  redteam_resilience_score: '%',
 };
 
 const MODULE_LABELS: Record<string, string> = {
@@ -96,6 +116,10 @@ const MODULE_LABELS: Record<string, string> = {
   inference: 'Model Monitoring',
   guardrails: 'Guardrail',
   rag: 'Knowledge Engine',
+  mcp: 'MCP Servers',
+  evaluation: 'Evaluation',
+  analysis: 'Analysis',
+  redteam: 'Red Team',
 };
 
 const MODULE_COLORS: Record<string, string> = {
@@ -103,6 +127,10 @@ const MODULE_COLORS: Record<string, string> = {
   inference: 'teal',
   guardrails: 'grape',
   rag: 'indigo',
+  mcp: 'cyan',
+  evaluation: 'green',
+  analysis: 'lime',
+  redteam: 'red',
 };
 
 const OPERATOR_SYMBOLS: Record<string, string> = {
@@ -119,6 +147,10 @@ function inferModule(metric: string): string {
   if (['gpu_cache_usage', 'request_queue_depth'].includes(metric)) return 'inference';
   if (metric.startsWith('guardrail_')) return 'guardrails';
   if (metric.startsWith('rag_')) return 'rag';
+  if (metric.startsWith('mcp_')) return 'mcp';
+  if (metric.startsWith('evaluation_')) return 'evaluation';
+  if (metric.startsWith('analysis_')) return 'analysis';
+  if (metric.startsWith('redteam_')) return 'redteam';
   return 'models';
 }
 

@@ -273,7 +273,6 @@ export type InstanceEntityType =
   | 'agent'
   | 'mcp'
   | 'browser'
-  | 'js-sandbox'
   | 'inference-server'
   | 'alert-rule'
   | 'automation'

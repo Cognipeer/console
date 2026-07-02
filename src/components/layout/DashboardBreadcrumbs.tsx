@@ -32,7 +32,6 @@ const SEGMENT_KEYS: Record<string, string> = {
   projects: 'projects',
   'inference-monitoring': 'inference-monitoring',
   mcp: 'mcp',
-  'js-sandbox': 'js-sandbox',
   servers: 'servers',
   members: 'members',
   providers: 'providers',

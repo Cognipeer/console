@@ -35,7 +35,7 @@ The suite exercises the full dashboard (cookie-session) API surface plus the Ope
 |---|---|
 | **Auth** | register, session, login, wrong-password rejection, forgot-password, unauthenticated → 401 |
 | **Health** | `/api/health/live`, `/api/health/ready` |
-| **CRUD lifecycles** | projects, prompts, guardrails, PII policies, evaluation datasets, analysis definitions, rerankers, alert rules, config groups/items, vector providers+indexes (+upsert/query against the built-in SQLite vector store), JS sandbox runtimes (+real isolated-vm execution), users (invite/delete), API tokens |
+| **CRUD lifecycles** | projects, prompts, guardrails, PII policies, evaluation datasets, analysis definitions, rerankers, alert rules, config groups/items, vector providers+indexes (+upsert/query against the built-in SQLite vector store), users (invite/delete), API tokens |
 | **Read paths** | models, providers, memory, RAG, tracing, redteam, audit, automations, cluster, crawler, browser, files, inference-monitoring, license, MCP, OCR jobs, quota, sandbox, tools |
 | **Client API** | Bearer-token auth enforcement, `GET /api/client/v1/prompts`, policy-based `POST /api/client/v1/pii/detect` |
 | **Metrics** | Prometheus `/api/metrics` with an API token |

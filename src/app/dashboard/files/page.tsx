@@ -101,6 +101,37 @@ export default function FilesDashboardPage() {
     },
   });
 
+  const toggleBucketStatus = useMutation({
+    mutationFn: async (bucket: FileBucketView) => {
+      const nextStatus = bucket.status === 'disabled' ? 'active' : 'disabled';
+      const { bucket: updated } = await apiRequest<{ bucket: FileBucketView }>(
+        `/api/files/buckets/${encodeURIComponent(bucket.key)}`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({ status: nextStatus }),
+        },
+      );
+      return updated;
+    },
+    onSuccess: (updated) => {
+      notifications.show({
+        color: 'green',
+        title: updated.status === 'disabled' ? 'Bucket disabled' : 'Bucket enabled',
+        message: `${updated.name} is now ${updated.status}.`,
+      });
+      queryClient.setQueryData<FileBucketView[]>(['file-buckets'], (current = []) =>
+        current.map((item) => (item.key === updated.key ? { ...item, ...updated } : item)),
+      );
+    },
+    onError: (error) => {
+      notifications.show({
+        color: 'red',
+        title: 'Unable to update bucket',
+        message: error instanceof Error ? error.message : 'Unexpected error',
+      });
+    },
+  });
+
   const buckets = useMemo(() => bucketsQuery.data ?? [], [bucketsQuery.data]);
   const loading = bucketsQuery.isPending;
 
@@ -288,6 +319,13 @@ export default function FilesDashboardPage() {
             label: 'Open bucket',
             icon: <IconFolder size={14} />,
             onClick: () => router.push(`/dashboard/files/${encodeURIComponent(b.key)}`),
+          },
+          {
+            id: 'toggle-status',
+            label: b.status === 'disabled' ? 'Enable' : 'Disable',
+            icon: b.status === 'disabled' ? <IconCheck size={14} /> : <IconBan size={14} />,
+            disabled: toggleBucketStatus.isPending,
+            onClick: () => toggleBucketStatus.mutate(b),
           },
           { divider: true },
           {

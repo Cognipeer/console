@@ -17,6 +17,7 @@ import {
   listFileBuckets,
   listFileProviders,
   listFiles,
+  updateFileBucket,
   uploadFile,
 } from '@/lib/services/files';
 import {
@@ -310,6 +311,43 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
         session.tenantId,
         projectId,
         bucketKey,
+      );
+
+      return reply.code(200).send({ bucket });
+    } catch (error) {
+      if (error instanceof Error && error.message === 'File bucket not found.') {
+        return reply.code(404).send({ error: 'Bucket not found' });
+      }
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({
+          error: error instanceof Error ? error.message : 'Internal server error',
+        });
+    }
+  }));
+
+  app.patch('/files/buckets/:bucketKey', withApiRequestContext(async (request, reply) => {
+    try {
+      const { bucketKey } = request.params as { bucketKey: string };
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const body = readJsonBody<Record<string, unknown>>(request);
+
+      const updates: Parameters<typeof updateFileBucket>[4] = { updatedBy: session.userId };
+      if (typeof body.name === 'string') updates.name = body.name;
+      if (typeof body.description === 'string') updates.description = body.description;
+      if (typeof body.prefix === 'string') updates.prefix = body.prefix;
+      if (body.metadata && typeof body.metadata === 'object') {
+        updates.metadata = body.metadata as Record<string, unknown>;
+      }
+      if (body.status === 'active' || body.status === 'disabled') {
+        updates.status = body.status;
+      }
+
+      const bucket = await updateFileBucket(
+        session.tenantDbName,
+        session.tenantId,
+        projectId,
+        bucketKey,
+        updates,
       );
 
       return reply.code(200).send({ bucket });

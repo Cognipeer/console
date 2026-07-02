@@ -1,13 +1,8 @@
 import { ChatOpenAI, OpenAIEmbeddings, AzureChatOpenAI, AzureOpenAIEmbeddings } from '@langchain/openai';
 import { ChatTogetherAI } from '@langchain/community/chat_models/togetherai';
 import { TogetherAIEmbeddings } from '@langchain/community/embeddings/togetherai';
-import { ChatOllama } from '@langchain/ollama';
-import { OllamaEmbeddings } from '@langchain/ollama';
 import { ChatBedrockConverse, BedrockEmbeddings } from '@langchain/aws';
 import { VertexAI, VertexAIEmbeddings } from '@langchain/google-vertexai';
-import { SimpleChatModel } from '@langchain/core/language_models/chat_models';
-import type { BaseMessage } from '@langchain/core/messages';
-import type { CallbackManagerForLLMRun } from '@langchain/core/callbacks/manager';
 import type { ProviderContract } from '../types';
 import type { ModelProviderRuntime } from '../domains/model';
 import {
@@ -66,14 +61,8 @@ interface AzureSettings {
   apiVersion: string;
 }
 
-type OllamaCredentials = Record<string, never>;
-
-interface OllamaSettings {
-  baseUrl: string;
-}
-
-interface CognipeerLlmCredentials {
-  url: string;
+interface RerankCredentials {
+  apiKey: string;
 }
 
 interface ModelSettingsOverrides {
@@ -276,7 +265,7 @@ export const OpenAiCompatibleModelProviderContract: ProviderContract<ModelProvid
     description: 'Any API following the OpenAI REST schema (Mistral, Groq, Deepgram-OpenAI, ElevenLabs-OpenAI, …) including /v1/audio/* and VLM-based OCR.',
   },
   capabilities: {
-    'model.categories': ['llm', 'embedding', 'stt', 'tts', 'ocr'],
+    'model.categories': ['llm', 'embedding', 'rerank', 'stt', 'tts', 'ocr'],
     'model.supports.tool_calls': true,
     'model.supports.streaming': true,
     'model.supports.reasoning': true,
@@ -766,145 +755,76 @@ export const AzureModelProviderContract: ProviderContract<ModelProviderRuntime, 
   },
 };
 
-// ─── Ollama ──────────────────────────────────────────────────────────────────
+// ─── Dedicated rerank providers ──────────────────────────────────────────────
+// These providers expose only the `rerank` category. Reranking bypasses the
+// LangChain runtime entirely — it is executed directly against the provider's
+// HTTP /rerank endpoint by `src/lib/services/reranker/rerankAdapter.ts`, keyed
+// on the provider `driver` (which equals the contract `id`). The runtime factory
+// therefore returns an empty runtime; no chat/embedding model is ever built for
+// these providers.
+const EMPTY_RERANK_RUNTIME: () => ModelProviderRuntime = () => ({});
 
-export const OllamaModelProviderContract: ProviderContract<ModelProviderRuntime, OllamaCredentials, OllamaSettings> = {
-  id: 'ollama',
-  version: '1.0.0',
-  domains: ['model', 'embedding'],
-  display: {
-    label: 'Ollama',
-    description: 'Locally hosted open-source models via the Ollama runtime.',
-  },
-  capabilities: {
-    'model.categories': ['llm', 'embedding'],
-    'model.supports.tool_calls': false,
-    'model.supports.streaming': true,
-  },
-  form: {
+function rerankCredentialForm(apiKeyLabel = 'API Key'): ProviderContract['form'] {
+  return {
     sections: [
       {
-        title: 'Settings',
+        title: 'Credentials',
         fields: [
           {
-            name: 'baseUrl',
-            label: 'Base URL',
-            type: 'text',
+            name: 'apiKey',
+            label: apiKeyLabel,
+            type: 'password',
             required: true,
-            placeholder: 'http://localhost:11434',
-            description: 'URL of the running Ollama server.',
-            scope: 'settings',
           },
         ],
       },
     ],
-  },
-  createRuntime: ({ settings }) => {
-    const baseUrl = ensureValue(settings.baseUrl, 'Ollama base URL is required.');
-
-    const runtime: ModelProviderRuntime = {
-      createChatModel: (config) => {
-        const overrides = resolveOverrides(config.modelSettings);
-        return new ChatOllama({
-          model: config.modelId,
-          baseUrl,
-          temperature: overrides.temperature,
-        });
-      },
-      createEmbeddingModel: (config) =>
-        new OllamaEmbeddings({
-          model: config.modelId,
-          baseUrl,
-        }),
-    };
-
-    return runtime;
-  },
-};
-
-// ─── CognipeerLLM (custom HTTP chat endpoint) ────────────────────────────────
-
-class CognipeerLlmModel extends SimpleChatModel {
-  private readonly endpointUrl: string;
-
-  constructor(endpointUrl: string) {
-    super({});
-    this.endpointUrl = endpointUrl;
-  }
-
-  _llmType(): string {
-    return 'cognipeer-llm';
-  }
-
-  async _call(
-    messages: BaseMessage[],
-    options: this['ParsedCallOptions'],
-    runManager?: CallbackManagerForLLMRun,
-  ): Promise<string> {
-    void options;
-    void runManager;
-
-    const payload = messages.map((m) => ({
-      role: m._getType() === 'human' ? 'user' : m._getType() === 'ai' ? 'assistant' : m._getType(),
-      content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
-    }));
-
-    const response = await fetch(`${this.endpointUrl}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: payload }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`CognipeerLLM request failed: ${response.status} ${response.statusText}`);
-    }
-
-    const data = (await response.json()) as { message?: { content?: string }; content?: string };
-    const content = data?.message?.content ?? (data?.content as string | undefined) ?? '';
-    return content.trim();
-  }
+  };
 }
 
-export const CognipeerLlmModelProviderContract: ProviderContract<ModelProviderRuntime, CognipeerLlmCredentials, Record<string, never>> = {
-  id: 'cognipeer-llm',
+export const CohereModelProviderContract: ProviderContract<ModelProviderRuntime, RerankCredentials, Record<string, never>> = {
+  id: 'cohere',
   version: '1.0.0',
   domains: ['model'],
   display: {
-    label: 'Cognipeer LLM',
-    description: 'Custom self-hosted LLM accessible via an HTTP chat endpoint.',
+    label: 'Cohere',
+    description: 'Cohere dedicated rerank models (rerank-v3.5, rerank-multilingual-v3.0).',
   },
   capabilities: {
-    'model.categories': ['llm'],
-    'model.supports.tool_calls': false,
-    'model.supports.streaming': false,
+    'model.categories': ['rerank'],
   },
-  form: {
-    sections: [
-      {
-        title: 'Connection',
-        fields: [
-          {
-            name: 'url',
-            label: 'Endpoint URL',
-            type: 'text',
-            required: true,
-            placeholder: 'http://localhost:8080',
-            description: 'Base URL of the Cognipeer LLM server (without /api/chat).',
-            scope: 'credentials',
-          },
-        ],
-      },
-    ],
-  },
-  createRuntime: ({ credentials }) => {
-    const url = ensureValue(credentials.url, 'Cognipeer LLM endpoint URL is required.');
+  form: rerankCredentialForm(),
+  createRuntime: EMPTY_RERANK_RUNTIME,
+};
 
-    const runtime: ModelProviderRuntime = {
-      createChatModel: () => new CognipeerLlmModel(url),
-    };
-
-    return runtime;
+export const JinaAiModelProviderContract: ProviderContract<ModelProviderRuntime, RerankCredentials, Record<string, never>> = {
+  id: 'jina-ai',
+  version: '1.0.0',
+  domains: ['model'],
+  display: {
+    label: 'Jina AI',
+    description: 'Jina AI rerankers (jina-reranker-v2-base-multilingual).',
   },
+  capabilities: {
+    'model.categories': ['rerank'],
+  },
+  form: rerankCredentialForm(),
+  createRuntime: EMPTY_RERANK_RUNTIME,
+};
+
+export const VoyageAiModelProviderContract: ProviderContract<ModelProviderRuntime, RerankCredentials, Record<string, never>> = {
+  id: 'voyage-ai',
+  version: '1.0.0',
+  domains: ['model'],
+  display: {
+    label: 'Voyage AI',
+    description: 'Voyage AI rerank models (rerank-2, rerank-2-lite).',
+  },
+  capabilities: {
+    'model.categories': ['rerank'],
+  },
+  form: rerankCredentialForm(),
+  createRuntime: EMPTY_RERANK_RUNTIME,
 };
 
 export const MODEL_PROVIDER_CONTRACTS = [
@@ -914,4 +834,7 @@ export const MODEL_PROVIDER_CONTRACTS = [
   BedrockModelProviderContract,
   VertexModelProviderContract,
   AzureModelProviderContract,
+  CohereModelProviderContract,
+  JinaAiModelProviderContract,
+  VoyageAiModelProviderContract,
 ] as unknown as ProviderContract<ModelProviderRuntime, unknown, unknown>[];

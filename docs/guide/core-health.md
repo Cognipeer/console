@@ -143,7 +143,6 @@ The gateway registers these health checks at startup:
 | `cluster` | Node registry / online node count |
 | `queue` | Queue provider availability |
 | `browser-runtime` | Managed browser session runtime |
-| `js-sandbox-runtime` | JS sandbox executor runtime |
 | `automations` | Background automation/scheduler state |
 
 ## Configuration

@@ -25,7 +25,6 @@ import {
   IconBrain,
   IconChevronRight,
   IconDatabase,
-  IconDownload,
   IconPlus,
   IconRobot,
   IconRocket,
@@ -153,13 +152,6 @@ export default function DashboardOverviewPage() {
         actions={
           <>
             <DashboardDateFilter value={dateFilter} onChange={setDateFilter} />
-            <Button
-              variant="default"
-              size="sm"
-              leftSection={<IconDownload size={14} stroke={1.7} />}
-            >
-              Export
-            </Button>
             <Button
               color="teal"
               size="sm"

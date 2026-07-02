@@ -8,6 +8,7 @@
  */
 
 import { createLogger } from '@/lib/core/logger';
+import { safeFetch } from '@/lib/security/outboundFetch';
 import { decryptObject, encryptObject } from '@/lib/utils/crypto';
 import { loadProviderRuntimeData } from '@/lib/services/providers/providerService';
 import type { ExternalAgentProtocol, IExternalAgentConnection } from '@/lib/database';
@@ -163,30 +164,27 @@ async function postJson(
   headers: Record<string, string>,
   body: unknown,
 ): Promise<unknown> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
-  try {
-    const res = await fetch(url, {
+  const res = await safeFetch(
+    url,
+    {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    const text = await res.text();
-    let json: unknown;
-    try {
-      json = text ? JSON.parse(text) : undefined;
-    } catch {
-      json = text;
-    }
-    if (!res.ok) {
-      const detail = typeof json === 'string' ? json : JSON.stringify(json);
-      throw new Error(`External agent returned ${res.status}: ${detail?.slice(0, 500)}`);
-    }
-    return json;
-  } finally {
-    clearTimeout(timer);
+    },
+    { timeoutMs: DEFAULT_TIMEOUT_MS },
+  );
+  const text = await res.text();
+  let json: unknown;
+  try {
+    json = text ? JSON.parse(text) : undefined;
+  } catch {
+    json = text;
   }
+  if (!res.ok) {
+    const detail = typeof json === 'string' ? json : JSON.stringify(json);
+    throw new Error(`External agent returned ${res.status}: ${detail?.slice(0, 500)}`);
+  }
+  return json;
 }
 
 /* ── Protocol response extractors ─────────────────────────────────────── */

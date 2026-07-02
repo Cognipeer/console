@@ -52,6 +52,16 @@ const METRIC_LABELS: Record<string, string> = {
   rag_avg_latency_ms: 'Avg Latency',
   rag_total_queries: 'Total Queries',
   rag_failed_documents: 'Failed Docs',
+  mcp_error_rate: 'Error Rate',
+  mcp_avg_latency_ms: 'Avg Latency',
+  mcp_total_requests: 'Total Requests',
+  evaluation_pass_rate: 'Pass Rate',
+  evaluation_avg_score: 'Avg Score',
+  analysis_pass_rate: 'Pass Rate',
+  analysis_avg_judge_score: 'Avg Judge Score',
+  analysis_avg_accuracy: 'Avg Accuracy',
+  redteam_attack_success_rate: 'Attack Success Rate',
+  redteam_resilience_score: 'Resilience Score',
 };
 
 const METRIC_UNITS: Record<string, string> = {
@@ -68,6 +78,16 @@ const METRIC_UNITS: Record<string, string> = {
   rag_avg_latency_ms: 'ms',
   rag_total_queries: '',
   rag_failed_documents: '',
+  mcp_error_rate: '%',
+  mcp_avg_latency_ms: 'ms',
+  mcp_total_requests: '',
+  evaluation_pass_rate: '%',
+  evaluation_avg_score: '%',
+  analysis_pass_rate: '%',
+  analysis_avg_judge_score: '%',
+  analysis_avg_accuracy: '%',
+  redteam_attack_success_rate: '%',
+  redteam_resilience_score: '%',
 };
 
 const STATUS_COLORS: Record<string, string> = {

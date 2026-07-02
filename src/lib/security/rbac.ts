@@ -21,7 +21,6 @@ export type PermissionService =
   | 'pii'
   | 'mcp'
   | 'tools'
-  | 'js-sandbox'
   | 'sandbox'
   | 'browser'
   | 'crawler'
@@ -74,7 +73,6 @@ export const RBAC_SERVICE_DEFINITIONS: RbacServiceDefinition[] = [
   { id: 'agents', label: 'Agents', description: 'AI agents and agent versions.', category: 'build' },
   { id: 'mcp', label: 'MCP Servers', description: 'MCP server configuration and proxy APIs.', category: 'build' },
   { id: 'tools', label: 'Tools', description: 'Tool definitions and tool execution metadata.', category: 'build' },
-  { id: 'js-sandbox', label: 'JS Sandbox', description: 'Managed JavaScript runtimes and sandboxed executions.', category: 'build' },
   { id: 'vector', label: 'Knowledge Index', description: 'Vector providers, indexes and vector operations.', category: 'data' },
   { id: 'memory', label: 'Agent Memory', description: 'Memory stores and memory items.', category: 'data' },
   { id: 'files', label: 'Document Store', description: 'File buckets and file objects.', category: 'data' },
@@ -127,7 +125,6 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/client/v1/redteam', service: 'redteam' },
   { prefix: '/api/client/v1/pii', service: 'pii' },
   { prefix: '/api/client/v1/mcp', service: 'mcp' },
-  { prefix: '/api/client/v1/js-sandbox', service: 'js-sandbox' },
   { prefix: '/api/client/v1/sandbox', service: 'sandbox' },
   { prefix: '/api/client/v1/memory', service: 'memory' },
   { prefix: '/api/client/v1/prompts', service: 'prompts' },
@@ -173,7 +170,6 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/pii', service: 'pii' },
   { prefix: '/api/mcp', service: 'mcp' },
   { prefix: '/api/tools', service: 'tools' },
-  { prefix: '/api/js-sandbox', service: 'js-sandbox' },
   { prefix: '/api/browser', service: 'browser' },
   { prefix: '/api/crawler', service: 'crawler' },
   { prefix: '/api/ocr-jobs', service: 'ocr' },

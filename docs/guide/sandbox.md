@@ -1,6 +1,6 @@
 # Agent Sandbox
 
-The Agent Sandbox gives every project remote, API-driven runtime containers for running code, managing files, opening interactive terminals, and previewing apps. Where the [JS Sandbox](/guide/js-sandbox) runs short, isolated JavaScript snippets in-process, the Agent Sandbox boots a **full Linux container** (Python, Node, or a multi-runtime base image) that an agent — or a person — can drive over its whole lifecycle: create, exec, snapshot, fork, persist, and tear down.
+The Agent Sandbox gives every project remote, API-driven runtime containers for running code, managing files, opening interactive terminals, and previewing apps. It boots a **full Linux container** (Python, Node, or a multi-runtime base image) that an agent — or a person — can drive over its whole lifecycle: create, exec, snapshot, fork, persist, and tear down.
 
 It is the execution substrate behind coding agents and any workflow that needs a real shell, a real filesystem, and real packages rather than a sandboxed function.
 
@@ -246,7 +246,6 @@ Beyond the in-app [Settings](#settings), a few environment variables tune the ru
 
 ## Where to go next
 
-- [JS Sandbox](/guide/js-sandbox) — in-process JavaScript execution for lightweight, short-lived snippets.
 - [File Storage](/guide/files) — the buckets that back sandbox volumes and snapshot exports.
 - [Multi-Tenancy](/guide/multi-tenancy) — how the per-request tenant binding the sandbox relies on works.
 - [Licensing](/guide/licensing) — enabling enterprise modules.

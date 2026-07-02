@@ -61,8 +61,6 @@ export const COLLECTIONS = {
   configAuditLogs: 'config_audit_logs',
   mcpServers: 'mcp_servers',
   mcpRequestLogs: 'mcp_request_logs',
-  jsSandboxRuntimes: 'js_sandbox_runtimes',
-  jsSandboxExecutions: 'js_sandbox_executions',
   tools: 'tools',
   toolRequestLogs: 'tool_request_logs',
   agents: 'agents',

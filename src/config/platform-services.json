@@ -448,27 +448,6 @@
       "defaultPinned": true
     },
     {
-      "id": "js-sandbox",
-      "href": "/dashboard/js-sandbox",
-      "icon": "IconCode",
-      "category": "build",
-      "navLabelKey": "jsSandbox",
-      "navDescriptionKey": "jsSandboxDescription",
-      "tags": [
-        "javascript",
-        "sandbox",
-        "runtime"
-      ],
-      "searchKeywords": [
-        "javascript",
-        "js",
-        "sandbox",
-        "runtime",
-        "code",
-        "execute"
-      ]
-    },
-    {
       "id": "browser",
       "href": "/dashboard/browser",
       "icon": "IconWorld",

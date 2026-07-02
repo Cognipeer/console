@@ -23,8 +23,6 @@ import { startDatasetGenerationConsumer } from '@/lib/services/evaluation/datase
 import { startRedTeamQueueConsumer } from '@/lib/services/redteam/campaignConsumer';
 import { startEvaluationRunQueueConsumer } from '@/lib/services/evaluation/evaluationRunConsumer';
 import { startAnalysisRunQueueConsumer } from '@/lib/services/analysis/analysisRunConsumer';
-import { jsSandboxExecutorManager } from '@/lib/services/jsSandbox';
-import { startJsSandboxQueueConsumer } from '@/lib/services/jsSandbox/jsSandboxConsumer';
 import { startAgentQueueConsumer } from '@/lib/services/agents/agentConsumer';
 import { startMcpQueueConsumer } from '@/lib/services/mcp/mcpConsumer';
 import { startPollScheduler } from '@/lib/services/inferenceMonitoring/pollScheduler';
@@ -157,14 +155,6 @@ export async function bootstrapApplication(): Promise<void> {
     };
   });
 
-  registerHealthCheck('js-sandbox-runtime', async () => {
-    const stats = jsSandboxExecutorManager.getRuntimeStats();
-    return {
-      status: stats.shuttingDown ? 'degraded' : 'ok',
-      details: stats,
-    };
-  });
-
   registerHealthCheck('automations', async () => {
     const automations = listAutomations();
     const degraded = automations.some((automation) => automation.state === 'degraded');
@@ -214,7 +204,6 @@ export async function bootstrapApplication(): Promise<void> {
     await Promise.all([
       startAgentQueueConsumer(),
       startMcpQueueConsumer(),
-      startJsSandboxQueueConsumer(),
       startBrowserQueueConsumer(),
       startCrawlerQueueConsumer(),
       startOcrJobQueueConsumer(),

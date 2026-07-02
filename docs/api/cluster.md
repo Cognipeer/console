@@ -79,7 +79,7 @@ Returns every assignable entity across every tenant, annotated with its current 
 
 `explicit: true` means an assignment row exists; `false` means the entity is falling back to the resolved default node.
 
-Entity types: `agent`, `mcp`, `browser`, `js-sandbox`, `inference-server`, `alert-rule`, `automation`.
+Entity types: `agent`, `mcp`, `browser`, `inference-server`, `alert-rule`, `automation`.
 
 ## Set assignment
 

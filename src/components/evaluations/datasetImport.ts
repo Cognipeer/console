@@ -55,7 +55,7 @@ export function rowsToItems(rows: Row[]): EvalDatasetItemView[] {
     const reference = pick(row, ALIASES.reference);
     if (reference) expected.reference = reference;
     const contains = pick(row, ALIASES.contains);
-    if (contains) expected.mustContain = contains.split(/[|;]/).map((s) => s.trim()).filter(Boolean);
+    if (contains) expected.mustContain = contains.split(/[|;,]/).map((s) => s.trim()).filter(Boolean);
     const equals = pick(row, ALIASES.equals);
     if (equals) expected.equals = equals;
 
@@ -197,7 +197,7 @@ export function editorRowsToItems(rows: EditorRow[]): EvalDatasetItemView[] {
     if (!r.input.trim()) return;
     const expected: Record<string, unknown> = {};
     if (r.reference.trim()) expected.reference = r.reference.trim();
-    if (r.contains.trim()) expected.mustContain = r.contains.split(/[|;]/).map((s) => s.trim()).filter(Boolean);
+    if (r.contains.trim()) expected.mustContain = r.contains.split(/[|;,]/).map((s) => s.trim()).filter(Boolean);
     items.push({
       id: r.id.trim() || `item-${i + 1}`,
       input: [{ role: 'user', content: r.input.trim() }],

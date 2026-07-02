@@ -192,45 +192,6 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     modelIdHint: 'e.g., gpt-4o, gpt-4o-mini',
   },
   {
-    id: 'ollama',
-    label: 'Ollama',
-    description:
-      'Locally hosted open-source models via the Ollama runtime.',
-    categories: ['llm', 'embedding'],
-    credentialFields: [
-      {
-        name: 'baseUrl',
-        label: 'Base URL',
-        type: 'text',
-        required: true,
-        placeholder: 'http://localhost:11434',
-        description: 'URL of the running Ollama server.',
-      },
-    ],
-    defaultPricingCurrency: 'USD',
-    supportsCustomBaseUrl: true,
-    modelIdHint: 'e.g., llama3:instruct, nomic-embed-text',
-  },
-  {
-    id: 'cognipeer-llm',
-    label: 'Cognipeer LLM',
-    description:
-      'Custom self-hosted LLM accessible via an HTTP chat endpoint.',
-    categories: ['llm'],
-    credentialFields: [
-      {
-        name: 'url',
-        label: 'Endpoint URL',
-        type: 'text',
-        required: true,
-        placeholder: 'http://localhost:8080',
-        description: 'Base URL of the Cognipeer LLM server (without /api/chat).',
-      },
-    ],
-    defaultPricingCurrency: 'USD',
-    modelIdHint: 'e.g., my-custom-model',
-  },
-  {
     id: 'system-openai',
     label: 'System OpenAI',
     description:
@@ -274,8 +235,8 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     id: 'cohere',
     label: 'Cohere',
     description:
-      'Cohere LLMs, embedding models, and dedicated rerank models (rerank-3.5, rerank-multilingual).',
-    categories: ['llm', 'embedding', 'rerank'],
+      'Cohere dedicated rerank models (rerank-v3.5, rerank-multilingual-v3.0).',
+    categories: ['rerank'],
     credentialFields: [
       {
         name: 'apiKey',
@@ -291,8 +252,8 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     id: 'jina-ai',
     label: 'Jina AI',
     description:
-      'Jina AI embeddings and rerankers (jina-reranker-v2-base-multilingual).',
-    categories: ['embedding', 'rerank'],
+      'Jina AI rerankers (jina-reranker-v2-base-multilingual).',
+    categories: ['rerank'],
     credentialFields: [
       {
         name: 'apiKey',
@@ -308,8 +269,8 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     id: 'voyage-ai',
     label: 'Voyage AI',
     description:
-      'Voyage AI embedding and rerank models (rerank-2, rerank-2-lite).',
-    categories: ['embedding', 'rerank'],
+      'Voyage AI rerank models (rerank-2, rerank-2-lite).',
+    categories: ['rerank'],
     credentialFields: [
       {
         name: 'apiKey',

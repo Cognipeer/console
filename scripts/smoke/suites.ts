@@ -512,42 +512,6 @@ export const suites: Suite[] = [
   },
 
   {
-    module: 'js-sandbox',
-    run: async (c, ctx) => {
-      await c.step('list libraries', 'GET', '/api/js-sandbox/libraries', OK);
-      await c.step('list runtimes', 'GET', '/api/js-sandbox/runtimes', OK);
-      await c.step('list executions', 'GET', '/api/js-sandbox/executions', OK);
-      // Execution requires a runtime; create one, then run pure in-process
-      // isolated-vm code in it (no external dependency).
-      const runtime = await c.step(
-        'create runtime',
-        'POST',
-        '/api/js-sandbox/runtimes',
-        CREATED,
-        { body: { name: `Smoke Runtime ${ctx.stamp}` } },
-      );
-      const runtimeKey = keyOf(runtime?.body);
-      if (runtimeKey) {
-        await c.step(
-          'execute code in runtime',
-          'POST',
-          `/api/js-sandbox/runtimes/${runtimeKey}/execute`,
-          OK,
-          { body: { code: 'export default 2 + 2;' } },
-        );
-        await c.step(
-          'delete runtime',
-          'DELETE',
-          `/api/js-sandbox/runtimes/${runtimeKey}`,
-          [200, 204],
-        );
-      } else {
-        c.skip('js execution', 'runtime create returned no key');
-      }
-    },
-  },
-
-  {
     module: 'license',
     run: async (c) => {
       await c.step('get license', 'GET', '/api/license', OK);

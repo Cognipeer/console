@@ -10,6 +10,7 @@ import type {
   OpenApiOperation,
 } from './types';
 import { createLogger } from '@/lib/core/logger';
+import { safeFetch } from '@/lib/security/outboundFetch';
 import { routeInstanceCall } from '@/lib/core/cluster';
 import type { QueuePayload } from '@/lib/core/queue';
 import { mcpEntityId } from './mcpEntityId';
@@ -414,7 +415,7 @@ export async function executeMcpToolLocal(
     fetchOptions.body = JSON.stringify(bodyContent);
   }
 
-  const response = await fetch(url, fetchOptions);
+  const response = await safeFetch(url, fetchOptions);
   const latencyMs = Date.now() - start;
 
   if (!response.ok) {

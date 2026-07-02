@@ -33,7 +33,6 @@ import {
   IconShield,
   IconStack2,
   IconTimeline,
-  IconUsers,
   IconVector,
   IconVolume,
 } from '@tabler/icons-react';
@@ -376,22 +375,6 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       href: '/dashboard/cluster/instances',
       icon: IconDatabase,
       matcher: (p) => p.startsWith('/dashboard/cluster/instances'),
-    },
-  ],
-  'tenant-settings': [
-    {
-      id: 'projects',
-      label: 'Projects',
-      href: '/dashboard/tenant-settings/projects',
-      icon: IconFolder,
-      matcher: (p) => p.startsWith('/dashboard/tenant-settings/projects'),
-    },
-    {
-      id: 'members',
-      label: 'Members',
-      href: '/dashboard/members',
-      icon: IconUsers,
-      matcher: (p) => p.startsWith('/dashboard/members'),
     },
   ],
 };

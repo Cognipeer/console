@@ -27,7 +27,6 @@ than just wiring:
 - **agents / evaluations / analysis / reranker** — real agent chat, an
   llm-judge evaluation suite that runs async to completion with scores, LLM
   field extraction, and llm-judge reranking.
-- **JS sandbox** — real isolated-vm code execution.
 - **load test** — concurrent real traffic with p50/p90/p95/p99 latency,
   throughput and error rate.
 

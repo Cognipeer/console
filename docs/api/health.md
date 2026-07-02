@@ -92,7 +92,6 @@ readinessProbe:
 | `cluster` | Cluster registry / coordination health |
 | `queue` | Background queue connectivity |
 | `browser-runtime` | Browser automation runtime health |
-| `js-sandbox-runtime` | JS sandbox runtime health |
 | `automations` | Automations subsystem health |
 
 Additional checks can be registered using `registerHealthCheck()` from the core health module.

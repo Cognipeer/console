@@ -70,6 +70,13 @@ const METRIC_LABELS: Record<string, string> = {
   mcp_error_rate: 'Error Rate',
   mcp_avg_latency_ms: 'Avg Latency',
   mcp_total_requests: 'Total Requests',
+  evaluation_pass_rate: 'Pass Rate',
+  evaluation_avg_score: 'Avg Score',
+  analysis_pass_rate: 'Pass Rate',
+  analysis_avg_judge_score: 'Avg Judge Score',
+  analysis_avg_accuracy: 'Avg Accuracy',
+  redteam_attack_success_rate: 'Attack Success Rate',
+  redteam_resilience_score: 'Resilience Score',
 };
 
 const METRIC_UNITS: Record<string, string> = {
@@ -89,6 +96,13 @@ const METRIC_UNITS: Record<string, string> = {
   mcp_error_rate: '%',
   mcp_avg_latency_ms: 'ms',
   mcp_total_requests: '',
+  evaluation_pass_rate: '%',
+  evaluation_avg_score: '%',
+  analysis_pass_rate: '%',
+  analysis_avg_judge_score: '%',
+  analysis_avg_accuracy: '%',
+  redteam_attack_success_rate: '%',
+  redteam_resilience_score: '%',
 };
 
 const METRIC_COLORS: Record<string, string> = {
@@ -108,6 +122,13 @@ const METRIC_COLORS: Record<string, string> = {
   mcp_error_rate: 'red',
   mcp_avg_latency_ms: 'orange',
   mcp_total_requests: 'blue',
+  evaluation_pass_rate: 'green',
+  evaluation_avg_score: 'teal',
+  analysis_pass_rate: 'green',
+  analysis_avg_judge_score: 'teal',
+  analysis_avg_accuracy: 'teal',
+  redteam_attack_success_rate: 'red',
+  redteam_resilience_score: 'green',
 };
 
 const MODULE_LABELS: Record<string, string> = {
@@ -116,6 +137,9 @@ const MODULE_LABELS: Record<string, string> = {
   guardrails: 'Guardrail',
   rag: 'Knowledge Engine',
   mcp: 'MCP Servers',
+  evaluation: 'Evaluation',
+  analysis: 'Analysis',
+  redteam: 'Red Team',
 };
 
 const MODULE_COLORS: Record<string, string> = {
@@ -124,6 +148,9 @@ const MODULE_COLORS: Record<string, string> = {
   guardrails: 'grape',
   rag: 'indigo',
   mcp: 'cyan',
+  evaluation: 'green',
+  analysis: 'lime',
+  redteam: 'red',
 };
 
 const OPERATOR_SYMBOLS: Record<string, string> = {
@@ -231,6 +258,10 @@ export default function AlertsPage() {
     if (inferenceMetrics.includes(rule.metric)) return 'inference';
     if (rule.metric.startsWith('guardrail_')) return 'guardrails';
     if (rule.metric.startsWith('rag_')) return 'rag';
+    if (rule.metric.startsWith('mcp_')) return 'mcp';
+    if (rule.metric.startsWith('evaluation_')) return 'evaluation';
+    if (rule.metric.startsWith('analysis_')) return 'analysis';
+    if (rule.metric.startsWith('redteam_')) return 'redteam';
     return 'models';
   };
 
@@ -314,6 +345,9 @@ export default function AlertsPage() {
           { label: 'Guardrail', value: 'guardrails' },
           { label: 'Knowledge Engine', value: 'rag' },
           { label: 'MCP Servers', value: 'mcp' },
+          { label: 'Evaluation', value: 'evaluation' },
+          { label: 'Analysis', value: 'analysis' },
+          { label: 'Red Team', value: 'redteam' },
         ]}
         size="xs"
       />
