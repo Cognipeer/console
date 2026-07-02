@@ -33,7 +33,6 @@ describe('getEnterpriseModuleForPath', () => {
   });
 
   it('does not gate community paths', () => {
-    expect(getEnterpriseModuleForPath('/api/js-sandbox/runtimes')).toBeNull();
     expect(getEnterpriseModuleForPath('/api/models')).toBeNull();
     expect(getEnterpriseModuleForPath('/api/rag/documents')).toBeNull();
   });

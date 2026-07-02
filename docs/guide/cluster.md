@@ -54,14 +54,14 @@ Every service that opts into the queue follows the same shape:
 - a **consumer** file (`*Consumer.ts`) registers handlers for the queue named after the service.
 - an **entityId** helper (`*EntityId.ts`) builds the stable identifier the assignment layer uses.
 
-This pattern is in place for: `agentConsumer`, `mcpConsumer`, `browserConsumer`, `jsSandboxConsumer`.
+This pattern is in place for: `agentConsumer`, `mcpConsumer`, `browserConsumer`.
 
 ## Instance assignments
 
 The assignable entity types today are:
 
 ```
-agent · mcp · browser · js-sandbox · inference-server · alert-rule · automation
+agent · mcp · browser · inference-server · alert-rule · automation
 ```
 
 Each assignment is `(entityType, entityId) → (nodeName, mode)` where `mode` is one of:

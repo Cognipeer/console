@@ -21,7 +21,6 @@ import { clientFilesApiPlugin } from './plugins/client-files';
 import { clientGuardrailsApiPlugin } from './plugins/client-guardrails';
 import { clientAudioOcrApiPlugin } from './plugins/client-audio-ocr';
 import { clientInferenceApiPlugin } from './plugins/client-inference';
-import { clientJsSandboxApiPlugin } from './plugins/client-js-sandbox';
 import { clientMemoryApiPlugin } from './plugins/client-memory';
 import { clientAutomationsApiPlugin } from './plugins/client-automations';
 import { clientMcpApiPlugin } from './plugins/client-mcp';
@@ -56,7 +55,6 @@ import { analysisApiPlugin } from './plugins/analysis';
 import { piiApiPlugin } from './plugins/pii';
 import { healthApiPlugin } from './plugins/health';
 import { inferenceMonitoringApiPlugin } from './plugins/inference-monitoring';
-import { jsSandboxApiPlugin } from './plugins/js-sandbox';
 import { licenseApiPlugin } from './plugins/license';
 import { mcpApiPlugin } from './plugins/mcp';
 import { memoryApiPlugin } from './plugins/memory';
@@ -354,7 +352,6 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(clientGuardrailsApiPlugin);
   await app.register(clientInferenceApiPlugin);
   await app.register(clientAudioOcrApiPlugin);
-  await app.register(clientJsSandboxApiPlugin);
   await app.register(clientMemoryApiPlugin);
   // Built-in console MCP server must register before the dynamic user MCP
   // plugin so its static `/console/*` routes win over the parametric
@@ -388,7 +385,6 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(piiApiPlugin);
   await app.register(healthApiPlugin);
   await app.register(inferenceMonitoringApiPlugin);
-  await app.register(jsSandboxApiPlugin);
   await app.register(licenseApiPlugin);
   await app.register(mcpApiPlugin);
   await app.register(memoryApiPlugin);

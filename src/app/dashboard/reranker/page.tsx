@@ -36,7 +36,6 @@ const STRATEGY_LABEL: Record<string, string> = {
   'llm-judge': 'LLM judge',
   'llm-listwise': 'LLM listwise',
   heuristic: 'Heuristic',
-  fusion: 'Fusion',
 };
 
 function formatDate(value?: string | Date) {

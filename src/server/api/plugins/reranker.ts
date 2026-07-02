@@ -25,7 +25,6 @@ const ALLOWED_STRATEGIES: RerankerStrategy[] = [
   'llm-judge',
   'llm-listwise',
   'heuristic',
-  'fusion',
 ];
 
 function isStrategy(value: unknown): value is RerankerStrategy {

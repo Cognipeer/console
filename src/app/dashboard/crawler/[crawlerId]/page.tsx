@@ -103,6 +103,7 @@ export default function CrawlerDetailPage() {
   const [newUrl, setNewUrl] = useState('');
   const [singleCrawlUrl, setSingleCrawlUrl] = useState('');
   const [openJob, setOpenJob] = useState<CrawlJobView | null>(null);
+  const [cancelingJob, setCancelingJob] = useState(false);
   const [jobResults, setJobResults] = useState<CrawlResultView[]>([]);
   const [resultsLoading, setResultsLoading] = useState(false);
   const [openResult, setOpenResult] = useState<CrawlResultView | null>(null);
@@ -572,6 +573,36 @@ export default function CrawlerDetailPage() {
       });
     } finally {
       setRunning(false);
+    }
+  }
+
+  async function cancelJob(jobId: string) {
+    setCancelingJob(true);
+    try {
+      const res = await fetch(`/api/crawler/jobs/${jobId}/cancel`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || 'Failed to cancel');
+      }
+      notifications.show({
+        color: 'teal',
+        title: 'Job canceled',
+        message: 'The crawl job was canceled',
+      });
+      setOpenJob(null);
+      await loadJobs();
+    } catch (err) {
+      notifications.show({
+        color: 'red',
+        title: 'Error',
+        message: err instanceof Error ? err.message : 'Failed',
+      });
+    } finally {
+      setCancelingJob(false);
     }
   }
 
@@ -1160,12 +1191,25 @@ Content-Type: application/json
       >
         {openJob && (
           <Stack>
-            <Group>
-              <StatusBadge status={statusToBadge(openJob.status)} />
-              <span className="ds-faint">
-                {openJob.pagesProcessed} pages · {openJob.filesProcessed} files · {openJob.errorsCount} errors
-                {openJob.durationMs ? ` · ${(openJob.durationMs / 1000).toFixed(1)}s` : ''}
-              </span>
+            <Group justify="space-between">
+              <Group>
+                <StatusBadge status={statusToBadge(openJob.status)} />
+                <span className="ds-faint">
+                  {openJob.pagesProcessed} pages · {openJob.filesProcessed} files · {openJob.errorsCount} errors
+                  {openJob.durationMs ? ` · ${(openJob.durationMs / 1000).toFixed(1)}s` : ''}
+                </span>
+              </Group>
+              {(openJob.status === 'queued' || openJob.status === 'running') && (
+                <Button
+                  color="red"
+                  variant="light"
+                  size="xs"
+                  loading={cancelingJob}
+                  onClick={() => void cancelJob(openJob.id)}
+                >
+                  Cancel job
+                </Button>
+              )}
             </Group>
             {openJob.errorMessage ? (
               <Code block color="red">{openJob.errorMessage}</Code>

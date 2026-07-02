@@ -1,4 +1,5 @@
 import type { IInferenceServer, IInferenceServerMetrics } from '@/lib/database';
+import { safeFetch } from '@/lib/security/outboundFetch';
 import type { VllmMetricsSnapshot } from './vllmPoller';
 
 /**
@@ -87,27 +88,17 @@ export async function pollLlamaCppServer(
     headers['Authorization'] = `Bearer ${server.apiKey}`;
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15_000);
+  const response = await safeFetch(parsed.toString(), { headers }, { timeoutMs: 15_000 });
 
-  try {
-    const response = await fetch(parsed.toString(), {
-      headers,
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      throw new Error(
-        `llama.cpp server returned ${response.status}: ${response.statusText}`,
-      );
-    }
-
-    const text = await response.text();
-    const raw = parsePrometheusMetrics(text);
-    return snapshotFromLlamaCpp(raw);
-  } finally {
-    clearTimeout(timeout);
+  if (!response.ok) {
+    throw new Error(
+      `llama.cpp server returned ${response.status}: ${response.statusText}`,
+    );
   }
+
+  const text = await response.text();
+  const raw = parsePrometheusMetrics(text);
+  return snapshotFromLlamaCpp(raw);
 }
 
 /**

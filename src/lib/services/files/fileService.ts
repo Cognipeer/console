@@ -543,6 +543,50 @@ export async function deleteFileBucket(
     return db.deleteFileBucket(bucketId);
 }
 
+export interface UpdateFileBucketInput {
+    name?: string;
+    description?: string;
+    status?: 'active' | 'disabled';
+    prefix?: string;
+    metadata?: Record<string, unknown>;
+    updatedBy?: string;
+}
+
+export async function updateFileBucket(
+    tenantDbName: string,
+    tenantId: string,
+    projectId: string,
+    bucketKey: string,
+    updates: UpdateFileBucketInput,
+): Promise<FileBucketView> {
+    const db = await withTenantDb(tenantDbName);
+    const record = await db.findFileBucketByKey(tenantId, bucketKey, projectId);
+
+    if (!record) {
+        throw new Error('File bucket not found.');
+    }
+
+    const bucketId = record._id?.toString();
+    if (!bucketId) {
+        throw new Error('Bucket identifier missing.');
+    }
+
+    const updated = await db.updateFileBucket(bucketId, updates);
+    if (!updated) {
+        throw new Error('File bucket not found.');
+    }
+
+    const provider = await getProviderConfigByKey(
+        tenantDbName,
+        tenantId,
+        updated.providerKey,
+        projectId,
+    );
+
+    const view = serializeFileBucket(updated);
+    return provider ? { ...view, provider: attachDriverCapabilities(provider) } : view;
+}
+
 export async function listFiles(
     tenantDbName: string,
     tenantId: string,

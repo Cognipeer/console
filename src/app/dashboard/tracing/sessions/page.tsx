@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { Button, Text, Tooltip } from '@mantine/core';
 import {
   IconBook,
@@ -42,6 +42,7 @@ const DEFAULT_PAGE_SIZE = 25;
 
 export default function TracingSessionsPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { openDocs } = useDocsDrawer();
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [totalSessions, setTotalSessions] = useState(0);
@@ -51,6 +52,9 @@ export default function TracingSessionsPage() {
   const [pageSize] = useState(DEFAULT_PAGE_SIZE);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
+  const [agentFilter, setAgentFilter] = useState(
+    () => searchParams.get('agent')?.trim() || '',
+  );
 
   const buildQueryParams = useCallback(() => {
     const params = new URLSearchParams();
@@ -58,8 +62,9 @@ export default function TracingSessionsPage() {
     params.set('skip', ((page - 1) * pageSize).toString());
     if (query) params.set('query', query.trim());
     if (statusFilter !== 'all') params.set('status', statusFilter);
+    if (agentFilter) params.set('agent', agentFilter.trim());
     return params;
-  }, [page, pageSize, query, statusFilter]);
+  }, [page, pageSize, query, statusFilter, agentFilter]);
 
   const fetchSessions = useCallback(
     async (isRefresh = false, signal?: AbortSignal) => {
@@ -93,6 +98,11 @@ export default function TracingSessionsPage() {
     },
     [buildQueryParams],
   );
+
+  useEffect(() => {
+    const agentParam = searchParams.get('agent')?.trim() || '';
+    setAgentFilter((current) => (current === agentParam ? current : agentParam));
+  }, [searchParams]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -270,7 +280,7 @@ export default function TracingSessionsPage() {
               { value: 'all', label: 'All statuses' },
               { value: 'success', label: 'Success' },
               { value: 'error', label: 'Error' },
-              { value: 'running', label: 'Running' },
+              { value: 'in_progress', label: 'In progress' },
             ],
           },
         ]}

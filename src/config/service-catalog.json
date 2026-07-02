@@ -68,15 +68,37 @@
       "aliases": ["llama", "mistral", "qwen"]
     },
     {
-      "id": "ollama",
-      "driver": "ollama",
-      "name": "Ollama",
-      "tagline": "Self-hosted models on your own hardware",
-      "description": "Run open-source models locally or on a private network through Ollama.",
-      "domains": ["model", "embedding"],
-      "color": "#7c3aed",
-      "tags": ["self-hosted", "free"],
-      "aliases": ["local", "ollama-server"]
+      "id": "cohere",
+      "driver": "cohere",
+      "name": "Cohere",
+      "tagline": "Dedicated rerank models",
+      "description": "Cohere rerank models (rerank-v3.5, rerank-multilingual-v3.0) for re-ranking retrieval results.",
+      "domains": ["model"],
+      "color": "#39594d",
+      "tags": ["rerank"],
+      "aliases": ["rerank", "reranker"]
+    },
+    {
+      "id": "jina-ai",
+      "driver": "jina-ai",
+      "name": "Jina AI",
+      "tagline": "Multilingual rerankers",
+      "description": "Jina AI rerankers (jina-reranker-v2-base-multilingual) for re-ranking retrieval results.",
+      "domains": ["model"],
+      "color": "#e91e63",
+      "tags": ["rerank"],
+      "aliases": ["rerank", "reranker", "jina"]
+    },
+    {
+      "id": "voyage-ai",
+      "driver": "voyage-ai",
+      "name": "Voyage AI",
+      "tagline": "Rerank models (rerank-2)",
+      "description": "Voyage AI rerank models (rerank-2, rerank-2-lite) for re-ranking retrieval results.",
+      "domains": ["model"],
+      "color": "#5b21b6",
+      "tags": ["rerank"],
+      "aliases": ["rerank", "reranker", "voyage"]
     },
     {
       "id": "openai-compatible",
@@ -89,18 +111,6 @@
       "tags": ["generic", "open-source", "audio"],
       "aliases": ["groq", "deepseek", "vllm", "lmstudio", "mistral", "deepgram", "elevenlabs"]
     },
-    {
-      "id": "cognipeer-llm",
-      "driver": "cognipeer-llm",
-      "name": "Cognipeer LLM",
-      "tagline": "Managed inference by Cognipeer",
-      "description": "First-party Cognipeer inference endpoints with built-in routing and caching.",
-      "domains": ["model", "embedding"],
-      "color": "#16b3ab",
-      "tags": ["managed"],
-      "aliases": ["cognipeer"]
-    },
-
     {
       "id": "chroma-cloud",
       "driver": "chroma-cloud",

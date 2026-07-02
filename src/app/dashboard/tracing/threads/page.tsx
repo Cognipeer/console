@@ -252,7 +252,7 @@ export default function TracingThreadsPage() {
               { value: 'all', label: 'All statuses' },
               { value: 'success', label: 'Success' },
               { value: 'error', label: 'Error' },
-              { value: 'running', label: 'Running' },
+              { value: 'in_progress', label: 'In progress' },
             ],
           },
         ]}

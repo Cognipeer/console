@@ -67,17 +67,23 @@ All application configuration is managed through the central `getConfig()` funct
 |----------|-------------|---------|
 | `BROWSER_BLOCK_PRIVATE_NETWORK` | Blocks localhost, link-local, private, and reserved network egress from managed browser sessions. | `true` |
 
-### JS Sandbox Runtime
+### Outbound HTTP (SSRF Guard)
+
+Services that fetch tenant-supplied URLs (tools, MCP servers, custom reranker
+endpoints, connected external agents, inference-monitoring pollers) route
+through a shared guard that blocks requests resolving to loopback, private,
+link-local, CGNAT, or cloud-metadata address space, and re-validates every
+redirect hop.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `JS_SANDBOX_DEFAULT_MAX_CONCURRENT` | Concurrent JS executions per tenant | `5` |
-| `JS_SANDBOX_DEFAULT_TIMEOUT_MS` | Default execution timeout | `5000` |
-| `JS_SANDBOX_MAX_TIMEOUT_MS` | Maximum execution timeout | `30000` |
-| `JS_SANDBOX_MEMORY_LIMIT_MB` | V8 isolate memory limit | `64` |
-| `JS_SANDBOX_MAX_CODE_SIZE_BYTES` | Maximum submitted code size | `65536` |
-| `JS_SANDBOX_MAX_RESULT_SIZE_BYTES` | Maximum serialized result size | `524288` |
-| `JS_SANDBOX_MAX_LOG_ENTRIES` | Maximum captured console log entries | `100` |
+| `OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK` | Block outbound requests to private/loopback address space from tenant-configured integrations. | `true` |
+| `OUTBOUND_HTTP_ALLOWED_HOSTS` | Comma-separated hostnames exempt from the block. Use a leading dot to match subdomains (e.g. `.svc.cluster.local`). | *(empty)* |
+| `OUTBOUND_HTTP_DEFAULT_TIMEOUT_MS` | Default timeout for guarded outbound requests. | `30000` |
+
+Self-hosted deployments that legitimately call in-network services (e.g. a
+vLLM server on a private IP) should list those hosts in
+`OUTBOUND_HTTP_ALLOWED_HOSTS` rather than disabling the guard globally.
 
 ### Cluster & Queue
 

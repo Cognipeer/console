@@ -6,6 +6,7 @@
  */
 
 import slugify from 'slugify';
+import { safeFetch } from '@/lib/security/outboundFetch';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
 import type { ITool, IToolAction, IToolAuthConfig } from '@/lib/database';
@@ -192,7 +193,7 @@ export async function discoverMcpTools(
   });
 
   try {
-    const response = await fetch(endpoint, {
+    const response = await safeFetch(endpoint, {
       method: 'POST',
       headers,
       body: listToolsBody,
@@ -474,7 +475,7 @@ async function executeOpenApiAction(
     fetchOptions.body = JSON.stringify(bodyContent);
   }
 
-  const response = await fetch(url, fetchOptions);
+  const response = await safeFetch(url, fetchOptions);
   const latencyMs = Date.now() - start;
 
   if (!response.ok) {
@@ -528,7 +529,7 @@ async function executeMcpAction(
     },
   });
 
-  const response = await fetch(tool.mcpEndpoint, {
+  const response = await safeFetch(tool.mcpEndpoint, {
     method: 'POST',
     headers,
     body: callBody,

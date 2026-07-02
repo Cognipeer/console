@@ -182,12 +182,6 @@ const STANDARD_RESOLVERS: BreadcrumbResolver[] = [
     excludeValues: ['new'],
   }),
   createStandardResolver({
-    path: ['js-sandbox'],
-    buildUrl: (id) => `/api/js-sandbox/runtimes/${encodeURIComponent(id)}`,
-    pickLabel: (b) => wrappedName(b, 'runtime'),
-    excludeValues: ['new'],
-  }),
-  createStandardResolver({
     path: ['memory'],
     buildUrl: (key) => `/api/memory/stores/${encodeURIComponent(key)}`,
     // Memory stores endpoint returns the document directly, not under a wrapper.

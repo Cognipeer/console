@@ -42,6 +42,7 @@ import {
   IconDeviceDesktop,
   IconDots,
   IconEdit,
+  IconHistory,
   IconInfoCircle,
   IconPlayerPlay,
   IconPlug,
@@ -320,6 +321,15 @@ export default function BrowserDetailPage() {
         onClick={loadAll}
       >
         Refresh
+      </Button>
+      <Button
+        variant="default"
+        size="sm"
+        component={Link}
+        href={`/dashboard/browser/${encodeURIComponent(browserId)}/sessions`}
+        leftSection={<IconHistory size={14} stroke={1.7} />}
+      >
+        Sessions
       </Button>
       <Button
         variant="default"

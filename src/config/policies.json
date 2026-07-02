@@ -207,16 +207,6 @@
         "/api/client/v1/tools/*"
       ]
     },
-    "JS_SANDBOX": {
-      "name": "JS Sandbox",
-      "description": "Create and execute managed JavaScript sandbox runtimes",
-      "endpoints": [
-        "/api/js-sandbox",
-        "/api/js-sandbox/*",
-        "/api/client/v1/js-sandbox",
-        "/api/client/v1/js-sandbox/*"
-      ]
-    },
     "AUTOMATIONS_CONTROL": {
       "name": "Automations",
       "description": "Inspect and control internal automations, schedulers and background maintenance jobs",

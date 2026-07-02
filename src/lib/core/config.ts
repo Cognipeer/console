@@ -157,16 +157,20 @@ export interface AppConfig {
     blockPrivateNetwork: boolean;
   };
 
-  jsSandbox: {
-    concurrencyProvider: 'memory';
-    defaultMaxConcurrent: number;
+  outboundHttp: {
+    /**
+     * Block requests to loopback/private/link-local/metadata address space
+     * from services that fetch tenant-supplied URLs (tools, MCP, rerankers,
+     * connected agents, inference pollers).
+     */
+    blockPrivateNetwork: boolean;
+    /**
+     * Hosts exempt from the private-network block. Exact hostnames, or
+     * `.suffix` entries matching any subdomain (e.g. `.internal.example.com`).
+     */
+    allowedHosts: string[];
+    /** Default timeout applied to guarded outbound requests (ms). */
     defaultTimeoutMs: number;
-    maxTimeoutMs: number;
-    memoryLimitMb: number;
-    maxCodeSizeBytes: number;
-    maxResultSizeBytes: number;
-    maxLogEntries: number;
-    childProcessTimeoutBufferMs: number;
   };
 
   systemModels: {
@@ -377,16 +381,10 @@ function buildConfig(source: ConfigSource): AppConfig {
       blockPrivateNetwork: bool(source, 'BROWSER_BLOCK_PRIVATE_NETWORK', true),
     },
 
-    jsSandbox: {
-      concurrencyProvider: oneOf(source, 'JS_SANDBOX_CONCURRENCY_PROVIDER', ['memory'] as const, 'memory'),
-      defaultMaxConcurrent: int(source, 'JS_SANDBOX_DEFAULT_MAX_CONCURRENT', 5),
-      defaultTimeoutMs: int(source, 'JS_SANDBOX_DEFAULT_TIMEOUT_MS', 5_000),
-      maxTimeoutMs: int(source, 'JS_SANDBOX_MAX_TIMEOUT_MS', 30_000),
-      memoryLimitMb: int(source, 'JS_SANDBOX_MEMORY_LIMIT_MB', 64),
-      maxCodeSizeBytes: int(source, 'JS_SANDBOX_MAX_CODE_SIZE_BYTES', 64 * 1024),
-      maxResultSizeBytes: int(source, 'JS_SANDBOX_MAX_RESULT_SIZE_BYTES', 512 * 1024),
-      maxLogEntries: int(source, 'JS_SANDBOX_MAX_LOG_ENTRIES', 100),
-      childProcessTimeoutBufferMs: int(source, 'JS_SANDBOX_CHILD_PROCESS_TIMEOUT_BUFFER_MS', 1_000),
+    outboundHttp: {
+      blockPrivateNetwork: bool(source, 'OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK', true),
+      allowedHosts: list(source, 'OUTBOUND_HTTP_ALLOWED_HOSTS', []),
+      defaultTimeoutMs: int(source, 'OUTBOUND_HTTP_DEFAULT_TIMEOUT_MS', 30_000),
     },
 
     systemModels: {

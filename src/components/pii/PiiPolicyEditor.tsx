@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import {
   ActionIcon,
   Badge,
@@ -19,7 +19,7 @@ import {
 import { IconPlus, IconTrash } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 
-const SUPPORTED_LANGUAGES = ['global', 'en', 'tr', 'de', 'fr', 'es', 'it', 'pt', 'ar', 'ja', 'zh'] as const;
+const SUPPORTED_LANGUAGES = ['global', 'en', 'tr', 'de'] as const;
 
 export interface PiiCustomPatternForm {
   id: string;

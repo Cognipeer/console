@@ -42,8 +42,6 @@ import type {
   IIncident,
   IInferenceServer,
   IInferenceServerMetrics,
-  IJsSandboxExecution,
-  IJsSandboxRuntime,
   IMcpRequestAggregate,
   IMcpRequestLog,
   IMcpServer,
@@ -96,8 +94,6 @@ import type {
   VectorMigrationLogStatus,
   IncidentSeverity,
   IncidentStatus,
-  JsSandboxExecutionStatus,
-  JsSandboxRuntimeStatus,
   McpServerStatus,
   MemoryItemStatus,
   MemoryScope,
@@ -1002,61 +998,6 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     configKey: string,
     options?: { limit?: number; skip?: number; from?: Date; to?: Date },
   ): Promise<IConfigAuditLog[]>;
-
-  // ── JS Sandbox runtime operations (tenant-specific) ──
-  createJsSandboxRuntime(
-    runtime: Omit<IJsSandboxRuntime, '_id' | 'createdAt' | 'updatedAt'>,
-  ): Promise<IJsSandboxRuntime>;
-  updateJsSandboxRuntime(
-    id: string,
-    data: Partial<Omit<IJsSandboxRuntime, '_id' | 'tenantId' | 'key' | 'createdBy' | 'createdAt'>>,
-  ): Promise<IJsSandboxRuntime | null>;
-  deleteJsSandboxRuntime(id: string): Promise<boolean>;
-  findJsSandboxRuntimeById(id: string): Promise<IJsSandboxRuntime | null>;
-  findJsSandboxRuntimeByKey(
-    tenantId: string,
-    key: string,
-    projectId?: string,
-  ): Promise<IJsSandboxRuntime | null>;
-  listJsSandboxRuntimes(
-    tenantId: string,
-    filters?: {
-      projectId?: string;
-      status?: JsSandboxRuntimeStatus | string;
-      search?: string;
-    },
-  ): Promise<IJsSandboxRuntime[]>;
-  countJsSandboxRuntimes(tenantId: string, projectId?: string): Promise<number>;
-
-  // ── JS Sandbox execution logs (tenant-specific) ──
-  createJsSandboxExecution(
-    execution: Omit<IJsSandboxExecution, '_id' | 'createdAt'>,
-  ): Promise<IJsSandboxExecution>;
-  findJsSandboxExecutionById(id: string): Promise<IJsSandboxExecution | null>;
-  listJsSandboxExecutions(
-    tenantId: string,
-    filters?: {
-      projectId?: string;
-      runtimeId?: string;
-      runtimeKey?: string;
-      status?: JsSandboxExecutionStatus | string;
-      from?: Date;
-      to?: Date;
-      limit?: number;
-      skip?: number;
-    },
-  ): Promise<IJsSandboxExecution[]>;
-  countJsSandboxExecutions(
-    tenantId: string,
-    filters?: {
-      projectId?: string;
-      runtimeId?: string;
-      runtimeKey?: string;
-      status?: JsSandboxExecutionStatus | string;
-      from?: Date;
-      to?: Date;
-    },
-  ): Promise<number>;
 
   // ── Tool operations (tenant-specific) ──
   createTool(

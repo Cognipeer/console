@@ -57,7 +57,10 @@ export function useTranslations(namespace?: string) {
     () =>
       (key: string, values?: TranslationValues) => {
         const fullKey = namespace ? `${namespace}.${key}` : key;
-        const message = resolveMessage(locale, fullKey) ?? fullKey;
+        const message =
+          resolveMessage(locale, fullKey) ??
+          (locale !== 'en' ? resolveMessage('en', fullKey) : undefined) ??
+          fullKey;
         return interpolate(message, values);
       },
     [locale, namespace],

@@ -1349,56 +1349,6 @@ export const TENANT_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_tool_request_logs_toolKey ON tool_request_logs(toolKey);
   CREATE INDEX IF NOT EXISTS idx_tool_request_logs_createdAt ON tool_request_logs(createdAt);
 
-  -- JS Sandbox runtimes
-  CREATE TABLE IF NOT EXISTS js_sandbox_runtimes (
-    id TEXT PRIMARY KEY,
-    tenantId TEXT NOT NULL,
-    projectId TEXT,
-    key TEXT NOT NULL,
-    name TEXT NOT NULL,
-    description TEXT,
-    status TEXT NOT NULL DEFAULT 'active',
-    engine TEXT NOT NULL DEFAULT 'isolated-vm',
-    libraries TEXT NOT NULL DEFAULT '[]',
-    limits TEXT NOT NULL DEFAULT '{}',
-    network TEXT NOT NULL DEFAULT '{}',
-    metadata TEXT DEFAULT '{}',
-    createdBy TEXT NOT NULL,
-    updatedBy TEXT,
-    createdAt TEXT NOT NULL,
-    updatedAt TEXT NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS idx_js_sandbox_runtimes_tenantId ON js_sandbox_runtimes(tenantId);
-  CREATE INDEX IF NOT EXISTS idx_js_sandbox_runtimes_projectId ON js_sandbox_runtimes(projectId);
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_js_sandbox_runtimes_tenant_key ON js_sandbox_runtimes(tenantId, key);
-
-  -- JS Sandbox execution logs
-  CREATE TABLE IF NOT EXISTS js_sandbox_executions (
-    id TEXT PRIMARY KEY,
-    tenantId TEXT NOT NULL,
-    projectId TEXT,
-    runtimeId TEXT NOT NULL,
-    runtimeKey TEXT NOT NULL,
-    executionId TEXT NOT NULL,
-    status TEXT NOT NULL,
-    durationMs INTEGER NOT NULL DEFAULT 0,
-    timeoutMs INTEGER NOT NULL DEFAULT 0,
-    memoryLimitMb INTEGER NOT NULL DEFAULT 0,
-    codeHash TEXT NOT NULL,
-    codePreview TEXT NOT NULL,
-    inputPreview TEXT,
-    result TEXT,
-    logs TEXT DEFAULT '{}',
-    errorMessage TEXT,
-    callerType TEXT NOT NULL,
-    callerTokenId TEXT,
-    createdAt TEXT NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS idx_js_sandbox_executions_tenantId ON js_sandbox_executions(tenantId);
-  CREATE INDEX IF NOT EXISTS idx_js_sandbox_executions_runtimeId ON js_sandbox_executions(runtimeId);
-  CREATE INDEX IF NOT EXISTS idx_js_sandbox_executions_createdAt ON js_sandbox_executions(createdAt);
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_js_sandbox_executions_executionId ON js_sandbox_executions(executionId);
-
   -- MCP Servers
   CREATE TABLE IF NOT EXISTS mcp_servers (
     id TEXT PRIMARY KEY,

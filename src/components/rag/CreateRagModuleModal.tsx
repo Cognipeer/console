@@ -57,7 +57,6 @@ interface FormValues {
   chunkSize: number | '';
   chunkOverlap: number | '';
   separators: string[];
-  encoding: string;
 }
 
 export default function CreateRagModuleModal({ opened, onClose, onCreated }: CreateRagModuleModalProps) {
@@ -77,7 +76,6 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
       chunkSize: 1000,
       chunkOverlap: 200,
       separators: ['\\n\\n', '\\n', '. ', ' '],
-      encoding: 'cl100k_base',
     },
     validate: {
       name: (v) => (!v ? 'Name is required' : null),
@@ -168,9 +166,6 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
         chunkConfig.separators = values.separators.map((s) =>
           s.replace(/\\n/g, '\n').replace(/\\t/g, '\t'),
         );
-      }
-      if (values.chunkStrategy === 'token') {
-        chunkConfig.encoding = values.encoding;
       }
 
       const res = await fetch('/api/rag/modules', {
@@ -452,19 +447,6 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
             <TagsInput
               placeholder="Add separator..."
               {...form.getInputProps('separators')}
-            />
-          </FormField>
-        ) : null}
-
-        {form.values.chunkStrategy === 'token' ? (
-          <FormField label="Token encoding">
-            <Select
-              data={[
-                { value: 'cl100k_base', label: 'cl100k_base (GPT-4, GPT-3.5)' },
-                { value: 'p50k_base', label: 'p50k_base (Codex, text-davinci)' },
-                { value: 'o200k_base', label: 'o200k_base (GPT-4o)' },
-              ]}
-              {...form.getInputProps('encoding')}
             />
           </FormField>
         ) : null}

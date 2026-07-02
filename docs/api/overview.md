@@ -81,8 +81,6 @@ For the relationship between the two, see [Using the SDK](/guide/sdk-integration
 | [Config Audit](./config) | `/config/items/:key/audit` | GET |
 | [Rerankers (list/get)](./reranker) | `/rerankers`, `/rerank/:key` | GET |
 | [Rerank (run)](./reranker) | `/rerank/:key` | POST |
-| [JS Sandbox Runtimes](./js-sandbox) | `/js-sandbox/runtimes`, `/js-sandbox/runtimes/:idOrKey` | GET |
-| [JS Sandbox Execute](./js-sandbox) | `/js-sandbox/execute` | POST |
 
 ## Dashboard And Operational Endpoints
 
@@ -92,7 +90,6 @@ These endpoints are documented here because operators often need them during rol
 |--------|-----------|------|---------|
 | [PII Policies & Scan](./pii) | `/api/pii/*` | Session (license-free) | GET, POST, PATCH, DELETE |
 | [Reranker Admin](./reranker) | `/api/reranker/*` | Session | GET, POST, PATCH, DELETE |
-| [JS Sandbox Admin](./js-sandbox) | `/api/js-sandbox/*` | Session | GET, POST, PATCH, DELETE |
 | [Browser Admin](./browser) | `/api/browser/*` | Session | GET, POST, PATCH, DELETE |
 | [Cluster](./cluster) | `/api/cluster/*` | Session (tenant admin) | GET, PUT, DELETE |
 | [Incidents](./incidents) | `/api/alerts/incidents` | JWT session | GET, PATCH, POST |

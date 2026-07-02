@@ -62,7 +62,6 @@ function validateStrategyConfig(strategy: RerankerStrategy, config: IRerankerCon
       }
       break;
     case 'heuristic':
-    case 'fusion':
       // No model required.
       break;
     default:

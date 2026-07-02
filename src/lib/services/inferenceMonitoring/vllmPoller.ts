@@ -1,4 +1,5 @@
 import type { IInferenceServer, IInferenceServerMetrics } from '@/lib/database';
+import { safeFetch } from '@/lib/security/outboundFetch';
 
 /**
  * Parsed vLLM metrics from the /metrics Prometheus endpoint.
@@ -85,44 +86,34 @@ export async function pollVllmServer(
     headers['Authorization'] = `Bearer ${server.apiKey}`;
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15_000);
+  const response = await safeFetch(url, { headers }, { timeoutMs: 15_000 });
 
-  try {
-    const response = await fetch(url, {
-      headers,
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      throw new Error(`vLLM server returned ${response.status}: ${response.statusText}`);
-    }
-
-    const text = await response.text();
-    const raw = parsePrometheusMetrics(text);
-
-    return {
-      numRequestsRunning: extractGauge(raw, 'vllm:num_requests_running'),
-      numRequestsWaiting: extractGauge(raw, 'vllm:num_requests_waiting'),
-      gpuCacheUsagePercent: extractGauge(raw, 'vllm:gpu_cache_usage_perc'),
-      cpuCacheUsagePercent: extractGauge(raw, 'vllm:cpu_cache_usage_perc'),
-      promptTokensThroughput: extractGauge(raw, 'vllm:prompt_tokens_total')
-        || extractGauge(raw, 'vllm:avg_prompt_throughput_toks_per_s'),
-      generationTokensThroughput: extractGauge(raw, 'vllm:generation_tokens_total')
-        || extractGauge(raw, 'vllm:avg_generation_throughput_toks_per_s'),
-      timeToFirstTokenSeconds: extractHistogramAvg(raw, 'vllm:time_to_first_token_seconds')
-        || extractHistogramAvg(raw, 'vllm:e2e_time_to_first_token_seconds'),
-      timePerOutputTokenSeconds: extractHistogramAvg(raw, 'vllm:time_per_output_token_seconds')
-        || extractHistogramAvg(raw, 'vllm:e2e_time_per_output_token_seconds'),
-      e2eRequestLatencySeconds: extractHistogramAvg(raw, 'vllm:e2e_request_latency_seconds'),
-      requestsPerSecond: extractGauge(raw, 'vllm:request_success')
-        || extractGauge(raw, 'vllm:request_success_total'),
-      runningModels: extractRunningModels(raw),
-      raw,
-    };
-  } finally {
-    clearTimeout(timeout);
+  if (!response.ok) {
+    throw new Error(`vLLM server returned ${response.status}: ${response.statusText}`);
   }
+
+  const text = await response.text();
+  const raw = parsePrometheusMetrics(text);
+
+  return {
+    numRequestsRunning: extractGauge(raw, 'vllm:num_requests_running'),
+    numRequestsWaiting: extractGauge(raw, 'vllm:num_requests_waiting'),
+    gpuCacheUsagePercent: extractGauge(raw, 'vllm:gpu_cache_usage_perc'),
+    cpuCacheUsagePercent: extractGauge(raw, 'vllm:cpu_cache_usage_perc'),
+    promptTokensThroughput: extractGauge(raw, 'vllm:prompt_tokens_total')
+      || extractGauge(raw, 'vllm:avg_prompt_throughput_toks_per_s'),
+    generationTokensThroughput: extractGauge(raw, 'vllm:generation_tokens_total')
+      || extractGauge(raw, 'vllm:avg_generation_throughput_toks_per_s'),
+    timeToFirstTokenSeconds: extractHistogramAvg(raw, 'vllm:time_to_first_token_seconds')
+      || extractHistogramAvg(raw, 'vllm:e2e_time_to_first_token_seconds'),
+    timePerOutputTokenSeconds: extractHistogramAvg(raw, 'vllm:time_per_output_token_seconds')
+      || extractHistogramAvg(raw, 'vllm:e2e_time_per_output_token_seconds'),
+    e2eRequestLatencySeconds: extractHistogramAvg(raw, 'vllm:e2e_request_latency_seconds'),
+    requestsPerSecond: extractGauge(raw, 'vllm:request_success')
+      || extractGauge(raw, 'vllm:request_success_total'),
+    runningModels: extractRunningModels(raw),
+    raw,
+  };
 }
 
 /**
