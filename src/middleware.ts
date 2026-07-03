@@ -18,7 +18,7 @@ function applySecurityHeaders(response: NextResponse): void {
   response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
   response.headers.set(
     'Permissions-Policy',
-    'camera=(), microphone=(), geolocation=()',
+    'camera=(), microphone=(self), geolocation=()',
   );
   // HSTS – only effective over HTTPS; max-age = 1 year
   response.headers.set(
