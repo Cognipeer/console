@@ -81,7 +81,7 @@ export function ProjectMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       const db = this.getTenantDb();
       const tables = [
         TABLES.models, TABLES.prompts, TABLES.promptVersions,
-        TABLES.providers, TABLES.vectorIndexes, TABLES.fileBuckets,
+        TABLES.vectorIndexes, TABLES.fileBuckets,
         TABLES.files, TABLES.guardrails, TABLES.ragModules,
       ];
 
@@ -94,6 +94,33 @@ export function ProjectMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
           } catch (err) {
             logger.warn(`assignProjectIdToLegacyRecords: skipping ${table}`, { err });
           }
+        }
+
+        // Providers are scoped via projectIds (plural); the legacy projectId
+        // column only matters for records created before that migration. Only
+        // stamp truly unassigned rows — stamping a projectIds-assigned record
+        // would leak it into the default project through the listProviders
+        // `projectId OR projectIds` filter.
+        try {
+          db.prepare(
+            `UPDATE ${TABLES.providers} SET projectId = @projectId
+             WHERE tenantId = @tenantId
+               AND (projectId IS NULL OR projectId = '')
+               AND (projectIds IS NULL OR projectIds = '' OR projectIds = '[]')`,
+          ).run({ tenantId, projectId });
+
+          // Self-heal rows the previous unconditional stamp already leaked:
+          // only this backfill ever wrote projectId onto projectIds-assigned
+          // records, so clearing it where projectIds disagrees is safe.
+          db.prepare(
+            `UPDATE ${TABLES.providers} SET projectId = NULL
+             WHERE tenantId = @tenantId
+               AND projectId = @projectId
+               AND projectIds IS NOT NULL AND projectIds != '' AND projectIds != '[]'
+               AND projectIds NOT LIKE @projectIdLike`,
+          ).run({ tenantId, projectId, projectIdLike: `%"${projectId}"%` });
+        } catch (err) {
+          logger.warn('assignProjectIdToLegacyRecords: skipping providers', { err });
         }
       });
       tx();

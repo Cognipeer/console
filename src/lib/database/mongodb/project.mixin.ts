@@ -113,7 +113,6 @@ export function ProjectMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
     async assignProjectIdToLegacyRecords(tenantId: string, projectId: string): Promise<void> {
       const db = this.getTenantDb();
       const collections = [
-        COLLECTIONS.providers,
         COLLECTIONS.models,
         COLLECTIONS.vectorIndexes,
         COLLECTIONS.fileBuckets,
@@ -139,6 +138,40 @@ export function ProjectMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
           }
         }),
       );
+
+      // Providers are scoped via projectIds (plural); the legacy projectId
+      // field only matters for records created before that migration. Only
+      // stamp truly unassigned rows — stamping a projectIds-assigned record
+      // would leak it into the default project through the listProviders
+      // `projectId OR projectIds` filter.
+      try {
+        await db.collection(COLLECTIONS.providers).updateMany(
+          {
+            tenantId,
+            projectId: { $exists: false },
+            $or: [
+              { projectIds: { $exists: false } },
+              { projectIds: { $size: 0 } },
+              { projectIds: null },
+            ],
+          },
+          { $set: { projectId } },
+        );
+
+        // Self-heal rows the previous unconditional stamp already leaked:
+        // only this backfill ever wrote projectId onto projectIds-assigned
+        // records, so clearing it where projectIds disagrees is safe.
+        await db.collection(COLLECTIONS.providers).updateMany(
+          {
+            tenantId,
+            projectId,
+            projectIds: { $exists: true, $ne: [], $nin: [null, projectId] },
+          },
+          { $unset: { projectId: '' } },
+        );
+      } catch (error) {
+        logger.warn('Legacy migration skipped for providers', { error });
+      }
     }
   };
 }
