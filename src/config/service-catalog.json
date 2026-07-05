@@ -248,12 +248,12 @@
       "id": "aws-s3-files",
       "driver": "aws-s3-files",
       "name": "Amazon S3",
-      "tagline": "Object storage on AWS",
-      "description": "Store ingested files and artifacts in an S3 bucket.",
+      "tagline": "S3-compatible object storage",
+      "description": "Store ingested files and artifacts in an S3 bucket — AWS S3 or any S3-compatible store (MinIO, Ceph RGW) via a custom endpoint.",
       "domains": ["file"],
       "color": "#ff9900",
       "tags": ["managed"],
-      "aliases": ["s3"]
+      "aliases": ["s3", "minio", "s3-compatible"]
     },
     {
       "id": "local-filesystem",
@@ -309,6 +309,72 @@
       "color": "#34a853",
       "tags": ["enterprise", "ocr", "forms"],
       "aliases": ["document ai", "google docai", "gcp-document-ai"]
+    },
+    {
+      "id": "bing-web-search",
+      "driver": "bing",
+      "name": "Bing Web Search",
+      "tagline": "Microsoft Bing Web Search API v7",
+      "description": "Web results from the Microsoft Bing index via Azure Cognitive Services. Requires an Azure subscription key.",
+      "domains": ["websearch"],
+      "color": "#008373",
+      "tags": ["popular", "managed", "us"],
+      "aliases": ["bing", "microsoft search", "azure web search"]
+    },
+    {
+      "id": "brave-search",
+      "driver": "brave-search",
+      "name": "Brave Search",
+      "tagline": "Independent web search index API",
+      "description": "Web search over Brave's own independent index with a privacy focus. Requires a Brave Search API subscription token.",
+      "domains": ["websearch"],
+      "color": "#fb542b",
+      "tags": ["managed", "privacy"],
+      "aliases": ["brave", "brave search api"]
+    },
+    {
+      "id": "serper",
+      "driver": "serper",
+      "name": "Serper",
+      "tagline": "Google SERP results via serper.dev",
+      "description": "Fast Google search results (organic results and answer box) through the serper.dev API.",
+      "domains": ["websearch"],
+      "color": "#1a73e8",
+      "tags": ["managed", "google"],
+      "aliases": ["serper.dev", "google serp", "google search api"]
+    },
+    {
+      "id": "tavily",
+      "driver": "tavily",
+      "name": "Tavily",
+      "tagline": "LLM-optimized web search with answers",
+      "description": "Search API built for AI agents; returns cleaned content snippets and optional synthesized answers.",
+      "domains": ["websearch"],
+      "color": "#3b82f6",
+      "tags": ["managed", "ai"],
+      "aliases": ["tavily search", "tavily api"]
+    },
+    {
+      "id": "searxng",
+      "driver": "searxng",
+      "name": "SearxNG",
+      "tagline": "Self-hosted open-source metasearch",
+      "description": "Privacy-respecting open-source metasearch engine aggregating many engines. Point it at your own instance (JSON format must be enabled).",
+      "domains": ["websearch"],
+      "color": "#3050ff",
+      "tags": ["self-hosted", "open-source", "privacy"],
+      "aliases": ["searx", "metasearch"]
+    },
+    {
+      "id": "duckduckgo",
+      "driver": "duckduckgo",
+      "name": "DuckDuckGo",
+      "tagline": "Keyless best-effort web search",
+      "description": "Best-effort search over the DuckDuckGo HTML endpoint. No API key or account required; suitable for light usage.",
+      "domains": ["websearch"],
+      "color": "#de5833",
+      "tags": ["free", "privacy", "open-source"],
+      "aliases": ["ddg", "duck duck go"]
     }
   ]
 }
