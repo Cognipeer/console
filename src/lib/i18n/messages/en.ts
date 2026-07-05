@@ -96,6 +96,8 @@ export const en = {
     browserDescription: 'Headless browser profiles for sessions and agents',
     crawler: 'Crawlers',
     crawlerDescription: 'Web crawlers that ingest markdown into knowledge engines',
+    websearch: 'Web Search',
+    websearchDescription: 'Search the web through configurable providers: Bing, Brave, Serper, Tavily, SearxNG, DuckDuckGo',
     ocr: 'OCR Jobs',
     ocrDescription: 'Batch OCR + extraction over files and images with summary and structured output',
   },

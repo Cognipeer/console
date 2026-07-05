@@ -6,6 +6,7 @@ import { SqliteVectorProviderContract } from './sqliteVector.contract';
 import { LocalFileProviderContract } from './localFile.contract';
 import { AwsS3FileProviderContract } from './awsS3Files.contract';
 import { MODEL_PROVIDER_CONTRACTS } from './modelContracts';
+import { WEBSEARCH_PROVIDER_CONTRACTS } from './webSearchContracts';
 import { MistralOcrProviderContract } from './mistralOcr.contract';
 import { AzureDocumentIntelligenceProviderContract } from './azureDocumentIntelligence.contract';
 import { AwsTextractProviderContract } from './awsTextract.contract';
@@ -45,6 +46,7 @@ export const CORE_PROVIDER_CONTRACTS = [
   PostgresVectorProviderContract,
   SystemDefaultVectorProviderContract,
   ...MODEL_PROVIDER_CONTRACTS,
+  ...WEBSEARCH_PROVIDER_CONTRACTS,
   MistralOcrProviderContract,
   AzureDocumentIntelligenceProviderContract,
   AwsTextractProviderContract,

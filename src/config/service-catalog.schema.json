@@ -16,7 +16,7 @@
   "definitions": {
     "domain": {
       "type": "string",
-      "enum": ["model", "embedding", "vector", "file", "datasource", "stt", "tts", "ocr"]
+      "enum": ["model", "embedding", "vector", "file", "datasource", "stt", "tts", "ocr", "websearch"]
     },
     "tag": {
       "type": "string",

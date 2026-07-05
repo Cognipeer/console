@@ -70,7 +70,8 @@
         "IconTool",
         "IconUsers",
         "IconVectorBezier",
-        "IconWorld"
+        "IconWorld",
+        "IconWorldSearch"
       ]
     },
     "service": {

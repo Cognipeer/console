@@ -695,6 +695,34 @@ export interface IRerankerRunLog {
   createdAt?: Date;
 }
 
+// ── Web Search types ────────────────────────────────────────────────────
+
+/**
+ * One executed search on a Web Search instance (a websearch-domain provider
+ * record). Keyed by `searchKey` = the instance's provider key so logs are
+ * viewable per instance in the dashboard.
+ */
+export interface IWebSearchRunLog {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  searchKey: string;
+  driver: string;
+  query: string;
+  resultCount: number;
+  latencyMs?: number;
+  status: 'success' | 'error';
+  errorMessage?: string;
+  /** Caller context — 'api' for client v1, 'dashboard' for the playground. */
+  source?: 'api' | 'dashboard';
+  /** Synthesized answer returned with this run (AI or provider-native). */
+  answer?: string;
+  /** Returned results (capped + snippet-truncated) for log inspection. */
+  results?: Array<{ title: string; url: string; snippet: string; position: number }>;
+  metadata?: Record<string, unknown>;
+  createdAt?: Date;
+}
+
 // ── Alert types ─────────────────────────────────────────────────────────
 
 export type AlertModule = 'models' | 'inference' | 'guardrails' | 'rag' | 'mcp' | 'analysis' | 'evaluation' | 'redteam';

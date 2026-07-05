@@ -249,6 +249,17 @@
         "/api/client/v1/crawler/jobs/*"
       ]
     },
+    "WEB_SEARCH": {
+      "name": "Web Search",
+      "description": "Web search over configurable providers (Bing, Brave, Serper, Tavily, SearxNG, DuckDuckGo)",
+      "endpoints": [
+        "/api/websearch/providers",
+        "/api/websearch/providers/*",
+        "/api/websearch/search",
+        "/api/client/v1/websearch/providers",
+        "/api/client/v1/websearch/search"
+      ]
+    },
     "BATCH_API": {
       "name": "Batch API",
       "description": "OpenAI-compatible asynchronous bulk inference (chat completions and embeddings)",

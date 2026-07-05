@@ -33,6 +33,7 @@ import { clientRerankerApiPlugin } from './plugins/client-reranker';
 import { clientToolsApiPlugin } from './plugins/client-tools';
 import { clientTracingApiPlugin } from './plugins/client-tracing';
 import { clientVectorApiPlugin } from './plugins/client-vector';
+import { clientWebSearchApiPlugin } from './plugins/client-websearch';
 import { clientBrowserApiPlugin } from './plugins/client-browser';
 import { clientBrowserMcpApiPlugin } from './plugins/client-browser-mcp';
 import { auditApiPlugin } from './plugins/audit';
@@ -72,6 +73,7 @@ import { toolsApiPlugin } from './plugins/tools';
 import { tracingApiPlugin } from './plugins/tracing';
 import { usersApiPlugin } from './plugins/users';
 import { vectorApiPlugin } from './plugins/vector';
+import { websearchApiPlugin } from './plugins/websearch';
 import {
   registerEnterpriseApiPlugins,
   enterprisePublicApiPaths,
@@ -366,6 +368,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(clientToolsApiPlugin);
   await app.register(clientTracingApiPlugin);
   await app.register(clientVectorApiPlugin);
+  await app.register(clientWebSearchApiPlugin);
   await app.register(clientBrowserApiPlugin);
   await app.register(clientBrowserMcpApiPlugin);
   await app.register(automationsApiPlugin);
@@ -402,6 +405,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(tracingApiPlugin);
   await app.register(usersApiPlugin);
   await app.register(vectorApiPlugin);
+  await app.register(websearchApiPlugin);
 
   // ── Enterprise overlay seam ──────────────────────────────────────────────
   // Registers the enterprise Fastify plugins (gpu-fleet, sandbox runtime,

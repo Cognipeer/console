@@ -61,6 +61,7 @@ export const TABLES = {
   ragQueryLogs: 'rag_query_logs',
   rerankers: 'rerankers',
   rerankerRunLogs: 'reranker_run_logs',
+  websearchRunLogs: 'websearch_run_logs',
   memoryStores: 'memory_stores',
   memoryItems: 'memory_items',
   configGroups: 'config_groups',
@@ -434,6 +435,10 @@ export class SQLiteProviderBase {
     // boot; default enabled=on, public=off (private behind login).
     this.ensureTableColumn(db, 'sandbox_instances', 'previewEnabled', 'previewEnabled INTEGER NOT NULL DEFAULT 1');
     this.ensureTableColumn(db, 'sandbox_instances', 'previewPublic', 'previewPublic INTEGER NOT NULL DEFAULT 0');
+    // Web search run logs: inline answer + returned results (added with the
+    // AI-answer feature). Safe to ensure on boot.
+    this.ensureTableColumn(db, TABLES.websearchRunLogs, 'answer', 'answer TEXT');
+    this.ensureTableColumn(db, TABLES.websearchRunLogs, 'results', 'results TEXT');
   }
 
   private migrateOcrJobsSchema(db: Database.Database): void {

@@ -249,6 +249,7 @@ export type {
   IReranker,
   IRerankerConfig,
   IRerankerRunLog,
+  IWebSearchRunLog,
   RerankerStrategy,
   RerankerStatus,
   IMemoryStore,

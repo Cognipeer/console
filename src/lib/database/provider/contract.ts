@@ -62,6 +62,7 @@ import type {
   IRagQueryLog,
   IReranker,
   IRerankerRunLog,
+  IWebSearchRunLog,
   RerankerStatus,
   ITenant,
   ITenantUserDirectoryEntry,
@@ -896,6 +897,15 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     rerankerKey: string,
     options?: { limit?: number; skip?: number; from?: Date; to?: Date },
   ): Promise<IRerankerRunLog[]>;
+
+  // ── Web Search operations (tenant-specific) ──
+  createWebSearchRunLog(
+    log: Omit<IWebSearchRunLog, '_id' | 'createdAt'>,
+  ): Promise<IWebSearchRunLog>;
+  listWebSearchRunLogs(
+    searchKey: string,
+    options?: { limit?: number; skip?: number; from?: Date; to?: Date },
+  ): Promise<IWebSearchRunLog[]>;
 
   // ── Memory Store operations (tenant-specific) ──
   createMemoryStore(

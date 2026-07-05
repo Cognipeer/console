@@ -58,6 +58,7 @@ describe('Domain classification', () => {
     'stt',
     'tts',
     'ocr',
+    'websearch',
   ] as const;
 
   it.each(CORE_PROVIDER_CONTRACTS.map((c) => [c.id, c]))(

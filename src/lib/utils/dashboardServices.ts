@@ -29,6 +29,7 @@ import {
   IconUsers,
   IconVectorBezier,
   IconWorld,
+  IconWorldSearch,
   type Icon,
 } from '@tabler/icons-react';
 import platformServicesJson from '@/config/platform-services.json';
@@ -75,6 +76,7 @@ const ICON_REGISTRY = {
   IconUsers,
   IconVectorBezier,
   IconWorld,
+  IconWorldSearch,
 } satisfies Record<string, Icon>;
 
 export type PlatformIconName = keyof typeof ICON_REGISTRY;

@@ -24,6 +24,7 @@ export type PermissionService =
   | 'sandbox'
   | 'browser'
   | 'crawler'
+  | 'websearch'
   | 'ocr'
   | 'alerts'
   | 'automations'
@@ -88,6 +89,7 @@ export const RBAC_SERVICE_DEFINITIONS: RbacServiceDefinition[] = [
   { id: 'pii', label: 'PII Service', description: 'PII detection, redaction and masking policies.', category: 'operate' },
   { id: 'browser', label: 'Browsers', description: 'Managed browser profiles and sessions.', category: 'operate' },
   { id: 'crawler', label: 'Crawler', description: 'Web crawlers that ingest markdown into knowledge engines.', category: 'data' },
+  { id: 'websearch', label: 'Web Search', description: 'Web search providers (Bing, Brave, Serper, Tavily, SearxNG, DuckDuckGo) and search APIs.', category: 'data' },
   { id: 'ocr', label: 'OCR Jobs', description: 'Batch OCR + extraction jobs over files and images.', category: 'data' },
   { id: 'alerts', label: 'Alerts & Incidents', description: 'Alert rules, history and incidents.', category: 'operate' },
   { id: 'automations', label: 'Automations', description: 'Operational schedulers, maintenance jobs and runtime controls.', category: 'admin', adminService: true },
@@ -115,6 +117,7 @@ const LEVEL_RANK: Record<ServicePermissionLevel, number> = {
 const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/client/v1/browser', service: 'browser' },
   { prefix: '/api/client/v1/crawler', service: 'crawler' },
+  { prefix: '/api/client/v1/websearch', service: 'websearch' },
   { prefix: '/api/client/v1/ocr-jobs', service: 'ocr' },
   { prefix: '/api/client/v1/automations', service: 'automations' },
   { prefix: '/api/client/v1/config', service: 'config' },
@@ -172,6 +175,7 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/tools', service: 'tools' },
   { prefix: '/api/browser', service: 'browser' },
   { prefix: '/api/crawler', service: 'crawler' },
+  { prefix: '/api/websearch', service: 'websearch' },
   { prefix: '/api/ocr-jobs', service: 'ocr' },
   { prefix: '/api/automations', service: 'automations' },
   { prefix: '/api/alerts', service: 'alerts' },
