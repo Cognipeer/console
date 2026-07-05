@@ -59,6 +59,40 @@ function sendError(
   return reply.code(status).send({ error: message });
 }
 
+/** Max results inlined into a sync run response; larger jobs page via /jobs/:id/results. */
+const SYNC_RESULTS_LIMIT = 100;
+
+/**
+ * Response body for a container run. Async keeps the fire-and-forget shape
+ * (202 + jobId). Sync blocks until the job finishes, then inlines the final
+ * job state and its results (markdown included) so a single request is enough:
+ * crawler → request → result.
+ */
+async function buildRunResponse(
+  crawlerCtx: { tenantDbName: string; tenantId: string; projectId?: string },
+  run: { jobId: string; status: string },
+  mode: 'sync' | 'async',
+): Promise<{ statusCode: number; body: Record<string, unknown> }> {
+  if (mode !== 'sync') {
+    return { statusCode: 202, body: { ...run } };
+  }
+  const [job, results] = await Promise.all([
+    getCrawlJob(crawlerCtx, run.jobId),
+    listCrawlJobResults(crawlerCtx, run.jobId, { limit: SYNC_RESULTS_LIMIT }),
+  ]);
+  return {
+    statusCode: 200,
+    body: {
+      jobId: run.jobId,
+      status: job?.status ?? run.status,
+      pagesProcessed: job?.pagesProcessed,
+      filesProcessed: job?.filesProcessed,
+      errorsCount: job?.errorsCount,
+      results,
+    },
+  };
+}
+
 export const clientCrawlerApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/client/v1/crawler/crawlers', withClientApiRequestContext(async (request, reply) => {
     try {
@@ -145,8 +179,10 @@ export const clientCrawlerApiPlugin: FastifyPluginAsync = async (app) => {
       const ctx = await getApiTokenContextForRequest(request);
       const { idOrKey } = request.params as { idOrKey: string };
       const body = runCrawlerOptionsSchema.parse(readJsonBody<unknown>(request) ?? {});
+      const crawlerCtx = { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: projectOf(ctx) };
+      const mode = body.mode ?? 'async';
       const result = await runCrawler(
-        { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: projectOf(ctx) },
+        crawlerCtx,
         idOrKey,
         {
           urls: body.urls,
@@ -154,13 +190,14 @@ export const clientCrawlerApiPlugin: FastifyPluginAsync = async (app) => {
           callbackUrl: body.callbackUrl,
           // External integrations default to async: enqueue, return the jobId,
           // and notify via callbackUrl. Pass `"mode":"sync"` to block instead.
-          mode: body.mode ?? 'async',
+          mode,
           metadata: body.metadata,
           trigger: 'api',
           triggerActor: actorFromCtx(ctx),
         },
       );
-      return reply.code(202).send(result);
+      const { statusCode, body: responseBody } = await buildRunResponse(crawlerCtx, result, mode);
+      return reply.code(statusCode).send(responseBody);
     } catch (error) {
       logger.error('Client run crawler failed', { error });
       return sendError(reply, error, 'Failed to run crawler');
@@ -225,19 +262,22 @@ export const clientCrawlerApiPlugin: FastifyPluginAsync = async (app) => {
       const ctx = await getApiTokenContextForRequest(request);
       const { idOrKey } = request.params as { idOrKey: string };
       const body = crawlOnContainerSchema.parse(readJsonBody<unknown>(request));
+      const crawlerCtx = { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: projectOf(ctx) };
+      const mode = body.mode ?? 'async';
       const result = await runCrawler(
-        { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: projectOf(ctx) },
+        crawlerCtx,
         idOrKey,
         {
           urls: body.urls,
           callbackUrl: body.callbackUrl,
-          mode: body.mode ?? 'async',
+          mode,
           metadata: body.metadata,
           trigger: 'api',
           triggerActor: actorFromCtx(ctx),
         },
       );
-      return reply.code(202).send(result);
+      const { statusCode, body: responseBody } = await buildRunResponse(crawlerCtx, result, mode);
+      return reply.code(statusCode).send(responseBody);
     } catch (error) {
       logger.error('Client crawl on container failed', { error });
       return sendError(reply, error, 'Failed to crawl on container');

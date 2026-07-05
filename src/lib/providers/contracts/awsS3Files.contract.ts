@@ -26,6 +26,9 @@ interface AwsS3FileSettings {
   region: string;
   bucket: string;
   prefix?: string;
+  // Custom S3-compatible endpoint (MinIO, Ceph RGW, ...). Empty means AWS S3
+  // proper (regional endpoint derived from `region`).
+  endpoint?: string;
   usePathStyleEndpoint?: boolean;
 }
 
@@ -201,6 +204,21 @@ export const AwsS3FileProviderContract: ProviderContract<
             description: 'Optional prefix prepended to all stored objects.',
             scope: 'settings',
           },
+          {
+            name: 'endpoint',
+            label: 'Custom endpoint',
+            type: 'text',
+            placeholder: 'https://minio.internal:9000',
+            description: 'Optional S3-compatible endpoint (MinIO, Ceph RGW, ...). Leave empty for AWS S3.',
+            scope: 'settings',
+          },
+          {
+            name: 'usePathStyleEndpoint',
+            label: 'Use path-style addressing',
+            type: 'switch',
+            description: 'Required by most S3-compatible stores. Defaults on automatically when a custom endpoint is set.',
+            scope: 'settings',
+          },
         ],
       },
     ],
@@ -208,6 +226,7 @@ export const AwsS3FileProviderContract: ProviderContract<
   async createRuntime({ tenantId, providerKey, credentials, settings, logger }) {
     const region = ensure(settings.region, 'AWS region is required.');
     const bucket = ensure(settings.bucket, 'Bucket name is required.');
+    const endpoint = settings.endpoint?.trim() || undefined;
 
     const client = new S3Client({
       region,
@@ -216,7 +235,10 @@ export const AwsS3FileProviderContract: ProviderContract<
         secretAccessKey: ensure(credentials.secretAccessKey, 'Secret access key is required.'),
         sessionToken: credentials.sessionToken,
       },
-      forcePathStyle: settings.usePathStyleEndpoint ?? false,
+      ...(endpoint ? { endpoint } : {}),
+      // MinIO and most S3-compatible stores require path-style addressing, so a
+      // custom endpoint defaults it on unless explicitly disabled.
+      forcePathStyle: settings.usePathStyleEndpoint ?? Boolean(endpoint),
     });
 
     const basePrefixSegments = [settings.prefix, tenantId, providerKey]

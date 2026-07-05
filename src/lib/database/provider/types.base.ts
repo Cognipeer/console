@@ -495,7 +495,8 @@ export type ProviderDomain =
   | 'datasource'
   | 'stt'
   | 'tts'
-  | 'ocr';
+  | 'ocr'
+  | 'websearch';
 
 export interface IProviderRecordStatus {
   status: 'active' | 'disabled' | 'errored';

@@ -54,6 +54,7 @@ export const COLLECTIONS = {
   ragQueryLogs: 'rag_query_logs',
   rerankers: 'rerankers',
   rerankerRunLogs: 'reranker_run_logs',
+  websearchRunLogs: 'websearch_run_logs',
   memoryStores: 'memory_stores',
   memoryItems: 'memory_items',
   configGroups: 'config_groups',

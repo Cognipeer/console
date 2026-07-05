@@ -22,6 +22,8 @@ export const tr: typeof en = {
     piiDescription: 'Kişisel verileri tespit edin, redakte edin ve maskeleyin',
     crawler: 'Crawler',
     crawlerDescription: 'Web sitelerini markdown olarak çekip knowledge engine ile birleştir',
+    websearch: 'Web Arama',
+    websearchDescription: 'Yapılandırılabilir sağlayıcılarla web araması: Bing, Brave, Serper, Tavily, SearxNG, DuckDuckGo',
     realtimeDescription: 'WebSocket üzerinden gerçek zamanlı ses ve sohbet oturumları; Twilio köprüsüyle telefon bağlantısı',
     ocr: 'OCR İşleri',
     ocrDescription: 'Dosya ve görseller üzerinde toplu OCR + çıkarım; özet ve yapısal çıktı',

@@ -489,6 +489,7 @@ export default function ProviderConfigModal({
                   'stt',
                   'tts',
                   'ocr',
+                  'websearch',
                 ] as const
               ).map((d) => (
                 <option key={d} value={d}>

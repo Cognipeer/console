@@ -36,6 +36,7 @@ import {
   IconTimeline,
   IconVector,
   IconVolume,
+  IconWorld,
 } from '@tabler/icons-react';
 import { ActionIcon, Text, Tooltip } from '@mantine/core';
 import type { DashboardServiceDefinition } from '@/lib/utils/dashboardServices';
@@ -309,6 +310,15 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       href: '/dashboard/reranker',
       icon: IconBook,
       matcher: (p) => p.startsWith('/dashboard/reranker'),
+    },
+  ],
+  websearch: [
+    {
+      id: 'instances',
+      label: 'Instances',
+      href: '/dashboard/websearch',
+      icon: IconWorld,
+      matcher: (p) => p.startsWith('/dashboard/websearch'),
     },
   ],
   realtime: [

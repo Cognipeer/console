@@ -1133,6 +1133,26 @@ export const TENANT_SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_reranker_run_logs_key_createdAt ON reranker_run_logs(rerankerKey, createdAt DESC);
 
+  -- Web search run logs (per Web Search instance = websearch provider record)
+  CREATE TABLE IF NOT EXISTS websearch_run_logs (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    searchKey TEXT NOT NULL,
+    driver TEXT NOT NULL,
+    query TEXT NOT NULL,
+    resultCount INTEGER NOT NULL DEFAULT 0,
+    latencyMs INTEGER,
+    status TEXT NOT NULL DEFAULT 'success',
+    errorMessage TEXT,
+    source TEXT,
+    answer TEXT,
+    results TEXT,
+    metadata TEXT DEFAULT '{}',
+    createdAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_websearch_run_logs_key_createdAt ON websearch_run_logs(searchKey, createdAt DESC);
+
   -- Memory stores
   CREATE TABLE IF NOT EXISTS memory_stores (
     id TEXT PRIMARY KEY,

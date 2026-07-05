@@ -494,6 +494,17 @@
       "badge": "new"
     },
     {
+      "id": "websearch",
+      "href": "/dashboard/websearch",
+      "icon": "IconWorldSearch",
+      "category": "data",
+      "navLabelKey": "websearch",
+      "navDescriptionKey": "websearchDescription",
+      "tags": ["search", "web", "providers"],
+      "searchKeywords": ["web search", "search", "bing", "brave", "serper", "tavily", "searxng", "duckduckgo", "serp"],
+      "badge": "new"
+    },
+    {
       "id": "ocr",
       "href": "/dashboard/ocr-jobs",
       "icon": "IconFileText",
