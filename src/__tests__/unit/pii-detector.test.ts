@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { runPiiDetection } from '@/lib/services/guardrail/piiDetector';
+import { runPiiDetection, redactFindings } from '@/lib/services/guardrail/piiDetector';
 import type { IGuardrailPiiPolicy } from '@/lib/database';
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -230,5 +230,133 @@ describe('runPiiDetection — finding structure', () => {
     expect(typeof f.action).toBe('string');
     expect(typeof f.block).toBe('boolean');
     expect(typeof f.value).toBe('string');
+  });
+});
+
+// ── TCKN (Turkish national ID) ────────────────────────────────────────────────
+
+describe('runPiiDetection — tckn', () => {
+  const policy = makePolicy({ tckn: true });
+
+  it('detects a checksum-valid TCKN', () => {
+    // 10000000146 is the canonical checksum-valid test TCKN
+    const findings = runPiiDetection('TC kimlik no: 10000000146', policy);
+    expect(findings.length).toBeGreaterThan(0);
+    expect(findings[0].category).toBe('tckn');
+  });
+
+  it('rejects an 11-digit number with an invalid checksum', () => {
+    const findings = runPiiDetection('order id 12345678901', policy);
+    expect(findings).toHaveLength(0);
+  });
+
+  it('rejects numbers starting with 0', () => {
+    const findings = runPiiDetection('ref 01000000146', policy);
+    expect(findings).toHaveLength(0);
+  });
+});
+
+// ── IBAN checksum ─────────────────────────────────────────────────────────────
+
+describe('runPiiDetection — iban', () => {
+  const policy = makePolicy({ iban: true });
+
+  it('detects a checksum-valid Turkish IBAN', () => {
+    const findings = runPiiDetection('IBAN: TR330006100519786457841326', policy);
+    expect(findings.length).toBeGreaterThan(0);
+    expect(findings[0].category).toBe('iban');
+  });
+
+  it('detects a checksum-valid UK IBAN', () => {
+    const findings = runPiiDetection('GB29NWBK60161331926819', policy);
+    expect(findings.length).toBeGreaterThan(0);
+  });
+
+  it('rejects random uppercase+digit strings that fail mod-97', () => {
+    const findings = runPiiDetection('code TR000000000000000000000001', policy);
+    expect(findings).toHaveLength(0);
+  });
+});
+
+// ── Obfuscation resistance ────────────────────────────────────────────────────
+
+describe('runPiiDetection — obfuscation', () => {
+  it('detects spelled-out email obfuscation "(at) … (dot)"', () => {
+    const findings = runPiiDetection('reach me: john (at) example (dot) com', makePolicy({ email: true }));
+    expect(findings.length).toBeGreaterThan(0);
+    expect(findings[0].category).toBe('email');
+  });
+
+  it('detects "[at]" bracket style', () => {
+    const findings = runPiiDetection('mail: jane[at]corp[dot]org', makePolicy({ email: true }));
+    expect(findings.length).toBeGreaterThan(0);
+  });
+
+  it('does not rewrite ordinary sentences containing " at "', () => {
+    const findings = runPiiDetection('the meeting is at 5.30 today', makePolicy({ email: true }));
+    expect(findings).toHaveLength(0);
+  });
+
+  it('detects email hidden with zero-width characters', () => {
+    const hidden = 'john​@​example​.com';
+    const findings = runPiiDetection(`contact ${hidden}`, makePolicy({ email: true }));
+    expect(findings.length).toBeGreaterThan(0);
+  });
+});
+
+// ── Known secret prefixes & entropy ───────────────────────────────────────────
+
+describe('runPiiDetection — apiKey hardening', () => {
+  const policy = makePolicy({ apiKey: true });
+
+  it('detects short known-prefix secrets (AWS access key)', () => {
+    const findings = runPiiDetection('key = AKIAIOSFODNN7EXAMPLE', policy);
+    expect(findings.length).toBeGreaterThan(0);
+    expect(findings[0].category).toBe('apiKey');
+  });
+
+  it('detects sk- style keys', () => {
+    const findings = runPiiDetection('OPENAI_KEY=sk-proj-Ab3dEf9hIjKl2mNoPq', policy);
+    expect(findings.length).toBeGreaterThan(0);
+  });
+
+  it('detects JWTs', () => {
+    const jwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U';
+    const findings = runPiiDetection(`token: ${jwt}`, policy);
+    expect(findings.length).toBeGreaterThan(0);
+  });
+
+  it('does not flag low-entropy repeated strings', () => {
+    const findings = runPiiDetection('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', policy);
+    expect(findings).toHaveLength(0);
+  });
+});
+
+// ── Redaction ─────────────────────────────────────────────────────────────────
+
+describe('redactFindings', () => {
+  it('masks detected values with category tags', () => {
+    const text = 'Email hello@example.com and card 4111111111111111';
+    const findings = runPiiDetection(text, makePolicy({ email: true, creditCard: true }));
+    const redacted = redactFindings(text, findings);
+    expect(redacted).not.toContain('hello@example.com');
+    expect(redacted).not.toContain('4111111111111111');
+    expect(redacted).toContain('[REDACTED:email]');
+    expect(redacted).toContain('[REDACTED:creditCard]');
+  });
+
+  it('masks every occurrence of a repeated value', () => {
+    const text = 'a@b.com again a@b.com';
+    const findings = runPiiDetection(text, makePolicy({ email: true }));
+    const redacted = redactFindings(text, findings);
+    expect(redacted).not.toContain('a@b.com');
+  });
+
+  it('labels non-PII finding types by their category (e.g. word_filter)', () => {
+    const redacted = redactFindings('well damn that', [
+      { type: 'word_filter', category: 'banned_word', severity: 'high', message: '', action: 'redact', block: false, value: 'damn' },
+    ]);
+    expect(redacted).toContain('[REDACTED:banned_word]');
+    expect(redacted).not.toContain('damn');
   });
 });

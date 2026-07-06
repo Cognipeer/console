@@ -807,6 +807,17 @@ button.ds-project-pill:hover,
   min-width: 0;
 }
 
+@media (max-width: 48em) {
+  button.ds-project-pill,
+  .ds-project-pill {
+    padding: 0 8px;
+    max-width: 44px;
+  }
+  .ds-project-label {
+    display: none;
+  }
+}
+
 /* Form controls */
 .ds-select {
   height: 32px;

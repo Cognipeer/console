@@ -47,6 +47,7 @@ export const clientGuardrailsApiPlugin: FastifyPluginAsync = async (app) => {
         tenantDbName: ctx.tenantDbName,
         tenantId: ctx.tenantId,
         text: body.text,
+        source: 'client-api',
       });
 
       return reply.code(200).send({
@@ -56,6 +57,8 @@ export const clientGuardrailsApiPlugin: FastifyPluginAsync = async (app) => {
         guardrail_name: result.guardrailName,
         message: result.passed ? null : buildUserMessage(result.findings),
         passed: result.passed,
+        disabled: result.disabled ?? false,
+        redacted_text: result.redactedText ?? null,
       });
     } catch (error) {
       logger.error('Evaluate client guardrail error', { error });

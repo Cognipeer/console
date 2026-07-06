@@ -31,6 +31,8 @@ interface EvalResult {
   action: string;
   findings: GuardrailFinding[];
   message: string | null;
+  disabled?: boolean;
+  redacted_text?: string | null;
 }
 
 const SEVERITY_COLORS: Record<string, string> = {
@@ -41,6 +43,7 @@ const SEVERITY_COLORS: Record<string, string> = {
 
 const FINDING_TYPE_LABELS: Record<string, string> = {
   pii: 'PII',
+  word_filter: 'Word Filter',
   moderation: 'Moderation',
   prompt_shield: 'Prompt Shield',
   custom: 'Custom Rule',
@@ -83,6 +86,11 @@ export default function GuardrailEvaluatePanel({
     }
   };
 
+  // "evaluation_error" findings mean a check could not run (e.g. the moderation
+  // model's provider credentials failed to decrypt). Surfaced distinctly so a
+  // fail-open PASS isn't mistaken for "safe".
+  const errorFindings = result?.findings.filter((f) => f.category === 'evaluation_error') ?? [];
+
   return (
     <Stack gap="md">
       <Textarea
@@ -118,6 +126,27 @@ export default function GuardrailEvaluatePanel({
         </Alert>
       )}
 
+      {result?.disabled && (
+        <Alert color="yellow" title="Guardrail is disabled" icon={<IconAlertTriangle size={16} />}>
+          This guardrail is turned off, so no checks ran and the result is a vacuous PASS. It is
+          also not enforced on live traffic. Enable it (Configure tab → Enabled) to test the policy.
+        </Alert>
+      )}
+
+      {errorFindings.length > 0 && (
+        <Alert color="orange" title="A check could not run" icon={<IconAlertTriangle size={16} />}>
+          {errorFindings.map((f, i) => (
+            <Text key={i} size="xs">
+              {FINDING_TYPE_LABELS[f.type] ?? f.type}: {f.message}
+            </Text>
+          ))}
+          <Text size="xs" mt={4} c="dimmed">
+            The content passed without this check actually running. Fix the underlying model /
+            provider, or set the guardrail to fail closed if these checks are mandatory.
+          </Text>
+        </Alert>
+      )}
+
       {result && (
         <Card withBorder p="md">
           <Stack gap="sm">
@@ -126,13 +155,13 @@ export default function GuardrailEvaluatePanel({
                 size={36}
                 radius="md"
                 variant="light"
-                color={result.passed ? 'teal' : 'red'}
+                color={result.disabled ? 'gray' : result.passed ? 'teal' : 'red'}
               >
                 {result.passed ? <IconShieldCheck size={18} /> : <IconShieldX size={18} />}
               </ThemeIcon>
               <div>
                 <Text fw={600} size="sm">
-                  {result.passed ? 'Passed' : 'Failed'}
+                  {result.disabled ? 'Not evaluated (disabled)' : result.passed ? 'Passed' : 'Failed'}
                 </Text>
                 <Text size="xs" c="dimmed">
                   Action: <Code>{result.action}</Code> &middot; {result.findings.length} finding
@@ -140,11 +169,11 @@ export default function GuardrailEvaluatePanel({
                 </Text>
               </div>
               <Badge
-                color={result.passed ? 'teal' : 'red'}
+                color={result.disabled ? 'gray' : result.passed ? 'teal' : 'red'}
                 variant="light"
                 ml="auto"
               >
-                {result.passed ? 'PASS' : 'FAIL'}
+                {result.disabled ? 'DISABLED' : result.passed ? 'PASS' : 'FAIL'}
               </Badge>
             </Group>
 
@@ -179,6 +208,15 @@ export default function GuardrailEvaluatePanel({
                   </Card>
                 ))}
               </Stack>
+            )}
+
+            {result.redacted_text && (
+              <div>
+                <Text size="xs" fw={500} mb={4}>Redacted output</Text>
+                <Code block style={{ fontSize: 11 }}>
+                  {result.redacted_text}
+                </Code>
+              </div>
             )}
 
             {result.message && (

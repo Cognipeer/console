@@ -34,6 +34,7 @@ export const COLLECTIONS = {
   inferenceServerMetrics: 'inference_server_metrics',
   guardrails: 'guardrails',
   guardrailEvalLogs: 'guardrail_evaluation_logs',
+  guardrailWordLists: 'guardrail_word_lists',
   evaluationTargets: 'evaluation_targets',
   evaluationDatasets: 'evaluation_datasets',
   evaluationSuites: 'evaluation_suites',

@@ -850,14 +850,160 @@
   gap: 8px;
 }
 
+/* ── Hamburger (mobile-only) ───────────────────────────────── */
+.hamburgerBtn {
+  display: none;
+}
+
+.hideOnMobile {
+  display: inline-flex;
+}
+
+/* ── Mobile nav drawer ──────────────────────────────────────── */
+.mobileNavOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 220;
+  display: flex;
+  animation: launcherFadeIn 0.18s ease;
+}
+
+.mobileNavBackdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  backdrop-filter: blur(4px);
+  border: none;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+}
+
+:global(:root[data-mantine-color-scheme='dark']) .mobileNavBackdrop {
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.mobileNavPanel {
+  position: relative;
+  width: min(300px, 84vw);
+  height: 100%;
+  background-color: var(--ds-surface-raised);
+  border-right: 1px solid var(--ds-border-soft);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  animation: mobileNavSlideIn 0.2s cubic-bezier(0.3, 0.7, 0.4, 1);
+}
+
+@keyframes mobileNavSlideIn {
+  from {
+    transform: translateX(-12px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.mobileNavHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--ds-border-soft);
+  flex-shrink: 0;
+}
+
+.mobileNavBrowseAll {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 10px 4px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: var(--ds-accent-soft);
+  color: var(--ds-accent);
+  font-size: 13px;
+  font-weight: 600;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+}
+
+.mobileNavSection {
+  padding: 4px 8px;
+}
+
+.mobileNavSectionTitle {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ds-text-faint);
+  padding: 10px 10px 4px;
+}
+
+.mobileNavDivider {
+  height: 1px;
+  background: var(--ds-border-soft);
+  margin: 6px 10px;
+}
+
+.mobileNavItem {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 10px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  color: var(--ds-text-muted);
+  font-size: 13.5px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.mobileNavItem:hover {
+  background: var(--ds-surface-2);
+  color: var(--ds-text);
+}
+
+.mobileNavItemActive {
+  background: var(--ds-accent-soft);
+  color: var(--ds-accent);
+  font-weight: 500;
+}
+
+.mobileNavItemIcon {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+.mobileNavExternal {
+  margin-left: auto;
+  opacity: 0.5;
+}
+
 /* ── Mobile ─────────────────────────────────────────────────── */
 @media (max-width: 48em) {
   .shell {
-    grid-template-columns: 48px var(--subnav-w, 0px) 1fr;
+    grid-template-columns: 1fr;
+    grid-template-rows: 60px minmax(0, 1fr);
   }
 
-  .shellWithSubnav {
-    --subnav-w: 200px;
+  .rail,
+  .subnav {
+    display: none;
+  }
+
+  .main {
+    grid-column: 1;
+    padding: 12px 14px 24px;
   }
 
   .searchBox {
@@ -869,15 +1015,50 @@
     transform-origin: left center;
   }
 
-  .svcTrigger span:not(.dotGridSm) {
+  .svcTrigger {
     display: none;
   }
 
-  .svcTrigger {
-    padding: 0 10px;
+  .hamburgerBtn {
+    display: inline-flex;
   }
 
-  .main {
-    padding: 12px 14px 24px;
+  .hideOnMobile {
+    display: none;
+  }
+
+  .launcherBody {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+  }
+
+  .launcherSidebar {
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-right: none;
+    border-bottom: 1px solid var(--mantine-color-gray-3);
+    padding: 10px 8px;
+    gap: 6px;
+    scrollbar-width: none;
+  }
+
+  .launcherSidebar::-webkit-scrollbar {
+    display: none;
+  }
+
+  :global(:root[data-mantine-color-scheme='dark']) .launcherSidebar {
+    border-bottom-color: var(--mantine-color-dark-4);
+  }
+
+  .launcherCat {
+    white-space: nowrap;
+    width: auto;
+  }
+
+  .launcherSidebarDivider {
+    width: 1px;
+    height: 24px;
+    margin: 0 4px;
   }
 }

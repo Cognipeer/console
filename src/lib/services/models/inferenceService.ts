@@ -98,6 +98,14 @@ function extractAssistantText(response: unknown): string {
   return guardrailContentToText(choices?.[0]?.message?.content);
 }
 
+interface GuardrailEnforcementOutcome {
+  /** Text with redact-action findings masked; undefined when nothing was redacted. */
+  redactedText?: string;
+  /** Non-blocking findings (warn/flag/redact) to surface to the caller. */
+  findings: Awaited<ReturnType<typeof evaluateGuardrail>>['findings'];
+  guardrailKey: string;
+}
+
 async function enforceModelGuardrail(params: {
   tenantDbName: string;
   tenantId: string;
@@ -105,16 +113,21 @@ async function enforceModelGuardrail(params: {
   guardrailKey: string;
   text: string;
   phase: 'input' | 'output';
-}): Promise<void> {
-  if (!params.text.trim()) return;
+  requestId?: string;
+  source?: string;
+}): Promise<GuardrailEnforcementOutcome | null> {
+  if (!params.text.trim()) return null;
   const result = await evaluateGuardrail({
     tenantDbName: params.tenantDbName,
     tenantId: params.tenantId,
     projectId: params.projectId,
     guardrailKey: params.guardrailKey,
     text: params.text,
+    phase: params.phase,
+    requestId: params.requestId,
+    source: params.source ?? 'chat.completions',
   });
-  if (!result.passed && result.action === 'block') {
+  if (!result.passed && result.findings.some((f) => f.block)) {
     const reasons = result.findings
       .map((f) => f.category || f.type)
       .filter(Boolean)
@@ -126,6 +139,36 @@ async function enforceModelGuardrail(params: {
       result.findings,
     );
   }
+  return {
+    redactedText: result.redactedText,
+    findings: result.findings,
+    guardrailKey: result.guardrailKey,
+  };
+}
+
+/** Rewrites the latest user message's textual content (used by the redact action). */
+function replaceLatestUserText(messages: unknown, newText: string): unknown {
+  if (!Array.isArray(messages)) return messages;
+  const cloned = [...messages];
+  for (let i = cloned.length - 1; i >= 0; i--) {
+    const msg = cloned[i] as { role?: string; content?: unknown };
+    if (msg?.role === 'user') {
+      cloned[i] = { ...msg, content: newText };
+      break;
+    }
+  }
+  return cloned;
+}
+
+/** Attaches non-blocking guardrail findings to an OpenAI-shaped response. */
+function annotateResponseWithGuardrails(
+  response: unknown,
+  annotations: Record<string, { guardrail_key: string; findings: unknown[] }>,
+): unknown {
+  if (!response || typeof response !== 'object' || Object.keys(annotations).length === 0) {
+    return response;
+  }
+  return { ...(response as Record<string, unknown>), guardrails: annotations };
 }
 
 interface ChatRunnable {
@@ -568,7 +611,8 @@ export async function handleChatCompletion(params: {
   /** Internal: recursion depth when a Dynamic LLM resolves to another model. */
   _routingDepth?: number;
 }): Promise<ChatCompletionOutcome> {
-  const { tenantDbName, tenantId, modelKey, projectId, body, stream } = params;
+  const { tenantDbName, tenantId, modelKey, projectId, stream } = params;
+  let { body } = params;
 
   if (!Array.isArray(body?.messages)) {
     throw new Error('`messages` array is required');
@@ -610,15 +654,28 @@ export async function handleChatCompletion(params: {
   ensureLlmModel(model);
 
   // Input guardrail: check the latest user message before calling the model.
+  // Non-blocking findings (warn/flag) are surfaced on the response; redact
+  // findings rewrite the user message before it reaches the provider.
+  const guardrailAnnotations: Record<string, { guardrail_key: string; findings: unknown[] }> = {};
   if (model.inputGuardrailKey) {
-    await enforceModelGuardrail({
+    const inputOutcome = await enforceModelGuardrail({
       tenantDbName,
       tenantId: model.tenantId,
       projectId,
       guardrailKey: model.inputGuardrailKey,
       text: extractLatestUserText(body.messages),
       phase: 'input',
+      requestId,
     });
+    if (inputOutcome?.redactedText !== undefined) {
+      body = { ...body, messages: replaceLatestUserText(body.messages, inputOutcome.redactedText) as typeof body.messages };
+    }
+    if (inputOutcome && inputOutcome.findings.length > 0) {
+      guardrailAnnotations.input = {
+        guardrail_key: inputOutcome.guardrailKey,
+        findings: inputOutcome.findings,
+      };
+    }
   }
 
   // Semantic cache: check for cached response before calling the model
@@ -770,6 +827,29 @@ export async function handleChatCompletion(params: {
               usage,
             }),
           );
+
+          // Output guardrail (streaming): the response is already delivered,
+          // so this is a post-hoc audit — violations land in the evaluation
+          // log and alert metrics rather than blocking the stream.
+          if (model.outputGuardrailKey) {
+            const streamedText = guardrailContentToText(
+              (aggregatedChunk as { content?: unknown } | null)?.content,
+            );
+            if (streamedText.trim()) {
+              fireAndForget('guardrail-stream-output-audit', async () => {
+                await evaluateGuardrail({
+                  tenantDbName,
+                  tenantId: model.tenantId,
+                  projectId,
+                  guardrailKey: model.outputGuardrailKey!,
+                  text: streamedText,
+                  phase: 'output',
+                  requestId,
+                  source: 'chat.completions:stream',
+                });
+              });
+            }
+          }
         } catch (error: unknown) {
           const latencyMs = Date.now() - startedAt;
           const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -835,17 +915,40 @@ export async function handleChatCompletion(params: {
   );
 
   // Output guardrail: check the assistant response before returning it
-  // (non-streaming only — streamed responses can't be inspected up front).
+  // (streamed responses are audited post-hoc after the stream completes).
+  let finalResponse: unknown = response;
   if (model.outputGuardrailKey) {
-    await enforceModelGuardrail({
+    const outputOutcome = await enforceModelGuardrail({
       tenantDbName,
       tenantId: model.tenantId,
       projectId,
       guardrailKey: model.outputGuardrailKey,
       text: extractAssistantText(response),
       phase: 'output',
+      requestId,
     });
+    if (outputOutcome?.redactedText !== undefined) {
+      const withChoices = finalResponse as { choices?: Array<{ message?: { content?: unknown } }> };
+      if (withChoices?.choices?.[0]?.message) {
+        finalResponse = {
+          ...withChoices,
+          choices: withChoices.choices.map((choice, index) =>
+            index === 0 && choice.message
+              ? { ...choice, message: { ...choice.message, content: outputOutcome.redactedText } }
+              : choice,
+          ),
+        };
+      }
+    }
+    if (outputOutcome && outputOutcome.findings.length > 0) {
+      guardrailAnnotations.output = {
+        guardrail_key: outputOutcome.guardrailKey,
+        findings: outputOutcome.findings,
+      };
+    }
   }
+
+  finalResponse = annotateResponseWithGuardrails(finalResponse, guardrailAnnotations);
 
   // Semantic cache: store the response for future lookups
   if (cacheEnabled && tenantId && model.semanticCache) {
@@ -861,7 +964,13 @@ export async function handleChatCompletion(params: {
     );
   }
 
-  return { response, usage, latencyMs, requestId, cacheHit: false };
+  return {
+    response: finalResponse as Record<string, unknown>,
+    usage,
+    latencyMs,
+    requestId,
+    cacheHit: false,
+  };
 }
 
 export async function handleEmbeddingRequest(params: {

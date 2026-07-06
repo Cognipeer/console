@@ -30,6 +30,7 @@ describe('getEnterpriseModuleForPath', () => {
     expect(getEnterpriseModuleForPath('/api/sandbox/runners')).toBe('sandbox');
     expect(getEnterpriseModuleForPath('/api/cluster/overview')).toBe('cluster');
     expect(getEnterpriseModuleForPath('/api/prompt-optimizer/runs')).toBe('prompt-optimizer');
+    expect(getEnterpriseModuleForPath('/api/reports/dashboard')).toBe('reports');
   });
 
   it('does not gate community paths', () => {

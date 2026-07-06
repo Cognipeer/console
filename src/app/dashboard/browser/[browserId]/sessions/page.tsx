@@ -196,6 +196,7 @@ export default function BrowserSessionsPage() {
         ) : sessions.length === 0 ? (
           <Text c="dimmed" ta="center" py="xl">No sessions yet. Create one to get started.</Text>
         ) : (
+          <div className="ds-tbl-wrap">
           <Table highlightOnHover>
             <Table.Thead>
               <Table.Tr>
@@ -242,6 +243,7 @@ export default function BrowserSessionsPage() {
               ))}
             </Table.Tbody>
           </Table>
+          </div>
         )}
       </Paper>
 

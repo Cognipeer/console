@@ -17,6 +17,7 @@ import {
   IconCertificate,
   IconChevronDown,
   IconLogout,
+  IconMenu2,
   IconMoon,
   IconSearch,
   IconSettings,
@@ -38,6 +39,7 @@ interface TopbarV2Props {
   onDocsClick: () => void;
   onLogout: () => void;
   onNavigate: (href: string) => void;
+  onMobileNavClick: () => void;
 }
 
 export default function TopbarV2({
@@ -48,6 +50,7 @@ export default function TopbarV2({
   onDocsClick,
   onLogout,
   onNavigate,
+  onMobileNavClick,
 }: TopbarV2Props) {
   const { colorScheme, toggleColorScheme } = useMantineColorScheme();
   const tNav = useTranslations('navigation');
@@ -57,6 +60,18 @@ export default function TopbarV2({
 
   return (
     <header className={classes.topbar}>
+      <ActionIcon
+        variant="subtle"
+        color="gray"
+        radius="md"
+        size="lg"
+        className={classes.hamburgerBtn}
+        onClick={onMobileNavClick}
+        aria-label="Open navigation"
+      >
+        <IconMenu2 size={18} stroke={1.8} />
+      </ActionIcon>
+
       <Link
         href="/dashboard/overview"
         className={classes.brand}
@@ -128,6 +143,7 @@ export default function TopbarV2({
           color="gray"
           radius="md"
           size="lg"
+          className={classes.hideOnMobile}
           onClick={onDocsClick}
           aria-label={tNav('docs')}
         >

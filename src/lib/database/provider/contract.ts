@@ -38,6 +38,7 @@ import type {
   IGuardrail,
   IGuardrailEvalAggregate,
   IGuardrailEvaluationLog,
+  IGuardrailWordList,
   IPiiPolicy,
   IIncident,
   IInferenceServer,
@@ -570,7 +571,27 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     search?: string;
   }): Promise<IGuardrail[]>;
 
+
+  // ── Guardrail word lists (tenant-managed banned-word lists) ──
+  createGuardrailWordList(
+    list: Omit<IGuardrailWordList, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IGuardrailWordList>;
+  updateGuardrailWordList(
+    id: string,
+    data: Partial<Omit<IGuardrailWordList, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IGuardrailWordList | null>;
+  deleteGuardrailWordList(id: string): Promise<boolean>;
+  findGuardrailWordListById(id: string): Promise<IGuardrailWordList | null>;
+  findGuardrailWordListByKey(key: string, projectId?: string): Promise<IGuardrailWordList | null>;
+  listGuardrailWordLists(filters?: {
+    projectId?: string;
+    search?: string;
+  }): Promise<IGuardrailWordList[]>;
+
   // ── Guardrail evaluation logs ──
+  createGuardrailEvaluationLog(
+    log: Omit<IGuardrailEvaluationLog, '_id' | 'createdAt'>,
+  ): Promise<void>;
   listGuardrailEvaluationLogs(
     guardrailId: string,
     options?: { limit?: number; skip?: number; from?: Date; to?: Date; passed?: boolean },

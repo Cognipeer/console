@@ -133,6 +133,7 @@ export default function RedTeamRunCompare({ run }: Props) {
           {comparison.changes.length === 0 ? (
             <Text size="sm" c="dimmed">No per-attempt changes between these scans.</Text>
           ) : (
+            <div className="ds-tbl-wrap">
             <Table highlightOnHover withTableBorder>
               <Table.Thead>
                 <Table.Tr>
@@ -160,6 +161,7 @@ export default function RedTeamRunCompare({ run }: Props) {
                 ))}
               </Table.Tbody>
             </Table>
+            </div>
           )}
         </Stack>
       ) : null}

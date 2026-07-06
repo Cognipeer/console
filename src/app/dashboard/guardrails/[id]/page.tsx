@@ -60,6 +60,11 @@ const ACTION_OPTIONS = [
   { value: 'flag', label: 'Flag — pass and mark for review' },
 ];
 
+const FAIL_MODE_OPTIONS = [
+  { value: 'open', label: 'Fail open — pass content if the evaluator errors' },
+  { value: 'closed', label: 'Fail closed — block content if the evaluator errors' },
+];
+
 export default function GuardrailDetailPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -89,6 +94,7 @@ export default function GuardrailDetailPage() {
       name: '',
       description: '',
       action: 'block',
+      failMode: 'open',
       modelKey: '',
       enabled: true,
     },
@@ -121,6 +127,7 @@ export default function GuardrailDetailPage() {
         name: g.name,
         description: g.description ?? '',
         action: g.action,
+        failMode: g.failMode ?? 'open',
         modelKey: g.modelKey ?? '',
         enabled: g.enabled,
       });
@@ -234,7 +241,7 @@ export default function GuardrailDetailPage() {
   if (!guardrail) return null;
 
   const typeColor = guardrail.type === 'preset' ? 'violet' : 'teal';
-  const actionColor = { block: 'red', warn: 'orange', flag: 'blue' }[guardrail.action] ?? 'gray';
+  const actionColor = { block: 'red', warn: 'orange', flag: 'blue', redact: 'grape' }[guardrail.action] ?? 'gray';
 
   const headerActions = (
     <Menu withinPortal position="bottom-end" withArrow>
@@ -434,6 +441,13 @@ export default function GuardrailDetailPage() {
                   description="What happens on a violation. Direction (input/output) is set where the guardrail is attached."
                   data={ACTION_OPTIONS}
                   {...form.getInputProps('action')}
+                />
+
+                <Select
+                  label="Failure Mode"
+                  description="Behavior when an LLM-backed check cannot run (model down, invalid verdict)"
+                  data={FAIL_MODE_OPTIONS}
+                  {...form.getInputProps('failMode')}
                 />
 
                 {guardrail.type === 'custom' && (

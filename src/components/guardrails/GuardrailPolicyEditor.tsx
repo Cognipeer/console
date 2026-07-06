@@ -1,15 +1,18 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import {
   Badge,
   Card,
   Checkbox,
   Divider,
   Group,
+  MultiSelect,
   Select,
   SimpleGrid,
   Stack,
   Switch,
+  TagsInput,
   Text,
   Textarea,
   ThemeIcon,
@@ -21,9 +24,10 @@ import {
   IconShieldLock,
   IconRobot,
   IconInfoCircle,
+  IconFilterX,
 } from '@tabler/icons-react';
 import type { IGuardrailPresetPolicy } from '@/lib/database';
-import { PII_CATEGORIES, MODERATION_CATEGORIES } from '@/lib/services/guardrail/constants';
+import { PII_CATEGORIES, MODERATION_CATEGORIES, WORD_FILTER_BUILTIN_LISTS } from '@/lib/services/guardrail/constants';
 import type { PiiCategoryDefinition, ModerationCategoryDefinition } from '@/lib/services/guardrail/constants';
 
 interface ModelOption {
@@ -86,11 +90,12 @@ function PiiSection({
               size="xs"
               data={[
                 { value: 'block', label: 'Block the request' },
+                { value: 'redact', label: 'Redact — mask the values and continue' },
                 { value: 'warn', label: 'Warn and continue' },
                 { value: 'flag', label: 'Flag for review' },
               ]}
               value={pii.action ?? 'block'}
-              onChange={(v) => onChange({ ...pii, action: (v ?? 'block') as 'block' | 'warn' | 'flag' })}
+              onChange={(v) => onChange({ ...pii, action: (v ?? 'block') as 'block' | 'redact' | 'warn' | 'flag' })}
               disabled={readOnly}
             />
             <div>
@@ -120,6 +125,154 @@ function PiiSection({
                 ))}
               </SimpleGrid>
             </div>
+          </>
+        )}
+      </Stack>
+    </Card>
+  );
+}
+
+// ── Word filter section ───────────────────────────────────────────────────
+
+interface WordListSummary {
+  key: string;
+  name: string;
+  wordCount: number;
+}
+
+function WordFilterSection({
+  wordFilter,
+  onChange,
+  readOnly,
+}: {
+  wordFilter: NonNullable<IGuardrailPresetPolicy['wordFilter']>;
+  onChange: (wf: NonNullable<IGuardrailPresetPolicy['wordFilter']>) => void;
+  readOnly?: boolean;
+}) {
+  const [customLists, setCustomLists] = useState<WordListSummary[]>([]);
+
+  useEffect(() => {
+    if (!wordFilter.enabled) return;
+    let cancelled = false;
+    fetch('/api/guardrails/word-lists', { cache: 'no-store' })
+      .then((res) => (res.ok ? res.json() : { wordLists: [] }))
+      .then((data) => {
+        if (!cancelled) setCustomLists(data.wordLists ?? []);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [wordFilter.enabled]);
+
+  // Keep deleted-list keys visible in the select so the user can unselect them.
+  const customListOptions = [
+    ...customLists.map((list) => ({
+      value: list.key,
+      label: `${list.name} (${list.wordCount} words)`,
+    })),
+    ...(wordFilter.customListKeys ?? [])
+      .filter((key) => !customLists.some((list) => list.key === key))
+      .map((key) => ({ value: key, label: `${key} (missing)` })),
+  ];
+
+  return (
+    <Card withBorder p="sm">
+      <Stack gap="sm">
+        <Group justify="space-between">
+          <Group gap="xs">
+            <ThemeIcon size={28} radius="sm" variant="light" color="grape">
+              <IconFilterX size={15} />
+            </ThemeIcon>
+            <div>
+              <Text fw={600} size="sm">Word Filter</Text>
+              <Text size="xs" c="dimmed">Deterministic banned-word and profanity matching — no LLM, catches leetspeak and spaced-out evasion</Text>
+            </div>
+          </Group>
+          <Switch
+            checked={wordFilter.enabled}
+            onChange={(e) => onChange({ ...wordFilter, enabled: e.currentTarget.checked })}
+            disabled={readOnly}
+          />
+        </Group>
+
+        {wordFilter.enabled && (
+          <>
+            <Divider />
+            <Select
+              label="Action on detection"
+              size="xs"
+              data={[
+                { value: 'block', label: 'Block the request' },
+                { value: 'redact', label: 'Redact — mask the words and continue' },
+                { value: 'warn', label: 'Warn and continue' },
+                { value: 'flag', label: 'Flag for review' },
+              ]}
+              value={wordFilter.action ?? 'block'}
+              onChange={(v) => onChange({ ...wordFilter, action: (v ?? 'block') as 'block' | 'redact' | 'warn' | 'flag' })}
+              disabled={readOnly}
+            />
+            <div>
+              <Text size="xs" fw={500} mb={6}>Built-in lists</Text>
+              <SimpleGrid cols={2} spacing="xs">
+                {WORD_FILTER_BUILTIN_LISTS.map((list) => (
+                  <Tooltip key={list.id} label={list.description} withArrow multiline w={220} position="top">
+                    <Checkbox
+                      size="xs"
+                      label={list.label}
+                      checked={wordFilter.builtinLists?.[list.id] ?? list.defaultEnabled}
+                      onChange={(e) =>
+                        onChange({
+                          ...wordFilter,
+                          builtinLists: {
+                            ...wordFilter.builtinLists,
+                            [list.id]: e.currentTarget.checked,
+                          },
+                        })
+                      }
+                      disabled={readOnly}
+                    />
+                  </Tooltip>
+                ))}
+              </SimpleGrid>
+            </div>
+            <MultiSelect
+              label="Uploaded word lists"
+              size="xs"
+              description="Tenant word lists (CSV/TXT uploads) to apply. Manage them from the Guardrails page → Word lists."
+              placeholder={customListOptions.length ? 'Select lists…' : 'No uploaded lists yet'}
+              data={customListOptions}
+              value={wordFilter.customListKeys ?? []}
+              onChange={(customListKeys) => onChange({ ...wordFilter, customListKeys })}
+              disabled={readOnly}
+              searchable
+              clearable
+            />
+            <TagsInput
+              label="Custom banned words"
+              size="xs"
+              description="Matched after normalization (case, diacritics, leetspeak). Press Enter to add."
+              placeholder="Add a word…"
+              value={wordFilter.words ?? []}
+              onChange={(words) => onChange({ ...wordFilter, words })}
+              disabled={readOnly}
+            />
+            <Textarea
+              label="Custom regex patterns"
+              size="xs"
+              description="One pattern per line, evaluated case-insensitively against the raw text."
+              placeholder={'\\bcompetitor-name\\b\ninternal-codename-\\d+'}
+              value={(wordFilter.regexes ?? []).join('\n')}
+              onChange={(e) =>
+                onChange({
+                  ...wordFilter,
+                  regexes: e.currentTarget.value.split('\n').filter((line) => line.trim() !== ''),
+                })
+              }
+              minRows={2}
+              autosize
+              readOnly={readOnly}
+            />
           </>
         )}
       </Stack>
@@ -355,6 +508,11 @@ export default function GuardrailPolicyEditor({
       <PiiSection
         pii={safePolicy.pii ?? { enabled: true, action: 'block', categories: {} }}
         onChange={(pii) => updatePolicy({ pii })}
+        readOnly={readOnly}
+      />
+      <WordFilterSection
+        wordFilter={safePolicy.wordFilter ?? { enabled: false, action: 'block' }}
+        onChange={(wordFilter) => updatePolicy({ wordFilter })}
         readOnly={readOnly}
       />
       <ModerationSection

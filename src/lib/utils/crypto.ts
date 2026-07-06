@@ -5,21 +5,49 @@ const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 12; // 96 bits for GCM
 const AUTH_TAG_LENGTH = 16;
 
-function resolveSecret(): Buffer {
+function deriveKey(secret: string): Buffer {
+  return createHash('sha256').update(secret).digest();
+}
+
+/**
+ * The secret used to ENCRYPT new payloads: the dedicated provider secret when
+ * configured, otherwise the JWT secret.
+ */
+function primarySecret(): string {
   const cfg = getConfig();
   const secret = cfg.auth.providerEncryptionSecret || cfg.auth.jwtSecret;
-  
   if (!secret) {
     throw new Error(
       'Encryption secret is not configured. Set PROVIDER_ENCRYPTION_SECRET or JWT_SECRET.',
     );
   }
+  return secret;
+}
 
-  return createHash('sha256').update(secret).digest();
+/**
+ * All secrets to TRY when decrypting, most-preferred first and de-duplicated.
+ *
+ * Backward compatibility: a deployment that stored credentials under
+ * `JWT_SECRET` and later introduced `PROVIDER_ENCRYPTION_SECRET` would
+ * otherwise be unable to decrypt its existing credentials, because the code
+ * prefers the new secret. Trying both keeps old payloads readable; the next
+ * save re-encrypts them under the primary secret.
+ */
+function candidateSecrets(): string[] {
+  const cfg = getConfig();
+  const secrets = [cfg.auth.providerEncryptionSecret, cfg.auth.jwtSecret].filter(
+    (s): s is string => Boolean(s),
+  );
+  if (secrets.length === 0) {
+    throw new Error(
+      'Encryption secret is not configured. Set PROVIDER_ENCRYPTION_SECRET or JWT_SECRET.',
+    );
+  }
+  return [...new Set(secrets)];
 }
 
 export function encryptObject(value: unknown): string {
-  const key = resolveSecret();
+  const key = deriveKey(primarySecret());
   const iv = randomBytes(IV_LENGTH);
   const cipher = createCipheriv(ALGORITHM, key, iv);
   const payload = Buffer.from(JSON.stringify(value), 'utf8');
@@ -34,12 +62,18 @@ export function decryptObject<T = unknown>(payload: string): T {
   const iv = buffer.subarray(0, IV_LENGTH);
   const authTag = buffer.subarray(IV_LENGTH, IV_LENGTH + AUTH_TAG_LENGTH);
   const ciphertext = buffer.subarray(IV_LENGTH + AUTH_TAG_LENGTH);
-  const key = resolveSecret();
-  const decipher = createDecipheriv(ALGORITHM, key, iv);
-  decipher.setAuthTag(authTag);
-  const decrypted = Buffer.concat([
-    decipher.update(ciphertext),
-    decipher.final(),
-  ]);
-  return JSON.parse(decrypted.toString('utf8')) as T;
+
+  let lastError: unknown;
+  for (const secret of candidateSecrets()) {
+    try {
+      const decipher = createDecipheriv(ALGORITHM, deriveKey(secret), iv);
+      decipher.setAuthTag(authTag);
+      const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+      return JSON.parse(decrypted.toString('utf8')) as T;
+    } catch (error) {
+      // GCM auth failure with this key — try the next candidate secret.
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('Failed to decrypt payload');
 }
