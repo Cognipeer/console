@@ -35,6 +35,50 @@ interface ModelOption {
   label: string;
 }
 
+/**
+ * LLM model picker for a guardrail check. Always renders — when the active
+ * project has no LLM models it stays visible but disabled with a clear reason,
+ * instead of vanishing (which read as a broken/missing control, especially now
+ * that moderation/prompt-shield require a model server-side).
+ */
+function ModelSelect({
+  value,
+  models,
+  onChange,
+  readOnly,
+  required,
+  description,
+  size,
+}: {
+  value: string | undefined;
+  models: ModelOption[];
+  onChange: (value: string | undefined) => void;
+  readOnly?: boolean;
+  required?: boolean;
+  description?: string;
+  size?: 'xs' | 'sm';
+}) {
+  const noModels = models.length === 0;
+  return (
+    <Select
+      label="Model"
+      size={size}
+      required={required}
+      placeholder={noModels ? 'No LLM models in this project' : 'Select an LLM model…'}
+      data={models}
+      value={value ?? null}
+      onChange={(v) => onChange(v ?? undefined)}
+      disabled={readOnly || noModels}
+      searchable
+      description={
+        noModels
+          ? 'This project has no LLM models yet. Add one under Model Hub to enable this check.'
+          : description
+      }
+    />
+  );
+}
+
 interface GuardrailPolicyEditorProps {
   type: 'preset' | 'custom';
   policy: IGuardrailPresetPolicy | undefined;
@@ -318,18 +362,14 @@ function ModerationSection({
         {moderation.enabled && (
           <>
             <Divider />
-            {models.length > 0 && (
-              <Select
-                label="Model"
-                size="xs"
-                placeholder="Select an LLM model…"
-                data={models}
-                value={moderation.modelKey ?? null}
-                onChange={(v) => onChange({ ...moderation, modelKey: v ?? undefined })}
-                disabled={readOnly}
-                description="LLM used to classify content violations"
-              />
-            )}
+            <ModelSelect
+              size="xs"
+              models={models}
+              value={moderation.modelKey}
+              onChange={(modelKey) => onChange({ ...moderation, modelKey })}
+              readOnly={readOnly}
+              description="LLM used to classify content violations"
+            />
             <div>
               <Group justify="space-between" mb={6}>
                 <Text size="xs" fw={500}>Categories to detect</Text>
@@ -399,18 +439,14 @@ function PromptShieldSection({
         {promptShield.enabled && (
           <>
             <Divider />
-            {models.length > 0 && (
-              <Select
-                label="Model"
-                size="xs"
-                placeholder="Select an LLM model…"
-                data={models}
-                value={promptShield.modelKey ?? null}
-                onChange={(v) => onChange({ ...promptShield, modelKey: v ?? undefined })}
-                disabled={readOnly}
-                description="LLM used to detect injection attempts"
-              />
-            )}
+            <ModelSelect
+              size="xs"
+              models={models}
+              value={promptShield.modelKey}
+              onChange={(modelKey) => onChange({ ...promptShield, modelKey })}
+              readOnly={readOnly}
+              description="LLM used to detect injection attempts"
+            />
             <Select
               label="Sensitivity"
               size="xs"
@@ -468,18 +504,14 @@ export default function GuardrailPolicyEditor({
               </div>
             </Group>
             <Divider />
-            {models.length > 0 && (
-              <Select
-                label="Model"
-                placeholder="Select an LLM model…"
-                required
-                data={models}
-                value={modelKey ?? null}
-                onChange={(v) => onChange({ modelKey: v ?? undefined })}
-                disabled={readOnly}
-                description="LLM used to evaluate this guardrail rule"
-              />
-            )}
+            <ModelSelect
+              models={models}
+              value={modelKey}
+              onChange={(mk) => onChange({ modelKey: mk })}
+              readOnly={readOnly}
+              required
+              description="LLM used to evaluate this guardrail rule"
+            />
             <Textarea
               label="Rule definition"
               description={

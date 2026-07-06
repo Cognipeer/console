@@ -344,8 +344,9 @@ export default function CreateGuardrailModal({
               }
             >
               <Select
-                placeholder="Select a model…"
+                placeholder={models.length ? 'Select a model…' : 'No LLM models in this project'}
                 data={models}
+                disabled={models.length === 0}
                 clearable={formValues.type !== 'custom'}
                 searchable
                 {...form.getInputProps('modelKey')}
