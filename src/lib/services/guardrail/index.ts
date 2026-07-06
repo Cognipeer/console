@@ -12,6 +12,7 @@ export {
   PII_CATEGORIES,
   MODERATION_CATEGORIES,
   PROMPT_SHIELD_ISSUES,
+  WORD_FILTER_BUILTIN_LISTS,
 } from './guardrailService';
 
 export type {
@@ -24,7 +25,23 @@ export type {
   PiiCategoryDefinition,
   ModerationCategoryDefinition,
   PromptShieldIssueDefinition,
+  WordFilterListDefinition,
 } from './types';
+
+export {
+  createWordList,
+  updateWordList,
+  deleteWordList,
+  getWordList,
+  listWordLists,
+  parseWordListContent,
+  normalizeWordArray,
+  resolveCustomWordLists,
+  serializeWordList,
+  WordListValidationError,
+  WORD_LIST_LIMITS,
+} from './wordListService';
+export type { WordListView } from './wordListService';
 
 export {
   ModerationRequestError,

@@ -41,6 +41,7 @@ export const TABLES = {
   inferenceServerMetrics: 'inference_server_metrics',
   guardrails: 'guardrails',
   guardrailEvalLogs: 'guardrail_evaluation_logs',
+  guardrailWordLists: 'guardrail_word_lists',
   evaluationTargets: 'evaluation_targets',
   evaluationDatasets: 'evaluation_datasets',
   evaluationSuites: 'evaluation_suites',
@@ -439,6 +440,11 @@ export class SQLiteProviderBase {
     // AI-answer feature). Safe to ensure on boot.
     this.ensureTableColumn(db, TABLES.websearchRunLogs, 'answer', 'answer TEXT');
     this.ensureTableColumn(db, TABLES.websearchRunLogs, 'results', 'results TEXT');
+    // Guardrail hardening: enforcement direction was never in the SQLite
+    // schema even though the mixin writes it, and failMode is new. Safe to
+    // ensure on boot for tenants created before the feature.
+    this.ensureTableColumn(db, TABLES.guardrails, 'target', "target TEXT NOT NULL DEFAULT 'input'");
+    this.ensureTableColumn(db, TABLES.guardrails, 'failMode', "failMode TEXT NOT NULL DEFAULT 'open'");
   }
 
   private migrateOcrJobsSchema(db: Database.Database): void {

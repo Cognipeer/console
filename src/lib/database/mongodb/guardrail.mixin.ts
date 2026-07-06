@@ -5,7 +5,7 @@
  */
 
 import { ObjectId } from 'mongodb';
-import type { IGuardrail, IGuardrailEvaluationLog, GuardrailType } from '../provider.interface';
+import type { IGuardrail, IGuardrailEvaluationLog, IGuardrailWordList, GuardrailType } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
 
@@ -95,7 +95,96 @@ export function GuardrailMixin<TBase extends Constructor<MongoDBProviderBase>>(B
       return docs as unknown as IGuardrail[];
     }
 
+    // ── Guardrail word lists ─────────────────────────────────────────
+
+    async createGuardrailWordList(
+      list: Omit<IGuardrailWordList, '_id' | 'createdAt' | 'updatedAt'>,
+    ): Promise<IGuardrailWordList> {
+      const db = this.getTenantDb();
+      const now = new Date();
+      const doc = { ...list, createdAt: now, updatedAt: now };
+      const result = await db
+        .collection(COLLECTIONS.guardrailWordLists)
+        .insertOne(doc);
+      return { ...doc, _id: result.insertedId.toString() };
+    }
+
+    async updateGuardrailWordList(
+      id: string,
+      data: Partial<Omit<IGuardrailWordList, 'tenantId' | 'key' | 'createdBy'>>,
+    ): Promise<IGuardrailWordList | null> {
+      const db = this.getTenantDb();
+      const updateData: Record<string, unknown> = { ...data, updatedAt: new Date() };
+      delete updateData._id;
+      const result = await db
+        .collection<IGuardrailWordList>(COLLECTIONS.guardrailWordLists)
+        .findOneAndUpdate(
+          { _id: new ObjectId(id) },
+          { $set: updateData },
+          { returnDocument: 'after' },
+        );
+      if (!result) return null;
+      return { ...result, _id: result._id?.toString() } as IGuardrailWordList;
+    }
+
+    async deleteGuardrailWordList(id: string): Promise<boolean> {
+      const db = this.getTenantDb();
+      const result = await db
+        .collection(COLLECTIONS.guardrailWordLists)
+        .deleteOne({ _id: new ObjectId(id) });
+      return result.deletedCount === 1;
+    }
+
+    async findGuardrailWordListById(id: string): Promise<IGuardrailWordList | null> {
+      const db = this.getTenantDb();
+      const doc = await db
+        .collection(COLLECTIONS.guardrailWordLists)
+        .findOne({ _id: new ObjectId(id) });
+      return doc as unknown as IGuardrailWordList | null;
+    }
+
+    async findGuardrailWordListByKey(key: string, projectId?: string): Promise<IGuardrailWordList | null> {
+      const db = this.getTenantDb();
+      const filter: Record<string, unknown> = { key };
+      if (projectId !== undefined) filter.projectId = projectId;
+      const doc = await db
+        .collection(COLLECTIONS.guardrailWordLists)
+        .findOne(filter);
+      return doc as unknown as IGuardrailWordList | null;
+    }
+
+    async listGuardrailWordLists(filters?: {
+      projectId?: string;
+      search?: string;
+    }): Promise<IGuardrailWordList[]> {
+      const db = this.getTenantDb();
+      const filter: Record<string, unknown> = {};
+      if (filters?.projectId !== undefined) filter.projectId = filters.projectId;
+      if (filters?.search) {
+        filter.$or = [
+          { name: { $regex: filters.search, $options: 'i' } },
+          { description: { $regex: filters.search, $options: 'i' } },
+          { key: { $regex: filters.search, $options: 'i' } },
+        ];
+      }
+      const docs = await db
+        .collection(COLLECTIONS.guardrailWordLists)
+        .find(filter)
+        .sort({ createdAt: -1 })
+        .toArray();
+      return docs as unknown as IGuardrailWordList[];
+    }
+
     // ── Guardrail evaluation logs ────────────────────────────────────
+
+    async createGuardrailEvaluationLog(
+      log: Omit<IGuardrailEvaluationLog, '_id' | 'createdAt'>,
+    ): Promise<void> {
+      const db = this.getTenantDb();
+      await db
+        .collection(COLLECTIONS.guardrailEvalLogs)
+        .insertOne({ ...log, createdAt: new Date() });
+    }
 
     async listGuardrailEvaluationLogs(
       guardrailId: string,

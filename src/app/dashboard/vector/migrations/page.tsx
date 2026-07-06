@@ -292,6 +292,7 @@ export default function VectorMigrationsPage() {
             </Stack>
           </Center>
         ) : (
+          <div className="ds-tbl-wrap">
           <Table highlightOnHover>
             <Table.Thead>
               <Table.Tr>
@@ -395,6 +396,7 @@ export default function VectorMigrationsPage() {
               ))}
             </Table.Tbody>
           </Table>
+          </div>
         )}
       </Paper>
 

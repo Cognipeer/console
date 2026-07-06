@@ -883,8 +883,8 @@ export async function executeAgentChatLocal(
         projectId,
         agentKey,
         conversationId,
-        userMessage,
     } = request;
+    let { userMessage } = request;
 
     // 1. Load agent config (use published version for API/SDK calls)
     const db = await getDatabase();
@@ -1005,10 +1005,15 @@ export async function executeAgentChatLocal(
             projectId,
             guardrailKey: config.inputGuardrailKey,
             text: userMessage,
+            phase: 'input',
+            source: 'agent',
         });
-        if (!inputResult.passed && inputResult.action === 'block') {
+        if (!inputResult.passed && inputResult.findings.some((f) => f.block)) {
             const reasons = inputResult.findings.map((f) => f.category || f.type).join(', ');
             throw new Error(`Input blocked by guardrail: ${reasons}`);
+        }
+        if (inputResult.redactedText !== undefined) {
+            userMessage = inputResult.redactedText;
         }
     }
 
@@ -1103,8 +1108,10 @@ export async function executeAgentChatLocal(
                 projectId,
                 guardrailKey: config.outputGuardrailKey,
                 text: assistantContent,
+                phase: 'output',
+                source: 'agent',
             });
-            if (!outputResult.passed && outputResult.action === 'block') {
+            if (!outputResult.passed && outputResult.findings.some((f) => f.block)) {
                 const reasons = outputResult.findings.map((f) => f.category || f.type).join(', ');
                 throw new Error(`Output blocked by guardrail: ${reasons}`);
             }
@@ -1266,8 +1273,10 @@ export async function executePlaygroundChatLocal(
             projectId,
             guardrailKey: config.inputGuardrailKey,
             text: userMessage,
+            phase: 'input',
+            source: 'agent-playground',
         });
-        if (!inputResult.passed && inputResult.action === 'block') {
+        if (!inputResult.passed && inputResult.findings.some((f) => f.block)) {
             const reasons = inputResult.findings.map((f) => f.category || f.type).join(', ');
             throw new Error(`Input blocked by guardrail: ${reasons}`);
         }

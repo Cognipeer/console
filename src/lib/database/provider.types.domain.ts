@@ -3,13 +3,45 @@ import type { ObjectId } from 'mongodb';
 // ── Guardrail types ────────────────────────────────────────────────────────
 
 export type GuardrailType = 'preset' | 'custom';
-export type GuardrailAction = 'block' | 'warn' | 'flag';
+export type GuardrailAction = 'block' | 'warn' | 'flag' | 'redact';
 export type GuardrailTarget = 'input' | 'output' | 'both';
+/** What happens when an LLM-backed check errors out: pass content (open) or block it (closed). */
+export type GuardrailFailMode = 'open' | 'closed';
 
 export interface IGuardrailPiiPolicy {
   enabled: boolean;
   action: GuardrailAction;
   categories: Record<string, boolean>;
+}
+
+export interface IGuardrailWordFilterPolicy {
+  enabled: boolean;
+  action?: GuardrailAction;
+  /** Built-in lists to activate, e.g. { 'profanity-en': true, 'profanity-tr': true }. */
+  builtinLists?: Record<string, boolean>;
+  /** Keys of tenant-uploaded word lists (guardrail_word_lists) to apply. */
+  customListKeys?: string[];
+  /** Tenant-defined banned words (matched after normalization). */
+  words?: string[];
+  /** Tenant-defined regular expressions (evaluated case-insensitively). */
+  regexes?: string[];
+}
+
+/** A reusable, tenant-managed banned-word list (uploaded via CSV/text or edited inline). */
+export interface IGuardrailWordList {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name: string;
+  description?: string;
+  /** Informational language tag, e.g. 'tr', 'en', 'mixed'. */
+  language?: string;
+  words: string[];
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
 }
 
 export interface IGuardrailModerationPolicy {
@@ -26,6 +58,7 @@ export interface IGuardrailPromptShieldPolicy {
 
 export interface IGuardrailPresetPolicy {
   pii?: IGuardrailPiiPolicy;
+  wordFilter?: IGuardrailWordFilterPolicy;
   moderation?: IGuardrailModerationPolicy;
   promptShield?: IGuardrailPromptShieldPolicy;
 }
@@ -41,6 +74,8 @@ export interface IGuardrail {
   target: GuardrailTarget;
   action: GuardrailAction;
   enabled: boolean;
+  /** LLM-check failure behavior. Defaults to 'open' (content passes if the evaluator errors). */
+  failMode?: GuardrailFailMode;
   modelKey?: string;
   // For preset guardrails
   policy?: IGuardrailPresetPolicy;

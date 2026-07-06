@@ -1431,6 +1431,7 @@ curl -X POST ${typeof window !== 'undefined' ? window.location.origin : 'https:/
                     minHeight={220}
                   />
                 ) : (
+                  <div className="ds-tbl-wrap">
                   <Table striped highlightOnHover>
                     <Table.Thead>
                       <Table.Tr>
@@ -1506,6 +1507,7 @@ curl -X POST ${typeof window !== 'undefined' ? window.location.origin : 'https:/
                       })}
                     </Table.Tbody>
                   </Table>
+                  </div>
                 )}
               </Stack>
             </SectionCard>

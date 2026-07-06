@@ -71,6 +71,11 @@ export const ENTERPRISE_API_RULES: EnterpriseApiRule[] = [
     module: 'realtime',
     prefixes: ['/api/realtime/', '/api/client/v1/realtime/'],
   },
+  {
+    // Usage reports powering the overview dashboard's service-report cards.
+    module: 'reports',
+    prefixes: ['/api/reports/'],
+  },
 ];
 
 export interface EnterpriseDenial {

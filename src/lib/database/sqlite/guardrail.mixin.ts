@@ -4,7 +4,7 @@
  * Includes guardrail CRUD, evaluation logs listing, and aggregation.
  */
 
-import type { IGuardrail, IGuardrailEvaluationLog, GuardrailType } from '../provider.interface';
+import type { IGuardrail, IGuardrailEvaluationLog, IGuardrailWordList, GuardrailType } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
 
@@ -21,9 +21,9 @@ export function GuardrailMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
 
       db.prepare(`
         INSERT INTO ${TABLES.guardrails}
-        (id, tenantId, projectId, key, name, description, type, action, enabled,
+        (id, tenantId, projectId, key, name, description, type, action, enabled, failMode,
           target, modelKey, policy, customPrompt, metadata, createdBy, updatedBy, createdAt, updatedAt)
-        VALUES (@id, @tenantId, @projectId, @key, @name, @description, @type, @action, @enabled,
+        VALUES (@id, @tenantId, @projectId, @key, @name, @description, @type, @action, @enabled, @failMode,
           @target, @modelKey, @policy, @customPrompt, @metadata, @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
@@ -35,6 +35,7 @@ export function GuardrailMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         type: guardrail.type,
         action: guardrail.action,
         enabled: this.toBoolInt(guardrail.enabled),
+        failMode: guardrail.failMode ?? 'open',
         target: guardrail.target,
         modelKey: guardrail.modelKey ?? null,
         policy: this.toJson(guardrail.policy ?? {}),
@@ -64,6 +65,7 @@ export function GuardrailMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       if (data.target !== undefined) { sets.push('target = @target'); params.target = data.target; }
       if (data.action !== undefined) { sets.push('action = @action'); params.action = data.action; }
       if (data.enabled !== undefined) { sets.push('enabled = @enabled'); params.enabled = this.toBoolInt(data.enabled); }
+      if (data.failMode !== undefined) { sets.push('failMode = @failMode'); params.failMode = data.failMode; }
       if (data.modelKey !== undefined) { sets.push('modelKey = @modelKey'); params.modelKey = data.modelKey; }
       if (data.policy !== undefined) { sets.push('policy = @policy'); params.policy = this.toJson(data.policy); }
       if (data.customPrompt !== undefined) { sets.push('customPrompt = @customPrompt'); params.customPrompt = data.customPrompt; }
@@ -120,7 +122,144 @@ export function GuardrailMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       return rows.map((r) => this.mapGuardrailRow(r));
     }
 
+    // ── Guardrail word lists ─────────────────────────────────────────
+
+    async createGuardrailWordList(
+      list: Omit<IGuardrailWordList, '_id' | 'createdAt' | 'updatedAt'>,
+    ): Promise<IGuardrailWordList> {
+      const db = this.getTenantDb();
+      const id = this.newId();
+      const now = this.now();
+      db.prepare(`
+        INSERT INTO ${TABLES.guardrailWordLists}
+        (id, tenantId, projectId, key, name, description, language, words, createdBy, updatedBy, createdAt, updatedAt)
+        VALUES (@id, @tenantId, @projectId, @key, @name, @description, @language, @words, @createdBy, @updatedBy, @createdAt, @updatedAt)
+      `).run({
+        id,
+        tenantId: list.tenantId,
+        projectId: list.projectId ?? null,
+        key: list.key,
+        name: list.name,
+        description: list.description ?? null,
+        language: list.language ?? null,
+        words: this.toJson(list.words ?? []),
+        createdBy: list.createdBy,
+        updatedBy: list.updatedBy ?? null,
+        createdAt: now,
+        updatedAt: now,
+      });
+      return { ...list, _id: id, createdAt: new Date(now), updatedAt: new Date(now) };
+    }
+
+    async updateGuardrailWordList(
+      id: string,
+      data: Partial<Omit<IGuardrailWordList, 'tenantId' | 'key' | 'createdBy'>>,
+    ): Promise<IGuardrailWordList | null> {
+      const db = this.getTenantDb();
+      const sets: string[] = ['updatedAt = @updatedAt'];
+      const params: Record<string, unknown> = { id, updatedAt: this.now() };
+
+      if (data.name !== undefined) { sets.push('name = @name'); params.name = data.name; }
+      if (data.description !== undefined) { sets.push('description = @description'); params.description = data.description; }
+      if (data.language !== undefined) { sets.push('language = @language'); params.language = data.language; }
+      if (data.words !== undefined) { sets.push('words = @words'); params.words = this.toJson(data.words); }
+      if (data.updatedBy !== undefined) { sets.push('updatedBy = @updatedBy'); params.updatedBy = data.updatedBy; }
+      if (data.projectId !== undefined) { sets.push('projectId = @projectId'); params.projectId = data.projectId; }
+
+      db.prepare(`UPDATE ${TABLES.guardrailWordLists} SET ${sets.join(', ')} WHERE id = @id`).run(params);
+      return this.findGuardrailWordListById(id);
+    }
+
+    async deleteGuardrailWordList(id: string): Promise<boolean> {
+      const db = this.getTenantDb();
+      return db.prepare(`DELETE FROM ${TABLES.guardrailWordLists} WHERE id = @id`).run({ id }).changes === 1;
+    }
+
+    async findGuardrailWordListById(id: string): Promise<IGuardrailWordList | null> {
+      const db = this.getTenantDb();
+      const row = db.prepare(`SELECT * FROM ${TABLES.guardrailWordLists} WHERE id = @id`).get({ id }) as SqliteRow | undefined;
+      return row ? this.mapWordListRow(row) : null;
+    }
+
+    async findGuardrailWordListByKey(key: string, projectId?: string): Promise<IGuardrailWordList | null> {
+      const db = this.getTenantDb();
+      const clauses: string[] = ['key = @key'];
+      const params: Record<string, unknown> = { key };
+      if (projectId !== undefined) { clauses.push('projectId = @projectId'); params.projectId = projectId; }
+      const row = db.prepare(
+        `SELECT * FROM ${TABLES.guardrailWordLists} WHERE ${clauses.join(' AND ')}`,
+      ).get(params) as SqliteRow | undefined;
+      return row ? this.mapWordListRow(row) : null;
+    }
+
+    async listGuardrailWordLists(filters?: {
+      projectId?: string;
+      search?: string;
+    }): Promise<IGuardrailWordList[]> {
+      const db = this.getTenantDb();
+      const clauses: string[] = [];
+      const params: Record<string, unknown> = {};
+      if (filters?.projectId !== undefined) { clauses.push('projectId = @projectId'); params.projectId = filters.projectId; }
+      if (filters?.search) {
+        clauses.push('(name LIKE @search OR description LIKE @search OR key LIKE @search)');
+        params.search = this.likePattern(filters.search);
+      }
+      const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+      const rows = db.prepare(
+        `SELECT * FROM ${TABLES.guardrailWordLists} ${where} ORDER BY createdAt DESC`,
+      ).all(params) as SqliteRow[];
+      return rows.map((r) => this.mapWordListRow(r));
+    }
+
+    protected mapWordListRow(r: SqliteRow): IGuardrailWordList {
+      return {
+        _id: r.id as string,
+        tenantId: r.tenantId as string,
+        projectId: (r.projectId as string | null) ?? undefined,
+        key: r.key as string,
+        name: r.name as string,
+        description: (r.description as string | null) ?? undefined,
+        language: (r.language as string | null) ?? undefined,
+        words: this.parseJson(r.words, []),
+        createdBy: r.createdBy as string,
+        updatedBy: (r.updatedBy as string | null) ?? undefined,
+        createdAt: this.toDate(r.createdAt),
+        updatedAt: this.toDate(r.updatedAt),
+      };
+    }
+
     // ── Guardrail evaluation logs ────────────────────────────────────
+
+    async createGuardrailEvaluationLog(
+      log: Omit<IGuardrailEvaluationLog, '_id' | 'createdAt'>,
+    ): Promise<void> {
+      const db = this.getTenantDb();
+      db.prepare(`
+        INSERT INTO ${TABLES.guardrailEvalLogs}
+        (id, tenantId, projectId, guardrailId, guardrailKey, guardrailName, guardrailType,
+          target, action, passed, findings, inputText, latencyMs, source, requestId, message, createdAt)
+        VALUES (@id, @tenantId, @projectId, @guardrailId, @guardrailKey, @guardrailName, @guardrailType,
+          @target, @action, @passed, @findings, @inputText, @latencyMs, @source, @requestId, @message, @createdAt)
+      `).run({
+        id: this.newId(),
+        tenantId: log.tenantId,
+        projectId: log.projectId ?? null,
+        guardrailId: log.guardrailId,
+        guardrailKey: log.guardrailKey,
+        guardrailName: log.guardrailName,
+        guardrailType: log.guardrailType,
+        target: log.target,
+        action: log.action,
+        passed: this.toBoolInt(log.passed),
+        findings: this.toJson(log.findings ?? []),
+        inputText: log.inputText ?? null,
+        latencyMs: log.latencyMs ?? null,
+        source: log.source ?? null,
+        requestId: log.requestId ?? null,
+        message: log.message ?? null,
+        createdAt: this.now(),
+      });
+    }
 
     async listGuardrailEvaluationLogs(
       guardrailId: string,
@@ -233,6 +372,7 @@ export function GuardrailMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         target: r.target as IGuardrail['target'],
         action: r.action as IGuardrail['action'],
         enabled: this.fromBoolInt(r.enabled),
+        failMode: (r.failMode as IGuardrail['failMode']) ?? 'open',
         modelKey: r.modelKey as string | undefined,
         policy: this.parseJson(r.policy, undefined),
         customPrompt: r.customPrompt as string | undefined,

@@ -22,6 +22,7 @@ vi.mock('@/lib/services/guardrail/llmEvaluator', () => ({
 }));
 
 import { getDatabase } from '@/lib/database';
+import { drainPendingTasks } from '@/lib/core/asyncTask';
 import { createMockDb } from '../helpers/db.mock';
 import {
   serializeGuardrail,
@@ -320,8 +321,29 @@ describe('evaluateGuardrail', () => {
     (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
   });
 
-  it('returns passed=true and no findings when guardrail is disabled', async () => {
-    db.findGuardrailByKey.mockResolvedValue(makeGuardrail({ enabled: false }));
+  it('returns passed=true, disabled=true, and no findings when guardrail is disabled', async () => {
+    db.findGuardrailByKey.mockResolvedValue(
+      makeGuardrail({
+        enabled: false,
+        // Even with a PII match in the text, a disabled guardrail runs nothing.
+        policy: { pii: { enabled: true, action: 'block', categories: { email: true } } },
+      }),
+    );
+
+    const result = await evaluateGuardrail({
+      tenantDbName: TENANT_DB,
+      tenantId: TENANT_ID,
+      guardrailKey: 'my-guardrail',
+      text: 'contact me at leak@corp.com',
+    });
+
+    expect(result.passed).toBe(true);
+    expect(result.disabled).toBe(true);
+    expect(result.findings).toHaveLength(0);
+  });
+
+  it('does not set disabled on an enabled guardrail', async () => {
+    db.findGuardrailByKey.mockResolvedValue(makeGuardrail({ enabled: true }));
 
     const result = await evaluateGuardrail({
       tenantDbName: TENANT_DB,
@@ -330,8 +352,7 @@ describe('evaluateGuardrail', () => {
       text: 'hello world',
     });
 
-    expect(result.passed).toBe(true);
-    expect(result.findings).toHaveLength(0);
+    expect(result.disabled).toBeUndefined();
   });
 
   it('throws when guardrail key is not found', async () => {
@@ -401,5 +422,165 @@ describe('evaluateGuardrail', () => {
 
     expect(result.passed).toBe(true);
     expect(result.findings).toHaveLength(0);
+  });
+
+  it('applies uploaded custom word lists referenced by customListKeys', async () => {
+    const listKey = `custom-list-${Date.now()}`;
+    db.findGuardrailByKey.mockResolvedValue(
+      makeGuardrail({
+        policy: {
+          wordFilter: {
+            enabled: true,
+            action: 'block',
+            builtinLists: { 'profanity-en': false, 'profanity-tr': false },
+            customListKeys: [listKey],
+          },
+        },
+      }),
+    );
+    db.findGuardrailWordListByKey.mockResolvedValue({ key: listKey, words: ['forbiddenbrand'], tenantId: TENANT_ID, name: 'List', createdBy: USER_ID });
+
+    const result = await evaluateGuardrail({
+      tenantDbName: TENANT_DB,
+      tenantId: TENANT_ID,
+      guardrailKey: 'my-guardrail',
+      text: 'tell me about ForbiddenBrand products',
+    });
+
+    expect(result.passed).toBe(false);
+    expect(result.findings[0].type).toBe('word_filter');
+  });
+
+  it('blocks profanity via the word filter policy', async () => {
+    db.findGuardrailByKey.mockResolvedValue(
+      makeGuardrail({
+        policy: {
+          wordFilter: { enabled: true, action: 'block' },
+        },
+      }),
+    );
+
+    const result = await evaluateGuardrail({
+      tenantDbName: TENANT_DB,
+      tenantId: TENANT_ID,
+      guardrailKey: 'my-guardrail',
+      text: 'this is fucking unacceptable',
+    });
+
+    expect(result.passed).toBe(false);
+    expect(result.findings[0].type).toBe('word_filter');
+  });
+
+  it('returns redactedText and passes when PII action is redact', async () => {
+    db.findGuardrailByKey.mockResolvedValue(
+      makeGuardrail({
+        policy: {
+          pii: { enabled: true, action: 'redact', categories: { email: true } },
+        },
+      }),
+    );
+
+    const result = await evaluateGuardrail({
+      tenantDbName: TENANT_DB,
+      tenantId: TENANT_ID,
+      guardrailKey: 'my-guardrail',
+      text: 'Mail me at leak@corp.com please',
+    });
+
+    expect(result.passed).toBe(true);
+    expect(result.findings.length).toBeGreaterThan(0);
+    expect(result.redactedText).toBeDefined();
+    expect(result.redactedText).not.toContain('leak@corp.com');
+    expect(result.redactedText).toContain('[REDACTED:email]');
+  });
+
+  it('fails closed when an LLM check is enabled without any model', async () => {
+    db.findGuardrailByKey.mockResolvedValue(
+      makeGuardrail({
+        modelKey: undefined,
+        failMode: 'closed',
+        policy: {
+          moderation: { enabled: true, categories: { hate: true } },
+        },
+      }),
+    );
+
+    const result = await evaluateGuardrail({
+      tenantDbName: TENANT_DB,
+      tenantId: TENANT_ID,
+      guardrailKey: 'my-guardrail',
+      text: 'anything',
+    });
+
+    expect(result.passed).toBe(false);
+    expect(result.findings[0].category).toBe('evaluation_error');
+  });
+
+  it('fails open (default) when an LLM check is enabled without any model — passes but surfaces the gap', async () => {
+    db.findGuardrailByKey.mockResolvedValue(
+      makeGuardrail({
+        modelKey: undefined,
+        policy: {
+          moderation: { enabled: true, categories: { hate: true } },
+        },
+      }),
+    );
+
+    const result = await evaluateGuardrail({
+      tenantDbName: TENANT_DB,
+      tenantId: TENANT_ID,
+      guardrailKey: 'my-guardrail',
+      text: 'anything',
+    });
+
+    expect(result.passed).toBe(true);
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0].category).toBe('evaluation_error');
+    expect(result.findings[0].block).toBe(false);
+  });
+
+  it('writes an evaluation log with masked values', async () => {
+    db.findGuardrailByKey.mockResolvedValue(
+      makeGuardrail({
+        policy: {
+          pii: { enabled: true, action: 'block', categories: { email: true } },
+        },
+      }),
+    );
+
+    await evaluateGuardrail({
+      tenantDbName: TENANT_DB,
+      tenantId: TENANT_ID,
+      guardrailKey: 'my-guardrail',
+      text: 'reach me at secret@corp.com',
+      source: 'unit-test',
+      requestId: 'req-1',
+    });
+    await drainPendingTasks();
+
+    expect(db.createGuardrailEvaluationLog).toHaveBeenCalledTimes(1);
+    const log = db.createGuardrailEvaluationLog.mock.calls[0][0];
+    expect(log.guardrailKey).toBe('my-guardrail');
+    expect(log.passed).toBe(false);
+    expect(log.source).toBe('unit-test');
+    expect(log.requestId).toBe('req-1');
+    // Raw PII must never be persisted
+    expect(log.inputText).not.toContain('secret@corp.com');
+    expect(JSON.stringify(log.findings)).not.toContain('secret@corp.com');
+  });
+
+  it('skips logging when skipLogging is set', async () => {
+    db.findGuardrailByKey.mockResolvedValue(makeGuardrail());
+
+    await evaluateGuardrail({
+      tenantDbName: TENANT_DB,
+      tenantId: TENANT_ID,
+      guardrailKey: 'my-guardrail',
+      text: 'plain text',
+      skipLogging: true,
+    });
+    await drainPendingTasks();
+
+    expect(db.createGuardrailEvaluationLog).not.toHaveBeenCalled();
   });
 });

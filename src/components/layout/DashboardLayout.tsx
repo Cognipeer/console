@@ -19,6 +19,7 @@ import CommandPalette, { openCommandPalette } from './CommandPalette';
 import SlimRail from './launcher/SlimRail';
 import TopbarV2 from './launcher/TopbarV2';
 import ServiceLauncher from './launcher/ServiceLauncher';
+import MobileNavDrawer from './launcher/MobileNavDrawer';
 import ServiceSubNav, {
   SUBNAV_CONFIG,
   findServiceForPath,
@@ -49,6 +50,7 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
   const [docsOpened, docsControls] = useDisclosure(false);
   const [docsDocId, setDocsDocId] = useState<SdkDocId>(DEFAULT_SDK_DOC);
   const [launcherOpen, setLauncherOpen] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const t = useTranslations('layout');
   const tNotifications = useTranslations('notifications');
 
@@ -251,6 +253,7 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
               onDocsClick={() => openDocs(DEFAULT_SDK_DOC)}
               onLogout={handleLogout}
               onNavigate={handleNavigate}
+              onMobileNavClick={() => setMobileNavOpen(true)}
             />
 
             <SlimRail
@@ -287,6 +290,19 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
               pinnedIds={pinned}
               onTogglePin={togglePin}
               onSelect={(svc) => router.push(svc.href)}
+            />
+          ) : null}
+
+          {hydrated ? (
+            <MobileNavDrawer
+              open={mobileNavOpen}
+              onClose={() => setMobileNavOpen(false)}
+              pathname={pathname}
+              pinned={pinnedServices}
+              recents={recentServices}
+              activeService={activeService}
+              onOpenLauncher={() => setLauncherOpen(true)}
+              onOpenDocs={() => openDocs(DEFAULT_SDK_DOC)}
             />
           ) : null}
         </AppShell.Main>

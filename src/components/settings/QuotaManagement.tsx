@@ -350,7 +350,7 @@ export default function QuotaManagement({ projectId }: QuotaManagementProps) {
                 onChange={setSelectedProjectId}
                 disabled={loadingProjects}
                 searchable
-                w={420}
+                w={{ base: '100%', sm: 420 }}
               />
             )}
 
@@ -374,7 +374,7 @@ export default function QuotaManagement({ projectId }: QuotaManagementProps) {
                 const value = e.currentTarget.value;
                 setFormState((s) => ({ ...s, label: value }));
               }}
-              w={420}
+              w={{ base: '100%', sm: 420 }}
             />
             <Switch
               label="Enabled"

@@ -689,8 +689,10 @@ export const TENANT_SCHEMA_SQL = `
     name TEXT NOT NULL,
     description TEXT,
     type TEXT NOT NULL DEFAULT 'preset',
+    target TEXT NOT NULL DEFAULT 'input',
     action TEXT NOT NULL DEFAULT 'block',
     enabled INTEGER NOT NULL DEFAULT 1,
+    failMode TEXT NOT NULL DEFAULT 'open',
     modelKey TEXT,
     policy TEXT DEFAULT '{}',
     customPrompt TEXT,
@@ -722,6 +724,22 @@ export const TENANT_SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_guardrail_eval_guardrailId ON guardrail_evaluation_logs(guardrailId);
   CREATE INDEX IF NOT EXISTS idx_guardrail_eval_createdAt ON guardrail_evaluation_logs(createdAt);
+
+  CREATE TABLE IF NOT EXISTS guardrail_word_lists (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    language TEXT,
+    words TEXT DEFAULT '[]',
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_guardrail_word_lists_key ON guardrail_word_lists(key);
 
   -- Evaluation service (offline agent/model testing)
   CREATE TABLE IF NOT EXISTS evaluation_targets (

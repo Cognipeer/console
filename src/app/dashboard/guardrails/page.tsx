@@ -7,6 +7,7 @@ import { notifications } from '@mantine/notifications';
 import {
   IconEdit,
   IconEye,
+  IconListDetails,
   IconPlayerPlay,
   IconPlus,
   IconShield,
@@ -19,6 +20,7 @@ import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import { useTableControls } from '@/components/common/ui/useTableControls';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import CreateGuardrailModal from '@/components/guardrails/CreateGuardrailModal';
+import WordListsManager from '@/components/guardrails/WordListsManager';
 import type { GuardrailView } from '@/lib/services/guardrail/constants';
 
 interface ModelOption {
@@ -30,12 +32,14 @@ const ACTION_LABELS: Record<string, string> = {
   block: 'Block',
   warn: 'Warn',
   flag: 'Flag',
+  redact: 'Redact',
 };
 
 const ACTION_BADGE: Record<string, string> = {
   block: 'ds-badge-err',
   warn: 'ds-badge-warn',
   flag: 'ds-badge-info',
+  redact: 'ds-badge-info',
 };
 
 export default function GuardrailsPage() {
@@ -45,6 +49,7 @@ export default function GuardrailsPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [wordListsOpen, setWordListsOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<GuardrailView | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [query, setQuery] = useState('');
@@ -239,14 +244,24 @@ export default function GuardrailsPage() {
         title="Guardrails"
         subtitle="Safety policies applied to model inputs and outputs. Block, warn, or flag traffic that matches a policy."
         actions={
-          <Button
-            color="teal"
-            size="sm"
-            leftSection={<IconPlus size={14} stroke={1.7} />}
-            onClick={() => setCreateModalOpen(true)}
-          >
-            New guardrail
-          </Button>
+          <Group gap="xs">
+            <Button
+              variant="default"
+              size="sm"
+              leftSection={<IconListDetails size={14} stroke={1.7} />}
+              onClick={() => setWordListsOpen(true)}
+            >
+              Word lists
+            </Button>
+            <Button
+              color="teal"
+              size="sm"
+              leftSection={<IconPlus size={14} stroke={1.7} />}
+              onClick={() => setCreateModalOpen(true)}
+            >
+              New guardrail
+            </Button>
+          </Group>
         }
       />
 
@@ -374,6 +389,8 @@ export default function GuardrailsPage() {
           </Button>
         </Group>
       </Modal>
+
+      <WordListsManager opened={wordListsOpen} onClose={() => setWordListsOpen(false)} />
 
       <CreateGuardrailModal
         opened={createModalOpen}

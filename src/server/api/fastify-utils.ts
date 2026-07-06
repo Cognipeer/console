@@ -215,6 +215,21 @@ async function loadGroupTenantGrants(
   return grants;
 }
 
+/**
+ * Resolves the RBAC user + group grants for routes that are not covered by the
+ * route-prefix map (e.g. /api/dashboard) but still need per-item permission
+ * filtering inside the handler. Reuses the exact same loaders as the
+ * route-level RBAC gate so both paths can never diverge.
+ */
+export async function resolveSessionRbacContext(
+  session: ApiSessionContext,
+): Promise<{ user: IUser; groupGrants: GroupTenantGrant[] }> {
+  const user = await loadRbacUser(session);
+  const db = await getDatabase();
+  const groupGrants = await loadGroupTenantGrants(db, String(user._id));
+  return { user, groupGrants };
+}
+
 async function enforceSessionRbac(request: FastifyRequest, session: ApiSessionContext): Promise<void> {
   const pathname = getRequestPathname(request);
   if (!getPermissionServiceForPath(pathname)) {

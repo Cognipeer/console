@@ -288,3 +288,191 @@ describeForEachProvider('Provider + Model CRUD + malformed-id safety', (getDb) =
     await expect(db.createModel({ ...base, name: 'GPT2' })).rejects.toBeTruthy();
   });
 });
+
+describeForEachProvider('Guardrail CRUD + evaluation logs', (getDb) => {
+  const tenantId = 'tenant-guardrail-parity';
+  const dbName = `tenant_guardrail_${Date.now()}`;
+
+  beforeEach(async () => {
+    const db = getDb();
+    await db.switchToTenant(dbName);
+  });
+
+  it('creates a guardrail with target and failMode and reads it back', async () => {
+    const db = getDb();
+    const created = await db.createGuardrail({
+      tenantId,
+      key: `gr-${Date.now()}`,
+      name: 'Parity Guardrail',
+      type: 'preset',
+      target: 'input',
+      action: 'block',
+      enabled: true,
+      failMode: 'closed',
+      policy: {
+        pii: { enabled: true, action: 'redact', categories: { email: true } },
+        wordFilter: { enabled: true, action: 'block', words: ['forbidden'] },
+      },
+      createdBy: 'user-1',
+    });
+
+    expect(created._id).toBeTruthy();
+
+    const found = await db.findGuardrailById(String(created._id));
+    expect(found?.name).toBe('Parity Guardrail');
+    expect(found?.target).toBe('input');
+    expect(found?.failMode).toBe('closed');
+    expect(found?.policy?.pii?.action).toBe('redact');
+    expect(found?.policy?.wordFilter?.words).toEqual(['forbidden']);
+  });
+
+  it('updates failMode and action', async () => {
+    const db = getDb();
+    const created = await db.createGuardrail({
+      tenantId,
+      key: `gr-upd-${Date.now()}`,
+      name: 'Updatable',
+      type: 'preset',
+      target: 'output',
+      action: 'block',
+      enabled: true,
+      createdBy: 'user-1',
+    });
+
+    const updated = await db.updateGuardrail(String(created._id), {
+      action: 'warn',
+      failMode: 'closed',
+    });
+    expect(updated?.action).toBe('warn');
+    expect(updated?.failMode).toBe('closed');
+  });
+
+  it('writes and lists evaluation logs, and aggregates pass rate', async () => {
+    const db = getDb();
+    const created = await db.createGuardrail({
+      tenantId,
+      key: `gr-log-${Date.now()}`,
+      name: 'Logged',
+      type: 'preset',
+      target: 'input',
+      action: 'block',
+      enabled: true,
+      createdBy: 'user-1',
+    });
+    const guardrailId = String(created._id);
+
+    await db.createGuardrailEvaluationLog({
+      tenantId,
+      guardrailId,
+      guardrailKey: created.key,
+      guardrailName: created.name,
+      guardrailType: created.type,
+      target: 'input',
+      action: 'block',
+      passed: false,
+      findings: [
+        { type: 'pii', category: 'email', severity: 'high', message: 'Email detected', action: 'block', block: true },
+      ],
+      inputText: 'reach me at [REDACTED:email]',
+      latencyMs: 12,
+      source: 'parity-test',
+      requestId: 'req-parity-1',
+      message: 'Email detected',
+    });
+    await db.createGuardrailEvaluationLog({
+      tenantId,
+      guardrailId,
+      guardrailKey: created.key,
+      guardrailName: created.name,
+      guardrailType: created.type,
+      target: 'input',
+      action: 'block',
+      passed: true,
+      findings: [],
+      inputText: 'hello world',
+      latencyMs: 3,
+      source: 'parity-test',
+      message: null,
+    });
+
+    const logs = await db.listGuardrailEvaluationLogs(guardrailId, { limit: 10 });
+    expect(logs).toHaveLength(2);
+    const failed = logs.find((l) => !l.passed);
+    expect(failed?.findings).toHaveLength(1);
+    expect(failed?.source).toBe('parity-test');
+
+    const aggregate = await db.aggregateGuardrailEvaluations(guardrailId);
+    expect(aggregate.totalEvaluations).toBe(2);
+    expect(aggregate.passedCount).toBe(1);
+    expect(aggregate.failedCount).toBe(1);
+    expect(aggregate.passRate).toBe(50);
+  });
+});
+
+describeForEachProvider('Guardrail word lists CRUD', (getDb) => {
+  const tenantId = 'tenant-wordlist-parity';
+  const dbName = `tenant_wordlist_${Date.now()}`;
+
+  beforeEach(async () => {
+    const db = getDb();
+    await db.switchToTenant(dbName);
+  });
+
+  it('creates a word list and reads it back with words intact', async () => {
+    const db = getDb();
+    const created = await db.createGuardrailWordList({
+      tenantId,
+      key: `wl-${Date.now()}`,
+      name: 'Competitors',
+      description: 'Rakip markalar',
+      language: 'tr',
+      words: ['acme', 'rakip marka', 'çakma-ürün'],
+      createdBy: 'user-1',
+    });
+
+    expect(created._id).toBeTruthy();
+
+    const found = await db.findGuardrailWordListById(String(created._id));
+    expect(found?.name).toBe('Competitors');
+    expect(found?.language).toBe('tr');
+    expect(found?.words).toEqual(['acme', 'rakip marka', 'çakma-ürün']);
+
+    const byKey = await db.findGuardrailWordListByKey(created.key);
+    expect(String(byKey?._id)).toBe(String(created._id));
+  });
+
+  it('updates words and lists summaries', async () => {
+    const db = getDb();
+    const created = await db.createGuardrailWordList({
+      tenantId,
+      key: `wl-upd-${Date.now()}`,
+      name: 'Updatable',
+      words: ['one'],
+      createdBy: 'user-1',
+    });
+
+    const updated = await db.updateGuardrailWordList(String(created._id), {
+      words: ['one', 'two'],
+      name: 'Updated',
+    });
+    expect(updated?.words).toEqual(['one', 'two']);
+    expect(updated?.name).toBe('Updated');
+
+    const all = await db.listGuardrailWordLists();
+    expect(all.some((l) => String(l._id) === String(created._id))).toBe(true);
+  });
+
+  it('deletes a word list', async () => {
+    const db = getDb();
+    const created = await db.createGuardrailWordList({
+      tenantId,
+      key: `wl-del-${Date.now()}`,
+      name: 'Deletable',
+      words: ['x'],
+      createdBy: 'user-1',
+    });
+
+    expect(await db.deleteGuardrailWordList(String(created._id))).toBe(true);
+    expect(await db.findGuardrailWordListById(String(created._id))).toBeNull();
+  });
+});

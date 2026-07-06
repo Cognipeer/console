@@ -146,8 +146,8 @@ export default function SchemaBuilder({
         <Stack gap="xs">
           {fields.map((f) => (
             <div key={f.id} style={{ border: '1px solid var(--ds-border)', borderRadius: 8, padding: 8 }}>
-              <Group gap="xs" align="flex-end" wrap="nowrap">
-                <TextInput label="Field" placeholder="name" value={f.name} onChange={(e) => updateField(f.id, { name: e.currentTarget.value })} style={{ flex: 1 }} />
+              <Group gap="xs" align="flex-end">
+                <TextInput label="Field" placeholder="name" value={f.name} onChange={(e) => updateField(f.id, { name: e.currentTarget.value })} style={{ flex: 1, minWidth: 140 }} />
                 <Select label="Type" data={FIELD_OPTIONS} value={f.type} onChange={(v) => updateField(f.id, { type: (v as FieldType) ?? 'string' })} w={120} />
                 {f.type === 'array' && (
                   <Select label="Items" data={PRIMITIVE_OPTIONS.filter((o) => o.value !== 'enum')} value={f.itemType ?? 'string'} onChange={(v) => updateField(f.id, { itemType: (v as Field['itemType']) ?? 'string' })} w={110} />
@@ -162,8 +162,8 @@ export default function SchemaBuilder({
               {f.type === 'object' && (
                 <Stack gap={6} mt={8} pl="md">
                   {(f.fields ?? []).map((sf) => (
-                    <Group key={sf.id} gap="xs" align="flex-end" wrap="nowrap">
-                      <TextInput label="Sub-field" placeholder="name" value={sf.name} onChange={(e) => updateFieldFn(f.id, (cur) => ({ ...cur, fields: (cur.fields ?? []).map((x) => x.id === sf.id ? { ...x, name: e.target.value } : x) }))} style={{ flex: 1 }} />
+                    <Group key={sf.id} gap="xs" align="flex-end">
+                      <TextInput label="Sub-field" placeholder="name" value={sf.name} onChange={(e) => updateFieldFn(f.id, (cur) => ({ ...cur, fields: (cur.fields ?? []).map((x) => x.id === sf.id ? { ...x, name: e.target.value } : x) }))} style={{ flex: 1, minWidth: 140 }} />
                       <Select label="Type" data={PRIMITIVE_OPTIONS} value={sf.type} onChange={(v) => updateFieldFn(f.id, (cur) => ({ ...cur, fields: (cur.fields ?? []).map((x) => x.id === sf.id ? { ...x, type: (v as Primitive) ?? 'string' } : x) }))} w={120} />
                       <Switch label="Req" checked={sf.required} onChange={(e) => updateFieldFn(f.id, (cur) => ({ ...cur, fields: (cur.fields ?? []).map((x) => x.id === sf.id ? { ...x, required: e.target.checked } : x) }))} mb={6} />
                       <ActionIcon color="red" variant="subtle" mb={6} onClick={() => updateFieldFn(f.id, (cur) => ({ ...cur, fields: (cur.fields ?? []).filter((x) => x.id !== sf.id) }))}><IconTrash size={14} /></ActionIcon>

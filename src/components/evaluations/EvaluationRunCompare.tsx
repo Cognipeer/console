@@ -129,6 +129,7 @@ export default function EvaluationRunCompare({ run }: Props) {
           {comparison.changes.length === 0 ? (
             <Text size="sm" c="dimmed">No per-item changes between these runs.</Text>
           ) : (
+            <div className="ds-tbl-wrap">
             <Table highlightOnHover withTableBorder>
               <Table.Thead>
                 <Table.Tr>
@@ -159,6 +160,7 @@ export default function EvaluationRunCompare({ run }: Props) {
                 ))}
               </Table.Tbody>
             </Table>
+            </div>
           )}
         </Stack>
       ) : null}

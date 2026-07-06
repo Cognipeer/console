@@ -20,6 +20,7 @@ const MODULE_LABELS: Record<string, string> = {
   cluster: 'Cluster (multi-node)',
   'prompt-optimizer': 'Prompt Optimizer',
   realtime: 'Realtime',
+  reports: 'Service Reports',
 };
 
 export function EnterpriseUpsell({ module }: EnterpriseUpsellProps) {

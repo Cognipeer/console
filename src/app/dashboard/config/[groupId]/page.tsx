@@ -454,6 +454,7 @@ export default function ConfigGroupDetailPage() {
               </Button>
             </Stack>
           ) : (
+            <div className="ds-tbl-wrap">
             <Table highlightOnHover>
               <Table.Thead>
                 <Table.Tr>
@@ -544,6 +545,7 @@ export default function ConfigGroupDetailPage() {
                 ))}
               </Table.Tbody>
             </Table>
+            </div>
           )}
         </Paper>
       </Stack>

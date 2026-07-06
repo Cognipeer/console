@@ -26,10 +26,10 @@ export default function DashboardDateFilter({
   onChange,
 }: DashboardDateFilterProps) {
   return (
-    <Group gap="xs" wrap="nowrap">
+    <Group gap="xs">
       <Select
         size="sm"
-        w={140}
+        w={{ base: '100%', xs: 140 }}
         data={periodOptions}
         value={value.period}
         onChange={(next) => {
@@ -45,7 +45,7 @@ export default function DashboardDateFilter({
         value={value.dateRange}
         clearable
         size="sm"
-        w={220}
+        w={{ base: '100%', xs: 220 }}
         placeholder="Select date range"
         valueFormat="MMM D, YYYY"
         leftSection={<IconCalendar size={14} stroke={1.5} />}
