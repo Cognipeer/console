@@ -45,10 +45,12 @@ import relativeTime from 'dayjs/plugin/relativeTime';
 import {
     formatDuration,
     formatNumber,
+    formatPercent,
     formatRelativeTime,
     resolveStatusColor,
     humanize,
     formatToolName,
+    calcCacheHitRate,
 } from '@/lib/utils/tracingUtils';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 import JsonTreeViewer from '@/components/common/JsonTreeViewer';
@@ -524,10 +526,16 @@ function EventTokenStats({ event }: { event: TracingEvent }) {
     const hasBytes = event.requestBytes != null || event.responseBytes != null;
     if (!hasTokens && !hasBytes) return null;
 
-    const items: Array<{ label: string; value: number }> = [];
+    const items: Array<{ label: string; value: number; sub?: string }> = [];
     if (event.inputTokens != null) items.push({ label: 'Input', value: event.inputTokens });
     if (event.outputTokens != null) items.push({ label: 'Output', value: event.outputTokens });
-    if (event.cachedInputTokens != null && event.cachedInputTokens > 0) items.push({ label: 'Cached', value: event.cachedInputTokens });
+    if (event.cachedInputTokens != null && event.cachedInputTokens > 0) {
+        items.push({
+            label: 'Cached',
+            value: event.cachedInputTokens,
+            sub: `Hit rate: ${formatPercent(calcCacheHitRate(event.inputTokens, event.cachedInputTokens))}`,
+        });
+    }
     if (event.totalTokens != null) items.push({ label: 'Total', value: event.totalTokens });
     if (event.requestBytes != null) items.push({ label: 'Req Bytes', value: event.requestBytes });
     if (event.responseBytes != null) items.push({ label: 'Res Bytes', value: event.responseBytes });
@@ -538,6 +546,7 @@ function EventTokenStats({ event }: { event: TracingEvent }) {
                 <Card key={item.label} withBorder p="sm">
                     <Text size="xs" c="dimmed" tt="uppercase" fw={600}>{item.label}</Text>
                     <Text size="md" fw={600} mt={2}>{formatNumber(item.value)}</Text>
+                    {item.sub && <Text size="xs" c="dimmed">{item.sub}</Text>}
                 </Card>
             ))}
         </SimpleGrid>
@@ -1173,6 +1182,9 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
                             <Card withBorder p="sm">
                                 <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Cache</Text>
                                 <Text size="lg" fw={700} mt={2}>{formatNumber(tokenStats.cached)}</Text>
+                                <Text size="xs" c="dimmed">
+                                    Hit rate: {formatPercent(calcCacheHitRate(tokenStats.input, tokenStats.cached))}
+                                </Text>
                             </Card>
                         </SimpleGrid>
 

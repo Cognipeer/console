@@ -16,6 +16,7 @@ import {
   TextInput,
   Select,
   Anchor,
+  Table,
 } from '@mantine/core';
 import { DatePickerInput } from '@mantine/dates';
 import { IconInfoCircle, IconRefresh, IconCalendar } from '@tabler/icons-react';
@@ -24,6 +25,7 @@ import {
   formatNumber,
   formatPercent,
   formatDuration,
+  calcCacheHitRate,
 } from '@/lib/utils/tracingUtils';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 import type { DashboardOverview } from '@/lib/services/agentTracing';
@@ -93,6 +95,8 @@ export default function AgentTracing() {
     sessionsCount: 0,
     totalEvents: 0,
     totalTokens: 0,
+    totalInputTokens: 0,
+    totalCachedInputTokens: 0,
     totalDurationMs: 0,
     averageTokensPerSession: 0,
     averageDurationMs: 0,
@@ -229,6 +233,19 @@ export default function AgentTracing() {
                 Error rate: {formatPercent(toolTotals.errorRate ?? 0)}
               </Text>
             </Paper>
+            {totals.totalCachedInputTokens ? (
+              <Paper withBorder p="md" radius="md">
+                <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
+                  Prompt Cache Hit Rate
+                </Text>
+                <Text fz={28} fw={700} mt={8}>
+                  {formatPercent(calcCacheHitRate(totals.totalInputTokens, totals.totalCachedInputTokens))}
+                </Text>
+                <Text size="xs" c="dimmed" mt={4}>
+                  {formatNumber(totals.totalCachedInputTokens)} cached tokens
+                </Text>
+              </Paper>
+            ) : null}
           </SimpleGrid>
 
           {/* Recent Sessions */}
@@ -259,26 +276,40 @@ export default function AgentTracing() {
                     Total tracked: {formatNumber(dashboardData.recentAgentsTotal)}
                   </Text>
                 </Group>
-                <SimpleGrid cols={{ base: 1, sm: 2, md: 3 }} spacing="sm">
-                  {dashboardData.recentAgents.slice(0, 6).map((agent) => (
-                    <Paper key={agent.name} withBorder p="sm" radius="md">
-                      <Group justify="space-between" align="flex-start" gap="xs">
-                        <Text size="sm" fw={500} lineClamp={1}>
-                          {agent.label || agent.name}
-                        </Text>
-                        <Badge size="xs" variant="light" color="blue">
-                          {formatNumber(agent.totalTokens)} tokens
-                        </Badge>
-                      </Group>
-                      <Text size="xs" c="dimmed">
-                        {formatNumber(agent.sessionsCount)} sessions
-                      </Text>
-                      <Text size="xs" c="dimmed">
-                        Avg {formatNumber(agent.averageTokensPerSession)} / session
-                      </Text>
-                    </Paper>
-                  ))}
-                </SimpleGrid>
+                <Table.ScrollContainer minWidth={480}>
+                  <Table verticalSpacing="xs" highlightOnHover>
+                    <Table.Thead>
+                      <Table.Tr>
+                        <Table.Th>Agent</Table.Th>
+                        <Table.Th ta="right">Sessions</Table.Th>
+                        <Table.Th ta="right">Tokens</Table.Th>
+                        <Table.Th ta="right">Avg / session</Table.Th>
+                      </Table.Tr>
+                    </Table.Thead>
+                    <Table.Tbody>
+                      {dashboardData.recentAgents.slice(0, 6).map((agent) => (
+                        <Table.Tr key={agent.name}>
+                          <Table.Td>
+                            <Text size="sm" fw={500} lineClamp={1}>
+                              {agent.label || agent.name}
+                            </Text>
+                          </Table.Td>
+                          <Table.Td ta="right">
+                            <Text size="xs" c="dimmed">{formatNumber(agent.sessionsCount)}</Text>
+                          </Table.Td>
+                          <Table.Td ta="right">
+                            <Badge size="xs" variant="light" color="blue">
+                              {formatNumber(agent.totalTokens)}
+                            </Badge>
+                          </Table.Td>
+                          <Table.Td ta="right">
+                            <Text size="xs" c="dimmed">{formatNumber(agent.averageTokensPerSession)}</Text>
+                          </Table.Td>
+                        </Table.Tr>
+                      ))}
+                    </Table.Tbody>
+                  </Table>
+                </Table.ScrollContainer>
               </Stack>
             </Card>
           )}

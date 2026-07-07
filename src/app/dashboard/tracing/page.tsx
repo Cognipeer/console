@@ -26,6 +26,7 @@ import {
   IconChartBar,
   IconExternalLink,
   IconArrowUpRight,
+  IconDatabase,
 } from '@tabler/icons-react';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
@@ -44,6 +45,7 @@ import {
   formatDuration,
   formatPercent,
   resolveStatusColor,
+  calcCacheHitRate,
 } from '@/lib/utils/tracingUtils';
 import { useTranslations } from '@/lib/i18n';
 import type { AgentTracingAgentSummary, DashboardOverview } from '@/lib/services/agentTracing';
@@ -143,6 +145,8 @@ export default function AgentTracingPage() {
     sessionsCount: 0,
     totalTokens: 0,
     totalEvents: 0,
+    totalInputTokens: 0,
+    totalCachedInputTokens: 0,
     averageTokensPerSession: 0,
     averageDurationMs: 0,
     totalDurationMs: 0,
@@ -209,6 +213,14 @@ export default function AgentTracingPage() {
           }
           delta={`${formatNumber(toolTotals.totalCalls)} total calls`}
         />
+        {totals.totalCachedInputTokens > 0 && (
+          <StatTile
+            label="Prompt Cache Hit Rate"
+            icon={<IconDatabase size={14} stroke={1.7} />}
+            value={formatPercent(calcCacheHitRate(totals.totalInputTokens, totals.totalCachedInputTokens))}
+            delta={`${formatNumber(totals.totalCachedInputTokens)} cached tokens`}
+          />
+        )}
       </div>
 
       {/* Quick Start Info Card */}
@@ -484,65 +496,65 @@ export default function AgentTracingPage() {
             </Stack>
           </Center>
         ) : (
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
-              gap: 14,
-            }}
-          >
-            {recentAgents.map((item) => {
-              const statusColor = resolveStatusColor(item.latestStatus);
-              return (
-                <div
-                  key={item.name}
-                  className="ds-card ds-card-pad"
-                  style={{ cursor: 'pointer', transition: 'all 0.2s ease' }}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => handleAgentClick(item.name)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' || event.key === ' ') {
-                      event.preventDefault();
-                      handleAgentClick(item.name);
-                    }
-                  }}>
-
-                  <Stack gap={8}>
-                    <Group justify="space-between" align="center">
-                      <Group gap="sm">
-                        <ThemeIcon size={32} radius="md" variant="light" color="teal">
-                          <IconRobot size={16} />
-                        </ThemeIcon>
-                        <Text fw={600} lineClamp={1}>
-                          {item.label || item.name}
-                        </Text>
-                      </Group>
-                      {item.latestStatus && (
-                        <Badge size="sm" variant="light" radius="xl" color={statusColor}>
-                          {item.latestStatus.toUpperCase()}
-                        </Badge>
-                      )}
-                    </Group>
-                    <Stack gap={4}>
-                      <Group gap="lg" wrap="wrap">
-                        <Text size="xs" c="dimmed">
-                          <Text component="span" fw={500} c="dark">{formatNumber(item.sessionsCount)}</Text> sessions
-                        </Text>
-                        {item.latestSessionAt && (
-                          <Text size="xs" c="dimmed">
-                            Last: {dayjs(item.latestSessionAt).fromNow()}
+          <div className="ds-tbl-wrap">
+            <table className="ds-tbl">
+              <thead>
+                <tr>
+                  <th>Agent</th>
+                  <th>Status</th>
+                  <th style={{ textAlign: 'right' }}>Sessions</th>
+                  <th style={{ textAlign: 'right' }}>Tokens</th>
+                  <th style={{ textAlign: 'right' }}>Avg / session</th>
+                  <th>Last active</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recentAgents.map((item) => {
+                  const statusColor = resolveStatusColor(item.latestStatus);
+                  return (
+                    <tr
+                      key={item.name}
+                      className="clickable"
+                      onClick={() => handleAgentClick(item.name)}
+                    >
+                      <td>
+                        <Group gap="sm" wrap="nowrap">
+                          <ThemeIcon size={28} radius="md" variant="light" color="teal">
+                            <IconRobot size={14} />
+                          </ThemeIcon>
+                          <Text size="sm" fw={600} lineClamp={1}>
+                            {item.label || item.name}
                           </Text>
+                        </Group>
+                      </td>
+                      <td>
+                        {item.latestStatus ? (
+                          <Badge size="sm" variant="light" radius="xl" color={statusColor}>
+                            {item.latestStatus.toUpperCase()}
+                          </Badge>
+                        ) : (
+                          <Text size="xs" c="dimmed">—</Text>
                         )}
-                      </Group>
-                      <Text size="xs" c="dimmed">
-                        <Text component="span" fw={500} c="dark">{formatNumber(item.totalTokens)}</Text> tokens · avg {formatNumber(item.averageTokensPerSession)}/session
-                      </Text>
-                    </Stack>
-                  </Stack>
-                </div>
-              );
-            })}
+                      </td>
+                      <td className="ds-mono" style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                        {formatNumber(item.sessionsCount)}
+                      </td>
+                      <td className="ds-mono" style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                        {formatNumber(item.totalTokens)}
+                      </td>
+                      <td className="ds-mono" style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                        {formatNumber(item.averageTokensPerSession)}
+                      </td>
+                      <td>
+                        <Text size="xs" c="dimmed">
+                          {item.latestSessionAt ? dayjs(item.latestSessionAt).fromNow() : '—'}
+                        </Text>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         )}
       </div>

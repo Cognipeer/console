@@ -41,6 +41,7 @@ import {
   formatDuration,
   formatPercent,
   humanize,
+  calcCacheHitRate,
 } from '@/lib/utils/tracingUtils';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 
@@ -361,10 +362,8 @@ export default function AgentTracingAgentPage() {
           <StatTile
             label="Cached input"
             value={formatNumber(totals.totalCachedInputTokens)}
-            delta={`Cache share: ${formatPercent(
-              totals.totalInputTokens > 0
-                ? totals.totalCachedInputTokens / totals.totalInputTokens
-                : 0,
+            delta={`Cache hit rate: ${formatPercent(
+              calcCacheHitRate(totals.totalInputTokens, totals.totalCachedInputTokens),
             )}`}
           />
         </div>

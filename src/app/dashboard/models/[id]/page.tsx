@@ -62,6 +62,7 @@ import {
   buildDashboardDateSearchParams,
   defaultDashboardDateFilter,
 } from '@/lib/utils/dashboardDateFilter';
+import { calcCacheHitRate, formatPercent } from '@/lib/utils/tracingUtils';
 import type { IDynamicRoutingConfig } from '@/lib/database';
 
 interface ModelPricing {
@@ -1032,6 +1033,12 @@ function OverviewTab({
               unit={usage?.avgLatencyMs != null ? 'ms' : undefined}
             />
             <MetricBlock label="Tokens" value={fmtNumber(usage?.totalTokens ?? 0)} />
+            {usage?.totalCachedInputTokens ? (
+              <MetricBlock
+                label="Prompt cache hit rate"
+                value={formatPercent(calcCacheHitRate(usage.totalInputTokens, usage.totalCachedInputTokens))}
+              />
+            ) : null}
             <MetricBlock
               label="Spend"
               value={totalCost > 0 ? fmtCurrency(totalCost, costCurrency) : '—'}

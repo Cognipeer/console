@@ -69,6 +69,21 @@ export const humanize = (str: string | undefined): string => {
     .join(' ');
 };
 
+/**
+ * Share of total input tokens (uncached + cached) that were served from cache.
+ * Cached tokens are billed/counted separately from `inputTokens`, so the total
+ * prompt volume is `inputTokens + cachedInputTokens` — not `inputTokens` alone.
+ */
+export const calcCacheHitRate = (
+  inputTokens: number | null | undefined,
+  cachedInputTokens: number | null | undefined,
+): number => {
+  const input = inputTokens ?? 0;
+  const cached = cachedInputTokens ?? 0;
+  const total = input + cached;
+  return total > 0 ? cached / total : 0;
+};
+
 export const formatBytes = (bytes: number | null | undefined): string => {
   if (!bytes || bytes === 0) return '0 B';
   const k = 1024;
