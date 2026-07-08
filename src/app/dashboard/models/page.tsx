@@ -39,7 +39,7 @@ import {
   IconTrash,
 } from '@tabler/icons-react';
 import dayjs from 'dayjs';
-import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
+import DashboardDateFilter, { useDashboardDateFilterState } from '@/components/layout/DashboardDateFilter';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import StatTile from '@/components/common/ui/StatTile';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
@@ -186,7 +186,7 @@ export default function ModelsPage() {
   const [dynamicEdit, setDynamicEdit] = useState<DynamicModelInit | null>(null);
   const [guardrailModel, setGuardrailModel] = useState<ModelDto | null>(null);
   const [deletingModelId, setDeletingModelId] = useState<string | null>(null);
-  const [dateFilter, setDateFilter] = useState(defaultDashboardDateFilter);
+  const [dateFilter, setDateFilter] = useDashboardDateFilterState();
 
   const [capability, setCapability] = useState<CapabilityFilter>('all');
   const [query, setQuery] = useState('');

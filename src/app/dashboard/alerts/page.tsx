@@ -32,6 +32,7 @@ import {
   IconExclamationCircle,
 } from '@tabler/icons-react';
 import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import StatTile from '@/components/common/ui/StatTile';
 import AlertRuleForm from '@/components/alerts/AlertRuleForm';
@@ -166,8 +167,24 @@ export default function AlertsPage() {
   const [loading, setLoading] = useState(true);
   const [formOpened, formControls] = useDisclosure(false);
   const [editingRule, setEditingRule] = useState<AlertRule | null>(null);
+  const [createPrefill, setCreatePrefill] = useState<Record<string, unknown> | undefined>();
   const [moduleFilter, setModuleFilter] = useState('all');
   const t = useTranslations('alerts');
+  const searchParams = useSearchParams();
+
+  // Deep-link support: ?create=1&module=models[&metric=error_rate] opens the
+  // create form prefilled (used by dashboard report drill-downs).
+  useEffect(() => {
+    if (searchParams.get('create') !== '1') return;
+    const module = searchParams.get('module');
+    const metric = searchParams.get('metric');
+    setCreatePrefill({
+      ...(module ? { module } : {}),
+      ...(metric ? { metric } : {}),
+    });
+    formControls.open();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   const fetchRules = useCallback(async () => {
     try {
@@ -470,7 +487,9 @@ export default function AlertsPage() {
         onSuccess={fetchRules}
         mode={editingRule ? 'edit' : 'create'}
         ruleId={editingRule?._id}
-        initialData={editingRule ? (editingRule as unknown as Record<string, unknown>) : undefined}
+        initialData={
+          editingRule ? (editingRule as unknown as Record<string, unknown>) : createPrefill
+        }
       />
     </PageContainer>
   );

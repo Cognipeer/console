@@ -31,7 +31,7 @@ import DetailShell, {
 } from '@/components/common/ui/DetailShell';
 import StatTile from '@/components/common/ui/StatTile';
 import StatusBadge from '@/components/common/ui/StatusBadge';
-import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
+import DashboardDateFilter, { useDashboardDateFilterState } from '@/components/layout/DashboardDateFilter';
 import {
   buildDashboardDateSearchParams,
   defaultDashboardDateFilter,
@@ -126,7 +126,7 @@ export default function AgentTracingAgentPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<AgentOverviewResponse | null>(null);
-  const [dateFilter, setDateFilter] = useState(defaultDashboardDateFilter);
+  const [dateFilter, setDateFilter] = useDashboardDateFilterState();
 
   const agentName = useMemo(() => {
     const value = params?.agentName ?? '';

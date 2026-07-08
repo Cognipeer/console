@@ -56,6 +56,7 @@ import OcrPlayground from '@/components/playground/OcrPlayground';
 import PageContainer from '@/components/common/ui/PageContainer';
 import TabsBar from '@/components/common/ui/TabsBar';
 import StatusBadge from '@/components/common/ui/StatusBadge';
+import { useDashboardDateFilterState } from '@/components/layout/DashboardDateFilter';
 import Spark from '@/components/common/ui/Spark';
 import Toolbar from '@/components/common/ui/Toolbar';
 import {
@@ -269,7 +270,7 @@ export default function ModelDetailPage() {
   const [selectedLog, setSelectedLog] = useState<UsageLogDto | null>(null);
   const [logModalOpened, { open: openLogModal, close: closeLogModal }] =
     useDisclosure(false);
-  const [dateFilter, setDateFilter] = useState(defaultDashboardDateFilter);
+  const [dateFilter, setDateFilter] = useDashboardDateFilterState();
   const [tab, setTab] = useState<DetailTab>('overview');
   const [logFilter, setLogFilter] = useState('');
   const [logLevel, setLogLevel] = useState<'all' | 'error'>('all');

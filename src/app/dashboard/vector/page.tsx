@@ -18,7 +18,7 @@ import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer'
 import StatTile from '@/components/common/ui/StatTile';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
-import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
+import DashboardDateFilter, { useDashboardDateFilterState } from '@/components/layout/DashboardDateFilter';
 import type {
   VectorIndexRecord,
   VectorProviderView,
@@ -67,7 +67,7 @@ export default function VectorIndexPage() {
   const [dashboardData, setDashboardData] = useState<VectorDashboardData | null>(
     null,
   );
-  const [dateFilter, setDateFilter] = useState(defaultDashboardDateFilter);
+  const [dateFilter, setDateFilter] = useDashboardDateFilterState();
   const [deleteTarget, setDeleteTarget] = useState<VectorIndexRow | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [query, setQuery] = useState('');

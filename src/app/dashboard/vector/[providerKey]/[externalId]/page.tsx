@@ -26,7 +26,7 @@ import {
 } from '@mantine/core';
 import { AreaChart } from '@mantine/charts';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
-import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
+import DashboardDateFilter, { useDashboardDateFilterState } from '@/components/layout/DashboardDateFilter';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import {
@@ -206,7 +206,7 @@ export default function VectorIndexDetailPage() {
   const [deleteVectorId, setDeleteVectorId] = useState('');
   const [stats, setStats] = useState<StatsData | null>(null);
   const [statsLoading, setStatsLoading] = useState(false);
-  const [dateFilter, setDateFilter] = useState(defaultDashboardDateFilter);
+  const [dateFilter, setDateFilter] = useDashboardDateFilterState();
 
   const description = useMemo(() => {
     if (!index?.metadata) return '';

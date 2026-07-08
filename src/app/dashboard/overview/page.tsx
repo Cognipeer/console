@@ -12,7 +12,7 @@ import {
   UnstyledButton,
 } from '@mantine/core';
 import LoadingState from '@/components/common/LoadingState';
-import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
+import DashboardDateFilter, { useDashboardDateFilterState } from '@/components/layout/DashboardDateFilter';
 import { useLauncher } from '@/components/layout/launcher/LauncherContext';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import StatTile from '@/components/common/ui/StatTile';
@@ -76,7 +76,7 @@ export default function DashboardOverviewPage() {
   const tNav = useTranslations('navigation');
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [dateFilter, setDateFilter] = useState(defaultDashboardDateFilter);
+  const [dateFilter, setDateFilter] = useDashboardDateFilterState();
   const { pinnedServices, services, openLauncher } = useLauncher();
 
   const fetchDashboard = useCallback(async () => {

@@ -34,7 +34,7 @@ import SessionTable from '@/components/tracing/SessionTable';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import StatTile from '@/components/common/ui/StatTile';
 import StatusBadge from '@/components/common/ui/StatusBadge';
-import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
+import DashboardDateFilter, { useDashboardDateFilterState } from '@/components/layout/DashboardDateFilter';
 import CollapsibleInfo from '@/components/layout/CollapsibleInfo';
 import {
   buildDashboardDateSearchParams,
@@ -63,7 +63,7 @@ export default function AgentTracingPage() {
   const [dashboardData, setDashboardData] = useState<DashboardData | null>(
     null,
   );
-  const [dateFilter, setDateFilter] = useState(defaultDashboardDateFilter);
+  const [dateFilter, setDateFilter] = useDashboardDateFilterState();
 
   const timezone = useMemo(() => {
     try {
