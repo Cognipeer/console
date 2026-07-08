@@ -83,10 +83,12 @@ The Preview tab reaches a web service you start **inside** the sandbox — a dev
 
 How it works — and why it needs **no ingress, DNS, or subdomain change**:
 
-- Preview ports are published to ephemeral host ports when the container starts. The default published set is `3000, 5173, 8000, 8080` plus any ports declared on the template (override with `SANDBOX_PREVIEW_PORTS`).
+- **Any port works** — you (or the agent) choose the port; there is no fixed list. The common dev ports (`3000, 5173, 8000, 8080`, override with `SANDBOX_PREVIEW_PORTS`, plus any ports declared on the template) are pre-published to ephemeral host ports when the container starts; a request for any **other** port transparently provisions a tiny on-demand forwarder, so it reaches the service all the same. (Set `SANDBOX_PREVIEW_ALL_PORTS=off` to restrict preview back to the pre-published set.)
+- The one requirement: the service must listen on `0.0.0.0`, not just `127.0.0.1` — the Preview tab flags loopback-only listeners.
+- The Preview tab also **detects listening ports live**: every TCP port something is actually listening on inside the sandbox is listed with its state, next to a free-form "open any port" field.
 - A request to `/api/sandbox/instances/:id/preview/:port/*` is proxied — riding the **console's existing origin** under a path — to that port inside the sandbox. **Open** launches it in a new tab (authenticated by your dashboard session).
 - HTML responses get a `<base href>` injected so a dev server emitting relative asset URLs renders correctly under the sub-path. For apps that hardcode absolute root paths, configure their base path (Vite `base`, Next `basePath`, CRA `PUBLIC_URL`).
-- **Share link** issues a short-lived, signed, **session-less** URL (`/api/sandbox/preview/<token>/`) so you can hand a running app to someone without a dashboard login. Sharing is enabled by setting `SANDBOX_PREVIEW_SECRET`; links default to a 24-hour TTL.
+- **Share link** issues a short-lived, signed, **session-less** URL (`/api/sandbox/preview/<token>/`) so you can hand a running app to someone without a dashboard login — for any port. Sharing is enabled by setting `SANDBOX_PREVIEW_SECRET`; links default to a 24-hour TTL.
 
 Previewing requires the sandbox to be **running** and network **not** blocked. WebSocket upgrades (e.g. Vite HMR) are not proxied — the app still renders; only live-reload over WS is unavailable.
 
@@ -95,7 +97,7 @@ Previewing requires the sandbox to be **running** and network **not** blocked. W
 - **Preview enabled** — turn preview on/off for this sandbox. When off, both the authenticated proxy and any share links are refused (applied instantly, no restart).
 - **Public access** — when on, session-less **share links** can be issued; when off the preview is **private**, reachable only through the authenticated proxy (a logged-in project member). Toggling public off immediately revokes already-minted share links. Public links additionally need `SANDBOX_PREVIEW_SECRET` on the server.
 
-The same controls are on the token API for agents: `GET /api/client/v1/sandbox/sandboxes/:id` returns `preview.{enabled,public,ports,sharingEnabled}`, `PATCH …/:id/preview` toggles `{enabled,public}`, and `POST …/:id/preview-tokens` mints a share link (only when the sandbox is enabled + public). Both flags are also accepted on create (`previewEnabled`, `previewPublic`).
+The same controls are on the token API for agents: `GET /api/client/v1/sandbox/sandboxes/:id` returns `preview.{enabled,public,allPorts,ports,sharingEnabled}`, `GET …/:id/preview-listening` lists the ports currently in LISTEN state (with a `loopbackOnly` flag), `PATCH …/:id/preview` toggles `{enabled,public}`, and `POST …/:id/preview-tokens` mints a share link for any port (only when the sandbox is enabled + public). Both flags are also accepted on create (`previewEnabled`, `previewPublic`).
 
 ### Terminal
 
@@ -204,7 +206,8 @@ Every screen above is backed by the `/api/sandbox/*` admin API (cookie-authentic
 | `POST /api/sandbox/instances/:id/exec` | Run a shell command, return exit/stdout/stderr |
 | `POST /api/sandbox/instances/:id/code` | Run a code block (`python`/`javascript`/`typescript`/`bash`) |
 | `POST /api/sandbox/instances/:id/terminal` | Open a terminal session (returns a WebSocket path) |
-| `GET /api/sandbox/instances/:id/preview` | Preview state: enabled/public + previewable ports |
+| `GET /api/sandbox/instances/:id/preview` | Preview state: enabled/public/allPorts + suggested ports |
+| `GET /api/sandbox/instances/:id/preview-listening` | Ports currently LISTENing inside the sandbox |
 | `PATCH /api/sandbox/instances/:id/preview` | Toggle preview `{enabled, public}` |
 | `ALL /api/sandbox/instances/:id/preview/:port/*` | Proxy to a port inside the sandbox (authenticated) |
 | `POST /api/sandbox/instances/:id/preview-tokens` | Mint a session-less share link for a port |
