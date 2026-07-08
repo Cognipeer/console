@@ -36,7 +36,7 @@ import {
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
-import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
+import DashboardDateFilter, { useDashboardDateFilterState } from '@/components/layout/DashboardDateFilter';
 import { useTranslations } from '@/lib/i18n';
 import {
   buildDashboardDateSearchParams,
@@ -123,7 +123,7 @@ export default function InferenceMonitoringPage() {
   const [creating, setCreating] = useState(false);
   const [dashboardData, setDashboardData] = useState<InferenceDashboardData | null>(null);
   const [dashboardLoading, setDashboardLoading] = useState(true);
-  const [dateFilter, setDateFilter] = useState(defaultDashboardDateFilter);
+  const [dateFilter, setDateFilter] = useDashboardDateFilterState();
 
   const loadDashboard = useCallback(async () => {
     setDashboardLoading(true);

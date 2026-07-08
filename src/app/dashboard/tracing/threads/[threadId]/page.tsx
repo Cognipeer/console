@@ -43,10 +43,12 @@ import StatusBadge from '@/components/common/ui/StatusBadge';
 import {
   formatDuration,
   formatNumber,
+  formatPercent,
   resolveStatusColor,
   formatRelativeTime,
   humanize,
   formatToolName,
+  calcCacheHitRate,
 } from '@/lib/utils/tracingUtils';
 
 dayjs.extend(relativeTime);
@@ -500,7 +502,7 @@ export default function ThreadDetailPage({
     );
   }
 
-  const totalTokens = thread.totalInputTokens + thread.totalOutputTokens;
+  const totalTokens = thread.totalInputTokens + thread.totalOutputTokens + thread.totalCachedInputTokens;
 
   const headerActions = hasInProgressSession ? (
     <Badge size="sm" variant="light" radius="xl" color="blue">
@@ -650,6 +652,16 @@ export default function ThreadDetailPage({
                   <Text size="xs" c="dimmed">Output</Text>
                   <Text size="sm">{formatNumber(thread.totalOutputTokens)}</Text>
                 </div>
+                {thread.totalCachedInputTokens > 0 && (
+                  <div>
+                    <Text size="xs" c="dimmed">Cached</Text>
+                    <Text size="sm">
+                      {formatNumber(thread.totalCachedInputTokens)}
+                      {' · '}
+                      {formatPercent(calcCacheHitRate(thread.totalInputTokens, thread.totalCachedInputTokens))} hit
+                    </Text>
+                  </div>
+                )}
               </Group>
               <Divider my={4} />
               {thread.modelsUsed.length > 0 && (
@@ -954,6 +966,11 @@ export default function ThreadDetailPage({
                                 ? formatNumber(selectedEventTokenStats.cached)
                                 : '—'}
                             </Text>
+                            {typeof selectedEventTokenStats.cached === 'number' && selectedEventTokenStats.cached > 0 && (
+                              <Text size="xs" c="dimmed">
+                                Hit rate: {formatPercent(calcCacheHitRate(selectedEventTokenStats.input, selectedEventTokenStats.cached))}
+                              </Text>
+                            )}
                           </Card>
                         </SimpleGrid>
                       ) : (selectedEvent.inputTokens || selectedEvent.outputTokens) ? (

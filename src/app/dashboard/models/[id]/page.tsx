@@ -56,12 +56,14 @@ import OcrPlayground from '@/components/playground/OcrPlayground';
 import PageContainer from '@/components/common/ui/PageContainer';
 import TabsBar from '@/components/common/ui/TabsBar';
 import StatusBadge from '@/components/common/ui/StatusBadge';
+import { useDashboardDateFilterState } from '@/components/layout/DashboardDateFilter';
 import Spark from '@/components/common/ui/Spark';
 import Toolbar from '@/components/common/ui/Toolbar';
 import {
   buildDashboardDateSearchParams,
   defaultDashboardDateFilter,
 } from '@/lib/utils/dashboardDateFilter';
+import { calcCacheHitRate, formatPercent } from '@/lib/utils/tracingUtils';
 import type { IDynamicRoutingConfig } from '@/lib/database';
 
 interface ModelPricing {
@@ -268,7 +270,7 @@ export default function ModelDetailPage() {
   const [selectedLog, setSelectedLog] = useState<UsageLogDto | null>(null);
   const [logModalOpened, { open: openLogModal, close: closeLogModal }] =
     useDisclosure(false);
-  const [dateFilter, setDateFilter] = useState(defaultDashboardDateFilter);
+  const [dateFilter, setDateFilter] = useDashboardDateFilterState();
   const [tab, setTab] = useState<DetailTab>('overview');
   const [logFilter, setLogFilter] = useState('');
   const [logLevel, setLogLevel] = useState<'all' | 'error'>('all');
@@ -1032,6 +1034,12 @@ function OverviewTab({
               unit={usage?.avgLatencyMs != null ? 'ms' : undefined}
             />
             <MetricBlock label="Tokens" value={fmtNumber(usage?.totalTokens ?? 0)} />
+            {usage?.totalCachedInputTokens ? (
+              <MetricBlock
+                label="Prompt cache hit rate"
+                value={formatPercent(calcCacheHitRate(usage.totalInputTokens, usage.totalCachedInputTokens))}
+              />
+            ) : null}
             <MetricBlock
               label="Spend"
               value={totalCost > 0 ? fmtCurrency(totalCost, costCurrency) : '—'}

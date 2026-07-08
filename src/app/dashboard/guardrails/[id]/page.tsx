@@ -41,7 +41,7 @@ import {
 } from '@tabler/icons-react';
 import DetailShell from '@/components/common/ui/DetailShell';
 import StatusBadge from '@/components/common/ui/StatusBadge';
-import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
+import DashboardDateFilter, { useDashboardDateFilterState } from '@/components/layout/DashboardDateFilter';
 import GuardrailPolicyEditor from '@/components/guardrails/GuardrailPolicyEditor';
 import GuardrailEvaluatePanel from '@/components/guardrails/GuardrailEvaluatePanel';
 import GuardrailEvaluationHistory from '@/components/guardrails/GuardrailEvaluationHistory';
@@ -81,7 +81,7 @@ export default function GuardrailDetailPage() {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [activeTab, setActiveTab] = useState<string>(initialTab);
-  const [dateFilter, setDateFilter] = useState(defaultDashboardDateFilter);
+  const [dateFilter, setDateFilter] = useDashboardDateFilterState();
 
   // policy state managed separately to avoid deep form cloning issues
   const [policy, setPolicy] = useState<IGuardrailPresetPolicy | undefined>(undefined);

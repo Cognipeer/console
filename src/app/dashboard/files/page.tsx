@@ -10,7 +10,7 @@ import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer'
 import StatTile from '@/components/common/ui/StatTile';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
-import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
+import DashboardDateFilter, { useDashboardDateFilterState } from '@/components/layout/DashboardDateFilter';
 import CreateFileBucketModal from '@/components/files/CreateFileBucketModal';
 import { ApiError, apiRequest } from '@/lib/api/client';
 import type { FileBucketView } from '@/lib/services/files';
@@ -37,7 +37,7 @@ export default function FilesDashboardPage() {
   const queryClient = useQueryClient();
   const [dashboardData, setDashboardData] = useState<FilesDashboardData | null>(null);
   const [dashboardLoading, setDashboardLoading] = useState(true);
-  const [dateFilter, setDateFilter] = useState(defaultDashboardDateFilter);
+  const [dateFilter, setDateFilter] = useDashboardDateFilterState();
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<FileBucketView | null>(null);
   const [query, setQuery] = useState('');

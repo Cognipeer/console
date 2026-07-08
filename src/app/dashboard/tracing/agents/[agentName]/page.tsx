@@ -31,7 +31,7 @@ import DetailShell, {
 } from '@/components/common/ui/DetailShell';
 import StatTile from '@/components/common/ui/StatTile';
 import StatusBadge from '@/components/common/ui/StatusBadge';
-import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
+import DashboardDateFilter, { useDashboardDateFilterState } from '@/components/layout/DashboardDateFilter';
 import {
   buildDashboardDateSearchParams,
   defaultDashboardDateFilter,
@@ -41,6 +41,7 @@ import {
   formatDuration,
   formatPercent,
   humanize,
+  calcCacheHitRate,
 } from '@/lib/utils/tracingUtils';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 
@@ -125,7 +126,7 @@ export default function AgentTracingAgentPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<AgentOverviewResponse | null>(null);
-  const [dateFilter, setDateFilter] = useState(defaultDashboardDateFilter);
+  const [dateFilter, setDateFilter] = useDashboardDateFilterState();
 
   const agentName = useMemo(() => {
     const value = params?.agentName ?? '';
@@ -361,10 +362,8 @@ export default function AgentTracingAgentPage() {
           <StatTile
             label="Cached input"
             value={formatNumber(totals.totalCachedInputTokens)}
-            delta={`Cache share: ${formatPercent(
-              totals.totalInputTokens > 0
-                ? totals.totalCachedInputTokens / totals.totalInputTokens
-                : 0,
+            delta={`Cache hit rate: ${formatPercent(
+              calcCacheHitRate(totals.totalInputTokens, totals.totalCachedInputTokens),
             )}`}
           />
         </div>
