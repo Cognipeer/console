@@ -176,10 +176,12 @@ export default function AlertsPage() {
   // create form prefilled (used by dashboard report drill-downs).
   useEffect(() => {
     if (searchParams.get('create') !== '1') return;
-    const module = searchParams.get('module');
+    // Note: avoid a variable literally named `module` (Next lint:
+    // @next/next/no-assign-module-variable).
+    const moduleParam = searchParams.get('module');
     const metric = searchParams.get('metric');
     setCreatePrefill({
-      ...(module ? { module } : {}),
+      ...(moduleParam ? { module: moduleParam } : {}),
       ...(metric ? { metric } : {}),
     });
     formControls.open();
