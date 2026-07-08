@@ -106,7 +106,6 @@ function buildPrimers(): Record<string, Mock> {
     listProjects: vi.fn().mockResolvedValue([]),
     updateProject: vi.fn().mockResolvedValue(null),
     deleteProject: vi.fn().mockResolvedValue(true),
-    assignProjectIdToLegacyRecords: vi.fn().mockResolvedValue(undefined),
 
     // UserProject (new: project-based RBAC)
     findUserProject: vi.fn().mockResolvedValue(null),

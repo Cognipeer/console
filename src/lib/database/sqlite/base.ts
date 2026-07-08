@@ -436,6 +436,11 @@ export class SQLiteProviderBase {
     // boot; default enabled=on, public=off (private behind login).
     this.ensureTableColumn(db, 'sandbox_instances', 'previewEnabled', 'previewEnabled INTEGER NOT NULL DEFAULT 1');
     this.ensureTableColumn(db, 'sandbox_instances', 'previewPublic', 'previewPublic INTEGER NOT NULL DEFAULT 0');
+    // Launch image an instance was created from (snapshot/fork restore). Persisted
+    // so start/redrive/attach relaunch from the SAME image instead of silently
+    // reverting to template.baseImage (the meeting-bot "snapshot rot" failure).
+    // Safe to ensure on boot for tenants created before the feature.
+    this.ensureTableColumn(db, 'sandbox_instances', 'imageRef', 'imageRef TEXT');
     // Web search run logs: inline answer + returned results (added with the
     // AI-answer feature). Safe to ensure on boot.
     this.ensureTableColumn(db, TABLES.websearchRunLogs, 'answer', 'answer TEXT');

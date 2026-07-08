@@ -292,7 +292,9 @@ export const MongoDbVectorProviderContract: ProviderContract<
 
         const { client, coll } = await getMongoCollection(uri, db, coll_);
         try {
-          const total = await coll.countDocuments();
+          // Whole-collection total: estimatedDocumentCount reads collection
+          // metadata; countDocuments() would scan every document on Cosmos.
+          const total = await coll.estimatedDocumentCount();
           const docs = await coll.find({}, { projection: { _id: 1, [vf]: 1, metadata: 1 } })
             .sort({ _id: 1 })
             .skip(skip)

@@ -8,6 +8,7 @@
 import { MongoClient, Db, type MongoClientOptions } from 'mongodb';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createLogger } from '@/lib/core/logger';
+import { ensureMainDbIndexes, ensureTenantDbIndexes } from './indexManifest';
 
 export const logger = createLogger('mongodb');
 
@@ -132,6 +133,9 @@ export class MongoDBProviderBase {
       this.client = new MongoClient(this.uri, this.clientOptions);
       await this.client.connect();
       this.mainDb = this.client.db(this.mainDbName);
+      // Ensure control-plane indexes once per process. Non-blocking: a slow or
+      // failing index build must never hold up connection readiness.
+      void ensureMainDbIndexes(this.mainDb, this.mainDbName);
     } catch (error) {
       throw error;
     }
@@ -159,6 +163,10 @@ export class MongoDBProviderBase {
       throw new Error('Database client not connected. Call connect() first.');
     }
     const tenantDb = this.client.db(tenantDbName);
+    // First touch of this tenant DB in this process ensures its indexes once,
+    // in the background. Memoized per process, so this is a cheap Set check on
+    // every subsequent request — no per-request index work.
+    void ensureTenantDbIndexes(tenantDb, tenantDbName);
     this.tenantDb = tenantDb;
     this.tenantContext.enterWith(tenantDb);
     this.tenantNameContext.enterWith(tenantDbName);
@@ -178,6 +186,7 @@ export class MongoDBProviderBase {
       throw new Error('Database client not connected. Call connect() first.');
     }
     const tenantDb = this.client.db(tenantDbName);
+    void ensureTenantDbIndexes(tenantDb, tenantDbName);
     return this.tenantContext.run(tenantDb, () =>
       this.tenantNameContext.run(tenantDbName, () => fn()),
     );

@@ -20,12 +20,6 @@ export async function ensureDefaultProject(
 
   const existing = await db.findProjectByKey(tenantId, DEFAULT_PROJECT_KEY);
   if (existing) {
-    if (existing._id) {
-      await db.assignProjectIdToLegacyRecords(
-        tenantId,
-        typeof existing._id === 'string' ? existing._id : existing._id.toString(),
-      );
-    }
     return existing;
   }
 
@@ -37,9 +31,6 @@ export async function ensureDefaultProject(
     createdBy,
     updatedBy: createdBy,
   });
-
-  const projectId = typeof created._id === 'string' ? created._id : created._id!.toString();
-  await db.assignProjectIdToLegacyRecords(tenantId, projectId);
 
   return created;
 }

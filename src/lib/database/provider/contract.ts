@@ -240,9 +240,6 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   findProjectByKey(tenantId: string, key: string): Promise<IProject | null>;
   listProjects(tenantId: string): Promise<IProject[]>;
 
-  // One-time / best-effort migration helper
-  assignProjectIdToLegacyRecords(tenantId: string, projectId: string): Promise<void>;
-
   // Quota policies (tenant-specific)
   createQuotaPolicy(
     policy: Omit<IQuotaPolicy, '_id'>,

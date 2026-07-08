@@ -90,17 +90,6 @@ describe('ensureDefaultProject', () => {
     expect(result.key).toBe(DEFAULT_PROJECT_KEY);
   });
 
-  it('calls assignProjectIdToLegacyRecords when existing project has _id', async () => {
-    db.findProjectByKey.mockResolvedValue(MOCK_DEFAULT_PROJECT);
-
-    await ensureDefaultProject(TENANT_DB, TENANT_ID, CREATED_BY);
-
-    expect(db.assignProjectIdToLegacyRecords).toHaveBeenCalledWith(
-      TENANT_ID,
-      MOCK_DEFAULT_PROJECT._id,
-    );
-  });
-
   it('creates default project when it does not exist', async () => {
     db.findProjectByKey.mockResolvedValue(null);
     db.createProject.mockResolvedValue(MOCK_DEFAULT_PROJECT);

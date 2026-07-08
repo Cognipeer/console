@@ -570,6 +570,16 @@ export interface ISandboxInstance {
   runnerId: string | null;
   name: string;
   containerId: string | null;
+  /**
+   * The concrete image this instance was launched from. Set when the instance
+   * was created from a snapshot/fork (the captured image) instead of the plain
+   * template base. Persisted so every later lifecycle rebuild (start after
+   * stop, boot redrive, volume attach) relaunches from the SAME image — without
+   * it, `resolveSpec` silently falls back to `template.baseImage`, which for a
+   * snapshot-restored sandbox swaps it to a bare base image (the meeting-bot
+   * "snapshot rot" failure: Xvfb/PulseAudio/deps vanish). null = use the base.
+   */
+  imageRef?: string | null;
   desiredState: SandboxDesiredState;
   actualState: SandboxInstanceState;
   volumeId: string | null;
