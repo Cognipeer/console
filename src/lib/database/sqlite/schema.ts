@@ -1909,6 +1909,7 @@ export const TENANT_SCHEMA_SQL = `
     runnerId TEXT,
     name TEXT NOT NULL,
     containerId TEXT,
+    imageRef TEXT,
     desiredState TEXT NOT NULL,
     actualState TEXT NOT NULL,
     volumeId TEXT,
