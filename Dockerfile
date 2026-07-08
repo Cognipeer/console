@@ -53,8 +53,8 @@ RUN npx playwright install-deps chromium
 
 RUN mkdir -p /home/node/.cache/ms-playwright && \
     mkdir -p /app/data && \
-    chown -R node:node /home/node && \
-    chown -R node:node /app
+    chown -R node:node /home/node 
+
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./package.json
@@ -67,6 +67,7 @@ COPY --from=builder /app/docker ./docker
 COPY --from=builder /app/scripts ./scripts
 COPY --from=builder /app/mail-templates ./mail-templates
 
+RUN chown -R node:node /app
 USER node
 
 RUN npx playwright install chromium
