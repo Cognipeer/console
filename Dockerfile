@@ -9,22 +9,18 @@ RUN npm ci --no-audit --no-fund
 FROM node:22 AS builder
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
-
 # When set to 1 (e.g. by docker-compose.e2e.yml) the build skips the strict
 # type/lint gate. Defaults to empty → normal strict production build.
 ARG E2E_BUILD=
 ENV E2E_BUILD=${E2E_BUILD}
-
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-
 RUN npm run build \
   && rm -rf .next/cache
 
 # --------------------- runner stage ---------------------
 FROM node:22 AS runner
 WORKDIR /app
-
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
@@ -43,8 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
        docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/*
 
-# kubectl — used by the in-app sandbox onboarding to detect the cluster, check
-# RBAC and provision a shared DinD when running on Kubernetes.
+
 RUN curl -fsSLo /usr/local/bin/kubectl \
       "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/$(dpkg --print-architecture)/kubectl" \
     && chmod +x /usr/local/bin/kubectl
@@ -53,8 +48,7 @@ RUN npx playwright install-deps chromium
 
 RUN mkdir -p /home/node/.cache/ms-playwright && \
     mkdir -p /app/data && \
-    chown -R node:node /home/node 
-
+    chown -R node:node /home/node
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./package.json
@@ -67,7 +61,10 @@ COPY --from=builder /app/docker ./docker
 COPY --from=builder /app/scripts ./scripts
 COPY --from=builder /app/mail-templates ./mail-templates
 
-RUN chown -R node:node /app
+
+RUN mkdir -p /app/.next/cache/images && \
+    chown -R node:node /app
+
 USER node
 
 RUN npx playwright install chromium
