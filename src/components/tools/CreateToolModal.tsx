@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from 'react';
 import {
-  JsonInput,
   PasswordInput,
   Select,
   Textarea,
@@ -25,6 +24,7 @@ import FormShell, {
   SummaryGroup,
   SummaryKV,
 } from '@/components/common/ui/FormShell';
+import SpecImportField, { type SpecFormat } from '@/components/common/SpecImportField';
 import type { ToolView } from '@/lib/services/tools';
 
 interface CreateToolModalProps {
@@ -39,6 +39,7 @@ interface FormValues {
   type: 'openapi' | 'mcp';
   // OpenAPI fields
   openApiSpec: string;
+  specFormat: SpecFormat;
   upstreamBaseUrl: string;
   // MCP fields
   mcpEndpoint: string;
@@ -91,6 +92,7 @@ export default function CreateToolModal({
       description: '',
       type: 'openapi',
       openApiSpec: '',
+      specFormat: 'auto',
       upstreamBaseUrl: '',
       mcpEndpoint: '',
       mcpTransport: 'streamable-http',
@@ -116,14 +118,7 @@ export default function CreateToolModal({
         if (!values.authPassword.trim()) errors.authPassword = 'Password is required';
       }
       if (values.type === 'openapi') {
-        if (!values.openApiSpec.trim()) errors.openApiSpec = 'OpenAPI specification is required';
-        else {
-          try {
-            JSON.parse(values.openApiSpec);
-          } catch {
-            errors.openApiSpec = 'Invalid JSON format';
-          }
-        }
+        if (!values.openApiSpec.trim()) errors.openApiSpec = 'A specification is required';
       } else {
         if (!values.mcpEndpoint.trim()) errors.mcpEndpoint = 'MCP endpoint URL is required';
         else {
@@ -175,6 +170,7 @@ export default function CreateToolModal({
 
       if (values.type === 'openapi') {
         body.openApiSpec = values.openApiSpec;
+        body.specFormat = values.specFormat;
         body.upstreamBaseUrl = values.upstreamBaseUrl || undefined;
       } else {
         body.mcpEndpoint = values.mcpEndpoint;
@@ -226,13 +222,7 @@ export default function CreateToolModal({
 
   const validSource = (() => {
     if (formValues.type === 'openapi') {
-      if (!formValues.openApiSpec.trim()) return false;
-      try {
-        JSON.parse(formValues.openApiSpec);
-        return true;
-      } catch {
-        return false;
-      }
+      return Boolean(formValues.openApiSpec.trim());
     }
     if (!formValues.mcpEndpoint.trim()) return false;
     try {
@@ -433,15 +423,15 @@ export default function CreateToolModal({
       {formValues.type === 'openapi' ? (
         <FormSection
           number={4}
-          title="OpenAPI specification"
-          description="Paste the spec JSON and optionally override the base URL."
+          title="API specification"
+          description="Import an OpenAPI document (JSON or YAML) or a Postman collection, and optionally override the base URL."
           done={validSource}
         >
           <FormRow cols={1}>
             <FormField
               label="Upstream base URL"
               optional
-              hint="Override the base URL from the OpenAPI spec servers array."
+              hint="Override the base URL from the spec's servers array."
             >
               <TextInput
                 placeholder="https://api.example.com"
@@ -450,14 +440,13 @@ export default function CreateToolModal({
             </FormField>
           </FormRow>
           <FormRow cols={1}>
-            <FormField label="OpenAPI specification" required>
-              <JsonInput
-                placeholder='{"openapi": "3.0.0", ...}'
+            <FormField label="Specification" required>
+              <SpecImportField
+                value={formValues.openApiSpec}
+                onChange={(v) => setFieldValue('openApiSpec', v)}
+                format={formValues.specFormat}
+                onFormatChange={(v) => setFieldValue('specFormat', v)}
                 minRows={10}
-                maxRows={20}
-                autosize
-                formatOnBlur
-                {...form.getInputProps('openApiSpec')}
               />
             </FormField>
           </FormRow>

@@ -1,4 +1,5 @@
 import type { IMcpTool, IMcpAuthConfig, McpAuthType } from '@/lib/database';
+import type { SpecFormatHint } from '@/lib/services/specImport';
 
 // ── View types ──────────────────────────────────────────────────────────
 
@@ -40,7 +41,10 @@ export interface McpRequestLogView {
 export interface CreateMcpServerInput {
   name: string;
   description?: string;
+  /** OpenAPI JSON/YAML or a Postman collection. */
   openApiSpec: string;
+  /** How to interpret `openApiSpec` (default: auto-detect). */
+  specFormat?: SpecFormatHint;
   upstreamBaseUrl?: string;
   upstreamAuth: {
     type: McpAuthType;
@@ -56,6 +60,7 @@ export interface UpdateMcpServerInput {
   name?: string;
   description?: string;
   openApiSpec?: string;
+  specFormat?: SpecFormatHint;
   upstreamBaseUrl?: string;
   upstreamAuth?: IMcpAuthConfig;
   status?: string;

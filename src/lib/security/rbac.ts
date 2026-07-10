@@ -173,6 +173,8 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/pii', service: 'pii' },
   { prefix: '/api/mcp', service: 'mcp' },
   { prefix: '/api/tools', service: 'tools' },
+  // Spec import helper (URL fetch) used by the MCP/Tool create dialogs.
+  { prefix: '/api/specs', service: 'tools' },
   { prefix: '/api/browser', service: 'browser' },
   { prefix: '/api/crawler', service: 'crawler' },
   { prefix: '/api/websearch', service: 'websearch' },

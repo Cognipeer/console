@@ -751,7 +751,7 @@ export default function ToolDetailPage() {
             Usage
           </Tabs.Tab>
           <Tabs.Tab value="test" leftSection={<IconCode size={14} />}>
-            Test
+            Playground
           </Tabs.Tab>
         </Tabs.List>
 

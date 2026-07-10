@@ -7,6 +7,7 @@
 
 import slugify from 'slugify';
 import { safeFetch } from '@/lib/security/outboundFetch';
+import { normalizeApiSpec, type SpecFormatHint } from '@/lib/services/specImport';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
 import type { ITool, IToolAction, IToolAuthConfig } from '@/lib/database';
@@ -78,13 +79,18 @@ interface OpenApiOperation {
   responses?: Record<string, unknown>;
 }
 
-export function parseOpenApiToActions(specString: string): {
+export function parseOpenApiToActions(specString: string, format: SpecFormatHint = 'auto'): {
   actions: IToolAction[];
   baseUrl: string;
+  /** Canonical OpenAPI JSON string (YAML/Postman inputs are converted). */
+  normalizedSpec: string;
 } {
+  // Accept OpenAPI JSON/YAML or a Postman collection; normalize to OpenAPI JSON.
+  const { openApiJson } = normalizeApiSpec(specString, format);
+
   let spec: OpenApiSpec;
   try {
-    spec = JSON.parse(specString);
+    spec = JSON.parse(openApiJson);
   } catch {
     throw new Error('Invalid JSON: could not parse OpenAPI specification');
   }
@@ -156,7 +162,7 @@ export function parseOpenApiToActions(specString: string): {
     throw new Error('No operations found in the OpenAPI specification');
   }
 
-  return { actions, baseUrl };
+  return { actions, baseUrl, normalizedSpec: openApiJson };
 }
 
 // ── MCP Tool Discovery ───────────────────────────────────────────────────
@@ -238,13 +244,15 @@ export async function createTool(
 
   let actions: IToolAction[] = [];
   let upstreamBaseUrl = input.upstreamBaseUrl;
+  let normalizedSpec = input.openApiSpec;
 
   if (input.type === 'openapi') {
     if (!input.openApiSpec) {
       throw new Error('OpenAPI specification is required for "openapi" tool type');
     }
-    const parsed = parseOpenApiToActions(input.openApiSpec);
+    const parsed = parseOpenApiToActions(input.openApiSpec, input.specFormat);
     actions = parsed.actions;
+    normalizedSpec = parsed.normalizedSpec;
     if (!upstreamBaseUrl && parsed.baseUrl) upstreamBaseUrl = parsed.baseUrl;
     if (!upstreamBaseUrl) {
       throw new Error('Upstream base URL is required. Provide it explicitly or include a servers array in the spec.');
@@ -272,7 +280,7 @@ export async function createTool(
     type: input.type,
     status: 'active',
     actions,
-    openApiSpec: input.openApiSpec,
+    openApiSpec: normalizedSpec,
     upstreamBaseUrl,
     upstreamAuth: input.upstreamAuth as IToolAuthConfig,
     mcpEndpoint: input.mcpEndpoint,
@@ -305,8 +313,11 @@ export async function updateTool(
 
   // Re-parse spec or re-discover MCP tools if source config changed
   if (input.openApiSpec !== undefined) {
-    const { actions, baseUrl: specBaseUrl } = parseOpenApiToActions(input.openApiSpec);
-    updateData.openApiSpec = input.openApiSpec;
+    const { actions, baseUrl: specBaseUrl, normalizedSpec } = parseOpenApiToActions(
+      input.openApiSpec,
+      input.specFormat,
+    );
+    updateData.openApiSpec = normalizedSpec;
     updateData.actions = actions;
     if (!input.upstreamBaseUrl && specBaseUrl) {
       updateData.upstreamBaseUrl = specBaseUrl;
