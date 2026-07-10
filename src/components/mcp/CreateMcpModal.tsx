@@ -2,7 +2,6 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import {
-  JsonInput,
   PasswordInput,
   Textarea,
   TextInput,
@@ -19,6 +18,7 @@ import FormShell, {
   SummaryGroup,
   SummaryKV,
 } from '@/components/common/ui/FormShell';
+import SpecImportField, { type SpecFormat } from '@/components/common/SpecImportField';
 import type { McpServerView } from '@/lib/services/mcp';
 
 interface CreateMcpModalProps {
@@ -40,6 +40,7 @@ interface FormValues {
   authUsername: string;
   authPassword: string;
   openApiSpec: string;
+  specFormat: SpecFormat;
 }
 
 export default function CreateMcpModal({
@@ -61,6 +62,7 @@ export default function CreateMcpModal({
       authUsername: '',
       authPassword: '',
       openApiSpec: '',
+      specFormat: 'auto',
     },
     validate: (values) => {
       const errors: Partial<Record<keyof FormValues, string>> = {};
@@ -77,13 +79,7 @@ export default function CreateMcpModal({
         if (!values.authPassword.trim()) errors.authPassword = 'Password is required';
       }
       if (!values.openApiSpec.trim()) {
-        errors.openApiSpec = 'OpenAPI specification is required';
-      } else {
-        try {
-          JSON.parse(values.openApiSpec);
-        } catch {
-          errors.openApiSpec = 'Invalid JSON format';
-        }
+        errors.openApiSpec = 'A specification is required';
       }
       return errors;
     },
@@ -122,6 +118,7 @@ export default function CreateMcpModal({
           name: values.name,
           description: values.description || undefined,
           openApiSpec: values.openApiSpec,
+          specFormat: values.specFormat,
           upstreamBaseUrl: values.upstreamBaseUrl || undefined,
           upstreamAuth,
         }),
@@ -158,21 +155,15 @@ export default function CreateMcpModal({
     if (v.authType === 'basic') return Boolean(v.authUsername.trim() && v.authPassword.trim());
     return true;
   })();
-  const validSpec = useMemo(() => {
-    const raw = form.values.openApiSpec.trim();
-    if (!raw) return false;
-    try {
-      JSON.parse(raw);
-      return true;
-    } catch {
-      return false;
-    }
-  }, [form.values.openApiSpec]);
+  const validSpec = useMemo(
+    () => Boolean(form.values.openApiSpec.trim()),
+    [form.values.openApiSpec],
+  );
 
   const checklist = [
     { id: 1, label: 'Name provided', done: validIdentity },
     { id: 2, label: 'Authentication configured', done: validAuth },
-    { id: 3, label: 'OpenAPI spec valid JSON', done: validSpec },
+    { id: 3, label: 'Specification provided', done: validSpec },
   ];
 
   const authLabel: Record<AuthType, string> = {
@@ -348,19 +339,16 @@ export default function CreateMcpModal({
 
       <FormSection
         number={3}
-        title="OpenAPI specification"
-        description="Paste the OpenAPI (Swagger) JSON. Paths and operations will be exposed as MCP tools automatically."
+        title="API specification"
+        description="Import an OpenAPI (Swagger) document as JSON or YAML, or a Postman collection. Paths and operations are exposed as MCP tools automatically."
         done={validSpec}
       >
-        <FormField label="Specification (JSON)" required>
-          <JsonInput
-            placeholder='{ "openapi": "3.0.0", "info": { ... }, "paths": { ... } }'
-            minRows={12}
-            maxRows={20}
-            autosize
-            validationError="Invalid JSON"
-            formatOnBlur
-            {...form.getInputProps('openApiSpec')}
+        <FormField label="Specification" required>
+          <SpecImportField
+            value={form.values.openApiSpec}
+            onChange={(v) => form.setFieldValue('openApiSpec', v)}
+            format={form.values.specFormat}
+            onFormatChange={(v) => form.setFieldValue('specFormat', v)}
           />
         </FormField>
       </FormSection>

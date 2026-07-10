@@ -1,14 +1,17 @@
 import type { IMcpAuthConfig, McpAuthType } from '@/lib/database';
 import type { FastifyPluginAsync } from 'fastify';
+import type { SpecFormatHint } from '@/lib/services/specImport';
 import { createLogger } from '@/lib/core/logger';
 import {
   aggregateMcpRequestLogs,
   countMcpRequestLogs,
   createMcpServer,
   deleteMcpServer,
+  executeMcpTool,
   getMcpServer,
   listMcpRequestLogs,
   listMcpServers,
+  logMcpRequest,
   serializeMcpServer,
   serializeMcpServerFull,
   updateMcpServer,
@@ -87,6 +90,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
           description: typeof body.description === 'string' ? body.description.trim() : undefined,
           name: body.name.trim(),
           openApiSpec: body.openApiSpec,
+          specFormat: typeof body.specFormat === 'string' ? body.specFormat as SpecFormatHint : undefined,
           upstreamAuth: body.upstreamAuth as IMcpAuthConfig,
           upstreamBaseUrl: typeof body.upstreamBaseUrl === 'string'
             ? body.upstreamBaseUrl.trim()
@@ -167,6 +171,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         description: body.description as string | undefined,
         name: body.name as string | undefined,
         openApiSpec: body.openApiSpec as string | undefined,
+        specFormat: typeof body.specFormat === 'string' ? body.specFormat as SpecFormatHint : undefined,
         status: body.status as 'active' | 'disabled' | undefined,
         upstreamAuth: body.upstreamAuth as IMcpAuthConfig | undefined,
         upstreamBaseUrl: body.upstreamBaseUrl as string | undefined,
@@ -264,6 +269,62 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
       });
     } catch (error) {
       logger.error('List MCP server logs error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({
+          error: error instanceof Error ? error.message : 'Internal error',
+        });
+    }
+  }));
+
+  // Playground: test-execute one of the server's tools from the dashboard.
+  app.post('/mcp/:id/execute', withApiRequestContext(async (request, reply) => {
+    try {
+      const { session } = await requireProjectContextForRequest(request);
+      const { id } = request.params as { id: string };
+      const body = readJsonBody<Record<string, unknown>>(request);
+
+      const toolName = typeof body.tool === 'string'
+        ? body.tool
+        : typeof body.toolName === 'string'
+          ? body.toolName
+          : '';
+      if (!toolName.trim()) {
+        return reply.code(400).send({ error: '"tool" is required' });
+      }
+
+      const args = (body.arguments ?? body.args ?? {}) as Record<string, unknown>;
+
+      const server = await getMcpServer(session.tenantDbName, id);
+      if (!server) {
+        return reply.code(404).send({ error: 'MCP server not found' });
+      }
+      if (server.status !== 'active') {
+        return reply.code(400).send({ error: 'MCP server is disabled' });
+      }
+
+      try {
+        const { result, latencyMs } = await executeMcpTool(server, toolName, args);
+
+        void logMcpRequest(
+          session.tenantDbName, session.tenantId, server.projectId,
+          server.key, toolName, 'success', latencyMs,
+          { tool: toolName, arguments: args },
+          typeof result === 'object' ? result as Record<string, unknown> : { value: result },
+        );
+
+        return reply.code(200).send({ result, latencyMs });
+      } catch (execError) {
+        const message = execError instanceof Error ? execError.message : 'Execution failed';
+        void logMcpRequest(
+          session.tenantDbName, session.tenantId, server.projectId,
+          server.key, toolName, 'error', 0,
+          { tool: toolName, arguments: args },
+          undefined, message,
+        );
+        return reply.code(500).send({ error: message });
+      }
+    } catch (error) {
+      logger.error('Execute MCP tool error', { error });
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Internal error',

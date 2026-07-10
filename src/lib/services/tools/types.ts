@@ -3,6 +3,7 @@
  */
 
 import type { IToolAction, IToolAuthConfig, ToolSourceType } from '@/lib/database';
+import type { SpecFormatHint } from '@/lib/services/specImport';
 
 // ── View types ──────────────────────────────────────────────────────────
 
@@ -62,8 +63,10 @@ export interface CreateToolInput {
   name: string;
   description?: string;
   type: ToolSourceType;
-  /** For OpenAPI: spec JSON or YAML string */
+  /** For OpenAPI: spec JSON/YAML, or a Postman collection */
   openApiSpec?: string;
+  /** How to interpret `openApiSpec` (default: auto-detect). */
+  specFormat?: SpecFormatHint;
   upstreamBaseUrl?: string;
   upstreamAuth?: {
     type: 'none' | 'token' | 'header' | 'basic';
@@ -82,6 +85,7 @@ export interface UpdateToolInput {
   name?: string;
   description?: string;
   openApiSpec?: string;
+  specFormat?: SpecFormatHint;
   upstreamBaseUrl?: string;
   upstreamAuth?: IToolAuthConfig;
   mcpEndpoint?: string;

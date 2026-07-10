@@ -68,6 +68,7 @@ import { projectsApiPlugin } from './plugins/projects';
 import { quotaApiPlugin } from './plugins/quota';
 import { ragApiPlugin } from './plugins/rag';
 import { rerankerApiPlugin } from './plugins/reranker';
+import { specsApiPlugin } from './plugins/specs';
 import { tokensApiPlugin } from './plugins/tokens';
 import { toolsApiPlugin } from './plugins/tools';
 import { tracingApiPlugin } from './plugins/tracing';
@@ -400,6 +401,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(quotaApiPlugin);
   await app.register(ragApiPlugin);
   await app.register(rerankerApiPlugin);
+  await app.register(specsApiPlugin);
   await app.register(tokensApiPlugin);
   await app.register(toolsApiPlugin);
   await app.register(tracingApiPlugin);

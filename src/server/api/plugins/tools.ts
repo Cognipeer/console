@@ -1,5 +1,6 @@
 import type { IToolAuthConfig } from '@/lib/database';
 import type { FastifyPluginAsync } from 'fastify';
+import type { SpecFormatHint } from '@/lib/services/specImport';
 import { createLogger } from '@/lib/core/logger';
 import {
   aggregateToolRequestLogs,
@@ -70,6 +71,7 @@ export const toolsApiPlugin: FastifyPluginAsync = async (app) => {
         mcpTransport: body.mcpTransport as 'sse' | 'streamable-http' | undefined,
         name: body.name,
         openApiSpec: body.openApiSpec as string | undefined,
+        specFormat: typeof body.specFormat === 'string' ? body.specFormat as SpecFormatHint : undefined,
         type: body.type,
         upstreamAuth: body.upstreamAuth as IToolAuthConfig | undefined,
         upstreamBaseUrl: body.upstreamBaseUrl as string | undefined,

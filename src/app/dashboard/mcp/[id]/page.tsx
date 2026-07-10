@@ -39,6 +39,7 @@ import {
   IconDots,
   IconEdit,
   IconList,
+  IconPlayerPlay,
   IconPlugConnected,
   IconTrash,
 } from '@tabler/icons-react';
@@ -71,7 +72,7 @@ export default function McpDetailPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const tabParam = searchParams.get('tab');
-  const initialTab = ['overview', 'usage', 'tools', 'logs'].includes(tabParam ?? '')
+  const initialTab = ['overview', 'usage', 'tools', 'playground', 'logs'].includes(tabParam ?? '')
     ? (tabParam as string)
     : 'overview';
 
@@ -96,6 +97,13 @@ export default function McpDetailPage() {
   const [overviewLoading, setOverviewLoading] = useState(false);
   const [overviewAggregate, setOverviewAggregate] = useState<McpAggregateView | null>(null);
   const [todaySummary, setTodaySummary] = useState({ total: 0, success: 0, error: 0 });
+
+  // ── Playground state ──
+  const [pgTool, setPgTool] = useState<string | null>(null);
+  const [pgArgs, setPgArgs] = useState('{}');
+  const [pgResult, setPgResult] = useState<string>('');
+  const [pgLatency, setPgLatency] = useState<number | null>(null);
+  const [pgRunning, setPgRunning] = useState(false);
 
   const form = useForm({
     initialValues: {
@@ -326,6 +334,48 @@ export default function McpDetailPage() {
     }
   };
 
+  const handleRunPlayground = async () => {
+    if (!pgTool) return;
+    setPgRunning(true);
+    setPgResult('');
+    setPgLatency(null);
+    try {
+      let args: unknown = {};
+      if (pgArgs.trim()) {
+        try {
+          args = JSON.parse(pgArgs);
+        } catch {
+          setPgResult('Error: Arguments must be valid JSON');
+          setPgRunning(false);
+          return;
+        }
+      }
+
+      const res = await fetch(`/api/mcp/${params.id}/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tool: pgTool, arguments: args }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setPgResult(`Error: ${data.error || 'Execution failed'}`);
+      } else {
+        setPgLatency(typeof data.latencyMs === 'number' ? data.latencyMs : null);
+        setPgResult(
+          typeof data.result === 'string'
+            ? data.result
+            : JSON.stringify(data.result, null, 2),
+        );
+      }
+    } catch (err) {
+      setPgResult(`Error: ${err instanceof Error ? err.message : 'Failed to execute'}`);
+    } finally {
+      setPgRunning(false);
+    }
+  };
+
+  const selectedPgTool = server?.tools?.find((t) => t.name === pgTool) ?? null;
+
   if (loading) {
     return (
       <Center p="xl" mt="xl">
@@ -446,6 +496,9 @@ export default function McpDetailPage() {
           </Tabs.Tab>
           <Tabs.Tab value="tools" leftSection={<IconCode size={14} />}>
             Tools ({server.tools?.length ?? 0})
+          </Tabs.Tab>
+          <Tabs.Tab value="playground" leftSection={<IconPlayerPlay size={14} />}>
+            Playground
           </Tabs.Tab>
           <Tabs.Tab value="logs" leftSection={<IconList size={14} />}>
             Request Logs
@@ -845,6 +898,84 @@ async with sse_client(
               </Table>
             )}
           </Paper>
+        </Tabs.Panel>
+
+        {/* ── Playground Tab ── */}
+        <Tabs.Panel value="playground">
+          <SimpleGrid cols={{ base: 1, md: 2 }} spacing="md">
+            <Paper withBorder radius="md" p="md">
+              <Stack gap="md">
+                <Text fw={600} size="sm">Try a tool</Text>
+                <Select
+                  label="Tool"
+                  placeholder={server.tools?.length ? 'Select a tool to run' : 'No tools available'}
+                  disabled={!server.tools?.length}
+                  data={(server.tools ?? []).map((t) => ({
+                    value: t.name,
+                    label: `${t.name} · ${t.httpMethod} ${t.httpPath}`,
+                  }))}
+                  value={pgTool}
+                  onChange={(v) => {
+                    setPgTool(v);
+                    setPgResult('');
+                    setPgLatency(null);
+                  }}
+                  searchable
+                />
+
+                {selectedPgTool?.description && (
+                  <Text size="sm" c="dimmed">{selectedPgTool.description}</Text>
+                )}
+
+                <JsonInput
+                  label="Arguments (JSON)"
+                  description="Path/query params at top level; request body under a &quot;body&quot; key."
+                  placeholder='{"id": "123", "body": {"name": "example"}}'
+                  minRows={5}
+                  maxRows={14}
+                  autosize
+                  formatOnBlur
+                  value={pgArgs}
+                  onChange={setPgArgs}
+                />
+
+                <Group>
+                  <Button
+                    leftSection={<IconPlayerPlay size={14} />}
+                    loading={pgRunning}
+                    disabled={!pgTool}
+                    onClick={handleRunPlayground}
+                  >
+                    Run
+                  </Button>
+                  {pgLatency !== null && (
+                    <Badge variant="light" color="gray">{pgLatency} ms</Badge>
+                  )}
+                </Group>
+              </Stack>
+            </Paper>
+
+            <Stack gap="md">
+              {selectedPgTool?.inputSchema && (
+                <Paper withBorder radius="md" p="md">
+                  <Text fw={600} size="sm" mb="xs">Input schema</Text>
+                  <Code block style={{ maxHeight: 220, overflow: 'auto', fontSize: 12 }}>
+                    {JSON.stringify(selectedPgTool.inputSchema, null, 2)}
+                  </Code>
+                </Paper>
+              )}
+              <Paper withBorder radius="md" p="md">
+                <Text fw={600} size="sm" mb="xs">Result</Text>
+                {pgResult ? (
+                  <Code block style={{ maxHeight: 400, overflow: 'auto', whiteSpace: 'pre-wrap' }}>
+                    {pgResult}
+                  </Code>
+                ) : (
+                  <Text size="sm" c="dimmed">Run a tool to see its response here.</Text>
+                )}
+              </Paper>
+            </Stack>
+          </SimpleGrid>
         </Tabs.Panel>
 
         {/* ── Logs Tab ── */}

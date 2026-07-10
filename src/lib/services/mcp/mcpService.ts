@@ -11,6 +11,7 @@ import type {
 } from './types';
 import { createLogger } from '@/lib/core/logger';
 import { safeFetch } from '@/lib/security/outboundFetch';
+import { normalizeApiSpec, type SpecFormatHint } from '@/lib/services/specImport';
 import { routeInstanceCall } from '@/lib/core/cluster';
 import type { QueuePayload } from '@/lib/core/queue';
 import { mcpEntityId } from './mcpEntityId';
@@ -74,14 +75,19 @@ function generateEndpointSlug(): string {
 
 // ── OpenAPI Parsing ───────────────────────────────────────────────────────
 
-export function parseOpenApiSpec(specString: string): {
+export function parseOpenApiSpec(specString: string, format: SpecFormatHint = 'auto'): {
   spec: OpenApiSpec;
   tools: IMcpTool[];
   baseUrl: string;
+  /** Canonical OpenAPI JSON string (YAML/Postman inputs are converted). */
+  normalizedSpec: string;
 } {
+  // Accept OpenAPI JSON/YAML or a Postman collection; normalize to OpenAPI JSON.
+  const { openApiJson } = normalizeApiSpec(specString, format);
+
   let spec: OpenApiSpec;
   try {
-    spec = JSON.parse(specString);
+    spec = JSON.parse(openApiJson);
   } catch {
     throw new Error('Invalid JSON: could not parse OpenAPI specification');
   }
@@ -155,7 +161,7 @@ export function parseOpenApiSpec(specString: string): {
     throw new Error('No operations found in the OpenAPI specification');
   }
 
-  return { spec, tools, baseUrl };
+  return { spec, tools, baseUrl, normalizedSpec: openApiJson };
 }
 
 // ── CRUD ──────────────────────────────────────────────────────────────────
@@ -167,7 +173,10 @@ export async function createMcpServer(
   projectId: string | undefined,
   input: CreateMcpServerInput,
 ): Promise<IMcpServer> {
-  const { tools, baseUrl: specBaseUrl } = parseOpenApiSpec(input.openApiSpec);
+  const { tools, baseUrl: specBaseUrl, normalizedSpec } = parseOpenApiSpec(
+    input.openApiSpec,
+    input.specFormat,
+  );
 
   const key = await generateUniqueKey(tenantDbName, projectId, input.name);
   const endpointSlug = generateEndpointSlug();
@@ -186,7 +195,7 @@ export async function createMcpServer(
     key,
     name: input.name.trim(),
     description: input.description?.trim(),
-    openApiSpec: input.openApiSpec,
+    openApiSpec: normalizedSpec,
     tools,
     upstreamBaseUrl,
     upstreamAuth: input.upstreamAuth as IMcpAuthConfig,
@@ -219,8 +228,11 @@ export async function updateMcpServer(
 
   // Re-parse spec if updated
   if (input.openApiSpec !== undefined) {
-    const { tools, baseUrl: specBaseUrl } = parseOpenApiSpec(input.openApiSpec);
-    updateData.openApiSpec = input.openApiSpec;
+    const { tools, baseUrl: specBaseUrl, normalizedSpec } = parseOpenApiSpec(
+      input.openApiSpec,
+      input.specFormat,
+    );
+    updateData.openApiSpec = normalizedSpec;
     updateData.tools = tools;
     if (!input.upstreamBaseUrl && specBaseUrl) {
       updateData.upstreamBaseUrl = specBaseUrl;
