@@ -109,6 +109,7 @@ export const TABLES = {
   gpuFleetCommands: 'gpu_fleet_commands',
   gpuFleetEvents: 'gpu_fleet_events',
   gpuFleetSettings: 'gpu_fleet_settings',
+  gpuHostMetrics: 'gpu_host_metrics',
   llmPools: 'llm_pools',
 } as const;
 

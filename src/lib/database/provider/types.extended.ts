@@ -513,6 +513,29 @@ export interface IGpuFleetSettings {
   updatedAt?: Date;
 }
 
+/**
+ * One `nvidia-smi` reading for one physical GPU on one host, recorded at a
+ * throttled cadence (see recordGpuHostMetrics in hostService.ts) so history
+ * charts have reasonable resolution without unbounded row growth.
+ */
+export interface IGpuHostMetrics {
+  _id?: string;
+  tenantId: string;
+  hostId: string;
+  /** Physical GPU UUID — matches IGpuSlice.gpuUuid. */
+  gpuUuid: string;
+  gpuIndex: number;
+  timestamp: Date;
+  utilizationGpuPercent: number | null;
+  utilizationMemoryPercent: number | null;
+  memoryUsedMiB: number | null;
+  memoryTotalMiB: number | null;
+  temperatureC: number | null;
+  powerDrawW: number | null;
+  powerLimitW: number | null;
+  createdAt?: Date;
+}
+
 // =====================================================================
 // Agent Runtime Sandbox
 //

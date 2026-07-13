@@ -1855,6 +1855,27 @@ export const TENANT_SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_gpu_fleet_events_host_seq ON gpu_fleet_events(hostId, sequence DESC);
 
+  -- GPU fleet: periodic nvidia-smi readings per host GPU (history/charts).
+  -- Rows are throttled at write time (not one per heartbeat) and pruned by
+  -- a retention reconciler — see hostService.ts.
+  CREATE TABLE IF NOT EXISTS gpu_host_metrics (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    hostId TEXT NOT NULL,
+    gpuUuid TEXT NOT NULL,
+    gpuIndex INTEGER NOT NULL,
+    timestamp TEXT NOT NULL,
+    utilizationGpuPercent REAL,
+    utilizationMemoryPercent REAL,
+    memoryUsedMiB REAL,
+    memoryTotalMiB REAL,
+    temperatureC REAL,
+    powerDrawW REAL,
+    powerLimitW REAL,
+    createdAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_gpu_host_metrics_host_gpu_time ON gpu_host_metrics(hostId, gpuUuid, timestamp DESC);
+
   -- ===== Agent Runtime Sandbox (independent of gpu fleet) =====
   CREATE TABLE IF NOT EXISTS sandbox_runners (
     id TEXT PRIMARY KEY,
