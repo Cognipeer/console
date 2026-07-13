@@ -1836,6 +1836,7 @@ export const TENANT_SCHEMA_SQL = `
     agentDistributionMode TEXT NOT NULL DEFAULT 'console-served',
     agentDistributionExternalUrlTemplate TEXT,
     terminalSessionTtlSeconds INTEGER NOT NULL DEFAULT 1800,
+    huggingFaceTokenEnc TEXT,
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   );

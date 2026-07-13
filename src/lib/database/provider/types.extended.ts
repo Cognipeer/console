@@ -503,6 +503,12 @@ export interface IGpuFleetSettings {
   /** Used when mode === 'external-url'; supports {{platform}} placeholder. */
   agentDistributionExternalUrlTemplate: string | null;
   terminalSessionTtlSeconds: number;
+  /**
+   * Encrypted Hugging Face access token, auto-injected as
+   * HUGGING_FACE_HUB_TOKEN/HF_TOKEN into vLLM/TGI/Ollama deployments so
+   * gated/private model repos can be pulled without per-deployment setup.
+   */
+  huggingFaceTokenEnc: string | null;
   createdAt?: Date;
   updatedAt?: Date;
 }

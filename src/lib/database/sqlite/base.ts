@@ -405,6 +405,14 @@ export class SQLiteProviderBase {
       "assignedDeploymentIds TEXT NOT NULL DEFAULT '[]'",
     );
     this.backfillGpuSliceAssignments(db);
+    // GPU fleet tenant-wide Hugging Face token, auto-injected into vLLM/TGI/
+    // Ollama deployments for gated model downloads (added 2026-07-13).
+    this.ensureTableColumn(
+      db,
+      TABLES.gpuFleetSettings,
+      'huggingFaceTokenEnc',
+      'huggingFaceTokenEnc TEXT',
+    );
     // Sandbox instance per-instance env (added later). Safe to ensure on boot.
     this.ensureTableColumn(db, 'sandbox_instances', 'env', 'env TEXT');
     this.ensureTableColumn(
