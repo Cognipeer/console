@@ -34,6 +34,13 @@ export interface SendWebhookInput<T = unknown> {
   overrideUrl?: string;
   /** Secret used for signing when `webhook` is missing but overrideUrl is set. */
   overrideSecret?: string;
+  /**
+   * Mirrors the crawler's own `http.allowPrivateNetwork` opt-in: a tenant
+   * that has explicitly accepted the risk of crawling private/internal
+   * hosts is trusted to also receive webhooks there (e.g. an internal
+   * notification service on the same network).
+   */
+  allowPrivateNetwork?: boolean;
   event: CrawlerWebhookEvent;
   payload: Omit<WebhookPayload<T>, 'id' | 'event' | 'createdAt'>;
 }
@@ -44,11 +51,12 @@ export async function sendCrawlerWebhook<T>(input: SendWebhookInput<T>): Promise
   const events = input.webhook?.events ?? ['page', 'completed', 'failed'];
   if (!events.includes(input.event)) return;
 
-  // Webhooks always target external systems the tenant owns — never allow
-  // delivery to private/loopback/link-local/metadata hosts (SSRF hardening).
-  // Unlike crawl targets, there is no legitimate opt-in here.
+  // Webhooks should target external systems the tenant owns — block
+  // delivery to private/loopback/link-local/metadata hosts (SSRF hardening)
+  // unless the tenant has explicitly opted in via `allowPrivateNetwork`
+  // (same flag that gates crawling private hosts).
   try {
-    assertSafeUrl(url);
+    assertSafeUrl(url, input.allowPrivateNetwork);
   } catch (err) {
     log.warn('Refusing to deliver webhook to private/loopback host', {
       url,

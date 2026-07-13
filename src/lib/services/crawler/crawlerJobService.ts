@@ -252,6 +252,7 @@ async function fireWebhook(
   await sendCrawlerWebhook({
     webhook: job.planSnapshot.webhook,
     overrideUrl: job.callbackUrl,
+    allowPrivateNetwork: job.planSnapshot.http?.allowPrivateNetwork,
     event,
     payload: {
       tenantId: job.tenantId,
@@ -288,6 +289,7 @@ async function fireSummaryWebhook(
   await sendCrawlerWebhook({
     webhook: job.planSnapshot.webhook,
     overrideUrl: job.callbackUrl,
+    allowPrivateNetwork: job.planSnapshot.http?.allowPrivateNetwork,
     event,
     payload: {
       tenantId: job.tenantId,
