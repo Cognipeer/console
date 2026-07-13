@@ -528,10 +528,17 @@ export async function cancelCrawlJob(
   if (!job) return false;
   if (job.status !== 'queued' && job.status !== 'running') return false;
   const db = await withTenantDb(ctx.tenantDbName);
-  await db.updateCrawlJob(jobId, { status: 'canceled', endedAt: new Date() });
-  // Signal the in-process runner if it's here. Cross-node cancel arrives
-  // in Faz 2 — see crawlerJobService.markJobCancelRequested for the local
-  // hook used today.
+  // Atomic: a `queued` job is canceled outright; a `running` job only has
+  // `cancelRequestedAt` stamped. The runner that actually claimed the job
+  // (which may be on a different node than the one handling this request)
+  // observes the flag on its own DB round trips and performs the terminal
+  // `running -> canceled` transition itself — this request never overwrites
+  // a `running` job's status directly, so a late-finishing runner can never
+  // have its own legitimate `succeeded`/`partial`/`failed` write clobbered
+  // by, or clobber, this cancellation.
+  const result = await db.requestCrawlJobCancel(jobId, ctx.tenantId);
+  if (!result) return false;
+  // Same-node fast path: skip the DB round trip if the runner is local.
   const { markJobCancelRequested } = await import('./crawlerJobService');
   markJobCancelRequested(jobId);
   return true;

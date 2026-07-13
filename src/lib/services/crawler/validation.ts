@@ -33,6 +33,7 @@ const httpSchema = z.object({
   basicAuth: z.object({ username: z.string(), password: z.string() }).optional(),
   bearerToken: z.string().optional(),
   allowPrivateNetwork: z.boolean().optional(),
+  allowInsecureTls: z.boolean().optional(),
 });
 
 const webhookSchema = z.object({

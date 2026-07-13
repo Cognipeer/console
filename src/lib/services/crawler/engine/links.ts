@@ -91,9 +91,25 @@ export function extractLinks({
 export function looksLikeJsShell(html: string): boolean {
   try {
     const $ = cheerio.load(html);
+
+    // Strong signal: known SPA root containers (Angular/React/Vue/Next)
+    // rendered empty because the framework bundle hasn't executed yet.
+    // Catches shells that otherwise have enough surrounding chrome text
+    // (nav/footer/cookie banner) to pass a text-length check alone.
+    const spaRootSelectors = ['app-root', '#root', '#app', '#__next', '[data-reactroot]'];
+    for (const selector of spaRootSelectors) {
+      const el = $(selector).first();
+      if (el.length > 0 && el.children().length === 0 && el.text().trim().length < 20) {
+        return true;
+      }
+    }
+
     $('script, style, noscript, iframe, svg').remove();
     const textLen = $('body').text().replace(/\s+/g, ' ').trim().length;
-    return textLen < 100;
+    // 200 rather than 100: many shells ship enough static nav/footer/cookie
+    // banner text to clear a lower bar while the real content is still
+    // client-rendered.
+    return textLen < 200;
   } catch {
     return false;
   }

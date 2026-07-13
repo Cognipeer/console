@@ -10,6 +10,7 @@ import crypto from 'node:crypto';
 import axios from 'axios';
 import { createLogger } from '@/lib/core/logger';
 import type { ICrawlerWebhookConfig, CrawlerWebhookEvent } from '@/lib/database';
+import { assertSafeUrl } from './engine/ssrf';
 
 const log = createLogger('crawler:webhook');
 
@@ -33,6 +34,13 @@ export interface SendWebhookInput<T = unknown> {
   overrideUrl?: string;
   /** Secret used for signing when `webhook` is missing but overrideUrl is set. */
   overrideSecret?: string;
+  /**
+   * Mirrors the crawler's own `http.allowPrivateNetwork` opt-in: a tenant
+   * that has explicitly accepted the risk of crawling private/internal
+   * hosts is trusted to also receive webhooks there (e.g. an internal
+   * notification service on the same network).
+   */
+  allowPrivateNetwork?: boolean;
   event: CrawlerWebhookEvent;
   payload: Omit<WebhookPayload<T>, 'id' | 'event' | 'createdAt'>;
 }
@@ -42,6 +50,23 @@ export async function sendCrawlerWebhook<T>(input: SendWebhookInput<T>): Promise
   if (!url) return;
   const events = input.webhook?.events ?? ['page', 'completed', 'failed'];
   if (!events.includes(input.event)) return;
+
+  // Webhooks should target external systems the tenant owns — block
+  // delivery to private/loopback/link-local/metadata hosts (SSRF hardening)
+  // unless the tenant has explicitly opted in via `allowPrivateNetwork`
+  // (same flag that gates crawling private hosts).
+  try {
+    assertSafeUrl(url, input.allowPrivateNetwork);
+  } catch (err) {
+    log.warn('Refusing to deliver webhook to private/loopback host', {
+      url,
+      event: input.event,
+      jobId: input.payload.jobId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
+
   const secret = input.overrideSecret ?? input.webhook?.secret;
 
   const body: WebhookPayload<T> = {
@@ -72,6 +97,10 @@ export async function sendCrawlerWebhook<T>(input: SendWebhookInput<T>): Promise
         headers,
         timeout: DEFAULT_TIMEOUT_MS,
         validateStatus: (s) => s >= 200 && s < 300,
+        // Do not follow redirects: a public URL could 3xx to a private/
+        // metadata host, bypassing the assertSafeUrl check above (SSRF via
+        // redirect). Webhook receivers should respond directly.
+        maxRedirects: 0,
       });
       return;
     } catch (err) {

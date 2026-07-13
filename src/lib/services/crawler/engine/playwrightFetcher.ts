@@ -7,6 +7,7 @@
 import { chromium, type Browser, type BrowserContext } from 'playwright';
 import mime from 'mime-types';
 import { parseContentTypeBase } from './normalize';
+import { assertSafeUrl } from './ssrf';
 import type { CrawlHttpConfig } from './types';
 import { DEFAULT_ACCEPT_LANGUAGE, DEFAULT_USER_AGENT } from './types';
 
@@ -17,6 +18,8 @@ export interface PlaywrightFetchResult {
   html?: string;
   htmlBytes?: number;
   fileBytes?: number;
+  /** Raw bytes of a downloaded attachment. Present when `type === 'file'`. */
+  fileBuffer?: Buffer;
 }
 
 export class PlaywrightSession {
@@ -52,6 +55,7 @@ export class PlaywrightSession {
             : {}),
         },
         httpCredentials: this.http.basicAuth,
+        ignoreHTTPSErrors: this.http.allowInsecureTls ?? false,
       });
       if (this.http.cookies?.length) {
         await this.context.addCookies(
@@ -69,9 +73,22 @@ export class PlaywrightSession {
           })) as Parameters<BrowserContext['addCookies']>[0],
         );
       }
-      // Block heavy resources to speed crawls up
+      // Block heavy resources to speed crawls up, and re-validate every
+      // navigation (including server redirects and client-side location
+      // changes) against the SSRF guard: Chromium follows redirect chains
+      // itself, so the original URL passing `assertSafeUrl()` in the caller
+      // is not enough — a public seed can 3xx straight to a private/
+      // metadata host and the browser would navigate there transparently.
       await this.context.route('**/*', (route) => {
-        const type = route.request().resourceType();
+        const request = route.request();
+        if (request.isNavigationRequest()) {
+          try {
+            assertSafeUrl(request.url(), this.http.allowPrivateNetwork);
+          } catch {
+            return route.abort('blockedbyclient').catch(() => undefined);
+          }
+        }
+        const type = request.resourceType();
         if (['image', 'media', 'font', 'stylesheet'].includes(type)) {
           return route.abort().catch(() => undefined);
         }
@@ -107,19 +124,32 @@ export class PlaywrightSession {
 
       if (isFile) {
         let fileBytes = 0;
+        let fileBuffer: Buffer | undefined;
         try {
           const buf = await response.body();
           fileBytes = buf.length;
+          fileBuffer = buf;
         } catch { /* ignore */ }
         return {
           type: 'file',
           httpStatus: status,
           contentType: contentType || mime.lookup(url) || 'application/octet-stream',
           fileBytes,
+          fileBuffer,
         };
       }
 
-      // Allow a short window for late-arriving JS rendering
+      // SPA pages (Angular/React) often render their real content well after
+      // `domcontentloaded` — the initial HTML is just a shell/title. Give the
+      // page a chance to go network-idle (bounded, since some sites keep a
+      // long-lived connection open for polling/websockets) before falling
+      // back to a short settle window either way.
+      try {
+        await page.waitForLoadState('networkidle', { timeout: Math.min(timeout, 8000) });
+      } catch {
+        // Timed out waiting for network idle (long-poll/websocket/etc.) —
+        // capture whatever has rendered so far rather than failing the page.
+      }
       await page.waitForTimeout(500);
       const html = await page.content();
       return {

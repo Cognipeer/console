@@ -42,3 +42,33 @@ function cheerioFallback(html: string): string {
     return '';
   }
 }
+
+export interface FileMarkdownInput {
+  buffer: Buffer;
+  fileName: string;
+  options?: CrawlMarkdownOptions;
+}
+
+/**
+ * Converts a downloaded attachment (PDF/DOCX/XLSX/…) to markdown text so it
+ * can be persisted alongside HTML pages and ingested into RAG. Returns
+ * `undefined` (rather than throwing) when the converter cannot extract any
+ * content — the caller still keeps the file metadata (bytes/contentType).
+ */
+export async function fileToMarkdown(input: FileMarkdownInput): Promise<string | undefined> {
+  const { buffer, fileName, options } = input;
+  try {
+    const result = await convertToMarkdown(buffer, {
+      fileName,
+      ...(options?.ocr ? { ocr: options.ocr } : {}),
+    });
+    if (typeof result === 'string') return result || undefined;
+    if (result && typeof result === 'object' && 'markdown' in result) {
+      const md = (result as { markdown?: unknown }).markdown;
+      if (typeof md === 'string') return md || undefined;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
