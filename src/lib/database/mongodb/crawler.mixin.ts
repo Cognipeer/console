@@ -148,6 +148,67 @@ export function CrawlerMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
       return { ...result, _id: toId(result._id) } as ICrawlJob;
     }
 
+    async claimCrawlJob(id: string, tenantId: string, startedAt: Date): Promise<ICrawlJob | null> {
+      const db = this.getTenantDb();
+      const result = await db
+        .collection<ICrawlJob>(COLLECTIONS.crawlJobs)
+        .findOneAndUpdate(
+          { _id: objectId(id), tenantId, status: 'queued' },
+          { $set: { status: 'running', startedAt, updatedAt: new Date() } },
+          { returnDocument: 'after' },
+        );
+      if (!result) return null;
+      return { ...result, _id: toId(result._id) } as ICrawlJob;
+    }
+
+    async requestCrawlJobCancel(id: string, tenantId: string): Promise<ICrawlJob | null> {
+      const db = this.getTenantDb();
+      const now = new Date();
+      // Fast path: job hasn't started yet, cancel it outright.
+      const queuedResult = await db
+        .collection<ICrawlJob>(COLLECTIONS.crawlJobs)
+        .findOneAndUpdate(
+          { _id: objectId(id), tenantId, status: 'queued' },
+          { $set: { status: 'canceled', endedAt: now, updatedAt: now } },
+          { returnDocument: 'after' },
+        );
+      if (queuedResult) {
+        return { ...queuedResult, _id: toId(queuedResult._id) } as ICrawlJob;
+      }
+      // Already running (possibly on another node) — stamp the request so
+      // the owning runner observes it on its next DB round trip.
+      const runningResult = await db
+        .collection<ICrawlJob>(COLLECTIONS.crawlJobs)
+        .findOneAndUpdate(
+          { _id: objectId(id), tenantId, status: 'running' },
+          { $set: { cancelRequestedAt: now, updatedAt: now } },
+          { returnDocument: 'after' },
+        );
+      if (!runningResult) return null;
+      return { ...runningResult, _id: toId(runningResult._id) } as ICrawlJob;
+    }
+
+    async finalizeCrawlJob(
+      id: string,
+      tenantId: string,
+      data: Partial<Omit<ICrawlJob, '_id' | 'tenantId' | 'createdAt'>>,
+    ): Promise<ICrawlJob | null> {
+      const db = this.getTenantDb();
+      const payload: Partial<ICrawlJob> = { ...data, updatedAt: new Date() };
+      delete payload._id;
+      delete payload.tenantId;
+      delete payload.createdAt;
+      const result = await db
+        .collection<ICrawlJob>(COLLECTIONS.crawlJobs)
+        .findOneAndUpdate(
+          { _id: objectId(id), tenantId, status: 'running' },
+          { $set: payload },
+          { returnDocument: 'after' },
+        );
+      if (!result) return null;
+      return { ...result, _id: toId(result._id) } as ICrawlJob;
+    }
+
     async findCrawlJobById(id: string): Promise<ICrawlJob | null> {
       const db = this.getTenantDb();
       try {

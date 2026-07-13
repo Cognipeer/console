@@ -1433,6 +1433,14 @@ export interface ICrawlJob {
   filesProcessed: number;
   errorsCount: number;
   limitReached?: boolean;
+  /**
+   * Persisted cancellation intent. Set when a cancel request arrives while
+   * the job is `running` (possibly from a different node than the one
+   * actually executing it) — the owning runner observes this on its next
+   * DB round trip and performs its own guarded transition to `canceled`.
+   * A `queued` job is canceled outright instead (see `requestCrawlJobCancel`).
+   */
+  cancelRequestedAt?: Date;
   /** Per-run callback override (ad-hoc tek-shot run desteği). */
   callbackUrl?: string;
   errorMessage?: string;

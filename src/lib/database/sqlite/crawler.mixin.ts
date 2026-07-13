@@ -228,6 +228,63 @@ export function CrawlerMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
     ): Promise<ICrawlJob | null> {
       const db = this.getTenantDb();
       const now = this.now();
+      const { sets, params } = this.buildCrawlJobSetClause(data, id, now);
+      db.prepare(`UPDATE ${TABLES.crawlJobs} SET ${sets.join(', ')} WHERE id = @id`).run(params);
+      return this.findCrawlJobById(id);
+    }
+
+    async claimCrawlJob(id: string, tenantId: string, startedAt: Date): Promise<ICrawlJob | null> {
+      const db = this.getTenantDb();
+      const now = this.now();
+      const result = db.prepare(`
+        UPDATE ${TABLES.crawlJobs} SET status = 'running', startedAt = @startedAt, updatedAt = @updatedAt
+        WHERE id = @id AND tenantId = @tenantId AND status = 'queued'
+      `).run({ id, tenantId, startedAt: startedAt.toISOString(), updatedAt: now });
+      if (result.changes !== 1) return null;
+      return this.findCrawlJobById(id);
+    }
+
+    async requestCrawlJobCancel(id: string, tenantId: string): Promise<ICrawlJob | null> {
+      const db = this.getTenantDb();
+      const now = this.now();
+      // Fast path: job hasn't started yet, cancel it outright.
+      const queuedResult = db.prepare(`
+        UPDATE ${TABLES.crawlJobs} SET status = 'canceled', endedAt = @now, updatedAt = @now
+        WHERE id = @id AND tenantId = @tenantId AND status = 'queued'
+      `).run({ id, tenantId, now });
+      if (queuedResult.changes === 1) return this.findCrawlJobById(id);
+
+      // Already running (possibly on another node) — stamp the request so
+      // the owning runner observes it on its next DB round trip.
+      const runningResult = db.prepare(`
+        UPDATE ${TABLES.crawlJobs} SET cancelRequestedAt = @now, updatedAt = @now
+        WHERE id = @id AND tenantId = @tenantId AND status = 'running'
+      `).run({ id, tenantId, now });
+      if (runningResult.changes !== 1) return null;
+      return this.findCrawlJobById(id);
+    }
+
+    async finalizeCrawlJob(
+      id: string,
+      tenantId: string,
+      data: Partial<Omit<ICrawlJob, '_id' | 'tenantId' | 'createdAt'>>,
+    ): Promise<ICrawlJob | null> {
+      const db = this.getTenantDb();
+      const now = this.now();
+      const { sets, params } = this.buildCrawlJobSetClause(data, id, now);
+      params.tenantId = tenantId;
+      const result = db.prepare(
+        `UPDATE ${TABLES.crawlJobs} SET ${sets.join(', ')} WHERE id = @id AND tenantId = @tenantId AND status = 'running'`,
+      ).run(params);
+      if (result.changes !== 1) return null;
+      return this.findCrawlJobById(id);
+    }
+
+    private buildCrawlJobSetClause(
+      data: Partial<Omit<ICrawlJob, '_id' | 'tenantId' | 'createdAt'>>,
+      id: string,
+      now: string,
+    ): { sets: string[]; params: Record<string, unknown> } {
       const sets: string[] = ['updatedAt = @updatedAt'];
       const params: Record<string, unknown> = { id, updatedAt: now };
       const scalarFields = ['status', 'crawlerKey', 'callbackUrl', 'errorMessage', 'projectId'];
@@ -248,7 +305,9 @@ export function CrawlerMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         sets.push('limitReached = @limitReached');
         params.limitReached = data.limitReached ? 1 : 0;
       }
-      const dateFields: Array<'startedAt' | 'endedAt'> = ['startedAt', 'endedAt'];
+      const dateFields: Array<'startedAt' | 'endedAt' | 'cancelRequestedAt'> = [
+        'startedAt', 'endedAt', 'cancelRequestedAt',
+      ];
       for (const f of dateFields) {
         if ((data as Record<string, unknown>)[f] !== undefined) {
           sets.push(`${f} = @${f}`);
@@ -264,8 +323,7 @@ export function CrawlerMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         sets.push('metadata = @metadata');
         params.metadata = this.toJson(data.metadata);
       }
-      db.prepare(`UPDATE ${TABLES.crawlJobs} SET ${sets.join(', ')} WHERE id = @id`).run(params);
-      return this.findCrawlJobById(id);
+      return { sets, params };
     }
 
     async findCrawlJobById(id: string): Promise<ICrawlJob | null> {
@@ -308,6 +366,7 @@ export function CrawlerMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         filesProcessed: Number(row.filesProcessed) || 0,
         errorsCount: Number(row.errorsCount) || 0,
         limitReached: Number(row.limitReached) === 1,
+        cancelRequestedAt: row.cancelRequestedAt ? this.toDate(row.cancelRequestedAt) : undefined,
         callbackUrl: (row.callbackUrl as string) ?? undefined,
         errorMessage: (row.errorMessage as string) ?? undefined,
         metadata: this.parseJson(row.metadata, {}),

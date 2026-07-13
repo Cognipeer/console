@@ -7,6 +7,7 @@
 import { chromium, type Browser, type BrowserContext } from 'playwright';
 import mime from 'mime-types';
 import { parseContentTypeBase } from './normalize';
+import { assertSafeUrl } from './ssrf';
 import type { CrawlHttpConfig } from './types';
 import { DEFAULT_ACCEPT_LANGUAGE, DEFAULT_USER_AGENT } from './types';
 
@@ -72,9 +73,22 @@ export class PlaywrightSession {
           })) as Parameters<BrowserContext['addCookies']>[0],
         );
       }
-      // Block heavy resources to speed crawls up
+      // Block heavy resources to speed crawls up, and re-validate every
+      // navigation (including server redirects and client-side location
+      // changes) against the SSRF guard: Chromium follows redirect chains
+      // itself, so the original URL passing `assertSafeUrl()` in the caller
+      // is not enough — a public seed can 3xx straight to a private/
+      // metadata host and the browser would navigate there transparently.
       await this.context.route('**/*', (route) => {
-        const type = route.request().resourceType();
+        const request = route.request();
+        if (request.isNavigationRequest()) {
+          try {
+            assertSafeUrl(request.url(), this.http.allowPrivateNetwork);
+          } catch {
+            return route.abort('blockedbyclient').catch(() => undefined);
+          }
+        }
+        const type = request.resourceType();
         if (['image', 'media', 'font', 'stylesheet'].includes(type)) {
           return route.abort().catch(() => undefined);
         }

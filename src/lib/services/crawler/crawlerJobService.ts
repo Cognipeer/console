@@ -67,25 +67,16 @@ export async function runCrawlJobLocal(
   jobId: string,
 ): Promise<void> {
   const db = await withTenantDb(ctx.tenantDbName);
-  const job = await db.findCrawlJobById(jobId);
-  if (!job) {
-    logger.warn('Crawl job not found, skipping run', { jobId });
-    return;
-  }
-  if (job.tenantId !== ctx.tenantId) {
-    logger.warn('Crawl job tenant mismatch; refusing to run', { jobId });
-    return;
-  }
-  if (job.status !== 'queued') {
-    logger.info('Crawl job not in queued state; skipping', {
-      jobId,
-      status: job.status,
-    });
-    return;
-  }
-
   const startedAt = new Date();
-  await db.updateCrawlJob(jobId, { status: 'running', startedAt });
+  // Atomic queued -> running transition (CAS on `status`). If this returns
+  // `null`, another consumer already claimed the job — a duplicate/
+  // redelivered queue message MUST NOT re-run it (duplicate crawl results,
+  // duplicate RAG ingestion, duplicate signed webhooks otherwise).
+  const job = await db.claimCrawlJob(jobId, ctx.tenantId, startedAt);
+  if (!job) {
+    logger.info('Crawl job already claimed or not queued; skipping duplicate run', { jobId });
+    return;
+  }
   logger.info('Crawl job started', { jobId, crawlerKey: job.crawlerKey });
 
   const plan = snapshotToPlan(job.planSnapshot);
@@ -120,12 +111,21 @@ export async function runCrawlJobLocal(
         limitReached = true;
       }
 
-      await db.updateCrawlJob(jobId, {
+      const updated = await db.updateCrawlJob(jobId, {
         pagesProcessed,
         filesProcessed,
         errorsCount,
         limitReached,
       });
+      // Cross-node cancellation: a cancel request may have been recorded by
+      // a different node than the one running this job. `cancelRequestedAt`
+      // rides along on the per-page update above (no extra DB round trip),
+      // so it's observed here even without any pub/sub between nodes.
+      if (updated?.cancelRequestedAt && !cancelRequested.has(jobId)) {
+        logger.info('Cross-node cancel request observed; aborting crawl', { jobId });
+        cancelRequested.add(jobId);
+        abort.abort();
+      }
 
       if (page.type === 'html' || page.type === 'file') {
         await fireWebhook(job, page, written.ragDocumentId, 'page').catch(() => undefined);
@@ -156,7 +156,10 @@ export async function runCrawlJobLocal(
           ? 'partial'
           : 'failed';
 
-    await db.updateCrawlJob(jobId, {
+    // Guarded by `WHERE status = 'running'` — this runner is the exclusive
+    // owner of the job (claimed atomically above), so this only fails to
+    // apply if something unexpected already moved the job out of `running`.
+    const finalized = await db.finalizeCrawlJob(jobId, ctx.tenantId, {
       status,
       endedAt,
       durationMs,
@@ -166,6 +169,9 @@ export async function runCrawlJobLocal(
       limitReached,
       errorMessage: failureMessage,
     });
+    if (!finalized) {
+      logger.warn('Crawl job finalize skipped: job was no longer running', { jobId, status });
+    }
 
     const event = status === 'failed' ? 'failed' : 'completed';
     await fireSummaryWebhook(job, status, {
@@ -185,6 +191,7 @@ export async function runCrawlJobLocal(
     });
   }
 }
+
 
 async function persistPage(
   db: DatabaseProvider,

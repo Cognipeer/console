@@ -450,6 +450,9 @@ export class SQLiteProviderBase {
     // ensure on boot for tenants created before the feature.
     this.ensureTableColumn(db, TABLES.guardrails, 'target', "target TEXT NOT NULL DEFAULT 'input'");
     this.ensureTableColumn(db, TABLES.guardrails, 'failMode', "failMode TEXT NOT NULL DEFAULT 'open'");
+    // Cross-node crawl-job cancellation signal (added with atomic job claim
+    // hardening). Safe to ensure on boot for tenants created before the feature.
+    this.ensureTableColumn(db, TABLES.crawlJobs, 'cancelRequestedAt', 'cancelRequestedAt TEXT');
   }
 
   private migrateOcrJobsSchema(db: Database.Database): void {
