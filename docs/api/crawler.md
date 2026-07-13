@@ -27,7 +27,7 @@ These appear on create/update and inside a job's frozen `planSnapshot`:
 | `maxPages` | int 0–5000 | `50` | Page cap. `0` = unlimited. |
 | `autoCrawl` | boolean | `false` | Follow discovered links within scope. |
 | `scope` | object | — | `sameDomainOnly` (default `true`), `includeSubdomains` (default `false`), `allowList[]`, `blockList[]` host globs. |
-| `http` | object | — | `userAgent`, `acceptLanguage`, `timeoutMs` (1000–120000), `maxConcurrency` (1–16), `retries` (1–5), `headers`, `cookies[]`, `basicAuth`, `bearerToken`, `allowPrivateNetwork`. |
+| `http` | object | — | `userAgent`, `acceptLanguage`, `timeoutMs` (1000–120000), `maxConcurrency` (1–16), `retries` (1–5), `headers`, `cookies[]`, `basicAuth`, `bearerToken`, `allowPrivateNetwork`, `allowInsecureTls` (skips TLS certificate verification — opt-in escape hatch for sites with a misconfigured cert chain). |
 | `downloadableMimes` | string[] | — | MIME types treated as downloadable files. |
 | `markdownOptions` | object | — | `{ ocr: { enabled, languages? } }` forwarded to the Markdown extractor. |
 | `rag` | object | — | `{ ragModuleKey, enabled }` — ingest crawled pages into a RAG module. |

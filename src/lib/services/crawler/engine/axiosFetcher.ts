@@ -4,11 +4,16 @@
  */
 
 import axios from 'axios';
+import https from 'node:https';
 import iconv from 'iconv-lite';
 import mime from 'mime-types';
 import { parseContentTypeBase } from './normalize';
 import type { CrawlHttpConfig, CrawlerEngineMode } from './types';
 import { DEFAULT_ACCEPT_LANGUAGE, DEFAULT_USER_AGENT } from './types';
+
+// Reused across requests when allowInsecureTls is set, to avoid creating a
+// fresh TLS agent (and losing keep-alive) per fetch.
+const insecureAgent = new https.Agent({ rejectUnauthorized: false });
 
 export interface FetchResult {
   type: 'html' | 'file';
@@ -17,6 +22,8 @@ export interface FetchResult {
   html?: string;
   htmlBytes?: number;
   fileBytes?: number;
+  /** Raw bytes of a downloaded attachment. Present when `type === 'file'`. */
+  fileBuffer?: Buffer;
 }
 
 export async function fetchWithAxios(
@@ -56,6 +63,7 @@ export async function fetchWithAxios(
       signal: controller.signal,
       auth: http.basicAuth,
       validateStatus: (status) => status < 400,
+      httpsAgent: http.allowInsecureTls ? insecureAgent : undefined,
     });
     clearTimeout(tid);
 
@@ -76,6 +84,7 @@ export async function fetchWithAxios(
         httpStatus: response.status,
         contentType: contentType || mime.lookup(url) || 'application/octet-stream',
         fileBytes: buffer.length,
+        fileBuffer: buffer,
       };
     }
 
@@ -127,6 +136,23 @@ function decodeBuffer(buffer: Buffer, contentType: string): string {
 export function isFileByExtension(url: string, downloadableMimes: string[]): boolean {
   const ext = String(mime.lookup(url) || '').toLowerCase();
   return Boolean(ext && downloadableMimes.includes(ext));
+}
+
+/**
+ * Derives a sensible file name for an attachment so the markdown converter
+ * can pick the right parser (extension-driven). Falls back to the mime type
+ * when the URL path has no usable file name (e.g. `/getFile?id=123`).
+ */
+export function deriveAttachmentFileName(url: string, contentType?: string): string {
+  try {
+    const { pathname } = new URL(url);
+    const last = pathname.split('/').filter(Boolean).pop();
+    if (last && last.includes('.')) return decodeURIComponent(last);
+    const ext = contentType ? mime.extension(contentType) : '';
+    return last ? `${decodeURIComponent(last)}.${ext || 'bin'}` : `attachment.${ext || 'bin'}`;
+  } catch {
+    return 'attachment';
+  }
 }
 
 export const AXIOS_ENGINE_NAME: CrawlerEngineMode = 'axios';

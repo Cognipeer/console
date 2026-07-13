@@ -55,6 +55,7 @@ function snapshotToPlan(snapshot: ICrawlPlanSnapshot): CrawlPlan {
       basicAuth: snapshot.http?.basicAuth,
       bearerToken: snapshot.http?.bearerToken,
       allowPrivateNetwork: snapshot.http?.allowPrivateNetwork,
+      allowInsecureTls: snapshot.http?.allowInsecureTls,
     },
     downloadableMimes: snapshot.downloadableMimes,
     markdownOptions: snapshot.markdownOptions,
@@ -139,13 +140,21 @@ export async function runCrawlJobLocal(
     const durationMs = endedAt.getTime() - startedAt.getTime();
     const canceled = cancelRequested.has(jobId);
     cancelRequested.delete(jobId);
+    // Persisted job status must reflect ALL failures, not just a thrown
+    // exception from the crawl generator itself. Per-page failures (TLS
+    // errors, 404s, timeouts, etc.) are streamed as `page.type === 'error'`
+    // and rolled into `errorsCount` above — without checking it here, a run
+    // with 50 good pages and 20 broken ones was persisted to the DB as
+    // `succeeded`, and the UI had no correct status to ever display.
+    const hadFailure = Boolean(failureMessage) || errorsCount > 0;
+    const processedAny = pagesProcessed + filesProcessed > 0;
     const status: ICrawlJob['status'] = canceled
       ? 'canceled'
-      : failureMessage
-        ? errorsCount === pagesProcessed + filesProcessed + errorsCount && pagesProcessed === 0
-          ? 'failed'
-          : 'partial'
-        : 'succeeded';
+      : !hadFailure
+        ? 'succeeded'
+        : processedAny
+          ? 'partial'
+          : 'failed';
 
     await db.updateCrawlJob(jobId, {
       status,
@@ -186,7 +195,11 @@ async function persistPage(
   let ragStatus: 'pending' | 'indexed' | 'skipped' | 'failed' | undefined;
   let ragError: string | undefined;
 
-  if (page.type === 'html' && job.planSnapshot.rag?.enabled && page.body) {
+  if (
+    (page.type === 'html' || page.type === 'file') &&
+    job.planSnapshot.rag?.enabled &&
+    page.body
+  ) {
     const ingest = await ingestCrawlPage({
       tenantDbName: job.tenantId, // ignored by ingestDocument; we use the loaded db below
       tenantId: job.tenantId,

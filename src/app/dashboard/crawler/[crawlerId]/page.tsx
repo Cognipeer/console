@@ -63,6 +63,7 @@ interface HttpForm {
   headers: string;
   cookies: string;
   allowPrivateNetwork: boolean;
+  allowInsecureTls: boolean;
 }
 
 interface IntegrationForm {
@@ -135,6 +136,7 @@ export default function CrawlerDetailPage() {
       headers: '',
       cookies: '',
       allowPrivateNetwork: false,
+      allowInsecureTls: false,
     },
   });
 
@@ -197,6 +199,7 @@ export default function CrawlerDetailPage() {
         headers: c.http.headers ? JSON.stringify(c.http.headers, null, 2) : '',
         cookies: c.http.cookies ? JSON.stringify(c.http.cookies, null, 2) : '',
         allowPrivateNetwork: c.http.allowPrivateNetwork ?? false,
+        allowInsecureTls: c.http.allowInsecureTls ?? false,
       });
 
       intForm.setValues({
@@ -384,6 +387,7 @@ export default function CrawlerDetailPage() {
         maxConcurrency: values.maxConcurrency,
         bearerToken: values.bearerToken || undefined,
         allowPrivateNetwork: values.allowPrivateNetwork,
+        allowInsecureTls: values.allowInsecureTls,
         headers,
         cookies,
       };
@@ -682,7 +686,7 @@ export default function CrawlerDetailPage() {
     {
       key: 'status',
       label: 'Status',
-      render: (j) => <StatusBadge status={statusToBadge(j.status)} />,
+      render: (j) => <StatusBadge status={j.status} />,
     },
     {
       key: 'startedAt',
@@ -826,7 +830,7 @@ export default function CrawlerDetailPage() {
             {summary.last ? (
               <Stack gap={4}>
                 <Group gap="xs">
-                  <StatusBadge status={statusToBadge(summary.last.status)} />
+                  <StatusBadge status={summary.last.status} />
                   <span className="ds-mono ds-muted" style={{ fontSize: 12 }}>
                     {new Date(summary.last.createdAt ?? Date.now()).toLocaleString()}
                   </span>
@@ -1062,6 +1066,11 @@ Content-Type: application/json
                 label="Allow private network (DANGER: disables SSRF guard)"
                 {...httpForm.getInputProps('allowPrivateNetwork', { type: 'checkbox' })}
               />
+              <Switch
+                label="Allow insecure TLS (DANGER: skips certificate verification)"
+                description="Use only when a site's TLS chain is misconfigured (e.g. missing intermediate certificate) and you trust the destination."
+                {...httpForm.getInputProps('allowInsecureTls', { type: 'checkbox' })}
+              />
               <Group justify="flex-end">
                 <Button type="submit" loading={savingHttp}>Save HTTP settings</Button>
               </Group>
@@ -1193,7 +1202,7 @@ Content-Type: application/json
           <Stack>
             <Group justify="space-between">
               <Group>
-                <StatusBadge status={statusToBadge(openJob.status)} />
+                <StatusBadge status={openJob.status} />
                 <span className="ds-faint">
                   {openJob.pagesProcessed} pages · {openJob.filesProcessed} files · {openJob.errorsCount} errors
                   {openJob.durationMs ? ` · ${(openJob.durationMs / 1000).toFixed(1)}s` : ''}
@@ -1255,20 +1264,4 @@ Content-Type: application/json
       </Modal>
     </PageContainer>
   );
-}
-
-function statusToBadge(status: CrawlJobView['status']): string {
-  switch (status) {
-    case 'succeeded':
-      return 'active';
-    case 'failed':
-      return 'failed';
-    case 'partial':
-    case 'canceled':
-      return 'warn';
-    case 'running':
-      return 'info';
-    default:
-      return 'pending';
-  }
 }

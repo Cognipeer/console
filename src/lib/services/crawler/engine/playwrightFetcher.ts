@@ -17,6 +17,8 @@ export interface PlaywrightFetchResult {
   html?: string;
   htmlBytes?: number;
   fileBytes?: number;
+  /** Raw bytes of a downloaded attachment. Present when `type === 'file'`. */
+  fileBuffer?: Buffer;
 }
 
 export class PlaywrightSession {
@@ -52,6 +54,7 @@ export class PlaywrightSession {
             : {}),
         },
         httpCredentials: this.http.basicAuth,
+        ignoreHTTPSErrors: this.http.allowInsecureTls ?? false,
       });
       if (this.http.cookies?.length) {
         await this.context.addCookies(
@@ -107,19 +110,32 @@ export class PlaywrightSession {
 
       if (isFile) {
         let fileBytes = 0;
+        let fileBuffer: Buffer | undefined;
         try {
           const buf = await response.body();
           fileBytes = buf.length;
+          fileBuffer = buf;
         } catch { /* ignore */ }
         return {
           type: 'file',
           httpStatus: status,
           contentType: contentType || mime.lookup(url) || 'application/octet-stream',
           fileBytes,
+          fileBuffer,
         };
       }
 
-      // Allow a short window for late-arriving JS rendering
+      // SPA pages (Angular/React) often render their real content well after
+      // `domcontentloaded` — the initial HTML is just a shell/title. Give the
+      // page a chance to go network-idle (bounded, since some sites keep a
+      // long-lived connection open for polling/websockets) before falling
+      // back to a short settle window either way.
+      try {
+        await page.waitForLoadState('networkidle', { timeout: Math.min(timeout, 8000) });
+      } catch {
+        // Timed out waiting for network idle (long-poll/websocket/etc.) —
+        // capture whatever has rendered so far rather than failing the page.
+      }
       await page.waitForTimeout(500);
       const html = await page.content();
       return {

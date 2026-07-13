@@ -37,6 +37,13 @@ export interface CrawlHttpConfig {
   basicAuth?: { username: string; password: string };
   bearerToken?: string;
   allowPrivateNetwork?: boolean;
+  /**
+   * Skip TLS certificate verification (DANGER: disables MITM protection).
+   * Opt-in escape hatch for sites whose server misconfigures the TLS chain
+   * (e.g. missing intermediate certificate) so Node can't build trust even
+   * though browsers/OS trust stores can. Default false.
+   */
+  allowInsecureTls?: boolean;
 }
 
 export interface CrawlMarkdownOptions {
@@ -66,7 +73,11 @@ export interface PageResult {
   contentType?: string;
   title?: string;
   description?: string;
-  /** Markdown text. Present for `type === 'html'`. */
+  /**
+   * Markdown text. Present for `type === 'html'` (rendered page content) and,
+   * when extraction succeeds, for `type === 'file'` (PDF/DOCX/XLSX/… attachment
+   * content converted via `@cognipeer/to-markdown`).
+   */
   body?: string;
   /** Raw bytes of fetched content (HTML before markdown, or file). */
   bytes?: number;

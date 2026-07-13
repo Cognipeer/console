@@ -1313,6 +1313,11 @@ export interface ICrawlerHttpConfig {
   bearerToken?: string;
   /** Allow private / link-local destinations. Default false (SSRF guard). */
   allowPrivateNetwork?: boolean;
+  /**
+   * Skip TLS certificate verification (DANGER: disables MITM protection).
+   * Use only for sites with a known-broken TLS chain. Default false.
+   */
+  allowInsecureTls?: boolean;
 }
 
 export interface ICrawlerWebhookConfig {

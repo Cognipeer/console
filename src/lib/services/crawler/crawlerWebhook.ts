@@ -10,6 +10,7 @@ import crypto from 'node:crypto';
 import axios from 'axios';
 import { createLogger } from '@/lib/core/logger';
 import type { ICrawlerWebhookConfig, CrawlerWebhookEvent } from '@/lib/database';
+import { assertSafeUrl } from './engine/ssrf';
 
 const log = createLogger('crawler:webhook');
 
@@ -42,6 +43,22 @@ export async function sendCrawlerWebhook<T>(input: SendWebhookInput<T>): Promise
   if (!url) return;
   const events = input.webhook?.events ?? ['page', 'completed', 'failed'];
   if (!events.includes(input.event)) return;
+
+  // Webhooks always target external systems the tenant owns — never allow
+  // delivery to private/loopback/link-local/metadata hosts (SSRF hardening).
+  // Unlike crawl targets, there is no legitimate opt-in here.
+  try {
+    assertSafeUrl(url);
+  } catch (err) {
+    log.warn('Refusing to deliver webhook to private/loopback host', {
+      url,
+      event: input.event,
+      jobId: input.payload.jobId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
+
   const secret = input.overrideSecret ?? input.webhook?.secret;
 
   const body: WebhookPayload<T> = {
@@ -72,6 +89,10 @@ export async function sendCrawlerWebhook<T>(input: SendWebhookInput<T>): Promise
         headers,
         timeout: DEFAULT_TIMEOUT_MS,
         validateStatus: (s) => s >= 200 && s < 300,
+        // Do not follow redirects: a public URL could 3xx to a private/
+        // metadata host, bypassing the assertSafeUrl check above (SSRF via
+        // redirect). Webhook receivers should respond directly.
+        maxRedirects: 0,
       });
       return;
     } catch (err) {
