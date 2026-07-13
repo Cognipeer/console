@@ -34,6 +34,33 @@
       }
     },
     {
+      "id": "qwen2.5-1.5b",
+      "displayName": "Qwen 2.5 1.5B",
+      "vendor": "Alibaba",
+      "license": "apache-2.0",
+      "modality": "llm",
+      "tags": ["chat", "tool-use", "long-context", "multilingual"],
+      "hfRepo": "Qwen/Qwen2.5-1.5B",
+      "contextLength": 131072,
+      "requirements": {
+        "minVramGiB": 8,
+        "recommendedVramGiB": 12,
+        "computeCapability": "8.0+",
+        "quantization": ["fp16", "awq", "gptq-int4"]
+      },
+      "supportedPlatforms": ["nvidia-gpu"],
+      "runtimes": {
+        "vllm": {
+          "image": "vllm/vllm-openai:v0.21.0",
+          "args": ["--model", "Qwen/Qwen2.5-1.5B", "--tensor-parallel-size", "{{gpuCount}}", "--max-model-len", "32768"],
+          "port": 8000,
+          "healthPath": "/v1/models",
+          "openaiCompatible": true,
+          "secretEnv": ["HUGGING_FACE_HUB_TOKEN"]
+        }
+      }
+    },
+    {
       "id": "qwen3-8b",
       "displayName": "Qwen 3 8B",
       "vendor": "Alibaba",
@@ -68,7 +95,7 @@
         "ollama": {
           "image": "ollama/ollama:0.24.0",
           "args": [],
-          "env": { "OLLAMA_MODELS": "qwen3:8b" },
+          "pullName": "qwen3:8b",
           "port": 11434,
           "healthPath": "/api/tags",
           "openaiCompatible": true,
@@ -246,7 +273,7 @@
       "license": "llama-3.1-community",
       "modality": "llm",
       "tags": ["chat", "small", "local", "mac-friendly"],
-      "hfRepo": "meta-llama/Llama-3.1-8B-Instruct",
+      "hfRepo": "meta-llama/Llama-3.1-8B",
       "contextLength": 131072,
       "requirements": {
         "minVramGiB": 8,
@@ -259,7 +286,7 @@
         "ollama": {
           "image": "ollama/ollama:0.24.0",
           "args": [],
-          "env": { "OLLAMA_MODELS": "llama3.1:8b-instruct" },
+          "pullName": "llama3.1:8b",
           "port": 11434,
           "healthPath": "/api/tags",
           "openaiCompatible": true,
