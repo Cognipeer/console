@@ -5,13 +5,17 @@
  * Domain-specific operations are added via mixins (see sibling files).
  */
 
-import Database from 'better-sqlite3';
-import path from 'node:path';
-import fs from 'node:fs';
-import { randomUUID } from 'node:crypto';
-import { AsyncLocalStorage } from 'node:async_hooks';
 import { createLogger } from '@/lib/core/logger';
-import { MAIN_SCHEMA_SQL, TENANT_SCHEMA_SQL, OCR_TENANT_SCHEMA_SQL } from './schema';
+import Database from 'better-sqlite3';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import {
+  MAIN_SCHEMA_SQL,
+  OCR_TENANT_SCHEMA_SQL,
+  TENANT_SCHEMA_SQL,
+} from './schema';
 
 export const logger = createLogger('sqlite');
 
@@ -190,7 +194,10 @@ export class SQLiteProviderBase {
    * across-`await` binding loss and to process-global overwrites by concurrent
    * requests for other tenants. See the MongoDB provider for the rationale.
    */
-  async runWithTenant<T>(tenantDbName: string, fn: () => T | Promise<T>): Promise<T> {
+  async runWithTenant<T>(
+    tenantDbName: string,
+    fn: () => T | Promise<T>,
+  ): Promise<T> {
     // Ensure the tenant DB is opened/cached and the global fallback is warm.
     await this.switchToTenant(tenantDbName);
     const db = this.tenantDbCache.get(tenantDbName);
@@ -218,7 +225,9 @@ export class SQLiteProviderBase {
   assertTenantContext(expectedTenantDbName: string): void {
     const active = this.tenantNameContext.getStore();
     if (!active) {
-      throw new Error(`Tenant context not initialized (expected ${expectedTenantDbName}).`);
+      throw new Error(
+        `Tenant context not initialized (expected ${expectedTenantDbName}).`,
+      );
     }
     if (active !== expectedTenantDbName) {
       throw new Error(
@@ -228,18 +237,8 @@ export class SQLiteProviderBase {
   }
 
   private applyMainMigrations(db: Database.Database): void {
-    this.ensureTableColumn(
-      db,
-      TABLES.tenants,
-      'licenseId',
-      'licenseId TEXT',
-    );
-    this.ensureTableColumn(
-      db,
-      TABLES.tenants,
-      'licenseKey',
-      'licenseKey TEXT',
-    );
+    this.ensureTableColumn(db, TABLES.tenants, 'licenseId', 'licenseId TEXT');
+    this.ensureTableColumn(db, TABLES.tenants, 'licenseKey', 'licenseKey TEXT');
     this.ensureTableColumn(
       db,
       TABLES.tenants,
@@ -283,7 +282,7 @@ export class SQLiteProviderBase {
       db,
       TABLES.users,
       'servicePermissions',
-      'servicePermissions TEXT DEFAULT \'{}\'',
+      "servicePermissions TEXT DEFAULT '{}'",
     );
     this.ensureTableColumn(
       db,
@@ -291,12 +290,7 @@ export class SQLiteProviderBase {
       'passwordChangedAt',
       'passwordChangedAt TEXT',
     );
-    this.ensureTableColumn(
-      db,
-      TABLES.quotaPolicies,
-      'scopeId',
-      'scopeId TEXT',
-    );
+    this.ensureTableColumn(db, TABLES.quotaPolicies, 'scopeId', 'scopeId TEXT');
     this.ensureTableColumn(
       db,
       TABLES.quotaPolicies,
@@ -309,12 +303,7 @@ export class SQLiteProviderBase {
       'enabled',
       'enabled INTEGER NOT NULL DEFAULT 1',
     );
-    this.ensureTableColumn(
-      db,
-      TABLES.quotaPolicies,
-      'label',
-      'label TEXT',
-    );
+    this.ensureTableColumn(db, TABLES.quotaPolicies, 'label', 'label TEXT');
     this.ensureTableColumn(
       db,
       TABLES.quotaPolicies,
@@ -382,86 +371,272 @@ export class SQLiteProviderBase {
       'rerankerOversample INTEGER',
     );
     // GPU fleet host extensions (added 2026-05-22). Safe to ensure on every boot.
-    this.ensureTableColumn(db, TABLES.gpuHosts, 'accelerator', "accelerator TEXT NOT NULL DEFAULT 'cpu'");
-    this.ensureTableColumn(db, TABLES.gpuHosts, 'gpuFramework', "gpuFramework TEXT NOT NULL DEFAULT 'none'");
-    this.ensureTableColumn(db, TABLES.gpuHosts, 'serviceAddress', 'serviceAddress TEXT');
-    this.ensureTableColumn(db, TABLES.gpuHosts, 'terminalEnabled', 'terminalEnabled INTEGER NOT NULL DEFAULT 0');
+    this.ensureTableColumn(
+      db,
+      TABLES.gpuHosts,
+      'accelerator',
+      "accelerator TEXT NOT NULL DEFAULT 'cpu'",
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.gpuHosts,
+      'gpuFramework',
+      "gpuFramework TEXT NOT NULL DEFAULT 'none'",
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.gpuHosts,
+      'serviceAddress',
+      'serviceAddress TEXT',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.gpuHosts,
+      'terminalEnabled',
+      'terminalEnabled INTEGER NOT NULL DEFAULT 0',
+    );
+    // GPU fleet slices: a slice can now host multiple deployments at once
+    // (added 2026-07-13). Additive column + one-time backfill from the old
+    // singular `assignedDeploymentId` so existing bindings aren't lost.
+    this.ensureTableColumn(
+      db,
+      TABLES.gpuSlices,
+      'assignedDeploymentIds',
+      "assignedDeploymentIds TEXT NOT NULL DEFAULT '[]'",
+    );
+    this.backfillGpuSliceAssignments(db);
     // Sandbox instance per-instance env (added later). Safe to ensure on boot.
     this.ensureTableColumn(db, 'sandbox_instances', 'env', 'env TEXT');
-    this.ensureTableColumn(db, 'sandbox_instances', 'persist', 'persist INTEGER NOT NULL DEFAULT 0');
-    this.ensureTableColumn(db, 'sandbox_instances', 'blockNetwork', 'blockNetwork INTEGER NOT NULL DEFAULT 0');
-    this.ensureTableColumn(db, 'sandbox_instances', 'resources', 'resources TEXT');
-    this.ensureTableColumn(db, 'sandbox_templates', 'idleReapSeconds', 'idleReapSeconds INTEGER');
-    this.ensureTableColumn(db, 'sandbox_templates', 'warmPoolSize', 'warmPoolSize INTEGER');
-    this.ensureTableColumn(db, 'sandbox_instances', 'warm', 'warm INTEGER NOT NULL DEFAULT 0');
+    this.ensureTableColumn(
+      db,
+      'sandbox_instances',
+      'persist',
+      'persist INTEGER NOT NULL DEFAULT 0',
+    );
+    this.ensureTableColumn(
+      db,
+      'sandbox_instances',
+      'blockNetwork',
+      'blockNetwork INTEGER NOT NULL DEFAULT 0',
+    );
+    this.ensureTableColumn(
+      db,
+      'sandbox_instances',
+      'resources',
+      'resources TEXT',
+    );
+    this.ensureTableColumn(
+      db,
+      'sandbox_templates',
+      'idleReapSeconds',
+      'idleReapSeconds INTEGER',
+    );
+    this.ensureTableColumn(
+      db,
+      'sandbox_templates',
+      'warmPoolSize',
+      'warmPoolSize INTEGER',
+    );
+    this.ensureTableColumn(
+      db,
+      'sandbox_instances',
+      'warm',
+      'warm INTEGER NOT NULL DEFAULT 0',
+    );
     this.ensureTableColumn(db, 'sandbox_instances', 'warmKey', 'warmKey TEXT');
-    this.ensureTableColumn(db, 'sandbox_snapshots', 'warmPoolSize', 'warmPoolSize INTEGER');
-    this.ensureTableColumn(db, 'sandbox_volumes', 'bucketKey', 'bucketKey TEXT');
-    this.ensureTableColumn(db, 'sandbox_snapshots', 'blockNetwork', 'blockNetwork INTEGER NOT NULL DEFAULT 0');
-    this.ensureTableColumn(db, 'sandbox_snapshots', 'resources', 'resources TEXT');
+    this.ensureTableColumn(
+      db,
+      'sandbox_snapshots',
+      'warmPoolSize',
+      'warmPoolSize INTEGER',
+    );
+    this.ensureTableColumn(
+      db,
+      'sandbox_volumes',
+      'bucketKey',
+      'bucketKey TEXT',
+    );
+    this.ensureTableColumn(
+      db,
+      'sandbox_snapshots',
+      'blockNetwork',
+      'blockNetwork INTEGER NOT NULL DEFAULT 0',
+    );
+    this.ensureTableColumn(
+      db,
+      'sandbox_snapshots',
+      'resources',
+      'resources TEXT',
+    );
     // OCR jobs v2: the container model replaced the v1 batch layout (which had
     // incompatible NOT NULL columns like `mode`). Drop+recreate the brand-new
     // tables when an old schema is detected; additive columns otherwise.
     this.migrateOcrJobsSchema(db);
     // OCR usage split aggregates (added later). Safe to ensure on boot.
-    this.ensureTableColumn(db, 'ocr_jobs', 'usageOcrTokens', 'usageOcrTokens INTEGER NOT NULL DEFAULT 0');
-    this.ensureTableColumn(db, 'ocr_jobs', 'usageLlmTokens', 'usageLlmTokens INTEGER NOT NULL DEFAULT 0');
-    this.ensureTableColumn(db, 'ocr_jobs', 'costOcr', 'costOcr REAL NOT NULL DEFAULT 0');
-    this.ensureTableColumn(db, 'ocr_jobs', 'costLlm', 'costLlm REAL NOT NULL DEFAULT 0');
+    this.ensureTableColumn(
+      db,
+      'ocr_jobs',
+      'usageOcrTokens',
+      'usageOcrTokens INTEGER NOT NULL DEFAULT 0',
+    );
+    this.ensureTableColumn(
+      db,
+      'ocr_jobs',
+      'usageLlmTokens',
+      'usageLlmTokens INTEGER NOT NULL DEFAULT 0',
+    );
+    this.ensureTableColumn(
+      db,
+      'ocr_jobs',
+      'costOcr',
+      'costOcr REAL NOT NULL DEFAULT 0',
+    );
+    this.ensureTableColumn(
+      db,
+      'ocr_jobs',
+      'costLlm',
+      'costLlm REAL NOT NULL DEFAULT 0',
+    );
     // Red-team campaign cron schedule (added with the scheduler). Safe on boot.
-    this.ensureTableColumn(db, TABLES.redTeamCampaigns, 'schedule', "schedule TEXT DEFAULT '{}'");
+    this.ensureTableColumn(
+      db,
+      TABLES.redTeamCampaigns,
+      'schedule',
+      "schedule TEXT DEFAULT '{}'",
+    );
     // Dynamic LLM routing decision metadata on usage logs (added with the
     // Dynamic LLM router). Safe to ensure on boot.
-    this.ensureTableColumn(db, TABLES.modelUsageLogs, 'routing', 'routing TEXT');
+    this.ensureTableColumn(
+      db,
+      TABLES.modelUsageLogs,
+      'routing',
+      'routing TEXT',
+    );
     // Analysis conversation tags for grouping/filtering (added later). Safe on boot.
-    this.ensureTableColumn(db, TABLES.analysisConversations, 'tags', "tags TEXT DEFAULT '[]'");
+    this.ensureTableColumn(
+      db,
+      TABLES.analysisConversations,
+      'tags',
+      "tags TEXT DEFAULT '[]'",
+    );
     // Group tenant-level grants + directory-sync provenance (added with user
     // groups). Safe to ensure on boot for tenants created before the feature.
     this.ensureTableColumn(db, TABLES.groups, 'tenantRole', 'tenantRole TEXT');
-    this.ensureTableColumn(db, TABLES.groups, 'servicePermissions', "servicePermissions TEXT DEFAULT '{}'");
-    this.ensureTableColumn(db, TABLES.groups, 'source', "source TEXT NOT NULL DEFAULT 'local'");
+    this.ensureTableColumn(
+      db,
+      TABLES.groups,
+      'servicePermissions',
+      "servicePermissions TEXT DEFAULT '{}'",
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.groups,
+      'source',
+      "source TEXT NOT NULL DEFAULT 'local'",
+    );
     this.ensureTableColumn(db, TABLES.groups, 'externalId', 'externalId TEXT');
-    this.ensureTableColumn(db, TABLES.groupMembers, 'source', "source TEXT NOT NULL DEFAULT 'local'");
+    this.ensureTableColumn(
+      db,
+      TABLES.groupMembers,
+      'source',
+      "source TEXT NOT NULL DEFAULT 'local'",
+    );
     // External identity provenance on users (LDAP/SSO JIT provisioning). Added
     // with directory auth; safe to ensure on boot for pre-existing tenants.
-    this.ensureTableColumn(db, TABLES.users, 'authProvider', "authProvider TEXT NOT NULL DEFAULT 'local'");
+    this.ensureTableColumn(
+      db,
+      TABLES.users,
+      'authProvider',
+      "authProvider TEXT NOT NULL DEFAULT 'local'",
+    );
     this.ensureTableColumn(db, TABLES.users, 'externalId', 'externalId TEXT');
     // Realtime models can generate responses through an agent instead of a
     // raw chat model (added later). Safe to ensure on boot.
-    this.ensureTableColumn(db, TABLES.realtimeModels, 'agentKey', 'agentKey TEXT');
+    this.ensureTableColumn(
+      db,
+      TABLES.realtimeModels,
+      'agentKey',
+      'agentKey TEXT',
+    );
     // Per-project sandbox resource defaults (added with port preview + resource
     // limits). Safe to ensure on boot for tenants created before the feature.
-    this.ensureTableColumn(db, 'sandbox_settings', 'projectResourceDefaults', 'projectResourceDefaults TEXT');
+    this.ensureTableColumn(
+      db,
+      'sandbox_settings',
+      'projectResourceDefaults',
+      'projectResourceDefaults TEXT',
+    );
     // Per-sandbox preview toggles (enabled + public/private). Safe to ensure on
     // boot; default enabled=on, public=off (private behind login).
-    this.ensureTableColumn(db, 'sandbox_instances', 'previewEnabled', 'previewEnabled INTEGER NOT NULL DEFAULT 1');
-    this.ensureTableColumn(db, 'sandbox_instances', 'previewPublic', 'previewPublic INTEGER NOT NULL DEFAULT 0');
+    this.ensureTableColumn(
+      db,
+      'sandbox_instances',
+      'previewEnabled',
+      'previewEnabled INTEGER NOT NULL DEFAULT 1',
+    );
+    this.ensureTableColumn(
+      db,
+      'sandbox_instances',
+      'previewPublic',
+      'previewPublic INTEGER NOT NULL DEFAULT 0',
+    );
     // Launch image an instance was created from (snapshot/fork restore). Persisted
     // so start/redrive/attach relaunch from the SAME image instead of silently
     // reverting to template.baseImage (the meeting-bot "snapshot rot" failure).
     // Safe to ensure on boot for tenants created before the feature.
-    this.ensureTableColumn(db, 'sandbox_instances', 'imageRef', 'imageRef TEXT');
+    this.ensureTableColumn(
+      db,
+      'sandbox_instances',
+      'imageRef',
+      'imageRef TEXT',
+    );
     // Web search run logs: inline answer + returned results (added with the
     // AI-answer feature). Safe to ensure on boot.
-    this.ensureTableColumn(db, TABLES.websearchRunLogs, 'answer', 'answer TEXT');
-    this.ensureTableColumn(db, TABLES.websearchRunLogs, 'results', 'results TEXT');
+    this.ensureTableColumn(
+      db,
+      TABLES.websearchRunLogs,
+      'answer',
+      'answer TEXT',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.websearchRunLogs,
+      'results',
+      'results TEXT',
+    );
     // Guardrail hardening: enforcement direction was never in the SQLite
     // schema even though the mixin writes it, and failMode is new. Safe to
     // ensure on boot for tenants created before the feature.
-    this.ensureTableColumn(db, TABLES.guardrails, 'target', "target TEXT NOT NULL DEFAULT 'input'");
-    this.ensureTableColumn(db, TABLES.guardrails, 'failMode', "failMode TEXT NOT NULL DEFAULT 'open'");
+    this.ensureTableColumn(
+      db,
+      TABLES.guardrails,
+      'target',
+      "target TEXT NOT NULL DEFAULT 'input'",
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.guardrails,
+      'failMode',
+      "failMode TEXT NOT NULL DEFAULT 'open'",
+    );
   }
 
   private migrateOcrJobsSchema(db: Database.Database): void {
     const exists = db
-      .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='ocr_jobs'`)
+      .prepare(
+        `SELECT name FROM sqlite_master WHERE type='table' AND name='ocr_jobs'`,
+      )
       .get() as { name?: unknown } | undefined;
     if (exists) {
-      const columns = db.prepare(`PRAGMA table_info(ocr_jobs)`).all() as Array<{ name?: unknown }>;
+      const columns = db.prepare(`PRAGMA table_info(ocr_jobs)`).all() as Array<{
+        name?: unknown;
+      }>;
       const names = new Set(columns.map((c) => String(c.name)));
       const isV1 = names.has('mode') || !names.has('bucketKey');
       if (isV1) {
-        db.exec(`DROP TABLE IF EXISTS ocr_job_items; DROP TABLE IF EXISTS ocr_jobs;`);
+        db.exec(
+          `DROP TABLE IF EXISTS ocr_job_items; DROP TABLE IF EXISTS ocr_jobs;`,
+        );
         db.exec(OCR_TENANT_SCHEMA_SQL);
         logger.info('OCR jobs schema migrated to v2 (drop+recreate)');
       }
@@ -488,7 +663,12 @@ export class SQLiteProviderBase {
     // in place, best-effort — skipped if pre-existing duplicates would violate
     // the constraint, and never leaving the table without an index.
     this.upgradeToUniqueIndex(db, 'idx_models_key', TABLES.models, '(key)');
-    this.upgradeToUniqueIndex(db, 'idx_providers_key', TABLES.providers, '(key)');
+    this.upgradeToUniqueIndex(
+      db,
+      'idx_providers_key',
+      TABLES.providers,
+      '(key)',
+    );
   }
 
   private upgradeToUniqueIndex(
@@ -508,10 +688,13 @@ export class SQLiteProviderBase {
           `DROP INDEX IF EXISTS ${indexName};`,
       );
     } catch (error) {
-      logger.warn(`Could not upgrade ${indexName} to unique (pre-existing duplicates?)`, {
-        tableName,
-        error,
-      });
+      logger.warn(
+        `Could not upgrade ${indexName} to unique (pre-existing duplicates?)`,
+        {
+          tableName,
+          error,
+        },
+      );
     }
   }
 
@@ -521,12 +704,56 @@ export class SQLiteProviderBase {
     columnName: string,
     columnDefinition: string,
   ): void {
-    const columns = db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name?: unknown }>;
-    const hasColumn = columns.some((column) => String(column.name) === columnName);
+    const columns = db
+      .prepare(`PRAGMA table_info(${tableName})`)
+      .all() as Array<{ name?: unknown }>;
+    const hasColumn = columns.some(
+      (column) => String(column.name) === columnName,
+    );
     if (hasColumn) return;
 
     db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnDefinition}`);
     logger.info('SQLite schema migration applied', { tableName, columnName });
+  }
+
+  /**
+   * One-time data migration for the gpu_slices multi-deployment change: a
+   * pre-existing tenant DB still has the legacy singular `assignedDeploymentId`
+   * column populated. Fold it into the new `assignedDeploymentIds` JSON array
+   * so bindings created before the upgrade aren't silently dropped. Safe to
+   * call on every boot — once a row's array is populated it's skipped.
+   */
+  private backfillGpuSliceAssignments(db: Database.Database): void {
+    const columns = db
+      .prepare(`PRAGMA table_info(${TABLES.gpuSlices})`)
+      .all() as Array<{ name?: unknown }>;
+    if (
+      !columns.some((column) => String(column.name) === 'assignedDeploymentId')
+    )
+      return;
+
+    const rows = db
+      .prepare(
+        `SELECT uuid, assignedDeploymentId FROM ${TABLES.gpuSlices}
+         WHERE assignedDeploymentId IS NOT NULL AND (assignedDeploymentIds IS NULL OR assignedDeploymentIds = '[]')`,
+      )
+      .all() as Array<{ uuid: string; assignedDeploymentId: string }>;
+    if (rows.length === 0) return;
+
+    const update = db.prepare(
+      `UPDATE ${TABLES.gpuSlices} SET assignedDeploymentIds = @ids WHERE uuid = @uuid`,
+    );
+    for (const row of rows) {
+      update.run({
+        uuid: row.uuid,
+        ids: JSON.stringify([row.assignedDeploymentId]),
+      });
+    }
+    logger.info('SQLite schema migration applied', {
+      tableName: TABLES.gpuSlices,
+      migration: 'backfill assignedDeploymentIds from assignedDeploymentId',
+      rows: rows.length,
+    });
   }
 
   // ── Public helpers ────────────────────────────────────────────────
@@ -586,7 +813,9 @@ export class SQLiteProviderBase {
 
   protected normalizeStringArray(value: unknown): string[] {
     if (!Array.isArray(value)) return [];
-    const flattened = value.flatMap((item) => (Array.isArray(item) ? item : [item]));
+    const flattened = value.flatMap((item) =>
+      Array.isArray(item) ? item : [item],
+    );
     return [
       ...new Set(
         flattened
@@ -641,8 +870,11 @@ export class SQLiteProviderBase {
     params: Record<string, unknown>;
   } {
     if (typeof projectId === 'string' && projectId.trim().length > 0) {
-      return { clause: 'projectId = @projectId', params: { projectId: projectId.trim() } };
+      return {
+        clause: 'projectId = @projectId',
+        params: { projectId: projectId.trim() },
+      };
     }
-    return { clause: '(projectId IS NULL OR projectId = \'\')', params: {} };
+    return { clause: "(projectId IS NULL OR projectId = '')", params: {} };
   }
 }

@@ -208,7 +208,6 @@ export const BATCH_TENANT_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_batch_job_items_batchId_status ON batch_job_items(batchId, status);
 `;
 
-
 /** Realtime API: named realtime models + per-connection session logs. */
 export const REALTIME_TENANT_SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS realtime_models (
@@ -1749,12 +1748,13 @@ export const TENANT_SCHEMA_SQL = `
     kind TEXT NOT NULL,
     profile TEXT,
     memoryMiB INTEGER NOT NULL DEFAULT 0,
-    assignedDeploymentId TEXT,
+    -- JSON array of deployment ids bound to this slice. A slice may host
+    -- more than one deployment at once (see gpu-fleet.mixin.ts).
+    assignedDeploymentIds TEXT NOT NULL DEFAULT '[]',
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_gpu_slices_host ON gpu_slices(hostId);
-  CREATE INDEX IF NOT EXISTS idx_gpu_slices_assignment ON gpu_slices(assignedDeploymentId);
 
   -- GPU fleet: LLM deployments (Docker containers serving a model on a slice)
   CREATE TABLE IF NOT EXISTS llm_deployments (
