@@ -123,24 +123,45 @@ export async function* crawl(
             `${url} looks JS-rendered or bot-challenged but no Playwright session is available`,
           );
         }
+        let pw: Awaited<ReturnType<typeof session.fetch>>;
         try {
-          return await retry(() => session.fetch(url, deps.signal), retries);
+          pw = await retry(() => session.fetch(url, deps.signal), retries);
         } catch (err) {
           throw new Error(
             `Playwright fallback failed for JS-shell/challenge page ${url}: ${(err as Error).message}`,
           );
         }
+        // A real (stealth-hardened) browser navigation not throwing doesn't
+        // mean it got past the challenge — some anti-bot vendors serve the
+        // exact same "please enable JavaScript..." interstitial to headless
+        // Chromium too (seen on tefas.gov.tr). Re-run the same shell/
+        // challenge check on the Playwright result instead of trusting it
+        // unconditionally; otherwise the challenge page itself gets
+        // ingested as if it were the real content.
+        if (pw.type === 'html' && pw.html && looksLikeJsShell(pw.html)) {
+          throw new Error(
+            `${url} still looks JS-rendered or bot-challenged after Playwright rendering`,
+          );
+        }
+        return pw;
       }
       return r;
     } catch (err) {
       if (!session) throw err;
+      let pw: Awaited<ReturnType<typeof session.fetch>>;
       try {
-        return await retry(() => session.fetch(url, deps.signal), retries);
+        pw = await retry(() => session.fetch(url, deps.signal), retries);
       } catch (pwErr) {
         throw new Error(
           `All engines failed for ${url}: ${(pwErr as Error).message}`,
         );
       }
+      if (pw.type === 'html' && pw.html && looksLikeJsShell(pw.html)) {
+        throw new Error(
+          `${url} still looks JS-rendered or bot-challenged after Playwright rendering (axios failed: ${(err as Error).message})`,
+        );
+      }
+      return pw;
     }
   }
 

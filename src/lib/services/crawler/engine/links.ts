@@ -106,6 +106,12 @@ const BOT_CHALLENGE_PATTERNS = [
   /please verify you are a human/i,
   /verifying you are human/i,
   /access denied.{0,40}(reference|error) #/i,
+  // Seen on tefas.gov.tr (and other Akamai/Radware-fronted sites): a bare
+  // 200 response whose entire body is this one sentence — the real page
+  // never gets served, JS challenge or not, incl. to a real headless
+  // Chromium (see the re-check of the Playwright result in engine/index.ts).
+  /please enable javascript to view the page content/i,
+  /your support id is\s*:/i,
 ];
 
 export function looksLikeJsShell(html: string): boolean {
