@@ -76,6 +76,12 @@ export const ENTERPRISE_API_RULES: EnterpriseApiRule[] = [
     module: 'reports',
     prefixes: ['/api/reports/'],
   },
+  {
+    // Aegis enforcement plane: policy evaluation, approvals and decision audit.
+    // Gates both the admin surface and the SDK's API-token surface.
+    module: 'aegis',
+    prefixes: ['/api/aegis/', '/api/client/v1/aegis/'],
+  },
 ];
 
 export interface EnterpriseDenial {
