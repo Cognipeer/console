@@ -196,25 +196,43 @@ export class PlaywrightSession {
       // yielding a page whose body looks "successful" but is incomplete.
       // Scroll to the bottom in bounded steps to trigger it before capturing
       // the final HTML (best-effort: failures here must not fail the page).
+      // `page.evaluate()` has NO built-in timeout in Playwright (unlike
+      // `goto`/`waitForLoadState`) — if the in-page script ever hangs (e.g.
+      // an exception thrown asynchronously inside the setInterval callback
+      // below, which would otherwise never resolve/reject the wrapping
+      // Promise), this would block the fetch — and therefore the whole
+      // crawl batch and the job's "Cancel" button — forever. Race it
+      // against a hard timeout so that can never happen.
       try {
-        await page.evaluate(async () => {
-          await new Promise<void>((resolve) => {
-            const step = 800;
-            const maxScroll = 20_000; // cap total scroll distance
-            let total = 0;
-            const timer = setInterval(() => {
-              window.scrollBy(0, step);
-              total += step;
-              if (total >= document.body.scrollHeight || total >= maxScroll) {
-                clearInterval(timer);
-                resolve();
-              }
-            }, 100);
-          });
-        });
+        await Promise.race([
+          page.evaluate(async () => {
+            await new Promise<void>((resolve) => {
+              const step = 800;
+              const maxScroll = 20_000; // cap total scroll distance
+              let total = 0;
+              const timer = setInterval(() => {
+                try {
+                  window.scrollBy(0, step);
+                  total += step;
+                  if (total >= document.body.scrollHeight || total >= maxScroll) {
+                    clearInterval(timer);
+                    resolve();
+                  }
+                } catch {
+                  // e.g. page mid-navigation/closed — stop instead of
+                  // leaving the interval (and this Promise) dangling.
+                  clearInterval(timer);
+                  resolve();
+                }
+              }, 100);
+            });
+          }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('scroll timed out')), 5000)),
+        ]);
         await page.waitForTimeout(300);
       } catch {
-        // best-effort only — page may have navigated away/closed
+        // best-effort only — page may have navigated away/closed, or the
+        // 5s guard above tripped; either way, capture whatever HTML exists.
       }
       await page.waitForTimeout(500);
       const html = await page.content();
