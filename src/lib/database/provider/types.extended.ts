@@ -1,8 +1,5 @@
 import type { ObjectId } from 'mongodb';
-import type {
-  GuardrailAction,
-  GuardrailType,
-} from './types.domain';
+import type { GuardrailAction, GuardrailType } from './types.domain';
 // ── Memory types ─────────────────────────────────────────────────────────
 
 export type MemoryScope = 'user' | 'agent' | 'session' | 'global';
@@ -303,7 +300,11 @@ export type GpuHostStatus =
   | 'draining'
   | 'archived';
 export type GpuHostProvider = 'azure' | 'aws' | 'gcp' | 'self';
-export type GpuHostAccelerator = 'nvidia-gpu' | 'apple-silicon' | 'amd-gpu' | 'cpu';
+export type GpuHostAccelerator =
+  | 'nvidia-gpu'
+  | 'apple-silicon'
+  | 'amd-gpu'
+  | 'cpu';
 export type GpuHostGpuFramework = 'cuda' | 'rocm' | 'metal' | 'none';
 
 export interface IGpuHost {
@@ -356,8 +357,13 @@ export interface IGpuSlice {
   kind: GpuSliceKind;
   profile: string | null;
   memoryMiB: number;
-  /** Deployment id currently bound to this slice (or null). */
-  assignedDeploymentId: string | null;
+  /**
+   * Deployment ids currently bound to this slice. A slice can host more than
+   * one deployment at once (e.g. several small models sharing one GPU/MIG
+   * partition) — capacity/VRAM budgeting across members is the operator's
+   * responsibility, the console does not enforce it.
+   */
+  assignedDeploymentIds: string[];
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -393,7 +399,11 @@ export interface ILlmDeployment {
   env: Record<string, string>;
   port: number;
   healthPath: string;
-  volumes: Array<{ hostPath: string; containerPath: string; readOnly?: boolean }>;
+  volumes: Array<{
+    hostPath: string;
+    containerPath: string;
+    readOnly?: boolean;
+  }>;
   restart: 'no' | 'on-failure' | 'always' | 'unless-stopped';
   desiredState: LlmDeploymentDesiredState;
   actualState: LlmDeploymentActualState;
@@ -411,7 +421,11 @@ export interface ILlmDeployment {
   updatedAt?: Date;
 }
 
-export type GpuFleetCommandStatus = 'pending' | 'delivered' | 'completed' | 'failed';
+export type GpuFleetCommandStatus =
+  | 'pending'
+  | 'delivered'
+  | 'completed'
+  | 'failed';
 
 export interface IGpuFleetCommand {
   _id?: string;
@@ -446,7 +460,11 @@ export type AgentDistributionMode = 'console-served' | 'external-url';
 
 // ── LLM pool (load-balanced multi-host deployment) ───────────────────────
 
-export type LlmPoolAlgorithm = 'round-robin' | 'least-busy' | 'weighted-static' | 'random';
+export type LlmPoolAlgorithm =
+  | 'round-robin'
+  | 'least-busy'
+  | 'weighted-static'
+  | 'random';
 export type LlmPoolStatus = 'active' | 'disabled';
 
 export interface ILlmPool {
@@ -485,8 +503,37 @@ export interface IGpuFleetSettings {
   /** Used when mode === 'external-url'; supports {{platform}} placeholder. */
   agentDistributionExternalUrlTemplate: string | null;
   terminalSessionTtlSeconds: number;
+  /**
+   * Encrypted Hugging Face access token, auto-injected as
+   * HUGGING_FACE_HUB_TOKEN/HF_TOKEN into vLLM/TGI/Ollama deployments so
+   * gated/private model repos can be pulled without per-deployment setup.
+   */
+  huggingFaceTokenEnc: string | null;
   createdAt?: Date;
   updatedAt?: Date;
+}
+
+/**
+ * One `nvidia-smi` reading for one physical GPU on one host, recorded at a
+ * throttled cadence (see recordGpuHostMetrics in hostService.ts) so history
+ * charts have reasonable resolution without unbounded row growth.
+ */
+export interface IGpuHostMetrics {
+  _id?: string;
+  tenantId: string;
+  hostId: string;
+  /** Physical GPU UUID — matches IGpuSlice.gpuUuid. */
+  gpuUuid: string;
+  gpuIndex: number;
+  timestamp: Date;
+  utilizationGpuPercent: number | null;
+  utilizationMemoryPercent: number | null;
+  memoryUsedMiB: number | null;
+  memoryTotalMiB: number | null;
+  temperatureC: number | null;
+  powerDrawW: number | null;
+  powerLimitW: number | null;
+  createdAt?: Date;
 }
 
 // =====================================================================
@@ -496,7 +543,11 @@ export interface IGpuFleetSettings {
 // Tables are prefixed `sandbox_` and share nothing with gpu-fleet/cluster.
 // =====================================================================
 
-export type SandboxRunnerStatus = 'pending' | 'online' | 'offline' | 'pending_claim';
+export type SandboxRunnerStatus =
+  | 'pending'
+  | 'online'
+  | 'offline'
+  | 'pending_claim';
 
 /** A DinD (later K8s) compute node that runs sandbox containers. */
 export interface ISandboxRunner {
@@ -621,7 +672,11 @@ export interface ISandboxInstance {
   updatedAt: Date;
 }
 
-export type SandboxCommandStatus = 'pending' | 'delivered' | 'completed' | 'failed';
+export type SandboxCommandStatus =
+  | 'pending'
+  | 'delivered'
+  | 'completed'
+  | 'failed';
 
 export interface ISandboxCommand {
   id: string;
@@ -681,7 +736,11 @@ export interface ISandboxVolume {
 export type SandboxSnapshotKind = 'snapshot' | 'backup';
 
 /** Lifecycle of a snapshot as it is committed and (optionally) exported. */
-export type SandboxSnapshotStatus = 'committing' | 'exporting' | 'ready' | 'failed';
+export type SandboxSnapshotStatus =
+  | 'committing'
+  | 'exporting'
+  | 'ready'
+  | 'failed';
 
 /**
  * A point-in-time capture of a sandbox container filesystem (`docker commit`).
@@ -763,7 +822,10 @@ export type OcrOutputKind = 'full_text' | 'summary' | 'structured';
 export type OcrJobMode = 'sync' | 'async';
 
 /** Per-file webhook events plus the job-level completion signal. */
-export type OcrJobWebhookEvent = 'item.succeeded' | 'item.failed' | 'job.completed';
+export type OcrJobWebhookEvent =
+  | 'item.succeeded'
+  | 'item.failed'
+  | 'job.completed';
 
 export type OcrJobItemCallbackStatus = 'delivered' | 'failed' | 'skipped';
 
@@ -897,7 +959,12 @@ export type BatchJobStatus =
 /** Target route each line of the batch is executed against. */
 export type BatchJobEndpoint = '/v1/chat/completions' | '/v1/embeddings';
 
-export type BatchJobItemStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+export type BatchJobItemStatus =
+  | 'pending'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled';
 
 /** Reference to a JSONL object in a Document Store bucket. */
 export interface BatchFileRef {

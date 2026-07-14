@@ -5,9 +5,9 @@
  * Domain-specific operations are added via mixins (see sibling files).
  */
 
-import { MongoClient, Db, type MongoClientOptions } from 'mongodb';
-import { AsyncLocalStorage } from 'node:async_hooks';
 import { createLogger } from '@/lib/core/logger';
+import { Db, MongoClient, type MongoClientOptions } from 'mongodb';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { ensureMainDbIndexes, ensureTenantDbIndexes } from './indexManifest';
 
 export const logger = createLogger('mongodb');
@@ -101,6 +101,7 @@ export const COLLECTIONS = {
   gpuFleetCommands: 'gpu_fleet_commands',
   gpuFleetEvents: 'gpu_fleet_events',
   gpuFleetSettings: 'gpu_fleet_settings',
+  gpuHostMetrics: 'gpu_host_metrics',
   llmPools: 'llm_pools',
 } as const;
 
@@ -116,7 +117,11 @@ export class MongoDBProviderBase {
   protected readonly mainDbName: string;
   protected readonly clientOptions?: MongoClientOptions;
 
-  constructor(uri: string, mainDbName: string = 'console_main', clientOptions?: MongoClientOptions) {
+  constructor(
+    uri: string,
+    mainDbName: string = 'console_main',
+    clientOptions?: MongoClientOptions,
+  ) {
     this.uri = uri;
     this.mainDbName = mainDbName;
     this.clientOptions = clientOptions;
@@ -181,7 +186,10 @@ export class MongoDBProviderBase {
    * request for another tenant can overwrite (cross-tenant data leakage).
    * `runWithTenant` is immune to both problems.
    */
-  async runWithTenant<T>(tenantDbName: string, fn: () => T | Promise<T>): Promise<T> {
+  async runWithTenant<T>(
+    tenantDbName: string,
+    fn: () => T | Promise<T>,
+  ): Promise<T> {
     if (!this.client) {
       throw new Error('Database client not connected. Call connect() first.');
     }
@@ -207,7 +215,9 @@ export class MongoDBProviderBase {
   assertTenantContext(expectedTenantDbName: string): void {
     const active = this.tenantNameContext.getStore();
     if (!active) {
-      throw new Error(`Tenant context not initialized (expected ${expectedTenantDbName}).`);
+      throw new Error(
+        `Tenant context not initialized (expected ${expectedTenantDbName}).`,
+      );
     }
     if (active !== expectedTenantDbName) {
       throw new Error(
@@ -241,7 +251,9 @@ export class MongoDBProviderBase {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
-  protected buildProjectScopeFilter(projectId?: string): Record<string, unknown> {
+  protected buildProjectScopeFilter(
+    projectId?: string,
+  ): Record<string, unknown> {
     if (typeof projectId === 'string' && projectId.trim().length > 0) {
       return { projectId: projectId.trim() };
     }
@@ -265,13 +277,17 @@ export class MongoDBProviderBase {
       return [];
     }
 
-    const flattened = value.flatMap((item) => (Array.isArray(item) ? item : [item]));
+    const flattened = value.flatMap((item) =>
+      Array.isArray(item) ? item : [item],
+    );
 
-    return [...new Set(
-      flattened
-        .filter((item): item is string => typeof item === 'string')
-        .map((item) => item.trim())
-        .filter(Boolean),
-    )];
+    return [
+      ...new Set(
+        flattened
+          .filter((item): item is string => typeof item === 'string')
+          .map((item) => item.trim())
+          .filter(Boolean),
+      ),
+    ];
   }
 }

@@ -208,7 +208,6 @@ export const BATCH_TENANT_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_batch_job_items_batchId_status ON batch_job_items(batchId, status);
 `;
 
-
 /** Realtime API: named realtime models + per-connection session logs. */
 export const REALTIME_TENANT_SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS realtime_models (
@@ -1750,12 +1749,13 @@ export const TENANT_SCHEMA_SQL = `
     kind TEXT NOT NULL,
     profile TEXT,
     memoryMiB INTEGER NOT NULL DEFAULT 0,
-    assignedDeploymentId TEXT,
+    -- JSON array of deployment ids bound to this slice. A slice may host
+    -- more than one deployment at once (see gpu-fleet.mixin.ts).
+    assignedDeploymentIds TEXT NOT NULL DEFAULT '[]',
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_gpu_slices_host ON gpu_slices(hostId);
-  CREATE INDEX IF NOT EXISTS idx_gpu_slices_assignment ON gpu_slices(assignedDeploymentId);
 
   -- GPU fleet: LLM deployments (Docker containers serving a model on a slice)
   CREATE TABLE IF NOT EXISTS llm_deployments (
@@ -1837,6 +1837,7 @@ export const TENANT_SCHEMA_SQL = `
     agentDistributionMode TEXT NOT NULL DEFAULT 'console-served',
     agentDistributionExternalUrlTemplate TEXT,
     terminalSessionTtlSeconds INTEGER NOT NULL DEFAULT 1800,
+    huggingFaceTokenEnc TEXT,
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   );
@@ -1854,6 +1855,27 @@ export const TENANT_SCHEMA_SQL = `
     UNIQUE(hostId, sequence)
   );
   CREATE INDEX IF NOT EXISTS idx_gpu_fleet_events_host_seq ON gpu_fleet_events(hostId, sequence DESC);
+
+  -- GPU fleet: periodic nvidia-smi readings per host GPU (history/charts).
+  -- Rows are throttled at write time (not one per heartbeat) and pruned by
+  -- a retention reconciler — see hostService.ts.
+  CREATE TABLE IF NOT EXISTS gpu_host_metrics (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    hostId TEXT NOT NULL,
+    gpuUuid TEXT NOT NULL,
+    gpuIndex INTEGER NOT NULL,
+    timestamp TEXT NOT NULL,
+    utilizationGpuPercent REAL,
+    utilizationMemoryPercent REAL,
+    memoryUsedMiB REAL,
+    memoryTotalMiB REAL,
+    temperatureC REAL,
+    powerDrawW REAL,
+    powerLimitW REAL,
+    createdAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_gpu_host_metrics_host_gpu_time ON gpu_host_metrics(hostId, gpuUuid, timestamp DESC);
 
   -- ===== Agent Runtime Sandbox (independent of gpu fleet) =====
   CREATE TABLE IF NOT EXISTS sandbox_runners (
