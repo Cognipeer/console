@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from '@/server/api/http';
 import { createFileBucket, listFileBuckets } from '@/lib/services/files';
+import { ensureBuiltinProviders } from '@/lib/services/providers/builtinProviders';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { checkResourceQuota } from '@/lib/quota/quotaGuard';
@@ -22,6 +23,13 @@ export async function GET(request: NextRequest) {
       tenantId,
       userId,
     });
+
+    await ensureBuiltinProviders(
+      tenantDbName,
+      tenantId,
+      projectContext.projectId,
+      userId,
+    );
 
     const buckets = await listFileBuckets(
       tenantDbName,

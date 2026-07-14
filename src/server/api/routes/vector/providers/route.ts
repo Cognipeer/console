@@ -4,6 +4,7 @@ import {
   listVectorProviders,
 } from '@/lib/services/vector';
 import type { ProviderStatus } from '@/lib/services/providers/providerService';
+import { ensureBuiltinProviders } from '@/lib/services/providers/builtinProviders';
 import { ProjectContextError, requireProjectContext } from '@/lib/services/projects/projectContext';
 import { createLogger } from '@/lib/core/logger';
 
@@ -37,6 +38,8 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const statusParam = searchParams.get('status');
     const driver = searchParams.get('driver') ?? undefined;
+
+    await ensureBuiltinProviders(tenantDbName, tenantId, projectId, userId);
 
     const providers = await listVectorProviders(tenantDbName, tenantId, projectId, {
       status: statusParam as ProviderStatus | undefined,

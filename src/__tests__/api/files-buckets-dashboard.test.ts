@@ -6,6 +6,10 @@ vi.mock('@/lib/services/files', () => ({
   createFileBucket: vi.fn(),
 }));
 
+vi.mock('@/lib/services/providers/builtinProviders', () => ({
+  ensureBuiltinProviders: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock('@/lib/services/projects/projectContext', () => {
   class ProjectContextError extends Error {
     status: number;
