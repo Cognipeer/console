@@ -85,9 +85,29 @@ export function extractLinks({
 
 /**
  * Heuristic that fires when the body returned by axios is almost certainly
- * a JS-rendered shell (SPA loading screen). Used to decide whether to
- * fall back to Playwright in `auto` mode.
+ * a JS-rendered shell (SPA loading screen) OR an anti-bot interstitial
+ * (Cloudflare/Akamai/DDoS-Guard/reCAPTCHA "checking your browser" page).
+ * Both cases return HTTP 200 with plausible-looking HTML but none of the
+ * real page content, and both are only escaped by rendering with a real
+ * browser engine (Playwright) — used to decide whether to escalate in
+ * `auto` mode.
  */
+const BOT_CHALLENGE_PATTERNS = [
+  /just a moment/i,
+  /checking your browser/i,
+  /attention required.{0,20}cloudflare/i,
+  /cloudflare.{0,20}ray id/i,
+  /enable javascript and cookies to continue/i,
+  /ddos-guard/i,
+  /\bincapsula\b/i,
+  /distil networks/i,
+  /perimeterx/i,
+  /captcha-delivery\.com/i,
+  /please verify you are a human/i,
+  /verifying you are human/i,
+  /access denied.{0,40}(reference|error) #/i,
+];
+
 export function looksLikeJsShell(html: string): boolean {
   try {
     const $ = cheerio.load(html);
@@ -102,6 +122,17 @@ export function looksLikeJsShell(html: string): boolean {
       if (el.length > 0 && el.children().length === 0 && el.text().trim().length < 20) {
         return true;
       }
+    }
+
+    // Bot-detection interstitials are usually short pages built almost
+    // entirely from a couple of known vendor snippets. A production-only
+    // symptom (page returns 200 but "wrong"/empty content, while the same
+    // URL crawls fine from a local/residential IP) is a classic sign the
+    // target site is challenging the crawler's (datacenter) IP instead of
+    // serving the real page — retrying with Playwright at least gives the
+    // challenge's JS a chance to run and, on some vendors, pass.
+    if (BOT_CHALLENGE_PATTERNS.some((re) => re.test(html))) {
+      return true;
     }
 
     $('script, style, noscript, iframe, svg').remove();
