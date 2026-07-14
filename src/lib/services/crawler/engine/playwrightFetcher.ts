@@ -190,6 +190,32 @@ export class PlaywrightSession {
         // Timed out waiting for network idle (long-poll/websocket/etc.) —
         // capture whatever has rendered so far rather than failing the page.
       }
+      // Many sites lazy-load content (article body chunks, images, infinite
+      // scroll feeds) only once the user scrolls into view — reading the DOM
+      // immediately after network-idle can silently miss that content,
+      // yielding a page whose body looks "successful" but is incomplete.
+      // Scroll to the bottom in bounded steps to trigger it before capturing
+      // the final HTML (best-effort: failures here must not fail the page).
+      try {
+        await page.evaluate(async () => {
+          await new Promise<void>((resolve) => {
+            const step = 800;
+            const maxScroll = 20_000; // cap total scroll distance
+            let total = 0;
+            const timer = setInterval(() => {
+              window.scrollBy(0, step);
+              total += step;
+              if (total >= document.body.scrollHeight || total >= maxScroll) {
+                clearInterval(timer);
+                resolve();
+              }
+            }, 100);
+          });
+        });
+        await page.waitForTimeout(300);
+      } catch {
+        // best-effort only — page may have navigated away/closed
+      }
       await page.waitForTimeout(500);
       const html = await page.content();
       return {
