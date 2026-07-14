@@ -28,6 +28,15 @@ import {
   type PageResult,
 } from './types';
 
+// Marks an error that already went through the full axios->playwright
+// escalation decision inside fetchOne() (including a re-check of
+// Playwright's own rendered output against looksLikeJsShell()). It must
+// propagate as-is — fetchOne()'s outer catch must NOT treat it as "axios
+// failed, try playwright" and re-run Playwright a second time (which
+// previously produced a confusing doubly-wrapped "...after Playwright
+// rendering (axios failed: ...after Playwright rendering)" message).
+class FetchStageError extends Error {}
+
 export * from './types';
 
 /**
@@ -119,7 +128,7 @@ export async function* crawl(
         // failed. Throw instead so the caller reports it as an error page
         // (visible in the Runs/Errors UI) rather than pretending success.
         if (!session) {
-          throw new Error(
+          throw new FetchStageError(
             `${url} looks JS-rendered or bot-challenged but no Playwright session is available`,
           );
         }
@@ -127,7 +136,7 @@ export async function* crawl(
         try {
           pw = await retry(() => session.fetch(url, deps.signal), retries);
         } catch (err) {
-          throw new Error(
+          throw new FetchStageError(
             `Playwright fallback failed for JS-shell/challenge page ${url}: ${(err as Error).message}`,
           );
         }
@@ -139,7 +148,7 @@ export async function* crawl(
         // unconditionally; otherwise the challenge page itself gets
         // ingested as if it were the real content.
         if (pw.type === 'html' && pw.html && looksLikeJsShell(pw.html)) {
-          throw new Error(
+          throw new FetchStageError(
             `${url} still looks JS-rendered or bot-challenged after Playwright rendering`,
           );
         }
@@ -147,6 +156,7 @@ export async function* crawl(
       }
       return r;
     } catch (err) {
+      if (err instanceof FetchStageError) throw err;
       if (!session) throw err;
       let pw: Awaited<ReturnType<typeof session.fetch>>;
       try {
