@@ -1247,6 +1247,34 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     id: string,
     data: Partial<Omit<ICrawlJob, '_id' | 'tenantId' | 'createdAt'>>,
   ): Promise<ICrawlJob | null>;
+  /**
+   * Atomically transition a `queued` job to `running`. Returns the claimed
+   * job (now `running`) only if this call performed the transition; returns
+   * `null` if the job was not `queued` (e.g. a duplicate/redelivered queue
+   * message tried to claim a job another consumer already started).
+   * Callers MUST treat `null` as "do not run this job".
+   */
+  claimCrawlJob(id: string, tenantId: string, startedAt: Date): Promise<ICrawlJob | null>;
+  /**
+   * Record a cancellation request. A `queued` job is transitioned straight
+   * to `canceled` (nothing is executing it yet); a `running` job only has
+   * `cancelRequestedAt` stamped so the *owning* runner — which may be on a
+   * different node than the one handling this request — observes it on its
+   * next DB round trip and performs its own terminal transition. Returns
+   * `null` if the job does not exist or is already in a terminal state.
+   */
+  requestCrawlJobCancel(id: string, tenantId: string): Promise<ICrawlJob | null>;
+  /**
+   * Persist a running job's terminal status/counters, guarded so it only
+   * applies while the job is still `running`. This prevents a late/duplicate
+   * writer from clobbering a status another writer already finalized (e.g.
+   * a cross-node cancel that raced the owning runner's own completion).
+   */
+  finalizeCrawlJob(
+    id: string,
+    tenantId: string,
+    data: Partial<Omit<ICrawlJob, '_id' | 'tenantId' | 'createdAt'>>,
+  ): Promise<ICrawlJob | null>;
   findCrawlJobById(id: string): Promise<ICrawlJob | null>;
   listCrawlJobs(
     tenantId: string,

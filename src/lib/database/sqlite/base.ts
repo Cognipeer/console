@@ -628,6 +628,12 @@ export class SQLiteProviderBase {
       'failMode',
       "failMode TEXT NOT NULL DEFAULT 'open'",
     );
+    this.ensureTableColumn(
+      db,
+      TABLES.crawlJobs,
+      'cancelRequestedAt',
+      'cancelRequestedAt TEXT',
+    );
   }
 
   private migrateOcrJobsSchema(db: Database.Database): void {

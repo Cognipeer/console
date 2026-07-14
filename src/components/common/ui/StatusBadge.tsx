@@ -22,6 +22,14 @@ const STATUS_MAP: Record<string, { cls: string; label: string }> = {
   error: { cls: 'ds-badge-err', label: 'Error' },
   pending: { cls: 'ds-badge-info', label: 'Pending' },
   info: { cls: 'ds-badge-info', label: 'Info' },
+  // Job/run lifecycle statuses (crawler, batch, evaluation, etc.)
+  queued: { cls: 'ds-badge-info', label: 'Queued' },
+  running: { cls: 'ds-badge-teal', label: 'Running' },
+  succeeded: { cls: 'ds-badge-ok', label: 'Succeeded' },
+  completed: { cls: 'ds-badge-ok', label: 'Completed' },
+  partial: { cls: 'ds-badge-warn', label: 'Partial' },
+  canceled: { cls: '', label: 'Canceled' },
+  cancelled: { cls: '', label: 'Cancelled' },
 };
 
 export default function StatusBadge({ status, label, withDot = true }: StatusBadgeProps) {

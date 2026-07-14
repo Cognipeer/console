@@ -10,10 +10,10 @@
  */
 
 import { Semaphore, retry } from './concurrency';
-import { fetchWithAxios, isFileByExtension } from './axiosFetcher';
+import { deriveAttachmentFileName, fetchWithAxios, isFileByExtension } from './axiosFetcher';
 import { PlaywrightSession } from './playwrightFetcher';
 import { extractLinks, extractMeta, looksLikeJsShell } from './links';
-import { htmlToMarkdown } from './markdown';
+import { fileToMarkdown, htmlToMarkdown } from './markdown';
 import {
   getHostname,
   isSkippableExtension,
@@ -78,6 +78,7 @@ export async function* crawl(
     html?: string;
     htmlBytes?: number;
     fileBytes?: number;
+    fileBuffer?: Buffer;
   }> {
     if (isFileByExtension(url, downloadableMimes)) {
       return retry(() => fetchWithAxios(url, plan.http, downloadableMimes), retries);
@@ -164,6 +165,20 @@ export async function* crawl(
         try {
           const fetched = await fetchOne(item.url);
           if (fetched.type === 'file') {
+            let attachmentBody: string | undefined;
+            if (fetched.fileBuffer) {
+              attachmentBody = await fileToMarkdown({
+                buffer: fetched.fileBuffer,
+                fileName: deriveAttachmentFileName(item.url, fetched.contentType),
+                options: plan.markdownOptions,
+              }).catch((err: unknown) => {
+                logger.warn('Attachment markdown conversion failed', {
+                  url: item.url,
+                  error: (err as Error).message,
+                });
+                return undefined;
+              });
+            }
             return {
               url: item.url,
               parentUrl: item.parent,
@@ -171,6 +186,7 @@ export async function* crawl(
               type: 'file' as const,
               httpStatus: fetched.httpStatus,
               contentType: fetched.contentType,
+              body: attachmentBody,
               bytes: fetched.fileBytes,
               fetchedAt: new Date(),
             };
