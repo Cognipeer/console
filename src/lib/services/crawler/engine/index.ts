@@ -251,12 +251,23 @@ export async function* crawl(
       });
 
       const settled = await Promise.all(tasks);
+      // Process every result in this batch before honoring maxPages — a
+      // `return` triggered mid-loop (as soon as the Nth success was seen)
+      // used to silently drop any later entries in the SAME `settled` array,
+      // including error pages that had already been fetched (network cost
+      // already paid) but would then vanish with no error reported anywhere.
+      // Instead, finish yielding the whole batch and only stop pulling new
+      // batches afterwards.
+      let limitReached = false;
       for (const r of settled) {
         if (!r) continue;
         if ('result' in r) {
           yield r.result;
           yielded++;
-          if (maxPages > 0 && yielded >= maxPages) return;
+          if (maxPages > 0 && yielded >= maxPages) {
+            limitReached = true;
+            continue;
+          }
           for (const child of r.children) {
             if (visited.has(child)) continue;
             queue.push({
@@ -275,6 +286,7 @@ export async function* crawl(
           yield r;
         }
       }
+      if (limitReached) return;
     }
   } finally {
     if (session) {
