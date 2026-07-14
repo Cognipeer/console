@@ -645,16 +645,30 @@ export default function CrawlerDetailPage() {
       if (!job.id) {
         throw new Error('Job is missing its id (data not serialized correctly)');
       }
-      const res = await fetch(
-        `/api/crawler/jobs/${job.id}/results?limit=200`,
-        { cache: 'no-store' },
-      );
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || `Server returned ${res.status}`);
+      // A single `limit=200` request silently truncated the table for any
+      // job with more than 200 results (e.g. 232 pages + 5 files + 2 errors
+      // = 239) — the Runs tab looked complete but was missing the tail end.
+      // Page through with skip/limit until a short page confirms we've
+      // reached the end, so jobs of any size are fully shown.
+      const pageSize = 200;
+      const all: CrawlResultView[] = [];
+      let skip = 0;
+      for (;;) {
+        const res = await fetch(
+          `/api/crawler/jobs/${job.id}/results?limit=${pageSize}&skip=${skip}`,
+          { cache: 'no-store' },
+        );
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(text || `Server returned ${res.status}`);
+        }
+        const data = await res.json();
+        const batch: CrawlResultView[] = data.results ?? [];
+        all.push(...batch);
+        if (batch.length < pageSize) break;
+        skip += pageSize;
       }
-      const data = await res.json();
-      setJobResults(data.results ?? []);
+      setJobResults(all);
     } catch (err) {
       notifications.show({
         color: 'red',
