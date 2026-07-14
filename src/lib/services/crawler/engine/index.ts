@@ -60,7 +60,15 @@ export async function* crawl(
     Math.max(1, plan.http.maxConcurrency ?? 5),
     16,
   );
-  const retries = Math.max(1, plan.http.retries ?? 2);
+  // Some sites (observed on tefas.gov.tr) intermittently drop the connection
+  // with an empty response — a transient WAF/load-balancer blip, not a
+  // permanent block: back-to-back manual requests during the same window
+  // showed failures immediately followed by successful 200s. The previous
+  // default of 2 attempts (1 retry, ~1s backoff) wasn't always enough to
+  // ride that out. 3 attempts with a bit more spacing costs almost nothing
+  // for URLs that fail fast (404s, DNS errors) but meaningfully improves
+  // odds of success for exactly this kind of flaky-but-not-dead target.
+  const retries = Math.max(1, plan.http.retries ?? 3);
 
   const seeds = (plan.seeds ?? []).map(normalizeUrl).filter(Boolean);
   if (seeds.length === 0) {
