@@ -35,7 +35,11 @@ export * from './types';
  *
  * The crawler respects:
  *   - plan.maxDepth   (capped at 3 for safety)
- *   - plan.maxPages   (0 = unlimited)
+ *   - plan.maxPages   (0 = unlimited; counts successful HTML/file pages
+ *                      only — error pages are still yielded for visibility
+ *                      but do not consume the budget, so a flaky/erroring
+ *                      URL can't cause fewer than maxPages real pages to
+ *                      come back while reachable URLs remain in the queue)
  *   - plan.scope      (sameDomain / allowList / blockList)
  *   - deps.signal     (abort mid-crawl; in-flight pages still yield)
  *   - plan.http.maxConcurrency (default 5, capped at 16)
@@ -97,15 +101,26 @@ export async function* crawl(
         retries,
       );
       if (r.type === 'html' && r.html && looksLikeJsShell(r.html)) {
+        // The axios response looks like a JS-rendered shell or a bot/WAF
+        // challenge interstitial (see looksLikeJsShell) — its content is
+        // not the real page. Previously, if the Playwright fallback also
+        // failed (browser unavailable, still-challenged, timeout, ...),
+        // this silently returned the incomplete/garbage axios result as a
+        // normal "successful" page — the exact cause of pages coming back
+        // with wrong/incomplete content instead of being reported as
+        // failed. Throw instead so the caller reports it as an error page
+        // (visible in the Runs/Errors UI) rather than pretending success.
+        if (!session) {
+          throw new Error(
+            `${url} looks JS-rendered or bot-challenged but no Playwright session is available`,
+          );
+        }
         try {
-          if (!session) throw new Error('Playwright unavailable');
           return await retry(() => session.fetch(url, deps.signal), retries);
         } catch (err) {
-          logger.warn('Playwright fallback failed, returning axios result', {
-            url,
-            error: (err as Error).message,
-          });
-          return r;
+          throw new Error(
+            `Playwright fallback failed for JS-shell/challenge page ${url}: ${(err as Error).message}`,
+          );
         }
       }
       return r;
@@ -252,9 +267,12 @@ export async function* crawl(
             });
           }
         } else {
+          // Error page: still surfaced to the caller (so it shows up in the
+          // run's error count / logs) but intentionally NOT counted against
+          // `maxPages` — otherwise a handful of broken/blocked URLs would
+          // silently shrink the number of real pages a run returns below
+          // what was requested, even though more crawlable URLs remain.
           yield r;
-          yielded++;
-          if (maxPages > 0 && yielded >= maxPages) return;
         }
       }
     }
