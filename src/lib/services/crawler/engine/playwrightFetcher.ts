@@ -98,11 +98,21 @@ export class PlaywrightSession {
     await this.launching;
   }
 
-  async fetch(url: string): Promise<PlaywrightFetchResult> {
+  async fetch(url: string, signal?: AbortSignal): Promise<PlaywrightFetchResult> {
     await this.ensure();
     if (!this.context) throw new Error('Playwright context not initialized');
+    if (signal?.aborted) throw new Error(`Fetch aborted for ${url}`);
     const timeout = this.http.timeoutMs ?? 30_000;
     const page = await this.context.newPage();
+    // Playwright has no native AbortSignal support: closing the page while
+    // `page.goto()` is in flight is what makes an external cancel actually
+    // interrupt a stuck/slow navigation immediately, instead of blocking the
+    // whole crawl batch (and the job's "Cancel" button) until the full
+    // navigation `timeout` elapses.
+    const onExternalAbort = () => {
+      page.close().catch(() => undefined);
+    };
+    signal?.addEventListener('abort', onExternalAbort);
     try {
       const response = await page.goto(url, {
         waitUntil: 'domcontentloaded',
@@ -160,6 +170,7 @@ export class PlaywrightSession {
         htmlBytes: Buffer.byteLength(html, 'utf8'),
       };
     } finally {
+      signal?.removeEventListener('abort', onExternalAbort);
       await page.close().catch(() => undefined);
     }
   }

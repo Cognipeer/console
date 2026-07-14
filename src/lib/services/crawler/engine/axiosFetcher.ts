@@ -39,6 +39,7 @@ export async function fetchWithAxios(
   url: string,
   http: CrawlHttpConfig,
   downloadableMimes: string[],
+  signal?: AbortSignal,
 ): Promise<FetchResult> {
   const timeout = http.timeoutMs ?? 30_000;
   const headers: Record<string, string> = {
@@ -62,8 +63,15 @@ export async function fetchWithAxios(
   let currentUrl = url;
 
   for (let hop = 0; ; hop += 1) {
+    if (signal?.aborted) throw new Error(`Fetch aborted for ${currentUrl}`);
     const controller = new AbortController();
     const tid = setTimeout(() => controller.abort(), timeout + 2000);
+    // Forward external (crawl-cancel) aborts so an in-flight request is
+    // killed immediately instead of dragging the whole batch out to the
+    // full timeout — this is what makes "Cancel" actually stop a run that's
+    // currently stuck on a slow/unreachable host.
+    const onExternalAbort = () => controller.abort();
+    signal?.addEventListener('abort', onExternalAbort);
 
     try {
       const response = await axios.get(currentUrl, {
@@ -80,6 +88,7 @@ export async function fetchWithAxios(
         httpsAgent: http.allowInsecureTls ? insecureAgent : undefined,
       });
       clearTimeout(tid);
+      signal?.removeEventListener('abort', onExternalAbort);
 
       if (response.status >= 300 && response.status < 400) {
         const location = response.headers['location'];
@@ -128,6 +137,8 @@ export async function fetchWithAxios(
       };
     } catch (error) {
       clearTimeout(tid);
+      signal?.removeEventListener('abort', onExternalAbort);
+      if (signal?.aborted) throw new Error(`Fetch aborted for ${currentUrl}`);
       if (axios.isAxiosError(error)) {
         if (error.code === 'ECONNABORTED' || error.code === 'ERR_CANCELED') {
           throw new Error(`Timeout fetching ${currentUrl} (${timeout}ms)`);
