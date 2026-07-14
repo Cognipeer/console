@@ -43,10 +43,21 @@ export class PlaywrightSession {
           '--disable-setuid-sandbox',
           '--disable-dev-shm-usage',
           '--disable-gpu',
+          // Vanilla headless Chromium is trivially fingerprinted by common
+          // WAF/anti-bot vendors (Cloudflare, Akamai, DataDome, ...), which
+          // then serve a 200-status "checking your browser" / challenge page
+          // instead of the real content — this is by far the most common
+          // reason a page crawls fine locally (residential IP, real Chrome)
+          // but comes back wrong from production (datacenter IP, headless
+          // flag detectable). This flag removes the most obvious tell
+          // (the automation-controlled infobar / `--enable-automation`
+          // behavior bundled into the default launch flags).
+          '--disable-blink-features=AutomationControlled',
         ],
       });
       this.context = await this.browser.newContext({
         userAgent: this.http.userAgent ?? DEFAULT_USER_AGENT,
+        locale: this.http.acceptLanguage?.split(',')[0]?.trim() || 'tr-TR',
         extraHTTPHeaders: {
           'Accept-Language': this.http.acceptLanguage ?? DEFAULT_ACCEPT_LANGUAGE,
           ...(this.http.headers ?? {}),
@@ -56,6 +67,18 @@ export class PlaywrightSession {
         },
         httpCredentials: this.http.basicAuth,
         ignoreHTTPSErrors: this.http.allowInsecureTls ?? false,
+      });
+      // Patch the most commonly-checked automation fingerprints before any
+      // page script runs. `navigator.webdriver` in particular is the single
+      // most widely used signal bot-detection scripts read to distinguish
+      // Playwright/Puppeteer from a real browser.
+      await this.context.addInitScript(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        Object.defineProperty(navigator, 'languages', { get: () => ['tr-TR', 'tr', 'en-US', 'en'] });
+        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+        // Chromium in headless mode omits `Notification`/`chrome` runtime
+        // globals a normal Chrome install always has.
+        (window as unknown as { chrome?: unknown }).chrome = { runtime: {} };
       });
       if (this.http.cookies?.length) {
         await this.context.addCookies(
@@ -89,7 +112,14 @@ export class PlaywrightSession {
           }
         }
         const type = request.resourceType();
-        if (['image', 'media', 'font', 'stylesheet'].includes(type)) {
+        // Stylesheets are intentionally NOT blocked (despite being "heavy"):
+        // a real browser always requests its page's CSS, and some anti-bot
+        // checks flag the request pattern of a client that never fetches any
+        // stylesheet as automated traffic. Images/media/fonts stay blocked —
+        // they don't affect extracted text content and blocking them is a
+        // much weaker bot signal (many real browsers also skip fonts/media
+        // when e.g. data-saver mode is on).
+        if (['image', 'media', 'font'].includes(type)) {
           return route.abort().catch(() => undefined);
         }
         return route.continue().catch(() => undefined);
