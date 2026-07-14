@@ -176,9 +176,7 @@ export async function* crawl(
               attachmentBody = await fileToMarkdown({
                 buffer: fetched.fileBuffer,
                 fileName: deriveAttachmentFileName(item.url, fetched.contentType),
-                contentType: fetched.contentType,
                 options: plan.markdownOptions,
-                ocrHandler: deps.ocrHandler,
               }).catch((err: unknown) => {
                 logger.warn('Attachment markdown conversion failed', {
                   url: item.url,
