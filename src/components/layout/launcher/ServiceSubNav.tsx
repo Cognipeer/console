@@ -32,6 +32,7 @@ import {
   IconServer,
   IconSettings,
   IconShield,
+  IconShieldLock,
   IconStack2,
   IconTimeline,
   IconVector,
@@ -126,7 +127,15 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
           !p.startsWith('/dashboard/redteam/runs') &&
           !p.startsWith('/dashboard/redteam/probes') &&
           !p.startsWith('/dashboard/redteam/overview') &&
+          !p.startsWith('/dashboard/redteam/policy') &&
           !p.startsWith('/dashboard/redteam/api')),
+    },
+    {
+      id: 'policy',
+      label: 'Policy Probes',
+      href: '/dashboard/redteam/policy',
+      icon: IconShieldLock,
+      matcher: (p) => p.startsWith('/dashboard/redteam/policy'),
     },
     {
       id: 'runs',
