@@ -81,25 +81,25 @@ export async function* crawl(
     fileBuffer?: Buffer;
   }> {
     if (isFileByExtension(url, downloadableMimes)) {
-      return retry(() => fetchWithAxios(url, plan.http, downloadableMimes), retries);
+      return retry(() => fetchWithAxios(url, plan.http, downloadableMimes, deps.signal), retries);
     }
     if (plan.engine === 'axios') {
-      return retry(() => fetchWithAxios(url, plan.http, downloadableMimes), retries);
+      return retry(() => fetchWithAxios(url, plan.http, downloadableMimes, deps.signal), retries);
     }
     if (plan.engine === 'playwright') {
       if (!session) throw new Error('Playwright session unavailable');
-      return retry(() => session.fetch(url), retries);
+      return retry(() => session.fetch(url, deps.signal), retries);
     }
     // auto: axios first, escalate to playwright if shell-like
     try {
       const r = await retry(
-        () => fetchWithAxios(url, plan.http, downloadableMimes),
+        () => fetchWithAxios(url, plan.http, downloadableMimes, deps.signal),
         retries,
       );
       if (r.type === 'html' && r.html && looksLikeJsShell(r.html)) {
         try {
           if (!session) throw new Error('Playwright unavailable');
-          return await retry(() => session.fetch(url), retries);
+          return await retry(() => session.fetch(url, deps.signal), retries);
         } catch (err) {
           logger.warn('Playwright fallback failed, returning axios result', {
             url,
@@ -112,7 +112,7 @@ export async function* crawl(
     } catch (err) {
       if (!session) throw err;
       try {
-        return await retry(() => session.fetch(url), retries);
+        return await retry(() => session.fetch(url, deps.signal), retries);
       } catch (pwErr) {
         throw new Error(
           `All engines failed for ${url}: ${(pwErr as Error).message}`,
@@ -148,6 +148,12 @@ export async function* crawl(
       const tasks = batch.map(async (item) => {
         if (visited.has(item.url)) return null;
         if (isSkippableExtension(item.url)) return null;
+        // An in-flight batch can be up to `concurrency` (up to 16) fetches;
+        // without this check a cancel/abort requested while this batch is
+        // running would only be honored once every task in it settles
+        // (potentially minutes later on a slow/unreachable host). Bail out
+        // of not-yet-started work immediately instead.
+        if (deps.signal?.aborted) return null;
         visited.add(item.url);
 
         // Scope checks at fetch time too (seeds may bypass extract filter)
@@ -170,7 +176,9 @@ export async function* crawl(
               attachmentBody = await fileToMarkdown({
                 buffer: fetched.fileBuffer,
                 fileName: deriveAttachmentFileName(item.url, fetched.contentType),
+                contentType: fetched.contentType,
                 options: plan.markdownOptions,
+                ocrHandler: deps.ocrHandler,
               }).catch((err: unknown) => {
                 logger.warn('Attachment markdown conversion failed', {
                   url: item.url,
