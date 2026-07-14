@@ -88,6 +88,22 @@ export async function runCrawlJobLocal(
   let limitReached = false;
   let failureMessage: string | undefined;
 
+  // The for-await loop below only gets a chance to check `cancelRequested`
+  // BETWEEN pages the engine yields — but the engine processes a batch of
+  // up to `maxConcurrency` fetches with `Promise.all`, so if a cancel is
+  // requested while a batch is in flight, `abort.signal` (which is what
+  // actually interrupts in-flight axios/Playwright requests) would not be
+  // aborted until that whole batch finishes on its own. That's exactly the
+  // "I clicked Cancel and it just stays Running" symptom. Poll the
+  // same-node flag on a short timer instead, so `abort.abort()` fires
+  // within a fraction of a second of the button being clicked, regardless
+  // of what the generator is doing.
+  const cancelPollTimer = setInterval(() => {
+    if (!abort.signal.aborted && cancelRequested.has(jobId)) {
+      abort.abort();
+    }
+  }, 250);
+
   try {
     for await (const page of crawl(plan, {
       logger: {
@@ -136,6 +152,7 @@ export async function runCrawlJobLocal(
     errorsCount += 1;
     logger.error('Crawl job failed', { jobId, error: failureMessage });
   } finally {
+    clearInterval(cancelPollTimer);
     const endedAt = new Date();
     const durationMs = endedAt.getTime() - startedAt.getTime();
     const canceled = cancelRequested.has(jobId);
