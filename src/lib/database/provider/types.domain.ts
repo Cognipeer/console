@@ -760,7 +760,7 @@ export interface IWebSearchRunLog {
 
 // ── Alert types ─────────────────────────────────────────────────────────
 
-export type AlertModule = 'models' | 'inference' | 'guardrails' | 'rag' | 'mcp' | 'analysis' | 'evaluation' | 'redteam';
+export type AlertModule = 'models' | 'inference' | 'guardrails' | 'rag' | 'mcp' | 'analysis' | 'evaluation' | 'redteam' | 'aegis';
 
 export type AlertMetric =
   // models
@@ -793,7 +793,12 @@ export type AlertMetric =
   | 'evaluation_avg_score'
   // red-team (percentages, 0–100, averaged over completed scans in the window)
   | 'redteam_attack_success_rate'
-  | 'redteam_resilience_score';
+  | 'redteam_resilience_score'
+  // aegis enforcement plane (over decisions in the window)
+  | 'aegis_block_rate'
+  | 'aegis_approval_rate'
+  | 'aegis_avg_risk_score'
+  | 'aegis_total_decisions';
 
 export type AlertConditionOperator = 'gt' | 'lt' | 'gte' | 'lte' | 'eq';
 

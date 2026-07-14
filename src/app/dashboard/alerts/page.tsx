@@ -78,6 +78,10 @@ const METRIC_LABELS: Record<string, string> = {
   analysis_avg_accuracy: 'Avg Accuracy',
   redteam_attack_success_rate: 'Attack Success Rate',
   redteam_resilience_score: 'Resilience Score',
+  aegis_block_rate: 'Block Rate',
+  aegis_approval_rate: 'Approval Rate',
+  aegis_avg_risk_score: 'Avg Risk Score',
+  aegis_total_decisions: 'Total Decisions',
 };
 
 const METRIC_UNITS: Record<string, string> = {
@@ -104,6 +108,10 @@ const METRIC_UNITS: Record<string, string> = {
   analysis_avg_accuracy: '%',
   redteam_attack_success_rate: '%',
   redteam_resilience_score: '%',
+  aegis_block_rate: '%',
+  aegis_approval_rate: '%',
+  aegis_avg_risk_score: '',
+  aegis_total_decisions: '',
 };
 
 const METRIC_COLORS: Record<string, string> = {
@@ -130,6 +138,10 @@ const METRIC_COLORS: Record<string, string> = {
   analysis_avg_accuracy: 'teal',
   redteam_attack_success_rate: 'red',
   redteam_resilience_score: 'green',
+  aegis_block_rate: 'red',
+  aegis_approval_rate: 'orange',
+  aegis_avg_risk_score: 'grape',
+  aegis_total_decisions: 'blue',
 };
 
 const MODULE_LABELS: Record<string, string> = {
@@ -141,6 +153,7 @@ const MODULE_LABELS: Record<string, string> = {
   evaluation: 'Evaluation',
   analysis: 'Analysis',
   redteam: 'Red Team',
+  aegis: 'Aegis',
 };
 
 const MODULE_COLORS: Record<string, string> = {
@@ -152,6 +165,7 @@ const MODULE_COLORS: Record<string, string> = {
   evaluation: 'green',
   analysis: 'lime',
   redteam: 'red',
+  aegis: 'grape',
 };
 
 const OPERATOR_SYMBOLS: Record<string, string> = {
@@ -281,6 +295,7 @@ export default function AlertsPage() {
     if (rule.metric.startsWith('evaluation_')) return 'evaluation';
     if (rule.metric.startsWith('analysis_')) return 'analysis';
     if (rule.metric.startsWith('redteam_')) return 'redteam';
+    if (rule.metric.startsWith('aegis_')) return 'aegis';
     return 'models';
   };
 
@@ -367,6 +382,7 @@ export default function AlertsPage() {
           { label: 'Evaluation', value: 'evaluation' },
           { label: 'Analysis', value: 'analysis' },
           { label: 'Red Team', value: 'redteam' },
+          { label: 'Aegis', value: 'aegis' },
         ]}
         size="xs"
       />

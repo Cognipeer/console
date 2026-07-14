@@ -64,6 +64,8 @@ export const en = {
     gpuFleetDescription: 'Onboard GPU hosts, deploy models from the curated library, manage pools',
     sandbox: 'Agent Sandbox',
     sandboxDescription: 'Remote, API-driven runtime sandboxes for code, files, terminals and previews',
+    aegis: 'Aegis',
+    aegisDescription: 'Enforcement-plane policy engine: tool-call evaluation, DLP redaction, approvals and audit',
     promptOptimizer: 'Prompt Optimizer',
     promptOptimizerDescription: 'Iteratively improve a prompt toward a goal: generate variants, test and score them, promote the best',
     memory: 'Agent Memory',

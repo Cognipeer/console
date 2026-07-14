@@ -22,6 +22,7 @@ export type PermissionService =
   | 'mcp'
   | 'tools'
   | 'sandbox'
+  | 'aegis'
   | 'browser'
   | 'crawler'
   | 'websearch'
@@ -102,6 +103,7 @@ export const RBAC_SERVICE_DEFINITIONS: RbacServiceDefinition[] = [
   { id: 'audit', label: 'Audit Log', description: 'Security and administrative audit events.', category: 'admin', adminService: true },
   { id: 'gpu-fleet', label: 'GPU Fleet', description: 'GPU hosts, MIG slices, model deployments, and terminal access.', category: 'operate', adminService: true },
   { id: 'sandbox', label: 'Agent Sandbox', description: 'Agent runtime sandboxes: runners, templates, instances, volumes, and terminal access.', category: 'operate', adminService: true },
+  { id: 'aegis', label: 'Aegis', description: 'Enforcement-plane policy engine: tool-call evaluation, DLP redaction, approvals and decision audit.', category: 'operate' },
   { id: 'cluster', label: 'Cluster', description: 'Multi-node cluster: node registry and per-instance assignment/orchestration.', category: 'admin', adminService: true },
 ];
 
@@ -129,6 +131,7 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/client/v1/pii', service: 'pii' },
   { prefix: '/api/client/v1/mcp', service: 'mcp' },
   { prefix: '/api/client/v1/sandbox', service: 'sandbox' },
+  { prefix: '/api/client/v1/aegis', service: 'aegis' },
   { prefix: '/api/client/v1/memory', service: 'memory' },
   { prefix: '/api/client/v1/prompts', service: 'prompts' },
   { prefix: '/api/client/v1/rag', service: 'rag' },
@@ -183,6 +186,7 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/alerts', service: 'alerts' },
   { prefix: '/api/gpu-fleet', service: 'gpu-fleet' },
   { prefix: '/api/sandbox', service: 'sandbox' },
+  { prefix: '/api/aegis', service: 'aegis' },
   { prefix: '/api/cluster', service: 'cluster' },
 ];
 

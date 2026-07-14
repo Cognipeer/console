@@ -25,6 +25,7 @@ const MODULE_METRICS: Record<AlertModule, AlertMetric[]> = {
   analysis: ['analysis_pass_rate', 'analysis_avg_judge_score', 'analysis_avg_accuracy'],
   evaluation: ['evaluation_pass_rate', 'evaluation_avg_score'],
   redteam: ['redteam_attack_success_rate', 'redteam_resilience_score'],
+  aegis: ['aegis_block_rate', 'aegis_approval_rate', 'aegis_avg_risk_score', 'aegis_total_decisions'],
 };
 
 /** Supported metric names for validation */
