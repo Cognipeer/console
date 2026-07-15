@@ -4,7 +4,7 @@ import { useTranslations } from '@/lib/i18n';
 import { Anchor, Breadcrumbs, Text } from '@mantine/core';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { BREADCRUMB_RESOLVERS } from './breadcrumbResolvers';
 
 /**
@@ -191,6 +191,35 @@ export default function DashboardBreadcrumbs() {
       }),
     [segments, resolvedLabels, t],
   );
+
+  // Browser tab title: breadcrumb labels minus "Dashboard". A layout effect
+  // + MutationObserver is used (instead of a plain useEffect) because Next's
+  // App Router can reset document.title on navigation without changing our
+  // deps, so a dep-based effect wouldn't reliably re-fire to correct it.
+  const titleRef = useRef('Cognipeer Console');
+
+  useLayoutEffect(() => {
+    if (!segments.length || segments[0] !== 'dashboard') return;
+    const pageLabels = labels.slice(1);
+    titleRef.current = pageLabels.length
+      ? `${pageLabels.join(' · ')} - Cognipeer Console`
+      : 'Cognipeer Console';
+    document.title = titleRef.current;
+  }, [segments, labels]);
+
+  useEffect(() => {
+    const observer = new MutationObserver(() => {
+      if (document.title !== titleRef.current) {
+        document.title = titleRef.current;
+      }
+    });
+    observer.observe(document.head, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+    return () => observer.disconnect();
+  }, []);
 
   if (segments.length === 0 || segments[0] !== 'dashboard') {
     return null;
