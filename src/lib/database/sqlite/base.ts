@@ -414,6 +414,15 @@ export class SQLiteProviderBase {
       'huggingFaceTokenEnc',
       'huggingFaceTokenEnc TEXT',
     );
+    // GPU fleet deployment → project link, chosen by the operator at deploy
+    // time so auto-published Model Hub rows land in the right project
+    // instead of always the tenant default (added 2026-07-15).
+    this.ensureTableColumn(
+      db,
+      TABLES.llmDeployments,
+      'projectId',
+      'projectId TEXT',
+    );
     // Sandbox instance per-instance env (added later). Safe to ensure on boot.
     this.ensureTableColumn(db, 'sandbox_instances', 'env', 'env TEXT');
     this.ensureTableColumn(

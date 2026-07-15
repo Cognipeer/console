@@ -5,7 +5,7 @@
   "license": "AGPL-3.0-only",
   "workspaces": [],
   "scripts": {
-    "dev": "NODE_ENV=development node --import tsx src/server/index.ts --dev",
+    "dev": "NODE_ENV=development NODE_OPTIONS=--max-old-space-size=16384 node --import tsx src/server/index.ts --dev",
     "dev:watch": "NODE_ENV=development node --watch --watch-path=src --import tsx src/server/index.ts --dev",
     "build": "next build",
     "start": "NODE_ENV=production node --import tsx src/server/index.ts",

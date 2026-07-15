@@ -388,6 +388,13 @@ export interface ILlmDeployment {
   tenantId: string;
   /** Stable UUID, used as the docker container name suffix. */
   id: string;
+  /**
+   * Project the auto-published Model Hub Provider/Model rows should belong
+   * to. Chosen by the operator at deploy time. `null` for deployments
+   * created before this field existed — those fall back to the tenant's
+   * default project when auto-published.
+   */
+  projectId: string | null;
   hostId: string;
   /** Slice UUID this deployment is pinned to. May be null when draining for MIG reconfig. */
   sliceUuid: string | null;
