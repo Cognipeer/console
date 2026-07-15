@@ -1,3 +1,4 @@
+import './polyfills';
 import { createLogger } from '@/lib/core/logger';
 import { createServer } from './app';
 import { ensureServerEnvLoaded } from './env';
