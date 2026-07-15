@@ -70,4 +70,13 @@ USER node
 RUN npx playwright install chromium
 
 EXPOSE 3000
-CMD ["npm", "start"]
+# Invoke node directly instead of `npm start`. `npm` as PID 1 does not
+# reliably forward SIGTERM to the child node process, so on every restart/
+# redeploy the orchestrator's SIGTERM was effectively swallowed and the
+# container sat until the hard-kill grace period expired — `initLifecycle()`'s
+# graceful shutdown handlers (queue drain, cache/db disconnect, etc., see
+# src/lib/core/lifecycle.ts) never ran. Any crawl job `running` at that
+# moment was hard-killed mid-crawl instead of shutting down cleanly, which is
+# consistent with production crawls stopping partway through instead of
+# completing all pages. Running node as PID 1 lets SIGTERM reach it directly.
+CMD ["node", "--import", "tsx", "src/server/index.ts"]
