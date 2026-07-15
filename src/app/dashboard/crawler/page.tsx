@@ -2,16 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import {
-  Button,
-  Group,
-  Modal,
-  Stack,
-  Textarea,
-  TextInput,
-} from '@mantine/core';
+import { Button, Group, Modal, Stack } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
-import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import {
   IconEye,
@@ -23,12 +15,8 @@ import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer'
 import StatTile from '@/components/common/ui/StatTile';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
+import CreateCrawlerModal from '@/components/crawler/CreateCrawlerModal';
 import type { CrawlerView } from '@/lib/services/crawler';
-
-interface CreateForm {
-  name: string;
-  description: string;
-}
 
 export default function CrawlersListPage() {
   const router = useRouter();
@@ -38,15 +26,7 @@ export default function CrawlersListPage() {
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [query, setQuery] = useState('');
   const [createOpened, createHandlers] = useDisclosure(false);
-  const [creating, setCreating] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<CrawlerView | null>(null);
-
-  const form = useForm<CreateForm>({
-    initialValues: { name: '', description: '' },
-    validate: {
-      name: (v) => (v.trim().length < 2 ? 'Name is required' : null),
-    },
-  });
 
   const load = useCallback(async () => {
     setRefreshing(true);
@@ -92,36 +72,6 @@ export default function CrawlersListPage() {
       return true;
     });
   }, [crawlers, statusFilter, query]);
-
-  async function handleCreate(values: CreateForm) {
-    setCreating(true);
-    try {
-      const res = await fetch('/api/crawler/crawlers', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          name: values.name.trim(),
-          description: values.description.trim() || undefined,
-        }),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || 'Failed to create');
-      }
-      notifications.show({ color: 'teal', title: 'Created', message: 'Crawler created' });
-      createHandlers.close();
-      form.reset();
-      await load();
-    } catch (err) {
-      notifications.show({
-        color: 'red',
-        title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed',
-      });
-    } finally {
-      setCreating(false);
-    }
-  }
 
   async function confirmDelete() {
     if (!deleteTarget) return;
@@ -292,39 +242,15 @@ export default function CrawlersListPage() {
         ]}
       />
 
-      <Modal
+      <CreateCrawlerModal
         opened={createOpened}
         onClose={createHandlers.close}
-        title="Create crawler"
-        size="md"
-      >
-        <form onSubmit={form.onSubmit(handleCreate)}>
-          <Stack>
-            <TextInput label="Name" required {...form.getInputProps('name')} />
-            <Textarea
-              label="Description"
-              autosize
-              minRows={2}
-              {...form.getInputProps('description')}
-            />
-            <span className="ds-faint" style={{ fontSize: 12 }}>
-              The crawler is a configuration container. You will add URLs and
-              tune engine / HTTP / RAG / webhook on the detail page after
-              creation.
-            </span>
-            <Group justify="flex-end">
-              <Button
-                variant="subtle"
-                onClick={createHandlers.close}
-                disabled={creating}
-              >
-                Cancel
-              </Button>
-              <Button type="submit" loading={creating}>Create</Button>
-            </Group>
-          </Stack>
-        </form>
-      </Modal>
+        onCreated={(crawler) => {
+          createHandlers.close();
+          void load();
+          router.push(`/dashboard/crawler/${crawler.id}`);
+        }}
+      />
 
       <Modal
         opened={deleteTarget !== null}

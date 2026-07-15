@@ -1326,6 +1326,25 @@ export interface ICrawlerHttpConfig {
   allowInsecureTls?: boolean;
 }
 
+/** Markdown extraction options forwarded to the crawler engine. */
+export interface ICrawlerMarkdownOptions {
+  ocr?: { enabled: boolean; languages?: string[] };
+  /** Stored body shape: 'markdown' (default) or flattened plain 'text'. */
+  outputFormat?: 'markdown' | 'text';
+  /** Run the markdown cleanup pass (entities, dead links, blank lines). Default true. */
+  cleanup?: boolean;
+  /** Strip base64-inlined `data:` images before conversion. Default true. */
+  stripDataImages?: boolean;
+  /** Narrow extraction to the main content region (drops nav/header/footer). */
+  mainContentOnly?: boolean;
+  /** Explicit CSS selector for the main content region. */
+  contentSelector?: string;
+  /** CSS selectors removed before conversion. */
+  removeSelectors?: string[];
+  /** Hard cap on stored markdown length (chars). 0/undefined = no cap. */
+  maxBodyChars?: number;
+}
+
 export interface ICrawlerWebhookConfig {
   url: string;
   /** HMAC secret used to sign payloads. */
@@ -1380,7 +1399,7 @@ export interface ICrawler {
 
   http: ICrawlerHttpConfig;
   /** Optional markdown extractor options forwarded to @cognipeer/to-markdown. */
-  markdownOptions?: { ocr?: { enabled: boolean; languages?: string[] } };
+  markdownOptions?: ICrawlerMarkdownOptions;
 
   rag?: ICrawlerRagBinding;
   webhook?: ICrawlerWebhookConfig;
@@ -1416,7 +1435,7 @@ export interface ICrawlPlanSnapshot {
   scope: ICrawlerScope;
   http: ICrawlerHttpConfig;
   downloadableMimes?: string[];
-  markdownOptions?: { ocr?: { enabled: boolean; languages?: string[] } };
+  markdownOptions?: ICrawlerMarkdownOptions;
   rag?: ICrawlerRagBinding;
   webhook?: ICrawlerWebhookConfig;
 }

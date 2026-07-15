@@ -1337,6 +1337,12 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<ICrawlResult[]>;
   findCrawlResultById(id: string): Promise<ICrawlResult | null>;
   countCrawlResults(jobId: string): Promise<number>;
+  /**
+   * Delete all crawl results for a job. Used when an interrupted job is
+   * restarted from scratch so the fresh run doesn't append duplicates to the
+   * partial results the dead run already wrote. Returns the number deleted.
+   */
+  deleteCrawlResultsByJob(jobId: string): Promise<number>;
 
   // ── OCR jobs (tenant-specific) ──
   createOcrJob(

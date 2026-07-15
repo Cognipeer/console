@@ -9,7 +9,7 @@
  * lifted into a separate npm package in a future phase.
  */
 
-import { Semaphore, retry } from './concurrency';
+import { Semaphore, retry, isTransientFetchError } from './concurrency';
 import { deriveAttachmentFileName, fetchWithAxios, isFileByExtension } from './axiosFetcher';
 import { PlaywrightSession } from './playwrightFetcher';
 import { extractLinks, extractMeta, looksLikeJsShell } from './links';
@@ -124,6 +124,44 @@ export async function* crawl(
     ? new PlaywrightSession(plan.http, downloadableMimes)
     : null;
 
+  // ── per-host axios circuit breaker ───────────────────────────────
+  // Sites that serve an incomplete TLS chain (missing intermediate) fail EVERY
+  // axios request but succeed under Playwright (Chromium completes the chain
+  // via AIA). Without this, every URL on such a host pays a full axios attempt
+  // (+ retry backoff) before falling back — on a 100-page crawl that's minutes
+  // of guaranteed-doomed requests. After a couple of permanent axios failures
+  // on a host we trip the breaker and go straight to the browser for the rest.
+  const AXIOS_CIRCUIT_THRESHOLD = 2;
+  const axiosPermanentFailures = new Map<string, number>();
+  // Hosts fronted by a JS-challenge (F5/TSPD, Akamai, DDoS-Guard, …): axios
+  // gets the challenge interstitial, but once Playwright solves it the cookie
+  // lives in the session's SHARED browser context, so every later page on that
+  // host loads directly. Remember such hosts and skip the pointless axios
+  // round-trip (+ challenge detection) for the rest of the crawl.
+  const axiosChallengeHosts = new Set<string>();
+
+  function axiosCircuitOpen(url: string): boolean {
+    if (!session) return false; // no fallback available — must still try axios
+    const host = getHostname(url);
+    if (axiosChallengeHosts.has(host)) return true;
+    return (axiosPermanentFailures.get(host) ?? 0) >= AXIOS_CIRCUIT_THRESHOLD;
+  }
+
+  function recordAxiosOutcome(url: string, err: unknown): void {
+    // Only permanent failures (bad cert, DNS, 4xx) count toward tripping the
+    // breaker — a one-off timeout shouldn't force a whole host onto the slower
+    // browser path.
+    if (isTransientFetchError(err)) return;
+    const host = getHostname(url);
+    axiosPermanentFailures.set(host, (axiosPermanentFailures.get(host) ?? 0) + 1);
+  }
+
+  function markAxiosChallengeHost(url: string): void {
+    axiosChallengeHosts.add(getHostname(url));
+  }
+
+  const axiosRetryOptions = { isRetryable: isTransientFetchError } as const;
+
   // ── per-URL fetch with engine auto-selection ─────────────────────
   async function fetchOne(url: string): Promise<{
     type: 'html' | 'file';
@@ -134,9 +172,6 @@ export async function* crawl(
     fileBytes?: number;
     fileBuffer?: Buffer;
   }> {
-    if (isFileByExtension(url, downloadableMimes)) {
-      return retry(() => fetchWithAxios(url, plan.http, downloadableMimes, deps.signal), retries);
-    }
     if (plan.engine === 'axios') {
       return retry(() => fetchWithAxios(url, plan.http, downloadableMimes, deps.signal), retries);
     }
@@ -144,11 +179,51 @@ export async function* crawl(
       if (!session) throw new Error('Playwright session unavailable');
       return retry(() => session.fetch(url, deps.signal), retries);
     }
-    // auto: axios first, escalate to playwright if shell-like
+    // auto mode, known-file URL (by extension): try axios first (it streams
+    // bytes cheaply), but fall back to the browser download path when axios
+    // fails. This is what rescues attachments on sites that serve an incomplete
+    // TLS chain (missing intermediate) — axios throws "unable to verify the
+    // first certificate", while Chromium completes the chain via AIA and still
+    // verifies it. Previously this was an axios-ONLY path with no fallback, so
+    // every such file was reported as a hard error.
+    if (isFileByExtension(url, downloadableMimes)) {
+      // Host already known to break axios (bad TLS chain) — skip straight to
+      // the browser download path instead of re-paying a doomed axios attempt.
+      if (session && axiosCircuitOpen(url)) {
+        return retry(() => session.fetch(url, deps.signal), retries);
+      }
+      try {
+        return await retry(
+          () => fetchWithAxios(url, plan.http, downloadableMimes, deps.signal),
+          retries,
+          axiosRetryOptions,
+        );
+      } catch (err) {
+        recordAxiosOutcome(url, err);
+        if (!session) throw err;
+        try {
+          return await retry(() => session.fetch(url, deps.signal), retries);
+        } catch (pwErr) {
+          throw new Error(`All engines failed for ${url}: ${(pwErr as Error).message}`);
+        }
+      }
+    }
+    // auto: axios first, escalate to playwright if shell-like.
+    // Skip axios entirely when the host's breaker is open.
+    if (session && axiosCircuitOpen(url)) {
+      const pw = await retry(() => session.fetch(url, deps.signal), retries);
+      if (pw.type === 'html' && pw.html && looksLikeJsShell(pw.html)) {
+        throw new FetchStageError(
+          `${url} still looks JS-rendered or bot-challenged after Playwright rendering`,
+        );
+      }
+      return pw;
+    }
     try {
       const r = await retry(
         () => fetchWithAxios(url, plan.http, downloadableMimes, deps.signal),
         retries,
+        axiosRetryOptions,
       );
       if (r.type === 'html' && r.html && looksLikeJsShell(r.html)) {
         // The axios response looks like a JS-rendered shell or a bot/WAF
@@ -185,11 +260,15 @@ export async function* crawl(
             `${url} still looks JS-rendered or bot-challenged after Playwright rendering`,
           );
         }
+        // Playwright cleared the challenge — its context now holds the vendor
+        // cookie. Route the rest of this host straight to Playwright.
+        markAxiosChallengeHost(url);
         return pw;
       }
       return r;
     } catch (err) {
       if (err instanceof FetchStageError) throw err;
+      recordAxiosOutcome(url, err);
       if (!session) throw err;
       let pw: Awaited<ReturnType<typeof session.fetch>>;
       try {

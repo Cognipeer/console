@@ -26,10 +26,25 @@ export function markJobCancelRequested(jobId: string): void {
   cancelRequested.add(jobId);
 }
 
-async function withTenantDb(tenantDbName: string): Promise<DatabaseProvider> {
+/**
+ * Bind `fn` to the tenant DB for its whole (sync + async) execution.
+ *
+ * A crawl job runs for minutes; using the bare `switchToTenant` (which relies
+ * on `enterWith` + a process-global `this.tenantDb` fallback) meant that ANY
+ * request for a different tenant arriving mid-crawl flipped the global pointer
+ * and redirected this job's writes (results, counters, finalize, RAG ingest)
+ * into the wrong tenant's database. `runWithTenant` pins the binding in a real
+ * AsyncLocalStorage scope that survives `await` and is immune to concurrent
+ * overwrites. See [[tenant-db-global-race]] and the sandbox isolation fix.
+ */
+async function runWithTenantDb<T>(
+  tenantDbName: string,
+  fn: (db: DatabaseProvider) => T | Promise<T>,
+): Promise<T> {
   const db = await getDatabase();
+  if (db.runWithTenant) return db.runWithTenant(tenantDbName, () => fn(db));
   await db.switchToTenant(tenantDbName);
-  return db;
+  return fn(db);
 }
 
 function snapshotToPlan(snapshot: ICrawlPlanSnapshot): CrawlPlan {
@@ -63,11 +78,24 @@ function snapshotToPlan(snapshot: ICrawlPlanSnapshot): CrawlPlan {
   };
 }
 
+/**
+ * Public entry point. Pins the tenant DB via ALS for the entire run so no
+ * concurrent request for another tenant can redirect this job's writes, then
+ * delegates to the inner runner.
+ */
 export async function runCrawlJobLocal(
   ctx: CrawlerContext,
   jobId: string,
 ): Promise<void> {
-  const db = await withTenantDb(ctx.tenantDbName);
+  return runWithTenantDb(ctx.tenantDbName, (db) =>
+    runCrawlJobInner(db, ctx, jobId));
+}
+
+async function runCrawlJobInner(
+  db: DatabaseProvider,
+  ctx: CrawlerContext,
+  jobId: string,
+): Promise<void> {
   const startedAt = new Date();
   // Atomic queued -> running transition (CAS on `status`). If this returns
   // `null`, another consumer already claimed the job — a duplicate/

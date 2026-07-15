@@ -453,6 +453,14 @@ export function CrawlerMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       return Number(row.cnt) || 0;
     }
 
+    async deleteCrawlResultsByJob(jobId: string): Promise<number> {
+      const db = this.getTenantDb();
+      const info = db.prepare(
+        `DELETE FROM ${TABLES.crawlResults} WHERE jobId = @jobId`,
+      ).run({ jobId });
+      return Number(info.changes) || 0;
+    }
+
     private mapCrawlResult(row: SqliteRow): ICrawlResult {
       return {
         _id: row.id as string,
