@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { mkdirSync, existsSync } from 'node:fs';
 import Database from 'better-sqlite3';
+import { getConfig } from '@/lib/core/config';
 import type { ProviderContract } from '../types';
 import type {
   CreateVectorIndexInput,
@@ -21,55 +22,70 @@ import type {
 type LocalVectorCredentials = Record<string, never>;
 
 interface LocalVectorSettings {
-  basePath: string;
+  basePath?: string;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Vector encoding                                                    */
+/* ------------------------------------------------------------------ */
+
+// Vectors are stored as Float32Array BLOBs (4 bytes/dimension). Rows written
+// by earlier versions hold JSON text in the same column; decodeVector accepts
+// both so existing databases keep working without migration.
+
+function encodeVector(values: number[]): Buffer {
+  return Buffer.from(new Float32Array(values).buffer);
+}
+
+function decodeVector(raw: unknown): Float32Array {
+  if (Buffer.isBuffer(raw)) {
+    // Copy into a fresh ArrayBuffer: pooled Buffers are not 4-byte aligned.
+    return new Float32Array(
+      raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength),
+    );
+  }
+  return Float32Array.from(JSON.parse(String(raw)) as number[]);
 }
 
 /* ------------------------------------------------------------------ */
 /*  Similarity helpers                                                 */
 /* ------------------------------------------------------------------ */
 
-function dotProduct(a: number[], b: number[]): number {
-  let sum = 0;
-  for (let i = 0; i < a.length; i++) sum += a[i] * b[i];
-  return sum;
-}
-
-function magnitude(v: number[]): number {
-  let sum = 0;
-  for (let i = 0; i < v.length; i++) sum += v[i] * v[i];
-  return Math.sqrt(sum);
-}
-
-function cosineSimilarity(a: number[], b: number[]): number {
-  const dot = dotProduct(a, b);
-  const magA = magnitude(a);
-  const magB = magnitude(b);
-  if (magA === 0 || magB === 0) return 0;
-  return dot / (magA * magB);
-}
-
-function euclideanDistance(a: number[], b: number[]): number {
-  let sum = 0;
-  for (let i = 0; i < a.length; i++) {
-    const d = a[i] - b[i];
-    sum += d * d;
-  }
-  return Math.sqrt(sum);
-}
-
 function computeScore(
-  a: number[],
-  b: number[],
+  query: Float32Array,
+  candidate: Float32Array,
   metric: 'cosine' | 'dot' | 'euclidean',
 ): number {
+  const len = Math.min(query.length, candidate.length);
+
   switch (metric) {
-    case 'cosine':
-      return cosineSimilarity(a, b);
-    case 'dot':
-      return dotProduct(a, b);
-    case 'euclidean':
+    case 'dot': {
+      let dot = 0;
+      for (let i = 0; i < len; i++) dot += query[i] * candidate[i];
+      return dot;
+    }
+    case 'euclidean': {
+      let sum = 0;
+      for (let i = 0; i < len; i++) {
+        const d = query[i] - candidate[i];
+        sum += d * d;
+      }
       // Convert distance to a similarity-style score: 1 / (1 + distance)
-      return 1 / (1 + euclideanDistance(a, b));
+      return 1 / (1 + Math.sqrt(sum));
+    }
+    case 'cosine':
+    default: {
+      let dot = 0;
+      let magQ = 0;
+      let magC = 0;
+      for (let i = 0; i < len; i++) {
+        dot += query[i] * candidate[i];
+        magQ += query[i] * query[i];
+        magC += candidate[i] * candidate[i];
+      }
+      if (magQ === 0 || magC === 0) return 0;
+      return dot / (Math.sqrt(magQ) * Math.sqrt(magC));
+    }
   }
 }
 
@@ -112,6 +128,10 @@ function openDb(dbPath: string): Database.Database {
   }
 
   const db = new Database(dbPath);
+  // Must be set before the first table is created to take effect; lets
+  // deleteIndex reclaim disk space via incremental_vacuum when many
+  // indexes come and go. A no-op on databases created without it.
+  db.pragma('auto_vacuum = INCREMENTAL');
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.exec(INDEXES_DDL);
@@ -124,10 +144,8 @@ function buildDbPath(
   tenantId: string,
   providerKey: string,
 ): string {
-  const base = settings.basePath?.trim();
-  if (!base) {
-    throw new Error('SQLite vector provider requires a basePath setting.');
-  }
+  const base = settings.basePath?.trim()
+    || path.join(getConfig().storage.dataDir, 'vectors');
   return path.resolve(base, tenantId, `${providerKey}-vectors.sqlite`);
 }
 
@@ -146,7 +164,7 @@ interface IndexRow {
 interface EntryRow {
   id: string;
   index_id: string;
-  vec_values: string;
+  vec_values: Buffer | string;
   metadata: string | null;
 }
 
@@ -160,12 +178,12 @@ export const SqliteVectorProviderContract: ProviderContract<
   LocalVectorSettings
 > = {
   id: 'sqlite-vector',
-  version: '1.0.0',
+  version: '1.1.0',
   domains: ['vector'],
   display: {
     label: 'SQLite Vector Store',
     description:
-      'Local vector store using SQLite with brute-force similarity search. No external dependencies required.',
+      'Built-in local vector store backed by SQLite. Persistent, zero-configuration, no external dependencies required.',
   },
   form: {
     sections: [
@@ -177,10 +195,10 @@ export const SqliteVectorProviderContract: ProviderContract<
             name: 'basePath',
             label: 'Data Directory',
             type: 'text',
-            required: true,
-            placeholder: './data/vectors',
+            required: false,
+            placeholder: 'Defaults to DATA_DIR/vectors',
             description:
-              'Base directory for vector SQLite files. A subdirectory is created per tenant.',
+              'Optional base directory for vector SQLite files. Leave empty to use the built-in data directory (DATA_DIR/vectors). A subdirectory is created per tenant.',
             scope: 'settings',
           },
         ],
@@ -194,6 +212,7 @@ export const SqliteVectorProviderContract: ProviderContract<
     supportsMetadataFilter: false,
     maxDimension: 4096,
     local: true,
+    builtin: true,
   },
 
   createRuntime({ tenantId, providerKey, settings, logger }) {
@@ -236,6 +255,12 @@ export const SqliteVectorProviderContract: ProviderContract<
       async deleteIndex({ externalId }: VectorDeleteIndexInput): Promise<void> {
         // Foreign key cascade deletes entries
         db.prepare(`DELETE FROM vector_indexes WHERE id = ?`).run(externalId);
+        try {
+          db.pragma('incremental_vacuum');
+        } catch {
+          // Databases created before auto_vacuum was enabled cannot vacuum
+          // incrementally; the space is reused by future inserts instead.
+        }
         logger?.info?.('Deleted vector index', { providerKey, externalId });
       },
 
@@ -287,7 +312,7 @@ export const SqliteVectorProviderContract: ProviderContract<
             stmt.run(
               item.id,
               handle.externalId,
-              JSON.stringify(item.values),
+              encodeVector(item.values),
               item.metadata ? JSON.stringify(item.metadata) : null,
             );
           }
@@ -329,29 +354,55 @@ export const SqliteVectorProviderContract: ProviderContract<
           );
         }
 
+        const queryVec = Float32Array.from(query.vector);
+        const metric = handle.metric ?? 'cosine';
+        const topK = Math.max(1, query.topK);
+
+        // Stream rows and keep only the current top-K candidates so memory
+        // stays flat no matter how large the index grows. Metadata JSON is
+        // parsed lazily for the final matches only.
+        const best: Array<{ id: string; score: number; metadataRaw: string | null }> = [];
+        let minIdx = 0;
+        let candidateCount = 0;
+
         const rows = db
           .prepare(`SELECT id, vec_values, metadata FROM vector_entries WHERE index_id = ?`)
-          .all(handle.externalId) as EntryRow[];
+          .iterate(handle.externalId) as IterableIterator<EntryRow>;
 
-        const metric = handle.metric ?? 'cosine';
+        for (const row of rows) {
+          candidateCount += 1;
+          const score = computeScore(queryVec, decodeVector(row.vec_values), metric);
 
-        // Compute scores using brute-force similarity
-        const scored = rows.map((row) => {
-          const values: number[] = JSON.parse(row.vec_values);
-          return {
-            id: row.id,
-            score: computeScore(query.vector, values, metric),
-            metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
-          };
-        });
+          if (best.length < topK) {
+            best.push({ id: row.id, score, metadataRaw: row.metadata });
+            if (best.length === topK) {
+              minIdx = 0;
+              for (let i = 1; i < best.length; i++) {
+                if (best[i].score < best[minIdx].score) minIdx = i;
+              }
+            }
+            continue;
+          }
 
-        // Sort by score descending (higher = more similar)
-        scored.sort((a, b) => b.score - a.score);
+          if (score > best[minIdx].score) {
+            best[minIdx] = { id: row.id, score, metadataRaw: row.metadata };
+            minIdx = 0;
+            for (let i = 1; i < best.length; i++) {
+              if (best[i].score < best[minIdx].score) minIdx = i;
+            }
+          }
+        }
+
+        best.sort((a, b) => b.score - a.score);
 
         return {
-          matches: scored.slice(0, query.topK),
+          matches: best.map((entry) => ({
+            id: entry.id,
+            score: entry.score,
+            metadata: entry.metadataRaw ? JSON.parse(entry.metadataRaw) : undefined,
+          })),
           usage: {
-            candidateCount: rows.length,
+            candidateCount,
             metric,
           },
         };
@@ -383,7 +434,7 @@ export const SqliteVectorProviderContract: ProviderContract<
 
         const items = pageRows.map((row) => ({
           id: row.id,
-          values: JSON.parse(row.vec_values) as number[],
+          values: Array.from(decodeVector(row.vec_values)),
           metadata: row.metadata ? (JSON.parse(row.metadata) as Record<string, unknown>) : undefined,
         }));
 

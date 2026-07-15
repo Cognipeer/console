@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import slugify from 'slugify';
+import { getConfig } from '@/lib/core/config';
 import type { Stats } from 'node:fs';
 import type { ProviderContract } from '../types';
 import type {
@@ -13,7 +14,7 @@ import type {
 } from '../domains/file';
 
 interface LocalFileSettings {
-  basePath: string;
+  basePath?: string;
   subdirectory?: string;
 }
 
@@ -31,14 +32,10 @@ const SLUG_OPTIONS = {
   trim: true,
 };
 
-function ensurePathProvided(settings: LocalFileSettings): string {
-  const raw = settings.basePath?.trim();
-  if (!raw) {
-    throw new Error('Local file provider requires a basePath setting.');
-  }
-
-  const resolved = path.resolve(raw);
-  return resolved;
+function resolveBasePath(settings: LocalFileSettings): string {
+  const raw = settings.basePath?.trim()
+    || path.join(getConfig().storage.dataDir, 'files');
+  return path.resolve(raw);
 }
 
 function buildTenantRoot(
@@ -46,7 +43,7 @@ function buildTenantRoot(
   tenantId: string,
   providerKey: string,
 ): string {
-  const base = ensurePathProvided(settings);
+  const base = resolveBasePath(settings);
   const segments = [base];
 
   if (settings.subdirectory && settings.subdirectory.trim().length > 0) {
@@ -204,11 +201,14 @@ export const LocalFileProviderContract: ProviderContract<
   domains: ['file'],
   display: {
     label: 'Local filesystem',
-    description: 'Store files on the local server filesystem.',
+    description:
+      'Built-in local file storage on the server filesystem. Persistent and zero-configuration.',
     icon: 'tabler:device-harddrive',
   },
   capabilities: {
     supportsMarkdownConversion: true,
+    local: true,
+    builtin: true,
   },
   form: {
     sections: [
@@ -219,10 +219,10 @@ export const LocalFileProviderContract: ProviderContract<
             name: 'basePath',
             label: 'Base directory',
             type: 'text',
-            required: true,
-            placeholder: '/var/lib/cognipeer-console/files',
+            required: false,
+            placeholder: 'Defaults to DATA_DIR/files',
             description:
-              'Absolute directory path used to store files for this provider.',
+              'Optional directory path used to store files for this provider. Leave empty to use the built-in data directory (DATA_DIR/files).',
             scope: 'settings',
           },
           {

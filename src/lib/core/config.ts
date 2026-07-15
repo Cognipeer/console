@@ -46,6 +46,15 @@ export interface AppConfig {
     graceDays: number;
   };
 
+  storage: {
+    /**
+     * Root directory for all built-in on-disk data (vector indexes, file
+     * storage, model caches). In Docker this points at the mounted
+     * app-data volume (/app/data).
+     */
+    dataDir: string;
+  };
+
   database: {
     provider: 'mongodb' | 'sqlite';
     uri: string;
@@ -292,6 +301,10 @@ function buildConfig(source: ConfigSource): AppConfig {
       issuer: str(source, 'OFFLINE_LICENSE_ISSUER', 'cognipeer'),
       audience: str(source, 'OFFLINE_LICENSE_AUDIENCE', 'cognipeer-console'),
       graceDays: int(source, 'LICENSE_GRACE_DAYS', 14),
+    },
+
+    storage: {
+      dataDir: str(source, 'DATA_DIR', './data'),
     },
 
     database: {

@@ -6,9 +6,11 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import Database from 'better-sqlite3';
+import { reloadConfig } from '@/lib/core/config';
 import { SqliteVectorProviderContract } from '@/lib/providers/contracts/sqliteVector.contract';
 import type { VectorProviderRuntime } from '@/lib/providers/domains/vector';
 
@@ -38,7 +40,7 @@ afterAll(() => {
 describe('SqliteVectorProviderContract shape', () => {
   it('has the correct id and version', () => {
     expect(SqliteVectorProviderContract.id).toBe('sqlite-vector');
-    expect(SqliteVectorProviderContract.version).toBe('1.0.0');
+    expect(SqliteVectorProviderContract.version).toBe('1.1.0');
   });
 
   it('declares vector domain', () => {
@@ -50,14 +52,19 @@ describe('SqliteVectorProviderContract shape', () => {
     expect(SqliteVectorProviderContract.display.description).toBeTruthy();
   });
 
-  it('has form schema with basePath field', () => {
+  it('has form schema with optional basePath field', () => {
     const fields = SqliteVectorProviderContract.form.sections.flatMap(
       (s) => s.fields,
     );
     const basePathField = fields.find((f) => f.name === 'basePath');
     expect(basePathField).toBeDefined();
     expect(basePathField!.scope).toBe('settings');
-    expect(basePathField!.required).toBe(true);
+    // Zero-config: falls back to DATA_DIR/vectors when left empty.
+    expect(basePathField!.required).toBe(false);
+  });
+
+  it('declares the builtin capability', () => {
+    expect(SqliteVectorProviderContract.capabilities?.builtin).toBe(true);
   });
 
   it('declares capabilities', () => {
@@ -364,5 +371,110 @@ describe('Edge cases', () => {
     const h2 = await runtime.createIndex({ name: 'cascade-test', dimension: 2 });
     const result = await runtime.queryVectors(h2, { vector: [1, 0], topK: 10 });
     expect(result.matches).toHaveLength(0);
+  });
+});
+
+// ── Zero-config fallback (DATA_DIR) ─────────────────────────────────────
+
+describe('Zero-config basePath fallback', () => {
+  it('falls back to DATA_DIR/vectors when basePath is empty', async () => {
+    const fallbackRoot = mkdtempSync(
+      path.join(tmpdir(), 'cognipeer-console-vec-fallback-'),
+    );
+    const previousDataDir = process.env.DATA_DIR;
+    process.env.DATA_DIR = fallbackRoot;
+    reloadConfig();
+
+    try {
+      const rt = await SqliteVectorProviderContract.createRuntime({
+        tenantId: TENANT_ID,
+        providerKey: 'fallback-provider',
+        credentials: {} as Record<string, never>,
+        settings: {},
+      });
+
+      const h = await rt.createIndex({ name: 'fallback-index', dimension: 2 });
+      await rt.upsertVectors(h, [{ id: 'f1', values: [1, 0] }]);
+      const result = await rt.queryVectors(h, { vector: [1, 0], topK: 1 });
+      expect(result.matches[0].id).toBe('f1');
+
+      expect(
+        existsSync(
+          path.join(
+            fallbackRoot,
+            'vectors',
+            TENANT_ID,
+            'fallback-provider-vectors.sqlite',
+          ),
+        ),
+      ).toBe(true);
+    } finally {
+      if (previousDataDir === undefined) {
+        delete process.env.DATA_DIR;
+      } else {
+        process.env.DATA_DIR = previousDataDir;
+      }
+      reloadConfig();
+      rmSync(fallbackRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── Legacy storage compatibility ───────────────────────────────────────
+
+describe('Legacy JSON vector rows', () => {
+  it('queries rows stored as JSON text by earlier versions', async () => {
+    const h = await runtime.createIndex({ name: 'legacy-mix', dimension: 2 });
+
+    // New rows are written as Float32 BLOBs through the runtime …
+    await runtime.upsertVectors(h, [{ id: 'blob-row', values: [0, 1] }]);
+
+    // … while this row simulates data written by contract version 1.0.0,
+    // which stored vectors as JSON text in the same column.
+    const legacyDb = new Database(
+      path.join(tmpDir, TENANT_ID, `${PROVIDER_KEY}-vectors.sqlite`),
+    );
+    legacyDb
+      .prepare(
+        `INSERT INTO vector_entries (id, index_id, vec_values, metadata) VALUES (?, ?, ?, ?)`,
+      )
+      .run('json-row', h.externalId, JSON.stringify([1, 0]), JSON.stringify({ legacy: true }));
+    legacyDb.close();
+
+    const result = await runtime.queryVectors(h, { vector: [1, 0], topK: 2 });
+    expect(result.matches[0].id).toBe('json-row');
+    expect(result.matches[0].score).toBeCloseTo(1.0, 4);
+    expect(result.matches[0].metadata).toEqual({ legacy: true });
+    expect(result.matches[1].id).toBe('blob-row');
+  });
+});
+
+// ── Top-K selection on larger indexes ──────────────────────────────────
+
+describe('Top-K selection with many vectors', () => {
+  it('returns the true top-K ordered by score', async () => {
+    const h = await runtime.createIndex({
+      name: 'bulk-topk',
+      dimension: 2,
+      metric: 'dot',
+    });
+
+    // Scores against query [1, 0] are simply the x component: 0..199.
+    const items = Array.from({ length: 200 }, (_, i) => ({
+      id: `bulk-${i}`,
+      values: [i, 1],
+    }));
+    await runtime.upsertVectors(h, items);
+
+    const result = await runtime.queryVectors(h, { vector: [1, 0], topK: 5 });
+
+    expect(result.matches.map((m) => m.id)).toEqual([
+      'bulk-199',
+      'bulk-198',
+      'bulk-197',
+      'bulk-196',
+      'bulk-195',
+    ]);
+    expect(result.usage?.candidateCount).toBe(200);
   });
 });
