@@ -202,7 +202,7 @@ export default function DashboardBreadcrumbs() {
     if (!segments.length || segments[0] !== 'dashboard') return;
     const pageLabels = labels.slice(1);
     titleRef.current = pageLabels.length
-      ? `${pageLabels.join(' · ')} - Cognipeer Console`
+      ? `${[...pageLabels].reverse().join(' · ')} - Cognipeer Console`
       : 'Cognipeer Console';
     document.title = titleRef.current;
   }, [segments, labels]);
