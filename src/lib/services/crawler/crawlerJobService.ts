@@ -12,6 +12,7 @@ import { getDatabase, type DatabaseProvider } from '@/lib/database';
 import type { ICrawlJob, ICrawlPlanSnapshot } from '@/lib/database';
 import { crawl } from './engine';
 import type { CrawlPlan, PageResult } from './engine';
+import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { sendCrawlerWebhook } from './crawlerWebhook';
 import { ingestCrawlPage } from './crawlerRagBridge';
 import type { CrawlerContext } from './types';
@@ -25,10 +26,25 @@ export function markJobCancelRequested(jobId: string): void {
   cancelRequested.add(jobId);
 }
 
-async function withTenantDb(tenantDbName: string): Promise<DatabaseProvider> {
+/**
+ * Bind `fn` to the tenant DB for its whole (sync + async) execution.
+ *
+ * A crawl job runs for minutes; using the bare `switchToTenant` (which relies
+ * on `enterWith` + a process-global `this.tenantDb` fallback) meant that ANY
+ * request for a different tenant arriving mid-crawl flipped the global pointer
+ * and redirected this job's writes (results, counters, finalize, RAG ingest)
+ * into the wrong tenant's database. `runWithTenant` pins the binding in a real
+ * AsyncLocalStorage scope that survives `await` and is immune to concurrent
+ * overwrites. See [[tenant-db-global-race]] and the sandbox isolation fix.
+ */
+async function runWithTenantDb<T>(
+  tenantDbName: string,
+  fn: (db: DatabaseProvider) => T | Promise<T>,
+): Promise<T> {
   const db = await getDatabase();
+  if (db.runWithTenant) return db.runWithTenant(tenantDbName, () => fn(db));
   await db.switchToTenant(tenantDbName);
-  return db;
+  return fn(db);
 }
 
 function snapshotToPlan(snapshot: ICrawlPlanSnapshot): CrawlPlan {
@@ -62,11 +78,24 @@ function snapshotToPlan(snapshot: ICrawlPlanSnapshot): CrawlPlan {
   };
 }
 
+/**
+ * Public entry point. Pins the tenant DB via ALS for the entire run so no
+ * concurrent request for another tenant can redirect this job's writes, then
+ * delegates to the inner runner.
+ */
 export async function runCrawlJobLocal(
   ctx: CrawlerContext,
   jobId: string,
 ): Promise<void> {
-  const db = await withTenantDb(ctx.tenantDbName);
+  return runWithTenantDb(ctx.tenantDbName, (db) =>
+    runCrawlJobInner(db, ctx, jobId));
+}
+
+async function runCrawlJobInner(
+  db: DatabaseProvider,
+  ctx: CrawlerContext,
+  jobId: string,
+): Promise<void> {
   const startedAt = new Date();
   // Atomic queued -> running transition (CAS on `status`). If this returns
   // `null`, another consumer already claimed the job — a duplicate/
@@ -118,7 +147,7 @@ export async function runCrawlJobLocal(
         break;
       }
 
-      const written = await persistPage(db, job, page);
+      const written = await persistPage(db, ctx, job, page);
       if (page.type === 'html') pagesProcessed += 1;
       else if (page.type === 'file') filesProcessed += 1;
       else if (page.type === 'error') {
@@ -212,6 +241,24 @@ export async function runCrawlJobLocal(
       logger.warn('Crawl job finalize skipped: job was no longer running', { jobId, status });
     }
 
+    // Rollup event at completion — attribution comes from the fields stamped
+    // on the job row at creation (the runner is outside the request ALS).
+    recordUsageEvent({
+      tenantDbName: ctx.tenantDbName,
+      tenantId: ctx.tenantId,
+      projectId: job.projectId,
+      service: 'crawler',
+      refKey: job.crawlerKey ?? '',
+      status: status === 'failed' ? 'error' : 'success',
+      latencyMs: durationMs,
+      units: { pagesProcessed },
+      attribution: {
+        userId: job.userId,
+        apiTokenId: job.apiTokenId,
+        actorType: job.actorType,
+      },
+    });
+
     const event = status === 'failed' ? 'failed' : 'completed';
     await fireSummaryWebhook(job, status, {
       pagesProcessed,
@@ -240,6 +287,7 @@ export async function runCrawlJobLocal(
 
 async function persistPage(
   db: DatabaseProvider,
+  ctx: CrawlerContext,
   job: ICrawlJob,
   page: PageResult,
 ): Promise<{ ragDocumentId?: string }> {
@@ -252,8 +300,13 @@ async function persistPage(
     job.planSnapshot.rag?.enabled &&
     page.body
   ) {
+    // Must be the tenant DB NAME (`tenant_<slug>`), not the tenant id:
+    // ingestDocument switches the shared provider to this database, so a
+    // wrong value here both breaks the module lookup AND redirects every
+    // subsequent write in this job (results, counters, finalize) into a
+    // phantom database.
     const ingest = await ingestCrawlPage({
-      tenantDbName: job.tenantId, // ignored by ingestDocument; we use the loaded db below
+      tenantDbName: ctx.tenantDbName,
       tenantId: job.tenantId,
       projectId: job.projectId,
       rag: job.planSnapshot.rag,

@@ -19,6 +19,7 @@ import {
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { calculateCost } from '@/lib/services/models/usageLogger';
 import { uploadFile } from '@/lib/services/files/fileService';
+import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { checkBudget } from '@/lib/quota/quotaGuard';
 import { buildResultsJsonl } from './batchService';
 import type { BatchContext } from './types';
@@ -212,6 +213,25 @@ async function applyDeltaAndMaybeFinalize(
     status: finalStatus,
     completedAt: finalStatus === 'completed' ? new Date() : undefined,
     outputFile,
+  });
+
+  // Rollup event at finalize — attribution comes from the fields stamped on
+  // the job row at creation (the runner is outside the request ALS). No
+  // tokens/cost: per-item inference already meters via logModelUsage.
+  recordUsageEvent({
+    tenantDbName: ctx.tenantDbName,
+    tenantId: ctx.tenantId,
+    projectId: job.projectId,
+    service: 'batch',
+    refKey: job.endpoint,
+    status: 'success',
+    latencyMs: job.startedAt ? Date.now() - new Date(job.startedAt).getTime() : undefined,
+    units: { items: job.itemsTotal },
+    attribution: {
+      userId: job.userId,
+      apiTokenId: job.apiTokenId,
+      actorType: job.actorType,
+    },
   });
   logger.info('Batch finalized', { batchId, status: finalStatus, done, total: job.itemsTotal });
 }

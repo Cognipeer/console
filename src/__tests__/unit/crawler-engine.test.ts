@@ -12,6 +12,8 @@ import {
 } from '@/lib/services/crawler/engine/normalize';
 import { extractLinks } from '@/lib/services/crawler/engine/links';
 import { assertSafeUrl, isPrivateHost } from '@/lib/services/crawler/engine/ssrf';
+import { isTransientFetchError, retry } from '@/lib/services/crawler/engine/concurrency';
+import { htmlToMarkdown, cleanupMarkdown, markdownToText } from '@/lib/services/crawler/engine/markdown';
 
 describe('engine/normalize', () => {
   it('lowercases hostname and strips trailing slash', () => {
@@ -122,5 +124,103 @@ describe('engine/ssrf', () => {
   it('assertSafeUrl throws on private host unless opted in', () => {
     expect(() => assertSafeUrl('http://127.0.0.1/x')).toThrow(/private/i);
     expect(() => assertSafeUrl('http://127.0.0.1/x', true)).not.toThrow();
+  });
+});
+
+describe('engine/concurrency — error classification', () => {
+  it('treats broken TLS chains as permanent (not retryable)', () => {
+    expect(isTransientFetchError(new Error(
+      'Axios error for https://x/y.pdf: unable to verify the first certificate',
+    ))).toBe(false);
+    expect(isTransientFetchError(new Error('self-signed certificate in chain'))).toBe(false);
+  });
+
+  it('treats DNS + 4xx as permanent', () => {
+    expect(isTransientFetchError(new Error('getaddrinfo ENOTFOUND example.test'))).toBe(false);
+    expect(isTransientFetchError(new Error('HTTP 404 for https://x/missing'))).toBe(false);
+    expect(isTransientFetchError(new Error('HTTP 403 for https://x/forbidden'))).toBe(false);
+  });
+
+  it('keeps timeouts, resets, 5xx and 429 retryable', () => {
+    expect(isTransientFetchError(new Error('Timeout fetching https://x (30000ms)'))).toBe(true);
+    expect(isTransientFetchError(new Error('socket hang up ECONNRESET'))).toBe(true);
+    expect(isTransientFetchError(new Error('HTTP 503 for https://x'))).toBe(true);
+    expect(isTransientFetchError(new Error('HTTP 429 for https://x'))).toBe(true);
+  });
+
+  it('retry() bails immediately on a non-retryable error', async () => {
+    let calls = 0;
+    await expect(retry(async () => {
+      calls += 1;
+      throw new Error('unable to verify the first certificate');
+    }, 3, { isRetryable: isTransientFetchError, initialDelayMs: 1 })).rejects.toThrow(/certificate/);
+    expect(calls).toBe(1); // no wasted retries on a permanent failure
+  });
+});
+
+describe('engine/markdown — output cleanup', () => {
+  it('strips base64 data: images by default', async () => {
+    const bigDataUri = `data:image/jpg;base64,${'A'.repeat(5000)}`;
+    const html = `<html><body><h1>Title</h1><img src="${bigDataUri}"><p>Real content here</p></body></html>`;
+    const md = await htmlToMarkdown({ html });
+    expect(md).not.toContain('base64');
+    expect(md.length).toBeLessThan(1000);
+    expect(md).toContain('Real content');
+  });
+
+  it('caps body length when maxBodyChars is set', async () => {
+    const html = `<html><body><p>${'word '.repeat(2000)}</p></body></html>`;
+    const md = await htmlToMarkdown({ html, options: { maxBodyChars: 100 } });
+    expect(md).toContain('truncated');
+    expect(md.length).toBeLessThan(300);
+  });
+
+  it('honors removeSelectors', async () => {
+    const html = '<html><body><nav>MENU LINKS</nav><main>Body text</main></body></html>';
+    const md = await htmlToMarkdown({ html, options: { removeSelectors: ['nav'] } });
+    expect(md).not.toContain('MENU LINKS');
+    expect(md).toContain('Body text');
+  });
+});
+
+describe('engine/markdown — cleanup pass', () => {
+  it('decodes leftover HTML entities', () => {
+    expect(cleanupMarkdown('Foo&nbsp;bar &amp; baz &#39;x&#39;')).toBe("Foo bar & baz 'x'");
+  });
+
+  it('reduces dead anchor / javascript links to their text', () => {
+    expect(cleanupMarkdown('[About Us](#) and [Go](javascript:void(0))')).toBe('About Us and Go');
+    // Real links are preserved.
+    expect(cleanupMarkdown('[Home](/tr)')).toBe('[Home](/tr)');
+  });
+
+  it('drops marker-only lines and collapses blank-line runs', () => {
+    const dirty = '## Real Heading\n\n##\n\n\n\n*\n\nBody';
+    const clean = cleanupMarkdown(dirty);
+    expect(clean).toContain('## Real Heading');
+    expect(clean).toContain('Body');
+    expect(clean).not.toMatch(/\n{3,}/);
+    expect(clean).not.toMatch(/^##\s*$/m);
+  });
+});
+
+describe('engine/markdown — text output', () => {
+  it('flattens markdown to clean plain text', async () => {
+    const html = '<html><body><h1>Title</h1><p><strong>Bold</strong> and <a href="/x">link</a>.</p><ul><li>one</li><li>two</li></ul></body></html>';
+    const md = await htmlToMarkdown({ html, options: { outputFormat: 'text' } });
+    expect(md).not.toMatch(/[#*`>]/);      // no markdown markers
+    expect(md).not.toContain('](');        // no link syntax
+    expect(md).toContain('Title');
+    expect(md).toContain('Bold and link');
+    expect(md).toContain('one');
+  });
+
+  it('markdownToText flattens table rows to spaced cells', () => {
+    const table = '| Phone | +90 212 |\n| --- | --- |\n| Address | Istanbul |';
+    const text = markdownToText(table);
+    expect(text).not.toContain('|');
+    expect(text).not.toContain('---');
+    expect(text).toContain('Phone +90 212');
+    expect(text).toContain('Address Istanbul');
   });
 });

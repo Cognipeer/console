@@ -21,9 +21,11 @@ export function WebSearchMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       db.prepare(`
         INSERT INTO ${TABLES.websearchRunLogs}
         (id, tenantId, projectId, searchKey, driver, query,
-         resultCount, latencyMs, status, errorMessage, source, answer, results, metadata, createdAt)
+         resultCount, latencyMs, status, errorMessage, source, answer, results, metadata,
+         userId, apiTokenId, actorType, createdAt)
         VALUES (@id, @tenantId, @projectId, @searchKey, @driver, @query,
-         @resultCount, @latencyMs, @status, @errorMessage, @source, @answer, @results, @metadata, @createdAt)
+         @resultCount, @latencyMs, @status, @errorMessage, @source, @answer, @results, @metadata,
+         @userId, @apiTokenId, @actorType, @createdAt)
       `).run({
         id,
         tenantId: log.tenantId,
@@ -39,6 +41,9 @@ export function WebSearchMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         answer: log.answer ?? null,
         results: log.results ? this.toJson(log.results) : null,
         metadata: this.toJson(log.metadata ?? {}),
+        userId: log.userId ?? null,
+        apiTokenId: log.apiTokenId ?? null,
+        actorType: log.actorType ?? null,
         createdAt: now,
       });
 
@@ -79,6 +84,9 @@ export function WebSearchMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         answer: (r.answer as string | null | undefined) ?? undefined,
         results: r.results ? this.parseJson(r.results, []) : undefined,
         metadata: this.parseJson(r.metadata, {}),
+        userId: (r.userId as string | null) ?? undefined,
+        apiTokenId: (r.apiTokenId as string | null) ?? undefined,
+        actorType: (r.actorType as IWebSearchRunLog['actorType'] | null) ?? undefined,
         createdAt: r.createdAt ? this.toDate(r.createdAt) : undefined,
       };
     }

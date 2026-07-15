@@ -13,6 +13,7 @@ import {
   loadProviderRuntimeData,
   type ProviderConfigView,
 } from '@/lib/services/providers/providerService';
+import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { callWebSearchProvider } from './webSearchAdapter';
 import type {
   WebSearchAiAnswerSettings,
@@ -66,9 +67,25 @@ function logRun(
   tenantDbName: string,
   entry: Omit<IWebSearchRunLog, '_id' | 'createdAt'>,
 ): void {
+  // Resolve attribution + rollup synchronously so the request ALS is in scope.
+  const attribution = recordUsageEvent({
+    tenantDbName,
+    tenantId: entry.tenantId,
+    projectId: entry.projectId,
+    service: 'websearch',
+    refKey: entry.searchKey,
+    status: entry.status,
+    latencyMs: entry.latencyMs,
+    units: { results: entry.resultCount },
+  });
   fireAndForget('log-websearch-run', async () => {
     const db = await withTenantDb(tenantDbName);
-    await db.createWebSearchRunLog(entry);
+    await db.createWebSearchRunLog({
+      ...entry,
+      userId: attribution.userId,
+      apiTokenId: attribution.apiTokenId,
+      actorType: attribution.actorType,
+    });
   });
 }
 

@@ -48,6 +48,45 @@ export interface CrawlHttpConfig {
 
 export interface CrawlMarkdownOptions {
   ocr?: { enabled: boolean; languages?: string[] };
+  /**
+   * Shape of the stored page body. `markdown` (default) keeps the converter's
+   * markdown; `text` flattens it to clean plain text (headings/links/lists/
+   * emphasis/tables stripped to their readable content) — useful for RAG
+   * pipelines that prefer prose and for sidestepping the converter's markdown
+   * structure defects entirely.
+   */
+  outputFormat?: 'markdown' | 'text';
+  /**
+   * Run the markdown cleanup pass (decode leftover HTML entities like
+   * `&nbsp;`, collapse blank-line runs, drop empty `[x](#)` anchors and
+   * marker-only lines). Default true. Ignored for `text` output (which does
+   * its own flattening).
+   */
+  cleanup?: boolean;
+  /**
+   * Drop `data:` (base64-inlined) images from HTML before conversion. A single
+   * page can carry several multi-hundred-KB inline JPEGs that otherwise bloat
+   * the stored markdown (observed: a 1.2 MB body that was ~99% base64) and
+   * poison RAG chunks. Default true.
+   */
+  stripDataImages?: boolean;
+  /**
+   * Restrict extraction to the page's main content, dropping nav menus,
+   * headers, footers and other chrome. When a `contentSelector` is given it is
+   * used verbatim; otherwise a small readability-style heuristic picks the
+   * densest `<main>/<article>/[role=main]`-like region. Default false
+   * (whole-body extraction, preserving prior behaviour).
+   */
+  mainContentOnly?: boolean;
+  /** CSS selector for the main content region (implies mainContentOnly). */
+  contentSelector?: string;
+  /** CSS selectors to remove before conversion (nav, .cookie-banner, …). */
+  removeSelectors?: string[];
+  /**
+   * Hard cap on stored markdown length (characters). Bodies longer than this
+   * are truncated. 0/undefined = no cap.
+   */
+  maxBodyChars?: number;
 }
 
 export interface CrawlPlan {

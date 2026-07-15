@@ -237,9 +237,11 @@ export function GuardrailMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       db.prepare(`
         INSERT INTO ${TABLES.guardrailEvalLogs}
         (id, tenantId, projectId, guardrailId, guardrailKey, guardrailName, guardrailType,
-          target, action, passed, findings, inputText, latencyMs, source, requestId, message, createdAt)
+          target, action, passed, findings, inputText, latencyMs, source, requestId, message,
+          userId, apiTokenId, actorType, createdAt)
         VALUES (@id, @tenantId, @projectId, @guardrailId, @guardrailKey, @guardrailName, @guardrailType,
-          @target, @action, @passed, @findings, @inputText, @latencyMs, @source, @requestId, @message, @createdAt)
+          @target, @action, @passed, @findings, @inputText, @latencyMs, @source, @requestId, @message,
+          @userId, @apiTokenId, @actorType, @createdAt)
       `).run({
         id: this.newId(),
         tenantId: log.tenantId,
@@ -257,6 +259,9 @@ export function GuardrailMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         source: log.source ?? null,
         requestId: log.requestId ?? null,
         message: log.message ?? null,
+        userId: log.userId ?? null,
+        apiTokenId: log.apiTokenId ?? null,
+        actorType: log.actorType ?? null,
         createdAt: this.now(),
       });
     }
@@ -402,6 +407,9 @@ export function GuardrailMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         source: r.source as string | undefined,
         requestId: r.requestId as string | undefined,
         message: r.message as string | undefined,
+        userId: (r.userId as string | null) ?? undefined,
+        apiTokenId: (r.apiTokenId as string | null) ?? undefined,
+        actorType: (r.actorType as IGuardrailEvaluationLog['actorType'] | null) ?? undefined,
         createdAt: this.toDate(r.createdAt),
       } as IGuardrailEvaluationLog;
     }

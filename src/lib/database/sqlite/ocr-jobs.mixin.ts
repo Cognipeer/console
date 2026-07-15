@@ -25,6 +25,7 @@ export function OcrJobMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
          usageInputTokens, usageOutputTokens, usageTotalTokens, usagePages,
          usageOcrTokens, usageLlmTokens, costOcr, costLlm,
          costTotal, costCurrency, lastItemAt, metadata,
+         userId, apiTokenId, actorType,
          createdBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @name, @status, @bucketKey, @prefix,
          @ocrModelKey, @llmModelKey, @outputs, @summaryPrompt, @structuredSchema,
@@ -34,6 +35,7 @@ export function OcrJobMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
          @usageInputTokens, @usageOutputTokens, @usageTotalTokens, @usagePages,
          @usageOcrTokens, @usageLlmTokens, @costOcr, @costLlm,
          @costTotal, @costCurrency, @lastItemAt, @metadata,
+         @userId, @apiTokenId, @actorType,
          @createdBy, @createdAt, @updatedAt)
       `).run({
         id,
@@ -69,6 +71,9 @@ export function OcrJobMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
         costCurrency: record.costCurrency ?? null,
         lastItemAt: record.lastItemAt ? new Date(record.lastItemAt).toISOString() : null,
         metadata: this.toJson(record.metadata ?? {}),
+        userId: record.userId ?? null,
+        apiTokenId: record.apiTokenId ?? null,
+        actorType: record.actorType ?? null,
         createdBy: record.createdBy,
         createdAt: now,
         updatedAt: now,
@@ -220,6 +225,9 @@ export function OcrJobMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
         costCurrency: (row.costCurrency as string) ?? undefined,
         lastItemAt: this.toDate(row.lastItemAt),
         metadata: this.parseJson(row.metadata, {}),
+        userId: (row.userId as string | null) ?? undefined,
+        apiTokenId: (row.apiTokenId as string | null) ?? undefined,
+        actorType: (row.actorType as IOcrJob['actorType'] | null) ?? undefined,
         createdBy: row.createdBy as string,
         createdAt: this.toDate(row.createdAt),
         updatedAt: this.toDate(row.updatedAt),

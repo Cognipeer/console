@@ -10,6 +10,7 @@ import { safeFetch } from '@/lib/security/outboundFetch';
 import { normalizeApiSpec, type SpecFormatHint } from '@/lib/services/specImport';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
+import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import type { ITool, IToolAction, IToolAuthConfig } from '@/lib/database';
 import type {
   CreateToolInput,
@@ -615,10 +616,25 @@ export async function logToolRequest(
   callerType?: 'dashboard' | 'api' | 'agent',
   callerTokenId?: string,
 ) {
+  // Resolve attribution + rollup before any await so the request ALS is in
+  // scope. `callerType`/`callerTokenId` stay for compat; the standard
+  // userId/apiTokenId/actorType columns are stamped alongside.
+  const attribution = recordUsageEvent({
+    tenantDbName,
+    tenantId,
+    projectId,
+    service: 'tools',
+    refKey: toolKey,
+    status,
+    latencyMs,
+  });
   try {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
     await db.createToolRequestLog({
+      userId: attribution.userId,
+      apiTokenId: attribution.apiTokenId,
+      actorType: attribution.actorType,
       tenantId,
       projectId,
       toolKey,

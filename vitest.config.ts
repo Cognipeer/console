@@ -9,6 +9,15 @@ export default defineConfig({
     setupFiles: ['src/__tests__/setup.ts'],
     include: ['src/__tests__/**/*.test.ts'],
     pool: 'forks',
+    server: {
+      deps: {
+        // to-markdown's ESM build does `import { fromBuffer } from 'file-type'`
+        // (a CJS package); Node's ESM loader can't resolve that named export,
+        // which kills any test whose import graph reaches ragService. Inlining
+        // lets Vite apply CJS interop instead.
+        inline: ['@cognipeer/to-markdown'],
+      },
+    },
     reporters: ['verbose'],
     coverage: {
       provider: 'v8',

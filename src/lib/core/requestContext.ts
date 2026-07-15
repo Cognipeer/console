@@ -17,11 +17,18 @@
 import { AsyncLocalStorage } from 'async_hooks';
 import { randomUUID } from 'crypto';
 
+export type RequestActorType = 'user' | 'api_token' | 'system';
+export type RequestSource = 'api' | 'dashboard' | 'system';
+
 export interface RequestContext {
   requestId: string;
   tenantId?: string;
   tenantSlug?: string;
   userId?: string;
+  projectId?: string;
+  apiTokenId?: string;
+  actorType?: RequestActorType;
+  source?: RequestSource;
   startedAt: number;
 }
 
@@ -40,9 +47,36 @@ export function runWithRequestContext<T>(
     tenantId: partial.tenantId,
     tenantSlug: partial.tenantSlug,
     userId: partial.userId,
+    projectId: partial.projectId,
+    apiTokenId: partial.apiTokenId,
+    actorType: partial.actorType,
+    source: partial.source,
     startedAt: partial.startedAt ?? Date.now(),
   };
   return storage.run(ctx, fn);
+}
+
+/**
+ * Merge fields into the CURRENT context in place, visible to the rest of the
+ * scope. Used by handlers that resolve identity facets after the wrapper
+ * opened the scope (e.g. session routes resolving the active project).
+ */
+export function patchRequestContext(patch: Partial<RequestContext>): void {
+  const ctx = storage.getStore();
+  if (ctx) {
+    Object.assign(ctx, patch);
+  }
+}
+
+/**
+ * Snapshot the current context for deferred/queued work. Fire-and-forget jobs
+ * (asyncTask, runners) lose the AsyncLocalStorage scope — capture a snapshot at
+ * enqueue time and reopen it with `runWithRequestContext(snapshot, fn)` when
+ * the job executes.
+ */
+export function captureRequestContext(): Partial<RequestContext> | undefined {
+  const ctx = storage.getStore();
+  return ctx ? { ...ctx } : undefined;
 }
 
 /**

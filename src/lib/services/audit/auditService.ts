@@ -30,18 +30,23 @@ export async function recordAuditLog(
   }
 }
 
+export interface AuditLogListFilters {
+  actorUserId?: string;
+  outcome?: IAuditLog['outcome'];
+  service?: string;
+  action?: string;
+  method?: string;
+  /** Free-text match against event, path and actorEmail. */
+  q?: string;
+  from?: Date;
+  to?: Date;
+  limit?: number;
+  skip?: number;
+}
+
 export async function listAuditLogs(
   context: AuditWriteContext,
-  filters: {
-    actorUserId?: string;
-    outcome?: IAuditLog['outcome'];
-    service?: string;
-    action?: string;
-    from?: Date;
-    to?: Date;
-    limit?: number;
-    skip?: number;
-  } = {},
+  filters: AuditLogListFilters = {},
 ): Promise<IAuditLog[]> {
   const db = await getDatabase();
   await db.switchToTenant(context.tenantDbName);

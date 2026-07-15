@@ -26,7 +26,11 @@ import {
   listQuotaPolicies,
   updateQuotaPolicy,
 } from '@/lib/services/quota/quotaService';
-import { getSpendReport } from '@/lib/services/spend';
+import {
+  getSpendEntityBreakdown,
+  getSpendReport,
+  type SpendGroupByEntity,
+} from '@/lib/services/spend';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import {
   getApiTokenContextForRequest,
@@ -42,6 +46,7 @@ const VALID_DOMAINS: QuotaDomain[] = [
 ];
 const VALID_SCOPES: QuotaScope[] = ['tenant', 'user', 'token', 'resource', 'provider'];
 const VALID_GROUP_BY = ['hour', 'day', 'month'] as const;
+const VALID_GROUP_BY_ENTITY: SpendGroupByEntity[] = ['user', 'api_key'];
 
 function parseDate(value: string | undefined, field: string): Date | undefined {
   if (!value) return undefined;
@@ -107,15 +112,71 @@ function requireWriteAccess(auth: ApiTokenContext): void {
 
 export const clientSpendApiPlugin: FastifyPluginAsync = async (app) => {
   // ── Spend report ──
+  //
+  // Default (no `group_by_entity`): totals + per-model + timeseries rolled up
+  // from the raw model usage logs — unchanged legacy behavior.
+  //
+  // With `group_by_entity=user|api_key`: a per-user / per-API-token breakdown
+  // read from the cross-service `usage_daily` rollup instead. Attribution
+  // (userId/apiTokenId) is only recorded from the rollup's deploy onward, so
+  // earlier traffic appears under the empty-id (unattributed) entry.
   app.get('/client/v1/spend/report', withClientApiRequestContext(async (request, reply) => {
     try {
       const auth = await getApiTokenContextForRequest(request);
       const query = request.query as {
-        from?: string; to?: string; group_by?: string; model?: string;
+        from?: string; to?: string; group_by?: string; group_by_entity?: string; model?: string;
       };
       const groupBy = query.group_by ?? 'day';
       if (!(VALID_GROUP_BY as readonly string[]).includes(groupBy)) {
         return reply.code(400).send({ error: '`group_by` must be hour, day, or month' });
+      }
+
+      if (query.group_by_entity !== undefined) {
+        if (!(VALID_GROUP_BY_ENTITY as readonly string[]).includes(query.group_by_entity)) {
+          return reply.code(400).send({ error: '`group_by_entity` must be user or api_key' });
+        }
+        const entity = query.group_by_entity as SpendGroupByEntity;
+
+        const breakdown = await getSpendEntityBreakdown(
+          {
+            tenantDbName: auth.tenantDbName,
+            tenantId: auth.tenantId,
+            projectId: auth.projectId,
+          },
+          {
+            from: parseDate(query.from, 'from'),
+            to: parseDate(query.to, 'to'),
+            modelKey: query.model,
+            entity,
+          },
+        );
+
+        const idField = entity === 'user' ? 'user_id' : 'api_token_id';
+        return reply.code(200).send({
+          object: 'spend.breakdown',
+          group_by_entity: entity,
+          from: breakdown.fromDay ?? null,
+          to: breakdown.toDay ?? null,
+          model: query.model ?? null,
+          currency: 'USD',
+          total_requests: breakdown.totals.requests,
+          total_errors: breakdown.totals.errors,
+          total_input_tokens: breakdown.totals.inputTokens,
+          total_output_tokens: breakdown.totals.outputTokens,
+          total_tokens: breakdown.totals.totalTokens,
+          total_cost: breakdown.totals.costUsd,
+          breakdown: breakdown.entries.map((entry) => ({
+            [idField]: entry.id,
+            name: entry.name ?? null,
+            label: entry.label ?? null,
+            requests: entry.requests,
+            errors: entry.errors,
+            input_tokens: entry.inputTokens,
+            output_tokens: entry.outputTokens,
+            total_tokens: entry.totalTokens,
+            cost: entry.costUsd,
+          })),
+        });
       }
 
       const report = await getSpendReport(

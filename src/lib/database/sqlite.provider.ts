@@ -43,9 +43,11 @@ import { BrowserMixin } from './sqlite/browser.mixin';
 import { CrawlerMixin } from './sqlite/crawler.mixin';
 import { OcrJobMixin } from './sqlite/ocr-jobs.mixin';
 import { BatchJobMixin } from './sqlite/batch.mixin';
+import { UsageRollupMixin } from './sqlite/usage.mixin';
 import { AuditMixin } from './sqlite/audit.mixin';
 import { UserProjectMixin } from './sqlite/user-project.mixin';
 import { ClusterMixin } from './sqlite/cluster.mixin';
+import { BetaAccessCodeMixin } from './sqlite/beta-access-code.mixin';
 import { applyEnterpriseSqliteDbMixins } from '@/enterprise/registry';
 
 // ── Compose mixins in domain groups ──────────────────────────────────────
@@ -74,18 +76,21 @@ const KnowledgeBase = MemoryMixin(WebSearchMixin(RerankerMixin(RagMixin(Alerting
 const PlatformBase = McpServerMixin(ConfigMixin(KnowledgeBase));
 const ToolingBase = VectorMigrationMixin(AgentMixin(ToolMixin(PlatformBase)));
 const AdvancedBase = OcrJobMixin(CrawlerMixin(AuditMixin(BrowserMixin(ToolingBase))));
-const BulkBase = BatchJobMixin(AdvancedBase);
+const BulkBase = UsageRollupMixin(BatchJobMixin(AdvancedBase));
 
 // Group 6 – Cluster (system-wide; uses main DB). Single-node node registry
 // stays in the community edition; the cluster ORCHESTRATION/admin lives in the
 // enterprise overlay.
 const ClusterBase = ClusterMixin(BulkBase);
 
+// Group 7 – Signup gating (main database; beta access codes)
+const SignupBase = BetaAccessCodeMixin(ClusterBase);
+
 // ── Enterprise overlay seam ───────────────────────────────────────────────
 // Enterprise DB mixins (sandbox runtime + gpu-fleet) are contributed by the
 // overlay registry; this is a no-op in the community edition.
 // See the cognipeer-console-ee repo (docs/licensing/MANIFEST.md).
-const FinalBase = applyEnterpriseSqliteDbMixins(ClusterBase);
+const FinalBase = applyEnterpriseSqliteDbMixins(SignupBase);
 
 // ── Final composed class ─────────────────────────────────────────────────
 

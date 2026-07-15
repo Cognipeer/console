@@ -33,6 +33,25 @@ All application configuration is managed through the central `getConfig()` funct
 | `JWT_EXPIRES_IN` | JWT token expiry | `7d` |
 | `PROVIDER_ENCRYPTION_SECRET` | Encryption key for provider credentials | Falls back to `JWT_SECRET` |
 
+### Registration
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `REGISTRATION_MODE` | `open` (anyone can sign up), `beta` (signup requires a beta access code), or `disabled` (public signup off) | `open` |
+| `BOOTSTRAP_ORG_NAME` | On-prem bootstrap: organization name to create on first boot when no organization exists | — |
+| `BOOTSTRAP_ADMIN_EMAIL` | On-prem bootstrap: owner user email | — |
+| `BOOTSTRAP_ADMIN_PASSWORD` | On-prem bootstrap: owner user password (must satisfy the password policy) | — |
+| `BOOTSTRAP_ADMIN_NAME` | On-prem bootstrap: owner display name | `Administrator` |
+
+With `REGISTRATION_MODE=beta`, seed single-use access codes into the main
+database with `npm run seed:beta-codes -- --count 10` (or pass explicit codes;
+`--list` shows all codes and their status). The signup form then requires a
+valid unused code, and each code is consumed on successful registration.
+
+For on-prem deployments, set `REGISTRATION_MODE=disabled` together with the
+three `BOOTSTRAP_*` variables: the server creates exactly one organization
+owned by the given user on first boot and public signup stays off.
+
 ### Gateway (Resilience)
 
 | Variable | Description | Default |

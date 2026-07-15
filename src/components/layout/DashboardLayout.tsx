@@ -23,6 +23,7 @@ import MobileNavDrawer from './launcher/MobileNavDrawer';
 import ServiceSubNav, {
   SUBNAV_CONFIG,
   findServiceForPath,
+  type SubNavItem,
 } from './launcher/ServiceSubNav';
 import { useLauncherState } from './launcher/useLauncherState';
 import { LauncherProvider } from './launcher/LauncherContext';
@@ -30,8 +31,21 @@ import { useTranslations } from '@/lib/i18n';
 import classes from './launcher/LauncherShell.module.css';
 import { DocsDrawerProvider } from '@/components/docs/DocsDrawerContext';
 import { DEFAULT_SDK_DOC, resolveSdkDoc, type SdkDocId } from '@/lib/docs/sdkDocs';
-import { getDashboardServices } from '@/lib/utils/dashboardServices';
+import {
+  getDashboardServices,
+  SETTINGS_NAV_SECTION,
+} from '@/lib/utils/dashboardServices';
 import type { UserServicePermissions } from '@/lib/security/rbac';
+
+/** Display order of the Settings section items in the left nav. */
+const SETTINGS_NAV_ORDER: string[] = [
+  'projects',
+  'providers',
+  'members',
+  'tokens',
+  'audit',
+  'license',
+];
 
 interface DashboardLayoutProps {
   children: ReactNode;
@@ -53,6 +67,7 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const t = useTranslations('layout');
   const tNotifications = useTranslations('notifications');
+  const tNavigation = useTranslations('navigation');
 
   const activeDoc = useMemo(() => resolveSdkDoc(docsDocId), [docsDocId]);
 
@@ -102,10 +117,36 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
     [defaultUser.role, defaultUser.servicePermissions, isTenantAdmin],
   );
 
+  const settingsServices = useMemo(
+    () =>
+      allowedServices
+        .filter((svc) => svc.isSettings)
+        .sort(
+          (a, b) => SETTINGS_NAV_ORDER.indexOf(a.id) - SETTINGS_NAV_ORDER.indexOf(b.id),
+        ),
+    [allowedServices],
+  );
+
+  const settingsNavItems = useMemo<SubNavItem[]>(
+    () =>
+      settingsServices.map((svc) => ({
+        id: svc.id,
+        label: tNavigation(svc.navLabelKey),
+        href: svc.href,
+        icon: svc.icon,
+        matcher: (p: string) => p === svc.href || p.startsWith(`${svc.href}/`),
+      })),
+    [settingsServices, tNavigation],
+  );
+
+  const settingsHref = settingsServices[0]?.href ?? '/dashboard/tokens';
+
   const defaultPinnedIds = useMemo(
     () =>
       allowedServices
-        .filter((svc) => svc.defaultPinned && svc.id !== 'services-home')
+        .filter(
+          (svc) => svc.defaultPinned && svc.id !== 'services-home' && !svc.isSettings,
+        )
         .map((svc) => svc.id),
     [allowedServices],
   );
@@ -115,7 +156,9 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
 
   const pinnedServices = useMemo(
     () =>
-      allowedServices.filter((svc) => pinned.has(svc.id) && svc.id !== 'services-home'),
+      allowedServices.filter(
+        (svc) => pinned.has(svc.id) && svc.id !== 'services-home' && !svc.isSettings,
+      ),
     [allowedServices, pinned],
   );
 
@@ -124,7 +167,7 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
     return recents
       .map((id) => byId.get(id))
       .filter((svc): svc is NonNullable<typeof svc> => !!svc)
-      .filter((svc) => !pinned.has(svc.id))
+      .filter((svc) => !pinned.has(svc.id) && !svc.isSettings)
       .slice(0, 4);
   }, [allowedServices, pinned, recents]);
 
@@ -139,7 +182,10 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
     }
   }, [activeService, recordVisit]);
 
-  const hasSubnav = Boolean(activeService && SUBNAV_CONFIG[activeService.id]);
+  const isSettingsActive = Boolean(activeService?.isSettings);
+  const hasSubnav = Boolean(
+    activeService && (SUBNAV_CONFIG[activeService.id] || isSettingsActive),
+  );
 
   const handleNavigate = useCallback(
     (href: string) => {
@@ -254,22 +300,27 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
               onLogout={handleLogout}
               onNavigate={handleNavigate}
               onMobileNavClick={() => setMobileNavOpen(true)}
+              settingsHref={settingsHref}
             />
 
             <SlimRail
               pinned={pinnedServices}
               recents={recentServices}
-              activeServiceId={activeService?.id ?? null}
+              activeServiceId={isSettingsActive ? null : (activeService?.id ?? null)}
               onLauncherClick={() => setLauncherOpen(true)}
+              settingsHref={settingsHref}
+              settingsActive={isSettingsActive}
             />
 
             {activeService && hasSubnav ? (
               <ServiceSubNav
-                service={activeService}
+                service={isSettingsActive ? SETTINGS_NAV_SECTION : activeService}
                 pathname={pathname}
                 isPinned={pinned.has(activeService.id)}
                 onTogglePin={() => togglePin(activeService.id)}
                 onOpenDocs={() => openDocs(DEFAULT_SDK_DOC)}
+                items={isSettingsActive ? settingsNavItems : undefined}
+                hidePin={isSettingsActive}
               />
             ) : null}
 
@@ -303,6 +354,13 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
               activeService={activeService}
               onOpenLauncher={() => setLauncherOpen(true)}
               onOpenDocs={() => openDocs(DEFAULT_SDK_DOC)}
+              subnavOverride={
+                isSettingsActive
+                  ? { title: tNavigation('settings'), items: settingsNavItems }
+                  : null
+              }
+              settingsHref={settingsHref}
+              settingsActive={isSettingsActive}
             />
           ) : null}
         </AppShell.Main>

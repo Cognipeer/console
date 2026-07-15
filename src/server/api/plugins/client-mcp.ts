@@ -2,11 +2,14 @@ import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import type { FastifyPluginAsync } from 'fastify';
+import type { IMcpServer } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
   executeMcpTool,
   getMcpServerByKey,
   logMcpRequest,
+  resolveExposure,
+  resolveSourceType,
   serializeMcpServer,
 } from '@/lib/services/mcp';
 import {
@@ -25,7 +28,7 @@ import {
 const logger = createLogger('api:client-mcp');
 
 const JSONRPC_VERSION = '2.0';
-const MCP_PROTOCOL_VERSION = '2024-11-05';
+const MCP_PROTOCOL_VERSION = '2025-03-26';
 const SERVER_INFO = {
   name: 'cognipeer-mcp-gateway',
   version: '1.0.0',
@@ -43,6 +46,71 @@ function jsonRpcError(id: string | number | null, code: number, message: string)
   };
 }
 
+function protocolEnabled(server: IMcpServer, protocol: 'streamable-http' | 'sse'): boolean {
+  return resolveExposure(server).protocols.includes(protocol);
+}
+
+interface CallerInfo {
+  tokenId?: string;
+  userId?: string;
+}
+
+async function runToolCall(
+  server: IMcpServer,
+  toolName: string,
+  args: Record<string, unknown>,
+  log: {
+    tenantDbName: string;
+    tenantId: string;
+    projectId?: string;
+    transport: 'rest' | 'jsonrpc' | 'sse';
+    caller: CallerInfo;
+    sessionId?: string;
+  },
+): Promise<{ ok: true; result: unknown; latencyMs: number } | { ok: false; error: string }> {
+  try {
+    const { latencyMs, result } = await executeMcpTool(server, toolName, args);
+    void logMcpRequest(log.tenantDbName, {
+      tenantId: log.tenantId,
+      projectId: log.projectId,
+      serverKey: server.key,
+      toolName,
+      status: 'success',
+      latencyMs,
+      requestPayload: { tool: toolName, arguments: args },
+      responsePayload: typeof result === 'object' && result !== null
+        ? result as Record<string, unknown>
+        : { value: result },
+      callerTokenId: log.caller.tokenId,
+      callerUserId: log.caller.userId,
+      callerType: 'api',
+      transport: log.transport,
+      sourceType: resolveSourceType(server),
+      sessionId: log.sessionId,
+    });
+    return { ok: true, result, latencyMs };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Tool execution failed';
+    void logMcpRequest(log.tenantDbName, {
+      tenantId: log.tenantId,
+      projectId: log.projectId,
+      serverKey: server.key,
+      toolName,
+      status: 'error',
+      latencyMs: 0,
+      requestPayload: { tool: toolName, arguments: args },
+      errorMessage,
+      callerTokenId: log.caller.tokenId,
+      callerUserId: log.caller.userId,
+      callerType: 'api',
+      transport: log.transport,
+      sourceType: resolveSourceType(server),
+      sessionId: log.sessionId,
+    });
+    return { ok: false, error: errorMessage };
+  }
+}
+
 export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/client/v1/mcp/:serverKey/execute', withClientApiRequestContext(async (request, reply) => {
     try {
@@ -58,6 +126,10 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(403).send({ error: 'MCP server is disabled' });
       }
 
+      if (!protocolEnabled(server, 'streamable-http')) {
+        return reply.code(403).send({ error: 'HTTP access is disabled for this MCP server' });
+      }
+
       const body = readJsonBody<Record<string, unknown>>(request);
       if (typeof body.tool !== 'string' || body.tool.trim() === '') {
         return reply.code(400).send({ error: '"tool" is required' });
@@ -67,50 +139,29 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         ? body.arguments as Record<string, unknown>
         : {};
 
-      try {
-        const { latencyMs, result } = await executeMcpTool(server, body.tool, args);
+      const outcome = await runToolCall(server, body.tool, args, {
+        tenantDbName: ctx.tenantDbName,
+        tenantId: ctx.tenantId,
+        projectId: ctx.projectId,
+        transport: 'rest',
+        caller: {
+          tokenId: ctx.tokenRecord._id?.toString(),
+          userId: ctx.user?._id?.toString(),
+        },
+      });
 
-        void logMcpRequest(
-          ctx.tenantDbName,
-          ctx.tenantId,
-          ctx.projectId,
-          server.key,
-          body.tool,
-          'success',
-          latencyMs,
-          { arguments: args, tool: body.tool },
-          typeof result === 'object' ? result as Record<string, unknown> : { value: result },
-          undefined,
-          ctx.tokenRecord._id?.toString(),
-        );
-
-        return reply.code(200).send({
-          metadata: {
-            latencyMs,
-            server: server.key,
-            tool: body.tool,
-          },
-          result,
-        });
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : 'Tool execution failed';
-
-        void logMcpRequest(
-          ctx.tenantDbName,
-          ctx.tenantId,
-          ctx.projectId,
-          server.key,
-          body.tool,
-          'error',
-          0,
-          { arguments: args, tool: body.tool },
-          undefined,
-          errorMessage,
-          ctx.tokenRecord._id?.toString(),
-        );
-
-        return reply.code(502).send({ error: errorMessage });
+      if (!outcome.ok) {
+        return reply.code(502).send({ error: outcome.error });
       }
+
+      return reply.code(200).send({
+        metadata: {
+          latencyMs: outcome.latencyMs,
+          server: server.key,
+          tool: body.tool,
+        },
+        result: outcome.result,
+      });
     } catch (error) {
       logger.error('Client MCP execute error', { error });
       return reply.code(500).send({
@@ -171,7 +222,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         const errorPayload = jsonRpcError(id, -32600, 'Invalid Request: method is required');
         if (session && sessionId) {
           sendSseResponse(sessionId, errorPayload);
-          return reply.code(202).send();
+          return reply.code(400).send(errorPayload);
         }
         return reply.code(400).send(errorPayload);
       }
@@ -184,7 +235,18 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(200).send(payload);
       };
 
+      // Direct (sessionless) JSON-RPC = streamable HTTP; via an SSE session
+      // the message endpoint belongs to the SSE transport.
+      const requiredProtocol = session && sessionId ? 'sse' : 'streamable-http';
+
       if (method === 'initialize') {
+        const server = await getMcpServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
+        if (!server) {
+          return respond(jsonRpcError(id, -32001, 'MCP server not found'));
+        }
+        if (!protocolEnabled(server, requiredProtocol)) {
+          return respond(jsonRpcError(id, -32003, `${requiredProtocol} access is disabled for this MCP server`));
+        }
         return respond(jsonRpcOk(id, {
           capabilities: {
             tools: { listChanged: false },
@@ -206,6 +268,9 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         const server = await getMcpServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
         if (!server) {
           return respond(jsonRpcError(id, -32001, 'MCP server not found'));
+        }
+        if (!protocolEnabled(server, requiredProtocol)) {
+          return respond(jsonRpcError(id, -32003, `${requiredProtocol} access is disabled for this MCP server`));
         }
 
         return respond(jsonRpcOk(id, {
@@ -234,60 +299,42 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         if (server.status !== 'active') {
           return respond(jsonRpcError(id, -32002, 'MCP server is disabled'));
         }
+        if (!protocolEnabled(server, requiredProtocol)) {
+          return respond(jsonRpcError(id, -32003, `${requiredProtocol} access is disabled for this MCP server`));
+        }
 
-        try {
-          const { latencyMs, result } = await executeMcpTool(server, toolName, args);
+        const outcome = await runToolCall(server, toolName, args, {
+          tenantDbName: ctx.tenantDbName,
+          tenantId: ctx.tenantId,
+          projectId: ctx.projectId,
+          transport: session && sessionId ? 'sse' : 'jsonrpc',
+          caller: {
+            tokenId: ctx.tokenRecord._id?.toString(),
+            userId: ctx.user?._id?.toString(),
+          },
+          sessionId: sessionId ?? undefined,
+        });
 
-          void logMcpRequest(
-            ctx.tenantDbName,
-            ctx.tenantId,
-            ctx.projectId,
-            server.key,
-            toolName,
-            'success',
-            latencyMs,
-            { arguments: args, tool: toolName },
-            typeof result === 'object' ? result as Record<string, unknown> : { value: result },
-            undefined,
-            ctx.tokenRecord._id?.toString(),
-          );
-
+        if (outcome.ok) {
           return respond(jsonRpcOk(id, {
             content: [
               {
-                text: typeof result === 'string' ? result : JSON.stringify(result),
+                text: typeof outcome.result === 'string' ? outcome.result : JSON.stringify(outcome.result),
                 type: 'text',
               },
             ],
             isError: false,
           }));
-        } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : 'Tool execution failed';
-
-          void logMcpRequest(
-            ctx.tenantDbName,
-            ctx.tenantId,
-            ctx.projectId,
-            server.key,
-            toolName,
-            'error',
-            0,
-            { arguments: args, tool: toolName },
-            undefined,
-            errorMessage,
-            ctx.tokenRecord._id?.toString(),
-          );
-
-          return respond(jsonRpcOk(id, {
-            content: [
-              {
-                text: errorMessage,
-                type: 'text',
-              },
-            ],
-            isError: true,
-          }));
         }
+        return respond(jsonRpcOk(id, {
+          content: [
+            {
+              text: outcome.error,
+              type: 'text',
+            },
+          ],
+          isError: true,
+        }));
       }
 
       return respond(jsonRpcError(id, -32601, `Method not found: ${method}`));
@@ -308,6 +355,9 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
       }
       if (server.status !== 'active') {
         return reply.code(403).send({ error: 'MCP server is disabled' });
+      }
+      if (!protocolEnabled(server, 'sse')) {
+        return reply.code(403).send({ error: 'SSE access is disabled for this MCP server' });
       }
 
       const sessionId = randomUUID();

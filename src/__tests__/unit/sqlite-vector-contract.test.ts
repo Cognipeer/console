@@ -238,6 +238,50 @@ describe('Dimension validation', () => {
   });
 });
 
+// ── Store-file loss self-heal ───────────────────────────────────────────
+// The console DB keeps the index record (externalId) forever, but the
+// provider's sqlite file can be recreated empty (deleted basePath, /tmp
+// cleanup, relative path resolved against a new cwd). Upsert must recreate
+// the parent index row instead of dying on the FK constraint.
+
+describe('Store-file loss self-heal', () => {
+  it('upserts into a recreated (empty) store file using a stale handle', async () => {
+    const isolatedDir = mkdtempSync(path.join(tmpdir(), 'cognipeer-console-vec-heal-'));
+    try {
+      const runtimeA = await SqliteVectorProviderContract.createRuntime({
+        tenantId: TENANT_ID,
+        providerKey: 'heal-provider',
+        credentials: {} as Record<string, never>,
+        settings: { basePath: isolatedDir },
+      });
+      const handle = await runtimeA.createIndex({
+        name: 'heal-index',
+        dimension: 2,
+        metric: 'cosine',
+      });
+
+      // Simulate file loss + process restart: wipe the store and build a
+      // fresh runtime, then upsert with the handle recorded in the console DB.
+      rmSync(path.join(isolatedDir, TENANT_ID), { recursive: true, force: true });
+      const runtimeB = await SqliteVectorProviderContract.createRuntime({
+        tenantId: TENANT_ID,
+        providerKey: 'heal-provider',
+        credentials: {} as Record<string, never>,
+        settings: { basePath: isolatedDir },
+      });
+
+      await runtimeB.upsertVectors(handle, [{ id: 'h1', values: [1, 0] }]);
+
+      const result = await runtimeB.queryVectors(handle, { vector: [1, 0], topK: 1 });
+      expect(result.matches[0].id).toBe('h1');
+      const indexes = await runtimeB.listIndexes();
+      expect(indexes.map((i) => i.externalId)).toContain(handle.externalId);
+    } finally {
+      rmSync(isolatedDir, { recursive: true, force: true });
+    }
+  });
+});
+
 // ── Metric variants ─────────────────────────────────────────────────────
 
 describe('Metric variants', () => {

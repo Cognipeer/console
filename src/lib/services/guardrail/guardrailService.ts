@@ -1,6 +1,7 @@
 import { getDatabase } from '@/lib/database';
 import type { IGuardrail, GuardrailType } from '@/lib/database';
 import { fireAndForget } from '@/lib/core/asyncTask';
+import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { generateUniqueSlugKey } from './keyGeneration';
 import type {
   CreateGuardrailInput,
@@ -219,10 +220,24 @@ function logEvaluation(params: {
   requestId?: string;
 }): void {
   const { tenantDbName, record, result, text, latencyMs, phase, source, requestId } = params;
+  // Resolve attribution + rollup synchronously so the request ALS is in scope.
+  // No tokens/cost — LLM-backed checks flow through the models service.
+  const attribution = recordUsageEvent({
+    tenantDbName,
+    tenantId: record.tenantId,
+    projectId: record.projectId,
+    service: 'guardrails',
+    refKey: record.key,
+    status: 'success',
+    latencyMs,
+  });
   fireAndForget('guardrail-eval-log', async () => {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
     await db.createGuardrailEvaluationLog({
+      userId: attribution.userId,
+      apiTokenId: attribution.apiTokenId,
+      actorType: attribution.actorType,
       tenantId: record.tenantId,
       projectId: record.projectId,
       guardrailId: typeof record._id === 'string' ? record._id : (record._id?.toString() ?? ''),

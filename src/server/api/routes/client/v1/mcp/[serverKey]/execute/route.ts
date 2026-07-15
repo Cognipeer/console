@@ -61,19 +61,19 @@ export async function POST(
       const { result, latencyMs } = await executeMcpTool(server, body.tool, args);
 
       // Log success
-      void logMcpRequest(
-        tenantDbName,
+      void logMcpRequest(tenantDbName, {
         tenantId,
         projectId,
-        server.key,
-        body.tool,
-        'success',
+        serverKey: server.key,
+        toolName: body.tool,
+        status: 'success',
         latencyMs,
-        { tool: body.tool, arguments: args },
-        typeof result === 'object' ? result as Record<string, unknown> : { value: result },
-        undefined,
-        ctx.tokenRecord._id?.toString(),
-      );
+        requestPayload: { tool: body.tool, arguments: args },
+        responsePayload: typeof result === 'object' ? result as Record<string, unknown> : { value: result },
+        callerTokenId: ctx.tokenRecord._id?.toString(),
+        callerType: 'api',
+        transport: 'rest',
+      });
 
       return NextResponse.json({
         result,
@@ -87,19 +87,19 @@ export async function POST(
       const errorMessage = execError instanceof Error ? execError.message : 'Tool execution failed';
 
       // Log error
-      void logMcpRequest(
-        tenantDbName,
+      void logMcpRequest(tenantDbName, {
         tenantId,
         projectId,
-        server.key,
-        body.tool,
-        'error',
-        0,
-        { tool: body.tool, arguments: args },
-        undefined,
+        serverKey: server.key,
+        toolName: body.tool,
+        status: 'error',
+        latencyMs: 0,
+        requestPayload: { tool: body.tool, arguments: args },
         errorMessage,
-        ctx.tokenRecord._id?.toString(),
-      );
+        callerTokenId: ctx.tokenRecord._id?.toString(),
+        callerType: 'api',
+        transport: 'rest',
+      });
 
       return NextResponse.json({ error: errorMessage }, { status: 502 });
     }

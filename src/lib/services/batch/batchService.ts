@@ -13,6 +13,7 @@ import type { BatchJobEndpoint, IBatchJob, IBatchJobItem } from '@/lib/database'
 import { getQueue, type QueuePayload } from '@/lib/core/queue';
 import { queueNameFor } from '@/lib/core/cluster';
 import { downloadFile } from '@/lib/services/files/fileService';
+import { resolveUsageAttribution } from '@/lib/services/usage/usageEvents';
 import type { BatchContext, BatchRequestLine, CreateBatchInput } from './types';
 
 const logger = createLogger('batch:service');
@@ -151,7 +152,13 @@ export async function createBatch(ctx: BatchContext, input: CreateBatchInput): P
   requests.forEach((line, index) => validateRequestLine(input.endpoint, line, index));
 
   const db = await withTenantDb(ctx.tenantDbName);
+  // Attribution is stamped at creation (request ALS in scope); the rollup
+  // event is emitted at finalize by the runner.
+  const attribution = resolveUsageAttribution();
   const job = await db.createBatchJob({
+    userId: attribution.userId,
+    apiTokenId: attribution.apiTokenId,
+    actorType: attribution.actorType,
     tenantId: ctx.tenantId,
     projectId: ctx.projectId,
     endpoint: input.endpoint,

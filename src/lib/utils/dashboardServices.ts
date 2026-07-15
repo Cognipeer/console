@@ -22,6 +22,7 @@ import {
   IconReportAnalytics,
   IconRobot,
   IconServerBolt,
+  IconSettings,
   IconShield,
   IconSparkles,
   IconTimeline,
@@ -111,6 +112,8 @@ export type DashboardServiceDefinition = {
   requiresEnterprise?: boolean;
   /** Closed-source overlay module that provides this service. */
   enterpriseModule?: string;
+  /** Settings entry — shown in the Settings section of the left nav, not the services launcher. */
+  isSettings?: boolean;
 };
 
 /* JSON schema mirror — used internally to type the raw config. */
@@ -135,6 +138,7 @@ interface RawPlatformServicesConfig {
     badge?: 'new';
     requiresEnterprise?: boolean;
     enterpriseModule?: string;
+    settings?: boolean;
   }>;
 }
 
@@ -167,6 +171,7 @@ const DASHBOARD_SERVICE_DEFINITIONS: DashboardServiceDefinition[] = RAW.services
     badge: entry.badge,
     requiresEnterprise: entry.requiresEnterprise,
     enterpriseModule: entry.enterpriseModule,
+    isSettings: entry.settings,
   }),
 );
 
@@ -213,6 +218,23 @@ export function getDashboardServices(
     return true;
   });
 }
+
+/**
+ * Synthetic definition for the Settings section of the left nav. Not part of
+ * the service registry — used as the sub-nav header when a settings page
+ * (projects, providers, members, tokens, audit, license) is active.
+ */
+export const SETTINGS_NAV_SECTION: DashboardServiceDefinition = {
+  id: 'settings' as DashboardServiceDefinition['id'],
+  href: '/dashboard/projects',
+  navLabelKey: 'settings',
+  navDescriptionKey: 'settingsDescription',
+  icon: IconSettings,
+  iconName: 'IconSettings',
+  category: 'admin',
+  tags: [],
+  searchKeywords: [],
+};
 
 /** All known service definitions (does not honor permissions). */
 export const ALL_DASHBOARD_SERVICES: ReadonlyArray<DashboardServiceDefinition> =

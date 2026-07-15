@@ -6,9 +6,35 @@
 import { getDatabase, type IAgentTracingEvent } from '@/lib/database';
 import type { IAgentTracingSession } from '@/lib/database/provider/types.base';
 import { createLogger } from '@/lib/core/logger';
+import {
+  recordUsageEvent,
+  type UsageAttribution,
+} from '@/lib/services/usage/usageEvents';
 import dayjs from 'dayjs';
 
 const logger = createLogger('agent-tracing');
+
+/**
+ * Usage accounting for one newly created tracing session. Call ONLY when a
+ * session is created (not on merge/update ingests) and stamp the returned
+ * attribution onto the session doc. No tokens — trace token counts are
+ * observability data and would double count the models service.
+ */
+export function recordTracingSessionCreated(params: {
+  tenantDbName: string;
+  tenantId: string;
+  projectId?: string;
+  agentName?: string;
+}): UsageAttribution {
+  return recordUsageEvent({
+    tenantDbName: params.tenantDbName,
+    tenantId: params.tenantId,
+    projectId: params.projectId,
+    service: 'tracing',
+    refKey: params.agentName ?? '',
+    status: 'success',
+  });
+}
 
 type SessionListQuery = Record<string, unknown> & {
   agentName?: string;

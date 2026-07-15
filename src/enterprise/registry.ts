@@ -74,6 +74,93 @@ export const enterpriseReconcilers: BootstrapHook[] = [];
 export const enterprisePublicApiPaths: string[] = [];
 export const enterprisePublicApiPrefixes: string[] = [];
 
+// ── MCP sandbox runner seam ───────────────────────────────────────────────
+// Runs stdio MCP servers on persistent sandboxes (enterprise sandbox module).
+// The overlay assigns `mcpSandboxRunner.current`; community leaves it null and
+// the create flow rejects executionMode 'sandbox' with a clear message.
+export interface McpSandboxRunnerServerRef {
+  tenantDbName: string;
+  tenantId: string;
+  projectId?: string;
+  serverId: string;
+  serverKey: string;
+}
+
+export interface McpSandboxRunnerConfig {
+  runtime: 'npx' | 'uvx';
+  packageName: string;
+  args?: string[];
+  env?: Record<string, string>;
+  templateKey?: string;
+  resources?: { cpuCores?: number; memoryMb?: number };
+  instanceId?: string;
+}
+
+export interface McpSandboxToolInfo {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+
+export interface McpSandboxRunner {
+  /**
+   * Ensure a persistent sandbox is running the given stdio MCP server.
+   * Returns the (possibly newly provisioned) instance id so the caller can
+   * persist it on the server record.
+   */
+  ensureRunning(
+    ref: McpSandboxRunnerServerRef,
+    config: McpSandboxRunnerConfig,
+  ): Promise<{ instanceId: string }>;
+  /** Discover the tool list from the sandbox-hosted MCP server. */
+  listTools(
+    ref: McpSandboxRunnerServerRef,
+    config: McpSandboxRunnerConfig,
+  ): Promise<McpSandboxToolInfo[]>;
+  /** Call a tool on the sandbox-hosted MCP server. */
+  callTool(
+    ref: McpSandboxRunnerServerRef,
+    config: McpSandboxRunnerConfig,
+    toolName: string,
+    args: Record<string, unknown>,
+  ): Promise<unknown>;
+  /** Stop/release the sandbox backing the server (delete/disable flows). */
+  release(ref: McpSandboxRunnerServerRef, instanceId?: string): Promise<void>;
+  /** Lightweight status probe for the monitor screen. */
+  status(ref: McpSandboxRunnerServerRef, instanceId?: string): Promise<{
+    state: 'running' | 'stopped' | 'failed' | 'unknown';
+    detail?: string;
+  }>;
+}
+
+export const mcpSandboxRunner: { current: McpSandboxRunner | null } = { current: null };
+
+// ── MCP Aegis guardrail seam ──────────────────────────────────────────────
+// Pre/post hooks around every MCP tool call. The enterprise overlay wires
+// these to the Aegis enforcement plane (shield evaluation); community is a
+// no-op. A pre-hook may block the call by returning `{ allowed: false }`.
+export interface McpGuardrailContext {
+  tenantId: string;
+  projectId?: string;
+  serverKey: string;
+  toolName: string;
+  shieldId?: string;
+  mode: 'off' | 'monitor' | 'enforce';
+}
+
+export interface McpGuardrailHook {
+  beforeToolCall(
+    ctx: McpGuardrailContext,
+    args: Record<string, unknown>,
+  ): Promise<{ allowed: boolean; reason?: string; args?: Record<string, unknown> }>;
+  afterToolCall(
+    ctx: McpGuardrailContext,
+    result: unknown,
+  ): Promise<{ allowed: boolean; reason?: string; result?: unknown }>;
+}
+
+export const mcpGuardrailHook: { current: McpGuardrailHook | null } = { current: null };
+
 // ── Edition flag ──────────────────────────────────────────────────────────
 // True only when the overlay has replaced this file. Lets the UI/runtime tell
 // "feature absent (community build)" apart from "feature present but FREE tier".

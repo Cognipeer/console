@@ -40,6 +40,7 @@ interface TopbarV2Props {
   onLogout: () => void;
   onNavigate: (href: string) => void;
   onMobileNavClick: () => void;
+  settingsHref?: string;
 }
 
 export default function TopbarV2({
@@ -51,6 +52,7 @@ export default function TopbarV2({
   onLogout,
   onNavigate,
   onMobileNavClick,
+  settingsHref = '/dashboard/tokens',
 }: TopbarV2Props) {
   const { colorScheme, toggleColorScheme } = useMantineColorScheme();
   const tNav = useTranslations('navigation');
@@ -174,7 +176,7 @@ export default function TopbarV2({
           <Menu.Label>{tAccount('menuLabel')}</Menu.Label>
           <Menu.Item
             leftSection={<IconSettings size={14} />}
-            onClick={() => onNavigate('/dashboard/tokens')}
+            onClick={() => onNavigate(settingsHref)}
           >
             {tAccount('settings')}
           </Menu.Item>

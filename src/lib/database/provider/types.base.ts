@@ -216,7 +216,7 @@ export interface ITenantUserDirectoryEntry {
   updatedAt?: Date;
 }
 
-export interface IAgentTracingSession {
+export interface IAgentTracingSession extends IUsageAttributionFields {
   _id?: ObjectId | string;
   sessionId: string;
   /** W3C-compatible trace identifier (32 hex chars). */
@@ -678,6 +678,27 @@ export interface IModel {
   updatedAt?: Date;
 }
 
+export type UsageActorType = 'user' | 'api_token' | 'system';
+export type UsageSource = 'api' | 'dashboard' | 'system';
+
+/**
+ * Shared attribution envelope for every per-service usage/log record. Filled
+ * centrally from the request context (see lib/services/usage/usageEvents.ts) —
+ * services must not populate these by hand.
+ *
+ * No `source` field here on purpose: several raw logs already carry a
+ * service-specific `source` column, and the request origin is derivable from
+ * `actorType` (user→dashboard, api_token→api, system→system). The rollup
+ * (`usage_daily`) stores the derived origin as its own `source` dimension.
+ */
+export interface IUsageAttributionFields {
+  /** Owner of the request: token owner's userId or the session user. */
+  userId?: string;
+  /** API token that made the request (client v1 paths only). */
+  apiTokenId?: string;
+  actorType?: UsageActorType;
+}
+
 export interface IModelUsageCostSnapshot {
   currency: string;
   inputCost?: number;
@@ -686,7 +707,7 @@ export interface IModelUsageCostSnapshot {
   totalCost?: number;
 }
 
-export interface IModelUsageLog {
+export interface IModelUsageLog extends IUsageAttributionFields {
   _id?: ObjectId | string;
   tenantId: string;
   projectId?: string;
@@ -709,6 +730,72 @@ export interface IModelUsageLog {
   /** Present on Dynamic LLM router rows (route 'chat.completions.router'). */
   routing?: IModelUsageRouting;
   createdAt?: Date;
+}
+
+/**
+ * Cross-service daily usage rollup — THE primary source for usage/spend
+ * reports. One row per (dimension tuple, UTC day); counters are additive and
+ * written via `incrementUsageDaily` upserts, so concurrent writers are safe.
+ *
+ * Dimension fields use '' (never NULL/undefined) when absent: SQLite treats
+ * NULLs as distinct in UNIQUE constraints, which would silently duplicate
+ * rows for the same logical dimension tuple.
+ */
+export interface IUsageDaily {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId: string;
+  userId: string;
+  apiTokenId: string;
+  actorType: string;
+  source: string;
+  /** Service slug: 'models' | 'websearch' | 'mcp' | 'tools' | 'rag' | ... */
+  service: string;
+  /** Service-local resource key: modelKey, searchKey, toolKey, ... */
+  refKey: string;
+  /** UTC calendar day, 'YYYY-MM-DD'. */
+  day: string;
+  /**
+   * UTC midnight of `day` as a real Date — set by the mixins on first insert.
+   * Exists because the EE reports engine builds time-range filters and
+   * time-bucket expressions against Date-typed fields.
+   */
+  dayDate?: Date;
+  requests: number;
+  errors: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  totalTokens: number;
+  costUsd: number;
+  latencyMsSum: number;
+  latencyCount: number;
+  /** Service-specific additive counters (pages, audioSeconds, results, ...). */
+  units?: Record<string, number>;
+  updatedAt?: Date;
+}
+
+/** Additive increment for one usage_daily row (all counters default 0). */
+export interface IUsageDailyIncrement {
+  tenantId: string;
+  projectId: string;
+  userId: string;
+  apiTokenId: string;
+  actorType: string;
+  source: string;
+  service: string;
+  refKey: string;
+  day: string;
+  requests?: number;
+  errors?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedInputTokens?: number;
+  totalTokens?: number;
+  costUsd?: number;
+  latencyMsSum?: number;
+  latencyCount?: number;
+  units?: Record<string, number>;
 }
 
 export interface IModelUsageAggregate {

@@ -19,6 +19,7 @@ import {
   deleteVectors,
 } from '@/lib/services/vector/vectorService';
 import { runReranker } from '@/lib/services/reranker';
+import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import type {
   CreateRagModuleRequest,
   UpdateRagModuleRequest,
@@ -667,9 +668,23 @@ export async function queryRag(
 
   const latencyMs = Date.now() - startTime;
 
-  // 6. Log the query
+  // 6. Log the query.
+  // No tokens — query embedding flows through the models service.
+  const attribution = recordUsageEvent({
+    tenantDbName,
+    tenantId,
+    projectId,
+    service: 'rag',
+    refKey: request.ragModuleKey,
+    status: 'success',
+    latencyMs,
+    units: { matches: matches.length },
+  });
   try {
     await db.createRagQueryLog({
+      userId: attribution.userId,
+      apiTokenId: attribution.apiTokenId,
+      actorType: attribution.actorType,
       tenantId,
       projectId,
       ragModuleKey: request.ragModuleKey,

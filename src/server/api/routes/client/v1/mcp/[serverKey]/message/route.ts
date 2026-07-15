@@ -153,19 +153,19 @@ export async function POST(
       try {
         const { result, latencyMs } = await executeMcpTool(server, toolName, args);
 
-        void logMcpRequest(
-          tenantDbName,
+        void logMcpRequest(tenantDbName, {
           tenantId,
           projectId,
-          server.key,
+          serverKey: server.key,
           toolName,
-          'success',
+          status: 'success',
           latencyMs,
-          { tool: toolName, arguments: args },
-          typeof result === 'object' ? (result as Record<string, unknown>) : { value: result },
-          undefined,
-          ctx.tokenRecord._id?.toString(),
-        );
+          requestPayload: { tool: toolName, arguments: args },
+          responsePayload: typeof result === 'object' ? (result as Record<string, unknown>) : { value: result },
+          callerTokenId: ctx.tokenRecord._id?.toString(),
+          callerType: 'api',
+          transport: 'jsonrpc',
+        });
 
         return respond(
           jsonRpcOk(id, {
@@ -181,19 +181,19 @@ export async function POST(
       } catch (execError: unknown) {
         const errorMessage = execError instanceof Error ? execError.message : 'Tool execution failed';
 
-        void logMcpRequest(
-          tenantDbName,
+        void logMcpRequest(tenantDbName, {
           tenantId,
           projectId,
-          server.key,
+          serverKey: server.key,
           toolName,
-          'error',
-          0,
-          { tool: toolName, arguments: args },
-          undefined,
+          status: 'error',
+          latencyMs: 0,
+          requestPayload: { tool: toolName, arguments: args },
           errorMessage,
-          ctx.tokenRecord._id?.toString(),
-        );
+          callerTokenId: ctx.tokenRecord._id?.toString(),
+          callerType: 'api',
+          transport: 'jsonrpc',
+        });
 
         return respond(
           jsonRpcOk(id, {

@@ -476,3 +476,335 @@ describeForEachProvider('Guardrail word lists CRUD', (getDb) => {
     expect(await db.findGuardrailWordListById(String(created._id))).toBeNull();
   });
 });
+
+describeForEachProvider('Beta access codes', (getDb) => {
+  let code: string;
+
+  beforeEach(() => {
+    code = `BETA-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+  });
+
+  it('creates a code normalized to uppercase and is idempotent', async () => {
+    const db = getDb();
+    const created = await db.createBetaAccessCode({ code: ` ${code.toLowerCase()} `, note: 'wave' });
+    expect(created.code).toBe(code);
+    expect(created.status).toBe('active');
+    expect(created.note).toBe('wave');
+
+    const again = await db.createBetaAccessCode({ code, note: 'other' });
+    expect(again.note).toBe('wave');
+
+    const found = await db.findBetaAccessCode(code.toLowerCase());
+    expect(found?.status).toBe('active');
+  });
+
+  it('consumes an active code exactly once and releases it back', async () => {
+    const db = getDb();
+    await db.createBetaAccessCode({ code });
+
+    expect(await db.consumeBetaAccessCode(code, { email: 'a@b.com' })).toBe(true);
+    expect(await db.consumeBetaAccessCode(code, { email: 'c@d.com' })).toBe(false);
+
+    const used = await db.findBetaAccessCode(code);
+    expect(used?.status).toBe('used');
+    expect(used?.usedByEmail).toBe('a@b.com');
+    expect(used?.usedAt).toBeInstanceOf(Date);
+
+    expect(await db.releaseBetaAccessCode(code)).toBe(true);
+    const released = await db.findBetaAccessCode(code);
+    expect(released?.status).toBe('active');
+    expect(released?.usedByEmail).toBeNull();
+    expect(released?.usedAt).toBeNull();
+
+    expect(await db.consumeBetaAccessCode(code, { email: 'c@d.com' })).toBe(true);
+  });
+
+  it('does not consume unknown codes and lists by status', async () => {
+    const db = getDb();
+    expect(await db.consumeBetaAccessCode('NOPE-0000-0000', { email: 'a@b.com' })).toBe(false);
+
+    await db.createBetaAccessCode({ code });
+    const active = await db.listBetaAccessCodes({ status: 'active' });
+    expect(active.map((c) => c.code)).toContain(code);
+  });
+});
+
+describeForEachProvider('Usage daily rollup (incrementUsageDaily/listUsageDaily)', (getDb) => {
+  let slug: string;
+  let dbName: string;
+  let tenantId: string;
+
+  const dims = (overrides: Record<string, string> = {}) => ({
+    tenantId,
+    projectId: 'proj-1',
+    userId: 'user-1',
+    apiTokenId: 'tok-1',
+    actorType: 'api_token',
+    source: 'api',
+    service: 'models',
+    refKey: 'gpt-4o',
+    day: '2026-07-15',
+    ...overrides,
+  });
+
+  beforeEach(async () => {
+    slug = `usage-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    dbName = `tenant_${slug}`;
+    const db = getDb();
+    const tenant = await db.createTenant({
+      companyName: 'Usage Co',
+      slug,
+      dbName,
+      licenseType: 'FREE',
+      ownerId: 'pending',
+    });
+    tenantId = String(tenant._id);
+    await db.switchToTenant(dbName);
+  });
+
+  it('upserts additively on the same dimension tuple (incl. units merge)', async () => {
+    const db = getDb();
+    await db.incrementUsageDaily([
+      { ...dims(), requests: 1, inputTokens: 100, outputTokens: 50, totalTokens: 150, costUsd: 0.5, latencyMsSum: 200, latencyCount: 1, units: { toolCalls: 2 } },
+    ]);
+    await db.incrementUsageDaily([
+      { ...dims(), requests: 1, errors: 1, inputTokens: 10, outputTokens: 5, totalTokens: 15, costUsd: 0.1, latencyMsSum: 100, latencyCount: 1, units: { toolCalls: 1, pages: 3 } },
+    ]);
+
+    const rows = await db.listUsageDaily({ userId: 'user-1' });
+    expect(rows).toHaveLength(1);
+    const row = rows[0];
+    expect(row.requests).toBe(2);
+    expect(row.errors).toBe(1);
+    expect(row.inputTokens).toBe(110);
+    expect(row.outputTokens).toBe(55);
+    expect(row.totalTokens).toBe(165);
+    expect(row.costUsd).toBeCloseTo(0.6, 10);
+    expect(row.latencyMsSum).toBe(300);
+    expect(row.latencyCount).toBe(2);
+    expect(row.units).toMatchObject({ toolCalls: 3, pages: 3 });
+    expect(row.day).toBe('2026-07-15');
+    // dayDate is the Date twin of `day` used by the reports engine.
+    expect(row.dayDate).toBeInstanceOf(Date);
+    expect(row.dayDate!.toISOString()).toBe('2026-07-15T00:00:00.000Z');
+  });
+
+  it('splits rows on differing dimensions and filters correctly', async () => {
+    const db = getDb();
+    await db.incrementUsageDaily([
+      { ...dims(), requests: 1 },
+      { ...dims({ userId: 'user-2', apiTokenId: '' }), requests: 2 },
+      { ...dims({ service: 'websearch', refKey: 'srch-1' }), requests: 3 },
+      { ...dims({ day: '2026-07-14' }), requests: 4 },
+    ]);
+
+    expect(await db.listUsageDaily({})).toHaveLength(4);
+    expect(await db.listUsageDaily({ userId: 'user-2' })).toHaveLength(1);
+    expect(await db.listUsageDaily({ service: 'websearch' })).toHaveLength(1);
+    const ranged = await db.listUsageDaily({ fromDay: '2026-07-15', toDay: '2026-07-15' });
+    expect(ranged).toHaveLength(3);
+    const tokenRows = await db.listUsageDaily({ apiTokenId: 'tok-1' });
+    expect(tokenRows.map((r) => r.requests).sort()).toEqual([1, 3, 4]);
+  });
+
+  it('handles empty-string sentinel dimensions without duplicating rows', async () => {
+    const db = getDb();
+    const anon = dims({ userId: '', apiTokenId: '', actorType: 'system', source: 'system' });
+    await db.incrementUsageDaily([{ ...anon, requests: 1 }]);
+    await db.incrementUsageDaily([{ ...anon, requests: 1 }]);
+
+    const rows = await db.listUsageDaily({ userId: '' });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].requests).toBe(2);
+  });
+});
+
+describeForEachProvider('Model usage log attribution roundtrip', (getDb) => {
+  let slug: string;
+  let dbName: string;
+  let tenantId: string;
+
+  beforeEach(async () => {
+    slug = `attr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    dbName = `tenant_${slug}`;
+    const db = getDb();
+    const tenant = await db.createTenant({
+      companyName: 'Attr Co',
+      slug,
+      dbName,
+      licenseType: 'FREE',
+      ownerId: 'pending',
+    });
+    tenantId = String(tenant._id);
+    await db.switchToTenant(dbName);
+  });
+
+  it('persists and returns userId/apiTokenId/actorType on model usage logs', async () => {
+    const db = getDb();
+    await db.createModelUsageLog({
+      tenantId,
+      projectId: 'proj-1',
+      modelKey: 'gpt-4o',
+      requestId: 'req-1',
+      route: 'chat.completions',
+      status: 'success',
+      providerRequest: {},
+      providerResponse: {},
+      inputTokens: 10,
+      outputTokens: 5,
+      totalTokens: 15,
+      userId: 'user-9',
+      apiTokenId: 'tok-9',
+      actorType: 'api_token',
+    });
+
+    const logs = await db.listModelUsageLogs('gpt-4o', {}, 'proj-1');
+    expect(logs).toHaveLength(1);
+    expect(logs[0].userId).toBe('user-9');
+    expect(logs[0].apiTokenId).toBe('tok-9');
+    expect(logs[0].actorType).toBe('api_token');
+  });
+});
+
+describeForEachProvider('MCP Hub servers + audit logs', (getDb) => {
+  let slug: string;
+  let dbName: string;
+  let tenantId: string;
+
+  beforeEach(async () => {
+    slug = `mcphub-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    dbName = `tenant_${slug}`;
+    const db = getDb();
+    const tenant = await db.createTenant({
+      companyName: 'McpHub Co',
+      slug,
+      dbName,
+      licenseType: 'FREE',
+      ownerId: 'owner-1',
+    });
+    tenantId = String(tenant._id);
+    await db.switchToTenant(dbName);
+  });
+
+  it('round-trips a multi-source server (remote + stdio + exposure + aegis + lastError)', async () => {
+    const db = getDb();
+    const created = await db.createMcpServer({
+      tenantId,
+      projectId: 'proj-1',
+      key: 'remote-server',
+      name: 'Remote server',
+      sourceType: 'remote',
+      remoteConfig: { url: 'https://mcp.example.com/mcp', transport: 'streamable-http' },
+      stdioConfig: undefined,
+      tools: [{ name: 'echo', description: 'Echo', inputSchema: { type: 'object' } }],
+      toolsDiscoveredAt: new Date('2026-07-15T10:00:00.000Z'),
+      upstreamBaseUrl: undefined,
+      upstreamAuth: { type: 'token', sealed: 'sealed-blob' },
+      exposure: { protocols: ['streamable-http'], accessMode: 'public' },
+      aegis: { mode: 'monitor', shieldId: 'shield-1' },
+      status: 'active',
+      endpointSlug: 'abcd1234abcd1234',
+      totalRequests: 0,
+      lastError: null,
+      createdBy: 'user-1',
+    });
+
+    const found = await db.findMcpServerById(String(created._id));
+    expect(found?.sourceType).toBe('remote');
+    expect(found?.remoteConfig?.url).toBe('https://mcp.example.com/mcp');
+    expect(found?.openApiSpec ?? undefined).toBeUndefined();
+    expect(found?.upstreamBaseUrl ?? undefined).toBeUndefined();
+    expect(found?.upstreamAuth.sealed).toBe('sealed-blob');
+    expect(found?.exposure?.accessMode).toBe('public');
+    expect(found?.exposure?.protocols).toEqual(['streamable-http']);
+    expect(found?.aegis?.mode).toBe('monitor');
+
+    const bySlug = await db.findMcpServerByEndpointSlug('abcd1234abcd1234');
+    expect(String(bySlug?._id)).toBe(String(created._id));
+
+    const updated = await db.updateMcpServer(String(created._id), {
+      stdioConfig: {
+        runtime: 'npx',
+        packageName: '@x/y',
+        executionMode: 'sandbox',
+        envSealed: 'env-blob',
+        sandbox: { resources: { cpuCores: 2, memoryMb: 1024 } },
+      },
+      lastError: { message: 'boom', at: new Date() },
+    });
+    expect(updated?.stdioConfig?.packageName).toBe('@x/y');
+    expect(updated?.stdioConfig?.sandbox?.resources?.memoryMb).toBe(1024);
+    expect(updated?.lastError?.message).toBe('boom');
+  });
+
+  it('persists extended request-log fields and lists recent logs project-wide', async () => {
+    const db = getDb();
+    await db.createMcpRequestLog({
+      tenantId,
+      projectId: 'proj-1',
+      serverKey: 'srv-a',
+      toolName: 'echo',
+      status: 'success',
+      latencyMs: 42,
+      callerType: 'public',
+      callerUserId: 'user-7',
+      transport: 'jsonrpc',
+      sourceType: 'stdio',
+      sessionId: 'sess-1',
+    });
+    await db.createMcpRequestLog({
+      tenantId,
+      projectId: 'proj-2',
+      serverKey: 'srv-b',
+      toolName: 'other',
+      status: 'error',
+      errorMessage: 'nope',
+    });
+
+    const logs = await db.listMcpRequestLogs('srv-a');
+    expect(logs).toHaveLength(1);
+    expect(logs[0].callerType).toBe('public');
+    expect(logs[0].transport).toBe('jsonrpc');
+    expect(logs[0].sourceType).toBe('stdio');
+    expect(logs[0].sessionId).toBe('sess-1');
+
+    const recentP1 = await db.listRecentMcpRequestLogs({ projectId: 'proj-1' });
+    expect(recentP1).toHaveLength(1);
+    expect(recentP1[0].serverKey).toBe('srv-a');
+  });
+
+  it('creates and filters audit logs', async () => {
+    const db = getDb();
+    await db.createMcpAuditLog({
+      tenantId,
+      projectId: 'proj-1',
+      serverId: 'id-1',
+      serverKey: 'srv-a',
+      action: 'create',
+      changes: { name: { to: 'Server A' } },
+      performedBy: 'user-1',
+      ipAddress: '10.0.0.1',
+      userAgent: 'vitest',
+    });
+    await db.createMcpAuditLog({
+      tenantId,
+      projectId: 'proj-1',
+      serverKey: 'srv-b',
+      action: 'secrets_change',
+      performedBy: 'user-2',
+    });
+
+    const all = await db.listMcpAuditLogs({ projectId: 'proj-1' });
+    expect(all).toHaveLength(2);
+
+    const filtered = await db.listMcpAuditLogs({ serverKey: 'srv-a' });
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0].action).toBe('create');
+    expect(filtered[0].changes?.name?.to).toBe('Server A');
+    expect(filtered[0].ipAddress).toBe('10.0.0.1');
+
+    const byAction = await db.listMcpAuditLogs({ action: 'secrets_change' });
+    expect(byAction).toHaveLength(1);
+    expect(byAction[0].performedBy).toBe('user-2');
+  });
+});

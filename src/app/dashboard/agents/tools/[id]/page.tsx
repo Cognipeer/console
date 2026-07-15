@@ -401,7 +401,7 @@ export default function ToolDetailPage() {
       const res = await fetch(`/api/tools/${params.id}?includeAggregate=true`, { cache: 'no-store' });
       if (!res.ok) {
         if (res.status === 404) {
-          router.push('/dashboard/tools');
+          router.push('/dashboard/agents/tools');
           return;
         }
         throw new Error('Failed to load tool');
@@ -609,7 +609,7 @@ export default function ToolDetailPage() {
       const res = await fetch(`/api/tools/${params.id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Failed to delete');
       notifications.show({ title: 'Deleted', message: `"${tool?.name}" was deleted`, color: 'red' });
-      router.push('/dashboard/tools');
+      router.push('/dashboard/agents/tools');
     } catch (err) {
       notifications.show({
         title: 'Error',
@@ -668,7 +668,7 @@ export default function ToolDetailPage() {
     <>
       <PageContainer>
       <PageHeader
-        eyebrow="Build · Tool"
+        eyebrow="Build · Agents · Tool"
         title={tool.name}
         subtitle={tool.description || 'No description'}
         actions={
@@ -677,7 +677,7 @@ export default function ToolDetailPage() {
               variant="default"
               size="xs"
               leftSection={<IconArrowLeft size={14} />}
-              onClick={() => router.push('/dashboard/tools')}
+              onClick={() => router.push('/dashboard/agents/tools')}
             >
               Back
             </Button>

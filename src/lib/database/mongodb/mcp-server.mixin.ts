@@ -1,12 +1,13 @@
 /**
  * MongoDB Provider – MCP Server operations mixin
  *
- * Includes MCP server CRUD, request logging, and aggregation.
+ * Includes MCP server CRUD, request logging, audit logging and aggregation.
  */
 
 import { ObjectId } from 'mongodb';
 import type {
   IMcpServer,
+  IMcpAuditLog,
   IMcpRequestLog,
   IMcpRequestAggregate,
   McpServerStatus,
@@ -71,6 +72,14 @@ export function McpServerMixin<TBase extends Constructor<MongoDBProviderBase>>(B
       const doc = await db
         .collection(COLLECTIONS.mcpServers)
         .findOne(filter);
+      return doc as unknown as IMcpServer | null;
+    }
+
+    async findMcpServerByEndpointSlug(endpointSlug: string): Promise<IMcpServer | null> {
+      const db = this.getTenantDb();
+      const doc = await db
+        .collection(COLLECTIONS.mcpServers)
+        .findOne({ endpointSlug });
       return doc as unknown as IMcpServer | null;
     }
 
@@ -151,6 +160,24 @@ export function McpServerMixin<TBase extends Constructor<MongoDBProviderBase>>(B
         .sort({ createdAt: -1 })
         .skip(options?.skip ?? 0)
         .limit(options?.limit ?? 50)
+        .toArray();
+      return docs as unknown as IMcpRequestLog[];
+    }
+
+    async listRecentMcpRequestLogs(options?: {
+      projectId?: string;
+      limit?: number;
+      status?: string;
+    }): Promise<IMcpRequestLog[]> {
+      const db = this.getTenantDb();
+      const filter: Record<string, unknown> = {};
+      if (options?.projectId !== undefined) filter.projectId = options.projectId;
+      if (options?.status) filter.status = options.status;
+      const docs = await db
+        .collection(COLLECTIONS.mcpRequestLogs)
+        .find(filter)
+        .sort({ createdAt: -1 })
+        .limit(Math.min(options?.limit ?? 50, 500))
         .toArray();
       return docs as unknown as IMcpRequestLog[];
     }
@@ -265,6 +292,42 @@ export function McpServerMixin<TBase extends Constructor<MongoDBProviderBase>>(B
         toolBreakdown,
         timeseries,
       };
+    }
+
+    // ── MCP Audit Logs ───────────────────────────────────────────────
+
+    async createMcpAuditLog(
+      log: Omit<IMcpAuditLog, '_id' | 'createdAt'>,
+    ): Promise<IMcpAuditLog> {
+      const db = this.getTenantDb();
+      const now = new Date();
+      const doc = { ...log, createdAt: now };
+      const result = await db
+        .collection(COLLECTIONS.mcpAuditLogs)
+        .insertOne(doc);
+      return { ...doc, _id: result.insertedId.toString() };
+    }
+
+    async listMcpAuditLogs(options?: {
+      projectId?: string;
+      serverKey?: string;
+      action?: string;
+      limit?: number;
+      skip?: number;
+    }): Promise<IMcpAuditLog[]> {
+      const db = this.getTenantDb();
+      const filter: Record<string, unknown> = {};
+      if (options?.projectId !== undefined) filter.projectId = options.projectId;
+      if (options?.serverKey) filter.serverKey = options.serverKey;
+      if (options?.action) filter.action = options.action;
+      const docs = await db
+        .collection(COLLECTIONS.mcpAuditLogs)
+        .find(filter)
+        .sort({ createdAt: -1 })
+        .skip(options?.skip ?? 0)
+        .limit(Math.min(options?.limit ?? 50, 500))
+        .toArray();
+      return docs as unknown as IMcpAuditLog[];
     }
   };
 }
