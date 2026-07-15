@@ -4,6 +4,7 @@ import {
   listFileProviders,
 } from '@/lib/services/files';
 import type { ProviderStatus } from '@/lib/services/providers/providerService';
+import { ensureBuiltinProviders } from '@/lib/services/providers/builtinProviders';
 import { requireProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
 import { createLogger } from '@/lib/core/logger';
 
@@ -28,6 +29,13 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const statusParam = searchParams.get('status');
     const driver = searchParams.get('driver') ?? undefined;
+
+    await ensureBuiltinProviders(
+      tenantDbName,
+      tenantId,
+      projectContext.projectId,
+      userId,
+    );
 
     const providers = await listFileProviders(
       tenantDbName,

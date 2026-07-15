@@ -214,12 +214,12 @@
       "id": "sqlite-vector",
       "driver": "sqlite-vector",
       "name": "SQLite Vector",
-      "tagline": "Local SQLite with vector extension",
-      "description": "Lightweight on-disk vector storage backed by SQLite.",
+      "tagline": "Built-in local vector store",
+      "description": "Persistent on-disk vector storage backed by SQLite. Zero configuration — works out of the box without any external service.",
       "domains": ["vector"],
       "color": "#0f80cc",
-      "tags": ["self-hosted", "embedded"],
-      "aliases": ["sqlite"]
+      "tags": ["built-in", "self-hosted", "embedded", "default"],
+      "aliases": ["sqlite", "builtin"]
     },
     {
       "id": "orama",
@@ -259,12 +259,12 @@
       "id": "local-filesystem",
       "driver": "local-filesystem",
       "name": "Local filesystem",
-      "tagline": "Store files on the server disk",
-      "description": "Persist files on the same host where Cognipeer runs.",
+      "tagline": "Built-in local file storage",
+      "description": "Persist files on the same host where Cognipeer runs. Zero configuration — works out of the box without any external service.",
       "domains": ["file"],
       "color": "#64748b",
-      "tags": ["self-hosted", "dev"],
-      "aliases": ["disk", "local"]
+      "tags": ["built-in", "self-hosted", "default"],
+      "aliases": ["disk", "local", "builtin"]
     },
     {
       "id": "mistral-ocr",
