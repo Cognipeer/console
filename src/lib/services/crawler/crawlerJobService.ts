@@ -121,7 +121,20 @@ export async function runCrawlJobLocal(
       const written = await persistPage(db, job, page);
       if (page.type === 'html') pagesProcessed += 1;
       else if (page.type === 'file') filesProcessed += 1;
-      else if (page.type === 'error') errorsCount += 1;
+      else if (page.type === 'error') {
+        errorsCount += 1;
+        // Page-level errors were previously only ever persisted to
+        // `crawl_results` (visible if someone happens to open this exact
+        // job's result row in the UI) and never written to the
+        // application logs — logging them here means they show up
+        // alongside every other server-side log line during the run.
+        logger.error('Crawl page failed', {
+          jobId,
+          url: page.url,
+          parentUrl: page.parentUrl,
+          error: page.errorMessage,
+        });
+      }
 
       if (plan.maxPages > 0 && pagesProcessed + filesProcessed >= plan.maxPages) {
         limitReached = true;
@@ -144,7 +157,16 @@ export async function runCrawlJobLocal(
       }
 
       if (page.type === 'html' || page.type === 'file') {
-        await fireWebhook(job, page, written.ragDocumentId, 'page').catch(() => undefined);
+        // A failed per-page webhook delivery used to vanish with no trace at
+        // all (neither logs nor DB) — log it so a misconfigured/unreachable
+        // webhook endpoint is actually visible instead of silently dropped.
+        await fireWebhook(job, page, written.ragDocumentId, 'page').catch((err) => {
+          logger.warn('Per-page webhook delivery failed', {
+            jobId,
+            url: page.url,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
       }
     }
   } catch (err) {
@@ -196,7 +218,13 @@ export async function runCrawlJobLocal(
       filesProcessed,
       errorsCount,
       durationMs,
-    }, event).catch(() => undefined);
+    }, event).catch((err) => {
+      logger.warn('Summary webhook delivery failed', {
+        jobId,
+        status,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
 
     logger.info('Crawl job ended', {
       jobId,
@@ -240,6 +268,15 @@ async function persistPage(
     ragDocumentId = ingest.ragDocumentId;
     ragStatus = ingest.ragStatus;
     ragError = ingest.errorMessage;
+    if (ragError) {
+      // Previously only persisted on the crawl_result row (silent unless
+      // someone opens that specific page's detail modal) — log it too.
+      logger.warn('RAG ingestion failed for crawled page', {
+        jobId: String(job._id),
+        url: page.url,
+        error: ragError,
+      });
+    }
   }
 
   await db.createCrawlResult({

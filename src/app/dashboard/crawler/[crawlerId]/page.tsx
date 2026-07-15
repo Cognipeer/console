@@ -17,10 +17,12 @@ import {
   Textarea,
   TextInput,
   Title,
+  Tooltip,
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import {
+  IconAlertTriangle,
   IconArrowLeft,
   IconExternalLink,
   IconPlayerPlay,
@@ -700,7 +702,16 @@ export default function CrawlerDetailPage() {
     {
       key: 'status',
       label: 'Status',
-      render: (j) => <StatusBadge status={j.status} />,
+      render: (j) => (
+        <Group gap={6} wrap="nowrap">
+          <StatusBadge status={j.status} />
+          {j.errorMessage ? (
+            <Tooltip label={j.errorMessage} multiline maw={420} withArrow>
+              <IconAlertTriangle size={15} color="var(--ds-err)" style={{ flexShrink: 0 }} />
+            </Tooltip>
+          ) : null}
+        </Group>
+      ),
     },
     {
       key: 'startedAt',
