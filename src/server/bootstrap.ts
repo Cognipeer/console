@@ -16,7 +16,11 @@ import { listAutomations } from '@/lib/services/automations';
 import { browserManager } from '@/lib/services/browser/browserManager';
 import { reconcileOrphanedBrowserSessions } from '@/lib/services/browser/browserOperationsService';
 import { startBrowserQueueConsumer } from '@/lib/services/browser/browserConsumer';
-import { startCrawlerQueueConsumer, startCrawlerScheduler } from '@/lib/services/crawler';
+import {
+  startCrawlerQueueConsumer,
+  startCrawlerScheduler,
+  reconcileOrphanedCrawlJobs,
+} from '@/lib/services/crawler';
 import { startOcrJobQueueConsumer } from '@/lib/services/ocrJobs';
 import { startBatchQueueConsumer } from '@/lib/services/batch';
 import { startDatasetGenerationConsumer } from '@/lib/services/evaluation/datasetGenerationConsumer';
@@ -174,6 +178,14 @@ export async function bootstrapApplication(): Promise<void> {
     await reconcileOrphanedBrowserSessions();
   } catch (error) {
     logger.warn('Browser session reconciliation failed during startup', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  try {
+    await reconcileOrphanedCrawlJobs();
+  } catch (error) {
+    logger.warn('Crawl job reconciliation failed during startup', {
       error: error instanceof Error ? error.message : String(error),
     });
   }

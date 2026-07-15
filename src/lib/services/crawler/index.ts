@@ -18,6 +18,7 @@ export {
   listCrawlerUrls,
 } from './crawlerService';
 export { startCrawlerQueueConsumer } from './crawlerConsumer';
+export { reconcileOrphanedCrawlJobs } from './crawlerJobReconciler';
 export {
   startCrawlerScheduler,
   stopCrawlerScheduler,
