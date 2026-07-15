@@ -93,11 +93,14 @@ export const config = {
     /*
      * Match all request paths except for the ones starting with:
      * - api (handled by the custom Fastify server)
+     * - _next/webpack-hmr (dev-mode Fast Refresh websocket — mixing Next
+     *   Middleware with a raw upgrade-track request breaks the handshake;
+     *   there's nothing to protect here anyway, it carries no data)
      * - _next/static (static files)
      * - _next/image (image optimization files)
      * - favicon.ico (favicon file)
      * - public static assets (images/fonts)
      */
-    '/((?!api|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|woff|woff2|ttf|otf|eot)$).*)',
+    '/((?!api|_next/webpack-hmr|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|woff|woff2|ttf|otf|eot)$).*)',
   ],
 };
