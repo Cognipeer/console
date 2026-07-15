@@ -326,7 +326,7 @@ function buildConfig(source: ConfigSource): AppConfig {
     },
 
     registration: {
-      mode: oneOf(source, 'REGISTRATION_MODE', ['open', 'beta', 'disabled'], 'beta'),
+      mode: oneOf(source, 'REGISTRATION_MODE', ['open', 'beta', 'disabled'], 'open'),
       bootstrapOrgName: str(source, 'BOOTSTRAP_ORG_NAME', ''),
       bootstrapAdminEmail: str(source, 'BOOTSTRAP_ADMIN_EMAIL', ''),
       bootstrapAdminPassword: str(source, 'BOOTSTRAP_ADMIN_PASSWORD', ''),
