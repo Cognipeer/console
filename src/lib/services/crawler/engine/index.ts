@@ -37,6 +37,39 @@ import {
 // rendering (axios failed: ...after Playwright rendering)" message).
 class FetchStageError extends Error {}
 
+// Bounds how long a single page/attachment's markdown conversion may run.
+// Observed in production: a bug in a transitive PDF-parsing dependency
+// (unpdf, used for PDF text extraction/OCR) could leave `await
+// convertToMarkdown(...)` pending forever — the rejection it eventually
+// threw came from a promise detached from the one being awaited, so it
+// surfaced only as an "unhandledRejection" at the process level while the
+// awaited call itself never resolved nor rejected. Since `fileToMarkdown`/
+// `htmlToMarkdown` already catch real errors internally, that hang was the
+// ONE failure mode not covered — it froze the whole crawl job's for-await
+// loop indefinitely (job stuck in "Running" with no further progress and
+// no "Crawl job ended" log ever printed). This timeout guarantees forward
+// progress regardless of the root cause: if conversion doesn't finish in
+// time, the page is kept with no body (rather than the crawl stalling).
+const MARKDOWN_CONVERSION_TIMEOUT_MS = 60_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
 export * from './types';
 
 /**
@@ -227,11 +260,15 @@ export async function* crawl(
           if (fetched.type === 'file') {
             let attachmentBody: string | undefined;
             if (fetched.fileBuffer) {
-              attachmentBody = await fileToMarkdown({
-                buffer: fetched.fileBuffer,
-                fileName: deriveAttachmentFileName(item.url, fetched.contentType),
-                options: plan.markdownOptions,
-              }).catch((err: unknown) => {
+              attachmentBody = await withTimeout(
+                fileToMarkdown({
+                  buffer: fetched.fileBuffer,
+                  fileName: deriveAttachmentFileName(item.url, fetched.contentType),
+                  options: plan.markdownOptions,
+                }),
+                MARKDOWN_CONVERSION_TIMEOUT_MS,
+                `Attachment markdown conversion for ${item.url}`,
+              ).catch((err: unknown) => {
                 logger.warn('Attachment markdown conversion failed', {
                   url: item.url,
                   error: (err as Error).message,
@@ -253,9 +290,16 @@ export async function* crawl(
           }
           const html = fetched.html ?? '';
           const meta = extractMeta(html);
-          const body = await htmlToMarkdown({
-            html,
-            options: plan.markdownOptions,
+          const body = await withTimeout(
+            htmlToMarkdown({ html, options: plan.markdownOptions }),
+            MARKDOWN_CONVERSION_TIMEOUT_MS,
+            `HTML markdown conversion for ${item.url}`,
+          ).catch((err: unknown) => {
+            logger.warn('HTML markdown conversion failed; keeping page with no body', {
+              url: item.url,
+              error: (err as Error).message,
+            });
+            return '';
           });
           // Discover children only if autoCrawl and we have depth budget
           let children: string[] = [];
