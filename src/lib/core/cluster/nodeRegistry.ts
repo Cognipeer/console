@@ -13,11 +13,11 @@
 import os from 'node:os';
 import { getConfig } from '../config';
 import { createLogger } from '../logger';
+import { getThisNodeIdentity, resetNodeIdentityForTests } from '../nodeIdentity';
 import { getDatabase, type INodeRecord, type NodeRole, type NodeStatus } from '@/lib/database';
 
 const log = createLogger('cluster.node-registry');
 
-let resolvedNodeName: string | null = null;
 let heartbeatTimer: NodeJS.Timeout | null = null;
 let staleSweepTimer: NodeJS.Timeout | null = null;
 let registered = false;
@@ -38,14 +38,7 @@ function readPackageVersion(): string {
  * Stable for the lifetime of the process.
  */
 export function getThisNodeName(): string {
-  if (resolvedNodeName) return resolvedNodeName;
-  const cfg = getConfig();
-  if (cfg.node.name.trim().length > 0) {
-    resolvedNodeName = cfg.node.name.trim();
-  } else {
-    resolvedNodeName = `${os.hostname()}-${process.pid}`;
-  }
-  return resolvedNodeName;
+  return getThisNodeIdentity();
 }
 
 export function getThisNodeRole(): NodeRole {
@@ -158,7 +151,7 @@ export async function findClusterNode(name: string): Promise<INodeRecord | null>
 
 /** Useful for tests. */
 export function resetNodeRegistryForTests(): void {
-  resolvedNodeName = null;
+  resetNodeIdentityForTests();
   registered = false;
   if (heartbeatTimer) {
     clearInterval(heartbeatTimer);

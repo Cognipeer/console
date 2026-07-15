@@ -634,6 +634,12 @@ export class SQLiteProviderBase {
       'cancelRequestedAt',
       'cancelRequestedAt TEXT',
     );
+    this.ensureTableColumn(
+      db,
+      TABLES.crawlJobs,
+      'nodeId',
+      'nodeId TEXT',
+    );
   }
 
   private migrateOcrJobsSchema(db: Database.Database): void {

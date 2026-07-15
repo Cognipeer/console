@@ -10,6 +10,7 @@ import type {
 } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
+import { getThisNodeIdentity } from '@/lib/core/nodeIdentity';
 
 function toId(value: ObjectId | string | undefined): string {
   if (!value) return '';
@@ -154,7 +155,14 @@ export function CrawlerMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
         .collection<ICrawlJob>(COLLECTIONS.crawlJobs)
         .findOneAndUpdate(
           { _id: objectId(id), tenantId, status: 'queued' },
-          { $set: { status: 'running', startedAt, updatedAt: new Date() } },
+          {
+            $set: {
+              status: 'running',
+              startedAt,
+              updatedAt: new Date(),
+              nodeId: getThisNodeIdentity(),
+            },
+          },
           { returnDocument: 'after' },
         );
       if (!result) return null;

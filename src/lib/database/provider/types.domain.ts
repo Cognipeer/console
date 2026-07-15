@@ -1379,7 +1379,7 @@ export interface ICrawler {
 
   http: ICrawlerHttpConfig;
   /** Optional markdown extractor options forwarded to @cognipeer/to-markdown. */
-  markdownOptions?: { ocr?: { enabled: boolean; languages?: string[] } };
+  markdownOptions?: { ocr?: { enabled: boolean; modelKey?: string; languages?: string[] } };
 
   rag?: ICrawlerRagBinding;
   webhook?: ICrawlerWebhookConfig;
@@ -1415,7 +1415,7 @@ export interface ICrawlPlanSnapshot {
   scope: ICrawlerScope;
   http: ICrawlerHttpConfig;
   downloadableMimes?: string[];
-  markdownOptions?: { ocr?: { enabled: boolean; languages?: string[] } };
+  markdownOptions?: { ocr?: { enabled: boolean; modelKey?: string; languages?: string[] } };
   rag?: ICrawlerRagBinding;
   webhook?: ICrawlerWebhookConfig;
 }
@@ -1446,6 +1446,15 @@ export interface ICrawlJob {
    * A `queued` job is canceled outright instead (see `requestCrawlJobCancel`).
    */
   cancelRequestedAt?: Date;
+  /**
+   * Name of the node (`getThisNodeName()`) that atomically claimed this job
+   * via `claimCrawlJob`. Lets `reconcileOrphanedCrawlJobs()` tell a job that
+   * is genuinely still running on a live sibling node apart from one that
+   * was truly orphaned by a dead node — without it, ANY node's boot would
+   * blindly fail every `running` job across the whole fleet, including ones
+   * another still-alive node is actively (and successfully) executing.
+   */
+  nodeId?: string;
   /** Per-run callback override (ad-hoc tek-shot run desteği). */
   callbackUrl?: string;
   errorMessage?: string;

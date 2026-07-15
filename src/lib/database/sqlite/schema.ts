@@ -1603,6 +1603,7 @@ export const TENANT_SCHEMA_SQL = `
     errorsCount INTEGER NOT NULL DEFAULT 0,
     limitReached INTEGER NOT NULL DEFAULT 0,
     cancelRequestedAt TEXT,
+    nodeId TEXT,
     callbackUrl TEXT,
     errorMessage TEXT,
     metadata TEXT DEFAULT '{}',

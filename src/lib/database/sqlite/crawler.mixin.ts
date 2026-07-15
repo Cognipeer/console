@@ -9,6 +9,7 @@ import type {
 } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
+import { getThisNodeIdentity } from '@/lib/core/nodeIdentity';
 
 export function CrawlerMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TBase) {
   return class CrawlerOps extends Base {
@@ -237,9 +238,9 @@ export function CrawlerMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       const db = this.getTenantDb();
       const now = this.now();
       const result = db.prepare(`
-        UPDATE ${TABLES.crawlJobs} SET status = 'running', startedAt = @startedAt, updatedAt = @updatedAt
+        UPDATE ${TABLES.crawlJobs} SET status = 'running', startedAt = @startedAt, updatedAt = @updatedAt, nodeId = @nodeId
         WHERE id = @id AND tenantId = @tenantId AND status = 'queued'
-      `).run({ id, tenantId, startedAt: startedAt.toISOString(), updatedAt: now });
+      `).run({ id, tenantId, startedAt: startedAt.toISOString(), updatedAt: now, nodeId: getThisNodeIdentity() });
       if (result.changes !== 1) return null;
       return this.findCrawlJobById(id);
     }
@@ -367,6 +368,7 @@ export function CrawlerMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         errorsCount: Number(row.errorsCount) || 0,
         limitReached: Number(row.limitReached) === 1,
         cancelRequestedAt: row.cancelRequestedAt ? this.toDate(row.cancelRequestedAt) : undefined,
+        nodeId: (row.nodeId as string) ?? undefined,
         callbackUrl: (row.callbackUrl as string) ?? undefined,
         errorMessage: (row.errorMessage as string) ?? undefined,
         metadata: this.parseJson(row.metadata, {}),
