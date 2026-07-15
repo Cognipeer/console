@@ -1,5 +1,5 @@
-import type { NextConfig } from "next";
-import path from "node:path";
+import type { NextConfig } from 'next';
+import path from 'node:path';
 
 // The E2E/load-test Docker image is built with E2E_BUILD=1. It only needs a
 // *runnable* server, not a type-clean one — so we skip the strict build-time
@@ -16,6 +16,16 @@ const nextConfig: NextConfig = {
     'winston',
     'async_hooks',
     '@cognipeer/agent-sdk',
+    // BullMQ's ESM build re-exports `classes/child-processor.js`, which has
+    // a dynamic `require(expression)` used only by its "sandboxed processor"
+    // feature (running a job handler from a separate file in a child
+    // process). We always pass an in-process function to `new Worker(...)`
+    // (see bullmqQueueProvider.ts), so that code path never actually runs —
+    // but webpack still can't statically analyze the expression and warns
+    // "Critical dependency: the request of a dependency is an expression"
+    // on every build. Marking it external skips webpack's bundling/analysis
+    // entirely (Node's native `require` handles the dynamic path fine).
+    'bullmq',
     // Optional vector / database driver packages — loaded dynamically only
     // when the matching provider is configured. Marking them external keeps
     // Next.js from trying to bundle them at build time when they may not be
