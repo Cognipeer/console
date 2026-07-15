@@ -21,6 +21,8 @@ export function AuditMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       outcome?: IAuditLog['outcome'];
       service?: string;
       action?: string;
+      method?: string;
+      q?: string;
       from?: Date;
       to?: Date;
       limit?: number;
@@ -32,6 +34,12 @@ export function AuditMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       if (filters.outcome) query.outcome = filters.outcome;
       if (filters.service) query.service = filters.service;
       if (filters.action) query.action = filters.action;
+      if (filters.method) query.method = filters.method;
+      if (filters.q) {
+        const escaped = filters.q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const rx = { $regex: escaped, $options: 'i' };
+        query.$or = [{ event: rx }, { path: rx }, { actorEmail: rx }];
+      }
       if (filters.from || filters.to) {
         const createdAt: Record<string, Date> = {};
         if (filters.from) createdAt.$gte = filters.from;

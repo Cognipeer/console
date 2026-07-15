@@ -27,6 +27,12 @@ const AUTH_LABELS: Record<string, string> = {
   basic: 'Basic',
 };
 
+const SOURCE_LABELS: Record<string, string> = {
+  openapi: 'OpenAPI',
+  remote: 'Remote MCP',
+  stdio: 'Package',
+};
+
 export default function McpServersPage() {
   const [servers, setServers] = useState<McpServerView[]>([]);
   const [loading, setLoading] = useState(true);
@@ -153,21 +159,40 @@ export default function McpServersPage() {
       ),
     },
     {
-      key: 'upstream',
-      label: 'Upstream',
-      render: (s) => (
-        <span className="ds-mono ds-muted" style={{ fontSize: 12 }}>
-          {s.upstreamBaseUrl.length > 40
-            ? `${s.upstreamBaseUrl.slice(0, 40)}…`
-            : s.upstreamBaseUrl}
-        </span>
-      ),
+      key: 'source',
+      label: 'Source',
+      render: (s) => {
+        const target = s.sourceType === 'remote'
+          ? s.remoteConfig?.url ?? ''
+          : s.sourceType === 'stdio'
+            ? `${s.stdioConfig?.runtime ?? 'npx'} ${s.stdioConfig?.packageName ?? ''}`
+            : s.upstreamBaseUrl ?? '';
+        return (
+          <div className="ds-col" style={{ gap: 2, whiteSpace: 'nowrap' }}>
+            <span className="ds-badge">{SOURCE_LABELS[s.sourceType] ?? 'OpenAPI'}</span>
+            <span className="ds-mono ds-muted" style={{ fontSize: 11.5 }}>
+              {target.length > 40 ? `${target.slice(0, 40)}…` : target}
+            </span>
+          </div>
+        );
+      },
     },
     {
-      key: 'auth',
-      label: 'Auth',
+      key: 'access',
+      label: 'Access',
       render: (s) => (
-        <span className="ds-badge">{AUTH_LABELS[s.upstreamAuth?.type] ?? 'None'}</span>
+        <div className="ds-col" style={{ gap: 2, whiteSpace: 'nowrap' }}>
+          <span className="ds-badge">
+            {s.exposure?.accessMode === 'public' ? 'Public URL' : 'API token'}
+          </span>
+          <span className="ds-faint" style={{ fontSize: 11 }}>
+            {(s.exposure?.protocols ?? [])
+              .map((p) => (p === 'streamable-http' ? 'HTTP' : 'SSE'))
+              .join(' + ') || 'HTTP + SSE'}
+            {' · '}
+            {AUTH_LABELS[s.upstreamAuth?.type] ?? 'None'}
+          </span>
+        </div>
       ),
     },
     {

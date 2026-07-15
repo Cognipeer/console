@@ -30,6 +30,7 @@ import { startAlertScheduler } from '@/lib/services/alerts/alertScheduler';
 import { startAnalysisScheduler } from '@/lib/services/analysis/analysisScheduler';
 import { startRedTeamScheduler } from '@/lib/services/redteam/redTeamScheduler';
 import { enterpriseReconcilers } from '@/enterprise/registry';
+import { ensureBootstrapOrganization } from '@/lib/services/auth/bootstrapOrganization';
 import { ensureServerEnvLoaded } from './env';
 
 const logger = createLogger('startup');
@@ -174,6 +175,16 @@ export async function bootstrapApplication(): Promise<void> {
     await reconcileOrphanedBrowserSessions();
   } catch (error) {
     logger.warn('Browser session reconciliation failed during startup', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  // On-prem: seed the single organization + owner from BOOTSTRAP_* envs.
+  // No-op when the envs are unset or a tenant already exists.
+  try {
+    await ensureBootstrapOrganization();
+  } catch (error) {
+    logger.error('Bootstrap organization creation failed during startup', {
       error: error instanceof Error ? error.message : String(error),
     });
   }

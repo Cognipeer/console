@@ -46,6 +46,8 @@ export const MAIN_DB_INDEXES: Record<string, IndexDef[]> = {
   tenant_user_directory: [{ key: { email: 1 }, options: { name: 'idx_email' } }],
   // Cluster heartbeat stale-sweep filters by lastHeartbeatAt.
   nodes: [{ key: { lastHeartbeatAt: 1 }, options: { name: 'idx_heartbeat' } }],
+  // Signup gating: codes are claimed atomically by exact value.
+  beta_access_codes: [{ key: { code: 1 }, options: { name: 'idx_code', unique: true } }],
 };
 
 /**
@@ -62,6 +64,13 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
   model_usage_logs: [
     { key: { modelKey: 1, createdAt: -1 }, options: { name: 'idx_modelKey_createdAt' } },
     { key: { projectId: 1, createdAt: -1 }, options: { name: 'idx_project_createdAt' } },
+    { key: { tenantId: 1, userId: 1, createdAt: -1 }, options: { name: 'idx_user_createdAt' } },
+  ],
+  // usage_daily's unique dimension index is created by the usage mixin's own
+  // ensure routine; these are the report-query indexes.
+  usage_daily: [
+    { key: { tenantId: 1, day: -1 }, options: { name: 'idx_usage_daily_day' } },
+    { key: { tenantId: 1, userId: 1, day: -1 }, options: { name: 'idx_usage_daily_user_day' } },
   ],
   browser_session_events: [
     { key: { sessionId: 1, createdAt: 1 }, options: { name: 'idx_session_createdAt' } },

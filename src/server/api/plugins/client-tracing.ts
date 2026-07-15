@@ -13,6 +13,7 @@ import {
   checkRateLimit,
   checkResourceQuota,
 } from '@/lib/quota/quotaGuard';
+import { recordTracingSessionCreated } from '@/lib/services/agentTracing';
 import { mapOtlpToInternalModels, type OtlpExportTraceServiceRequest } from '@/lib/services/otlpMapper';
 import {
   getApiTokenContextForRequest,
@@ -576,7 +577,18 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
               ctx.projectId,
             );
           } else {
-            await backgroundDb.createAgentTracingSession(mergedSession);
+            const attribution = recordTracingSessionCreated({
+              tenantDbName: ctx.tenantDbName,
+              tenantId: ctx.tenantId,
+              projectId: ctx.projectId,
+              agentName: mergedSession.agentName,
+            });
+            await backgroundDb.createAgentTracingSession({
+              ...mergedSession,
+              userId: attribution.userId,
+              apiTokenId: attribution.apiTokenId,
+              actorType: attribution.actorType,
+            });
           }
         }
       });
@@ -734,7 +746,18 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
         if (existing) {
           await backgroundDb.updateAgentTracingSession(sessionId, sessionDoc, ctx.projectId);
         } else {
-          await backgroundDb.createAgentTracingSession(sessionDoc);
+          const attribution = recordTracingSessionCreated({
+            tenantDbName: ctx.tenantDbName,
+            tenantId: ctx.tenantId,
+            projectId: ctx.projectId,
+            agentName: sessionDoc.agentName,
+          });
+          await backgroundDb.createAgentTracingSession({
+            ...sessionDoc,
+            userId: attribution.userId,
+            apiTokenId: attribution.apiTokenId,
+            actorType: attribution.actorType,
+          });
         }
 
         await backgroundDb.deleteAgentTracingEvents(sessionId, ctx.projectId);
@@ -895,7 +918,18 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
         if (existing) {
           await backgroundDb.updateAgentTracingSession(sessionId, sessionDoc, ctx.projectId);
         } else {
-          await backgroundDb.createAgentTracingSession(sessionDoc);
+          const attribution = recordTracingSessionCreated({
+            tenantDbName: ctx.tenantDbName,
+            tenantId: ctx.tenantId,
+            projectId: ctx.projectId,
+            agentName: sessionDoc.agentName,
+          });
+          await backgroundDb.createAgentTracingSession({
+            ...sessionDoc,
+            userId: attribution.userId,
+            apiTokenId: attribution.apiTokenId,
+            actorType: attribution.actorType,
+          });
         }
       });
 

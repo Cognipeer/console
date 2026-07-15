@@ -1,4 +1,5 @@
 import type { ObjectId } from 'mongodb';
+import type { IUsageAttributionFields } from './types.base';
 import type { GuardrailAction, GuardrailType } from './types.domain';
 // ── Memory types ─────────────────────────────────────────────────────────
 
@@ -61,7 +62,7 @@ export interface IMemoryItem {
   updatedAt?: Date;
 }
 
-export interface IGuardrailEvaluationLog {
+export interface IGuardrailEvaluationLog extends IUsageAttributionFields {
   _id?: ObjectId | string;
   tenantId: string;
   projectId?: string;
@@ -179,6 +180,66 @@ export interface IMcpAuthConfig {
   /** For 'basic': username + password */
   username?: string;
   password?: string;
+  /**
+   * Encrypted-at-rest secret payload (AES-256-GCM). When set, the plaintext
+   * secret fields above are absent from the stored record and must be
+   * recovered through the MCP secret vault before use.
+   */
+  sealed?: string;
+}
+
+/** Where the server's tools come from. Legacy records (no field) are 'openapi'. */
+export type McpSourceType = 'openapi' | 'remote' | 'stdio';
+
+/** Protocols the gateway exposes for a server. */
+export type McpExposureProtocol = 'streamable-http' | 'sse';
+
+/** How callers authenticate against the exposed MCP endpoint. */
+export type McpAccessMode = 'token' | 'public';
+
+export interface IMcpExposureConfig {
+  protocols: McpExposureProtocol[];
+  accessMode: McpAccessMode;
+}
+
+/** Upstream remote MCP server the gateway proxies. */
+export interface IMcpRemoteConfig {
+  url: string;
+  transport: 'streamable-http' | 'sse';
+}
+
+export type McpStdioRuntime = 'npx' | 'uvx';
+export type McpStdioExecutionMode = 'subprocess' | 'sandbox';
+
+export interface IMcpSandboxResources {
+  cpuCores?: number;
+  memoryMb?: number;
+}
+
+/** Locally-launched MCP server (npx / uvx package) config. */
+export interface IMcpStdioConfig {
+  runtime: McpStdioRuntime;
+  /** Package spec, e.g. "@modelcontextprotocol/server-everything" or "mcp-server-fetch" */
+  packageName: string;
+  args?: string[];
+  /** Plaintext env var names → values. Secret values are sealed into envSealed. */
+  env?: Record<string, string>;
+  /** Encrypted-at-rest env payload (AES-256-GCM JSON of Record<string,string>). */
+  envSealed?: string;
+  executionMode: McpStdioExecutionMode;
+  /** Only for executionMode 'sandbox'. */
+  sandbox?: {
+    templateKey?: string;
+    resources?: IMcpSandboxResources;
+    /** Persistent sandbox instance backing this server (set once provisioned). */
+    instanceId?: string;
+  };
+}
+
+/** Aegis integration seam — enforcement is wired by the enterprise overlay. */
+export interface IMcpAegisConfig {
+  shieldId?: string;
+  mode: 'off' | 'monitor' | 'enforce';
 }
 
 export interface IMcpServer {
@@ -188,18 +249,32 @@ export interface IMcpServer {
   key: string;
   name: string;
   description?: string;
-  /** Raw OpenAPI spec JSON string */
-  openApiSpec: string;
-  /** Parsed tool definitions extracted from the spec */
+  /** Tool source. Legacy records without the field are treated as 'openapi'. */
+  sourceType?: McpSourceType;
+  /** Raw OpenAPI spec JSON string (sourceType 'openapi' only). */
+  openApiSpec?: string;
+  /** Remote upstream MCP config (sourceType 'remote'). */
+  remoteConfig?: IMcpRemoteConfig;
+  /** Stdio launch config (sourceType 'stdio'). */
+  stdioConfig?: IMcpStdioConfig;
+  /** Parsed/discovered tool definitions */
   tools: IMcpTool[];
-  /** Upstream base URL (derived from spec or overridden) */
-  upstreamBaseUrl: string;
-  /** Authentication for upstream API calls */
+  /** When tools were last discovered from a remote/stdio source. */
+  toolsDiscoveredAt?: Date;
+  /** Upstream base URL (sourceType 'openapi'). */
+  upstreamBaseUrl?: string;
+  /** Authentication for upstream API/MCP calls */
   upstreamAuth: IMcpAuthConfig;
+  /** Endpoint exposure: enabled protocols + access mode. Default: both + token. */
+  exposure?: IMcpExposureConfig;
+  /** Aegis shield binding (prep — enforcement lands with the EE integration). */
+  aegis?: IMcpAegisConfig;
   status: McpServerStatus;
   /** Unique slug used in the public MCP endpoint URL */
   endpointSlug: string;
   totalRequests?: number;
+  /** Last runtime error observed for this server (stdio spawn/remote probe). */
+  lastError?: { message: string; at: Date } | null;
   metadata?: Record<string, unknown>;
   createdBy: string;
   updatedBy?: string;
@@ -212,13 +287,19 @@ export interface IMcpTool {
   description: string;
   /** JSON Schema for tool input parameters */
   inputSchema: Record<string, unknown>;
-  /** HTTP method mapped from the OpenAPI operation */
-  httpMethod: string;
-  /** Path template from the OpenAPI spec */
-  httpPath: string;
+  /** HTTP method mapped from the OpenAPI operation (sourceType 'openapi'). */
+  httpMethod?: string;
+  /** Path template from the OpenAPI spec (sourceType 'openapi'). */
+  httpPath?: string;
 }
 
-export interface IMcpRequestLog {
+/** Who initiated an MCP tool call. */
+export type McpCallerType = 'dashboard' | 'api' | 'agent' | 'public';
+
+/** Which surface the call arrived on. */
+export type McpCallTransport = 'rest' | 'jsonrpc' | 'sse' | 'internal';
+
+export interface IMcpRequestLog extends IUsageAttributionFields {
   _id?: ObjectId | string;
   tenantId: string;
   projectId?: string;
@@ -230,6 +311,40 @@ export interface IMcpRequestLog {
   errorMessage?: string;
   latencyMs?: number;
   callerTokenId?: string;
+  callerType?: McpCallerType;
+  callerUserId?: string;
+  transport?: McpCallTransport;
+  sourceType?: McpSourceType;
+  /** SSE session id when the call arrived over an SSE session. */
+  sessionId?: string;
+  createdAt?: Date;
+}
+
+// ── MCP audit log ─────────────────────────────────────────────────────────
+
+export type McpAuditAction =
+  | 'create'
+  | 'update'
+  | 'delete'
+  | 'status_change'
+  | 'exposure_change'
+  | 'secrets_change'
+  | 'tools_refresh'
+  | 'playground_execute';
+
+export interface IMcpAuditLog {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  serverId?: string;
+  serverKey: string;
+  action: McpAuditAction;
+  /** Field-level diff with secrets masked. */
+  changes?: Record<string, { from?: unknown; to?: unknown }>;
+  performedBy: string;
+  ipAddress?: string;
+  userAgent?: string;
+  metadata?: Record<string, unknown>;
   createdAt?: Date;
 }
 
@@ -286,6 +401,20 @@ export interface IInstanceAssignment {
   mode: InstanceAssignmentMode;
   updatedAt: Date;
   updatedBy: string | null;
+}
+
+// ── Beta access codes (main database) ────────────────────────────────────
+
+export type BetaAccessCodeStatus = 'active' | 'used' | 'disabled';
+
+export interface IBetaAccessCode {
+  /** The code itself (stored normalized: trimmed, uppercase). Unique. */
+  code: string;
+  status: BetaAccessCodeStatus;
+  note: string | null;
+  usedByEmail: string | null;
+  usedAt: Date | null;
+  createdAt: Date;
 }
 
 // ── GPU fleet (tenant-scoped) ────────────────────────────────────────────
@@ -612,8 +741,16 @@ export type SandboxInstanceState =
 
 export type SandboxDesiredState = 'running' | 'stopped' | 'deleted';
 
-/** A running (or desired) sandbox container. */
-export interface ISandboxInstance {
+/**
+ * A running (or desired) sandbox container.
+ *
+ * Carries the usage attribution envelope (userId/apiTokenId/actorType),
+ * stamped at creation/claim time so the stop-time usage rollup can attribute
+ * runtime to the owner even when the lifecycle transition is system-initiated
+ * (idle reaper). `createdBy` predates the envelope and remains the raw caller
+ * label (dashboard userId, or markers like 'api-token' / 'system:warm').
+ */
+export interface ISandboxInstance extends IUsageAttributionFields {
   id: string;
   tenantId: string;
   projectId: string | null;
@@ -839,7 +976,7 @@ export type OcrJobItemSource =
   | { kind: 'bucket'; bucketKey: string; objectKey: string }
   | { kind: 'url'; url: string; contentType?: string };
 
-export interface IOcrJob {
+export interface IOcrJob extends IUsageAttributionFields {
   _id?: ObjectId | string;
   tenantId: string;
   projectId?: string;
@@ -972,7 +1109,7 @@ export interface BatchFileRef {
   objectKey: string;
 }
 
-export interface IBatchJob {
+export interface IBatchJob extends IUsageAttributionFields {
   _id?: ObjectId | string;
   tenantId: string;
   projectId?: string;
@@ -1094,7 +1231,7 @@ export type RealtimeSessionTransport = 'websocket' | 'twilio';
 export type RealtimeSessionLogStatus = 'active' | 'ended' | 'error';
 
 /** One realtime connection, recorded for the observability dashboard. */
-export interface IRealtimeSessionLog {
+export interface IRealtimeSessionLog extends IUsageAttributionFields {
   _id?: ObjectId | string;
   tenantId: string;
   projectId?: string;

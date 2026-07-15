@@ -190,11 +190,13 @@ export function CrawlerMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         (id, tenantId, projectId, crawlerKey, trigger, triggerActor, planSnapshot,
          status, startedAt, endedAt, durationMs,
          pagesDiscovered, pagesProcessed, filesProcessed, errorsCount, limitReached,
-         callbackUrl, errorMessage, metadata, createdBy, createdAt, updatedAt)
+         callbackUrl, errorMessage, metadata, userId, apiTokenId, actorType,
+         createdBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @crawlerKey, @trigger, @triggerActor, @planSnapshot,
          @status, @startedAt, @endedAt, @durationMs,
          @pagesDiscovered, @pagesProcessed, @filesProcessed, @errorsCount, @limitReached,
-         @callbackUrl, @errorMessage, @metadata, @createdBy, @createdAt, @updatedAt)
+         @callbackUrl, @errorMessage, @metadata, @userId, @apiTokenId, @actorType,
+         @createdBy, @createdAt, @updatedAt)
       `).run({
         id,
         tenantId: record.tenantId,
@@ -215,6 +217,9 @@ export function CrawlerMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         callbackUrl: record.callbackUrl ?? null,
         errorMessage: record.errorMessage ?? null,
         metadata: this.toJson(record.metadata ?? {}),
+        userId: record.userId ?? null,
+        apiTokenId: record.apiTokenId ?? null,
+        actorType: record.actorType ?? null,
         createdBy: record.createdBy,
         createdAt: now,
         updatedAt: now,
@@ -370,6 +375,9 @@ export function CrawlerMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         callbackUrl: (row.callbackUrl as string) ?? undefined,
         errorMessage: (row.errorMessage as string) ?? undefined,
         metadata: this.parseJson(row.metadata, {}),
+        userId: (row.userId as string | null) ?? undefined,
+        apiTokenId: (row.apiTokenId as string | null) ?? undefined,
+        actorType: (row.actorType as ICrawlJob['actorType'] | null) ?? undefined,
         createdBy: row.createdBy as string,
         createdAt: this.toDate(row.createdAt),
         updatedAt: this.toDate(row.updatedAt),

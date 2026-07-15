@@ -154,12 +154,12 @@ export function BrowserMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         INSERT INTO ${TABLES.browserSessions}
         (id, tenantId, projectId, browserId, sessionKey, name, agentId, agentKey, status,
          config, currentUrl, pageTitle, lastActivityAt, lastScreenshot, artifactBucketKey,
-         startedAt, endedAt, errorMessage, eventCount, metadata, createdBy, updatedBy,
-         createdAt, updatedAt)
+         startedAt, endedAt, errorMessage, eventCount, metadata, userId, apiTokenId, actorType,
+         createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @browserId, @sessionKey, @name, @agentId, @agentKey, @status,
          @config, @currentUrl, @pageTitle, @lastActivityAt, @lastScreenshot, @artifactBucketKey,
-         @startedAt, @endedAt, @errorMessage, @eventCount, @metadata, @createdBy, @updatedBy,
-         @createdAt, @updatedAt)
+         @startedAt, @endedAt, @errorMessage, @eventCount, @metadata, @userId, @apiTokenId, @actorType,
+         @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
         tenantId: record.tenantId,
@@ -181,6 +181,9 @@ export function BrowserMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         errorMessage: record.errorMessage ?? null,
         eventCount: record.eventCount ?? 0,
         metadata: this.toJson(record.metadata ?? {}),
+        userId: record.userId ?? null,
+        apiTokenId: record.apiTokenId ?? null,
+        actorType: record.actorType ?? null,
         createdBy: record.createdBy,
         updatedBy: record.updatedBy ?? null,
         createdAt: now,
@@ -305,6 +308,9 @@ export function BrowserMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         errorMessage: (row.errorMessage as string) ?? undefined,
         eventCount: Number(row.eventCount) || 0,
         metadata: this.parseJson(row.metadata, {}),
+        userId: (row.userId as string | null) ?? undefined,
+        apiTokenId: (row.apiTokenId as string | null) ?? undefined,
+        actorType: (row.actorType as IBrowserSession['actorType'] | null) ?? undefined,
         createdBy: row.createdBy as string,
         updatedBy: (row.updatedBy as string) ?? undefined,
         createdAt: this.toDate(row.createdAt),

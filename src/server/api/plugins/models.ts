@@ -5,6 +5,7 @@ import {
   createModelProvider,
   deleteModel,
   getModelById,
+  getModelUsageBreakdown,
   getUsageAggregate,
   listModelProviders,
   listModels,
@@ -63,6 +64,12 @@ type ModelLogsQuery = {
 type ModelUsageQuery = {
   from?: string;
   groupBy?: 'hour' | 'day' | 'month';
+  to?: string;
+};
+
+type ModelUsageBreakdownQuery = {
+  from?: string;
+  groupBy?: 'user' | 'token';
   to?: string;
 };
 
@@ -600,6 +607,46 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ usage: aggregate });
     } catch (error) {
       logger.error('Fetch model usage error', { error });
+      return sendProjectError(reply, error)
+        ?? reply.code(500).send({
+          error: error instanceof Error ? error.message : 'Internal error',
+        });
+    }
+  }));
+
+  // Per-user / per-API-token breakdown from the `usage_daily` rollup.
+  // Attribution starts at the rollup's deploy; earlier traffic shows as the
+  // ''-id (unattributed/legacy) entry. Defaults: groupBy=user, last 30 days.
+  app.get('/models/:id/usage/breakdown', withApiRequestContext(async (request, reply) => {
+    try {
+      const { id } = request.params as { id: string };
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const model = await getModelById(session.tenantDbName, id, projectId);
+
+      if (!model) {
+        return reply.code(404).send({ error: 'Model not found' });
+      }
+
+      const query = (request.query ?? {}) as ModelUsageBreakdownQuery;
+      if (query.groupBy !== undefined && query.groupBy !== 'user' && query.groupBy !== 'token') {
+        return reply.code(400).send({ error: '`groupBy` must be user or token' });
+      }
+      const groupBy = query.groupBy ?? 'user';
+      const to = buildDate(query.to) ?? new Date();
+      const from = buildDate(query.from)
+        ?? new Date(to.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+      const breakdown = await getModelUsageBreakdown(
+        session.tenantDbName,
+        session.tenantId,
+        model.key,
+        projectId,
+        { groupBy, from, to },
+      );
+
+      return reply.code(200).send({ breakdown });
+    } catch (error) {
+      logger.error('Fetch model usage breakdown error', { error });
       return sendProjectError(reply, error)
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Internal error',

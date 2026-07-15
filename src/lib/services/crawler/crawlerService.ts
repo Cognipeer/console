@@ -19,6 +19,7 @@ import type {
   ICrawlPlanSnapshot,
   ICrawlResult,
 } from '@/lib/database';
+import { resolveUsageAttribution } from '@/lib/services/usage/usageEvents';
 import { crawlerEntityId } from './crawlerEntityId';
 import { matchesProjectScope } from './internals';
 import { computeNextRun, validateSchedule } from './schedulePlanner';
@@ -347,7 +348,13 @@ export async function runCrawler(
   }
 
   const plan = snapshotCrawlerPlan(crawler, { seeds: urls });
+  // Attribution is stamped at creation (request ALS in scope); the rollup
+  // event is emitted at job completion by the runner.
+  const attribution = resolveUsageAttribution();
   const job = await db.createCrawlJob({
+    userId: attribution.userId,
+    apiTokenId: attribution.apiTokenId,
+    actorType: attribution.actorType,
     tenantId: ctx.tenantId,
     projectId: ctx.projectId,
     crawlerKey: crawler.key,
@@ -392,7 +399,13 @@ export async function runAdhocCrawl(
     webhook: input.webhook,
   };
 
+  // Attribution is stamped at creation (request ALS in scope); the rollup
+  // event is emitted at job completion by the runner.
+  const attribution = resolveUsageAttribution();
   const job = await db.createCrawlJob({
+    userId: attribution.userId,
+    apiTokenId: attribution.apiTokenId,
+    actorType: attribution.actorType,
     tenantId: ctx.tenantId,
     projectId: ctx.projectId,
     trigger: 'adhoc',

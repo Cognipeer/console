@@ -255,6 +255,20 @@ export const SqliteVectorProviderContract: ProviderContract<
       async upsertVectors(handle: VectorIndexHandle, items: VectorUpsertItem[]): Promise<void> {
         if (items.length === 0) return;
 
+        // Self-heal the index row. The console DB keeps the index record
+        // (externalId) forever, but this file can be recreated empty (deleted
+        // basePath, /tmp cleanup, relative path resolved against a new cwd) —
+        // without the parent row every insert dies on the FK constraint.
+        db.prepare(
+          `INSERT OR IGNORE INTO vector_indexes (id, name, dimension, metric, metadata) VALUES (?, ?, ?, ?, ?)`,
+        ).run(
+          handle.externalId,
+          handle.name,
+          handle.dimension,
+          handle.metric ?? 'cosine',
+          handle.metadata ? JSON.stringify(handle.metadata) : null,
+        );
+
         const stmt = db.prepare(`
           INSERT INTO vector_entries (id, index_id, vec_values, metadata)
           VALUES (?, ?, ?, ?)

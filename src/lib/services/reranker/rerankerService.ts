@@ -24,6 +24,7 @@ import type {
   RerankerStrategy,
 } from '@/lib/database';
 import { getModelByKey } from '@/lib/services/models/modelService';
+import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { getStrategy } from './strategies';
 import type {
   CreateRerankerRequest,
@@ -233,8 +234,22 @@ export async function runReranker(
     );
   } catch (error) {
     const latencyMs = Date.now() - start;
+    // No tokens — LLM strategies flow through the models service.
+    const attribution = recordUsageEvent({
+      tenantDbName,
+      tenantId,
+      projectId,
+      service: 'reranker',
+      refKey: reranker.key,
+      status: 'error',
+      latencyMs,
+      units: { inputCount: request.documents.length, outputCount: 0 },
+    });
     fireAndForget('log-reranker-error', async () => {
       await db.createRerankerRunLog({
+        userId: attribution.userId,
+        apiTokenId: attribution.apiTokenId,
+        actorType: attribution.actorType,
         tenantId,
         projectId,
         rerankerKey: reranker.key,
@@ -286,9 +301,23 @@ export async function runReranker(
   const latencyMs = Date.now() - start;
 
   // Update reranker stats + log run.
+  // No tokens — LLM strategies flow through the models service.
+  const attribution = recordUsageEvent({
+    tenantDbName,
+    tenantId,
+    projectId,
+    service: 'reranker',
+    refKey: reranker.key,
+    status: 'success',
+    latencyMs,
+    units: { inputCount: request.documents.length, outputCount: results.length },
+  });
   fireAndForget('log-reranker-success', async () => {
     try {
       await db.createRerankerRunLog({
+        userId: attribution.userId,
+        apiTokenId: attribution.apiTokenId,
+        actorType: attribution.actorType,
         tenantId,
         projectId,
         rerankerKey: reranker.key,

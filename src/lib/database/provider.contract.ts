@@ -24,6 +24,7 @@ import type {
   IIncident,
   IInferenceServer,
   IInferenceServerMetrics,
+  IMcpAuditLog,
   IMcpRequestAggregate,
   IMcpRequestLog,
   IMcpServer,
@@ -103,6 +104,9 @@ export interface DatabaseProvider {
     outcome?: IAuditLog['outcome'];
     service?: string;
     action?: string;
+    method?: string;
+    /** Free-text match against event, path and actorEmail. */
+    q?: string;
     from?: Date;
     to?: Date;
     limit?: number;
@@ -771,6 +775,7 @@ export interface DatabaseProvider {
   deleteMcpServer(id: string): Promise<boolean>;
   findMcpServerById(id: string): Promise<IMcpServer | null>;
   findMcpServerByKey(key: string, projectId?: string): Promise<IMcpServer | null>;
+  findMcpServerByEndpointSlug(endpointSlug: string): Promise<IMcpServer | null>;
   listMcpServers(filters?: {
     projectId?: string;
     status?: McpServerStatus;
@@ -801,4 +806,21 @@ export interface DatabaseProvider {
     serverKey: string,
     options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month' },
   ): Promise<IMcpRequestAggregate>;
+  listRecentMcpRequestLogs(options?: {
+    projectId?: string;
+    limit?: number;
+    status?: string;
+  }): Promise<IMcpRequestLog[]>;
+
+  // ── MCP Audit Log operations (tenant-specific) ──
+  createMcpAuditLog(
+    log: Omit<IMcpAuditLog, '_id' | 'createdAt'>,
+  ): Promise<IMcpAuditLog>;
+  listMcpAuditLogs(options?: {
+    projectId?: string;
+    serverKey?: string;
+    action?: string;
+    limit?: number;
+    skip?: number;
+  }): Promise<IMcpAuditLog[]>;
 }

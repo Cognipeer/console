@@ -1,11 +1,16 @@
 /**
  * SQLite Provider – MCP Server operations mixin
  *
- * Includes MCP server CRUD, request logging, and aggregation.
+ * Includes MCP server CRUD, request logging, audit logging and aggregation.
+ *
+ * Legacy-schema note: tenant DBs created before the MCP Hub keep NOT NULL on
+ * `openApiSpec`/`upstreamBaseUrl`. Non-openapi sources therefore persist ''
+ * and the row mappers translate '' back to undefined.
  */
 
 import type {
   IMcpServer,
+  IMcpAuditLog,
   IMcpRequestLog,
   IMcpRequestAggregate,
   McpServerStatus,
@@ -26,12 +31,14 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
 
       db.prepare(`
         INSERT INTO ${TABLES.mcpServers}
-        (id, tenantId, projectId, key, name, description, openApiSpec, tools,
-         upstreamBaseUrl, upstreamAuth, status, endpointSlug, totalRequests,
-         metadata, createdBy, updatedBy, createdAt, updatedAt)
-        VALUES (@id, @tenantId, @projectId, @key, @name, @description, @openApiSpec, @tools,
-         @upstreamBaseUrl, @upstreamAuth, @status, @endpointSlug, @totalRequests,
-         @metadata, @createdBy, @updatedBy, @createdAt, @updatedAt)
+        (id, tenantId, projectId, key, name, description, sourceType, openApiSpec, remoteConfig,
+         stdioConfig, tools, toolsDiscoveredAt, upstreamBaseUrl, upstreamAuth, exposure, aegis,
+         status, endpointSlug, totalRequests, lastError, metadata, createdBy, updatedBy,
+         createdAt, updatedAt)
+        VALUES (@id, @tenantId, @projectId, @key, @name, @description, @sourceType, @openApiSpec,
+         @remoteConfig, @stdioConfig, @tools, @toolsDiscoveredAt, @upstreamBaseUrl, @upstreamAuth,
+         @exposure, @aegis, @status, @endpointSlug, @totalRequests, @lastError, @metadata,
+         @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
         tenantId: server.tenantId,
@@ -39,13 +46,20 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         key: server.key,
         name: server.name,
         description: server.description ?? null,
-        openApiSpec: server.openApiSpec,
+        sourceType: server.sourceType ?? 'openapi',
+        openApiSpec: server.openApiSpec ?? '',
+        remoteConfig: server.remoteConfig ? this.toJson(server.remoteConfig) : null,
+        stdioConfig: server.stdioConfig ? this.toJson(server.stdioConfig) : null,
         tools: this.toJson(server.tools ?? []),
-        upstreamBaseUrl: server.upstreamBaseUrl,
+        toolsDiscoveredAt: server.toolsDiscoveredAt ? server.toolsDiscoveredAt.toISOString() : null,
+        upstreamBaseUrl: server.upstreamBaseUrl ?? '',
         upstreamAuth: this.toJson(server.upstreamAuth ?? {}),
+        exposure: server.exposure ? this.toJson(server.exposure) : null,
+        aegis: server.aegis ? this.toJson(server.aegis) : null,
         status: server.status,
         endpointSlug: server.endpointSlug,
         totalRequests: server.totalRequests ?? 0,
+        lastError: server.lastError ? this.toJson(server.lastError) : null,
         metadata: this.toJson(server.metadata ?? {}),
         createdBy: server.createdBy,
         updatedBy: server.updatedBy ?? null,
@@ -67,13 +81,20 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
 
       if (data.name !== undefined) { sets.push('name = @name'); params.name = data.name; }
       if (data.description !== undefined) { sets.push('description = @description'); params.description = data.description; }
-      if (data.openApiSpec !== undefined) { sets.push('openApiSpec = @openApiSpec'); params.openApiSpec = data.openApiSpec; }
+      if (data.sourceType !== undefined) { sets.push('sourceType = @sourceType'); params.sourceType = data.sourceType; }
+      if (data.openApiSpec !== undefined) { sets.push('openApiSpec = @openApiSpec'); params.openApiSpec = data.openApiSpec ?? ''; }
+      if (data.remoteConfig !== undefined) { sets.push('remoteConfig = @remoteConfig'); params.remoteConfig = data.remoteConfig ? this.toJson(data.remoteConfig) : null; }
+      if (data.stdioConfig !== undefined) { sets.push('stdioConfig = @stdioConfig'); params.stdioConfig = data.stdioConfig ? this.toJson(data.stdioConfig) : null; }
       if (data.tools !== undefined) { sets.push('tools = @tools'); params.tools = this.toJson(data.tools); }
-      if (data.upstreamBaseUrl !== undefined) { sets.push('upstreamBaseUrl = @upstreamBaseUrl'); params.upstreamBaseUrl = data.upstreamBaseUrl; }
+      if (data.toolsDiscoveredAt !== undefined) { sets.push('toolsDiscoveredAt = @toolsDiscoveredAt'); params.toolsDiscoveredAt = data.toolsDiscoveredAt ? data.toolsDiscoveredAt.toISOString() : null; }
+      if (data.upstreamBaseUrl !== undefined) { sets.push('upstreamBaseUrl = @upstreamBaseUrl'); params.upstreamBaseUrl = data.upstreamBaseUrl ?? ''; }
       if (data.upstreamAuth !== undefined) { sets.push('upstreamAuth = @upstreamAuth'); params.upstreamAuth = this.toJson(data.upstreamAuth); }
+      if (data.exposure !== undefined) { sets.push('exposure = @exposure'); params.exposure = data.exposure ? this.toJson(data.exposure) : null; }
+      if (data.aegis !== undefined) { sets.push('aegis = @aegis'); params.aegis = data.aegis ? this.toJson(data.aegis) : null; }
       if (data.status !== undefined) { sets.push('status = @status'); params.status = data.status; }
       if (data.endpointSlug !== undefined) { sets.push('endpointSlug = @endpointSlug'); params.endpointSlug = data.endpointSlug; }
       if (data.totalRequests !== undefined) { sets.push('totalRequests = @totalRequests'); params.totalRequests = data.totalRequests; }
+      if (data.lastError !== undefined) { sets.push('lastError = @lastError'); params.lastError = data.lastError ? this.toJson(data.lastError) : null; }
       if (data.metadata !== undefined) { sets.push('metadata = @metadata'); params.metadata = this.toJson(data.metadata); }
       if (data.updatedBy !== undefined) { sets.push('updatedBy = @updatedBy'); params.updatedBy = data.updatedBy; }
       if (data.projectId !== undefined) { sets.push('projectId = @projectId'); params.projectId = data.projectId; }
@@ -101,6 +122,14 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       const row = db.prepare(
         `SELECT * FROM ${TABLES.mcpServers} WHERE ${clauses.join(' AND ')}`,
       ).get(params) as SqliteRow | undefined;
+      return row ? this.mapMcpServerRow(row) : null;
+    }
+
+    async findMcpServerByEndpointSlug(endpointSlug: string): Promise<IMcpServer | null> {
+      const db = this.getTenantDb();
+      const row = db.prepare(
+        `SELECT * FROM ${TABLES.mcpServers} WHERE endpointSlug = @endpointSlug`,
+      ).get({ endpointSlug }) as SqliteRow | undefined;
       return row ? this.mapMcpServerRow(row) : null;
     }
 
@@ -149,9 +178,13 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       db.prepare(`
         INSERT INTO ${TABLES.mcpRequestLogs}
         (id, tenantId, projectId, serverKey, toolName, status,
-         requestPayload, responsePayload, errorMessage, latencyMs, callerTokenId, createdAt)
+         requestPayload, responsePayload, errorMessage, latencyMs, callerTokenId,
+         callerType, callerUserId, transport, sourceType, sessionId,
+         userId, apiTokenId, actorType, createdAt)
         VALUES (@id, @tenantId, @projectId, @serverKey, @toolName, @status,
-         @requestPayload, @responsePayload, @errorMessage, @latencyMs, @callerTokenId, @createdAt)
+         @requestPayload, @responsePayload, @errorMessage, @latencyMs, @callerTokenId,
+         @callerType, @callerUserId, @transport, @sourceType, @sessionId,
+         @userId, @apiTokenId, @actorType, @createdAt)
       `).run({
         id,
         tenantId: log.tenantId,
@@ -164,6 +197,14 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         errorMessage: log.errorMessage ?? null,
         latencyMs: log.latencyMs ?? null,
         callerTokenId: log.callerTokenId ?? null,
+        callerType: log.callerType ?? null,
+        callerUserId: log.callerUserId ?? null,
+        transport: log.transport ?? null,
+        sourceType: log.sourceType ?? null,
+        sessionId: log.sessionId ?? null,
+        userId: log.userId ?? null,
+        apiTokenId: log.apiTokenId ?? null,
+        actorType: log.actorType ?? null,
         createdAt: now,
       });
 
@@ -197,6 +238,24 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       const skip = options?.skip ?? 0;
       const rows = db.prepare(
         `SELECT * FROM ${TABLES.mcpRequestLogs} ${where} ORDER BY createdAt DESC LIMIT ${limit} OFFSET ${skip}`,
+      ).all(params) as SqliteRow[];
+      return rows.map((r) => this.mapMcpRequestLogRow(r));
+    }
+
+    async listRecentMcpRequestLogs(options?: {
+      projectId?: string;
+      limit?: number;
+      status?: string;
+    }): Promise<IMcpRequestLog[]> {
+      const db = this.getTenantDb();
+      const clauses: string[] = [];
+      const params: Record<string, unknown> = {};
+      if (options?.projectId !== undefined) { clauses.push('projectId = @projectId'); params.projectId = options.projectId; }
+      if (options?.status) { clauses.push('status = @status'); params.status = options.status; }
+      const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+      const limit = Math.min(options?.limit ?? 50, 500);
+      const rows = db.prepare(
+        `SELECT * FROM ${TABLES.mcpRequestLogs} ${where} ORDER BY createdAt DESC LIMIT ${limit}`,
       ).all(params) as SqliteRow[];
       return rows.map((r) => this.mapMcpRequestLogRow(r));
     }
@@ -291,6 +350,61 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       };
     }
 
+    // ── MCP Audit Logs ───────────────────────────────────────────────
+
+    async createMcpAuditLog(
+      log: Omit<IMcpAuditLog, '_id' | 'createdAt'>,
+    ): Promise<IMcpAuditLog> {
+      const db = this.getTenantDb();
+      const id = this.newId();
+      const now = this.now();
+
+      db.prepare(`
+        INSERT INTO ${TABLES.mcpAuditLogs}
+        (id, tenantId, projectId, serverId, serverKey, action, changes,
+         performedBy, ipAddress, userAgent, metadata, createdAt)
+        VALUES (@id, @tenantId, @projectId, @serverId, @serverKey, @action, @changes,
+         @performedBy, @ipAddress, @userAgent, @metadata, @createdAt)
+      `).run({
+        id,
+        tenantId: log.tenantId,
+        projectId: log.projectId ?? null,
+        serverId: log.serverId ?? null,
+        serverKey: log.serverKey,
+        action: log.action,
+        changes: log.changes ? this.toJson(log.changes) : null,
+        performedBy: log.performedBy,
+        ipAddress: log.ipAddress ?? null,
+        userAgent: log.userAgent ?? null,
+        metadata: this.toJson(log.metadata ?? {}),
+        createdAt: now,
+      });
+
+      return { ...log, _id: id, createdAt: new Date(now) };
+    }
+
+    async listMcpAuditLogs(options?: {
+      projectId?: string;
+      serverKey?: string;
+      action?: string;
+      limit?: number;
+      skip?: number;
+    }): Promise<IMcpAuditLog[]> {
+      const db = this.getTenantDb();
+      const clauses: string[] = [];
+      const params: Record<string, unknown> = {};
+      if (options?.projectId !== undefined) { clauses.push('projectId = @projectId'); params.projectId = options.projectId; }
+      if (options?.serverKey) { clauses.push('serverKey = @serverKey'); params.serverKey = options.serverKey; }
+      if (options?.action) { clauses.push('action = @action'); params.action = options.action; }
+      const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+      const limit = Math.min(options?.limit ?? 50, 500);
+      const skip = options?.skip ?? 0;
+      const rows = db.prepare(
+        `SELECT * FROM ${TABLES.mcpAuditLogs} ${where} ORDER BY createdAt DESC LIMIT ${limit} OFFSET ${skip}`,
+      ).all(params) as SqliteRow[];
+      return rows.map((r) => this.mapMcpAuditLogRow(r));
+    }
+
     // ── Row mappers ──────────────────────────────────────────────────
 
     protected mapMcpServerRow(r: SqliteRow): IMcpServer {
@@ -301,13 +415,20 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         key: r.key as string,
         name: r.name as string,
         description: r.description as string | undefined,
-        openApiSpec: r.openApiSpec as string,
+        sourceType: (r.sourceType as IMcpServer['sourceType']) ?? 'openapi',
+        openApiSpec: (r.openApiSpec as string) || undefined,
+        remoteConfig: r.remoteConfig ? this.parseJson(r.remoteConfig, undefined) : undefined,
+        stdioConfig: r.stdioConfig ? this.parseJson(r.stdioConfig, undefined) : undefined,
         tools: this.parseJson(r.tools, []),
-        upstreamBaseUrl: r.upstreamBaseUrl as string,
+        toolsDiscoveredAt: r.toolsDiscoveredAt ? this.toDate(r.toolsDiscoveredAt) : undefined,
+        upstreamBaseUrl: (r.upstreamBaseUrl as string) || undefined,
         upstreamAuth: this.parseJson(r.upstreamAuth, { type: 'none' }),
+        exposure: r.exposure ? this.parseJson(r.exposure, undefined) : undefined,
+        aegis: r.aegis ? this.parseJson(r.aegis, undefined) : undefined,
         status: r.status as IMcpServer['status'],
         endpointSlug: r.endpointSlug as string,
         totalRequests: (r.totalRequests as number) ?? 0,
+        lastError: r.lastError ? this.parseJson(r.lastError, null) : null,
         metadata: this.parseJson(r.metadata, {}),
         createdBy: r.createdBy as string,
         updatedBy: r.updatedBy as string | undefined,
@@ -329,6 +450,31 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         errorMessage: r.errorMessage as string | undefined,
         latencyMs: r.latencyMs as number | undefined,
         callerTokenId: r.callerTokenId as string | undefined,
+        callerType: (r.callerType as IMcpRequestLog['callerType'] | null) ?? undefined,
+        callerUserId: (r.callerUserId as string | null) ?? undefined,
+        transport: (r.transport as IMcpRequestLog['transport'] | null) ?? undefined,
+        sourceType: (r.sourceType as IMcpRequestLog['sourceType'] | null) ?? undefined,
+        sessionId: (r.sessionId as string | null) ?? undefined,
+        userId: (r.userId as string | null) ?? undefined,
+        apiTokenId: (r.apiTokenId as string | null) ?? undefined,
+        actorType: (r.actorType as IMcpRequestLog['actorType'] | null) ?? undefined,
+        createdAt: this.toDate(r.createdAt),
+      };
+    }
+
+    protected mapMcpAuditLogRow(r: SqliteRow): IMcpAuditLog {
+      return {
+        _id: r.id as string,
+        tenantId: r.tenantId as string,
+        projectId: r.projectId as string | undefined,
+        serverId: r.serverId as string | undefined,
+        serverKey: r.serverKey as string,
+        action: r.action as IMcpAuditLog['action'],
+        changes: r.changes ? this.parseJson(r.changes, undefined) : undefined,
+        performedBy: r.performedBy as string,
+        ipAddress: r.ipAddress as string | undefined,
+        userAgent: r.userAgent as string | undefined,
+        metadata: this.parseJson(r.metadata, {}),
         createdAt: this.toDate(r.createdAt),
       };
     }

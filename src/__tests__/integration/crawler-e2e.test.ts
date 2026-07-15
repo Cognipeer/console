@@ -20,6 +20,27 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+// Captures ingestDocument calls so the RAG-binding test can assert the crawl
+// runner hands over the tenant db NAME. Passing the tenant id here opens a
+// phantom database: the module lookup fails AND all later writes of the job
+// (results, counters, finalize) land in that phantom db.
+const ragIngestCalls = vi.hoisted(() => [] as Array<{
+  tenantDbName: string;
+  tenantId: string;
+  ragModuleKey: string;
+}>);
+vi.mock('@/lib/services/rag', () => ({
+  ingestDocument: async (
+    tenantDbName: string,
+    tenantId: string,
+    _projectId: string | undefined,
+    request: { ragModuleKey: string },
+  ) => {
+    ragIngestCalls.push({ tenantDbName, tenantId, ragModuleKey: request.ragModuleKey });
+    return { _id: `ragdoc-${ragIngestCalls.length}`, status: 'indexed' };
+  },
+}));
+
 // @cognipeer/to-markdown ships an ESM-incompatible CJS dep (`file-type`) that
 // trips vitest's strict ESM resolver. The engine's markdown.ts is the only
 // consumer and falls back to cheerio text when this import fails — but
@@ -472,4 +493,44 @@ describe('crawler e2e — schedule planner integration', () => {
     const next = new Date(created.schedule!.nextRunAt!);
     expect(Math.abs(next.getTime() - Date.now())).toBeLessThan(5_000);
   }, 15_000);
+});
+
+describe('crawler e2e — RAG binding routes ingest to the tenant DB', () => {
+  it('passes the tenant db name (not the tenant id) and keeps job bookkeeping intact', async () => {
+    ragIngestCalls.length = 0;
+    const ctx = { tenantDbName: TENANT_DB_NAME, tenantId: TENANT_ID };
+
+    const created = await createCrawler(ctx, {
+      name: 'RAG-bound crawler',
+      seeds: [originUrl],
+      engine: 'axios',
+      maxDepth: 0,
+      maxPages: 1,
+      autoCrawl: false,
+      http: { allowPrivateNetwork: true },
+      rag: { enabled: true, ragModuleKey: 'kb-module' },
+      createdBy: ACTOR,
+    });
+
+    const summary = await runCrawler(ctx, created.key, {
+      triggerActor: ACTOR,
+      trigger: 'manual',
+    });
+
+    // Bookkeeping must stay in the real tenant db: the job finalizes and the
+    // page result is readable back with the ingested document attached.
+    const job = await getCrawlJob(ctx, summary.jobId);
+    expect(job?.status).toBe('succeeded');
+    expect(job?.pagesProcessed).toBe(1);
+
+    expect(ragIngestCalls.length).toBe(1);
+    expect(ragIngestCalls[0]!.tenantDbName).toBe(TENANT_DB_NAME);
+    expect(ragIngestCalls[0]!.tenantId).toBe(TENANT_ID);
+    expect(ragIngestCalls[0]!.ragModuleKey).toBe('kb-module');
+
+    const results = await listCrawlJobResults(ctx, summary.jobId);
+    expect(results.length).toBe(1);
+    expect(results[0]!.ragStatus).toBe('indexed');
+    expect(results[0]!.ragDocumentId).toBe('ragdoc-1');
+  }, 45_000);
 });

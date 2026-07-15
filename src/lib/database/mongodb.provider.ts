@@ -43,9 +43,11 @@ import { BrowserMixin } from './mongodb/browser.mixin';
 import { CrawlerMixin } from './mongodb/crawler.mixin';
 import { OcrJobMixin } from './mongodb/ocr-jobs.mixin';
 import { BatchJobMixin } from './mongodb/batch.mixin';
+import { UsageRollupMixin } from './mongodb/usage.mixin';
 import { AuditMixin } from './mongodb/audit.mixin';
 import { UserProjectMixin } from './mongodb/user-project.mixin';
 import { ClusterMixin } from './mongodb/cluster.mixin';
+import { BetaAccessCodeMixin } from './mongodb/beta-access-code.mixin';
 import { applyEnterpriseMongoDbMixins } from '@/enterprise/registry';
 
 // ── Compose mixins in domain groups ──────────────────────────────────────
@@ -75,16 +77,19 @@ const KnowledgeBase = MemoryMixin(WebSearchMixin(RerankerMixin(RagMixin(Alerting
 const PlatformBase = McpServerMixin(ConfigMixin(KnowledgeBase));
 const ToolingBase = VectorMigrationMixin(AgentMixin(ToolMixin(PlatformBase)));
 const AdvancedBase = OcrJobMixin(CrawlerMixin(AuditMixin(BrowserMixin(ToolingBase))));
-const BulkBase = BatchJobMixin(AdvancedBase);
+const BulkBase = UsageRollupMixin(BatchJobMixin(AdvancedBase));
 
 // Group 6 – Cluster (system-wide; uses main DB). Single-node node registry
 // stays in the community edition; cluster orchestration/admin is enterprise.
 const ClusterBase = ClusterMixin(BulkBase);
 
+// Group 7 – Signup gating (main database; beta access codes)
+const SignupBase = BetaAccessCodeMixin(ClusterBase);
+
 // ── Enterprise overlay seam ───────────────────────────────────────────────
 // Enterprise DB mixins (sandbox runtime + gpu-fleet) are contributed by the
 // overlay registry; no-op in the community edition. See the cognipeer-console-ee repo (docs/licensing/MANIFEST.md).
-const FinalBase = applyEnterpriseMongoDbMixins(ClusterBase);
+const FinalBase = applyEnterpriseMongoDbMixins(SignupBase);
 
 // ── Final composed class ─────────────────────────────────────────────────
 

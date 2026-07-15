@@ -174,7 +174,7 @@ const FETCH_SOURCES: FetchSource<any>[] = [
       group: 'tools',
       label: t.name || t.key,
       sublabel: t.type ?? undefined,
-      href: `/dashboard/tools/${t.id}`,
+      href: `/dashboard/agents/tools/${t.id}`,
       icon: <IconTool size={15} stroke={1.7} />,
       haystack: `${t.name} ${t.key} ${t.type ?? ''}`.toLowerCase(),
     }),

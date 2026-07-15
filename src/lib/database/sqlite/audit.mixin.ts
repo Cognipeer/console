@@ -55,6 +55,8 @@ export function AuditMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       outcome?: IAuditLog['outcome'];
       service?: string;
       action?: string;
+      method?: string;
+      q?: string;
       from?: Date;
       to?: Date;
       limit?: number;
@@ -79,6 +81,16 @@ export function AuditMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       if (filters.action) {
         clauses.push('action = @action');
         params.action = filters.action;
+      }
+      if (filters.method) {
+        clauses.push('method = @method');
+        params.method = filters.method;
+      }
+      if (filters.q) {
+        clauses.push(
+          "(event LIKE @q ESCAPE '\\' OR path LIKE @q ESCAPE '\\' OR actorEmail LIKE @q ESCAPE '\\')",
+        );
+        params.q = `%${filters.q.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
       }
       if (filters.from) {
         clauses.push('createdAt >= @from');

@@ -35,9 +35,11 @@ import {
   IconShieldLock,
   IconStack2,
   IconTimeline,
+  IconTool,
   IconVector,
   IconVolume,
   IconWorld,
+  type Icon,
 } from '@tabler/icons-react';
 import { ActionIcon, Text, Tooltip } from '@mantine/core';
 import type { DashboardServiceDefinition } from '@/lib/utils/dashboardServices';
@@ -48,7 +50,7 @@ export interface SubNavItem {
   id: string;
   label: string;
   href: string;
-  icon: typeof IconLayoutDashboard;
+  icon: Icon;
   badge?: number | string;
   matcher?: (pathname: string, search: URLSearchParams) => boolean;
 }
@@ -359,7 +361,34 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       label: 'Agents',
       href: '/dashboard/agents',
       icon: IconLayoutDashboard,
-      matcher: (p) => p.startsWith('/dashboard/agents'),
+      matcher: (p) =>
+        p.startsWith('/dashboard/agents') &&
+        !p.startsWith('/dashboard/agents/tools'),
+    },
+    {
+      id: 'tools',
+      label: 'Tools',
+      href: '/dashboard/agents/tools',
+      icon: IconTool,
+      matcher: (p) => p.startsWith('/dashboard/agents/tools'),
+    },
+  ],
+  mcp: [
+    {
+      id: 'servers',
+      label: 'Servers',
+      href: '/dashboard/mcp',
+      icon: IconServer,
+      matcher: (p) =>
+        p.startsWith('/dashboard/mcp') &&
+        !p.startsWith('/dashboard/mcp/monitor'),
+    },
+    {
+      id: 'monitor',
+      label: 'Monitor',
+      href: '/dashboard/mcp/monitor',
+      icon: IconTimeline,
+      matcher: (p) => p.startsWith('/dashboard/mcp/monitor'),
     },
   ],
   alerts: [
@@ -414,6 +443,8 @@ interface ServiceSubNavProps {
   onTogglePin: () => void;
   onOpenDocs: () => void;
   items?: SubNavItem[];
+  /** Hide the pin toggle — used for sections that are not pinnable (e.g. Settings). */
+  hidePin?: boolean;
 }
 
 export default function ServiceSubNav({
@@ -423,6 +454,7 @@ export default function ServiceSubNav({
   onTogglePin,
   onOpenDocs,
   items,
+  hidePin = false,
 }: ServiceSubNavProps) {
   const router = useRouter();
   const rawSearchParams = useSearchParams();
@@ -438,18 +470,20 @@ export default function ServiceSubNav({
           <Text component="span" className={classes.subnavEyebrow}>
             {service.category}
           </Text>
-          <Tooltip label={isPinned ? 'Unpin from rail' : 'Pin to rail'} withArrow>
-            <ActionIcon
-              variant="subtle"
-              color="gray"
-              size="sm"
-              onClick={onTogglePin}
-              aria-label={isPinned ? 'Unpin' : 'Pin'}
-              className={isPinned ? classes.subnavPinActive : ''}
-            >
-              {isPinned ? <IconPinFilled size={13} /> : <IconPin size={13} />}
-            </ActionIcon>
-          </Tooltip>
+          {hidePin ? null : (
+            <Tooltip label={isPinned ? 'Unpin from rail' : 'Pin to rail'} withArrow>
+              <ActionIcon
+                variant="subtle"
+                color="gray"
+                size="sm"
+                onClick={onTogglePin}
+                aria-label={isPinned ? 'Unpin' : 'Pin'}
+                className={isPinned ? classes.subnavPinActive : ''}
+              >
+                {isPinned ? <IconPinFilled size={13} /> : <IconPin size={13} />}
+              </ActionIcon>
+            </Tooltip>
+          )}
         </div>
         <div className={classes.subnavTitle}>
           <span className={classes.subnavTitleIcon}>

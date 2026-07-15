@@ -16,6 +16,8 @@ interface SlimRailProps {
   recents: DashboardServiceDefinition[];
   activeServiceId: string | null;
   onLauncherClick: () => void;
+  settingsHref: string;
+  settingsActive: boolean;
 }
 
 export default function SlimRail({
@@ -23,6 +25,8 @@ export default function SlimRail({
   recents,
   activeServiceId,
   onLauncherClick,
+  settingsHref,
+  settingsActive,
 }: SlimRailProps) {
   const router = useRouter();
   const pathname = usePathname();
@@ -112,9 +116,10 @@ export default function SlimRail({
       <Tooltip label="Settings" position="right" withArrow offset={8} openDelay={120}>
         <button
           type="button"
-          className={classes.railBtn}
+          className={`${classes.railBtn} ${settingsActive ? classes.railBtnActive : ''}`}
           aria-label="Settings"
-          onClick={() => goTo('/dashboard/tokens')}
+          aria-current={settingsActive ? 'page' : undefined}
+          onClick={() => goTo(settingsHref)}
         >
           <IconSettings size={17} stroke={1.7} />
         </button>

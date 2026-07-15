@@ -101,11 +101,13 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         (id, sessionId, traceId, rootSpanId, threadId, tenantId, projectId, source, agent, agentName, agentVersion, agentModel,
          config, summary, status, startedAt, endedAt, durationMs, errors, modelsUsed, toolsUsed,
          eventCounts, totalEvents, totalInputTokens, totalOutputTokens, totalCachedInputTokens,
-         totalBytesIn, totalBytesOut, totalRequestBytes, totalResponseBytes, createdAt, updatedAt)
+         totalBytesIn, totalBytesOut, totalRequestBytes, totalResponseBytes,
+         userId, apiTokenId, actorType, createdAt, updatedAt)
         VALUES (@id, @sessionId, @traceId, @rootSpanId, @threadId, @tenantId, @projectId, @source, @agent, @agentName, @agentVersion, @agentModel,
          @config, @summary, @status, @startedAt, @endedAt, @durationMs, @errors, @modelsUsed, @toolsUsed,
          @eventCounts, @totalEvents, @totalInputTokens, @totalOutputTokens, @totalCachedInputTokens,
-         @totalBytesIn, @totalBytesOut, @totalRequestBytes, @totalResponseBytes, @createdAt, @updatedAt)
+         @totalBytesIn, @totalBytesOut, @totalRequestBytes, @totalResponseBytes,
+         @userId, @apiTokenId, @actorType, @createdAt, @updatedAt)
       `).run({
         id,
         sessionId: session.sessionId,
@@ -137,6 +139,9 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         totalBytesOut: session.totalBytesOut ?? 0,
         totalRequestBytes: session.totalRequestBytes ?? 0,
         totalResponseBytes: session.totalResponseBytes ?? 0,
+        userId: session.userId ?? null,
+        apiTokenId: session.apiTokenId ?? null,
+        actorType: session.actorType ?? null,
         createdAt: now,
         updatedAt: now,
       });
@@ -719,6 +724,9 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         totalBytesOut: (r.totalBytesOut as number) ?? 0,
         totalRequestBytes: (r.totalRequestBytes as number) ?? 0,
         totalResponseBytes: (r.totalResponseBytes as number) ?? 0,
+        userId: (r.userId as string | null) ?? undefined,
+        apiTokenId: (r.apiTokenId as string | null) ?? undefined,
+        actorType: (r.actorType as IAgentTracingSession['actorType'] | null) ?? undefined,
         createdAt: this.toDate(r.createdAt),
         updatedAt: this.toDate(r.updatedAt),
       };

@@ -8,10 +8,11 @@ import {
   IconExternalLink,
   IconLayoutDashboard,
   IconLayoutGrid,
+  IconSettings,
   IconX,
 } from '@tabler/icons-react';
 import classes from './LauncherShell.module.css';
-import { SUBNAV_CONFIG } from './ServiceSubNav';
+import { SUBNAV_CONFIG, type SubNavItem } from './ServiceSubNav';
 import type { DashboardServiceDefinition } from '@/lib/utils/dashboardServices';
 import { useTranslations } from '@/lib/i18n';
 
@@ -24,6 +25,10 @@ interface MobileNavDrawerProps {
   activeService: DashboardServiceDefinition | null;
   onOpenLauncher: () => void;
   onOpenDocs: () => void;
+  /** Overrides the active service's sub-nav (used for the Settings section). */
+  subnavOverride?: { title: string; items: SubNavItem[] } | null;
+  settingsHref: string;
+  settingsActive: boolean;
 }
 
 export default function MobileNavDrawer({
@@ -35,6 +40,9 @@ export default function MobileNavDrawer({
   activeService,
   onOpenLauncher,
   onOpenDocs,
+  subnavOverride = null,
+  settingsHref,
+  settingsActive,
 }: MobileNavDrawerProps) {
   const router = useRouter();
   const rawSearchParams = useSearchParams();
@@ -64,7 +72,12 @@ export default function MobileNavDrawer({
 
   const overviewActive =
     pathname === '/dashboard' || pathname?.startsWith('/dashboard/overview');
-  const subnavItems = activeService ? (SUBNAV_CONFIG[activeService.id] ?? []) : [];
+  const subnavItems =
+    subnavOverride?.items ??
+    (activeService ? (SUBNAV_CONFIG[activeService.id] ?? []) : []);
+  const subnavTitle =
+    subnavOverride?.title ??
+    (activeService ? tNav(activeService.navLabelKey) : '');
 
   const renderServiceItem = (service: DashboardServiceDefinition) => {
     const Icon = service.icon;
@@ -155,13 +168,11 @@ export default function MobileNavDrawer({
           </div>
         ) : null}
 
-        {activeService && subnavItems.length > 0 ? (
+        {subnavItems.length > 0 ? (
           <>
             <div className={classes.mobileNavDivider} />
             <div className={classes.mobileNavSection}>
-              <div className={classes.mobileNavSectionTitle}>
-                {tNav(activeService.navLabelKey)}
-              </div>
+              <div className={classes.mobileNavSectionTitle}>{subnavTitle}</div>
               {subnavItems.map((item) => {
                 const ItemIcon = item.icon;
                 const active = item.matcher
@@ -191,6 +202,17 @@ export default function MobileNavDrawer({
 
         <div className={classes.mobileNavDivider} />
         <div className={classes.mobileNavSection}>
+          <button
+            type="button"
+            className={`${classes.mobileNavItem} ${settingsActive ? classes.mobileNavItemActive : ''}`}
+            onClick={() => goTo(settingsHref)}
+            aria-current={settingsActive ? 'page' : undefined}
+          >
+            <span className={classes.mobileNavItemIcon}>
+              <IconSettings size={16} stroke={1.7} />
+            </span>
+            <span>Settings</span>
+          </button>
           <button
             type="button"
             className={classes.mobileNavItem}

@@ -42,6 +42,7 @@ type LoginBody = {
 };
 
 type RegisterBody = {
+  accessCode?: string;
   companyName?: string;
   email?: string;
   name?: string;
@@ -345,8 +346,25 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
     }
   });
 
+  // Public: tells the signup UI which registration mode is active so it can
+  // show the access-code field (beta) or a "registration disabled" notice.
+  app.get('/auth/register/options', async (_request, reply) => {
+    return reply.send({ mode: getConfig().registration.mode });
+  });
+
   app.post('/auth/register', async (request, reply) => {
+    // Set once a beta access code is claimed, so a failure later in the
+    // handler can put the code back instead of burning it.
+    let claimedAccessCode: string | null = null;
+
     try {
+      const registrationMode = getConfig().registration.mode;
+      if (registrationMode === 'disabled') {
+        return reply.code(403).send({
+          error: 'Registration is disabled on this deployment. Contact your administrator.',
+        });
+      }
+
       const clientIp = getClientIp(request);
       const rl = checkRateLimit(`register:${clientIp}`, REGISTER_RATE_LIMIT);
       if (!rl.allowed) {
@@ -363,7 +381,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const { email, password, name, companyName } =
+      const { email, password, name, companyName, accessCode } =
         readJsonBody<RegisterBody>(request);
 
       if (!email || !password || !name || !companyName) {
@@ -391,6 +409,25 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
           error:
             'A company with this name already exists. Please choose a different name.',
         });
+      }
+
+      if (registrationMode === 'beta') {
+        const trimmedCode = (accessCode ?? '').trim();
+        if (!trimmedCode) {
+          return reply.code(400).send({
+            error: 'An access code is required to register during the beta.',
+          });
+        }
+
+        // Atomic active→used claim; released in the catch below if anything
+        // after this point fails.
+        const claimed = await db.consumeBetaAccessCode(trimmedCode, { email });
+        if (!claimed) {
+          return reply.code(400).send({
+            error: 'Invalid or already used access code.',
+          });
+        }
+        claimedAccessCode = trimmedCode;
       }
 
       const finalLicenseType: LicenseType = 'FREE';
@@ -482,6 +519,16 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         },
       });
     } catch (error) {
+      if (claimedAccessCode) {
+        try {
+          const db = await getDatabase();
+          await db.releaseBetaAccessCode(claimedAccessCode);
+        } catch (releaseError) {
+          logger.error('Failed to release beta access code after error', {
+            error: releaseError,
+          });
+        }
+      }
       logger.error('Registration error', { error });
       return reply.code(500).send({ error: 'Internal server error' });
     }

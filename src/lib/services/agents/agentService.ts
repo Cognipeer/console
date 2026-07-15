@@ -27,6 +27,7 @@ import { evaluateGuardrail } from '@/lib/services/guardrail';
 import { getMcpServerByKey, executeMcpTool } from '@/lib/services/mcp';
 import { getToolByKey, executeToolAction, logToolRequest } from '@/lib/services/tools';
 import { resolveBrowser, createBrowserSession, buildBrowserAgentTools, closeBrowserSession } from '@/lib/services/browser';
+import { recordTracingSessionCreated } from '@/lib/services/agentTracing';
 import { invokeExternalAgent } from './externalAgent';
 
 const logger = createLogger('agents');
@@ -394,7 +395,18 @@ async function createInternalTracingSink(
                 if (existing) {
                     await db.updateAgentTracingSession(session.sessionId, sessionDoc, projectId);
                 } else {
-                    await db.createAgentTracingSession(sessionDoc);
+                    const attribution = recordTracingSessionCreated({
+                        tenantDbName,
+                        tenantId,
+                        projectId,
+                        agentName: sessionDoc.agentName,
+                    });
+                    await db.createAgentTracingSession({
+                        ...sessionDoc,
+                        userId: attribution.userId,
+                        apiTokenId: attribution.apiTokenId,
+                        actorType: attribution.actorType,
+                    });
                 }
 
                 // Replace events

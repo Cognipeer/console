@@ -140,14 +140,19 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         INSERT INTO ${TABLES.modelUsageLogs}
         (id, tenantId, projectId, modelKey, modelId, requestId, route, status,
          providerRequest, providerResponse, errorMessage, latencyMs,
-         inputTokens, outputTokens, cachedInputTokens, totalTokens, toolCalls, cacheHit, pricingSnapshot, routing, createdAt)
+         inputTokens, outputTokens, cachedInputTokens, totalTokens, toolCalls, cacheHit, pricingSnapshot, routing,
+         userId, apiTokenId, actorType, createdAt)
         VALUES (@id, @tenantId, @projectId, @modelKey, @modelId, @requestId, @route, @status,
          @providerRequest, @providerResponse, @errorMessage, @latencyMs,
-         @inputTokens, @outputTokens, @cachedInputTokens, @totalTokens, @toolCalls, @cacheHit, @pricingSnapshot, @routing, @createdAt)
+         @inputTokens, @outputTokens, @cachedInputTokens, @totalTokens, @toolCalls, @cacheHit, @pricingSnapshot, @routing,
+         @userId, @apiTokenId, @actorType, @createdAt)
       `).run({
         id,
         tenantId: log.tenantId,
         projectId: log.projectId ?? null,
+        userId: log.userId ?? null,
+        apiTokenId: log.apiTokenId ?? null,
+        actorType: log.actorType ?? null,
         modelKey: log.modelKey,
         modelId: log.modelId ?? null,
         requestId: log.requestId,
@@ -329,6 +334,9 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         cacheHit: this.fromBoolInt(r.cacheHit),
         pricingSnapshot: r.pricingSnapshot ? this.parseJson(r.pricingSnapshot, undefined) : undefined,
         routing: r.routing ? this.parseJson(r.routing, undefined) : undefined,
+        userId: (r.userId as string | null) ?? undefined,
+        apiTokenId: (r.apiTokenId as string | null) ?? undefined,
+        actorType: (r.actorType as IModelUsageLog['actorType'] | null) ?? undefined,
         createdAt: this.toDate(r.createdAt),
       };
     }

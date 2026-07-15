@@ -7,18 +7,22 @@ import {
   TextInput,
   PasswordInput,
   Button,
+  Alert,
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
-import { IconUserPlus, IconBolt, IconCheck } from '@tabler/icons-react';
+import { IconUserPlus, IconBolt, IconCheck, IconLock } from '@tabler/icons-react';
 import LoadingState from '@/components/common/LoadingState';
 import AuthShell from '@/components/layout/AuthShell';
 import { useTranslations } from '@/lib/i18n';
+
+type RegistrationMode = 'open' | 'beta' | 'disabled';
 
 export default function RegisterPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [checkingAuth, setCheckingAuth] = useState(true);
+  const [registrationMode, setRegistrationMode] = useState<RegistrationMode>('open');
   const t = useTranslations('register');
   const tValidation = useTranslations('validation');
   const tNotifications = useTranslations('notifications');
@@ -30,6 +34,7 @@ export default function RegisterPage() {
       companyName: '',
       password: '',
       confirmPassword: '',
+      accessCode: '',
     },
     validate: {
       name: (value) =>
@@ -67,10 +72,32 @@ export default function RegisterPage() {
       setCheckingAuth(false);
     };
 
+    const checkRegistrationMode = async () => {
+      try {
+        const response = await fetch('/api/auth/register/options', {
+          cache: 'no-store',
+        });
+        if (response.ok) {
+          const data = (await response.json()) as { mode?: RegistrationMode };
+          if (data.mode === 'beta' || data.mode === 'disabled') {
+            setRegistrationMode(data.mode);
+          }
+        }
+      } catch {
+        // Network error — fall back to the open-registration form
+      }
+    };
+
     checkAuth();
+    checkRegistrationMode();
   }, [router]);
 
   const handleSubmit = async (values: typeof form.values) => {
+    if (registrationMode === 'beta' && !values.accessCode.trim()) {
+      form.setFieldError('accessCode', tValidation('accessCodeRequired'));
+      return;
+    }
+
     setLoading(true);
 
     try {
@@ -84,6 +111,9 @@ export default function RegisterPage() {
           email: values.email,
           companyName: values.companyName,
           password: values.password,
+          ...(registrationMode === 'beta'
+            ? { accessCode: values.accessCode.trim() }
+            : {}),
         }),
       });
 
@@ -155,8 +185,29 @@ export default function RegisterPage() {
         </>
       }
     >
+      {registrationMode === 'disabled' ? (
+        <Alert
+          color="gray"
+          icon={<IconLock size={16} stroke={1.7} />}
+          title={t('disabled.title')}
+        >
+          {t('disabled.message')}
+        </Alert>
+      ) : (
       <form onSubmit={form.onSubmit(handleSubmit)}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {registrationMode === 'beta' && (
+            <TextInput
+              label={t('form.accessCode.label')}
+              placeholder={t('form.accessCode.placeholder')}
+              description={t('form.accessCode.description')}
+              required
+              size="md"
+              autoComplete="off"
+              {...form.getInputProps('accessCode')}
+            />
+          )}
+
           <TextInput
             label={t('form.name.label')}
             placeholder={t('form.name.placeholder')}
@@ -216,6 +267,7 @@ export default function RegisterPage() {
           </Button>
         </div>
       </form>
+      )}
     </AuthShell>
   );
 }

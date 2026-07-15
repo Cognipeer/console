@@ -32,15 +32,18 @@ import {
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import {
+  IconAlertTriangle,
   IconCheck,
   IconChartBar,
   IconCode,
   IconCopy,
   IconDots,
   IconEdit,
+  IconHistory,
   IconList,
   IconPlayerPlay,
   IconPlugConnected,
+  IconRefresh,
   IconTrash,
 } from '@tabler/icons-react';
 import DetailShell from '@/components/common/ui/DetailShell';
@@ -52,6 +55,12 @@ const AUTH_LABELS: Record<string, string> = {
   token: 'Bearer Token',
   header: 'Custom Header',
   basic: 'Basic Auth',
+};
+
+const SOURCE_LABELS: Record<string, string> = {
+  openapi: 'OpenAPI proxy',
+  remote: 'Remote MCP proxy',
+  stdio: 'Stdio package',
 };
 
 const STATUS_COLORS: Record<string, string> = {
@@ -72,7 +81,7 @@ export default function McpDetailPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const tabParam = searchParams.get('tab');
-  const initialTab = ['overview', 'usage', 'tools', 'playground', 'logs'].includes(tabParam ?? '')
+  const initialTab = ['overview', 'usage', 'tools', 'playground', 'logs', 'audit'].includes(tabParam ?? '')
     ? (tabParam as string)
     : 'overview';
 
@@ -104,6 +113,19 @@ export default function McpDetailPage() {
   const [pgResult, setPgResult] = useState<string>('');
   const [pgLatency, setPgLatency] = useState<number | null>(null);
   const [pgRunning, setPgRunning] = useState(false);
+
+  // ── Tools refresh + audit state ──
+  const [refreshingTools, setRefreshingTools] = useState(false);
+  const [auditLogs, setAuditLogs] = useState<Array<{
+    _id?: string;
+    action: string;
+    performedBy: string;
+    ipAddress?: string;
+    userAgent?: string;
+    changes?: Record<string, { from?: unknown; to?: unknown }>;
+    createdAt?: string;
+  }>>([]);
+  const [auditLoading, setAuditLoading] = useState(false);
 
   const form = useForm({
     initialValues: {
@@ -251,6 +273,41 @@ export default function McpDetailPage() {
     loadLogs();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, params.id, logsPage, logsKeyword, logsFrom, logsTo]);
+
+  useEffect(() => {
+    if (activeTab !== 'audit' || !server) return;
+    setAuditLoading(true);
+    fetch(`/api/mcp/audit?serverKey=${encodeURIComponent(server.key)}&limit=100`, { cache: 'no-store' })
+      .then((res) => (res.ok ? res.json() : { logs: [] }))
+      .then((data) => setAuditLogs(data.logs ?? []))
+      .catch(() => setAuditLogs([]))
+      .finally(() => setAuditLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, server?.key]);
+
+  const handleRefreshTools = async () => {
+    if (!params.id) return;
+    setRefreshingTools(true);
+    try {
+      const res = await fetch(`/api/mcp/${params.id}/refresh-tools`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Tool discovery failed');
+      setServer(data.server);
+      notifications.show({
+        title: 'Tools refreshed',
+        message: `${data.server?.tools?.length ?? 0} tools discovered`,
+        color: 'teal',
+      });
+    } catch (err) {
+      notifications.show({
+        title: 'Tool discovery failed',
+        message: err instanceof Error ? err.message : 'Unknown error',
+        color: 'red',
+      });
+    } finally {
+      setRefreshingTools(false);
+    }
+  };
 
   const handleSave = async () => {
     const validation = form.validate();
@@ -503,10 +560,25 @@ export default function McpDetailPage() {
           <Tabs.Tab value="logs" leftSection={<IconList size={14} />}>
             Request Logs
           </Tabs.Tab>
+          <Tabs.Tab value="audit" leftSection={<IconHistory size={14} />}>
+            Audit
+          </Tabs.Tab>
         </Tabs.List>
 
         {/* ── Overview Tab ── */}
         <Tabs.Panel value="overview">
+          {server.lastError ? (
+            <Paper withBorder p="md" radius="md" mb="md" style={{ borderColor: 'var(--mantine-color-red-4)' }}>
+              <Group gap="xs">
+                <IconAlertTriangle size={16} color="var(--mantine-color-red-6)" />
+                <Text size="sm" fw={600} c="red">Last runtime error</Text>
+              </Group>
+              <Text size="sm" c="dimmed" mt={4} style={{ wordBreak: 'break-word' }}>
+                {server.lastError.message}
+              </Text>
+            </Paper>
+          ) : null}
+
           <SimpleGrid cols={{ base: 1, sm: 2, md: 3 }} spacing="md" mb="md">
             <Paper withBorder p="md" radius="md">
               <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Status</Text>
@@ -528,6 +600,54 @@ export default function McpDetailPage() {
               <Text fw={500} size="sm" mt="xs">
                 {AUTH_LABELS[server.upstreamAuth?.type] ?? 'None'}
               </Text>
+            </Paper>
+          </SimpleGrid>
+
+          <SimpleGrid cols={{ base: 1, sm: 2, md: 3 }} spacing="md" mb="md">
+            <Paper withBorder p="md" radius="md">
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Tool Source</Text>
+              <Badge size="lg" variant="light" color="grape" mt="xs">
+                {SOURCE_LABELS[server.sourceType] ?? 'OpenAPI'}
+              </Badge>
+              <Text size="xs" c="dimmed" mt={6} ff="monospace" style={{ wordBreak: 'break-all' }}>
+                {server.sourceType === 'remote'
+                  ? server.remoteConfig?.url
+                  : server.sourceType === 'stdio'
+                    ? `${server.stdioConfig?.runtime ?? 'npx'} ${server.stdioConfig?.packageName ?? ''} · ${server.stdioConfig?.executionMode === 'sandbox' ? 'sandbox' : 'subprocess'}`
+                    : server.upstreamBaseUrl || '—'}
+              </Text>
+            </Paper>
+            <Paper withBorder p="md" radius="md">
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Exposure</Text>
+              <Group gap="xs" mt="xs">
+                {(server.exposure?.protocols ?? ['streamable-http', 'sse']).map((p) => (
+                  <Badge key={p} size="sm" variant="light" color="blue">
+                    {p === 'streamable-http' ? 'Streamable HTTP' : 'SSE'}
+                  </Badge>
+                ))}
+                <Badge
+                  size="sm"
+                  variant="light"
+                  color={server.exposure?.accessMode === 'public' ? 'orange' : 'teal'}
+                >
+                  {server.exposure?.accessMode === 'public' ? 'Public URL' : 'API token'}
+                </Badge>
+              </Group>
+            </Paper>
+            <Paper withBorder p="md" radius="md">
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Aegis Shield</Text>
+              <Group gap="xs" mt="xs">
+                <Badge
+                  size="sm"
+                  variant="light"
+                  color={server.aegis?.mode === 'enforce' ? 'red' : server.aegis?.mode === 'monitor' ? 'yellow' : 'gray'}
+                >
+                  {server.aegis?.mode ?? 'off'}
+                </Badge>
+                {server.aegis?.shieldId ? (
+                  <Code style={{ fontSize: 11 }}>{server.aegis.shieldId}</Code>
+                ) : null}
+              </Group>
             </Paper>
           </SimpleGrid>
 
@@ -635,6 +755,49 @@ export default function McpDetailPage() {
         {/* ── Usage Tab ── */}
         <Tabs.Panel value="usage">
           <Stack gap="lg">
+            {server.exposure?.accessMode === 'public' ? (
+              <Paper withBorder p="lg" radius="md" style={{ borderColor: 'var(--mantine-color-orange-4)' }}>
+                <Group gap="xs" mb="sm">
+                  <Badge size="lg" variant="light" color="orange">Public access</Badge>
+                  <Text fw={600} size="lg">Unauthenticated endpoint</Text>
+                </Group>
+                <Text size="sm" c="dimmed" mb="md">
+                  This server is exposed on an unguessable public URL — no API token
+                  required. Treat the URL like a webhook secret.
+                </Text>
+                <Text fw={600} size="sm" mb={4}>Streamable HTTP (JSON-RPC)</Text>
+                <Group gap="sm" mb="md">
+                  <Code block style={{ flex: 1 }}>
+                    {`POST /api/public/mcp/${server.tenantId}/${server.endpointSlug}/message`}
+                  </Code>
+                  <CopyButton value={`/api/public/mcp/${server.tenantId}/${server.endpointSlug}/message`}>
+                    {({ copied, copy }) => (
+                      <Tooltip label={copied ? 'Copied' : 'Copy URL'}>
+                        <Button variant="subtle" size="compact-xs" color={copied ? 'teal' : 'gray'} onClick={copy}>
+                          {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
+                        </Button>
+                      </Tooltip>
+                    )}
+                  </CopyButton>
+                </Group>
+                <Text fw={600} size="sm" mb={4}>SSE</Text>
+                <Group gap="sm">
+                  <Code block style={{ flex: 1 }}>
+                    {`GET /api/public/mcp/${server.tenantId}/${server.endpointSlug}/sse`}
+                  </Code>
+                  <CopyButton value={`/api/public/mcp/${server.tenantId}/${server.endpointSlug}/sse`}>
+                    {({ copied, copy }) => (
+                      <Tooltip label={copied ? 'Copied' : 'Copy URL'}>
+                        <Button variant="subtle" size="compact-xs" color={copied ? 'teal' : 'gray'} onClick={copy}>
+                          {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
+                        </Button>
+                      </Tooltip>
+                    )}
+                  </CopyButton>
+                </Group>
+              </Paper>
+            ) : null}
+
             {/* SSE Transport (Primary) */}
             <Paper withBorder p="lg" radius="md">
               <Group gap="xs" mb="sm">
@@ -858,18 +1021,37 @@ async with sse_client(
 
         {/* ── Tools Tab ── */}
         <Tabs.Panel value="tools">
+          {server.sourceType !== 'openapi' ? (
+            <Group justify="space-between" mb="sm">
+              <Text size="sm" c="dimmed">
+                Tools discovered from the {server.sourceType === 'remote' ? 'remote MCP server' : 'stdio package'}
+                {server.toolsDiscoveredAt
+                  ? ` · last discovery ${new Date(server.toolsDiscoveredAt).toLocaleString()}`
+                  : ''}
+              </Text>
+              <Button
+                variant="default"
+                size="xs"
+                leftSection={<IconRefresh size={13} />}
+                loading={refreshingTools}
+                onClick={() => void handleRefreshTools()}
+              >
+                Refresh tools
+              </Button>
+            </Group>
+          ) : null}
           <Paper withBorder radius="md" p={0} style={{ overflow: 'hidden' }}>
             {!server.tools?.length ? (
               <Center p="xl">
-                <Text c="dimmed">No tools found in the specification</Text>
+                <Text c="dimmed">No tools discovered yet</Text>
               </Center>
             ) : (
               <Table horizontalSpacing="md" verticalSpacing="sm">
                 <Table.Thead>
                   <Table.Tr>
                     <Table.Th>Name</Table.Th>
-                    <Table.Th>Method</Table.Th>
-                    <Table.Th>Path</Table.Th>
+                    {server.sourceType === 'openapi' ? <Table.Th>Method</Table.Th> : null}
+                    {server.sourceType === 'openapi' ? <Table.Th>Path</Table.Th> : null}
                     <Table.Th>Description</Table.Th>
                   </Table.Tr>
                 </Table.Thead>
@@ -879,14 +1061,18 @@ async with sse_client(
                       <Table.Td>
                         <Code>{tool.name}</Code>
                       </Table.Td>
-                      <Table.Td>
-                        <Badge size="sm" variant="light" color="blue">
-                          {tool.httpMethod}
-                        </Badge>
-                      </Table.Td>
-                      <Table.Td>
-                        <Text size="sm" ff="monospace">{tool.httpPath}</Text>
-                      </Table.Td>
+                      {server.sourceType === 'openapi' ? (
+                        <Table.Td>
+                          <Badge size="sm" variant="light" color="blue">
+                            {tool.httpMethod ?? '—'}
+                          </Badge>
+                        </Table.Td>
+                      ) : null}
+                      {server.sourceType === 'openapi' ? (
+                        <Table.Td>
+                          <Text size="sm" ff="monospace">{tool.httpPath ?? '—'}</Text>
+                        </Table.Td>
+                      ) : null}
                       <Table.Td>
                         <Text size="sm" c="dimmed" lineClamp={1}>
                           {tool.description || '—'}
@@ -1127,6 +1313,73 @@ async with sse_client(
               />
             </Group>
           </Stack>
+        </Tabs.Panel>
+
+        {/* ── Audit Tab ── */}
+        <Tabs.Panel value="audit">
+          <Paper withBorder radius="md" p={0} style={{ overflow: 'hidden' }}>
+            {auditLoading ? (
+              <Center p="xl"><Loader size="sm" /></Center>
+            ) : auditLogs.length === 0 ? (
+              <Center p="xl">
+                <Text c="dimmed">No audit entries yet</Text>
+              </Center>
+            ) : (
+              <Table horizontalSpacing="md" verticalSpacing="sm">
+                <Table.Thead>
+                  <Table.Tr>
+                    <Table.Th>Time</Table.Th>
+                    <Table.Th>Action</Table.Th>
+                    <Table.Th>By</Table.Th>
+                    <Table.Th>IP</Table.Th>
+                    <Table.Th>Changes</Table.Th>
+                  </Table.Tr>
+                </Table.Thead>
+                <Table.Tbody>
+                  {auditLogs.map((entry, idx) => (
+                    <Table.Tr key={entry._id ?? idx}>
+                      <Table.Td>
+                        <Text size="xs" ff="monospace" c="dimmed" style={{ whiteSpace: 'nowrap' }}>
+                          {entry.createdAt ? new Date(entry.createdAt).toLocaleString() : '—'}
+                        </Text>
+                      </Table.Td>
+                      <Table.Td>
+                        <Badge size="sm" variant="light" color={
+                          entry.action === 'delete' ? 'red'
+                            : entry.action === 'secrets_change' ? 'orange'
+                              : entry.action === 'create' ? 'teal'
+                                : 'blue'
+                        }>
+                          {entry.action.replace(/_/g, ' ')}
+                        </Badge>
+                      </Table.Td>
+                      <Table.Td>
+                        <Text size="xs" ff="monospace">{entry.performedBy}</Text>
+                      </Table.Td>
+                      <Table.Td>
+                        <Text size="xs" ff="monospace" c="dimmed">{entry.ipAddress ?? '—'}</Text>
+                      </Table.Td>
+                      <Table.Td>
+                        {entry.changes && Object.keys(entry.changes).length ? (
+                          <Tooltip
+                            multiline
+                            maw={420}
+                            label={<pre style={{ margin: 0, fontSize: 11 }}>{JSON.stringify(entry.changes, null, 2)}</pre>}
+                          >
+                            <Text size="xs" c="dimmed" style={{ cursor: 'help' }}>
+                              {Object.keys(entry.changes).join(', ')}
+                            </Text>
+                          </Tooltip>
+                        ) : (
+                          <Text size="xs" c="dimmed">—</Text>
+                        )}
+                      </Table.Td>
+                    </Table.Tr>
+                  ))}
+                </Table.Tbody>
+              </Table>
+            )}
+          </Paper>
         </Tabs.Panel>
 
       <Modal

@@ -60,7 +60,7 @@ export default function ServiceLauncher({
   }, [open, onClose]);
 
   const navigable = useMemo(
-    () => services.filter((s) => s.id !== 'services-home'),
+    () => services.filter((s) => s.id !== 'services-home' && !s.isSettings),
     [services],
   );
 

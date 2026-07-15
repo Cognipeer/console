@@ -1,4 +1,5 @@
 import type { ObjectId } from 'mongodb';
+import type { IUsageAttributionFields } from './types.base';
 
 // ── Guardrail types ────────────────────────────────────────────────────────
 
@@ -637,7 +638,7 @@ export interface IRagChunk {
   createdAt?: Date;
 }
 
-export interface IRagQueryLog {
+export interface IRagQueryLog extends IUsageAttributionFields {
   _id?: ObjectId | string;
   tenantId: string;
   projectId?: string;
@@ -710,7 +711,7 @@ export interface IReranker {
   updatedAt?: Date;
 }
 
-export interface IRerankerRunLog {
+export interface IRerankerRunLog extends IUsageAttributionFields {
   _id?: ObjectId | string;
   tenantId: string;
   projectId?: string;
@@ -737,7 +738,7 @@ export interface IRerankerRunLog {
  * record). Keyed by `searchKey` = the instance's provider key so logs are
  * viewable per instance in the dashboard.
  */
-export interface IWebSearchRunLog {
+export interface IWebSearchRunLog extends IUsageAttributionFields {
   _id?: ObjectId | string;
   tenantId: string;
   projectId?: string;
@@ -926,7 +927,7 @@ export interface ITool {
 
 // ── Tool Request Log types ────────────────────────────────────────────────
 
-export interface IToolRequestLog {
+export interface IToolRequestLog extends IUsageAttributionFields {
   _id?: ObjectId | string;
   tenantId: string;
   projectId?: string;
@@ -1205,7 +1206,7 @@ export interface IBrowserSessionConfig {
   access?: IBrowserAccessRules;
 }
 
-export interface IBrowserSession {
+export interface IBrowserSession extends IUsageAttributionFields {
   _id?: ObjectId | string;
   tenantId: string;
   projectId?: string;
@@ -1420,7 +1421,7 @@ export interface ICrawlPlanSnapshot {
   webhook?: ICrawlerWebhookConfig;
 }
 
-export interface ICrawlJob {
+export interface ICrawlJob extends IUsageAttributionFields {
   _id?: ObjectId | string;
   tenantId: string;
   projectId?: string;

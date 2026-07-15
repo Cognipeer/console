@@ -119,6 +119,10 @@
           "type": "boolean",
           "description": "Pin to the slim rail by default for new users."
         },
+        "settings": {
+          "type": "boolean",
+          "description": "Tenant/workspace settings entry. Shown in the Settings section of the left nav instead of the services launcher and services home."
+        },
         "popular": {
           "type": "boolean",
           "description": "Highlighted in the launcher's Popular section."

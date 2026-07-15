@@ -14,6 +14,10 @@ import { routeInstanceCall } from '@/lib/core/cluster';
 import type { QueuePayload } from '@/lib/core/queue';
 import { getDatabase, type DatabaseProvider } from '@/lib/database';
 import { uploadFile } from '@/lib/services/files';
+import {
+  recordUsageEvent,
+  resolveUsageAttribution,
+} from '@/lib/services/usage/usageEvents';
 import { browserManager } from './browserManager';
 import { browserEntityId } from './entityId';
 import { matchesProjectScope, redactTypedText, sanitizePersistedUrl } from './internals';
@@ -93,7 +97,13 @@ export async function createBrowserSession(
   const config = { ...(browser.defaultSessionConfig ?? {}), ...(input.config ?? {}) };
   const artifactBucketKey = input.artifactBucketKey ?? browser.artifactBucketKey ?? cfg.defaultArtifactBucketKey;
 
+  // Attribution is stamped at creation (request ALS in scope); the rollup
+  // event is emitted once per session when it ends.
+  const attribution = resolveUsageAttribution();
   const created = await db.createBrowserSession({
+    userId: attribution.userId,
+    apiTokenId: attribution.apiTokenId,
+    actorType: attribution.actorType,
     tenantId: ctx.tenantId,
     projectId: ctx.projectId,
     browserId: input.browserId,
@@ -126,6 +136,28 @@ export async function createBrowserSession(
             status: reason === 'shutdown' ? 'closed' : reason === 'idle-timeout' || reason === 'max-lifetime' ? 'expired' : 'closed',
             endedAt: new Date(),
           });
+          // Rollup event at session end — onClose fires exactly once for every
+          // manager-side close (manual, idle, lifetime, shutdown, deleted).
+          // The manager callback runs outside the request ALS, so pass the
+          // attribution stamped on the row at creation.
+          const row = await db.findBrowserSessionById(sessionId);
+          const durationMs = row?.startedAt && row?.endedAt
+            ? new Date(row.endedAt).getTime() - new Date(row.startedAt).getTime()
+            : undefined;
+          recordUsageEvent({
+            tenantDbName: ctx.tenantDbName,
+            tenantId: ctx.tenantId,
+            projectId: ctx.projectId,
+            service: 'browser',
+            refKey: browser.key,
+            status: 'success',
+            latencyMs: durationMs,
+            attribution: {
+              userId: row?.userId ?? attribution.userId,
+              apiTokenId: row?.apiTokenId ?? attribution.apiTokenId,
+              actorType: row?.actorType ?? attribution.actorType,
+            },
+          });
         } catch (err) {
           logger.warn('Failed to persist close metadata', {
             sessionId,
@@ -153,6 +185,21 @@ export async function createBrowserSession(
       status: 'errored',
       errorMessage: err instanceof Error ? err.message : String(err),
       endedAt: new Date(),
+    });
+    // The manager session never opened, so onClose will not fire — this is
+    // the session's only rollup event.
+    recordUsageEvent({
+      tenantDbName: ctx.tenantDbName,
+      tenantId: ctx.tenantId,
+      projectId: ctx.projectId,
+      service: 'browser',
+      refKey: browser.key,
+      status: 'error',
+      attribution: {
+        userId: attribution.userId,
+        apiTokenId: attribution.apiTokenId,
+        actorType: attribution.actorType,
+      },
     });
     throw err;
   }

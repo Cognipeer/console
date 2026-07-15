@@ -181,9 +181,11 @@ export function ToolMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
       db.prepare(`
         INSERT INTO ${TABLES.toolRequestLogs}
         (id, tenantId, projectId, toolKey, actionKey, actionName, status,
-         requestPayload, responsePayload, errorMessage, latencyMs, callerType, callerTokenId, createdAt)
+         requestPayload, responsePayload, errorMessage, latencyMs, callerType, callerTokenId,
+         userId, apiTokenId, actorType, createdAt)
         VALUES (@id, @tenantId, @projectId, @toolKey, @actionKey, @actionName, @status,
-         @requestPayload, @responsePayload, @errorMessage, @latencyMs, @callerType, @callerTokenId, @createdAt)
+         @requestPayload, @responsePayload, @errorMessage, @latencyMs, @callerType, @callerTokenId,
+         @userId, @apiTokenId, @actorType, @createdAt)
       `).run({
         id,
         tenantId: log.tenantId,
@@ -198,6 +200,9 @@ export function ToolMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
         latencyMs: log.latencyMs ?? null,
         callerType: log.callerType ?? null,
         callerTokenId: log.callerTokenId ?? null,
+        userId: log.userId ?? null,
+        apiTokenId: log.apiTokenId ?? null,
+        actorType: log.actorType ?? null,
         createdAt: now,
       });
 
@@ -342,6 +347,9 @@ export function ToolMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
         latencyMs: r.latencyMs as number | undefined,
         callerType: r.callerType as IToolRequestLog['callerType'],
         callerTokenId: r.callerTokenId as string | undefined,
+        userId: (r.userId as string | null) ?? undefined,
+        apiTokenId: (r.apiTokenId as string | null) ?? undefined,
+        actorType: (r.actorType as IToolRequestLog['actorType'] | null) ?? undefined,
         createdAt: this.toDate(r.createdAt),
       };
     }
