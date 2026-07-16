@@ -33,7 +33,7 @@ const MODULE_OPTIONS = [
   { value: 'models', label: 'Models' },
   { value: 'inference', label: 'Inference Servers' },
   { value: 'guardrails', label: 'Guardrails' },
-  { value: 'rag', label: 'RAG' },
+  { value: 'rag', label: 'Knowledge Engine' },
   { value: 'mcp', label: 'MCP Servers' },
   { value: 'evaluation', label: 'Evaluation' },
   { value: 'analysis', label: 'Analysis' },

@@ -23,9 +23,9 @@ const METRIC_LABELS: Record<string, string> = {
   guardrail_fail_rate: 'Guardrail Fail Rate',
   guardrail_avg_latency_ms: 'Guardrail Avg Latency',
   guardrail_total_evaluations: 'Guardrail Total Evaluations',
-  rag_avg_latency_ms: 'RAG Avg Query Latency',
-  rag_total_queries: 'RAG Total Queries',
-  rag_failed_documents: 'RAG Failed Documents',
+  rag_avg_latency_ms: 'Knowledge Engine Avg Query Latency',
+  rag_total_queries: 'Knowledge Engine Total Queries',
+  rag_failed_documents: 'Knowledge Engine Failed Documents',
 };
 
 /** Human-readable operator symbols */

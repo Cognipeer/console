@@ -78,7 +78,7 @@ export const RBAC_SERVICE_DEFINITIONS: RbacServiceDefinition[] = [
   { id: 'vector', label: 'Knowledge Index', description: 'Vector providers, indexes and vector operations.', category: 'data' },
   { id: 'memory', label: 'Agent Memory', description: 'Memory stores and memory items.', category: 'data' },
   { id: 'files', label: 'Document Store', description: 'File buckets and file objects.', category: 'data' },
-  { id: 'rag', label: 'Knowledge Engine', description: 'RAG modules, documents and chunks.', category: 'data' },
+  { id: 'rag', label: 'Knowledge Engine', description: 'Knowledge Engine modules, documents and chunks.', category: 'data' },
   { id: 'reranker', label: 'Reranker', description: 'Reranker services and run logs.', category: 'data' },
   { id: 'realtime', label: 'Realtime', description: 'Realtime models, live sessions and telephony bridges.', category: 'build' },
   { id: 'tracing', label: 'Agent Observability', description: 'Tracing sessions, threads and events.', category: 'operate' },

@@ -70,14 +70,14 @@ export default function RagDashboardPage() {
     setRefreshing(true);
     try {
       const res = await fetch('/api/rag/modules', { cache: 'no-store' });
-      if (!res.ok) throw new Error('Failed to load RAG modules');
+      if (!res.ok) throw new Error('Failed to load Knowledge Engine modules');
       const data = await res.json();
       setModules(data.modules ?? []);
     } catch (error) {
       console.error(error);
       notifications.show({
         color: 'red',
-        title: 'Unable to load RAG modules',
+        title: 'Unable to load Knowledge Engine modules',
         message: error instanceof Error ? error.message : 'Unexpected error',
       });
     } finally {
@@ -104,7 +104,7 @@ export default function RagDashboardPage() {
       }
       notifications.show({
         color: 'green',
-        title: 'RAG module deleted',
+        title: 'Knowledge Engine module deleted',
         message: `${deleteTarget.name} has been removed.`,
       });
       setModules((prev) => prev.filter((m) => m.key !== deleteTarget.key));
@@ -292,9 +292,9 @@ export default function RagDashboardPage() {
         refreshing={refreshing}
         empty={{
           icon: <IconBook2 size={26} stroke={1.7} />,
-          title: 'No RAG modules yet',
+          title: 'No Knowledge Engine modules yet',
           description:
-            'Create your first RAG module to start ingesting documents and querying knowledge.',
+            'Create your first Knowledge Engine module to start ingesting documents and querying knowledge.',
           primaryAction: {
             label: 'Create module',
             icon: <IconPlus size={14} stroke={1.7} />,
@@ -324,12 +324,12 @@ export default function RagDashboardPage() {
       <Modal
         opened={deleteTarget !== null}
         onClose={() => setDeleteTarget(null)}
-        title="Delete RAG module"
+        title="Delete Knowledge Engine module"
         centered
         size="sm"
       >
         <Text size="sm" mb="lg">
-          Delete RAG module <strong>{deleteTarget?.name}</strong>? This will remove
+          Delete Knowledge Engine module <strong>{deleteTarget?.name}</strong>? This will remove
           the module and its index configuration. Documents in the vector index will
           not be deleted automatically.
         </Text>

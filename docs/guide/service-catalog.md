@@ -5,7 +5,7 @@ The Console UI is driven by two declarative JSON files. Together they define whi
 | File | Purpose |
 |---|---|
 | `src/config/service-catalog.json` | Third-party services Cognipeer can integrate with (LLM providers, vector stores, file backends). Drives the provider picker, brand swatches, and search. |
-| `src/config/platform-services.json` | First-party Console modules (Models, Prompts, RAG, Cluster, …). Drives the dashboard nav, command palette, slim rail, and service launcher. |
+| `src/config/platform-services.json` | First-party Console modules (Models, Prompts, Knowledge Engine, Cluster, …). Drives the dashboard nav, command palette, slim rail, and service launcher. |
 
 Both files are schema-validated (`service-catalog.schema.json` and `platform-services.schema.json` sit next to them). Validation runs as part of the build — invalid entries fail the type-check, not at runtime.
 

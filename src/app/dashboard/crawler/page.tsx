@@ -131,7 +131,7 @@ export default function CrawlersListPage() {
     },
     {
       key: 'rag',
-      label: 'RAG',
+      label: 'Knowledge Engine',
       render: (c) =>
         c.rag?.enabled ? (
           <span className="ds-badge ds-badge-ok">{c.rag.ragModuleKey}</span>
@@ -184,7 +184,7 @@ export default function CrawlersListPage() {
         />
         <StatTile label="Active" value={summary.active} />
         <StatTile label="Disabled" value={summary.disabled} />
-        <StatTile label="With RAG" value={summary.withRag} />
+        <StatTile label="With Knowledge Engine" value={summary.withRag} />
       </div>
 
       <DataGrid<CrawlerView>

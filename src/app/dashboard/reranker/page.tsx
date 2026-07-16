@@ -318,7 +318,7 @@ export default function RerankerDashboardPage() {
         size="sm"
       >
         <Text size="sm">
-          Delete <strong>{deleteTarget?.name}</strong>? Any RAG modules pointing to this
+          Delete <strong>{deleteTarget?.name}</strong>? Any Knowledge Engine modules pointing to this
           reranker will silently skip reranking and return vector-ranked results.
         </Text>
         <div

@@ -135,7 +135,7 @@ After login you land on the overview. This is the page you'll come back to most 
 The header has three controls worth knowing about up front:
 
 - **Services launcher** (the grid icon next to the logo) opens the full app switcher with every module grouped by category. Open it once when you're new to the console and pin the services you use most.
-- **Project switcher** (right of centre) toggles between projects inside the same tenant. Most resources — models, prompts, RAG indices, API tokens — are scoped to the active project.
+- **Project switcher** (right of centre) toggles between projects inside the same tenant. Most resources — models, prompts, Knowledge Engine indices, API tokens — are scoped to the active project.
 - **Account menu** (top right) is where you flip the theme, sign out, and review license status.
 
 Press **Cmd+K** (or **Ctrl+K** on Windows/Linux) from anywhere to open the [Command Palette](/guide/command-palette) — searches across services, models, providers, agents, prompts, tools, MCP servers, vector indexes, memory stores, files, guardrails, PII policies, browsers, and more.

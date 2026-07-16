@@ -2,7 +2,7 @@
 
 Cognipeer Console and the Console SDK solve different layers of the same system.
 
-- **Cognipeer Console** is the platform and control plane: deployment, tenant isolation, API tokens, providers, tracing, prompts, guardrails, RAG, and runtime policy.
+- **Cognipeer Console** is the platform and control plane: deployment, tenant isolation, API tokens, providers, tracing, prompts, guardrails, Knowledge Engine, and runtime policy.
 - **Console SDK** is the application integration layer: a TypeScript and JavaScript client that talks to the Console client API.
 
 ## Which Team Uses Which
