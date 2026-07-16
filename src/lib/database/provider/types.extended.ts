@@ -1227,6 +1227,12 @@ export interface IRealtimeModel {
   turnSilenceThreshold?: number;
   /** Greeting spoken/sent when a telephony call connects. */
   greeting?: string;
+  /**
+   * Filler line announced (emitted as an event and, when TTS is configured,
+   * spoken) the first time the agent starts calling tools within a response,
+   * e.g. "Bir saniye, kontrol ediyorum…". Only meaningful with `agentKey`.
+   */
+  toolStatusMessage?: string;
   metadata?: Record<string, unknown>;
   createdBy: string;
   updatedBy?: string;

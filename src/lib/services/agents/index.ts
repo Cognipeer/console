@@ -27,4 +27,5 @@ export type {
   AgentChatRequest,
   AgentChatResponse,
   AgentPlaygroundChatRequest,
+  AgentToolCallEvent,
 } from './agentService';

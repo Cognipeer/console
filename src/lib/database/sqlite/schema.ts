@@ -248,6 +248,7 @@ export const REALTIME_TENANT_SCHEMA_SQL = `
     turnSilenceMs INTEGER,
     turnSilenceThreshold REAL,
     greeting TEXT,
+    toolStatusMessage TEXT,
     metadata TEXT,
     createdBy TEXT NOT NULL,
     updatedBy TEXT,

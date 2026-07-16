@@ -13,6 +13,7 @@ import type {
     AgentInvokeResult as AgentSdkInvokeResult,
     Message as AgentSdkMessage,
     RuntimeProfile as AgentSdkRuntimeProfile,
+    SmartAgentEvent as AgentSdkEvent,
     SmartState as AgentSdkSmartState,
     ToolResponseRetentionPolicy as AgentSdkToolResponseRetentionPolicy,
     ToolInterface as AgentSdkToolInterface,
@@ -814,6 +815,15 @@ export interface AgentChatRequest {
     usePublished?: boolean;
 }
 
+/** Tool-call progress notification surfaced while an agent run executes. */
+export interface AgentToolCallEvent {
+    phase: 'start' | 'success' | 'error';
+    /** Tool name as the agent sees it (e.g. `knowledge_search`). */
+    name: string;
+    /** Provider tool-call id, when available. */
+    id?: string;
+}
+
 /** Ephemeral (playground) chat — no DB conversation required */
 export interface AgentPlaygroundChatRequest {
     tenantDbName: string;
@@ -823,6 +833,13 @@ export interface AgentPlaygroundChatRequest {
     userMessage: string;
     /** Previous messages for context (in-memory only) */
     history?: Array<{ role: string; content: string }>;
+    /**
+     * In-process only, best-effort: fires as the agent starts/finishes each
+     * tool call so callers (e.g. realtime sessions) can surface progress.
+     * Functions cannot cross the job queue — when the agent is assigned to
+     * another cluster node the run still works, but no events fire.
+     */
+    onToolEvent?: (event: AgentToolCallEvent) => void;
 }
 
 /** OpenAI Responses API–compatible output content item */
@@ -1213,13 +1230,17 @@ export async function executeAgentChatLocal(
 export async function executePlaygroundChat(
     request: AgentPlaygroundChatRequest,
 ): Promise<{ content: string; reasoning?: string }> {
+    // The callback can't serialize over the queue — keep it out of the payload
+    // (the local fast path still receives the full request).
+    const payload = { ...request };
+    delete payload.onToolEvent;
     return routeInstanceCall(
         {
             entityType: 'agent',
             entityId: agentEntityId(request.tenantId, request.agentKey),
             jobName: 'playground',
         },
-        request as unknown as QueuePayload,
+        payload as unknown as QueuePayload,
         () => executePlaygroundChatLocal(request),
     );
 }
@@ -1364,8 +1385,27 @@ export async function executePlaygroundChatLocal(
         tracingSink,
     });
 
+    // Surface tool-call progress to the caller (best-effort; never fails the run).
+    const { onToolEvent } = request;
+    const invokeConfig = onToolEvent
+        ? {
+            onEvent: (event: AgentSdkEvent) => {
+                if (event.type !== 'tool_call' || !event.name) return;
+                if (event.phase !== 'start' && event.phase !== 'success' && event.phase !== 'error') return;
+                try {
+                    onToolEvent({ phase: event.phase, name: event.name, id: event.id });
+                } catch (callbackError) {
+                    logger.warn('onToolEvent callback failed', { agentKey, error: callbackError });
+                }
+            },
+        }
+        : undefined;
+
     try {
-        const result: AgentSdkInvokeResult = await sdkAgent.invoke(createConsoleAgentState(inputMessages));
+        const result: AgentSdkInvokeResult = await sdkAgent.invoke(
+            createConsoleAgentState(inputMessages),
+            invokeConfig,
+        );
         const assistantContent = result.content || '';
         const assistantReasoning = extractAgentReasoning(result);
 

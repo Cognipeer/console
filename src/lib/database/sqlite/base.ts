@@ -581,6 +581,14 @@ export class SQLiteProviderBase {
       'agentKey',
       'agentKey TEXT',
     );
+    // Parametric "agent is using tools" filler line (added with tool-call
+    // progress events). Safe to ensure on boot.
+    this.ensureTableColumn(
+      db,
+      TABLES.realtimeModels,
+      'toolStatusMessage',
+      'toolStatusMessage TEXT',
+    );
     // Per-project sandbox resource defaults (added with port preview + resource
     // limits). Safe to ensure on boot for tenants created before the feature.
     this.ensureTableColumn(
