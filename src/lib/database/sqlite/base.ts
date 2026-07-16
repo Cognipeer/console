@@ -8,6 +8,7 @@
 import { createLogger } from '@/lib/core/logger';
 import Database from 'better-sqlite3';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { warnGlobalTenantFallback } from '../tenantScopeGuard';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -865,11 +866,15 @@ export class SQLiteProviderBase {
   }
 
   protected getTenantDb(): Database.Database {
-    const tenantDb = this.tenantContext.getStore() ?? this.tenantDb;
-    if (!tenantDb) {
+    const scoped = this.tenantContext.getStore();
+    if (scoped) return scoped;
+    if (!this.tenantDb) {
       throw new Error('Tenant database not set. Call switchToTenant() first.');
     }
-    return tenantDb;
+    // See tenantScopeGuard: unwrapped callers fall back to the process-global
+    // handle, which is a cross-tenant race under concurrent load.
+    warnGlobalTenantFallback(this.tenantDb.name);
+    return this.tenantDb;
   }
 
   /** Generate a new random ID (replaces MongoDB ObjectId). */

@@ -12,7 +12,7 @@
  */
 
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase } from '@/lib/database';
+import { getDatabase, runWithTenantScope } from '@/lib/database';
 import { getQueue, type QueuePayload } from '@/lib/core/queue';
 import { createAsyncRun, executeRun, type RunOptions, type WithId } from './service';
 import { isDue } from './schedulePlanner';
@@ -69,25 +69,28 @@ export async function enqueueCampaignRun(input: EnqueueCampaignRunInput): Promis
 
 /** Execute one scan job. Throws on a fatal error so the queue can retry. */
 export async function runCampaignJob(payload: RedTeamJobPayload): Promise<void> {
-  const db = await getDatabase();
-  await db.switchToTenant(payload.tenantDbName);
-  const campaign = await db.findRedTeamCampaignById(payload.campaignId);
-  if (!campaign) {
-    logger.error('Red-team scan job: campaign gone', { campaignId: payload.campaignId, runId: payload.runId });
-    await db.updateRedTeamRun(payload.runId, { status: 'failed', error: 'campaign not found', finishedAt: new Date() });
-    return;
-  }
+  // Queue-consumer context: no request-level tenant scope exists, so bind the
+  // tenant for the whole job — switchToTenant alone would let the run
+  // updates land in whatever tenant a concurrent request last bound.
+  return runWithTenantScope(payload.tenantDbName, async (db) => {
+    const campaign = await db.findRedTeamCampaignById(payload.campaignId);
+    if (!campaign) {
+      logger.error('Red-team scan job: campaign gone', { campaignId: payload.campaignId, runId: payload.runId });
+      await db.updateRedTeamRun(payload.runId, { status: 'failed', error: 'campaign not found', finishedAt: new Date() });
+      return;
+    }
 
-  await executeRun({
-    tenantDbName: payload.tenantDbName,
-    tenantId: payload.tenantId,
-    projectId: payload.projectId,
-    createdBy: payload.createdBy,
-    runId: payload.runId,
-    campaign,
-    options: payload.options,
+    await executeRun({
+      tenantDbName: payload.tenantDbName,
+      tenantId: payload.tenantId,
+      projectId: payload.projectId,
+      createdBy: payload.createdBy,
+      runId: payload.runId,
+      campaign,
+      options: payload.options,
+    });
+    logger.info('Red-team scan completed', { runId: payload.runId, campaignKey: campaign.key });
   });
-  logger.info('Red-team scan completed', { runId: payload.runId, campaignKey: campaign.key });
 }
 
 /**

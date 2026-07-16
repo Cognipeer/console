@@ -8,7 +8,7 @@
  * scans run on the queue, so the tick stays cheap.
  */
 
-import { getDatabase } from '@/lib/database';
+import { getDatabase, runWithTenantScope } from '@/lib/database';
 import { getCache } from '@/lib/core/cache';
 import { createLogger } from '@/lib/core/logger';
 import { runScheduledScans } from './campaignJob';
@@ -36,7 +36,10 @@ async function runOnce(): Promise<void> {
     for (const tenant of tenants) {
       if (!tenant.dbName) continue;
       try {
-        const { fired, errors } = await runScheduledScans(tenant.dbName, String(tenant._id));
+        // Timer context: bind the tenant for the whole per-tenant run (see
+        // runWithTenantScope — switchToTenant alone races cross-tenant).
+        const { fired, errors } = await runWithTenantScope(tenant.dbName, () =>
+          runScheduledScans(tenant.dbName!, String(tenant._id)));
         if (fired.length > 0) {
           logger.info(`Tenant ${tenant.slug}: enqueued ${fired.length} scheduled red-team scan(s)`, { campaigns: fired });
         }
