@@ -31,6 +31,7 @@ import {
 } from '@/lib/services/mcp';
 import type { McpAuditContext } from '@/lib/services/mcp';
 import { mcpSandboxRunner, mcpGuardrailHook, IS_ENTERPRISE_BUILD } from '@/enterprise/registry';
+import { isEnterpriseLicenseType } from '@/lib/license/license-manager';
 import {
   getClientIp,
   readJsonBody,
@@ -160,11 +161,17 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
   // execution modes are available on this deployment.
   app.get('/mcp/capabilities', withApiRequestContext(async (request, reply) => {
     try {
-      await requireProjectContextForRequest(request);
+      const { session } = await requireProjectContextForRequest(request);
+      const licenseEnterprise = isEnterpriseLicenseType(session.licenseType);
       const [npxAvailable, uvxAvailable] = await Promise.all([
         stdioRuntimeAvailable('npx'),
         stdioRuntimeAvailable('uvx'),
       ]);
+      // Sandbox execution + Aegis enforcement are enterprise sub-features: a
+      // tenant may use them only when the runtime seam is wired (enterprise
+      // build) AND the tenant holds an active ENTERPRISE license. `available`
+      // therefore folds both; `seamAvailable`/`licenseEnterprise` let the UI
+      // explain WHY it is unavailable (build vs. plan).
       return reply.code(200).send({
         stdioSubprocess: {
           enabled: isStdioRunnerEnabled(),
@@ -172,12 +179,16 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
           uvx: uvxAvailable,
         },
         stdioSandbox: {
-          available: Boolean(mcpSandboxRunner.current),
+          available: Boolean(mcpSandboxRunner.current) && licenseEnterprise,
+          seamAvailable: Boolean(mcpSandboxRunner.current),
           enterpriseBuild: IS_ENTERPRISE_BUILD,
+          licenseEnterprise,
         },
         aegis: {
-          hookAvailable: Boolean(mcpGuardrailHook.current),
+          hookAvailable: Boolean(mcpGuardrailHook.current) && licenseEnterprise,
+          seamAvailable: Boolean(mcpGuardrailHook.current),
           enterpriseBuild: IS_ENTERPRISE_BUILD,
+          licenseEnterprise,
         },
       });
     } catch (error) {
@@ -253,6 +264,21 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'stdioConfig.packageName is required' });
       }
 
+      // Enterprise sub-feature: persistent sandbox execution needs the runtime
+      // seam (enterprise build) AND an active ENTERPRISE license. Reject up-front
+      // with a clear 402 — it literally cannot run otherwise, so a silent save
+      // would strand the tenant. (Aegis is softer: it is saved but stays inert
+      // without the license; the UI warns about that — no hard reject here.)
+      const licenseEnterprise = isEnterpriseLicenseType(session.licenseType);
+      const aegisConfig = parseAegis(body.aegis);
+      if (stdioConfig?.executionMode === 'sandbox' && !(licenseEnterprise && mcpSandboxRunner.current)) {
+        return reply.code(402).send({
+          error: 'Persistent sandbox execution requires an active Enterprise license.',
+          module: 'sandbox',
+          requiresEnterprise: true,
+        });
+      }
+
       if (
         !body.upstreamAuth
         || typeof body.upstreamAuth !== 'object'
@@ -286,7 +312,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
           remoteConfig,
           stdioConfig,
           exposure: parseExposure(body.exposure),
-          aegis: parseAegis(body.aegis),
+          aegis: aegisConfig,
         },
         auditContextFor(request, session.userId),
       );
@@ -368,6 +394,20 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'status must be "active" or "disabled"' });
       }
 
+      // Enterprise sub-feature gate (mirrors POST): a non-enterprise tenant may
+      // not turn on persistent sandbox execution via edit. Aegis is left as
+      // save-but-inert (UI warns) to match create behaviour.
+      const licenseEnterprise = isEnterpriseLicenseType(session.licenseType);
+      const nextStdioConfig = body.stdioConfig !== undefined ? parseStdioConfig(body.stdioConfig) : undefined;
+      const nextAegis = body.aegis !== undefined ? parseAegis(body.aegis) : undefined;
+      if (nextStdioConfig?.executionMode === 'sandbox' && !(licenseEnterprise && mcpSandboxRunner.current)) {
+        return reply.code(402).send({
+          error: 'Persistent sandbox execution requires an active Enterprise license.',
+          module: 'sandbox',
+          requiresEnterprise: true,
+        });
+      }
+
       const updated = await updateMcpServer(session.tenantDbName, id, session.userId, {
         description: body.description as string | undefined,
         name: body.name as string | undefined,
@@ -377,9 +417,9 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         upstreamAuth: body.upstreamAuth as IMcpAuthConfig | undefined,
         upstreamBaseUrl: body.upstreamBaseUrl as string | undefined,
         remoteConfig: body.remoteConfig !== undefined ? parseRemoteConfig(body.remoteConfig) : undefined,
-        stdioConfig: body.stdioConfig !== undefined ? parseStdioConfig(body.stdioConfig) : undefined,
+        stdioConfig: nextStdioConfig,
         exposure: body.exposure !== undefined ? parseExposure(body.exposure) : undefined,
-        aegis: body.aegis !== undefined ? parseAegis(body.aegis) : undefined,
+        aegis: nextAegis,
       }, auditContextFor(request, session.userId));
 
       if (!updated) {

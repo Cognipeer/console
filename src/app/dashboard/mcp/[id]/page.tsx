@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import {
   ActionIcon,
+  Alert,
   Badge,
   Box,
   Button,
@@ -106,6 +107,13 @@ export default function McpDetailPage() {
   const [overviewLoading, setOverviewLoading] = useState(false);
   const [overviewAggregate, setOverviewAggregate] = useState<McpAggregateView | null>(null);
   const [todaySummary, setTodaySummary] = useState({ total: 0, success: 0, error: 0 });
+  // Enterprise sub-feature availability for THIS tenant (sandbox exec + Aegis).
+  // `available`/`hookAvailable` fold the enterprise build seam AND the tenant's
+  // ENTERPRISE license, so a downgraded tenant sees the warning below.
+  const [caps, setCaps] = useState<{
+    stdioSandbox: { available: boolean };
+    aegis: { hookAvailable: boolean };
+  } | null>(null);
 
   // ── Playground state ──
   const [pgTool, setPgTool] = useState<string | null>(null);
@@ -262,6 +270,13 @@ export default function McpDetailPage() {
     loadServer();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params.id]);
+
+  useEffect(() => {
+    fetch('/api/mcp/capabilities', { cache: 'no-store' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => { if (data) setCaps(data); })
+      .catch(() => setCaps(null));
+  }, []);
 
   useEffect(() => {
     loadOverviewMetrics();
@@ -567,6 +582,32 @@ export default function McpDetailPage() {
 
         {/* ── Overview Tab ── */}
         <Tabs.Panel value="overview">
+          {caps && (
+            (server.stdioConfig?.executionMode === 'sandbox' && !caps.stdioSandbox.available)
+            || ((server.aegis?.mode ?? 'off') !== 'off' && !caps.aegis.hookAvailable)
+          ) ? (
+            <Alert
+              color="yellow"
+              icon={<IconAlertTriangle size={16} />}
+              title="Enterprise features inactive"
+              mb="md"
+            >
+              {server.stdioConfig?.executionMode === 'sandbox' && !caps.stdioSandbox.available ? (
+                <Text size="sm">
+                  This server is configured for <b>persistent sandbox execution</b>, an Enterprise
+                  feature that is not active on your current plan — it will not run until you upgrade
+                  under Dashboard → License.
+                </Text>
+              ) : null}
+              {(server.aegis?.mode ?? 'off') !== 'off' && !caps.aegis.hookAvailable ? (
+                <Text size="sm" mt={server.stdioConfig?.executionMode === 'sandbox' && !caps.stdioSandbox.available ? 6 : 0}>
+                  An <b>Aegis shield</b> is bound in <b>{server.aegis?.mode}</b> mode but will not
+                  enforce without an active Enterprise plan.
+                </Text>
+              ) : null}
+            </Alert>
+          ) : null}
+
           {server.lastError ? (
             <Paper withBorder p="md" radius="md" mb="md" style={{ borderColor: 'var(--mantine-color-red-4)' }}>
               <Group gap="xs">
