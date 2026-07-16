@@ -8,7 +8,7 @@ All endpoints live under `/api/client/v1/crawler/*` and require a Bearer token:
 Authorization: Bearer cpeer_…
 ```
 
-A **crawler** is a saved container that holds crawl configuration (engine, depth/page limits, scope filters, HTTP options, RAG binding, webhook, schedule). Running a crawler — or starting an ad-hoc run — enqueues a **job**, and each fetched page or file is stored as a **result** (extracted as Markdown for HTML).
+A **crawler** is a saved container that holds crawl configuration (engine, depth/page limits, scope filters, HTTP options, Knowledge Engine binding, webhook, schedule). Running a crawler — or starting an ad-hoc run — enqueues a **job**, and each fetched page or file is stored as a **result** (extracted as Markdown for HTML).
 
 By default the client API runs **async**: a run enqueues the job and returns immediately with `{ "jobId": "…", "status": "queued" }`. Poll the job, or supply a `callbackUrl`/`webhook` to be notified. Pass `"mode": "sync"` to block until the crawl finishes.
 
@@ -30,7 +30,7 @@ These appear on create/update and inside a job's frozen `planSnapshot`:
 | `http` | object | — | `userAgent`, `acceptLanguage`, `timeoutMs` (1000–120000), `maxConcurrency` (1–16), `retries` (1–5), `headers`, `cookies[]`, `basicAuth`, `bearerToken`, `allowPrivateNetwork`, `allowInsecureTls` (skips TLS certificate verification — opt-in escape hatch for sites with a misconfigured cert chain). |
 | `downloadableMimes` | string[] | — | MIME types treated as downloadable files. |
 | `markdownOptions` | object | — | `{ ocr: { enabled, languages? } }` forwarded to the Markdown extractor. |
-| `rag` | object | — | `{ ragModuleKey, enabled }` — ingest crawled pages into a RAG module. |
+| `rag` | object | — | `{ ragModuleKey, enabled }` — ingest crawled pages into a Knowledge Engine module. |
 | `webhook` | object | — | `{ url, secret?, events[] }` where events are `page`, `completed`, `failed`. |
 | `schedule` | object | — | `{ mode: interval\|cron, enabled, intervalSeconds?, cron?, startAt?, endAt? }`. Interval mode needs `intervalSeconds` (≥60); cron mode needs `cron`. |
 | `metadata` | object | — | Arbitrary key/value bag. |
@@ -322,7 +322,7 @@ GET /api/client/v1/crawler/jobs/:jobId/results?type=html&limit=100&skip=0
 }
 ```
 
-`bodyMarkdown` is present for `html` results. `ragStatus` is one of `pending`, `indexed`, `skipped`, `failed` (only when the crawler has a RAG binding). `error` results carry an `errorMessage`.
+`bodyMarkdown` is present for `html` results. `ragStatus` is one of `pending`, `indexed`, `skipped`, `failed` (only when the crawler has a Knowledge Engine binding). `error` results carry an `errorMessage`.
 
 ### Get result
 

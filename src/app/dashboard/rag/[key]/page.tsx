@@ -233,7 +233,7 @@ export default function RagModuleDetailPage() {
         const res = await fetch(`/api/rag/modules/${encodeURIComponent(moduleKey)}`, { cache: 'no-store' });
         if (!res.ok) {
           if (res.status === 404) { router.push('/dashboard/rag'); return; }
-          throw new Error('Failed to load RAG module');
+          throw new Error('Failed to load Knowledge Engine module');
         }
         const data = await res.json();
         setMod(data.module ?? null);
@@ -295,7 +295,7 @@ export default function RagModuleDetailPage() {
 
   const handleDelete = async () => {
     if (!mod) return;
-    if (!window.confirm(`Delete RAG module "${mod.name}"? This cannot be undone.`)) return;
+    if (!window.confirm(`Delete Knowledge Engine module "${mod.name}"? This cannot be undone.`)) return;
     try {
       const res = await fetch(`/api/rag/modules/${encodeURIComponent(mod.key)}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Failed to delete module');
@@ -451,9 +451,9 @@ export default function RagModuleDetailPage() {
     return (
       <Center py="xl">
         <Stack gap="sm" align="center">
-          <Text c="dimmed">RAG module not found.</Text>
+          <Text c="dimmed">Knowledge Engine module not found.</Text>
           <Button leftSection={<IconArrowLeft size={16} />} onClick={() => router.push('/dashboard/rag')}>
-            Back to RAG modules
+            Back to Knowledge Engine modules
           </Button>
         </Stack>
       </Center>
@@ -555,7 +555,7 @@ export default function RagModuleDetailPage() {
   return (
     <PageContainer>
       <PageHeader
-        eyebrow="Build · RAG module"
+        eyebrow="Build · Knowledge Engine module"
         title={mod.name}
         subtitle={`Key: ${mod.key} • Embedding: ${mod.embeddingModelKey} • Strategy: ${strategyLabel(mod.chunkConfig.strategy)}`}
         actions={
@@ -758,7 +758,7 @@ export default function RagModuleDetailPage() {
               <Group justify="space-between" mb="md">
                 <div>
                   <Text fw={600} size="lg">Ingest Document</Text>
-                  <Text size="sm" c="dimmed">Add a new document to this RAG module. Upload a file or paste text content.</Text>
+                  <Text size="sm" c="dimmed">Add a new document to this Knowledge Engine module. Upload a file or paste text content.</Text>
                 </div>
               </Group>
               <Stack gap="sm">
@@ -947,7 +947,7 @@ export default function RagModuleDetailPage() {
             <Paper withBorder radius="lg" p="lg">
               <Text fw={600} size="lg" mb="xs">Query Playground</Text>
               <Text size="sm" c="dimmed" mb="md">
-                Ask questions against this RAG module. The system will embed your query, search the vector index, and return the most relevant chunks.
+                Ask questions against this Knowledge Engine module. The system will embed your query, search the vector index, and return the most relevant chunks.
               </Text>
 
               <form onSubmit={handleQuery}>

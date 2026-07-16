@@ -39,6 +39,11 @@ interface VectorIndex {
   dimension: number;
 }
 
+interface RerankerOption {
+  key: string;
+  name: string;
+}
+
 interface CreateRagModuleModalProps {
   opened: boolean;
   onClose: () => void;
@@ -57,12 +62,15 @@ interface FormValues {
   chunkSize: number | '';
   chunkOverlap: number | '';
   separators: string[];
+  rerankerKey: string;
+  rerankerOversample: number | '';
 }
 
 export default function CreateRagModuleModal({ opened, onClose, onCreated }: CreateRagModuleModalProps) {
   const [embeddingModels, setEmbeddingModels] = useState<EmbeddingModel[]>([]);
   const [vectorProviders, setVectorProviders] = useState<VectorProvider[]>([]);
   const [vectorIndexes, setVectorIndexes] = useState<VectorIndex[]>([]);
+  const [rerankers, setRerankers] = useState<RerankerOption[]>([]);
   const [submitting, setSubmitting] = useState(false);
 
   const form = useForm<FormValues>({
@@ -76,6 +84,8 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
       chunkSize: 1000,
       chunkOverlap: 200,
       separators: ['\\n\\n', '\\n', '. ', ' '],
+      rerankerKey: '',
+      rerankerOversample: '',
     },
     validate: {
       name: (v) => (!v ? 'Name is required' : null),
@@ -138,12 +148,30 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
     }
   }, [selectedProvider]);
 
+  const loadRerankers = useCallback(async () => {
+    try {
+      const res = await fetch('/api/reranker?status=active', { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        setRerankers(
+          (data.rerankers ?? []).map((r: Record<string, string>) => ({
+            key: r.key,
+            name: r.name,
+          })),
+        );
+      }
+    } catch (err) {
+      console.error('Failed to load rerankers', err);
+    }
+  }, []);
+
   useEffect(() => {
     if (opened) {
       void loadEmbeddingModels();
       void loadVectorProviders();
+      void loadRerankers();
     }
-  }, [opened, loadEmbeddingModels, loadVectorProviders]);
+  }, [opened, loadEmbeddingModels, loadVectorProviders, loadRerankers]);
 
   useEffect(() => {
     void loadVectorIndexes();
@@ -178,18 +206,23 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
           vectorProviderKey: values.vectorProviderKey,
           vectorIndexKey: values.vectorIndexKey,
           chunkConfig,
+          rerankerKey: values.rerankerKey ? values.rerankerKey : undefined,
+          rerankerOversample:
+            values.rerankerKey && values.rerankerOversample !== ''
+              ? Number(values.rerankerOversample)
+              : undefined,
         }),
       });
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(err.error ?? 'Failed to create RAG module');
+        throw new Error(err.error ?? 'Failed to create Knowledge Engine module');
       }
 
       const data = await res.json();
       notifications.show({
         color: 'green',
-        title: 'RAG Module Created',
+        title: 'Knowledge Engine Module Created',
         message: `${values.name} has been created successfully.`,
       });
       form.reset();
@@ -198,7 +231,7 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
       console.error(error);
       notifications.show({
         color: 'red',
-        title: 'Failed to create RAG module',
+        title: 'Failed to create Knowledge Engine module',
         message: error instanceof Error ? error.message : 'Unexpected error',
       });
     } finally {
@@ -217,6 +250,10 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
   const selectedVectorIndex = useMemo(
     () => vectorIndexes.find((i) => i.key === form.values.vectorIndexKey),
     [vectorIndexes, form.values.vectorIndexKey],
+  );
+  const selectedReranker = useMemo(
+    () => rerankers.find((r) => r.key === form.values.rerankerKey),
+    [rerankers, form.values.rerankerKey],
   );
 
   const validIdentity = Boolean(form.values.name.trim());
@@ -297,6 +334,16 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
         />
       </SummaryGroup>
 
+      <SummaryGroup title="Reranking">
+        <SummaryKV
+          label="Reranker"
+          value={
+            selectedReranker?.name
+            ?? <span className="ds-faint">none</span>
+          }
+        />
+      </SummaryGroup>
+
       <SummaryGroup title="Pre-flight">
         <Checklist items={checklist} />
       </SummaryGroup>
@@ -311,7 +358,7 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
       open={opened}
       onClose={onClose}
       icon={<IconBook size={16} />}
-      title="Create RAG module"
+      title="Create Knowledge Engine module"
       subtitle="Configure embedding, vector storage, and chunking for a knowledge base."
       summary={summary}
       footerStatus={`${checklist.filter((c) => c.done).length} of ${checklist.length} ready`}
@@ -328,7 +375,7 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
       <FormSection
         number={1}
         title="Identity"
-        description="How this RAG module is identified across the console."
+        description="How this Knowledge Engine module is identified across the console."
         done={validIdentity}
       >
         <FormRow cols={1}>
@@ -342,7 +389,7 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
         <FormRow cols={1}>
           <FormField label="Description" optional>
             <Textarea
-              placeholder="Describe what this RAG module is for..."
+              placeholder="Describe what this Knowledge Engine module is for..."
               minRows={2}
               autosize
               {...form.getInputProps('description')}
@@ -450,6 +497,33 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
             />
           </FormField>
         ) : null}
+      </FormSection>
+
+      <FormSection
+        number={5}
+        title="Reranking"
+        description="Optionally re-order vector matches with a reranker before they're returned."
+      >
+        <FormRow cols={2}>
+          <FormField label="Reranker" hint="Optional. Re-orders vector matches before returning.">
+            <Select
+              placeholder="None — use vector ranking only"
+              data={[{ value: '', label: 'None' }, ...rerankers.map((r) => ({ value: r.key, label: r.name }))]}
+              searchable
+              clearable
+              {...form.getInputProps('rerankerKey')}
+            />
+          </FormField>
+          <FormField label="Oversample multiplier" hint="When a reranker is set, fetch topK × N candidates. Default: 3.">
+            <NumberInput
+              min={1}
+              max={20}
+              step={1}
+              disabled={!form.values.rerankerKey}
+              {...form.getInputProps('rerankerOversample')}
+            />
+          </FormField>
+        </FormRow>
       </FormSection>
     </FormShell>
   );

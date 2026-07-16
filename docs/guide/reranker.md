@@ -1,6 +1,6 @@
 # Reranker
 
-Rerankers re-order a candidate set of documents by relevance to a query. They sit between an initial retriever (vector search, BM25, hybrid) and the final consumer (LLM, RAG pipeline) and dramatically improve precision at low recall depths.
+Rerankers re-order a candidate set of documents by relevance to a query. They sit between an initial retriever (vector search, BM25, hybrid) and the final consumer (LLM, Knowledge Engine pipeline) and dramatically improve precision at low recall depths.
 
 Operators manage rerankers under **Data → Reranker**. Each reranker is project-scoped, has a unique key, and persists usage stats (`totalRuns`, `avgLatencyMs`, `lastUsedAt`) for monitoring.
 
@@ -60,15 +60,15 @@ curl -X POST https://console.example.com/api/reranker/support-knowledge-rerank/r
 
 Each run is persisted to a run-log table; `GET /api/reranker/:key/runs?from=&to=&limit=` returns the recent history for debugging and quality tracking.
 
-## RAG integration
+## Knowledge Engine integration
 
-The [RAG](./rag.md) module accepts an optional `rerankerKey` per module. When set, the retrieval pipeline becomes:
+The [Knowledge Engine](./rag.md) module accepts an optional `rerankerKey` per module. When set, the retrieval pipeline becomes:
 
 ```
 Query → Vector store top-K → Reranker (top-N) → LLM context
 ```
 
-Set the reranker on a RAG module to bolt better ranking onto an existing pipeline without changing the embedding model or vector store.
+Set the reranker on a Knowledge Engine module to bolt better ranking onto an existing pipeline without changing the embedding model or vector store.
 
 ## Dashboard
 

@@ -51,8 +51,8 @@ tags:
     description: Content safety and policy evaluation
   - name: Memory
     description: Persistent memory stores for agents
-  - name: RAG
-    description: Retrieval-Augmented Generation modules
+  - name: Knowledge Engine
+    description: Retrieval-Augmented Generation (Knowledge Engine) modules
   - name: Health
     description: Liveness and readiness probes
 
@@ -1268,11 +1268,11 @@ paths:
 
   /rag/modules:
     get:
-      tags: [RAG]
-      summary: List RAG modules
+      tags: [Knowledge Engine]
+      summary: List Knowledge Engine modules
       responses:
         '200':
-          description: List of RAG modules
+          description: List of Knowledge Engine modules
           content:
             application/json:
               schema:
@@ -1287,8 +1287,8 @@ paths:
 
   /rag/modules/{key}/query:
     post:
-      tags: [RAG]
-      summary: Query a RAG module
+      tags: [Knowledge Engine]
+      summary: Query a Knowledge Engine module
       parameters:
         - name: key
           in: path
@@ -1326,8 +1326,8 @@ paths:
 
   /rag/modules/{key}/ingest:
     post:
-      tags: [RAG]
-      summary: Ingest a document into a RAG module
+      tags: [Knowledge Engine]
+      summary: Ingest a document into a Knowledge Engine module
       parameters:
         - name: key
           in: path

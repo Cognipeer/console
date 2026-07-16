@@ -865,7 +865,7 @@ export default function CrawlerDetailPage() {
         { id: 'urls', label: 'URLs', count: summary.urlCount },
         { id: 'plan', label: 'Engine' },
         { id: 'http', label: 'HTTP' },
-        { id: 'integration', label: 'RAG + Webhook' },
+        { id: 'integration', label: 'Knowledge Engine + Webhook' },
         { id: 'schedule', label: 'Schedule' },
         { id: 'runs', label: 'Runs', count: jobs.length },
       ]}
@@ -1027,7 +1027,7 @@ Content-Type: application/json
 
           <DetailCard
             title="One-shot crawl"
-            description="Crawl a URL with this crawler’s config (engine, HTTP, RAG, webhook) without saving it to the list."
+            description="Crawl a URL with this crawler’s config (engine, HTTP, Knowledge Engine, webhook) without saving it to the list."
           >
             <Stack>
               <TextInput
@@ -1168,12 +1168,12 @@ Content-Type: application/json
 
             <DetailCard
               title="Content extraction"
-              description="How fetched HTML is turned into markdown or plain text before storage and RAG ingestion."
+              description="How fetched HTML is turned into markdown or plain text before storage and Knowledge Engine ingestion."
             >
               <Stack>
                 <Select
                   label="Output format"
-                  description="markdown keeps headings/links/tables; text flattens to clean plain prose (good for RAG, and sidesteps markdown-structure quirks)."
+                  description="markdown keeps headings/links/tables; text flattens to clean plain prose (good for the Knowledge Engine, and sidesteps markdown-structure quirks)."
                   data={[
                     { value: 'markdown', label: 'Markdown' },
                     { value: 'text', label: 'Plain text' },
@@ -1194,7 +1194,7 @@ Content-Type: application/json
                 />
                 <Switch
                   label="Main content only"
-                  description="Extract just the primary content region, dropping nav menus, headers and footers. Reduces boilerplate noise in RAG."
+                  description="Extract just the primary content region, dropping nav menus, headers and footers. Reduces boilerplate noise in the Knowledge Engine."
                   {...httpForm.getInputProps('mainContentOnly', { type: 'checkbox' })}
                 />
                 <TextInput
@@ -1229,21 +1229,21 @@ Content-Type: application/json
         <form onSubmit={intForm.onSubmit(saveIntegration)}>
           <DetailTwoCol>
             <DetailCard
-              title="Knowledge engine (RAG)"
-              description="Ingest every successfully fetched page into a RAG module for retrieval."
+              title="Knowledge Engine"
+              description="Ingest every successfully fetched page into a Knowledge Engine module for retrieval."
             >
               <Stack>
-                <Switch label="Ingest fetched pages into a RAG module" {...intForm.getInputProps('ragEnabled', { type: 'checkbox' })} />
+                <Switch label="Ingest fetched pages into a Knowledge Engine module" {...intForm.getInputProps('ragEnabled', { type: 'checkbox' })} />
                 <Select
-                  label="RAG module"
+                  label="Knowledge Engine module"
                   description="Each successful page will be ingested into the selected module via ragService."
                   placeholder={ragModules.length === 0
-                    ? 'No active RAG modules found — create one in the Knowledge Engine page first'
-                    : 'Select a RAG module'}
+                    ? 'No active Knowledge Engine modules found — create one in the Knowledge Engine page first'
+                    : 'Select a Knowledge Engine module'}
                   disabled={!intForm.values.ragEnabled || ragModules.length === 0}
                   data={ragModules.map((m) => ({ value: m.key, label: `${m.name} · ${m.key}` }))}
                   searchable
-                  nothingFoundMessage="No matching RAG modules"
+                  nothingFoundMessage="No matching Knowledge Engine modules"
                   {...intForm.getInputProps('ragModuleKey')}
                 />
               </Stack>

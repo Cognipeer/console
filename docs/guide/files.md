@@ -8,7 +8,7 @@ Buckets are the unit of file organisation — each bucket points to a remote pre
 
 ![Document Store list](/screenshots/files/01-files-list.png)
 
-Click a bucket row to drill into the file browser for that bucket — uploads, downloads, deletes, and bulk operations all happen there. **Create bucket** opens a form where you pick the provider, declare a prefix (used to namespace the bucket within the provider), and optionally enable on-upload Markdown conversion. The conversion step uses [`@cognipeer/to-markdown`](https://github.com/cognipeer/to-markdown) to extract text from PDFs, Office docs, and images for downstream RAG ingestion.
+Click a bucket row to drill into the file browser for that bucket — uploads, downloads, deletes, and bulk operations all happen there. **Create bucket** opens a form where you pick the provider, declare a prefix (used to namespace the bucket within the provider), and optionally enable on-upload Markdown conversion. The conversion step uses [`@cognipeer/to-markdown`](https://github.com/cognipeer/to-markdown) to extract text from PDFs, Office docs, and images for downstream Knowledge Engine ingestion.
 
 ## Supported Providers
 
@@ -70,7 +70,7 @@ Authorization: Bearer <token>
 
 ## Markdown Conversion
 
-When a file is uploaded, the gateway can automatically convert it to Markdown using `@cognipeer/to-markdown`. This is used by the RAG pipeline for document ingestion.
+When a file is uploaded, the gateway can automatically convert it to Markdown using `@cognipeer/to-markdown`. This is used by the Knowledge Engine pipeline for document ingestion.
 
 Supported formats include PDF, DOCX, PPTX, HTML, and plain text.
 

@@ -4,7 +4,7 @@ layout: home
 hero:
   name: Cognipeer Console
   text: Run Multi-Tenant AI Infrastructure Without Rebuilding The Control Plane
-  tagline: Operate inference, vector stores, tracing, guardrails, RAG, config, and incident workflows behind one production-ready console with tenant isolation built in.
+  tagline: Operate inference, vector stores, tracing, guardrails, Knowledge Engine, config, and incident workflows behind one production-ready console with tenant isolation built in.
   actions:
     - theme: brand
       text: Get Started
@@ -44,7 +44,7 @@ If you already know the basics, jump directly to the part that matches your work
 - Building against the gateway surface? Start with [API Overview](/api/overview) and [Authentication](/guide/authentication).
 - Writing application code against Cognipeer Console? Start with the [Console SDK documentation](https://cognipeer.github.io/console-sdk/) and use this site for platform and endpoint semantics.
 - Extending platform internals? Start with [Core Modules](/guide/core-overview) and [Providers](/guide/providers).
-- Operating agent workflows? Start with [Tracing](/guide/tracing), [Guardrails](/guide/guardrails), and [RAG](/guide/rag).
+- Operating agent workflows? Start with [Tracing](/guide/tracing), [Guardrails](/guide/guardrails), and [Knowledge Engine](/guide/rag).
 - Planning a public or commercial rollout? Start with [Licensing](/guide/licensing) and [Security](/guide/security).
 
 ## Choose Your Entry Point
@@ -77,7 +77,7 @@ docker run -p 3000:3000 --env-file .env.local cognipeer-console
 
 - [Guide](/guide/getting-started): setup, architecture, deployment, providers, and feature walkthroughs.
 - [Core Modules](/guide/core-overview): config, request context, cache, resilience, runtime pool, health, lifecycle, and CORS.
-- [API Reference](/api/overview): gateway endpoints for chat, embeddings, agents, tools, tracing, vector, RAG, files, and health.
+- [API Reference](/api/overview): gateway endpoints for chat, embeddings, agents, tools, tracing, vector, Knowledge Engine, files, and health.
 - [Using the SDK](/guide/sdk-integration): where Console stops, where the SDK starts, and how teams should split responsibility.
 - [Licensing](/guide/licensing): AGPL community terms, commercial options, and redistribution guidance.
 - [Security](/guide/security): secret handling, hardening defaults, and vulnerability disclosure workflow.
@@ -94,6 +94,6 @@ docker run -p 3000:3000 --env-file .env.local cognipeer-console
 ## What This Site Covers
 
 - A platform-level view of Cognipeer Console as a multi-tenant AI control plane rather than a loose collection of feature modules.
-- The runtime contracts behind inference, tracing, vector, guardrails, files, prompts, and RAG workflows.
+- The runtime contracts behind inference, tracing, vector, guardrails, files, prompts, and Knowledge Engine workflows.
 - The shared core infrastructure that keeps request handling, logging, caching, resilience, and shutdown behavior predictable.
 - A docs shell aligned with the `agent-sdk` and `chat-ui` surfaces while keeping Cognipeer Console's own information architecture.

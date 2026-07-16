@@ -75,7 +75,7 @@ const GROUP_META: Record<
   prompts: { label: 'Prompts', icon: IconSparkles, order: 4 },
   tools: { label: 'Tools', icon: IconTool, order: 5 },
   mcp: { label: 'MCP servers', icon: IconPlug, order: 6 },
-  rag: { label: 'RAG modules', icon: IconFolder, order: 7 },
+  rag: { label: 'Knowledge Engine modules', icon: IconFolder, order: 7 },
   vector: { label: 'Vector indexes', icon: IconVectorBezier, order: 8 },
   memory: { label: 'Memory stores', icon: IconBulb, order: 9 },
   files: { label: 'File buckets', icon: IconFolder, order: 10 },

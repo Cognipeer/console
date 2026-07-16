@@ -308,7 +308,7 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
   rag: [
     {
       id: 'overview',
-      label: 'Knowledge bases',
+      label: 'Knowledge Engine',
       href: '/dashboard/rag',
       icon: IconBook,
       matcher: (p) => p.startsWith('/dashboard/rag'),

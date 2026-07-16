@@ -197,7 +197,7 @@ export async function createRagModule(
   // Check uniqueness
   const existing = await db.findRagModuleByKey(key, projectId);
   if (existing) {
-    throw new Error(`RAG module with key "${key}" already exists`);
+    throw new Error(`Knowledge Engine module with key "${key}" already exists`);
   }
 
   return db.createRagModule({
@@ -314,8 +314,8 @@ export async function ingestDocument(
   await db.switchToTenant(tenantDbName);
 
   const ragModule = await db.findRagModuleByKey(request.ragModuleKey, projectId);
-  if (!ragModule) throw new Error(`RAG module "${request.ragModuleKey}" not found`);
-  if (ragModule.status !== 'active') throw new Error('RAG module is not active');
+  if (!ragModule) throw new Error(`Knowledge Engine module "${request.ragModuleKey}" not found`);
+  if (ragModule.status !== 'active') throw new Error('Knowledge Engine module is not active');
 
   // Create document record
   const docRecord = await db.createRagDocument({
@@ -443,7 +443,7 @@ function extractMarkdownContent(conversion: unknown): string | undefined {
 }
 
 /**
- * Ingest a file into a RAG module.
+ * Ingest a file into a Knowledge Engine module.
  * Converts the file to markdown/text using @cognipeer/to-markdown, then
  * delegates to ingestDocument for chunking + embedding + vector upsert.
  */
@@ -558,7 +558,7 @@ export async function queryRag(
   await db.switchToTenant(tenantDbName);
 
   const ragModule = await db.findRagModuleByKey(request.ragModuleKey, projectId);
-  if (!ragModule) throw new Error(`RAG module "${request.ragModuleKey}" not found`);
+  if (!ragModule) throw new Error(`Knowledge Engine module "${request.ragModuleKey}" not found`);
 
   // 1. Embed the query
   const [queryEmbedding] = await getEmbeddings(
@@ -725,7 +725,7 @@ export async function deleteRagDocument(
   await db.switchToTenant(tenantDbName);
 
   const ragModule = await db.findRagModuleByKey(request.ragModuleKey, projectId);
-  if (!ragModule) throw new Error(`RAG module "${request.ragModuleKey}" not found`);
+  if (!ragModule) throw new Error(`Knowledge Engine module "${request.ragModuleKey}" not found`);
 
   const doc = await db.findRagDocumentById(request.documentId);
   if (!doc) throw new Error('Document not found');
@@ -790,8 +790,8 @@ export async function reingestDocument(
   await db.switchToTenant(tenantDbName);
 
   const ragModule = await db.findRagModuleByKey(request.ragModuleKey, projectId);
-  if (!ragModule) throw new Error(`RAG module "${request.ragModuleKey}" not found`);
-  if (ragModule.status !== 'active') throw new Error('RAG module is not active');
+  if (!ragModule) throw new Error(`Knowledge Engine module "${request.ragModuleKey}" not found`);
+  if (ragModule.status !== 'active') throw new Error('Knowledge Engine module is not active');
 
   const doc = await db.findRagDocumentById(request.documentId);
   if (!doc) throw new Error('Document not found');

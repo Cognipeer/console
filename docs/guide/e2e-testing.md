@@ -21,7 +21,7 @@ than just wiring:
 
 - **chat** — answers "4" / "Paris"; SSE streaming; token usage.
 - **embeddings** — correct dimensionality, batching, semantic distance.
-- **RAG** — ingest a fact → vector retrieval → grounded answer that cites it.
+- **Knowledge Engine** — ingest a fact → vector retrieval → grounded answer that cites it.
 - **guardrails** — an llm-judge guardrail blocks an unsafe prompt, passes a benign one.
 - **memory** — semantic recall returns the right memory.
 - **agents / evaluations / analysis / reranker** — real agent chat, an

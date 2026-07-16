@@ -231,14 +231,14 @@ export default function RunDetailModal({
                     value={ragFilter}
                     onChange={(e) => setRagFilter(e.target.value as typeof ragFilter)}
                     style={{ flex: 1 }}
-                    aria-label="Filter by RAG status"
+                    aria-label="Filter by Knowledge Engine status"
                   >
-                    <option value="all">All RAG</option>
+                    <option value="all">All Knowledge Engine</option>
                     <option value="indexed">Indexed</option>
                     <option value="pending">Pending</option>
                     <option value="skipped">Skipped</option>
                     <option value="failed">Failed</option>
-                    <option value="none">No RAG</option>
+                    <option value="none">No Knowledge Engine</option>
                   </select>
                 </div>
               </div>

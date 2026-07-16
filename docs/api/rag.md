@@ -1,6 +1,6 @@
-# RAG API
+# Knowledge Engine API
 
-Endpoints for managing RAG modules, document ingestion, and semantic retrieval.
+Endpoints for managing Knowledge Engine modules, document ingestion, and semantic retrieval.
 
 ## Modules
 

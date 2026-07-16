@@ -113,7 +113,7 @@ DELETE /api/client/v1/files/buckets/:bucketKey/objects/:objectKey
 
 ## Markdown Conversion
 
-When uploading with `convertToMarkdown: true`, the gateway extracts text content from the file and stores it as Markdown. This is used by the RAG pipeline for document ingestion.
+When uploading with `convertToMarkdown: true`, the gateway extracts text content from the file and stores it as Markdown. This is used by the Knowledge Engine pipeline for document ingestion.
 
 Supported formats: PDF, DOCX, PPTX, HTML, plain text.
 
