@@ -19,9 +19,15 @@
  *
  * This reconciler runs once at bootstrap, before the queue consumer/
  * scheduler start taking new work, and:
- *  - marks any `running` job as `failed` (nothing is executing it anymore);
  *  - re-publishes any `queued` job so it actually gets picked up now that
- *    the crawler queue consumer is back online.
+ *    the crawler queue consumer is back online;
+ *  - for `running` jobs (nothing is executing them anymore) by default
+ *    restarts them from scratch — clears the partial results the dead run
+ *    wrote, resets the job to `queued`, bumps a bounded per-job restart
+ *    counter and re-publishes it — so an interrupted crawl recovers on its
+ *    own. After MAX_ORPHAN_RESTARTS the job is failed instead (guards against
+ *    a crash-looping crawl). Set CRAWLER_RESTART_ORPHANED_RUNS=false to skip
+ *    auto-restart and fail orphaned runs outright for manual re-run.
  */
 
 import { getDatabase, getTenantDatabase } from '@/lib/database';
@@ -35,18 +41,40 @@ const logger = createLogger('crawler:reconcile');
 const ORPHANED_RUNNING_MESSAGE =
   'Crawl job orphaned by a server restart before it finished. Please re-run the crawler.';
 
+// How many times a single job may be auto-restarted after being orphaned by a
+// restart. Bounded on purpose: a crawl that reliably crashes the process (e.g.
+// OOM on a huge PDF) would otherwise restart → crash → restart forever and take
+// the whole service down with it (see [[prod-crash-analysis-crawler]]). After
+// the cap the job is failed so an operator can look at it.
+const MAX_ORPHAN_RESTARTS = 2;
+
 export async function reconcileOrphanedCrawlJobs(): Promise<{
   tenantsScanned: number;
   failedRunningJobs: number;
+  restartedRunningJobs: number;
   requeuedJobs: number;
 }> {
   const mainDb = await getDatabase();
   const tenants = await mainDb.listTenants();
   const queue = await getQueue();
+  // Auto-restart interrupted crawls by default (bounded per job below). Set
+  // CRAWLER_RESTART_ORPHANED_RUNS=false to instead fail them for manual re-run.
+  const autoRestart = process.env.CRAWLER_RESTART_ORPHANED_RUNS !== 'false';
 
   let tenantsScanned = 0;
   let failedRunningJobs = 0;
+  let restartedRunningJobs = 0;
   let requeuedJobs = 0;
+
+  const republish = async (
+    tenantDbName: string,
+    tenantId: string,
+    job: { _id?: unknown; projectId?: string },
+  ): Promise<void> => {
+    const ctx: CrawlerContext = { tenantDbName, tenantId, projectId: job.projectId };
+    const payload = { ctx, jobId: String(job._id) } as unknown as QueuePayload;
+    await queue.publish(queueNameFor('crawler'), 'crawler.run', payload, { attempts: 1 });
+  };
 
   for (const tenant of tenants) {
     if (!tenant.dbName || !tenant._id) continue;
@@ -58,25 +86,51 @@ export async function reconcileOrphanedCrawlJobs(): Promise<{
 
       const runningJobs = await tenantDb.listCrawlJobs(tenantId, { status: 'running' });
       for (const job of runningJobs) {
-        const endedAt = new Date();
-        const finalized = await tenantDb.finalizeCrawlJob(String(job._id), tenantId, {
-          status: 'failed',
-          endedAt,
-          durationMs: job.startedAt ? endedAt.getTime() - job.startedAt.getTime() : undefined,
-          errorMessage: ORPHANED_RUNNING_MESSAGE,
-        });
-        if (finalized) failedRunningJobs += 1;
+        const jobId = String(job._id);
+        const priorRestarts = Number(
+          (job.metadata as Record<string, unknown> | undefined)?.orphanRestarts ?? 0,
+        );
+        const canRestart = autoRestart && priorRestarts < MAX_ORPHAN_RESTARTS;
+        if (canRestart) {
+          // Restart from scratch: drop the partial results the dead run wrote
+          // (so the fresh run doesn't append duplicates), reset counters to
+          // `queued`, bump the restart tally, and re-publish. Idempotent claim
+          // (claimCrawlJob) still guards against a redelivered message
+          // double-running it.
+          await tenantDb.deleteCrawlResultsByJob(jobId);
+          const reset = await tenantDb.updateCrawlJob(jobId, {
+            status: 'queued',
+            startedAt: undefined,
+            endedAt: undefined,
+            durationMs: undefined,
+            pagesProcessed: 0,
+            filesProcessed: 0,
+            errorsCount: 0,
+            limitReached: false,
+            errorMessage: undefined,
+            metadata: { ...(job.metadata ?? {}), orphanRestarts: priorRestarts + 1 },
+          });
+          if (reset) {
+            await republish(tenant.dbName, tenantId, job);
+            restartedRunningJobs += 1;
+          }
+        } else {
+          const endedAt = new Date();
+          const finalized = await tenantDb.finalizeCrawlJob(jobId, tenantId, {
+            status: 'failed',
+            endedAt,
+            durationMs: job.startedAt ? endedAt.getTime() - job.startedAt.getTime() : undefined,
+            errorMessage: autoRestart
+              ? `${ORPHANED_RUNNING_MESSAGE} (gave up after ${MAX_ORPHAN_RESTARTS} auto-restarts)`
+              : ORPHANED_RUNNING_MESSAGE,
+          });
+          if (finalized) failedRunningJobs += 1;
+        }
       }
 
       const queuedJobs = await tenantDb.listCrawlJobs(tenantId, { status: 'queued' });
       for (const job of queuedJobs) {
-        const ctx: CrawlerContext = {
-          tenantDbName: tenant.dbName,
-          tenantId,
-          projectId: job.projectId,
-        };
-        const payload = { ctx, jobId: String(job._id) } as unknown as QueuePayload;
-        await queue.publish(queueNameFor('crawler'), 'crawler.run', payload, { attempts: 1 });
+        await republish(tenant.dbName, tenantId, job);
         requeuedJobs += 1;
       }
     } catch (error) {
@@ -88,13 +142,14 @@ export async function reconcileOrphanedCrawlJobs(): Promise<{
     }
   }
 
-  if (failedRunningJobs > 0 || requeuedJobs > 0) {
+  if (failedRunningJobs > 0 || restartedRunningJobs > 0 || requeuedJobs > 0) {
     logger.info('Reconciled orphaned crawl jobs', {
       tenantsScanned,
       failedRunningJobs,
+      restartedRunningJobs,
       requeuedJobs,
     });
   }
 
-  return { tenantsScanned, failedRunningJobs, requeuedJobs };
+  return { tenantsScanned, failedRunningJobs, restartedRunningJobs, requeuedJobs };
 }

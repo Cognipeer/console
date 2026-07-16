@@ -201,7 +201,7 @@ export default function ToolsPage() {
   return (
     <PageContainer>
       <PageHeader
-        eyebrow="Build · Tools"
+        eyebrow="Build · Agents · Tools"
         title="Tools"
         subtitle="Manage tools from OpenAPI specs or MCP servers. Tools are available for agents and direct API execution."
         actions={
@@ -227,7 +227,7 @@ export default function ToolsPage() {
         records={filtered}
         loading={loading}
         rowKey={(t) => t.id}
-        onRowClick={(t) => router.push(`/dashboard/tools/${t.id}`)}
+        onRowClick={(t) => router.push(`/dashboard/agents/tools/${t.id}`)}
         columns={columns}
         search={{
           value: query,
@@ -276,13 +276,13 @@ export default function ToolsPage() {
             id: 'view',
             label: 'View',
             icon: <IconEye size={14} />,
-            onClick: () => router.push(`/dashboard/tools/${t.id}`),
+            onClick: () => router.push(`/dashboard/agents/tools/${t.id}`),
           },
           {
             id: 'edit',
             label: 'Edit',
             icon: <IconEdit size={14} />,
-            onClick: () => router.push(`/dashboard/tools/${t.id}`),
+            onClick: () => router.push(`/dashboard/agents/tools/${t.id}`),
           },
           {
             id: 'toggle',
@@ -333,7 +333,7 @@ export default function ToolsPage() {
         onClose={() => setCreateModalOpen(false)}
         onCreated={(t) => {
           void loadTools();
-          router.push(`/dashboard/tools/${t.id}`);
+          router.push(`/dashboard/agents/tools/${t.id}`);
         }}
       />
     </PageContainer>

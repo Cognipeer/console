@@ -110,7 +110,9 @@ export default function DashboardOverviewPage() {
   const licenseType = data?.user?.licenseType ?? '—';
   const userName = data?.user?.name
     || (data?.user?.email ? data.user.email.split('@')[0] : null);
-  const totalServices = services.filter((s) => s.id !== 'services-home').length;
+  const totalServices = services.filter(
+    (s) => s.id !== 'services-home' && !s.isSettings,
+  ).length;
 
   const trend = data?.stats?.apiCalls?.trend ?? 0;
 

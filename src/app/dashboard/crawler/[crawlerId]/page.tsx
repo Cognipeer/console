@@ -1,14 +1,13 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams } from 'next/navigation';
 import {
   Badge,
   Button,
   Code,
   Divider,
   Group,
-  Modal,
   NumberInput,
   PasswordInput,
   Select,
@@ -16,25 +15,27 @@ import {
   Switch,
   Textarea,
   TextInput,
-  Title,
   Tooltip,
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import {
   IconAlertTriangle,
-  IconArrowLeft,
+  IconClock,
   IconExternalLink,
   IconPlayerPlay,
   IconPlus,
   IconTrash,
   IconWorld,
 } from '@tabler/icons-react';
-import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
-import TabsBar from '@/components/common/ui/TabsBar';
+import DetailShell, {
+  DetailCard,
+  DetailTwoCol,
+} from '@/components/common/ui/DetailShell';
 import StatTile from '@/components/common/ui/StatTile';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
+import RunDetailModal from '@/components/crawler/RunDetailModal';
 import type {
   CrawlerView,
   CrawlJobView,
@@ -66,6 +67,13 @@ interface HttpForm {
   cookies: string;
   allowPrivateNetwork: boolean;
   allowInsecureTls: boolean;
+  outputFormat: 'markdown' | 'text';
+  cleanup: boolean;
+  stripDataImages: boolean;
+  mainContentOnly: boolean;
+  contentSelector: string;
+  removeSelectors: string;
+  maxBodyChars: number;
 }
 
 interface IntegrationForm {
@@ -89,7 +97,6 @@ interface ScheduleForm {
 type TabId = 'overview' | 'urls' | 'plan' | 'http' | 'integration' | 'schedule' | 'runs';
 
 export default function CrawlerDetailPage() {
-  const router = useRouter();
   const params = useParams<{ crawlerId: string }>();
   const crawlerId = params.crawlerId;
 
@@ -109,7 +116,9 @@ export default function CrawlerDetailPage() {
   const [cancelingJob, setCancelingJob] = useState(false);
   const [jobResults, setJobResults] = useState<CrawlResultView[]>([]);
   const [resultsLoading, setResultsLoading] = useState(false);
-  const [openResult, setOpenResult] = useState<CrawlResultView | null>(null);
+  const [jobQuery, setJobQuery] = useState('');
+  const [jobStatusFilter, setJobStatusFilter] = useState('all');
+  const [jobTriggerFilter, setJobTriggerFilter] = useState('all');
 
   const planForm = useForm<PlanForm>({
     initialValues: {
@@ -139,6 +148,13 @@ export default function CrawlerDetailPage() {
       cookies: '',
       allowPrivateNetwork: false,
       allowInsecureTls: false,
+      outputFormat: 'markdown',
+      cleanup: true,
+      stripDataImages: true,
+      mainContentOnly: false,
+      contentSelector: '',
+      removeSelectors: '',
+      maxBodyChars: 0,
     },
   });
 
@@ -202,6 +218,13 @@ export default function CrawlerDetailPage() {
         cookies: c.http.cookies ? JSON.stringify(c.http.cookies, null, 2) : '',
         allowPrivateNetwork: c.http.allowPrivateNetwork ?? false,
         allowInsecureTls: c.http.allowInsecureTls ?? false,
+        outputFormat: c.markdownOptions?.outputFormat ?? 'markdown',
+        cleanup: c.markdownOptions?.cleanup ?? true,
+        stripDataImages: c.markdownOptions?.stripDataImages ?? true,
+        mainContentOnly: c.markdownOptions?.mainContentOnly ?? false,
+        contentSelector: c.markdownOptions?.contentSelector ?? '',
+        removeSelectors: (c.markdownOptions?.removeSelectors ?? []).join('\n'),
+        maxBodyChars: c.markdownOptions?.maxBodyChars ?? 0,
       });
 
       intForm.setValues({
@@ -306,6 +329,21 @@ export default function CrawlerDetailPage() {
     };
   }, [jobs, crawler]);
 
+  const filteredJobs = useMemo(() => {
+    const q = jobQuery.trim().toLowerCase();
+    return jobs.filter((j) => {
+      if (jobStatusFilter !== 'all' && j.status !== jobStatusFilter) return false;
+      if (jobTriggerFilter !== 'all' && j.trigger !== jobTriggerFilter) return false;
+      if (q) {
+        const started = j.startedAt ? new Date(j.startedAt).toLocaleString() : '';
+        const created = j.createdAt ? new Date(j.createdAt).toLocaleString() : '';
+        const hay = `${j.id} ${j.status} ${j.trigger} ${j.errorMessage ?? ''} ${started} ${created}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [jobs, jobQuery, jobStatusFilter, jobTriggerFilter]);
+
   function parseRecord(value: string): Record<string, unknown> | undefined {
     if (!value.trim()) return undefined;
     try {
@@ -400,10 +438,21 @@ export default function CrawlerDetailPage() {
         };
       }
 
+      const markdownOptions: Record<string, unknown> = {
+        outputFormat: values.outputFormat,
+        cleanup: values.cleanup,
+        stripDataImages: values.stripDataImages,
+        mainContentOnly: values.mainContentOnly,
+        contentSelector: values.contentSelector || undefined,
+        removeSelectors: values.removeSelectors
+          .split('\n').map((s) => s.trim()).filter(Boolean),
+        maxBodyChars: values.maxBodyChars > 0 ? values.maxBodyChars : undefined,
+      };
+
       const res = await fetch(`/api/crawler/crawlers/${crawlerId}`, {
         method: 'PATCH',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ http }),
+        body: JSON.stringify({ http, markdownOptions }),
       });
       if (!res.ok) {
         const text = await res.text();
@@ -682,17 +731,24 @@ export default function CrawlerDetailPage() {
     }
   }
 
-  if (loading) {
-    return <PageContainer><div>Loading…</div></PageContainer>;
-  }
-  if (!crawler) {
+  if (loading || !crawler) {
     return (
-      <PageContainer>
-        <PageHeader title="Crawler not found" />
-        <Button leftSection={<IconArrowLeft size={14} />} onClick={() => router.push('/dashboard/crawler')}>
-          Back to crawlers
-        </Button>
-      </PageContainer>
+      <DetailShell
+        backHref="/dashboard/crawler"
+        backLabel="Back to crawlers"
+        icon={<IconWorld size={16} />}
+        title={loading ? 'Loading…' : 'Crawler not found'}
+      >
+        <div className="ds-card ds-card-pad">
+          {loading ? (
+            <span className="ds-faint">Loading crawler…</span>
+          ) : (
+            <span className="ds-faint">
+              This crawler doesn’t exist or was removed.
+            </span>
+          )}
+        </div>
+      </DetailShell>
     );
   }
 
@@ -759,122 +815,115 @@ export default function CrawlerDetailPage() {
     },
   ];
 
-  const resultColumns: DataGridColumn<CrawlResultView>[] = [
-    {
-      key: 'url',
-      label: 'URL',
-      render: (r) => (
-        <span style={{ maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block' }} title={r.url}>
-          {r.url}
-        </span>
-      ),
-    },
-    { key: 'depth', label: 'Depth', render: (r) => <span className="ds-mono">{r.depth}</span> },
-    { key: 'type', label: 'Type', render: (r) => <span className="ds-mono ds-muted">{r.type}</span> },
-    {
-      key: 'rag',
-      label: 'RAG',
-      render: (r) =>
-        r.ragStatus
-          ? <Badge variant="light" color={r.ragStatus === 'indexed' ? 'teal' : r.ragStatus === 'failed' ? 'red' : 'gray'}>{r.ragStatus}</Badge>
-          : <span className="ds-faint">—</span>,
-    },
-    {
-      key: 'bytes',
-      label: 'Bytes',
-      render: (r) => <span className="ds-mono ds-muted">{r.bytes ?? '—'}</span>,
-    },
-  ];
+  const scheduleLabel = crawler.schedule?.enabled
+    ? crawler.schedule.mode === 'cron'
+      ? `cron ${crawler.schedule.cron}`
+      : `every ${crawler.schedule.intervalSeconds}s`
+    : 'Manual';
 
   return (
-    <PageContainer>
-      <PageHeader
-        eyebrow={`Data · Crawlers · ${crawler.key}`}
-        title={crawler.name}
-        subtitle={crawler.description || 'Crawler container — add URLs and run them with this profile’s engine / HTTP / RAG / webhook config.'}
-        actions={
-          <Group gap="xs">
-            <Button
-              variant="default"
-              size="sm"
-              leftSection={<IconArrowLeft size={14} />}
-              onClick={() => router.push('/dashboard/crawler')}
+    <DetailShell
+      backHref="/dashboard/crawler"
+      backLabel="Back to crawlers"
+      icon={<IconWorld size={16} />}
+      title={crawler.name}
+      meta={
+        <>
+          <span className="ds-faint ds-mono" style={{ fontSize: 12 }}>
+            {crawler.key}
+          </span>
+          <StatusBadge status={crawler.status === 'active' ? 'active' : 'paused'} />
+          <Badge size="xs" variant="light" color="gray">
+            {crawler.engine}
+          </Badge>
+          {crawler.schedule?.enabled ? (
+            <Badge
+              size="xs"
+              variant="light"
+              color="blue"
+              leftSection={<IconClock size={10} />}
             >
-              Back
-            </Button>
-            <Button
-              color="teal"
-              size="sm"
-              leftSection={<IconPlayerPlay size={14} />}
-              onClick={runAll}
-              loading={running}
-              disabled={crawler.status !== 'active' || urls.length === 0}
+              {scheduleLabel}
+            </Badge>
+          ) : null}
+        </>
+      }
+      actions={
+        <Button
+          color="teal"
+          size="sm"
+          leftSection={<IconPlayerPlay size={14} />}
+          onClick={runAll}
+          loading={running}
+          disabled={crawler.status !== 'active' || urls.length === 0}
+        >
+          Run all ({urls.length})
+        </Button>
+      }
+      tabs={[
+        { id: 'overview', label: 'Overview' },
+        { id: 'urls', label: 'URLs', count: summary.urlCount },
+        { id: 'plan', label: 'Engine' },
+        { id: 'http', label: 'HTTP' },
+        { id: 'integration', label: 'Knowledge Engine + Webhook' },
+        { id: 'schedule', label: 'Schedule' },
+        { id: 'runs', label: 'Runs', count: jobs.length },
+      ]}
+      activeTab={activeTab}
+      onTabChange={(id) => setActiveTab(id as TabId)}
+    >
+      {activeTab === 'overview' && (
+        <>
+          <div className="ds-stat-grid" style={{ marginBottom: 12 }}>
+            <StatTile
+              label="Status"
+              icon={<IconWorld size={14} stroke={1.7} />}
+              value={crawler.status === 'active' ? 'Active' : 'Disabled'}
+            />
+            <StatTile label="URLs" value={summary.urlCount} />
+            <StatTile label="Total runs" value={summary.totalRuns} />
+            <StatTile label="Schedule" value={scheduleLabel} />
+          </div>
+
+          <DetailTwoCol>
+            <DetailCard
+              title="Last run"
+              description="The most recent crawl job for this crawler."
             >
-              Run all ({urls.length})
-            </Button>
-          </Group>
-        }
-      />
-
-      <div className="ds-stat-grid" style={{ marginBottom: 16 }}>
-        <StatTile
-          label="Status"
-          icon={<IconWorld size={14} stroke={1.7} />}
-          value={crawler.status === 'active' ? 'Active' : 'Disabled'}
-        />
-        <StatTile label="URLs" value={summary.urlCount} />
-        <StatTile label="Total runs" value={summary.totalRuns} />
-        <StatTile
-          label="Schedule"
-          value={crawler.schedule?.enabled
-            ? (crawler.schedule.mode === 'cron'
-              ? `cron: ${crawler.schedule.cron}`
-              : `every ${crawler.schedule.intervalSeconds}s`)
-            : 'manual'}
-        />
-      </div>
-
-      <TabsBar
-        items={[
-          { id: 'overview', label: 'Overview' },
-          { id: 'urls', label: 'URLs', count: summary.urlCount },
-          { id: 'plan', label: 'Engine' },
-          { id: 'http', label: 'HTTP' },
-          { id: 'integration', label: 'RAG + Webhook' },
-          { id: 'schedule', label: 'Schedule' },
-          { id: 'runs', label: 'Runs', count: jobs.length },
-        ]}
-        activeId={activeTab}
-        onChange={(id) => setActiveTab(id as TabId)}
-      />
-
-      <div style={{ marginTop: 16 }}>
-        {activeTab === 'overview' && (
-          <Stack>
-            <Title order={5}>Last run</Title>
-            {summary.last ? (
-              <Stack gap={4}>
-                <Group gap="xs">
-                  <StatusBadge status={summary.last.status} />
-                  <span className="ds-mono ds-muted" style={{ fontSize: 12 }}>
-                    {new Date(summary.last.createdAt ?? Date.now()).toLocaleString()}
+              {summary.last ? (
+                <Stack gap={6}>
+                  <Group gap="xs">
+                    <StatusBadge status={summary.last.status} />
+                    <span className="ds-mono ds-muted" style={{ fontSize: 12 }}>
+                      {new Date(summary.last.createdAt ?? Date.now()).toLocaleString()}
+                    </span>
+                  </Group>
+                  <span className="ds-faint" style={{ fontSize: 13 }}>
+                    {summary.last.pagesProcessed} pages · {summary.last.filesProcessed} files · {summary.last.errorsCount} errors
+                    {summary.last.durationMs ? ` · ${(summary.last.durationMs / 1000).toFixed(1)}s` : ''}
                   </span>
-                </Group>
+                  <div>
+                    <Button
+                      variant="subtle"
+                      size="xs"
+                      onClick={() => setActiveTab('runs')}
+                    >
+                      View all runs
+                    </Button>
+                  </div>
+                </Stack>
+              ) : (
                 <span className="ds-faint" style={{ fontSize: 13 }}>
-                  {summary.last.pagesProcessed} pages · {summary.last.filesProcessed} files · {summary.last.errorsCount} errors
-                  {summary.last.durationMs ? ` · ${(summary.last.durationMs / 1000).toFixed(1)}s` : ''}
+                  No runs yet — add URLs and click <strong>Run all</strong> to kick off the first job.
                 </span>
-              </Stack>
-            ) : (
-              <span className="ds-faint">No runs yet — add URLs and click <strong>Run all</strong> to kick off the first job.</span>
-            )}
+              )}
+            </DetailCard>
 
-            <Divider my="md" />
-            <Title order={5}>API quick start</Title>
-            <span className="ds-faint" style={{ fontSize: 13 }}>
-              Send URLs from an external app and crawl them with this profile&apos;s settings:
-            </span>
-            <Code block>{`POST /api/client/v1/crawler/crawlers/${crawler.key}/crawl
+            <DetailCard
+              title="API quick start"
+              description="Send URLs from an external app and crawl them with this crawler’s settings."
+            >
+              <Code block>{`POST /api/client/v1/crawler/crawlers/${crawler.key}/crawl
 Authorization: Bearer <api-token>
 Content-Type: application/json
 
@@ -884,105 +933,108 @@ Content-Type: application/json
 
 # Returns: { "jobId": "...", "status": "queued" }
 # Poll /api/client/v1/crawler/jobs/{jobId}/results for markdown.`}</Code>
-          </Stack>
-        )}
+            </DetailCard>
+          </DetailTwoCol>
+        </>
+      )}
 
-        {activeTab === 'urls' && (
-          <Stack>
-            <Title order={5}>URLs in this crawler</Title>
-            <span className="ds-faint" style={{ fontSize: 13 }}>
-              The crawler runs against this list when you click <strong>Run all</strong> or
-              when a schedule fires. You can also send URLs directly via API without
-              persisting them here.
-            </span>
+      {activeTab === 'urls' && (
+        <DetailTwoCol narrowAside>
+          <DetailCard
+            title="URLs in this crawler"
+            description="The crawler runs against this list on “Run all” or when a schedule fires. You can also send URLs directly via API without persisting them here."
+          >
+            <Stack>
+              <Group align="end">
+                <TextInput
+                  label="Add URL"
+                  placeholder="https://example.com/page"
+                  value={newUrl}
+                  onChange={(e) => setNewUrl(e.currentTarget.value)}
+                  style={{ flexGrow: 1 }}
+                />
+                <Button
+                  leftSection={<IconPlus size={14} />}
+                  onClick={() => void addUrls(newUrl)}
+                  disabled={!newUrl.trim()}
+                >
+                  Add
+                </Button>
+              </Group>
 
-            <Group align="end">
-              <TextInput
-                label="Add URL"
-                placeholder="https://example.com/page"
-                value={newUrl}
-                onChange={(e) => setNewUrl(e.currentTarget.value)}
-                style={{ flexGrow: 1 }}
+              <Textarea
+                label="Or paste multiple URLs (one per line)"
+                autosize
+                minRows={2}
+                onBlur={(e) => {
+                  if (e.currentTarget.value.trim()) {
+                    void addUrls(e.currentTarget.value);
+                    e.currentTarget.value = '';
+                  }
+                }}
               />
-              <Button
-                leftSection={<IconPlus size={14} />}
-                onClick={() => void addUrls(newUrl)}
-                disabled={!newUrl.trim()}
-              >
-                Add
-              </Button>
-            </Group>
 
-            <Textarea
-              label="Or paste multiple URLs (one per line)"
-              autosize
-              minRows={2}
-              onBlur={(e) => {
-                if (e.currentTarget.value.trim()) {
-                  void addUrls(e.currentTarget.value);
-                  e.currentTarget.value = '';
-                }
-              }}
-            />
+              <Divider my={2} />
 
-            <Divider my="xs" />
+              {urls.length === 0 ? (
+                <span className="ds-faint">No URLs yet. Add one above.</span>
+              ) : (
+                <DataGrid<{ url: string }>
+                  records={urls.map((url) => ({ url }))}
+                  rowKey={(r) => r.url}
+                  columns={[
+                    {
+                      key: 'url',
+                      label: 'URL',
+                      render: (r) => (
+                        <Group gap="xs" wrap="nowrap">
+                          <IconExternalLink size={14} className="ds-muted" />
+                          <a
+                            href={r.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="ds-mono"
+                            style={{ fontSize: 13 }}
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            {r.url}
+                          </a>
+                        </Group>
+                      ),
+                    },
+                  ]}
+                  rowActions={(r) => [
+                    {
+                      id: 'crawl',
+                      label: 'Crawl now',
+                      icon: <IconPlayerPlay size={14} />,
+                      onClick: () => void runOne(r.url),
+                    },
+                    { divider: true },
+                    {
+                      id: 'remove',
+                      label: 'Remove',
+                      icon: <IconTrash size={14} />,
+                      color: 'red',
+                      onClick: () => void removeUrl(r.url),
+                    },
+                  ]}
+                  footerLeft={`${urls.length} URL${urls.length === 1 ? '' : 's'}`}
+                />
+              )}
+            </Stack>
+          </DetailCard>
 
-            {urls.length === 0 ? (
-              <span className="ds-faint">No URLs yet. Add one above.</span>
-            ) : (
-              <DataGrid<{ url: string }>
-                records={urls.map((url) => ({ url }))}
-                rowKey={(r) => r.url}
-                columns={[
-                  {
-                    key: 'url',
-                    label: 'URL',
-                    render: (r) => (
-                      <Group gap="xs" wrap="nowrap">
-                        <IconExternalLink size={14} className="ds-muted" />
-                        <a
-                          href={r.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="ds-mono"
-                          style={{ fontSize: 13 }}
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          {r.url}
-                        </a>
-                      </Group>
-                    ),
-                  },
-                ]}
-                rowActions={(r) => [
-                  {
-                    id: 'crawl',
-                    label: 'Crawl now',
-                    icon: <IconPlayerPlay size={14} />,
-                    onClick: () => void runOne(r.url),
-                  },
-                  { divider: true },
-                  {
-                    id: 'remove',
-                    label: 'Remove',
-                    icon: <IconTrash size={14} />,
-                    color: 'red',
-                    onClick: () => void removeUrl(r.url),
-                  },
-                ]}
-                footerLeft={`${urls.length} URL${urls.length === 1 ? '' : 's'}`}
-              />
-            )}
-
-            <Divider my="md" label="Try an URL without saving it" />
-            <Group align="end">
+          <DetailCard
+            title="One-shot crawl"
+            description="Crawl a URL with this crawler’s config (engine, HTTP, Knowledge Engine, webhook) without saving it to the list."
+          >
+            <Stack>
               <TextInput
-                label="One-shot crawl"
-                description="Crawl this URL with the container's config (engine, HTTP, RAG, webhook) but don't save it to the list."
+                label="URL"
                 placeholder="https://example.com/article"
                 value={singleCrawlUrl}
                 onChange={(e) => setSingleCrawlUrl(e.currentTarget.value)}
-                style={{ flexGrow: 1 }}
               />
               <Button
                 leftSection={<IconPlayerPlay size={14} />}
@@ -993,13 +1045,23 @@ Content-Type: application/json
                 }}
                 disabled={!singleCrawlUrl.trim() || crawler.status !== 'active'}
               >
-                Crawl
+                Crawl now
               </Button>
-            </Group>
-          </Stack>
-        )}
+              {crawler.status !== 'active' ? (
+                <span className="ds-faint" style={{ fontSize: 12 }}>
+                  Enable the crawler to run one-shot crawls.
+                </span>
+              ) : null}
+            </Stack>
+          </DetailCard>
+        </DetailTwoCol>
+      )}
 
-        {activeTab === 'plan' && (
+      {activeTab === 'plan' && (
+        <DetailCard
+          title="Engine & scope"
+          description="How pages are fetched and, when link-following is on, which links the crawler is allowed to walk."
+        >
           <form onSubmit={planForm.onSubmit(savePlan)}>
             <Stack>
               <TextInput label="Name" required {...planForm.getInputProps('name')} />
@@ -1016,7 +1078,6 @@ Content-Type: application/json
                 />
                 <NumberInput
                   label="Link-follow depth (0–3)"
-                  description="0 = only the URLs you provide. >0 = follow in-domain links."
                   min={0}
                   max={3}
                   {...planForm.getInputProps('maxDepth')}
@@ -1057,25 +1118,31 @@ Content-Type: application/json
               </Group>
             </Stack>
           </form>
-        )}
+        </DetailCard>
+      )}
 
-        {activeTab === 'http' && (
-          <form onSubmit={httpForm.onSubmit(saveHttp)}>
-            <Stack>
-              <TextInput label="User-Agent" placeholder="Leave empty for default" {...httpForm.getInputProps('userAgent')} />
-              <TextInput label="Accept-Language" placeholder="en-US,en;q=0.9,tr;q=0.8" {...httpForm.getInputProps('acceptLanguage')} />
-              <Group grow>
-                <NumberInput label="Timeout (ms)" min={1000} max={120000} {...httpForm.getInputProps('timeoutMs')} />
-                <NumberInput label="Max concurrency" min={1} max={16} {...httpForm.getInputProps('maxConcurrency')} />
-              </Group>
-              <Divider my="xs" label="Auth" />
-              <PasswordInput label="Bearer token" {...httpForm.getInputProps('bearerToken')} />
-              <Group grow>
-                <TextInput label="Basic auth username" {...httpForm.getInputProps('basicUsername')} />
-                <PasswordInput label="Basic auth password" {...httpForm.getInputProps('basicPassword')} />
-              </Group>
-              <Divider my="xs" label="Headers & cookies" />
-              <Textarea
+      {activeTab === 'http' && (
+        <form onSubmit={httpForm.onSubmit(saveHttp)}>
+          <DetailTwoCol>
+            <DetailCard
+              title="Request"
+              description="Headers and connection tuning applied to every fetch."
+            >
+              <Stack>
+                <TextInput label="User-Agent" placeholder="Leave empty for default" {...httpForm.getInputProps('userAgent')} />
+                <TextInput label="Accept-Language" placeholder="en-US,en;q=0.9,tr;q=0.8" {...httpForm.getInputProps('acceptLanguage')} />
+                <Group grow>
+                  <NumberInput label="Timeout (ms)" min={1000} max={120000} {...httpForm.getInputProps('timeoutMs')} />
+                  <NumberInput label="Max concurrency" min={1} max={16} {...httpForm.getInputProps('maxConcurrency')} />
+                </Group>
+                <Divider my={2} label="Auth" />
+                <PasswordInput label="Bearer token" {...httpForm.getInputProps('bearerToken')} />
+                <Group grow>
+                  <TextInput label="Basic auth username" {...httpForm.getInputProps('basicUsername')} />
+                  <PasswordInput label="Basic auth password" {...httpForm.getInputProps('basicPassword')} />
+                </Group>
+                <Divider my={2} label="Headers & cookies" />
+                <Textarea
                 label='Custom headers (JSON: { "X-Foo": "bar" })'
                 autosize
                 minRows={3}
@@ -1093,61 +1160,133 @@ Content-Type: application/json
               />
               <Switch
                 label="Allow insecure TLS (DANGER: skips certificate verification)"
-                description="Use only when a site's TLS chain is misconfigured (e.g. missing intermediate certificate) and you trust the destination."
+                description="Rarely needed — the crawler now falls back to the browser engine for sites with a missing-intermediate TLS chain, keeping verification on. Enable this only as a last resort for a destination you trust."
                 {...httpForm.getInputProps('allowInsecureTls', { type: 'checkbox' })}
               />
-              <Group justify="flex-end">
-                <Button type="submit" loading={savingHttp}>Save HTTP settings</Button>
-              </Group>
-            </Stack>
-          </form>
-        )}
+              </Stack>
+            </DetailCard>
 
-        {activeTab === 'integration' && (
-          <form onSubmit={intForm.onSubmit(saveIntegration)}>
-            <Stack>
-              <Title order={5}>Knowledge engine (RAG)</Title>
-              <Switch label="Ingest fetched pages into a RAG module" {...intForm.getInputProps('ragEnabled', { type: 'checkbox' })} />
-              <Select
-                label="RAG module"
-                description="Each successful page will be ingested into the selected module via ragService."
-                placeholder={ragModules.length === 0
-                  ? 'No active RAG modules found — create one in the Knowledge Engine page first'
-                  : 'Select a RAG module'}
-                disabled={!intForm.values.ragEnabled || ragModules.length === 0}
-                data={ragModules.map((m) => ({ value: m.key, label: `${m.name} · ${m.key}` }))}
-                searchable
-                nothingFoundMessage="No matching RAG modules"
-                {...intForm.getInputProps('ragModuleKey')}
-              />
-              <Divider my="md" />
-              <Title order={5}>Webhook</Title>
-              <Switch label="Send webhook for every page / completion" {...intForm.getInputProps('webhookEnabled', { type: 'checkbox' })} />
-              <TextInput
-                label="Webhook URL"
-                placeholder="https://your.app/hook"
-                disabled={!intForm.values.webhookEnabled}
-                {...intForm.getInputProps('webhookUrl')}
-              />
-              <PasswordInput
-                label="HMAC secret (optional)"
-                description="If set, payloads are signed with X-Cognipeer-Signature."
-                disabled={!intForm.values.webhookEnabled}
-                {...intForm.getInputProps('webhookSecret')}
-              />
-              <Group>
-                <Switch label="page" disabled={!intForm.values.webhookEnabled} {...intForm.getInputProps('webhookEventPage', { type: 'checkbox' })} />
-                <Switch label="completed" disabled={!intForm.values.webhookEnabled} {...intForm.getInputProps('webhookEventCompleted', { type: 'checkbox' })} />
-                <Switch label="failed" disabled={!intForm.values.webhookEnabled} {...intForm.getInputProps('webhookEventFailed', { type: 'checkbox' })} />
-              </Group>
-              <Group justify="flex-end">
-                <Button type="submit" loading={savingIntegration}>Save integration</Button>
-              </Group>
-            </Stack>
-          </form>
-        )}
+            <DetailCard
+              title="Content extraction"
+              description="How fetched HTML is turned into markdown or plain text before storage and Knowledge Engine ingestion."
+            >
+              <Stack>
+                <Select
+                  label="Output format"
+                  description="markdown keeps headings/links/tables; text flattens to clean plain prose (good for the Knowledge Engine, and sidesteps markdown-structure quirks)."
+                  data={[
+                    { value: 'markdown', label: 'Markdown' },
+                    { value: 'text', label: 'Plain text' },
+                  ]}
+                  allowDeselect={false}
+                  {...httpForm.getInputProps('outputFormat')}
+                />
+                <Switch
+                  label="Clean up markdown"
+                  description="Decodes leftover HTML entities (&nbsp; etc.), drops dead #/javascript: links and collapses blank-line runs. Ignored for plain-text output."
+                  disabled={httpForm.values.outputFormat === 'text'}
+                  {...httpForm.getInputProps('cleanup', { type: 'checkbox' })}
+                />
+                <Switch
+                  label="Strip inline (base64) images"
+                  description="Drops data: images from the extracted markdown. Recommended — a single page can otherwise carry megabytes of inline image data."
+                  {...httpForm.getInputProps('stripDataImages', { type: 'checkbox' })}
+                />
+                <Switch
+                  label="Main content only"
+                  description="Extract just the primary content region, dropping nav menus, headers and footers. Reduces boilerplate noise in the Knowledge Engine."
+                  {...httpForm.getInputProps('mainContentOnly', { type: 'checkbox' })}
+                />
+                <TextInput
+                  label="Content selector (optional)"
+                  placeholder="e.g. main, article, #content"
+                  description="CSS selector for the main content region. Overrides the auto heuristic when set."
+                  {...httpForm.getInputProps('contentSelector')}
+                />
+                <Textarea
+                  label="Remove selectors (one per line)"
+                  placeholder={'.cookie-banner\nnav\nfooter'}
+                  autosize
+                  minRows={2}
+                  {...httpForm.getInputProps('removeSelectors')}
+                />
+                <NumberInput
+                  label="Max body length (chars, 0 = no limit)"
+                  min={0}
+                  max={5000000}
+                  {...httpForm.getInputProps('maxBodyChars')}
+                />
+                <Group justify="flex-end">
+                  <Button type="submit" loading={savingHttp}>Save HTTP settings</Button>
+                </Group>
+              </Stack>
+            </DetailCard>
+          </DetailTwoCol>
+        </form>
+      )}
 
-        {activeTab === 'schedule' && (
+      {activeTab === 'integration' && (
+        <form onSubmit={intForm.onSubmit(saveIntegration)}>
+          <DetailTwoCol>
+            <DetailCard
+              title="Knowledge Engine"
+              description="Ingest every successfully fetched page into a Knowledge Engine module for retrieval."
+            >
+              <Stack>
+                <Switch label="Ingest fetched pages into a Knowledge Engine module" {...intForm.getInputProps('ragEnabled', { type: 'checkbox' })} />
+                <Select
+                  label="Knowledge Engine module"
+                  description="Each successful page will be ingested into the selected module via ragService."
+                  placeholder={ragModules.length === 0
+                    ? 'No active Knowledge Engine modules found — create one in the Knowledge Engine page first'
+                    : 'Select a Knowledge Engine module'}
+                  disabled={!intForm.values.ragEnabled || ragModules.length === 0}
+                  data={ragModules.map((m) => ({ value: m.key, label: `${m.name} · ${m.key}` }))}
+                  searchable
+                  nothingFoundMessage="No matching Knowledge Engine modules"
+                  {...intForm.getInputProps('ragModuleKey')}
+                />
+              </Stack>
+            </DetailCard>
+
+            <DetailCard
+              title="Webhook"
+              description="Notify an external endpoint on each page and on run completion / failure."
+            >
+              <Stack>
+                <Switch label="Send webhook for every page / completion" {...intForm.getInputProps('webhookEnabled', { type: 'checkbox' })} />
+                <TextInput
+                  label="Webhook URL"
+                  placeholder="https://your.app/hook"
+                  disabled={!intForm.values.webhookEnabled}
+                  {...intForm.getInputProps('webhookUrl')}
+                />
+                <PasswordInput
+                  label="HMAC secret (optional)"
+                  description="If set, payloads are signed with X-Cognipeer-Signature."
+                  disabled={!intForm.values.webhookEnabled}
+                  {...intForm.getInputProps('webhookSecret')}
+                />
+                <Divider my={2} label="Events" />
+                <Group>
+                  <Switch label="page" disabled={!intForm.values.webhookEnabled} {...intForm.getInputProps('webhookEventPage', { type: 'checkbox' })} />
+                  <Switch label="completed" disabled={!intForm.values.webhookEnabled} {...intForm.getInputProps('webhookEventCompleted', { type: 'checkbox' })} />
+                  <Switch label="failed" disabled={!intForm.values.webhookEnabled} {...intForm.getInputProps('webhookEventFailed', { type: 'checkbox' })} />
+                </Group>
+                <Group justify="flex-end">
+                  <Button type="submit" loading={savingIntegration}>Save integration</Button>
+                </Group>
+              </Stack>
+            </DetailCard>
+          </DetailTwoCol>
+        </form>
+      )}
+
+      {activeTab === 'schedule' && (
+        <DetailCard
+          title="Schedule"
+          description="Run this crawler automatically against its saved URL list on a recurring interval or cron expression."
+        >
           <form onSubmit={schedForm.onSubmit(saveSchedule)}>
             <Stack>
               <Switch
@@ -1198,95 +1337,80 @@ Content-Type: application/json
               </Group>
             </Stack>
           </form>
-        )}
+        </DetailCard>
+      )}
 
-        {activeTab === 'runs' && (
+      {activeTab === 'runs' && (
+        <DetailCard
+          title="Runs"
+          description="Every crawl job for this crawler. Click a row to inspect its pages and errors."
+          pad="sm"
+        >
           <DataGrid<CrawlJobView>
-            records={jobs}
+            records={filteredJobs}
             rowKey={(j) => j.id}
             onRowClick={(j) => void openJobModal(j)}
             columns={jobColumns}
             onRefresh={loadJobs}
+            search={{
+              value: jobQuery,
+              onChange: setJobQuery,
+              placeholder: 'Search by id, status, trigger, date…',
+            }}
+            filters={[
+              {
+                value: jobStatusFilter,
+                onChange: setJobStatusFilter,
+                ariaLabel: 'Filter by status',
+                width: 150,
+                options: [
+                  { value: 'all', label: 'All statuses' },
+                  { value: 'queued', label: 'Queued' },
+                  { value: 'running', label: 'Running' },
+                  { value: 'succeeded', label: 'Succeeded' },
+                  { value: 'partial', label: 'Partial' },
+                  { value: 'failed', label: 'Failed' },
+                  { value: 'canceled', label: 'Canceled' },
+                ],
+              },
+              {
+                value: jobTriggerFilter,
+                onChange: setJobTriggerFilter,
+                ariaLabel: 'Filter by trigger',
+                width: 140,
+                options: [
+                  { value: 'all', label: 'All triggers' },
+                  { value: 'manual', label: 'Manual' },
+                  { value: 'schedule', label: 'Schedule' },
+                  { value: 'api', label: 'API' },
+                  { value: 'adhoc', label: 'Ad-hoc' },
+                ],
+              },
+            ]}
             empty={{
               icon: <IconPlayerPlay size={22} stroke={1.7} />,
-              title: 'No runs yet',
-              description: 'Click "Run all" or "Crawl now" on a URL to start the first run.',
+              title: jobs.length === 0 ? 'No runs yet' : 'No runs match your filters',
+              description:
+                jobs.length === 0
+                  ? 'Click "Run all" or "Crawl now" on a URL to start the first run.'
+                  : 'Try clearing the search or filters above.',
             }}
-            footerLeft={`${jobs.length} run${jobs.length === 1 ? '' : 's'}`}
+            footerLeft={`Showing ${filteredJobs.length} of ${jobs.length} run${jobs.length === 1 ? '' : 's'}`}
           />
-        )}
-      </div>
+        </DetailCard>
+      )}
 
-      <Modal
-        opened={openJob !== null}
-        onClose={() => { setOpenJob(null); setJobResults([]); setOpenResult(null); }}
-        title={openJob ? `Job ${openJob.id.slice(0, 12)}…` : ''}
-        size="xl"
-      >
-        {openJob && (
-          <Stack>
-            <Group justify="space-between">
-              <Group>
-                <StatusBadge status={openJob.status} />
-                <span className="ds-faint">
-                  {openJob.pagesProcessed} pages · {openJob.filesProcessed} files · {openJob.errorsCount} errors
-                  {openJob.durationMs ? ` · ${(openJob.durationMs / 1000).toFixed(1)}s` : ''}
-                </span>
-              </Group>
-              {(openJob.status === 'queued' || openJob.status === 'running') && (
-                <Button
-                  color="red"
-                  variant="light"
-                  size="xs"
-                  loading={cancelingJob}
-                  onClick={() => void cancelJob(openJob.id)}
-                >
-                  Cancel job
-                </Button>
-              )}
-            </Group>
-            {openJob.errorMessage ? (
-              <Code block color="red">{openJob.errorMessage}</Code>
-            ) : null}
-            {resultsLoading ? (
-              <span className="ds-faint">Loading results…</span>
-            ) : (
-              <DataGrid<CrawlResultView>
-                records={jobResults}
-                rowKey={(r) => r.id}
-                onRowClick={(r) => setOpenResult(r)}
-                columns={resultColumns}
-                empty={{ title: 'No results' }}
-              />
-            )}
-          </Stack>
-        )}
-      </Modal>
-
-      <Modal
-        opened={openResult !== null}
-        onClose={() => setOpenResult(null)}
-        title={openResult?.url ?? ''}
-        size="xl"
-      >
-        {openResult && (
-          <Stack>
-            <Group gap="xs">
-              <Badge>{openResult.type}</Badge>
-              {openResult.httpStatus ? <Badge variant="light">HTTP {openResult.httpStatus}</Badge> : null}
-              {openResult.ragStatus ? <Badge color="teal" variant="light">rag: {openResult.ragStatus}</Badge> : null}
-            </Group>
-            {openResult.errorMessage ? (
-              <Code block color="red">{openResult.errorMessage}</Code>
-            ) : null}
-            {openResult.bodyMarkdown ? (
-              <Code block style={{ maxHeight: '60vh', overflow: 'auto' }}>{openResult.bodyMarkdown}</Code>
-            ) : (
-              <span className="ds-faint">(no markdown body)</span>
-            )}
-          </Stack>
-        )}
-      </Modal>
-    </PageContainer>
+      <RunDetailModal
+        job={openJob}
+        results={jobResults}
+        loading={resultsLoading}
+        canceling={cancelingJob}
+        onCancel={(jobId) => void cancelJob(jobId)}
+        onClose={() => {
+          setOpenJob(null);
+          setJobResults([]);
+        }}
+      />
+    </DetailShell>
   );
 }

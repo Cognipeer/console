@@ -426,28 +426,6 @@
       ]
     },
     {
-      "id": "tools",
-      "href": "/dashboard/tools",
-      "icon": "IconTool",
-      "category": "build",
-      "navLabelKey": "tools",
-      "navDescriptionKey": "toolsDescription",
-      "tags": [
-        "tools",
-        "actions",
-        "integrations"
-      ],
-      "searchKeywords": [
-        "tool",
-        "action",
-        "openapi",
-        "mcp",
-        "execute",
-        "api"
-      ],
-      "defaultPinned": true
-    },
-    {
       "id": "browser",
       "href": "/dashboard/browser",
       "icon": "IconWorld",
@@ -716,7 +694,8 @@
         "tenant",
         "\u00fcyeler"
       ],
-      "tenantAdminOnly": true
+      "tenantAdminOnly": true,
+      "settings": true
     },
     {
       "id": "projects",
@@ -732,7 +711,8 @@
       "searchKeywords": [
         "project",
         "proje"
-      ]
+      ],
+      "settings": true
     },
     {
       "id": "providers",
@@ -750,7 +730,8 @@
         "integrations",
         "sa\u011flay\u0131c\u0131lar"
       ],
-      "tenantAdminOnly": true
+      "tenantAdminOnly": true,
+      "settings": true
     },
     {
       "id": "tokens",
@@ -770,7 +751,7 @@
         "key",
         "anahtar"
       ],
-      "defaultPinned": true
+      "settings": true
     },
     {
       "id": "audit",
@@ -791,7 +772,8 @@
         "rbac",
         "yetki"
       ],
-      "tenantAdminOnly": true
+      "tenantAdminOnly": true,
+      "settings": true
     },
     {
       "id": "license",
@@ -811,7 +793,8 @@
         "enterprise",
         "limits"
       ],
-      "tenantAdminOnly": true
+      "tenantAdminOnly": true,
+      "settings": true
     }
   ]
 }

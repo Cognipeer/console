@@ -186,6 +186,33 @@ interface ModelProviderDto {
   driver: string;
 }
 
+interface UsageBreakdownEntryDto {
+  id: string;
+  name?: string | null;
+  label?: string | null;
+  requests: number;
+  errors: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  costUsd: number;
+}
+
+interface UsageBreakdownDto {
+  groupBy: 'user' | 'token';
+  fromDay?: string;
+  toDay?: string;
+  totals: {
+    requests: number;
+    errors: number;
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+    costUsd: number;
+  };
+  entries: UsageBreakdownEntryDto[];
+}
+
 const PAGE_SIZE_OPTIONS = [10, 25, 50];
 
 function fmtCurrency(amount: number, currency = 'USD') {
@@ -1183,6 +1210,9 @@ function OverviewTab({
             </div>
           )}
         </div>
+
+        {/* Usage by user / API key (usage_daily rollup, last 30 days) */}
+        <UsageBreakdownCard modelId={model._id} costCurrency={costCurrency} />
       </div>
 
       {/* Right column */}
@@ -1315,6 +1345,163 @@ function MetricBlock({
           </span>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+/* ───────────────────────── Usage breakdown card ───────────────────────── */
+
+function UsageBreakdownCard({
+  modelId,
+  costCurrency,
+}: {
+  modelId: string;
+  costCurrency: string;
+}) {
+  const [groupBy, setGroupBy] = useState<'user' | 'token'>('user');
+  const [breakdown, setBreakdown] = useState<UsageBreakdownDto | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetch(`/api/models/${modelId}/usage/breakdown?groupBy=${groupBy}`)
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data) => {
+        if (!cancelled) setBreakdown(data?.breakdown ?? null);
+      })
+      .catch((error) => {
+        console.error('Failed to load usage breakdown', error);
+        if (!cancelled) setBreakdown(null);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [modelId, groupBy]);
+
+  const entries = breakdown?.entries ?? [];
+
+  return (
+    <div className="ds-card">
+      <div className="ds-row-between" style={{ padding: '14px 18px' }}>
+        <div className="ds-h3">
+          Usage by {groupBy === 'user' ? 'user' : 'API key'}
+        </div>
+        <div className="ds-row ds-gap-xs">
+          <span className="ds-faint" style={{ fontSize: 11, marginRight: 6 }}>
+            Last 30 days
+          </span>
+          {(
+            [
+              { id: 'user' as const, label: 'Users' },
+              { id: 'token' as const, label: 'API keys' },
+            ]
+          ).map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              className={`ds-period-btn ${groupBy === option.id ? 'active' : ''}`}
+              onClick={() => setGroupBy(option.id)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      {loading ? (
+        <Center py="lg">
+          <Loader size="sm" color="teal" />
+        </Center>
+      ) : entries.length === 0 ? (
+        <div className="ds-empty" style={{ padding: 36 }}>
+          <Text size="sm" c="dimmed">
+            No attributed usage yet. Attribution is collected from the daily
+            usage rollup and starts with recent traffic.
+          </Text>
+        </div>
+      ) : (
+        <div className="ds-tbl-wrap">
+          <table className="ds-tbl">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th style={{ textAlign: 'right' }}>Requests</th>
+                <th style={{ textAlign: 'right' }}>Tokens</th>
+                <th style={{ textAlign: 'right' }}>Cost</th>
+                <th style={{ textAlign: 'right' }}>Errors</th>
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map((entry) => {
+                const isUnattributed = entry.id === '';
+                const primary = isUnattributed
+                  ? 'Unattributed / legacy'
+                  : entry.name || entry.label || entry.id;
+                const secondary = !isUnattributed && entry.name && entry.label
+                  ? entry.label
+                  : null;
+                return (
+                  <tr key={entry.id || '__unattributed__'}>
+                    <td style={{ fontSize: 12.5 }}>
+                      <span className={isUnattributed ? 'ds-faint' : undefined}>
+                        {primary}
+                      </span>
+                      {secondary ? (
+                        <div className="ds-faint" style={{ fontSize: 11 }}>
+                          {secondary}
+                        </div>
+                      ) : null}
+                    </td>
+                    <td
+                      className="ds-mono"
+                      style={{
+                        textAlign: 'right',
+                        fontSize: 12,
+                        fontVariantNumeric: 'tabular-nums',
+                      }}
+                    >
+                      {fmtNumber(entry.requests)}
+                    </td>
+                    <td
+                      className="ds-mono"
+                      style={{
+                        textAlign: 'right',
+                        fontSize: 12,
+                        fontVariantNumeric: 'tabular-nums',
+                      }}
+                    >
+                      {fmtNumber(entry.totalTokens)}
+                    </td>
+                    <td
+                      className="ds-mono"
+                      style={{
+                        textAlign: 'right',
+                        fontSize: 12,
+                        fontVariantNumeric: 'tabular-nums',
+                      }}
+                    >
+                      {entry.costUsd > 0 ? fmtCurrency(entry.costUsd, costCurrency) : '—'}
+                    </td>
+                    <td
+                      className="ds-mono"
+                      style={{
+                        textAlign: 'right',
+                        fontSize: 12,
+                        fontVariantNumeric: 'tabular-nums',
+                      }}
+                    >
+                      {fmtNumber(entry.errors)}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

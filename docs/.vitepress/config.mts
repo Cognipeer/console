@@ -5,7 +5,7 @@ const docsBase = process.env.GITHUB_PAGES === 'true' ? '/console/' : '/';
 export default defineConfig({
   title: 'Cognipeer Console',
   description:
-    'Multi-tenant AI platform for LLM inference, vector stores, agent tracing, RAG, and more.',
+    'Multi-tenant AI platform for LLM inference, vector stores, agent tracing, Knowledge Engine, and more.',
   base: docsBase,
   ignoreDeadLinks: true,
   appearance: 'dark',
@@ -75,7 +75,7 @@ export default defineConfig({
             { text: 'Guardrails', link: '/guide/guardrails' },
             { text: 'PII Service', link: '/guide/pii' },
             { text: 'Evaluation & Analysis', link: '/guide/evaluation-and-analysis' },
-            { text: 'RAG', link: '/guide/rag' },
+            { text: 'Knowledge Engine', link: '/guide/rag' },
             { text: 'Prompts', link: '/guide/prompts' },
             { text: 'Memory', link: '/guide/memory' },
             { text: 'File Storage', link: '/guide/files' },
@@ -146,7 +146,7 @@ export default defineConfig({
             { text: 'Evaluation', link: '/api/evaluation' },
             { text: 'Analysis', link: '/api/analysis' },
             { text: 'Prompts', link: '/api/prompts' },
-            { text: 'RAG', link: '/api/rag' },
+            { text: 'Knowledge Engine', link: '/api/rag' },
             { text: 'Memory', link: '/api/memory' },
             { text: 'Config', link: '/api/config' },
             { text: 'Cluster', link: '/api/cluster' },

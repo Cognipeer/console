@@ -1,4 +1,13 @@
-import type { IMcpTool, IMcpAuthConfig, McpAuthType } from '@/lib/database';
+import type {
+  IMcpAegisConfig,
+  IMcpAuthConfig,
+  IMcpExposureConfig,
+  IMcpRemoteConfig,
+  IMcpStdioConfig,
+  IMcpTool,
+  McpAuthType,
+  McpSourceType,
+} from '@/lib/database';
 import type { SpecFormatHint } from '@/lib/services/specImport';
 
 // ── View types ──────────────────────────────────────────────────────────
@@ -10,12 +19,21 @@ export interface McpServerView {
   key: string;
   name: string;
   description?: string;
+  sourceType: McpSourceType;
   tools: IMcpTool[];
-  upstreamBaseUrl: string;
+  toolsDiscoveredAt?: Date;
+  upstreamBaseUrl?: string;
+  /** Secrets are masked in views. */
   upstreamAuth: IMcpAuthConfig;
+  remoteConfig?: IMcpRemoteConfig;
+  /** Env values are masked in views. */
+  stdioConfig?: IMcpStdioConfig;
+  exposure: IMcpExposureConfig;
+  aegis?: IMcpAegisConfig;
   status: string;
   endpointSlug: string;
   totalRequests?: number;
+  lastError?: { message: string; at: Date } | null;
   metadata?: Record<string, unknown>;
   createdBy: string;
   updatedBy?: string;
@@ -33,6 +51,8 @@ export interface McpRequestLogView {
   requestPayload?: Record<string, unknown>;
   responsePayload?: Record<string, unknown>;
   callerTokenId?: string;
+  callerType?: string;
+  transport?: string;
   createdAt?: Date;
 }
 
@@ -41,8 +61,10 @@ export interface McpRequestLogView {
 export interface CreateMcpServerInput {
   name: string;
   description?: string;
-  /** OpenAPI JSON/YAML or a Postman collection. */
-  openApiSpec: string;
+  /** Tool source (default 'openapi' for backward compatibility). */
+  sourceType?: McpSourceType;
+  /** OpenAPI JSON/YAML or a Postman collection (sourceType 'openapi'). */
+  openApiSpec?: string;
   /** How to interpret `openApiSpec` (default: auto-detect). */
   specFormat?: SpecFormatHint;
   upstreamBaseUrl?: string;
@@ -54,6 +76,12 @@ export interface CreateMcpServerInput {
     username?: string;
     password?: string;
   };
+  /** Remote MCP upstream (sourceType 'remote'). */
+  remoteConfig?: IMcpRemoteConfig;
+  /** Stdio launch config (sourceType 'stdio'). */
+  stdioConfig?: IMcpStdioConfig;
+  exposure?: IMcpExposureConfig;
+  aegis?: IMcpAegisConfig;
 }
 
 export interface UpdateMcpServerInput {
@@ -63,7 +91,18 @@ export interface UpdateMcpServerInput {
   specFormat?: SpecFormatHint;
   upstreamBaseUrl?: string;
   upstreamAuth?: IMcpAuthConfig;
+  remoteConfig?: IMcpRemoteConfig;
+  stdioConfig?: IMcpStdioConfig;
+  exposure?: IMcpExposureConfig;
+  aegis?: IMcpAegisConfig;
   status?: string;
+}
+
+/** Request-scoped context threaded into audit writes. */
+export interface McpAuditContext {
+  performedBy: string;
+  ipAddress?: string;
+  userAgent?: string;
 }
 
 // ── OpenAPI parsing types ───────────────────────────────────────────────

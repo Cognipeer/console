@@ -87,7 +87,7 @@ MongoDB Server
 │   ├── agent_tracing_*      # Tracing sessions & events
 │   ├── guardrails           # Guardrail policies
 │   ├── prompts              # Prompt templates
-│   ├── rag_modules          # RAG configurations
+│   ├── rag_modules          # Knowledge Engine configurations
 │   ├── memory_stores        # Memory store configs
 │   └── ...
 └── tenant_{another_slug}    # Another company (complete isolation)
@@ -140,7 +140,7 @@ Business logic is in `src/lib/services/`:
 | `guardrail/` | Input/output evaluation with regex/keyword/LLM |
 | `agentTracing/` | Tracing session & event persistence |
 | `providers/providerService` | Provider config CRUD, credential encryption |
-| `rag/` | RAG module management, document ingestion, queries |
+| `rag/` | Knowledge Engine module management, document ingestion, queries |
 | `memory/` | Memory store CRUD, semantic search |
 | `prompts/` | Prompt template management, versioning |
 | `apiTokenAuth` | API token validation with caching |

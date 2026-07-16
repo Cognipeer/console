@@ -1,4 +1,8 @@
 import { getDatabase, IModel, IModelPricing, IModelUsageRouting } from '@/lib/database';
+import {
+  recordUsageEvent,
+  type UsageAttribution,
+} from '@/lib/services/usage/usageEvents';
 
 const TOKENS_PER_MILLION = 1_000_000;
 const SECONDS_PER_THOUSAND = 1_000;
@@ -97,6 +101,8 @@ export async function logModelUsage(
     usage: TokenUsage;
     cacheHit?: boolean;
     routing?: IModelUsageRouting;
+    /** Explicit attribution for call sites outside the request ALS scope. */
+    attribution?: Partial<UsageAttribution>;
   },
 ) {
   const db = await getDatabase();
@@ -107,8 +113,41 @@ export async function logModelUsage(
     ...model.pricing,
     ...calculateCost(model.pricing, usage),
   };
+  const totalTokens =
+    usage.totalTokens ??
+    (usage.inputTokens ?? 0) +
+      (usage.outputTokens ?? 0) +
+      (usage.cachedInputTokens ?? 0);
+
+  const units: Record<string, number> = {};
+  if (usage.toolCalls) units.toolCalls = usage.toolCalls;
+  if (usage.inputSeconds) units.inputSeconds = usage.inputSeconds;
+  if (usage.outputSeconds) units.outputSeconds = usage.outputSeconds;
+  if (usage.inputCharacters) units.inputCharacters = usage.inputCharacters;
+  if (usage.pages) units.pages = usage.pages;
+  if (usage.images) units.images = usage.images;
+
+  const attribution = recordUsageEvent({
+    tenantDbName,
+    tenantId: model.tenantId,
+    projectId: model.projectId,
+    service: 'models',
+    refKey: model.key,
+    status: payload.status,
+    latencyMs: payload.latencyMs,
+    inputTokens: usage.inputTokens ?? 0,
+    outputTokens: usage.outputTokens ?? 0,
+    cachedInputTokens: usage.cachedInputTokens ?? 0,
+    totalTokens,
+    costUsd: pricingSnapshot.totalCost,
+    units,
+    attribution: payload.attribution,
+  });
 
   await db.createModelUsageLog({
+    userId: attribution.userId,
+    apiTokenId: attribution.apiTokenId,
+    actorType: attribution.actorType,
     tenantId: model.tenantId,
     projectId: model.projectId,
     modelKey: model.key,
@@ -127,11 +166,7 @@ export async function logModelUsage(
     inputTokens: usage.inputTokens ?? 0,
     outputTokens: usage.outputTokens ?? 0,
     cachedInputTokens: usage.cachedInputTokens ?? 0,
-    totalTokens:
-      usage.totalTokens ??
-      (usage.inputTokens ?? 0) +
-        (usage.outputTokens ?? 0) +
-        (usage.cachedInputTokens ?? 0),
+    totalTokens,
     toolCalls: usage.toolCalls ?? 0,
     cacheHit: payload.cacheHit,
     pricingSnapshot,

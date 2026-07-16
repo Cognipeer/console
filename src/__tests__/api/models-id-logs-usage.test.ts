@@ -6,6 +6,7 @@ vi.mock('@/lib/services/models/modelService', () => ({
   getModelById: vi.fn(),
   listUsageLogs: vi.fn(),
   getUsageAggregate: vi.fn(),
+  getModelUsageBreakdown: vi.fn(),
 }));
 
 vi.mock('@/lib/services/projects/projectContext', () => {
@@ -27,6 +28,7 @@ import {
   getModelById,
   listUsageLogs,
   getUsageAggregate,
+  getModelUsageBreakdown,
 } from '@/lib/services/models/modelService';
 import { resolveProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
 import { modelsApiPlugin } from '@/server/api/plugins/models';
@@ -111,6 +113,58 @@ describe('GET /api/models/:id/logs and /usage', () => {
       'project-1',
       expect.objectContaining({ groupBy: 'hour' }),
     );
+  });
+
+  it('returns the usage breakdown with defaults (groupBy=user, last 30 days)', async () => {
+    (getModelUsageBreakdown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      groupBy: 'user',
+      totals: { requests: 5, errors: 1, inputTokens: 10, outputTokens: 20, totalTokens: 30, costUsd: 0.5 },
+      entries: [{ id: 'user-9', name: 'Ada', label: 'ada@acme.io', requests: 5, errors: 1, inputTokens: 10, outputTokens: 20, totalTokens: 30, costUsd: 0.5 }],
+    });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/models/model-1/usage/breakdown',
+      headers: HEADERS,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = parseJsonBody<{ breakdown: { entries: Array<{ id: string }> } }>(res.body);
+    expect(body.breakdown.entries[0].id).toBe('user-9');
+    expect(getModelUsageBreakdown).toHaveBeenCalledWith(
+      'tenant_acme',
+      'tenant-1',
+      'gpt-4o',
+      'project-1',
+      expect.objectContaining({ groupBy: 'user', from: expect.any(Date), to: expect.any(Date) }),
+    );
+    const [, , , , options] = (getModelUsageBreakdown as ReturnType<typeof vi.fn>).mock.calls[0];
+    const rangeMs = options.to.getTime() - options.from.getTime();
+    expect(rangeMs).toBe(30 * 24 * 60 * 60 * 1000);
+  });
+
+  it('passes groupBy=token to the breakdown and rejects invalid values', async () => {
+    (getModelUsageBreakdown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      groupBy: 'token', totals: {}, entries: [],
+    });
+    const ok = await app.inject({
+      method: 'GET',
+      url: '/api/models/model-1/usage/breakdown?groupBy=token',
+      headers: HEADERS,
+    });
+    expect(ok.statusCode).toBe(200);
+    expect(getModelUsageBreakdown).toHaveBeenCalledWith(
+      'tenant_acme',
+      'tenant-1',
+      'gpt-4o',
+      'project-1',
+      expect.objectContaining({ groupBy: 'token' }),
+    );
+
+    const bad = await app.inject({
+      method: 'GET',
+      url: '/api/models/model-1/usage/breakdown?groupBy=nope',
+      headers: HEADERS,
+    });
+    expect(bad.statusCode).toBe(400);
   });
 
   it('returns 404 when model not found', async () => {

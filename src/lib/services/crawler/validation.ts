@@ -64,6 +64,13 @@ const markdownOptionsSchema = z.object({
     enabled: z.boolean(),
     languages: z.array(z.string()).optional(),
   }).optional(),
+  outputFormat: z.enum(['markdown', 'text']).optional(),
+  cleanup: z.boolean().optional(),
+  stripDataImages: z.boolean().optional(),
+  mainContentOnly: z.boolean().optional(),
+  contentSelector: z.string().max(200).optional(),
+  removeSelectors: z.array(z.string().max(200)).max(50).optional(),
+  maxBodyChars: z.number().int().min(0).max(5_000_000).optional(),
 }).optional();
 
 const engineSchema = z.enum(['axios', 'playwright', 'auto']);

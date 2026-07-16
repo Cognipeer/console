@@ -79,6 +79,17 @@ export const MAIN_SCHEMA_SQL = `
     PRIMARY KEY (entityType, entityId)
   );
   CREATE INDEX IF NOT EXISTS idx_instance_assignments_node ON instance_assignments(nodeName);
+
+  -- Beta access codes gating public signup (system-wide)
+  CREATE TABLE IF NOT EXISTS beta_access_codes (
+    code TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'active',
+    note TEXT,
+    usedByEmail TEXT,
+    usedAt TEXT,
+    createdAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_beta_access_codes_status ON beta_access_codes(status);
 `;
 
 /**
@@ -121,6 +132,9 @@ export const OCR_TENANT_SCHEMA_SQL = `
     costCurrency TEXT,
     lastItemAt TEXT,
     metadata TEXT,
+    userId TEXT,
+    apiTokenId TEXT,
+    actorType TEXT,
     createdBy TEXT NOT NULL,
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
@@ -175,6 +189,9 @@ export const BATCH_TENANT_SCHEMA_SQL = `
     usageOutputTokens INTEGER NOT NULL DEFAULT 0,
     usageTotalTokens INTEGER NOT NULL DEFAULT 0,
     metadata TEXT,
+    userId TEXT,
+    apiTokenId TEXT,
+    actorType TEXT,
     createdBy TEXT NOT NULL,
     startedAt TEXT,
     completedAt TEXT,
@@ -260,6 +277,9 @@ export const REALTIME_TENANT_SCHEMA_SQL = `
     startedAt TEXT NOT NULL,
     endedAt TEXT,
     durationMs INTEGER,
+    userId TEXT,
+    apiTokenId TEXT,
+    actorType TEXT,
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   );
@@ -452,6 +472,9 @@ export const TENANT_SCHEMA_SQL = `
     totalBytesOut INTEGER DEFAULT 0,
     totalRequestBytes INTEGER DEFAULT 0,
     totalResponseBytes INTEGER DEFAULT 0,
+    userId TEXT,
+    apiTokenId TEXT,
+    actorType TEXT,
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   );
@@ -550,10 +573,50 @@ export const TENANT_SCHEMA_SQL = `
     cacheHit INTEGER DEFAULT 0,
     pricingSnapshot TEXT,
     routing TEXT,
+    userId TEXT,
+    apiTokenId TEXT,
+    actorType TEXT,
     createdAt TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_model_usage_modelKey ON model_usage_logs(modelKey);
   CREATE INDEX IF NOT EXISTS idx_model_usage_createdAt ON model_usage_logs(createdAt);
+  -- NOTE: idx_model_usage_user lives in applyTenantIndexes (base.ts), NOT here:
+  -- it references userId, which legacy tenant DBs only gain via the
+  -- ensureTableColumn migration that runs AFTER this schema script. Creating it
+  -- here aborts the whole schema exec on pre-attribution DBs
+  -- ("no such column: userId").
+
+  -- Cross-service daily usage rollup — primary source for usage/spend reports.
+  -- Dimension columns store '' (never NULL) when absent: SQLite treats NULLs
+  -- as distinct in UNIQUE constraints, which would duplicate dimension rows.
+  CREATE TABLE IF NOT EXISTS usage_daily (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT NOT NULL DEFAULT '',
+    userId TEXT NOT NULL DEFAULT '',
+    apiTokenId TEXT NOT NULL DEFAULT '',
+    actorType TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    service TEXT NOT NULL,
+    refKey TEXT NOT NULL DEFAULT '',
+    day TEXT NOT NULL,
+    dayDate TEXT,
+    requests INTEGER NOT NULL DEFAULT 0,
+    errors INTEGER NOT NULL DEFAULT 0,
+    inputTokens INTEGER NOT NULL DEFAULT 0,
+    outputTokens INTEGER NOT NULL DEFAULT 0,
+    cachedInputTokens INTEGER NOT NULL DEFAULT 0,
+    totalTokens INTEGER NOT NULL DEFAULT 0,
+    costUsd REAL NOT NULL DEFAULT 0,
+    latencyMsSum INTEGER NOT NULL DEFAULT 0,
+    latencyCount INTEGER NOT NULL DEFAULT 0,
+    units TEXT,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS uniq_usage_daily_dims
+    ON usage_daily(tenantId, projectId, userId, apiTokenId, source, service, refKey, day);
+  CREATE INDEX IF NOT EXISTS idx_usage_daily_day ON usage_daily(tenantId, day DESC);
+  CREATE INDEX IF NOT EXISTS idx_usage_daily_user_day ON usage_daily(tenantId, userId, day DESC);
 
   -- Vector indexes
   CREATE TABLE IF NOT EXISTS vector_indexes (
@@ -719,6 +782,9 @@ export const TENANT_SCHEMA_SQL = `
     source TEXT,
     requestId TEXT,
     message TEXT,
+    userId TEXT,
+    apiTokenId TEXT,
+    actorType TEXT,
     createdAt TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_guardrail_eval_guardrailId ON guardrail_evaluation_logs(guardrailId);
@@ -1105,6 +1171,9 @@ export const TENANT_SCHEMA_SQL = `
     matchCount INTEGER NOT NULL DEFAULT 0,
     latencyMs INTEGER,
     metadata TEXT DEFAULT '{}',
+    userId TEXT,
+    apiTokenId TEXT,
+    actorType TEXT,
     createdAt TEXT NOT NULL
   );
 
@@ -1146,6 +1215,9 @@ export const TENANT_SCHEMA_SQL = `
     source TEXT,
     ragModuleKey TEXT,
     metadata TEXT DEFAULT '{}',
+    userId TEXT,
+    apiTokenId TEXT,
+    actorType TEXT,
     createdAt TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_reranker_run_logs_key_createdAt ON reranker_run_logs(rerankerKey, createdAt DESC);
@@ -1166,6 +1238,9 @@ export const TENANT_SCHEMA_SQL = `
     answer TEXT,
     results TEXT,
     metadata TEXT DEFAULT '{}',
+    userId TEXT,
+    apiTokenId TEXT,
+    actorType TEXT,
     createdAt TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_websearch_run_logs_key_createdAt ON websearch_run_logs(searchKey, createdAt DESC);
@@ -1381,6 +1456,9 @@ export const TENANT_SCHEMA_SQL = `
     latencyMs INTEGER,
     callerType TEXT,
     callerTokenId TEXT,
+    userId TEXT,
+    apiTokenId TEXT,
+    actorType TEXT,
     createdAt TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_tool_request_logs_toolKey ON tool_request_logs(toolKey);
@@ -1394,13 +1472,20 @@ export const TENANT_SCHEMA_SQL = `
     key TEXT NOT NULL,
     name TEXT NOT NULL,
     description TEXT,
-    openApiSpec TEXT NOT NULL,
+    sourceType TEXT NOT NULL DEFAULT 'openapi',
+    openApiSpec TEXT,
+    remoteConfig TEXT,
+    stdioConfig TEXT,
     tools TEXT DEFAULT '[]',
-    upstreamBaseUrl TEXT NOT NULL,
+    toolsDiscoveredAt TEXT,
+    upstreamBaseUrl TEXT,
     upstreamAuth TEXT DEFAULT '{}',
+    exposure TEXT,
+    aegis TEXT,
     status TEXT NOT NULL DEFAULT 'active',
     endpointSlug TEXT NOT NULL,
     totalRequests INTEGER DEFAULT 0,
+    lastError TEXT,
     metadata TEXT DEFAULT '{}',
     createdBy TEXT NOT NULL,
     updatedBy TEXT,
@@ -1423,10 +1508,36 @@ export const TENANT_SCHEMA_SQL = `
     errorMessage TEXT,
     latencyMs INTEGER,
     callerTokenId TEXT,
+    callerType TEXT,
+    callerUserId TEXT,
+    transport TEXT,
+    sourceType TEXT,
+    sessionId TEXT,
+    userId TEXT,
+    apiTokenId TEXT,
+    actorType TEXT,
     createdAt TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_mcp_request_logs_serverKey ON mcp_request_logs(serverKey);
   CREATE INDEX IF NOT EXISTS idx_mcp_request_logs_createdAt ON mcp_request_logs(createdAt);
+
+  -- MCP Audit Logs
+  CREATE TABLE IF NOT EXISTS mcp_audit_logs (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    serverId TEXT,
+    serverKey TEXT NOT NULL,
+    action TEXT NOT NULL,
+    changes TEXT,
+    performedBy TEXT NOT NULL,
+    ipAddress TEXT,
+    userAgent TEXT,
+    metadata TEXT DEFAULT '{}',
+    createdAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_mcp_audit_logs_serverKey ON mcp_audit_logs(serverKey);
+  CREATE INDEX IF NOT EXISTS idx_mcp_audit_logs_createdAt ON mcp_audit_logs(createdAt);
 
   -- Vector migrations
   CREATE TABLE IF NOT EXISTS vector_migrations (
@@ -1523,6 +1634,9 @@ export const TENANT_SCHEMA_SQL = `
     errorMessage TEXT,
     eventCount INTEGER NOT NULL DEFAULT 0,
     metadata TEXT DEFAULT '{}',
+    userId TEXT,
+    apiTokenId TEXT,
+    actorType TEXT,
     createdBy TEXT NOT NULL,
     updatedBy TEXT,
     createdAt TEXT NOT NULL,
@@ -1606,6 +1720,9 @@ export const TENANT_SCHEMA_SQL = `
     callbackUrl TEXT,
     errorMessage TEXT,
     metadata TEXT DEFAULT '{}',
+    userId TEXT,
+    apiTokenId TEXT,
+    actorType TEXT,
     createdBy TEXT NOT NULL,
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
@@ -1950,6 +2067,9 @@ export const TENANT_SCHEMA_SQL = `
     warmKey TEXT,
     lastError TEXT,
     lastActivityAt TEXT,
+    userId TEXT,
+    apiTokenId TEXT,
+    actorType TEXT,
     createdBy TEXT NOT NULL,
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL

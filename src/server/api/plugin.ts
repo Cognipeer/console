@@ -25,12 +25,12 @@ import { clientMemoryApiPlugin } from './plugins/client-memory';
 import { clientAutomationsApiPlugin } from './plugins/client-automations';
 import { clientMcpApiPlugin } from './plugins/client-mcp';
 import { clientMcpConsoleApiPlugin } from './plugins/client-mcp-console';
+import { publicMcpApiPlugin } from './plugins/public-mcp';
 import { clientPiiApiPlugin } from './plugins/client-pii';
 import { clientEvaluationsApiPlugin } from './plugins/client-evaluations';
 import { clientPromptsApiPlugin } from './plugins/client-prompts';
 import { clientRagApiPlugin } from './plugins/client-rag';
 import { clientRerankerApiPlugin } from './plugins/client-reranker';
-import { clientToolsApiPlugin } from './plugins/client-tools';
 import { clientTracingApiPlugin } from './plugins/client-tracing';
 import { clientVectorApiPlugin } from './plugins/client-vector';
 import { clientWebSearchApiPlugin } from './plugins/client-websearch';
@@ -99,7 +99,12 @@ const PUBLIC_API_PATHS = [
  * contains no tenant secrets — pairing requires a fleet token). Empty in the
  * community edition.
  */
-const PUBLIC_API_PREFIXES = [...enterprisePublicApiPrefixes];
+const PUBLIC_API_PREFIXES = [
+  // MCP servers exposed with accessMode 'public' (unguessable slug URLs; the
+  // handler re-checks the access mode on every request).
+  '/api/public/mcp/',
+  ...enterprisePublicApiPrefixes,
+];
 
 const CLIENT_API_PREFIXES = ['/api/client/', '/api/models/v1/', '/api/metrics', '/api/internal/gpu-pool/'];
 
@@ -361,12 +366,17 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   // `/:serverKey/*` routes.
   await app.register(clientMcpConsoleApiPlugin);
   await app.register(clientMcpApiPlugin);
+  // Unauthenticated MCP endpoints for servers with accessMode 'public'
+  // (slug-addressed; see PUBLIC_API_PREFIXES).
+  await app.register(publicMcpApiPlugin);
   await app.register(clientPiiApiPlugin);
   await app.register(clientEvaluationsApiPlugin);
   await app.register(clientPromptsApiPlugin);
   await app.register(clientRagApiPlugin);
   await app.register(clientRerankerApiPlugin);
-  await app.register(clientToolsApiPlugin);
+  // NOTE: the public client Tools API (`/api/client/v1/tools`) is retired —
+  // Tools are an agent-module capability now, executed server-side through
+  // agent tool bindings. The dashboard management API (`/api/tools`) stays.
   await app.register(clientTracingApiPlugin);
   await app.register(clientVectorApiPlugin);
   await app.register(clientWebSearchApiPlugin);

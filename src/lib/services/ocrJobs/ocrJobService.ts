@@ -14,6 +14,7 @@ import type { IOcrJob, IOcrJobItem, OcrOutputKind } from '@/lib/database';
 import { getQueue, type QueuePayload } from '@/lib/core/queue';
 import { queueNameFor } from '@/lib/core/cluster';
 import { uploadFile } from '@/lib/services/files/fileService';
+import { resolveUsageAttribution } from '@/lib/services/usage/usageEvents';
 import { processOcrItem } from './ocrJobRunner';
 import {
   type AddFilesResult,
@@ -57,7 +58,13 @@ export async function createOcrJob(ctx: OcrJobContext, input: CreateOcrJobInput)
 
   const outputs: OcrOutputKind[] = input.outputs?.length ? input.outputs : ['full_text'];
   const jobId = randomUUID();
+  // Attribution is stamped at creation (request ALS in scope); rollup events
+  // are emitted per item by the runner.
+  const attribution = resolveUsageAttribution();
   const job = await db.createOcrJob({
+    userId: attribution.userId,
+    apiTokenId: attribution.apiTokenId,
+    actorType: attribution.actorType,
     tenantId: ctx.tenantId,
     projectId: ctx.projectId,
     name: input.name,

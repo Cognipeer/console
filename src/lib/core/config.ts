@@ -73,6 +73,20 @@ export interface AppConfig {
     providerEncryptionSecret: string;
   };
 
+  registration: {
+    /**
+     * open     – anyone can sign up (default; current behavior)
+     * beta     – signup requires a valid beta access code (SaaS beta)
+     * disabled – public signup is off (on-prem; use the bootstrap envs below)
+     */
+    mode: 'open' | 'beta' | 'disabled';
+    /** On-prem bootstrap: create a single organization + owner on boot when no tenant exists. */
+    bootstrapOrgName: string;
+    bootstrapAdminEmail: string;
+    bootstrapAdminPassword: string;
+    bootstrapAdminName: string;
+  };
+
   smtp: {
     host: string;
     port: number;
@@ -311,6 +325,14 @@ function buildConfig(source: ConfigSource): AppConfig {
       providerEncryptionSecret: str(source, 'PROVIDER_ENCRYPTION_SECRET', ''),
     },
 
+    registration: {
+      mode: oneOf(source, 'REGISTRATION_MODE', ['open', 'beta', 'disabled'], 'open'),
+      bootstrapOrgName: str(source, 'BOOTSTRAP_ORG_NAME', ''),
+      bootstrapAdminEmail: str(source, 'BOOTSTRAP_ADMIN_EMAIL', ''),
+      bootstrapAdminPassword: str(source, 'BOOTSTRAP_ADMIN_PASSWORD', ''),
+      bootstrapAdminName: str(source, 'BOOTSTRAP_ADMIN_NAME', 'Administrator'),
+    },
+
     smtp: {
       host: str(source, 'SMTP_HOST', 'smtp.gmail.com'),
       port: int(source, 'SMTP_PORT', 587),
@@ -483,6 +505,18 @@ export function validateConfig(cfg: AppConfig): ConfigValidationError[] {
     errors.push({
       key: 'PROVIDER_ENCRYPTION_SECRET',
       message: 'PROVIDER_ENCRYPTION_SECRET must not equal JWT_SECRET (use independent secrets)',
+    });
+  }
+  const bootstrapEnvs = [
+    cfg.registration.bootstrapOrgName,
+    cfg.registration.bootstrapAdminEmail,
+    cfg.registration.bootstrapAdminPassword,
+  ];
+  if (bootstrapEnvs.some(Boolean) && !bootstrapEnvs.every(Boolean)) {
+    errors.push({
+      key: 'BOOTSTRAP_ORG_NAME',
+      message:
+        'BOOTSTRAP_ORG_NAME, BOOTSTRAP_ADMIN_EMAIL and BOOTSTRAP_ADMIN_PASSWORD must all be set together to bootstrap an organization',
     });
   }
   if (cfg.cache.provider === 'redis' && !cfg.cache.redis.url) {

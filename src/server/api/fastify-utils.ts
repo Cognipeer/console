@@ -3,7 +3,7 @@ import { getConfig } from '@/lib/core/config';
 import { getDatabase, type IUser } from '@/lib/database';
 import { isShuttingDown } from '@/lib/core/lifecycle';
 import type { LicenseType } from '@/lib/license/license-manager';
-import { runWithRequestContext } from '@/lib/core/requestContext';
+import { patchRequestContext, runWithRequestContext } from '@/lib/core/requestContext';
 import {
   authorizeServiceRequest,
   getPermissionServiceForPath,
@@ -344,6 +344,8 @@ export function withApiRequestContext<
           tenantId: session?.tenantId,
           tenantSlug: session?.tenantSlug,
           userId: session?.userId,
+          actorType: session ? 'user' : undefined,
+          source: 'dashboard',
         },
         async () => {
           // Bind the tenant DB for the whole handler execution so every nested
@@ -515,7 +517,15 @@ export function withClientApiRequestContext<
           requestId: request.apiRequestId,
           tenantId: apiToken.tenantId,
           tenantSlug: apiToken.tenantSlug,
-          userId: apiToken.user?._id ? String(apiToken.user._id) : undefined,
+          userId: apiToken.tokenRecord.userId
+            ? String(apiToken.tokenRecord.userId)
+            : apiToken.user?._id
+              ? String(apiToken.user._id)
+              : undefined,
+          projectId: apiToken.projectId ?? undefined,
+          apiTokenId: apiToken.tokenRecord._id ? String(apiToken.tokenRecord._id) : undefined,
+          actorType: 'api_token',
+          source: 'api',
         },
         async () => {
           // Bind the tenant DB for the whole handler execution so every nested
@@ -610,6 +620,10 @@ export async function requireProjectContextForRequest(
     tenantId: session.tenantId,
     userId: session.userId,
   });
+
+  if (projectContext.projectId) {
+    patchRequestContext({ projectId: String(projectContext.projectId) });
+  }
 
   return {
     ...projectContext,

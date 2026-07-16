@@ -37,6 +37,7 @@ export const TABLES = {
   agentTracingEvents: 'agent_tracing_events',
   models: 'models',
   modelUsageLogs: 'model_usage_logs',
+  usageDaily: 'usage_daily',
   vectorIndexes: 'vector_indexes',
   fileBuckets: 'file_buckets',
   files: 'files',
@@ -74,6 +75,7 @@ export const TABLES = {
   configAuditLogs: 'config_audit_logs',
   mcpServers: 'mcp_servers',
   mcpRequestLogs: 'mcp_request_logs',
+  mcpAuditLogs: 'mcp_audit_logs',
   tools: 'tools',
   toolRequestLogs: 'tool_request_logs',
   agents: 'agents',
@@ -102,6 +104,8 @@ export const TABLES = {
   // ── Cluster (main database) ────────────────────────────────────────
   nodes: 'nodes',
   instanceAssignments: 'instance_assignments',
+  // ── Signup gating (main database) ──────────────────────────────────
+  betaAccessCodes: 'beta_access_codes',
   // ── GPU fleet (tenant database) ───────────────────────────────────
   gpuHosts: 'gpu_hosts',
   gpuSlices: 'gpu_slices',
@@ -643,6 +647,61 @@ export class SQLiteProviderBase {
       'cancelRequestedAt',
       'cancelRequestedAt TEXT',
     );
+
+    // Usage attribution envelope (userId/apiTokenId/actorType) on every
+    // per-service usage/log table — filled centrally from the request context
+    // (lib/services/usage/usageEvents.ts). Safe to ensure on boot for tenants
+    // created before the feature.
+    const usageAttributionTables = [
+      TABLES.modelUsageLogs,
+      TABLES.guardrailEvalLogs,
+      TABLES.websearchRunLogs,
+      TABLES.mcpRequestLogs,
+      TABLES.toolRequestLogs,
+      TABLES.ragQueryLogs,
+      TABLES.rerankerRunLogs,
+      TABLES.crawlJobs,
+      TABLES.browserSessions,
+      TABLES.batchJobs,
+      TABLES.ocrJobs,
+      TABLES.agentTracingSessions,
+      TABLES.realtimeSessions,
+      // EE sandbox instances (table lives in the shared tenant schema; the
+      // service/mixin code is enterprise-only).
+      'sandbox_instances',
+    ];
+    for (const table of usageAttributionTables) {
+      this.ensureTableColumn(db, table, 'userId', 'userId TEXT');
+      this.ensureTableColumn(db, table, 'apiTokenId', 'apiTokenId TEXT');
+      this.ensureTableColumn(db, table, 'actorType', 'actorType TEXT');
+    }
+
+    // usage_daily.dayDate (real Date for the reports engine) was added after
+    // the table shipped; ensure on boot for DBs created in between.
+    this.ensureTableColumn(db, TABLES.usageDaily, 'dayDate', 'dayDate TEXT');
+
+    // MCP Hub: multi-source servers (remote URL / stdio packages), exposure
+    // config, Aegis binding and richer request logs. Safe to ensure on boot
+    // for tenants created before the feature. NOTE: legacy DBs keep the
+    // NOT NULL constraint on openApiSpec/upstreamBaseUrl — the mixin writes
+    // '' for non-openapi sources and maps '' back to undefined on read.
+    this.ensureTableColumn(
+      db,
+      TABLES.mcpServers,
+      'sourceType',
+      "sourceType TEXT NOT NULL DEFAULT 'openapi'",
+    );
+    this.ensureTableColumn(db, TABLES.mcpServers, 'remoteConfig', 'remoteConfig TEXT');
+    this.ensureTableColumn(db, TABLES.mcpServers, 'stdioConfig', 'stdioConfig TEXT');
+    this.ensureTableColumn(db, TABLES.mcpServers, 'toolsDiscoveredAt', 'toolsDiscoveredAt TEXT');
+    this.ensureTableColumn(db, TABLES.mcpServers, 'exposure', 'exposure TEXT');
+    this.ensureTableColumn(db, TABLES.mcpServers, 'aegis', 'aegis TEXT');
+    this.ensureTableColumn(db, TABLES.mcpServers, 'lastError', 'lastError TEXT');
+    this.ensureTableColumn(db, TABLES.mcpRequestLogs, 'callerType', 'callerType TEXT');
+    this.ensureTableColumn(db, TABLES.mcpRequestLogs, 'callerUserId', 'callerUserId TEXT');
+    this.ensureTableColumn(db, TABLES.mcpRequestLogs, 'transport', 'transport TEXT');
+    this.ensureTableColumn(db, TABLES.mcpRequestLogs, 'sourceType', 'sourceType TEXT');
+    this.ensureTableColumn(db, TABLES.mcpRequestLogs, 'sessionId', 'sessionId TEXT');
   }
 
   private migrateOcrJobsSchema(db: Database.Database): void {
@@ -679,6 +738,15 @@ export class SQLiteProviderBase {
         ON ${TABLES.agentTracingSessions}(projectId, status, startedAt DESC);
       CREATE INDEX IF NOT EXISTS idx_tracing_sessions_project_agent_startedAt
         ON ${TABLES.agentTracingSessions}(projectId, agentName, startedAt DESC);
+    `);
+
+    // Attribution index — must be created here (after applyTenantMigrations)
+    // rather than in TENANT_SCHEMA_SQL: userId is added to legacy DBs by an
+    // ensureTableColumn migration, and referencing it in the schema script
+    // aborted the entire schema exec on pre-attribution tenant DBs.
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_model_usage_user
+        ON ${TABLES.modelUsageLogs}(tenantId, userId, createdAt DESC);
     `);
 
     // Enforce unique provider/model keys at the DB layer so a concurrent

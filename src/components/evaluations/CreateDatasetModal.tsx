@@ -121,7 +121,7 @@ export default function CreateDatasetModal({ opened, models, onClose, onCreated,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened]);
 
-  // Load RAG modules for the "generate from documents" source.
+  // Load Knowledge Engine modules for the "generate from documents" source.
   useEffect(() => {
     if (!opened) return;
     let cancelled = false;
@@ -394,7 +394,7 @@ export default function CreateDatasetModal({ opened, models, onClose, onCreated,
           <Stack gap="sm">
             <Alert color="grape" variant="light" icon={<IconSparkles size={16} />}>
               Generate question + reference-answer pairs with a model, grounded in your content.
-              Use them to evaluate a RAG module, model, or agent.
+              Use them to evaluate a Knowledge Engine module, model, or agent.
             </Alert>
 
             <FormField label="Source">
@@ -402,7 +402,7 @@ export default function CreateDatasetModal({ opened, models, onClose, onCreated,
                 value={genSource}
                 onChange={(v) => setGenSource(v as GenerateSource)}
                 options={[
-                  { value: 'rag', label: 'RAG module documents' },
+                  { value: 'rag', label: 'Knowledge Engine module documents' },
                   { value: 'text', label: 'Paste text' },
                   { value: 'file', label: 'Upload file' },
                 ]}
@@ -410,14 +410,14 @@ export default function CreateDatasetModal({ opened, models, onClose, onCreated,
             </FormField>
 
             {genSource === 'rag' && (
-              <FormField label="RAG module" required hint="Questions are generated from this module's indexed documents.">
+              <FormField label="Knowledge Engine module" required hint="Questions are generated from this module's indexed documents.">
                 <Select
-                  placeholder={ragModules.length ? 'Select a RAG module' : 'No RAG modules found'}
+                  placeholder={ragModules.length ? 'Select a Knowledge Engine module' : 'No Knowledge Engine modules found'}
                   data={ragModules}
                   value={ragModuleKey}
                   onChange={setRagModuleKey}
                   searchable
-                  nothingFoundMessage="No RAG modules"
+                  nothingFoundMessage="No Knowledge Engine modules"
                 />
               </FormField>
             )}

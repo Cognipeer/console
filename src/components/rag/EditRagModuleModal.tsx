@@ -248,13 +248,13 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(err.error ?? 'Failed to update RAG module');
+        throw new Error(err.error ?? 'Failed to update Knowledge Engine module');
       }
 
       const data = await res.json();
       notifications.show({
         color: 'green',
-        title: 'RAG Module Updated',
+        title: 'Knowledge Engine Module Updated',
         message: `${values.name} has been updated successfully.`,
       });
       onUpdated(data.module);
@@ -263,7 +263,7 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
       console.error(error);
       notifications.show({
         color: 'red',
-        title: 'Failed to update RAG module',
+        title: 'Failed to update Knowledge Engine module',
         message: error instanceof Error ? error.message : 'Unexpected error',
       });
     } finally {
@@ -284,7 +284,7 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
   ];
 
   const summary = (
-    <SummaryGroup title="RAG module">
+    <SummaryGroup title="Knowledge Engine module">
       <SummaryKV label="Key" value={module.key} mono />
       <SummaryKV label="Name" value={v.name || '—'} />
       <SummaryKV label="Embedding" value={v.embeddingModelKey || '—'} />
@@ -300,7 +300,7 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
       open={opened}
       onClose={onClose}
       icon={<IconBook size={16} />}
-      title="Edit RAG module"
+      title="Edit Knowledge Engine module"
       subtitle={module.key}
       summary={summary}
       footerStatus={`${checklist.filter((c) => c.done).length} of ${checklist.length} ready`}
@@ -318,7 +318,7 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
             <TextInput placeholder="My Knowledge Base" {...form.getInputProps('name')} />
           </FormField>
           <FormField label="Description" optional>
-            <Textarea placeholder="Describe what this RAG module is for..." rows={2} {...form.getInputProps('description')} />
+            <Textarea placeholder="Describe what this Knowledge Engine module is for..." rows={2} {...form.getInputProps('description')} />
           </FormField>
         </FormRow>
       </FormSection>

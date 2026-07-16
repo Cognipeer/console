@@ -16,6 +16,7 @@
  */
 
 import { createLogger } from './logger';
+import { captureRequestContext, runWithRequestContext } from './requestContext';
 
 const log = createLogger('async-task');
 
@@ -32,7 +33,11 @@ const pending = new Set<Promise<void>>();
  * @param fn     Async function to execute
  */
 export function fireAndForget(label: string, fn: () => Promise<void>): void {
-  const task = fn()
+  // Reopen the caller's request context around the task so attribution
+  // (userId/apiTokenId/source) survives even if execution outlives the
+  // request's AsyncLocalStorage scope.
+  const snapshot = captureRequestContext();
+  const task = (snapshot ? runWithRequestContext(snapshot, fn) : fn())
     .catch((error) => {
       log.error(`Async task "${label}" failed`, {
         error: error instanceof Error ? error.message : String(error),

@@ -188,7 +188,7 @@ export const tr: typeof en = {
       advancedSettings: 'Gelişmiş Ayarlar',
       knowledgeEngine: 'Bilgi Motoru',
       knowledgeEnginePlaceholder: 'Bir bilgi motoru seçin',
-      knowledgeEngineDescription: 'Agent için bir RAG modülünü getirim aracı olarak ekleyin.',
+      knowledgeEngineDescription: 'Agent için bir Bilgi Motoru modülünü getirim aracı olarak ekleyin.',
       guardrails: 'Guardrail’ler',
       inputGuardrail: 'Girdi Guardrail’i',
       inputGuardrailPlaceholder: 'Girdi guardrail’i seçin',

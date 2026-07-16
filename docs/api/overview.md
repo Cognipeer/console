@@ -72,7 +72,7 @@ For the relationship between the two, see [Using the SDK](/guide/sdk-integration
 | [Files](./files) | `/files/buckets` | GET, POST |
 | [Guardrails](./guardrails) | `/guardrails/evaluate` | POST |
 | [Prompts](./prompts) | `/prompts` | GET, POST |
-| [RAG](./rag) | `/rag/modules` | GET, POST, DELETE |
+| [Knowledge Engine](./rag) | `/rag/modules` | GET, POST, DELETE |
 | [Memory](./memory) | `/memory/stores` | GET, POST, PATCH, DELETE |
 | [Config Groups](./config) | `/config/groups` | GET, POST |
 | [Config Group Items](./config) | `/config/groups/:groupKey/items` | GET, POST |

@@ -43,12 +43,15 @@ import type {
   IIncident,
   IInferenceServer,
   IInferenceServerMetrics,
+  IMcpAuditLog,
   IMcpRequestAggregate,
   IMcpRequestLog,
   IMcpServer,
   IModel,
   IModelUsageAggregate,
   IModelUsageLog,
+  IUsageDaily,
+  IUsageDailyIncrement,
   IMemoryItem,
   IMemoryStore,
   IPrompt,
@@ -79,6 +82,8 @@ import type {
   INodeRecord,
   InstanceEntityType,
   NodeStatus,
+  IBetaAccessCode,
+  BetaAccessCodeStatus,
   IGpuHost,
   IGpuSlice,
   ILlmDeployment,
@@ -221,6 +226,9 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     outcome?: IAuditLog['outcome'];
     service?: string;
     action?: string;
+    method?: string;
+    /** Free-text match against event, path and actorEmail. */
+    q?: string;
     from?: Date;
     to?: Date;
     limit?: number;
@@ -389,6 +397,21 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month' },
     projectId?: string,
   ): Promise<IModelUsageAggregate>;
+
+  // Cross-service daily usage rollup (tenant-specific)
+  /** Additive bulk upsert — one call per rollup flush, safe under concurrency. */
+  incrementUsageDaily(rows: IUsageDailyIncrement[]): Promise<void>;
+  listUsageDaily(filter: {
+    projectId?: string;
+    userId?: string;
+    apiTokenId?: string;
+    service?: string;
+    refKey?: string;
+    source?: string;
+    fromDay?: string;
+    toDay?: string;
+    limit?: number;
+  }): Promise<IUsageDaily[]>;
 
   // Vector index operations (tenant-specific)
   createVectorIndex(
@@ -1131,6 +1154,7 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   deleteMcpServer(id: string): Promise<boolean>;
   findMcpServerById(id: string): Promise<IMcpServer | null>;
   findMcpServerByKey(key: string, projectId?: string): Promise<IMcpServer | null>;
+  findMcpServerByEndpointSlug(endpointSlug: string): Promise<IMcpServer | null>;
   listMcpServers(filters?: {
     projectId?: string;
     status?: McpServerStatus;
@@ -1161,6 +1185,23 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     serverKey: string,
     options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month' },
   ): Promise<IMcpRequestAggregate>;
+  listRecentMcpRequestLogs(options?: {
+    projectId?: string;
+    limit?: number;
+    status?: string;
+  }): Promise<IMcpRequestLog[]>;
+
+  // ── MCP Audit Log operations (tenant-specific) ──
+  createMcpAuditLog(
+    log: Omit<IMcpAuditLog, '_id' | 'createdAt'>,
+  ): Promise<IMcpAuditLog>;
+  listMcpAuditLogs(options?: {
+    projectId?: string;
+    serverKey?: string;
+    action?: string;
+    limit?: number;
+    skip?: number;
+  }): Promise<IMcpAuditLog[]>;
 
   // ── Browsers (tenant-specific) ──
   createBrowser(
@@ -1296,6 +1337,12 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<ICrawlResult[]>;
   findCrawlResultById(id: string): Promise<ICrawlResult | null>;
   countCrawlResults(jobId: string): Promise<number>;
+  /**
+   * Delete all crawl results for a job. Used when an interrupted job is
+   * restarted from scratch so the fresh run doesn't append duplicates to the
+   * partial results the dead run already wrote. Returns the number deleted.
+   */
+  deleteCrawlResultsByJob(jobId: string): Promise<number>;
 
   // ── OCR jobs (tenant-specific) ──
   createOcrJob(
@@ -1413,6 +1460,19 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     entityType: InstanceEntityType,
     entityId: string,
   ): Promise<boolean>;
+
+  // ── Beta access codes (main database) ──
+  /** Insert a code if it does not exist yet; returns the stored record either way. */
+  createBetaAccessCode(record: { code: string; note?: string | null }): Promise<IBetaAccessCode>;
+  findBetaAccessCode(code: string): Promise<IBetaAccessCode | null>;
+  listBetaAccessCodes(filters?: { status?: BetaAccessCodeStatus }): Promise<IBetaAccessCode[]>;
+  /**
+   * Atomically claim an active code (active → used). Returns false when the
+   * code does not exist or was already used/disabled.
+   */
+  consumeBetaAccessCode(code: string, usedBy: { email: string }): Promise<boolean>;
+  /** Revert a used code back to active (rollback when registration fails after the claim). */
+  releaseBetaAccessCode(code: string): Promise<boolean>;
 
   // ── GPU fleet + Agent Runtime Sandbox (tenant-scoped) ──
   // EDITION SPLIT: these enterprise methods were moved to the overlay. In the enterprise

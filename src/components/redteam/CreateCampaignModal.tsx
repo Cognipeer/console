@@ -132,7 +132,7 @@ export default function CreateCampaignModal({ opened, editing, onClose, agents, 
         </FormRow>
       </FormSection>
 
-      <FormSection number={2} title="Target" done={validTarget} description="What gets attacked. Agent targets exercise the full agent (guardrails, RAG, tools).">
+      <FormSection number={2} title="Target" done={validTarget} description="What gets attacked. Agent targets exercise the full agent (guardrails, Knowledge Engine, tools).">
         <FormField label="Target type" required>
           <SegmentedControl
             value={targetKind}

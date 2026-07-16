@@ -1,6 +1,6 @@
 # Cognipeer Console
 
-Open-source, multi-tenant AI gateway for LLM services, agent orchestration, vector stores, RAG pipelines, prompt management, and more.
+Open-source, multi-tenant AI gateway for LLM services, agent orchestration, vector stores, Knowledge Engine pipelines, prompt management, and more.
 
 [![License](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
 
@@ -11,7 +11,7 @@ Community edition is available under AGPL-3.0. Commercial licensing, hosted depl
 - **Multi-Tenant Architecture** — Complete data isolation per tenant with per-tenant databases
 - **LLM Gateway** — OpenAI-compatible chat completions and embeddings with multi-provider support (OpenAI, Anthropic, AWS Bedrock, Google Vertex AI, vLLM, Ollama, and more)
 - **Vector Store Management** — Multi-provider vector operations with built-in SQLite vector support
-- **RAG Pipeline** — Document ingestion, chunking, embedding, and retrieval
+- **Knowledge Engine** — Document ingestion, chunking, embedding, and retrieval
 - **Agent Tracing** — Batch and streaming ingest with thread correlation
 - **Guardrails** — PII detection, content moderation, prompt shields, and custom LLM-based evaluators
 - **Prompt Management** — Versioned templates with environment-based deployment (dev/staging/prod)
@@ -68,7 +68,7 @@ docker run -p 3000:3000 -v ./data:/app/data -e JWT_SECRET=your-secret-here cogni
 │         (JWT Auth + Feature Gates + CORS)           │
 ├────────────────────────────────────────────────────┤
 │                 Service Layer                       │
-│  Models │ Vector │ RAG │ Memory │ Tracing │ ...    │
+│ Models │ Vector │ Knowledge Engine │ Memory │ Tracing │
 ├────────────────────────────────────────────────────┤
 │              Provider Registry                      │
 │  Contracts → Runtimes (LLM, Vector, File)          │

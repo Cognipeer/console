@@ -29,7 +29,7 @@ Results are grouped; the ordering is stable so muscle memory works.
 | Prompts | Stored prompt versions |
 | Tools | Built-in + custom tools |
 | MCP servers | Configured MCP servers |
-| RAG modules | RAG modules in the active project |
+| Knowledge Engine modules | Knowledge Engine modules in the active project |
 | Vector indexes | Vector indexes in the active project |
 | Memory stores | Memory stores in the active project |
 | Files | File buckets |

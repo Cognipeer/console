@@ -3,6 +3,9 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 const db = {
   switchToTenant: vi.fn().mockResolvedValue(undefined),
   aggregateModelUsage: vi.fn(),
+  listUsageDaily: vi.fn(),
+  findUserById: vi.fn(),
+  listTenantApiTokens: vi.fn(),
 };
 
 vi.mock('@/lib/database', () => ({
@@ -14,7 +17,7 @@ vi.mock('@/lib/services/models/modelService', () => ({
   listModels: (...args: unknown[]) => listModels(...args),
 }));
 
-import { getSpendReport } from '@/lib/services/spend/spendService';
+import { getSpendEntityBreakdown, getSpendReport } from '@/lib/services/spend/spendService';
 
 const ctx = { tenantDbName: 'tenant_t1', tenantId: 't1', projectId: 'p1' };
 
@@ -101,5 +104,64 @@ describe('getSpendReport', () => {
     expect(db.aggregateModelUsage).toHaveBeenCalledTimes(1);
     expect(report.byModel).toHaveLength(1);
     expect(report.byModel[0].modelKey).toBe('gpt');
+  });
+});
+
+describe('getSpendEntityBreakdown', () => {
+  it('reads usage_daily, groups per user and resolves names', async () => {
+    db.listUsageDaily.mockResolvedValue([
+      { userId: 'u1', apiTokenId: '', requests: 3, errors: 0, inputTokens: 30, outputTokens: 10, totalTokens: 40, costUsd: 0.4 },
+      { userId: 'u1', apiTokenId: 't1', requests: 1, errors: 1, inputTokens: 5, outputTokens: 5, totalTokens: 10, costUsd: 0.1 },
+      { userId: 'gone', apiTokenId: '', requests: 2, errors: 0, inputTokens: 2, outputTokens: 2, totalTokens: 4, costUsd: 5 },
+    ]);
+    db.findUserById.mockImplementation(async (id: string) =>
+      id === 'u1' ? { _id: 'u1', name: 'Ada', email: 'ada@acme.io' } : null,
+    );
+
+    const breakdown = await getSpendEntityBreakdown(ctx, {
+      entity: 'user',
+      modelKey: 'gpt',
+      from: new Date('2026-06-01T00:00:00.000Z'),
+      to: new Date('2026-06-30T23:00:00.000Z'),
+    });
+
+    expect(db.listUsageDaily).toHaveBeenCalledWith(expect.objectContaining({
+      projectId: 'p1',
+      service: 'models',
+      refKey: 'gpt',
+      fromDay: '2026-06-01',
+      toDay: '2026-06-30',
+    }));
+
+    expect(breakdown.entity).toBe('user');
+    // sorted by cost desc; deleted user keeps its raw id without a name
+    expect(breakdown.entries.map((entry) => entry.id)).toEqual(['gone', 'u1']);
+    expect(breakdown.entries[0].name).toBeUndefined();
+    expect(breakdown.entries[1]).toMatchObject({
+      name: 'Ada',
+      label: 'ada@acme.io',
+      requests: 4,
+      errors: 1,
+      totalTokens: 50,
+      costUsd: 0.5,
+    });
+    expect(breakdown.totals).toMatchObject({ requests: 6, costUsd: 5.5 });
+  });
+
+  it('groups per API token when entity is api_key', async () => {
+    db.listUsageDaily.mockResolvedValue([
+      { userId: 'u1', apiTokenId: 't1', requests: 2, errors: 0, inputTokens: 1, outputTokens: 1, totalTokens: 2, costUsd: 0.2 },
+      { userId: 'u2', apiTokenId: '', requests: 1, errors: 0, inputTokens: 1, outputTokens: 1, totalTokens: 2, costUsd: 0.1 },
+    ]);
+    db.listTenantApiTokens.mockResolvedValue([{ _id: 't1', label: 'CI token' }]);
+
+    const breakdown = await getSpendEntityBreakdown(ctx, { entity: 'api_key' });
+
+    expect(db.listTenantApiTokens).toHaveBeenCalledWith('t1');
+    expect(breakdown.entity).toBe('api_key');
+    expect(breakdown.entries.map((entry) => entry.id)).toEqual(['t1', '']);
+    expect(breakdown.entries[0].label).toBe('CI token');
+    // dashboard/unattributed traffic collapses into the '' entry
+    expect(breakdown.entries[1]).toMatchObject({ requests: 1, costUsd: 0.1 });
   });
 });

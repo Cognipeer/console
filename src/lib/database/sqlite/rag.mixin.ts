@@ -326,8 +326,10 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
 
       db.prepare(`
         INSERT INTO ${TABLES.ragQueryLogs}
-        (id, tenantId, projectId, ragModuleKey, query, topK, matchCount, latencyMs, metadata, createdAt)
-        VALUES (@id, @tenantId, @projectId, @ragModuleKey, @query, @topK, @matchCount, @latencyMs, @metadata, @createdAt)
+        (id, tenantId, projectId, ragModuleKey, query, topK, matchCount, latencyMs, metadata,
+         userId, apiTokenId, actorType, createdAt)
+        VALUES (@id, @tenantId, @projectId, @ragModuleKey, @query, @topK, @matchCount, @latencyMs, @metadata,
+         @userId, @apiTokenId, @actorType, @createdAt)
       `).run({
         id,
         tenantId: log.tenantId,
@@ -338,6 +340,9 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         matchCount: log.matchCount,
         latencyMs: log.latencyMs ?? null,
         metadata: this.toJson(log.metadata ?? {}),
+        userId: log.userId ?? null,
+        apiTokenId: log.apiTokenId ?? null,
+        actorType: log.actorType ?? null,
         createdAt: now,
       });
 
@@ -439,6 +444,9 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         matchCount: r.matchCount as number,
         latencyMs: r.latencyMs as number | undefined,
         metadata: this.parseJson(r.metadata, {}),
+        userId: (r.userId as string | null) ?? undefined,
+        apiTokenId: (r.apiTokenId as string | null) ?? undefined,
+        actorType: (r.actorType as IRagQueryLog['actorType'] | null) ?? undefined,
         createdAt: this.toDate(r.createdAt),
       };
     }

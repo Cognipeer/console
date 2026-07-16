@@ -41,9 +41,11 @@ import {
   IconStack2,
   IconStackPush,
   IconTimeline,
+  IconTool,
   IconVector,
   IconVolume,
   IconWorld,
+  type Icon,
 } from '@tabler/icons-react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import classes from './LauncherShell.module.css';
@@ -52,7 +54,7 @@ export interface SubNavItem {
   id: string;
   label: string;
   href: string;
-  icon: typeof IconLayoutDashboard;
+  icon: Icon;
   badge?: number | string;
   matcher?: (pathname: string, search: URLSearchParams) => boolean;
 }
@@ -349,7 +351,7 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
   rag: [
     {
       id: 'overview',
-      label: 'Knowledge bases',
+      label: 'Knowledge Engine',
       href: '/dashboard/rag',
       icon: IconBook,
       matcher: (p) => p.startsWith('/dashboard/rag'),
@@ -404,7 +406,34 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       label: 'Agents',
       href: '/dashboard/agents',
       icon: IconLayoutDashboard,
-      matcher: (p) => p.startsWith('/dashboard/agents'),
+      matcher: (p) =>
+        p.startsWith('/dashboard/agents') &&
+        !p.startsWith('/dashboard/agents/tools'),
+    },
+    {
+      id: 'tools',
+      label: 'Tools',
+      href: '/dashboard/agents/tools',
+      icon: IconTool,
+      matcher: (p) => p.startsWith('/dashboard/agents/tools'),
+    },
+  ],
+  mcp: [
+    {
+      id: 'servers',
+      label: 'Servers',
+      href: '/dashboard/mcp',
+      icon: IconServer,
+      matcher: (p) =>
+        p.startsWith('/dashboard/mcp') &&
+        !p.startsWith('/dashboard/mcp/monitor'),
+    },
+    {
+      id: 'monitor',
+      label: 'Monitor',
+      href: '/dashboard/mcp/monitor',
+      icon: IconTimeline,
+      matcher: (p) => p.startsWith('/dashboard/mcp/monitor'),
     },
   ],
   alerts: [
@@ -509,6 +538,8 @@ interface ServiceSubNavProps {
   onTogglePin: () => void;
   onOpenDocs: () => void;
   items?: SubNavItem[];
+  /** Hide the pin toggle — used for sections that are not pinnable (e.g. Settings). */
+  hidePin?: boolean;
 }
 
 export default function ServiceSubNav({
@@ -518,6 +549,7 @@ export default function ServiceSubNav({
   onTogglePin,
   onOpenDocs,
   items,
+  hidePin = false,
 }: ServiceSubNavProps) {
   const router = useRouter();
   const rawSearchParams = useSearchParams();

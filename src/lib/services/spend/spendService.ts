@@ -10,6 +10,10 @@
 import { getDatabase } from '@/lib/database';
 import type { IModel, IModelUsageAggregate } from '@/lib/database';
 import { listModels } from '@/lib/services/models/modelService';
+import {
+  getUsageBreakdown,
+  type UsageBreakdown,
+} from '@/lib/services/usage/usageBreakdown';
 
 export interface SpendContext {
   tenantDbName: string;
@@ -129,4 +133,43 @@ export async function getSpendReport(
     byModel,
     timeseries,
   };
+}
+
+/** Client-facing entity names for the per-user / per-token spend breakdown. */
+export type SpendGroupByEntity = 'user' | 'api_key';
+
+export interface SpendEntityBreakdownOptions {
+  from?: Date;
+  to?: Date;
+  /** Restrict the breakdown to a single model key. */
+  modelKey?: string;
+  entity: SpendGroupByEntity;
+}
+
+export interface SpendEntityBreakdown extends UsageBreakdown {
+  entity: SpendGroupByEntity;
+}
+
+/**
+ * Per-user / per-API-token spend breakdown, read from the `usage_daily`
+ * rollup (service 'models') — the only aggregate that keeps attribution.
+ * Attribution starts at the deploy that introduced the rollup; earlier
+ * (backfilled) traffic shows up under the '' (unattributed) entry.
+ */
+export async function getSpendEntityBreakdown(
+  ctx: SpendContext,
+  options: SpendEntityBreakdownOptions,
+): Promise<SpendEntityBreakdown> {
+  const breakdown = await getUsageBreakdown({
+    tenantDbName: ctx.tenantDbName,
+    tenantId: ctx.tenantId,
+    projectId: ctx.projectId,
+    service: 'models',
+    refKey: options.modelKey,
+    groupBy: options.entity === 'api_key' ? 'token' : 'user',
+    from: options.from,
+    to: options.to,
+  });
+
+  return { ...breakdown, entity: options.entity };
 }

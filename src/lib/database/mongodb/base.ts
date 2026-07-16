@@ -64,6 +64,7 @@ export const COLLECTIONS = {
   configAuditLogs: 'config_audit_logs',
   mcpServers: 'mcp_servers',
   mcpRequestLogs: 'mcp_request_logs',
+  mcpAuditLogs: 'mcp_audit_logs',
   tools: 'tools',
   toolRequestLogs: 'tool_request_logs',
   agents: 'agents',
@@ -74,6 +75,7 @@ export const COLLECTIONS = {
   apiTokens: 'api_tokens',
   models: 'models',
   modelUsageLogs: 'model_usage_logs',
+  usageDaily: 'usage_daily',
   browsers: 'browsers',
   browserSessions: 'browser_sessions',
   browserSessionEvents: 'browser_session_events',
@@ -94,6 +96,8 @@ export const COLLECTIONS = {
   // ── Cluster (main database) ────────────────────────────────────────
   nodes: 'nodes',
   instanceAssignments: 'instance_assignments',
+  // ── Signup gating (main database) ──────────────────────────────────
+  betaAccessCodes: 'beta_access_codes',
   // ── GPU fleet (tenant database) ───────────────────────────────────
   gpuHosts: 'gpu_hosts',
   gpuSlices: 'gpu_slices',

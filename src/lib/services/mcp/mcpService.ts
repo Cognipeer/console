@@ -1,24 +1,68 @@
 import slugify from 'slugify';
 import { randomUUID } from 'crypto';
 import { getDatabase } from '@/lib/database';
-import type { IMcpServer, IMcpTool, IMcpAuthConfig } from '@/lib/database';
+import type {
+  IMcpAuditLog,
+  IMcpAuthConfig,
+  IMcpExposureConfig,
+  IMcpRequestLog,
+  IMcpServer,
+  IMcpStdioConfig,
+  IMcpTool,
+  McpSourceType,
+} from '@/lib/database';
 import type {
   CreateMcpServerInput,
   UpdateMcpServerInput,
+  McpAuditContext,
   McpServerView,
   OpenApiSpec,
   OpenApiOperation,
 } from './types';
 import { createLogger } from '@/lib/core/logger';
+import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { safeFetch } from '@/lib/security/outboundFetch';
 import { normalizeApiSpec, type SpecFormatHint } from '@/lib/services/specImport';
 import { routeInstanceCall } from '@/lib/core/cluster';
 import type { QueuePayload } from '@/lib/core/queue';
 import { mcpEntityId } from './mcpEntityId';
+import {
+  maskAuthConfig,
+  maskStdioConfig,
+  mergeAuthConfigUpdate,
+  mergeStdioConfigUpdate,
+  openAuthConfig,
+  openStdioEnv,
+  sealAuthConfig,
+  sealStdioEnv,
+} from './secretVault';
+import { remoteCallTool, remoteListTools } from './remoteMcpClient';
+import { isStdioRunnerEnabled, stdioCallTool, stdioListTools } from './stdioRunner';
+import { mcpGuardrailHook, mcpSandboxRunner } from '@/enterprise/registry';
 
 const logger = createLogger('mcp-service');
 const SLUG_OPTIONS = { lower: true, strict: true, trim: true };
 const MAX_KEY_ATTEMPTS = 50;
+
+export const DEFAULT_MCP_EXPOSURE: IMcpExposureConfig = {
+  protocols: ['streamable-http', 'sse'],
+  accessMode: 'token',
+};
+
+export function resolveSourceType(server: IMcpServer): McpSourceType {
+  return server.sourceType ?? 'openapi';
+}
+
+export function resolveExposure(server: IMcpServer): IMcpExposureConfig {
+  const exposure = server.exposure;
+  if (!exposure || !Array.isArray(exposure.protocols) || exposure.protocols.length === 0) {
+    return DEFAULT_MCP_EXPOSURE;
+  }
+  return {
+    protocols: exposure.protocols,
+    accessMode: exposure.accessMode === 'public' ? 'public' : 'token',
+  };
+}
 
 // ── Serialization ─────────────────────────────────────────────────────────
 
@@ -29,15 +73,23 @@ export function serializeMcpServer(record: IMcpServer): McpServerView {
   return {
     ...serialized,
     id: typeof record._id === 'string' ? record._id : (record._id?.toString() ?? ''),
+    sourceType: resolveSourceType(record),
+    exposure: resolveExposure(record),
+    upstreamAuth: maskAuthConfig(record.upstreamAuth),
+    stdioConfig: maskStdioConfig(record.stdioConfig),
   } as McpServerView;
 }
 
-export function serializeMcpServerFull(record: IMcpServer): McpServerView & { openApiSpec: string } {
+export function serializeMcpServerFull(record: IMcpServer): McpServerView & { openApiSpec?: string } {
   const { _id, ...rest } = record;
   return {
     ...rest,
     id: typeof _id === 'string' ? _id : (_id?.toString() ?? ''),
-  } as McpServerView & { openApiSpec: string };
+    sourceType: resolveSourceType(record),
+    exposure: resolveExposure(record),
+    upstreamAuth: maskAuthConfig(record.upstreamAuth),
+    stdioConfig: maskStdioConfig(record.stdioConfig),
+  } as McpServerView & { openApiSpec?: string };
 }
 
 // ── Key generation ────────────────────────────────────────────────────────
@@ -164,7 +216,136 @@ export function parseOpenApiSpec(specString: string, format: SpecFormatHint = 'a
   return { spec, tools, baseUrl, normalizedSpec: openApiJson };
 }
 
+// ── Source-specific discovery ────────────────────────────────────────────
+
+/**
+ * Discover the tool list for a server config. For 'stdio' + 'sandbox' the
+ * sandbox must already be provisioned (pass the ensured base URL).
+ */
+async function discoverToolsForServer(server: IMcpServer): Promise<IMcpTool[]> {
+  const sourceType = resolveSourceType(server);
+
+  if (sourceType === 'openapi') {
+    if (!server.openApiSpec) throw new Error('Server has no OpenAPI spec');
+    return parseOpenApiSpec(server.openApiSpec).tools;
+  }
+
+  if (sourceType === 'remote') {
+    if (!server.remoteConfig?.url) throw new Error('Server has no remote MCP URL');
+    return remoteListTools({
+      url: server.remoteConfig.url,
+      transport: server.remoteConfig.transport,
+      auth: openAuthConfig(server.upstreamAuth),
+    });
+  }
+
+  // stdio
+  const config = server.stdioConfig;
+  if (!config?.packageName) throw new Error('Server has no stdio package configured');
+
+  if (config.executionMode === 'sandbox') {
+    const { runner, ref, runnerConfig } = await resolveSandboxRunner(server);
+    await ensureSandboxInstance(server, runner, ref, runnerConfig);
+    return runner.listTools(ref, runnerConfig);
+  }
+
+  return stdioListTools(config);
+}
+
+async function resolveSandboxRunner(server: IMcpServer) {
+  const runner = mcpSandboxRunner.current;
+  if (!runner) {
+    throw new Error('Sandbox execution requires the enterprise sandbox module');
+  }
+  const db = await getDatabase();
+  const tenant = await db.findTenantById(server.tenantId);
+  if (!tenant?.dbName) {
+    throw new Error('Could not resolve tenant database for sandbox execution');
+  }
+  const config = server.stdioConfig!;
+  return {
+    runner,
+    ref: {
+      tenantDbName: tenant.dbName,
+      tenantId: server.tenantId,
+      projectId: server.projectId,
+      serverId: String(server._id ?? ''),
+      serverKey: server.key,
+    },
+    runnerConfig: {
+      runtime: config.runtime,
+      packageName: config.packageName,
+      args: config.args,
+      env: openStdioEnv(config),
+      templateKey: config.sandbox?.templateKey,
+      resources: config.sandbox?.resources,
+      instanceId: config.sandbox?.instanceId,
+    },
+  };
+}
+
+/**
+ * Ensure the backing sandbox instance exists and persist a newly provisioned
+ * instance id onto the server record so restarts reuse the same sandbox.
+ */
+async function ensureSandboxInstance(
+  server: IMcpServer,
+  runner: NonNullable<typeof mcpSandboxRunner.current>,
+  ref: { tenantDbName: string; tenantId: string; projectId?: string; serverId: string; serverKey: string },
+  runnerConfig: { instanceId?: string } & Record<string, unknown>,
+): Promise<void> {
+  const { instanceId } = await runner.ensureRunning(ref, runnerConfig as never);
+  if (instanceId && instanceId !== server.stdioConfig?.sandbox?.instanceId && server._id) {
+    runnerConfig.instanceId = instanceId;
+    const db = await getDatabase();
+    const nextConfig: IMcpStdioConfig = {
+      ...server.stdioConfig!,
+      sandbox: { ...server.stdioConfig!.sandbox, instanceId },
+    };
+    server.stdioConfig = nextConfig;
+    await db.runWithTenant?.(ref.tenantDbName, () =>
+      db.updateMcpServer(String(server._id), { stdioConfig: nextConfig }));
+  }
+}
+
 // ── CRUD ──────────────────────────────────────────────────────────────────
+
+function validateCreateInput(input: CreateMcpServerInput): McpSourceType {
+  const sourceType: McpSourceType = input.sourceType ?? 'openapi';
+  if (sourceType === 'openapi' && !input.openApiSpec) {
+    throw new Error('openApiSpec is required for source type "openapi"');
+  }
+  if (sourceType === 'remote' && !input.remoteConfig?.url) {
+    throw new Error('remoteConfig.url is required for source type "remote"');
+  }
+  if (sourceType === 'stdio') {
+    if (!input.stdioConfig?.packageName?.trim()) {
+      throw new Error('stdioConfig.packageName is required for source type "stdio"');
+    }
+    if (!['npx', 'uvx'].includes(input.stdioConfig.runtime)) {
+      throw new Error('stdioConfig.runtime must be "npx" or "uvx"');
+    }
+    if (input.stdioConfig.executionMode === 'sandbox') {
+      if (!mcpSandboxRunner.current) {
+        throw new Error('Sandbox execution requires the enterprise sandbox module');
+      }
+    } else if (!isStdioRunnerEnabled()) {
+      throw new Error('Stdio subprocess execution is disabled on this deployment');
+    }
+  }
+  return sourceType;
+}
+
+function normalizeExposure(input?: IMcpExposureConfig): IMcpExposureConfig {
+  if (!input) return DEFAULT_MCP_EXPOSURE;
+  const protocols = (input.protocols ?? []).filter(
+    (p): p is IMcpExposureConfig['protocols'][number] => p === 'streamable-http' || p === 'sse',
+  );
+  return {
+    protocols: protocols.length ? protocols : DEFAULT_MCP_EXPOSURE.protocols,
+    accessMode: input.accessMode === 'public' ? 'public' : 'token',
+  };
+}
 
 export async function createMcpServer(
   tenantDbName: string,
@@ -172,22 +353,41 @@ export async function createMcpServer(
   userId: string,
   projectId: string | undefined,
   input: CreateMcpServerInput,
+  audit?: McpAuditContext,
 ): Promise<IMcpServer> {
-  const { tools, baseUrl: specBaseUrl, normalizedSpec } = parseOpenApiSpec(
-    input.openApiSpec,
-    input.specFormat,
-  );
+  const sourceType = validateCreateInput(input);
 
   const key = await generateUniqueKey(tenantDbName, projectId, input.name);
   const endpointSlug = generateEndpointSlug();
 
-  const upstreamBaseUrl = input.upstreamBaseUrl || specBaseUrl;
-  if (!upstreamBaseUrl) {
-    throw new Error('Upstream base URL is required. Provide it explicitly or include a servers array in the spec.');
+  let tools: IMcpTool[] = [];
+  let normalizedSpec: string | undefined;
+  let upstreamBaseUrl = input.upstreamBaseUrl;
+  const openedAuth: IMcpAuthConfig = { ...(input.upstreamAuth as IMcpAuthConfig) };
+
+  if (sourceType === 'openapi') {
+    const parsed = parseOpenApiSpec(input.openApiSpec!, input.specFormat);
+    tools = parsed.tools;
+    normalizedSpec = parsed.normalizedSpec;
+    upstreamBaseUrl = upstreamBaseUrl || parsed.baseUrl;
+    if (!upstreamBaseUrl) {
+      throw new Error('Upstream base URL is required. Provide it explicitly or include a servers array in the spec.');
+    }
+  } else if (sourceType === 'remote') {
+    tools = await remoteListTools({
+      url: input.remoteConfig!.url,
+      transport: input.remoteConfig!.transport,
+      auth: openedAuth,
+    });
+  } else if (sourceType === 'stdio' && input.stdioConfig!.executionMode === 'subprocess') {
+    // Discover eagerly so the create screen fails fast on a broken package.
+    tools = await stdioListTools(input.stdioConfig!);
   }
 
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
+
+  const stdioConfig = input.stdioConfig ? sealStdioEnv(input.stdioConfig) : undefined;
 
   const server = await db.createMcpServer({
     tenantId,
@@ -195,18 +395,106 @@ export async function createMcpServer(
     key,
     name: input.name.trim(),
     description: input.description?.trim(),
+    sourceType,
     openApiSpec: normalizedSpec,
+    remoteConfig: input.remoteConfig,
+    stdioConfig,
     tools,
+    toolsDiscoveredAt: sourceType === 'openapi' ? undefined : new Date(),
     upstreamBaseUrl,
-    upstreamAuth: input.upstreamAuth as IMcpAuthConfig,
+    upstreamAuth: sealAuthConfig(openedAuth),
+    exposure: normalizeExposure(input.exposure),
+    aegis: input.aegis,
     status: 'active',
     endpointSlug,
     totalRequests: 0,
     createdBy: userId,
   });
 
-  logger.info('MCP server created', { key, tenantId, toolCount: tools.length });
+  // Sandbox-backed stdio servers provision after the record exists (the
+  // runner needs the server identity); discovery failures are surfaced on
+  // the record instead of failing the create.
+  if (sourceType === 'stdio' && input.stdioConfig!.executionMode === 'sandbox') {
+    try {
+      const discovered = await discoverToolsForServer({ ...server, stdioConfig });
+      await db.switchToTenant(tenantDbName);
+      await db.updateMcpServer(String(server._id), {
+        tools: discovered,
+        toolsDiscoveredAt: new Date(),
+        lastError: null,
+      });
+      server.tools = discovered;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await db.updateMcpServer(String(server._id), {
+        lastError: { message, at: new Date() },
+      });
+      logger.warn('Sandbox MCP provisioning failed at create', { key, error: message });
+    }
+  }
+
+  logger.info('MCP server created', { key, tenantId, sourceType, toolCount: server.tools.length });
+
+  void logMcpAudit(tenantDbName, {
+    tenantId,
+    projectId,
+    serverId: String(server._id ?? ''),
+    serverKey: key,
+    action: 'create',
+    changes: {
+      name: { to: input.name.trim() },
+      sourceType: { to: sourceType },
+      exposure: { to: normalizeExposure(input.exposure) },
+    },
+    performedBy: audit?.performedBy ?? userId,
+    ipAddress: audit?.ipAddress,
+    userAgent: audit?.userAgent,
+  });
+
   return server;
+}
+
+/** Fields compared for the audit diff (secrets excluded — masked separately). */
+function diffForAudit(before: IMcpServer, after: Partial<IMcpServer>): Record<string, { from?: unknown; to?: unknown }> {
+  const changes: Record<string, { from?: unknown; to?: unknown }> = {};
+  const compare = (field: string, from: unknown, to: unknown) => {
+    if (to === undefined) return;
+    const fromJson = JSON.stringify(from ?? null);
+    const toJson = JSON.stringify(to ?? null);
+    if (fromJson !== toJson) changes[field] = { from, to };
+  };
+
+  compare('name', before.name, after.name);
+  compare('description', before.description, after.description);
+  compare('status', before.status, after.status);
+  compare('upstreamBaseUrl', before.upstreamBaseUrl, after.upstreamBaseUrl);
+  compare('exposure', resolveExposure(before), after.exposure);
+  compare('aegis', before.aegis, after.aegis);
+  compare('remoteConfig', before.remoteConfig, after.remoteConfig);
+  if (after.stdioConfig !== undefined) {
+    const strip = (c?: IMcpStdioConfig) => c && {
+      runtime: c.runtime,
+      packageName: c.packageName,
+      args: c.args,
+      executionMode: c.executionMode,
+      sandbox: c.sandbox,
+      envKeys: Object.keys(c.env ?? {}),
+    };
+    compare('stdioConfig', strip(before.stdioConfig), strip(after.stdioConfig));
+  }
+  if (after.upstreamAuth !== undefined) {
+    const beforeAuth = before.upstreamAuth ?? { type: 'none' };
+    if (beforeAuth.type !== after.upstreamAuth.type
+      || beforeAuth.headerName !== after.upstreamAuth.headerName
+      || beforeAuth.username !== after.upstreamAuth.username
+      || (after.upstreamAuth.sealed && after.upstreamAuth.sealed !== beforeAuth.sealed)) {
+      changes.upstreamAuth = { from: beforeAuth.type, to: after.upstreamAuth.type };
+    }
+  }
+  if (after.openApiSpec !== undefined && after.openApiSpec !== before.openApiSpec) {
+    changes.openApiSpec = { from: '(previous spec)', to: '(updated spec)' };
+  }
+  return changes;
 }
 
 export async function updateMcpServer(
@@ -214,9 +502,13 @@ export async function updateMcpServer(
   serverId: string,
   userId: string,
   input: UpdateMcpServerInput,
+  audit?: McpAuditContext,
 ): Promise<IMcpServer | null> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
+
+  const existing = await db.findMcpServerById(serverId);
+  if (!existing) return null;
 
   const updateData: Record<string, unknown> = { updatedBy: userId };
 
@@ -224,9 +516,17 @@ export async function updateMcpServer(
   if (input.description !== undefined) updateData.description = input.description.trim();
   if (input.status !== undefined) updateData.status = input.status;
   if (input.upstreamBaseUrl !== undefined) updateData.upstreamBaseUrl = input.upstreamBaseUrl;
-  if (input.upstreamAuth !== undefined) updateData.upstreamAuth = input.upstreamAuth;
+  if (input.upstreamAuth !== undefined) {
+    updateData.upstreamAuth = mergeAuthConfigUpdate(existing.upstreamAuth, input.upstreamAuth);
+  }
+  if (input.exposure !== undefined) updateData.exposure = normalizeExposure(input.exposure);
+  if (input.aegis !== undefined) updateData.aegis = input.aegis;
+  if (input.remoteConfig !== undefined) updateData.remoteConfig = input.remoteConfig;
+  if (input.stdioConfig !== undefined) {
+    updateData.stdioConfig = mergeStdioConfigUpdate(existing.stdioConfig, input.stdioConfig);
+  }
 
-  // Re-parse spec if updated
+  // Re-parse spec if updated (openapi source only)
   if (input.openApiSpec !== undefined) {
     const { tools, baseUrl: specBaseUrl, normalizedSpec } = parseOpenApiSpec(
       input.openApiSpec,
@@ -239,16 +539,129 @@ export async function updateMcpServer(
     }
   }
 
-  return db.updateMcpServer(serverId, updateData as Partial<IMcpServer>);
+  // Re-discover tools when the remote/stdio source configuration changed.
+  const sourceType = resolveSourceType(existing);
+  if (sourceType === 'remote' && input.remoteConfig !== undefined) {
+    const auth = updateData.upstreamAuth
+      ? openAuthConfig(updateData.upstreamAuth as IMcpAuthConfig)
+      : openAuthConfig(existing.upstreamAuth);
+    updateData.tools = await remoteListTools({
+      url: input.remoteConfig.url,
+      transport: input.remoteConfig.transport,
+      auth,
+    });
+    updateData.toolsDiscoveredAt = new Date();
+  }
+  if (sourceType === 'stdio' && input.stdioConfig !== undefined
+    && (updateData.stdioConfig as IMcpStdioConfig).executionMode === 'subprocess') {
+    updateData.tools = await stdioListTools(updateData.stdioConfig as IMcpStdioConfig);
+    updateData.toolsDiscoveredAt = new Date();
+  }
+
+  const updated = await db.updateMcpServer(serverId, updateData as Partial<IMcpServer>);
+
+  if (updated) {
+    const changes = diffForAudit(existing, updateData as Partial<IMcpServer>);
+    const isSecretsChange = 'upstreamAuth' in changes || 'stdioConfig' in changes;
+    void logMcpAudit(tenantDbName, {
+      tenantId: existing.tenantId,
+      projectId: existing.projectId,
+      serverId,
+      serverKey: existing.key,
+      action: input.status !== undefined && Object.keys(changes).length === 1 && changes.status
+        ? 'status_change'
+        : changes.exposure && Object.keys(changes).length === 1
+          ? 'exposure_change'
+          : isSecretsChange && Object.keys(changes).length === 1
+            ? 'secrets_change'
+            : 'update',
+      changes,
+      performedBy: audit?.performedBy ?? userId,
+      ipAddress: audit?.ipAddress,
+      userAgent: audit?.userAgent,
+    });
+  }
+
+  return updated;
+}
+
+/** Re-run tool discovery for remote/stdio servers. */
+export async function refreshMcpServerTools(
+  tenantDbName: string,
+  serverId: string,
+  userId: string,
+  audit?: McpAuditContext,
+): Promise<IMcpServer | null> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const server = await db.findMcpServerById(serverId);
+  if (!server) return null;
+
+  try {
+    const tools = await discoverToolsForServer(server);
+    const updated = await db.updateMcpServer(serverId, {
+      tools,
+      toolsDiscoveredAt: new Date(),
+      lastError: null,
+      updatedBy: userId,
+    });
+    void logMcpAudit(tenantDbName, {
+      tenantId: server.tenantId,
+      projectId: server.projectId,
+      serverId,
+      serverKey: server.key,
+      action: 'tools_refresh',
+      changes: { toolCount: { from: server.tools?.length ?? 0, to: tools.length } },
+      performedBy: audit?.performedBy ?? userId,
+      ipAddress: audit?.ipAddress,
+      userAgent: audit?.userAgent,
+    });
+    return updated;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await db.updateMcpServer(serverId, { lastError: { message, at: new Date() } });
+    throw error;
+  }
 }
 
 export async function deleteMcpServer(
   tenantDbName: string,
   serverId: string,
+  audit?: McpAuditContext,
 ): Promise<boolean> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
-  return db.deleteMcpServer(serverId);
+  const existing = await db.findMcpServerById(serverId);
+  const deleted = await db.deleteMcpServer(serverId);
+
+  if (deleted && existing) {
+    // Release a sandbox-backed runtime if one exists (best-effort).
+    if (existing.stdioConfig?.executionMode === 'sandbox' && mcpSandboxRunner.current) {
+      void mcpSandboxRunner.current
+        .release(
+          {
+            tenantDbName,
+            tenantId: existing.tenantId,
+            projectId: existing.projectId,
+            serverId,
+            serverKey: existing.key,
+          },
+          existing.stdioConfig.sandbox?.instanceId,
+        )
+        .catch((error) => logger.warn('Failed to release MCP sandbox', { serverId, error }));
+    }
+    void logMcpAudit(tenantDbName, {
+      tenantId: existing.tenantId,
+      projectId: existing.projectId,
+      serverId,
+      serverKey: existing.key,
+      action: 'delete',
+      performedBy: audit?.performedBy ?? existing.updatedBy ?? existing.createdBy,
+      ipAddress: audit?.ipAddress,
+      userAgent: audit?.userAgent,
+    });
+  }
+  return deleted;
 }
 
 export async function getMcpServer(
@@ -283,34 +696,35 @@ export async function listMcpServers(
 
 export async function logMcpRequest(
   tenantDbName: string,
-  tenantId: string,
-  projectId: string | undefined,
-  serverKey: string,
-  toolName: string,
-  status: 'success' | 'error',
-  latencyMs: number,
-  requestPayload?: Record<string, unknown>,
-  responsePayload?: Record<string, unknown>,
-  errorMessage?: string,
-  callerTokenId?: string,
+  entry: Omit<IMcpRequestLog, '_id' | 'createdAt'>,
 ) {
+  // Resolve attribution + rollup before any await so the request ALS is in
+  // scope. `callerTokenId`/`callerUserId` stay for compat; the standard
+  // userId/apiTokenId/actorType columns are stamped alongside.
+  const attribution = recordUsageEvent({
+    tenantDbName,
+    tenantId: entry.tenantId,
+    projectId: entry.projectId,
+    service: 'mcp',
+    refKey: entry.serverKey,
+    status: entry.status,
+    latencyMs: entry.latencyMs,
+  });
   try {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
     await db.createMcpRequestLog({
-      tenantId,
-      projectId,
-      serverKey,
-      toolName,
-      status,
-      latencyMs,
-      requestPayload,
-      responsePayload,
-      errorMessage,
-      callerTokenId,
+      ...entry,
+      userId: attribution.userId,
+      apiTokenId: attribution.apiTokenId,
+      actorType: attribution.actorType,
     });
   } catch (err) {
-    logger.error('Failed to log MCP request', { serverKey, toolName, error: err });
+    logger.error('Failed to log MCP request', {
+      serverKey: entry.serverKey,
+      toolName: entry.toolName,
+      error: err,
+    });
   }
 }
 
@@ -351,6 +765,140 @@ export async function aggregateMcpRequestLogs(
   return db.aggregateMcpRequestLogs(serverKey, options);
 }
 
+// ── Audit logging ─────────────────────────────────────────────────────────
+
+export async function logMcpAudit(
+  tenantDbName: string,
+  entry: Omit<IMcpAuditLog, '_id' | 'createdAt'>,
+): Promise<void> {
+  try {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+    await db.createMcpAuditLog(entry);
+  } catch (err) {
+    logger.error('Failed to write MCP audit log', { serverKey: entry.serverKey, error: err });
+  }
+}
+
+export async function listMcpAuditLogs(
+  tenantDbName: string,
+  options?: { projectId?: string; serverKey?: string; action?: string; limit?: number; skip?: number },
+) {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  return db.listMcpAuditLogs(options);
+}
+
+// ── Monitor snapshot ──────────────────────────────────────────────────────
+
+export interface McpServerMonitorEntry {
+  server: McpServerView;
+  aggregate: {
+    totalRequests: number;
+    successCount: number;
+    errorCount: number;
+    avgLatencyMs: number | null;
+    timeseries?: Array<{ period: string; total: number; success: number; errors: number }>;
+  };
+  runtime: {
+    kind: 'openapi' | 'remote' | 'stdio-subprocess' | 'stdio-sandbox';
+    state: 'ready' | 'disabled' | 'degraded' | 'unavailable';
+    detail?: string;
+  };
+}
+
+export async function getMcpMonitorSnapshot(
+  tenantDbName: string,
+  projectId?: string,
+): Promise<{
+  servers: McpServerMonitorEntry[];
+  recentLogs: IMcpRequestLog[];
+  recentAudit: IMcpAuditLog[];
+}> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+
+  const servers = await db.listMcpServers({ projectId });
+  const from = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+  const entries: McpServerMonitorEntry[] = [];
+  for (const server of servers) {
+    const aggregate = await db.aggregateMcpRequestLogs(server.key, { from, groupBy: 'hour' });
+
+    const sourceType = resolveSourceType(server);
+    let kind: McpServerMonitorEntry['runtime']['kind'] = 'openapi';
+    let state: McpServerMonitorEntry['runtime']['state'] = 'ready';
+    let detail: string | undefined;
+
+    if (server.status !== 'active') {
+      state = 'disabled';
+    }
+
+    if (sourceType === 'remote') {
+      kind = 'remote';
+    } else if (sourceType === 'stdio') {
+      if (server.stdioConfig?.executionMode === 'sandbox') {
+        kind = 'stdio-sandbox';
+        const runner = mcpSandboxRunner.current;
+        if (!runner) {
+          state = 'unavailable';
+          detail = 'Sandbox module not available';
+        } else {
+          try {
+            const status = await runner.status(
+              {
+                tenantDbName,
+                tenantId: server.tenantId,
+                projectId: server.projectId,
+                serverId: String(server._id ?? ''),
+                serverKey: server.key,
+              },
+              server.stdioConfig.sandbox?.instanceId,
+            );
+            if (status.state !== 'running') {
+              state = status.state === 'failed' ? 'degraded' : 'unavailable';
+              detail = status.detail ?? `Sandbox ${status.state}`;
+            }
+          } catch (error) {
+            state = 'degraded';
+            detail = error instanceof Error ? error.message : 'Sandbox status probe failed';
+          }
+        }
+      } else {
+        kind = 'stdio-subprocess';
+        if (!isStdioRunnerEnabled()) {
+          state = 'unavailable';
+          detail = 'Stdio execution disabled (MCP_STDIO_ENABLED=false)';
+        }
+      }
+    }
+
+    if (server.lastError && state === 'ready') {
+      state = 'degraded';
+      detail = server.lastError.message;
+    }
+
+    entries.push({
+      server: serializeMcpServer(server),
+      aggregate: {
+        totalRequests: aggregate.totalRequests,
+        successCount: aggregate.successCount,
+        errorCount: aggregate.errorCount,
+        avgLatencyMs: aggregate.avgLatencyMs,
+        timeseries: aggregate.timeseries,
+      },
+      runtime: { kind, state, detail },
+    });
+  }
+
+  const [recentLogs, recentAudit] = await Promise.all([
+    db.listRecentMcpRequestLogs({ projectId, limit: 50 }),
+    db.listMcpAuditLogs({ projectId, limit: 50 }),
+  ]);
+
+  return { servers: entries, recentLogs, recentAudit };
+}
+
 // ── MCP Proxy ─────────────────────────────────────────────────────────────
 
 export async function executeMcpTool(
@@ -374,12 +922,93 @@ export async function executeMcpToolLocal(
   toolName: string,
   args: Record<string, unknown>,
 ): Promise<{ result: unknown; latencyMs: number }> {
+  const sourceType = resolveSourceType(server);
+  const start = Date.now();
+
+  // Aegis pre-hook (enterprise overlay; no-op in community).
+  const guardrail = mcpGuardrailHook.current;
+  const aegisMode = server.aegis?.mode ?? 'off';
+  const guardCtx = {
+    tenantId: server.tenantId,
+    projectId: server.projectId,
+    serverKey: server.key,
+    toolName,
+    shieldId: server.aegis?.shieldId,
+    mode: aegisMode,
+  };
+  let effectiveArgs = args;
+  if (guardrail && aegisMode !== 'off') {
+    const verdict = await guardrail.beforeToolCall(guardCtx, args);
+    if (!verdict.allowed && aegisMode === 'enforce') {
+      throw new Error(`Blocked by Aegis shield${verdict.reason ? `: ${verdict.reason}` : ''}`);
+    }
+    if (verdict.args) effectiveArgs = verdict.args;
+  }
+
+  let result: unknown;
+  try {
+    if (sourceType === 'openapi') {
+      result = await executeOpenApiTool(server, toolName, effectiveArgs);
+    } else if (sourceType === 'remote') {
+      result = await remoteCallTool(
+        {
+          url: server.remoteConfig!.url,
+          transport: server.remoteConfig!.transport,
+          auth: openAuthConfig(server.upstreamAuth),
+        },
+        toolName,
+        effectiveArgs,
+      );
+    } else if (server.stdioConfig?.executionMode === 'sandbox') {
+      const { runner, ref, runnerConfig } = await resolveSandboxRunner(server);
+      await ensureSandboxInstance(server, runner, ref, runnerConfig);
+      result = await runner.callTool(ref, runnerConfig, toolName, effectiveArgs);
+    } else {
+      result = await stdioCallTool(server.stdioConfig!, toolName, effectiveArgs);
+    }
+  } catch (error) {
+    // Persist the failure on the record so the monitor can surface it.
+    void markServerError(server, error instanceof Error ? error.message : String(error));
+    throw error;
+  }
+
+  // Aegis post-hook.
+  if (guardrail && aegisMode !== 'off') {
+    const verdict = await guardrail.afterToolCall(guardCtx, result);
+    if (!verdict.allowed && aegisMode === 'enforce') {
+      throw new Error(`Response blocked by Aegis shield${verdict.reason ? `: ${verdict.reason}` : ''}`);
+    }
+    if (verdict.result !== undefined) result = verdict.result;
+  }
+
+  return { result, latencyMs: Date.now() - start };
+}
+
+async function markServerError(server: IMcpServer, message: string): Promise<void> {
+  try {
+    if (!server._id) return;
+    const db = await getDatabase();
+    // The caller already bound the tenant context for this request.
+    await db.updateMcpServer(String(server._id), {
+      lastError: { message: message.slice(0, 1_000), at: new Date() },
+    });
+  } catch {
+    // Best-effort only.
+  }
+}
+
+async function executeOpenApiTool(
+  server: IMcpServer,
+  toolName: string,
+  args: Record<string, unknown>,
+): Promise<unknown> {
   const tool = server.tools.find((t) => t.name === toolName);
   if (!tool) {
     throw new Error(`Tool "${toolName}" not found on MCP server "${server.name}"`);
   }
-
-  const start = Date.now();
+  if (!tool.httpPath || !tool.httpMethod) {
+    throw new Error(`Tool "${toolName}" has no HTTP mapping`);
+  }
 
   // Build URL with path parameters
   let url = `${server.upstreamBaseUrl}${tool.httpPath}`;
@@ -402,13 +1031,13 @@ export async function executeMcpToolLocal(
     url += `?${qp.toString()}`;
   }
 
-  // Build headers with upstream auth
+  // Build headers with upstream auth (decrypted from the vault)
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'Accept': 'application/json',
   };
 
-  const auth = server.upstreamAuth;
+  const auth = openAuthConfig(server.upstreamAuth);
   if (auth?.type === 'token' && auth.token) {
     headers['Authorization'] = `Bearer ${auth.token}`;
   } else if (auth?.type === 'header' && auth.headerName && auth.headerValue) {
@@ -428,7 +1057,6 @@ export async function executeMcpToolLocal(
   }
 
   const response = await safeFetch(url, fetchOptions);
-  const latencyMs = Date.now() - start;
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => 'Unknown error');
@@ -436,12 +1064,8 @@ export async function executeMcpToolLocal(
   }
 
   const contentType = response.headers.get('content-type') || '';
-  let result: unknown;
   if (contentType.includes('application/json')) {
-    result = await response.json();
-  } else {
-    result = await response.text();
+    return response.json();
   }
-
-  return { result, latencyMs };
+  return response.text();
 }

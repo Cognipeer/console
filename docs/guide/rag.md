@@ -1,16 +1,16 @@
-# RAG Pipeline
+# Knowledge Engine
 
-The RAG (Retrieval-Augmented Generation) service provides end-to-end document ingestion, chunking, embedding, and semantic retrieval. It surfaces in the console as **Data → Knowledge Engine**.
+The Knowledge Engine (Retrieval-Augmented Generation / RAG) service provides end-to-end document ingestion, chunking, embedding, and semantic retrieval. It surfaces in the console as **Data → Knowledge Engine**.
 
 ## Knowledge Engine
 
-A *RAG module* is the configuration unit that ties a chunking strategy, an embedding model, and a vector index together. The Knowledge Engine screen lists every module configured for the active project, with counters for modules, documents indexed, and chunk count.
+A *Knowledge Engine module* is the configuration unit that ties a chunking strategy, an embedding model, and a vector index together. The Knowledge Engine screen lists every module configured for the active project, with counters for modules, documents indexed, and chunk count.
 
 ![Knowledge Engine list](/screenshots/rag/01-rag-list.png)
 
 When the project is empty the screen shows the onboarding CTA — clicking **Create module** opens a multi-step form where you choose the source datasource, pick chunking parameters (size, overlap, splitter), select an embedding model from [Model Hub](/guide/model-hub), point the output at a vector index (see [Vector Stores](/guide/vector-stores)), and — optionally — attach a [Reranker](/guide/reranker) to re-order results before they reach the LLM.
 
-When a reranker is attached, retrieval becomes a two-stage pipeline: the vector store returns top-K candidates and the reranker scores them down to the final top-N. This is the recommended way to plug Cohere Rerank, Jina, Voyage, or any cross-encoder onto an existing RAG module without changing the embedding model or vector store.
+When a reranker is attached, retrieval becomes a two-stage pipeline: the vector store returns top-K candidates and the reranker scores them down to the final top-N. This is the recommended way to plug Cohere Rerank, Jina, Voyage, or any cross-encoder onto an existing Knowledge Engine module without changing the embedding model or vector store.
 
 ## Architecture
 
@@ -24,7 +24,7 @@ Query   → Embed → Vector Search → (Reranker?) → Return Matches
 
 | Concept | Description |
 |---------|-------------|
-| **RAG Module** | Configuration container linking chunking strategy, embedding model, and vector index |
+| **Knowledge Engine Module** | Configuration container linking chunking strategy, embedding model, and vector index |
 | **Document** | A text or file ingested into a module |
 | **Chunk** | A segment of a document after splitting |
 | **Query Log** | Audit record of retrieval queries |
@@ -140,7 +140,7 @@ When a document is updated or chunking config changes, use `reingestDocument()` 
 
 ## Dependencies
 
-The RAG pipeline integrates several gateway services:
+The Knowledge Engine pipeline integrates several gateway services:
 
 - **Inference Service** — For generating embeddings
 - **Vector Service** — For storing and querying vectors

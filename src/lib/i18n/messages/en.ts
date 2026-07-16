@@ -36,7 +36,7 @@ export const en = {
     files: 'Document Store',
     filesDescription: 'Buckets and storage integrations',
     settings: 'Settings',
-    settingsDescription: 'API tokens and access controls',
+    settingsDescription: 'Projects, providers, members, tokens, audit and license',
     tenantSettings: 'Tenant Settings',
     tenantSettingsDescription: 'Users, projects, and providers',
     projects: 'Projects',
@@ -170,6 +170,7 @@ export const en = {
   },
   validation: {
     invalidEmail: 'Invalid email',
+    accessCodeRequired: 'An access code is required during the beta',
     passwordMinLength: 'Password must be at least 8 characters',
     nameMinLength: 'Name must be at least 2 characters',
     companyNameMinLength: 'Company name must be at least 2 characters',
@@ -227,6 +228,11 @@ export const en = {
         label: 'Confirm Password',
         placeholder: 'Confirm your password',
       },
+      accessCode: {
+        label: 'Access Code',
+        placeholder: 'BETA-XXXX-XXXX',
+        description: 'Registration is currently in beta and requires an invitation code',
+      },
       license: {
         label: 'License Type',
         placeholder: 'Select a license',
@@ -242,6 +248,11 @@ export const en = {
     footer: {
       cta: 'Already have an account?',
       link: 'Sign in',
+    },
+    disabled: {
+      title: 'Registration is disabled',
+      message:
+        'Self-service registration is not available on this deployment. Contact your administrator to get an account.',
     },
   },
   settings: {
@@ -1413,8 +1424,8 @@ export const en = {
       serverKeyPlaceholder: 'Scope to a specific server',
       guardrailKey: 'Guardrail Key (optional)',
       guardrailKeyPlaceholder: 'Scope to a specific guardrail',
-      ragModuleKey: 'RAG Module Key (optional)',
-      ragModuleKeyPlaceholder: 'Scope to a specific RAG module',
+      ragModuleKey: 'Knowledge Engine Module Key (optional)',
+      ragModuleKeyPlaceholder: 'Scope to a specific Knowledge Engine module',
       mcpServerKey: 'MCP Server Key (optional)',
       mcpServerKeyPlaceholder: 'Scope to a specific MCP server',
       recipients: 'Email Recipients',
@@ -1467,7 +1478,7 @@ export const en = {
     model: 'Model',
     server: 'Server',
     guardrail: 'Guardrail',
-    ragModule: 'RAG Module',
+    ragModule: 'Knowledge Engine Module',
     timeline: 'Timeline',
     notFound: 'Incident not found',
     backToIncidents: 'Back to incidents',
@@ -1831,7 +1842,7 @@ export const en = {
       advancedSettings: 'Advanced Settings',
       knowledgeEngine: 'Knowledge Engine',
       knowledgeEnginePlaceholder: 'Select a knowledge engine',
-      knowledgeEngineDescription: 'Attach a RAG module as a retrieval tool for the agent.',
+      knowledgeEngineDescription: 'Attach a Knowledge Engine module as a retrieval tool for the agent.',
       guardrails: 'Guardrails',
       inputGuardrail: 'Input Guardrail',
       inputGuardrailPlaceholder: 'Select input guardrail',

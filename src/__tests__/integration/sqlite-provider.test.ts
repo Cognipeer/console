@@ -242,6 +242,43 @@ describe('Audit logs', () => {
     expect(logs.length).toBeGreaterThanOrEqual(1);
     expect(logs[0].event).toBe('POST /api/projects');
   });
+
+  it('filters audit events by method and free-text query', async () => {
+    await db.switchToTenant(TEST_DB_NAME);
+
+    await db.createAuditLog({
+      action: 'read',
+      actorEmail: 'viewer@test.com',
+      actorType: 'user',
+      actorUserId: userId,
+      event: 'GET /api/models',
+      method: 'GET',
+      outcome: 'success',
+      path: '/api/models',
+      service: 'models',
+      statusCode: 200,
+      tenantId,
+    });
+
+    const byMethod = await db.listAuditLogs({ method: 'GET' });
+    expect(byMethod.length).toBeGreaterThanOrEqual(1);
+    expect(byMethod.every((log) => log.method === 'GET')).toBe(true);
+
+    const byEvent = await db.listAuditLogs({ q: 'api/models' });
+    expect(byEvent.length).toBeGreaterThanOrEqual(1);
+    expect(byEvent.every((log) => log.path === '/api/models')).toBe(true);
+
+    const byActor = await db.listAuditLogs({ q: 'viewer@test' });
+    expect(byActor.length).toBeGreaterThanOrEqual(1);
+    expect(byActor.every((log) => log.actorEmail === 'viewer@test.com')).toBe(true);
+
+    const noMatch = await db.listAuditLogs({ q: 'definitely-not-there' });
+    expect(noMatch.length).toBe(0);
+
+    // LIKE wildcards in the query must be treated literally.
+    const literalPercent = await db.listAuditLogs({ q: '%api/models%' });
+    expect(literalPercent.length).toBe(0);
+  });
 });
 
 // ── Project operations ────────────────────────────────────────────────────
@@ -557,6 +594,64 @@ describe('Cross-tenant user directory', () => {
     const tenants = await db.listTenantsForUser('admin@test.com');
     const found = tenants.find((t) => t.tenantId === tenantId);
     expect(found).toBeUndefined();
+  });
+});
+
+// ── Beta access codes ─────────────────────────────────────────────────────
+
+describe('Beta access codes', () => {
+  it('creates a code (normalized to uppercase)', async () => {
+    const record = await db.createBetaAccessCode({ code: ' beta-test-1 ', note: 'wave 1' });
+    expect(record.code).toBe('BETA-TEST-1');
+    expect(record.status).toBe('active');
+    expect(record.note).toBe('wave 1');
+  });
+
+  it('is idempotent on duplicate codes', async () => {
+    const again = await db.createBetaAccessCode({ code: 'BETA-TEST-1', note: 'other' });
+    expect(again.code).toBe('BETA-TEST-1');
+    expect(again.note).toBe('wave 1');
+    const all = await db.listBetaAccessCodes();
+    expect(all.filter((c) => c.code === 'BETA-TEST-1')).toHaveLength(1);
+  });
+
+  it('finds a code case-insensitively', async () => {
+    const found = await db.findBetaAccessCode('beta-test-1');
+    expect(found).not.toBeNull();
+    expect(found!.status).toBe('active');
+  });
+
+  it('consumes an active code exactly once', async () => {
+    const first = await db.consumeBetaAccessCode('BETA-TEST-1', { email: 'a@b.com' });
+    expect(first).toBe(true);
+    const second = await db.consumeBetaAccessCode('BETA-TEST-1', { email: 'c@d.com' });
+    expect(second).toBe(false);
+
+    const used = await db.findBetaAccessCode('BETA-TEST-1');
+    expect(used!.status).toBe('used');
+    expect(used!.usedByEmail).toBe('a@b.com');
+    expect(used!.usedAt).toBeInstanceOf(Date);
+  });
+
+  it('lists codes filtered by status', async () => {
+    await db.createBetaAccessCode({ code: 'BETA-TEST-2' });
+    const active = await db.listBetaAccessCodes({ status: 'active' });
+    expect(active.map((c) => c.code)).toContain('BETA-TEST-2');
+    expect(active.map((c) => c.code)).not.toContain('BETA-TEST-1');
+  });
+
+  it('releases a used code back to active', async () => {
+    const released = await db.releaseBetaAccessCode('BETA-TEST-1');
+    expect(released).toBe(true);
+    const record = await db.findBetaAccessCode('BETA-TEST-1');
+    expect(record!.status).toBe('active');
+    expect(record!.usedByEmail).toBeNull();
+    expect(record!.usedAt).toBeNull();
+  });
+
+  it('does not consume unknown codes', async () => {
+    const claimed = await db.consumeBetaAccessCode('NOPE-0000-0000', { email: 'a@b.com' });
+    expect(claimed).toBe(false);
   });
 });
 

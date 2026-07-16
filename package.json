@@ -19,6 +19,8 @@
     "test:flake": "tsx scripts/flake-hunter.ts",
     "format": "prettier --log-level warn --no-error-on-unmatched-pattern --write ./src/{,*/**/,*/**/**/,*/**/**/**/}*.{js,jsx,ts}",
     "check-setup": "node scripts/check-setup.js",
+    "seed:beta-codes": "node --import tsx scripts/seed-beta-codes.ts",
+    "backfill:usage-daily": "node --import tsx scripts/backfill-usage-daily.ts",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs"

@@ -18,6 +18,7 @@ import {
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { calculateCost, type TokenUsage } from '@/lib/services/models/usageLogger';
 import { downloadFile } from '@/lib/services/files/fileService';
+import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import type { OcrDocumentSource, OcrFeature } from '@/lib/providers';
 import { sendOcrJobWebhook } from './ocrJobWebhook';
 import type { OcrJobContext } from './types';
@@ -260,6 +261,25 @@ export async function processOcrItem(ctx: OcrJobContext, itemId: string): Promis
       { costCurrency: totals.currency, lastItemAt: new Date() },
     );
 
+    // Rollup event per item — attribution comes from the fields stamped on
+    // the job row at creation (the runner is outside the request ALS). No
+    // tokens/cost: OCR + LLM calls already meter via logModelUsage.
+    recordUsageEvent({
+      tenantDbName: ctx.tenantDbName,
+      tenantId: ctx.tenantId,
+      projectId: job.projectId,
+      service: 'ocr',
+      refKey: job.ocrModelKey,
+      status: 'success',
+      latencyMs: Date.now() - startedAt,
+      units: { items: 1, pages: totals.pages },
+      attribution: {
+        userId: job.userId,
+        apiTokenId: job.apiTokenId,
+        actorType: job.actorType,
+      },
+    });
+
     const delivered = await sendOcrJobWebhook({
       job,
       event: 'item.succeeded',
@@ -277,6 +297,21 @@ export async function processOcrItem(ctx: OcrJobContext, itemId: string): Promis
     const message = err instanceof Error ? err.message : String(err);
     await db.updateOcrJobItem(itemId, { status: 'failed', errorMessage: message, endedAt: new Date() });
     const afterJob = await db.incrementOcrJobAggregates(item.jobId, { itemsFailed: 1 }, { lastItemAt: new Date() });
+    recordUsageEvent({
+      tenantDbName: ctx.tenantDbName,
+      tenantId: ctx.tenantId,
+      projectId: job.projectId,
+      service: 'ocr',
+      refKey: job.ocrModelKey,
+      status: 'error',
+      latencyMs: Date.now() - startedAt,
+      units: { items: 1 },
+      attribution: {
+        userId: job.userId,
+        apiTokenId: job.apiTokenId,
+        actorType: job.actorType,
+      },
+    });
     const delivered = await sendOcrJobWebhook({
       job,
       event: 'item.failed',

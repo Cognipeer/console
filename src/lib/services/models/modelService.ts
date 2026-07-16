@@ -17,6 +17,11 @@ import {
   type ProviderConfigView,
   type ProviderStatus,
 } from '@/lib/services/providers/providerService';
+import {
+  getUsageBreakdown,
+  type UsageBreakdown,
+  type UsageBreakdownGroupBy,
+} from '@/lib/services/usage/usageBreakdown';
 import type {
   CreateModelInput,
   UpdateModelInput,
@@ -415,6 +420,31 @@ export async function getUsageAggregate(
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
   return db.aggregateModelUsage(modelKey, options, projectId);
+}
+
+/**
+ * Per-user / per-API-token usage breakdown for one model, read from the
+ * cross-service `usage_daily` rollup (service 'models', refKey = model.key).
+ * Attribution starts at the rollup's deploy; older (backfilled) traffic shows
+ * as the ''-id (unattributed/legacy) entry. Entries are sorted by cost desc.
+ */
+export async function getModelUsageBreakdown(
+  tenantDbName: string,
+  tenantId: string,
+  modelKey: string,
+  projectId: string,
+  options: { groupBy: UsageBreakdownGroupBy; from?: Date; to?: Date },
+): Promise<UsageBreakdown> {
+  return getUsageBreakdown({
+    tenantDbName,
+    tenantId,
+    projectId,
+    service: 'models',
+    refKey: modelKey,
+    groupBy: options.groupBy,
+    from: options.from,
+    to: options.to,
+  });
 }
 
 // Providers that can back a model definition. 'model' covers chat/embedding

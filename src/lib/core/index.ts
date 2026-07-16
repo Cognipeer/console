@@ -13,7 +13,14 @@ export type { AppConfig, ConfigSource, ConfigValidationError } from './config';
 export { logger, createLogger, resetLogger } from './logger';
 
 // Request Context
-export { runWithRequestContext, getRequestContext, getRequestId } from './requestContext';
+export {
+  runWithRequestContext,
+  getRequestContext,
+  getRequestId,
+  patchRequestContext,
+  captureRequestContext,
+} from './requestContext';
+export type { RequestContext, RequestActorType, RequestSource } from './requestContext';
 
 // Cache
 export { getCache, destroyCache } from './cache';

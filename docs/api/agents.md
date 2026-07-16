@@ -1,6 +1,6 @@
 # Agents API
 
-Manage and invoke AI agents via the client API. Agents combine a model, system prompt, tools, guardrails, and RAG modules into a single deployable unit.
+Manage and invoke AI agents via the client API. Agents combine a model, system prompt, tools, guardrails, and Knowledge Engine modules into a single deployable unit.
 
 ## List Agents
 
@@ -195,7 +195,7 @@ Agents configured in the dashboard can include:
 | **System Prompt** | Base instructions for the agent |
 | **Tools** | Bound tools from the unified tool system or MCP servers |
 | **Guardrails** | Input/output validation rules |
-| **RAG Modules** | Retrieval-augmented generation sources |
+| **Knowledge Engine Modules** | Retrieval-augmented generation sources |
 | **Temperature / Top-P** | Model parameter overrides |
 | **Max Tokens** | Output length limit |
 | **Versioning** | Publish and pin specific agent configurations |

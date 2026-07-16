@@ -145,9 +145,11 @@ export function RerankerMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       db.prepare(`
         INSERT INTO ${TABLES.rerankerRunLogs}
         (id, tenantId, projectId, rerankerKey, strategy, modelKey, query,
-         inputCount, outputCount, latencyMs, status, errorMessage, source, ragModuleKey, metadata, createdAt)
+         inputCount, outputCount, latencyMs, status, errorMessage, source, ragModuleKey, metadata,
+         userId, apiTokenId, actorType, createdAt)
         VALUES (@id, @tenantId, @projectId, @rerankerKey, @strategy, @modelKey, @query,
-         @inputCount, @outputCount, @latencyMs, @status, @errorMessage, @source, @ragModuleKey, @metadata, @createdAt)
+         @inputCount, @outputCount, @latencyMs, @status, @errorMessage, @source, @ragModuleKey, @metadata,
+         @userId, @apiTokenId, @actorType, @createdAt)
       `).run({
         id,
         tenantId: log.tenantId,
@@ -164,6 +166,9 @@ export function RerankerMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         source: log.source ?? null,
         ragModuleKey: log.ragModuleKey ?? null,
         metadata: this.toJson(log.metadata ?? {}),
+        userId: log.userId ?? null,
+        apiTokenId: log.apiTokenId ?? null,
+        actorType: log.actorType ?? null,
         createdAt: now,
       });
 
@@ -229,6 +234,9 @@ export function RerankerMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         source: (r.source as IRerankerRunLog['source']) ?? undefined,
         ragModuleKey: (r.ragModuleKey as string | null | undefined) ?? undefined,
         metadata: this.parseJson(r.metadata, {}),
+        userId: (r.userId as string | null) ?? undefined,
+        apiTokenId: (r.apiTokenId as string | null) ?? undefined,
+        actorType: (r.actorType as IRerankerRunLog['actorType'] | null) ?? undefined,
         createdAt: this.toDate(r.createdAt),
       };
     }

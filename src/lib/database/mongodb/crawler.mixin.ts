@@ -293,5 +293,13 @@ export function CrawlerMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
         .collection<ICrawlResult>(COLLECTIONS.crawlResults)
         .countDocuments({ jobId });
     }
+
+    async deleteCrawlResultsByJob(jobId: string): Promise<number> {
+      const db = this.getTenantDb();
+      const res = await db
+        .collection<ICrawlResult>(COLLECTIONS.crawlResults)
+        .deleteMany({ jobId });
+      return res.deletedCount ?? 0;
+    }
   };
 }
