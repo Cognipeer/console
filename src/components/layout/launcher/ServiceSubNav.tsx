@@ -14,6 +14,7 @@ import {
   IconBoxModel,
   IconBrain,
   IconBug,
+  IconCalculator,
   IconChecklist,
   IconClipboardText,
   IconCode,
@@ -476,6 +477,13 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       href: '/dashboard/gpu-fleet/models',
       icon: IconBoxModel,
       matcher: (p) => p.startsWith('/dashboard/gpu-fleet/models'),
+    },
+    {
+      id: 'planner',
+      label: 'Planner',
+      href: '/dashboard/gpu-fleet/planner',
+      icon: IconCalculator,
+      matcher: (p) => p.startsWith('/dashboard/gpu-fleet/planner'),
     },
     {
       id: 'pools',
