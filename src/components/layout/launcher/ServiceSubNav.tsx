@@ -1,25 +1,29 @@
 'use client';
 
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useTranslations } from '@/lib/i18n';
+import type { DashboardServiceDefinition } from '@/lib/utils/dashboardServices';
+import { ActionIcon, Text, Tooltip } from '@mantine/core';
 import {
   IconAlertTriangle,
   IconArrowLeftRight,
-  IconArrowsSplit,
   IconArrowsSort,
+  IconArrowsSplit,
   IconBell,
   IconBook,
   IconBox,
+  IconBoxModel,
   IconBrain,
   IconBug,
+  IconCalculator,
   IconChecklist,
   IconClipboardText,
   IconCode,
+  IconCpu,
   IconDatabase,
   IconExternalLink,
   IconFolder,
   IconHistory,
   IconLayoutDashboard,
-  IconSparkles,
   IconMessage,
   IconMessages,
   IconMicrophone,
@@ -33,7 +37,9 @@ import {
   IconSettings,
   IconShield,
   IconShieldLock,
+  IconSparkles,
   IconStack2,
+  IconStackPush,
   IconTimeline,
   IconTool,
   IconVector,
@@ -41,9 +47,7 @@ import {
   IconWorld,
   type Icon,
 } from '@tabler/icons-react';
-import { ActionIcon, Text, Tooltip } from '@mantine/core';
-import type { DashboardServiceDefinition } from '@/lib/utils/dashboardServices';
-import { useTranslations } from '@/lib/i18n';
+import { useRouter, useSearchParams } from 'next/navigation';
 import classes from './LauncherShell.module.css';
 
 export interface SubNavItem {
@@ -60,12 +64,48 @@ const MODEL_TYPE_KEYS = ['llm', 'embedding', 'rerank', 'stt', 'tts', 'ocr'];
 
 export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
   sandbox: [
-    { id: 'overview', label: 'Overview', href: '/dashboard/sandbox', icon: IconLayoutDashboard, matcher: (p) => p === '/dashboard/sandbox' },
-    { id: 'instances', label: 'Sandboxes', href: '/dashboard/sandbox/instances', icon: IconBox, matcher: (p) => p.startsWith('/dashboard/sandbox/instances') },
-    { id: 'templates', label: 'Templates', href: '/dashboard/sandbox/templates', icon: IconCode, matcher: (p) => p.startsWith('/dashboard/sandbox/templates') },
-    { id: 'volumes', label: 'Volumes', href: '/dashboard/sandbox/volumes', icon: IconDatabase, matcher: (p) => p.startsWith('/dashboard/sandbox/volumes') },
-    { id: 'playground', label: 'Playground', href: '/dashboard/sandbox/playground', icon: IconPlayerPlay, matcher: (p) => p.startsWith('/dashboard/sandbox/playground') },
-    { id: 'settings', label: 'Settings', href: '/dashboard/sandbox/settings', icon: IconSettings, matcher: (p) => p.startsWith('/dashboard/sandbox/settings') },
+    {
+      id: 'overview',
+      label: 'Overview',
+      href: '/dashboard/sandbox',
+      icon: IconLayoutDashboard,
+      matcher: (p) => p === '/dashboard/sandbox',
+    },
+    {
+      id: 'instances',
+      label: 'Sandboxes',
+      href: '/dashboard/sandbox/instances',
+      icon: IconBox,
+      matcher: (p) => p.startsWith('/dashboard/sandbox/instances'),
+    },
+    {
+      id: 'templates',
+      label: 'Templates',
+      href: '/dashboard/sandbox/templates',
+      icon: IconCode,
+      matcher: (p) => p.startsWith('/dashboard/sandbox/templates'),
+    },
+    {
+      id: 'volumes',
+      label: 'Volumes',
+      href: '/dashboard/sandbox/volumes',
+      icon: IconDatabase,
+      matcher: (p) => p.startsWith('/dashboard/sandbox/volumes'),
+    },
+    {
+      id: 'playground',
+      label: 'Playground',
+      href: '/dashboard/sandbox/playground',
+      icon: IconPlayerPlay,
+      matcher: (p) => p.startsWith('/dashboard/sandbox/playground'),
+    },
+    {
+      id: 'settings',
+      label: 'Settings',
+      href: '/dashboard/sandbox/settings',
+      icon: IconSettings,
+      matcher: (p) => p.startsWith('/dashboard/sandbox/settings'),
+    },
   ],
   evaluations: [
     {
@@ -258,21 +298,24 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       label: 'Dynamic LLM',
       href: '/dashboard/models?create=dynamic',
       icon: IconArrowsSplit,
-      matcher: (p, s) => p === '/dashboard/models' && s.get('create') === 'dynamic',
+      matcher: (p, s) =>
+        p === '/dashboard/models' && s.get('create') === 'dynamic',
     },
     {
       id: 'embedding',
       label: 'Embedding',
       href: '/dashboard/models?type=embedding',
       icon: IconVector,
-      matcher: (p, s) => p === '/dashboard/models' && s.get('type') === 'embedding',
+      matcher: (p, s) =>
+        p === '/dashboard/models' && s.get('type') === 'embedding',
     },
     {
       id: 'rerank',
       label: 'Rerank',
       href: '/dashboard/models?type=rerank',
       icon: IconArrowsSort,
-      matcher: (p, s) => p === '/dashboard/models' && s.get('type') === 'rerank',
+      matcher: (p, s) =>
+        p === '/dashboard/models' && s.get('type') === 'rerank',
     },
     {
       id: 'stt',
@@ -338,7 +381,9 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       label: 'Realtime models',
       href: '/dashboard/realtime',
       icon: IconLayoutDashboard,
-      matcher: (p) => p === '/dashboard/realtime' || p.startsWith('/dashboard/realtime/models'),
+      matcher: (p) =>
+        p === '/dashboard/realtime' ||
+        p.startsWith('/dashboard/realtime/models'),
     },
     {
       id: 'playground',
@@ -434,6 +479,56 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       matcher: (p) => p.startsWith('/dashboard/cluster/instances'),
     },
   ],
+  'gpu-fleet': [
+    {
+      id: 'overview',
+      label: 'Overview',
+      href: '/dashboard/gpu-fleet',
+      icon: IconCpu,
+      // Host + deployment detail pages drill down from the overview list,
+      // so keep this item active there too (they're separate top-level
+      // route folders, not nested under /dashboard/gpu-fleet itself).
+      matcher: (p) =>
+        p === '/dashboard/gpu-fleet' ||
+        p.startsWith('/dashboard/gpu-fleet/hosts') ||
+        p.startsWith('/dashboard/gpu-fleet/deployments'),
+    },
+    {
+      id: 'onboarding',
+      label: 'Onboarding',
+      href: '/dashboard/gpu-fleet/onboarding',
+      icon: IconSparkles,
+      matcher: (p) => p.startsWith('/dashboard/gpu-fleet/onboarding'),
+    },
+    {
+      id: 'models',
+      label: 'Model Marketplace',
+      href: '/dashboard/gpu-fleet/models',
+      icon: IconBoxModel,
+      matcher: (p) => p.startsWith('/dashboard/gpu-fleet/models'),
+    },
+    {
+      id: 'planner',
+      label: 'Planner',
+      href: '/dashboard/gpu-fleet/planner',
+      icon: IconCalculator,
+      matcher: (p) => p.startsWith('/dashboard/gpu-fleet/planner'),
+    },
+    {
+      id: 'pools',
+      label: 'Pools',
+      href: '/dashboard/gpu-fleet/pools',
+      icon: IconStackPush,
+      matcher: (p) => p.startsWith('/dashboard/gpu-fleet/pools'),
+    },
+    {
+      id: 'settings',
+      label: 'Settings',
+      href: '/dashboard/gpu-fleet/settings',
+      icon: IconSettings,
+      matcher: (p) => p.startsWith('/dashboard/gpu-fleet/settings'),
+    },
+  ],
 };
 
 interface ServiceSubNavProps {
@@ -470,20 +565,19 @@ export default function ServiceSubNav({
           <Text component="span" className={classes.subnavEyebrow}>
             {service.category}
           </Text>
-          {hidePin ? null : (
-            <Tooltip label={isPinned ? 'Unpin from rail' : 'Pin to rail'} withArrow>
-              <ActionIcon
-                variant="subtle"
-                color="gray"
-                size="sm"
-                onClick={onTogglePin}
-                aria-label={isPinned ? 'Unpin' : 'Pin'}
-                className={isPinned ? classes.subnavPinActive : ''}
-              >
-                {isPinned ? <IconPinFilled size={13} /> : <IconPin size={13} />}
-              </ActionIcon>
-            </Tooltip>
-          )}
+          <Tooltip
+            label={isPinned ? 'Unpin from rail' : 'Pin to rail'}
+            withArrow>
+            <ActionIcon
+              variant="subtle"
+              color="gray"
+              size="sm"
+              onClick={onTogglePin}
+              aria-label={isPinned ? 'Unpin' : 'Pin'}
+              className={isPinned ? classes.subnavPinActive : ''}>
+              {isPinned ? <IconPinFilled size={13} /> : <IconPin size={13} />}
+            </ActionIcon>
+          </Tooltip>
         </div>
         <div className={classes.subnavTitle}>
           <span className={classes.subnavTitleIcon}>
@@ -508,11 +602,12 @@ export default function ServiceSubNav({
               type="button"
               className={`${classes.subnavItem} ${active ? classes.subnavItemActive : ''}`}
               onClick={() => router.push(item.href)}
-              aria-current={active ? 'page' : undefined}
-            >
+              aria-current={active ? 'page' : undefined}>
               <ItemIcon size={15} stroke={1.7} />
               <span className={classes.subnavItemLabel}>{item.label}</span>
-              {item.badge ? <span className={classes.subnavBadge}>{item.badge}</span> : null}
+              {item.badge ? (
+                <span className={classes.subnavBadge}>{item.badge}</span>
+              ) : null}
             </button>
           );
         })}
@@ -521,11 +616,14 @@ export default function ServiceSubNav({
         <button
           type="button"
           className={classes.subnavItem}
-          onClick={onOpenDocs}
-        >
+          onClick={onOpenDocs}>
           <IconBook size={15} stroke={1.7} />
           <span className={classes.subnavItemLabel}>Documentation</span>
-          <IconExternalLink size={11} stroke={1.7} className={classes.subnavExternal} />
+          <IconExternalLink
+            size={11}
+            stroke={1.7}
+            className={classes.subnavExternal}
+          />
         </button>
       </div>
     </aside>
@@ -553,6 +651,8 @@ export function findServiceForPath(
   return best;
 }
 
-export function getSubNavItemsForService(serviceId: string): SubNavItem[] | undefined {
+export function getSubNavItemsForService(
+  serviceId: string,
+): SubNavItem[] | undefined {
   return SUBNAV_CONFIG[serviceId];
 }

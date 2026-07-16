@@ -1,10 +1,10 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslations } from '@/lib/i18n';
+import { Anchor, Breadcrumbs, Text } from '@mantine/core';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Anchor, Breadcrumbs, Text } from '@mantine/core';
-import { useTranslations } from '@/lib/i18n';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { BREADCRUMB_RESOLVERS } from './breadcrumbResolvers';
 
 /**
@@ -80,15 +80,44 @@ function isMongoObjectId(value: string) {
   return /^[a-f\d]{24}$/i.test(value);
 }
 
+/**
+ * `SEGMENT_KEYS` is keyed by bare segment string with no path context, so a
+ * leaf folder that happens to share its name with an unrelated top-level
+ * route silently gets that route's label instead. Currently only one such
+ * collision exists: `/dashboard/gpu-fleet/models` (the GPU Fleet model
+ * marketplace) vs `/dashboard/models` (Model Hub) both end in "models", so
+ * without this override the marketplace page's breadcrumb (and tab title)
+ * incorrectly showed "Model Hub". Keyed by the full path relative to
+ * `dashboard`, checked before the generic segment-name lookup.
+ */
+const PATH_LABEL_OVERRIDES: Record<string, string> = {
+  'gpu-fleet/models': 'Model Marketplace',
+};
+
+function pathOverrideLabel(
+  segments: string[],
+  index: number,
+): string | undefined {
+  return PATH_LABEL_OVERRIDES[segments.slice(1, index + 1).join('/')];
+}
+
 function isLikelyId(value: string): boolean {
   if (!value) return false;
   if (isMongoObjectId(value)) return true;
   // UUID v4 or similar: 8-4-4-4-12 hex
-  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) {
+  if (
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      value,
+    )
+  ) {
     return true;
   }
   // Any long alphanumeric id (24+ chars, mostly hex/dash/underscore)
-  if (value.length >= 16 && /^[0-9a-zA-Z_-]+$/.test(value) && /\d/.test(value)) {
+  if (
+    value.length >= 16 &&
+    /^[0-9a-zA-Z_-]+$/.test(value) &&
+    /\d/.test(value)
+  ) {
     return true;
   }
   return false;
@@ -106,7 +135,9 @@ export default function DashboardBreadcrumbs() {
   const t = useTranslations('breadcrumbs');
 
   const cacheRef = useRef<Map<string, string>>(new Map());
-  const [resolvedLabels, setResolvedLabels] = useState<ResolvedSegmentLabels>({});
+  const [resolvedLabels, setResolvedLabels] = useState<ResolvedSegmentLabels>(
+    {},
+  );
 
   const segments = useMemo(() => {
     if (!pathname) return [] as string[];
@@ -147,15 +178,56 @@ export default function DashboardBreadcrumbs() {
     };
   }, [segments]);
 
+  const labels = useMemo(
+    () =>
+      segments.map((segment, index) => {
+        const resolved = resolvedLabels[index];
+        if (resolved) return resolved;
+        const override = pathOverrideLabel(segments, index);
+        if (override) return override;
+        return isLikelyId(segment)
+          ? shortenId(segment)
+          : formatSegment(segment, t);
+      }),
+    [segments, resolvedLabels, t],
+  );
+
+  // Browser tab title: breadcrumb labels minus "Dashboard". A layout effect
+  // + MutationObserver is used (instead of a plain useEffect) because Next's
+  // App Router can reset document.title on navigation without changing our
+  // deps, so a dep-based effect wouldn't reliably re-fire to correct it.
+  const titleRef = useRef('Cognipeer Console');
+
+  useLayoutEffect(() => {
+    if (!segments.length || segments[0] !== 'dashboard') return;
+    const pageLabels = labels.slice(1);
+    titleRef.current = pageLabels.length
+      ? `${[...pageLabels].reverse().join(' · ')} - Cognipeer Console`
+      : 'Cognipeer Console';
+    document.title = titleRef.current;
+  }, [segments, labels]);
+
+  useEffect(() => {
+    const observer = new MutationObserver(() => {
+      if (document.title !== titleRef.current) {
+        document.title = titleRef.current;
+      }
+    });
+    observer.observe(document.head, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+    return () => observer.disconnect();
+  }, []);
+
   if (segments.length === 0 || segments[0] !== 'dashboard') {
     return null;
   }
 
   const items = segments.map((segment, index) => {
     const href = `/${segments.slice(0, index + 1).join('/')}`;
-    const resolved = resolvedLabels[index];
-    const label =
-      resolved ?? (isLikelyId(segment) ? shortenId(segment) : formatSegment(segment, t));
+    const label = labels[index];
     const isLast = index === segments.length - 1;
 
     if (isLast) {
@@ -184,8 +256,7 @@ export default function DashboardBreadcrumbs() {
       separatorMargin={6}
       styles={{
         separator: { color: 'var(--ds-text-faint)', opacity: 0.6 },
-      }}
-    >
+      }}>
       {items}
     </Breadcrumbs>
   );

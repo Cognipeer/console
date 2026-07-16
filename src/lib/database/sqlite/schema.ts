@@ -1878,6 +1878,7 @@ export const TENANT_SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS llm_deployments (
     id TEXT PRIMARY KEY,
     tenantId TEXT NOT NULL,
+    projectId TEXT,
     hostId TEXT NOT NULL,
     sliceUuid TEXT,
     name TEXT NOT NULL,

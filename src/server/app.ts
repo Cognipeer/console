@@ -1,11 +1,11 @@
-import next from 'next';
-import Fastify, { type FastifyInstance } from 'fastify';
-import cookie from '@fastify/cookie';
 import { getConfig } from '@/lib/core/config';
 import { registerShutdownHandler } from '@/lib/core/lifecycle';
 import { createLogger } from '@/lib/core/logger';
-import { bootstrapApplication } from './bootstrap';
+import cookie from '@fastify/cookie';
+import Fastify, { type FastifyInstance } from 'fastify';
+import next from 'next';
 import { fastifyApiPlugin } from './api/plugin';
+import { bootstrapApplication } from './bootstrap';
 
 const logger = createLogger('server');
 
@@ -107,6 +107,41 @@ export async function createServer(dev: boolean): Promise<FastifyInstance> {
     await nextHandler(request.raw, reply.raw);
     reply.hijack();
   });
+
+  if (dev) {
+    // Next's Fast Refresh pushes recompiled-module notifications to the
+    // browser over a WebSocket (/_next/webpack-hmr). A custom server (this
+    // Fastify wrapper) doesn't forward HTTP upgrade requests to Next by
+    // default, so without this the dev server still compiles changes fine
+    // but the browser never gets told to hot-swap — it just shows stale
+    // content until you manually refresh. `getUpgradeHandler()` is Next's
+    // documented hook for exactly this case.
+    const upgradeHandler = nextApp.getUpgradeHandler();
+
+    // `@fastify/websocket` (registered by enterprise plugins — sandbox/GPU
+    // terminal, realtime) attaches its own 'upgrade' listener on this same
+    // server that unconditionally routes EVERY upgrade request through
+    // Fastify's normal HTTP router, then destroys the socket once a
+    // response is sent (its `onResponse` hook). Since no Fastify route
+    // matches `/_next/webpack-hmr`, that request falls through to the Next
+    // catch-all route as a plain GET, 404s, and the socket gets torn down —
+    // breaking HMR and logging "GET /_next/webpack-hmr 404" whenever those
+    // plugins are active. Node has no way to stop a later 'upgrade'
+    // listener from also running, so we replace the listener set entirely:
+    // claim Next-internal paths ourselves and forward every other upgrade
+    // to whatever listener(s) were already registered.
+    const existingUpgradeListeners = app.server.listeners('upgrade');
+    app.server.removeAllListeners('upgrade');
+    app.server.on('upgrade', (req, socket, head) => {
+      if (req.url?.startsWith('/_next/')) {
+        upgradeHandler(req, socket, head);
+        return;
+      }
+      for (const listener of existingUpgradeListeners) {
+        listener.apply(app.server, [req, socket, head]);
+      }
+    });
+  }
 
   registerShutdownHandler('http-server', async () => {
     logger.info('Closing Fastify server');
