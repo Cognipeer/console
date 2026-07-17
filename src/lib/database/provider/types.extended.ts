@@ -363,6 +363,38 @@ export interface IMcpRequestAggregate {
   }>;
 }
 
+// ── MCP Hub (enterprise module) ──────────────────────────────────────────
+// A hub is a curated catalog of MCP servers shared externally as a
+// discovery API (list/search/detail). Execution stays on the per-server
+// endpoints — the hub only publishes metadata + connection info.
+
+export type McpHubStatus = 'active' | 'disabled';
+
+export interface IMcpHubExposureConfig {
+  accessMode: McpAccessMode;
+}
+
+export interface IMcpHub {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  name: string;
+  description?: string;
+  /** Member MCP servers by `key` (project-scoped, curated order preserved). */
+  serverKeys: string[];
+  /** Default: token. Public hubs are addressed by {tenantId, endpointSlug}. */
+  exposure?: IMcpHubExposureConfig;
+  status: McpHubStatus;
+  /** Unique slug used in the public hub URL. */
+  endpointSlug: string;
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
 // ── Cluster: nodes & instance assignments ────────────────────────────────
 
 export type NodeRole = 'main' | 'worker' | 'all';

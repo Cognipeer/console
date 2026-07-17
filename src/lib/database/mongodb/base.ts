@@ -66,6 +66,7 @@ export const COLLECTIONS = {
   mcpServers: 'mcp_servers',
   mcpRequestLogs: 'mcp_request_logs',
   mcpAuditLogs: 'mcp_audit_logs',
+  mcpHubs: 'mcp_hubs',
   tools: 'tools',
   toolRequestLogs: 'tool_request_logs',
   agents: 'agents',

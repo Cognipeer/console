@@ -82,6 +82,14 @@ export const ENTERPRISE_API_RULES: EnterpriseApiRule[] = [
     module: 'aegis',
     prefixes: ['/api/aegis/', '/api/client/v1/aegis/'],
   },
+  {
+    // MCP Hubs: curated MCP-server catalogs published as a discovery API.
+    // Gates the admin CRUD + the token discovery surface. The public surface
+    // (/api/public/mcp/hubs/) never reaches this guard — the plugin checks
+    // the owning tenant's license in-handler.
+    module: 'mcp-hub',
+    prefixes: ['/api/mcp/hubs', '/api/client/v1/mcp/hubs'],
+  },
 ];
 
 export interface EnterpriseDenial {
