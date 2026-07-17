@@ -21,6 +21,8 @@ export interface McpServerView {
   description?: string;
   sourceType: McpSourceType;
   tools: IMcpTool[];
+  /** Tool names hidden from callers (tools/list, agents, execute). */
+  disabledTools: string[];
   toolsDiscoveredAt?: Date;
   upstreamBaseUrl?: string;
   /** Secrets are masked in views. */
@@ -96,6 +98,10 @@ export interface UpdateMcpServerInput {
   exposure?: IMcpExposureConfig;
   aegis?: IMcpAegisConfig;
   status?: string;
+  /** Opt-in policy for caller-supplied runtime header passthrough (null clears). */
+  runtimeHeaders?: { allow?: boolean; allowedNames?: string[] } | null;
+  /** Full replacement list of disabled tool names (empty array enables all). */
+  disabledTools?: string[];
 }
 
 /** Request-scoped context threaded into audit writes. */

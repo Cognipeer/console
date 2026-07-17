@@ -40,6 +40,15 @@ const nextConfig: NextConfig = {
     // keep it out of the Next.js bundle so `next build` doesn't try to resolve
     // it (it is imported only by the enterprise overlay's auth plugin).
     'ldapts',
+    // @cognipeer/to-markdown → pdf-to-img → @napi-rs/canvas ships a
+    // platform-specific `.node` native binary that webpack cannot parse
+    // ("Unexpected character '�'"). Externalize ONLY the native package —
+    // Node's own `require` loads it fine at runtime. Do NOT externalize
+    // @cognipeer/to-markdown itself: its ESM build does
+    // `import { fromBuffer } from 'file-type'` (CJS v16), whose named
+    // export Node's cjs-module-lexer can't detect, so loading it unbundled
+    // crashes the server at startup; webpack handles that interop.
+    '@napi-rs/canvas',
   ],
   turbopack: {
     root: path.resolve(process.cwd(), '..'),

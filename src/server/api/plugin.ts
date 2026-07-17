@@ -12,6 +12,7 @@ import { getPermissionServiceForPath, getRequiredPermissionLevel } from '@/lib/s
 import { recordAuditLog } from '@/lib/services/audit';
 import { applyCorsHeaders } from './cors';
 import { authApiPlugin } from './plugins/auth';
+import { clientA2aApiPlugin } from './plugins/client-a2a';
 import { clientAgentsApiPlugin } from './plugins/client-agents';
 import { clientBatchesApiPlugin } from './plugins/client-batches';
 import { clientModerationsApiPlugin } from './plugins/client-moderations';
@@ -25,6 +26,7 @@ import { clientMemoryApiPlugin } from './plugins/client-memory';
 import { clientAutomationsApiPlugin } from './plugins/client-automations';
 import { clientMcpApiPlugin } from './plugins/client-mcp';
 import { clientMcpConsoleApiPlugin } from './plugins/client-mcp-console';
+import { publicA2aApiPlugin } from './plugins/public-a2a';
 import { publicMcpApiPlugin } from './plugins/public-mcp';
 import { clientPiiApiPlugin } from './plugins/client-pii';
 import { clientEvaluationsApiPlugin } from './plugins/client-evaluations';
@@ -103,6 +105,8 @@ const PUBLIC_API_PREFIXES = [
   // MCP servers exposed with accessMode 'public' (unguessable slug URLs; the
   // handler re-checks the access mode on every request).
   '/api/public/mcp/',
+  // Agents exposed over A2A with accessMode 'public' (same slug-URL model).
+  '/api/public/a2a/',
   ...enterprisePublicApiPrefixes,
 ];
 
@@ -350,6 +354,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(alertsApiPlugin);
   await app.register(auditApiPlugin);
   await app.register(authApiPlugin);
+  await app.register(clientA2aApiPlugin);
   await app.register(clientAgentsApiPlugin);
   await app.register(clientBatchesApiPlugin);
   await app.register(clientModerationsApiPlugin);
@@ -369,6 +374,8 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   // Unauthenticated MCP endpoints for servers with accessMode 'public'
   // (slug-addressed; see PUBLIC_API_PREFIXES).
   await app.register(publicMcpApiPlugin);
+  // Unauthenticated A2A endpoints for agents with accessMode 'public'.
+  await app.register(publicA2aApiPlugin);
   await app.register(clientPiiApiPlugin);
   await app.register(clientEvaluationsApiPlugin);
   await app.register(clientPromptsApiPlugin);

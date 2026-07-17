@@ -987,6 +987,11 @@ export interface IExternalAgentConnection {
   credentialProviderKey?: string;
   /** Dot-path used to pull the assistant text out of a non-standard JSON response. */
   responsePath?: string;
+  /**
+   * Opt-in policy for caller-supplied runtime header passthrough. Absent or
+   * `allow: false` means caller headers never reach this endpoint.
+   */
+  runtimeHeaders?: { allow?: boolean; allowedNames?: string[] };
 }
 
 export interface IAgentConfig {

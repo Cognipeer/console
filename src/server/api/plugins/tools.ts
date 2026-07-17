@@ -17,6 +17,12 @@ import {
   updateTool,
 } from '@/lib/services/tools';
 import {
+  buildRuntimeContextFromRequest,
+  describeRuntimeAuth,
+  resolveRuntimeHeaders,
+  runtimeHeaderPolicyFromMetadata,
+} from '@/lib/services/runtimeContext';
+import {
   readJsonBody,
   requireProjectContextForRequest,
   sendProjectContextError,
@@ -249,8 +255,22 @@ export const toolsApiPlugin: FastifyPluginAsync = async (app) => {
       const action = tool.actions.find((item) => item.key === actionKey);
       const actionName = action?.name ?? actionKey;
 
+      // Test-tab JSON editor: caller-supplied runtime context, filtered by
+      // the tool's opt-in policy exactly like the external surfaces.
+      const runtimeContext = buildRuntimeContextFromRequest(body.runtime_context, request.headers, {
+        userId: session.userId,
+        source: 'playground',
+      });
+      const runtimeHeaders = resolveRuntimeHeaders(
+        runtimeContext,
+        'tool',
+        tool.key,
+        runtimeHeaderPolicyFromMetadata(tool.metadata),
+      );
+      const runtimeAuth = describeRuntimeAuth(runtimeContext, runtimeHeaders);
+
       try {
-        const { latencyMs, result } = await executeToolAction(tool, actionKey, args);
+        const { latencyMs, result } = await executeToolAction(tool, actionKey, args, runtimeHeaders);
 
         void logToolRequest(
           session.tenantDbName,
@@ -265,6 +285,8 @@ export const toolsApiPlugin: FastifyPluginAsync = async (app) => {
           typeof result === 'object' ? result as Record<string, unknown> : { value: result },
           undefined,
           'dashboard',
+          undefined,
+          runtimeAuth,
         );
 
         return reply.code(200).send({ latencyMs, result });
@@ -284,6 +306,8 @@ export const toolsApiPlugin: FastifyPluginAsync = async (app) => {
           undefined,
           errorMessage,
           'dashboard',
+          undefined,
+          runtimeAuth,
         );
 
         return reply.code(500).send({ error: errorMessage });

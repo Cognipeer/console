@@ -54,6 +54,15 @@ export function prepareConnectionForStorage(input: unknown): IExternalAgentConne
   if (typeof raw.credentialProviderKey === 'string' && raw.credentialProviderKey.trim()) {
     conn.credentialProviderKey = raw.credentialProviderKey.trim();
   }
+  if (raw.runtimeHeaders && typeof raw.runtimeHeaders === 'object') {
+    const policy = raw.runtimeHeaders as Record<string, unknown>;
+    conn.runtimeHeaders = {
+      allow: policy.allow === true,
+      ...(Array.isArray(policy.allowedNames)
+        ? { allowedNames: policy.allowedNames.filter((n): n is string => typeof n === 'string' && !!n.trim()) }
+        : {}),
+    };
+  }
 
   const rawKey = typeof raw.apiKey === 'string' ? raw.apiKey.trim() : '';
   if (rawKey) {
@@ -124,6 +133,7 @@ function pickCredentialValue(credentials: Record<string, unknown>): string | und
 async function buildHeaders(
   connection: IExternalAgentConnection,
   ctx: ExternalAgentContext,
+  runtimeHeaders?: Record<string, string>,
 ): Promise<Record<string, string>> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -135,6 +145,9 @@ async function buildHeaders(
     const apiKey = await resolveApiKey(connection, ctx);
     if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
   }
+
+  // Caller-supplied runtime headers (already policy-filtered) win over static config.
+  Object.assign(headers, runtimeHeaders);
 
   return headers;
 }
@@ -281,9 +294,10 @@ export async function invokeExternalAgent(
   connection: IExternalAgentConnection,
   messages: ExternalChatMessage[],
   ctx: ExternalAgentContext,
+  runtimeHeaders?: Record<string, string>,
 ): Promise<InvokeExternalAgentResult> {
   if (!connection.url) throw new Error('Connected agent has no endpoint URL configured');
-  const headers = await buildHeaders(connection, ctx);
+  const headers = await buildHeaders(connection, ctx, runtimeHeaders);
 
   let url: string;
   let body: unknown;

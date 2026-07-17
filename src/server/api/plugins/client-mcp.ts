@@ -7,6 +7,7 @@ import { createLogger } from '@/lib/core/logger';
 import {
   executeMcpTool,
   getMcpServerByKey,
+  listEnabledMcpTools,
   logMcpRequest,
   resolveExposure,
   resolveSourceType,
@@ -20,12 +21,32 @@ import {
   sendSseResponse,
 } from '@/lib/services/mcp/sseSessionManager';
 import {
+  buildRuntimeContextFromRequest,
+  describeRuntimeAuth,
+  resolveRuntimeHeaders,
+  runtimeHeaderPolicyFromMetadata,
+  type AgentRuntimeContext,
+} from '@/lib/services/runtimeContext';
+import {
   getApiTokenContextForRequest,
   readJsonBody,
   withClientApiRequestContext,
 } from '../fastify-utils';
 
 const logger = createLogger('api:client-mcp');
+
+/** Resolve caller-supplied headers against the server's opt-in policy. */
+function resolveMcpRuntimeHeaders(
+  server: IMcpServer,
+  runtimeContext: AgentRuntimeContext | undefined,
+): Record<string, string> | undefined {
+  return resolveRuntimeHeaders(
+    runtimeContext,
+    'mcp',
+    server.key,
+    runtimeHeaderPolicyFromMetadata(server.metadata),
+  );
+}
 
 const JSONRPC_VERSION = '2.0';
 const MCP_PROTOCOL_VERSION = '2025-03-26';
@@ -66,10 +87,14 @@ async function runToolCall(
     transport: 'rest' | 'jsonrpc' | 'sse';
     caller: CallerInfo;
     sessionId?: string;
+    runtimeContext?: AgentRuntimeContext;
   },
 ): Promise<{ ok: true; result: unknown; latencyMs: number } | { ok: false; error: string }> {
+  const runtimeHeaders = resolveMcpRuntimeHeaders(server, log.runtimeContext);
+  // Header names only — values never reach the log payload.
+  const runtimeAuth = describeRuntimeAuth(log.runtimeContext, runtimeHeaders);
   try {
-    const { latencyMs, result } = await executeMcpTool(server, toolName, args);
+    const { latencyMs, result } = await executeMcpTool(server, toolName, args, runtimeHeaders);
     void logMcpRequest(log.tenantDbName, {
       tenantId: log.tenantId,
       projectId: log.projectId,
@@ -77,7 +102,11 @@ async function runToolCall(
       toolName,
       status: 'success',
       latencyMs,
-      requestPayload: { tool: toolName, arguments: args },
+      requestPayload: {
+        tool: toolName,
+        arguments: args,
+        ...(runtimeAuth ? { _runtimeAuth: runtimeAuth } : {}),
+      },
       responsePayload: typeof result === 'object' && result !== null
         ? result as Record<string, unknown>
         : { value: result },
@@ -98,7 +127,11 @@ async function runToolCall(
       toolName,
       status: 'error',
       latencyMs: 0,
-      requestPayload: { tool: toolName, arguments: args },
+      requestPayload: {
+        tool: toolName,
+        arguments: args,
+        ...(runtimeAuth ? { _runtimeAuth: runtimeAuth } : {}),
+      },
       errorMessage,
       callerTokenId: log.caller.tokenId,
       callerUserId: log.caller.userId,
@@ -148,6 +181,11 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
           tokenId: ctx.tokenRecord._id?.toString(),
           userId: ctx.user?._id?.toString(),
         },
+        runtimeContext: buildRuntimeContextFromRequest(body.runtime_context, request.headers, {
+          userId: ctx.user?._id?.toString(),
+          tokenId: ctx.tokenRecord._id?.toString(),
+          source: 'mcp',
+        }),
       });
 
       if (!outcome.ok) {
@@ -182,7 +220,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({
         server: serializeMcpServer(server),
-        tools: server.tools,
+        tools: listEnabledMcpTools(server),
       });
     } catch (error) {
       logger.error('Client MCP list tools error', { error });
@@ -274,7 +312,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         }
 
         return respond(jsonRpcOk(id, {
-          tools: (server.tools ?? []).map((tool) => ({
+          tools: listEnabledMcpTools(server).map((tool) => ({
             description: tool.description,
             inputSchema: tool.inputSchema,
             name: tool.name,
@@ -303,6 +341,8 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
           return respond(jsonRpcError(id, -32003, `${requiredProtocol} access is disabled for this MCP server`));
         }
 
+        // MCP convention: request-scoped extras ride in params._meta.
+        const meta = body.params?._meta as Record<string, unknown> | undefined;
         const outcome = await runToolCall(server, toolName, args, {
           tenantDbName: ctx.tenantDbName,
           tenantId: ctx.tenantId,
@@ -313,6 +353,11 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
             userId: ctx.user?._id?.toString(),
           },
           sessionId: sessionId ?? undefined,
+          runtimeContext: buildRuntimeContextFromRequest(meta?.runtime_context, request.headers, {
+            userId: ctx.user?._id?.toString(),
+            tokenId: ctx.tokenRecord._id?.toString(),
+            source: 'mcp',
+          }),
         });
 
         if (outcome.ok) {

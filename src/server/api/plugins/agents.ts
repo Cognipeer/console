@@ -11,10 +11,12 @@ import {
   listAgents,
   listAgentVersions,
   listConversations,
+  normalizeA2aMetadataUpdate,
   prepareConnectionForStorage,
   publishAgent,
   updateAgentRecord,
 } from '@/lib/services/agents';
+import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import {
   readJsonBody,
   requireProjectContextForRequest,
@@ -173,6 +175,15 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
             delete body.config;
           }
         }
+      }
+
+      // A2A exposure updates: whitelist fields and keep the endpoint slug
+      // server-owned (existing slug is preserved, never client-chosen).
+      if (body.metadata && typeof body.metadata === 'object'
+        && (body.metadata as Record<string, unknown>).a2a !== undefined) {
+        const metadata = body.metadata as Record<string, unknown>;
+        const existing = await getAgentById(session.tenantDbName, agentId);
+        metadata.a2a = normalizeA2aMetadataUpdate(metadata.a2a, existing);
       }
 
       const agent = await updateAgentRecord(session.tenantDbName, agentId, body, session.userId);
@@ -337,8 +348,16 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Agent not found' });
       }
 
+      // Playground JSON editor: caller-supplied runtime context (downstream
+      // headers/metadata), stamped with the dashboard user's identity.
+      const runtimeContext = buildRuntimeContextFromRequest(body.runtime_context, request.headers, {
+        userId: session.userId,
+        source: 'playground',
+      });
+
       const result = await executePlaygroundChat({
         agentKey: agent.key,
+        runtimeContext,
         history: Array.isArray(body.history)
           ? body.history
             .filter((item): item is { content: string; role: string } =>

@@ -25,10 +25,16 @@ import { getModelByKey } from '@/lib/services/models/modelService';
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
 import { queryRag } from '@/lib/services/rag/ragService';
 import { evaluateGuardrail } from '@/lib/services/guardrail';
-import { getMcpServerByKey, executeMcpTool } from '@/lib/services/mcp';
+import { getMcpServerByKey, executeMcpTool, isMcpToolEnabled } from '@/lib/services/mcp';
 import { getToolByKey, executeToolAction, logToolRequest } from '@/lib/services/tools';
 import { resolveBrowser, createBrowserSession, buildBrowserAgentTools, closeBrowserSession } from '@/lib/services/browser';
 import { recordTracingSessionCreated } from '@/lib/services/agentTracing';
+import {
+    describeRuntimeAuth,
+    resolveRuntimeHeaders,
+    runtimeHeaderPolicyFromMetadata,
+    type AgentRuntimeContext,
+} from '@/lib/services/runtimeContext';
 import { invokeExternalAgent } from './externalAgent';
 
 const logger = createLogger('agents');
@@ -168,6 +174,7 @@ async function buildBoundTools(
     bindings: { source: string; sourceKey: string; toolNames: string[]; config?: Record<string, unknown> }[] | undefined,
     createToolFn: typeof import('@cognipeer/agent-sdk').createTool,
     zod: typeof import('zod').z,
+    runtimeContext?: AgentRuntimeContext,
 ): Promise<{ cleanupTasks: Array<() => Promise<void>>; tools: AgentSdkToolInterface[] }> {
     if (!bindings || bindings.length === 0) return { cleanupTasks: [], tools: [] };
 
@@ -182,6 +189,14 @@ async function buildBoundTools(
                 logger.warn('Skipping inactive/missing tool', { key: binding.sourceKey });
                 continue;
             }
+
+            const toolRuntimeHeaders = resolveRuntimeHeaders(
+                runtimeContext,
+                'tool',
+                toolRecord.key,
+                runtimeHeaderPolicyFromMetadata(toolRecord.metadata),
+            );
+            const toolRuntimeAuth = describeRuntimeAuth(runtimeContext, toolRuntimeHeaders);
 
             for (const actionName of binding.toolNames) {
                 const action = toolRecord.actions.find(
@@ -201,7 +216,9 @@ async function buildBoundTools(
                     schema: zod.object({}).passthrough(),
                     func: async (args: Record<string, unknown>) => {
                         try {
-                            const { result, latencyMs } = await executeToolAction(toolRecord, action.key, args);
+                            const { result, latencyMs } = await executeToolAction(
+                                toolRecord, action.key, args, toolRuntimeHeaders,
+                            );
                             logToolRequest(
                                 tenantDbName, tenantId, toolRecord.projectId,
                                 toolRecord.key, action.key, action.name,
@@ -210,6 +227,8 @@ async function buildBoundTools(
                                 typeof result === 'object' ? (result as Record<string, unknown>) : { value: result },
                                 undefined,
                                 'agent',
+                                runtimeContext?.tokenId,
+                                toolRuntimeAuth,
                             );
                             return typeof result === 'string' ? result : JSON.stringify(result);
                         } catch (execError) {
@@ -222,6 +241,8 @@ async function buildBoundTools(
                                 undefined,
                                 errorMessage,
                                 'agent',
+                                runtimeContext?.tokenId,
+                                toolRuntimeAuth,
                             );
                             throw execError;
                         }
@@ -237,10 +258,24 @@ async function buildBoundTools(
                 continue;
             }
 
+            const mcpRuntimeHeaders = resolveRuntimeHeaders(
+                runtimeContext,
+                'mcp',
+                server.key,
+                runtimeHeaderPolicyFromMetadata(server.metadata),
+            );
+
             for (const toolName of binding.toolNames) {
                 const mcpToolDef = server.tools.find((t) => t.name === toolName);
                 if (!mcpToolDef) {
                     logger.warn('MCP tool not found, skipping', {
+                        server: binding.sourceKey,
+                        tool: toolName,
+                    });
+                    continue;
+                }
+                if (!isMcpToolEnabled(server, toolName)) {
+                    logger.warn('MCP tool disabled on server, skipping', {
                         server: binding.sourceKey,
                         tool: toolName,
                     });
@@ -252,7 +287,7 @@ async function buildBoundTools(
                     description: mcpToolDef.description || `Call ${mcpToolDef.name} on ${server.name}`,
                     schema: zod.object({}).passthrough(),
                     func: async (args: Record<string, unknown>) => {
-                        const { result } = await executeMcpTool(server, toolName, args);
+                        const { result } = await executeMcpTool(server, toolName, args, mcpRuntimeHeaders);
                         return typeof result === 'string' ? result : JSON.stringify(result);
                     },
                 });
@@ -813,6 +848,11 @@ export interface AgentChatRequest {
     version?: number;
     /** When true, use the published version (default for API/SDK calls) */
     usePublished?: boolean;
+    /**
+     * Caller-supplied runtime context (headers for downstream tools/MCP/
+     * connected agents, metadata). Plain data — serializes over the job queue.
+     */
+    runtimeContext?: AgentRuntimeContext;
 }
 
 /** Tool-call progress notification surfaced while an agent run executes. */
@@ -833,6 +873,11 @@ export interface AgentPlaygroundChatRequest {
     userMessage: string;
     /** Previous messages for context (in-memory only) */
     history?: Array<{ role: string; content: string }>;
+    /**
+     * Caller-supplied runtime context (headers for downstream tools/MCP/
+     * connected agents, metadata). Plain data — serializes over the job queue.
+     */
+    runtimeContext?: AgentRuntimeContext;
     /**
      * In-process only, best-effort: fires as the agent starts/finishes each
      * tool call so callers (e.g. realtime sessions) can surface progress.
@@ -954,6 +999,7 @@ export async function executeAgentChatLocal(
             config.connection,
             [...history, { role: 'user', content: userMessage }],
             { tenantDbName, tenantId, projectId },
+            resolveRuntimeHeaders(request.runtimeContext, 'agent', agentKey, config.connection.runtimeHeaders),
         );
 
         const updatedMessages = [
@@ -1094,6 +1140,7 @@ export async function executeAgentChatLocal(
         config.toolBindings,
         createTool,
         z,
+        request.runtimeContext,
     );
     tools.push(...boundTools);
 
@@ -1265,6 +1312,7 @@ export async function executePlaygroundChatLocal(
             config.connection,
             [...(history || []), { role: 'user', content: userMessage }],
             { tenantDbName, tenantId, projectId },
+            resolveRuntimeHeaders(request.runtimeContext, 'agent', agentKey, config.connection.runtimeHeaders),
         );
         logger.info('Connected agent playground chat completed', { agentKey });
         return { content };
@@ -1363,6 +1411,7 @@ export async function executePlaygroundChatLocal(
         config.toolBindings,
         createTool,
         z,
+        request.runtimeContext,
     );
     playgroundTools.push(...boundPlaygroundTools);
 

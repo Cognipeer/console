@@ -64,6 +64,38 @@ export function resolveExposure(server: IMcpServer): IMcpExposureConfig {
   };
 }
 
+// ── Tool enable/disable ───────────────────────────────────────────────────
+// Disabled tool names ride in metadata.disabledTools (same pattern as
+// runtimeHeaders — no schema migration in either DB tree). Absent/empty
+// list means every discovered tool is enabled.
+
+export function getDisabledToolNames(server: Pick<IMcpServer, 'metadata'>): string[] {
+  const raw = (server.metadata as Record<string, unknown> | undefined)?.disabledTools;
+  return Array.isArray(raw) ? raw.filter((n): n is string => typeof n === 'string') : [];
+}
+
+export function isMcpToolEnabled(server: IMcpServer, toolName: string): boolean {
+  return !getDisabledToolNames(server).includes(toolName);
+}
+
+/** Tools visible to callers (tools/list, client APIs, agents). */
+export function listEnabledMcpTools(server: IMcpServer): IMcpTool[] {
+  const disabled = new Set(getDisabledToolNames(server));
+  if (disabled.size === 0) return server.tools ?? [];
+  return (server.tools ?? []).filter((tool) => !disabled.has(tool.name));
+}
+
+/** Merge a disabled-name list into a metadata blob (empty list removes the key). */
+function metadataWithDisabledTools(
+  metadata: Record<string, unknown> | undefined,
+  disabledTools: string[],
+): Record<string, unknown> {
+  const next = { ...(metadata ?? {}) };
+  if (disabledTools.length) next.disabledTools = disabledTools;
+  else delete next.disabledTools;
+  return next;
+}
+
 // ── Serialization ─────────────────────────────────────────────────────────
 
 export function serializeMcpServer(record: IMcpServer): McpServerView {
@@ -77,6 +109,7 @@ export function serializeMcpServer(record: IMcpServer): McpServerView {
     exposure: resolveExposure(record),
     upstreamAuth: maskAuthConfig(record.upstreamAuth),
     stdioConfig: maskStdioConfig(record.stdioConfig),
+    disabledTools: getDisabledToolNames(record),
   } as McpServerView;
 }
 
@@ -89,6 +122,7 @@ export function serializeMcpServerFull(record: IMcpServer): McpServerView & { op
     exposure: resolveExposure(record),
     upstreamAuth: maskAuthConfig(record.upstreamAuth),
     stdioConfig: maskStdioConfig(record.stdioConfig),
+    disabledTools: getDisabledToolNames(record),
   } as McpServerView & { openApiSpec?: string };
 }
 
@@ -494,6 +528,14 @@ function diffForAudit(before: IMcpServer, after: Partial<IMcpServer>): Record<st
   if (after.openApiSpec !== undefined && after.openApiSpec !== before.openApiSpec) {
     changes.openApiSpec = { from: '(previous spec)', to: '(updated spec)' };
   }
+  if (after.metadata !== undefined) {
+    // Record counts only — the full name list can run to thousands of entries.
+    const fromList = getDisabledToolNames(before);
+    const toList = getDisabledToolNames({ metadata: after.metadata });
+    if (JSON.stringify(fromList) !== JSON.stringify(toList)) {
+      changes.disabledTools = { from: `${fromList.length} disabled`, to: `${toList.length} disabled` };
+    }
+  }
   return changes;
 }
 
@@ -524,6 +566,21 @@ export async function updateMcpServer(
   if (input.remoteConfig !== undefined) updateData.remoteConfig = input.remoteConfig;
   if (input.stdioConfig !== undefined) {
     updateData.stdioConfig = mergeStdioConfigUpdate(existing.stdioConfig, input.stdioConfig);
+  }
+  // Runtime-header passthrough policy lives in the metadata blob (no schema
+  // migration needed in either DB tree).
+  if (input.runtimeHeaders !== undefined) {
+    updateData.metadata = {
+      ...(existing.metadata ?? {}),
+      runtimeHeaders: input.runtimeHeaders === null
+        ? undefined
+        : {
+          allow: input.runtimeHeaders.allow === true,
+          ...(input.runtimeHeaders.allowedNames?.length
+            ? { allowedNames: input.runtimeHeaders.allowedNames.filter((n) => typeof n === 'string' && n.trim()) }
+            : {}),
+        },
+    };
   }
 
   // Re-parse spec if updated (openapi source only)
@@ -556,6 +613,33 @@ export async function updateMcpServer(
     && (updateData.stdioConfig as IMcpStdioConfig).executionMode === 'subprocess') {
     updateData.tools = await stdioListTools(updateData.stdioConfig as IMcpStdioConfig);
     updateData.toolsDiscoveredAt = new Date();
+  }
+
+  // Tool enable/disable list (metadata-backed). Runs after tool rediscovery so
+  // the incoming names are validated against the tool list being persisted.
+  if (input.disabledTools !== undefined) {
+    const knownNames = new Set(
+      ((updateData.tools as IMcpTool[] | undefined) ?? existing.tools ?? []).map((t) => t.name),
+    );
+    const disabled = [...new Set(
+      input.disabledTools.filter((n) => typeof n === 'string' && knownNames.has(n)),
+    )];
+    updateData.metadata = metadataWithDisabledTools(
+      (updateData.metadata as Record<string, unknown> | undefined) ?? existing.metadata,
+      disabled,
+    );
+  } else if (updateData.tools !== undefined) {
+    // Tool list changed without an explicit selection — prune disabled names
+    // that no longer exist so stale entries don't linger.
+    const knownNames = new Set((updateData.tools as IMcpTool[]).map((t) => t.name));
+    const before = getDisabledToolNames(existing);
+    const pruned = before.filter((n) => knownNames.has(n));
+    if (pruned.length !== before.length) {
+      updateData.metadata = metadataWithDisabledTools(
+        (updateData.metadata as Record<string, unknown> | undefined) ?? existing.metadata,
+        pruned,
+      );
+    }
   }
 
   const updated = await db.updateMcpServer(serverId, updateData as Partial<IMcpServer>);
@@ -599,12 +683,19 @@ export async function refreshMcpServerTools(
 
   try {
     const tools = await discoverToolsForServer(server);
-    const updated = await db.updateMcpServer(serverId, {
+    const refreshUpdate: Partial<IMcpServer> = {
       tools,
       toolsDiscoveredAt: new Date(),
       lastError: null,
       updatedBy: userId,
-    });
+    };
+    // Prune disabled names that vanished from the rediscovered tool list.
+    const disabledBefore = getDisabledToolNames(server);
+    const disabledKept = disabledBefore.filter((n) => tools.some((t) => t.name === n));
+    if (disabledKept.length !== disabledBefore.length) {
+      refreshUpdate.metadata = metadataWithDisabledTools(server.metadata, disabledKept);
+    }
+    const updated = await db.updateMcpServer(serverId, refreshUpdate);
     void logMcpAudit(tenantDbName, {
       tenantId: server.tenantId,
       projectId: server.projectId,
@@ -905,6 +996,7 @@ export async function executeMcpTool(
   server: IMcpServer,
   toolName: string,
   args: Record<string, unknown>,
+  runtimeHeaders?: Record<string, string>,
 ): Promise<{ result: unknown; latencyMs: number }> {
   return routeInstanceCall(
     {
@@ -912,8 +1004,8 @@ export async function executeMcpTool(
       entityId: mcpEntityId(server.tenantId, server.key),
       jobName: 'invoke',
     },
-    { server, toolName, args } as unknown as QueuePayload,
-    () => executeMcpToolLocal(server, toolName, args),
+    { server, toolName, args, runtimeHeaders } as unknown as QueuePayload,
+    () => executeMcpToolLocal(server, toolName, args, runtimeHeaders),
   );
 }
 
@@ -921,9 +1013,19 @@ export async function executeMcpToolLocal(
   server: IMcpServer,
   toolName: string,
   args: Record<string, unknown>,
+  /**
+   * Caller-supplied, policy-filtered headers merged into upstream HTTP calls.
+   * Applies to remote and openapi sources only; stdio/sandbox runs have no
+   * upstream HTTP request to attach them to.
+   */
+  runtimeHeaders?: Record<string, string>,
 ): Promise<{ result: unknown; latencyMs: number }> {
   const sourceType = resolveSourceType(server);
   const start = Date.now();
+
+  if (!isMcpToolEnabled(server, toolName)) {
+    throw new Error(`Tool "${toolName}" is disabled on MCP server "${server.name}"`);
+  }
 
   // Aegis pre-hook (enterprise overlay; no-op in community).
   const guardrail = mcpGuardrailHook.current;
@@ -948,13 +1050,14 @@ export async function executeMcpToolLocal(
   let result: unknown;
   try {
     if (sourceType === 'openapi') {
-      result = await executeOpenApiTool(server, toolName, effectiveArgs);
+      result = await executeOpenApiTool(server, toolName, effectiveArgs, runtimeHeaders);
     } else if (sourceType === 'remote') {
       result = await remoteCallTool(
         {
           url: server.remoteConfig!.url,
           transport: server.remoteConfig!.transport,
           auth: openAuthConfig(server.upstreamAuth),
+          extraHeaders: runtimeHeaders,
         },
         toolName,
         effectiveArgs,
@@ -1001,6 +1104,7 @@ async function executeOpenApiTool(
   server: IMcpServer,
   toolName: string,
   args: Record<string, unknown>,
+  runtimeHeaders?: Record<string, string>,
 ): Promise<unknown> {
   const tool = server.tools.find((t) => t.name === toolName);
   if (!tool) {
@@ -1046,6 +1150,9 @@ async function executeOpenApiTool(
     const encoded = Buffer.from(`${auth.username}:${auth.password}`).toString('base64');
     headers['Authorization'] = `Basic ${encoded}`;
   }
+
+  // Caller-supplied runtime headers (already policy-filtered) win over static auth.
+  Object.assign(headers, runtimeHeaders);
 
   const fetchOptions: RequestInit = {
     method: tool.httpMethod,

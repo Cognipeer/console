@@ -30,6 +30,12 @@ import {
   updateMcpServer,
 } from '@/lib/services/mcp';
 import type { McpAuditContext } from '@/lib/services/mcp';
+import {
+  buildRuntimeContextFromRequest,
+  describeRuntimeAuth,
+  resolveRuntimeHeaders,
+  runtimeHeaderPolicyFromMetadata,
+} from '@/lib/services/runtimeContext';
 import { mcpSandboxRunner, mcpGuardrailHook, IS_ENTERPRISE_BUILD } from '@/enterprise/registry';
 import { isEnterpriseLicenseType } from '@/lib/license/license-manager';
 import {
@@ -394,6 +400,11 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'status must be "active" or "disabled"' });
       }
 
+      if (body.disabledTools !== undefined
+        && (!Array.isArray(body.disabledTools) || body.disabledTools.some((n) => typeof n !== 'string'))) {
+        return reply.code(400).send({ error: 'disabledTools must be an array of tool names' });
+      }
+
       // Enterprise sub-feature gate (mirrors POST): a non-enterprise tenant may
       // not turn on persistent sandbox execution via edit. Aegis is left as
       // save-but-inert (UI warns) to match create behaviour.
@@ -420,6 +431,8 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         stdioConfig: nextStdioConfig,
         exposure: body.exposure !== undefined ? parseExposure(body.exposure) : undefined,
         aegis: nextAegis,
+        runtimeHeaders: body.runtimeHeaders as { allow?: boolean; allowedNames?: string[] } | null | undefined,
+        disabledTools: body.disabledTools as string[] | undefined,
       }, auditContextFor(request, session.userId));
 
       if (!updated) {
@@ -575,6 +588,20 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'MCP server is disabled' });
       }
 
+      // Playground JSON editor: caller-supplied runtime context, filtered by
+      // the server's opt-in policy exactly like the external surfaces.
+      const runtimeContext = buildRuntimeContextFromRequest(body.runtime_context, request.headers, {
+        userId: session.userId,
+        source: 'playground',
+      });
+      const runtimeHeaders = resolveRuntimeHeaders(
+        runtimeContext,
+        'mcp',
+        server.key,
+        runtimeHeaderPolicyFromMetadata(server.metadata),
+      );
+      const runtimeAuth = describeRuntimeAuth(runtimeContext, runtimeHeaders);
+
       void logMcpAudit(session.tenantDbName, {
         tenantId: session.tenantId,
         projectId: server.projectId,
@@ -590,7 +617,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
       });
 
       try {
-        const { result, latencyMs } = await executeMcpTool(server, toolName, args);
+        const { result, latencyMs } = await executeMcpTool(server, toolName, args, runtimeHeaders);
 
         void logMcpRequest(session.tenantDbName, {
           tenantId: session.tenantId,
@@ -599,7 +626,11 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
           toolName,
           status: 'success',
           latencyMs,
-          requestPayload: { tool: toolName, arguments: args },
+          requestPayload: {
+            tool: toolName,
+            arguments: args,
+            ...(runtimeAuth ? { _runtimeAuth: runtimeAuth } : {}),
+          },
           responsePayload: typeof result === 'object' ? result as Record<string, unknown> : { value: result },
           callerType: 'dashboard',
           callerUserId: session.userId,
@@ -617,7 +648,11 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
           toolName,
           status: 'error',
           latencyMs: 0,
-          requestPayload: { tool: toolName, arguments: args },
+          requestPayload: {
+            tool: toolName,
+            arguments: args,
+            ...(runtimeAuth ? { _runtimeAuth: runtimeAuth } : {}),
+          },
           errorMessage: message,
           callerType: 'dashboard',
           callerUserId: session.userId,

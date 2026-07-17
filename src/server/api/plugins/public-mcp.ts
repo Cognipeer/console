@@ -22,6 +22,7 @@ import { getDatabase } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
   executeMcpTool,
+  listEnabledMcpTools,
   logMcpRequest,
   resolveExposure,
   resolveSourceType,
@@ -189,7 +190,7 @@ async function handlePublicMessage(request: FastifyRequest, reply: FastifyReply)
   }
   if (method === 'tools/list') {
     return respond(jsonRpcOk(id, {
-      tools: (server.tools ?? []).map((tool) => ({
+      tools: listEnabledMcpTools(server).map((tool) => ({
         description: tool.description,
         inputSchema: tool.inputSchema,
         name: tool.name,

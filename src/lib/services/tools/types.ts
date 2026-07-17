@@ -91,6 +91,8 @@ export interface UpdateToolInput {
   mcpEndpoint?: string;
   mcpTransport?: 'sse' | 'streamable-http';
   status?: string;
+  /** Opt-in policy for caller-supplied runtime header passthrough (null clears). */
+  runtimeHeaders?: { allow?: boolean; allowedNames?: string[] } | null;
 }
 
 export interface ExecuteToolActionResult {

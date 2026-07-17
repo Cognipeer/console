@@ -18,6 +18,8 @@ export interface RemoteMcpTarget {
   url: string;
   transport?: 'streamable-http' | 'sse';
   auth?: IMcpAuthConfig;
+  /** Caller-supplied, policy-filtered runtime headers; merged after static auth. */
+  extraHeaders?: Record<string, string>;
 }
 
 export function buildUpstreamAuthHeaders(auth: IMcpAuthConfig | undefined): Record<string, string> {
@@ -46,6 +48,7 @@ async function rpcCall(
     // Streamable HTTP servers may respond with JSON or an SSE stream.
     Accept: 'application/json, text/event-stream',
     ...buildUpstreamAuthHeaders(target.auth),
+    ...(target.extraHeaders ?? {}),
   };
 
   const response = await safeFetch(target.url, {
