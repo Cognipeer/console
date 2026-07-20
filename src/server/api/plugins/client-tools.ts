@@ -5,6 +5,7 @@ import {
   getToolByKey,
   listTools,
   logToolRequest,
+  toolRequestSecretValues,
 } from '@/lib/services/tools';
 import {
   getApiTokenContextForRequest,
@@ -98,6 +99,9 @@ export const clientToolsApiPlugin: FastifyPluginAsync = async (app) => {
       const action = tool.actions.find((item) => item.key === actionKey);
       const actionName = action?.name ?? actionKey;
       const callerTokenId = String(ctx.tokenRecord._id ?? '');
+      // No runtime headers on this surface, but the tool's static upstream
+      // credential can still be echoed back into the logged response.
+      const secretValues = toolRequestSecretValues(tool);
 
       try {
         const { latencyMs, result } = await executeToolAction(tool, actionKey, args);
@@ -115,6 +119,8 @@ export const clientToolsApiPlugin: FastifyPluginAsync = async (app) => {
           undefined,
           'api',
           callerTokenId,
+          undefined,
+          secretValues,
         );
 
         return reply.code(200).send({
@@ -142,6 +148,8 @@ export const clientToolsApiPlugin: FastifyPluginAsync = async (app) => {
           errorMessage,
           'api',
           callerTokenId,
+          undefined,
+          secretValues,
         );
 
         return reply.code(400).send({ error: errorMessage });

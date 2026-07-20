@@ -39,7 +39,12 @@ const requestContextFormat = winston.format((info) => {
 /* ------------------------------------------------------------------ */
 
 const REDACTED = '[REDACTED]';
-const SENSITIVE_KEY_PATTERN = /^(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|authorization|bearer|cookie|set[_-]?cookie|token|jwt|encryption[_-]?key|private[_-]?key|x[_-]?api[_-]?key|aws[_-]?secret)$/i;
+/**
+ * Object keys whose VALUE is a secret and must never be persisted or shown.
+ * Shared with the persisted-log scrubber (see `logRedaction.ts`) so app logs
+ * and request-log payloads redact by the same rule.
+ */
+export const SENSITIVE_KEY_PATTERN = /^(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|authorization|bearer|cookie|set[_-]?cookie|token|jwt|encryption[_-]?key|private[_-]?key|x[_-]?api[_-]?key|aws[_-]?secret)$/i;
 const REDACT_MAX_DEPTH = 6;
 
 function redactValue(value: unknown, depth: number, seen: WeakSet<object>): unknown {

@@ -9,6 +9,7 @@ import {
   getMcpServerByKey,
   listEnabledMcpTools,
   logMcpRequest,
+  mcpRequestSecretValues,
   resolveExposure,
   resolveSourceType,
   serializeMcpServer,
@@ -93,6 +94,9 @@ async function runToolCall(
   const runtimeHeaders = resolveMcpRuntimeHeaders(server, log.runtimeContext);
   // Header names only — values never reach the log payload.
   const runtimeAuth = describeRuntimeAuth(log.runtimeContext, runtimeHeaders);
+  // Values (runtime headers + static upstream credential) that must be scrubbed
+  // from an echoed response before it is persisted.
+  const secretValues = mcpRequestSecretValues(server, runtimeHeaders);
   try {
     const { latencyMs, result } = await executeMcpTool(server, toolName, args, runtimeHeaders);
     void logMcpRequest(log.tenantDbName, {
@@ -116,7 +120,7 @@ async function runToolCall(
       transport: log.transport,
       sourceType: resolveSourceType(server),
       sessionId: log.sessionId,
-    });
+    }, secretValues);
     return { ok: true, result, latencyMs };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Tool execution failed';
@@ -139,7 +143,7 @@ async function runToolCall(
       transport: log.transport,
       sourceType: resolveSourceType(server),
       sessionId: log.sessionId,
-    });
+    }, secretValues);
     return { ok: false, error: errorMessage };
   }
 }

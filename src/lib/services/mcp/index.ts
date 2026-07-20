@@ -6,6 +6,7 @@ export {
   getMcpServerByKey,
   listMcpServers,
   logMcpRequest,
+  mcpRequestSecretValues,
   listMcpRequestLogs,
   countMcpRequestLogs,
   aggregateMcpRequestLogs,

@@ -24,6 +24,7 @@ import {
   executeMcpTool,
   listEnabledMcpTools,
   logMcpRequest,
+  mcpRequestSecretValues,
   resolveExposure,
   resolveSourceType,
 } from '@/lib/services/mcp';
@@ -93,6 +94,9 @@ async function runPublicToolCall(
   sessionId?: string,
 ): Promise<{ ok: true; result: unknown } | { ok: false; error: string }> {
   const db = await getDatabase();
+  // Public surface forwards no runtime headers, but the server's own static
+  // upstream credential can still be echoed back — scrub it from the response.
+  const secretValues = mcpRequestSecretValues(server);
   try {
     const { result, latencyMs } = await withTenantDb(db, tenant.dbName, () =>
       executeMcpTool(server, toolName, args));
@@ -111,7 +115,7 @@ async function runPublicToolCall(
       transport,
       sourceType: resolveSourceType(server),
       sessionId,
-    });
+    }, secretValues);
     return { ok: true, result };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Tool execution failed';
@@ -128,7 +132,7 @@ async function runPublicToolCall(
       transport,
       sourceType: resolveSourceType(server),
       sessionId,
-    });
+    }, secretValues);
     return { ok: false, error: errorMessage };
   }
 }

@@ -9,6 +9,11 @@ import slugify from 'slugify';
 import { safeFetch } from '@/lib/security/outboundFetch';
 import { normalizeApiSpec, type SpecFormatHint } from '@/lib/services/specImport';
 import { createLogger } from '@/lib/core/logger';
+import {
+  authConfigSecretValues,
+  redactLogPayload,
+  redactLogString,
+} from '@/lib/services/logRedaction';
 import { getDatabase } from '@/lib/database';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import type { RuntimeAuthLogInfo } from '@/lib/services/runtimeContext';
@@ -628,6 +633,22 @@ export function serializeTool(tool: ITool): ToolView {
 
 // ── Request Logging ───────────────────────────────────────────────────────
 
+/**
+ * Outbound secret values that could be echoed back into a logged response for
+ * this tool: the caller's applied runtime-header values plus the tool's own
+ * static upstream credential. Tool auth is stored plaintext (no vault seal),
+ * so it is read directly. Passed to `logToolRequest`.
+ */
+export function toolRequestSecretValues(
+  tool: ITool,
+  runtimeHeaders?: Record<string, string>,
+): string[] {
+  return [
+    ...Object.values(runtimeHeaders ?? {}),
+    ...authConfigSecretValues(tool.upstreamAuth),
+  ];
+}
+
 export async function logToolRequest(
   tenantDbName: string,
   tenantId: string,
@@ -644,6 +665,8 @@ export async function logToolRequest(
   callerTokenId?: string,
   /** Log-safe runtime-auth info: header NAMES only, never values. */
   runtimeAuth?: RuntimeAuthLogInfo,
+  /** Outbound secret values to scrub from echoed request/response payloads. */
+  secretValues?: string[],
 ) {
   // Resolve attribution + rollup before any await so the request ALS is in
   // scope. `callerType`/`callerTokenId` stay for compat; the standard
@@ -673,11 +696,15 @@ export async function logToolRequest(
       latencyMs,
       // Runtime-auth usage rides inside the payload blob so both DB schemas
       // persist it without a migration. Header names only — values never land here.
-      requestPayload: runtimeAuth
-        ? { ...(requestPayload ?? {}), _runtimeAuth: runtimeAuth as unknown as Record<string, unknown> }
-        : requestPayload,
-      responsePayload,
-      errorMessage,
+      // Scrub echoed secrets / sensitive keys and cap size before persisting.
+      requestPayload: redactLogPayload(
+        runtimeAuth
+          ? { ...(requestPayload ?? {}), _runtimeAuth: runtimeAuth as unknown as Record<string, unknown> }
+          : requestPayload,
+        { secretValues },
+      ),
+      responsePayload: redactLogPayload(responsePayload, { secretValues }),
+      errorMessage: redactLogString(errorMessage, secretValues),
       callerType,
       callerTokenId,
     });

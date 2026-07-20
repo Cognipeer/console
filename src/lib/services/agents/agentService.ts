@@ -26,7 +26,7 @@ import { buildModelRuntime } from '@/lib/services/models/runtimeService';
 import { queryRag } from '@/lib/services/rag/ragService';
 import { evaluateGuardrail } from '@/lib/services/guardrail';
 import { getMcpServerByKey, executeMcpTool, isMcpToolEnabled } from '@/lib/services/mcp';
-import { getToolByKey, executeToolAction, logToolRequest } from '@/lib/services/tools';
+import { getToolByKey, executeToolAction, logToolRequest, toolRequestSecretValues } from '@/lib/services/tools';
 import { resolveBrowser, createBrowserSession, buildBrowserAgentTools, closeBrowserSession } from '@/lib/services/browser';
 import { recordTracingSessionCreated } from '@/lib/services/agentTracing';
 import {
@@ -197,6 +197,7 @@ async function buildBoundTools(
                 runtimeHeaderPolicyFromMetadata(toolRecord.metadata),
             );
             const toolRuntimeAuth = describeRuntimeAuth(runtimeContext, toolRuntimeHeaders);
+            const toolSecretValues = toolRequestSecretValues(toolRecord, toolRuntimeHeaders);
 
             for (const actionName of binding.toolNames) {
                 const action = toolRecord.actions.find(
@@ -229,6 +230,7 @@ async function buildBoundTools(
                                 'agent',
                                 runtimeContext?.tokenId,
                                 toolRuntimeAuth,
+                                toolSecretValues,
                             );
                             return typeof result === 'string' ? result : JSON.stringify(result);
                         } catch (execError) {
@@ -243,6 +245,7 @@ async function buildBoundTools(
                                 'agent',
                                 runtimeContext?.tokenId,
                                 toolRuntimeAuth,
+                                toolSecretValues,
                             );
                             throw execError;
                         }
