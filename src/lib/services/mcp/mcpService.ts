@@ -20,6 +20,11 @@ import type {
   OpenApiOperation,
 } from './types';
 import { createLogger } from '@/lib/core/logger';
+import {
+  authConfigSecretValues,
+  redactLogPayload,
+  redactLogString,
+} from '@/lib/services/logRedaction';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { safeFetch } from '@/lib/security/outboundFetch';
 import { normalizeApiSpec, type SpecFormatHint } from '@/lib/services/specImport';
@@ -785,9 +790,26 @@ export async function listMcpServers(
 
 // ── Request logging ───────────────────────────────────────────────────────
 
+/**
+ * Outbound secret values that could be echoed back into a logged response for
+ * this server: the caller's applied runtime-header values plus the server's
+ * own static upstream credential (opened from the vault). Passed to
+ * `logMcpRequest` so an echoing upstream can't leak them into the log.
+ */
+export function mcpRequestSecretValues(
+  server: IMcpServer,
+  runtimeHeaders?: Record<string, string>,
+): string[] {
+  return [
+    ...Object.values(runtimeHeaders ?? {}),
+    ...authConfigSecretValues(openAuthConfig(server.upstreamAuth)),
+  ];
+}
+
 export async function logMcpRequest(
   tenantDbName: string,
   entry: Omit<IMcpRequestLog, '_id' | 'createdAt'>,
+  secretValues?: string[],
 ) {
   // Resolve attribution + rollup before any await so the request ALS is in
   // scope. `callerTokenId`/`callerUserId` stay for compat; the standard
@@ -806,6 +828,11 @@ export async function logMcpRequest(
     await db.switchToTenant(tenantDbName);
     await db.createMcpRequestLog({
       ...entry,
+      // Scrub echoed secrets / sensitive keys and cap size before persisting
+      // (redactLogPayload passes undefined through).
+      requestPayload: redactLogPayload(entry.requestPayload, { secretValues }),
+      responsePayload: redactLogPayload(entry.responsePayload, { secretValues }),
+      errorMessage: redactLogString(entry.errorMessage, secretValues),
       userId: attribution.userId,
       apiTokenId: attribution.apiTokenId,
       actorType: attribution.actorType,

@@ -26,6 +26,8 @@ import type {
 import { runRedTeam } from './runner';
 import { buildProbes, CUSTOM_PROBE_PREFIX, validateCustomProbe, CustomProbeError } from './probes';
 import { compareRedTeamRuns, type RedTeamComparison } from './compare';
+import { mapOwaspToEu, EU_RISK_CATEGORIES, type EuRiskCategory } from './euTaxonomy';
+import type { CampaignComplianceMeta } from './compliance/types';
 import {
   buildAttackerInvoker,
   buildJudgeInvoker,
@@ -153,7 +155,18 @@ export interface CreateCampaignInput {
   runConfig?: { concurrency?: number };
   policy?: IRedTeamCampaign['policy'];
   schedule?: IRedTeamCampaign['schedule'];
+  /** EU AI Act compliance classification of the system under test. */
+  compliance?: CampaignComplianceMeta;
   projectId?: string;
+}
+
+/** Fold compliance metadata into a campaign's opaque `metadata` bag. */
+function withCompliance(
+  existing: Record<string, unknown> | undefined,
+  compliance: CampaignComplianceMeta | undefined,
+): Record<string, unknown> | undefined {
+  if (compliance === undefined) return existing;
+  return { ...(existing ?? {}), compliance };
 }
 
 export async function createCampaign(
@@ -179,6 +192,7 @@ export async function createCampaign(
     runConfig: input.runConfig,
     policy: input.policy,
     schedule: input.schedule,
+    metadata: withCompliance(undefined, input.compliance),
     createdBy,
   });
   return toView(campaign);
@@ -204,11 +218,20 @@ export async function updateCampaign(
   tenantDbName: string,
   id: string,
   updatedBy: string,
-  data: Partial<Pick<IRedTeamCampaign, 'name' | 'description' | 'targetKind' | 'agentKey' | 'modelKey' | 'probeKeys' | 'judgeModelKey' | 'runConfig' | 'policy' | 'schedule' | 'projectId'>>,
+  data: Partial<Pick<IRedTeamCampaign, 'name' | 'description' | 'targetKind' | 'agentKey' | 'modelKey' | 'probeKeys' | 'judgeModelKey' | 'runConfig' | 'policy' | 'schedule' | 'projectId'>>
+    & { compliance?: CampaignComplianceMeta },
 ): Promise<WithId<IRedTeamCampaign> | null> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
-  const updated = await db.updateRedTeamCampaign(id, { ...data, updatedBy });
+  const { compliance, ...rest } = data;
+  // Merge compliance into the existing metadata bag rather than replacing it.
+  let metadata: Record<string, unknown> | undefined;
+  if (compliance !== undefined) {
+    const existing = await db.findRedTeamCampaignById(id);
+    if (!existing) return null;
+    metadata = withCompliance(existing.metadata, compliance);
+  }
+  const updated = await db.updateRedTeamCampaign(id, { ...rest, ...(metadata ? { metadata } : {}), updatedBy });
   return updated ? toView(updated) : null;
 }
 
@@ -267,6 +290,16 @@ export interface RedTeamOverviewCategory {
   resilience: number;
 }
 
+export interface RedTeamOverviewEuCategory {
+  category: EuRiskCategory;
+  label: string;
+  total: number;
+  vulnerable: number;
+  needsReview: number;
+  /** (total - vulnerable) / total, in [0, 1]. */
+  resilience: number;
+}
+
 export interface RedTeamOverviewTrendPoint {
   runId: string;
   campaignKey: string;
@@ -287,6 +320,8 @@ export interface RedTeamOverview {
   resilienceScore: number;
   bySeverity: Record<string, number>;
   byCategory: RedTeamOverviewCategory[];
+  /** Same posture folded onto the EU AI Act / GPAI risk taxonomy. */
+  byEuCategory: RedTeamOverviewEuCategory[];
   /** Recent completed scans, oldest → newest (for a resilience trend line). */
   trend: RedTeamOverviewTrendPoint[];
   latestRunAt?: Date;
@@ -341,6 +376,32 @@ export async function getOverview(
   // Worst posture first so the dashboard surfaces the riskiest categories on top.
   categories.sort((a, b) => a.resilience - b.resilience || b.vulnerable - a.vulnerable);
 
+  // Fold the OWASP posture onto the EU AI Act taxonomy. One OWASP category can
+  // feed several EU families, so each contributes its counts to every mapped
+  // family (a finding relevant to two duties is evidenced under both).
+  const byEu = new Map<EuRiskCategory, RedTeamOverviewEuCategory>();
+  for (const c of categories) {
+    for (const eu of mapOwaspToEu(c.category)) {
+      const entry = byEu.get(eu) ?? {
+        category: eu,
+        label: EU_RISK_CATEGORIES[eu].label,
+        total: 0,
+        vulnerable: 0,
+        needsReview: 0,
+        resilience: 1,
+      };
+      entry.total += c.total;
+      entry.vulnerable += c.vulnerable;
+      entry.needsReview += c.needsReview;
+      byEu.set(eu, entry);
+    }
+  }
+  const euCategories = [...byEu.values()].map((c) => ({
+    ...c,
+    resilience: c.total > 0 ? (c.total - c.vulnerable) / c.total : 1,
+  }));
+  euCategories.sort((a, b) => a.resilience - b.resilience || b.vulnerable - a.vulnerable);
+
   const trend: RedTeamOverviewTrendPoint[] = runs
     .filter((r) => r.aggregate)
     .slice(0, 20)
@@ -364,6 +425,7 @@ export async function getOverview(
     resilienceScore: completed > 0 ? 1 - vulnerable / completed : 1,
     bySeverity,
     byCategory: categories,
+    byEuCategory: euCategories,
     trend,
     latestRunAt: runs[0]?.finishedAt,
   };

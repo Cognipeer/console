@@ -12,6 +12,7 @@ import {
   listToolRequestLogs,
   listTools,
   logToolRequest,
+  toolRequestSecretValues,
   serializeTool,
   syncToolActions,
   updateTool,
@@ -268,6 +269,7 @@ export const toolsApiPlugin: FastifyPluginAsync = async (app) => {
         runtimeHeaderPolicyFromMetadata(tool.metadata),
       );
       const runtimeAuth = describeRuntimeAuth(runtimeContext, runtimeHeaders);
+      const secretValues = toolRequestSecretValues(tool, runtimeHeaders);
 
       try {
         const { latencyMs, result } = await executeToolAction(tool, actionKey, args, runtimeHeaders);
@@ -287,6 +289,7 @@ export const toolsApiPlugin: FastifyPluginAsync = async (app) => {
           'dashboard',
           undefined,
           runtimeAuth,
+          secretValues,
         );
 
         return reply.code(200).send({ latencyMs, result });
@@ -308,6 +311,7 @@ export const toolsApiPlugin: FastifyPluginAsync = async (app) => {
           'dashboard',
           undefined,
           runtimeAuth,
+          secretValues,
         );
 
         return reply.code(500).send({ error: errorMessage });

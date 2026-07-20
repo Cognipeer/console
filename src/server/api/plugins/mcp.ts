@@ -21,6 +21,7 @@ import {
   listMcpServers,
   logMcpAudit,
   logMcpRequest,
+  mcpRequestSecretValues,
   refreshMcpServerTools,
   resolveSourceType,
   serializeMcpServer,
@@ -601,6 +602,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         runtimeHeaderPolicyFromMetadata(server.metadata),
       );
       const runtimeAuth = describeRuntimeAuth(runtimeContext, runtimeHeaders);
+      const secretValues = mcpRequestSecretValues(server, runtimeHeaders);
 
       void logMcpAudit(session.tenantDbName, {
         tenantId: session.tenantId,
@@ -636,7 +638,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
           callerUserId: session.userId,
           transport: 'rest',
           sourceType: resolveSourceType(server),
-        });
+        }, secretValues);
 
         return reply.code(200).send({ result, latencyMs });
       } catch (execError) {
@@ -658,7 +660,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
           callerUserId: session.userId,
           transport: 'rest',
           sourceType: resolveSourceType(server),
-        });
+        }, secretValues);
         return reply.code(500).send({ error: message });
       }
     } catch (error) {
