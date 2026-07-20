@@ -10,6 +10,7 @@ import { buildCustomProbe, isCustomProbeKey } from './customProbe';
 import { createPromptInjectionProbe } from './promptInjection';
 import { createJailbreakProbe } from './jailbreak';
 import { createSensitiveInfoProbe } from './sensitiveInfoDisclosure';
+import { createSystemPromptLeakageProbe } from './systemPromptLeakage';
 import { createEncodingInjectionProbe } from './encodingInjection';
 import { createInsecureOutputProbe } from './insecureOutput';
 import { createExcessiveAgencyProbe } from './excessiveAgency';
@@ -23,6 +24,7 @@ export const PROBE_REGISTRY: Record<string, () => Probe> = {
   'encoding-injection': createEncodingInjectionProbe,
   jailbreak: createJailbreakProbe,
   'sensitive-info-disclosure': createSensitiveInfoProbe,
+  'system-prompt-leakage': createSystemPromptLeakageProbe,
   'pii-generation': createPiiGenerationProbe,
   'data-extraction': createDataExtractionProbe,
   'insecure-output-handling': createInsecureOutputProbe,
@@ -103,6 +105,7 @@ export {
   createPromptInjectionProbe,
   createJailbreakProbe,
   createSensitiveInfoProbe,
+  createSystemPromptLeakageProbe,
   createEncodingInjectionProbe,
   createInsecureOutputProbe,
   createExcessiveAgencyProbe,
