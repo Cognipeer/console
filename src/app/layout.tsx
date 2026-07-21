@@ -32,6 +32,11 @@ export const metadata: Metadata = {
   icons: {
     icon: [
       {
+        url: '/images/cognipeer-icon-32.png',
+        type: 'image/png',
+        sizes: '32x32',
+      },
+      {
         url: '/images/cognipeer-icon.png',
         type: 'image/png',
         sizes: '128x128',
@@ -39,12 +44,12 @@ export const metadata: Metadata = {
     ],
     apple: [
       {
-        url: '/images/cognipeer-icon.png',
+        url: '/images/cognipeer-icon-180.png',
         type: 'image/png',
-        sizes: '128x128',
+        sizes: '180x180',
       },
     ],
-    shortcut: '/images/cognipeer-icon.png',
+    shortcut: '/images/cognipeer-icon-32.png',
   },
 };
 

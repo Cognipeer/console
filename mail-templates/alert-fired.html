@@ -1,57 +1,101 @@
-<!-- subject: ⚠️ Alert: {{alertName}} — {{metricLabel}} threshold breached -->
+<!-- subject: Alert: {{alertName}} — {{metricLabel}} threshold breached -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light">
     <title>Alert Notification</title>
     <style>
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            font-family: Arial, Helvetica, sans-serif;
             line-height: 1.6;
-            color: #333;
+            color: #4a5260;
             max-width: 600px;
             margin: 0 auto;
             padding: 20px;
-            background-color: #f5f5f5;
+            background-color: #fbfbfa;
         }
         .container {
             background-color: #ffffff;
-            border-radius: 8px;
+            border: 1px solid #e8e8e3;
+            border-radius: 10px;
             padding: 40px;
-            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
         }
         .header {
             text-align: center;
             margin-bottom: 30px;
         }
         .logo {
-            font-size: 28px;
-            font-weight: bold;
-            color: #0969ff;
+            font-size: 22px;
+            font-weight: 600;
+            letter-spacing: -0.02em;
+            color: #0c1118;
             margin-bottom: 10px;
+        }
+        h1 {
+            color: #0c1118;
+            font-size: 22px;
+            font-weight: 600;
+            letter-spacing: -0.02em;
+            margin-bottom: 16px;
+        }
+        code {
+            font-family: 'Courier New', Courier, monospace;
+            background-color: #0f1419;
+            color: #e6edf3;
+            padding: 2px 8px;
+            border-radius: 4px;
+        }
+        .info-box {
+            background-color: #f7f7f4;
+            border-left: 4px solid #0fba94;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 6px;
+        }
+        .warning-box {
+            background-color: #f7f7f4;
+            border-left: 4px solid #c87b15;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 6px;
+        }
+        .credentials {
+            background-color: #f7f7f4;
+            border-left: 4px solid #c87b15;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 6px;
+        }
+        .alert {
+            background-color: #f7f7f4;
+            border-left: 4px solid #2a6fdb;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 6px;
         }
         .alert-badge {
             display: inline-block;
-            padding: 6px 16px;
-            background-color: #fff3e0;
-            color: #e65100;
-            border-radius: 20px;
+            padding: 5px 14px;
+            background-color: #f7f7f4;
+            border: 1px solid #e8e8e3;
+            color: #c87b15;
+            border-radius: 999px;
             font-size: 13px;
             font-weight: 600;
             margin-bottom: 16px;
         }
-        h1 {
-            color: #e65100;
-            font-size: 22px;
-            margin-bottom: 12px;
-        }
-        .info-box {
-            background-color: #fff8f0;
-            border-left: 4px solid #e65100;
+        .code {
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 18px;
+            background-color: #0f1419;
+            color: #e6edf3;
             padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+            letter-spacing: 2px;
             margin: 20px 0;
-            border-radius: 4px;
         }
         .metric-table {
             width: 100%;
@@ -60,10 +104,10 @@
         }
         .metric-table td {
             padding: 10px 12px;
-            border-bottom: 1px solid #f0f0f0;
+            border-bottom: 1px solid #efefea;
         }
         .metric-table td:first-child {
-            color: #666;
+            color: #6b7280;
             font-size: 13px;
             font-weight: 500;
             width: 40%;
@@ -73,54 +117,51 @@
             text-align: right;
         }
         .metric-value {
-            color: #e65100;
+            color: #c87b15;
             font-size: 16px;
         }
         .threshold-value {
-            color: #666;
-        }
-        .footer {
-            margin-top: 30px;
-            padding-top: 20px;
-            border-top: 1px solid #e0e0e0;
-            text-align: center;
-            color: #666;
-            font-size: 14px;
-        }
-        .button {
-            display: inline-block;
-            padding: 12px 30px;
-            background-color: #e65100;
-            color: #ffffff;
-            text-decoration: none;
-            border-radius: 6px;
-            font-weight: 600;
-            margin-top: 20px;
-        }
-        .button:hover {
-            background-color: #bf360c;
-        }
-        .button-secondary {
-            display: inline-block;
-            padding: 12px 30px;
-            background-color: #1565c0;
-            color: #ffffff;
-            text-decoration: none;
-            border-radius: 6px;
-            font-weight: 600;
-            margin-top: 10px;
-        }
-        .button-secondary:hover {
-            background-color: #0d47a1;
+            color: #6b7280;
         }
         .project-tag {
             display: inline-block;
             padding: 3px 10px;
-            background-color: #f0f0f0;
-            border-radius: 12px;
+            background-color: #f4f4f1;
+            border: 1px solid #e8e8e3;
+            border-radius: 999px;
             font-size: 12px;
-            color: #555;
+            color: #4a5260;
             margin-bottom: 4px;
+        }
+        .button {
+            display: inline-block;
+            padding: 12px 28px;
+            background-color: #0c1118;
+            color: #fbfbfa;
+            text-decoration: none;
+            border-radius: 999px;
+            margin: 20px 0;
+            font-weight: 600;
+            font-size: 14px;
+        }
+        .button-secondary {
+            display: inline-block;
+            padding: 12px 28px;
+            background-color: #0fba94;
+            color: #062a23;
+            text-decoration: none;
+            border-radius: 999px;
+            margin-top: 10px;
+            font-weight: 600;
+            font-size: 14px;
+        }
+        .footer {
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #e8e8e3;
+            text-align: center;
+            color: #6b7280;
+            font-size: 13px;
         }
     </style>
 </head>
@@ -128,7 +169,7 @@
     <div class="container">
         <div class="header">
             <div class="logo">Cognipeer</div>
-            <div class="alert-badge">⚠️ Alert Fired</div>
+            <div class="alert-badge">Alert fired</div>
         </div>
 
         <h1>{{alertName}}</h1>
@@ -139,7 +180,7 @@
             in <strong>{{companyName}}</strong>.
         </p>
 
-        <div class="info-box">
+        <div class="warning-box">
             <strong>{{metricLabel}}</strong> reached <strong>{{actualValue}}{{unit}}</strong>,
             which breaches the configured threshold of <strong>{{threshold}}{{unit}}</strong>.
         </div>
@@ -150,7 +191,7 @@
                 <td>{{metricLabel}}</td>
             </tr>
             <tr>
-                <td>Actual Value</td>
+                <td>Actual value</td>
                 <td class="metric-value">{{actualValue}}{{unit}}</td>
             </tr>
             <tr>
@@ -158,25 +199,25 @@
                 <td class="threshold-value">{{threshold}}{{unit}}</td>
             </tr>
             <tr>
-                <td>Evaluation Window</td>
+                <td>Evaluation window</td>
                 <td>Last {{windowMinutes}} minutes</td>
             </tr>
             <tr>
-                <td>Fired At</td>
+                <td>Fired at</td>
                 <td>{{firedAt}}</td>
             </tr>
         </table>
 
         <div style="text-align: center;">
-            <a href="{{incidentUrl}}" class="button">View Incident</a>
+            <a href="{{incidentUrl}}" class="button">View incident</a>
             <br/>
-            <a href="{{dashboardUrl}}" class="button-secondary">View All Incidents</a>
+            <a href="{{dashboardUrl}}" class="button-secondary">View all incidents</a>
         </div>
 
         <div class="footer">
             <p>This is an automated alert from Cognipeer Console.</p>
             <p>An incident has been created for this alert. You can acknowledge, investigate, and resolve it from the Incidents dashboard.</p>
-            <p style="font-size: 12px; color: #999;">
+            <p style="font-size: 12px; color: #98a1ad;">
                 To manage alert rules, visit your project's Alerts settings.
             </p>
         </div>

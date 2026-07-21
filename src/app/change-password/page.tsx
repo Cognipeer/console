@@ -7,9 +7,11 @@ import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { IconKey, IconShieldLock, IconCheck } from '@tabler/icons-react';
 import AuthShell from '@/components/layout/AuthShell';
+import { useTranslations } from '@/lib/i18n';
 
 export default function ChangePasswordPage() {
   const router = useRouter();
+  const t = useTranslations('changePassword');
   const [loading, setLoading] = useState(false);
 
   const form = useForm({
@@ -19,10 +21,10 @@ export default function ChangePasswordPage() {
       confirmPassword: '',
     },
     validate: {
-      currentPassword: (v) => (v ? null : 'Current password is required'),
-      newPassword: (v) => (v.length >= 8 ? null : 'Password must be at least 8 characters'),
+      currentPassword: (v) => (v ? null : t('validation.currentRequired')),
+      newPassword: (v) => (v.length >= 8 ? null : t('validation.minLength')),
       confirmPassword: (v, values) =>
-        v === values.newPassword ? null : 'Passwords do not match',
+        v === values.newPassword ? null : t('validation.mismatch'),
     },
   });
 
@@ -57,19 +59,19 @@ export default function ChangePasswordPage() {
 
       const body = await res.json().catch(() => null);
       if (!res.ok) {
-        throw new Error(body?.error || 'Failed to change password');
+        throw new Error(body?.error || t('notifications.failed'));
       }
 
       notifications.show({
-        title: 'Password',
-        message: 'Password updated',
+        title: t('notifications.title'),
+        message: t('notifications.updated'),
         color: 'green',
       });
 
       router.replace('/dashboard');
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to change password';
-      notifications.show({ title: 'Password', message, color: 'red' });
+      const message = error instanceof Error ? error.message : t('notifications.failed');
+      notifications.show({ title: t('notifications.title'), message, color: 'red' });
     } finally {
       setLoading(false);
     }
@@ -77,37 +79,38 @@ export default function ChangePasswordPage() {
 
   return (
     <AuthShell
-      title="Change your password"
-      subtitle="You signed in with a temporary password. Please set a new password to continue."
+      title={t('hero.title')}
+      titleAccent={t('hero.titleAccent')}
+      subtitle={t('hero.subtitle')}
       highlights={[
         {
           icon: <IconShieldLock size={13} stroke={1.7} />,
-          label: 'Required for new accounts.',
+          label: t('highlights.required'),
         },
         {
           icon: <IconKey size={13} stroke={1.7} />,
-          label: "Choose a password you don't use elsewhere.",
+          label: t('highlights.unique'),
         },
       ]}
     >
       <form onSubmit={form.onSubmit(submit)}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <PasswordInput
-            label="Current password"
+            label={t('form.currentPassword.label')}
             required
             size="md"
             autoComplete="current-password"
             {...form.getInputProps('currentPassword')}
           />
           <PasswordInput
-            label="New password"
+            label={t('form.newPassword.label')}
             required
             size="md"
             autoComplete="new-password"
             {...form.getInputProps('newPassword')}
           />
           <PasswordInput
-            label="Confirm new password"
+            label={t('form.confirmPassword.label')}
             required
             size="md"
             autoComplete="new-password"
@@ -122,7 +125,7 @@ export default function ChangePasswordPage() {
             leftSection={<IconCheck size={16} stroke={1.7} />}
             mt={4}
           >
-            Update password
+            {t('form.submit')}
           </Button>
         </div>
       </form>

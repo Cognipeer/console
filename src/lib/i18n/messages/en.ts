@@ -1,4 +1,7 @@
 export const en = {
+  auth: {
+    eyebrow: 'Console access',
+  },
   common: {
     appName: 'Cognipeer Console',
     loading: 'Loading',
@@ -182,6 +185,7 @@ export const en = {
     hero: {
       emoji: '🚀',
       title: 'Welcome Back',
+      titleAccent: 'Back',
       subtitle: 'Sign in to your Cognipeer Console account',
     },
     form: {
@@ -204,6 +208,7 @@ export const en = {
     hero: {
       emoji: '🚀',
       title: 'Create Account',
+      titleAccent: 'Account',
       subtitle: 'Join Cognipeer Console and access powerful AI services',
     },
     form: {
@@ -254,6 +259,155 @@ export const en = {
       message:
         'Self-service registration is not available on this deployment. Contact your administrator to get an account.',
     },
+  },
+  forgotPassword: {
+    hero: {
+      title: 'Reset your password',
+      titleAccent: 'password',
+      subtitle: 'Enter your email and organization slug to receive a reset link.',
+    },
+    highlights: {
+      emailLink: "We'll email you a reset link.",
+      validity: 'Link is valid for 1 hour.',
+    },
+    form: {
+      slug: {
+        label: 'Organization Slug',
+        placeholder: 'my-company',
+      },
+      email: {
+        label: 'Email',
+        placeholder: 'you@example.com',
+      },
+      submit: 'Send reset link',
+    },
+    footer: {
+      cta: 'Remember your password?',
+      link: 'Back to login',
+    },
+    validation: {
+      invalidEmail: 'Invalid email address',
+      slugRequired: 'Organization slug is required',
+    },
+    notifications: {
+      tooManyTitle: 'Too many requests',
+      tooManyMessage: 'Please wait before requesting another reset link.',
+      genericError: 'Something went wrong. Please try again.',
+    },
+    success: {
+      title: 'Check your email',
+      titleAccent: 'email',
+      subtitle:
+        "If an account exists with that email address, we've sent a password reset link. It will expire in 1 hour.",
+      note: "Didn't get an email? Check your spam folder, or try again with the correct organization slug.",
+      backToLogin: 'Back to login',
+    },
+  },
+  resetPassword: {
+    hero: {
+      title: 'Set new password',
+      titleAccent: 'password',
+      subtitle: 'Choose a strong password for your account.',
+    },
+    highlights: {
+      strong: 'Strong passwords protect your tenant.',
+      requirements: 'Min 8 chars, mixed case + number.',
+    },
+    form: {
+      newPassword: {
+        label: 'New Password',
+        placeholder: 'Enter new password',
+      },
+      confirmPassword: {
+        label: 'Confirm Password',
+        placeholder: 'Confirm new password',
+      },
+      submit: 'Reset password',
+    },
+    requirements: {
+      title: 'Password requirements:',
+      length: 'At least 8 characters',
+      case: 'Uppercase and lowercase letters',
+      digit: 'At least one digit',
+      special: 'At least one special character',
+    },
+    footer: {
+      cta: 'Remember your password?',
+      link: 'Back to login',
+    },
+    validation: {
+      minLength: 'Password must be at least 8 characters',
+      uppercase: 'Must contain an uppercase letter',
+      lowercase: 'Must contain a lowercase letter',
+      digit: 'Must contain a digit',
+      special: 'Must contain a special character',
+      mismatch: 'Passwords do not match',
+    },
+    notifications: {
+      resetFailed: 'Failed to reset password',
+      genericError: 'Something went wrong. Please try again.',
+    },
+    invalid: {
+      title: 'Invalid reset link',
+      subtitle: 'This password reset link is invalid or has expired. Please request a new one.',
+      expiry: 'Reset links expire after 1 hour.',
+      fresh: 'Request a fresh link to continue.',
+      submit: 'Request new link',
+    },
+    success: {
+      title: 'Password reset successful',
+      subtitle: 'Your password has been updated. You can now log in with your new password.',
+      updated: 'Your password is updated.',
+      signIn: 'Use it to sign in next time.',
+      submit: 'Go to login',
+    },
+  },
+  changePassword: {
+    hero: {
+      title: 'Change your password',
+      titleAccent: 'password',
+      subtitle: 'You signed in with a temporary password. Please set a new password to continue.',
+    },
+    highlights: {
+      required: 'Required for new accounts.',
+      unique: "Choose a password you don't use elsewhere.",
+    },
+    form: {
+      currentPassword: {
+        label: 'Current password',
+      },
+      newPassword: {
+        label: 'New password',
+      },
+      confirmPassword: {
+        label: 'Confirm new password',
+      },
+      submit: 'Update password',
+    },
+    validation: {
+      currentRequired: 'Current password is required',
+      minLength: 'Password must be at least 8 characters',
+      mismatch: 'Passwords do not match',
+    },
+    notifications: {
+      title: 'Password',
+      updated: 'Password updated',
+      failed: 'Failed to change password',
+    },
+  },
+  noProject: {
+    hero: {
+      title: 'No project assigned',
+      titleAccent: 'project',
+      subtitle: "Your account isn't assigned to any project yet.",
+    },
+    highlights: {
+      askAdmin: 'Ask a tenant admin to assign you to a project.',
+      noContent: 'You won’t see workspace content until then.',
+    },
+    note: 'Once an admin grants you project access, click refresh to continue to your dashboard. Otherwise you can sign out and return later.',
+    refresh: 'Refresh access',
+    logout: 'Log out',
   },
   settings: {
     title: 'Tenant Settings',
