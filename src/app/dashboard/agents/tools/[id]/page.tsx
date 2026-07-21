@@ -20,6 +20,7 @@ import {
   Select,
   SimpleGrid,
   Stack,
+  Switch,
   Table,
   Tabs,
   Text,
@@ -45,6 +46,7 @@ import {
   IconTrash,
 } from '@tabler/icons-react';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
+import RuntimeContextEditor, { parseRuntimeContextJson } from '@/components/common/RuntimeContextEditor';
 import type { ToolView, ToolRequestLogView } from '@/lib/services/tools';
 import type { IToolAction } from '@/lib/database';
 
@@ -358,6 +360,7 @@ export default function ToolDetailPage() {
   // ── Test state ──
   const [testAction, setTestAction] = useState<string | null>(null);
   const [testArgs, setTestArgs] = useState('{}');
+  const [runtimeContextJson, setRuntimeContextJson] = useState('');
   const [testResult, setTestResult] = useState<string>('');
   const [testing, setTesting] = useState(false);
 
@@ -638,7 +641,10 @@ export default function ToolDetailPage() {
       const res = await fetch(`/api/tools/${tool.id}/actions/${testAction}/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ arguments: args }),
+        body: JSON.stringify({
+          arguments: args,
+          runtime_context: parseRuntimeContextJson(runtimeContextJson),
+        }),
       });
 
       const data = await res.json();
@@ -777,6 +783,39 @@ export default function ToolDetailPage() {
               <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Source Type</Text>
               <Text fw={500} size="sm" mt="xs">
                 {TYPE_LABELS[tool.type] ?? tool.type}
+              </Text>
+            </Paper>
+            <Paper withBorder p="md" radius="md">
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Runtime Headers</Text>
+              <Switch
+                mt="xs"
+                size="sm"
+                label="Accept caller headers"
+                checked={
+                  (tool.metadata?.runtimeHeaders as { allow?: boolean } | undefined)?.allow === true
+                }
+                onChange={async (event) => {
+                  const allow = event.currentTarget.checked;
+                  try {
+                    const res = await fetch(`/api/tools/${tool.id}`, {
+                      method: 'PUT',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ runtimeHeaders: allow ? { allow: true } : null }),
+                    });
+                    if (!res.ok) throw new Error('update failed');
+                    const data = await res.json();
+                    setTool(data.tool);
+                  } catch {
+                    notifications.show({
+                      title: 'Error',
+                      message: 'Failed to update runtime header policy',
+                      color: 'red',
+                    });
+                  }
+                }}
+              />
+              <Text size="xs" c="dimmed" mt={6}>
+                Allow API/A2A/realtime callers to pass per-request headers to the upstream.
               </Text>
             </Paper>
           </SimpleGrid>
@@ -1065,9 +1104,23 @@ export default function ToolDetailPage() {
                             </Text>
                           </Table.Td>
                           <Table.Td>
-                            <Badge size="xs" variant="light" color="gray">
-                              {log.callerType || 'unknown'}
-                            </Badge>
+                            <Group gap={4} wrap="nowrap">
+                              <Badge size="xs" variant="light" color="gray">
+                                {log.callerType || 'unknown'}
+                              </Badge>
+                              {(() => {
+                                const auth = (log.requestPayload as Record<string, unknown> | undefined)
+                                  ?._runtimeAuth as { headerKeys?: string[]; source?: string } | undefined;
+                                if (!auth?.headerKeys?.length) return null;
+                                return (
+                                  <Tooltip label={`Runtime headers: ${auth.headerKeys.join(', ')}${auth.source ? ` (${auth.source})` : ''}`}>
+                                    <Badge size="xs" variant="outline" color="orange">
+                                      runtime auth
+                                    </Badge>
+                                  </Tooltip>
+                                );
+                              })()}
+                            </Group>
                           </Table.Td>
                           <Table.Td>
                             <Text size="xs" c="dimmed" lineClamp={1}>
@@ -1135,6 +1188,11 @@ export default function ToolDetailPage() {
                 formatOnBlur
                 value={testArgs}
                 onChange={setTestArgs}
+              />
+
+              <RuntimeContextEditor
+                value={runtimeContextJson}
+                onChange={setRuntimeContextJson}
               />
 
               <Button

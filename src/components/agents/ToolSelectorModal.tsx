@@ -164,13 +164,15 @@ export function ToolSelectorModal({
       if (mcpRes.ok) {
         const mcpData = await mcpRes.json();
         const mcpGroups: ToolSourceGroup[] = (mcpData.servers ?? []).map(
-          (s: { key: string; name: string; description?: string; tools: { name: string; description: string }[] }) => ({
+          (s: { key: string; name: string; description?: string; tools: { name: string; description: string }[]; disabledTools?: string[] }) => ({
             source: 'mcp' as const,
             sourceKey: s.key,
             name: s.name,
             description: s.description,
             typeLabel: 'MCP (legacy)',
-            tools: s.tools ?? [],
+            tools: (s.tools ?? []).filter(
+              (t) => !(s.disabledTools ?? []).includes(t.name),
+            ),
           }),
         );
         allGroups.push(...mcpGroups);

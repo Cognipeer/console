@@ -182,7 +182,7 @@ export default function DashboardOverviewPage() {
               delta={trend ? `${trend > 0 ? '+' : ''}${trend.toFixed(1)}% vs last 24h` : undefined}
               deltaDir={trend > 0 ? 'up' : trend < 0 ? 'down' : null}
               spark={SPARK_CALLS}
-              sparkColor="var(--teal-6)"
+              sparkColor="var(--teal-500)"
             />
             <StatTile
               label={t('stats.activeSessions')}
@@ -393,7 +393,7 @@ export default function DashboardOverviewPage() {
                           borderRadius: '50%',
                           background:
                             a.status === 'success'
-                              ? 'linear-gradient(135deg, var(--teal-6), var(--teal-4))'
+                              ? 'linear-gradient(135deg, var(--teal-500), var(--teal-4))'
                               : 'var(--ds-surface-2)',
                           color: 'white',
                           display: 'grid',

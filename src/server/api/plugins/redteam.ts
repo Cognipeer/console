@@ -13,6 +13,9 @@ import type { IRedTeamCustomAttempt, IRedTeamCustomDetectors, RedTeamSeverity } 
 import { validateCron } from '@/lib/services/redteam/schedulePlanner';
 import { runCalibration } from '@/lib/services/redteam/calibration/calibrationRunner';
 import { enqueueCampaignRun } from '@/lib/services/redteam/campaignJob';
+import { buildComplianceReport } from '@/lib/services/redteam/compliance/report';
+import { EU_RISK_TIERS, type CampaignComplianceMeta, type EuRiskTier } from '@/lib/services/redteam/compliance/types';
+import { EU_RISK_CATEGORIES } from '@/lib/services/redteam/euTaxonomy';
 import { buildJudgeInvoker, type RedTeamModelContext } from '@/lib/services/redteam/adapters';
 import type { IRedTeamCampaign } from '@/lib/database';
 import {
@@ -131,6 +134,32 @@ const VALID_OWASP_CATEGORIES = [
   'LLM09-overreliance',
 ];
 
+type ComplianceResult = { compliance: CampaignComplianceMeta | undefined } | { error: string };
+
+/** Validate optional EU compliance metadata on a campaign body. */
+function sanitizeCompliance(raw: unknown): ComplianceResult {
+  if (raw === undefined || raw === null) return { compliance: undefined };
+  if (typeof raw !== 'object') return { error: 'compliance must be an object' };
+  const c = raw as Record<string, unknown>;
+  const out: CampaignComplianceMeta = {};
+  if (c.riskTier !== undefined) {
+    if (typeof c.riskTier !== 'string' || !EU_RISK_TIERS.includes(c.riskTier as EuRiskTier)) {
+      return { error: `riskTier must be one of: ${EU_RISK_TIERS.join(', ')}` };
+    }
+    out.riskTier = c.riskTier as EuRiskTier;
+  }
+  const strField = (v: unknown, max = 2000): string | undefined =>
+    typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : undefined;
+  out.intendedPurpose = strField(c.intendedPurpose);
+  out.systemCardUrl = strField(c.systemCardUrl, 500);
+  out.deployer = strField(c.deployer, 300);
+  out.provider = strField(c.provider, 300);
+  out.notes = strField(c.notes, 5000);
+  // Collapse to undefined when nothing meaningful was provided.
+  const hasAny = Object.values(out).some((v) => v !== undefined);
+  return { compliance: hasAny ? out : undefined };
+}
+
 type CustomProbeResult = { input: Omit<CustomProbeInput, 'projectId'> } | { error: string };
 
 /** Validate and normalise a custom-probe request body. */
@@ -224,6 +253,34 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
+  // ── EU AI Act compliance report ────────────────────────────────────
+  // Aggregate completed-scan evidence into a regulator-facing Model-Report-style
+  // document (per-EU-category posture, evidence samples, findings, coverage gaps).
+  app.get('/redteam/compliance/report', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const query = (request.query ?? {}) as { limit?: string };
+      const report = await buildComplianceReport(session.tenantDbName, new Date(), {
+        projectId,
+        limit: query.limit ? Math.min(Number.parseInt(query.limit, 10), 500) : undefined,
+      });
+      return reply.code(200).send({ report });
+    } catch (error) {
+      logger.error('Compliance report error', { error });
+      return internalError(reply, error);
+    }
+  }));
+
+  // Static EU risk taxonomy + article mapping (for UI legends / documentation).
+  app.get('/redteam/compliance/mapping', withApiRequestContext(async (request, reply) => {
+    try {
+      requireSessionContext(request);
+      return reply.code(200).send({ categories: Object.values(EU_RISK_CATEGORIES), riskTiers: EU_RISK_TIERS });
+    } catch (error) {
+      return internalError(reply, error);
+    }
+  }));
+
   // ── Calibration ────────────────────────────────────────────────────
   // Run the golden set through the live detectors + decision policy to measure
   // precision/recall. An optional judgeModelKey enables judge-dependent cases.
@@ -286,6 +343,8 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
         : undefined;
       const sched = sanitizeSchedule(body.schedule);
       if ('error' in sched) return reply.code(400).send({ error: sched.error });
+      const comp = sanitizeCompliance(body.compliance);
+      if ('error' in comp) return reply.code(400).send({ error: comp.error });
       const campaign = await createCampaign(session.tenantDbName, session.tenantId, session.userId, {
         name: body.name.trim(),
         description: typeof body.description === 'string' ? body.description : undefined,
@@ -297,6 +356,7 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
         runConfig,
         policy: (body.policy as Record<string, never> | undefined) ?? undefined,
         schedule: sched.schedule,
+        compliance: comp.compliance,
         projectId,
       });
       return reply.code(201).send({ campaign });
@@ -338,6 +398,12 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
         if ('error' in sched) return reply.code(400).send({ error: sched.error });
         schedule = sched.schedule;
       }
+      let compliance: CampaignComplianceMeta | undefined;
+      if (body.compliance !== undefined) {
+        const comp = sanitizeCompliance(body.compliance);
+        if ('error' in comp) return reply.code(400).send({ error: comp.error });
+        compliance = comp.compliance;
+      }
       const campaign = await updateCampaign(session.tenantDbName, id, session.userId, {
         name: body.name as string | undefined,
         description: body.description as string | undefined,
@@ -346,6 +412,7 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
         probeKeys: probeKeys ?? undefined,
         judgeModelKey: body.judgeModelKey as string | undefined,
         schedule,
+        compliance,
       });
       if (!campaign) return reply.code(404).send({ error: 'Campaign not found' });
       return reply.code(200).send({ campaign });

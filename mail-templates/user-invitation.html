@@ -4,142 +4,223 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light">
     <title>Join {{companyName}}</title>
     <style>
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            font-family: Arial, Helvetica, sans-serif;
             line-height: 1.6;
-            color: #333;
+            color: #4a5260;
             max-width: 600px;
             margin: 0 auto;
             padding: 20px;
-            background-color: #f5f5f5;
+            background-color: #fbfbfa;
         }
         .container {
             background-color: #ffffff;
-            border-radius: 8px;
+            border: 1px solid #e8e8e3;
+            border-radius: 10px;
             padding: 40px;
-            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
         }
         .header {
             text-align: center;
             margin-bottom: 30px;
         }
         .logo {
-            font-size: 28px;
-            font-weight: bold;
-            color: #0969ff;
+            font-size: 22px;
+            font-weight: 600;
+            letter-spacing: -0.02em;
+            color: #0c1118;
             margin-bottom: 10px;
         }
         h1 {
-            color: #0969ff;
-            font-size: 24px;
-            margin-bottom: 20px;
+            color: #0c1118;
+            font-size: 22px;
+            font-weight: 600;
+            letter-spacing: -0.02em;
+            margin-bottom: 16px;
+        }
+        code {
+            font-family: 'Courier New', Courier, monospace;
+            background-color: #0f1419;
+            color: #e6edf3;
+            padding: 2px 8px;
+            border-radius: 4px;
         }
         .info-box {
-            background-color: #f0f7ff;
-            border-left: 4px solid #0969ff;
+            background-color: #f7f7f4;
+            border-left: 4px solid #0fba94;
             padding: 15px;
             margin: 20px 0;
-            border-radius: 4px;
+            border-radius: 6px;
+        }
+        .warning-box {
+            background-color: #f7f7f4;
+            border-left: 4px solid #c87b15;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 6px;
         }
         .credentials {
-            background-color: #fff9e6;
-            border-left: 4px solid #ffc107;
+            background-color: #f7f7f4;
+            border-left: 4px solid #c87b15;
             padding: 15px;
             margin: 20px 0;
-            border-radius: 4px;
+            border-radius: 6px;
         }
-        .credentials code {
-            background-color: #ffe0b2;
-            padding: 2px 6px;
-            border-radius: 3px;
-            font-family: 'Courier New', monospace;
+        .alert {
+            background-color: #f7f7f4;
+            border-left: 4px solid #2a6fdb;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 6px;
+        }
+        .alert-badge {
+            display: inline-block;
+            padding: 5px 14px;
+            background-color: #f7f7f4;
+            border: 1px solid #e8e8e3;
+            color: #c87b15;
+            border-radius: 999px;
+            font-size: 13px;
+            font-weight: 600;
+            margin-bottom: 16px;
+        }
+        .code {
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 18px;
+            background-color: #0f1419;
+            color: #e6edf3;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+            letter-spacing: 2px;
+            margin: 20px 0;
+        }
+        .metric-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+        .metric-table td {
+            padding: 10px 12px;
+            border-bottom: 1px solid #efefea;
+        }
+        .metric-table td:first-child {
+            color: #6b7280;
+            font-size: 13px;
+            font-weight: 500;
+            width: 40%;
+        }
+        .metric-table td:last-child {
+            font-weight: 600;
+            text-align: right;
+        }
+        .metric-value {
+            color: #c87b15;
+            font-size: 16px;
+        }
+        .threshold-value {
+            color: #6b7280;
+        }
+        .project-tag {
+            display: inline-block;
+            padding: 3px 10px;
+            background-color: #f4f4f1;
+            border: 1px solid #e8e8e3;
+            border-radius: 999px;
+            font-size: 12px;
+            color: #4a5260;
+            margin-bottom: 4px;
+        }
+        .button {
+            display: inline-block;
+            padding: 12px 28px;
+            background-color: #0c1118;
+            color: #fbfbfa;
+            text-decoration: none;
+            border-radius: 999px;
+            margin: 20px 0;
+            font-weight: 600;
+            font-size: 14px;
+        }
+        .button-secondary {
+            display: inline-block;
+            padding: 12px 28px;
+            background-color: #0fba94;
+            color: #062a23;
+            text-decoration: none;
+            border-radius: 999px;
+            margin-top: 10px;
+            font-weight: 600;
+            font-size: 14px;
         }
         .footer {
             margin-top: 30px;
             padding-top: 20px;
-            border-top: 1px solid #e0e0e0;
+            border-top: 1px solid #e8e8e3;
             text-align: center;
-            color: #666;
-            font-size: 14px;
-        }
-        .button {
-            display: inline-block;
-            padding: 12px 30px;
-            background-color: #0969ff;
-            color: #ffffff;
-            text-decoration: none;
-            border-radius: 6px;
-            margin: 20px 0;
-            font-weight: 500;
-        }
-        .alert {
-            background-color: #fff3cd;
-            border: 1px solid #ffc107;
-            color: #856404;
-            padding: 12px;
-            border-radius: 4px;
-            margin: 15px 0;
+            color: #6b7280;
+            font-size: 13px;
         }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <div class="logo">🚀 Cognipeer Console</div>
+            <div class="logo">Cognipeer</div>
         </div>
-        
-        <h1>You've been invited! 🎉</h1>
-        
+
+        <h1>You have been invited.</h1>
+
         <p>Hi {{name}},</p>
-        
-        <p>You've been invited to join <strong>{{companyName}}</strong> on Cognipeer Console. Your team is waiting for you!</p>
-        
+
+        <p>You have been invited to join <strong>{{companyName}}</strong> on Cognipeer Console.</p>
+
         <div class="info-box">
-            <strong>Organization Details:</strong><br>
+            <strong>Organization details:</strong><br>
             <strong>Company:</strong> {{companyName}}<br>
-            <strong>Company Slug:</strong> {{slug}}
+            <strong>Company slug:</strong> {{slug}}
         </div>
 
         <div class="credentials">
-            <strong>⚠️ Your Login Credentials:</strong><br><br>
+            <strong>Your login credentials:</strong><br><br>
             <strong>Email:</strong> {{email}}<br>
-            <strong>Temporary Password:</strong> <code>{{tempPassword}}</code><br><br>
+            <strong>Temporary password:</strong> <code>{{tempPassword}}</code><br><br>
             <small>Please change your password after your first login.</small>
         </div>
 
         <div class="alert">
-            <strong>Important:</strong> When logging in, you'll need to enter your company slug: <strong>{{slug}}</strong>
+            <strong>Important:</strong> When logging in, you will need to enter your company slug: <strong>{{slug}}</strong>.
         </div>
-        
+
         <div style="text-align: center;">
-            <a href="{{loginUrl}}" class="button">Accept Invitation & Login</a>
+            <a href="{{loginUrl}}" class="button">Accept invitation and log in</a>
         </div>
-        
-        <p>Once logged in, you'll have access to:</p>
+
+        <p>Once logged in, you will have access to:</p>
         <ul>
-            <li>🤖 LLM Chat Services</li>
-            <li>🔄 Agent Orchestration</li>
-            <li>📊 Vector Store & Embeddings</li>
-            <li>⚡ Workflow Automation</li>
-            <li>📈 Analytics & Monitoring</li>
+            <li>LLM chat services</li>
+            <li>Agent orchestration</li>
+            <li>Vector store and embeddings</li>
+            <li>Workflow automation</li>
+            <li>Analytics and monitoring</li>
         </ul>
 
-        <p><strong>How to Login:</strong></p>
+        <p><strong>How to log in:</strong></p>
         <ol>
             <li>Go to the login page</li>
             <li>Enter company slug: <code>{{slug}}</code></li>
             <li>Enter your email: <code>{{email}}</code></li>
             <li>Enter the temporary password provided above</li>
-            <li>You'll be prompted to change your password</li>
+            <li>You will be prompted to change your password</li>
         </ol>
-        
+
         <p>If you have any questions, please reach out to your team administrator.</p>
-        
+
         <div class="footer">
             <p>This invitation was sent via Cognipeer Console by {{inviterName}} from {{companyName}}.</p>
-            <p>&copy; 2025 Cognipeer. All rights reserved.</p>
+            <p>&copy; {{currentYear}} Cognipeer. All rights reserved.</p>
         </div>
     </div>
 </body>

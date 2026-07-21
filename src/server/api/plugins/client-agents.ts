@@ -8,6 +8,7 @@ import {
   getConversationById,
   listAgents,
 } from '@/lib/services/agents/agentService';
+import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import {
   getApiTokenContextForRequest,
   readJsonBody,
@@ -116,6 +117,12 @@ function createResponsesHandler(usePublished: boolean) {
         conversationId = String(conversation._id);
       }
 
+      const runtimeContext = buildRuntimeContextFromRequest(body.runtime_context, request.headers, {
+        userId: ctx.tokenRecord.userId,
+        tokenId: ctx.tokenRecord._id ? String(ctx.tokenRecord._id) : undefined,
+        source: 'api',
+      });
+
       const result = await executeAgentChat({
         agentKey: agent.key,
         conversationId,
@@ -126,6 +133,7 @@ function createResponsesHandler(usePublished: boolean) {
         userId: ctx.tokenRecord.userId,
         userMessage,
         version: requestedVersion,
+        runtimeContext,
       });
 
       const { _conversation_messages, ...responseBody } = result;

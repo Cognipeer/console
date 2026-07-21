@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import {
   ActionIcon,
+  Alert,
   Badge,
   Box,
   Button,
@@ -21,6 +22,7 @@ import {
   Select,
   SimpleGrid,
   Stack,
+  Switch,
   Table,
   Tabs,
   Text,
@@ -48,6 +50,9 @@ import {
 } from '@tabler/icons-react';
 import DetailShell from '@/components/common/ui/DetailShell';
 import StatusBadge from '@/components/common/ui/StatusBadge';
+import McpToolArgsEditor from '@/components/mcp/McpToolArgsEditor';
+import McpToolsPanel from '@/components/mcp/McpToolsPanel';
+import RuntimeContextEditor, { parseRuntimeContextJson } from '@/components/common/RuntimeContextEditor';
 import type { McpServerView, McpRequestLogView } from '@/lib/services/mcp';
 
 const AUTH_LABELS: Record<string, string> = {
@@ -106,10 +111,18 @@ export default function McpDetailPage() {
   const [overviewLoading, setOverviewLoading] = useState(false);
   const [overviewAggregate, setOverviewAggregate] = useState<McpAggregateView | null>(null);
   const [todaySummary, setTodaySummary] = useState({ total: 0, success: 0, error: 0 });
+  // Enterprise sub-feature availability for THIS tenant (sandbox exec + Aegis).
+  // `available`/`hookAvailable` fold the enterprise build seam AND the tenant's
+  // ENTERPRISE license, so a downgraded tenant sees the warning below.
+  const [caps, setCaps] = useState<{
+    stdioSandbox: { available: boolean };
+    aegis: { hookAvailable: boolean };
+  } | null>(null);
 
   // ── Playground state ──
   const [pgTool, setPgTool] = useState<string | null>(null);
   const [pgArgs, setPgArgs] = useState('{}');
+  const [runtimeContextJson, setRuntimeContextJson] = useState('');
   const [pgResult, setPgResult] = useState<string>('');
   const [pgLatency, setPgLatency] = useState<number | null>(null);
   const [pgRunning, setPgRunning] = useState(false);
@@ -139,6 +152,14 @@ export default function McpDetailPage() {
       authUsername: '',
       authPassword: '',
       openApiSpec: '',
+      // remote source
+      remoteUrl: '',
+      remoteTransport: 'streamable-http' as string,
+      // stdio source
+      stdioRuntime: 'npx' as string,
+      stdioPackage: '',
+      stdioArgs: '',
+      stdioEnv: '',
     },
     validate: {
       name: (v) => (!v.trim() ? 'Name is required' : null),
@@ -160,6 +181,10 @@ export default function McpDetailPage() {
       setServer(data.server);
       setOverviewAggregate((data.aggregate ?? null) as McpAggregateView | null);
 
+      const stdioEnvLines = Object.entries(
+        (data.server.stdioConfig?.env ?? {}) as Record<string, string>,
+      ).map(([k, val]) => `${k}=${val}`).join('\n');
+
       form.setValues({
         name: data.server.name || '',
         description: data.server.description || '',
@@ -171,6 +196,12 @@ export default function McpDetailPage() {
         authUsername: data.server.upstreamAuth?.username || '',
         authPassword: '',
         openApiSpec: data.server.openApiSpec || '',
+        remoteUrl: data.server.remoteConfig?.url || '',
+        remoteTransport: data.server.remoteConfig?.transport || 'streamable-http',
+        stdioRuntime: data.server.stdioConfig?.runtime || 'npx',
+        stdioPackage: data.server.stdioConfig?.packageName || '',
+        stdioArgs: (data.server.stdioConfig?.args ?? []).join(' '),
+        stdioEnv: stdioEnvLines,
       });
     } catch (err) {
       console.error('Failed to load MCP server', err);
@@ -264,6 +295,13 @@ export default function McpDetailPage() {
   }, [params.id]);
 
   useEffect(() => {
+    fetch('/api/mcp/capabilities', { cache: 'no-store' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => { if (data) setCaps(data); })
+      .catch(() => setCaps(null));
+  }, []);
+
+  useEffect(() => {
     loadOverviewMetrics();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params.id]);
@@ -316,28 +354,76 @@ export default function McpDetailPage() {
     setSaving(true);
     try {
       const values = form.values;
+      const sourceType = server?.sourceType ?? 'openapi';
       const update: Record<string, unknown> = {
         name: values.name,
         description: values.description || undefined,
-        upstreamBaseUrl: values.upstreamBaseUrl || undefined,
       };
 
-      // Only update auth if values were touched
-      const upstreamAuth: Record<string, string> = { type: values.authType };
-      if (values.authType === 'token' && values.authToken) {
-        upstreamAuth.token = values.authToken;
-      } else if (values.authType === 'header') {
-        upstreamAuth.headerName = values.authHeaderName;
-        if (values.authHeaderValue) upstreamAuth.headerValue = values.authHeaderValue;
-      } else if (values.authType === 'basic') {
-        upstreamAuth.username = values.authUsername;
-        if (values.authPassword) upstreamAuth.password = values.authPassword;
+      // Upstream auth applies to openapi/remote sources; stdio talks over
+      // stdin/stdout and authenticates via env vars instead.
+      if (sourceType !== 'stdio') {
+        const upstreamAuth: Record<string, string> = { type: values.authType };
+        if (values.authType === 'token' && values.authToken) {
+          upstreamAuth.token = values.authToken;
+        } else if (values.authType === 'header') {
+          upstreamAuth.headerName = values.authHeaderName;
+          if (values.authHeaderValue) upstreamAuth.headerValue = values.authHeaderValue;
+        } else if (values.authType === 'basic') {
+          upstreamAuth.username = values.authUsername;
+          if (values.authPassword) upstreamAuth.password = values.authPassword;
+        }
+        update.upstreamAuth = upstreamAuth;
       }
-      update.upstreamAuth = upstreamAuth;
 
-      // Update spec if changed
-      if (values.openApiSpec && values.openApiSpec !== server?.openApiSpec) {
-        update.openApiSpec = values.openApiSpec;
+      if (sourceType === 'openapi') {
+        update.upstreamBaseUrl = values.upstreamBaseUrl || undefined;
+        // Update spec if changed
+        if (values.openApiSpec && values.openApiSpec !== server?.openApiSpec) {
+          update.openApiSpec = values.openApiSpec;
+        }
+      } else if (sourceType === 'remote') {
+        if (!values.remoteUrl.trim()) throw new Error('MCP server URL is required');
+        const currentRemote = server?.remoteConfig;
+        if (values.remoteUrl.trim() !== (currentRemote?.url ?? '')
+          || values.remoteTransport !== (currentRemote?.transport ?? 'streamable-http')) {
+          update.remoteConfig = {
+            url: values.remoteUrl.trim(),
+            transport: values.remoteTransport,
+          };
+        }
+      } else if (sourceType === 'stdio') {
+        if (!values.stdioPackage.trim()) throw new Error('Package name is required');
+        const env: Record<string, string> = {};
+        for (const line of values.stdioEnv.split('\n')) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith('#')) continue;
+          const eq = trimmed.indexOf('=');
+          if (eq <= 0) continue;
+          env[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1).trim();
+        }
+        // Masked values ("••••••") are resolved server-side to the stored
+        // secrets; execution mode / sandbox settings pass through unchanged.
+        // Sending stdioConfig triggers tool re-discovery, so only include it
+        // when the launch configuration actually changed.
+        const current = server?.stdioConfig;
+        const currentEnvLines = Object.entries(current?.env ?? {})
+          .map(([k, val]) => `${k}=${val}`).join('\n');
+        const args = values.stdioArgs.split(/\s+/).map((a) => a.trim()).filter(Boolean);
+        const stdioChanged = values.stdioRuntime !== (current?.runtime ?? 'npx')
+          || values.stdioPackage.trim() !== (current?.packageName ?? '')
+          || args.join(' ') !== (current?.args ?? []).join(' ')
+          || values.stdioEnv.trim() !== currentEnvLines.trim();
+        if (stdioChanged) {
+          update.stdioConfig = {
+            runtime: values.stdioRuntime,
+            packageName: values.stdioPackage.trim(),
+            args,
+            env: Object.keys(env).length ? env : undefined,
+            executionMode: current?.executionMode ?? 'subprocess',
+            sandbox: current?.sandbox,
+          };
+        }
       }
 
       const res = await fetch(`/api/mcp/${params.id}`, {
@@ -411,7 +497,11 @@ export default function McpDetailPage() {
       const res = await fetch(`/api/mcp/${params.id}/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tool: pgTool, arguments: args }),
+        body: JSON.stringify({
+          tool: pgTool,
+          arguments: args,
+          runtime_context: parseRuntimeContextJson(runtimeContextJson),
+        }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -431,6 +521,9 @@ export default function McpDetailPage() {
     }
   };
 
+  const enabledPgTools = (server?.tools ?? []).filter(
+    (t) => !(server?.disabledTools ?? []).includes(t.name),
+  );
   const selectedPgTool = server?.tools?.find((t) => t.name === pgTool) ?? null;
 
   if (loading) {
@@ -518,7 +611,9 @@ export default function McpDetailPage() {
               label={server.status === 'active' ? 'Active' : 'Disabled'}
             />
             <span className="ds-badge ds-badge-info">
-              {server.tools?.length ?? 0} tools
+              {server.disabledTools?.length
+                ? `${(server.tools?.length ?? 0) - server.disabledTools.length}/${server.tools?.length ?? 0} tools`
+                : `${server.tools?.length ?? 0} tools`}
             </span>
           </>
         }
@@ -552,7 +647,9 @@ export default function McpDetailPage() {
             Usage
           </Tabs.Tab>
           <Tabs.Tab value="tools" leftSection={<IconCode size={14} />}>
-            Tools ({server.tools?.length ?? 0})
+            {server.disabledTools?.length
+              ? `Tools (${(server.tools?.length ?? 0) - server.disabledTools.length}/${server.tools?.length ?? 0})`
+              : `Tools (${server.tools?.length ?? 0})`}
           </Tabs.Tab>
           <Tabs.Tab value="playground" leftSection={<IconPlayerPlay size={14} />}>
             Playground
@@ -567,6 +664,32 @@ export default function McpDetailPage() {
 
         {/* ── Overview Tab ── */}
         <Tabs.Panel value="overview">
+          {caps && (
+            (server.stdioConfig?.executionMode === 'sandbox' && !caps.stdioSandbox.available)
+            || ((server.aegis?.mode ?? 'off') !== 'off' && !caps.aegis.hookAvailable)
+          ) ? (
+            <Alert
+              color="yellow"
+              icon={<IconAlertTriangle size={16} />}
+              title="Enterprise features inactive"
+              mb="md"
+            >
+              {server.stdioConfig?.executionMode === 'sandbox' && !caps.stdioSandbox.available ? (
+                <Text size="sm">
+                  This server is configured for <b>persistent sandbox execution</b>, an Enterprise
+                  feature that is not active on your current plan — it will not run until you upgrade
+                  under Dashboard → License.
+                </Text>
+              ) : null}
+              {(server.aegis?.mode ?? 'off') !== 'off' && !caps.aegis.hookAvailable ? (
+                <Text size="sm" mt={server.stdioConfig?.executionMode === 'sandbox' && !caps.stdioSandbox.available ? 6 : 0}>
+                  An <b>Aegis shield</b> is bound in <b>{server.aegis?.mode}</b> mode but will not
+                  enforce without an active Enterprise plan.
+                </Text>
+              ) : null}
+            </Alert>
+          ) : null}
+
           {server.lastError ? (
             <Paper withBorder p="md" radius="md" mb="md" style={{ borderColor: 'var(--mantine-color-red-4)' }}>
               <Group gap="xs">
@@ -593,7 +716,12 @@ export default function McpDetailPage() {
             </Paper>
             <Paper withBorder p="md" radius="md">
               <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Tools</Text>
-              <Text fw={700} size="xl" mt="xs">{server.tools?.length ?? 0}</Text>
+              <Text fw={700} size="xl" mt="xs">
+                {(server.tools?.length ?? 0) - (server.disabledTools?.length ?? 0)}
+                {server.disabledTools?.length ? (
+                  <Text span size="sm" c="dimmed" fw={500}> of {server.tools?.length ?? 0} enabled</Text>
+                ) : null}
+              </Text>
             </Paper>
             <Paper withBorder p="md" radius="md">
               <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Authentication</Text>
@@ -648,6 +776,39 @@ export default function McpDetailPage() {
                   <Code style={{ fontSize: 11 }}>{server.aegis.shieldId}</Code>
                 ) : null}
               </Group>
+            </Paper>
+            <Paper withBorder p="md" radius="md">
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Runtime Headers</Text>
+              <Switch
+                mt="xs"
+                size="sm"
+                label="Accept caller headers"
+                checked={
+                  (server.metadata?.runtimeHeaders as { allow?: boolean } | undefined)?.allow === true
+                }
+                onChange={async (event) => {
+                  const allow = event.currentTarget.checked;
+                  try {
+                    const res = await fetch(`/api/mcp/${server.id}`, {
+                      method: 'PATCH',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ runtimeHeaders: allow ? { allow: true } : null }),
+                    });
+                    if (!res.ok) throw new Error('update failed');
+                    const data = await res.json();
+                    setServer(data.server);
+                  } catch {
+                    notifications.show({
+                      title: 'Error',
+                      message: 'Failed to update runtime header policy',
+                      color: 'red',
+                    });
+                  }
+                }}
+              />
+              <Text size="xs" c="dimmed" mt={6}>
+                Allow API/A2A/realtime callers to pass per-request headers to the upstream.
+              </Text>
             </Paper>
           </SimpleGrid>
 
@@ -1021,14 +1182,17 @@ async with sse_client(
 
         {/* ── Tools Tab ── */}
         <Tabs.Panel value="tools">
-          {server.sourceType !== 'openapi' ? (
-            <Group justify="space-between" mb="sm">
-              <Text size="sm" c="dimmed">
-                Tools discovered from the {server.sourceType === 'remote' ? 'remote MCP server' : 'stdio package'}
-                {server.toolsDiscoveredAt
-                  ? ` · last discovery ${new Date(server.toolsDiscoveredAt).toLocaleString()}`
-                  : ''}
-              </Text>
+          <Group justify="space-between" mb="sm">
+            <Text size="sm" c="dimmed">
+              {server.sourceType !== 'openapi'
+                ? `Tools discovered from the ${server.sourceType === 'remote' ? 'remote MCP server' : 'stdio package'}`
+                : 'Tools imported from the OpenAPI spec'}
+              {server.toolsDiscoveredAt
+                ? ` · last discovery ${new Date(server.toolsDiscoveredAt).toLocaleString()}`
+                : ''}
+              {' '}· disabled tools are hidden from tools/list and rejected on execution
+            </Text>
+            {server.sourceType !== 'openapi' ? (
               <Button
                 variant="default"
                 size="xs"
@@ -1038,52 +1202,14 @@ async with sse_client(
               >
                 Refresh tools
               </Button>
-            </Group>
-          ) : null}
-          <Paper withBorder radius="md" p={0} style={{ overflow: 'hidden' }}>
-            {!server.tools?.length ? (
-              <Center p="xl">
-                <Text c="dimmed">No tools discovered yet</Text>
-              </Center>
-            ) : (
-              <Table horizontalSpacing="md" verticalSpacing="sm">
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>Name</Table.Th>
-                    {server.sourceType === 'openapi' ? <Table.Th>Method</Table.Th> : null}
-                    {server.sourceType === 'openapi' ? <Table.Th>Path</Table.Th> : null}
-                    <Table.Th>Description</Table.Th>
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {server.tools.map((tool) => (
-                    <Table.Tr key={tool.name}>
-                      <Table.Td>
-                        <Code>{tool.name}</Code>
-                      </Table.Td>
-                      {server.sourceType === 'openapi' ? (
-                        <Table.Td>
-                          <Badge size="sm" variant="light" color="blue">
-                            {tool.httpMethod ?? '—'}
-                          </Badge>
-                        </Table.Td>
-                      ) : null}
-                      {server.sourceType === 'openapi' ? (
-                        <Table.Td>
-                          <Text size="sm" ff="monospace">{tool.httpPath ?? '—'}</Text>
-                        </Table.Td>
-                      ) : null}
-                      <Table.Td>
-                        <Text size="sm" c="dimmed" lineClamp={1}>
-                          {tool.description || '—'}
-                        </Text>
-                      </Table.Td>
-                    </Table.Tr>
-                  ))}
-                </Table.Tbody>
-              </Table>
-            )}
-          </Paper>
+            ) : null}
+          </Group>
+          <McpToolsPanel
+            serverId={params.id}
+            tools={server.tools ?? []}
+            disabledTools={server.disabledTools ?? []}
+            onServerUpdated={(s) => setServer(s as McpServerView & { openApiSpec?: string })}
+          />
         </Tabs.Panel>
 
         {/* ── Playground Tab ── */}
@@ -1094,15 +1220,18 @@ async with sse_client(
                 <Text fw={600} size="sm">Try a tool</Text>
                 <Select
                   label="Tool"
-                  placeholder={server.tools?.length ? 'Select a tool to run' : 'No tools available'}
-                  disabled={!server.tools?.length}
-                  data={(server.tools ?? []).map((t) => ({
+                  placeholder={enabledPgTools.length ? 'Select a tool to run' : 'No enabled tools available'}
+                  disabled={!enabledPgTools.length}
+                  data={enabledPgTools.map((t) => ({
                     value: t.name,
-                    label: `${t.name} · ${t.httpMethod} ${t.httpPath}`,
+                    label: t.httpMethod && t.httpPath
+                      ? `${t.name} · ${t.httpMethod} ${t.httpPath}`
+                      : t.name,
                   }))}
                   value={pgTool}
                   onChange={(v) => {
                     setPgTool(v);
+                    setPgArgs('{}');
                     setPgResult('');
                     setPgLatency(null);
                   }}
@@ -1113,16 +1242,24 @@ async with sse_client(
                   <Text size="sm" c="dimmed">{selectedPgTool.description}</Text>
                 )}
 
-                <JsonInput
-                  label="Arguments (JSON)"
-                  description="Path/query params at top level; request body under a &quot;body&quot; key."
-                  placeholder='{"id": "123", "body": {"name": "example"}}'
-                  minRows={5}
-                  maxRows={14}
-                  autosize
-                  formatOnBlur
-                  value={pgArgs}
-                  onChange={setPgArgs}
+                {server.sourceType === 'openapi' && pgTool ? (
+                  <Text size="xs" c="dimmed">
+                    Path/query params at top level; request body under a &quot;body&quot; key.
+                  </Text>
+                ) : null}
+
+                {pgTool ? (
+                  <McpToolArgsEditor
+                    key={pgTool}
+                    inputSchema={selectedPgTool?.inputSchema ?? null}
+                    value={pgArgs}
+                    onChange={setPgArgs}
+                  />
+                ) : null}
+
+                <RuntimeContextEditor
+                  value={runtimeContextJson}
+                  onChange={setRuntimeContextJson}
                 />
 
                 <Group>
@@ -1265,13 +1402,27 @@ async with sse_client(
                           <Code>{log.toolName}</Code>
                         </Table.Td>
                         <Table.Td>
-                          <Badge
-                            size="sm"
-                            variant="light"
-                            color={STATUS_COLORS[log.status] ?? 'gray'}
-                          >
-                            {log.status}
-                          </Badge>
+                          <Group gap={4} wrap="nowrap">
+                            <Badge
+                              size="sm"
+                              variant="light"
+                              color={STATUS_COLORS[log.status] ?? 'gray'}
+                            >
+                              {log.status}
+                            </Badge>
+                            {(() => {
+                              const auth = (log.requestPayload as Record<string, unknown> | undefined)
+                                ?._runtimeAuth as { headerKeys?: string[]; source?: string } | undefined;
+                              if (!auth?.headerKeys?.length) return null;
+                              return (
+                                <Tooltip label={`Runtime headers: ${auth.headerKeys.join(', ')}${auth.source ? ` (${auth.source})` : ''}`}>
+                                  <Badge size="xs" variant="outline" color="orange">
+                                    runtime auth
+                                  </Badge>
+                                </Tooltip>
+                              );
+                            })()}
+                          </Group>
                         </Table.Td>
                         <Table.Td>
                           <Text size="sm">
@@ -1445,70 +1596,134 @@ async with sse_client(
             {...form.getInputProps('description')}
           />
 
-          <TextInput
-            label="Upstream Base URL"
-            placeholder="https://api.example.com"
-            {...form.getInputProps('upstreamBaseUrl')}
-          />
-
-          <Select
-            label="Authentication Type"
-            data={[
-              { value: 'none', label: 'No authentication' },
-              { value: 'token', label: 'Bearer Token' },
-              { value: 'header', label: 'Custom Header' },
-              { value: 'basic', label: 'Basic Auth' },
-            ]}
-            {...form.getInputProps('authType')}
-          />
-
-          {form.values.authType === 'token' && (
-            <PasswordInput
-              label="Bearer Token"
-              description="Leave empty to keep the current token"
-              {...form.getInputProps('authToken')}
+          {server.sourceType === 'openapi' ? (
+            <TextInput
+              label="Upstream Base URL"
+              placeholder="https://api.example.com"
+              {...form.getInputProps('upstreamBaseUrl')}
             />
-          )}
+          ) : null}
 
-          {form.values.authType === 'header' && (
+          {server.sourceType === 'remote' ? (
             <>
               <TextInput
-                label="Header Name"
-                {...form.getInputProps('authHeaderName')}
+                label="MCP Server URL"
+                required
+                placeholder="https://mcp.example.com/mcp"
+                description="Changing the URL re-discovers the tool list"
+                {...form.getInputProps('remoteUrl')}
               />
-              <PasswordInput
-                label="Header Value"
-                description="Leave empty to keep the current value"
-                {...form.getInputProps('authHeaderValue')}
+              <Select
+                label="Upstream Transport"
+                data={[
+                  { value: 'streamable-http', label: 'Streamable HTTP' },
+                  { value: 'sse', label: 'SSE (legacy)' },
+                ]}
+                {...form.getInputProps('remoteTransport')}
               />
             </>
-          )}
+          ) : null}
 
-          {form.values.authType === 'basic' && (
+          {server.sourceType === 'stdio' ? (
             <>
+              <Group grow>
+                <Select
+                  label="Runtime"
+                  data={[
+                    { value: 'npx', label: 'npx (Node)' },
+                    { value: 'uvx', label: 'uvx (Python)' },
+                  ]}
+                  {...form.getInputProps('stdioRuntime')}
+                />
+                <TextInput
+                  label="Package"
+                  required
+                  placeholder="@modelcontextprotocol/server-everything"
+                  {...form.getInputProps('stdioPackage')}
+                />
+              </Group>
               <TextInput
-                label="Username"
-                {...form.getInputProps('authUsername')}
+                label="Arguments"
+                placeholder="--flag value"
+                description="Space-separated arguments passed to the package"
+                {...form.getInputProps('stdioArgs')}
               />
-              <PasswordInput
-                label="Password"
-                description="Leave empty to keep the current password"
-                {...form.getInputProps('authPassword')}
+              <Textarea
+                label="Environment Variables"
+                description="One KEY=value per line. Masked values (••••••) keep the stored secret; changing the config re-discovers the tool list."
+                placeholder={'API_KEY=sk-...\nBASE_URL=https://api.example.com'}
+                minRows={2}
+                autosize
+                styles={{ input: { fontFamily: 'var(--mantine-font-family-monospace)' } }}
+                {...form.getInputProps('stdioEnv')}
               />
             </>
-          )}
+          ) : null}
 
-          <Box>
-            <JsonInput
-              label="OpenAPI Specification"
-              description="Edit the JSON spec to update available tools"
-              minRows={8}
-              maxRows={16}
-              autosize
-              formatOnBlur
-              {...form.getInputProps('openApiSpec')}
-            />
-          </Box>
+          {server.sourceType !== 'stdio' ? (
+            <>
+              <Select
+                label="Authentication Type"
+                data={[
+                  { value: 'none', label: 'No authentication' },
+                  { value: 'token', label: 'Bearer Token' },
+                  { value: 'header', label: 'Custom Header' },
+                  { value: 'basic', label: 'Basic Auth' },
+                ]}
+                {...form.getInputProps('authType')}
+              />
+
+              {form.values.authType === 'token' && (
+                <PasswordInput
+                  label="Bearer Token"
+                  description="Leave empty to keep the current token"
+                  {...form.getInputProps('authToken')}
+                />
+              )}
+
+              {form.values.authType === 'header' && (
+                <>
+                  <TextInput
+                    label="Header Name"
+                    {...form.getInputProps('authHeaderName')}
+                  />
+                  <PasswordInput
+                    label="Header Value"
+                    description="Leave empty to keep the current value"
+                    {...form.getInputProps('authHeaderValue')}
+                  />
+                </>
+              )}
+
+              {form.values.authType === 'basic' && (
+                <>
+                  <TextInput
+                    label="Username"
+                    {...form.getInputProps('authUsername')}
+                  />
+                  <PasswordInput
+                    label="Password"
+                    description="Leave empty to keep the current password"
+                    {...form.getInputProps('authPassword')}
+                  />
+                </>
+              )}
+            </>
+          ) : null}
+
+          {server.sourceType === 'openapi' ? (
+            <Box>
+              <JsonInput
+                label="OpenAPI Specification"
+                description="Edit the JSON spec to update available tools"
+                minRows={8}
+                maxRows={16}
+                autosize
+                formatOnBlur
+                {...form.getInputProps('openApiSpec')}
+              />
+            </Box>
+          ) : null}
 
           <Group justify="flex-end" mt="sm">
             <Button variant="default" onClick={() => setEditOpen(false)}>

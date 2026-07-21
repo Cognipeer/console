@@ -8,6 +8,7 @@
 import { createLogger } from '@/lib/core/logger';
 import Database from 'better-sqlite3';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { warnGlobalTenantFallback } from '../tenantScopeGuard';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -76,6 +77,7 @@ export const TABLES = {
   mcpServers: 'mcp_servers',
   mcpRequestLogs: 'mcp_request_logs',
   mcpAuditLogs: 'mcp_audit_logs',
+  mcpHubs: 'mcp_hubs',
   tools: 'tools',
   toolRequestLogs: 'tool_request_logs',
   agents: 'agents',
@@ -580,6 +582,14 @@ export class SQLiteProviderBase {
       'agentKey',
       'agentKey TEXT',
     );
+    // Parametric "agent is using tools" filler line (added with tool-call
+    // progress events). Safe to ensure on boot.
+    this.ensureTableColumn(
+      db,
+      TABLES.realtimeModels,
+      'toolStatusMessage',
+      'toolStatusMessage TEXT',
+    );
     // Per-project sandbox resource defaults (added with port preview + resource
     // limits). Safe to ensure on boot for tenants created before the feature.
     this.ensureTableColumn(
@@ -865,11 +875,15 @@ export class SQLiteProviderBase {
   }
 
   protected getTenantDb(): Database.Database {
-    const tenantDb = this.tenantContext.getStore() ?? this.tenantDb;
-    if (!tenantDb) {
+    const scoped = this.tenantContext.getStore();
+    if (scoped) return scoped;
+    if (!this.tenantDb) {
       throw new Error('Tenant database not set. Call switchToTenant() first.');
     }
-    return tenantDb;
+    // See tenantScopeGuard: unwrapped callers fall back to the process-global
+    // handle, which is a cross-tenant race under concurrent load.
+    warnGlobalTenantFallback(this.tenantDb.name);
+    return this.tenantDb;
   }
 
   /** Generate a new random ID (replaces MongoDB ObjectId). */

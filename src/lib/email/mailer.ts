@@ -75,7 +75,10 @@ class EmailService {
         allowProtoMethodsByDefault: false,
       } as const;
       const template = handlebars.compile(templateContent, compileOpts);
-      const html = template(data, runtimeOpts);
+      const html = template(
+        { currentYear: new Date().getFullYear(), ...data },
+        runtimeOpts,
+      );
 
       // Extract subject from template (first line should be: <!-- subject: Your Subject -->)
       const subjectMatch = templateContent.match(

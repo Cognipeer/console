@@ -105,6 +105,12 @@ export async function getDatabase(): Promise<DatabaseProvider> {
 /**
  * Get database instance for a specific tenant.
  * This is a convenience function that gets the database and switches to the tenant.
+ *
+ * ⚠️ Prefer `runWithTenantScope` for any code path that is not already inside a
+ * request-level `runWithTenant` scope (websockets, schedulers, fire-and-forget
+ * tasks): `switchToTenant` alone does not survive the caller's continuation
+ * after an `await`, so subsequent queries fall back to the process-global
+ * tenant handle, which a concurrent request for another tenant can overwrite.
  */
 export async function getTenantDatabase(
   tenantDbName: string,
@@ -112,6 +118,33 @@ export async function getTenantDatabase(
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
   return db;
+}
+
+/**
+ * THE canonical tenant-scope wrapper for code that runs outside a
+ * request-level tenant scope: websocket sessions, background schedulers,
+ * fire-and-forget tasks, queue/job runners, transport bridges.
+ *
+ * Binds the tenant DB for the entire (sync + async) execution of `fn` via the
+ * provider's `.run()`-based `runWithTenant`, which — unlike `switchToTenant` —
+ * is immune to both the lost-`enterWith`-binding problem and the process-global
+ * fallback that concurrent requests for other tenants can overwrite
+ * (cross-tenant reads/writes). Falls back to `switchToTenant` only for partial
+ * test doubles that do not implement `runWithTenant`.
+ *
+ * Do not hand-roll this per service — local clones drift (this consolidates
+ * sandbox `inTenant`, crawler `runWithTenantDb`, and public-mcp's helper).
+ */
+export async function runWithTenantScope<T>(
+  tenantDbName: string,
+  fn: (db: DatabaseProvider) => T | Promise<T>,
+): Promise<T> {
+  const db = await getDatabase();
+  if (typeof db.runWithTenant === 'function') {
+    return db.runWithTenant(tenantDbName, () => fn(db));
+  }
+  await db.switchToTenant(tenantDbName);
+  return fn(db);
 }
 
 export async function disconnectDatabase(): Promise<void> {
@@ -292,6 +325,9 @@ export type {
   McpStdioExecutionMode,
   McpCallerType,
   McpCallTransport,
+  IMcpHub,
+  IMcpHubExposureConfig,
+  McpHubStatus,
   IAgent,
   IAgentConfig,
   IAgentConversation,

@@ -12,7 +12,7 @@ import { createLogger } from '@/lib/core/logger';
 import { getConfig } from '@/lib/core/config';
 import { routeInstanceCall } from '@/lib/core/cluster';
 import type { QueuePayload } from '@/lib/core/queue';
-import { getDatabase, type DatabaseProvider } from '@/lib/database';
+import { getDatabase, runWithTenantScope, type DatabaseProvider } from '@/lib/database';
 import { uploadFile } from '@/lib/services/files';
 import {
   recordUsageEvent,
@@ -128,6 +128,11 @@ export async function createBrowserSession(
       config,
       onClose: async (reason) => {
         try {
+          // The manager invokes this from its reaper timer / shutdown path —
+          // outside any request tenant scope — so bind the tenant explicitly
+          // (the captured `db` handle would otherwise fall back to whatever
+          // tenant a concurrent request last bound).
+          await runWithTenantScope(ctx.tenantDbName, async () => {
           await persistEvent(ctx, sessionId, sessionKey, 'close', {
             status: 'success',
             data: { reason },
@@ -157,6 +162,7 @@ export async function createBrowserSession(
               apiTokenId: row?.apiTokenId ?? attribution.apiTokenId,
               actorType: row?.actorType ?? attribution.actorType,
             },
+          });
           });
         } catch (err) {
           logger.warn('Failed to persist close metadata', {

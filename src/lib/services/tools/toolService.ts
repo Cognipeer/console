@@ -9,8 +9,14 @@ import slugify from 'slugify';
 import { safeFetch } from '@/lib/security/outboundFetch';
 import { normalizeApiSpec, type SpecFormatHint } from '@/lib/services/specImport';
 import { createLogger } from '@/lib/core/logger';
+import {
+  authConfigSecretValues,
+  redactLogPayload,
+  redactLogString,
+} from '@/lib/services/logRedaction';
 import { getDatabase } from '@/lib/database';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
+import type { RuntimeAuthLogInfo } from '@/lib/services/runtimeContext';
 import type { ITool, IToolAction, IToolAuthConfig } from '@/lib/database';
 import type {
   CreateToolInput,
@@ -312,6 +318,23 @@ export async function updateTool(
   if (input.mcpEndpoint !== undefined) updateData.mcpEndpoint = input.mcpEndpoint;
   if (input.mcpTransport !== undefined) updateData.mcpTransport = input.mcpTransport;
 
+  // Runtime-header passthrough policy lives in the metadata blob (no schema
+  // migration needed in either DB tree).
+  if (input.runtimeHeaders !== undefined) {
+    const existing = await db.findToolById(toolId);
+    updateData.metadata = {
+      ...(existing?.metadata ?? {}),
+      runtimeHeaders: input.runtimeHeaders === null
+        ? undefined
+        : {
+          allow: input.runtimeHeaders.allow === true,
+          ...(input.runtimeHeaders.allowedNames?.length
+            ? { allowedNames: input.runtimeHeaders.allowedNames.filter((n) => typeof n === 'string' && n.trim()) }
+            : {}),
+        },
+    };
+  }
+
   // Re-parse spec or re-discover MCP tools if source config changed
   if (input.openApiSpec !== undefined) {
     const { actions, baseUrl: specBaseUrl, normalizedSpec } = parseOpenApiToActions(
@@ -418,6 +441,7 @@ export async function executeToolAction(
   tool: ITool,
   actionKey: string,
   args: Record<string, unknown>,
+  runtimeHeaders?: Record<string, string>,
 ): Promise<ExecuteToolActionResult> {
   const action = tool.actions.find((a) => a.key === actionKey);
   if (!action) {
@@ -427,9 +451,9 @@ export async function executeToolAction(
   const start = Date.now();
 
   if (action.executionType === 'openapi_http') {
-    return executeOpenApiAction(tool, action, args, start);
+    return executeOpenApiAction(tool, action, args, start, runtimeHeaders);
   } else if (action.executionType === 'mcp_call') {
-    return executeMcpAction(tool, action, args, start);
+    return executeMcpAction(tool, action, args, start, runtimeHeaders);
   }
 
   throw new Error(`Unsupported execution type: ${action.executionType}`);
@@ -440,6 +464,7 @@ async function executeOpenApiAction(
   action: IToolAction,
   args: Record<string, unknown>,
   start: number,
+  runtimeHeaders?: Record<string, string>,
 ): Promise<ExecuteToolActionResult> {
   if (!tool.upstreamBaseUrl) {
     throw new Error('Tool has no upstream base URL configured');
@@ -478,6 +503,9 @@ async function executeOpenApiAction(
     headers['Authorization'] = `Basic ${encoded}`;
   }
 
+  // Caller-supplied runtime headers (already policy-filtered) win over static auth.
+  Object.assign(headers, runtimeHeaders);
+
   const fetchOptions: RequestInit = {
     method: action.httpMethod || 'GET',
     headers,
@@ -511,6 +539,7 @@ async function executeMcpAction(
   action: IToolAction,
   args: Record<string, unknown>,
   start: number,
+  runtimeHeaders?: Record<string, string>,
 ): Promise<ExecuteToolActionResult> {
   if (!tool.mcpEndpoint) {
     throw new Error('Tool has no MCP endpoint configured');
@@ -530,6 +559,9 @@ async function executeMcpAction(
     const encoded = Buffer.from(`${auth.username}:${auth.password}`).toString('base64');
     headers['Authorization'] = `Basic ${encoded}`;
   }
+
+  // Caller-supplied runtime headers (already policy-filtered) win over static auth.
+  Object.assign(headers, runtimeHeaders);
 
   const callBody = JSON.stringify({
     jsonrpc: '2.0',
@@ -601,6 +633,22 @@ export function serializeTool(tool: ITool): ToolView {
 
 // ── Request Logging ───────────────────────────────────────────────────────
 
+/**
+ * Outbound secret values that could be echoed back into a logged response for
+ * this tool: the caller's applied runtime-header values plus the tool's own
+ * static upstream credential. Tool auth is stored plaintext (no vault seal),
+ * so it is read directly. Passed to `logToolRequest`.
+ */
+export function toolRequestSecretValues(
+  tool: ITool,
+  runtimeHeaders?: Record<string, string>,
+): string[] {
+  return [
+    ...Object.values(runtimeHeaders ?? {}),
+    ...authConfigSecretValues(tool.upstreamAuth),
+  ];
+}
+
 export async function logToolRequest(
   tenantDbName: string,
   tenantId: string,
@@ -615,6 +663,10 @@ export async function logToolRequest(
   errorMessage?: string,
   callerType?: 'dashboard' | 'api' | 'agent',
   callerTokenId?: string,
+  /** Log-safe runtime-auth info: header NAMES only, never values. */
+  runtimeAuth?: RuntimeAuthLogInfo,
+  /** Outbound secret values to scrub from echoed request/response payloads. */
+  secretValues?: string[],
 ) {
   // Resolve attribution + rollup before any await so the request ALS is in
   // scope. `callerType`/`callerTokenId` stay for compat; the standard
@@ -642,9 +694,17 @@ export async function logToolRequest(
       actionName,
       status,
       latencyMs,
-      requestPayload,
-      responsePayload,
-      errorMessage,
+      // Runtime-auth usage rides inside the payload blob so both DB schemas
+      // persist it without a migration. Header names only — values never land here.
+      // Scrub echoed secrets / sensitive keys and cap size before persisting.
+      requestPayload: redactLogPayload(
+        runtimeAuth
+          ? { ...(requestPayload ?? {}), _runtimeAuth: runtimeAuth as unknown as Record<string, unknown> }
+          : requestPayload,
+        { secretValues },
+      ),
+      responsePayload: redactLogPayload(responsePayload, { secretValues }),
+      errorMessage: redactLogString(errorMessage, secretValues),
       callerType,
       callerTokenId,
     });

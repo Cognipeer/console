@@ -12,7 +12,7 @@
  * with discovery + dispatch.
  */
 
-import { getDatabase, getTenantDatabase } from '@/lib/database';
+import { getDatabase, runWithTenantScope } from '@/lib/database';
 import type { ICrawler } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { getCache } from '@/lib/core/cache';
@@ -71,7 +71,10 @@ async function runOnce(manual = false): Promise<{
       processedTenants += 1;
 
       try {
-        const tenantDb = await getTenantDatabase(tenant.dbName);
+        // Timer context — bind the tenant for the whole per-tenant block so
+        // the schedule updateCrawler write and runCrawler's job creation can
+        // never land in another tenant's DB via the process-global fallback.
+        await runWithTenantScope(tenant.dbName, async (tenantDb) => {
         const tenantId = String(tenant._id);
         const crawlers = await tenantDb.listCrawlers(tenantId);
         const now = new Date();
@@ -98,7 +101,7 @@ async function runOnce(manual = false): Promise<{
           }
         }
 
-        if (eligible.length === 0) continue;
+        if (eligible.length === 0) return;
         dueCrawlersCount += eligible.length;
 
         await Promise.allSettled(
@@ -137,6 +140,7 @@ async function runOnce(manual = false): Promise<{
             }
           }),
         );
+        });
       } catch (err) {
         logger.error(`Error processing tenant ${tenant.slug}`, {
           error: err instanceof Error ? err.message : String(err),

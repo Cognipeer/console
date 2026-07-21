@@ -426,7 +426,15 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       icon: IconServer,
       matcher: (p) =>
         p.startsWith('/dashboard/mcp') &&
-        !p.startsWith('/dashboard/mcp/monitor'),
+        !p.startsWith('/dashboard/mcp/monitor') &&
+        !p.startsWith('/dashboard/mcp/hubs'),
+    },
+    {
+      id: 'hubs',
+      label: 'MCP Hubs',
+      href: '/dashboard/mcp/hubs',
+      icon: IconStack2,
+      matcher: (p) => p.startsWith('/dashboard/mcp/hubs'),
     },
     {
       id: 'monitor',

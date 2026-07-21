@@ -10,9 +10,11 @@ import {
   IconUserOff,
 } from '@tabler/icons-react';
 import AuthShell from '@/components/layout/AuthShell';
+import { useTranslations } from '@/lib/i18n';
 
 export default function NoProjectPage() {
   const router = useRouter();
+  const t = useTranslations('noProject');
   const [checkingAccess, setCheckingAccess] = useState(false);
 
   const handleCheckAccess = async () => {
@@ -51,16 +53,17 @@ export default function NoProjectPage() {
 
   return (
     <AuthShell
-      title="No project assigned"
-      subtitle="Your account isn't assigned to any project yet."
+      title={t('hero.title')}
+      titleAccent={t('hero.titleAccent')}
+      subtitle={t('hero.subtitle')}
       highlights={[
         {
           icon: <IconUserOff size={13} stroke={1.7} />,
-          label: 'Ask a tenant admin to assign you to a project.',
+          label: t('highlights.askAdmin'),
         },
         {
           icon: <IconAlertTriangle size={13} stroke={1.7} />,
-          label: 'You won’t see workspace content until then.',
+          label: t('highlights.noContent'),
         },
       ]}
     >
@@ -73,11 +76,11 @@ export default function NoProjectPage() {
             lineHeight: 1.55,
           }}
         >
-          Once an admin grants you project access, click refresh to continue to
-          your dashboard. Otherwise you can sign out and return later.
+          {t('note')}
         </p>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <Button
+            className="auth-cta-primary"
             color="teal"
             size="md"
             fullWidth
@@ -85,7 +88,7 @@ export default function NoProjectPage() {
             leftSection={<IconRefresh size={16} stroke={1.7} />}
             onClick={handleCheckAccess}
           >
-            Refresh access
+            {t('refresh')}
           </Button>
           <Button
             variant="default"
@@ -94,7 +97,7 @@ export default function NoProjectPage() {
             leftSection={<IconLogout size={16} stroke={1.7} />}
             onClick={handleLogout}
           >
-            Log out
+            {t('logout')}
           </Button>
         </div>
       </div>

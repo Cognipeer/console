@@ -13,9 +13,12 @@ import {
   IconClock,
 } from '@tabler/icons-react';
 import AuthShell from '@/components/layout/AuthShell';
+import { useTranslations } from '@/lib/i18n';
 
 export default function ForgotPasswordPage() {
   const router = useRouter();
+  const t = useTranslations('forgotPassword');
+  const tCommon = useTranslations('common');
   const [loading, setLoading] = useState(false);
   const [submitted, setSubmitted] = useState(false);
 
@@ -26,9 +29,9 @@ export default function ForgotPasswordPage() {
     },
     validate: {
       email: (value) =>
-        /^\S+@\S+$/.test(value) ? null : 'Invalid email address',
+        /^\S+@\S+$/.test(value) ? null : t('validation.invalidEmail'),
       slug: (value) =>
-        value.trim().length > 0 ? null : 'Organization slug is required',
+        value.trim().length > 0 ? null : t('validation.slugRequired'),
     },
   });
 
@@ -43,8 +46,8 @@ export default function ForgotPasswordPage() {
 
       if (res.status === 429) {
         notifications.show({
-          title: 'Too many requests',
-          message: 'Please wait before requesting another reset link.',
+          title: t('notifications.tooManyTitle'),
+          message: t('notifications.tooManyMessage'),
           color: 'orange',
         });
         return;
@@ -54,8 +57,8 @@ export default function ForgotPasswordPage() {
       setSubmitted(true);
     } catch {
       notifications.show({
-        title: 'Error',
-        message: 'Something went wrong. Please try again.',
+        title: tCommon('error'),
+        message: t('notifications.genericError'),
         color: 'red',
       });
     } finally {
@@ -66,21 +69,22 @@ export default function ForgotPasswordPage() {
   if (submitted) {
     return (
       <AuthShell
-        title="Check your email"
-        subtitle="If an account exists with that email address, we've sent a password reset link. It will expire in 1 hour."
+        title={t('success.title')}
+        titleAccent={t('success.titleAccent')}
+        subtitle={t('success.subtitle')}
         highlights={[
           {
             icon: <IconMail size={13} stroke={1.7} />,
-            label: "We'll email you a reset link.",
+            label: t('highlights.emailLink'),
           },
           {
             icon: <IconClock size={13} stroke={1.7} />,
-            label: 'Link is valid for 1 hour.',
+            label: t('highlights.validity'),
           },
         ]}
         footer={
           <>
-            Remember your password?{' '}
+            {t('footer.cta')}{' '}
             <Link
               href="/login"
               style={{
@@ -89,24 +93,24 @@ export default function ForgotPasswordPage() {
                 textDecoration: 'none',
               }}
             >
-              Back to login
+              {t('footer.link')}
             </Link>
           </>
         }
       >
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <p style={{ fontSize: 13, color: 'var(--ds-text-muted)', margin: 0 }}>
-            Didn&apos;t get an email? Check your spam folder, or try again with
-            the correct organization slug.
+            {t('success.note')}
           </p>
           <Button
+            className="auth-cta-primary"
             color="teal"
             size="md"
             fullWidth
             leftSection={<IconCheck size={16} stroke={1.7} />}
             onClick={() => router.push('/login')}
           >
-            Back to login
+            {t('success.backToLogin')}
           </Button>
         </div>
       </AuthShell>
@@ -115,21 +119,22 @@ export default function ForgotPasswordPage() {
 
   return (
     <AuthShell
-      title="Reset your password"
-      subtitle="Enter your email and organization slug to receive a reset link."
+      title={t('hero.title')}
+      titleAccent={t('hero.titleAccent')}
+      subtitle={t('hero.subtitle')}
       highlights={[
         {
           icon: <IconMail size={13} stroke={1.7} />,
-          label: "We'll email you a reset link.",
+          label: t('highlights.emailLink'),
         },
         {
           icon: <IconClock size={13} stroke={1.7} />,
-          label: 'Link is valid for 1 hour.',
+          label: t('highlights.validity'),
         },
       ]}
       footer={
         <>
-          Remember your password?{' '}
+          {t('footer.cta')}{' '}
           <Link
             href="/login"
             style={{
@@ -138,7 +143,7 @@ export default function ForgotPasswordPage() {
               textDecoration: 'none',
             }}
           >
-            Back to login
+            {t('footer.link')}
           </Link>
         </>
       }
@@ -146,15 +151,15 @@ export default function ForgotPasswordPage() {
       <form onSubmit={form.onSubmit(handleSubmit)}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <TextInput
-            label="Organization Slug"
-            placeholder="my-company"
+            label={t('form.slug.label')}
+            placeholder={t('form.slug.placeholder')}
             required
             size="md"
             {...form.getInputProps('slug')}
           />
           <TextInput
-            label="Email"
-            placeholder="you@example.com"
+            label={t('form.email.label')}
+            placeholder={t('form.email.placeholder')}
             required
             size="md"
             autoComplete="email"
@@ -169,7 +174,7 @@ export default function ForgotPasswordPage() {
             leftSection={<IconMailForward size={16} stroke={1.7} />}
             mt={4}
           >
-            Send reset link
+            {t('form.submit')}
           </Button>
         </div>
       </form>

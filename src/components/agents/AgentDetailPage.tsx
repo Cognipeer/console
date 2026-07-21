@@ -31,6 +31,9 @@ import {
   Modal,
   Table,
   VisuallyHidden,
+  Switch,
+  SegmentedControl,
+  Alert,
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { DatePickerInput } from '@mantine/dates';
@@ -58,11 +61,14 @@ import {
   IconArrowsExchange,
   IconPlugConnected,
   IconPencil,
+  IconWorld,
+  IconAlertTriangle,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import EmptyState from '@/components/common/EmptyState';
 import LoadingState from '@/components/common/LoadingState';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
+import RuntimeContextEditor, { parseRuntimeContextJson } from '@/components/common/RuntimeContextEditor';
 import SectionCard from '@/components/common/SectionCard';
 import SessionTable from '@/components/tracing/SessionTable';
 import ReactMarkdown from 'react-markdown';
@@ -71,8 +77,16 @@ import { ToolSelectorModal, type ToolBinding } from './ToolSelectorModal';
 import ConnectAgentModal from './ConnectAgentModal';
 import classes from './AgentDetailPage.module.css';
 
+interface A2aMetadata {
+  enabled?: boolean;
+  accessMode?: 'token' | 'public';
+  /** Server-generated unguessable slug for the public endpoint. */
+  endpointSlug?: string;
+}
+
 interface Agent {
   _id: string;
+  tenantId: string;
   key: string;
   name: string;
   description?: string;
@@ -101,6 +115,7 @@ interface Agent {
   status: string;
   publishedVersion?: number | null;
   latestVersion?: number;
+  metadata?: { a2a?: A2aMetadata } & Record<string, unknown>;
 }
 
 interface AgentVersion {
@@ -195,6 +210,7 @@ export default function AgentDetailPage() {
   const [toolBindings, setToolBindings] = useState<ToolBinding[]>([]);
 
   // Publish & version state
+  const [a2aSaving, setA2aSaving] = useState(false);
   const [publishModalOpen, setPublishModalOpen] = useState(false);
   const [publishChangelog, setPublishChangelog] = useState('');
   const [publishing, setPublishing] = useState(false);
@@ -208,6 +224,7 @@ export default function AgentDetailPage() {
   // Chat state (in-memory only — no DB conversations)
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState('');
+  const [runtimeContextJson, setRuntimeContextJson] = useState('');
   const [chatLoading, setChatLoading] = useState(false);
   const chatViewportRef = useRef<HTMLDivElement>(null);
 
@@ -511,6 +528,44 @@ export default function AgentDetailPage() {
     }
   };
 
+  const updateA2a = async (patch: Partial<Pick<A2aMetadata, 'enabled' | 'accessMode'>>) => {
+    if (!agent) return;
+    setA2aSaving(true);
+    const current = agent.metadata?.a2a;
+    const next: A2aMetadata = {
+      enabled: current?.enabled === true,
+      accessMode: current?.accessMode === 'public' ? 'public' : 'token',
+      ...patch,
+    };
+    try {
+      const res = await fetch(`/api/agents/${agentId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          metadata: { ...(agent.metadata ?? {}), a2a: next },
+        }),
+      });
+      if (!res.ok) throw new Error('update failed');
+      const data = await res.json();
+      setAgent(data.agent);
+      if (patch.enabled !== undefined) {
+        notifications.show({
+          title: patch.enabled ? t('a2a.enabled') : t('a2a.disabled'),
+          message: '',
+          color: 'teal',
+        });
+      }
+    } catch {
+      notifications.show({
+        title: t('notifications.error'),
+        message: t('a2a.updateFailed'),
+        color: 'red',
+      });
+    } finally {
+      setA2aSaving(false);
+    }
+  };
+
   const handleToolBindingsChange = async (bindings: ToolBinding[]) => {
     setToolBindings(bindings);
     const saved = await saveAgentConfig({ notify: false, bindings });
@@ -560,6 +615,7 @@ export default function AgentDetailPage() {
         body: JSON.stringify({
           message,
           history: chatMessages, // send previous messages as context
+          runtime_context: parseRuntimeContextJson(runtimeContextJson),
         }),
       });
 
@@ -617,6 +673,17 @@ export default function AgentDetailPage() {
   const isConnected = agent.config?.kind === 'external';
   const connection = agent.config?.connection;
 
+  // ── A2A publish state ────────────────────────────────────────
+  const a2aConfig = agent.metadata?.a2a;
+  const a2aEnabled = a2aConfig?.enabled === true;
+  const a2aAccessMode: 'token' | 'public' = a2aConfig?.accessMode === 'public' ? 'public' : 'token';
+  const a2aIsPublic = a2aAccessMode === 'public' && Boolean(a2aConfig?.endpointSlug);
+  const origin = typeof window !== 'undefined' ? window.location.origin : 'https://your-instance.com';
+  const a2aEndpointUrl = a2aIsPublic
+    ? `${origin}/api/public/a2a/${agent.tenantId}/${a2aConfig?.endpointSlug}`
+    : `${origin}/api/client/v1/a2a/${agent.key}`;
+  const a2aCardUrl = `${a2aEndpointUrl}/.well-known/agent-card.json`;
+
   return (
     <PageContainer>
       <PageHeader
@@ -663,6 +730,9 @@ export default function AgentDetailPage() {
               {t('tabs.versions')}
             </Tabs.Tab>
           ) : null}
+          <Tabs.Tab value="publish" leftSection={<IconWorld size={14} />}>
+            {t('tabs.publish')}
+          </Tabs.Tab>
           <Tabs.Tab value="traces" leftSection={<IconTimeline size={14} />}>
             {t('tabs.traces')}
           </Tabs.Tab>
@@ -1136,6 +1206,14 @@ export default function AgentDetailPage() {
                     />
                   </Group>
                 )}
+
+                {/* Runtime context sent with every playground turn */}
+                <Box px="sm" pb="sm">
+                  <RuntimeContextEditor
+                    value={runtimeContextJson}
+                    onChange={setRuntimeContextJson}
+                  />
+                </Box>
               </div>
             </Paper>
           </div>
@@ -1397,6 +1475,91 @@ curl -X POST ${typeof window !== 'undefined' ? window.location.origin : 'https:/
           </Stack>
         </Tabs.Panel>
 
+        {/* ── Publish Tab (A2A exposure) ─────────────────────── */}
+        <Tabs.Panel value="publish">
+          <Stack gap="md">
+            <SectionCard p="md">
+              <Stack gap="md">
+                <div>
+                  <Text size="lg" fw={600}>{t('a2a.title')}</Text>
+                  <Text size="sm" c="dimmed">{t('a2a.description')}</Text>
+                </div>
+
+                <Switch
+                  label={t('a2a.toggle')}
+                  checked={a2aEnabled}
+                  disabled={a2aSaving}
+                  onChange={(event) => updateA2a({ enabled: event.currentTarget.checked })}
+                />
+
+                {a2aEnabled && (
+                  <>
+                    <Divider />
+
+                    <div>
+                      <Text size="sm" fw={600} mb={6}>{t('a2a.accessMode')}</Text>
+                      <SegmentedControl
+                        value={a2aAccessMode}
+                        disabled={a2aSaving}
+                        onChange={(value) =>
+                          updateA2a({ accessMode: value === 'public' ? 'public' : 'token' })
+                        }
+                        data={[
+                          { value: 'token', label: t('a2a.accessToken') },
+                          { value: 'public', label: t('a2a.accessPublic') },
+                        ]}
+                      />
+                      <Text size="xs" c="dimmed" mt={6}>
+                        {a2aAccessMode === 'public'
+                          ? t('a2a.accessPublicDesc')
+                          : t('a2a.accessTokenDesc')}
+                      </Text>
+                    </div>
+
+                    {a2aIsPublic && (
+                      <Alert
+                        color="yellow"
+                        variant="light"
+                        icon={<IconAlertTriangle size={16} />}
+                      >
+                        {t('a2a.publicWarning')}
+                      </Alert>
+                    )}
+
+                    <Text size="sm" c="dimmed">{t('a2a.cardLabel')}</Text>
+                    <CopyableCode value={a2aCardUrl} />
+
+                    <Text size="sm" c="dimmed">{t('a2a.endpointLabel')}</Text>
+                    <CopyableCode value={a2aEndpointUrl} />
+
+                    <Text size="sm" c="dimmed">{t('a2a.exampleLabel')}</Text>
+                    <Code block>
+                      {`curl -X POST ${a2aEndpointUrl} \\${a2aIsPublic ? '' : `
+  -H "Authorization: Bearer YOUR_API_KEY" \\`}
+  -H "Content-Type: application/json" \\
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "message/send",
+    "params": {
+      "message": {
+        "role": "user",
+        "parts": [{ "kind": "text", "text": "Hello!" }],
+        "messageId": "msg-1"
+      }
+    }
+  }'
+
+# Continue the same conversation: set params.message.contextId
+# to the "contextId" returned in the previous task.`}
+                    </Code>
+                  </>
+                )}
+              </Stack>
+            </SectionCard>
+          </Stack>
+        </Tabs.Panel>
+
         {/* ── Versions Tab ───────────────────────────────────── */}
         <Tabs.Panel value="versions">
           <Stack gap="md">
@@ -1578,6 +1741,24 @@ curl -X POST ${typeof window !== 'undefined' ? window.location.origin : 'https:/
         />
       ) : null}
     </PageContainer>
+  );
+}
+
+/** One-line code block with a copy button (endpoint URLs on the Publish tab). */
+function CopyableCode({ value }: { value: string }) {
+  return (
+    <Group gap="xs" align="center">
+      <Code block className={classes.codeGrow}>{value}</Code>
+      <CopyButton value={value}>
+        {({ copied, copy }) => (
+          <Tooltip label={copied ? 'Copied' : 'Copy'}>
+            <ActionIcon variant="subtle" onClick={copy} color={copied ? 'teal' : 'gray'}>
+              {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
+            </ActionIcon>
+          </Tooltip>
+        )}
+      </CopyButton>
+    </Group>
   );
 }
 

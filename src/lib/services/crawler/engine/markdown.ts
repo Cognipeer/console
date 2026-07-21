@@ -14,6 +14,19 @@ export interface MarkdownInput {
   options?: CrawlMarkdownOptions;
 }
 
+/**
+ * Adapt the crawler's `{ enabled, languages[] }` OCR shape to
+ * @cognipeer/to-markdown v3's `boolean | { lang, ... }` option. Tesseract
+ * accepts multiple languages joined with `+` (e.g. `eng+tur`).
+ */
+function toConverterOcr(
+  ocr?: CrawlMarkdownOptions['ocr'],
+): { ocr: boolean | { lang?: string } } | Record<string, never> {
+  if (!ocr?.enabled) return {};
+  const lang = ocr.languages?.filter(Boolean).join('+');
+  return { ocr: lang ? { lang } : true };
+}
+
 export async function htmlToMarkdown(input: MarkdownInput): Promise<string> {
   const { html, fileName = 'page.html', options } = input;
   const prepared = preprocessHtml(html, options);
@@ -22,7 +35,7 @@ export async function htmlToMarkdown(input: MarkdownInput): Promise<string> {
     const dataUri = `data:text/html;base64,${base64}`;
     const result = await convertToMarkdown(dataUri, {
       fileName,
-      ...(options?.ocr ? { ocr: options.ocr } : {}),
+      ...toConverterOcr(options?.ocr),
     });
     if (typeof result === 'string') return finalizeBody(result, options);
     if (result && typeof result === 'object' && 'markdown' in result) {
@@ -68,8 +81,10 @@ export function cleanupMarkdown(md: string): string {
   out = out.replace(/\[([^\]]*)\]\((?:#[^)]*|javascript:[^)\s(]*(?:\([^)]*\))?[^)]*)\)/gi, '$1');
   // Empty images (no alt AND placeholder/empty src is noise in prose).
   out = out.replace(/!\[\s*\]\([^)]*\)/g, '');
-  // Collapse horizontal whitespace runs (but keep newlines).
-  out = out.replace(/[^\S\n]{2,}/g, ' ');
+  // Collapse horizontal whitespace runs (but keep newlines) — only after a
+  // non-space character, so leading indentation (nested list levels, code)
+  // survives.
+  out = out.replace(/(?<=\S)[^\S\n]{2,}/g, ' ');
   // Trim trailing whitespace on every line.
   out = out.replace(/[^\S\n]+$/gm, '');
   // Drop lines that are only a heading/list/quote marker with no content.
@@ -203,7 +218,7 @@ export async function fileToMarkdown(input: FileMarkdownInput): Promise<string |
   try {
     const result = await convertToMarkdown(buffer, {
       fileName,
-      ...(options?.ocr ? { ocr: options.ocr } : {}),
+      ...toConverterOcr(options?.ocr),
     });
     if (typeof result === 'string') return result ? finalizeBody(result, options) : undefined;
     if (result && typeof result === 'object' && 'markdown' in result) {

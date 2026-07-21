@@ -10,7 +10,7 @@
  * predictable across tenant databases.
  */
 
-import { getDatabase } from '@/lib/database';
+import { getDatabase, runWithTenantScope } from '@/lib/database';
 import { getCache } from '@/lib/core/cache';
 import { createLogger } from '@/lib/core/logger';
 import {
@@ -72,9 +72,13 @@ async function runOnce(manual = false): Promise<{ firedCount: number; processedT
       const tenantId = String(tenant._id);
 
       try {
-        const tenantFiredCount = await evaluateTenantAlerts(
+        // Timer context: bind the tenant for the whole evaluation — rule
+        // listing, event creation and lastTriggeredAt updates must not run on
+        // the process-global fallback handle.
+        const tenantFiredCount = await runWithTenantScope(tenant.dbName, () =>
+          evaluateTenantAlerts(
           {
-            tenantDbName: tenant.dbName,
+            tenantDbName: tenant.dbName!,
             tenantId,
             tenantSlug: tenant.slug,
             companyName: tenant.companyName,
@@ -93,7 +97,7 @@ async function runOnce(manual = false): Promise<{ firedCount: number; processedT
               return holdsGlobalLock;
             },
           },
-        );
+        ));
 
         firedCount += tenantFiredCount;
 

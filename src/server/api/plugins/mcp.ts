@@ -21,6 +21,7 @@ import {
   listMcpServers,
   logMcpAudit,
   logMcpRequest,
+  mcpRequestSecretValues,
   refreshMcpServerTools,
   resolveSourceType,
   serializeMcpServer,
@@ -30,7 +31,14 @@ import {
   updateMcpServer,
 } from '@/lib/services/mcp';
 import type { McpAuditContext } from '@/lib/services/mcp';
+import {
+  buildRuntimeContextFromRequest,
+  describeRuntimeAuth,
+  resolveRuntimeHeaders,
+  runtimeHeaderPolicyFromMetadata,
+} from '@/lib/services/runtimeContext';
 import { mcpSandboxRunner, mcpGuardrailHook, IS_ENTERPRISE_BUILD } from '@/enterprise/registry';
+import { isEnterpriseLicenseType } from '@/lib/license/license-manager';
 import {
   getClientIp,
   readJsonBody,
@@ -160,11 +168,17 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
   // execution modes are available on this deployment.
   app.get('/mcp/capabilities', withApiRequestContext(async (request, reply) => {
     try {
-      await requireProjectContextForRequest(request);
+      const { session } = await requireProjectContextForRequest(request);
+      const licenseEnterprise = isEnterpriseLicenseType(session.licenseType);
       const [npxAvailable, uvxAvailable] = await Promise.all([
         stdioRuntimeAvailable('npx'),
         stdioRuntimeAvailable('uvx'),
       ]);
+      // Sandbox execution + Aegis enforcement are enterprise sub-features: a
+      // tenant may use them only when the runtime seam is wired (enterprise
+      // build) AND the tenant holds an active ENTERPRISE license. `available`
+      // therefore folds both; `seamAvailable`/`licenseEnterprise` let the UI
+      // explain WHY it is unavailable (build vs. plan).
       return reply.code(200).send({
         stdioSubprocess: {
           enabled: isStdioRunnerEnabled(),
@@ -172,12 +186,16 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
           uvx: uvxAvailable,
         },
         stdioSandbox: {
-          available: Boolean(mcpSandboxRunner.current),
+          available: Boolean(mcpSandboxRunner.current) && licenseEnterprise,
+          seamAvailable: Boolean(mcpSandboxRunner.current),
           enterpriseBuild: IS_ENTERPRISE_BUILD,
+          licenseEnterprise,
         },
         aegis: {
-          hookAvailable: Boolean(mcpGuardrailHook.current),
+          hookAvailable: Boolean(mcpGuardrailHook.current) && licenseEnterprise,
+          seamAvailable: Boolean(mcpGuardrailHook.current),
           enterpriseBuild: IS_ENTERPRISE_BUILD,
+          licenseEnterprise,
         },
       });
     } catch (error) {
@@ -253,6 +271,21 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'stdioConfig.packageName is required' });
       }
 
+      // Enterprise sub-feature: persistent sandbox execution needs the runtime
+      // seam (enterprise build) AND an active ENTERPRISE license. Reject up-front
+      // with a clear 402 — it literally cannot run otherwise, so a silent save
+      // would strand the tenant. (Aegis is softer: it is saved but stays inert
+      // without the license; the UI warns about that — no hard reject here.)
+      const licenseEnterprise = isEnterpriseLicenseType(session.licenseType);
+      const aegisConfig = parseAegis(body.aegis);
+      if (stdioConfig?.executionMode === 'sandbox' && !(licenseEnterprise && mcpSandboxRunner.current)) {
+        return reply.code(402).send({
+          error: 'Persistent sandbox execution requires an active Enterprise license.',
+          module: 'sandbox',
+          requiresEnterprise: true,
+        });
+      }
+
       if (
         !body.upstreamAuth
         || typeof body.upstreamAuth !== 'object'
@@ -286,7 +319,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
           remoteConfig,
           stdioConfig,
           exposure: parseExposure(body.exposure),
-          aegis: parseAegis(body.aegis),
+          aegis: aegisConfig,
         },
         auditContextFor(request, session.userId),
       );
@@ -368,6 +401,25 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'status must be "active" or "disabled"' });
       }
 
+      if (body.disabledTools !== undefined
+        && (!Array.isArray(body.disabledTools) || body.disabledTools.some((n) => typeof n !== 'string'))) {
+        return reply.code(400).send({ error: 'disabledTools must be an array of tool names' });
+      }
+
+      // Enterprise sub-feature gate (mirrors POST): a non-enterprise tenant may
+      // not turn on persistent sandbox execution via edit. Aegis is left as
+      // save-but-inert (UI warns) to match create behaviour.
+      const licenseEnterprise = isEnterpriseLicenseType(session.licenseType);
+      const nextStdioConfig = body.stdioConfig !== undefined ? parseStdioConfig(body.stdioConfig) : undefined;
+      const nextAegis = body.aegis !== undefined ? parseAegis(body.aegis) : undefined;
+      if (nextStdioConfig?.executionMode === 'sandbox' && !(licenseEnterprise && mcpSandboxRunner.current)) {
+        return reply.code(402).send({
+          error: 'Persistent sandbox execution requires an active Enterprise license.',
+          module: 'sandbox',
+          requiresEnterprise: true,
+        });
+      }
+
       const updated = await updateMcpServer(session.tenantDbName, id, session.userId, {
         description: body.description as string | undefined,
         name: body.name as string | undefined,
@@ -377,9 +429,11 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         upstreamAuth: body.upstreamAuth as IMcpAuthConfig | undefined,
         upstreamBaseUrl: body.upstreamBaseUrl as string | undefined,
         remoteConfig: body.remoteConfig !== undefined ? parseRemoteConfig(body.remoteConfig) : undefined,
-        stdioConfig: body.stdioConfig !== undefined ? parseStdioConfig(body.stdioConfig) : undefined,
+        stdioConfig: nextStdioConfig,
         exposure: body.exposure !== undefined ? parseExposure(body.exposure) : undefined,
-        aegis: body.aegis !== undefined ? parseAegis(body.aegis) : undefined,
+        aegis: nextAegis,
+        runtimeHeaders: body.runtimeHeaders as { allow?: boolean; allowedNames?: string[] } | null | undefined,
+        disabledTools: body.disabledTools as string[] | undefined,
       }, auditContextFor(request, session.userId));
 
       if (!updated) {
@@ -535,6 +589,21 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'MCP server is disabled' });
       }
 
+      // Playground JSON editor: caller-supplied runtime context, filtered by
+      // the server's opt-in policy exactly like the external surfaces.
+      const runtimeContext = buildRuntimeContextFromRequest(body.runtime_context, request.headers, {
+        userId: session.userId,
+        source: 'playground',
+      });
+      const runtimeHeaders = resolveRuntimeHeaders(
+        runtimeContext,
+        'mcp',
+        server.key,
+        runtimeHeaderPolicyFromMetadata(server.metadata),
+      );
+      const runtimeAuth = describeRuntimeAuth(runtimeContext, runtimeHeaders);
+      const secretValues = mcpRequestSecretValues(server, runtimeHeaders);
+
       void logMcpAudit(session.tenantDbName, {
         tenantId: session.tenantId,
         projectId: server.projectId,
@@ -550,7 +619,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
       });
 
       try {
-        const { result, latencyMs } = await executeMcpTool(server, toolName, args);
+        const { result, latencyMs } = await executeMcpTool(server, toolName, args, runtimeHeaders);
 
         void logMcpRequest(session.tenantDbName, {
           tenantId: session.tenantId,
@@ -559,13 +628,17 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
           toolName,
           status: 'success',
           latencyMs,
-          requestPayload: { tool: toolName, arguments: args },
+          requestPayload: {
+            tool: toolName,
+            arguments: args,
+            ...(runtimeAuth ? { _runtimeAuth: runtimeAuth } : {}),
+          },
           responsePayload: typeof result === 'object' ? result as Record<string, unknown> : { value: result },
           callerType: 'dashboard',
           callerUserId: session.userId,
           transport: 'rest',
           sourceType: resolveSourceType(server),
-        });
+        }, secretValues);
 
         return reply.code(200).send({ result, latencyMs });
       } catch (execError) {
@@ -577,13 +650,17 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
           toolName,
           status: 'error',
           latencyMs: 0,
-          requestPayload: { tool: toolName, arguments: args },
+          requestPayload: {
+            tool: toolName,
+            arguments: args,
+            ...(runtimeAuth ? { _runtimeAuth: runtimeAuth } : {}),
+          },
           errorMessage: message,
           callerType: 'dashboard',
           callerUserId: session.userId,
           transport: 'rest',
           sourceType: resolveSourceType(server),
-        });
+        }, secretValues);
         return reply.code(500).send({ error: message });
       }
     } catch (error) {

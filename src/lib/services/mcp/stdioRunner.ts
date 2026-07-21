@@ -128,6 +128,10 @@ async function runStdioSession(
       finish(new Error(`Failed to launch ${command}: ${err.message}`));
     });
 
+    // A server that exits mid-write must surface as "exited before
+    // responding", not as an uncaught EPIPE on stdin.
+    child.stdin.on('error', () => { /* handled by the exit listener */ });
+
     child.stderr.on('data', (chunk: Buffer) => {
       stderrTail = (stderrTail + chunk.toString('utf8')).slice(-4_000);
     });
@@ -148,8 +152,12 @@ async function runStdioSession(
         if (!line) continue;
         try {
           const message = JSON.parse(line) as JsonRpcResponse;
-          if (typeof message.id === 'number' && (message.result !== undefined || message.error !== undefined)) {
-            responses.set(message.id, message);
+          // Some servers echo numeric ids back as strings — normalize.
+          const id = typeof message.id === 'string' && /^\d+$/.test(message.id)
+            ? Number(message.id)
+            : message.id;
+          if (typeof id === 'number' && (message.result !== undefined || message.error !== undefined)) {
+            responses.set(id, message);
           }
         } catch {
           // Some servers log human text to stdout; ignore non-JSON lines.
@@ -158,6 +166,7 @@ async function runStdioSession(
           finish();
           return;
         }
+        pump();
       }
     });
 
@@ -172,19 +181,45 @@ async function runStdioSession(
       }
     });
 
-    // Write the whole conversation up front; stdio servers process in order.
+    // Send frames respecting the MCP lifecycle: after each request, wait for
+    // its response before sending the next frame. Strict servers reject (or
+    // drop) requests that arrive before `initialize` has completed.
     let nextId = 1;
-    const frames: string[] = [];
+    const frames: Array<{ payload: string; id?: number }> = [];
     for (const req of requests) {
       if (req.notification) {
-        frames.push(JSON.stringify({ jsonrpc: JSONRPC_VERSION, method: req.method, ...(req.params ? { params: req.params } : {}) }));
+        frames.push({
+          payload: JSON.stringify({ jsonrpc: JSONRPC_VERSION, method: req.method, ...(req.params ? { params: req.params } : {}) }),
+        });
       } else {
         const id = nextId++;
         expectedIds.push(id);
-        frames.push(JSON.stringify({ jsonrpc: JSONRPC_VERSION, id, method: req.method, ...(req.params ? { params: req.params } : {}) }));
+        frames.push({
+          payload: JSON.stringify({ jsonrpc: JSONRPC_VERSION, id, method: req.method, ...(req.params ? { params: req.params } : {}) }),
+          id,
+        });
       }
     }
-    child.stdin.write(`${frames.join('\n')}\n`);
+
+    let cursor = 0;
+    let awaitingId: number | null = null;
+    function pump(): void {
+      if (settled) return;
+      if (awaitingId !== null && !responses.has(awaitingId)) return;
+      awaitingId = null;
+      while (cursor < frames.length) {
+        const frame = frames[cursor];
+        cursor += 1;
+        try {
+          child.stdin.write(`${frame.payload}\n`);
+        } catch { /* exit handler reports the failure */ }
+        if (frame.id !== undefined) {
+          awaitingId = frame.id;
+          return;
+        }
+      }
+    }
+    pump();
   });
 }
 

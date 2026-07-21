@@ -105,6 +105,7 @@ export default function LoginPage() {
   return (
     <AuthShell
       title={t('hero.title')}
+      titleAccent={t('hero.titleAccent')}
       subtitle={t('hero.subtitle')}
       highlights={[
         {

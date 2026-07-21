@@ -14,11 +14,14 @@ import {
   IconKey,
 } from '@tabler/icons-react';
 import AuthShell from '@/components/layout/AuthShell';
+import { useTranslations } from '@/lib/i18n';
 
 function ResetPasswordContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const token = searchParams.get('token');
+  const t = useTranslations('resetPassword');
+  const tCommon = useTranslations('common');
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
 
@@ -29,37 +32,37 @@ function ResetPasswordContent() {
     },
     validate: {
       newPassword: (value) => {
-        if (value.length < 8) return 'Password must be at least 8 characters';
-        if (!/[A-Z]/.test(value)) return 'Must contain an uppercase letter';
-        if (!/[a-z]/.test(value)) return 'Must contain a lowercase letter';
-        if (!/\d/.test(value)) return 'Must contain a digit';
+        if (value.length < 8) return t('validation.minLength');
+        if (!/[A-Z]/.test(value)) return t('validation.uppercase');
+        if (!/[a-z]/.test(value)) return t('validation.lowercase');
+        if (!/\d/.test(value)) return t('validation.digit');
         if (!/[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?]/.test(value))
-          return 'Must contain a special character';
+          return t('validation.special');
         return null;
       },
       confirmPassword: (value, values) =>
-        value !== values.newPassword ? 'Passwords do not match' : null,
+        value !== values.newPassword ? t('validation.mismatch') : null,
     },
   });
 
   if (!token) {
     return (
       <AuthShell
-        title="Invalid reset link"
-        subtitle="This password reset link is invalid or has expired. Please request a new one."
+        title={t('invalid.title')}
+        subtitle={t('invalid.subtitle')}
         highlights={[
           {
             icon: <IconAlertTriangle size={13} stroke={1.7} />,
-            label: 'Reset links expire after 1 hour.',
+            label: t('invalid.expiry'),
           },
           {
             icon: <IconKey size={13} stroke={1.7} />,
-            label: 'Request a fresh link to continue.',
+            label: t('invalid.fresh'),
           },
         ]}
         footer={
           <>
-            Remember your password?{' '}
+            {t('footer.cta')}{' '}
             <Link
               href="/login"
               style={{
@@ -68,20 +71,21 @@ function ResetPasswordContent() {
                 textDecoration: 'none',
               }}
             >
-              Back to login
+              {t('footer.link')}
             </Link>
           </>
         }
       >
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <Button
+            className="auth-cta-primary"
             color="teal"
             size="md"
             fullWidth
             leftSection={<IconKey size={16} stroke={1.7} />}
             onClick={() => router.push('/forgot-password')}
           >
-            Request new link
+            {t('invalid.submit')}
           </Button>
         </div>
       </AuthShell>
@@ -91,28 +95,29 @@ function ResetPasswordContent() {
   if (success) {
     return (
       <AuthShell
-        title="Password reset successful"
-        subtitle="Your password has been updated. You can now log in with your new password."
+        title={t('success.title')}
+        subtitle={t('success.subtitle')}
         highlights={[
           {
             icon: <IconCheck size={13} stroke={1.7} />,
-            label: 'Your password is updated.',
+            label: t('success.updated'),
           },
           {
             icon: <IconShieldLock size={13} stroke={1.7} />,
-            label: 'Use it to sign in next time.',
+            label: t('success.signIn'),
           },
         ]}
       >
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <Button
+            className="auth-cta-primary"
             color="teal"
             size="md"
             fullWidth
             leftSection={<IconCheck size={16} stroke={1.7} />}
             onClick={() => router.push('/login')}
           >
-            Go to login
+            {t('success.submit')}
           </Button>
         </div>
       </AuthShell>
@@ -132,8 +137,8 @@ function ResetPasswordContent() {
 
       if (!res.ok) {
         notifications.show({
-          title: 'Error',
-          message: data.error || 'Failed to reset password',
+          title: tCommon('error'),
+          message: data.error || t('notifications.resetFailed'),
           color: 'red',
         });
         return;
@@ -142,8 +147,8 @@ function ResetPasswordContent() {
       setSuccess(true);
     } catch {
       notifications.show({
-        title: 'Error',
-        message: 'Something went wrong. Please try again.',
+        title: tCommon('error'),
+        message: t('notifications.genericError'),
         color: 'red',
       });
     } finally {
@@ -153,21 +158,22 @@ function ResetPasswordContent() {
 
   return (
     <AuthShell
-      title="Set new password"
-      subtitle="Choose a strong password for your account."
+      title={t('hero.title')}
+      titleAccent={t('hero.titleAccent')}
+      subtitle={t('hero.subtitle')}
       highlights={[
         {
           icon: <IconShieldLock size={13} stroke={1.7} />,
-          label: 'Strong passwords protect your tenant.',
+          label: t('highlights.strong'),
         },
         {
           icon: <IconKey size={13} stroke={1.7} />,
-          label: 'Min 8 chars, mixed case + number.',
+          label: t('highlights.requirements'),
         },
       ]}
       footer={
         <>
-          Remember your password?{' '}
+          {t('footer.cta')}{' '}
           <Link
             href="/login"
             style={{
@@ -176,7 +182,7 @@ function ResetPasswordContent() {
               textDecoration: 'none',
             }}
           >
-            Back to login
+            {t('footer.link')}
           </Link>
         </>
       }
@@ -184,16 +190,16 @@ function ResetPasswordContent() {
       <form onSubmit={form.onSubmit(handleSubmit)}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <PasswordInput
-            label="New Password"
-            placeholder="Enter new password"
+            label={t('form.newPassword.label')}
+            placeholder={t('form.newPassword.placeholder')}
             required
             size="md"
             autoComplete="new-password"
             {...form.getInputProps('newPassword')}
           />
           <PasswordInput
-            label="Confirm Password"
-            placeholder="Confirm new password"
+            label={t('form.confirmPassword.label')}
+            placeholder={t('form.confirmPassword.placeholder')}
             required
             size="md"
             autoComplete="new-password"
@@ -208,13 +214,13 @@ function ResetPasswordContent() {
             }}
           >
             <div style={{ fontWeight: 600, marginBottom: 4 }}>
-              Password requirements:
+              {t('requirements.title')}
             </div>
             <ul style={{ margin: 0, paddingLeft: 18 }}>
-              <li>At least 8 characters</li>
-              <li>Uppercase and lowercase letters</li>
-              <li>At least one digit</li>
-              <li>At least one special character</li>
+              <li>{t('requirements.length')}</li>
+              <li>{t('requirements.case')}</li>
+              <li>{t('requirements.digit')}</li>
+              <li>{t('requirements.special')}</li>
             </ul>
           </div>
 
@@ -227,7 +233,7 @@ function ResetPasswordContent() {
             leftSection={<IconLock size={16} stroke={1.7} />}
             mt={4}
           >
-            Reset password
+            {t('form.submit')}
           </Button>
         </div>
       </form>

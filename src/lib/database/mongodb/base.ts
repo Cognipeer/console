@@ -8,6 +8,7 @@
 import { createLogger } from '@/lib/core/logger';
 import { Db, MongoClient, type MongoClientOptions } from 'mongodb';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { warnGlobalTenantFallback } from '../tenantScopeGuard';
 import { ensureMainDbIndexes, ensureTenantDbIndexes } from './indexManifest';
 
 export const logger = createLogger('mongodb');
@@ -65,6 +66,7 @@ export const COLLECTIONS = {
   mcpServers: 'mcp_servers',
   mcpRequestLogs: 'mcp_request_logs',
   mcpAuditLogs: 'mcp_audit_logs',
+  mcpHubs: 'mcp_hubs',
   tools: 'tools',
   toolRequestLogs: 'tool_request_logs',
   agents: 'agents',
@@ -240,11 +242,18 @@ export class MongoDBProviderBase {
   }
 
   protected getTenantDb(): Db {
-    const tenantDb = this.tenantContext.getStore() ?? this.tenantDb;
-    if (!tenantDb) {
+    const scoped = this.tenantContext.getStore();
+    if (scoped) return scoped;
+    if (!this.tenantDb) {
       throw new Error('Tenant database not set. Call switchToTenant() first.');
     }
-    return tenantDb;
+    // Falling back to the process-global handle: the caller never established
+    // a `runWithTenant`/`runWithTenantScope` scope, so under concurrent
+    // multi-tenant load this query can hit whatever tenant another request
+    // last bound. Surface it (rate-limited) so stragglers show up in logs;
+    // TENANT_SCOPE_STRICT=1 turns it into a hard error for dev/CI.
+    warnGlobalTenantFallback(this.tenantDb.databaseName);
+    return this.tenantDb;
   }
 
   protected normalizeEmail(email: string): string {

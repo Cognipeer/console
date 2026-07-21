@@ -2,6 +2,7 @@
 
 import Image from 'next/image';
 import { ReactNode } from 'react';
+import { useTranslations } from '@/lib/i18n';
 
 const DEFAULT_BRAND = (
   <>
@@ -24,9 +25,28 @@ const DEFAULT_BRAND = (
   </>
 );
 
+function renderTitle(title: ReactNode, accent?: string): ReactNode {
+  if (typeof title !== 'string' || !accent) {
+    return title;
+  }
+  const index = title.indexOf(accent);
+  if (index === -1) {
+    return title;
+  }
+  return (
+    <>
+      {title.slice(0, index)}
+      <span className="auth-title-accent">{accent}</span>
+      {title.slice(index + accent.length)}
+    </>
+  );
+}
+
 interface AuthShellProps {
   title: ReactNode;
   subtitle: ReactNode;
+  /** Single word of `title` rendered in accent teal (string titles only). */
+  titleAccent?: string;
   eyebrow?: ReactNode;
   /** Optional brand badge text (defaults to "Cognipeer Console"). */
   brand?: ReactNode;
@@ -40,12 +60,15 @@ interface AuthShellProps {
 export default function AuthShell({
   title,
   subtitle,
+  titleAccent,
   eyebrow,
   brand = DEFAULT_BRAND,
   highlights,
   children,
   footer,
 }: AuthShellProps) {
+  const t = useTranslations('auth');
+  const eyebrowContent = eyebrow ?? t('eyebrow');
   return (
     <div className="auth-page">
       <div className="auth-glow auth-glow-a" aria-hidden="true" />
@@ -53,8 +76,8 @@ export default function AuthShell({
       <div className="auth-shell">
         <section className="auth-intro">
           {brand ? <div className="auth-brand">{brand}</div> : null}
-          {eyebrow ? <div className="ds-eyebrow">{eyebrow}</div> : null}
-          <h1 className="auth-title">{title}</h1>
+          {eyebrowContent ? <div className="ds-eyebrow">{eyebrowContent}</div> : null}
+          <h1 className="auth-title">{renderTitle(title, titleAccent)}</h1>
           <p className="auth-subtitle">{subtitle}</p>
           {highlights && highlights.length > 0 ? (
             <ul className="auth-highlights">

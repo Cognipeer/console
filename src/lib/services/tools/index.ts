@@ -12,6 +12,7 @@ export {
   parseOpenApiToActions,
   discoverMcpTools,
   logToolRequest,
+  toolRequestSecretValues,
   listToolRequestLogs,
   countToolRequestLogs,
   aggregateToolRequestLogs,

@@ -11,7 +11,7 @@
  * does not fan out across every tenant database at once.
  */
 
-import { getDatabase, getTenantDatabase } from '@/lib/database';
+import { getDatabase, runWithTenantScope } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { getCache } from '@/lib/core/cache';
 import {
@@ -77,8 +77,10 @@ async function runOnce(manual = false): Promise<{ dueServers: number; processedT
       processedTenants += 1;
 
       try {
-        // 2. Switch to the tenant DB and list active servers.
-        const tenantDb = await getTenantDatabase(tenant.dbName);
+        // 2. Bind the tenant DB for the whole per-tenant block (timer context:
+        // switchToTenant alone falls back to the process-global handle that
+        // concurrent requests for other tenants overwrite).
+        await runWithTenantScope(tenant.dbName, async (tenantDb) => {
         const tenantId = String(tenant._id);
         const servers = await tenantDb.listInferenceServers(tenantId);
 
@@ -106,11 +108,11 @@ async function runOnce(manual = false): Promise<{ dueServers: number; processedT
           }
         }
 
-        if (dueServers.length === 0) continue;
+        if (dueServers.length === 0) return;
         dueServersCount += dueServers.length;
 
         // 3. Poll all due servers for this tenant concurrently.
-        //    All of them use the same tenant DB so concurrent access is safe.
+        //    The enclosing runWithTenantScope keeps them on this tenant's DB.
         await Promise.allSettled(
           dueServers.map((server) =>
             InferenceMonitoringService.pollServer(tenant.dbName, tenantId, server.key).catch(
@@ -122,6 +124,7 @@ async function runOnce(manual = false): Promise<{ dueServers: number; processedT
             ),
           ),
         );
+        });
       } catch (err) {
         logger.error(`Error processing tenant ${tenant.slug}`, {
           error: err instanceof Error ? err.message : err,

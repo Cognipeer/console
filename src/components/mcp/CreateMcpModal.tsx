@@ -38,8 +38,11 @@ type AegisMode = 'off' | 'monitor' | 'enforce';
 
 interface McpCapabilities {
   stdioSubprocess: { enabled: boolean; npx: boolean; uvx: boolean };
-  stdioSandbox: { available: boolean; enterpriseBuild: boolean };
-  aegis: { hookAvailable: boolean; enterpriseBuild: boolean };
+  // `available`/`hookAvailable` fold both the enterprise build seam AND the
+  // tenant's ENTERPRISE license. `seamAvailable`/`licenseEnterprise` explain WHY
+  // it is off: no license (upgradeable) vs. community build (edition).
+  stdioSandbox: { available: boolean; enterpriseBuild: boolean; seamAvailable?: boolean; licenseEnterprise?: boolean };
+  aegis: { hookAvailable: boolean; enterpriseBuild: boolean; seamAvailable?: boolean; licenseEnterprise?: boolean };
 }
 
 interface FormValues {
@@ -325,6 +328,19 @@ export default function CreateMcpModal({
   const sandboxAvailable = capabilities?.stdioSandbox.available ?? false;
   const subprocessEnabled = capabilities?.stdioSubprocess.enabled ?? true;
   const uvxAvailable = capabilities?.stdioSubprocess.uvx ?? true;
+  const aegisAvailable = capabilities?.aegis.hookAvailable ?? false;
+  // Distinguish "off because no ENTERPRISE license" (upgradeable on this SaaS
+  // deployment) from "off because community build" (edition has no seam).
+  const sandboxNeedsPlan = (capabilities?.stdioSandbox.seamAvailable ?? capabilities?.stdioSandbox.enterpriseBuild ?? false)
+    && !(capabilities?.stdioSandbox.licenseEnterprise ?? false);
+  const aegisNeedsPlan = (capabilities?.aegis.seamAvailable ?? capabilities?.aegis.enterpriseBuild ?? false)
+    && !(capabilities?.aegis.licenseEnterprise ?? false);
+  const sandboxUnavailableReason = sandboxNeedsPlan
+    ? 'Persistent sandbox execution requires an active Enterprise plan. Upgrade under Dashboard → License to enable it.'
+    : 'Persistent sandbox execution is part of the Enterprise edition and is not available on this deployment.';
+  const aegisUnavailableReason = aegisNeedsPlan
+    ? 'Aegis shield enforcement requires an active Enterprise plan. The binding is saved but stays inactive until you upgrade under Dashboard → License.'
+    : 'Aegis enforcement is part of the Enterprise edition. The binding is saved and becomes active once Aegis is available.';
 
   const summary = (
     <>
@@ -554,7 +570,7 @@ export default function CreateMcpModal({
               label="Execution mode"
               hint={sandboxAvailable
                 ? 'Subprocess spawns per call (npm/uv cache keeps it fast). Sandbox runs the server persistently.'
-                : 'Persistent sandbox execution requires the enterprise sandbox module.'}
+                : sandboxUnavailableReason}
             >
               <ChipPicker<ExecutionMode>
                 options={[
@@ -704,10 +720,9 @@ export default function CreateMcpModal({
         description="Guardrail enforcement on tool calls (evaluated by the Aegis enforcement plane)."
         done
       >
-        {capabilities && !capabilities.aegis.hookAvailable ? (
-          <Alert color="gray" icon={<IconInfoCircle size={16} />}>
-            Aegis enforcement is part of the enterprise edition. The binding is
-            saved and becomes active once Aegis is available.
+        {capabilities && !aegisAvailable ? (
+          <Alert color={aegisNeedsPlan ? 'yellow' : 'gray'} icon={<IconInfoCircle size={16} />}>
+            {aegisUnavailableReason}
           </Alert>
         ) : null}
         <FormRow cols={2}>

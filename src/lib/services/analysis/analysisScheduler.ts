@@ -7,7 +7,7 @@
  * a single instance firing each tick. Mirrors the alert scheduler.
  */
 
-import { getDatabase } from '@/lib/database';
+import { getDatabase, runWithTenantScope } from '@/lib/database';
 import { getCache } from '@/lib/core/cache';
 import { createLogger } from '@/lib/core/logger';
 import { runScheduledAnalyses } from './service';
@@ -35,7 +35,11 @@ async function runOnce(): Promise<void> {
     for (const tenant of tenants) {
       if (!tenant.dbName) continue;
       try {
-        const { fired, errors } = await runScheduledAnalyses(tenant.dbName, String(tenant._id));
+        // Timer context: bind the tenant for the whole per-tenant run —
+        // switchToTenant alone would fall back to the process-global handle
+        // that concurrent requests for other tenants overwrite.
+        const { fired, errors } = await runWithTenantScope(tenant.dbName, () =>
+          runScheduledAnalyses(tenant.dbName!, String(tenant._id)));
         if (fired.length > 0) {
           logger.info(`Tenant ${tenant.slug}: fired ${fired.length} scheduled analysis run(s)`, { definitions: fired });
         }

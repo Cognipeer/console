@@ -248,6 +248,7 @@ export const REALTIME_TENANT_SCHEMA_SQL = `
     turnSilenceMs INTEGER,
     turnSilenceThreshold REAL,
     greeting TEXT,
+    toolStatusMessage TEXT,
     metadata TEXT,
     createdBy TEXT NOT NULL,
     updatedBy TEXT,
@@ -1538,6 +1539,27 @@ export const TENANT_SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_mcp_audit_logs_serverKey ON mcp_audit_logs(serverKey);
   CREATE INDEX IF NOT EXISTS idx_mcp_audit_logs_createdAt ON mcp_audit_logs(createdAt);
+
+  -- MCP Hubs (enterprise module: curated server catalogs)
+  CREATE TABLE IF NOT EXISTS mcp_hubs (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    serverKeys TEXT DEFAULT '[]',
+    exposure TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    endpointSlug TEXT NOT NULL,
+    metadata TEXT DEFAULT '{}',
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_mcp_hubs_key ON mcp_hubs(key);
+  CREATE INDEX IF NOT EXISTS idx_mcp_hubs_slug ON mcp_hubs(endpointSlug);
 
   -- Vector migrations
   CREATE TABLE IF NOT EXISTS vector_migrations (

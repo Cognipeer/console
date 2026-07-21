@@ -7,6 +7,7 @@ import {
   Group,
   PasswordInput,
   Select,
+  Switch,
   Textarea,
   TextInput,
 } from '@mantine/core';
@@ -41,6 +42,7 @@ interface EditAgent {
       credentialProviderKey?: string;
       hasApiKey?: boolean;
       headers?: Record<string, string>;
+      runtimeHeaders?: { allow?: boolean; allowedNames?: string[] };
     };
   };
 }
@@ -69,6 +71,7 @@ interface FormValues {
   credentialProviderKey: string;
   responsePath: string;
   headers: HeaderRow[];
+  allowRuntimeHeaders: boolean;
 }
 
 export default function ConnectAgentModal({
@@ -93,6 +96,7 @@ export default function ConnectAgentModal({
       credentialProviderKey: '',
       responsePath: '',
       headers: [],
+      allowRuntimeHeaders: false,
     },
     validate: {
       name: (v) => (!v.trim() ? t('validation.nameRequired') : null),
@@ -123,6 +127,7 @@ export default function ConnectAgentModal({
         headers: c.headers
           ? Object.entries(c.headers).map(([key, value]) => ({ key, value: String(value) }))
           : [],
+        allowRuntimeHeaders: c.runtimeHeaders?.allow === true,
       });
     } else {
       form.reset();
@@ -166,6 +171,7 @@ export default function ConnectAgentModal({
                 credentialProviderKey: v.credentialProviderKey || undefined,
                 responsePath: v.responsePath.trim() || undefined,
                 headers: Object.keys(headers).length ? headers : undefined,
+                runtimeHeaders: v.allowRuntimeHeaders ? { allow: true } : undefined,
               },
             },
           }),
@@ -356,6 +362,16 @@ export default function ConnectAgentModal({
           <TextInput
             placeholder={t('connectModal.responsePathPlaceholder')}
             {...form.getInputProps('responsePath')}
+          />
+        </FormField>
+        <FormField
+          label={t('connectModal.runtimeHeaders')}
+          optional
+          hint={t('connectModal.runtimeHeadersHint')}
+        >
+          <Switch
+            label={t('connectModal.runtimeHeadersToggle')}
+            {...form.getInputProps('allowRuntimeHeaders', { type: 'checkbox' })}
           />
         </FormField>
       </FormSection>

@@ -21,7 +21,6 @@
   --teal-3: var(--teal-300);
   --teal-4: var(--teal-400);
   --teal-5: var(--teal-500);
-  --teal-6: var(--teal-500);
   --teal-7: var(--teal-600);
   --teal-8: var(--teal-700);
   --teal-9: var(--teal-800);
@@ -306,12 +305,12 @@ table {
 }
 
 .mantine-Badge-root .mantine-Badge-label {
-  font-weight: 900 !important;
+  font-weight: 500 !important;
   font-size: var(--badge-fz) !important;
 }
 
 .mantine-Badge-root .mantine-Badge-label * {
-  font-weight: 900 !important;
+  font-weight: 500 !important;
   font-size: var(--badge-fz) !important;
 }
 
@@ -797,7 +796,7 @@ button.ds-project-pill:hover,
   height: 8px;
   border-radius: 50%;
   background: var(--teal-5);
-  box-shadow: 0 0 0 3px rgba(22, 179, 171, 0.2);
+  box-shadow: 0 0 0 3px rgba(15, 186, 148, 0.2);
   flex-shrink: 0;
 }
 .ds-project-label {
@@ -2457,11 +2456,15 @@ textarea.ds-input { height: auto; padding: 10px 12px; line-height: 1.5; resize: 
 .auth-title {
   margin: 0;
   font-size: clamp(28px, 3.4vw, 38px);
-  font-weight: 700;
+  font-weight: 500;
   line-height: 1.15;
   letter-spacing: -0.015em;
   color: var(--ds-text);
   max-width: 18ch;
+}
+
+.auth-title-accent {
+  color: var(--ds-accent-strong);
 }
 
 .auth-subtitle {
@@ -2518,6 +2521,27 @@ textarea.ds-input { height: auto; padding: 10px 12px; line-height: 1.5; resize: 
   font-size: 13px;
   color: var(--ds-text-muted);
   text-align: center;
+}
+
+/* Submit = ink pill (flips to paper-on-ink in dark via tokens). Scoped to
+   the auth panel so in-app buttons keep the teal primary. */
+.auth-panel .mantine-Button-root[type='submit']:not(:disabled):not([data-disabled]),
+.auth-panel .mantine-Button-root.auth-cta-primary:not(:disabled):not([data-disabled]) {
+  border-radius: 999px;
+  background: var(--ds-text);
+  border-color: var(--ds-text);
+  color: var(--ds-surface-0);
+  transition: transform var(--ds-m-fast), background-color var(--ds-m-fast);
+}
+.auth-panel .mantine-Button-root[type='submit']:not(:disabled):not([data-disabled]):hover,
+.auth-panel .mantine-Button-root.auth-cta-primary:not(:disabled):not([data-disabled]):hover {
+  background: var(--ds-text);
+  border-color: var(--ds-text);
+  color: var(--ds-surface-0);
+}
+.auth-panel .mantine-Button-root[type='submit']:not(:disabled):not([data-disabled]):not([data-loading]):hover,
+.auth-panel .mantine-Button-root.auth-cta-primary:not(:disabled):not([data-disabled]):not([data-loading]):hover {
+  transform: translateY(-1px);
 }
 
 @media (max-width: 880px) {
