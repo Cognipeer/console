@@ -1,19 +1,32 @@
 import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
-import type { FastifyPluginAsync } from 'fastify';
-import type { IMcpServer } from '@/lib/database';
+import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
+import type {
+  IMcpAuthConfig,
+  IMcpExposureConfig,
+  IMcpRemoteConfig,
+  IMcpServer,
+  IMcpStdioConfig,
+  McpAuthType,
+} from '@/lib/database';
+import type { SpecFormatHint } from '@/lib/services/specImport';
 import { createLogger } from '@/lib/core/logger';
 import {
+  createMcpServer,
+  deleteMcpServer,
   executeMcpTool,
   getMcpServerByKey,
   listEnabledMcpTools,
   logMcpRequest,
   mcpRequestSecretValues,
+  refreshMcpServerTools,
   resolveExposure,
   resolveSourceType,
   serializeMcpServer,
+  updateMcpServer,
 } from '@/lib/services/mcp';
+import type { McpAuditContext } from '@/lib/services/mcp';
 import {
   createSseSession,
   encodeSseEndpointEvent,
@@ -28,13 +41,108 @@ import {
   runtimeHeaderPolicyFromMetadata,
   type AgentRuntimeContext,
 } from '@/lib/services/runtimeContext';
+import { mcpSandboxRunner } from '@/enterprise/registry';
+import { isEnterpriseLicenseType } from '@/lib/license/license-manager';
 import {
   getApiTokenContextForRequest,
+  getClientIp,
   readJsonBody,
   withClientApiRequestContext,
 } from '../fastify-utils';
 
 const logger = createLogger('api:client-mcp');
+
+const VALID_AUTH_TYPES: McpAuthType[] = ['none', 'token', 'header', 'basic'];
+const VALID_SOURCE_TYPES = ['openapi', 'remote', 'stdio'] as const;
+
+// Local parse helpers replicated from the dashboard `mcp.ts` plugin (they are
+// not exported). They coerce the raw request sub-objects into the typed config
+// shapes the service expects.
+function auditContextFor(request: FastifyRequest, userId: string): McpAuditContext {
+  const ua = request.headers['user-agent'];
+  return {
+    performedBy: userId,
+    ipAddress: getClientIp(request),
+    userAgent: typeof ua === 'string' ? ua.slice(0, 300) : undefined,
+  };
+}
+
+function parseExposure(raw: unknown): IMcpExposureConfig | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const value = raw as { protocols?: unknown; accessMode?: unknown };
+  const protocols = Array.isArray(value.protocols)
+    ? value.protocols.filter((p): p is 'streamable-http' | 'sse' => p === 'streamable-http' || p === 'sse')
+    : [];
+  return {
+    protocols: protocols.length ? protocols : ['streamable-http', 'sse'],
+    accessMode: value.accessMode === 'public' ? 'public' : 'token',
+  };
+}
+
+function parseAegis(raw: unknown): { shieldId?: string; mode: 'off' | 'monitor' | 'enforce' } | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const value = raw as { shieldId?: unknown; mode?: unknown };
+  const mode = value.mode === 'monitor' || value.mode === 'enforce' ? value.mode : 'off';
+  return {
+    shieldId: typeof value.shieldId === 'string' && value.shieldId.trim() ? value.shieldId.trim() : undefined,
+    mode,
+  };
+}
+
+function parseRemoteConfig(raw: unknown): IMcpRemoteConfig | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const value = raw as { url?: unknown; transport?: unknown };
+  if (typeof value.url !== 'string' || !value.url.trim()) return undefined;
+  return {
+    url: value.url.trim(),
+    transport: value.transport === 'sse' ? 'sse' : 'streamable-http',
+  };
+}
+
+function parseStdioConfig(raw: unknown): IMcpStdioConfig | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const value = raw as {
+    runtime?: unknown;
+    packageName?: unknown;
+    args?: unknown;
+    env?: unknown;
+    executionMode?: unknown;
+    sandbox?: unknown;
+  };
+  if (typeof value.packageName !== 'string' || !value.packageName.trim()) return undefined;
+  const runtime = value.runtime === 'uvx' ? 'uvx' : 'npx';
+  const args = Array.isArray(value.args)
+    ? value.args.map((a) => String(a)).filter((a) => a.length > 0)
+    : undefined;
+  const env = value.env && typeof value.env === 'object'
+    ? Object.fromEntries(
+        Object.entries(value.env as Record<string, unknown>)
+          .filter(([k, v]) => k.trim() && typeof v === 'string')
+          .map(([k, v]) => [k.trim(), v as string]),
+      )
+    : undefined;
+  const sandboxRaw = value.sandbox && typeof value.sandbox === 'object'
+    ? value.sandbox as { templateKey?: unknown; resources?: { cpuCores?: unknown; memoryMb?: unknown }; instanceId?: unknown }
+    : undefined;
+  return {
+    runtime,
+    packageName: value.packageName.trim(),
+    args,
+    env: env && Object.keys(env).length ? env : undefined,
+    executionMode: value.executionMode === 'sandbox' ? 'sandbox' : 'subprocess',
+    sandbox: sandboxRaw
+      ? {
+          templateKey: typeof sandboxRaw.templateKey === 'string' ? sandboxRaw.templateKey : undefined,
+          resources: sandboxRaw.resources
+            ? {
+                cpuCores: Number(sandboxRaw.resources.cpuCores) || undefined,
+                memoryMb: Number(sandboxRaw.resources.memoryMb) || undefined,
+              }
+            : undefined,
+        }
+      : undefined,
+  };
+}
 
 /** Resolve caller-supplied headers against the server's opt-in policy. */
 function resolveMcpRuntimeHeaders(
@@ -456,6 +564,223 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
       logger.error('Client MCP SSE error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal error',
+      });
+    }
+  }));
+
+  // ── Authoring: create an MCP server definition ──
+  // Collection-level path — distinct from the deeper `:serverKey/execute`
+  // gateway routes above, so there is no Fastify path collision.
+  app.post('/client/v1/mcp', withClientApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await getApiTokenContextForRequest(request);
+      const body = readJsonBody<Record<string, unknown>>(request);
+
+      if (typeof body.name !== 'string' || body.name.trim() === '') {
+        return reply.code(400).send({ error: 'name is required' });
+      }
+
+      const sourceType = typeof body.sourceType === 'string' ? body.sourceType : 'openapi';
+      if (!VALID_SOURCE_TYPES.includes(sourceType as typeof VALID_SOURCE_TYPES[number])) {
+        return reply.code(400).send({ error: 'sourceType must be "openapi", "remote", or "stdio"' });
+      }
+
+      if (sourceType === 'openapi' && typeof body.openApiSpec !== 'string') {
+        return reply.code(400).send({ error: 'openApiSpec is required' });
+      }
+
+      const remoteConfig = parseRemoteConfig(body.remoteConfig);
+      if (sourceType === 'remote' && !remoteConfig) {
+        return reply.code(400).send({ error: 'remoteConfig.url is required' });
+      }
+
+      const stdioConfig = parseStdioConfig(body.stdioConfig);
+      if (sourceType === 'stdio' && !stdioConfig) {
+        return reply.code(400).send({ error: 'stdioConfig.packageName is required' });
+      }
+
+      // Enterprise sub-feature: persistent sandbox execution needs the runtime
+      // seam (enterprise build) AND an active ENTERPRISE license. Reject up-front
+      // with the same 402 the dashboard uses — it literally cannot run otherwise.
+      const licenseEnterprise = isEnterpriseLicenseType(ctx.tenant.licenseType);
+      const aegisConfig = parseAegis(body.aegis);
+      if (stdioConfig?.executionMode === 'sandbox' && !(licenseEnterprise && mcpSandboxRunner.current)) {
+        return reply.code(402).send({
+          error: 'Persistent sandbox execution requires an active Enterprise license.',
+          module: 'sandbox',
+          requiresEnterprise: true,
+        });
+      }
+
+      if (
+        !body.upstreamAuth
+        || typeof body.upstreamAuth !== 'object'
+        || !('type' in body.upstreamAuth)
+      ) {
+        return reply.code(400).send({ error: 'upstreamAuth with type is required' });
+      }
+
+      const authType = (body.upstreamAuth as { type?: unknown }).type;
+      if (!VALID_AUTH_TYPES.includes(authType as McpAuthType)) {
+        return reply.code(400).send({
+          error: 'upstreamAuth.type must be "none", "token", "header", or "basic"',
+        });
+      }
+
+      const server = await createMcpServer(
+        ctx.tenantDbName,
+        ctx.tenantId,
+        ctx.tokenRecord.userId,
+        ctx.projectId,
+        {
+          description: typeof body.description === 'string' ? body.description.trim() : undefined,
+          name: body.name.trim(),
+          sourceType: sourceType as 'openapi' | 'remote' | 'stdio',
+          openApiSpec: typeof body.openApiSpec === 'string' ? body.openApiSpec : undefined,
+          specFormat: typeof body.specFormat === 'string' ? body.specFormat as SpecFormatHint : undefined,
+          upstreamAuth: body.upstreamAuth as IMcpAuthConfig,
+          upstreamBaseUrl: typeof body.upstreamBaseUrl === 'string' ? body.upstreamBaseUrl.trim() : undefined,
+          remoteConfig,
+          stdioConfig,
+          exposure: parseExposure(body.exposure),
+          aegis: aegisConfig,
+        },
+        auditContextFor(request, ctx.tokenRecord.userId),
+      );
+
+      return reply.code(201).send({ server: serializeMcpServer(server) });
+    } catch (error) {
+      logger.error('Create client MCP server error', { error });
+      return reply.code(500).send({
+        error: error instanceof Error ? error.message : 'Internal error',
+      });
+    }
+  }));
+
+  // ── Authoring: update an MCP server definition (project-scoped resolve by key) ──
+  app.patch('/client/v1/mcp/:serverKey', withClientApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await getApiTokenContextForRequest(request);
+      const { serverKey } = request.params as { serverKey: string };
+      const existing = await getMcpServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
+      if (!existing) {
+        return reply.code(404).send({ error: 'MCP server not found' });
+      }
+
+      const body = readJsonBody<Record<string, unknown>>(request);
+
+      const authType = body.upstreamAuth && typeof body.upstreamAuth === 'object'
+        ? (body.upstreamAuth as { type?: unknown }).type
+        : undefined;
+      if (authType !== undefined && !VALID_AUTH_TYPES.includes(authType as McpAuthType)) {
+        return reply.code(400).send({
+          error: 'upstreamAuth.type must be "none", "token", "header", or "basic"',
+        });
+      }
+
+      if (body.status !== undefined && body.status !== 'active' && body.status !== 'disabled') {
+        return reply.code(400).send({ error: 'status must be "active" or "disabled"' });
+      }
+
+      if (body.disabledTools !== undefined
+        && (!Array.isArray(body.disabledTools) || body.disabledTools.some((n) => typeof n !== 'string'))) {
+        return reply.code(400).send({ error: 'disabledTools must be an array of tool names' });
+      }
+
+      // Same enterprise-sandbox gate as create (mirrors the dashboard PATCH).
+      const licenseEnterprise = isEnterpriseLicenseType(ctx.tenant.licenseType);
+      const nextStdioConfig = body.stdioConfig !== undefined ? parseStdioConfig(body.stdioConfig) : undefined;
+      const nextAegis = body.aegis !== undefined ? parseAegis(body.aegis) : undefined;
+      if (nextStdioConfig?.executionMode === 'sandbox' && !(licenseEnterprise && mcpSandboxRunner.current)) {
+        return reply.code(402).send({
+          error: 'Persistent sandbox execution requires an active Enterprise license.',
+          module: 'sandbox',
+          requiresEnterprise: true,
+        });
+      }
+
+      const updated = await updateMcpServer(ctx.tenantDbName, String(existing._id), ctx.tokenRecord.userId, {
+        description: body.description as string | undefined,
+        name: body.name as string | undefined,
+        openApiSpec: body.openApiSpec as string | undefined,
+        specFormat: typeof body.specFormat === 'string' ? body.specFormat as SpecFormatHint : undefined,
+        status: body.status as 'active' | 'disabled' | undefined,
+        upstreamAuth: body.upstreamAuth as IMcpAuthConfig | undefined,
+        upstreamBaseUrl: body.upstreamBaseUrl as string | undefined,
+        remoteConfig: body.remoteConfig !== undefined ? parseRemoteConfig(body.remoteConfig) : undefined,
+        stdioConfig: nextStdioConfig,
+        exposure: body.exposure !== undefined ? parseExposure(body.exposure) : undefined,
+        aegis: nextAegis,
+        runtimeHeaders: body.runtimeHeaders as { allow?: boolean; allowedNames?: string[] } | null | undefined,
+        disabledTools: body.disabledTools as string[] | undefined,
+      }, auditContextFor(request, ctx.tokenRecord.userId));
+
+      if (!updated) {
+        return reply.code(404).send({ error: 'MCP server not found' });
+      }
+
+      return reply.code(200).send({ server: serializeMcpServer(updated) });
+    } catch (error) {
+      logger.error('Update client MCP server error', { error });
+      return reply.code(500).send({
+        error: error instanceof Error ? error.message : 'Internal error',
+      });
+    }
+  }));
+
+  // ── Authoring: delete an MCP server definition (project-scoped resolve by key) ──
+  app.delete('/client/v1/mcp/:serverKey', withClientApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await getApiTokenContextForRequest(request);
+      const { serverKey } = request.params as { serverKey: string };
+      const existing = await getMcpServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
+      if (!existing) {
+        return reply.code(404).send({ error: 'MCP server not found' });
+      }
+
+      const deleted = await deleteMcpServer(
+        ctx.tenantDbName,
+        String(existing._id),
+        auditContextFor(request, ctx.tokenRecord.userId),
+      );
+      if (!deleted) {
+        return reply.code(404).send({ error: 'MCP server not found' });
+      }
+
+      return reply.code(200).send({ success: true });
+    } catch (error) {
+      logger.error('Delete client MCP server error', { error });
+      return reply.code(500).send({
+        error: error instanceof Error ? error.message : 'Internal error',
+      });
+    }
+  }));
+
+  // ── Authoring: re-run tool discovery against the source ──
+  app.post('/client/v1/mcp/:serverKey/refresh-tools', withClientApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await getApiTokenContextForRequest(request);
+      const { serverKey } = request.params as { serverKey: string };
+      const existing = await getMcpServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
+      if (!existing) {
+        return reply.code(404).send({ error: 'MCP server not found' });
+      }
+
+      const updated = await refreshMcpServerTools(
+        ctx.tenantDbName,
+        String(existing._id),
+        ctx.tokenRecord.userId,
+        auditContextFor(request, ctx.tokenRecord.userId),
+      );
+      if (!updated) {
+        return reply.code(404).send({ error: 'MCP server not found' });
+      }
+
+      return reply.code(200).send({ server: serializeMcpServer(updated) });
+    } catch (error) {
+      logger.error('Refresh client MCP tools error', { error });
+      return reply.code(500).send({
+        error: error instanceof Error ? error.message : 'Tool discovery failed',
       });
     }
   }));

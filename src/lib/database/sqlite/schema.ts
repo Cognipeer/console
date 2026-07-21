@@ -34,6 +34,7 @@ export const MAIN_SCHEMA_SQL = `
     label TEXT NOT NULL,
     tokenHash TEXT NOT NULL UNIQUE,
     tokenPrefix TEXT NOT NULL,
+    servicePermissions TEXT,
     lastUsed TEXT,
     createdAt TEXT NOT NULL,
     expiresAt TEXT
@@ -369,6 +370,7 @@ export const TENANT_SCHEMA_SQL = `
     token TEXT,
     tokenHash TEXT,
     tokenPrefix TEXT,
+    servicePermissions TEXT,
     lastUsed TEXT,
     createdAt TEXT NOT NULL,
     expiresAt TEXT

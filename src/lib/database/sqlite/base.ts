@@ -371,6 +371,14 @@ export class SQLiteProviderBase {
       'rerankerKey',
       'rerankerKey TEXT',
     );
+    // Per-token least-privilege scope (JSON UserServicePermissions). Legacy rows
+    // read as NULL = unscoped (inherit owner). API tokens live in the main DB.
+    this.ensureTableColumn(
+      db,
+      TABLES.apiTokens,
+      'servicePermissions',
+      'servicePermissions TEXT',
+    );
     this.ensureTableColumn(
       db,
       TABLES.ragModules,

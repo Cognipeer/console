@@ -15,8 +15,8 @@ export function ApiTokenMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       const now = this.now();
 
       db.prepare(`
-        INSERT INTO ${TABLES.apiTokens} (id, userId, tenantId, projectId, label, tokenHash, tokenPrefix, lastUsed, createdAt, expiresAt)
-        VALUES (@id, @userId, @tenantId, @projectId, @label, @tokenHash, @tokenPrefix, @lastUsed, @createdAt, @expiresAt)
+        INSERT INTO ${TABLES.apiTokens} (id, userId, tenantId, projectId, label, tokenHash, tokenPrefix, servicePermissions, lastUsed, createdAt, expiresAt)
+        VALUES (@id, @userId, @tenantId, @projectId, @label, @tokenHash, @tokenPrefix, @servicePermissions, @lastUsed, @createdAt, @expiresAt)
       `).run({
         id,
         userId: tokenData.userId,
@@ -25,6 +25,9 @@ export function ApiTokenMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         label: tokenData.label,
         tokenHash: tokenData.tokenHash,
         tokenPrefix: tokenData.tokenPrefix,
+        servicePermissions: tokenData.servicePermissions != null
+          ? JSON.stringify(tokenData.servicePermissions)
+          : null,
         lastUsed: tokenData.lastUsed?.toISOString() ?? null,
         createdAt: now,
         expiresAt: tokenData.expiresAt?.toISOString() ?? null,
@@ -98,6 +101,9 @@ export function ApiTokenMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         token: r.token as string | undefined,
         tokenHash: r.tokenHash as string | undefined,
         tokenPrefix: r.tokenPrefix as string | undefined,
+        servicePermissions: r.servicePermissions
+          ? JSON.parse(r.servicePermissions as string)
+          : null,
         lastUsed: this.toDate(r.lastUsed),
         createdAt: this.toDate(r.createdAt),
         expiresAt: this.toDate(r.expiresAt),

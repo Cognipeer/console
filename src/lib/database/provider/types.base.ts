@@ -201,6 +201,14 @@ export interface IApiToken {
   token?: string;
   tokenHash?: string;
   tokenPrefix?: string;
+  /**
+   * Optional least-privilege permission scope for this token. When set (an
+   * object, even `{}`), the token's effective RBAC permission is capped at
+   * `min(owner, scope)` per service — a service absent from the map resolves to
+   * `none`. `null`/`undefined` means the token is unscoped and inherits the
+   * owner's permissions (legacy behaviour; the default for existing tokens).
+   */
+  servicePermissions?: UserServicePermissions | null;
   lastUsed?: Date;
   createdAt?: Date;
   expiresAt?: Date;

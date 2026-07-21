@@ -216,3 +216,85 @@ export async function getUsageBreakdown(
     entries,
   };
 }
+
+export interface UsageServiceBreakdownEntry {
+  /** Service slug, e.g. 'models' | 'websearch' | 'mcp'; '' = unattributed. */
+  service: string;
+  requests: number;
+  errors: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  costUsd: number;
+}
+
+export interface UsageServiceBreakdown {
+  fromDay?: string;
+  toDay?: string;
+  totals: UsageBreakdownTotals;
+  entries: UsageServiceBreakdownEntry[];
+}
+
+/**
+ * Read `usage_daily` across ALL services and group by `service`. Unlike
+ * {@link getUsageBreakdown} (which requires a single service slug and groups by
+ * user/token), this reduces every rollup row by its `service` field to answer
+ * "which service cost what". No new DB primitive — reuses `listUsageDaily`.
+ */
+export async function getUsageServiceBreakdown(
+  ctx: { tenantDbName: string; tenantId: string; projectId?: string },
+  options: { from?: Date; to?: Date } = {},
+): Promise<UsageServiceBreakdown> {
+  const db = await getDatabase();
+  await db.switchToTenant(ctx.tenantDbName);
+
+  const fromDay = options.from ? toUtcDay(options.from) : undefined;
+  const toDay = options.to ? toUtcDay(options.to) : undefined;
+
+  const rows = await db.listUsageDaily({
+    projectId: ctx.projectId,
+    fromDay,
+    toDay,
+    limit: MAX_ROLLUP_ROWS,
+  });
+
+  const byService = new Map<string, UsageServiceBreakdownEntry>();
+  const totals: UsageBreakdownTotals = {
+    requests: 0,
+    errors: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+    costUsd: 0,
+  };
+
+  for (const row of rows) {
+    const service = row.service ?? '';
+    const entry = byService.get(service) ?? {
+      service,
+      requests: 0,
+      errors: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      costUsd: 0,
+    };
+    entry.requests += row.requests ?? 0;
+    entry.errors += row.errors ?? 0;
+    entry.inputTokens += row.inputTokens ?? 0;
+    entry.outputTokens += row.outputTokens ?? 0;
+    entry.totalTokens += row.totalTokens ?? 0;
+    entry.costUsd += row.costUsd ?? 0;
+    byService.set(service, entry);
+
+    totals.requests += row.requests ?? 0;
+    totals.errors += row.errors ?? 0;
+    totals.inputTokens += row.inputTokens ?? 0;
+    totals.outputTokens += row.outputTokens ?? 0;
+    totals.totalTokens += row.totalTokens ?? 0;
+    totals.costUsd += row.costUsd ?? 0;
+  }
+
+  const entries = [...byService.values()].sort((a, b) => b.costUsd - a.costUsd);
+  return { fromDay, toDay, totals, entries };
+}

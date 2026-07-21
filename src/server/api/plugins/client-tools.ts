@@ -1,11 +1,18 @@
 import type { FastifyPluginAsync } from 'fastify';
+import type { IToolAuthConfig } from '@/lib/database';
+import type { SpecFormatHint } from '@/lib/services/specImport';
 import { createLogger } from '@/lib/core/logger';
 import {
+  createTool,
+  deleteTool,
   executeToolAction,
   getToolByKey,
   listTools,
   logToolRequest,
+  serializeTool,
+  syncToolActions,
   toolRequestSecretValues,
+  updateTool,
 } from '@/lib/services/tools';
 import {
   getApiTokenContextForRequest,
@@ -158,6 +165,114 @@ export const clientToolsApiPlugin: FastifyPluginAsync = async (app) => {
       logger.error('Execute client tool action error', { error });
       return reply.code(400).send({
         error: error instanceof Error ? error.message : 'Failed to execute tool action',
+      });
+    }
+  }));
+
+  // ── Authoring: create a tool definition ──
+  app.post('/client/v1/tools', withClientApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await getApiTokenContextForRequest(request);
+      const body = readJsonBody<Record<string, unknown>>(request);
+
+      if (typeof body.name !== 'string' || body.name.trim() === '') {
+        return reply.code(400).send({ error: 'Tool name is required' });
+      }
+
+      if (body.type !== 'openapi' && body.type !== 'mcp') {
+        return reply.code(400).send({ error: 'Tool type must be "openapi" or "mcp"' });
+      }
+
+      const tool = await createTool(ctx.tenantDbName, ctx.tenantId, ctx.tokenRecord.userId, ctx.projectId, {
+        description: body.description as string | undefined,
+        mcpEndpoint: body.mcpEndpoint as string | undefined,
+        mcpTransport: body.mcpTransport as 'sse' | 'streamable-http' | undefined,
+        name: body.name,
+        openApiSpec: body.openApiSpec as string | undefined,
+        specFormat: typeof body.specFormat === 'string' ? body.specFormat as SpecFormatHint : undefined,
+        type: body.type,
+        upstreamAuth: body.upstreamAuth as IToolAuthConfig | undefined,
+        upstreamBaseUrl: body.upstreamBaseUrl as string | undefined,
+      });
+
+      return reply.code(201).send({ tool: serializeTool(tool) });
+    } catch (error) {
+      logger.error('Create client tool error', { error });
+      return reply.code(400).send({
+        error: error instanceof Error ? error.message : 'Failed to create tool',
+      });
+    }
+  }));
+
+  // ── Authoring: update a tool definition (project-scoped resolve by key) ──
+  app.patch('/client/v1/tools/:toolKey', withClientApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await getApiTokenContextForRequest(request);
+      const { toolKey } = request.params as { toolKey: string };
+      const existing = await getToolByKey(ctx.tenantDbName, toolKey, ctx.projectId);
+      if (!existing) {
+        return reply.code(404).send({ error: 'Tool not found' });
+      }
+
+      const body = readJsonBody<Record<string, unknown>>(request);
+      const tool = await updateTool(ctx.tenantDbName, String(existing._id), ctx.tokenRecord.userId, body);
+      if (!tool) {
+        return reply.code(404).send({ error: 'Tool not found' });
+      }
+
+      return reply.code(200).send({ tool: serializeTool(tool) });
+    } catch (error) {
+      logger.error('Update client tool error', { error });
+      return reply.code(400).send({
+        error: error instanceof Error ? error.message : 'Failed to update tool',
+      });
+    }
+  }));
+
+  // ── Authoring: re-discover the tool's actions from its source ──
+  app.post('/client/v1/tools/:toolKey/sync', withClientApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await getApiTokenContextForRequest(request);
+      const { toolKey } = request.params as { toolKey: string };
+      const existing = await getToolByKey(ctx.tenantDbName, toolKey, ctx.projectId);
+      if (!existing) {
+        return reply.code(404).send({ error: 'Tool not found' });
+      }
+
+      const synced = await syncToolActions(ctx.tenantDbName, String(existing._id), ctx.tokenRecord.userId);
+      if (!synced) {
+        return reply.code(404).send({ error: 'Tool not found' });
+      }
+
+      return reply.code(200).send({ tool: serializeTool(synced) });
+    } catch (error) {
+      logger.error('Sync client tool actions error', { error });
+      return reply.code(400).send({
+        error: error instanceof Error ? error.message : 'Failed to sync tool actions',
+      });
+    }
+  }));
+
+  // ── Authoring: delete a tool definition (project-scoped resolve by key) ──
+  app.delete('/client/v1/tools/:toolKey', withClientApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await getApiTokenContextForRequest(request);
+      const { toolKey } = request.params as { toolKey: string };
+      const existing = await getToolByKey(ctx.tenantDbName, toolKey, ctx.projectId);
+      if (!existing) {
+        return reply.code(404).send({ error: 'Tool not found' });
+      }
+
+      const deleted = await deleteTool(ctx.tenantDbName, String(existing._id));
+      if (!deleted) {
+        return reply.code(404).send({ error: 'Tool not found' });
+      }
+
+      return reply.code(200).send({ success: true });
+    } catch (error) {
+      logger.error('Delete client tool error', { error });
+      return reply.code(500).send({
+        error: error instanceof Error ? error.message : 'Internal server error',
       });
     }
   }));

@@ -1,7 +1,9 @@
 import { Buffer } from 'node:buffer';
 import type { FastifyPluginAsync } from 'fastify';
+import type { IRagChunkConfig } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
+  createRagModule,
   deleteRagDocument,
   deleteRagModule,
   getRagDocument,
@@ -12,6 +14,7 @@ import {
   listRagModules,
   queryRag,
   reingestDocument,
+  updateRagModule,
 } from '@/lib/services/rag/ragService';
 import {
   getApiTokenContextForRequest,
@@ -36,10 +39,53 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/client/v1/rag/modules', withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
-      const modules = await listRagModules(ctx.tenantDbName, {});
+      const modules = await listRagModules(ctx.tenantDbName, { projectId: ctx.projectId });
       return reply.code(200).send({ modules });
     } catch (error) {
       logger.error('List client RAG modules error', { error });
+      return reply.code(500).send({
+        error: error instanceof Error ? error.message : 'Internal error',
+      });
+    }
+  }));
+
+  // ── Create a RAG module definition ──
+  app.post('/client/v1/rag/modules', withClientApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await getApiTokenContextForRequest(request);
+      const body = readJsonBody<Record<string, unknown>>(request);
+
+      if (
+        typeof body.name !== 'string'
+        || typeof body.embeddingModelKey !== 'string'
+        || typeof body.vectorProviderKey !== 'string'
+        || typeof body.vectorIndexKey !== 'string'
+        || !body.chunkConfig
+      ) {
+        return reply.code(400).send({
+          error: 'name, embeddingModelKey, vectorProviderKey, vectorIndexKey, and chunkConfig are required',
+        });
+      }
+
+      const ragModule = await createRagModule(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
+        chunkConfig: body.chunkConfig as IRagChunkConfig,
+        createdBy: ctx.tokenRecord.userId,
+        description: body.description as string | undefined,
+        embeddingModelKey: body.embeddingModelKey,
+        fileBucketKey: body.fileBucketKey as string | undefined,
+        fileProviderKey: body.fileProviderKey as string | undefined,
+        key: body.key as string | undefined,
+        metadata: body.metadata as Record<string, unknown> | undefined,
+        name: body.name,
+        vectorIndexKey: body.vectorIndexKey,
+        vectorProviderKey: body.vectorProviderKey,
+        rerankerKey: typeof body.rerankerKey === 'string' && body.rerankerKey ? body.rerankerKey : undefined,
+        rerankerOversample: typeof body.rerankerOversample === 'number' ? body.rerankerOversample : undefined,
+      });
+
+      return reply.code(201).send({ module: ragModule });
+    } catch (error) {
+      logger.error('Create client RAG module error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal error',
       });
@@ -50,7 +96,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { key } = request.params as { key: string };
-      const ragModule = await getRagModule(ctx.tenantDbName, key);
+      const ragModule = await getRagModule(ctx.tenantDbName, key, ctx.projectId);
 
       if (!ragModule) {
         return reply.code(404).send({ error: 'RAG module not found' });
@@ -65,11 +111,40 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
+  // ── Update a RAG module definition (resolve by key, scoped to project) ──
+  app.patch('/client/v1/rag/modules/:key', withClientApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await getApiTokenContextForRequest(request);
+      const { key } = request.params as { key: string };
+      const existing = await getRagModule(ctx.tenantDbName, key, ctx.projectId);
+
+      if (!existing) {
+        return reply.code(404).send({ error: 'RAG module not found' });
+      }
+
+      const body = readJsonBody<Record<string, unknown>>(request);
+      const ragModule = await updateRagModule(ctx.tenantDbName, String(existing._id), {
+        ...body,
+        updatedBy: ctx.tokenRecord.userId,
+      });
+
+      if (!ragModule) {
+        return reply.code(404).send({ error: 'RAG module not found' });
+      }
+      return reply.code(200).send({ module: ragModule });
+    } catch (error) {
+      logger.error('Update client RAG module error', { error });
+      return reply.code(500).send({
+        error: error instanceof Error ? error.message : 'Internal error',
+      });
+    }
+  }));
+
   app.delete('/client/v1/rag/modules/:key', withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { key } = request.params as { key: string };
-      const ragModule = await getRagModule(ctx.tenantDbName, key);
+      const ragModule = await getRagModule(ctx.tenantDbName, key, ctx.projectId);
 
       if (!ragModule) {
         return reply.code(404).send({ error: 'RAG module not found' });

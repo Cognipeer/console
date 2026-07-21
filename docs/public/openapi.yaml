@@ -98,6 +98,12 @@ tags:
     description: Curated MCP hub discovery (read-only). Enterprise.
   - name: Aegis
     description: "Aegis enforcement plane: policy evaluation and shield audit. Enterprise."
+  - name: Analytics
+    description: Usage analytics and dashboard overview (project-scoped).
+  - name: Audit
+    description: Security and administrative audit log (read; owner/admin tokens).
+  - name: Monitoring
+    description: Inference server monitoring metrics (owner/admin tokens).
 paths:
   /a2a/{agentKey}:
     post:
@@ -310,6 +316,36 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "500":
           $ref: "#/components/responses/InternalError"
+    post:
+      tags:
+        - Agents
+      summary: Create an agent
+      description: Create a new agent definition (native model-backed or connected external agent). Inline API keys are encrypted at rest and redacted from the response. Requires an API token with `write` permission for this service.
+      operationId: createAgent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentCreateInput"
+      responses:
+        "201":
+          description: The created agent (secrets redacted).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  agent:
+                    $ref: "#/components/schemas/AgentRecord"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /agents/responses:
     post:
       tags:
@@ -363,6 +399,222 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    patch:
+      tags:
+        - Agents
+      summary: Update an agent
+      description: Partially update an agent definition resolved by key within the token's project. Native config never clobbers a stored connected agent; omitting a connection API key preserves the stored one. Requires an API token with `write` permission for this service.
+      operationId: updateAgent
+      parameters:
+        - name: agentKey
+          in: path
+          required: true
+          description: Unique agent key.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentUpdateInput"
+      responses:
+        "200":
+          description: The updated agent (secrets redacted).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  agent:
+                    $ref: "#/components/schemas/AgentRecord"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      tags:
+        - Agents
+      summary: Delete an agent
+      description: Delete an agent definition resolved by key within the token's project. Requires an API token with `write` permission for this service.
+      operationId: deleteAgent
+      parameters:
+        - name: agentKey
+          in: path
+          required: true
+          description: Unique agent key.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The agent was deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                    description: Always true when the resource was deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /agents/{agentKey}/publish:
+    post:
+      tags:
+        - Agents
+      summary: Publish an agent version
+      description: Snapshot the agent's current config as a new immutable, monotonically-numbered version. Requires an API token with `write` permission for this service.
+      operationId: publishAgent
+      parameters:
+        - name: agentKey
+          in: path
+          required: true
+          description: Unique agent key.
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentPublishInput"
+      responses:
+        "201":
+          description: The newly published version.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version:
+                    $ref: "#/components/schemas/AgentVersionRecord"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /analytics/overview:
+    get:
+      tags:
+        - Analytics
+      summary: Dashboard rollup
+      description: "Returns the dashboard rollup for the token's project: aggregate stats, recent tracing sessions, and a daily series. Project-scoped: a token that is not scoped to a project returns 400. RBAC maps this path to the (non-admin) `models` service; a token lacking read permission is rejected with 403."
+      operationId: getAnalyticsOverview
+      parameters:
+        - name: from
+          in: query
+          required: false
+          description: Inclusive lower bound as an ISO 8601 date/date-time. Invalid values return 400.
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          description: Inclusive upper bound as an ISO 8601 date/date-time. Invalid values return 400.
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: Dashboard overview rollup.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalyticsOverview"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /analytics/usage:
+    get:
+      tags:
+        - Analytics
+      summary: Usage time-series and breakdowns
+      description: "Returns usage/spend analytics derived from the same data that backs the dashboard. Project-scoped: reads are strictly bound to the token's tenant and project. A token that is not scoped to a project returns 400. The response body shape depends on `group_by`: `model` returns a per-model breakdown plus an interval time-series; `user`/`token` return per-entity attribution from the usage rollup; `service` returns a per-service breakdown. RBAC maps this path to the (non-admin) `models` service, so any token with `models:read` may call it; a token whose role/grants lack read permission is rejected with 403."
+      operationId: getAnalyticsUsage
+      parameters:
+        - name: from
+          in: query
+          required: false
+          description: Inclusive lower bound as an ISO 8601 date/date-time. Invalid values return 400.
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          description: Inclusive upper bound as an ISO 8601 date/date-time. Invalid values return 400.
+          schema:
+            type: string
+            format: date-time
+        - name: group_by
+          in: query
+          required: false
+          description: Breakdown dimension. Defaults to `model`. Selects which response envelope is returned.
+          schema:
+            type: string
+            enum:
+              - model
+              - user
+              - token
+              - service
+            default: model
+        - name: interval
+          in: query
+          required: false
+          description: Time-series bucket granularity. Only applies when `group_by=model`. Defaults to `day`.
+          schema:
+            type: string
+            enum:
+              - hour
+              - day
+              - month
+            default: day
+        - name: model
+          in: query
+          required: false
+          description: Optional model key filter (applied for `group_by=model|user|token`).
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Usage analytics. The body is one of three envelopes selected by `group_by`.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/AnalyticsUsageModel"
+                  - $ref: "#/components/schemas/AnalyticsUsageEntity"
+                  - $ref: "#/components/schemas/AnalyticsUsageService"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalError"
   /audio/speech:
@@ -463,6 +715,98 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "429":
           $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /audit/logs:
+    get:
+      tags:
+        - Audit
+      summary: List audit logs
+      description: "Returns filtered, paginated security/administrative audit events. Tenant-scoped (NOT project-scoped): the query is tenant-wide. `audit` is an admin RBAC service, so only owner/admin tokens or tokens with an explicit `audit:read` grant may call it; insufficient permission returns 403."
+      operationId: listAuditLogs
+      parameters:
+        - name: action
+          in: query
+          required: false
+          description: Filter by audit action.
+          schema:
+            type: string
+        - name: actorUserId
+          in: query
+          required: false
+          description: Filter by the acting user's id.
+          schema:
+            type: string
+        - name: from
+          in: query
+          required: false
+          description: Inclusive lower bound (ISO 8601). Unparseable values are ignored.
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          description: Inclusive upper bound (ISO 8601). Unparseable values are ignored.
+          schema:
+            type: string
+            format: date-time
+        - name: method
+          in: query
+          required: false
+          description: Filter by HTTP method (upper-cased server-side).
+          schema:
+            type: string
+        - name: outcome
+          in: query
+          required: false
+          description: Filter by outcome. Only `success`, `failure`, or `denied` are honoured; other values are ignored.
+          schema:
+            type: string
+            enum:
+              - success
+              - failure
+              - denied
+        - name: q
+          in: query
+          required: false
+          description: Free-text search over event/path/actor fields.
+          schema:
+            type: string
+        - name: service
+          in: query
+          required: false
+          description: Filter by the RBAC service slug.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          description: Maximum events to return. Defaults to 100, capped at 1000.
+          schema:
+            type: integer
+            default: 100
+            maximum: 1000
+        - name: skip
+          in: query
+          required: false
+          description: Number of events to skip for pagination. Defaults to 0.
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: A list of sanitized audit log entries.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditLogList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalError"
   /automations:
@@ -3348,6 +3692,37 @@ paths:
           $ref: "#/components/responses/Conflict"
         "500":
           $ref: "#/components/responses/InternalError"
+  /guardrails:
+    post:
+      tags:
+        - Guardrails
+      summary: Create a guardrail
+      description: Create a preset or custom (LLM-evaluated) guardrail definition. Requires an API token with `write` permission for this service.
+      operationId: createGuardrail
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GuardCreateInput"
+      responses:
+        "201":
+          description: The created guardrail.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  guardrail:
+                    $ref: "#/components/schemas/GuardRecord"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /guardrails/evaluate:
     post:
       tags:
@@ -3374,6 +3749,116 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /guardrails/{key}:
+    patch:
+      tags:
+        - Guardrails
+      summary: Update a guardrail
+      description: Partially update a guardrail resolved by key within the token's project. Requires an API token with `write` permission for this service.
+      operationId: updateGuardrail
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: Unique guardrail key.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GuardUpdateInput"
+      responses:
+        "200":
+          description: The updated guardrail.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  guardrail:
+                    $ref: "#/components/schemas/GuardRecord"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      tags:
+        - Guardrails
+      summary: Delete a guardrail
+      description: Delete a guardrail resolved by key within the token's project. Requires an API token with `write` permission for this service.
+      operationId: deleteGuardrail
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: Unique guardrail key.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The guardrail was deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                    description: Always true when the resource was deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /mcp:
+    post:
+      tags:
+        - MCP
+      summary: Create an MCP server
+      description: Create an MCP server definition from an OpenAPI spec, a remote MCP endpoint, or a stdio (npx/uvx) package. Upstream secrets are masked in the response. Requires an API token with `write` permission for this service.
+      operationId: createMcpServer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/McpCreateInput"
+      responses:
+        "201":
+          description: The created MCP server (secrets masked).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  server:
+                    $ref: "#/components/schemas/McpServer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "402":
+          description: Payment Required — persistent sandbox execution requires an active Enterprise license.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalError"
   /mcp/console/execute:
@@ -3600,6 +4085,85 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
+  /mcp/{serverKey}:
+    patch:
+      tags:
+        - MCP
+      summary: Update an MCP server
+      description: Partially update an MCP server definition resolved by key within the token's project. Requires an API token with `write` permission for this service.
+      operationId: updateMcpServer
+      parameters:
+        - name: serverKey
+          in: path
+          required: true
+          description: Unique MCP server key.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/McpUpdateInput"
+      responses:
+        "200":
+          description: The updated MCP server (secrets masked).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  server:
+                    $ref: "#/components/schemas/McpServer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "402":
+          description: Payment Required — persistent sandbox execution requires an active Enterprise license.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      tags:
+        - MCP
+      summary: Delete an MCP server
+      description: Delete an MCP server definition resolved by key within the token's project. Requires an API token with `write` permission for this service.
+      operationId: deleteMcpServer
+      parameters:
+        - name: serverKey
+          in: path
+          required: true
+          description: Unique MCP server key.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The MCP server was deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                    description: Always true when the resource was deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /mcp/{serverKey}/execute:
     get:
       tags:
@@ -3715,6 +4279,38 @@ paths:
                 $ref: "#/components/schemas/McpJsonRpcResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /mcp/{serverKey}/refresh-tools:
+    post:
+      tags:
+        - MCP
+      summary: Refresh MCP tools
+      description: Re-run tool discovery against the server's source and persist the refreshed tool set. Requires an API token with `write` permission for this service.
+      operationId: refreshMcpServerTools
+      parameters:
+        - name: serverKey
+          in: path
+          required: true
+          description: Unique MCP server key.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The MCP server with its refreshed tools.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  server:
+                    $ref: "#/components/schemas/McpServer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
   /mcp/{serverKey}/sse:
@@ -4341,6 +4937,41 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "500":
           $ref: "#/components/responses/InternalError"
+  /monitoring/inference:
+    get:
+      tags:
+        - Monitoring
+      summary: Inference server metrics summary
+      description: Returns a per-server latest-metrics snapshot plus an aggregate overview for the tenant's inference servers. Tenant-scoped (inference servers are not project-scoped). Server `apiKey` values are stripped from the response. `inference-monitoring` is an admin RBAC service, so only owner/admin tokens or tokens with an explicit `inference-monitoring:read` grant may call it; insufficient permission returns 403.
+      operationId: getMonitoringInference
+      parameters:
+        - name: from
+          in: query
+          required: false
+          description: Inclusive lower bound for the metrics window (ISO 8601 or dashboard relative range).
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          description: Inclusive upper bound for the metrics window (ISO 8601 or dashboard relative range).
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: Inference monitoring summary.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MonitoringInference"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /ocr:
     post:
       tags:
@@ -4899,6 +5530,110 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
+  /pii/policies:
+    post:
+      tags:
+        - PII
+      summary: Create a PII policy
+      description: Create a PII detection policy (categories, custom patterns, languages, default action) referenced by the `/pii/*` detection endpoints. Requires an API token with `write` permission for this service.
+      operationId: createPiiPolicy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PiiPolicyCreateInput"
+      responses:
+        "201":
+          description: The created PII policy.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  policy:
+                    $ref: "#/components/schemas/PiiPolicyRecord"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /pii/policies/{key}:
+    patch:
+      tags:
+        - PII
+      summary: Update a PII policy
+      description: Partially update a PII policy resolved by key within the token's project. Requires an API token with `write` permission for this service.
+      operationId: updatePiiPolicy
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: Unique PII policy key.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PiiPolicyUpdateInput"
+      responses:
+        "200":
+          description: The updated PII policy.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  policy:
+                    $ref: "#/components/schemas/PiiPolicyRecord"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      tags:
+        - PII
+      summary: Delete a PII policy
+      description: Delete a PII policy resolved by key within the token's project. Requires an API token with `write` permission for this service.
+      operationId: deletePiiPolicy
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: Unique PII policy key.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The PII policy was deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                    description: Always true when the resource was deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /pii/redact:
     post:
       tags:
@@ -4984,6 +5719,36 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
   /prompts:
+    post:
+      tags:
+        - Prompts
+      summary: Create a prompt
+      description: Create a prompt template. The initial content becomes version 1. Requires an API token with `write` permission for this service.
+      operationId: createPrompt
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PromptCreateInput"
+      responses:
+        "201":
+          description: The created prompt.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  prompt:
+                    $ref: "#/components/schemas/PromptView"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
     get:
       tags:
         - Prompts
@@ -5014,6 +5779,78 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
   /prompts/{key}:
+    patch:
+      tags:
+        - Prompts
+      summary: Update a prompt
+      description: Partially update a prompt resolved by key within the token's project. Changing the template creates a new version. Requires an API token with `write` permission for this service.
+      operationId: updatePrompt
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: Unique prompt key.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PromptUpdateInput"
+      responses:
+        "200":
+          description: The updated prompt.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  prompt:
+                    $ref: "#/components/schemas/PromptView"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      tags:
+        - Prompts
+      summary: Delete a prompt
+      description: Delete a prompt (and its versions) resolved by key within the token's project. Requires an API token with `write` permission for this service.
+      operationId: deletePrompt
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: Unique prompt key.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The prompt was deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                    description: Always true when the resource was deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
     get:
       tags:
         - Prompts
@@ -5308,6 +6145,45 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
   /prompts/{key}/versions:
+    post:
+      tags:
+        - Prompts
+      summary: Set the latest prompt version
+      description: Re-point the prompt's `latest` pointer to an existing version id. Requires an API token with `write` permission for this service.
+      operationId: setPromptLatestVersion
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: Unique prompt key.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PromptSetLatestInput"
+      responses:
+        "200":
+          description: The prompt with its updated latest pointer.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  prompt:
+                    $ref: "#/components/schemas/PromptView"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
     get:
       tags:
         - Prompts
@@ -5347,6 +6223,36 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
   /rag/modules:
+    post:
+      tags:
+        - Knowledge Engine
+      summary: Create a RAG module
+      description: Create a Knowledge Engine (RAG) module wiring an embedding model, vector store and chunking config. Requires an API token with `write` permission for this service.
+      operationId: createRagModule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RagCreateInput"
+      responses:
+        "201":
+          description: The created RAG module.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  module:
+                    $ref: "#/components/schemas/RagModule"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
     get:
       tags:
         - Knowledge Engine
@@ -5370,6 +6276,45 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
   /rag/modules/{key}:
+    patch:
+      tags:
+        - Knowledge Engine
+      summary: Update a RAG module
+      description: Partially update a RAG module resolved by key within the token's project. Requires an API token with `write` permission for this service.
+      operationId: updateRagModule
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: Unique RAG module key.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RagUpdateInput"
+      responses:
+        "200":
+          description: The updated RAG module.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  module:
+                    $ref: "#/components/schemas/RagModule"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
     get:
       tags:
         - Knowledge Engine
@@ -6068,6 +7013,37 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
+  /rerank:
+    post:
+      tags:
+        - Reranker
+      summary: Create a reranker
+      description: Create a reranker definition. Registered on the `/rerank` collection (the run endpoint is `POST /rerank/{key}`). Requires an API token with `write` permission for this service.
+      operationId: createReranker
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RerankCreateInput"
+      responses:
+        "201":
+          description: The created reranker.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reranker:
+                    $ref: "#/components/schemas/Reranker"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /rerank/{key}:
     get:
       tags:
@@ -6125,6 +7101,78 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    patch:
+      tags:
+        - Reranker
+      summary: Update a reranker
+      description: Partially update a reranker resolved by key within the token's project. Requires an API token with `write` permission for this service.
+      operationId: updateReranker
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: Unique reranker key.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RerankUpdateInput"
+      responses:
+        "200":
+          description: The updated reranker.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reranker:
+                    $ref: "#/components/schemas/Reranker"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      tags:
+        - Reranker
+      summary: Delete a reranker
+      description: Delete a reranker resolved by key within the token's project. Requires an API token with `write` permission for this service.
+      operationId: deleteReranker
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: Unique reranker key.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The reranker was deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                    description: Always true when the resource was deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -8569,6 +9617,36 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
   /tools:
+    post:
+      tags:
+        - Tools
+      summary: Create a tool
+      description: Create a tool definition from an OpenAPI/Postman spec or an MCP endpoint. Actions are discovered from the source. Requires an API token with `write` permission for this service.
+      operationId: createTool
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ToolCreateInput"
+      responses:
+        "201":
+          description: The created tool.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tool:
+                    $ref: "#/components/schemas/ToolSerialized"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
     get:
       tags:
         - Tools
@@ -8606,6 +9684,78 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
   /tools/{toolKey}:
+    patch:
+      tags:
+        - Tools
+      summary: Update a tool
+      description: Partially update a tool definition resolved by key within the token's project. Requires an API token with `write` permission for this service.
+      operationId: updateTool
+      parameters:
+        - name: toolKey
+          in: path
+          required: true
+          description: Unique tool key.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ToolUpdateInput"
+      responses:
+        "200":
+          description: The updated tool.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tool:
+                    $ref: "#/components/schemas/ToolSerialized"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      tags:
+        - Tools
+      summary: Delete a tool
+      description: Delete a tool definition resolved by key within the token's project. Requires an API token with `write` permission for this service.
+      operationId: deleteTool
+      parameters:
+        - name: toolKey
+          in: path
+          required: true
+          description: Unique tool key.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The tool was deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                    description: Always true when the resource was deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
     get:
       tags:
         - Tools
@@ -8665,6 +9815,40 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ToolExecuteResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /tools/{toolKey}/sync:
+    post:
+      tags:
+        - Tools
+      summary: Sync tool actions
+      description: Re-discover the tool's actions from its source (OpenAPI spec or MCP endpoint) and persist the refreshed action set. Requires an API token with `write` permission for this service.
+      operationId: syncTool
+      parameters:
+        - name: toolKey
+          in: path
+          required: true
+          description: Unique tool key.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The tool with its refreshed actions.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tool:
+                    $ref: "#/components/schemas/ToolSerialized"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -8977,6 +10161,98 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "429":
           $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /tracing/threads:
+    get:
+      tags:
+        - Tracing
+      summary: List tracing threads
+      description: Lists agent tracing threads (sessions grouped by `threadId`) for the token's project. Strictly tenant + project scoped. RBAC maps this path to the `tracing` service at read level.
+      operationId: listTracingThreads
+      parameters:
+        - name: agent
+          in: query
+          required: false
+          description: Case-insensitive filter matching a thread's agent name.
+          schema:
+            type: string
+        - name: status
+          in: query
+          required: false
+          description: Filter by the thread's latest status (e.g. `success`, `error`, `in_progress`).
+          schema:
+            type: string
+        - name: threadId
+          in: query
+          required: false
+          description: Case-insensitive substring filter on the thread id.
+          schema:
+            type: string
+        - name: from
+          in: query
+          required: false
+          description: Inclusive lower bound on thread start time (ISO 8601).
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          description: Inclusive upper bound on thread start time (ISO 8601).
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          required: false
+          description: Maximum threads to return. Defaults to 50.
+          schema:
+            type: integer
+            default: 50
+        - name: skip
+          in: query
+          required: false
+          description: Number of threads to skip for pagination. Defaults to 0.
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: Paginated list of tracing threads.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TracingThreadList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /tracing/threads/{threadId}:
+    get:
+      tags:
+        - Tracing
+      summary: Get tracing thread detail
+      description: Returns a single tracing thread with aggregated stats and its constituent sessions. Strictly tenant + project scoped. Returns 404 when no sessions belong to the given `threadId`. RBAC maps this path to the `tracing` service at read level.
+      operationId: getTracingThread
+      parameters:
+        - name: threadId
+          in: path
+          required: true
+          description: The thread id to fetch.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Tracing thread detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TracingThreadDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
   /vector/providers:
@@ -10178,6 +11454,74 @@ components:
           type: integer
           nullable: true
           description: Maximum output tokens.
+    AgentConfigInput:
+      type: object
+      additionalProperties: true
+      description: "Agent configuration. For native agents `modelKey` is required; for connected agents set `kind: external` and supply `connection`."
+      properties:
+        kind:
+          type: string
+          enum:
+            - external
+          nullable: true
+          description: Set to `external` for a connected agent. Omit for a native (model-backed) agent.
+        modelKey:
+          type: string
+          description: Key of the model to run on. Required for native agents.
+        connection:
+          $ref: "#/components/schemas/AgentConnectionInput"
+        temperature:
+          type: number
+          nullable: true
+          description: Sampling temperature override.
+        topP:
+          type: number
+          nullable: true
+          description: Nucleus sampling (top-p) override.
+        maxTokens:
+          type: integer
+          nullable: true
+          description: Maximum output tokens.
+        systemPrompt:
+          type: string
+          description: System prompt / instructions for the agent.
+    AgentConnectionInput:
+      type: object
+      additionalProperties: true
+      description: Connection descriptor for an external ("connected") agent. On update, omit `apiKey` to keep the stored credential.
+      properties:
+        provider:
+          type: string
+          description: Upstream provider identifier for the connected agent.
+        baseUrl:
+          type: string
+          description: Base URL of the external agent endpoint.
+        apiKey:
+          type: string
+          description: Inline API key. Encrypted at rest and never returned; the response exposes only `hasApiKey`.
+    AgentCreateInput:
+      type: object
+      required:
+        - name
+        - config
+      description: Create an agent definition.
+      properties:
+        name:
+          type: string
+          description: Human-readable agent name.
+          example: Support Triage
+        description:
+          type: string
+          description: Optional description.
+        status:
+          type: string
+          enum:
+            - active
+            - inactive
+            - draft
+          description: Initial status. Defaults to the service default when omitted.
+        config:
+          $ref: "#/components/schemas/AgentConfigInput"
     AgentDetailResponse:
       type: object
       description: Response body for a single agent lookup.
@@ -10225,6 +11569,68 @@ components:
           description: The agents visible to the token's project.
           items:
             $ref: "#/components/schemas/AgentSummary"
+    AgentPublishInput:
+      type: object
+      description: Publish the current draft config as a new immutable version.
+      properties:
+        changelog:
+          type: string
+          description: Optional changelog note recorded on the published version.
+    AgentRecord:
+      type: object
+      additionalProperties: true
+      description: A stored agent definition with secret material redacted.
+      properties:
+        _id:
+          type: string
+          description: Internal agent id.
+        key:
+          type: string
+          description: Stable agent key (used as the `model` field when running the agent).
+          example: support-triage
+        name:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+          enum:
+            - active
+            - inactive
+            - draft
+        tenantId:
+          type: string
+        projectId:
+          type: string
+        config:
+          type: object
+          additionalProperties: true
+          description: "Stored config. Secret material is redacted: a connected agent's `connection` carries `hasApiKey` (boolean) instead of the encrypted key."
+          properties:
+            kind:
+              type: string
+              nullable: true
+            modelKey:
+              type: string
+            connection:
+              type: object
+              additionalProperties: true
+              properties:
+                hasApiKey:
+                  type: boolean
+                  description: Whether an inline API key is stored (the key itself is never returned).
+        latestVersion:
+          type: integer
+          nullable: true
+        publishedVersion:
+          type: integer
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
     AgentResponse:
       type: object
       description: OpenAI Responses API-compatible response object.
@@ -10405,6 +11811,351 @@ components:
           type: string
           format: date-time
           description: When the agent was created.
+    AgentUpdateInput:
+      type: object
+      additionalProperties: true
+      description: Partial update of an agent definition. Only supplied fields are changed.
+      properties:
+        name:
+          type: string
+          description: Updated name.
+        description:
+          type: string
+          description: Updated description.
+        status:
+          type: string
+          enum:
+            - active
+            - inactive
+            - draft
+          description: Updated status.
+        config:
+          $ref: "#/components/schemas/AgentConfigInput"
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Arbitrary metadata. An `a2a` sub-object updates A2A exposure; the endpoint slug is server-owned and preserved.
+    AgentVersionRecord:
+      type: object
+      additionalProperties: true
+      description: A published, immutable agent version snapshot.
+      properties:
+        version:
+          type: integer
+          description: Monotonic version number assigned to this publish.
+          example: 3
+        agentKey:
+          type: string
+        changelog:
+          type: string
+          nullable: true
+        snapshot:
+          type: object
+          additionalProperties: true
+          description: Frozen snapshot of the agent at publish time.
+          properties:
+            name:
+              type: string
+            description:
+              type: string
+            status:
+              type: string
+        publishedBy:
+          type: string
+          description: User id that published the version.
+        createdAt:
+          type: string
+          format: date-time
+    AnalyticsDailyPoint:
+      type: object
+      description: One day of the overview series.
+      properties:
+        date:
+          type: string
+        sessionsCount:
+          type: number
+        totalTokens:
+          type: number
+    AnalyticsEntityEntry:
+      type: object
+      description: Per-entity attribution row. `user_id` is present when `group_by=user`; `api_token_id` is present when `group_by=token`.
+      properties:
+        user_id:
+          type: string
+        api_token_id:
+          type: string
+        name:
+          type: string
+          nullable: true
+        label:
+          type: string
+          nullable: true
+        requests:
+          type: number
+        errors:
+          type: number
+        input_tokens:
+          type: number
+        output_tokens:
+          type: number
+        total_tokens:
+          type: number
+        cost:
+          type: number
+    AnalyticsModelEntry:
+      type: object
+      description: Per-model usage aggregate.
+      properties:
+        model_key:
+          type: string
+        model_name:
+          type: string
+          nullable: true
+        category:
+          type: string
+          nullable: true
+        provider_key:
+          type: string
+          nullable: true
+        calls:
+          type: number
+        input_tokens:
+          type: number
+        output_tokens:
+          type: number
+        total_tokens:
+          type: number
+        cost:
+          type: number
+    AnalyticsOverview:
+      type: object
+      description: Dashboard rollup for the token's project.
+      properties:
+        object:
+          type: string
+          enum:
+            - analytics.overview
+        stats:
+          $ref: "#/components/schemas/AnalyticsOverviewStats"
+        recent_sessions:
+          type: array
+          items:
+            $ref: "#/components/schemas/AnalyticsRecentSession"
+        daily:
+          type: array
+          items:
+            $ref: "#/components/schemas/AnalyticsDailyPoint"
+    AnalyticsOverviewStats:
+      type: object
+      description: Dashboard aggregate counters. Inner keys are camelCase, mirroring the dashboard payload.
+      properties:
+        models:
+          type: object
+          properties:
+            total:
+              type: number
+            llm:
+              type: number
+            embedding:
+              type: number
+        vectors:
+          type: object
+          properties:
+            providers:
+              type: number
+            indexes:
+              type: number
+        tracing:
+          type: object
+          properties:
+            totalSessions:
+              type: number
+            totalTokens:
+              type: number
+            activeSessions:
+              type: number
+        apiCalls:
+          type: object
+          properties:
+            total:
+              type: number
+            trend:
+              type: number
+              description: Percentage change.
+    AnalyticsRecentSession:
+      type: object
+      description: Recent tracing session summary (camelCase, passed through from the tracing service).
+      properties:
+        sessionId:
+          type: string
+        agentName:
+          type: string
+        status:
+          type: string
+        startedAt:
+          type: string
+          format: date-time
+        durationMs:
+          type: number
+        totalEvents:
+          type: number
+        totalTokens:
+          type: number
+    AnalyticsServiceEntry:
+      type: object
+      description: Per-service usage aggregate.
+      properties:
+        service:
+          type: string
+        requests:
+          type: number
+        errors:
+          type: number
+        input_tokens:
+          type: number
+        output_tokens:
+          type: number
+        total_tokens:
+          type: number
+        cost:
+          type: number
+    AnalyticsTimeseriesPoint:
+      type: object
+      description: One time-series bucket at the requested interval.
+      properties:
+        period:
+          type: string
+        calls:
+          type: number
+        total_tokens:
+          type: number
+        cost:
+          type: number
+    AnalyticsUsageEntity:
+      type: object
+      description: "Usage response when `group_by=user` or `group_by=token`: per-entity attribution from the usage rollup."
+      properties:
+        object:
+          type: string
+          enum:
+            - analytics.usage
+        group_by:
+          type: string
+          enum:
+            - user
+            - token
+        from:
+          type: string
+          nullable: true
+          description: Rollup day (YYYY-MM-DD) or null.
+        to:
+          type: string
+          nullable: true
+          description: Rollup day (YYYY-MM-DD) or null.
+        currency:
+          type: string
+        totals:
+          $ref: "#/components/schemas/AnalyticsUsageEntityTotals"
+        breakdown:
+          type: array
+          items:
+            $ref: "#/components/schemas/AnalyticsEntityEntry"
+    AnalyticsUsageEntityTotals:
+      type: object
+      description: Aggregate totals for the per-entity (`user`/`token`) and `service` envelopes.
+      properties:
+        requests:
+          type: number
+        errors:
+          type: number
+        input_tokens:
+          type: number
+        output_tokens:
+          type: number
+        total_tokens:
+          type: number
+        cost:
+          type: number
+    AnalyticsUsageModel:
+      type: object
+      description: "Usage response when `group_by=model`: per-model aggregates plus an interval time-series."
+      properties:
+        object:
+          type: string
+          enum:
+            - analytics.usage
+        group_by:
+          type: string
+          enum:
+            - model
+        interval:
+          type: string
+          enum:
+            - hour
+            - day
+            - month
+        from:
+          type: string
+          format: date-time
+          nullable: true
+        to:
+          type: string
+          format: date-time
+          nullable: true
+        currency:
+          type: string
+        totals:
+          $ref: "#/components/schemas/AnalyticsUsageModelTotals"
+        by_model:
+          type: array
+          items:
+            $ref: "#/components/schemas/AnalyticsModelEntry"
+        timeseries:
+          type: array
+          items:
+            $ref: "#/components/schemas/AnalyticsTimeseriesPoint"
+    AnalyticsUsageModelTotals:
+      type: object
+      description: Aggregate totals for the `group_by=model` envelope.
+      properties:
+        cost:
+          type: number
+        calls:
+          type: number
+        input_tokens:
+          type: number
+        output_tokens:
+          type: number
+        total_tokens:
+          type: number
+    AnalyticsUsageService:
+      type: object
+      description: "Usage response when `group_by=service`: per-service breakdown across all services."
+      properties:
+        object:
+          type: string
+          enum:
+            - analytics.usage
+        group_by:
+          type: string
+          enum:
+            - service
+        from:
+          type: string
+          nullable: true
+          description: Rollup day (YYYY-MM-DD) or null.
+        to:
+          type: string
+          nullable: true
+          description: Rollup day (YYYY-MM-DD) or null.
+        currency:
+          type: string
+        totals:
+          $ref: "#/components/schemas/AnalyticsUsageEntityTotals"
+        breakdown:
+          type: array
+          items:
+            $ref: "#/components/schemas/AnalyticsServiceEntry"
     AudioBase64Input:
       type: object
       description: Audio supplied inline as base64-encoded bytes.
@@ -10577,6 +12328,76 @@ components:
         request_id:
           type: string
           description: Request correlation ID.
+    AuditLog:
+      type: object
+      description: A sanitized audit log entry (`_id` stringified as `id`).
+      properties:
+        id:
+          type: string
+        tenantId:
+          type: string
+        projectId:
+          type: string
+        requestId:
+          type: string
+        actorType:
+          type: string
+          enum:
+            - user
+            - api_token
+            - system
+        actorUserId:
+          type: string
+        actorEmail:
+          type: string
+        actorRole:
+          type: string
+        apiTokenId:
+          type: string
+        service:
+          type: string
+        action:
+          type: string
+        event:
+          type: string
+        method:
+          type: string
+        path:
+          type: string
+        statusCode:
+          type: number
+        outcome:
+          type: string
+          enum:
+            - success
+            - failure
+            - denied
+        ipAddress:
+          type: string
+        userAgent:
+          type: string
+        resourceType:
+          type: string
+        resourceId:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+        createdAt:
+          type: string
+          format: date-time
+    AuditLogList:
+      type: object
+      description: A list envelope of sanitized audit log entries.
+      properties:
+        object:
+          type: string
+          enum:
+            - list
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditLog"
     AutomationView:
       type: object
       description: Live view of a platform automation (background scheduler or maintenance job).
@@ -13161,6 +14982,50 @@ components:
         metadata:
           type: object
           description: Arbitrary metadata to attach to the file.
+    GuardCreateInput:
+      type: object
+      required:
+        - name
+        - type
+      description: Create a guardrail definition.
+      properties:
+        name:
+          type: string
+          description: Guardrail name.
+        type:
+          type: string
+          enum:
+            - preset
+            - custom
+          description: Guardrail type.
+        action:
+          type: string
+          enum:
+            - block
+            - warn
+            - flag
+          description: Action on violation. Defaults to `block`.
+        customPrompt:
+          type: string
+          description: LLM rule text. Required for `custom` guardrails.
+        description:
+          type: string
+        enabled:
+          type: boolean
+          description: Whether the guardrail is active. Defaults to true.
+        failMode:
+          type: string
+          enum:
+            - open
+            - closed
+          description: Behaviour when the check errors.
+        modelKey:
+          type: string
+          description: Model used to evaluate the rule. Required for `custom` guardrails and for LLM-backed policy checks.
+        policy:
+          type: object
+          additionalProperties: true
+          description: Preset policy config (moderation, promptShield, wordFilter, etc.).
     GuardEvaluateRequest:
       type: object
       required:
@@ -13225,6 +15090,91 @@ components:
         block:
           type: boolean
           description: Whether this finding blocks the content.
+    GuardRecord:
+      type: object
+      additionalProperties: true
+      description: A stored guardrail definition.
+      properties:
+        id:
+          type: string
+        key:
+          type: string
+          example: no-pii
+        name:
+          type: string
+        description:
+          type: string
+        type:
+          type: string
+          enum:
+            - preset
+            - custom
+        action:
+          type: string
+          enum:
+            - block
+            - warn
+            - flag
+        enabled:
+          type: boolean
+        failMode:
+          type: string
+          enum:
+            - open
+            - closed
+        modelKey:
+          type: string
+        policy:
+          type: object
+          additionalProperties: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    GuardUpdateInput:
+      type: object
+      description: Partial update of a guardrail definition.
+      properties:
+        name:
+          type: string
+        action:
+          type: string
+          enum:
+            - block
+            - warn
+            - flag
+        customPrompt:
+          type: string
+        description:
+          type: string
+        enabled:
+          type: boolean
+        failMode:
+          type: string
+          enum:
+            - open
+            - closed
+        modelKey:
+          type: string
+        policy:
+          type: object
+          additionalProperties: true
+    McpAegisInput:
+      type: object
+      description: Aegis enforcement configuration.
+      properties:
+        shieldId:
+          type: string
+          description: Aegis shield id to apply.
+        mode:
+          type: string
+          enum:
+            - off
+            - monitor
+            - enforce
+          description: Aegis enforcement mode. Defaults to `off`.
     McpConsoleExecuteRequest:
       type: object
       required:
@@ -13278,6 +15228,48 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/McpToolDescriptor"
+    McpCreateInput:
+      type: object
+      required:
+        - name
+        - upstreamAuth
+      description: Create an MCP server definition. `openApiSpec`/`remoteConfig`/`stdioConfig` are required per the chosen `sourceType`.
+      properties:
+        name:
+          type: string
+          description: MCP server name.
+          example: Tavily Search
+        description:
+          type: string
+        sourceType:
+          type: string
+          enum:
+            - openapi
+            - remote
+            - stdio
+          description: Where the server's tools come from. Defaults to `openapi`.
+        openApiSpec:
+          type: string
+          description: OpenAPI/Postman spec text. Required when `sourceType` is `openapi`.
+        specFormat:
+          type: string
+          enum:
+            - auto
+            - openapi
+            - postman
+          description: Hint for parsing `openApiSpec`.
+        upstreamBaseUrl:
+          type: string
+        upstreamAuth:
+          $ref: "#/components/schemas/McpUpstreamAuthInput"
+        remoteConfig:
+          $ref: "#/components/schemas/McpRemoteConfigInput"
+        stdioConfig:
+          $ref: "#/components/schemas/McpStdioConfigInput"
+        exposure:
+          $ref: "#/components/schemas/McpExposureInput"
+        aegis:
+          $ref: "#/components/schemas/McpAegisInput"
     McpExecuteRequest:
       type: object
       required:
@@ -13318,6 +15310,24 @@ components:
               type: integer
               description: Execution latency in milliseconds.
               example: 1523
+    McpExposureInput:
+      type: object
+      description: Exposed access surface for the gateway.
+      properties:
+        protocols:
+          type: array
+          items:
+            type: string
+            enum:
+              - streamable-http
+              - sse
+          description: Enabled transport protocols. Defaults to both.
+        accessMode:
+          type: string
+          enum:
+            - token
+            - public
+          description: How callers authenticate against the exposed endpoint. Defaults to `token`.
     McpHubCatalogEntry:
       type: object
       description: MCP-Registry-style catalog entry for one hub member server (whitelist-serialized — no upstream auth/env/vault material).
@@ -13533,6 +15543,21 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/McpToolDescriptor"
+    McpRemoteConfigInput:
+      type: object
+      required:
+        - url
+      description: "Remote MCP source configuration (for `sourceType: remote`)."
+      properties:
+        url:
+          type: string
+          description: Remote MCP server URL.
+        transport:
+          type: string
+          enum:
+            - streamable-http
+            - sse
+          description: Transport. Defaults to `streamable-http`.
     McpServer:
       type: object
       description: Serialized MCP server metadata. Secret upstream credentials are masked.
@@ -13584,6 +15609,50 @@ components:
           type: string
           format: date-time
           description: Creation timestamp.
+    McpStdioConfigInput:
+      type: object
+      required:
+        - packageName
+      description: "Stdio (npx/uvx) MCP source configuration (for `sourceType: stdio`)."
+      properties:
+        runtime:
+          type: string
+          enum:
+            - npx
+            - uvx
+          description: Package runner. Defaults to `npx`.
+        packageName:
+          type: string
+          description: Package to run.
+        args:
+          type: array
+          items:
+            type: string
+          description: Extra CLI arguments.
+        env:
+          type: object
+          additionalProperties:
+            type: string
+          description: Environment variables passed to the process.
+        executionMode:
+          type: string
+          enum:
+            - subprocess
+            - sandbox
+          description: Execution mode. `sandbox` requires an Enterprise license.
+        sandbox:
+          type: object
+          description: Sandbox settings (only used when `executionMode` is `sandbox`).
+          properties:
+            templateKey:
+              type: string
+            resources:
+              type: object
+              properties:
+                cpuCores:
+                  type: number
+                memoryMb:
+                  type: number
     McpToolDescriptor:
       type: object
       description: An MCP tool descriptor (name, description and input schema).
@@ -13600,6 +15669,85 @@ components:
           type: object
           additionalProperties: true
           description: JSON Schema describing the tool's input arguments.
+    McpUpdateInput:
+      type: object
+      additionalProperties: true
+      description: Partial update of an MCP server definition.
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+          enum:
+            - active
+            - disabled
+        openApiSpec:
+          type: string
+        specFormat:
+          type: string
+          enum:
+            - auto
+            - openapi
+            - postman
+        upstreamBaseUrl:
+          type: string
+        upstreamAuth:
+          $ref: "#/components/schemas/McpUpstreamAuthInput"
+        remoteConfig:
+          $ref: "#/components/schemas/McpRemoteConfigInput"
+        stdioConfig:
+          $ref: "#/components/schemas/McpStdioConfigInput"
+        exposure:
+          $ref: "#/components/schemas/McpExposureInput"
+        aegis:
+          $ref: "#/components/schemas/McpAegisInput"
+        runtimeHeaders:
+          type: object
+          nullable: true
+          description: Runtime header passthrough policy. `null` clears it.
+          properties:
+            allow:
+              type: boolean
+            allowedNames:
+              type: array
+              items:
+                type: string
+        disabledTools:
+          type: array
+          items:
+            type: string
+          description: Names of tools to disable on this server.
+    McpUpstreamAuthInput:
+      type: object
+      required:
+        - type
+      description: Upstream auth configuration. Secret fields are encrypted at rest and masked in responses.
+      properties:
+        type:
+          type: string
+          enum:
+            - none
+            - token
+            - header
+            - basic
+          description: Upstream auth scheme.
+        token:
+          type: string
+          description: Bearer token (for `token`).
+        headerName:
+          type: string
+          description: Custom header name (for `header`).
+        headerValue:
+          type: string
+          description: Custom header value (for `header`).
+        username:
+          type: string
+          description: Username (for `basic`).
+        password:
+          type: string
+          description: Password (for `basic`).
     MemoryBatchRequest:
       type: object
       required:
@@ -14026,6 +16174,101 @@ components:
           description: "Console extension: the raw guardrail findings, including PII and prompt-shield findings when those policies are enabled."
           items:
             $ref: "#/components/schemas/ModFinding"
+    MonitoringInference:
+      type: object
+      description: Per-server latest metrics plus an aggregate overview for the tenant's inference fleet.
+      properties:
+        object:
+          type: string
+          enum:
+            - monitoring.inference
+        overview:
+          $ref: "#/components/schemas/MonitoringOverview"
+        servers:
+          type: array
+          items:
+            $ref: "#/components/schemas/MonitoringServer"
+        type_breakdown:
+          type: array
+          items:
+            $ref: "#/components/schemas/MonitoringTypeBreakdown"
+    MonitoringMetrics:
+      type: object
+      description: Latest metrics sample for one inference server.
+      properties:
+        generation_tokens_throughput:
+          type: number
+        gpu_cache_usage_percent:
+          type: number
+        num_requests_running:
+          type: number
+        num_requests_waiting:
+          type: number
+        prompt_tokens_throughput:
+          type: number
+        requests_per_second:
+          type: number
+        running_models:
+          type: array
+          items:
+            type: string
+        time_to_first_token_seconds:
+          type: number
+        timestamp:
+          type: string
+          format: date-time
+    MonitoringOverview:
+      type: object
+      description: Aggregate inference-fleet counters.
+      properties:
+        active_servers:
+          type: number
+        avg_gpu_cache_usage:
+          type: number
+          nullable: true
+        disabled_servers:
+          type: number
+        errored_servers:
+          type: number
+        running_models_count:
+          type: number
+        total_running_requests:
+          type: number
+        total_servers:
+          type: number
+        total_waiting_requests:
+          type: number
+    MonitoringServer:
+      type: object
+      description: One inference server with its latest metrics (apiKey stripped).
+      properties:
+        key:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+        status:
+          type: string
+        last_error:
+          type: string
+          nullable: true
+        last_polled_at:
+          type: string
+          format: date-time
+          nullable: true
+        latest_metrics:
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/MonitoringMetrics"
+    MonitoringTypeBreakdown:
+      type: object
+      description: Count of servers per server type.
+      properties:
+        count:
+          type: number
+        type:
+          type: string
     OcrAddFilesMultipartRequest:
       type: object
       description: Multipart body for adding files. Attach one or more files under files (or file).
@@ -14522,6 +16765,118 @@ components:
         replacement:
           type: string
           description: Replacement text applied for the match (for redact/mask/tokenize actions).
+    PiiPolicyCreateInput:
+      type: object
+      required:
+        - name
+      description: Create a PII policy definition.
+      properties:
+        name:
+          type: string
+          example: Support Intake
+        defaultAction:
+          type: string
+          enum:
+            - detect
+            - redact
+            - mask
+            - block
+            - tokenize
+          description: Default action for matched categories. Defaults to `detect`.
+        description:
+          type: string
+        categories:
+          type: object
+          additionalProperties:
+            type: boolean
+          description: Enabled detection categories keyed by category name. Defaults to the built-in category set.
+        customPatterns:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+          description: Custom regex detectors.
+        languages:
+          type: array
+          items:
+            type: string
+            enum:
+              - global
+              - en
+              - tr
+              - de
+              - fr
+              - es
+              - it
+              - pt
+              - ar
+              - ja
+              - zh
+          description: Languages to detect. A comma-separated string is also accepted.
+        enabled:
+          type: boolean
+          description: Defaults to true.
+        metadata:
+          type: object
+          additionalProperties: true
+    PiiPolicyRecord:
+      type: object
+      additionalProperties: true
+      description: A stored PII policy definition.
+      properties:
+        id:
+          type: string
+        key:
+          type: string
+          example: support-intake
+        name:
+          type: string
+        description:
+          type: string
+        defaultAction:
+          type: string
+          enum:
+            - detect
+            - redact
+            - mask
+            - block
+            - tokenize
+        categories:
+          type: object
+          additionalProperties:
+            type: boolean
+        customPatterns:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        languages:
+          type: array
+          items:
+            type: string
+            enum:
+              - global
+              - en
+              - tr
+              - de
+              - fr
+              - es
+              - it
+              - pt
+              - ar
+              - ja
+              - zh
+        enabled:
+          type: boolean
+        metadata:
+          type: object
+          additionalProperties: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
     PiiPolicyRequest:
       type: object
       description: Shared request body for the policy-based PII endpoints (`detect`, `redact`, `mask`, `tokenize`, `scan`). The `action` field is only read by `/pii/scan` as an override; the named endpoints pin their own action and ignore it.
@@ -14562,6 +16917,52 @@ components:
             - mask
             - block
             - tokenize
+    PiiPolicyUpdateInput:
+      type: object
+      description: Partial update of a PII policy definition.
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        defaultAction:
+          type: string
+          enum:
+            - detect
+            - redact
+            - mask
+            - block
+            - tokenize
+        categories:
+          type: object
+          additionalProperties:
+            type: boolean
+        customPatterns:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        languages:
+          type: array
+          items:
+            type: string
+            enum:
+              - global
+              - en
+              - tr
+              - de
+              - fr
+              - es
+              - it
+              - pt
+              - ar
+              - ja
+              - zh
+        enabled:
+          type: boolean
+        metadata:
+          type: object
+          additionalProperties: true
     PiiScanResponse:
       type: object
       properties:
@@ -14684,6 +17085,32 @@ components:
               updatedAt:
                 type: string
                 format: date-time
+    PromptCreateInput:
+      type: object
+      required:
+        - name
+        - template
+      description: Create a prompt (creates its first version).
+      properties:
+        name:
+          type: string
+          description: Prompt name.
+          example: Welcome Message
+        template:
+          type: string
+          description: Mustache template body.
+          example: Hello {{name}}!
+        description:
+          type: string
+        key:
+          type: string
+          description: Desired key. Auto-generated from the name when omitted.
+        metadata:
+          type: object
+          additionalProperties: true
+        versionComment:
+          type: string
+          description: Comment for the initial version. `comment` is also accepted.
     PromptDeploymentEvent:
       type: object
       description: A single deployment history event for a prompt.
@@ -14781,6 +17208,32 @@ components:
           type: string
         isLatest:
           type: boolean
+    PromptSetLatestInput:
+      type: object
+      required:
+        - versionId
+      description: Re-point the prompt's `latest` pointer to an existing version.
+      properties:
+        versionId:
+          type: string
+          description: Id of an existing version to re-point the latest pointer to.
+    PromptUpdateInput:
+      type: object
+      description: Partial update of a prompt. Template changes implicitly create a new version.
+      properties:
+        name:
+          type: string
+        template:
+          type: string
+          description: New template body. Supplying it creates a new version.
+        description:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+        versionComment:
+          type: string
+          description: Comment for the new version. `comment` is also accepted.
     PromptVersionSummary:
       type: object
       description: A single entry in a prompt's version history.
@@ -14873,6 +17326,48 @@ components:
             type: string
         encoding:
           type: string
+    RagCreateInput:
+      type: object
+      required:
+        - name
+        - embeddingModelKey
+        - vectorProviderKey
+        - vectorIndexKey
+        - chunkConfig
+      description: Create a Knowledge Engine (RAG) module.
+      properties:
+        name:
+          type: string
+          example: Support Knowledge Base
+        embeddingModelKey:
+          type: string
+          description: Key of the embedding model.
+        vectorProviderKey:
+          type: string
+          description: Key of the vector store provider.
+        vectorIndexKey:
+          type: string
+          description: Key/name of the vector index.
+        chunkConfig:
+          $ref: "#/components/schemas/RagChunkConfig"
+        description:
+          type: string
+        key:
+          type: string
+          description: Desired key. Auto-generated when omitted.
+        fileBucketKey:
+          type: string
+        fileProviderKey:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+        rerankerKey:
+          type: string
+          description: Optional reranker to apply to query results.
+        rerankerOversample:
+          type: integer
+          description: Candidate multiplier fetched before reranking.
     RagDocument:
       type: object
       description: A document ingested into a Knowledge Engine module.
@@ -15016,6 +17511,39 @@ components:
           type: string
         latencyMs:
           type: number
+    RagUpdateInput:
+      type: object
+      additionalProperties: true
+      description: Partial update of a RAG module definition.
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        embeddingModelKey:
+          type: string
+        vectorProviderKey:
+          type: string
+        vectorIndexKey:
+          type: string
+        chunkConfig:
+          $ref: "#/components/schemas/RagChunkConfig"
+        fileBucketKey:
+          type: string
+        fileProviderKey:
+          type: string
+        status:
+          type: string
+          enum:
+            - active
+            - disabled
+        metadata:
+          type: object
+          additionalProperties: true
+        rerankerKey:
+          type: string
+        rerankerOversample:
+          type: integer
     RealtimeModel:
       type: object
       description: A realtime model preset (snake_case client view) — a named session config bundling a response generator (chat model or agent) with STT, TTS, voice, and turn-detection settings.
@@ -15528,6 +18056,43 @@ components:
           type: string
           description: Enqueue status.
           example: pending
+    RerankCreateInput:
+      type: object
+      required:
+        - name
+        - strategy
+        - config
+      description: Create a reranker definition.
+      properties:
+        name:
+          type: string
+          example: Support Rerank
+        strategy:
+          type: string
+          enum:
+            - dedicated-model
+            - llm-judge
+            - llm-listwise
+            - heuristic
+          description: Rerank strategy.
+        config:
+          type: object
+          additionalProperties: true
+          description: Strategy-specific configuration (e.g. modelKey).
+        key:
+          type: string
+          description: Desired key. Auto-generated when omitted.
+        description:
+          type: string
+        status:
+          type: string
+          enum:
+            - active
+            - disabled
+          description: Defaults to `active`.
+        metadata:
+          type: object
+          additionalProperties: true
     RerankDocumentInput:
       description: "A document to rerank: either a plain string or an object with `content`/`text` and optional metadata."
       oneOf:
@@ -15632,6 +18197,32 @@ components:
             latency_ms:
               type: number
               description: Run latency in milliseconds.
+    RerankUpdateInput:
+      type: object
+      description: Partial update of a reranker definition.
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        strategy:
+          type: string
+          enum:
+            - dedicated-model
+            - llm-judge
+            - llm-listwise
+            - heuristic
+        config:
+          type: object
+          additionalProperties: true
+        status:
+          type: string
+          enum:
+            - active
+            - disabled
+        metadata:
+          type: object
+          additionalProperties: true
     Reranker:
       type: object
       description: A configured reranker.
@@ -16877,6 +19468,57 @@ components:
           type: object
           additionalProperties: true
           description: JSON Schema describing the action's input arguments.
+    ToolAuthConfigInput:
+      type: object
+      additionalProperties: true
+      description: Upstream auth configuration. Credentials are stored server-side and never returned.
+      properties:
+        type:
+          type: string
+          description: Auth scheme (e.g. none, bearer, apiKey, basic).
+    ToolCreateInput:
+      type: object
+      required:
+        - name
+        - type
+      description: Create a tool definition.
+      properties:
+        name:
+          type: string
+          description: Tool name.
+          example: GitHub API
+        type:
+          type: string
+          enum:
+            - openapi
+            - mcp
+          description: Tool source type.
+        description:
+          type: string
+        openApiSpec:
+          type: string
+          description: OpenAPI/Swagger/Postman spec text (for `openapi` tools).
+        specFormat:
+          type: string
+          enum:
+            - auto
+            - openapi
+            - postman
+          description: Hint for parsing `openApiSpec`. Defaults to `auto`.
+        upstreamBaseUrl:
+          type: string
+          description: Override base URL for upstream calls.
+        upstreamAuth:
+          $ref: "#/components/schemas/ToolAuthConfigInput"
+        mcpEndpoint:
+          type: string
+          description: MCP server endpoint URL (for `mcp` tools).
+        mcpTransport:
+          type: string
+          enum:
+            - sse
+            - streamable-http
+          description: MCP transport (for `mcp` tools).
     ToolDetailResponse:
       type: object
       properties:
@@ -16920,6 +19562,61 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ToolSummary"
+    ToolSerialized:
+      type: object
+      additionalProperties: true
+      description: A serialized tool definition. Upstream auth secrets are omitted.
+      properties:
+        id:
+          type: string
+        tenantId:
+          type: string
+        projectId:
+          type: string
+        key:
+          type: string
+          example: github-api
+        name:
+          type: string
+        description:
+          type: string
+        type:
+          type: string
+          enum:
+            - openapi
+            - mcp
+        status:
+          type: string
+          enum:
+            - active
+            - disabled
+        actions:
+          type: array
+          description: Discovered actions.
+          items:
+            $ref: "#/components/schemas/ToolAction"
+        upstreamBaseUrl:
+          type: string
+        mcpEndpoint:
+          type: string
+        mcpTransport:
+          type: string
+          enum:
+            - sse
+            - streamable-http
+        metadata:
+          type: object
+          additionalProperties: true
+        createdBy:
+          type: string
+        updatedBy:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
     ToolSummary:
       type: object
       description: A tool from the unified tool system with its actions.
@@ -16957,6 +19654,42 @@ components:
           type: string
           format: date-time
           description: Creation timestamp.
+    ToolUpdateInput:
+      type: object
+      additionalProperties: true
+      description: Partial update of a tool definition.
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+          enum:
+            - active
+            - disabled
+        openApiSpec:
+          type: string
+        specFormat:
+          type: string
+          enum:
+            - auto
+            - openapi
+            - postman
+        upstreamBaseUrl:
+          type: string
+        upstreamAuth:
+          $ref: "#/components/schemas/ToolAuthConfigInput"
+        mcpEndpoint:
+          type: string
+        mcpTransport:
+          type: string
+          enum:
+            - sse
+            - streamable-http
+        metadata:
+          type: object
+          additionalProperties: true
     TraceAgent:
       type: object
       description: Metadata about the agent that produced the session.
@@ -17304,6 +20037,136 @@ components:
           additionalProperties:
             type: integer
       additionalProperties: true
+    TracingThread:
+      type: object
+      description: "A tracing thread: sessions grouped by threadId, with aggregate counters."
+      properties:
+        threadId:
+          type: string
+        sessionsCount:
+          type: number
+        agents:
+          type: array
+          items:
+            type: string
+        statuses:
+          type: array
+          items:
+            type: string
+        latestStatus:
+          type: string
+        startedAt:
+          type: string
+          format: date-time
+          nullable: true
+        endedAt:
+          type: string
+          format: date-time
+          nullable: true
+        totalEvents:
+          type: number
+        totalInputTokens:
+          type: number
+        totalOutputTokens:
+          type: number
+        totalDurationMs:
+          type: number
+        modelsUsed:
+          type: array
+          items:
+            type: string
+    TracingThreadDetail:
+      type: object
+      description: A tracing thread with aggregated stats and its constituent sessions.
+      properties:
+        threadId:
+          type: string
+        status:
+          type: string
+        agents:
+          type: array
+          items:
+            type: string
+        sessionsCount:
+          type: number
+        startedAt:
+          type: string
+          format: date-time
+          nullable: true
+        endedAt:
+          type: string
+          format: date-time
+          nullable: true
+        totalDurationMs:
+          type: number
+        totalEvents:
+          type: number
+        totalInputTokens:
+          type: number
+        totalOutputTokens:
+          type: number
+        totalCachedInputTokens:
+          type: number
+        modelsUsed:
+          type: array
+          items:
+            type: string
+        toolsUsed:
+          type: array
+          items:
+            type: string
+        sessions:
+          type: array
+          items:
+            $ref: "#/components/schemas/TracingThreadSession"
+    TracingThreadList:
+      type: object
+      description: Paginated list of tracing threads.
+      properties:
+        threads:
+          type: array
+          items:
+            $ref: "#/components/schemas/TracingThread"
+        total:
+          type: number
+    TracingThreadSession:
+      type: object
+      description: A session belonging to a thread.
+      properties:
+        sessionId:
+          type: string
+        agentName:
+          type: string
+        agentVersion:
+          type: string
+        status:
+          type: string
+        startedAt:
+          type: string
+          format: date-time
+          nullable: true
+        endedAt:
+          type: string
+          format: date-time
+          nullable: true
+        durationMs:
+          type: number
+        totalEvents:
+          type: number
+        totalTokens:
+          type: number
+        totalInputTokens:
+          type: number
+        totalOutputTokens:
+          type: number
+        modelsUsed:
+          type: array
+          items:
+            type: string
+        toolsUsed:
+          type: array
+          items:
+            type: string
     VectorCreateIndexRequest:
       type: object
       description: Payload to create a vector index.

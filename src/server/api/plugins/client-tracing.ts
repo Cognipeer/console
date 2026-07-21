@@ -13,7 +13,7 @@ import {
   checkRateLimit,
   checkResourceQuota,
 } from '@/lib/quota/quotaGuard';
-import { recordTracingSessionCreated } from '@/lib/services/agentTracing';
+import { AgentTracingService, recordTracingSessionCreated } from '@/lib/services/agentTracing';
 import { mapOtlpToInternalModels, type OtlpExportTraceServiceRequest } from '@/lib/services/otlpMapper';
 import {
   getApiTokenContextForRequest,
@@ -1193,6 +1193,54 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
       logger.error('Client tracing session end error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Failed to end tracing session',
+      });
+    }
+  }));
+
+  // ── Read: list threads (grouped sessions) ──
+  app.get('/client/v1/tracing/threads', withClientApiRequestContext(async (request, reply, auth) => {
+    try {
+      const query = request.query as {
+        agent?: string; status?: string; threadId?: string;
+        from?: string; to?: string; limit?: string; skip?: string;
+      };
+
+      const result = await AgentTracingService.listThreads(auth.tenantDbName, auth.projectId, {
+        agent: query.agent,
+        status: query.status,
+        threadId: query.threadId,
+        from: query.from,
+        to: query.to,
+        limit: query.limit || '50',
+        skip: query.skip || '0',
+      });
+
+      return reply.code(200).send(result);
+    } catch (error) {
+      logger.error('Client tracing threads list error', { error });
+      return reply.code(500).send({
+        error: error instanceof Error ? error.message : 'Failed to list tracing threads',
+      });
+    }
+  }));
+
+  // ── Read: single thread detail ──
+  app.get('/client/v1/tracing/threads/:threadId', withClientApiRequestContext(async (request, reply, auth) => {
+    try {
+      const { threadId } = request.params as { threadId: string };
+      const result = await AgentTracingService.getThreadDetail(
+        auth.tenantDbName,
+        auth.projectId,
+        threadId,
+      );
+      if (!result) {
+        return reply.code(404).send({ error: 'Thread not found' });
+      }
+      return reply.code(200).send(result);
+    } catch (error) {
+      logger.error('Client tracing thread detail error', { error });
+      return reply.code(500).send({
+        error: error instanceof Error ? error.message : 'Failed to get tracing thread',
       });
     }
   }));
