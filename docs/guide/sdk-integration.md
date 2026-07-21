@@ -13,6 +13,7 @@ Cognipeer Console and the Console SDK solve different layers of the same system.
 | Configuring tenants, providers, prompts, tools, agents, or guardrails | Cognipeer Console docs |
 | Writing backend or frontend application code against the API | [Console SDK docs](https://cognipeer.github.io/console-sdk/) |
 | Debugging raw HTTP request and response behavior | Console API Reference |
+| Generating a client in another language, or driving contract tests | [OpenAPI Specification](/api/openapi) |
 
 ## Recommended Workflow
 
