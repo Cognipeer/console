@@ -251,11 +251,11 @@ Returns the run summary plus `progress`, any fatal `error`, and the per-attempt 
 ```bash
 # Launch a scan and capture the run id
 RUN_ID=$(curl -s -X POST \
-  https://api.cognipeer.com/api/client/v1/redteam/campaigns/nightly-agent-scan/scan \
+  https://console.cognipeer.com/api/client/v1/redteam/campaigns/nightly-agent-scan/scan \
   -H "Authorization: Bearer cpeer_your_token" | jq -r '.run.id')
 
 # Poll until it finishes, then read the resilience score
-curl -s https://api.cognipeer.com/api/client/v1/redteam/runs/$RUN_ID \
+curl -s https://console.cognipeer.com/api/client/v1/redteam/runs/$RUN_ID \
   -H "Authorization: Bearer cpeer_your_token" \
   | jq '{status: .run.status, resilience: .run.aggregate.resilienceScore, vulnerable: .run.aggregate.vulnerable}'
 ```
