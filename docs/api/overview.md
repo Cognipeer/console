@@ -5,6 +5,10 @@ Cognipeer Console exposes two HTTP surfaces:
 - **Client API** under `/api/client/v1/` for API-token authenticated integrations.
 - **Dashboard/Internal API** under `/api/` for JWT-authenticated console features such as incidents and health.
 
+::: tip Machine-readable spec
+The full Client API is published as an OpenAPI 3.0 document — see [OpenAPI Specification](./openapi) to download it or generate a client. Direct link: [openapi.yaml](/openapi.yaml).
+:::
+
 ## Base URL
 
 ```

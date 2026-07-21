@@ -10,6 +10,15 @@ export default defineConfig({
   ignoreDeadLinks: true,
   appearance: 'dark',
 
+  markdown: {
+    // Code blocks use an always-dark "terminal" background in both light and
+    // dark site themes (see theme/custom.css --cp-bg-code). VitePress' default
+    // dual Shiki theme would apply light-mode (dark-on-white) token colors on
+    // that dark background in light mode, making code unreadable. Pin a single
+    // dark Shiki theme so tokens stay light-on-dark regardless of site theme.
+    theme: 'github-dark',
+  },
+
   themeConfig: {
     logo: '/Console.svg',
     siteTitle: 'Cognipeer Console',
@@ -122,6 +131,7 @@ export default defineConfig({
           text: 'API Reference',
           items: [
             { text: 'Overview', link: '/api/overview' },
+            { text: 'OpenAPI Spec', link: '/api/openapi' },
             { text: 'Chat Completions', link: '/api/chat-completions' },
             { text: 'Embeddings', link: '/api/embeddings' },
             { text: 'Moderations', link: '/api/moderations' },
