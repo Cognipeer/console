@@ -147,6 +147,14 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/client/v1/audit', service: 'audit' },
   { prefix: '/api/client/v1/monitoring', service: 'inference-monitoring' },
   { prefix: '/api/client/v1/analytics', service: 'models' },
+  // Admin-surface management (token-authenticated). All require the token owner
+  // to hold the service permission (providers/members/license are adminService →
+  // owner/admin or an explicit scope grant); a scoped token further narrows it.
+  { prefix: '/api/client/v1/providers', service: 'providers' },
+  { prefix: '/api/client/v1/models', service: 'models' },
+  { prefix: '/api/client/v1/projects', service: 'projects' },
+  { prefix: '/api/client/v1/members', service: 'members' },
+  { prefix: '/api/client/v1/license', service: 'license' },
   { prefix: '/api/client/v1/memory', service: 'memory' },
   { prefix: '/api/client/v1/prompts', service: 'prompts' },
   { prefix: '/api/client/v1/rag', service: 'rag' },
