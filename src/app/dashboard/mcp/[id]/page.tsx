@@ -49,6 +49,7 @@ import {
   IconTrash,
 } from '@tabler/icons-react';
 import DetailShell from '@/components/common/ui/DetailShell';
+import FormShell, { FormField, FormRow, FormSection } from '@/components/common/ui/FormShell';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import McpToolArgsEditor from '@/components/mcp/McpToolArgsEditor';
 import McpToolsPanel from '@/components/mcp/McpToolsPanel';
@@ -554,6 +555,17 @@ export default function McpDetailPage() {
 
   const headerActions = (
     <>
+      {server.sourceType !== 'openapi' ? (
+        <Button
+          variant="default"
+          size="sm"
+          leftSection={<IconRefresh size={14} stroke={1.7} />}
+          loading={refreshingTools}
+          onClick={() => void handleRefreshTools()}
+        >
+          Update tools
+        </Button>
+      ) : null}
       <Button
         variant="default"
         size="sm"
@@ -1200,7 +1212,7 @@ async with sse_client(
                 loading={refreshingTools}
                 onClick={() => void handleRefreshTools()}
               >
-                Refresh tools
+                Update tools
               </Button>
             ) : null}
           </Group>
@@ -1576,165 +1588,206 @@ async with sse_client(
       </Tabs>
       </DetailShell>
 
-      <Modal
-        opened={editOpen}
+      <FormShell
+        open={editOpen}
         onClose={() => setEditOpen(false)}
-        title="Edit MCP Server"
-        centered
-        size="lg"
+        icon={<IconPlugConnected size={16} stroke={1.7} />}
+        title="Edit MCP server"
+        subtitle={
+          <>
+            {SOURCE_LABELS[server.sourceType ?? 'openapi'] ?? 'MCP server'}
+            {' · '}
+            <span className="ds-mono">{server.key}</span>
+          </>
+        }
+        primaryAction={{
+          label: 'Save changes',
+          icon: <IconCheck size={13} />,
+          loading: saving,
+          onClick: handleSave,
+        }}
       >
-        <Stack gap="md">
-          <TextInput
-            label="Name"
-            required
-            {...form.getInputProps('name')}
-          />
+        <FormSection
+          number={1}
+          title="Identity"
+          description="How this MCP server is identified across the console."
+        >
+          <FormRow cols={1}>
+            <FormField label="Name" required>
+              <TextInput placeholder="My API Service" {...form.getInputProps('name')} />
+            </FormField>
+          </FormRow>
+          <FormRow cols={1}>
+            <FormField label="Description" optional>
+              <Textarea
+                placeholder="Brief description of what this MCP server does"
+                minRows={2}
+                autosize
+                {...form.getInputProps('description')}
+              />
+            </FormField>
+          </FormRow>
+        </FormSection>
 
-          <Textarea
-            label="Description"
-            rows={2}
-            {...form.getInputProps('description')}
-          />
-
+        <FormSection
+          number={2}
+          title="Tool source"
+          description="Where this server's tools are discovered from."
+        >
           {server.sourceType === 'openapi' ? (
-            <TextInput
-              label="Upstream Base URL"
-              placeholder="https://api.example.com"
-              {...form.getInputProps('upstreamBaseUrl')}
-            />
+            <>
+              <FormRow cols={1}>
+                <FormField label="Upstream base URL" optional>
+                  <TextInput
+                    placeholder="https://api.example.com"
+                    {...form.getInputProps('upstreamBaseUrl')}
+                  />
+                </FormField>
+              </FormRow>
+              <FormRow cols={1}>
+                <FormField
+                  label="OpenAPI specification"
+                  hint="Edit the JSON spec to update available tools."
+                >
+                  <JsonInput
+                    minRows={10}
+                    maxRows={20}
+                    autosize
+                    formatOnBlur
+                    {...form.getInputProps('openApiSpec')}
+                  />
+                </FormField>
+              </FormRow>
+            </>
           ) : null}
 
           {server.sourceType === 'remote' ? (
             <>
-              <TextInput
-                label="MCP Server URL"
-                required
-                placeholder="https://mcp.example.com/mcp"
-                description="Changing the URL re-discovers the tool list"
-                {...form.getInputProps('remoteUrl')}
-              />
-              <Select
-                label="Upstream Transport"
-                data={[
-                  { value: 'streamable-http', label: 'Streamable HTTP' },
-                  { value: 'sse', label: 'SSE (legacy)' },
-                ]}
-                {...form.getInputProps('remoteTransport')}
-              />
+              <FormRow cols={1}>
+                <FormField
+                  label="MCP server URL"
+                  required
+                  hint="Changing the URL re-discovers the tool list."
+                >
+                  <TextInput
+                    placeholder="https://mcp.example.com/mcp"
+                    {...form.getInputProps('remoteUrl')}
+                  />
+                </FormField>
+              </FormRow>
+              <FormRow cols={1}>
+                <FormField label="Upstream transport">
+                  <Select
+                    data={[
+                      { value: 'streamable-http', label: 'Streamable HTTP' },
+                      { value: 'sse', label: 'SSE (legacy)' },
+                    ]}
+                    {...form.getInputProps('remoteTransport')}
+                  />
+                </FormField>
+              </FormRow>
             </>
           ) : null}
 
           {server.sourceType === 'stdio' ? (
             <>
-              <Group grow>
+              <FormRow cols={2}>
+                <FormField label="Runtime">
+                  <Select
+                    data={[
+                      { value: 'npx', label: 'npx (Node)' },
+                      { value: 'uvx', label: 'uvx (Python)' },
+                    ]}
+                    {...form.getInputProps('stdioRuntime')}
+                  />
+                </FormField>
+                <FormField label="Package" required>
+                  <TextInput
+                    placeholder="@modelcontextprotocol/server-everything"
+                    {...form.getInputProps('stdioPackage')}
+                  />
+                </FormField>
+              </FormRow>
+              <FormRow cols={1}>
+                <FormField
+                  label="Arguments"
+                  optional
+                  hint="Space-separated arguments passed to the package."
+                >
+                  <TextInput placeholder="--flag value" {...form.getInputProps('stdioArgs')} />
+                </FormField>
+              </FormRow>
+              <FormRow cols={1}>
+                <FormField
+                  label="Environment variables"
+                  optional
+                  hint="One KEY=value per line. Masked values (••••••) keep the stored secret; changing the config re-discovers the tool list."
+                >
+                  <Textarea
+                    placeholder={'API_KEY=sk-...\nBASE_URL=https://api.example.com'}
+                    minRows={2}
+                    autosize
+                    styles={{ input: { fontFamily: 'var(--mantine-font-family-monospace)' } }}
+                    {...form.getInputProps('stdioEnv')}
+                  />
+                </FormField>
+              </FormRow>
+            </>
+          ) : null}
+        </FormSection>
+
+        {server.sourceType !== 'stdio' ? (
+          <FormSection
+            number={3}
+            title="Upstream authentication"
+            description="Credentials the gateway uses when calling the upstream service."
+          >
+            <FormRow cols={1}>
+              <FormField label="Authentication type">
                 <Select
-                  label="Runtime"
                   data={[
-                    { value: 'npx', label: 'npx (Node)' },
-                    { value: 'uvx', label: 'uvx (Python)' },
+                    { value: 'none', label: 'No authentication' },
+                    { value: 'token', label: 'Bearer Token' },
+                    { value: 'header', label: 'Custom Header' },
+                    { value: 'basic', label: 'Basic Auth' },
                   ]}
-                  {...form.getInputProps('stdioRuntime')}
+                  {...form.getInputProps('authType')}
                 />
-                <TextInput
-                  label="Package"
-                  required
-                  placeholder="@modelcontextprotocol/server-everything"
-                  {...form.getInputProps('stdioPackage')}
-                />
-              </Group>
-              <TextInput
-                label="Arguments"
-                placeholder="--flag value"
-                description="Space-separated arguments passed to the package"
-                {...form.getInputProps('stdioArgs')}
-              />
-              <Textarea
-                label="Environment Variables"
-                description="One KEY=value per line. Masked values (••••••) keep the stored secret; changing the config re-discovers the tool list."
-                placeholder={'API_KEY=sk-...\nBASE_URL=https://api.example.com'}
-                minRows={2}
-                autosize
-                styles={{ input: { fontFamily: 'var(--mantine-font-family-monospace)' } }}
-                {...form.getInputProps('stdioEnv')}
-              />
-            </>
-          ) : null}
+              </FormField>
+            </FormRow>
 
-          {server.sourceType !== 'stdio' ? (
-            <>
-              <Select
-                label="Authentication Type"
-                data={[
-                  { value: 'none', label: 'No authentication' },
-                  { value: 'token', label: 'Bearer Token' },
-                  { value: 'header', label: 'Custom Header' },
-                  { value: 'basic', label: 'Basic Auth' },
-                ]}
-                {...form.getInputProps('authType')}
-              />
+            {form.values.authType === 'token' && (
+              <FormRow cols={1}>
+                <FormField label="Bearer token" hint="Leave empty to keep the current token.">
+                  <PasswordInput {...form.getInputProps('authToken')} />
+                </FormField>
+              </FormRow>
+            )}
 
-              {form.values.authType === 'token' && (
-                <PasswordInput
-                  label="Bearer Token"
-                  description="Leave empty to keep the current token"
-                  {...form.getInputProps('authToken')}
-                />
-              )}
+            {form.values.authType === 'header' && (
+              <FormRow cols={2}>
+                <FormField label="Header name">
+                  <TextInput {...form.getInputProps('authHeaderName')} />
+                </FormField>
+                <FormField label="Header value" hint="Leave empty to keep the current value.">
+                  <PasswordInput {...form.getInputProps('authHeaderValue')} />
+                </FormField>
+              </FormRow>
+            )}
 
-              {form.values.authType === 'header' && (
-                <>
-                  <TextInput
-                    label="Header Name"
-                    {...form.getInputProps('authHeaderName')}
-                  />
-                  <PasswordInput
-                    label="Header Value"
-                    description="Leave empty to keep the current value"
-                    {...form.getInputProps('authHeaderValue')}
-                  />
-                </>
-              )}
-
-              {form.values.authType === 'basic' && (
-                <>
-                  <TextInput
-                    label="Username"
-                    {...form.getInputProps('authUsername')}
-                  />
-                  <PasswordInput
-                    label="Password"
-                    description="Leave empty to keep the current password"
-                    {...form.getInputProps('authPassword')}
-                  />
-                </>
-              )}
-            </>
-          ) : null}
-
-          {server.sourceType === 'openapi' ? (
-            <Box>
-              <JsonInput
-                label="OpenAPI Specification"
-                description="Edit the JSON spec to update available tools"
-                minRows={8}
-                maxRows={16}
-                autosize
-                formatOnBlur
-                {...form.getInputProps('openApiSpec')}
-              />
-            </Box>
-          ) : null}
-
-          <Group justify="flex-end" mt="sm">
-            <Button variant="default" onClick={() => setEditOpen(false)}>
-              Cancel
-            </Button>
-            <Button loading={saving} onClick={handleSave}>
-              Save Changes
-            </Button>
-          </Group>
-        </Stack>
-      </Modal>
+            {form.values.authType === 'basic' && (
+              <FormRow cols={2}>
+                <FormField label="Username">
+                  <TextInput {...form.getInputProps('authUsername')} />
+                </FormField>
+                <FormField label="Password" hint="Leave empty to keep the current password.">
+                  <PasswordInput {...form.getInputProps('authPassword')} />
+                </FormField>
+              </FormRow>
+            )}
+          </FormSection>
+        ) : null}
+      </FormShell>
 
       {/* Delete confirmation modal */}
       <Modal
