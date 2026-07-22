@@ -116,6 +116,18 @@ const LEVEL_RANK: Record<ServicePermissionLevel, number> = {
   admin: 3,
 };
 
+/**
+ * Lower of two permission levels. Used to cap an API token's effective
+ * permission at its own least-privilege scope: a scoped token can only ever
+ * NARROW the access its owner has, never widen it.
+ */
+export function minPermission(
+  a: ServicePermissionLevel,
+  b: ServicePermissionLevel,
+): ServicePermissionLevel {
+  return LEVEL_RANK[a] <= LEVEL_RANK[b] ? a : b;
+}
+
 const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/client/v1/browser', service: 'browser' },
   { prefix: '/api/client/v1/crawler', service: 'crawler' },
@@ -132,6 +144,17 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/client/v1/mcp', service: 'mcp' },
   { prefix: '/api/client/v1/sandbox', service: 'sandbox' },
   { prefix: '/api/client/v1/aegis', service: 'aegis' },
+  { prefix: '/api/client/v1/audit', service: 'audit' },
+  { prefix: '/api/client/v1/monitoring', service: 'inference-monitoring' },
+  { prefix: '/api/client/v1/analytics', service: 'models' },
+  // Admin-surface management (token-authenticated). All require the token owner
+  // to hold the service permission (providers/members/license are adminService →
+  // owner/admin or an explicit scope grant); a scoped token further narrows it.
+  { prefix: '/api/client/v1/providers', service: 'providers' },
+  { prefix: '/api/client/v1/models', service: 'models' },
+  { prefix: '/api/client/v1/projects', service: 'projects' },
+  { prefix: '/api/client/v1/members', service: 'members' },
+  { prefix: '/api/client/v1/license', service: 'license' },
   { prefix: '/api/client/v1/memory', service: 'memory' },
   { prefix: '/api/client/v1/prompts', service: 'prompts' },
   { prefix: '/api/client/v1/rag', service: 'rag' },
@@ -398,6 +421,7 @@ export function authorizeServiceRequest(
   method: string,
   pathname: string,
   groupGrants: GroupTenantGrant[] = [],
+  tokenScope?: UserServicePermissions | null,
 ): { allowed: true; service: PermissionService | null; required?: ServicePermissionLevel } | {
   allowed: false;
   service: PermissionService;
@@ -410,7 +434,15 @@ export function authorizeServiceRequest(
   }
 
   const required = getRequiredPermissionLevel(method, service);
-  const current = getEffectiveServicePermissionWithGroups(user, groupGrants, service);
+  let current = getEffectiveServicePermissionWithGroups(user, groupGrants, service);
+  // Least-privilege API-token scope: when the token carries its own
+  // servicePermissions allowlist, cap the effective level at that scope (a
+  // service absent from the map → `none`). `tokenScope == null` means the token
+  // is unscoped and inherits the owner's permissions unchanged (legacy tokens).
+  if (tokenScope != null) {
+    const scopedLevel = normalizeServicePermissions(tokenScope)[service] ?? 'none';
+    current = minPermission(current, scopedLevel);
+  }
   if (LEVEL_RANK[current] >= LEVEL_RANK[required]) {
     return { allowed: true, service, required };
   }

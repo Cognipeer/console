@@ -86,3 +86,43 @@ describe('RBAC group-inherited permissions', () => {
     ])).toEqual({ models: 'admin', audit: 'read' });
   });
 });
+
+describe('API-token least-privilege scope (authorizeServiceRequest tokenScope arg)', () => {
+  const owner = { role: 'owner' as const };
+
+  it('unscoped token (null) inherits the owner unchanged (legacy behaviour)', () => {
+    const d = authorizeServiceRequest(owner, 'GET', '/api/audit/logs', [], null);
+    expect(d.allowed).toBe(true);
+  });
+
+  it('a scoped token is an allowlist: a service absent from the scope is denied even for an owner', () => {
+    const d = authorizeServiceRequest(owner, 'GET', '/api/audit/logs', [], { models: 'read' });
+    expect(d.allowed).toBe(false);
+  });
+
+  it('an empty scope {} denies everything', () => {
+    const d = authorizeServiceRequest(owner, 'GET', '/api/audit/logs', [], {});
+    expect(d.allowed).toBe(false);
+  });
+
+  it('a scoped token grants a listed service up to (but not above) the owner level', () => {
+    const d = authorizeServiceRequest(owner, 'GET', '/api/audit/logs', [], { audit: 'read' });
+    expect(d.allowed).toBe(true);
+  });
+
+  it('a token scope can never exceed the owner: admin scope on a service the owner lacks stays denied', () => {
+    // A plain user has no permission on the admin `audit` service; naming
+    // `audit: 'admin'` in the token scope cannot raise them above the owner.
+    const d = authorizeServiceRequest({ role: 'user' }, 'GET', '/api/audit/logs', [], { audit: 'admin' });
+    expect(d.allowed).toBe(false);
+  });
+
+  it('a scope can narrow write down to read (min cap)', () => {
+    // owner has admin on models; scope caps it to read → a write (DELETE) is denied.
+    const d = authorizeServiceRequest(owner, 'DELETE', '/api/models/m1', [], { models: 'read' });
+    expect(d.allowed).toBe(false);
+    // ...but a read (GET) on the same scoped service is allowed.
+    const r = authorizeServiceRequest(owner, 'GET', '/api/models/m1', [], { models: 'read' });
+    expect(r.allowed).toBe(true);
+  });
+});

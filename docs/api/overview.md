@@ -86,6 +86,18 @@ For the relationship between the two, see [Using the SDK](/guide/sdk-integration
 | [Rerankers (list/get)](./reranker) | `/rerankers`, `/rerank/:key` | GET |
 | [Rerank (run)](./reranker) | `/rerank/:key` | POST |
 
+## Enterprise Client APIs
+
+These client (token-authenticated) endpoints are part of the **Enterprise** edition and are only available on licensed deployments; they return `403` otherwise. Full request/response details are in the [OpenAPI Specification](./openapi).
+
+| Domain | Base Path | Methods |
+|--------|-----------|---------|
+| Realtime | `/realtime` (WebSocket), `/realtime/models`, `/realtime/models/:id` | GET (WS), GET, POST, PATCH, DELETE |
+| Sandbox (lifecycle) | `/sandbox/sandboxes`, `/sandbox/sandboxes/:id/{exec,code,start,stop,snapshot,fork,files,preview,...}`, `/sandbox/snapshots` | GET, POST, PATCH, DELETE |
+| Sandbox (toolbox) | `/sandbox/sandboxes/:id/{fs/*,git/*,sessions/*}` | POST, GET, DELETE |
+| MCP Hubs | `/mcp/hubs`, `/mcp/hubs/:hubKey`, `/mcp/hubs/:hubKey/servers` | GET |
+| Aegis | `/aegis/evaluate`, `/aegis/shields`, `/aegis/shields/:id/audit` | GET, POST |
+
 ## Dashboard And Operational Endpoints
 
 These endpoints are documented here because operators often need them during rollout, but they are **not** part of the `/api/client/v1` customer surface.

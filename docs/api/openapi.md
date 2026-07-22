@@ -12,7 +12,7 @@ Use it to generate typed SDK clients, import the API into Postman/Insomnia, driv
 
 ## What it covers
 
-The specification documents the **end-user Client API** only — the token-authenticated surface described throughout this API reference (chat, embeddings, audio, OCR, batches, agents, tools, MCP, browser, crawler, vector, files, memory, prompts, Knowledge Engine, guardrails, PII, reranker, evaluation, tracing, and more).
+The specification documents the **end-user Client API** only — the token-authenticated surface described throughout this API reference (chat, embeddings, audio, OCR, batches, agents, tools, MCP, browser, crawler, vector, files, memory, prompts, Knowledge Engine, guardrails, PII, reranker, evaluation, tracing, and more). It also includes the **Enterprise** client endpoints (realtime, sandbox + toolbox, MCP hubs, Aegis), which are only available on licensed deployments and otherwise return `403`.
 
 It does **not** cover the JWT/session-authenticated dashboard (internal) API. Some endpoints are gated by license tier and return `403` when the feature is not enabled — see the individual reference pages for details.
 

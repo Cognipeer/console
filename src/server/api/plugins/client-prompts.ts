@@ -4,6 +4,8 @@ import { createLogger } from '@/lib/core/logger';
 import {
   activatePromptDeployment,
   comparePromptVersions,
+  createPrompt,
+  deletePrompt,
   getPromptByKey,
   listPromptDeployments,
   listPrompts,
@@ -12,6 +14,8 @@ import {
   promotePromptVersion,
   resolvePromptForEnvironment,
   rollbackPromptDeployment,
+  setPromptLatestVersion,
+  updatePrompt,
   type PromptEnvironment,
 } from '@/lib/services/prompts';
 import {
@@ -321,6 +325,136 @@ export const clientPromptsApiPlugin: FastifyPluginAsync = async (app) => {
       });
     } catch (error) {
       logger.error('Render client prompt error', { error });
+      return reply.code(500).send({
+        error: error instanceof Error ? error.message : 'Internal server error',
+      });
+    }
+  }));
+
+  // ── Authoring: create a prompt ──
+  app.post('/client/v1/prompts', withClientApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await getApiTokenContextForRequest(request);
+      const body = readJsonBody<Record<string, unknown>>(request);
+
+      for (const field of ['name', 'template']) {
+        const value = body[field];
+        if (!value || (typeof value === 'string' && value.trim() === '')) {
+          return reply.code(400).send({ error: `${field} is required` });
+        }
+      }
+
+      const prompt = await createPrompt(
+        ctx.tenantDbName,
+        ctx.tenantId,
+        ctx.projectId,
+        ctx.tokenRecord.userId,
+        {
+          description: body.description as string | undefined,
+          key: body.key as string | undefined,
+          metadata: body.metadata as Record<string, unknown> | undefined,
+          name: body.name as string,
+          template: body.template as string,
+          versionComment: (body.versionComment ?? body.comment) as string | undefined,
+        },
+      );
+
+      return reply.code(201).send({ prompt });
+    } catch (error) {
+      logger.error('Create client prompt error', { error });
+      return reply.code(500).send({
+        error: error instanceof Error ? error.message : 'Internal server error',
+      });
+    }
+  }));
+
+  // ── Authoring: update a prompt (implicitly creates a new version) ──
+  app.patch('/client/v1/prompts/:key', withClientApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await getApiTokenContextForRequest(request);
+      const { key } = request.params as { key: string };
+      const existing = await getPromptByKey(ctx.tenantDbName, ctx.projectId, key);
+      if (!existing) {
+        return reply.code(404).send({ error: 'Prompt not found' });
+      }
+
+      const body = readJsonBody<Record<string, unknown>>(request);
+      const prompt = await updatePrompt(ctx.tenantDbName, ctx.projectId, existing.id, {
+        description: body.description as string | undefined,
+        metadata: body.metadata as Record<string, unknown> | undefined,
+        name: body.name as string | undefined,
+        template: body.template as string | undefined,
+        updatedBy: ctx.tokenRecord.userId,
+        versionComment: (body.versionComment ?? body.comment) as string | undefined,
+      });
+
+      if (!prompt) {
+        return reply.code(404).send({ error: 'Prompt not found' });
+      }
+
+      return reply.code(200).send({ prompt });
+    } catch (error) {
+      logger.error('Update client prompt error', { error });
+      return reply.code(500).send({
+        error: error instanceof Error ? error.message : 'Internal server error',
+      });
+    }
+  }));
+
+  // ── Authoring: re-point the latest pointer to an existing version ──
+  app.post('/client/v1/prompts/:key/versions', withClientApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await getApiTokenContextForRequest(request);
+      const { key } = request.params as { key: string };
+      const existing = await getPromptByKey(ctx.tenantDbName, ctx.projectId, key);
+      if (!existing) {
+        return reply.code(404).send({ error: 'Prompt not found' });
+      }
+
+      const body = readJsonBody<Record<string, unknown>>(request);
+      if (typeof body.versionId !== 'string' || body.versionId.trim() === '') {
+        return reply.code(400).send({ error: 'versionId is required' });
+      }
+
+      const prompt = await setPromptLatestVersion(
+        ctx.tenantDbName,
+        ctx.projectId,
+        existing.id,
+        body.versionId,
+        ctx.tokenRecord.userId,
+      );
+
+      if (!prompt) {
+        return reply.code(404).send({ error: 'Prompt or version not found' });
+      }
+
+      return reply.code(200).send({ prompt });
+    } catch (error) {
+      logger.error('Set client prompt latest version error', { error });
+      return reply.code(500).send({
+        error: error instanceof Error ? error.message : 'Internal server error',
+      });
+    }
+  }));
+
+  // ── Authoring: delete a prompt (project-scoped resolve by key) ──
+  app.delete('/client/v1/prompts/:key', withClientApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await getApiTokenContextForRequest(request);
+      const { key } = request.params as { key: string };
+      const existing = await getPromptByKey(ctx.tenantDbName, ctx.projectId, key);
+      if (!existing) {
+        return reply.code(404).send({ error: 'Prompt not found' });
+      }
+
+      const deleted = await deletePrompt(ctx.tenantDbName, ctx.projectId, existing.id);
+      if (!deleted) {
+        return reply.code(404).send({ error: 'Prompt not found' });
+      }
+
+      return reply.code(200).send({ success: true });
+    } catch (error) {
+      logger.error('Delete client prompt error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal server error',
       });

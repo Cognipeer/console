@@ -264,7 +264,16 @@ function enforceApiTokenRbac(
   }
 
   request.rbacUser = context.user;
-  const decision = authorizeServiceRequest(context.user, request.method, pathname);
+  const decision = authorizeServiceRequest(
+    context.user,
+    request.method,
+    pathname,
+    [],
+    // Least-privilege token scope: when the token carries its own
+    // servicePermissions allowlist, cap the owner-derived permission at it.
+    // Unscoped tokens (null) inherit the owner's permissions unchanged.
+    context.tokenRecord.servicePermissions,
+  );
   if (!decision.allowed) {
     throw new RbacAuthorizationError(
       `Forbidden: ${decision.service} requires ${decision.required} permission`,

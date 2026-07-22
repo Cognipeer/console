@@ -1,13 +1,19 @@
 import type { FastifyPluginAsync } from 'fastify';
-import type { AgentStatus } from '@/lib/database';
+import type { AgentStatus, IAgent, IAgentConfig } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
+  createAgentRecord,
   createConversation,
+  deleteAgentRecord,
   executeAgentChat,
   getAgentByKey,
   getConversationById,
   listAgents,
-} from '@/lib/services/agents/agentService';
+  normalizeA2aMetadataUpdate,
+  prepareConnectionForStorage,
+  publishAgent,
+  updateAgentRecord,
+} from '@/lib/services/agents';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import {
   getApiTokenContextForRequest,
@@ -16,6 +22,48 @@ import {
 } from '../fastify-utils';
 
 const logger = createLogger('api:client-agents');
+
+/**
+ * Strip secret material (encrypted inline API keys) from an agent before it
+ * leaves the API. Mirrors the dashboard `agents.ts` helper — the presence of a
+ * key is surfaced as `connection.hasApiKey`.
+ */
+function redactAgent<T extends IAgent>(agent: T): T {
+  const connection = agent.config?.connection;
+  if (!connection) return agent;
+  const { apiKeyEnc, ...rest } = connection;
+  return {
+    ...agent,
+    config: {
+      ...agent.config,
+      connection: { ...rest, hasApiKey: Boolean(apiKeyEnc) },
+    },
+  } as unknown as T;
+}
+
+/**
+ * Normalize an incoming agent config. For connected (external) agents the
+ * connection is validated and its inline API key encrypted; native agents must
+ * carry a modelKey. Throws (Error) on invalid input — callers map to 400.
+ */
+function normalizeAgentConfig(rawConfig: unknown): IAgentConfig {
+  if (!rawConfig || typeof rawConfig !== 'object') {
+    throw new Error('Agent config is required');
+  }
+  const cfg = rawConfig as Record<string, unknown>;
+
+  if (cfg.kind === 'external') {
+    return {
+      kind: 'external',
+      connection: prepareConnectionForStorage(cfg.connection),
+    };
+  }
+
+  if (typeof cfg.modelKey !== 'string' || !cfg.modelKey) {
+    throw new Error('Model configuration is required');
+  }
+  return cfg as IAgentConfig;
+}
 
 function extractUserMessage(input: unknown): string | null {
   if (typeof input === 'string') {
@@ -210,4 +258,159 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.post('/client/v1/agents/responses', createResponsesHandler(true));
   app.post('/client/v1/responses', createResponsesHandler(false));
+
+  // ── Authoring: create an agent definition ──
+  app.post('/client/v1/agents', withClientApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await getApiTokenContextForRequest(request);
+      const body = readJsonBody<Record<string, unknown>>(request);
+
+      if (typeof body.name !== 'string' || body.name.trim() === '') {
+        return reply.code(400).send({ error: 'Agent name is required' });
+      }
+
+      let config: IAgentConfig;
+      try {
+        config = normalizeAgentConfig(body.config);
+      } catch (validationError) {
+        return reply.code(400).send({
+          error: validationError instanceof Error ? validationError.message : 'Invalid agent config',
+        });
+      }
+
+      const agent = await createAgentRecord(
+        ctx.tenantDbName,
+        ctx.tenantId,
+        ctx.projectId,
+        ctx.tokenRecord.userId,
+        {
+          config,
+          description: typeof body.description === 'string' ? body.description : undefined,
+          name: body.name,
+          status: body.status as AgentStatus | undefined,
+        },
+      );
+
+      return reply.code(201).send({ agent: redactAgent(agent) });
+    } catch (error) {
+      logger.error('Create client agent error', { error });
+      return reply.code(500).send({
+        error: error instanceof Error ? error.message : 'Internal server error',
+      });
+    }
+  }));
+
+  // ── Authoring: update an agent definition (project-scoped resolve by key) ──
+  app.patch('/client/v1/agents/:agentKey', withClientApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await getApiTokenContextForRequest(request);
+      const { agentKey } = request.params as { agentKey: string };
+      const existing = await getAgentByKey(ctx.tenantDbName, agentKey, ctx.projectId);
+      if (!existing) {
+        return reply.code(404).send({ error: 'Agent not found' });
+      }
+
+      const body = readJsonBody<Record<string, unknown>>(request);
+
+      if (body.config && typeof body.config === 'object') {
+        const cfg = body.config as Record<string, unknown>;
+        if (cfg.kind === 'external') {
+          // Connected-agent config: validate connection & preserve the stored
+          // API key when the client edits without resending it.
+          const conn = { ...((cfg.connection as Record<string, unknown>) ?? {}) };
+          if (!conn.apiKey && !conn.apiKeyEnc) {
+            const existingEnc = existing.config?.connection?.apiKeyEnc;
+            if (existingEnc) conn.apiKeyEnc = existingEnc;
+          }
+          try {
+            body.config = { kind: 'external', connection: prepareConnectionForStorage(conn) };
+          } catch (validationError) {
+            return reply.code(400).send({
+              error: validationError instanceof Error ? validationError.message : 'Invalid agent config',
+            });
+          }
+        } else if (existing.config?.kind === 'external') {
+          // Guard: never let a native-shaped config silently clobber a stored
+          // connected agent's connection.
+          delete body.config;
+        }
+      }
+
+      // A2A exposure updates: whitelist fields and keep the endpoint slug
+      // server-owned (existing slug is preserved, never client-chosen).
+      if (body.metadata && typeof body.metadata === 'object'
+        && (body.metadata as Record<string, unknown>).a2a !== undefined) {
+        const metadata = body.metadata as Record<string, unknown>;
+        metadata.a2a = normalizeA2aMetadataUpdate(metadata.a2a, existing);
+      }
+
+      const agent = await updateAgentRecord(
+        ctx.tenantDbName,
+        String(existing._id),
+        body,
+        ctx.tokenRecord.userId,
+      );
+      if (!agent) {
+        return reply.code(404).send({ error: 'Agent not found' });
+      }
+
+      return reply.code(200).send({ agent: redactAgent(agent) });
+    } catch (error) {
+      logger.error('Update client agent error', { error });
+      return reply.code(500).send({
+        error: error instanceof Error ? error.message : 'Internal server error',
+      });
+    }
+  }));
+
+  // ── Authoring: delete an agent definition (project-scoped resolve by key) ──
+  app.delete('/client/v1/agents/:agentKey', withClientApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await getApiTokenContextForRequest(request);
+      const { agentKey } = request.params as { agentKey: string };
+      const existing = await getAgentByKey(ctx.tenantDbName, agentKey, ctx.projectId);
+      if (!existing) {
+        return reply.code(404).send({ error: 'Agent not found' });
+      }
+
+      const deleted = await deleteAgentRecord(ctx.tenantDbName, String(existing._id));
+      if (!deleted) {
+        return reply.code(404).send({ error: 'Agent not found' });
+      }
+
+      return reply.code(200).send({ success: true });
+    } catch (error) {
+      logger.error('Delete client agent error', { error });
+      return reply.code(500).send({
+        error: error instanceof Error ? error.message : 'Internal server error',
+      });
+    }
+  }));
+
+  // ── Authoring: publish the current config as a new version ──
+  app.post('/client/v1/agents/:agentKey/publish', withClientApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await getApiTokenContextForRequest(request);
+      const { agentKey } = request.params as { agentKey: string };
+      const existing = await getAgentByKey(ctx.tenantDbName, agentKey, ctx.projectId);
+      if (!existing) {
+        return reply.code(404).send({ error: 'Agent not found' });
+      }
+
+      const body = readJsonBody<Record<string, unknown>>(request);
+      const version = await publishAgent(
+        ctx.tenantDbName,
+        String(existing._id),
+        ctx.tokenRecord.userId,
+        typeof body.changelog === 'string' ? body.changelog : undefined,
+      );
+
+      return reply.code(201).send({ version });
+    } catch (error) {
+      logger.error('Publish client agent error', { error });
+      return reply.code(500).send({
+        error: error instanceof Error ? error.message : 'Failed to publish agent',
+      });
+    }
+  }));
 };
