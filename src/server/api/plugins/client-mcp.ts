@@ -552,7 +552,15 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
       const host = typeof request.headers.host === 'string' && request.headers.host.length > 0
         ? request.headers.host
         : 'localhost';
-      const messageEndpoint = `${protocol}://${host}/api/client/v1/mcp/${serverKey}/message?sessionId=${sessionId}`;
+      // If the caller authenticated via a query-param token (header-less SSE
+      // client), carry it onto the advertised message endpoint so the follow-up
+      // POSTs authenticate the same way — the client only sends what we hand it.
+      const sseQuery = (request.query ?? {}) as { token?: string; access_token?: string };
+      const passThroughToken = sseQuery.token || sseQuery.access_token;
+      const tokenSuffix = passThroughToken
+        ? `&token=${encodeURIComponent(passThroughToken)}`
+        : '';
+      const messageEndpoint = `${protocol}://${host}/api/client/v1/mcp/${serverKey}/message?sessionId=${sessionId}${tokenSuffix}`;
 
       const stream = new ReadableStream<Uint8Array>({
         cancel() {

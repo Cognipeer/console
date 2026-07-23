@@ -1028,6 +1028,26 @@ export default function McpDetailPage() {
               <Code block mb="md">
                 {`Authorization: Bearer YOUR_API_TOKEN`}
               </Code>
+              <Text size="sm" c="dimmed" mb="xs">
+                If your MCP client can only be given a URL and cannot set headers
+                (e.g. browser <Code>EventSource</Code> clients), pass the token as
+                a <Code>token</Code> query parameter instead — the gateway folds
+                it into the same Bearer auth:
+              </Text>
+              <Group gap="sm" mb="md">
+                <Code block style={{ flex: 1 }}>
+                  {`GET /api/client/v1/mcp/${server.key}/sse?token=YOUR_API_TOKEN`}
+                </Code>
+                <CopyButton value={`/api/client/v1/mcp/${server.key}/sse?token=YOUR_API_TOKEN`}>
+                  {({ copied, copy }) => (
+                    <Tooltip label={copied ? 'Copied' : 'Copy URL'}>
+                      <Button variant="subtle" size="compact-xs" color={copied ? 'teal' : 'gray'} onClick={copy}>
+                        {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
+                      </Button>
+                    </Tooltip>
+                  )}
+                </CopyButton>
+              </Group>
 
               <Text fw={600} size="sm" mb={4}>Protocol Flow</Text>
               <Code block>

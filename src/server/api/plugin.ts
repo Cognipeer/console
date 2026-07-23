@@ -146,6 +146,29 @@ function isClientApiPath(pathname: string): boolean {
   return CLIENT_API_PREFIXES.some((path) => pathname.startsWith(path));
 }
 
+/**
+ * MCP gateway endpoints are frequently consumed by SSE / EventSource-based MCP
+ * clients that cannot set request headers at all. For those, the API token is
+ * allowed to travel in a `token` / `access_token` query parameter, which the
+ * auth guard folds into the standard `Bearer` header. Scoped to the MCP gateway
+ * subtree so this never widens the auth surface of any other client API.
+ */
+const MCP_GATEWAY_PREFIX = '/api/client/v1/mcp/';
+
+function isMcpGatewayPath(pathname: string): boolean {
+  return pathname.startsWith(MCP_GATEWAY_PREFIX);
+}
+
+function mcpQueryToken(url: string | undefined): string | null {
+  try {
+    const { searchParams } = new URL(url || '/', 'http://localhost');
+    const token = searchParams.get('token') || searchParams.get('access_token');
+    return token && token.trim() ? token.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 function applySecurityHeaders(reply: { header: (name: string, value: string) => void }) {
   reply.header('X-Content-Type-Options', 'nosniff');
   reply.header('X-Frame-Options', 'DENY');
@@ -302,7 +325,16 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
     }
 
     if (clientApiRequest) {
-      const authHeader = request.headers.authorization;
+      let authHeader = request.headers.authorization;
+      // Header-less MCP clients (SSE/EventSource) may pass the token in the URL.
+      // Fold a query-param token into the Bearer header the auth layer expects.
+      if ((!authHeader || !authHeader.startsWith('Bearer ')) && isMcpGatewayPath(pathname)) {
+        const queryToken = mcpQueryToken(request.raw.url);
+        if (queryToken) {
+          authHeader = `Bearer ${queryToken}`;
+          request.headers.authorization = authHeader;
+        }
+      }
       if (!authHeader || !authHeader.startsWith('Bearer ')) {
         return unauthorized(reply, {
           error: 'Unauthorized',
