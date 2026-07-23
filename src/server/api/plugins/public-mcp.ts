@@ -245,6 +245,18 @@ export const publicMcpApiPlugin: FastifyPluginAsync = async (app) => {
     }
   });
 
+  // Streamable HTTP transport: accept JSON-RPC POSTs on the advertised `/sse`
+  // URL so streamable-HTTP-first MCP clients connect without a failed attempt +
+  // SSE fallback (mirrors the client gateway).
+  app.post('/public/mcp/:tenantId/:endpointSlug/sse', async (request, reply) => {
+    try {
+      return await handlePublicMessage(request, reply);
+    } catch (error) {
+      logger.error('Public MCP streamable-http error', { error });
+      return reply.code(500).send(jsonRpcError(null, -32603, 'Internal error'));
+    }
+  });
+
   app.get('/public/mcp/:tenantId/:endpointSlug/sse', async (request, reply) => {
     try {
       const { tenantId, endpointSlug } = request.params as { tenantId: string; endpointSlug: string };

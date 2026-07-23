@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
-import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type {
   IMcpAuthConfig,
   IMcpExposureConfig,
@@ -256,6 +256,170 @@ async function runToolCall(
   }
 }
 
+/**
+ * Handle a single JSON-RPC message for the client MCP gateway.
+ *
+ * Shared by the `/message` endpoint (SSE transport when a `sessionId` is
+ * present, streamable-HTTP when it is not) and the POST handler on `/sse`
+ * (streamable HTTP). Modern MCP clients speak streamable HTTP first and POST
+ * their JSON-RPC to the very URL they would open an SSE stream on — so the
+ * advertised `/sse` URL must accept POST too, or those clients fail their
+ * streamable-HTTP attempt (404) before falling back to SSE.
+ */
+async function handleClientMcpMessage(request: FastifyRequest, reply: FastifyReply) {
+  const ctx = await getApiTokenContextForRequest(request);
+  const { serverKey } = request.params as { serverKey: string };
+  const query = (request.query ?? {}) as { sessionId?: string };
+  const sessionId = query.sessionId;
+  const session = sessionId ? getSseSession(sessionId) : null;
+
+  let body: {
+    id?: string | number | null;
+    jsonrpc?: string;
+    method?: string;
+    params?: Record<string, unknown>;
+  };
+  try {
+    body = readJsonBody(request);
+  } catch {
+    const errorPayload = jsonRpcError(null, -32700, 'Parse error');
+    if (session && sessionId) {
+      sendSseResponse(sessionId, errorPayload);
+      return reply.code(202).send();
+    }
+    return reply.code(400).send(errorPayload);
+  }
+
+  const { id = null, method } = body;
+  if (!method) {
+    const errorPayload = jsonRpcError(id, -32600, 'Invalid Request: method is required');
+    if (session && sessionId) {
+      sendSseResponse(sessionId, errorPayload);
+      return reply.code(400).send(errorPayload);
+    }
+    return reply.code(400).send(errorPayload);
+  }
+
+  const respond = (payload: Record<string, unknown>) => {
+    if (session && sessionId) {
+      sendSseResponse(sessionId, payload);
+      return reply.code(202).send();
+    }
+    return reply.code(200).send(payload);
+  };
+
+  // Direct (sessionless) JSON-RPC = streamable HTTP; via an SSE session
+  // the message endpoint belongs to the SSE transport.
+  const requiredProtocol = session && sessionId ? 'sse' : 'streamable-http';
+
+  if (method === 'initialize') {
+    const server = await getMcpServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
+    if (!server) {
+      return respond(jsonRpcError(id, -32001, 'MCP server not found'));
+    }
+    if (!protocolEnabled(server, requiredProtocol)) {
+      return respond(jsonRpcError(id, -32003, `${requiredProtocol} access is disabled for this MCP server`));
+    }
+    return respond(jsonRpcOk(id, {
+      capabilities: {
+        tools: { listChanged: false },
+      },
+      protocolVersion: MCP_PROTOCOL_VERSION,
+      serverInfo: SERVER_INFO,
+    }));
+  }
+
+  if (method === 'notifications/initialized') {
+    return reply.code(202).send();
+  }
+
+  if (method === 'ping') {
+    return respond(jsonRpcOk(id, {}));
+  }
+
+  if (method === 'tools/list') {
+    const server = await getMcpServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
+    if (!server) {
+      return respond(jsonRpcError(id, -32001, 'MCP server not found'));
+    }
+    if (!protocolEnabled(server, requiredProtocol)) {
+      return respond(jsonRpcError(id, -32003, `${requiredProtocol} access is disabled for this MCP server`));
+    }
+
+    return respond(jsonRpcOk(id, {
+      tools: listEnabledMcpTools(server).map((tool) => ({
+        description: tool.description,
+        inputSchema: tool.inputSchema,
+        name: tool.name,
+      })),
+    }));
+  }
+
+  if (method === 'tools/call') {
+    const toolName = typeof body.params?.name === 'string' ? body.params.name : '';
+    const args = body.params?.arguments && typeof body.params.arguments === 'object'
+      ? body.params.arguments as Record<string, unknown>
+      : {};
+
+    if (!toolName) {
+      return respond(jsonRpcError(id, -32602, 'Invalid params: "name" is required'));
+    }
+
+    const server = await getMcpServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
+    if (!server) {
+      return respond(jsonRpcError(id, -32001, 'MCP server not found'));
+    }
+    if (server.status !== 'active') {
+      return respond(jsonRpcError(id, -32002, 'MCP server is disabled'));
+    }
+    if (!protocolEnabled(server, requiredProtocol)) {
+      return respond(jsonRpcError(id, -32003, `${requiredProtocol} access is disabled for this MCP server`));
+    }
+
+    // MCP convention: request-scoped extras ride in params._meta.
+    const meta = body.params?._meta as Record<string, unknown> | undefined;
+    const outcome = await runToolCall(server, toolName, args, {
+      tenantDbName: ctx.tenantDbName,
+      tenantId: ctx.tenantId,
+      projectId: ctx.projectId,
+      transport: session && sessionId ? 'sse' : 'jsonrpc',
+      caller: {
+        tokenId: ctx.tokenRecord._id?.toString(),
+        userId: ctx.user?._id?.toString(),
+      },
+      sessionId: sessionId ?? undefined,
+      runtimeContext: buildRuntimeContextFromRequest(meta?.runtime_context, request.headers, {
+        userId: ctx.user?._id?.toString(),
+        tokenId: ctx.tokenRecord._id?.toString(),
+        source: 'mcp',
+      }),
+    });
+
+    if (outcome.ok) {
+      return respond(jsonRpcOk(id, {
+        content: [
+          {
+            text: typeof outcome.result === 'string' ? outcome.result : JSON.stringify(outcome.result),
+            type: 'text',
+          },
+        ],
+        isError: false,
+      }));
+    }
+    return respond(jsonRpcOk(id, {
+      content: [
+        {
+          text: outcome.error,
+          type: 'text',
+        },
+      ],
+      isError: true,
+    }));
+  }
+
+  return respond(jsonRpcError(id, -32601, `Method not found: ${method}`));
+}
+
 export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/client/v1/mcp/:serverKey/execute', withClientApiRequestContext(async (request, reply) => {
     try {
@@ -344,159 +508,22 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.post('/client/v1/mcp/:serverKey/message', withClientApiRequestContext(async (request, reply) => {
     try {
-      const ctx = await getApiTokenContextForRequest(request);
-      const { serverKey } = request.params as { serverKey: string };
-      const query = (request.query ?? {}) as { sessionId?: string };
-      const sessionId = query.sessionId;
-      const session = sessionId ? getSseSession(sessionId) : null;
-
-      let body: {
-        id?: string | number | null;
-        jsonrpc?: string;
-        method?: string;
-        params?: Record<string, unknown>;
-      };
-      try {
-        body = readJsonBody(request);
-      } catch {
-        const errorPayload = jsonRpcError(null, -32700, 'Parse error');
-        if (session && sessionId) {
-          sendSseResponse(sessionId, errorPayload);
-          return reply.code(202).send();
-        }
-        return reply.code(400).send(errorPayload);
-      }
-
-      const { id = null, method } = body;
-      if (!method) {
-        const errorPayload = jsonRpcError(id, -32600, 'Invalid Request: method is required');
-        if (session && sessionId) {
-          sendSseResponse(sessionId, errorPayload);
-          return reply.code(400).send(errorPayload);
-        }
-        return reply.code(400).send(errorPayload);
-      }
-
-      const respond = (payload: Record<string, unknown>) => {
-        if (session && sessionId) {
-          sendSseResponse(sessionId, payload);
-          return reply.code(202).send();
-        }
-        return reply.code(200).send(payload);
-      };
-
-      // Direct (sessionless) JSON-RPC = streamable HTTP; via an SSE session
-      // the message endpoint belongs to the SSE transport.
-      const requiredProtocol = session && sessionId ? 'sse' : 'streamable-http';
-
-      if (method === 'initialize') {
-        const server = await getMcpServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
-        if (!server) {
-          return respond(jsonRpcError(id, -32001, 'MCP server not found'));
-        }
-        if (!protocolEnabled(server, requiredProtocol)) {
-          return respond(jsonRpcError(id, -32003, `${requiredProtocol} access is disabled for this MCP server`));
-        }
-        return respond(jsonRpcOk(id, {
-          capabilities: {
-            tools: { listChanged: false },
-          },
-          protocolVersion: MCP_PROTOCOL_VERSION,
-          serverInfo: SERVER_INFO,
-        }));
-      }
-
-      if (method === 'notifications/initialized') {
-        return reply.code(202).send();
-      }
-
-      if (method === 'ping') {
-        return respond(jsonRpcOk(id, {}));
-      }
-
-      if (method === 'tools/list') {
-        const server = await getMcpServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
-        if (!server) {
-          return respond(jsonRpcError(id, -32001, 'MCP server not found'));
-        }
-        if (!protocolEnabled(server, requiredProtocol)) {
-          return respond(jsonRpcError(id, -32003, `${requiredProtocol} access is disabled for this MCP server`));
-        }
-
-        return respond(jsonRpcOk(id, {
-          tools: listEnabledMcpTools(server).map((tool) => ({
-            description: tool.description,
-            inputSchema: tool.inputSchema,
-            name: tool.name,
-          })),
-        }));
-      }
-
-      if (method === 'tools/call') {
-        const toolName = typeof body.params?.name === 'string' ? body.params.name : '';
-        const args = body.params?.arguments && typeof body.params.arguments === 'object'
-          ? body.params.arguments as Record<string, unknown>
-          : {};
-
-        if (!toolName) {
-          return respond(jsonRpcError(id, -32602, 'Invalid params: "name" is required'));
-        }
-
-        const server = await getMcpServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
-        if (!server) {
-          return respond(jsonRpcError(id, -32001, 'MCP server not found'));
-        }
-        if (server.status !== 'active') {
-          return respond(jsonRpcError(id, -32002, 'MCP server is disabled'));
-        }
-        if (!protocolEnabled(server, requiredProtocol)) {
-          return respond(jsonRpcError(id, -32003, `${requiredProtocol} access is disabled for this MCP server`));
-        }
-
-        // MCP convention: request-scoped extras ride in params._meta.
-        const meta = body.params?._meta as Record<string, unknown> | undefined;
-        const outcome = await runToolCall(server, toolName, args, {
-          tenantDbName: ctx.tenantDbName,
-          tenantId: ctx.tenantId,
-          projectId: ctx.projectId,
-          transport: session && sessionId ? 'sse' : 'jsonrpc',
-          caller: {
-            tokenId: ctx.tokenRecord._id?.toString(),
-            userId: ctx.user?._id?.toString(),
-          },
-          sessionId: sessionId ?? undefined,
-          runtimeContext: buildRuntimeContextFromRequest(meta?.runtime_context, request.headers, {
-            userId: ctx.user?._id?.toString(),
-            tokenId: ctx.tokenRecord._id?.toString(),
-            source: 'mcp',
-          }),
-        });
-
-        if (outcome.ok) {
-          return respond(jsonRpcOk(id, {
-            content: [
-              {
-                text: typeof outcome.result === 'string' ? outcome.result : JSON.stringify(outcome.result),
-                type: 'text',
-              },
-            ],
-            isError: false,
-          }));
-        }
-        return respond(jsonRpcOk(id, {
-          content: [
-            {
-              text: outcome.error,
-              type: 'text',
-            },
-          ],
-          isError: true,
-        }));
-      }
-
-      return respond(jsonRpcError(id, -32601, `Method not found: ${method}`));
+      return await handleClientMcpMessage(request, reply);
     } catch (error) {
       logger.error('Client MCP message handler error', { error });
+      return reply.code(500).send(jsonRpcError(null, -32603, 'Internal error'));
+    }
+  }));
+
+  // Streamable HTTP transport: modern MCP clients POST JSON-RPC to the same URL
+  // they open the SSE stream on (the advertised `/sse` URL). Without this POST
+  // handler such a client's streamable-HTTP attempt 404s (falling through to
+  // the Next.js app) before it can fall back to the GET SSE transport below.
+  app.post('/client/v1/mcp/:serverKey/sse', withClientApiRequestContext(async (request, reply) => {
+    try {
+      return await handleClientMcpMessage(request, reply);
+    } catch (error) {
+      logger.error('Client MCP streamable-http handler error', { error });
       return reply.code(500).send(jsonRpcError(null, -32603, 'Internal error'));
     }
   }));

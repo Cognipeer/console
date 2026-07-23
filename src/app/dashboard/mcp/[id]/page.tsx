@@ -12,7 +12,6 @@ import {
   Code,
   CopyButton,
   Group,
-  JsonInput,
   Loader,
   Menu,
   Modal,
@@ -54,6 +53,7 @@ import StatusBadge from '@/components/common/ui/StatusBadge';
 import McpToolArgsEditor from '@/components/mcp/McpToolArgsEditor';
 import McpToolsPanel from '@/components/mcp/McpToolsPanel';
 import RuntimeContextEditor, { parseRuntimeContextJson } from '@/components/common/RuntimeContextEditor';
+import SpecImportField, { type SpecFormat } from '@/components/common/SpecImportField';
 import type { McpServerView, McpRequestLogView } from '@/lib/services/mcp';
 
 const AUTH_LABELS: Record<string, string> = {
@@ -153,6 +153,7 @@ export default function McpDetailPage() {
       authUsername: '',
       authPassword: '',
       openApiSpec: '',
+      specFormat: 'auto' as SpecFormat,
       // remote source
       remoteUrl: '',
       remoteTransport: 'streamable-http' as string,
@@ -191,12 +192,18 @@ export default function McpDetailPage() {
         description: data.server.description || '',
         upstreamBaseUrl: data.server.upstreamBaseUrl || '',
         authType: data.server.upstreamAuth?.type || 'none',
-        authToken: '',
+        // Secrets come back masked (••••••) when present. Prefill the masked
+        // placeholder so an untouched save round-trips it and the vault keeps
+        // the stored secret — leaving these blank drops the secret on save.
+        authToken: data.server.upstreamAuth?.token || '',
         authHeaderName: data.server.upstreamAuth?.headerName || '',
-        authHeaderValue: '',
+        authHeaderValue: data.server.upstreamAuth?.headerValue || '',
         authUsername: data.server.upstreamAuth?.username || '',
-        authPassword: '',
+        authPassword: data.server.upstreamAuth?.password || '',
         openApiSpec: data.server.openApiSpec || '',
+        // Stored spec is already normalized to OpenAPI JSON; a re-import can
+        // still bring YAML/Postman, so the format hint resets to auto-detect.
+        specFormat: 'auto',
         remoteUrl: data.server.remoteConfig?.url || '',
         remoteTransport: data.server.remoteConfig?.transport || 'streamable-http',
         stdioRuntime: data.server.stdioConfig?.runtime || 'npx',
@@ -379,9 +386,11 @@ export default function McpDetailPage() {
 
       if (sourceType === 'openapi') {
         update.upstreamBaseUrl = values.upstreamBaseUrl || undefined;
-        // Update spec if changed
+        // Update spec if changed. A re-imported spec may be YAML/Postman, so
+        // pass the format hint through for server-side normalization.
         if (values.openApiSpec && values.openApiSpec !== server?.openApiSpec) {
           update.openApiSpec = values.openApiSpec;
+          update.specFormat = values.specFormat;
         }
       } else if (sourceType === 'remote') {
         if (!values.remoteUrl.trim()) throw new Error('MCP server URL is required');
@@ -1647,14 +1656,14 @@ async with sse_client(
               <FormRow cols={1}>
                 <FormField
                   label="OpenAPI specification"
-                  hint="Edit the JSON spec to update available tools."
+                  hint="Paste, upload, or re-fetch the spec from a URL to refresh the available tools. Saving re-imports the tool list."
                 >
-                  <JsonInput
+                  <SpecImportField
+                    value={form.values.openApiSpec}
+                    onChange={(val) => form.setFieldValue('openApiSpec', val)}
+                    format={form.values.specFormat}
+                    onFormatChange={(val) => form.setFieldValue('specFormat', val)}
                     minRows={10}
-                    maxRows={20}
-                    autosize
-                    formatOnBlur
-                    {...form.getInputProps('openApiSpec')}
                   />
                 </FormField>
               </FormRow>
@@ -1758,7 +1767,7 @@ async with sse_client(
 
             {form.values.authType === 'token' && (
               <FormRow cols={1}>
-                <FormField label="Bearer token" hint="Leave empty to keep the current token.">
+                <FormField label="Bearer token" hint="Keep the masked value to preserve the current token, or type a new one to replace it.">
                   <PasswordInput {...form.getInputProps('authToken')} />
                 </FormField>
               </FormRow>
@@ -1769,7 +1778,7 @@ async with sse_client(
                 <FormField label="Header name">
                   <TextInput {...form.getInputProps('authHeaderName')} />
                 </FormField>
-                <FormField label="Header value" hint="Leave empty to keep the current value.">
+                <FormField label="Header value" hint="Keep the masked value to preserve the current value, or type a new one to replace it.">
                   <PasswordInput {...form.getInputProps('authHeaderValue')} />
                 </FormField>
               </FormRow>
@@ -1780,7 +1789,7 @@ async with sse_client(
                 <FormField label="Username">
                   <TextInput {...form.getInputProps('authUsername')} />
                 </FormField>
-                <FormField label="Password" hint="Leave empty to keep the current password.">
+                <FormField label="Password" hint="Keep the masked value to preserve the current password, or type a new one to replace it.">
                   <PasswordInput {...form.getInputProps('authPassword')} />
                 </FormField>
               </FormRow>
