@@ -437,6 +437,16 @@ export class SQLiteProviderBase {
       'projectId',
       'projectId TEXT',
     );
+    // Explicit `/dev/shm` override for a deployment's container, falling
+    // back to the agent's per-runtime default when null (added 2026-07-26,
+    // alongside the Ray Serve runtime — vLLM/Ray need more than Docker's
+    // 64 MiB default to avoid a silent engine-startup hang).
+    this.ensureTableColumn(
+      db,
+      TABLES.llmDeployments,
+      'shmSizeBytes',
+      'shmSizeBytes INTEGER',
+    );
     // Sandbox instance per-instance env (added later). Safe to ensure on boot.
     this.ensureTableColumn(db, 'sandbox_instances', 'env', 'env TEXT');
     this.ensureTableColumn(

@@ -1915,6 +1915,7 @@ export const TENANT_SCHEMA_SQL = `
     healthPath TEXT NOT NULL DEFAULT '/health',
     volumes TEXT NOT NULL DEFAULT '[]',
     restart TEXT NOT NULL DEFAULT 'unless-stopped',
+    shmSizeBytes INTEGER,
     desiredState TEXT NOT NULL DEFAULT 'running',
     actualState TEXT NOT NULL DEFAULT 'pending',
     containerId TEXT,
