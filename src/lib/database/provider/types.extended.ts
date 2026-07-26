@@ -529,7 +529,7 @@ export interface IGpuSlice {
   updatedAt?: Date;
 }
 
-export type LlmDeploymentRuntime = 'vllm' | 'tgi' | 'ollama' | 'custom';
+export type LlmDeploymentRuntime = 'vllm' | 'tgi' | 'ollama' | 'ray' | 'custom';
 
 export type LlmDeploymentDesiredState = 'running' | 'stopped';
 

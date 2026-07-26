@@ -100,6 +100,19 @@
           "healthPath": "/api/tags",
           "openaiCompatible": true,
           "openaiBasePath": "/v1"
+        },
+        "ray": {
+          "image": "rayproject/ray-llm:2.47.1-py311-cu124",
+          "_meta": "Ray Serve LLM wraps vLLM under Ray Serve for autoscaling/multi-replica serving. rayproject/ray-llm ships no ENTRYPOINT, so `args` is the full process command: boot a tiny inline script that builds an OpenAI-compatible Serve app and calls serve.run(). Requires an NVIDIA GPU host, same as vLLM.",
+          "args": [
+            "python3", "-c",
+            "from ray import serve; from ray.serve.llm import LLMConfig, build_openai_app; app = build_openai_app({'llm_configs': [LLMConfig(model_loading_config={'model_id': 'qwen3-8b', 'model_source': 'Qwen/Qwen3-8B'}, deployment_config={'autoscaling_config': {'min_replicas': 1, 'max_replicas': 1}}, engine_kwargs={'tensor_parallel_size': {{gpuCount}}})]}); serve.run(app, blocking=True)"
+          ],
+          "port": 8000,
+          "healthPath": "/-/healthz",
+          "openaiCompatible": true,
+          "openaiBasePath": "/v1",
+          "secretEnv": ["HUGGING_FACE_HUB_TOKEN"]
         }
       }
     },
