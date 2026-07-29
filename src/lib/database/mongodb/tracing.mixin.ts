@@ -6,6 +6,7 @@
 
 import { ObjectId } from 'mongodb';
 import type {
+  AgentTracingSessionEventDelta,
   IAgentTracingDashboardAggregate,
   IAgentTracingSession,
   IAgentTracingEvent,
@@ -98,7 +99,25 @@ export function TracingMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
         return;
       }
 
+      // Upserting on (projectId, sessionId) only collapses concurrent inserts if
+      // the key is unique — without this two simultaneous /start requests can
+      // still both create a document, and every aggregation counts the session
+      // twice. Best-effort: a tenant that already accumulated duplicates cannot
+      // build it, and that must not take the rest of the tracing indexes (or the
+      // request) down. Such a tenant keeps the old double-count until its
+      // duplicates are merged.
+      const uniqueSessionIndexPromise = db
+        .collection(COLLECTIONS.agentTracingSessions)
+        .createIndex({ projectId: 1, sessionId: 1 }, { name: 'uniq_project_sessionId', unique: true })
+        .catch((error) => {
+          logger.warn('Could not create unique tracing session index; duplicates present?', {
+            dbName,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+
       const setupPromise = Promise.all([
+        uniqueSessionIndexPromise,
         db
           .collection(COLLECTIONS.agentTracingSessions)
           .createIndex({ sessionId: 1 }, { name: 'idx_sessionId' }),
@@ -505,9 +524,29 @@ export function TracingMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
         updatedAt: now,
       };
 
+      // Callers decide create-vs-update from a read taken earlier in the request,
+      // and the write itself runs in the background. Two starts for one sessionId
+      // arriving within that window both saw "no session" and would each insert,
+      // leaving duplicate documents that every aggregation counts twice. Upserting
+      // on the identity keys collapses that to one document.
+      //
+      // `_id` is stripped because `$setOnInsert: {_id: undefined}` stores a literal
+      // null — after which the next distinct session fails on the `_id_` index.
+      // `insertOne` generated an id instead, so the old code was immune.
+      const { _id: _ignoredId, ...insertData } = sessionData as typeof sessionData & { _id?: unknown };
+      const identity = { sessionId: sessionData.sessionId, projectId: sessionData.projectId };
       const result = await db
         .collection(COLLECTIONS.agentTracingSessions)
-        .insertOne(sessionData);
+        .findOneAndUpdate(identity, { $setOnInsert: insertData }, { upsert: true, returnDocument: 'after' });
+
+      // `$setOnInsert` is a no-op when the document already exists, which would
+      // silently discard the caller's payload — the OTLP path in particular
+      // arrives with fully merged totals. Apply them explicitly in that case.
+      const created = result?.createdAt instanceof Date
+        && result.createdAt.getTime() === sessionData.createdAt.getTime();
+      if (result && !created) {
+        await this.updateAgentTracingSession(sessionData.sessionId, insertData, sessionData.projectId);
+      }
 
       if (normalizedThreadId) {
         await this.syncAgentTracingThread(normalizedThreadId, sessionData.projectId);
@@ -515,7 +554,7 @@ export function TracingMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
 
       return {
         ...sessionData,
-        _id: result.insertedId.toString(),
+        _id: result?._id?.toString() ?? '',
       };
     }
 
@@ -642,6 +681,100 @@ export function TracingMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
       }
 
       return { sessionsDeleted, eventsDeleted };
+    }
+
+    /**
+     * Fold one event into a session's running totals atomically.
+     *
+     * The alternative — read the session, add, write the sum back — loses events:
+     * a session's events are posted concurrently, so several of them read the
+     * same baseline and the last write discards the rest. Letting the server do
+     * the addition means every event lands exactly once.
+     *
+     * This is an aggregation-pipeline update rather than plain `$inc` for two
+     * reasons. `$inc` rejects the WHOLE update if any incremented path currently
+     * holds a non-number — and session fields come from unvalidated client JSON,
+     * so one `"500"` in a batch-ingested summary would silently swallow every
+     * subsequent event. And the pipeline can read the column it just computed,
+     * which keeps `summary.*` equal to the denormalized column instead of letting
+     * the two drift apart when they did not start out equal.
+     */
+    async applyAgentTracingSessionEvent(
+      sessionId: string,
+      delta: AgentTracingSessionEventDelta,
+      projectId?: string,
+    ): Promise<void> {
+      const db = this.getTenantDb();
+      const collection = db.collection<IAgentTracingSession>(COLLECTIONS.agentTracingSessions);
+      const filter = projectId ? { sessionId, projectId } : { sessionId };
+
+      /** Current value of a field as a number, treating anything unusable as 0. */
+      const asNumber = (path: string) => ({
+        $convert: { input: `$${path}`, to: 'double', onError: 0, onNull: 0 },
+      });
+      const plus = (path: string, amount: number | undefined) => ({
+        $add: [asNumber(path), typeof amount === 'number' && Number.isFinite(amount) ? amount : 0],
+      });
+      const asObject = (path: string) => ({
+        $cond: [{ $eq: [{ $type: `$${path}` }, 'object'] }, `$${path}`, {}],
+      });
+      const asArray = (path: string) => ({
+        $cond: [{ $isArray: `$${path}` }, `$${path}`, []],
+      });
+
+      // Mongo reads `.` and `$` in a field path as structure, so an event type
+      // carrying either would land in the wrong place (or be rejected outright).
+      const eventType = delta.eventType?.replace(/[.$]/g, '_');
+      const eventCounts = eventType
+        ? {
+            $mergeObjects: [
+              asObject('eventCounts'),
+              { [eventType]: { $add: [asNumber(`eventCounts.${eventType}`), 1] } },
+            ],
+          }
+        : asObject('eventCounts');
+
+      const totals = {
+        totalEvents: plus('totalEvents', 1),
+        totalInputTokens: plus('totalInputTokens', delta.inputTokens),
+        totalOutputTokens: plus('totalOutputTokens', delta.outputTokens),
+        totalCachedInputTokens: plus('totalCachedInputTokens', delta.cachedInputTokens),
+      };
+
+      await collection.updateOne(filter, [
+        { $set: { ...totals, eventCounts } },
+        {
+          $set: {
+            updatedAt: new Date(),
+            modelsUsed: { $setUnion: [asArray('modelsUsed'), delta.modelsUsed ?? []] },
+            toolsUsed: { $setUnion: [asArray('toolsUsed'), delta.toolsUsed ?? []] },
+            // Second stage so these read the totals the first stage just wrote,
+            // keeping the summary and the columns from diverging.
+            summary: {
+              $mergeObjects: [
+                asObject('summary'),
+                {
+                  totalInputTokens: '$totalInputTokens',
+                  totalOutputTokens: '$totalOutputTokens',
+                  totalCachedInputTokens: '$totalCachedInputTokens',
+                  totalDurationMs: plus('summary.totalDurationMs', delta.durationMs),
+                  eventCounts: '$eventCounts',
+                },
+              ],
+            },
+          },
+        },
+      ]);
+
+      // The read-modify-write path this replaced went through
+      // `updateAgentTracingSession`, which refreshed the materialized thread
+      // rollup on every event. Without this the Threads screen reports zeros for
+      // the whole life of a running session.
+      const session = await collection.findOne(filter, { projection: { threadId: 1, projectId: 1 } });
+      const threadId = this.normalizeThreadId(session?.threadId);
+      if (threadId) {
+        await this.syncAgentTracingThread(threadId, session?.projectId ?? projectId);
+      }
     }
 
     async updateAgentTracingSession(

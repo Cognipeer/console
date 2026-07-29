@@ -294,6 +294,42 @@ function getSummaryNumber(
   return toNumber(getSummaryRecord(summary)[key]);
 }
 
+/**
+ * Largest value a running total has reached, across the incoming payload, the
+ * session's own summary and its denormalized column. Session totals accumulate
+ * over the life of a sessionId, so a later write must never shrink them.
+ */
+function maxTotal(
+  payloadSummary: unknown,
+  sessionSummary: unknown,
+  denormalized: number | undefined,
+  key: keyof TracingSummaryPayload,
+): number {
+  const candidates = [
+    getSummaryNumber(payloadSummary, key),
+    getSummaryNumber(sessionSummary, key),
+    toNumber(denormalized),
+  ].filter((value): value is number => typeof value === 'number');
+
+  return candidates.length > 0 ? Math.max(...candidates) : 0;
+}
+
+function mergeUnique(...lists: Array<string[] | undefined>): string[] {
+  return Array.from(new Set(lists.flatMap((list) => list ?? [])));
+}
+
+/** Drops repeats so a retried `end` cannot grow the session's error list. */
+function dedupeErrors(errors: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const seen = new Set<string>();
+
+  return errors.filter((error) => {
+    const key = JSON.stringify(error);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function getEventSections(event: TracingEventPayload): Array<Record<string, unknown>> {
   const rawSections = Array.isArray(event.sections)
     ? event.sections
@@ -912,11 +948,37 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
         traceId: typeof payload.traceId === 'string' ? payload.traceId : undefined,
       };
 
+      // A caller may re-`/start` an id it already used: SDK agents create a trace
+      // session per `invoke()`, so one logical run (summarization legs, tool-call
+      // retries, approval/question resumes) posts several starts under one
+      // caller-supplied sessionId. Writing the zeroed skeleton over a live row on
+      // those later starts erased everything the earlier legs had accumulated, so
+      // the session only ever reported its final leg. Reopen the row instead:
+      // keep every running total and re-arm it for the incoming leg.
+      const hasAgent = Object.keys(sessionDoc.agent ?? {}).length > 0;
+      const hasConfig = Object.keys(sessionDoc.config ?? {}).length > 0;
+      const reopenDoc: Partial<IAgentTracingSession> = {
+        // A re-start body is often empty. Writing `{}` over these would drop the
+        // agent identity the reopen exists to preserve.
+        ...(hasAgent ? { agent: sessionDoc.agent } : {}),
+        ...(hasConfig ? { config: sessionDoc.config } : {}),
+        agentModel: sessionDoc.agentModel ?? existing?.agentModel,
+        agentName: sessionDoc.agentName ?? existing?.agentName,
+        agentVersion: sessionDoc.agentVersion ?? existing?.agentVersion,
+        durationMs: undefined,
+        endedAt: undefined,
+        modelsUsed: mergeUnique(existing?.modelsUsed, sessionDoc.modelsUsed),
+        status: 'in_progress',
+        ...(sessionDoc.threadId ? { threadId: sessionDoc.threadId } : {}),
+        ...(sessionDoc.traceId ? { traceId: sessionDoc.traceId } : {}),
+        ...(sessionDoc.rootSpanId ? { rootSpanId: sessionDoc.rootSpanId } : {}),
+      };
+
       fireAndForget('client-tracing-stream-start', async () => {
         const backgroundDb = await getDatabase();
         await backgroundDb.switchToTenant(ctx.tenantDbName);
         if (existing) {
-          await backgroundDb.updateAgentTracingSession(sessionId, sessionDoc, ctx.projectId);
+          await backgroundDb.updateAgentTracingSession(sessionId, reopenDoc, ctx.projectId);
         } else {
           const attribution = recordTracingSessionCreated({
             tenantDbName: ctx.tenantDbName,
@@ -1000,32 +1062,8 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
         ?? usage?.cache_read_input_tokens
         ?? undefined;
       const newTotalEvents = (session.totalEvents || 0) + 1;
-      const newInputTokens = (session.totalInputTokens || 0) + (inputTokens || 0);
-      const newOutputTokens = (session.totalOutputTokens || 0) + (outputTokens || 0);
-      const newCachedTokens = (session.totalCachedInputTokens || 0) + (cachedInputTokens || 0);
-      const modelsUsed = new Set<string>(session.modelsUsed || []);
-      const toolsUsed = new Set<string>(session.toolsUsed || []);
-      if (event?.model) modelsUsed.add(event.model);
-      if (event?.modelName) modelsUsed.add(event.modelName);
-      if (event?.metadata?.modelName) modelsUsed.add(event.metadata.modelName);
-      for (const toolName of collectEventToolNames(event)) {
-        toolsUsed.add(toolName);
-      }
-
-      const eventCounts = { ...(session.eventCounts || {}) };
-      if (event.type) {
-        eventCounts[event.type] = (eventCounts[event.type] || 0) + 1;
-      }
-
-      const currentSummary = getSummaryRecord(session.summary);
-      const summary: Record<string, unknown> = { ...currentSummary };
-      summary.totalInputTokens = newInputTokens;
-      summary.totalOutputTokens = newOutputTokens;
-      summary.totalCachedInputTokens = newCachedTokens;
-      summary.eventCounts = eventCounts;
-      if (event.durationMs) {
-        summary.totalDurationMs = (getSummaryNumber(session.summary, 'totalDurationMs') ?? 0) + event.durationMs;
-      }
+      const models = [event?.model, event?.modelName, event?.metadata?.modelName]
+        .filter((name): name is string => typeof name === 'string' && name.length > 0);
 
       fireAndForget('client-tracing-stream-event', async () => {
         const backgroundDb = await getDatabase();
@@ -1068,15 +1106,14 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
 
         await backgroundDb.createAgentTracingEvent(eventDoc);
 
-        await backgroundDb.updateAgentTracingSession(sessionId, {
-          eventCounts,
-          modelsUsed: Array.from(modelsUsed),
-          summary,
-          toolsUsed: Array.from(toolsUsed),
-          totalCachedInputTokens: newCachedTokens,
-          totalEvents: newTotalEvents,
-          totalInputTokens: newInputTokens,
-          totalOutputTokens: newOutputTokens,
+        await backgroundDb.applyAgentTracingSessionEvent(sessionId, {
+          cachedInputTokens,
+          durationMs: event.durationMs ?? undefined,
+          eventType: event.type ?? undefined,
+          inputTokens,
+          modelsUsed: models,
+          outputTokens,
+          toolsUsed: collectEventToolNames(event),
         }, ctx.projectId);
       });
 
@@ -1136,34 +1173,35 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
           : (Object.keys(existingEventCounts).length > 0
             ? existingEventCounts
             : (session.eventCounts || {})),
-        totalBytesIn: getSummaryNumber(payload.summary, 'totalBytesIn')
-          ?? getSummaryNumber(session.summary, 'totalBytesIn')
-          ?? session.totalBytesIn
-          ?? 0,
-        totalBytesOut: getSummaryNumber(payload.summary, 'totalBytesOut')
-          ?? getSummaryNumber(session.summary, 'totalBytesOut')
-          ?? session.totalBytesOut
-          ?? 0,
-        totalCachedInputTokens: getSummaryNumber(payload.summary, 'totalCachedInputTokens')
-          ?? getSummaryNumber(session.summary, 'totalCachedInputTokens')
-          ?? session.totalCachedInputTokens
-          ?? 0,
-        totalDurationMs: getSummaryNumber(payload.summary, 'totalDurationMs')
-          ?? getSummaryNumber(session.summary, 'totalDurationMs')
-          ?? durationMs,
-        totalInputTokens: getSummaryNumber(payload.summary, 'totalInputTokens')
-          ?? getSummaryNumber(session.summary, 'totalInputTokens')
-          ?? session.totalInputTokens
-          ?? 0,
-        totalOutputTokens: getSummaryNumber(payload.summary, 'totalOutputTokens')
-          ?? getSummaryNumber(session.summary, 'totalOutputTokens')
-          ?? session.totalOutputTokens
-          ?? 0,
+        // `end` used to let the payload win outright. A session that spans several
+        // SDK legs sends one `end` per leg carrying only that leg's summary, so the
+        // last leg's numbers replaced the run's. Take the larger of what the session
+        // already accumulated (from `/events`) and what this leg reports: totals can
+        // only ever grow, which also makes a retried `end` idempotent.
+        totalBytesIn: maxTotal(payload.summary, session.summary, session.totalBytesIn, 'totalBytesIn'),
+        totalBytesOut: maxTotal(payload.summary, session.summary, session.totalBytesOut, 'totalBytesOut'),
+        totalCachedInputTokens: maxTotal(
+          payload.summary,
+          session.summary,
+          session.totalCachedInputTokens,
+          'totalCachedInputTokens',
+        ),
+        // Monotonic like the token totals: one `end` per leg means the payload
+        // only ever describes that leg's wall clock, so letting it win shrank a
+        // multi-leg run's duration to its last leg.
+        totalDurationMs: Math.max(
+          maxTotal(payload.summary, session.summary, undefined, 'totalDurationMs'),
+          durationMs,
+        ),
+        totalInputTokens: maxTotal(payload.summary, session.summary, session.totalInputTokens, 'totalInputTokens'),
+        totalOutputTokens: maxTotal(payload.summary, session.summary, session.totalOutputTokens, 'totalOutputTokens'),
       };
-      const mergedErrors = [
+      // A retried `end` resends the same errors. Appending blindly meant each
+      // retry grew the list, so deduplicate on the serialized entry.
+      const mergedErrors = dedupeErrors([
         ...(session.errors || []),
         ...toErrorList(payload.errors),
-      ];
+      ]);
 
       fireAndForget('client-tracing-stream-end', async () => {
         const backgroundDb = await getDatabase();

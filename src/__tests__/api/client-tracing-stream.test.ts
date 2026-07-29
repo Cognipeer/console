@@ -125,6 +125,27 @@ describe('POST /api/client/v1/tracing/sessions/stream/[sessionId]/start', () => 
     expect(mockDb.createAgentTracingSession).not.toHaveBeenCalled();
   });
 
+  it('keeps the accumulated totals when an existing session is re-started', async () => {
+    // An SDK agent opens a trace session per invoke(), so one logical run posts
+    // several starts under one sessionId. Zeroing the row here used to erase every
+    // earlier leg, leaving the session reporting only its last one.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    mockDb.findAgentTracingSessionById.mockResolvedValueOnce(mockSession as any);
+    await startPOST(
+      makeReq('POST', '/api/client/v1/tracing/sessions/stream/sess-abc/start', {}),
+      sessionParams,
+    );
+    await drainPendingTasks();
+
+    const [, update] = mockDb.updateAgentTracingSession.mock.calls[0];
+    expect(update.status).toBe('in_progress');
+    expect(update.endedAt).toBeUndefined();
+    expect(update).not.toHaveProperty('summary');
+    expect(update).not.toHaveProperty('totalInputTokens');
+    expect(update).not.toHaveProperty('totalOutputTokens');
+    expect(update).not.toHaveProperty('totalEvents');
+  });
+
   it('returns 429 when rate limit exceeded', async () => {
     const { checkRateLimit } = await import('@/lib/quota/quotaGuard');
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -234,6 +255,39 @@ describe('POST /api/client/v1/tracing/sessions/stream/[sessionId]/end', () => {
     expect(body.status).toBe('success');
     await drainPendingTasks();
     expect(mockDb.updateAgentTracingSession).toHaveBeenCalled();
+  });
+
+  it('never lets one leg’s end summary shrink the session totals', async () => {
+    // Each leg's `end` carries only that leg's numbers. Letting the payload win
+    // outright discarded whatever the run had already accumulated.
+    await endPOST(
+      makeReq('POST', '/api/client/v1/tracing/sessions/stream/sess-abc/end', {
+        status: 'success',
+        summary: { totalInputTokens: 10, totalOutputTokens: 5, totalCachedInputTokens: 0 },
+      }),
+      sessionParams,
+    );
+    await drainPendingTasks();
+
+    const [, update] = mockDb.updateAgentTracingSession.mock.calls[0];
+    expect(update.totalInputTokens).toBe(mockSession.totalInputTokens);
+    expect(update.totalOutputTokens).toBe(mockSession.totalOutputTokens);
+  });
+
+  it('adopts a leg summary larger than the session totals', async () => {
+    await endPOST(
+      makeReq('POST', '/api/client/v1/tracing/sessions/stream/sess-abc/end', {
+        status: 'success',
+        summary: { totalInputTokens: 900, totalOutputTokens: 400, totalCachedInputTokens: 300 },
+      }),
+      sessionParams,
+    );
+    await drainPendingTasks();
+
+    const [, update] = mockDb.updateAgentTracingSession.mock.calls[0];
+    expect(update.totalInputTokens).toBe(900);
+    expect(update.totalOutputTokens).toBe(400);
+    expect(update.totalCachedInputTokens).toBe(300);
   });
 
   it('ends a session with error status', async () => {

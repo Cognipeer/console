@@ -3,6 +3,7 @@
  */
 
 import type {
+  AgentTracingSessionEventDelta,
   IAgentTracingDashboardAggregate,
   IAgentTracingEvent,
   IAgentTracingSession,
@@ -202,6 +203,95 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       return { sessionsDeleted: sessionIds.length, eventsDeleted };
     }
 
+    /**
+     * Fold one event into a session's running totals in a single statement, so
+     * concurrent events for the same session add up instead of overwriting each
+     * other. Mirrors the MongoDB provider's `$inc` behaviour.
+     */
+    async applyAgentTracingSessionEvent(
+      sessionId: string,
+      delta: AgentTracingSessionEventDelta,
+      projectId?: string,
+    ): Promise<void> {
+      const db = this.getTenantDb();
+      // Coerce here rather than binding the raw value: SQLite's numeric affinity
+      // would happily add the string "100", while the MongoDB provider's
+      // arithmetic treats a non-number as 0. The two must agree.
+      const toNumber = (value: number | undefined) =>
+        typeof value === 'number' && Number.isFinite(value) ? value : 0;
+
+      const params: Record<string, unknown> = {
+        sessionId,
+        updatedAt: this.now(),
+        inputTokens: toNumber(delta.inputTokens),
+        outputTokens: toNumber(delta.outputTokens),
+        cachedInputTokens: toNumber(delta.cachedInputTokens),
+      };
+      let where = 'sessionId = @sessionId';
+      if (projectId) { where += ' AND projectId = @projectId'; params.projectId = projectId; }
+
+      const tx = db.transaction(() => {
+        db.prepare(
+          `UPDATE ${TABLES.agentTracingSessions} SET
+             updatedAt = @updatedAt,
+             totalEvents = COALESCE(totalEvents, 0) + 1,
+             totalInputTokens = COALESCE(totalInputTokens, 0) + @inputTokens,
+             totalOutputTokens = COALESCE(totalOutputTokens, 0) + @outputTokens,
+             totalCachedInputTokens = COALESCE(totalCachedInputTokens, 0) + @cachedInputTokens
+           WHERE ${where}`,
+        ).run(params);
+
+        const row = db
+          .prepare(`SELECT * FROM ${TABLES.agentTracingSessions} WHERE ${where}`)
+          .get(params) as SqliteRow | undefined;
+        if (!row) return;
+
+        const session = this.mapAgentTracingSessionRow(row);
+        const summary: Record<string, unknown> = { ...(session.summary ?? {}) };
+        summary.totalInputTokens = session.totalInputTokens ?? 0;
+        summary.totalOutputTokens = session.totalOutputTokens ?? 0;
+        summary.totalCachedInputTokens = session.totalCachedInputTokens ?? 0;
+        if (delta.durationMs) {
+          summary.totalDurationMs = (Number(summary.totalDurationMs) || 0) + delta.durationMs;
+        }
+
+        const eventCounts: Record<string, number> = { ...(session.eventCounts ?? {}) };
+        // Same key normalization the MongoDB provider applies, so the two report
+        // identical eventCounts maps for an event type containing `.` or `$`.
+        const eventType = delta.eventType?.replace(/[.$]/g, '_');
+        if (eventType) {
+          eventCounts[eventType] = (eventCounts[eventType] || 0) + 1;
+        }
+        summary.eventCounts = eventCounts;
+
+        const modelsUsed = this.normalizeStringArray([
+          ...(session.modelsUsed ?? []),
+          ...(delta.modelsUsed ?? []),
+        ]);
+        const toolsUsed = this.normalizeStringArray([
+          ...(session.toolsUsed ?? []),
+          ...(delta.toolsUsed ?? []),
+        ]);
+
+        db.prepare(
+          `UPDATE ${TABLES.agentTracingSessions} SET
+             summary = @summary,
+             eventCounts = @eventCounts,
+             modelsUsed = @modelsUsed,
+             toolsUsed = @toolsUsed
+           WHERE ${where}`,
+        ).run({
+          ...params,
+          summary: this.toJson(summary),
+          eventCounts: this.toJson(eventCounts),
+          modelsUsed: this.toJson(modelsUsed),
+          toolsUsed: this.toJson(toolsUsed),
+        });
+      });
+
+      tx();
+    }
+
     async updateAgentTracingSession(
       sessionId: string,
       data: Partial<IAgentTracingSession>,
@@ -226,8 +316,12 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       if (data.summary !== undefined) { sets.push('summary = @summary'); params.summary = this.toJson(data.summary); }
       if (data.status !== undefined) { sets.push('status = @status'); params.status = data.status; }
       if (data.startedAt !== undefined) { sets.push('startedAt = @startedAt'); params.startedAt = data.startedAt?.toISOString() ?? null; }
-      if (data.endedAt !== undefined) { sets.push('endedAt = @endedAt'); params.endedAt = data.endedAt?.toISOString() ?? null; }
-      if (data.durationMs !== undefined) { sets.push('durationMs = @durationMs'); params.durationMs = data.durationMs; }
+      // Keyed on presence, not on `!== undefined`: reopening a session sets these
+      // to undefined deliberately to clear them. Skipping the write left a stale
+      // endedAt/durationMs on a row whose status had flipped back to in_progress,
+      // which is what MongoDB does clear.
+      if ('endedAt' in data) { sets.push('endedAt = @endedAt'); params.endedAt = data.endedAt?.toISOString() ?? null; }
+      if ('durationMs' in data) { sets.push('durationMs = @durationMs'); params.durationMs = data.durationMs ?? null; }
       if (data.errors !== undefined) { sets.push('errors = @errors'); params.errors = this.toJson(data.errors); }
       if (data.modelsUsed !== undefined) { sets.push('modelsUsed = @modelsUsed'); params.modelsUsed = this.toJson(this.normalizeStringArray(data.modelsUsed)); }
       if (data.toolsUsed !== undefined) { sets.push('toolsUsed = @toolsUsed'); params.toolsUsed = this.toJson(this.normalizeStringArray(data.toolsUsed)); }

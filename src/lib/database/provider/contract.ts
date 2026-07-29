@@ -1,5 +1,6 @@
 import type {
   AgentStatus,
+  AgentTracingSessionEventDelta,
   AlertEventStatus,
   BrowserSessionStatus,
   BrowserStatus,
@@ -290,6 +291,11 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     data: Partial<IAgentTracingSession>,
     projectId?: string,
   ): Promise<IAgentTracingSession | null>;
+  applyAgentTracingSessionEvent(
+    sessionId: string,
+    delta: AgentTracingSessionEventDelta,
+    projectId?: string,
+  ): Promise<void>;
   findAgentTracingSessionById(
     sessionId: string,
     projectId?: string,

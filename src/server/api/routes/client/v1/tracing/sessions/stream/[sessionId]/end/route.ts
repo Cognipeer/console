@@ -67,13 +67,21 @@ const _POST = async (
         const existingSummary = session.summary || {};
         const payloadSummary = payload.summary || {};
         
+        // One `end` arrives per SDK leg, each carrying only that leg's summary, so
+        // letting the payload win outright threw away everything the run had already
+        // accumulated. Totals only ever grow — which also makes a retried `end` a no-op.
+        const maxTotal = (key: string, denormalized: unknown) => Math.max(
+            ...[payloadSummary[key], existingSummary[key], denormalized]
+                .map((value) => (typeof value === 'number' && Number.isFinite(value) ? value : 0)),
+        );
+
         const mergedSummary = {
             totalDurationMs: payloadSummary.totalDurationMs ?? existingSummary.totalDurationMs ?? durationMs,
-            totalInputTokens: payloadSummary.totalInputTokens ?? existingSummary.totalInputTokens ?? session.totalInputTokens ?? 0,
-            totalOutputTokens: payloadSummary.totalOutputTokens ?? existingSummary.totalOutputTokens ?? session.totalOutputTokens ?? 0,
-            totalCachedInputTokens: payloadSummary.totalCachedInputTokens ?? existingSummary.totalCachedInputTokens ?? session.totalCachedInputTokens ?? 0,
-            totalBytesIn: payloadSummary.totalBytesIn ?? existingSummary.totalBytesIn ?? session.totalBytesIn ?? 0,
-            totalBytesOut: payloadSummary.totalBytesOut ?? existingSummary.totalBytesOut ?? session.totalBytesOut ?? 0,
+            totalInputTokens: maxTotal('totalInputTokens', session.totalInputTokens),
+            totalOutputTokens: maxTotal('totalOutputTokens', session.totalOutputTokens),
+            totalCachedInputTokens: maxTotal('totalCachedInputTokens', session.totalCachedInputTokens),
+            totalBytesIn: maxTotal('totalBytesIn', session.totalBytesIn),
+            totalBytesOut: maxTotal('totalBytesOut', session.totalBytesOut),
             eventCounts: payloadSummary.eventCounts ?? existingSummary.eventCounts ?? session.eventCounts ?? {},
         };
 
