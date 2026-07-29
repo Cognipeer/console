@@ -1,5 +1,6 @@
 import type {
   AgentStatus,
+  AgentTracingSessionEventDelta,
   AlertEventStatus,
   GuardrailType,
   IAgent,
@@ -168,6 +169,11 @@ export interface DatabaseProvider {
     data: Partial<IAgentTracingSession>,
     projectId?: string,
   ): Promise<IAgentTracingSession | null>;
+  applyAgentTracingSessionEvent(
+    sessionId: string,
+    delta: AgentTracingSessionEventDelta,
+    projectId?: string,
+  ): Promise<void>;
   findAgentTracingSessionById(
     sessionId: string,
     projectId?: string,

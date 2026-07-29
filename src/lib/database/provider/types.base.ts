@@ -262,6 +262,22 @@ export interface IAgentTracingSession extends IUsageAttributionFields {
   updatedAt?: Date;
 }
 
+/**
+ * One event's contribution to a session's running totals. Applied atomically by
+ * the provider so that concurrent events for the same session cannot overwrite
+ * each other's increments.
+ */
+export interface AgentTracingSessionEventDelta {
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedInputTokens?: number;
+  durationMs?: number;
+  /** Event type whose per-type counter should be bumped, e.g. `ai_call`. */
+  eventType?: string;
+  modelsUsed?: string[];
+  toolsUsed?: string[];
+}
+
 export interface IAgentTracingSessionSummaryAggregate {
   sessionId: string;
   agentName?: string;

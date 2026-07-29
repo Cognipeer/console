@@ -121,12 +121,31 @@ const _POST = async (
             source: 'custom' as const,
         };
 
+        // Re-starting an id that already exists must NOT reset it: SDK agents open a
+        // trace session per invoke(), so one logical run posts several starts under
+        // one caller-supplied sessionId. Writing the zeroed skeleton over a live row
+        // erased the earlier legs, leaving only the last one. Reopen instead.
+        const reopenDoc = {
+            agent: sessionDoc.agent,
+            agentModel: sessionDoc.agentModel ?? existing?.agentModel,
+            agentName: sessionDoc.agentName ?? existing?.agentName,
+            agentVersion: sessionDoc.agentVersion ?? existing?.agentVersion,
+            config: sessionDoc.config,
+            durationMs: undefined,
+            endedAt: undefined,
+            modelsUsed: Array.from(new Set([...(existing?.modelsUsed || []), ...sessionDoc.modelsUsed])),
+            status: 'in_progress',
+            ...(sessionDoc.threadId ? { threadId: sessionDoc.threadId } : {}),
+            ...(sessionDoc.traceId ? { traceId: sessionDoc.traceId } : {}),
+            ...(sessionDoc.rootSpanId ? { rootSpanId: sessionDoc.rootSpanId } : {}),
+        };
+
         // Fire-and-forget: persist session in background
         fireAndForget('tracing-stream-start', async () => {
             const bgDb = await getDatabase();
             await bgDb.switchToTenant(auth.tenantDbName);
             if (existing) {
-                await bgDb.updateAgentTracingSession(sessionId, sessionDoc, auth.projectId);
+                await bgDb.updateAgentTracingSession(sessionId, reopenDoc, auth.projectId);
             } else {
                 await bgDb.createAgentTracingSession(sessionDoc);
             }
