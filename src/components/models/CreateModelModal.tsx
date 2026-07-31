@@ -3,6 +3,11 @@ import { Button, NumberInput, Select, TextInput, Textarea } from '@mantine/core'
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { IconBolt, IconBrain } from '@tabler/icons-react';
+import { useTranslations } from '@/lib/i18n';
+import {
+  getDefaultModelInputModalities,
+  getDefaultModelOutputModalities,
+} from '@/lib/services/models/modelCapabilities';
 import FormShell, {
   Checklist,
   ChipPicker,
@@ -63,6 +68,12 @@ interface FormValues {
   modelId: string;
   isMultimodal: boolean;
   supportsToolCalls: boolean;
+  capabilities: {
+    contextWindow: number | '';
+    maxOutputTokens: number | '';
+    supportsReasoning: boolean;
+    supportsStructuredOutputs: boolean;
+  };
   pricing: {
     currency: string;
     inputTokenPer1M: number | '';
@@ -121,6 +132,7 @@ export default function CreateModelModal({
   onCreated,
   onAddProvider,
 }: CreateModelModalProps) {
+  const tWizard = useTranslations('modelWizard');
   const [availableProviders, setAvailableProviders] =
     useState<ModelProviderView[]>(providers);
   const [submitting, setSubmitting] = useState(false);
@@ -136,6 +148,12 @@ export default function CreateModelModal({
       modelId: '',
       isMultimodal: false,
       supportsToolCalls: true,
+      capabilities: {
+        contextWindow: '',
+        maxOutputTokens: '',
+        supportsReasoning: false,
+        supportsStructuredOutputs: false,
+      },
       pricing: {
         currency: DEFAULT_PRICING.currency,
         inputTokenPer1M: DEFAULT_PRICING.inputTokenPer1M,
@@ -282,6 +300,20 @@ export default function CreateModelModal({
     const validation = form.validate();
     if (validation.hasErrors) return;
     const values = form.getValues();
+    const contextWindow = toNumber(values.capabilities.contextWindow);
+    const maxOutputTokens = toNumber(values.capabilities.maxOutputTokens);
+    if (
+      contextWindow !== undefined
+      && maxOutputTokens !== undefined
+      && maxOutputTokens > contextWindow
+    ) {
+      notifications.show({
+        color: 'red',
+        title: tWizard('notifications.errorTitle'),
+        message: tWizard('validation.maxOutputTokens'),
+      });
+      return;
+    }
 
     const provider = availableProviders.find(
       (item) => item.key === values.providerKey,
@@ -309,6 +341,18 @@ export default function CreateModelModal({
           modelId: values.modelId,
           isMultimodal: values.isMultimodal,
           supportsToolCalls: values.supportsToolCalls,
+          capabilities: {
+            ...(contextWindow !== undefined ? { contextWindow } : {}),
+            ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+            inputModalities: getDefaultModelInputModalities(
+              values.category,
+              values.isMultimodal,
+            ),
+            outputModalities: getDefaultModelOutputModalities(values.category),
+            supportsReasoning: values.capabilities.supportsReasoning,
+            supportsStructuredOutputs: values.capabilities.supportsStructuredOutputs,
+            supportsToolCalls: values.supportsToolCalls,
+          },
           pricing: {
             currency: values.pricing.currency || DEFAULT_PRICING.currency,
             inputTokenPer1M: Number(values.pricing.inputTokenPer1M ?? 0),
@@ -402,8 +446,14 @@ export default function CreateModelModal({
           label="Capabilities"
           value={
             [
-              formValues.supportsToolCalls ? 'tools' : null,
-              formValues.isMultimodal ? 'vision' : null,
+              formValues.supportsToolCalls ? tWizard('review.capabilityTags.tools') : null,
+              formValues.isMultimodal ? tWizard('review.capabilityTags.vision') : null,
+              formValues.capabilities.supportsReasoning
+                ? tWizard('review.capabilityTags.reasoning')
+                : null,
+              formValues.capabilities.supportsStructuredOutputs
+                ? tWizard('review.capabilityTags.structuredOutput')
+                : null,
             ]
               .filter(Boolean)
               .join(' · ') || '—'
@@ -602,7 +652,47 @@ export default function CreateModelModal({
             disabled={!providerSupportsMultimodal(selectedProvider)}
             onChange={(v) => setFieldValue('isMultimodal', v)}
           />
+          <ToggleRow
+            label={tWizard('fields.supportsReasoning.label')}
+            description={tWizard('fields.supportsReasoning.description')}
+            checked={formValues.capabilities.supportsReasoning}
+            onChange={(v) => setFieldValue('capabilities.supportsReasoning', v)}
+          />
+          <ToggleRow
+            label={tWizard('fields.supportsStructuredOutputs.label')}
+            description={tWizard('fields.supportsStructuredOutputs.description')}
+            checked={formValues.capabilities.supportsStructuredOutputs}
+            onChange={(v) => setFieldValue('capabilities.supportsStructuredOutputs', v)}
+          />
         </ToggleList>
+        <FormRow cols={2}>
+          <FormField
+            label={tWizard('fields.contextWindow.label')}
+            optional
+            hint={tWizard('fields.contextWindow.description')}
+          >
+            <NumberInput
+              min={1}
+              step={1024}
+              thousandSeparator=","
+              placeholder={tWizard('fields.contextWindow.placeholder')}
+              {...form.getInputProps('capabilities.contextWindow')}
+            />
+          </FormField>
+          <FormField
+            label={tWizard('fields.maxOutputTokens.label')}
+            optional
+            hint={tWizard('fields.maxOutputTokens.description')}
+          >
+            <NumberInput
+              min={1}
+              step={1024}
+              thousandSeparator=","
+              placeholder={tWizard('fields.maxOutputTokens.placeholder')}
+              {...form.getInputProps('capabilities.maxOutputTokens')}
+            />
+          </FormField>
+        </FormRow>
       </FormSection>
 
       {formValues.category === 'ocr' && (

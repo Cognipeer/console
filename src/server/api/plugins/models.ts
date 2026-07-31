@@ -15,6 +15,11 @@ import {
 import type { IDynamicRoutingConfig } from '@/lib/database';
 import type { UpdateModelInput } from '@/lib/services/models/types';
 import {
+  ModelCapabilityValidationError,
+  parseModelCapabilityOverrides,
+  resolveModelCapabilities,
+} from '@/lib/services/models/modelCapabilities';
+import {
   type IModel,
   type ModelCategory,
   type ProviderDomain,
@@ -100,6 +105,7 @@ function sanitizeSettings(settings: Record<string, unknown>) {
 function sanitizeModel(model: IModel) {
   return {
     ...model,
+    capabilities: resolveModelCapabilities(model),
     settings: sanitizeSettings(model.settings || {}),
   };
 }
@@ -466,6 +472,7 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
         projectId,
         session.userId,
         {
+          capabilities: parseModelCapabilityOverrides(body.capabilities) ?? undefined,
           category: body.category as ModelCategory,
           description: body.description as string | undefined,
           isMultimodal: body.isMultimodal as boolean | undefined,
@@ -485,6 +492,9 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(201).send({ model: sanitizeModel(model) });
     } catch (error) {
       logger.error('Create model error', { error });
+      if (error instanceof ModelCapabilityValidationError) {
+        return reply.code(400).send({ error: error.message });
+      }
       return sendProjectError(reply, error)
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Internal error',
@@ -687,6 +697,9 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
       const body = readJsonBody<Partial<UpdateModelInput> & Record<string, unknown>>(request);
       const updates: Partial<UpdateModelInput> = {};
 
+      if (body.capabilities !== undefined) {
+        updates.capabilities = parseModelCapabilityOverrides(body.capabilities);
+      }
       if (body.name !== undefined) updates.name = body.name;
       if (body.description !== undefined) updates.description = body.description;
       if (body.key !== undefined) updates.key = body.key;
@@ -729,6 +742,9 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ model: sanitizeModel(updated) });
     } catch (error) {
       logger.error('Update model error', { error });
+      if (error instanceof ModelCapabilityValidationError) {
+        return reply.code(400).send({ error: error.message });
+      }
       return sendProjectError(reply, error)
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Internal error',

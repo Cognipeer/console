@@ -42,6 +42,8 @@ tags:
     description: OpenAI-compatible chat completions with streaming and tool calling
   - name: Embeddings
     description: OpenAI-compatible text embeddings
+  - name: Model Discovery
+    description: OpenAI-compatible model listing with versioned Cognipeer capability metadata
   - name: Moderations
     description: Content moderation / safety classification
   - name: Audio
@@ -2017,6 +2019,32 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /models:
+    get:
+      tags:
+        - Model Discovery
+      summary: List available models
+      description: |-
+        Lists project-scoped LLMs in the OpenAI `object: list` shape. The `id`
+        is the public Model Hub key and is the exact value clients must send in
+        chat completion requests. `cognipeer.canonical_model_id` identifies the
+        upstream provider model without changing public routing.
+
+        The legacy `models` array remains present for existing Console clients.
+        OpenAI-compatible clients should consume `data` and ignore extensions
+        they do not understand.
+      operationId: listModels
+      responses:
+        "200":
+          description: Project-scoped model discovery response.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelDiscoveryResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "500":
           $ref: "#/components/responses/InternalError"
   /chat/completions:
@@ -10868,6 +10896,124 @@ components:
       bearerFormat: opaque
       description: "Console API token. Create one in the dashboard under Settings → API Tokens. Format: `cpeer_...`"
   schemas:
+    ModelCapabilities:
+      type: object
+      description: Versioned, explicit model capabilities resolved by Console without guessing from the public alias.
+      required:
+        - inputModalities
+        - outputModalities
+      properties:
+        contextWindow:
+          type: integer
+          minimum: 1
+        maxOutputTokens:
+          type: integer
+          minimum: 1
+        inputModalities:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: string
+            enum: [text, image, audio, video, file]
+        outputModalities:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: string
+            enum: [text, image, audio, embeddings]
+        supportsReasoning:
+          type: boolean
+        supportsStructuredOutputs:
+          type: boolean
+        supportsToolCalls:
+          type: boolean
+    OpenAIModelDiscoveryEntry:
+      type: object
+      required:
+        - id
+        - object
+        - created
+        - owned_by
+        - name
+        - architecture
+        - cognipeer
+      properties:
+        id:
+          type: string
+          description: Public Model Hub key used in inference requests.
+        object:
+          type: string
+          enum: [model]
+        created:
+          type: integer
+          format: int64
+          description: Unix creation timestamp in seconds, or zero for legacy records without a timestamp.
+        owned_by:
+          type: string
+          example: cognipeer
+        name:
+          type: string
+          description: Human-readable display name.
+        category:
+          type: string
+          enum: [llm]
+        context_length:
+          type: integer
+          minimum: 1
+        max_output_tokens:
+          type: integer
+          minimum: 1
+        supports_image_input:
+          type: boolean
+        supports_reasoning:
+          type: boolean
+        supports_structured_outputs:
+          type: boolean
+        supports_tool_calls:
+          type: boolean
+        architecture:
+          type: object
+          required: [input_modalities, output_modalities]
+          properties:
+            input_modalities:
+              type: array
+              items:
+                type: string
+            output_modalities:
+              type: array
+              items:
+                type: string
+        cognipeer:
+          type: object
+          required: [schema_version, canonical_model_id, capabilities]
+          properties:
+            schema_version:
+              type: string
+              enum: ["1.0"]
+            canonical_model_id:
+              type: string
+              description: Provider-facing model identifier. It is metadata, not a public routing key.
+            capabilities:
+              $ref: "#/components/schemas/ModelCapabilities"
+    ModelDiscoveryResponse:
+      type: object
+      required: [object, data, models]
+      properties:
+        object:
+          type: string
+          enum: [list]
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/OpenAIModelDiscoveryEntry"
+        models:
+          type: array
+          description: Backward-compatible Console model records with sensitive settings masked.
+          items:
+            type: object
+            additionalProperties: true
     AegisAuditEvent:
       type: object
       description: One recorded shield decision.
