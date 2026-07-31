@@ -4,6 +4,7 @@ import type {
   CreateProviderConfigInput,
   ProviderConfigView,
 } from '@/lib/services/providers/providerService';
+import type { ModelCapabilityOverrides } from './modelCapabilities';
 
 export interface CreateModelInput {
   name: string;
@@ -16,6 +17,7 @@ export interface CreateModelInput {
   settings: Record<string, unknown>;
   isMultimodal?: boolean;
   supportsToolCalls?: boolean;
+  capabilities?: ModelCapabilityOverrides;
   semanticCache?: ISemanticCacheConfig;
   metadata?: Record<string, unknown>;
 }
@@ -32,6 +34,7 @@ export interface UpdateModelInput {
   settings?: Record<string, unknown>;
   isMultimodal?: boolean;
   supportsToolCalls?: boolean;
+  capabilities?: ModelCapabilityOverrides | null;
   semanticCache?: ISemanticCacheConfig;
   inputGuardrailKey?: string;
   outputGuardrailKey?: string;

@@ -29,6 +29,10 @@ import { IconArrowLeft, IconBook, IconDeviceFloppy, IconRefresh } from '@tabler/
 import { useTranslations } from '@/lib/i18n';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 import { PROVIDER_DEFINITIONS } from '@/lib/services/models/providerCatalog';
+import {
+  getDefaultModelInputModalities,
+  getDefaultModelOutputModalities,
+} from '@/lib/services/models/modelCapabilities';
 
 interface ModelProviderOption {
   key: string;
@@ -66,6 +70,12 @@ interface ModelDetailDto {
   modelId: string;
   isMultimodal?: boolean;
   supportsToolCalls?: boolean;
+  capabilities?: {
+    contextWindow?: number;
+    maxOutputTokens?: number;
+    supportsReasoning?: boolean;
+    supportsStructuredOutputs?: boolean;
+  };
   pricing: ModelPricing;
   settings: Record<string, string>;
   semanticCache?: SemanticCacheConfig;
@@ -105,6 +115,10 @@ interface FormValues {
   settings: Record<string, string>;
   isMultimodal: boolean;
   supportsToolCalls: boolean;
+  contextWindow: number | '';
+  maxOutputTokens: number | '';
+  supportsReasoning: boolean;
+  supportsStructuredOutputs: boolean;
   semanticCacheEnabled: boolean;
   semanticCacheVectorProviderKey: string;
   semanticCacheVectorIndexKey: string;
@@ -162,6 +176,10 @@ export default function EditModelPage() {
       settings: {},
       isMultimodal: false,
       supportsToolCalls: false,
+      contextWindow: '',
+      maxOutputTokens: '',
+      supportsReasoning: false,
+      supportsStructuredOutputs: false,
       semanticCacheEnabled: false,
       semanticCacheVectorProviderKey: '',
       semanticCacheVectorIndexKey: '',
@@ -256,6 +274,12 @@ export default function EditModelPage() {
         settings,
         isMultimodal: Boolean(nextModel.isMultimodal),
         supportsToolCalls: Boolean(nextModel.supportsToolCalls),
+        contextWindow: nextModel.capabilities?.contextWindow ?? '',
+        maxOutputTokens: nextModel.capabilities?.maxOutputTokens ?? '',
+        supportsReasoning: Boolean(nextModel.capabilities?.supportsReasoning),
+        supportsStructuredOutputs: Boolean(
+          nextModel.capabilities?.supportsStructuredOutputs,
+        ),
         semanticCacheEnabled: Boolean(cache?.enabled),
         semanticCacheVectorProviderKey: cache?.vectorProviderKey || '',
         semanticCacheVectorIndexKey: cache?.vectorIndexKey || '',
@@ -351,6 +375,18 @@ export default function EditModelPage() {
     if (validation.hasErrors) {
       return;
     }
+    if (
+      values.contextWindow !== ''
+      && values.maxOutputTokens !== ''
+      && values.maxOutputTokens > values.contextWindow
+    ) {
+      notifications.show({
+        title: t('notifications.errorTitle'),
+        message: tWizard('validation.maxOutputTokens'),
+        color: 'red',
+      });
+      return;
+    }
 
     setSaving(true);
     try {
@@ -369,6 +405,22 @@ export default function EditModelPage() {
           settings: values.settings,
           isMultimodal: values.isMultimodal,
           supportsToolCalls: values.supportsToolCalls,
+          capabilities: {
+            ...(values.contextWindow !== ''
+              ? { contextWindow: values.contextWindow }
+              : {}),
+            ...(values.maxOutputTokens !== ''
+              ? { maxOutputTokens: values.maxOutputTokens }
+              : {}),
+            inputModalities: getDefaultModelInputModalities(
+              model.category,
+              values.isMultimodal,
+            ),
+            outputModalities: getDefaultModelOutputModalities(model.category),
+            supportsReasoning: values.supportsReasoning,
+            supportsStructuredOutputs: values.supportsStructuredOutputs,
+            supportsToolCalls: values.supportsToolCalls,
+          },
           semanticCache: {
             enabled: values.semanticCacheEnabled,
             vectorProviderKey: values.semanticCacheVectorProviderKey,
@@ -568,7 +620,30 @@ export default function EditModelPage() {
               </Grid>
             </Paper>
 
-            <Group>
+            <Grid>
+              <Grid.Col span={{ base: 12, md: 6 }}>
+                <NumberInput
+                  label={tWizard('fields.contextWindow.label')}
+                  description={tWizard('fields.contextWindow.description')}
+                  min={1}
+                  step={1024}
+                  thousandSeparator=","
+                  {...form.getInputProps('contextWindow')}
+                />
+              </Grid.Col>
+              <Grid.Col span={{ base: 12, md: 6 }}>
+                <NumberInput
+                  label={tWizard('fields.maxOutputTokens.label')}
+                  description={tWizard('fields.maxOutputTokens.description')}
+                  min={1}
+                  step={1024}
+                  thousandSeparator=","
+                  {...form.getInputProps('maxOutputTokens')}
+                />
+              </Grid.Col>
+            </Grid>
+
+            <Group align="flex-start">
               <Checkbox
                 label={tWizard('fields.isMultimodal.label')}
                 description={tWizard('fields.isMultimodal.description')}
@@ -578,6 +653,16 @@ export default function EditModelPage() {
                 label={tWizard('fields.supportsToolCalls.label')}
                 description={tWizard('fields.supportsToolCalls.description')}
                 {...form.getInputProps('supportsToolCalls', { type: 'checkbox' })}
+              />
+              <Checkbox
+                label={tWizard('fields.supportsReasoning.label')}
+                description={tWizard('fields.supportsReasoning.description')}
+                {...form.getInputProps('supportsReasoning', { type: 'checkbox' })}
+              />
+              <Checkbox
+                label={tWizard('fields.supportsStructuredOutputs.label')}
+                description={tWizard('fields.supportsStructuredOutputs.description')}
+                {...form.getInputProps('supportsStructuredOutputs', { type: 'checkbox' })}
               />
             </Group>
 

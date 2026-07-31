@@ -28,6 +28,7 @@ import type {
   ModelProviderView,
   CreateModelProviderInput,
 } from './types';
+import { applyModelCapabilityOverrides } from './modelCapabilities';
 
 const logger = createLogger('model-service');
 
@@ -204,7 +205,7 @@ export async function createModel(
     supportsToolCalls:
       payload.supportsToolCalls ??
       Boolean(provider.driverCapabilities?.['model.supports.tool_calls']),
-    metadata: payload.metadata || {},
+    metadata: applyModelCapabilityOverrides(payload.metadata, payload.capabilities),
     createdBy: userId,
     updatedBy: userId,
   };
@@ -317,9 +318,14 @@ export async function updateModel(
     return null;
   }
 
-  const updatePayload: UpdateModelInput & { updatedBy?: string } = {
-    ...updates,
-  };
+  const { capabilities, ...modelUpdates } = updates;
+  const updatePayload: UpdateModelInput & { updatedBy?: string } = { ...modelUpdates };
+  if (capabilities !== undefined) {
+    updatePayload.metadata = applyModelCapabilityOverrides(
+      updates.metadata ?? existing.metadata,
+      capabilities,
+    );
+  }
   if (updates.pricing) {
     updatePayload.pricing = ensureCurrency(updates.pricing);
   }
