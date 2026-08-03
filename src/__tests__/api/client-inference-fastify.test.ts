@@ -153,4 +153,20 @@ describe('Fastify client inference errors', () => {
       code: 'inference_error',
     });
   });
+
+  it('returns a structured 400 for malformed multimodal content', async () => {
+    mockFn(handleChatCompletion).mockRejectedValue(
+      new Error('`messages[0].content[1].image_url` must be a non-empty string or an object with a non-empty `url` string'),
+    );
+
+    const response = await postChat();
+    const body = parseJsonBody<{ error: Record<string, unknown> }>(response.body);
+
+    expect(response.statusCode).toBe(400);
+    expect(body.error).toMatchObject({
+      type: 'invalid_request_error',
+      code: 'invalid_request',
+    });
+    expect(body.error.message).toContain('messages[0].content[1].image_url');
+  });
 });

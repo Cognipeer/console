@@ -74,6 +74,103 @@ describe('toLangChainMessages', () => {
     ]);
     expect(msgs[0].constructor.name).toBe('HumanMessage');
   });
+
+  it('wraps string image URLs in the OpenAI-compatible object shape', () => {
+    const imageUrl = 'data:image/png;base64,iVBORw0KGgo=';
+    const msgs = toLangChainMessages([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Describe this image' },
+          { type: 'image_url', image_url: imageUrl },
+        ] as never,
+      },
+    ]);
+
+    expect(msgs[0].content).toEqual([
+      { type: 'text', text: 'Describe this image' },
+      { type: 'image_url', image_url: { url: imageUrl } },
+    ]);
+  });
+
+  it('preserves the detail option on object image URLs', () => {
+    const imageUrl = 'https://example.com/image.png';
+    const msgs = toLangChainMessages([
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'image_url',
+            image_url: { url: imageUrl, detail: 'high' },
+          },
+        ] as never,
+      },
+    ]);
+
+    expect(msgs[0].content).toEqual([
+      {
+        type: 'image_url',
+        image_url: { url: imageUrl, detail: 'high' },
+      },
+    ]);
+  });
+
+  it('normalizes multiple HTTP and data URL images without changing their order', () => {
+    const firstUrl = 'https://cdn.example.com/first.png';
+    const secondUrl = 'data:image/jpeg;base64,/9j/4AAQSkZJRg==';
+    const msgs = toLangChainMessages([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Compare these images' },
+          { type: 'image_url', image_url: firstUrl },
+          { type: 'image_url', image_url: { url: secondUrl, detail: 'low' } },
+        ] as never,
+      },
+    ]);
+
+    expect(msgs[0].content).toEqual([
+      { type: 'text', text: 'Compare these images' },
+      { type: 'image_url', image_url: { url: firstUrl } },
+      { type: 'image_url', image_url: { url: secondUrl, detail: 'low' } },
+    ]);
+  });
+
+  it('rejects malformed image URLs before calling a provider', () => {
+    expect(() => toLangChainMessages([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Describe this image' },
+          { type: 'image_url', image_url: { detail: 'high' } },
+        ] as never,
+      },
+    ])).toThrow('`messages[0].content[1].image_url` must be');
+  });
+
+  it.each([
+    '',
+    '   ',
+    { url: '' },
+    { url: '   ' },
+  ])('rejects an empty image URL: %j', (imageUrl) => {
+    expect(() => toLangChainMessages([{
+      role: 'user',
+      content: [{ type: 'image_url', image_url: imageUrl }] as never,
+    }])).toThrow('`messages[0].content[0].image_url` must be');
+  });
+
+  it('preserves unknown content parts for forward compatibility', () => {
+    const inputAudio = {
+      type: 'input_audio',
+      input_audio: { data: 'UklGRg==', format: 'wav' },
+    };
+    const msgs = toLangChainMessages([
+      { role: 'user', content: [inputAudio] as never },
+    ]);
+
+    expect(msgs[0].content).toEqual([inputAudio]);
+  });
 });
 
 // ── toOpenAIChatResponse ──────────────────────────────────────────────────────

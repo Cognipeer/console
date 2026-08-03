@@ -1,3 +1,5 @@
+import { redactDataUrls } from '@/lib/services/logRedaction';
+
 export type OpenAIErrorBody = {
   message: string;
   type: string;
@@ -82,7 +84,7 @@ function firstStatus(records: ErrorRecord[]): number | undefined {
 }
 
 function safeMessage(message: string): string {
-  return message
+  return redactDataUrls(message)
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
     .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, '[REDACTED]')
     .replace(/\bAIza[A-Za-z0-9_-]{20,}\b/g, '[REDACTED]')

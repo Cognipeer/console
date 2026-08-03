@@ -84,6 +84,25 @@ describe('normalizeInferenceError', () => {
     expect(result.error.message).toContain('[REDACTED]');
   });
 
+  it('redacts base64 image data from provider validation errors', () => {
+    const imagePayload = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB';
+    const error = Object.assign(
+      new Error(
+        `image_url Input should be a valid dictionary input_value='data:image/png;base64,${imagePayload}'`,
+      ),
+      { status: 400 },
+    );
+
+    const result = normalizeInferenceError(error);
+
+    expect(result).toMatchObject({
+      status: 400,
+      error: { type: 'invalid_request_error', code: 'invalid_request' },
+    });
+    expect(result.error.message).not.toContain(imagePayload);
+    expect(result.error.message).toContain('data:[REDACTED];base64,[REDACTED]');
+  });
+
   it('reads provider error details nested in arrays', () => {
     const error = {
       response: {

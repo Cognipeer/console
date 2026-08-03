@@ -38,6 +38,8 @@ export const DEFAULT_MAX_STRING_CHARS = 8 * 1024;
 const MIN_SECRET_LENGTH = 6;
 const MAX_DEPTH = 8;
 const TRUNCATION_PREVIEW_CHARS = 2048;
+const DATA_URL_PATTERN = /data:[a-z0-9.+-]+\/[a-z0-9.+-]+(?:;(?!base64(?:[,;]))[^;,\s]+)*;base64,[a-z0-9+/_=-]+/gi;
+const REDACTED_DATA_URL = 'data:[REDACTED];base64,[REDACTED]';
 
 export interface RedactOptions {
   /** Outbound secret values (runtime-header values, static credentials) to mask. */
@@ -55,15 +57,19 @@ function usableSecrets(values: Iterable<string> | undefined): string[] {
   return [...out];
 }
 
+export function redactDataUrls(str: string): string {
+  return str.replace(DATA_URL_PATTERN, REDACTED_DATA_URL);
+}
+
 function scrubString(str: string, secrets: string[]): string {
-  let out = str;
+  let out = redactDataUrls(str);
   for (const secret of secrets) out = out.replaceAll(secret, LOG_SECRET_MASK);
   return out;
 }
 
 function scrubValue(value: unknown, secrets: string[], depth: number, seen: WeakSet<object>): unknown {
   if (value === null || value === undefined) return value;
-  if (typeof value === 'string') return secrets.length ? scrubString(value, secrets) : value;
+  if (typeof value === 'string') return scrubString(value, secrets);
   if (typeof value !== 'object') return value;
   // Preserve native instances — walking a Date/Buffer/Error as a plain object
   // would erase it (Object.entries is empty → {}). Matches logger.ts.
@@ -124,7 +130,7 @@ export function redactLogString(
 ): string | undefined {
   if (!str) return str;
   const secrets = usableSecrets(secretValues);
-  const scrubbed = secrets.length ? scrubString(str, secrets) : str;
+  const scrubbed = scrubString(str, secrets);
   return scrubbed.length > maxChars ? `${scrubbed.slice(0, maxChars)}…[truncated]` : scrubbed;
 }
 

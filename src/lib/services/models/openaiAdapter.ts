@@ -75,13 +75,14 @@ export interface ChatTransformOptions {
 
 function normalizeContent(
   content: OpenAIMessage['content'],
+  messageIndex: number,
 ): string | MessageContentPart[] {
   if (typeof content === 'string') {
     return content;
   }
 
   if (Array.isArray(content)) {
-    return content.map((item) => {
+    return content.map((item, partIndex) => {
       const record = item as Record<string, unknown>;
       const type = typeof record.type === 'string' ? record.type : undefined;
 
@@ -94,10 +95,10 @@ function normalizeContent(
 
       if (type === 'image_url') {
         const rawImage = record.image_url;
-        if (typeof rawImage === 'string') {
+        if (typeof rawImage === 'string' && rawImage.trim()) {
           return {
             type: 'image_url',
-            image_url: rawImage,
+            image_url: { url: rawImage },
           } as MessageContentPart;
         }
 
@@ -108,16 +109,27 @@ function normalizeContent(
         ) {
           const url =
             typeof (rawImage as Record<string, unknown>).url === 'string'
+              && (rawImage as Record<string, string>).url.trim()
               ? (rawImage as Record<string, unknown>).url
               : undefined;
+          const detail = (rawImage as Record<string, unknown>).detail;
 
           if (url) {
             return {
               type: 'image_url',
-              image_url: url,
+              image_url: {
+                url,
+                ...(detail === 'auto' || detail === 'low' || detail === 'high'
+                  ? { detail }
+                  : {}),
+              },
             } as MessageContentPart;
           }
         }
+
+        throw new Error(
+          `\`messages[${messageIndex}].content[${partIndex}].image_url\` must be a non-empty string or an object with a non-empty \`url\` string`,
+        );
       }
 
       return record;
@@ -128,8 +140,8 @@ function normalizeContent(
 }
 
 export function toLangChainMessages(messages: OpenAIMessage[]): BaseMessage[] {
-  return messages.map((message) => {
-    const content = normalizeContent(message.content);
+  return messages.map((message, messageIndex) => {
+    const content = normalizeContent(message.content, messageIndex);
 
     switch (message.role) {
       case 'system':

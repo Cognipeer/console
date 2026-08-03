@@ -711,7 +711,9 @@ export const AzureModelProviderContract: ProviderContract<ModelProviderRuntime, 
           azureOpenAIApiVersion: apiVersion,
           temperature: overrides.temperature,
           maxTokens: overrides.maxTokens,
+          maxCompletionTokens: overrides.maxCompletionTokens,
           streaming: config.options?.streaming ?? false,
+          disableStreaming: config.options?.disableStreaming ?? false,
         });
       },
       createEmbeddingModel: (config) =>
