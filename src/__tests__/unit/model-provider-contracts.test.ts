@@ -21,6 +21,7 @@ import {
   afterAll,
   afterEach,
 } from 'vitest';
+import { http, HttpResponse } from 'msw';
 import { mswServer } from '../helpers/msw.server';
 
 // ── AWS SDK mock (Bedrock) ───────────────────────────────────────────────────
@@ -81,6 +82,7 @@ import {
   AzureModelProviderContract,
 } from '@/lib/providers/contracts/modelContracts';
 import type { ModelProviderRuntime } from '@/lib/providers/domains/model';
+import { toLangChainMessages } from '@/lib/services/models/openaiAdapter';
 
 // ── Helper ───────────────────────────────────────────────────────────────────
 
@@ -154,6 +156,52 @@ describe('openai-compatible provider', () => {
     const model = runtime
       .createChatModel!({ modelId: 'mistral-large', category: 'llm' });
     assertChatModel(model);
+  });
+
+  it('preserves canonical vision content in the provider HTTP payload', async () => {
+    let capturedBody: Record<string, unknown> | undefined;
+    mswServer.use(
+      http.post('https://api.custom.com/v1/chat/completions', async ({ request }) => {
+        capturedBody = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({
+          id: 'chatcmpl-vision',
+          object: 'chat.completion',
+          created: 1,
+          model: 'vision-model',
+          choices: [{
+            index: 0,
+            message: { role: 'assistant', content: 'A test image' },
+            finish_reason: 'stop',
+          }],
+          usage: { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 },
+        });
+      }),
+    );
+    const model = runtime.createChatModel!({
+      modelId: 'vision-model',
+      category: 'llm',
+    }) as { invoke: (messages: unknown[]) => Promise<unknown> };
+    const imageUrl = 'data:image/png;base64,iVBORw0KGgo=';
+    const messages = toLangChainMessages([{
+      role: 'user',
+      content: [
+        { type: 'text', text: 'Describe this image' },
+        { type: 'image_url', image_url: imageUrl },
+      ],
+    }]);
+
+    await model.invoke(messages);
+
+    expect(capturedBody).toMatchObject({
+      model: 'vision-model',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Describe this image' },
+          { type: 'image_url', image_url: { url: imageUrl } },
+        ],
+      }],
+    });
   });
 
   it('createEmbeddingModel returns LangChain-compatible object', () => {
@@ -402,6 +450,18 @@ describe('azure provider', () => {
     const model = runtime
       .createChatModel!({ modelId: 'gpt-4o', category: 'llm' });
     assertChatModel(model);
+  });
+
+  it('forwards provider streaming controls for eager tool calls', () => {
+    const model = runtime.createChatModel!({
+      modelId: 'o3-mini',
+      category: 'llm',
+      modelSettings: { maxCompletionTokens: 1024 },
+      options: { streaming: true, disableStreaming: true },
+    }) as unknown as Record<string, unknown>;
+
+    expect(model.disableStreaming).toBe(true);
+    expect(model.streaming).toBe(false);
   });
 
   it('createEmbeddingModel returns LangChain-compatible object', () => {

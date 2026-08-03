@@ -24,12 +24,15 @@ vi.mock('@/lib/services/models/usageLogger', () => ({
   logModelUsage: vi.fn().mockResolvedValue(undefined),
 }));
 
-vi.mock('@/lib/services/models/openaiAdapter', () => ({
-  toLangChainMessages: vi.fn().mockReturnValue([{ role: 'user', content: 'hello' }]),
-  toOpenAIChatResponse: vi.fn().mockReturnValue({ id: 'chatcmpl-1', choices: [] }),
-  toOpenAIStreamChunk: vi.fn().mockReturnValue({ id: 'chatcmpl-1', choices: [] }),
-  summarizeUsage: vi.fn().mockReturnValue({ inputTokens: 10, outputTokens: 20, totalTokens: 30 }),
-}));
+vi.mock('@/lib/services/models/openaiAdapter', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@/lib/services/models/openaiAdapter')>();
+  return {
+    ...original,
+    toOpenAIChatResponse: vi.fn().mockReturnValue({ id: 'chatcmpl-1', choices: [] }),
+    toOpenAIStreamChunk: vi.fn().mockReturnValue({ id: 'chatcmpl-1', choices: [] }),
+    summarizeUsage: vi.fn().mockReturnValue({ inputTokens: 10, outputTokens: 20, totalTokens: 30 }),
+  };
+});
 
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
@@ -195,6 +198,36 @@ describe('handleChatCompletion', () => {
         cacheHit: false,
       }),
     );
+  });
+
+  it('passes canonical OpenAI vision content to the provider runnable', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeLlmModel());
+    const chatModel = {
+      invoke: vi.fn().mockResolvedValue({ content: 'A small image', tool_calls: [] }),
+    };
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
+      runtime: { createChatModel: vi.fn().mockResolvedValue(chatModel) },
+    });
+    const imageUrl = 'data:image/png;base64,iVBORw0KGgo=';
+
+    await handleChatCompletion({
+      ...BASE_PARAMS,
+      body: {
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Describe this image' },
+            { type: 'image_url', image_url: imageUrl },
+          ],
+        }],
+      },
+    });
+
+    const messages = chatModel.invoke.mock.calls[0][0];
+    expect(messages[0].content).toEqual([
+      { type: 'text', text: 'Describe this image' },
+      { type: 'image_url', image_url: { url: imageUrl } },
+    ]);
   });
 
   it('uses provided request_id in response', async () => {

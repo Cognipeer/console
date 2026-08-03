@@ -3,6 +3,10 @@ import {
   recordUsageEvent,
   type UsageAttribution,
 } from '@/lib/services/usage/usageEvents';
+import {
+  redactLogPayload,
+  redactLogString,
+} from '@/lib/services/logRedaction';
 
 const TOKENS_PER_MILLION = 1_000_000;
 const SECONDS_PER_THOUSAND = 1_000;
@@ -159,9 +163,9 @@ export async function logModelUsage(
     requestId: payload.requestId,
     route: payload.route,
     status: payload.status,
-    providerRequest: toRecord(payload.providerRequest),
-    providerResponse: toRecord(payload.providerResponse),
-    errorMessage: payload.errorMessage,
+    providerRequest: toRecord(redactLogPayload(payload.providerRequest)),
+    providerResponse: toRecord(redactLogPayload(payload.providerResponse)),
+    errorMessage: redactLogString(payload.errorMessage),
     latencyMs: payload.latencyMs,
     inputTokens: usage.inputTokens ?? 0,
     outputTokens: usage.outputTokens ?? 0,

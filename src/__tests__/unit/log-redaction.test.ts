@@ -47,6 +47,21 @@ describe('redactLogPayload — value scrubbing', () => {
     redactLogPayload(input, { secretValues: [secret] });
     expect(input.a.b).toBe(secret);
   });
+
+  it('redacts base64 data URLs from nested persisted payloads', () => {
+    const encodedImage = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB';
+    const out = redactLogPayload({
+      messages: [{
+        content: [{
+          type: 'image_url',
+          image_url: { url: `data:image/png;base64,${encodedImage}` },
+        }],
+      }],
+    });
+
+    expect(JSON.stringify(out)).not.toContain(encodedImage);
+    expect(JSON.stringify(out)).toContain('data:[REDACTED];base64,[REDACTED]');
+  });
 });
 
 describe('redactLogPayload — sensitive key scrubbing', () => {
@@ -115,6 +130,16 @@ describe('redactLogString', () => {
     const out = redactLogString(huge, []) as string;
     expect(out.length).toBeLessThan(huge.length);
     expect(out.endsWith('…[truncated]')).toBe(true);
+  });
+
+  it('redacts embedded base64 data URLs without supplied secrets', () => {
+    const encodedImage = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB';
+    const out = redactLogString(
+      `Invalid image data:image/png;base64,${encodedImage}`,
+    );
+
+    expect(out).not.toContain(encodedImage);
+    expect(out).toContain('data:[REDACTED];base64,[REDACTED]');
   });
 });
 

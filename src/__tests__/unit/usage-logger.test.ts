@@ -245,4 +245,28 @@ describe('logModelUsage', () => {
     const payload = db.createModelUsageLog.mock.calls[0][0];
     expect(payload.totalTokens).toBe(150);
   });
+
+  it('redacts multimodal data URLs before persisting usage logs', async () => {
+    const encodedImage = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB';
+    await logModelUsage('tenant_acme', MOCK_MODEL, {
+      requestId: 'req-007',
+      route: '/api/chat',
+      status: 'error',
+      providerRequest: {
+        messages: [{
+          content: [{
+            type: 'image_url',
+            image_url: { url: `data:image/png;base64,${encodedImage}` },
+          }],
+        }],
+      },
+      providerResponse: { error: `Rejected data:image/png;base64,${encodedImage}` },
+      errorMessage: `Rejected data:image/png;base64,${encodedImage}`,
+      usage: {},
+    });
+
+    const payload = db.createModelUsageLog.mock.calls[0][0];
+    expect(JSON.stringify(payload)).not.toContain(encodedImage);
+    expect(JSON.stringify(payload)).toContain('data:[REDACTED];base64,[REDACTED]');
+  });
 });
