@@ -56,9 +56,21 @@ interface OpenAIToolCall {
   };
 }
 
+interface OpenAIStreamToolCall {
+  index: number;
+  id?: string;
+  type?: 'function';
+  function: {
+    name?: string;
+    arguments: string;
+  };
+}
+
 export interface ChatTransformOptions {
   model: string;
   stream?: boolean;
+  completionId?: string;
+  created?: number;
 }
 
 function normalizeContent(
@@ -165,21 +177,25 @@ export function toLangChainMessages(messages: OpenAIMessage[]): BaseMessage[] {
 
 function extractUsage(message: AIMessage | AIMessageChunk): UsageMetrics {
   const metadata = message.response_metadata || {};
-  const usageSource =
-    metadata.tokenUsage ||
-    metadata.token_usage ||
-    metadata.usage_metadata ||
-    {};
-  const usage =
-    typeof usageSource === 'object' && usageSource !== null
-      ? (usageSource as Record<string, unknown>)
-      : {};
+  const messageUsage = (message as { usage_metadata?: unknown }).usage_metadata;
+  const usageSources = [
+    metadata.tokenUsage,
+    metadata.token_usage,
+    metadata.usage,
+    metadata.usage_metadata,
+    messageUsage,
+  ].filter(
+    (source): source is Record<string, unknown> =>
+      typeof source === 'object' && source !== null && !Array.isArray(source),
+  );
 
   const coalesceNumber = (keys: string[]): number | undefined => {
-    for (const key of keys) {
-      const value = usage[key];
-      if (typeof value === 'number') {
-        return value;
+    for (const usage of usageSources) {
+      for (const key of keys) {
+        const value = usage[key];
+        if (typeof value === 'number') {
+          return value;
+        }
       }
     }
     return undefined;
@@ -188,17 +204,19 @@ function extractUsage(message: AIMessage | AIMessageChunk): UsageMetrics {
   const coalesceDetails = (
     keys: string[],
   ): Record<string, number> | undefined => {
-    for (const key of keys) {
-      const value = usage[key];
-      if (value && typeof value === 'object' && !Array.isArray(value)) {
-        const entries = Object.entries(value as Record<string, unknown>)
-          .filter(([, detailValue]) => typeof detailValue === 'number')
-          .map(([detailKey, detailValue]) => [
-            detailKey,
-            detailValue as number,
-          ]);
-        if (entries.length) {
-          return Object.fromEntries(entries);
+    for (const usage of usageSources) {
+      for (const key of keys) {
+        const value = usage[key];
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+          const entries = Object.entries(value as Record<string, unknown>)
+            .filter(([, detailValue]) => typeof detailValue === 'number')
+            .map(([detailKey, detailValue]) => [
+              detailKey,
+              detailValue as number,
+            ]);
+          if (entries.length) {
+            return Object.fromEntries(entries);
+          }
         }
       }
     }
@@ -235,6 +253,7 @@ function extractUsage(message: AIMessage | AIMessageChunk): UsageMetrics {
     'prompt_tokens_details',
     'promptTokensDetail',
     'prompt_tokens_detail',
+    'input_token_details',
   ]);
 
   const completionTokensDetails = coalesceDetails([
@@ -242,15 +261,35 @@ function extractUsage(message: AIMessage | AIMessageChunk): UsageMetrics {
     'completion_tokens_details',
     'completionTokensDetail',
     'completion_tokens_detail',
+    'output_token_details',
   ]);
+
+  const normalizedPromptTokensDetails = promptTokensDetails
+    ? {
+        ...promptTokensDetails,
+        ...(promptTokensDetails.cache_read !== undefined
+          ? { cached_tokens: promptTokensDetails.cache_read }
+          : {}),
+      }
+    : undefined;
+  const normalizedCompletionTokensDetails = completionTokensDetails
+    ? {
+        ...completionTokensDetails,
+        ...(completionTokensDetails.reasoning !== undefined
+          ? { reasoning_tokens: completionTokensDetails.reasoning }
+          : {}),
+      }
+    : undefined;
+
+  const nestedCachedTokens = normalizedPromptTokensDetails?.cached_tokens;
 
   return {
     inputTokens,
     outputTokens,
-    cachedInputTokens,
+    cachedInputTokens: cachedInputTokens ?? nestedCachedTokens,
     totalTokens,
-    promptTokensDetails,
-    completionTokensDetails,
+    promptTokensDetails: normalizedPromptTokensDetails,
+    completionTokensDetails: normalizedCompletionTokensDetails,
   };
 }
 
@@ -393,16 +432,26 @@ export function toOpenAIStreamChunk(
     delta.reasoning = reasoning;
   }
 
-  const chunkWithTools = chunk as AIMessageChunk & { tool_calls?: unknown };
-  const normalizedToolCalls = normalizeToolCalls(chunkWithTools.tool_calls);
+  const chunkWithTools = chunk as AIMessageChunk & {
+    tool_calls?: unknown;
+    tool_call_chunks?: unknown;
+  };
+  const additional =
+    chunk.additional_kwargs && typeof chunk.additional_kwargs === 'object'
+      ? chunk.additional_kwargs as Record<string, unknown>
+      : {};
+  const normalizedToolCalls =
+    normalizeRawStreamToolCalls(additional.tool_calls)
+    ?? normalizeToolCallChunks(chunkWithTools.tool_call_chunks)
+    ?? normalizeToolCalls(chunkWithTools.tool_calls);
   if (normalizedToolCalls) {
     delta.tool_calls = normalizedToolCalls;
   }
 
   return {
-    id: `chatcmpl_${crypto.randomUUID()}`,
+    id: options.completionId || `chatcmpl_${crypto.randomUUID()}`,
     object: 'chat.completion.chunk',
-    created: Math.floor(Date.now() / 1000),
+    created: options.created ?? Math.floor(Date.now() / 1000),
     model: options.model,
     choices: [
       {
@@ -411,12 +460,18 @@ export function toOpenAIStreamChunk(
         finish_reason: chunk.response_metadata?.finish_reason || null,
       },
     ],
-    usage: usage.totalTokens
+    usage: usage.totalTokens !== undefined
       ? {
           prompt_tokens: usage.inputTokens ?? 0,
           completion_tokens: usage.outputTokens ?? 0,
           cached_tokens: usage.cachedInputTokens ?? 0,
           total_tokens: usage.totalTokens,
+          ...(usage.promptTokensDetails
+            ? { prompt_tokens_details: usage.promptTokensDetails }
+            : {}),
+          ...(usage.completionTokensDetails
+            ? { completion_tokens_details: usage.completionTokensDetails }
+            : {}),
         }
       : undefined,
   };
@@ -492,6 +547,77 @@ function normalizeToolCalls(
       function: {
         name: nameCandidate,
         arguments: argsString,
+      },
+    };
+  });
+}
+
+function normalizeToolCallChunks(
+  rawToolCallChunks: unknown,
+): OpenAIStreamToolCall[] | undefined {
+  if (!Array.isArray(rawToolCallChunks) || rawToolCallChunks.length === 0) {
+    return undefined;
+  }
+
+  return rawToolCallChunks.map((entry, position) => {
+    const chunk = entry && typeof entry === 'object'
+      ? entry as Record<string, unknown>
+      : {};
+    const id = typeof chunk.id === 'string' && chunk.id.length > 0
+      ? chunk.id
+      : undefined;
+    const name = typeof chunk.name === 'string' && chunk.name.length > 0
+      ? chunk.name
+      : undefined;
+    const index = typeof chunk.index === 'number' ? chunk.index : position;
+    const argumentsChunk = typeof chunk.args === 'string'
+      ? chunk.args
+      : serializeArguments(chunk.args);
+
+    return {
+      index,
+      ...(id ? { id, type: 'function' as const } : {}),
+      function: {
+        ...(name ? { name } : {}),
+        arguments: argumentsChunk,
+      },
+    };
+  });
+}
+
+function normalizeRawStreamToolCalls(
+  rawToolCalls: unknown,
+): OpenAIStreamToolCall[] | undefined {
+  if (!Array.isArray(rawToolCalls) || rawToolCalls.length === 0) {
+    return undefined;
+  }
+
+  return rawToolCalls.map((entry, position) => {
+    const call = entry && typeof entry === 'object'
+      ? entry as Record<string, unknown>
+      : {};
+    const fn = call.function && typeof call.function === 'object'
+      ? call.function as Record<string, unknown>
+      : {};
+    const id = typeof call.id === 'string' && call.id.length > 0
+      ? call.id
+      : undefined;
+    const name = typeof fn.name === 'string' && fn.name.length > 0
+      ? fn.name
+      : undefined;
+    const index = typeof call.index === 'number' ? call.index : position;
+    const argumentsChunk = typeof fn.arguments === 'string'
+      ? fn.arguments
+      : fn.arguments === undefined
+        ? ''
+        : serializeArguments(fn.arguments);
+
+    return {
+      index,
+      ...(id ? { id, type: 'function' as const } : {}),
+      function: {
+        ...(name ? { name } : {}),
+        arguments: argumentsChunk,
       },
     };
   });

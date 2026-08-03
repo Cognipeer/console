@@ -77,7 +77,7 @@ interface ModelDetailDto {
     supportsStructuredOutputs?: boolean;
   };
   pricing: ModelPricing;
-  settings: Record<string, string>;
+  settings: Record<string, string | number | boolean | null>;
   semanticCache?: SemanticCacheConfig;
   inputGuardrailKey?: string;
   outputGuardrailKey?: string;
@@ -112,7 +112,7 @@ interface FormValues {
     outputTokenPer1M: number;
     cachedTokenPer1M: number;
   };
-  settings: Record<string, string>;
+  settings: Record<string, string | number | boolean | null>;
   isMultimodal: boolean;
   supportsToolCalls: boolean;
   contextWindow: number | '';
@@ -252,10 +252,7 @@ export default function EditModelPage() {
       const nextModel: ModelDetailDto = modelData.model;
       setModel(nextModel);
 
-      const settings = Object.entries(nextModel.settings || {}).reduce<Record<string, string>>((acc, [key, value]) => {
-        acc[key] = typeof value === 'string' ? value : JSON.stringify(value);
-        return acc;
-      }, {});
+      const settings = { ...nextModel.settings };
 
       const cache = nextModel.semanticCache;
 
@@ -621,7 +618,7 @@ export default function EditModelPage() {
             </Paper>
 
             <Grid>
-              <Grid.Col span={{ base: 12, md: 6 }}>
+              <Grid.Col span={{ base: 12, md: 4 }}>
                 <NumberInput
                   label={tWizard('fields.contextWindow.label')}
                   description={tWizard('fields.contextWindow.description')}
@@ -631,7 +628,7 @@ export default function EditModelPage() {
                   {...form.getInputProps('contextWindow')}
                 />
               </Grid.Col>
-              <Grid.Col span={{ base: 12, md: 6 }}>
+              <Grid.Col span={{ base: 12, md: 4 }}>
                 <NumberInput
                   label={tWizard('fields.maxOutputTokens.label')}
                   description={tWizard('fields.maxOutputTokens.description')}
@@ -639,6 +636,16 @@ export default function EditModelPage() {
                   step={1024}
                   thousandSeparator=","
                   {...form.getInputProps('maxOutputTokens')}
+                />
+              </Grid.Col>
+              <Grid.Col span={{ base: 12, md: 4 }}>
+                <NumberInput
+                  label={tWizard('fields.runtimeMaxTokens.label')}
+                  description={tWizard('fields.runtimeMaxTokens.description')}
+                  min={1}
+                  step={1024}
+                  thousandSeparator=","
+                  {...form.getInputProps('settings.maxTokens')}
                 />
               </Grid.Col>
             </Grid>

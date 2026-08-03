@@ -39,6 +39,10 @@ export const tr: typeof en = {
           'Üretilebilecek maksimum token sayısı; bağlam penceresini aşmamalıdır.',
         placeholder: 'ör. 16384',
       },
+      runtimeMaxTokens: {
+        label: 'Varsayılan maksimum token',
+        description: 'İstekte belirtilmediğinde kullanılan çalışma zamanı çıktı sınırı.',
+      },
     },
     review: {
       ...en.modelWizard.review,

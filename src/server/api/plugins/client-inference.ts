@@ -9,6 +9,7 @@ import {
   handleChatCompletion,
   handleEmbeddingRequest,
 } from '@/lib/services/models/inferenceService';
+import { normalizeInferenceError } from '@/lib/services/models/openaiErrors';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import {
   calculateCost,
@@ -293,12 +294,14 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
+      const normalizedError = normalizeInferenceError(error);
+
       try {
         const model = modelKey
           ? await getModelByKey(auth.tenantDbName, modelKey, auth.projectId)
           : null;
         if (model) {
-          const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+          const errorMessage = normalizedError.error.message;
           await logModelUsage(auth.tenantDbName, model, {
             errorMessage,
             latencyMs: Date.now() - startedAt,
@@ -316,12 +319,7 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
         logger.error('Failed to log client chat completion error', { error: logError });
       }
 
-      return reply.code(500).send({
-        error: {
-          message: error instanceof Error ? error.message : 'Inference error',
-          type: 'server_error',
-        },
-      });
+      return reply.code(normalizedError.status).send({ error: normalizedError.error });
     }
   }));
 
@@ -450,13 +448,14 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
       });
     } catch (error) {
       logger.error('Client embeddings error', { error });
+      const normalizedError = normalizeInferenceError(error);
 
       try {
         const model = modelKey
           ? await getModelByKey(auth.tenantDbName, modelKey, auth.projectId)
           : null;
         if (model) {
-          const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+          const errorMessage = normalizedError.error.message;
           await logModelUsage(auth.tenantDbName, model, {
             errorMessage,
             latencyMs: Date.now() - startedAt,
@@ -474,12 +473,7 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
         logger.error('Failed to log client embedding error', { error: logError });
       }
 
-      return reply.code(500).send({
-        error: {
-          message: error instanceof Error ? error.message : 'Inference error',
-          type: 'server_error',
-        },
-      });
+      return reply.code(normalizedError.status).send({ error: normalizedError.error });
     }
   }));
 };

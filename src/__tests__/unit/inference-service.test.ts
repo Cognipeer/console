@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { handleChatCompletion, handleEmbeddingRequest } from '@/lib/services/models/inferenceService';
+import {
+  handleChatCompletion,
+  handleEmbeddingRequest,
+  OutputTokenLimitError,
+} from '@/lib/services/models/inferenceService';
 
 // ---- mocks ----
 vi.mock('@/lib/services/models/modelService', () => ({
@@ -31,7 +35,11 @@ import { getModelByKey } from '@/lib/services/models/modelService';
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
 import { isSemanticCacheEnabled, lookupCache, storeInCache } from '@/lib/services/models/semanticCacheService';
 import { logModelUsage } from '@/lib/services/models/usageLogger';
-import { toOpenAIChatResponse, summarizeUsage } from '@/lib/services/models/openaiAdapter';
+import {
+  toOpenAIChatResponse,
+  toOpenAIStreamChunk,
+  summarizeUsage,
+} from '@/lib/services/models/openaiAdapter';
 
 // ---- helpers ----
 const makeLlmModel = (overrides = {}) => ({
@@ -322,6 +330,166 @@ describe('handleChatCompletion', () => {
     expect(result.stream).toBeInstanceOf(ReadableStream);
   });
 
+  it('emits requested stream usage as a final usage-only chunk', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeLlmModel());
+    const asyncIterator = (async function* () {
+      yield { content: 'Hello' };
+    })();
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
+      runtime: {
+        createChatModel: vi.fn().mockResolvedValue({
+          invoke: vi.fn(),
+          stream: vi.fn().mockResolvedValue(asyncIterator),
+        }),
+      },
+    });
+    (toOpenAIStreamChunk as ReturnType<typeof vi.fn>).mockReturnValue({
+      id: 'chatcmpl-1',
+      object: 'chat.completion.chunk',
+      choices: [{ index: 0, delta: { content: 'Hello' }, finish_reason: 'stop' }],
+      usage: {
+        prompt_tokens: 5,
+        completion_tokens: 2,
+        cached_tokens: 0,
+        total_tokens: 7,
+      },
+    });
+
+    const result = await handleChatCompletion({
+      ...BASE_PARAMS,
+      body: {
+        messages: [],
+        stream_options: { include_usage: true },
+      },
+      stream: true,
+    });
+    const body = await new Response(result.stream).text();
+    const chunks = body
+      .split('\n')
+      .filter((line) => line.startsWith('data: {'))
+      .map((line) => JSON.parse(line.slice(6)));
+
+    expect(chunks[0].usage).toBeUndefined();
+    expect(chunks.at(-1)).toMatchObject({
+      choices: [],
+      usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
+    });
+  });
+
+  it('emits an explanatory SSE error when output budget ends without an answer', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeLlmModel({ settings: { maxTokens: 512 } }),
+    );
+    const asyncIterator = (async function* () {
+      yield { content: '', response_metadata: { finish_reason: 'length' } };
+    })();
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
+      runtime: {
+        createChatModel: vi.fn().mockResolvedValue({
+          invoke: vi.fn(),
+          stream: vi.fn().mockResolvedValue(asyncIterator),
+        }),
+      },
+    });
+    (toOpenAIStreamChunk as ReturnType<typeof vi.fn>).mockReturnValue({
+      id: 'chatcmpl-limit',
+      object: 'chat.completion.chunk',
+      choices: [{ index: 0, delta: { content: '' }, finish_reason: 'length' }],
+      usage: {
+        prompt_tokens: 100,
+        completion_tokens: 512,
+        cached_tokens: 0,
+        total_tokens: 612,
+      },
+    });
+
+    const result = await handleChatCompletion({
+      ...BASE_PARAMS,
+      body: { messages: [], stream_options: { include_usage: true } },
+      stream: true,
+    });
+    const streamBody = await new Response(result.stream).text();
+    const errorLine = streamBody
+      .split('\n')
+      .find((line) => line.startsWith('data: {') && line.includes('"error"'));
+    const payload = JSON.parse(errorLine!.slice(6));
+
+    expect(payload.error).toMatchObject({
+      type: 'output_token_limit_exceeded',
+      code: 'output_token_limit_exceeded',
+      param: 'max_completion_tokens',
+    });
+    expect(payload.error.message).toContain('512 tokens');
+    expect(streamBody).not.toContain('"finish_reason":"length"');
+    expect(streamBody).not.toContain('data: [DONE]');
+  });
+
+  it('emits a normalized SSE error when a provider stream fails', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeLlmModel());
+    const providerError = Object.assign(new Error('Provider rate limit reached'), {
+      status: 429,
+      code: 'rate_limit_exceeded',
+    });
+    const asyncIterator = (async function* () {
+      yield { content: 'Partial' };
+      throw providerError;
+    })();
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
+      runtime: {
+        createChatModel: vi.fn().mockResolvedValue({
+          invoke: vi.fn(),
+          stream: vi.fn().mockResolvedValue(asyncIterator),
+        }),
+      },
+    });
+    (toOpenAIStreamChunk as ReturnType<typeof vi.fn>).mockReturnValueOnce({
+      id: 'chatcmpl-rate-limit',
+      object: 'chat.completion.chunk',
+      choices: [{ index: 0, delta: { content: 'Partial' }, finish_reason: null }],
+    });
+
+    const result = await handleChatCompletion({
+      ...BASE_PARAMS,
+      body: { messages: [] },
+      stream: true,
+    });
+    const streamBody = await new Response(result.stream).text();
+    const errorLine = streamBody
+      .split('\n')
+      .find((line) => line.startsWith('data: {') && line.includes('"error"'));
+    const payload = JSON.parse(errorLine!.slice(6));
+
+    expect(payload.error).toMatchObject({
+      message: 'Provider rate limit reached',
+      type: 'rate_limit_error',
+      code: 'rate_limit_exceeded',
+    });
+    expect(payload.request_id).toBe(result.requestId);
+    expect(streamBody).not.toContain('data: [DONE]');
+  });
+
+  it('throws an output token limit error for an empty non-streaming length result', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeLlmModel({ settings: { maxTokens: 512 } }),
+    );
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
+      runtime: makeChatRuntime({
+        content: '',
+        tool_calls: [],
+        response_metadata: { finish_reason: 'length' },
+      }),
+    });
+
+    await expect(handleChatCompletion({
+      ...BASE_PARAMS,
+      body: { messages: [] },
+    })).rejects.toMatchObject({
+      name: 'OutputTokenLimitError',
+      limit: 512,
+      message: expect.stringContaining('Reasoning models'),
+    } satisfies Partial<OutputTokenLimitError>);
+  });
+
   it('throws when streaming is requested but runtime does not support it', async () => {
     (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeLlmModel());
 
@@ -380,6 +548,144 @@ describe('handleChatCompletion', () => {
       expect.any(Array),
       expect.objectContaining({ stop: ['DONE'] }),
     );
+  });
+
+  it('forwards parallel tool options and normalizes strict nested schemas', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeLlmModel());
+    const chatModel = {
+      invoke: vi.fn().mockResolvedValue({ content: '', tool_calls: [] }),
+    };
+    const createChatModel = vi.fn().mockResolvedValue(chatModel);
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
+      runtime: { createChatModel },
+    });
+
+    await handleChatCompletion({
+      ...BASE_PARAMS,
+      body: {
+        messages: [],
+        strict: true,
+        parallel_tool_calls: true,
+        tools: [{
+          type: 'function',
+          function: {
+            name: 'lookup',
+            parameters: {
+              type: 'object',
+              properties: {
+                filters: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: { key: { type: 'string' } },
+                  },
+                },
+              },
+            },
+          },
+        }],
+      },
+    });
+
+    expect(chatModel.invoke).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({
+        strict: true,
+        parallel_tool_calls: true,
+        tools: [expect.objectContaining({
+          function: expect.objectContaining({
+            strict: true,
+            parameters: expect.objectContaining({
+              additionalProperties: false,
+              properties: {
+                filters: expect.objectContaining({
+                  items: expect.objectContaining({
+                    additionalProperties: false,
+                  }),
+                }),
+              },
+            }),
+          }),
+        })],
+      }),
+    );
+  });
+
+  it('disables provider streaming only for streamed tool calls', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeLlmModel());
+    const createChatModel = vi.fn().mockResolvedValue({
+      invoke: vi.fn().mockResolvedValue({
+        content: '',
+        tool_calls: [{
+          id: 'call_lookup',
+          name: 'lookup',
+          args: {},
+          type: 'tool_call',
+        }],
+        response_metadata: { finish_reason: 'tool_calls' },
+      }),
+      stream: vi.fn().mockResolvedValue((async function* () {
+        yield { content: '' };
+      })()),
+    });
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
+      runtime: { createChatModel },
+    });
+
+    await handleChatCompletion({
+      ...BASE_PARAMS,
+      body: {
+        messages: [],
+        tools: [{
+          type: 'function',
+          function: { name: 'lookup', parameters: { type: 'object' } },
+        }],
+      },
+      stream: true,
+    });
+
+    expect(createChatModel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        options: { streaming: true, disableStreaming: true },
+      }),
+    );
+  });
+
+  it('emits an explanatory SSE error for an empty eager tool result', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeLlmModel({ settings: { maxTokens: 512 } }),
+    );
+    const stream = vi.fn();
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
+      runtime: {
+        createChatModel: vi.fn().mockResolvedValue({
+          invoke: vi.fn().mockResolvedValue({
+            content: '',
+            tool_calls: [],
+            response_metadata: { finish_reason: 'length' },
+          }),
+          stream,
+        }),
+      },
+    });
+
+    const result = await handleChatCompletion({
+      ...BASE_PARAMS,
+      body: {
+        messages: [],
+        tools: [{
+          type: 'function',
+          function: { name: 'lookup', parameters: { type: 'object' } },
+        }],
+      },
+      stream: true,
+    });
+    const streamBody = await new Response(result.stream).text();
+
+    expect(streamBody).toContain('"code":"output_token_limit_exceeded"');
+    expect(streamBody).toContain('512 tokens');
+    expect(streamBody).not.toContain('"finish_reason":"length"');
+    expect(stream).not.toHaveBeenCalled();
   });
 });
 
