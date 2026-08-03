@@ -6,6 +6,7 @@ export type ModelRuntimeCategory = ModelCategory;
 
 export interface ModelRuntimeOptions {
   streaming?: boolean;
+  disableStreaming?: boolean;
 }
 
 export interface ModelRuntimeConfig {

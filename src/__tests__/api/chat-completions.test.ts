@@ -139,7 +139,7 @@ describe('POST /api/client/v1/chat/completions', () => {
       expect(res.status).toBe(400);
     });
 
-    it('returns 500 when handleChatCompletion throws because messages is missing', async () => {
+    it('returns 400 when handleChatCompletion rejects missing messages', async () => {
       // The route delegates messages validation to the service, not at the route level.
       // When messages is omitted & the service throws, the route returns 500.
       (handleChatCompletion as ReturnType<typeof vi.fn>).mockRejectedValue(
@@ -147,7 +147,7 @@ describe('POST /api/client/v1/chat/completions', () => {
       );
       const req = buildChatRequest({ model: 'gpt-4o' });
       const res = await POST(req);
-      expect(res.status).toBe(500);
+      expect(res.status).toBe(400);
     });
   });
 
@@ -199,7 +199,7 @@ describe('POST /api/client/v1/chat/completions', () => {
   });
 
   describe('service error propagation', () => {
-    it('returns 500 when inference service throws an unexpected error', async () => {
+    it('returns 404 when the requested model is not found', async () => {
       (requireApiToken as ReturnType<typeof vi.fn>).mockResolvedValue(MOCK_TOKEN_CONTEXT);
       (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(MOCK_MODEL);
       (handleChatCompletion as ReturnType<typeof vi.fn>).mockRejectedValue(
@@ -211,7 +211,7 @@ describe('POST /api/client/v1/chat/completions', () => {
         messages: [{ role: 'user', content: 'Hello' }],
       });
       const res = await POST(req);
-      expect(res.status).toBe(500);
+      expect(res.status).toBe(404);
     });
   });
 });

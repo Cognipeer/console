@@ -183,6 +183,7 @@ export const OpenAiModelProviderContract: ProviderContract<ModelProviderRuntime,
           maxTokens: overrides.maxTokens,
           reasoning: overrides.reasoning,
           streaming: config.options?.streaming ?? false,
+          disableStreaming: config.options?.disableStreaming ?? false,
         });
       },
       createEmbeddingModel: (config) =>
@@ -329,6 +330,7 @@ export const OpenAiCompatibleModelProviderContract: ProviderContract<ModelProvid
           maxTokens: overrides.maxTokens,
           reasoning: overrides.reasoning,
           streaming: config.options?.streaming ?? false,
+          disableStreaming: config.options?.disableStreaming ?? false,
         });
       },
       createEmbeddingModel: (config) =>
@@ -414,6 +416,7 @@ export const TogetherModelProviderContract: ProviderContract<ModelProviderRuntim
           temperature: overrides.temperature,
           maxTokens: overrides.maxTokens,
           streaming: config.options?.streaming ?? false,
+          disableStreaming: config.options?.disableStreaming ?? false,
         });
       },
       createEmbeddingModel: (config) =>

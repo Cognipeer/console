@@ -1174,6 +1174,10 @@ export const en = {
         description: 'Maximum generated tokens; must not exceed the context window.',
         placeholder: 'e.g. 16384',
       },
+      runtimeMaxTokens: {
+        label: 'Default max tokens',
+        description: 'Runtime output limit used when the request does not provide one.',
+      },
     },
     review: {
       title: 'Review configuration',

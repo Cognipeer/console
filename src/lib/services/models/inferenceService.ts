@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import { createLogger } from '@/lib/core/logger';
 import { withResilience } from '@/lib/core/resilience';
 import { fireAndForget } from '@/lib/core/asyncTask';
-import type { AIMessage, AIMessageChunk } from '@langchain/core/messages';
+import { AIMessageChunk, type AIMessage } from '@langchain/core/messages';
 
 const logger = createLogger('inference');
 import { IModel } from '@/lib/database';
@@ -23,6 +23,12 @@ import {
   toOpenAIStreamChunk,
   summarizeUsage,
 } from './openaiAdapter';
+import {
+  normalizeInferenceError,
+  OutputTokenLimitError,
+} from './openaiErrors';
+
+export { OutputTokenLimitError } from './openaiErrors';
 
 import { logModelUsage, TokenUsage } from './usageLogger';
 import {
@@ -301,6 +307,13 @@ function buildOverrides(body: Record<string, unknown>) {
   if (body.stop !== undefined) overrides.stop = body.stop;
   if (body.tools !== undefined) overrides.tools = body.tools;
   if (body.tool_choice !== undefined) overrides.tool_choice = body.tool_choice;
+  if (body.parallel_tool_calls !== undefined) {
+    overrides.parallel_tool_calls = body.parallel_tool_calls;
+  }
+  if (body.strict !== undefined) overrides.strict = body.strict;
+  if (body.stream_options !== undefined) {
+    overrides.stream_options = body.stream_options;
+  }
   if (body.response_format !== undefined)
     overrides.response_format = body.response_format;
   if (body.modality !== undefined) overrides.modality = body.modality;
@@ -363,12 +376,73 @@ function buildChatModelSettings(
   return settings;
 }
 
+function normalizeStrictJsonSchema(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(normalizeStrictJsonSchema);
+  }
+
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+
+  const schema = Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([key, nestedValue]) => [
+      key,
+      normalizeStrictJsonSchema(nestedValue),
+    ]),
+  );
+
+  if (schema.type === 'object' || schema.properties) {
+    schema.additionalProperties = false;
+  }
+
+  return schema;
+}
+
+function normalizeTools(tools: unknown, strictOverride: unknown): unknown {
+  if (!Array.isArray(tools)) {
+    return tools;
+  }
+
+  return tools.map((tool) => {
+    if (!tool || typeof tool !== 'object') {
+      return tool;
+    }
+
+    const normalizedTool = { ...(tool as Record<string, unknown>) };
+    if (!normalizedTool.function || typeof normalizedTool.function !== 'object') {
+      return normalizedTool;
+    }
+
+    const fn = { ...(normalizedTool.function as Record<string, unknown>) };
+    const strict = typeof strictOverride === 'boolean' ? strictOverride : fn.strict;
+    if (strict === true) {
+      fn.strict = true;
+      if (fn.parameters !== undefined) {
+        fn.parameters = normalizeStrictJsonSchema(fn.parameters);
+      }
+    }
+
+    normalizedTool.function = fn;
+    return normalizedTool;
+  });
+}
+
 function buildChatCallOptions(overrides: Record<string, unknown>) {
   const options: Record<string, unknown> = {};
 
   if (overrides.stop !== undefined) options.stop = overrides.stop;
-  if (overrides.tools !== undefined) options.tools = overrides.tools;
+  if (overrides.tools !== undefined) {
+    options.tools = normalizeTools(overrides.tools, overrides.strict);
+  }
   if (overrides.tool_choice !== undefined) options.tool_choice = overrides.tool_choice;
+  if (overrides.parallel_tool_calls !== undefined) {
+    options.parallel_tool_calls = overrides.parallel_tool_calls;
+  }
+  if (overrides.strict !== undefined) options.strict = overrides.strict;
+  if (overrides.stream_options !== undefined) {
+    options.stream_options = overrides.stream_options;
+  }
   if (overrides.response_format !== undefined) {
     options.response_format = overrides.response_format;
   }
@@ -383,6 +457,22 @@ function buildChatCallOptions(overrides: Record<string, unknown>) {
   }
 
   return options;
+}
+
+function resolveOutputTokenLimit(
+  overrides: Record<string, unknown>,
+  modelSettings: Record<string, unknown>,
+): number | undefined {
+  const candidates = [
+    overrides.max_completion_tokens,
+    overrides.max_tokens,
+    modelSettings.maxCompletionTokens,
+    modelSettings.maxTokens,
+  ];
+
+  return candidates.find(
+    (value): value is number => typeof value === 'number' && Number.isFinite(value),
+  );
 }
 
 function ensureLlmModel(model: IModel) {
@@ -739,29 +829,68 @@ export async function handleChatCompletion(params: {
   const overrides = buildOverrides(body);
   const modelSettings = buildChatModelSettings(model.settings, overrides);
   const callOptions = buildChatCallOptions(overrides);
+  const outputTokenLimit = resolveOutputTokenLimit(overrides, modelSettings);
+  const disableProviderStreaming = Boolean(
+    stream && Array.isArray(overrides.tools) && overrides.tools.length > 0,
+  );
+  const includeStreamUsage =
+    asRecord(overrides.stream_options).include_usage === true;
+
+  if (disableProviderStreaming) {
+    delete callOptions.stream_options;
+  }
 
   const chatModel = ensureChatRunnable(await runtime.createChatModel({
     modelId: model.modelId,
     category: model.category,
     modelSettings,
-    options: { streaming: Boolean(stream) },
+    options: {
+      streaming: Boolean(stream),
+      disableStreaming: disableProviderStreaming,
+    },
   }));
 
   if (stream) {
-    if (typeof chatModel.stream !== 'function') {
+    if (!disableProviderStreaming && typeof chatModel.stream !== 'function') {
       throw new Error('Model provider does not support streaming responses');
     }
 
-    const asyncIterator = await withResilience(
-      () => chatModel.stream!(messages, callOptions) as Promise<AsyncIterable<AIMessageChunk>>,
-      { key: `chat-stream:${model.providerKey}` },
-    );
+    let asyncIterator: AsyncIterable<AIMessageChunk>;
+    if (disableProviderStreaming) {
+      const eagerMessage = await withResilience(
+        () => chatModel.invoke(messages, callOptions),
+        { key: `chat:${model.providerKey}` },
+      );
+      asyncIterator = (async function* () {
+        yield new AIMessageChunk({
+          content: eagerMessage.content,
+          additional_kwargs: eagerMessage.additional_kwargs,
+          response_metadata: eagerMessage.response_metadata,
+          id: eagerMessage.id,
+          name: eagerMessage.name,
+          usage_metadata: eagerMessage.usage_metadata,
+          tool_calls: eagerMessage.tool_calls,
+          invalid_tool_calls: eagerMessage.invalid_tool_calls,
+        });
+      })();
+    } else {
+      asyncIterator = await withResilience(
+        () => chatModel.stream!(messages, callOptions) as Promise<AsyncIterable<AIMessageChunk>>,
+        { key: `chat-stream:${model.providerKey}` },
+      );
+    }
     const startedAt = Date.now();
+    const completionId = `chatcmpl_${crypto.randomUUID()}`;
+    const completionCreated = Math.floor(Date.now() / 1000);
 
     const readable = new ReadableStream<Uint8Array>({
       async start(controller) {
         let aggregatedChunk: AIMessageChunk | null = null;
         let lastUsage: TokenUsage | undefined;
+        let finalUsagePayload: Record<string, unknown> | undefined;
+        let terminalFinishReason: string | undefined;
+        let hasFinalOutput = false;
+        let outputLimitError: OutputTokenLimitError | null = null;
         const toolCalls: ToolCallPayload[] = [];
 
         try {
@@ -780,7 +909,23 @@ export async function handleChatCompletion(params: {
             const payload = toOpenAIStreamChunk(chunk, {
               model: model.modelId,
               stream: true,
+              completionId,
+              created: completionCreated,
             });
+            const choice = payload.choices[0];
+            if (typeof choice?.finish_reason === 'string') {
+              terminalFinishReason = choice.finish_reason;
+            }
+            const delta = choice?.delta as Record<string, unknown> | undefined;
+            if (
+              guardrailContentToText(delta?.content).trim()
+              || (Array.isArray(delta?.tool_calls) && delta.tool_calls.length > 0)
+            ) {
+              hasFinalOutput = true;
+            }
+            if (terminalFinishReason === 'length' && !hasFinalOutput) {
+              outputLimitError = new OutputTokenLimitError(outputTokenLimit);
+            }
 
             if (payload.usage) {
               lastUsage = {
@@ -789,14 +934,45 @@ export async function handleChatCompletion(params: {
                 cachedInputTokens: payload.usage.cached_tokens,
                 totalTokens: payload.usage.total_tokens,
               };
+              if (includeStreamUsage) {
+                finalUsagePayload = payload.usage;
+                payload.usage = undefined;
+              }
             }
 
+            if (!outputLimitError) {
+              controller.enqueue(
+                encoder.encode(`data: ${JSON.stringify(payload)}\n\n`),
+              );
+            }
+          }
+
+          if (outputLimitError) {
+            const normalizedError = normalizeInferenceError(outputLimitError);
             controller.enqueue(
-              encoder.encode(`data: ${JSON.stringify(payload)}\n\n`),
+              encoder.encode(`data: ${JSON.stringify({
+                error: normalizedError.error,
+                request_id: requestId,
+              })}\n\n`),
             );
           }
 
-          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+          if (!outputLimitError && includeStreamUsage && finalUsagePayload) {
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify({
+                id: completionId,
+                object: 'chat.completion.chunk',
+                created: completionCreated,
+                model: model.modelId,
+                choices: [],
+                usage: finalUsagePayload,
+              })}\n\n`),
+            );
+          }
+
+          if (!outputLimitError) {
+            controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+          }
           controller.close();
 
           const latencyMs = Date.now() - startedAt;
@@ -815,7 +991,7 @@ export async function handleChatCompletion(params: {
             logModelUsage(tenantDbName, model, {
               requestId,
               route: 'chat.completions',
-              status: 'success',
+              status: outputLimitError ? 'error' : 'success',
               providerRequest: sanitizeForLogging({
                 model: modelKey,
                 messages: body.messages,
@@ -823,6 +999,7 @@ export async function handleChatCompletion(params: {
                 stream: true,
               }),
               providerResponse: sanitizeForLogging(providerResponse),
+              errorMessage: outputLimitError?.message,
               latencyMs,
               usage,
             }),
@@ -852,7 +1029,8 @@ export async function handleChatCompletion(params: {
           }
         } catch (error: unknown) {
           const latencyMs = Date.now() - startedAt;
-          const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+          const normalizedError = normalizeInferenceError(error);
+          const errorMessage = normalizedError.error.message;
           fireAndForget('log-stream-error', () =>
             logModelUsage(tenantDbName, model, {
               requestId,
@@ -871,7 +1049,13 @@ export async function handleChatCompletion(params: {
             }),
           );
 
-          controller.error(error);
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify({
+              error: normalizedError.error,
+              request_id: requestId,
+            })}\n\n`),
+          );
+          controller.close();
         }
       },
     });
@@ -889,6 +1073,14 @@ export async function handleChatCompletion(params: {
     model: model.modelId,
     stream: false,
   });
+
+  if (
+    aiMessage.response_metadata?.finish_reason === 'length'
+    && !guardrailContentToText(aiMessage.content).trim()
+    && getToolCallCount(aiMessage) === 0
+  ) {
+    throw new OutputTokenLimitError(outputTokenLimit);
+  }
 
   const usage = summarizeUsage(aiMessage) as TokenUsage;
   const toolCallCount = getToolCallCount(aiMessage);
