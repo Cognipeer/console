@@ -4,6 +4,7 @@ import { redirect } from 'next/navigation';
 import DashboardLayout from '@/components/layout/DashboardLayout';
 import { getDatabase } from '@/lib/database';
 import { normalizeServicePermissions } from '@/lib/security/rbac';
+import { isSupportReachable } from '@/lib/services/support/supportHandoff';
 
 interface DashboardRouteLayoutProps {
   children: ReactNode;
@@ -53,6 +54,7 @@ export default async function DashboardRouteLayout({ children }: DashboardRouteL
 
   return (
     <DashboardLayout
+      supportEnabled={isSupportReachable()}
       user={{
         name: email ? email.split('@')[0] : 'Account',
         email,

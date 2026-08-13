@@ -37,6 +37,12 @@ class EnvConfigSource implements ConfigSource {
 export interface AppConfig {
   nodeEnv: string;
 
+  deployment: {
+    /** saas = Cognipeer-hosted, onprem = customer-hosted. */
+    mode: 'saas' | 'onprem';
+    isOnPrem: boolean;
+  };
+
   license: {
     offlinePublicKey: string;
     offlinePublicKeyPath: string;
@@ -85,6 +91,19 @@ export interface AppConfig {
     bootstrapAdminEmail: string;
     bootstrapAdminPassword: string;
     bootstrapAdminName: string;
+  };
+
+  /**
+   * Cognipeer Support handoff. Console never sends the secret to the browser:
+   * it exchanges it server-to-server for a single-use CRM code.
+   */
+  support: {
+    /** Public Support app URL. Every Support entry point stays hidden while this is empty. */
+    baseUrl: string;
+    /** CRM API that issues handoff codes. */
+    crmApiUrl: string;
+    /** Must equal CRM's SUPPORT_HANDOFF_SECRET_CONSOLE. */
+    handoffSecret: string;
   };
 
   smtp: {
@@ -291,9 +310,22 @@ function oneOf<T extends string>(
 
 function buildConfig(source: ConfigSource): AppConfig {
   const nodeEnv = str(source, 'NODE_ENV', 'development');
+  const databaseProvider = oneOf(source, 'DB_PROVIDER', ['mongodb', 'sqlite'], 'sqlite');
+  // SQLite is the self-hosted default, so it decides the mode unless an operator says otherwise.
+  const deploymentMode = oneOf(
+    source,
+    'DEPLOYMENT_MODE',
+    ['saas', 'onprem'],
+    databaseProvider === 'sqlite' ? 'onprem' : 'saas',
+  );
 
   return {
     nodeEnv,
+
+    deployment: {
+      mode: deploymentMode,
+      isOnPrem: deploymentMode === 'onprem',
+    },
 
     license: {
       offlinePublicKey: str(source, 'OFFLINE_LICENSE_PUBLIC_KEY', ''),
@@ -308,7 +340,7 @@ function buildConfig(source: ConfigSource): AppConfig {
     },
 
     database: {
-      provider: oneOf(source, 'DB_PROVIDER', ['mongodb', 'sqlite'], 'sqlite'),
+      provider: databaseProvider,
       uri: str(source, 'MONGODB_URI', ''),
       mainDbName: str(source, 'MAIN_DB_NAME', 'console_main'),
       dataDir: str(source, 'SQLITE_DATA_DIR', './data'),
@@ -331,6 +363,12 @@ function buildConfig(source: ConfigSource): AppConfig {
       bootstrapAdminEmail: str(source, 'BOOTSTRAP_ADMIN_EMAIL', ''),
       bootstrapAdminPassword: str(source, 'BOOTSTRAP_ADMIN_PASSWORD', ''),
       bootstrapAdminName: str(source, 'BOOTSTRAP_ADMIN_NAME', 'Administrator'),
+    },
+
+    support: {
+      baseUrl: str(source, 'SUPPORT_BASE_URL', '').replace(/\/$/, ''),
+      crmApiUrl: str(source, 'SUPPORT_CRM_API_URL', '').replace(/\/$/, ''),
+      handoffSecret: str(source, 'SUPPORT_HANDOFF_SECRET', ''),
     },
 
     smtp: {
