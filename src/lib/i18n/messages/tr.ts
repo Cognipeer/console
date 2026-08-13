@@ -58,6 +58,15 @@ export const tr: typeof en = {
       maxOutputTokens: 'Maksimum çıktı token sayısı bağlam penceresini aşamaz.',
     },
   },
+  account: {
+    ...en.account,
+    support: 'Yardım ve Destek',
+  },
+  notifications: {
+    ...en.notifications,
+    supportErrorTitle: 'Destek açılamadı',
+    supportErrorMessage: 'Destek şu anda açılamadı. Lütfen kısa süre sonra tekrar deneyin.',
+  },
   navigation: {
     ...en.navigation,
     evaluations: 'Değerlendirme',

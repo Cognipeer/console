@@ -111,6 +111,8 @@ export const en = {
     logoutSuccessMessage: 'You have been logged out successfully',
     logoutErrorTitle: 'Error',
     logoutErrorMessage: 'Failed to logout',
+    supportErrorTitle: 'Support unavailable',
+    supportErrorMessage: 'Support could not be opened. Please try again shortly.',
     loginFailedTitle: 'Login Failed',
     invalidCredentials: 'Invalid credentials',
     loginSuccess: 'Login successful!',
@@ -127,6 +129,7 @@ export const en = {
     menuLabel: 'Account',
     settings: 'Settings',
     license: 'License',
+    support: 'Help & Support',
     logout: 'Logout',
   },
   breadcrumbs: {

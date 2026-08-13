@@ -287,6 +287,14 @@
         "/api/client/v1/realtime",
         "/api/client/v1/realtime/*"
       ]
+    },
+    "SUPPORT": {
+      "name": "Cognipeer Support",
+      "description": "Hand the signed-in user over to Cognipeer Support with a single-use CRM code",
+      "endpoints": [
+        "/api/support/status",
+        "/api/support/handoff"
+      ]
     }
   },
   "licenses": {

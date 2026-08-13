@@ -16,6 +16,7 @@ import {
   IconBook,
   IconCertificate,
   IconChevronDown,
+  IconLifebuoy,
   IconLogout,
   IconMenu2,
   IconMoon,
@@ -34,9 +35,11 @@ interface TopbarV2Props {
     licenseType: string;
   };
   isTenantAdmin: boolean;
+  supportEnabled?: boolean;
   onSearchClick: () => void;
   onLauncherClick: () => void;
   onDocsClick: () => void;
+  onSupportClick?: () => void;
   onLogout: () => void;
   onNavigate: (href: string) => void;
   onMobileNavClick: () => void;
@@ -46,9 +49,11 @@ interface TopbarV2Props {
 export default function TopbarV2({
   user,
   isTenantAdmin,
+  supportEnabled = false,
   onSearchClick,
   onLauncherClick,
   onDocsClick,
+  onSupportClick,
   onLogout,
   onNavigate,
   onMobileNavClick,
@@ -186,6 +191,11 @@ export default function TopbarV2({
               onClick={() => onNavigate('/dashboard/license')}
             >
               {tAccount('license')}
+            </Menu.Item>
+          ) : null}
+          {supportEnabled && onSupportClick ? (
+            <Menu.Item leftSection={<IconLifebuoy size={14} />} onClick={onSupportClick}>
+              {tAccount('support')}
             </Menu.Item>
           ) : null}
           <Menu.Divider />
