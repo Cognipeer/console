@@ -30,7 +30,7 @@ export default defineConfig({
       { text: 'SDK Docs', link: 'https://cognipeer.github.io/console-sdk/' },
       { text: 'Licensing', link: '/guide/licensing' },
       {
-        text: 'v0.1.0',
+        text: 'v1.2.20',
         items: [
           { text: 'Changelog', link: '/changelog' },
           { text: 'Contributing', link: '/contributing' },
