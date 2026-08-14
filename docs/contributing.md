@@ -102,4 +102,8 @@ npm run test
 npm run docs:build
 ```
 
+## Release Process
+
+For the public release-order runbook, see [Releasing](/guide/releasing).
+
 If you are changing licensing, community policies, or release-process documents, update the root repo files and the mirrored pages under `docs/guide/` in the same pull request.

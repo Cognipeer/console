@@ -78,6 +78,7 @@ docker run -p 3000:3000 --env-file .env.local cognipeer-console
 - [Guide](/guide/getting-started): setup, architecture, deployment, providers, and feature walkthroughs.
 - [Core Modules](/guide/core-overview): config, request context, cache, resilience, runtime pool, health, lifecycle, and CORS.
 - [API Reference](/api/overview): gateway endpoints for chat, embeddings, agents, tools, tracing, vector, Knowledge Engine, files, and health.
+- [Releasing](/guide/releasing): the required release order for community and enterprise SaaS, plus the tag-driven runbook.
 - [Using the SDK](/guide/sdk-integration): where Console stops, where the SDK starts, and how teams should split responsibility.
 - [Licensing](/guide/licensing): AGPL community terms, commercial options, and redistribution guidance.
 - [Security](/guide/security): secret handling, hardening defaults, and vulnerability disclosure workflow.
