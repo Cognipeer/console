@@ -32,6 +32,7 @@
 
 import type { IModelPricing } from '@/lib/database';
 import { safeFetch } from '@/lib/security/outboundFetch';
+import { normalizeModelName } from './modelTraits';
 
 export const MODEL_PRICE_CATALOG_URL =
   'https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json';
@@ -108,86 +109,25 @@ export function perTokenToPerMillion(costPerToken: unknown): number {
   return Math.round(value * 1_000_000 * 1_000_000) / 1_000_000;
 }
 
-// ── Deterministic quality-tier inference ──────────────────────────────────
+// ── Deterministic name-derived traits ─────────────────────────────────────
 //
-// A transparent, dependency-free quality prior for the recommendation
-// engine's guard rails: model names carry size/tier markers with a stable
-// industry convention. This is a PRIOR, not a verdict — parity evidence
-// always outranks it. Unmarked names sit at the STANDARD tier.
+// Quality tier, parameter count, open-weight family and multilingual
+// expectation all live in `modelTraits` — they are pure string work over a
+// model NAME and are needed by callers that never touch pricing. Re-exported
+// here because this module was their original home.
 
-export const MODEL_TIER_STANDARD = 3;
-
-/** Marker → tier. 1 = smallest. Checked as whole name tokens. */
-const TIER_MARKERS: Record<string, number> = {
-  nano: 1,
-  micro: 1,
-  tiny: 1,
-  mini: 2,
-  small: 2,
-  lite: 2,
-  flash: 2,
-  haiku: 2,
-  sonnet: 3,
-  medium: 3,
-  pro: 4,
-  large: 4,
-  opus: 4,
-  ultra: 4,
-  max: 4,
-};
-
-/**
- * Infer a coarse quality tier (1 smallest … 4 largest) from a model name's
- * tier markers. Tokenizes the normalized name on separators; the SMALLEST
- * marker found wins (a "pro-mini" is a mini). No marker ⇒ STANDARD (3).
- */
-export function inferModelTier(raw: string): number {
-  const tokens = normalizeModelName(raw).split(/[^a-z0-9.]+/).filter(Boolean);
-  let tier: number | undefined;
-  for (const token of tokens) {
-    const marked = TIER_MARKERS[token];
-    if (marked !== undefined && (tier === undefined || marked < tier)) tier = marked;
-  }
-  return tier ?? MODEL_TIER_STANDARD;
-}
-
-/**
- * Canonical form of a model name for cross-provider matching:
- *  - lowercase,
- *  - drop provider path prefixes ('azure/gpt-4o' → 'gpt-4o'),
- *  - drop dotted vendor/region prefixes ('us.anthropic.claude-…' →
- *    'claude-…'); only non-numeric segments are treated as prefixes so
- *    version dots ('gpt-4.1') survive,
- *  - drop trailing date suffixes ('-2025-09-29', '-20250929') and '-latest',
- *  - collapse duplicate separators and trim stray ones.
- */
-export function normalizeModelName(raw: string): string {
-  let name = (raw ?? '').trim().toLowerCase();
-
-  const slash = name.lastIndexOf('/');
-  if (slash >= 0) name = name.slice(slash + 1);
-
-  // Dotted prefixes: letters/underscores/hyphens only, so 'gpt-4.1' keeps
-  // its dot ('gpt-4' contains a digit and never matches).
-  for (;;) {
-    const stripped = name.replace(/^[a-z][a-z_-]*\./, '');
-    if (stripped === name || stripped.length === 0) break;
-    name = stripped;
-  }
-
-  for (;;) {
-    const stripped = name
-      .replace(/-20\d{2}-\d{2}-\d{2}$/, '')
-      .replace(/-20\d{6}$/, '')
-      .replace(/-latest$/, '');
-    if (stripped === name) break;
-    name = stripped;
-  }
-
-  name = name.replace(/[-_]{2,}/g, (run) => run[0]);
-  name = name.replace(/^[-_.]+|[-_.]+$/g, '');
-  return name;
-}
+export {
+  MODEL_TIER_STANDARD,
+  normalizeModelName,
+  inferModelTier,
+  inferModelTierDetail,
+  inferActiveParamsB,
+  inferTotalParamsB,
+  isOpenWeightModel,
+  inferMultilingualSupport,
+  type ModelTierDetail,
+  type MultilingualSupport,
+} from './modelTraits';
 
 interface RawCatalogEntry {
   input_cost_per_token?: number;
@@ -312,6 +252,17 @@ export function getCatalogStatus(): ModelPriceCatalogStatus {
     fetchedAt: cache?.fetchedAt.toISOString(),
     source: MODEL_PRICE_CATALOG_URL,
   };
+}
+
+/**
+ * The whole loaded catalog, unpaged. `listCatalogEntries` caps a page at 500
+ * because it backs a UI table; callers that need to REASON over the catalog
+ * (the recommendation engine ranks every chat-capable model against a
+ * baseline) need all of it. The entries come from the module's 24h in-memory
+ * cache, so this is a array reference, not a fetch.
+ */
+export async function getCatalogEntries(): Promise<ModelPriceCatalogEntry[]> {
+  return (await ensureCatalog()).entries;
 }
 
 /** Paged, key-sorted slice of the catalog; `search` filters by substring. */

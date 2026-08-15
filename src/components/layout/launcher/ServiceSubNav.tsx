@@ -35,6 +35,7 @@ import {
   IconPlayerPlay,
   IconReportAnalytics,
   IconChartHistogram,
+  IconStethoscope,
   IconRobot,
   IconScan,
   IconServer,
@@ -274,6 +275,7 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
           !p.startsWith('/dashboard/cost/reports') &&
           !p.startsWith('/dashboard/cost/recommendations') &&
           !p.startsWith('/dashboard/cost/analysis') &&
+          !p.startsWith('/dashboard/cost/prescriptions') &&
           !p.startsWith('/dashboard/cost/parity')),
     },
     {
@@ -289,6 +291,13 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       href: '/dashboard/cost/analysis',
       icon: IconChartHistogram,
       matcher: (p) => p.startsWith('/dashboard/cost/analysis'),
+    },
+    {
+      id: 'prescriptions',
+      label: 'Prescriptions',
+      href: '/dashboard/cost/prescriptions',
+      icon: IconStethoscope,
+      matcher: (p) => p.startsWith('/dashboard/cost/prescriptions'),
     },
     {
       // EE overlay routes (abacus module) — community builds without the

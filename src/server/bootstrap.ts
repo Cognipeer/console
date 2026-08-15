@@ -25,6 +25,7 @@ import { startOcrJobQueueConsumer } from '@/lib/services/ocrJobs';
 import { startBatchQueueConsumer } from '@/lib/services/batch';
 import { startDatasetGenerationConsumer } from '@/lib/services/evaluation/datasetGenerationConsumer';
 import { startSnapshotQueueConsumer } from '@/lib/services/snapshots/snapshotConsumer';
+import { startPrescriptionQueueConsumer } from '@/lib/services/prescriptions/reportConsumer';
 import { startRedTeamQueueConsumer } from '@/lib/services/redteam/campaignConsumer';
 import { startEvaluationRunQueueConsumer } from '@/lib/services/evaluation/evaluationRunConsumer';
 import { startAnalysisRunQueueConsumer } from '@/lib/services/analysis/analysisRunConsumer';
@@ -273,6 +274,7 @@ async function runBootstrap(): Promise<void> {
       startBatchQueueConsumer(),
       startDatasetGenerationConsumer(),
       startSnapshotQueueConsumer(),
+      startPrescriptionQueueConsumer(),
       startRedTeamQueueConsumer(),
       startEvaluationRunQueueConsumer(),
       startAnalysisRunQueueConsumer(),

@@ -44,6 +44,7 @@ import { createDataset } from '@/lib/services/evaluation/service';
 import { toUtcDay } from '@/lib/services/usage/usageBreakdown';
 import { anonymizeText, type AnonymizeOptions } from '@/lib/services/pii/anonymize';
 import { redactLogPayload } from '@/lib/services/logRedaction';
+import { detectLanguageMix } from '@/lib/services/workload/workloadSignals';
 import type {
   CreateSnapshotParams,
   CreateSnapshotResult,
@@ -956,6 +957,29 @@ export interface SnapshotBuildOutput {
 }
 
 /**
+ * Stamp a `lang:<iso>` tag on a snapshot item from its human turns.
+ *
+ * A model-parity verdict averaged over mixed-language traffic hides the
+ * failure that matters most when evaluating small open-weight candidates:
+ * they are documented on English benchmarks and degrade elsewhere. Tagging
+ * at snapshot time — the existing `tags` field, no schema change — lets a
+ * parity or matrix run be read PER LANGUAGE afterwards, which turns "this
+ * model scored 0.4" into "this model is fine in English and unusable in
+ * Turkish". Unclassifiable items are left untagged rather than guessed.
+ */
+function withLanguageTag(item: SnapshotDatasetItem): SnapshotDatasetItem {
+  const texts = item.input
+    .filter((turn) => turn.role === 'user' || turn.role === 'system')
+    .map((turn) => turn.content);
+  if (texts.length === 0) return item;
+  const primary = detectLanguageMix(texts).primary;
+  if (primary === 'unknown') return item;
+  const tag = `lang:${primary}`;
+  if (item.tags?.includes(tag)) return item;
+  return { ...item, tags: [...(item.tags ?? []), tag] };
+}
+
+/**
  * Scan, sample, map and anonymize — the heavy stage shared by the synchronous
  * path (`createSnapshotDataset`) and the background job (`snapshotJob.ts`).
  * Refuses to run without valid anonymization options.
@@ -985,7 +1009,8 @@ export async function buildSnapshotDataset(
   let noContentSessions = 0;
   // Datasets persist as ONE document — stay far below Mongo's 16MB cap.
   let payloadBytes = 0;
-  const pushWithinBudget = (item: SnapshotDatasetItem): boolean => {
+  const pushWithinBudget = (rawItem: SnapshotDatasetItem): boolean => {
+    const item = withLanguageTag(rawItem);
     const itemBytes = Buffer.byteLength(JSON.stringify(item), 'utf8');
     if (payloadBytes + itemBytes > SNAPSHOT_PAYLOAD_BUDGET_BYTES) {
       skipped.sizeCapped += 1;

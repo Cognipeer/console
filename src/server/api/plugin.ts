@@ -60,6 +60,7 @@ import { configApiPlugin } from './plugins/config';
 import { costApiPlugin } from './plugins/cost';
 import { modelPriceCatalogApiPlugin } from './plugins/model-price-catalog';
 import { snapshotsApiPlugin } from './plugins/snapshots';
+import { prescriptionsApiPlugin } from './plugins/prescriptions';
 import { datasetImportApiPlugin } from './plugins/dataset-import';
 import { dashboardApiPlugin } from './plugins/dashboard';
 import { filesApiPlugin } from './plugins/files';
@@ -440,6 +441,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(costApiPlugin);
   await app.register(modelPriceCatalogApiPlugin);
   await app.register(snapshotsApiPlugin);
+  await app.register(prescriptionsApiPlugin);
   await app.register(datasetImportApiPlugin);
   await app.register(dashboardApiPlugin);
   await app.register(filesApiPlugin);

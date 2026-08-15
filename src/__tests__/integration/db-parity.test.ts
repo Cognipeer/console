@@ -1182,3 +1182,111 @@ describeForEachProvider('Evaluation dataset items — destructive-write safety',
     expect(retried.itemCount).toBe(1);
   });
 });
+
+describeForEachProvider('Prescription reports CRUD + lifecycle', (getDb) => {
+  const tenantId = 'tenant-prescription-parity';
+  const dbName = `tenant_prescription_${Date.now()}`;
+  const projectId = 'proj-rx-1';
+
+  beforeEach(async () => {
+    const db = getDb();
+    await db.switchToTenant(dbName);
+  });
+
+  it('creates a pending report and flips it to ready with findings', async () => {
+    const db = getDb();
+    const created = await db.createPrescriptionReport({
+      tenantId,
+      projectId,
+      subjectKind: 'agent',
+      subjectName: 'pulse-main',
+      windowDays: 14,
+      status: 'pending',
+      findings: [],
+      createdBy: 'tester',
+    });
+    expect(created._id).toBeTruthy();
+    expect(created.status).toBe('pending');
+
+    const findings = [
+      {
+        id: 'cache-hit-low',
+        detector: 'cache-hit-low',
+        severity: 'critical',
+        title: 'Prompt cache barely used',
+        estMonthlySavingsUsd: 73.5,
+        status: 'open',
+      },
+    ];
+    const ready = await db.updatePrescriptionReport(String(created._id), {
+      status: 'ready',
+      findings,
+      totals: { sessions: 500, requests: 10000, totalTokens: 52_000_000, costUsd: 500 },
+      from: new Date('2026-08-01T00:00:00.000Z'),
+      to: new Date('2026-08-15T00:00:00.000Z'),
+      finishedAt: new Date(),
+    });
+    expect(ready?.status).toBe('ready');
+    expect(ready?.findings).toHaveLength(1);
+    expect((ready?.findings?.[0] as { estMonthlySavingsUsd: number }).estMonthlySavingsUsd).toBe(73.5);
+    expect((ready?.totals as { costUsd: number })?.costUsd).toBe(500);
+
+    const found = await db.findPrescriptionReportById(String(created._id));
+    expect(found?.subjectName).toBe('pulse-main');
+    expect(found?.windowDays).toBe(14);
+    expect(found?.from?.toISOString()).toBe('2026-08-01T00:00:00.000Z');
+  });
+
+  it('lists by project + subject filters with total, newest first', async () => {
+    const db = getDb();
+    await db.createPrescriptionReport({
+      tenantId, projectId, subjectKind: 'workspace', subjectName: null,
+      windowDays: 14, status: 'ready', findings: [],
+    });
+    await db.createPrescriptionReport({
+      tenantId, projectId, subjectKind: 'agent', subjectName: 'worker',
+      windowDays: 7, status: 'ready', findings: [],
+    });
+    await db.createPrescriptionReport({
+      tenantId, projectId: 'proj-other', subjectKind: 'agent', subjectName: 'worker',
+      windowDays: 7, status: 'ready', findings: [],
+    });
+
+    const all = await db.listPrescriptionReports({ projectId });
+    expect(all.total).toBeGreaterThanOrEqual(2);
+    expect(all.reports.every((r) => r.projectId === projectId)).toBe(true);
+
+    const workers = await db.listPrescriptionReports({
+      projectId, subjectKind: 'agent', subjectName: 'worker',
+    });
+    expect(workers.total).toBe(1);
+    expect(workers.reports[0].subjectName).toBe('worker');
+  });
+
+  it('persists a narrative and deletes the report', async () => {
+    const db = getDb();
+    const created = await db.createPrescriptionReport({
+      tenantId, projectId, subjectKind: 'model', subjectName: 'gpt-5.6-terra',
+      windowDays: 30, status: 'ready', findings: [],
+    });
+    const generatedAt = new Date('2026-08-15T12:00:00.000Z');
+    const withNarrative = await db.updatePrescriptionReport(String(created._id), {
+      narrative: { text: '## Summary\nAll good.', modelKey: 'hub-model-1', generatedAt },
+    });
+    expect(withNarrative?.narrative?.text).toContain('All good');
+    expect(withNarrative?.narrative?.modelKey).toBe('hub-model-1');
+
+    const reread = await db.findPrescriptionReportById(String(created._id));
+    expect(reread?.narrative?.generatedAt?.toISOString()).toBe(generatedAt.toISOString());
+
+    expect(await db.deletePrescriptionReport(String(created._id))).toBe(true);
+    expect(await db.findPrescriptionReportById(String(created._id))).toBeNull();
+  });
+
+  it('is malformed-id safe on the mongo side', async () => {
+    const db = getDb();
+    expect(await db.findPrescriptionReportById('not-an-object-id')).toBeNull();
+    expect(await db.updatePrescriptionReport('not-an-object-id', { status: 'failed' })).toBeNull();
+    expect(await db.deletePrescriptionReport('not-an-object-id')).toBe(false);
+  });
+});

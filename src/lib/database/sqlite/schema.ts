@@ -1124,6 +1124,30 @@ export const TENANT_SCHEMA_SQL = `
     metadata TEXT DEFAULT '{}'
   );
 
+  CREATE TABLE IF NOT EXISTS prescription_reports (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT NOT NULL,
+    subjectKind TEXT NOT NULL,
+    subjectName TEXT,
+    windowDays INTEGER NOT NULL,
+    fromAt TEXT,
+    toAt TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    error TEXT,
+    totals TEXT,
+    findings TEXT NOT NULL DEFAULT '[]',
+    narrative TEXT,
+    createdBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL,
+    finishedAt TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_prescription_reports_project
+    ON prescription_reports (projectId, createdAt);
+  CREATE INDEX IF NOT EXISTS idx_prescription_reports_subject
+    ON prescription_reports (projectId, subjectKind, subjectName);
+
   CREATE TABLE IF NOT EXISTS incidents (
     id TEXT PRIMARY KEY,
     tenantId TEXT NOT NULL,
