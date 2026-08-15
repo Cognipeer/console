@@ -8,10 +8,14 @@ drive them.
 
 | Route group | Backs | Edition |
 |---|---|---|
-| `/api/cost/*` | Model costs, Agent costs, Pricing, Reports | Community |
-| `/api/model-price-catalog*` | Market reference prices behind the Pricing page and the Model Hub | Community |
-| `/api/prescriptions/*` | Prescriptions (automated analysis reports) | Community |
+| `/api/cost/*` | Model costs, Agent costs, Analysis, Pricing, Reports | **Enterprise** |
+| `/api/prescriptions/*` | Prescriptions (automated reports) | **Enterprise** |
 | `/api/abacus/*` | Recommendations, Parity tests, Model matrix | **Enterprise** |
+| `/api/model-price-catalog*` | Market reference prices behind the Pricing page and the Model Hub | Community |
+
+Cost & Optimization is an enterprise module in its entirety. The one exception
+is the market price catalog: it also feeds the Model Hub, which is community, so
+that route is not gated.
 
 For the screens these endpoints back, see
 [Cost & Optimization](/guide/cost-optimization). For the spend report that
@@ -31,9 +35,10 @@ RBAC maps the prefixes to two services:
 | `/api/cost`, `/api/model-price-catalog`, `/api/prescriptions` | `cost` | Cost Management |
 | `/api/abacus` | `abacus` | Abacus |
 
-`/api/abacus/*` is additionally gated per tenant by the enterprise access
-rules. Without an active ENTERPRISE licence every route in that group answers
-**402**:
+Both service groups are additionally gated per tenant by the enterprise access
+rules — `/api/cost/` and `/api/prescriptions` under the `cost` module,
+`/api/abacus/` under `abacus`. Without an active ENTERPRISE licence every route
+answers **402**, naming the module it needs:
 
 ```json
 {
@@ -43,6 +48,8 @@ rules. Without an active ENTERPRISE licence every route in that group answers
   "requiresEnterprise": true
 }
 ```
+
+`/api/model-price-catalog*` is not gated — it backs the Model Hub as well.
 
 Errors elsewhere are plain `{ "error": "…" }` bodies: 400 for invalid input,
 404 for a missing record, 500 for an unexpected failure. The model price

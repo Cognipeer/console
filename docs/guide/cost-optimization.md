@@ -6,34 +6,52 @@ that traffic is shaped; which model could carry it instead; and did the swap act
 quality. Operators find it under **Operate → Cost & Optimization** — "Spend across models and
 agents, pricing, model-switch recommendations and parity testing".
 
+::: tip Enterprise module
+Cost & Optimization is an enterprise module in its entirety — the screens, the services and
+the APIs. A community installation sees the entry in the service catalog with an upsell page
+behind it; `/api/cost/*`, `/api/prescriptions/*` and `/api/abacus/*` return `HTTP 402` per
+tenant without an enterprise licence, rather than a broken page. See
+[Licensing](/guide/licensing).
+:::
+
 The sub-navigation is the workflow, left to right:
 
-| Page | Edition | What it is for |
-|---|---|---|
-| **Model costs** | Community | Spend per model, with pricing status |
-| **Agent costs** | Community | The same spend attributed to agents |
-| **Analysis** | Community | Deterministic per-agent / per-model metrics from traces |
-| **Prescriptions** | Community | Automated findings with prescribed actions |
-| **Recommendations** | Enterprise | Cheaper / faster model candidates, computed from observed usage |
-| **Parity tests** | Enterprise | Replay real traffic against a candidate and score it |
-| **Pricing** | Community | The effective-dated price catalog |
-| **Reports** | Community | Spend over time, daily / weekly / monthly |
+| Page | What it is for |
+|---|---|
+| **Model costs** | Spend per model, with pricing status |
+| **Agent costs** | The same spend attributed to agents |
+| **Analysis** | Deterministic per-agent / per-model metrics from traces |
+| **Prescriptions** | Automated reports with prescribed actions |
+| **Recommendations** | Cheaper / faster model candidates, computed from observed usage |
+| **Parity tests** | Replay real traffic against a candidate and score it |
+| **Pricing** | The effective-dated price catalog |
+| **Reports** | Spend over time, daily / weekly / monthly |
 
 ## Two layers
 
-The split is not a feature paywall drawn at random — it follows what the data can support.
+The module does two different kinds of work, and it is worth knowing which one you are
+looking at, because they carry different weight.
 
-**Community measures and diagnoses.** Everything on Model costs, Agent costs, Analysis,
-Prescriptions, Pricing and Reports is computed from data the console already collects: the
-`usage_daily` rollup and agent traces. No model is called to produce a number.
+**Measurement and diagnosis** — Model costs, Agent costs, Analysis, Prescriptions, Pricing
+and Reports — is computed from data the console already collects: the `usage_daily` rollup
+and agent traces. No model is called to produce a number, so the figures are reproducible and
+you can check them.
 
-**Enterprise simulates, recommends and proves.** Recommendations replays observed token
-volume against other models' prices; parity tests and the model matrix replay real traffic
-against a candidate and score the answers. These surfaces live in the enterprise overlay and
-every `/api/abacus/*` route is gated per tenant — a tenant without an enterprise licence gets
-`HTTP 402`, not a broken page. The RBAC service id is `abacus` ("Abacus" — "Cost intelligence:
-what-if repricing, model-switch recommendations and parity testing."). See
-[Licensing](/guide/licensing).
+**Simulation and proof** — Recommendations, parity tests and the model matrix — is
+predictive. Recommendations replays observed token volume against other models' prices;
+parity tests and the model matrix replay real traffic against a candidate and score the
+answers. A recommendation is a projection; a parity test is a measurement. Do not act on the
+first without the second — a projected saving and a measured pass rate regularly disagree,
+and when they do, the pass rate is the one that matters.
+
+Two RBAC service ids cover the module: `cost` for spend, analysis, prescriptions, pricing
+and reports, and `abacus` ("Cost intelligence: what-if repricing, model-switch
+recommendations and parity testing") for the predictive surfaces.
+
+**Pricing resolution stays in the community edition.** Resolving which price applied on a
+given day runs on the ingest path, where trace-derived usage is priced before it is written
+to `usage_daily`. That rollup also feeds spend reporting, quotas and Model Hub figures, so a
+community install that never sees these screens still has to be able to resolve a price.
 
 ::: tip These are dashboard routes
 `/api/cost/*`, `/api/prescriptions/*` and `/api/abacus/*` are **dashboard** APIs. They
