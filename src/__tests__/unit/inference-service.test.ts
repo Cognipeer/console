@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { AIMessageChunk } from '@langchain/core/messages';
 import {
   handleChatCompletion,
   handleEmbeddingRequest,
@@ -410,6 +411,151 @@ describe('handleChatCompletion', () => {
     });
   });
 
+  it('never puts usage on a delta when include_usage was not requested', async () => {
+    // OpenAI only emits `usage` when the caller asks for it, and then only on a
+    // trailing choices-less frame. We were attaching it to whichever content
+    // chunk the provider happened to hang it on.
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeLlmModel());
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
+      runtime: {
+        createChatModel: vi.fn().mockResolvedValue({
+          invoke: vi.fn(),
+          stream: vi.fn().mockResolvedValue((async function* () {
+            yield { content: 'Hello' };
+          })()),
+        }),
+      },
+    });
+    (toOpenAIStreamChunk as ReturnType<typeof vi.fn>).mockReturnValue({
+      id: 'chatcmpl-1',
+      object: 'chat.completion.chunk',
+      choices: [{ index: 0, delta: { content: 'Hello' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
+    });
+
+    const result = await handleChatCompletion({
+      ...BASE_PARAMS,
+      body: { messages: [] },
+      stream: true,
+    });
+    const body = await new Response(result.stream).text();
+    const chunks = body
+      .split('\n')
+      .filter((line) => line.startsWith('data: {'))
+      .map((line) => JSON.parse(line.slice(6)));
+
+    expect(chunks.every((chunk) => chunk.usage === undefined)).toBe(true);
+    expect(body.trimEnd().endsWith('data: [DONE]')).toBe(true);
+    // The opening role frame carries the id the whole completion reuses. It
+    // used to be built inline as `chatcmpl_<dashed uuid>`, long after the
+    // OpenAI-shaped `chatcmpl-<opaque>` was adopted everywhere else.
+    expect(chunks[0].id).toMatch(/^chatcmpl-[0-9a-f]{32}$/);
+  });
+
+  it('streams a tool-carrying request frame by frame rather than in one shot', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeLlmModel());
+    const invoke = vi.fn();
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
+      runtime: {
+        createChatModel: vi.fn().mockResolvedValue({
+          invoke,
+          stream: vi.fn().mockResolvedValue((async function* () {
+            // Real chunks: the streaming path aggregates with `.concat()`, so
+            // plain objects would abort the stream after the first frame and
+            // the assertion below would pass for the wrong reason.
+            yield new AIMessageChunk({ content: 'one' });
+            yield new AIMessageChunk({ content: 'two' });
+            yield new AIMessageChunk({ content: 'three' });
+          })()),
+        }),
+      },
+    });
+    (toOpenAIStreamChunk as ReturnType<typeof vi.fn>).mockImplementation((chunk: {
+      content: string;
+    }) => ({
+      id: 'chatcmpl-1',
+      object: 'chat.completion.chunk',
+      choices: [{ index: 0, delta: { content: chunk.content }, finish_reason: null }],
+    }));
+
+    const result = await handleChatCompletion({
+      ...BASE_PARAMS,
+      body: {
+        messages: [],
+        tools: [{
+          type: 'function',
+          function: { name: 'lookup', parameters: { type: 'object' } },
+        }],
+      },
+      stream: true,
+    });
+    const body = await new Response(result.stream).text();
+    const contents = body
+      .split('\n')
+      .filter((line) => line.startsWith('data: {'))
+      .map((line) => JSON.parse(line.slice(6)))
+      .map((chunk) => chunk.choices?.[0]?.delta?.content)
+      .filter((content) => typeof content === 'string' && content.length > 0);
+
+    expect(contents).toEqual(['one', 'two', 'three']);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it('forwards each frame as the provider produces it, without collecting the answer first', async () => {
+    // The distinction that matters to a caller: do we relay the provider's
+    // chunks as they land, or wait for the completion and replay it? Assert the
+    // first content frame is readable *before* the provider has finished
+    // producing — a buffered implementation cannot satisfy that.
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeLlmModel());
+    const GAP_MS = 40;
+    const CHUNKS = 5;
+    let producerFinishedAt = Number.POSITIVE_INFINITY;
+
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
+      runtime: {
+        createChatModel: vi.fn().mockResolvedValue({
+          invoke: vi.fn(),
+          stream: vi.fn().mockResolvedValue((async function* () {
+            for (let i = 0; i < CHUNKS; i += 1) {
+              await new Promise((resolve) => { setTimeout(resolve, GAP_MS); });
+              yield new AIMessageChunk({ content: `tok${i}` });
+            }
+            producerFinishedAt = Date.now();
+          })()),
+        }),
+      },
+    });
+    (toOpenAIStreamChunk as ReturnType<typeof vi.fn>).mockImplementation((chunk: {
+      content: string;
+    }) => ({
+      id: 'chatcmpl-1',
+      object: 'chat.completion.chunk',
+      choices: [{ index: 0, delta: { content: chunk.content }, finish_reason: null }],
+    }));
+
+    const result = await handleChatCompletion({
+      ...BASE_PARAMS,
+      body: { messages: [] },
+      stream: true,
+    });
+
+    const reader = result.stream!.getReader();
+    const decoder = new TextDecoder();
+    let firstContentAt = Number.POSITIVE_INFINITY;
+    let lastContentAt = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const text = decoder.decode(value);
+      if (!text.includes('tok')) continue;
+      firstContentAt = Math.min(firstContentAt, Date.now());
+      lastContentAt = Date.now();
+    }
+
+    expect(firstContentAt).toBeLessThan(producerFinishedAt);
+    expect(lastContentAt - firstContentAt).toBeGreaterThanOrEqual(GAP_MS);
+  });
+
   it('emits an explanatory SSE error when output budget ends without an answer', async () => {
     (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(
       makeLlmModel({ settings: { maxTokens: 512 } }),
@@ -455,7 +601,9 @@ describe('handleChatCompletion', () => {
     });
     expect(payload.error.message).toContain('512 tokens');
     expect(streamBody).not.toContain('"finish_reason":"length"');
-    expect(streamBody).not.toContain('data: [DONE]');
+    // The error frame is still terminated: a client reading until the sentinel
+    // must be released, not left waiting on the socket.
+    expect(streamBody.trimEnd().endsWith('data: [DONE]')).toBe(true);
   });
 
   it('emits a normalized SSE error when a provider stream fails', async () => {
@@ -499,7 +647,7 @@ describe('handleChatCompletion', () => {
       code: 'rate_limit_exceeded',
     });
     expect(payload.request_id).toBe(result.requestId);
-    expect(streamBody).not.toContain('data: [DONE]');
+    expect(streamBody.trimEnd().endsWith('data: [DONE]')).toBe(true);
   });
 
   it('throws an output token limit error for an empty non-streaming length result', async () => {
@@ -645,8 +793,44 @@ describe('handleChatCompletion', () => {
     );
   });
 
-  it('disables provider streaming only for streamed tool calls', async () => {
+  it('keeps provider streaming on when a request carries tools', async () => {
+    // Open WebUI (native function calling by default) and Onyx send `tools` on
+    // essentially every chat request. Turning provider streaming off for them
+    // collapsed the whole answer into one SSE frame — "streaming is broken".
     (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeLlmModel());
+    const createChatModel = vi.fn().mockResolvedValue({
+      invoke: vi.fn(),
+      stream: vi.fn().mockResolvedValue((async function* () {
+        yield { content: 'hi' };
+      })()),
+    });
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
+      runtime: { createChatModel },
+    });
+
+    await handleChatCompletion({
+      ...BASE_PARAMS,
+      body: {
+        messages: [],
+        tools: [{
+          type: 'function',
+          function: { name: 'lookup', parameters: { type: 'object' } },
+        }],
+      },
+      stream: true,
+    });
+
+    expect(createChatModel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        options: { streaming: true, disableStreaming: false, maxRetries: 0 },
+      }),
+    );
+  });
+
+  it('disables provider streaming for tool calls only when the model opts in', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeLlmModel({ settings: { disableStreamingWithTools: true } }),
+    );
     const createChatModel = vi.fn().mockResolvedValue({
       invoke: vi.fn().mockResolvedValue({
         content: '',
@@ -687,7 +871,7 @@ describe('handleChatCompletion', () => {
 
   it('emits an explanatory SSE error for an empty eager tool result', async () => {
     (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(
-      makeLlmModel({ settings: { maxTokens: 512 } }),
+      makeLlmModel({ settings: { maxTokens: 512, disableStreamingWithTools: true } }),
     );
     const stream = vi.fn();
     (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({

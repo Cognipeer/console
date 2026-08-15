@@ -291,15 +291,22 @@ not match your build, look for the equivalent section:
 - **The `Bearer` prefix is case-sensitive.** The edge check matches `Bearer `
   exactly; `bearer cpeer_…` returns **401** before the token is ever looked up.
   The message is `Missing or invalid Authorization header. Use: Bearer <token>`.
-- **`stream_options` is dropped from your request.** The gateway forwards a
+- **Parameters outside the forwarded set are dropped.** The gateway forwards a
   fixed set of request parameters; anything outside it is discarded unless the
   model has **Forward unrecognised caller parameters** enabled
-  (`settings.allowUnknownPassthrough`, off by default). Also dropped by default:
-  `n`, `logit_bias`, `user`, `logprobs`. Streaming usage still arrives in the
-  normal case — the gateway asks the provider for the terminal usage frame on
-  its own account — but a model that lists `stream_options` under **Also reject
-  these**, or has it auto-detected as unsupported, suppresses that frame, and
-  client-side token counters then read zero.
+  (`settings.allowUnknownPassthrough`, off by default). Dropped by default:
+  `n`, `logit_bias`, `user`, `logprobs`.
+- **`usage` only rides on a stream when you ask for it.** Send
+  `stream_options: {"include_usage": true}` and the counts arrive on a final
+  `{"choices": [], "usage": {…}}` frame, as OpenAI specifies. Without it, no
+  frame carries `usage` — billing and quota are still accounted for
+  server-side. A model that lists `stream_options` under **Also reject these**,
+  or has it auto-detected as unsupported, suppresses the frame, and client-side
+  token counters then read zero.
+- **Streaming stays on when your request carries `tools`.** If an upstream
+  genuinely cannot stream tool calls, set `disableStreamingWithTools: true` in
+  that model's **Settings** JSON; the gateway then answers a streamed
+  tool-carrying request in a single frame for that model only.
 - **Token authentication is cached for 60 seconds.** A deleted or newly
   permission-changed token can keep working for up to a minute. Expiry is
   re-checked on every request and is not subject to the cache.

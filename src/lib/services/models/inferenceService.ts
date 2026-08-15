@@ -21,6 +21,7 @@ import { getModelByKey } from './modelService';
 import {
   toLangChainMessages,
   toOpenAIChatResponse,
+  newCompletionId,
   openAIStreamRoleChunk,
   openAIStreamStopChunk,
   toOpenAIStreamChunk,
@@ -1045,8 +1046,21 @@ export async function handleChatCompletion(params: {
   const messages = toLangChainMessages(messagesInput);
   const { modelSettings, callOptions, overrides } = invocation;
   const outputTokenLimit = resolveOutputTokenLimit(overrides, modelSettings);
+  // A streamed request that carries tools used to be answered by a single
+  // `invoke()` replayed as one SSE frame. The reason was real at the time —
+  // the collapsed `tool_calls` on a streamed chunk arrive with empty arguments
+  // — but `toOpenAIStreamChunk` now emits genuine `tool_call_chunks` deltas,
+  // so all the workaround still did was turn streaming silently off for any
+  // client that sends tools. That is every request from Open WebUI (native
+  // function calling is its default, and it always ships its built-in time
+  // tools) and from Onyx, i.e. exactly the clients that reported streaming not
+  // working. Tools are the normal case, not the exception; the escape hatch
+  // stays per-model for an upstream that really cannot stream them.
   const disableProviderStreaming = Boolean(
-    stream && Array.isArray(overrides.tools) && overrides.tools.length > 0,
+    stream
+    && modelSettings.disableStreamingWithTools === true
+    && Array.isArray(overrides.tools)
+    && overrides.tools.length > 0,
   );
   const includeStreamUsage =
     asRecord(overrides.stream_options).include_usage === true;
@@ -1104,7 +1118,7 @@ export async function handleChatCompletion(params: {
       );
     }
     const startedAt = Date.now();
-    const completionId = `chatcmpl_${crypto.randomUUID()}`;
+    const completionId = newCompletionId();
     const completionCreated = Math.floor(Date.now() / 1000);
 
     const chunkOptions = {
@@ -1170,10 +1184,13 @@ export async function handleChatCompletion(params: {
                 cachedInputTokens: payload.usage.cached_tokens,
                 totalTokens: payload.usage.total_tokens,
               };
-              if (includeStreamUsage) {
-                finalUsagePayload = payload.usage;
-                payload.usage = undefined;
-              }
+              // `usage` is only allowed on the wire when the caller asked for
+              // it with `stream_options.include_usage`, and then only on a
+              // dedicated final frame. We were attaching it to whichever
+              // content chunk happened to carry it, which is a shape strict
+              // OpenAI clients do not expect on a delta.
+              finalUsagePayload = payload.usage;
+              payload.usage = undefined;
             }
 
             if (!outputLimitError) {
@@ -1219,9 +1236,11 @@ export async function handleChatCompletion(params: {
             );
           }
 
-          if (!outputLimitError) {
-            controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-          }
+          // `[DONE]` terminates every stream, including one that ended in an
+          // error frame. Withholding it leaves a client that reads until the
+          // sentinel — the OpenAI SDK, and everything built on it — blocked on
+          // the socket instead of returning the error it was just handed.
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
           controller.close();
 
           const latencyMs = Date.now() - startedAt;
@@ -1304,6 +1323,7 @@ export async function handleChatCompletion(params: {
               request_id: requestId,
             })}\n\n`),
           );
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
           controller.close();
         }
       },
