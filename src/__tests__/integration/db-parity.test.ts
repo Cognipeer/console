@@ -617,6 +617,57 @@ describeForEachProvider('Usage daily rollup (incrementUsageDaily/listUsageDaily)
     expect(rows).toHaveLength(1);
     expect(rows[0].requests).toBe(2);
   });
+
+  it('setUsageDailyCost overwrites costUsd by row id (retroactive reprice)', async () => {
+    const db = getDb();
+    await db.incrementUsageDaily([
+      { ...dims(), requests: 1, totalTokens: 150, costUsd: 0 },
+      { ...dims({ day: '2026-07-14' }), requests: 1, totalTokens: 100, costUsd: 0.2 },
+    ]);
+
+    const rows = await db.listUsageDaily({});
+    const target = rows.find((row) => row.day === '2026-07-15')!;
+    const updated = await db.setUsageDailyCost([{ id: String(target._id), costUsd: 1.25 }]);
+    expect(updated).toBe(1);
+
+    const after = await db.listUsageDaily({});
+    expect(after.find((row) => row.day === '2026-07-15')!.costUsd).toBeCloseTo(1.25, 10);
+    expect(after.find((row) => row.day === '2026-07-14')!.costUsd).toBeCloseTo(0.2, 10);
+  });
+
+  it('persists effective-dated external pricing versions round-trip', async () => {
+    const db = getDb();
+    const versions = [
+      { effectiveFrom: '', pricing: { inputTokenPer1M: 1, outputTokenPer1M: 2 } },
+      { effectiveFrom: '2026-08-01', pricing: { inputTokenPer1M: 3, outputTokenPer1M: 6 } },
+    ];
+    await db.upsertExternalModelPricing({
+      tenantId,
+      projectId: 'proj-1',
+      modelName: 'Claude-Sonnet-4-5',
+      pricing: versions[1].pricing,
+      versions,
+      updatedBy: 'user-1',
+    });
+
+    const entries = await db.listExternalModelPricing('proj-1');
+    const entry = entries.find((item) => item.normalizedName === 'claude-sonnet-4-5')!;
+    expect(entry.pricing.inputTokenPer1M).toBe(3);
+    expect(entry.versions).toHaveLength(2);
+    expect(entry.versions![0].effectiveFrom).toBe('');
+    expect(entry.versions![1].pricing.outputTokenPer1M).toBe(6);
+
+    // Upsert without versions (legacy caller) keeps the column nullable.
+    await db.upsertExternalModelPricing({
+      tenantId,
+      projectId: 'proj-1',
+      modelName: 'legacy-model',
+      pricing: { inputTokenPer1M: 5, outputTokenPer1M: 5 },
+    });
+    const legacy = (await db.listExternalModelPricing('proj-1'))
+      .find((item) => item.normalizedName === 'legacy-model')!;
+    expect(legacy.versions ?? undefined).toBeUndefined();
+  });
 });
 
 describeForEachProvider('Model usage log attribution roundtrip', (getDb) => {
@@ -663,6 +714,91 @@ describeForEachProvider('Model usage log attribution roundtrip', (getDb) => {
     expect(logs[0].userId).toBe('user-9');
     expect(logs[0].apiTokenId).toBe('tok-9');
     expect(logs[0].actorType).toBe('api_token');
+  });
+
+  // Regression: the SQLite provider used to omit every cost field from
+  // aggregateModelUsage, so the Model Hub Spend column was permanently empty
+  // on SQLite deployments (including the docker-compose quickstart) while the
+  // numbers sat unread in the pricingSnapshot column.
+  it('aggregateModelUsage sums the pricing snapshot into costSummary', async () => {
+    const db = getDb();
+    const base = {
+      tenantId,
+      projectId: 'proj-cost',
+      modelKey: 'gpt-cost',
+      route: 'chat.completions',
+      status: 'success' as const,
+      providerRequest: {},
+      providerResponse: {},
+    };
+
+    await db.createModelUsageLog({
+      ...base,
+      requestId: 'cost-1',
+      inputTokens: 1000,
+      outputTokens: 500,
+      totalTokens: 1500,
+      pricingSnapshot: {
+        currency: 'USD',
+        inputTokenPer1M: 1,
+        outputTokenPer1M: 2,
+        inputCost: 0.001,
+        outputCost: 0.001,
+        cachedCost: 0,
+        totalCost: 0.002,
+      },
+    });
+    await db.createModelUsageLog({
+      ...base,
+      requestId: 'cost-2',
+      inputTokens: 2000,
+      outputTokens: 1000,
+      totalTokens: 3000,
+      pricingSnapshot: {
+        currency: 'USD',
+        inputTokenPer1M: 1,
+        outputTokenPer1M: 2,
+        inputCost: 0.002,
+        outputCost: 0.002,
+        cachedCost: 0,
+        totalCost: 0.004,
+      },
+    });
+
+    const agg = await db.aggregateModelUsage('gpt-cost', { groupBy: 'day' }, 'proj-cost');
+
+    expect(agg.totalCalls).toBe(2);
+    expect(agg.totalTokens).toBe(4500);
+    expect(agg.costSummary).toBeDefined();
+    expect(agg.costSummary?.currency).toBe('USD');
+    expect(agg.costSummary?.totalCost).toBeCloseTo(0.006, 10);
+    expect(agg.costSummary?.inputCost).toBeCloseTo(0.003, 10);
+    expect(agg.costSummary?.outputCost).toBeCloseTo(0.003, 10);
+
+    // The per-period buckets carry cost too — the usage chart reads them.
+    const charted = (agg.timeseries ?? []).reduce((sum, point) => sum + (point.totalCost ?? 0), 0);
+    expect(charted).toBeCloseTo(0.006, 10);
+  });
+
+  it('aggregateModelUsage omits costSummary when nothing is priced', async () => {
+    const db = getDb();
+    await db.createModelUsageLog({
+      tenantId,
+      projectId: 'proj-unpriced',
+      modelKey: 'gpt-unpriced',
+      requestId: 'unpriced-1',
+      route: 'chat.completions',
+      status: 'success',
+      providerRequest: {},
+      providerResponse: {},
+      inputTokens: 10,
+      outputTokens: 5,
+      totalTokens: 15,
+    });
+
+    const agg = await db.aggregateModelUsage('gpt-unpriced', {}, 'proj-unpriced');
+    expect(agg.totalCalls).toBe(1);
+    expect(agg.costSummary).toBeUndefined();
   });
 });
 
@@ -806,5 +942,243 @@ describeForEachProvider('MCP Hub servers + audit logs', (getDb) => {
     const byAction = await db.listMcpAuditLogs({ action: 'secrets_change' });
     expect(byAction).toHaveLength(1);
     expect(byAction[0].performedBy).toBe('user-2');
+  });
+});
+
+describeForEachProvider('Evaluation dataset items (separate collection)', (getDb) => {
+  let dbName: string;
+  let tenantId: string;
+
+  beforeEach(async () => {
+    const slug = `eval-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    dbName = `tenant_${slug}`;
+    const db = getDb();
+    const tenant = await db.createTenant({
+      companyName: 'Eval Co',
+      slug,
+      dbName,
+      licenseType: 'FREE',
+      ownerId: 'pending',
+    });
+    tenantId = String(tenant._id);
+    await db.switchToTenant(dbName);
+  });
+
+  it('routes inline items on create into the item collection and keeps itemCount', async () => {
+    const db = getDb();
+    const dataset = await db.createEvaluationDataset({
+      tenantId,
+      key: 'ds-routing',
+      name: 'Routing DS',
+      source: 'manual',
+      items: [
+        { id: 'i1', input: [{ role: 'user', content: 'one' }], tags: ['t'] },
+        { id: 'i2', input: [{ role: 'user', content: 'two' }], expected: { reference: 'ref' } },
+      ],
+      createdBy: 'tester',
+    });
+    const datasetId = String(dataset._id);
+
+    // The dataset document/row never carries items — only the count.
+    const found = await db.findEvaluationDatasetById(datasetId);
+    expect(found?.items).toBeUndefined();
+    expect(found?.itemCount).toBe(2);
+
+    const rows = await db.listEvaluationDatasetItems(datasetId);
+    expect(rows.map((r) => r.id)).toEqual(['i1', 'i2']);
+    expect(rows.map((r) => r.position)).toEqual([0, 1]);
+    expect(rows[0].datasetId).toBe(datasetId);
+    expect(rows[1].expected).toEqual({ reference: 'ref' });
+    expect(await db.countEvaluationDatasetItems(datasetId)).toBe(2);
+  });
+
+  it('appends after the last position and rejects duplicate item ids', async () => {
+    const db = getDb();
+    const dataset = await db.createEvaluationDataset({
+      tenantId,
+      key: 'ds-append',
+      name: 'Append DS',
+      source: 'manual',
+      items: [{ id: 'a', input: [{ role: 'user', content: 'a' }] }],
+      createdBy: 'tester',
+    });
+    const datasetId = String(dataset._id);
+
+    await db.createEvaluationDatasetItems(datasetId, [{ id: 'b', input: [{ role: 'user', content: 'b' }] }]);
+    const rows = await db.listEvaluationDatasetItems(datasetId);
+    expect(rows.map((r) => [r.id, r.position])).toEqual([['a', 0], ['b', 1]]);
+
+    await expect(
+      db.createEvaluationDatasetItems(datasetId, [{ id: 'a', input: [{ role: 'user', content: 'dup' }] }]),
+    ).rejects.toThrow(/already exists/);
+
+    const after = await db.findEvaluationDatasetById(datasetId);
+    expect(after?.itemCount).toBe(2);
+  });
+
+  it('update-with-items replaces the full set; item update/delete stay consistent', async () => {
+    const db = getDb();
+    const dataset = await db.createEvaluationDataset({
+      tenantId,
+      key: 'ds-replace',
+      name: 'Replace DS',
+      source: 'manual',
+      items: [
+        { id: 'x1', input: [{ role: 'user', content: 'x1' }] },
+        { id: 'x2', input: [{ role: 'user', content: 'x2' }] },
+      ],
+      createdBy: 'tester',
+    });
+    const datasetId = String(dataset._id);
+
+    // Full replace through the legacy-compatible update path.
+    const updated = await db.updateEvaluationDataset(datasetId, {
+      items: [
+        { id: 'y1', input: [{ role: 'user', content: 'y1' }] },
+        { id: 'y2', input: [{ role: 'user', content: 'y2' }] },
+        { id: 'y3', input: [{ role: 'user', content: 'y3' }] },
+      ],
+    });
+    expect(updated?.itemCount).toBe(3);
+    const replaced = await db.listEvaluationDatasetItems(datasetId);
+    expect(replaced.map((r) => r.id)).toEqual(['y1', 'y2', 'y3']);
+
+    // Item-level update.
+    const patched = await db.updateEvaluationDatasetItem(datasetId, 'y2', {
+      tags: ['patched'],
+    });
+    expect(patched?.tags).toEqual(['patched']);
+    expect(patched?.position).toBe(1);
+
+    // Item-level delete recounts.
+    expect(await db.deleteEvaluationDatasetItem(datasetId, 'y1')).toBe(true);
+    expect(await db.deleteEvaluationDatasetItem(datasetId, 'nope')).toBe(false);
+    const afterDelete = await db.findEvaluationDatasetById(datasetId);
+    expect(afterDelete?.itemCount).toBe(2);
+
+    // search narrows list + count identically on both backends.
+    const found = await db.listEvaluationDatasetItems(datasetId, { search: 'patched' });
+    expect(found.map((r) => r.id)).toEqual(['y2']);
+    expect(await db.countEvaluationDatasetItems(datasetId, 'patched')).toBe(1);
+  });
+
+  it('deleting the dataset cascades its item rows', async () => {
+    const db = getDb();
+    const dataset = await db.createEvaluationDataset({
+      tenantId,
+      key: 'ds-cascade',
+      name: 'Cascade DS',
+      source: 'manual',
+      items: [{ id: 'c1', input: [{ role: 'user', content: 'c1' }] }],
+      createdBy: 'tester',
+    });
+    const datasetId = String(dataset._id);
+    expect(await db.deleteEvaluationDataset(datasetId)).toBe(true);
+    expect(await db.countEvaluationDatasetItems(datasetId)).toBe(0);
+    expect(await db.listEvaluationDatasetItems(datasetId)).toHaveLength(0);
+  });
+});
+
+describeForEachProvider('Evaluation dataset items — destructive-write safety', (getDb) => {
+  let dbName: string;
+  let tenantId: string;
+
+  beforeEach(async () => {
+    const slug = `evsafe-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    dbName = `tenant_${slug}`;
+    const db = getDb();
+    const tenant = await db.createTenant({
+      companyName: 'Eval Safe Co',
+      slug,
+      dbName,
+      licenseType: 'FREE',
+      ownerId: 'pending',
+    });
+    tenantId = String(tenant._id);
+    await db.switchToTenant(dbName);
+  });
+
+  it('rejects a replace whose payload repeats an id WITHOUT destroying existing items', async () => {
+    const db = getDb();
+    const dataset = await db.createEvaluationDataset({
+      tenantId,
+      key: 'ds-safe-replace',
+      name: 'Safe Replace DS',
+      source: 'manual',
+      items: [
+        { id: 'keep-1', input: [{ role: 'user', content: 'one' }] },
+        { id: 'keep-2', input: [{ role: 'user', content: 'two' }] },
+      ],
+      createdBy: 'tester',
+    });
+    const datasetId = String(dataset._id);
+
+    await expect(
+      db.updateEvaluationDataset(datasetId, {
+        items: [
+          { id: 'x', input: [{ role: 'user', content: 'x' }] },
+          { id: 'x', input: [{ role: 'user', content: 'dup' }] },
+        ],
+      }),
+    ).rejects.toThrow(/already exists/);
+
+    // The original items and count survive the failed replace.
+    const rows = await db.listEvaluationDatasetItems(datasetId);
+    expect(rows.map((r) => r.id)).toEqual(['keep-1', 'keep-2']);
+    expect(await db.countEvaluationDatasetItems(datasetId)).toBe(2);
+  });
+
+  it('rolls back the whole append batch when one id collides (no partial commit)', async () => {
+    const db = getDb();
+    const dataset = await db.createEvaluationDataset({
+      tenantId,
+      key: 'ds-safe-append',
+      name: 'Safe Append DS',
+      source: 'manual',
+      items: [{ id: 'a', input: [{ role: 'user', content: 'a' }] }],
+      createdBy: 'tester',
+    });
+    const datasetId = String(dataset._id);
+
+    await expect(
+      db.createEvaluationDatasetItems(datasetId, [
+        { id: 'b', input: [{ role: 'user', content: 'b' }] },
+        { id: 'a', input: [{ role: 'user', content: 'collides' }] },
+      ]),
+    ).rejects.toThrow(/already exists/);
+
+    // Neither 'b' nor the colliding 'a' landed — the batch is atomic.
+    const rows = await db.listEvaluationDatasetItems(datasetId);
+    expect(rows.map((r) => r.id)).toEqual(['a']);
+    const after = await db.findEvaluationDatasetById(datasetId);
+    expect(after?.itemCount).toBe(1);
+  });
+
+  it('rejects duplicate ids on create without leaving a ghost dataset', async () => {
+    const db = getDb();
+    await expect(
+      db.createEvaluationDataset({
+        tenantId,
+        key: 'ds-ghost',
+        name: 'Ghost DS',
+        source: 'manual',
+        items: [
+          { id: 'g', input: [{ role: 'user', content: 'g' }] },
+          { id: 'g', input: [{ role: 'user', content: 'dup' }] },
+        ],
+        createdBy: 'tester',
+      }),
+    ).rejects.toThrow(/already exists/);
+    // The key stays free for the corrected retry.
+    expect(await db.findEvaluationDatasetByKey('ds-ghost')).toBeNull();
+    const retried = await db.createEvaluationDataset({
+      tenantId,
+      key: 'ds-ghost',
+      name: 'Ghost DS',
+      source: 'manual',
+      items: [{ id: 'g', input: [{ role: 'user', content: 'g' }] }],
+      createdBy: 'tester',
+    });
+    expect(retried.itemCount).toBe(1);
   });
 });

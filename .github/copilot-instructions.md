@@ -8,9 +8,12 @@ Cognipeer Console is a **multi-tenant SaaS platform** for AI and Agentic service
 
 ### Technology Stack
 
-- **Frontend**: Next.js 15 with App Router, TypeScript, Mantine v7 UI
-- **Backend**: Next.js API Routes
-- **Database**: MongoDB (multi-tenant) with abstraction layer for future provider changes
+- **Frontend**: Next.js 15 with App Router, TypeScript, Mantine v8 UI
+- **Backend**: Fastify. Every live route is a Fastify plugin under `src/server/api/plugins/*.ts`.
+  The `src/server/api/routes/**` tree is DEAD — do not add to it or copy patterns from it.
+- **Database**: multi-tenant behind a provider contract. Two implementations ship and must be kept
+  in step: MongoDB (`src/lib/database/mongodb/`) and SQLite (`src/lib/database/sqlite/`).
+  `docker-compose.yml` defaults to SQLite, so a change to only one tree is a bug.
 - **Authentication**: JWT (using jose library for Edge Runtime compatibility)
 - **Email**: Nodemailer with Handlebars templates
 - **Styling**: Mantine theme system + Tailwind CSS

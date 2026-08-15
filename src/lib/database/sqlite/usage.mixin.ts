@@ -34,14 +34,14 @@ export function UsageRollupMixin<TBase extends Constructor<SQLiteProviderBase>>(
         SELECT id, units FROM ${TABLES.usageDaily}
         WHERE tenantId = @tenantId AND projectId = @projectId AND userId = @userId
           AND apiTokenId = @apiTokenId AND source = @source AND service = @service
-          AND refKey = @refKey AND day = @day
+          AND refKey = @refKey AND agentKey = @agentKey AND day = @day
       `);
       const insert = db.prepare(`
         INSERT INTO ${TABLES.usageDaily}
-        (id, tenantId, projectId, userId, apiTokenId, actorType, source, service, refKey, day, dayDate,
+        (id, tenantId, projectId, userId, apiTokenId, actorType, source, service, refKey, agentKey, day, dayDate,
          requests, errors, inputTokens, outputTokens, cachedInputTokens, totalTokens,
          costUsd, latencyMsSum, latencyCount, units, updatedAt)
-        VALUES (@id, @tenantId, @projectId, @userId, @apiTokenId, @actorType, @source, @service, @refKey, @day, @dayDate,
+        VALUES (@id, @tenantId, @projectId, @userId, @apiTokenId, @actorType, @source, @service, @refKey, @agentKey, @day, @dayDate,
          @requests, @errors, @inputTokens, @outputTokens, @cachedInputTokens, @totalTokens,
          @costUsd, @latencyMsSum, @latencyCount, @units, @updatedAt)
       `);
@@ -71,6 +71,7 @@ export function UsageRollupMixin<TBase extends Constructor<SQLiteProviderBase>>(
             source: row.source,
             service: row.service,
             refKey: row.refKey,
+            agentKey: row.agentKey ?? '',
             day: row.day,
           };
           const counters = Object.fromEntries(
@@ -114,12 +115,35 @@ export function UsageRollupMixin<TBase extends Constructor<SQLiteProviderBase>>(
       applyAll(rows);
     }
 
+    async setUsageDailyCost(
+      updates: Array<{ id: string; costUsd: number }>,
+    ): Promise<number> {
+      if (updates.length === 0) return 0;
+      const db = this.getTenantDb();
+      const update = db.prepare(`
+        UPDATE ${TABLES.usageDaily} SET costUsd = @costUsd, updatedAt = @updatedAt WHERE id = @id
+      `);
+      let changed = 0;
+      const applyAll = db.transaction((rows: Array<{ id: string; costUsd: number }>) => {
+        for (const row of rows) {
+          changed += update.run({
+            id: row.id,
+            costUsd: row.costUsd,
+            updatedAt: this.now(),
+          }).changes;
+        }
+      });
+      applyAll(updates);
+      return changed;
+    }
+
     async listUsageDaily(filter: {
       projectId?: string;
       userId?: string;
       apiTokenId?: string;
       service?: string;
       refKey?: string;
+      agentKey?: string;
       source?: string;
       fromDay?: string;
       toDay?: string;
@@ -135,6 +159,7 @@ export function UsageRollupMixin<TBase extends Constructor<SQLiteProviderBase>>(
         ['apiTokenId', 'apiTokenId'],
         ['service', 'service'],
         ['refKey', 'refKey'],
+        ['agentKey', 'agentKey'],
         ['source', 'source'],
       ];
       for (const [key, column] of eqFilters) {
@@ -173,6 +198,7 @@ export function UsageRollupMixin<TBase extends Constructor<SQLiteProviderBase>>(
         source: String(row.source ?? ''),
         service: String(row.service),
         refKey: String(row.refKey ?? ''),
+        agentKey: String(row.agentKey ?? ''),
         day: String(row.day),
         dayDate: row.dayDate ? new Date(String(row.dayDate)) : undefined,
         requests: Number(row.requests ?? 0),

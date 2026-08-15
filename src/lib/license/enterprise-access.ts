@@ -83,6 +83,11 @@ export const ENTERPRISE_API_RULES: EnterpriseApiRule[] = [
     prefixes: ['/api/aegis/', '/api/client/v1/aegis/'],
   },
   {
+    // Abacus cost intelligence: what-if repricing + optimization recommendations.
+    module: 'abacus',
+    prefixes: ['/api/abacus/'],
+  },
+  {
     // MCP Hubs: curated MCP-server catalogs published as a discovery API.
     // Gates the admin CRUD + the token discovery surface. The public surface
     // (/api/public/mcp/hubs/) never reaches this guard — the plugin checks

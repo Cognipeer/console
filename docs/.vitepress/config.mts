@@ -2,12 +2,37 @@ import { defineConfig } from 'vitepress';
 
 const docsBase = process.env.GITHUB_PAGES === 'true' ? '/console/' : '/';
 
+// Task-shaped guides. Shown as their own section and repeated at the top of the
+// Guide sidebar, because most people arrive wanting to do a thing, not to read a
+// reference page.
+const howToSidebar = [
+  {
+    text: 'How-To',
+    collapsed: false,
+    items: [
+      { text: 'All guides', link: '/how-to/' },
+      { text: 'Connect an OpenAI-compatible client', link: '/how-to/connect-openai-client' },
+      { text: 'Create your first model', link: '/how-to/first-model' },
+      { text: 'Add a guardrail and PII policy', link: '/how-to/guardrail-and-pii' },
+      { text: 'Trace an existing agent', link: '/how-to/trace-an-existing-agent' },
+      { text: 'Crawl a website into the Knowledge Engine', link: '/how-to/crawl-a-site' },
+      { text: 'Automate a browser task', link: '/how-to/automate-a-browser-task' },
+      { text: 'Build and publish an agent', link: '/how-to/build-and-publish-an-agent' },
+      { text: 'Optimize token usage', link: '/how-to/optimize-token-usage' },
+      { text: 'Build a dataset from production traffic', link: '/how-to/dataset-from-production-traffic' },
+      { text: 'Route requests with a Dynamic LLM', link: '/how-to/route-with-dynamic-llm' },
+    ],
+  },
+];
+
 export default defineConfig({
   title: 'Cognipeer Console',
   description:
     'Multi-tenant AI platform for LLM inference, vector stores, agent tracing, Knowledge Engine, and more.',
   base: docsBase,
-  ignoreDeadLinks: true,
+  // Kept strict on purpose. This was `true`, and it was quietly hiding a whole
+  // sidebar section's worth of links to pages that did not exist yet.
+  ignoreDeadLinks: false,
   appearance: 'dark',
 
   markdown: {
@@ -24,6 +49,7 @@ export default defineConfig({
     siteTitle: 'Cognipeer Console',
     nav: [
       { text: 'Guide', link: '/guide/getting-started' },
+      { text: 'How-To', link: '/how-to/' },
       { text: 'Architecture', link: '/guide/architecture' },
       { text: 'Core Modules', link: '/guide/core-overview' },
       { text: 'API Reference', link: '/api/overview' },
@@ -41,7 +67,10 @@ export default defineConfig({
     ],
 
     sidebar: {
+      '/how-to/': howToSidebar,
+
       '/guide/': [
+        ...howToSidebar,
         {
           text: 'Introduction',
           items: [
@@ -90,6 +119,24 @@ export default defineConfig({
             { text: 'File Storage', link: '/guide/files' },
             { text: 'Agent Sandbox', link: '/guide/sandbox' },
             { text: 'Browser Automation', link: '/guide/browser' },
+          ],
+        },
+        {
+          text: 'Observability Integrations',
+          collapsed: false,
+          items: [
+            { text: 'Overview', link: '/guide/observability/overview' },
+            { text: 'Quickstart', link: '/guide/observability/quickstart' },
+            { text: 'LangChain', link: '/guide/observability/langchain' },
+            { text: 'LangGraph', link: '/guide/observability/langgraph' },
+            { text: 'OpenAI Agents SDK', link: '/guide/observability/openai-agents' },
+            { text: 'Claude Agent SDK', link: '/guide/observability/claude-agent-sdk' },
+            { text: 'Vercel AI SDK', link: '/guide/observability/vercel-ai' },
+            { text: 'n8n', link: '/guide/observability/n8n' },
+            { text: 'OpenTelemetry', link: '/guide/observability/opentelemetry' },
+            { text: 'Manual Instrumentation', link: '/guide/observability/manual' },
+            { text: 'Data Model', link: '/guide/observability/data-model' },
+            { text: 'Troubleshooting', link: '/guide/observability/troubleshooting' },
           ],
         },
         {

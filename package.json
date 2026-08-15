@@ -21,6 +21,7 @@
     "check-setup": "node scripts/check-setup.js",
     "seed:beta-codes": "node --import tsx scripts/seed-beta-codes.ts",
     "backfill:usage-daily": "node --import tsx scripts/backfill-usage-daily.ts",
+    "backfill:trace-usage": "node --import tsx scripts/backfill-trace-usage.ts",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs"

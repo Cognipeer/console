@@ -65,6 +65,7 @@ const SIGNALS: ReadonlyArray<{ value: DynamicRoutingSignal; label: string; kind:
   { value: 'inputTokensEst', label: 'Estimated input tokens', kind: 'number' },
   { value: 'messageCount', label: 'Message count', kind: 'number' },
   { value: 'lastUserLength', label: 'Last user message length', kind: 'number' },
+  { value: 'estimatedCostUsd', label: 'Estimated cost in USD (at default model pricing)', kind: 'number' },
   { value: 'hasTools', label: 'Request uses tools', kind: 'boolean' },
   { value: 'hasResponseFormat', label: 'Structured output requested', kind: 'boolean' },
   { value: 'hasImages', label: 'Request has images', kind: 'boolean' },

@@ -13,8 +13,13 @@ import {
   checkRateLimit,
   checkResourceQuota,
 } from '@/lib/quota/quotaGuard';
-import { AgentTracingService, recordTracingSessionCreated } from '@/lib/services/agentTracing';
+import { AgentTracingService, recordTracingSessionCreated, recordTraceModelUsage } from '@/lib/services/agentTracing';
 import { mapOtlpToInternalModels, type OtlpExportTraceServiceRequest } from '@/lib/services/otlpMapper';
+import {
+  buildToolDefinitionsSection,
+  normalizeSectionListToolDefinitions,
+  TOOL_DEFINITIONS_SECTION_KIND,
+} from '@/lib/services/tracingToolDefinitions';
 import {
   getApiTokenContextForRequest,
   readJsonBody,
@@ -82,6 +87,10 @@ type TracingEventPayload = {
   spanId?: string;
   status?: string | null;
   timestamp?: string | Date;
+  /** Tool menu offered to the model on THIS call — normalized into a
+   *  `tool_definitions` section so SDK senders don't need to know the
+   *  section encoding. Ignored silently when malformed. */
+  toolDefinitions?: unknown;
   toolDetails?: Record<string, unknown>;
   toolExecutionId?: string | null;
   toolName?: string | null;
@@ -335,10 +344,21 @@ function getEventSections(event: TracingEventPayload): Array<Record<string, unkn
     ? event.sections
     : (Array.isArray(event.data?.sections) ? event.data.sections : []);
 
-  return rawSections.flatMap((section) => {
+  // tool_definitions sections get the shared cap/shape treatment whether the
+  // sender encoded the section itself or used the first-class
+  // `toolDefinitions` event field (the field is normalized into a section so
+  // SDK senders don't need to know the encoding). Malformed input is ignored
+  // silently.
+  const sections = normalizeSectionListToolDefinitions(rawSections.flatMap((section) => {
     const normalized = toRecord(section);
     return normalized ? [normalized] : [];
-  });
+  }));
+
+  const fromField = buildToolDefinitionsSection(event.toolDefinitions);
+  if (fromField && !sections.some((section) => section.kind === TOOL_DEFINITIONS_SECTION_KIND)) {
+    return [...sections, fromField];
+  }
+  return sections;
 }
 
 function normalizeToolName(value: unknown): string | undefined {
@@ -543,6 +563,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
             }),
           ));
 
+          const insertedEvents: typeof incomingEvents = [];
           for (const event of incomingEvents) {
             const fingerprint = buildEventFingerprint({
               id: event.id,
@@ -559,6 +580,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
 
             seen.add(fingerprint);
             await backgroundDb.createAgentTracingEvent(event);
+            insertedEvents.push(event);
           }
 
           const allEvents = await backgroundDb.listAgentTracingEvents(session.sessionId, ctx.projectId);
@@ -626,6 +648,15 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
               actorType: attribution.actorType,
             });
           }
+
+          // Fingerprint-deduped, so each event is costed exactly once.
+          await recordTraceModelUsage({
+            tenantDbName: ctx.tenantDbName,
+            tenantId: ctx.tenantId,
+            projectId: ctx.projectId,
+            agentName: mergedSession.agentName,
+            events: insertedEvents,
+          });
         }
       });
 
@@ -796,8 +827,13 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
           });
         }
 
+        // This path deletes + recreates all events, so cost accounting must
+        // work on the DELTA: tokens in the new event set minus what the old
+        // set already accounted — a re-posted session contributes zero.
+        const previousEvents = await backgroundDb.listAgentTracingEvents(sessionId, ctx.projectId);
         await backgroundDb.deleteAgentTracingEvents(sessionId, ctx.projectId);
 
+        const createdEvents: Array<Omit<IAgentTracingEvent, '_id' | 'createdAt'>> = [];
         for (const event of events) {
           const sections = getEventSections(event);
           const metadata = buildEventMetadata(event, sections);
@@ -852,7 +888,17 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
           };
 
           await backgroundDb.createAgentTracingEvent(eventDoc);
+          createdEvents.push(eventDoc);
         }
+
+        await recordTraceModelUsage({
+          tenantDbName: ctx.tenantDbName,
+          tenantId: ctx.tenantId,
+          projectId: ctx.projectId,
+          agentName: sessionDoc.agentName,
+          events: createdEvents,
+          previousEvents,
+        });
       });
 
       return reply.code(200).send({
@@ -1105,6 +1151,14 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
         };
 
         await backgroundDb.createAgentTracingEvent(eventDoc);
+
+        await recordTraceModelUsage({
+          tenantDbName: ctx.tenantDbName,
+          tenantId: ctx.tenantId,
+          projectId: ctx.projectId,
+          agentName: session.agentName,
+          events: [eventDoc],
+        });
 
         await backgroundDb.applyAgentTracingSessionEvent(sessionId, {
           cachedInputTokens,

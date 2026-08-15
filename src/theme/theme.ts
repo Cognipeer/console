@@ -83,7 +83,69 @@ export const designTokens = {
   },
 } as const;
 
-const componentDefaults: MantineThemeOverride['components'] = {
+// A form row only reads as aligned when every column puts its control the
+// same distance below its label. Mantine's stock part order (label →
+// description → input) breaks that as soon as one field carries helper text
+// and its neighbour doesn't: the described field's input drops by the height
+// of the description, so two fields sharing a SimpleGrid/Grid row end up
+// visibly staggered. Rendering helper text *under* the control instead makes
+// label → input a fixed two-row block, so side-by-side fields line up whether
+// or not they have a description — and a description that wraps to two lines
+// can no longer push its own control out of line either.
+export const FIELD_WRAPPER_ORDER = ['label', 'input', 'description', 'error'];
+
+// Every Input.Wrapper-based control (@mantine/core + @mantine/dates),
+// including ones no call site uses yet so the rule also holds for new forms.
+// Mantine derives the gap between the control and its helper text from the
+// order itself (--input-margin-top vs --input-margin-bottom), so nothing else
+// needs restyling.
+//
+// Deliberately excludes the *.Group wrappers (Checkbox/Radio/Switch/Chip):
+// there the description introduces the option list below it, and a group
+// never has this column-alignment problem to begin with.
+export const FIELD_CONTROLS = [
+  'Autocomplete',
+  'ColorInput',
+  'FileInput',
+  'JsonInput',
+  'MultiSelect',
+  'NativeSelect',
+  'NumberInput',
+  'PasswordInput',
+  'PillsInput',
+  'Select',
+  'TagsInput',
+  'Textarea',
+  'TextInput',
+  'DateInput',
+  'DatePickerInput',
+  'DateTimePicker',
+  'MonthPickerInput',
+  'TimeInput',
+  'YearPickerInput',
+];
+
+// Merges FIELD_WRAPPER_ORDER into every field control without disturbing the
+// defaults a control already declares above (radius/size).
+export function withHelperTextBelowControl(
+  defaults: MantineThemeOverride['components'],
+): MantineThemeOverride['components'] {
+  const merged = { ...defaults };
+
+  for (const name of FIELD_CONTROLS) {
+    merged[name] = {
+      ...merged[name],
+      defaultProps: {
+        ...merged[name]?.defaultProps,
+        inputWrapperOrder: FIELD_WRAPPER_ORDER,
+      },
+    };
+  }
+
+  return merged;
+}
+
+const explicitComponentDefaults: MantineThemeOverride['components'] = {
   Button: {
     defaultProps: {
       radius: 'md',
@@ -185,6 +247,8 @@ const componentDefaults: MantineThemeOverride['components'] = {
     },
   },
 };
+
+const componentDefaults = withHelperTextBelowControl(explicitComponentDefaults);
 
 export const theme = createTheme({
   primaryColor: 'teal',

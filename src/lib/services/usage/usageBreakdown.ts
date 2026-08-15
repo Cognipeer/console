@@ -1,11 +1,11 @@
 /**
- * Usage breakdown — read-side grouping of `usage_daily` rollup rows by user
- * or API token.
+ * Usage breakdown — read-side grouping of `usage_daily` rollup rows by user,
+ * API token or agent.
  *
  * The rollup table is the only place per-request attribution (userId /
- * apiTokenId) survives aggregation, so any "who spent what" view reads from
- * here rather than the raw service logs. Rows are daily aggregates (small),
- * so grouping happens in JS.
+ * apiTokenId / agentKey) survives aggregation, so any "who spent what" view
+ * reads from here rather than the raw service logs. Rows are daily aggregates
+ * (small), so grouping happens in JS.
  *
  * Attribution only exists from the deploy that introduced the rollup onward;
  * rows written by the backfill script carry '' dimensions and surface as the
@@ -15,10 +15,10 @@
 import { getDatabase } from '@/lib/database';
 import type { IUsageDaily } from '@/lib/database';
 
-export type UsageBreakdownGroupBy = 'user' | 'token';
+export type UsageBreakdownGroupBy = 'user' | 'token' | 'agent';
 
 export interface UsageBreakdownEntry {
-  /** userId or apiTokenId depending on groupBy; '' = unattributed/legacy. */
+  /** userId, apiTokenId or agentKey depending on groupBy; '' = unattributed. */
   id: string;
   /** Display name (user.name); undefined when the entity no longer exists. */
   name?: string;
@@ -55,22 +55,25 @@ export function toUtcDay(date: Date): string {
 }
 
 /**
- * Pure grouping over daily rollup rows: one entry per userId (or apiTokenId),
- * sorted by cost descending, plus overall totals. Rows with an empty
- * dimension value collapse into a single '' entry (unattributed/legacy).
+ * Pure grouping over daily rollup rows: one entry per userId / apiTokenId /
+ * agentKey, sorted by cost descending, plus overall totals. Rows with an
+ * empty dimension value collapse into a single '' entry (unattributed).
  */
 export function groupUsageDailyRows(
-  rows: Pick<
-    IUsageDaily,
-    | 'userId'
-    | 'apiTokenId'
-    | 'requests'
-    | 'errors'
-    | 'inputTokens'
-    | 'outputTokens'
-    | 'totalTokens'
-    | 'costUsd'
-  >[],
+  rows: Array<
+    Pick<
+      IUsageDaily,
+      | 'userId'
+      | 'apiTokenId'
+      | 'requests'
+      | 'errors'
+      | 'inputTokens'
+      | 'outputTokens'
+      | 'totalTokens'
+      | 'costUsd'
+    > &
+      Partial<Pick<IUsageDaily, 'agentKey'>>
+  >,
   groupBy: UsageBreakdownGroupBy,
 ): { totals: UsageBreakdownTotals; entries: UsageBreakdownEntry[] } {
   const byId = new Map<string, UsageBreakdownEntry>();
@@ -84,7 +87,13 @@ export function groupUsageDailyRows(
   };
 
   for (const row of rows) {
-    const id = (groupBy === 'user' ? row.userId : row.apiTokenId) ?? '';
+    // Legacy rows predate the agentKey dimension — treat missing as ''.
+    const id =
+      (groupBy === 'user'
+        ? row.userId
+        : groupBy === 'token'
+          ? row.apiTokenId
+          : row.agentKey) ?? '';
     const entry = byId.get(id) ?? {
       id,
       requests: 0,
@@ -129,6 +138,15 @@ export async function resolveUsageEntityNames(
 ): Promise<void> {
   const ids = [...new Set(entries.map((entry) => entry.id).filter((id) => id !== ''))];
   if (ids.length === 0) return;
+
+  // Agent keys are tracing agent names — there is no entity record to
+  // resolve; the key itself is the display name.
+  if (groupBy === 'agent') {
+    for (const entry of entries) {
+      if (entry.id !== '') entry.name = entry.id;
+    }
+    return;
+  }
 
   const db = await getDatabase();
 
@@ -175,6 +193,8 @@ export interface GetUsageBreakdownOptions {
   service: string;
   /** Service-local resource key, e.g. modelKey. Omit for all resources. */
   refKey?: string;
+  /** Restrict to one agent's usage (agentKey dimension). */
+  agentKey?: string;
   groupBy: UsageBreakdownGroupBy;
   from?: Date;
   to?: Date;
@@ -200,6 +220,7 @@ export async function getUsageBreakdown(
     projectId: options.projectId,
     service: options.service,
     refKey: options.refKey,
+    agentKey: options.agentKey,
     fromDay,
     toDay,
     limit: MAX_ROLLUP_ROWS,

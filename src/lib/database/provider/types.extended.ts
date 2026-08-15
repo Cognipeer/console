@@ -1,5 +1,5 @@
 import type { ObjectId } from 'mongodb';
-import type { IUsageAttributionFields } from './types.base';
+import type { IModelPricing, IUsageAttributionFields } from './types.base';
 import type { GuardrailAction, GuardrailType } from './types.domain';
 // ── Memory types ─────────────────────────────────────────────────────────
 
@@ -447,6 +447,43 @@ export interface IBetaAccessCode {
   usedByEmail: string | null;
   usedAt: Date | null;
   createdAt: Date;
+}
+
+// ── External model pricing (tenant-scoped) ───────────────────────────────
+// Reference prices for models observed via agent observability (traces) that
+// do NOT exist in the Model Hub — agents often call providers directly, so
+// the hub has no record to price their usage with. Entries here are pricing
+// references only: they are never servable and never appear in the hub.
+
+/** One effective-dated price. Ingest/reprice pick the version whose
+ *  `effectiveFrom` is the latest one <= the usage day. */
+export interface IExternalPricingVersion {
+  /** UTC day 'YYYY-MM-DD' the price takes effect; '' = since the beginning. */
+  effectiveFrom: string;
+  pricing: IModelPricing;
+  updatedBy?: string;
+  updatedAt?: Date;
+}
+
+export interface IExternalModelPricing {
+  _id?: ObjectId | string;
+  tenantId: string;
+  /** '' = tenant-wide; a project-scoped entry overrides it for that project. */
+  projectId?: string;
+  /** Model name as reported in trace events, kept verbatim for display. */
+  modelName: string;
+  /** Lowercased modelName — the unique/match key (trace names vary in case). */
+  normalizedName: string;
+  /** Price effective as of the latest update — kept for display/back-compat.
+   *  Per-day resolution uses `versions` when present. */
+  pricing: IModelPricing;
+  /** Effective-dated price history, ascending by `effectiveFrom`. Entries
+   *  created before versioning shipped have only `pricing`. */
+  versions?: IExternalPricingVersion[];
+  createdBy?: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
 }
 
 // ── GPU fleet (tenant-scoped) ────────────────────────────────────────────

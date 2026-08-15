@@ -33,7 +33,7 @@ Cognipeer may offer separate commercial terms for teams that need one or more of
 - managed SaaS terms outside AGPL reciprocity,
 - contractual support, SLA, onboarding, or enterprise deployment assistance.
 
-See [COMMERCIAL.md](../../COMMERCIAL.md) for the repository-level summary.
+See [COMMERCIAL.md](https://github.com/Cognipeer/console/blob/main/COMMERCIAL.md) for the repository-level summary.
 
 ## Hosted Service Versus Community Edition
 
@@ -63,4 +63,4 @@ AGPL is a defensible default.
 
 ## Legal Note
 
-This page is an engineering-facing summary, not legal advice. If you are making a redistribution, SaaS, OEM, or procurement decision, have counsel review the full [LICENSE](../../LICENSE).
+This page is an engineering-facing summary, not legal advice. If you are making a redistribution, SaaS, OEM, or procurement decision, have counsel review the full [LICENSE](https://github.com/Cognipeer/console/blob/main/LICENSE).

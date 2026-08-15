@@ -23,11 +23,13 @@ export type PermissionService =
   | 'tools'
   | 'sandbox'
   | 'aegis'
+  | 'abacus'
   | 'browser'
   | 'crawler'
   | 'websearch'
   | 'ocr'
   | 'alerts'
+  | 'cost'
   | 'automations'
   | 'members'
   | 'projects'
@@ -93,6 +95,7 @@ export const RBAC_SERVICE_DEFINITIONS: RbacServiceDefinition[] = [
   { id: 'websearch', label: 'Web Search', description: 'Web search providers (Bing, Brave, Serper, Tavily, SearxNG, DuckDuckGo) and search APIs.', category: 'data' },
   { id: 'ocr', label: 'OCR Jobs', description: 'Batch OCR + extraction jobs over files and images.', category: 'data' },
   { id: 'alerts', label: 'Alerts & Incidents', description: 'Alert rules, history and incidents.', category: 'operate' },
+  { id: 'cost', label: 'Cost Management', description: 'Spend attribution across models and agents, and reference pricing for observed (non-hub) models.', category: 'operate' },
   { id: 'automations', label: 'Automations', description: 'Operational schedulers, maintenance jobs and runtime controls.', category: 'admin', adminService: true },
   { id: 'projects', label: 'Projects', description: 'Project contexts and project-scoped access.', category: 'admin' },
   { id: 'tokens', label: 'API Tokens', description: 'User and project API tokens.', category: 'admin' },
@@ -104,6 +107,7 @@ export const RBAC_SERVICE_DEFINITIONS: RbacServiceDefinition[] = [
   { id: 'gpu-fleet', label: 'GPU Fleet', description: 'GPU hosts, MIG slices, model deployments, and terminal access.', category: 'operate', adminService: true },
   { id: 'sandbox', label: 'Agent Sandbox', description: 'Agent runtime sandboxes: runners, templates, instances, volumes, and terminal access.', category: 'operate', adminService: true },
   { id: 'aegis', label: 'Aegis', description: 'Enforcement-plane policy engine: tool-call evaluation, DLP redaction, approvals and decision audit.', category: 'operate' },
+  { id: 'abacus', label: 'Abacus', description: 'Cost intelligence: what-if repricing, model-switch recommendations and parity testing.', category: 'operate' },
   { id: 'cluster', label: 'Cluster', description: 'Multi-node cluster: node registry and per-instance assignment/orchestration.', category: 'admin', adminService: true },
 ];
 
@@ -194,6 +198,12 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/inference-monitoring', service: 'inference-monitoring' },
   { prefix: '/api/guardrails', service: 'guardrails' },
   { prefix: '/api/evaluation', service: 'evaluations' },
+  // Traffic snapshots sample production payloads into evaluation datasets —
+  // gated as the evaluations service (dataset factory, not a viewer surface).
+  { prefix: '/api/snapshots', service: 'evaluations' },
+  // External log imports (OpenAI/Bedrock/Langfuse/gateway) — same dataset
+  // factory tier as snapshots.
+  { prefix: '/api/dataset-import', service: 'evaluations' },
   { prefix: '/api/redteam', service: 'redteam' },
   { prefix: '/api/analysis', service: 'analysis' },
   { prefix: '/api/pii', service: 'pii' },
@@ -207,6 +217,11 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/ocr-jobs', service: 'ocr' },
   { prefix: '/api/automations', service: 'automations' },
   { prefix: '/api/alerts', service: 'alerts' },
+  { prefix: '/api/cost', service: 'cost' },
+  // Market reference prices (LiteLLM feed) backing the Cost pricing surfaces.
+  { prefix: '/api/model-price-catalog', service: 'cost' },
+  // Cost intelligence (EE module; enterprise-402 gated in addition to RBAC).
+  { prefix: '/api/abacus', service: 'abacus' },
   { prefix: '/api/gpu-fleet', service: 'gpu-fleet' },
   { prefix: '/api/sandbox', service: 'sandbox' },
   { prefix: '/api/aegis', service: 'aegis' },

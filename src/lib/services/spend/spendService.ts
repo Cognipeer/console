@@ -135,8 +135,8 @@ export async function getSpendReport(
   };
 }
 
-/** Client-facing entity names for the per-user / per-token spend breakdown. */
-export type SpendGroupByEntity = 'user' | 'api_key';
+/** Client-facing entity names for the per-user / per-token / per-agent spend breakdown. */
+export type SpendGroupByEntity = 'user' | 'api_key' | 'agent';
 
 export interface SpendEntityBreakdownOptions {
   from?: Date;
@@ -166,7 +166,12 @@ export async function getSpendEntityBreakdown(
     projectId: ctx.projectId,
     service: 'models',
     refKey: options.modelKey,
-    groupBy: options.entity === 'api_key' ? 'token' : 'user',
+    groupBy:
+      options.entity === 'api_key'
+        ? 'token'
+        : options.entity === 'agent'
+          ? 'agent'
+          : 'user',
     from: options.from,
     to: options.to,
   });

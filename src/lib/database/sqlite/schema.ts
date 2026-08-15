@@ -602,6 +602,7 @@ export const TENANT_SCHEMA_SQL = `
     source TEXT NOT NULL DEFAULT '',
     service TEXT NOT NULL,
     refKey TEXT NOT NULL DEFAULT '',
+    agentKey TEXT NOT NULL DEFAULT '',
     day TEXT NOT NULL,
     dayDate TEXT,
     requests INTEGER NOT NULL DEFAULT 0,
@@ -616,10 +617,28 @@ export const TENANT_SCHEMA_SQL = `
     units TEXT,
     updatedAt TEXT NOT NULL
   );
-  CREATE UNIQUE INDEX IF NOT EXISTS uniq_usage_daily_dims
-    ON usage_daily(tenantId, projectId, userId, apiTokenId, source, service, refKey, day);
+  -- The unique dimension index (v2, includes agentKey) is created in
+  -- applyTenantIndexes AFTER migrations: agentKey is added to legacy DBs by
+  -- ensureTableColumn, and referencing it here would abort the schema exec.
   CREATE INDEX IF NOT EXISTS idx_usage_daily_day ON usage_daily(tenantId, day DESC);
   CREATE INDEX IF NOT EXISTS idx_usage_daily_user_day ON usage_daily(tenantId, userId, day DESC);
+
+  -- Reference prices for models observed via tracing but absent from the
+  -- Model Hub. projectId '' = tenant-wide (NULLs are distinct in UNIQUE).
+  CREATE TABLE IF NOT EXISTS external_model_pricing (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT NOT NULL DEFAULT '',
+    modelName TEXT NOT NULL,
+    normalizedName TEXT NOT NULL,
+    pricing TEXT NOT NULL DEFAULT '{}',
+    versions TEXT,
+    createdBy TEXT,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL,
+    UNIQUE(tenantId, projectId, normalizedName)
+  );
 
   -- Vector indexes
   CREATE TABLE IF NOT EXISTS vector_indexes (
@@ -838,7 +857,10 @@ export const TENANT_SCHEMA_SQL = `
     name TEXT NOT NULL,
     description TEXT,
     source TEXT NOT NULL DEFAULT 'manual',
+    -- LEGACY: live items are rows in evaluation_dataset_items; this column
+    -- survives only for pre-split rows and is cleared on migration.
     items TEXT DEFAULT '[]',
+    itemCount INTEGER,
     metadata TEXT DEFAULT '{}',
     createdBy TEXT NOT NULL,
     updatedBy TEXT,
@@ -846,6 +868,26 @@ export const TENANT_SCHEMA_SQL = `
     updatedAt TEXT NOT NULL
   );
   CREATE UNIQUE INDEX IF NOT EXISTS idx_eval_datasets_key ON evaluation_datasets(key);
+
+  -- One row per dataset item (split out of evaluation_datasets.items so a
+  -- dataset is no longer bounded by a single row/document).
+  CREATE TABLE IF NOT EXISTS evaluation_dataset_items (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    datasetId TEXT NOT NULL,
+    itemId TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    input TEXT NOT NULL DEFAULT '[]',
+    expected TEXT,
+    tools TEXT,
+    toolResults TEXT,
+    tags TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_eval_dataset_items_position ON evaluation_dataset_items(datasetId, position);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_eval_dataset_items_itemId ON evaluation_dataset_items(datasetId, itemId);
 
   CREATE TABLE IF NOT EXISTS evaluation_suites (
     id TEXT PRIMARY KEY,
@@ -858,6 +900,7 @@ export const TENANT_SCHEMA_SQL = `
     datasetKey TEXT NOT NULL,
     scorers TEXT DEFAULT '[]',
     judgeModelKey TEXT,
+    embeddingModelKey TEXT,
     runConfig TEXT DEFAULT '{}',
     metadata TEXT DEFAULT '{}',
     createdBy TEXT NOT NULL,

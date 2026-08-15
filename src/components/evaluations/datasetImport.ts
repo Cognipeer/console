@@ -86,10 +86,20 @@ export function parseJsonItems(raw: string): { items: EvalDatasetItemView[] } | 
     const entry = parsed[i] as Record<string, unknown>;
     if (!entry || typeof entry !== 'object') return { error: `Item ${i} is not an object` };
     if (!Array.isArray(entry.input)) return { error: `Item ${i} must have an "input" array of messages` };
+    if (entry.tools !== undefined && !Array.isArray(entry.tools)) {
+      return { error: `Item ${i}: "tools" must be an array of tool definitions` };
+    }
     items.push({
       id: typeof entry.id === 'string' && entry.id ? entry.id : `item-${i + 1}`,
       input: entry.input as EvalDatasetItemView['input'],
       expected: (entry.expected as Record<string, unknown> | undefined) ?? undefined,
+      // Tool fidelity: without `tools` the target never sees the menu and a
+      // trajectory item scores a guaranteed 0 — these MUST survive import.
+      tools: Array.isArray(entry.tools) ? (entry.tools as EvalDatasetItemView['tools']) : undefined,
+      toolResults:
+        entry.toolResults && typeof entry.toolResults === 'object' && !Array.isArray(entry.toolResults)
+          ? (entry.toolResults as Record<string, unknown>)
+          : undefined,
       tags: Array.isArray(entry.tags) ? (entry.tags as string[]) : undefined,
     });
   }
@@ -151,6 +161,35 @@ export const JSON_TEMPLATE = JSON.stringify(
       input: [{ role: 'user', content: 'List two primary colors.' }],
       expected: { mustContain: ['red', 'blue'] },
     },
+    {
+      id: 'q3-tool-trajectory',
+      input: [
+        { role: 'system', content: 'You are a travel booking assistant.' },
+        { role: 'user', content: 'Book a flight to Paris.' },
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ id: 'call_1', name: 'search_flights', args: { city: 'Paris' } }],
+        },
+        { role: 'tool', toolCallId: 'call_1', name: 'search_flights', content: '{"flights":[{"id":"AF123"}]}' },
+        { role: 'user', content: 'Take the first one.' },
+      ],
+      tools: [
+        {
+          name: 'search_flights',
+          description: 'Search available flights',
+          parameters: { type: 'object', properties: { city: { type: 'string' } } },
+        },
+        {
+          name: 'book_flight',
+          description: 'Book a flight by id',
+          parameters: { type: 'object', properties: { flightId: { type: 'string' } } },
+        },
+      ],
+      expected: {
+        toolCalls: [{ name: 'book_flight', argsMatch: 'subset', args: { flightId: 'AF123' } }],
+      },
+    },
   ],
   null,
   2,
@@ -186,14 +225,31 @@ export interface EditorRow {
   reference: string;
   contains: string;
   tags: string;
+  /**
+   * When set, the row holds a full item built with the advanced item editor
+   * (multi-turn conversation / tools / expectations). It wins over the simple
+   * fields and is edited through the editor from then on.
+   */
+  item?: EvalDatasetItemView;
 }
 
 export const emptyEditorRow = (): EditorRow => ({ id: '', input: '', reference: '', contains: '', tags: '' });
 
-/** Build dataset items from the UI editor rows (skips rows without a question). */
-export function editorRowsToItems(rows: EditorRow[]): EvalDatasetItemView[] {
+/**
+ * Build dataset items from the UI editor rows (skips simple rows without a
+ * question). Advanced rows (`row.item`) pass through as-is. `defaultTools`,
+ * when provided, are applied to every item that doesn't define its own.
+ */
+export function editorRowsToItems(
+  rows: EditorRow[],
+  defaultTools?: EvalDatasetItemView['tools'],
+): EvalDatasetItemView[] {
   const items: EvalDatasetItemView[] = [];
   rows.forEach((r, i) => {
+    if (r.item) {
+      items.push(r.item);
+      return;
+    }
     if (!r.input.trim()) return;
     const expected: Record<string, unknown> = {};
     if (r.reference.trim()) expected.reference = r.reference.trim();
@@ -205,5 +261,12 @@ export function editorRowsToItems(rows: EditorRow[]): EvalDatasetItemView[] {
       tags: r.tags.trim() ? r.tags.split(',').map((s) => s.trim()).filter(Boolean) : undefined,
     });
   });
+  if (defaultTools && defaultTools.length > 0) {
+    return items.map((item) =>
+      Array.isArray(item.tools) && item.tools.length > 0
+        ? item
+        : { ...item, tools: defaultTools.map((t) => ({ ...t })) },
+    );
+  }
   return items;
 }

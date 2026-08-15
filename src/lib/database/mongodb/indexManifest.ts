@@ -89,6 +89,21 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
   tool_request_logs: [{ key: { toolKey: 1, createdAt: -1 }, options: { name: 'idx_tool_createdAt' } }],
   ocr_job_items: [{ key: { jobId: 1, index: 1 }, options: { name: 'idx_job_index' } }],
   batch_job_items: [{ key: { batchId: 1, index: 1 }, options: { name: 'idx_batch_index' } }],
+  // ── Evaluation service — key lookups + run listings were full scans ──
+  evaluation_targets: [{ key: { projectId: 1, key: 1 }, options: { name: 'idx_project_key' } }],
+  evaluation_datasets: [{ key: { projectId: 1, key: 1 }, options: { name: 'idx_project_key' } }],
+  // The item collection also ensures these itself on the first write (the
+  // manifest only covers collections that already exist at tenant bind);
+  // names/keys are IDENTICAL so the two paths never conflict.
+  evaluation_dataset_items: [
+    { key: { datasetId: 1, position: 1 }, options: { name: 'idx_dataset_position' } },
+    { key: { datasetId: 1, id: 1 }, options: { name: 'uniq_dataset_itemId', unique: true } },
+  ],
+  evaluation_suites: [{ key: { projectId: 1, key: 1 }, options: { name: 'idx_project_key' } }],
+  evaluation_runs: [
+    { key: { projectId: 1, suiteKey: 1, createdAt: -1 }, options: { name: 'idx_project_suite_createdAt' } },
+    { key: { projectId: 1, status: 1 }, options: { name: 'idx_project_status' } },
+  ],
   memory_items: [{ key: { storeKey: 1, createdAt: -1 }, options: { name: 'idx_store_createdAt' } }],
   alert_events: [{ key: { ruleId: 1, firedAt: -1 }, options: { name: 'idx_rule_firedAt' } }],
   files: [{ key: { providerKey: 1, bucketKey: 1, key: 1 }, options: { name: 'idx_provider_bucket_key' } }],

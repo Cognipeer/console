@@ -10,6 +10,10 @@ import {
   recordUsageEvent,
   type UsageAttribution,
 } from '@/lib/services/usage/usageEvents';
+import { calculateCost } from '@/lib/services/models/usageLogger';
+import { resolveExternalPricingForDay } from '@/lib/services/cost/costService';
+import { toUtcDay } from '@/lib/services/usage/usageBreakdown';
+import { lintSystemPrompt, type PromptLintReport } from '@/lib/services/promptLint';
 import dayjs from 'dayjs';
 
 const logger = createLogger('agent-tracing');
@@ -18,7 +22,7 @@ const logger = createLogger('agent-tracing');
  * Usage accounting for one newly created tracing session. Call ONLY when a
  * session is created (not on merge/update ingests) and stamp the returned
  * attribution onto the session doc. No tokens — trace token counts are
- * observability data and would double count the models service.
+ * accounted separately per model by `recordTraceModelUsage`.
  */
 export function recordTracingSessionCreated(params: {
   tenantDbName: string;
@@ -34,6 +38,189 @@ export function recordTracingSessionCreated(params: {
     refKey: params.agentName ?? '',
     status: 'success',
   });
+}
+
+// ── Trace-derived model usage / cost accounting ────────────────────────────
+//
+// Agents frequently call model providers DIRECTLY (not through the gateway)
+// and only report what happened via tracing. Those tokens never hit the
+// models service, so spend reports would miss them entirely. This block
+// derives per-model usage from trace events, prices it with Model Hub
+// pricing, and rolls it into `usage_daily` as
+//   (service 'models', source 'tracing', agentKey = agentName)
+// rows — separable from gateway-served rows (source 'api') in every report.
+//
+// DOUBLE-COUNT CONTRACT: a trace event describing a model call that DID go
+// through this gateway must carry one of the markers below in its metadata;
+// such events are skipped here because the models service already accounted
+// them at serving time.
+
+/** Metadata keys that mark a trace event as gateway-served (already billed). */
+const GATEWAY_MARKER_KEYS = ['gatewayRequestId', 'consoleRequestId'] as const;
+
+/** Loose event shape accepted from any ingestion path (OTLP / JSON / stream). */
+export interface TraceUsageEventLike {
+  model?: string;
+  modelNames?: string[];
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedInputTokens?: number;
+  /** Model-call wall time — feeds the rollup's latency counters so latency
+   *  optimization works for direct-to-provider (on-prem) traffic too. */
+  durationMs?: number;
+  metadata?: Record<string, unknown>;
+}
+
+interface ModelTokenTotals {
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  calls: number;
+  /** Sum of durationMs over the calls that reported one. */
+  durationMsSum: number;
+  /** How many calls reported a durationMs. */
+  durationSamples: number;
+}
+
+function isGatewayServed(event: TraceUsageEventLike): boolean {
+  const metadata = event.metadata;
+  if (!metadata) return false;
+  if (metadata.gateway === true) return true;
+  return GATEWAY_MARKER_KEYS.some(
+    (key) => typeof metadata[key] === 'string' && (metadata[key] as string).length > 0,
+  );
+}
+
+function eventModelName(event: TraceUsageEventLike): string | undefined {
+  if (typeof event.model === 'string' && event.model.length > 0) return event.model;
+  const fromList = event.modelNames?.find((name) => typeof name === 'string' && name.length > 0);
+  return fromList;
+}
+
+/** Sum tokens per model name across events, skipping gateway-served ones. */
+function sumTokensByModel(events: TraceUsageEventLike[]): Map<string, ModelTokenTotals> {
+  const byModel = new Map<string, ModelTokenTotals>();
+  for (const event of events) {
+    const model = eventModelName(event);
+    if (!model || isGatewayServed(event)) continue;
+    const inputTokens = typeof event.inputTokens === 'number' ? event.inputTokens : 0;
+    const outputTokens = typeof event.outputTokens === 'number' ? event.outputTokens : 0;
+    const cachedInputTokens =
+      typeof event.cachedInputTokens === 'number' ? event.cachedInputTokens : 0;
+    if (inputTokens === 0 && outputTokens === 0 && cachedInputTokens === 0) continue;
+    const totals = byModel.get(model) ?? {
+      inputTokens: 0,
+      outputTokens: 0,
+      cachedInputTokens: 0,
+      calls: 0,
+      durationMsSum: 0,
+      durationSamples: 0,
+    };
+    totals.inputTokens += inputTokens;
+    totals.outputTokens += outputTokens;
+    totals.cachedInputTokens += cachedInputTokens;
+    totals.calls += 1;
+    if (typeof event.durationMs === 'number' && event.durationMs > 0) {
+      totals.durationMsSum += event.durationMs;
+      totals.durationSamples += 1;
+    }
+    byModel.set(model, totals);
+  }
+  return byModel;
+}
+
+/**
+ * Record trace-derived model usage into the usage rollup.
+ *
+ * `events` are the events this ingest added; `previousEvents` (JSON session
+ * re-posts, which delete + recreate all events) are subtracted per model so a
+ * replayed session contributes zero delta. Pricing resolves against the Model
+ * Hub by hub `key` first, then provider `modelId`, then the tenant's external
+ * model pricing catalog (all case-insensitive) — an unmatched model still
+ * records tokens with cost 0 so the Cost page can surface it as "unpriced"
+ * instead of silently dropping it.
+ *
+ * Never throws — cost accounting must not break trace ingestion.
+ */
+export async function recordTraceModelUsage(params: {
+  tenantDbName: string;
+  tenantId: string;
+  projectId?: string;
+  agentName?: string;
+  events: TraceUsageEventLike[];
+  previousEvents?: TraceUsageEventLike[];
+}): Promise<void> {
+  try {
+    const current = sumTokensByModel(params.events);
+    if (current.size === 0) return;
+    const previous = params.previousEvents?.length
+      ? sumTokensByModel(params.previousEvents)
+      : undefined;
+
+    const db = await getDatabase();
+    await db.switchToTenant(params.tenantDbName);
+    const models = await db.listModels({ projectId: params.projectId });
+    const byKey = new Map(models.map((model) => [model.key.toLowerCase(), model]));
+    const byModelId = new Map(models.map((model) => [model.modelId.toLowerCase(), model]));
+    const externalEntries = await db.listExternalModelPricing(params.projectId);
+    // Project-scoped entries win over tenant-wide ('') ones for the same name.
+    const externalByName = new Map(
+      externalEntries
+        .sort((a, b) => (a.projectId === '' ? -1 : 1) - (b.projectId === '' ? -1 : 1))
+        .map((entry) => [entry.normalizedName, entry]),
+    );
+    const today = toUtcDay(new Date());
+
+    for (const [modelName, totals] of current) {
+      const prior = previous?.get(modelName);
+      const inputTokens = Math.max(0, totals.inputTokens - (prior?.inputTokens ?? 0));
+      const outputTokens = Math.max(0, totals.outputTokens - (prior?.outputTokens ?? 0));
+      const cachedInputTokens = Math.max(
+        0,
+        totals.cachedInputTokens - (prior?.cachedInputTokens ?? 0),
+      );
+      const calls = Math.max(0, totals.calls - (prior?.calls ?? 0));
+      const durationMsSum = Math.max(0, totals.durationMsSum - (prior?.durationMsSum ?? 0));
+      const durationSamples = Math.max(0, totals.durationSamples - (prior?.durationSamples ?? 0));
+      if (inputTokens === 0 && outputTokens === 0 && cachedInputTokens === 0) continue;
+
+      const lookup = modelName.toLowerCase();
+      const hubModel = byKey.get(lookup) ?? byModelId.get(lookup);
+      const externalEntry = externalByName.get(lookup);
+      const pricing = hubModel?.pricing
+        ?? (externalEntry ? resolveExternalPricingForDay(externalEntry, today) : undefined);
+      const costUsd = pricing
+        ? calculateCost(pricing, { inputTokens, outputTokens, cachedInputTokens }).totalCost
+        : 0;
+
+      recordUsageEvent({
+        tenantDbName: params.tenantDbName,
+        tenantId: params.tenantId,
+        projectId: params.projectId,
+        service: 'models',
+        refKey: hubModel?.key ?? modelName,
+        agentKey: params.agentName ?? '',
+        source: 'tracing',
+        status: 'success',
+        inputTokens,
+        outputTokens,
+        cachedInputTokens,
+        totalTokens: inputTokens + outputTokens + cachedInputTokens,
+        costUsd,
+        // Latency: aggregate model-call durations, weighted by sample count —
+        // the on-prem optimization objective needs latency on tracing rows.
+        ...(durationMsSum > 0 && durationSamples > 0
+          ? { latencyMs: durationMsSum, latencySamples: durationSamples }
+          : {}),
+        units: { modelCalls: calls },
+      });
+    }
+  } catch (error) {
+    logger.warn('Trace-derived model usage accounting failed', {
+      agentName: params.agentName,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 type SessionListQuery = Record<string, unknown> & {
@@ -76,7 +263,26 @@ const AGENT_OVERVIEW_SESSION_PROJECTION = {
   agentVersion: 1,
   modelsUsed: 1,
   toolsUsed: 1,
+  errors: 1,
 } as const;
+
+/** Model overview additionally needs the owning agent per session. */
+const MODEL_OVERVIEW_SESSION_PROJECTION = {
+  ...AGENT_OVERVIEW_SESSION_PROJECTION,
+  agentName: 1,
+} as const;
+
+/** Agent directory (sub-nav) — the bare minimum per session. */
+const AGENT_DIRECTORY_SESSION_PROJECTION = {
+  agentName: 1,
+  startedAt: 1,
+  status: 1,
+} as const;
+
+/** How many recent sessions the deterministic-insights event sample reads. */
+const INSIGHT_EVENT_SESSION_CAP = 12;
+/** Top-N error patterns surfaced on the agent overview. */
+const INSIGHT_ERROR_PATTERN_CAP = 6;
 
 const SESSION_LIST_PROJECTION = {
   sessionId: 1,
@@ -108,6 +314,13 @@ const SESSION_EVENT_SUMMARY_PROJECTION = {
   cachedInputTokens: 1,
   spanId: 1,
   parentSpanId: 1,
+  // Per-turn tool menu, names only: sections survive as {kind} shells except
+  // tool_definitions, which keeps tools[].name — a few bytes per event, so
+  // the timeline can show "which tools were offered on this call" without
+  // shipping message/tool payloads. (SQLite ignores projections and always
+  // returns full sections; the summary mapper extracts the same names.)
+  'sections.kind': 1,
+  'sections.tools.name': 1,
 } as const;
 
 function toRecord(value: unknown): Record<string, unknown> | undefined {
@@ -144,7 +357,32 @@ function getStoredToolDetails(event: IAgentTracingEvent): Record<string, unknown
   };
 }
 
+/** Cap on tool names surfaced per event summary (full menu in the detail). */
+const SUMMARY_TOOL_NAME_CAP = 32;
+
+/**
+ * Names from the event's `tool_definitions` section — the tool menu the model
+ * was offered on THIS call. Surfaced on summaries so the timeline can answer
+ * "which tools were sent on this turn?" without opening every event. `count`
+ * is the FULL menu size (names may be capped for payload discipline).
+ */
+function getToolDefinitionNames(
+  event: IAgentTracingEvent,
+): { names: string[]; count: number } | undefined {
+  const section = (event.sections || []).find(
+    (candidate) => toRecord(candidate)?.kind === 'tool_definitions',
+  );
+  const tools = toRecord(section)?.tools;
+  if (!Array.isArray(tools)) return undefined;
+  const names = tools
+    .map((tool) => toRecord(tool)?.name)
+    .filter((name): name is string => typeof name === 'string' && name.length > 0);
+  if (names.length === 0) return undefined;
+  return { names: names.slice(0, SUMMARY_TOOL_NAME_CAP), count: names.length };
+}
+
 function mapTracingEventSummary(event: IAgentTracingEvent) {
+  const toolMenu = getToolDefinitionNames(event);
   return {
     id: event.id || event._id,
     sequence: event.sequence,
@@ -161,6 +399,9 @@ function mapTracingEventSummary(event: IAgentTracingEvent) {
     cachedInputTokens: event.cachedInputTokens,
     spanId: event.spanId,
     parentSpanId: event.parentSpanId,
+    ...(toolMenu
+      ? { toolDefinitionNames: toolMenu.names, toolDefinitionCount: toolMenu.count }
+      : {}),
   };
 }
 
@@ -720,6 +961,7 @@ export class AgentTracingService {
           models: [],
           versions: [],
           daily: [],
+          insights: null,
         },
       };
     }
@@ -876,6 +1118,9 @@ export class AgentTracingService {
       }))
       .slice(-30);
 
+    // ── Deterministic insights (bounded event sample of recent sessions) ──
+    const insights = await buildAgentInsights(db, projectId, sortedSessions);
+
     return {
       agent,
       recentSessions,
@@ -889,7 +1134,422 @@ export class AgentTracingService {
         models,
         versions,
         daily,
+        insights,
       },
     };
   }
+
+  /**
+   * Lightweight agent directory for navigation: distinct agent names in the
+   * window with session count, latest activity, and latest status — no
+   * event reads, minimal projection.
+   */
+  static async listRecentAgents(
+    tenantDbName: string,
+    projectId: string,
+    filters?: { from?: string; to?: string; limit?: number },
+  ) {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+
+    const query: SessionListQuery = {};
+    if (filters?.from) query.from = filters.from;
+    if (filters?.to) query.to = filters.to;
+
+    const sessions = await fetchAllSessionsBatched(
+      db,
+      projectId,
+      query,
+      AGENT_DIRECTORY_SESSION_PROJECTION,
+    );
+
+    const byAgent = new Map<
+      string,
+      { name: string; sessionsCount: number; latestSessionAt: string | null; latestStatus: string | null }
+    >();
+    for (const session of sessions) {
+      const name = session.agentName;
+      if (!name) continue;
+      const entry = byAgent.get(name) ?? {
+        name,
+        sessionsCount: 0,
+        latestSessionAt: null,
+        latestStatus: null,
+      };
+      entry.sessionsCount += 1;
+      const at = session.startedAt ? new Date(session.startedAt).toISOString() : null;
+      if (at && (!entry.latestSessionAt || at > entry.latestSessionAt)) {
+        entry.latestSessionAt = at;
+        entry.latestStatus = session.status ?? null;
+      }
+      byAgent.set(name, entry);
+    }
+
+    const agents = [...byAgent.values()].sort((a, b) =>
+      (b.latestSessionAt ?? '').localeCompare(a.latestSessionAt ?? ''),
+    );
+    const limit = filters?.limit && filters.limit > 0 ? filters.limit : 50;
+    return { agents: agents.slice(0, limit), total: agents.length };
+  }
+
+  /**
+   * Model overview — the model-dimension twin of `getAgentOverview`. Window
+   * totals cover sessions that USED the model (session token totals include
+   * every model in the session — labeled as such in the UI); the insight
+   * sample narrows ai_call metrics to this model's events exactly.
+   */
+  static async getModelOverview(
+    tenantDbName: string,
+    projectId: string,
+    modelName: string,
+    filters?: { from?: string; to?: string; timezone?: string },
+  ) {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+
+    const query: SessionListQuery = {};
+    if (filters?.from || filters?.to) {
+      query.from = filters.from;
+      query.to = filters.to;
+    }
+
+    const allSessions = await fetchAllSessionsBatched(
+      db,
+      projectId,
+      query,
+      MODEL_OVERVIEW_SESSION_PROJECTION,
+    );
+    const sessions = allSessions.filter((s) => (s.modelsUsed || []).includes(modelName));
+
+    if (sessions.length === 0) {
+      return {
+        model: {
+          name: modelName,
+          sessionsCount: 0,
+          agentsCount: 0,
+          latestSessionAt: null,
+          latestStatus: null,
+        },
+        analytics: {
+          totals: buildAggregateTotals([]),
+          statuses: [],
+          agents: [],
+          insights: null,
+        },
+      };
+    }
+
+    const sortedSessions = sessions
+      .slice()
+      .sort(
+        (a, b) =>
+          new Date(b.startedAt || 0).getTime() -
+          new Date(a.startedAt || 0).getTime(),
+      );
+
+    const totals = buildAggregateTotals(sessions);
+
+    const statusMap = new Map<string, number>();
+    sortedSessions.forEach((session) => {
+      const status = session.status || 'unknown';
+      statusMap.set(status, (statusMap.get(status) || 0) + 1);
+    });
+    const statuses = Array.from(statusMap.entries())
+      .map(([status, count]) => ({ status, count }))
+      .sort((a, b) => b.count - a.count);
+
+    const agentMap = new Map<string, number>();
+    sortedSessions.forEach((session) => {
+      const name = session.agentName || 'unknown';
+      agentMap.set(name, (agentMap.get(name) || 0) + 1);
+    });
+    const agents = Array.from(agentMap.entries())
+      .map(([name, sessionsCount]) => ({ name, sessionsCount }))
+      .sort((a, b) => b.sessionsCount - a.sessionsCount);
+
+    const latestSession = sortedSessions[0];
+    const insights = await buildAgentInsights(db, projectId, sortedSessions, {
+      modelName,
+    });
+
+    return {
+      model: {
+        name: modelName,
+        sessionsCount: sessions.length,
+        agentsCount: agents.length,
+        latestSessionAt: latestSession?.startedAt || null,
+        latestStatus: latestSession?.status || null,
+      },
+      analytics: {
+        totals,
+        statuses,
+        agents,
+        insights,
+      },
+    };
+  }
+}
+
+// ── Agent deterministic insights ───────────────────────────────────────────
+
+export interface AgentInsights {
+  /** Sessions whose events were actually read for the sample. */
+  sampledSessions: number;
+  /** ai_call / tool_call volumes inside the sample. */
+  perCall: {
+    aiCalls: number;
+    toolCalls: number;
+    avgAiCallsPerSession: number;
+    avgToolCallsPerSession: number;
+    avgInputTokensPerAiCall: number | null;
+  };
+  /** Per-turn tool MENU stats from `tool_definitions` sections (when traced). */
+  toolMenu: {
+    /** ai_calls that carried a recorded menu / all ai_calls in the sample. */
+    coveragePct: number;
+    avgMenuSize: number | null;
+    maxMenuSize: number | null;
+    distinctTools: number;
+    /** No menus at all → the tracer predates tool_definitions (SDK < 0.9.2). */
+    available: boolean;
+  };
+  /** System prompt profile + deterministic checks, from the freshest trace
+   *  that carries a system message (longest wins — compaction shrinks some). */
+  promptProfile: {
+    found: boolean;
+    sourceSessionId?: string;
+    capturedAt?: string;
+    lint?: PromptLintReport;
+    preview?: string;
+  };
+  /** Top recurring error messages on this agent's sessions (window-scoped). */
+  errorPatterns: Array<{ message: string; count: number; lastSeen: string | null }>;
+  /** Deterministic waste signals inside the sample. */
+  waste: {
+    /** Identical (tool + args) calls repeated within ONE session. */
+    repeatedToolCalls: {
+      /** Tool calls whose args could be read and were analysed. */
+      callsAnalyzed: number;
+      /** Calls beyond the first of each identical group — pure repetition. */
+      wastedCalls: number;
+      topOffenders: Array<{
+        tool: string;
+        /** Largest identical-call count seen in a single session. */
+        maxRepeatsInOneSession: number;
+        /** Sessions containing at least one repeat of this tool+args. */
+        sessionsAffected: number;
+        totalWasted: number;
+        argsPreview: string;
+      }>;
+    };
+  };
+}
+
+/** Stable stringify (sorted keys) so identical args always hash the same. */
+function canonicalArgsKey(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map((v) => canonicalArgsKey(v)).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalArgsKey(record[k])}`).join(',')}}`;
+}
+
+/**
+ * Pull the call arguments off a tool_call event (shape varies by producer).
+ *
+ * `content` is last because it is the CANONICAL section field — the one the
+ * detail UI renders and the one third-party integrations emit — while the
+ * others are producer-specific aliases that, when present, are more precisely
+ * the arguments. Without `content`, repeated-call detection silently skips
+ * every trace that did not come from the Cognipeer agent runtime.
+ */
+function extractToolCallArgs(event: IAgentTracingEvent): unknown {
+  for (const rawSection of event.sections ?? []) {
+    const section = toRecord(rawSection);
+    if (!section || section.kind !== 'tool_call') continue;
+    for (const key of ['arguments', 'args', 'input', 'content']) {
+      if (section[key] !== undefined) return section[key];
+    }
+  }
+  const metadata = toRecord(event.metadata);
+  if (metadata?.arguments !== undefined) return metadata.arguments;
+  return undefined;
+}
+
+/**
+ * Compute deterministic per-agent insights from a bounded sample: the
+ * INSIGHT_EVENT_SESSION_CAP most recent sessions' full events (indexed
+ * per-session reads — never a collection scan), plus the already-loaded
+ * session rows for error patterns. Pure aggregation — no model calls.
+ *
+ * `options.modelName` narrows ai_call metrics (calls, tokens, tool menus,
+ * prompt extraction) to events of that model — the model-analysis view.
+ * tool_call and waste metrics stay session-scoped: the caller pre-filters
+ * sessions to those that used the model, and repeats inside such a session
+ * are that model's behaviour.
+ */
+async function buildAgentInsights(
+  db: Awaited<ReturnType<typeof getDatabase>>,
+  projectId: string,
+  sortedSessions: Array<Partial<IAgentTracingSession>>,
+  options?: { modelName?: string },
+): Promise<AgentInsights> {
+  const modelName = options?.modelName;
+  const sample = sortedSessions.slice(0, INSIGHT_EVENT_SESSION_CAP);
+
+  let aiCalls = 0;
+  let toolCalls = 0;
+  let aiCallInputTokens = 0;
+  let aiCallsWithTokens = 0;
+  let menuEvents = 0;
+  const menuSizes: number[] = [];
+  const menuTools = new Set<string>();
+  let bestPrompt: { text: string; sessionId: string; at?: string } | null = null;
+  // Repetition detection: identical (tool + canonical args) within a session.
+  let callsAnalyzed = 0;
+  let wastedCalls = 0;
+  const offenderMap = new Map<
+    string,
+    { tool: string; maxRepeatsInOneSession: number; sessionsAffected: number; totalWasted: number; argsPreview: string }
+  >();
+
+  for (const session of sample) {
+    if (!session.sessionId) continue;
+    let events: IAgentTracingEvent[] = [];
+    try {
+      events = await db.listAgentTracingEvents(session.sessionId, projectId);
+    } catch {
+      continue; // a single unreadable session must not sink the overview
+    }
+    const sessionCallGroups = new Map<string, { tool: string; n: number; argsPreview: string }>();
+    for (const event of events) {
+      if (event.type === 'tool_call') {
+        toolCalls += 1;
+        const tool = event.toolName;
+        const args = extractToolCallArgs(event);
+        // Args-less calls are skipped — without arguments, two calls to the
+        // same tool are NOT provably identical.
+        if (tool && args !== undefined) {
+          callsAnalyzed += 1;
+          const key = `${tool} ${canonicalArgsKey(args)}`;
+          const group = sessionCallGroups.get(key) ?? {
+            tool,
+            n: 0,
+            argsPreview: JSON.stringify(args)?.slice(0, 120) ?? '',
+          };
+          group.n += 1;
+          sessionCallGroups.set(key, group);
+        }
+      }
+      if (event.type !== 'ai_call') continue;
+      if (modelName && event.model !== modelName) continue;
+      aiCalls += 1;
+      if (typeof event.inputTokens === 'number') {
+        aiCallInputTokens += event.inputTokens;
+        aiCallsWithTokens += 1;
+      }
+      for (const rawSection of event.sections ?? []) {
+        const section = toRecord(rawSection);
+        if (!section) continue;
+        if (section.kind === 'tool_definitions' && Array.isArray(section.tools)) {
+          menuEvents += 1;
+          menuSizes.push(section.tools.length);
+          for (const tool of section.tools) {
+            const name = toRecord(tool)?.name;
+            if (typeof name === 'string' && name) menuTools.add(name);
+          }
+        }
+        if (
+          section.kind === 'message'
+          && typeof section.role === 'string'
+          && section.role.toLowerCase() === 'system'
+          && typeof section.content === 'string'
+          && section.content.length > (bestPrompt?.text.length ?? 0)
+        ) {
+          bestPrompt = {
+            text: section.content,
+            sessionId: session.sessionId,
+            at: session.startedAt ? new Date(session.startedAt).toISOString() : undefined,
+          };
+        }
+      }
+    }
+
+    // Fold this session's identical-call groups into the offender ranking.
+    for (const [key, group] of sessionCallGroups) {
+      if (group.n < 2) continue;
+      const wasted = group.n - 1;
+      wastedCalls += wasted;
+      const offender = offenderMap.get(key) ?? {
+        tool: group.tool,
+        maxRepeatsInOneSession: 0,
+        sessionsAffected: 0,
+        totalWasted: 0,
+        argsPreview: group.argsPreview,
+      };
+      offender.maxRepeatsInOneSession = Math.max(offender.maxRepeatsInOneSession, group.n);
+      offender.sessionsAffected += 1;
+      offender.totalWasted += wasted;
+      offenderMap.set(key, offender);
+    }
+  }
+
+  // Error patterns from the (already-loaded) window sessions.
+  const patterns = new Map<string, { count: number; lastSeen: string | null }>();
+  for (const session of sortedSessions) {
+    for (const rawError of (session as { errors?: Array<{ message?: unknown }> }).errors ?? []) {
+      const message = typeof rawError?.message === 'string' ? rawError.message.slice(0, 160) : null;
+      if (!message) continue;
+      const entry = patterns.get(message) ?? { count: 0, lastSeen: null };
+      entry.count += 1;
+      const at = session.startedAt ? new Date(session.startedAt).toISOString() : null;
+      if (at && (!entry.lastSeen || at > entry.lastSeen)) entry.lastSeen = at;
+      patterns.set(message, entry);
+    }
+  }
+  const errorPatterns = [...patterns.entries()]
+    .map(([message, entry]) => ({ message, ...entry }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, INSIGHT_ERROR_PATTERN_CAP);
+
+  return {
+    sampledSessions: sample.length,
+    perCall: {
+      aiCalls,
+      toolCalls,
+      avgAiCallsPerSession: sample.length > 0 ? aiCalls / sample.length : 0,
+      avgToolCallsPerSession: sample.length > 0 ? toolCalls / sample.length : 0,
+      avgInputTokensPerAiCall:
+        aiCallsWithTokens > 0 ? Math.round(aiCallInputTokens / aiCallsWithTokens) : null,
+    },
+    toolMenu: {
+      coveragePct: aiCalls > 0 ? Math.round((menuEvents / aiCalls) * 100) : 0,
+      avgMenuSize:
+        menuSizes.length > 0
+          ? Math.round((menuSizes.reduce((a, b) => a + b, 0) / menuSizes.length) * 10) / 10
+          : null,
+      maxMenuSize: menuSizes.length > 0 ? Math.max(...menuSizes) : null,
+      distinctTools: menuTools.size,
+      available: menuEvents > 0,
+    },
+    promptProfile: bestPrompt
+      ? {
+          found: true,
+          sourceSessionId: bestPrompt.sessionId,
+          capturedAt: bestPrompt.at,
+          lint: lintSystemPrompt(bestPrompt.text),
+          preview: bestPrompt.text.slice(0, 400),
+        }
+      : { found: false },
+    errorPatterns,
+    waste: {
+      repeatedToolCalls: {
+        callsAnalyzed,
+        wastedCalls,
+        topOffenders: [...offenderMap.values()]
+          .sort((a, b) => b.totalWasted - a.totalWasted)
+          .slice(0, 8),
+      },
+    },
+  };
 }

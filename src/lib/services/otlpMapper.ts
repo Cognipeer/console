@@ -13,6 +13,10 @@ import type {
   IAgentTracingSession,
   IAgentTracingEvent,
 } from '@/lib/database/provider/types.base';
+import {
+  buildToolDefinitionsSection,
+  normalizeSectionListToolDefinitions,
+} from '@/lib/services/tracingToolDefinitions';
 
 const logger = createLogger('otlp-mapper');
 
@@ -93,6 +97,29 @@ function getIntAttr(attrs: OtlpKeyValue[] | undefined, key: string): number | un
   const found = attrs?.find((a) => a.key === key);
   if (found?.value?.intValue != null) return parseInt(found.value.intValue, 10);
   if (found?.value?.doubleValue != null) return Math.round(found.value.doubleValue);
+  // Some instrumentations emit counts as strings.
+  if (found?.value?.stringValue != null) {
+    const parsed = Number(found.value.stringValue);
+    return Number.isFinite(parsed) ? Math.round(parsed) : undefined;
+  }
+  return undefined;
+}
+
+/** First key that carries a string value. */
+function firstStringAttr(attrs: OtlpKeyValue[] | undefined, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = getStringAttr(attrs, key);
+    if (value) return value;
+  }
+  return undefined;
+}
+
+/** First key that carries an integer value. */
+function firstIntAttr(attrs: OtlpKeyValue[] | undefined, keys: string[]): number | undefined {
+  for (const key of keys) {
+    const value = getIntAttr(attrs, key);
+    if (value !== undefined) return value;
+  }
   return undefined;
 }
 
@@ -132,6 +159,296 @@ function otlpStatusToString(code?: number): string {
     case 1: return 'success';
     default: return 'success'; // UNSET maps to success
   }
+}
+
+// ─── Third-party GenAI semantic conventions ─────────────────────────────────
+//
+// Agent frameworks that are not instrumented by the Cognipeer SDK still reach
+// this endpoint through one of three attribute conventions, and a customer
+// usually cannot choose which:
+//
+//   * OpenInference (Arize/Phoenix) — `openinference.span.kind`, `llm.*`
+//   * OTel GenAI semconv / OpenLLMetry >= 0.55 — `gen_ai.*` with JSON message
+//     blobs, and the system prompt split out into `gen_ai.system_instructions`
+//   * OpenLLMetry <= 0.54 — indexed `gen_ai.prompt.{i}.*` / `llm.request.*`
+//
+// A single span can carry two of them at once (an app running both an
+// OpenInference instrumentor and a Traceloop one), so everything below reads
+// by attribute presence and merges rather than picking a "winner".
+
+/** OpenInference span kind → internal event type. */
+const OPENINFERENCE_KIND_TO_EVENT: Record<string, string> = {
+  LLM: 'ai_call',
+  TOOL: 'tool_call',
+  RETRIEVER: 'retrieval',
+  EMBEDDING: 'embedding',
+  RERANKER: 'retrieval',
+  GUARDRAIL: 'guardrail',
+  EVALUATOR: 'guardrail',
+  AGENT: 'span',
+  CHAIN: 'span',
+};
+
+/** OTel GenAI `gen_ai.operation.name` → internal event type. */
+const GENAI_OPERATION_TO_EVENT: Record<string, string> = {
+  chat: 'ai_call',
+  text_completion: 'ai_call',
+  generate_content: 'ai_call',
+  embeddings: 'embedding',
+  execute_tool: 'tool_call',
+  invoke_agent: 'span',
+  create_agent: 'span',
+};
+
+/** Instrumentations replace redacted values with this literal. */
+const REDACTION_SENTINEL = '__REDACTED__';
+
+function isUsableContent(value: string | undefined): value is string {
+  return Boolean(value) && value !== REDACTION_SENTINEL;
+}
+
+/**
+ * Group flat indexed attributes (`prefix.0.field`) into per-index records,
+ * ordered by index. Both OpenInference and legacy OpenLLMetry encode lists
+ * this way, and the keys arrive in arbitrary order.
+ */
+function groupIndexedAttrs(
+  attrs: OtlpKeyValue[],
+  prefix: string,
+): Array<Record<string, string>> {
+  const groups = new Map<number, Record<string, string>>();
+  for (const kv of attrs) {
+    if (!kv.key.startsWith(`${prefix}.`)) continue;
+    const rest = kv.key.slice(prefix.length + 1);
+    const dot = rest.indexOf('.');
+    if (dot < 0) continue;
+    const index = parseInt(rest.slice(0, dot), 10);
+    if (Number.isNaN(index)) continue;
+    const value = kv.value.stringValue
+      ?? kv.value.intValue
+      ?? (kv.value.doubleValue != null ? String(kv.value.doubleValue) : undefined)
+      ?? (kv.value.boolValue != null ? String(kv.value.boolValue) : undefined);
+    if (value === undefined) continue;
+    const group = groups.get(index) ?? {};
+    group[rest.slice(dot + 1)] = value;
+    groups.set(index, group);
+  }
+  return [...groups.entries()].sort(([a], [b]) => a - b).map(([, group]) => group);
+}
+
+/**
+ * Parse a JSON-array attribute. Attribute values are subject to OTel's length
+ * limit, so a long conversation can arrive truncated mid-JSON — a parse
+ * failure must lose that one attribute, never the whole span.
+ */
+function parseJsonArrayAttr(attrs: OtlpKeyValue[], key: string): unknown[] {
+  const raw = getStringAttr(attrs, key);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    logger.warn('Failed to parse JSON trace attribute', { attribute: key });
+    return [];
+  }
+}
+
+/** Model name across all three conventions. */
+function getConventionModel(attrs: OtlpKeyValue[] | undefined): string | undefined {
+  return firstStringAttr(attrs, [
+    'cognipeer.model',
+    'llm.model_name',
+    'gen_ai.response.model',
+    'gen_ai.request.model',
+  ]);
+}
+
+/** Token counts across all three conventions. */
+function getConventionTokens(attrs: OtlpKeyValue[] | undefined) {
+  return {
+    inputTokens: firstIntAttr(attrs, [
+      'cognipeer.tokens.input',
+      'llm.token_count.prompt',
+      'gen_ai.usage.input_tokens',
+      'gen_ai.usage.prompt_tokens',
+    ]),
+    outputTokens: firstIntAttr(attrs, [
+      'cognipeer.tokens.output',
+      'llm.token_count.completion',
+      'gen_ai.usage.output_tokens',
+      'gen_ai.usage.completion_tokens',
+    ]),
+    totalTokens: firstIntAttr(attrs, [
+      'cognipeer.tokens.total',
+      'llm.token_count.total',
+      'gen_ai.usage.total_tokens',
+    ]),
+    // Deliberately excludes cache *write* / *creation* counts: those are a
+    // different, separately-priced number, and the Console treats
+    // cachedInputTokens as a subset of inputTokens.
+    cachedInputTokens: firstIntAttr(attrs, [
+      'cognipeer.tokens.cached_input',
+      'llm.token_count.prompt_details.cache_read',
+      'gen_ai.usage.cache_read.input_tokens',
+      'gen_ai.usage.cache_read_input_tokens',
+    ]),
+  };
+}
+
+/** Conversation identifier — the closest thing OTel has to a thread id. */
+function getConventionThreadId(attrs: OtlpKeyValue[] | undefined): string | undefined {
+  return firstStringAttr(attrs, [
+    'cognipeer.thread.id',
+    'session.id',
+    'gen_ai.conversation.id',
+    'traceloop.association.properties.session_id',
+  ]);
+}
+
+/** Tool name for a tool span. */
+function getConventionToolName(attrs: OtlpKeyValue[] | undefined): string | undefined {
+  return firstStringAttr(attrs, ['tool.name', 'gen_ai.tool.name', 'traceloop.entity.name']);
+}
+
+/**
+ * Sections from OpenInference's indexed message attributes:
+ * `llm.input_messages.{i}.message.role` / `.message.content`, with nested
+ * `.message.tool_calls.{j}.tool_call.function.name` / `.arguments`.
+ */
+function buildOpenInferenceMessageSections(
+  attrs: OtlpKeyValue[],
+): Array<Record<string, unknown>> {
+  const sections: Array<Record<string, unknown>> = [];
+
+  for (const [prefix, fallbackRole] of [
+    ['llm.input_messages', 'user'],
+    ['llm.output_messages', 'assistant'],
+  ] as const) {
+    for (const message of groupIndexedAttrs(attrs, prefix)) {
+      const role = message['message.role'] || fallbackRole;
+      const content = message['message.content'];
+      if (isUsableContent(content)) {
+        sections.push({
+          kind: 'message',
+          label: buildMessageLabel(role, sections.length + 1),
+          role,
+          content,
+        });
+      }
+
+      // Tool calls are nested one level deeper under the same message.
+      const toolCalls = groupIndexedAttrs(
+        Object.entries(message).map(([key, value]) => ({
+          key,
+          value: { stringValue: value },
+        })),
+        'message.tool_calls',
+      );
+      for (const call of toolCalls) {
+        const name = call['tool_call.function.name'];
+        if (!name) continue;
+        sections.push({
+          kind: 'tool_call',
+          label: `Tool call: ${name}`,
+          tool: name,
+          content: call['tool_call.function.arguments'],
+        });
+      }
+    }
+  }
+
+  return sections;
+}
+
+/**
+ * Sections from the current OTel GenAI convention, where messages are whole
+ * JSON documents: `[{role, parts: [{type, content|name|arguments|response}]}]`.
+ *
+ * The system prompt is NOT in `gen_ai.input.messages` — OpenLLMetry 0.55 moved
+ * it to `gen_ai.system_instructions`. Reading only the former silently drops
+ * it, which is exactly the part of the prompt that dominates token cost.
+ */
+function buildGenAiJsonSections(attrs: OtlpKeyValue[]): Array<Record<string, unknown>> {
+  const sections: Array<Record<string, unknown>> = [];
+
+  for (const instruction of parseJsonArrayAttr(attrs, 'gen_ai.system_instructions')) {
+    const content = readPartContent(instruction);
+    if (isUsableContent(content)) {
+      sections.push({ kind: 'message', label: 'System message', role: 'system', content });
+    }
+  }
+
+  for (const key of ['gen_ai.input.messages', 'gen_ai.output.messages']) {
+    for (const entry of parseJsonArrayAttr(attrs, key)) {
+      const message = entry as { role?: string; parts?: unknown[] };
+      const role = typeof message?.role === 'string' ? message.role : 'user';
+      for (const rawPart of message?.parts ?? []) {
+        const part = rawPart as {
+          type?: string;
+          content?: unknown;
+          name?: string;
+          arguments?: unknown;
+          id?: string;
+          response?: unknown;
+        };
+        switch (part?.type) {
+          case 'text':
+          case 'reasoning':
+          case 'refusal': {
+            const content = readPartContent(part);
+            if (isUsableContent(content)) {
+              sections.push({
+                kind: 'message',
+                label: buildMessageLabel(role, sections.length + 1),
+                role,
+                content,
+              });
+            }
+            break;
+          }
+          case 'tool_call':
+            sections.push({
+              kind: 'tool_call',
+              label: `Tool call: ${part.name ?? 'tool'}`,
+              tool: part.name,
+              content:
+                typeof part.arguments === 'string'
+                  ? part.arguments
+                  : JSON.stringify(part.arguments ?? {}),
+            });
+            break;
+          case 'tool_call_response':
+            sections.push({
+              kind: 'tool_result',
+              label: 'Tool result',
+              tool: part.id,
+              content:
+                typeof part.response === 'string'
+                  ? part.response
+                  : JSON.stringify(part.response ?? null),
+            });
+            break;
+          default:
+            break;
+        }
+      }
+    }
+  }
+
+  const toolResult = getStringAttr(attrs, 'gen_ai.tool.call.result');
+  if (isUsableContent(toolResult)) {
+    sections.push({ kind: 'tool_result', label: 'Tool result', content: toolResult });
+  }
+
+  return sections;
+}
+
+function readPartContent(part: unknown): string | undefined {
+  if (typeof part === 'string') return part;
+  const content = (part as { content?: unknown })?.content;
+  if (typeof content === 'string') return content;
+  if (content === undefined || content === null) return undefined;
+  return JSON.stringify(content);
 }
 
 /** Check if a span is a Cognipeer root session span */
@@ -223,8 +540,13 @@ export function mapOtlpToInternalModels(
     const sessionId = getStringAttr(resourceAttrs, 'cognipeer.session.id')
       || getStringAttr(rootSpan.attributes, 'cognipeer.session.id')
       || `otlp_${traceId.slice(0, 16)}`;
-    const threadId = getStringAttr(resourceAttrs, 'cognipeer.thread.id')
-      || getStringAttr(rootSpan.attributes, 'cognipeer.thread.id');
+    // Conversation grouping. Third-party instrumentations only emit this when
+    // the application opted in (OpenInference `using_session`, OpenLLMetry
+    // `set_association_properties`), and a child span often carries it while
+    // the root does not — so every span in the trace is consulted.
+    const threadId = getConventionThreadId(resourceAttrs)
+      || getConventionThreadId(rootSpan.attributes)
+      || spans.map((span) => getConventionThreadId(span.attributes)).find(Boolean);
     const agentModel = getStringAttr(resourceAttrs, 'cognipeer.agent.model');
     const agentProvider = getStringAttr(resourceAttrs, 'cognipeer.agent.provider');
 
@@ -260,14 +582,18 @@ export function mapOtlpToInternalModels(
     for (const span of childSpans) {
       sequence++;
       const eventType = getStringAttr(span.attributes, 'cognipeer.event.type') || deriveEventType(span);
-      const model = getStringAttr(span.attributes, 'cognipeer.model');
-      const toolName = getStringAttr(span.attributes, 'cognipeer.actor.name');
-      const actorScope = getStringAttr(span.attributes, 'cognipeer.actor.scope');
+      const model = getConventionModel(span.attributes);
+      const conventionToolName = getConventionToolName(span.attributes);
+      const toolName = getStringAttr(span.attributes, 'cognipeer.actor.name') || conventionToolName;
+      const actorScope = getStringAttr(span.attributes, 'cognipeer.actor.scope')
+        || (eventType === 'tool_call' && conventionToolName ? 'tool' : undefined);
       const actorRole = getStringAttr(span.attributes, 'cognipeer.actor.role');
-      const inputTokens = getIntAttr(span.attributes, 'cognipeer.tokens.input');
-      const outputTokens = getIntAttr(span.attributes, 'cognipeer.tokens.output');
-      const totalTokens = getIntAttr(span.attributes, 'cognipeer.tokens.total');
-      const cachedInputTokens = getIntAttr(span.attributes, 'cognipeer.tokens.cached_input');
+      const {
+        inputTokens,
+        outputTokens,
+        totalTokens,
+        cachedInputTokens,
+      } = getConventionTokens(span.attributes);
       const requestBytes = getIntAttr(span.attributes, 'cognipeer.bytes.request');
       const responseBytes = getIntAttr(span.attributes, 'cognipeer.bytes.response');
       const toolExecutionId = getStringAttr(span.attributes, 'cognipeer.tool.execution_id');
@@ -294,6 +620,11 @@ export function mapOtlpToInternalModels(
       if (sectionsJson) {
         try {
           sections = JSON.parse(sectionsJson);
+          // Same cap/shape treatment tool_definitions sections get on every
+          // other ingestion path.
+          if (Array.isArray(sections)) {
+            sections = normalizeSectionListToolDefinitions(sections);
+          }
         } catch {
           logger.warn('Failed to parse cognipeer.sections attribute', { spanId: span.spanId });
         }
@@ -433,6 +764,9 @@ export function mapOtlpToInternalModels(
  * Mirrors the section structure used by agent-sdk custom tracing:
  *   - kind: "message" | "tool_call" | "tool_result" | "metadata"
  *   - label, content, role, tool
+ *   - kind: "tool_definitions" — the tool menu offered to the model on THIS
+ *     call (per-event, never per-session — the menu can change between
+ *     turns); contract in tracingToolDefinitions.ts
  *
  * Uses standard OTel semantic conventions (gen_ai.*) and common patterns
  * to extract meaningful input/output data from generic spans.
@@ -443,6 +777,16 @@ function buildSectionsFromSpan(
 ): Array<Record<string, unknown>> | undefined {
   const sections: Array<Record<string, unknown>>[] = [];
   const attrs = span.attributes || [];
+
+  // ── 0. Current-generation conventions ─────────────────────────
+  //    OpenInference's indexed `llm.input_messages.{i}.message.*` and the OTel
+  //    GenAI JSON blobs. A span can carry both (two instrumentors in one app),
+  //    so both are collected before falling through to the older forms.
+  const openInferenceSections = buildOpenInferenceMessageSections(attrs);
+  if (openInferenceSections.length > 0) sections.push(openInferenceSections);
+
+  const genAiSections = buildGenAiJsonSections(attrs);
+  if (genAiSections.length > 0) sections.push(genAiSections);
 
   // ── 1. Extract gen_ai.* semantic convention content ───────────
   //    gen_ai.prompt.0.content, gen_ai.prompt.0.role, gen_ai.completion.0.content, etc.
@@ -472,16 +816,25 @@ function buildSectionsFromSpan(
   }
 
   // ── 2. Generic input/output attributes ────────────────────────
+  //    `input.value` / `output.value` are OpenInference's catch-all, and the
+  //    only place a TOOL span's result reliably appears; `traceloop.entity.*`
+  //    is OpenLLMetry's equivalent.
+  const hasStructuredMessages =
+    openInferenceSections.length > 0 || genAiSections.length > 0 || prompts.length > 0;
   const inputContent = getStringAttr(attrs, 'input')
+    || getStringAttr(attrs, 'input.value')
     || getStringAttr(attrs, 'cognipeer.input')
     || getStringAttr(attrs, 'llm.input')
-    || getStringAttr(attrs, 'ai.input');
+    || getStringAttr(attrs, 'ai.input')
+    || getStringAttr(attrs, 'traceloop.entity.input');
   const outputContent = getStringAttr(attrs, 'output')
+    || getStringAttr(attrs, 'output.value')
     || getStringAttr(attrs, 'cognipeer.output')
     || getStringAttr(attrs, 'llm.output')
-    || getStringAttr(attrs, 'ai.output');
+    || getStringAttr(attrs, 'ai.output')
+    || getStringAttr(attrs, 'traceloop.entity.output');
 
-  if (inputContent && prompts.length === 0) {
+  if (isUsableContent(inputContent) && !hasStructuredMessages) {
     const label = eventType === 'tool_call' ? 'Tool Input' : 'Input';
     const kind = eventType === 'tool_call' ? 'tool_call' : 'message';
     sections.push([{
@@ -492,7 +845,13 @@ function buildSectionsFromSpan(
     }]);
   }
 
-  if (outputContent && completions.length === 0) {
+  // Guarded the same way as the input: on an LLM span that already produced
+  // structured messages, `output.value` is the same response again in raw form.
+  if (
+    isUsableContent(outputContent)
+    && completions.length === 0
+    && (!hasStructuredMessages || eventType === 'tool_call')
+  ) {
     const label = eventType === 'tool_call' ? 'Tool Result' : 'Output';
     const kind = eventType === 'tool_call' ? 'tool_result' : 'message';
     sections.push([{
@@ -526,6 +885,16 @@ function buildSectionsFromSpan(
         content: toolResult,
       }]);
     }
+  }
+
+  // ── 3b. Tool definitions offered to the model ─────────────────
+  //    Attached to the same synthesized event that carries the span's model
+  //    call — per event, so a menu that changes between turns is captured
+  //    turn by turn.
+  const toolDefinitionEntries = extractToolDefinitionAttrs(attrs, span.spanId);
+  if (toolDefinitionEntries.length > 0) {
+    const toolDefinitionsSection = buildToolDefinitionsSection(toolDefinitionEntries);
+    if (toolDefinitionsSection) sections.push([toolDefinitionsSection]);
   }
 
   // ── 4. Non-cognipeer attributes as metadata section ────────────
@@ -605,11 +974,117 @@ function extractGenAiMessages(
     .map(([idx, v]) => ({ content: v.content!, role: v.role, index: idx + 1 }));
 }
 
+/** Indexed tool-definition attribute prefixes, most common first:
+ *  OpenLLMetry/Traceloop `llm.request.functions.{i}.name/.description/
+ *  .parameters` (parameters is a JSON string) and its `gen_ai.request.
+ *  functions.{i}.*` mirror. */
+const TOOL_DEFINITION_ATTR_PREFIXES = ['llm.request.functions', 'gen_ai.request.functions'];
+/** Single-attribute variant: one JSON array of tool definitions (bare
+ *  `{name, description, parameters}` entries or OpenAI `{type:'function',
+ *  function:{...}}` envelopes — the normalizer accepts both). */
+const TOOL_DEFINITION_JSON_ATTRS = ['gen_ai.request.tools', 'llm.request.tools'];
+
+/**
+ * Extract the tool definitions offered to the model from span attributes.
+ * Returns raw entries for `buildToolDefinitionsSection` to normalize
+ * (`parameters` may still be a JSON string here). Same tolerance level as the
+ * prompt extraction: bad indices are skipped, unparseable JSON is warned and
+ * ignored.
+ */
+function extractToolDefinitionAttrs(
+  attrs: OtlpKeyValue[],
+  spanId: string
+): Array<Record<string, unknown>> {
+  // OpenInference: `llm.tools.{i}.tool.json_schema`, where each value is the
+  // WHOLE tool object as JSON — usually the OpenAI envelope, which
+  // normalizeToolDefinitions unwraps.
+  const openInferenceTools = groupIndexedAttrs(attrs, 'llm.tools')
+    .map((tool) => {
+      const raw = tool['tool.json_schema'];
+      if (!raw) return undefined;
+      try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+          ? (parsed as Record<string, unknown>)
+          : undefined;
+      } catch {
+        logger.warn('Failed to parse JSON trace attribute', {
+          attribute: 'llm.tools.{i}.tool.json_schema',
+          spanId,
+        });
+        return undefined;
+      }
+    })
+    .filter((tool): tool is Record<string, unknown> => Boolean(tool));
+  if (openInferenceTools.length > 0) return openInferenceTools;
+
+  // OTel GenAI / OpenLLMetry >= 0.55: one JSON array of unwrapped definitions.
+  const genAiTools = parseJsonArrayAttr(attrs, 'gen_ai.tool.definitions');
+  if (genAiTools.length > 0) return genAiTools as Array<Record<string, unknown>>;
+
+  for (const prefix of TOOL_DEFINITION_ATTR_PREFIXES) {
+    const map = new Map<number, Record<string, unknown>>();
+    for (const kv of attrs) {
+      if (!kv.key.startsWith(prefix + '.')) continue;
+      const rest = kv.key.slice(prefix.length + 1); // "0.name" / "0.parameters"
+      const dotIdx = rest.indexOf('.');
+      if (dotIdx < 0) continue;
+      const idx = parseInt(rest.slice(0, dotIdx), 10);
+      if (Number.isNaN(idx)) continue;
+      const field = rest.slice(dotIdx + 1);
+      const val = kv.value.stringValue;
+      if (!val) continue;
+
+      let entry = map.get(idx);
+      if (!entry) { entry = {}; map.set(idx, entry); }
+      if (field === 'name') entry.name = val;
+      if (field === 'description') entry.description = val;
+      // JSON string — buildToolDefinitionsSection parses it.
+      if (field === 'parameters' || field === 'arguments') entry.parameters = val;
+    }
+    const entries = [...map.entries()]
+      .filter(([, entry]) => typeof entry.name === 'string')
+      .sort(([a], [b]) => a - b)
+      .map(([, entry]) => entry);
+    if (entries.length > 0) return entries;
+  }
+
+  for (const key of TOOL_DEFINITION_JSON_ATTRS) {
+    const raw = getStringAttr(attrs, key);
+    if (!raw) continue;
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed as Array<Record<string, unknown>>;
+    } catch {
+      logger.warn('Failed to parse JSON trace attribute', { attribute: key, spanId });
+    }
+  }
+
+  return [];
+}
+
 /**
  * Derive an event type from a generic OTel span (no cognipeer.* attributes).
  * Heuristic based on span name and kind.
  */
 function deriveEventType(span: OtlpSpan): string {
+  // An explicit convention attribute always beats guessing from the name.
+  const openInferenceKind = getStringAttr(span.attributes, 'openinference.span.kind');
+  if (openInferenceKind) {
+    const mapped = OPENINFERENCE_KIND_TO_EVENT[openInferenceKind.toUpperCase()];
+    if (mapped) return mapped;
+  }
+
+  const genAiOperation = getStringAttr(span.attributes, 'gen_ai.operation.name');
+  if (genAiOperation) {
+    const mapped = GENAI_OPERATION_TO_EVENT[genAiOperation.toLowerCase()];
+    if (mapped) return mapped;
+  }
+
+  // OpenLLMetry's own span-kind attribute (workflow/task/agent/tool).
+  const traceloopKind = getStringAttr(span.attributes, 'traceloop.span.kind');
+  if (traceloopKind === 'tool') return 'tool_call';
+
   const name = (span.name || '').toLowerCase();
 
   // Common LLM/AI patterns

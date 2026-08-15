@@ -2,9 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { Button, Text, Tooltip } from '@mantine/core';
+import { Button, Group, Text, Tooltip } from '@mantine/core';
 import {
   IconBook,
+  IconCamera,
   IconEye,
 } from '@tabler/icons-react';
 import dayjs from 'dayjs';
@@ -240,14 +241,30 @@ export default function TracingSessionsPage() {
         title="Session Explorer"
         subtitle="Inspect recent agent sessions, filter by agent or status, and drill into the execution timeline."
         actions={
-          <Button
-            variant="default"
-            size="sm"
-            leftSection={<IconBook size={14} stroke={1.7} />}
-            onClick={() => openDocs('api-tracing')}
-          >
-            Docs
-          </Button>
+          <Group gap="xs">
+            <Button
+              variant="default"
+              size="sm"
+              leftSection={<IconCamera size={14} stroke={1.7} />}
+              onClick={() =>
+                router.push(
+                  `/dashboard/evaluations/snapshots/new?source=tracing${
+                    agentFilter ? `&agent=${encodeURIComponent(agentFilter)}` : ''
+                  }`,
+                )
+              }
+            >
+              Create snapshot from traffic
+            </Button>
+            <Button
+              variant="default"
+              size="sm"
+              leftSection={<IconBook size={14} stroke={1.7} />}
+              onClick={() => openDocs('api-tracing')}
+            >
+              Docs
+            </Button>
+          </Group>
         }
       />
 

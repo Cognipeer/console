@@ -39,6 +39,7 @@ export const TABLES = {
   models: 'models',
   modelUsageLogs: 'model_usage_logs',
   usageDaily: 'usage_daily',
+  externalModelPricing: 'external_model_pricing',
   vectorIndexes: 'vector_indexes',
   fileBuckets: 'file_buckets',
   files: 'files',
@@ -50,6 +51,7 @@ export const TABLES = {
   guardrailWordLists: 'guardrail_word_lists',
   evaluationTargets: 'evaluation_targets',
   evaluationDatasets: 'evaluation_datasets',
+  evaluationDatasetItems: 'evaluation_dataset_items',
   evaluationSuites: 'evaluation_suites',
   evaluationRuns: 'evaluation_runs',
   redTeamCampaigns: 'redteam_campaigns',
@@ -698,6 +700,20 @@ export class SQLiteProviderBase {
     // the table shipped; ensure on boot for DBs created in between.
     this.ensureTableColumn(db, TABLES.usageDaily, 'dayDate', 'dayDate TEXT');
 
+    // usage_daily.agentKey (agent attribution dimension). Existing rows get
+    // '' via the column default; the v2 unique index that includes it is
+    // created in applyTenantIndexes (must run after this migration).
+    this.ensureTableColumn(
+      db,
+      TABLES.usageDaily,
+      'agentKey',
+      "agentKey TEXT NOT NULL DEFAULT ''",
+    );
+
+    // external_model_pricing.versions (effective-dated price history) was
+    // added after the table shipped; ensure on boot for DBs created before.
+    this.ensureTableColumn(db, TABLES.externalModelPricing, 'versions', 'versions TEXT');
+
     // MCP Hub: multi-source servers (remote URL / stdio packages), exposure
     // config, Aegis binding and richer request logs. Safe to ensure on boot
     // for tenants created before the feature. NOTE: legacy DBs keep the
@@ -720,6 +736,13 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.mcpRequestLogs, 'transport', 'transport TEXT');
     this.ensureTableColumn(db, TABLES.mcpRequestLogs, 'sourceType', 'sourceType TEXT');
     this.ensureTableColumn(db, TABLES.mcpRequestLogs, 'sessionId', 'sessionId TEXT');
+
+    // Evaluation: dataset items moved to their own table; the denormalised
+    // itemCount rides on the dataset row. Suites were missing the
+    // embeddingModelKey column entirely (semantic scorer's embedding model
+    // silently dropped on SQLite) — ensure both on boot for existing DBs.
+    this.ensureTableColumn(db, TABLES.evaluationDatasets, 'itemCount', 'itemCount INTEGER');
+    this.ensureTableColumn(db, TABLES.evaluationSuites, 'embeddingModelKey', 'embeddingModelKey TEXT');
   }
 
   private migrateOcrJobsSchema(db: Database.Database): void {
@@ -765,6 +788,17 @@ export class SQLiteProviderBase {
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_model_usage_user
         ON ${TABLES.modelUsageLogs}(tenantId, userId, createdAt DESC);
+    `);
+
+    // usage_daily unique dimension index v2 (adds agentKey). Same ordering
+    // constraint as above: agentKey reaches legacy DBs via ensureTableColumn.
+    // The pre-agent index would reject rows differing only in agentKey.
+    db.exec(`
+      DROP INDEX IF EXISTS uniq_usage_daily_dims;
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_usage_daily_dims_v2
+        ON ${TABLES.usageDaily}(tenantId, projectId, userId, apiTokenId, source, service, refKey, agentKey, day);
+      CREATE INDEX IF NOT EXISTS idx_usage_daily_agent_day
+        ON ${TABLES.usageDaily}(tenantId, agentKey, day DESC);
     `);
 
     // Enforce unique provider/model keys at the DB layer so a concurrent

@@ -6,7 +6,7 @@
  * never conflict; the unique dimension index only backstops the upsert filter.
  */
 
-import type { Filter } from 'mongodb';
+import { ObjectId, type Filter } from 'mongodb';
 import type { IUsageDaily, IUsageDailyIncrement } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
@@ -36,6 +36,9 @@ export function UsageRollupMixin<TBase extends Constructor<MongoDBProviderBase>>
       this.usageDailyIndexReady.add(dbName);
       try {
         const col = db.collection(COLLECTIONS.usageDaily);
+        // v2 adds the agentKey dimension — drop the pre-agent unique index,
+        // which would otherwise reject rows differing only in agentKey.
+        await col.dropIndex('uniq_usage_daily_dims').catch(() => undefined);
         await col.createIndex(
           {
             tenantId: 1,
@@ -45,9 +48,10 @@ export function UsageRollupMixin<TBase extends Constructor<MongoDBProviderBase>>
             source: 1,
             service: 1,
             refKey: 1,
+            agentKey: 1,
             day: 1,
           },
-          { unique: true, name: 'uniq_usage_daily_dims' },
+          { unique: true, name: 'uniq_usage_daily_dims_v2' },
         );
         await col.createIndex(
           { tenantId: 1, day: -1 },
@@ -56,6 +60,10 @@ export function UsageRollupMixin<TBase extends Constructor<MongoDBProviderBase>>
         await col.createIndex(
           { tenantId: 1, userId: 1, day: -1 },
           { name: 'idx_usage_daily_user_day' },
+        );
+        await col.createIndex(
+          { tenantId: 1, agentKey: 1, day: -1 },
+          { name: 'idx_usage_daily_agent_day' },
         );
       } catch (error) {
         logger.warn('Could not ensure usage_daily indexes', { dbName, error });
@@ -89,6 +97,7 @@ export function UsageRollupMixin<TBase extends Constructor<MongoDBProviderBase>>
               source: row.source,
               service: row.service,
               refKey: row.refKey,
+              agentKey: row.agentKey ?? '',
               day: row.day,
             },
             update: {
@@ -110,12 +119,30 @@ export function UsageRollupMixin<TBase extends Constructor<MongoDBProviderBase>>
         .bulkWrite(ops, { ordered: false });
     }
 
+    async setUsageDailyCost(
+      updates: Array<{ id: string; costUsd: number }>,
+    ): Promise<number> {
+      if (updates.length === 0) return 0;
+      const db = this.getTenantDb();
+      const result = await db.collection(COLLECTIONS.usageDaily).bulkWrite(
+        updates.map((row) => ({
+          updateOne: {
+            filter: { _id: new ObjectId(row.id) },
+            update: { $set: { costUsd: row.costUsd, updatedAt: new Date() } },
+          },
+        })),
+        { ordered: false },
+      );
+      return result.modifiedCount;
+    }
+
     async listUsageDaily(filter: {
       projectId?: string;
       userId?: string;
       apiTokenId?: string;
       service?: string;
       refKey?: string;
+      agentKey?: string;
       source?: string;
       fromDay?: string;
       toDay?: string;
@@ -128,6 +155,7 @@ export function UsageRollupMixin<TBase extends Constructor<MongoDBProviderBase>>
       if (filter.apiTokenId !== undefined) query.apiTokenId = filter.apiTokenId;
       if (filter.service !== undefined) query.service = filter.service;
       if (filter.refKey !== undefined) query.refKey = filter.refKey;
+      if (filter.agentKey !== undefined) query.agentKey = filter.agentKey;
       if (filter.source !== undefined) query.source = filter.source;
       if (filter.fromDay || filter.toDay) {
         query.day = {

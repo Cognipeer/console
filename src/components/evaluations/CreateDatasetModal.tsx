@@ -7,6 +7,7 @@ import {
   Box,
   Button,
   Code,
+  Collapse,
   FileButton,
   Group,
   NumberInput,
@@ -18,7 +19,7 @@ import {
   TextInput,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { IconCheck, IconDatabase, IconDownload, IconFileSpreadsheet, IconFileText, IconInfoCircle, IconPlus, IconSparkles, IconTrash } from '@tabler/icons-react';
+import { IconAdjustments, IconCheck, IconChevronDown, IconChevronRight, IconDatabase, IconDownload, IconFileSpreadsheet, IconFileText, IconInfoCircle, IconPencil, IconPlus, IconSparkles, IconTrash } from '@tabler/icons-react';
 import FormShell, {
   ChipPicker,
   Checklist,
@@ -38,6 +39,13 @@ import {
   parseJsonItems,
   type EditorRow,
 } from './datasetImport';
+import DatasetItemEditor, { ToolsEditor } from './DatasetItemEditor';
+import {
+  simpleRowToItem,
+  summarizeItem,
+  toolDraftsToDefinitions,
+  type ToolDraft,
+} from './datasetItemHelpers';
 
 interface CreateDatasetModalProps {
   opened: boolean;
@@ -100,23 +108,27 @@ export default function CreateDatasetModal({ opened, models, onClose, onCreated,
   const [fileName, setFileName] = useState<string | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
 
+  // Editor-mode extras: per-row advanced item editor + dataset default tools.
+  const [advancedRow, setAdvancedRow] = useState<number | null>(null);
+  const [defaultTools, setDefaultTools] = useState<ToolDraft[]>([]);
+  const [defaultToolsOpen, setDefaultToolsOpen] = useState(false);
+
   useEffect(() => {
     if (!opened) {
       setName(''); setDescription(''); setMode('editor');
       setRows([emptyEditorRow()]); setJsonText('');
       setFileItems([]); setFileName(null); setFileError(null);
       setLoading(false);
+      setAdvancedRow(null); setDefaultTools([]); setDefaultToolsOpen(false);
       setGenSource('rag'); setGenModelKey(null); setGenCount(10); setGenLanguage('');
       setRagModuleKey(null); setGenText(''); setGenFile(null);
       return;
     }
     if (editing) {
-      // Edit: prefill name/description and load the existing items into the JSON
-      // editor (lossless for arbitrary message arrays / expectations).
+      // Edit: metadata only. Items live in their own collection and are
+      // added / edited / deleted one by one on the dataset detail page.
       setName(editing.name ?? '');
       setDescription(editing.description ?? '');
-      setMode('json');
-      setJsonText(JSON.stringify(editing.items ?? [], null, 2));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened]);
@@ -156,21 +168,28 @@ export default function CreateDatasetModal({ opened, models, onClose, onCreated,
   const jsonParsed = useMemo(() => parseJsonItems(jsonText), [jsonText]);
   const jsonError = 'error' in jsonParsed ? jsonParsed.error : null;
 
+  const defaultToolsResult = useMemo(() => toolDraftsToDefinitions(defaultTools), [defaultTools]);
+
   const items: EvalDatasetItemView[] = useMemo(() => {
-    if (mode === 'editor') return editorRowsToItems(rows);
+    if (mode === 'editor') return editorRowsToItems(rows, defaultToolsResult.tools);
     if (mode === 'file') return fileItems;
     return 'items' in jsonParsed ? jsonParsed.items : [];
-  }, [mode, rows, fileItems, jsonParsed]);
+  }, [mode, rows, fileItems, jsonParsed, defaultToolsResult.tools]);
 
   const isGenerate = mode === 'generate';
   const validName = name.trim().length > 0;
-  const validItems = items.length > 0 && (mode !== 'json' || !jsonError) && (mode !== 'file' || !fileError);
+  const validItems =
+    items.length > 0 &&
+    (mode !== 'json' || !jsonError) &&
+    (mode !== 'file' || !fileError) &&
+    (mode !== 'editor' || defaultToolsResult.errors.length === 0);
   const genSourceReady =
     genSource === 'rag' ? Boolean(ragModuleKey)
       : genSource === 'text' ? genText.trim().length > 0
         : Boolean(genFile);
   const genValid = Boolean(genModelKey) && genSourceReady && genCount > 0;
-  const canSubmit = validName && (isGenerate ? genValid : validItems);
+  // Edit mode touches metadata only — item authoring lives on the detail page.
+  const canSubmit = validName && (isEdit || (isGenerate ? genValid : validItems));
 
   const handleSubmit = async () => {
     if (!canSubmit) return;
@@ -181,7 +200,11 @@ export default function CreateDatasetModal({ opened, models, onClose, onCreated,
         {
           method: isEdit ? 'PATCH' : 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: name.trim(), description: description || undefined, items }),
+          body: JSON.stringify(
+            isEdit
+              ? { name: name.trim(), description: description || undefined }
+              : { name: name.trim(), description: description || undefined, items },
+          ),
         },
       );
       if (!res.ok) {
@@ -189,7 +212,8 @@ export default function CreateDatasetModal({ opened, models, onClose, onCreated,
         throw new Error(data.error || `Failed to ${isEdit ? 'update' : 'create'} dataset`);
       }
       const data = await res.json();
-      notifications.show({ title: isEdit ? 'Dataset updated' : 'Dataset created', message: `"${data.dataset.name}" (${data.dataset.items.length} items)`, color: 'teal' });
+      const count = typeof data.dataset.itemCount === 'number' ? data.dataset.itemCount : items.length;
+      notifications.show({ title: isEdit ? 'Dataset updated' : 'Dataset created', message: `"${data.dataset.name}" (${count} items)`, color: 'teal' });
       onCreated(data.dataset);
       onClose();
     } catch (err) {
@@ -248,29 +272,56 @@ export default function CreateDatasetModal({ opened, models, onClose, onCreated,
       : mode === 'json' ? 'JSON'
         : `AI · ${genSource}`;
 
-  const checklist = [
-    { id: 'name', label: 'Name provided', done: validName },
-    isGenerate
-      ? { id: 'gen', label: genValid ? `Ready to generate ${genCount} question(s)` : 'Pick a model and source', done: genValid }
-      : { id: 'items', label: validItems ? `${items.length} item(s) ready` : 'Add test cases', done: validItems },
-  ];
+  const checklist = isEdit
+    ? [{ id: 'name', label: 'Name provided', done: validName }]
+    : [
+        { id: 'name', label: 'Name provided', done: validName },
+        isGenerate
+          ? { id: 'gen', label: genValid ? `Ready to generate ${genCount} question(s)` : 'Pick a model and source', done: genValid }
+          : { id: 'items', label: validItems ? `${items.length} item(s) ready` : 'Add test cases', done: validItems },
+      ];
 
   const summary = (
     <SummaryGroup title="Dataset">
       <SummaryKV label="Name" value={name || '—'} />
-      <SummaryKV label="Source" value={sourceLabel} />
-      <SummaryKV label="Items" value={isGenerate ? `~${genCount}` : String(items.length)} />
+      {isEdit ? (
+        <SummaryKV label="Items" value={String(editing?.itemCount ?? 0)} />
+      ) : (
+        <>
+          <SummaryKV label="Source" value={sourceLabel} />
+          <SummaryKV label="Items" value={isGenerate ? `~${genCount}` : String(items.length)} />
+        </>
+      )}
       <Checklist items={checklist} />
     </SummaryGroup>
   );
 
+  // Advanced per-row item editor: prefill from the row's stored item, or lift
+  // the simple fields into a single-turn item (question → user turn).
+  const advancedSourceRow = advancedRow !== null ? rows[advancedRow] : undefined;
+  const advancedInitialItem = advancedSourceRow
+    ? advancedSourceRow.item ?? simpleRowToItem(advancedSourceRow, `item-${(advancedRow ?? 0) + 1}`)
+    : null;
+  const advancedExistingIds = advancedRow !== null
+    ? rows
+        .map((r, i) => ({ i, id: r.item?.id ?? (r.id.trim() || `item-${i + 1}`) }))
+        .filter((entry) => entry.i !== advancedRow)
+        .map((entry) => entry.id)
+    : [];
+
   return (
+    <>
     <FormShell
       open={opened}
       onClose={onClose}
+      disableEscape={advancedRow !== null}
       icon={<IconDatabase size={16} />}
       title={isEdit ? 'Edit evaluation dataset' : 'New evaluation dataset'}
-      subtitle="Add test cases by hand, import a file, paste JSON, or generate Q&A from documents with a model."
+      subtitle={
+        isEdit
+          ? 'Rename the dataset or update its description. Test cases are managed on the dataset page.'
+          : 'Add test cases by hand, import a file, paste JSON, or generate Q&A from documents with a model.'
+      }
       summary={summary}
       footerStatus={`${checklist.filter((c) => c.done).length} of ${checklist.length} ready`}
       primaryAction={{
@@ -292,6 +343,7 @@ export default function CreateDatasetModal({ opened, models, onClose, onCreated,
         </FormRow>
       </FormSection>
 
+      {!isEdit && (
       <FormSection number={2} title="Test cases" done={validItems}>
         <FormField label="How do you want to add cases?">
           <ChipPicker<InputMode>
@@ -311,27 +363,85 @@ export default function CreateDatasetModal({ opened, models, onClose, onCreated,
             {rows.map((r, idx) => (
               <Paper key={idx} withBorder radius="md" p="sm">
                 <Group justify="space-between" mb={6}>
-                  <Text size="xs" c="dimmed" fw={600}>Case {idx + 1}</Text>
-                  <ActionIcon variant="subtle" color="red" disabled={rows.length === 1} onClick={() => setRows((prev) => prev.filter((_, i) => i !== idx))}>
-                    <IconTrash size={15} />
-                  </ActionIcon>
+                  <Group gap={6}>
+                    <Text size="xs" c="dimmed" fw={600}>Case {idx + 1}</Text>
+                    {r.item ? <span className="ds-badge">advanced</span> : null}
+                  </Group>
+                  <Group gap={4}>
+                    <Button
+                      variant="subtle"
+                      size="compact-xs"
+                      leftSection={r.item ? <IconPencil size={12} /> : <IconAdjustments size={12} />}
+                      onClick={() => setAdvancedRow(idx)}
+                    >
+                      {r.item ? 'Edit' : 'Advanced'}
+                    </Button>
+                    <ActionIcon variant="subtle" color="red" disabled={rows.length === 1} onClick={() => setRows((prev) => prev.filter((_, i) => i !== idx))}>
+                      <IconTrash size={15} />
+                    </ActionIcon>
+                  </Group>
                 </Group>
-                <Stack gap="xs">
-                  <Textarea label="Question / input" placeholder="What the target is asked" autosize minRows={1} value={r.input} onChange={(e) => updateRow(idx, { input: e.currentTarget.value })} />
-                  <Group grow align="flex-start">
-                    <TextInput label="Expected answer" placeholder="Gold answer (judge / semantic)" value={r.reference} onChange={(e) => updateRow(idx, { reference: e.currentTarget.value })} />
-                    <TextInput label="Must contain" placeholder="comma / | separated" value={r.contains} onChange={(e) => updateRow(idx, { contains: e.currentTarget.value })} />
-                  </Group>
-                  <Group grow align="flex-start">
-                    <TextInput label="ID" placeholder="auto" value={r.id} onChange={(e) => updateRow(idx, { id: e.currentTarget.value })} />
-                    <TextInput label="Tags" placeholder="comma separated" value={r.tags} onChange={(e) => updateRow(idx, { tags: e.currentTarget.value })} />
-                  </Group>
-                </Stack>
+                {r.item ? (
+                  (() => {
+                    const s = summarizeItem(r.item);
+                    const firstUser = r.item.input.find((m) => m.role === 'user')?.content ?? r.item.input[0]?.content ?? '';
+                    return (
+                      <Stack gap={4}>
+                        <Text size="sm" lineClamp={2}>{firstUser || '(no user turn)'}</Text>
+                        <Text size="xs" c="dimmed">
+                          <span className="ds-mono">{r.item.id}</span>
+                          {` · ${s.turns} turn(s) · ${s.tools} tool(s)`}
+                          {s.hasReference ? ' · reference' : ''}
+                          {s.hasExpectedToolCalls ? ' · expected tool calls' : ''}
+                          {s.hasAssertions ? ' · assertions' : ''}
+                        </Text>
+                      </Stack>
+                    );
+                  })()
+                ) : (
+                  <Stack gap="xs">
+                    <Textarea label="Question / input" placeholder="What the target is asked" autosize minRows={1} value={r.input} onChange={(e) => updateRow(idx, { input: e.currentTarget.value })} />
+                    <Group grow align="flex-start">
+                      <TextInput label="Expected answer" placeholder="Gold answer (judge / semantic)" value={r.reference} onChange={(e) => updateRow(idx, { reference: e.currentTarget.value })} />
+                      <TextInput label="Must contain" placeholder="comma / | separated" value={r.contains} onChange={(e) => updateRow(idx, { contains: e.currentTarget.value })} />
+                    </Group>
+                    <Group grow align="flex-start">
+                      <TextInput label="ID" placeholder="auto" value={r.id} onChange={(e) => updateRow(idx, { id: e.currentTarget.value })} />
+                      <TextInput label="Tags" placeholder="comma separated" value={r.tags} onChange={(e) => updateRow(idx, { tags: e.currentTarget.value })} />
+                    </Group>
+                  </Stack>
+                )}
               </Paper>
             ))}
             <Button variant="light" size="xs" leftSection={<IconPlus size={14} />} onClick={() => setRows((prev) => [...prev, emptyEditorRow()])} style={{ alignSelf: 'flex-start' }}>
               Add case
             </Button>
+
+            <Button
+              variant="subtle"
+              size="compact-xs"
+              leftSection={defaultToolsOpen ? <IconChevronDown size={12} /> : <IconChevronRight size={12} />}
+              onClick={() => setDefaultToolsOpen((o) => !o)}
+              style={{ alignSelf: 'flex-start' }}
+            >
+              Default tools ({defaultTools.length})
+            </Button>
+            <Collapse in={defaultToolsOpen}>
+              <FormField
+                label="Default tools"
+                optional
+                hint="Applied to every new item that doesn't define its own tools."
+              >
+                <ToolsEditor
+                  tools={defaultTools}
+                  onChange={setDefaultTools}
+                  emptyHint="No default tools — items only expose the tools they define themselves."
+                />
+              </FormField>
+              {defaultToolsResult.errors.length > 0 ? (
+                <Text size="xs" c="red" mt={4}>{defaultToolsResult.errors[0]}</Text>
+              ) : null}
+            </Collapse>
           </Stack>
         )}
 
@@ -376,7 +486,7 @@ export default function CreateDatasetModal({ opened, models, onClose, onCreated,
                 Load example
               </Button>
             }
-            hint={<>Full control: each item needs an <Code>input</Code> message array; optional <Code>expected</Code> with reference / mustContain / equals / regex / jsonSchema / jsonPath.</>}
+            hint={<>Full control: each item needs an <Code>input</Code> message array — roles <Code>system</Code>/<Code>user</Code>/<Code>assistant</Code>/<Code>tool</Code>, assistant turns may carry <Code>toolCalls</Code> and tool turns a <Code>toolCallId</Code>. Optional per-item <Code>tools</Code> (definitions exposed to the target) and <Code>expected</Code> with reference / toolCalls / mustContain / equals / regex / jsonSchema / jsonPath. Load the example for a full tool-trajectory item.</>}
           >
             <Textarea
               placeholder={JSON_EXAMPLE}
@@ -467,6 +577,22 @@ export default function CreateDatasetModal({ opened, models, onClose, onCreated,
           </Stack>
         )}
       </FormSection>
+      )}
     </FormShell>
+
+    <DatasetItemEditor
+      opened={advancedRow !== null}
+      item={advancedInitialItem}
+      idEditable
+      existingIds={advancedExistingIds}
+      defaultTools={defaultToolsResult.tools}
+      title={advancedSourceRow?.item ? `Edit item · ${advancedSourceRow.item.id}` : 'Advanced item editor'}
+      onClose={() => setAdvancedRow(null)}
+      onSave={(item) => {
+        if (advancedRow !== null) updateRow(advancedRow, { item, id: item.id });
+        setAdvancedRow(null);
+      }}
+    />
+    </>
   );
 }

@@ -69,8 +69,16 @@ export interface UsageEventInput {
   service: string;
   /** Service-local resource key: modelKey, searchKey, toolKey, ... */
   refKey?: string;
+  /** Agent the usage belongs to (tracing agentName); rollup dimension. */
+  agentKey?: string;
+  /** Overrides the actor-derived origin — e.g. 'tracing' for usage derived
+   *  from observability ingests rather than gateway-served calls. */
+  source?: UsageSource;
   status?: 'success' | 'error';
   latencyMs?: number;
+  /** When `latencyMs` aggregates multiple calls (trace-derived usage), the
+   *  number of calls it covers — weights the rollup's latency average. */
+  latencySamples?: number;
   inputTokens?: number;
   outputTokens?: number;
   cachedInputTokens?: number;

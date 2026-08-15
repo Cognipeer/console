@@ -1,14 +1,55 @@
 /** Lightweight view types mirroring the /api/evaluation/* JSON responses. */
 
+/** A tool call recorded on an assistant turn. */
+export interface EvalToolCallView {
+  id?: string;
+  name: string;
+  args: Record<string, unknown>;
+}
+
 export interface EvalMessageView {
-  role: 'system' | 'user' | 'assistant';
+  role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
+  /** Assistant turns: tool calls issued in this turn. */
+  toolCalls?: EvalToolCallView[];
+  /** Tool turns: id of the assistant tool call this responds to. */
+  toolCallId?: string;
+  /** Tool turns: tool name, when recorded. */
+  name?: string;
+}
+
+/** A tool exposed to the target for one item (never executed). */
+export interface EvalToolDefinitionView {
+  name: string;
+  description?: string;
+  parameters?: Record<string, unknown>;
+}
+
+export type EvalArgsMatchMode = 'exact' | 'subset' | 'schema' | 'ignore';
+
+/** An expected tool call with a per-call argument matching strategy. */
+export interface EvalExpectedToolCallView {
+  name: string;
+  argsMatch?: EvalArgsMatchMode;
+  args?: Record<string, unknown>;
+  argsSchema?: Record<string, unknown>;
+}
+
+/** A single JSON-path assertion against the (parsed) target output. */
+export interface EvalJsonPathAssertionView {
+  path: string;
+  exists?: boolean;
+  equals?: unknown;
 }
 
 export interface EvalDatasetItemView {
   id: string;
   input: EvalMessageView[];
   expected?: Record<string, unknown>;
+  /** Tools exposed to the target for trajectory testing. */
+  tools?: EvalToolDefinitionView[];
+  /** Canned tool results; key format: `name + '(' + canonicalJson(args) + ')'`. */
+  toolResults?: Record<string, unknown>;
   tags?: string[];
 }
 
@@ -36,8 +77,10 @@ export interface EvalDatasetView {
   key: string;
   name: string;
   description?: string;
-  source: 'manual' | 'file' | 'generated';
-  items: EvalDatasetItemView[];
+  source: 'manual' | 'file' | 'generated' | 'imported';
+  /** Items are paginated via GET /api/evaluation/datasets/:id/items — dataset
+   *  responses carry only the count. */
+  itemCount: number;
   createdAt?: string;
   metadata?: { generation?: EvalDatasetGenerationMeta } & Record<string, unknown>;
 }
@@ -72,13 +115,26 @@ export interface EvalScoreView {
   error?: string;
 }
 
+/** Token / cost usage reported for one item's target invocation. */
+export interface EvalUsageView {
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedInputTokens?: number;
+  costUsd?: number;
+}
+
 export interface EvalRunItemView {
   itemId: string;
-  output?: { text: string; latencyMs?: number };
+  output?: {
+    text: string;
+    latencyMs?: number;
+    toolCalls?: Array<{ name: string; args: Record<string, unknown> }>;
+  };
   scores: EvalScoreView[];
   score: number;
   passed: boolean;
   latencyMs?: number;
+  usage?: EvalUsageView;
   error?: string;
 }
 
@@ -90,6 +146,9 @@ export interface EvalRunAggregateView {
   passRate: number;
   avgScore: number;
   avgLatencyMs: number | null;
+  /** Present only when at least one item reported provider usage. */
+  totalCostUsd?: number;
+  totalTokens?: number;
 }
 
 export interface EvalRunView {

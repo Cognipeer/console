@@ -193,7 +193,8 @@ describe('toOpenAIChatResponse', () => {
 
     expect(result.object).toBe('chat.completion');
     expect(typeof result.id).toBe('string');
-    expect(result.id).toMatch(/^chatcmpl_/);
+    // OpenAI's own prefix is `chatcmpl-`; we used to emit an underscore.
+    expect(result.id).toMatch(/^chatcmpl-/);
     expect(result.model).toBe('gpt-4o');
     expect(Array.isArray(result.choices)).toBe(true);
     expect(result.choices).toHaveLength(1);

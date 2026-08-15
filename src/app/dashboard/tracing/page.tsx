@@ -13,7 +13,6 @@ import {
   Table,
   Anchor,
   ThemeIcon,
-  Box,
 } from '@mantine/core';
 import {
   IconPlug,
@@ -33,7 +32,6 @@ import relativeTime from 'dayjs/plugin/relativeTime';
 import SessionTable from '@/components/tracing/SessionTable';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import StatTile from '@/components/common/ui/StatTile';
-import StatusBadge from '@/components/common/ui/StatusBadge';
 import DashboardDateFilter, { useDashboardDateFilterState } from '@/components/layout/DashboardDateFilter';
 import CollapsibleInfo from '@/components/layout/CollapsibleInfo';
 import {
@@ -125,10 +123,6 @@ export default function AgentTracingPage() {
     }
   };
 
-  const handleAgentClick = (agentName: string) => {
-    router.push(`/dashboard/tracing/agents/${encodeURIComponent(agentName)}`);
-  };
-
   if (loading) {
     return (
       <Center h={400}>
@@ -137,7 +131,6 @@ export default function AgentTracingPage() {
     );
   }
 
-  const recentAgents = dashboardData?.recentAgents || [];
   const recentAgentsTotal = dashboardData?.recentAgentsTotal || 0;
   const recentSessions = dashboardData?.recentSessions || [];
   const analytics = dashboardData?.analytics;
@@ -259,7 +252,7 @@ export default function AgentTracingPage() {
             <Anchor href="/dashboard/tokens" size="xs">API Tokens</Anchor>{' '}
             and POST your agent payloads to{' '}
             <span className="ds-mono" style={{ background: 'var(--ds-surface-raised)', padding: '1px 4px', borderRadius: 3 }}>
-              /api/client/tracing/sessions
+              /api/client/v1/tracing/sessions
             </span>
           </Text>
         </Stack>
@@ -467,99 +460,7 @@ export default function AgentTracingPage() {
         </div>
       </div>
 
-      {/* Recent Agents */}
-      <div className="ds-card ds-card-pad-lg">
-        <div className="ds-row-between" style={{ marginBottom: 16 }}>
-          <div>
-            <Group gap="sm">
-              <ThemeIcon size={32} radius="md" variant="light" color="teal">
-                <IconRobot size={18} />
-              </ThemeIcon>
-              <div>
-                <div className="ds-h3">Recently Active Agents</div>
-                <div className="ds-muted" style={{ fontSize: 12.5, marginTop: 2 }}>
-                  Showing up to {recentAgents.length} agents by recent activity
-                </div>
-              </div>
-            </Group>
-          </div>
-          <StatusBadge status="info" label={`${formatNumber(recentAgentsTotal)} total`} withDot={false} />
-        </div>
-
-        {recentAgents.length === 0 ? (
-          <Center py="xl">
-            <Stack gap="md" align="center">
-              <ThemeIcon size={60} radius="xl" variant="light" color="gray">
-                <IconRobot size={30} />
-              </ThemeIcon>
-              <Text size="sm" c="dimmed">No agents have reported activity yet.</Text>
-            </Stack>
-          </Center>
-        ) : (
-          <div className="ds-tbl-wrap">
-            <table className="ds-tbl">
-              <thead>
-                <tr>
-                  <th>Agent</th>
-                  <th>Status</th>
-                  <th style={{ textAlign: 'right' }}>Sessions</th>
-                  <th style={{ textAlign: 'right' }}>Tokens</th>
-                  <th style={{ textAlign: 'right' }}>Avg / session</th>
-                  <th>Last active</th>
-                </tr>
-              </thead>
-              <tbody>
-                {recentAgents.map((item) => {
-                  const statusColor = resolveStatusColor(item.latestStatus);
-                  return (
-                    <tr
-                      key={item.name}
-                      className="clickable"
-                      onClick={() => handleAgentClick(item.name)}
-                    >
-                      <td>
-                        <Group gap="sm" wrap="nowrap">
-                          <ThemeIcon size={28} radius="md" variant="light" color="teal">
-                            <IconRobot size={14} />
-                          </ThemeIcon>
-                          <Text size="sm" fw={600} lineClamp={1}>
-                            {item.label || item.name}
-                          </Text>
-                        </Group>
-                      </td>
-                      <td>
-                        {item.latestStatus ? (
-                          <Badge size="sm" variant="light" radius="xl" color={statusColor}>
-                            {item.latestStatus.toUpperCase()}
-                          </Badge>
-                        ) : (
-                          <Text size="xs" c="dimmed">—</Text>
-                        )}
-                      </td>
-                      <td className="ds-mono" style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
-                        {formatNumber(item.sessionsCount)}
-                      </td>
-                      <td className="ds-mono" style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
-                        {formatNumber(item.totalTokens)}
-                      </td>
-                      <td className="ds-mono" style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
-                        {formatNumber(item.averageTokensPerSession)}
-                      </td>
-                      <td>
-                        <Text size="xs" c="dimmed">
-                          {item.latestSessionAt ? dayjs(item.latestSessionAt).fromNow() : '—'}
-                        </Text>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
-      {/* Recent Sessions */}
+      {/* Recent Sessions — agents themselves live in the left sub-nav */}
       <div className="ds-card ds-card-pad-lg">
         <div className="ds-row-between" style={{ marginBottom: 16 }}>
           <div>

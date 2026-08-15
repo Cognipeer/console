@@ -177,6 +177,10 @@ interface SessionDetailResponse {
         parentSpanId?: string;
         actorName?: string;
         actorRole?: string;
+        /** Tool menu offered to the model on THIS call (summary responses;
+         *  names may be capped — count is the full menu size). */
+        toolDefinitionNames?: string[];
+        toolDefinitionCount?: number;
     }>;
 }
 
@@ -276,7 +280,7 @@ const SectionCard = ({ section, index }: { section: SectionEntry; index: number 
     if (kind) badges.push({
         key: 'kind',
         label: humanize(kind),
-        color: kind === 'message' ? 'blue' : kind === 'tool_call' ? 'violet' : kind === 'tool_result' || kind === 'tool_response' ? 'green' : 'gray',
+        color: kind === 'message' ? 'blue' : kind === 'tool_call' ? 'violet' : kind === 'tool_result' || kind === 'tool_response' ? 'green' : kind === 'tool_definitions' ? 'indigo' : 'gray',
     });
     if (role) badges.push({
         key: 'role',
@@ -285,6 +289,14 @@ const SectionCard = ({ section, index }: { section: SectionEntry; index: number 
     });
     if (tool) badges.push({ key: 'tool', label: tool, color: 'violet' });
     if (truncated) badges.push({ key: 'truncated', label: 'Truncated', color: 'yellow' });
+
+    // tool_definitions: the tool menu offered to the model on this call —
+    // labeled name list + collapsible schemas instead of the generic fields.
+    const toolDefinitions = kind === 'tool_definitions' && Array.isArray(section.tools)
+        ? (section.tools as Array<Record<string, unknown>>).filter(
+            (entry) => entry && typeof entry === 'object' && typeof entry.name === 'string',
+        )
+        : undefined;
 
     const copyValue = formatSectionContent(section.content ?? section);
 
@@ -320,15 +332,28 @@ const SectionCard = ({ section, index }: { section: SectionEntry; index: number 
                     </Group>
                 </Group>
                 <Stack gap="sm">
-                    {Object.entries(section)
-                        .filter(([key]) => !SECTION_HEADER_PROPS.includes(key))
-                        .filter(([, value]) => shouldDisplaySectionField(value))
-                        .map(([key, value]) => (
-                            <Stack key={key} gap={4}>
-                                <Text size="xs" c="dimmed">{humanize(key)}</Text>
-                                {renderFieldValue(value)}
-                            </Stack>
-                        ))}
+                    {toolDefinitions ? (
+                        <Stack gap={6}>
+                            <Group gap={6}>
+                                {toolDefinitions.map((entry, index) => (
+                                    <Badge key={`${String(entry.name)}-${index}`} size="xs" variant="light" color="indigo">
+                                        {String(entry.name)}
+                                    </Badge>
+                                ))}
+                            </Group>
+                            <JsonTreeViewer data={toolDefinitions} initialExpandLevel={1} />
+                        </Stack>
+                    ) : (
+                        Object.entries(section)
+                            .filter(([key]) => !SECTION_HEADER_PROPS.includes(key))
+                            .filter(([, value]) => shouldDisplaySectionField(value))
+                            .map(([key, value]) => (
+                                <Stack key={key} gap={4}>
+                                    <Text size="xs" c="dimmed">{humanize(key)}</Text>
+                                    {renderFieldValue(value)}
+                                </Stack>
+                            ))
+                    )}
                 </Stack>
             </Stack>
         </Card>
@@ -375,6 +400,29 @@ function buildSpanTree(events: TracingEvent[]): SpanTreeNode[] {
     }
 
     return roots;
+}
+
+/**
+ * Compact per-turn tool-menu badge: "N tools" with the full name list in the
+ * tooltip. Rendered on ai_call rows so the timeline answers "which tools were
+ * sent on this LLM request?" without opening each event's detail panel.
+ */
+function ToolMenuBadge({ names, count }: { names?: string[]; count?: number }) {
+    if (!names || names.length === 0) return null;
+    const total = count ?? names.length;
+    const omitted = total - names.length;
+    return (
+        <Tooltip
+            label={`${names.map(formatToolName).join(', ')}${omitted > 0 ? ` … +${omitted} more` : ''}`}
+            multiline
+            maw={420}
+            withArrow
+        >
+            <Badge size="xs" variant="light" color="indigo" style={{ flexShrink: 0, cursor: 'help' }}>
+                {total} {total === 1 ? 'tool' : 'tools'}
+            </Badge>
+        </Tooltip>
+    );
 }
 
 function SpanTreeItem({
@@ -425,6 +473,7 @@ function SpanTreeItem({
                     <Text size="sm" fw={500} lineClamp={1} style={{ flex: 1 }}>
                         {event.label ? humanize(event.label) : humanize(event.type) || 'Event'}
                     </Text>
+                    <ToolMenuBadge names={event.toolDefinitionNames} count={event.toolDefinitionCount} />
                     {event.status && (
                         <Badge size="sm" variant="dot" color={resolveStatusColor(event.status)} style={{ flexShrink: 0 }}>
                             {event.status}
@@ -853,6 +902,7 @@ function EventListFlat({
                                 {event.toolName && (
                                     <Badge size="xs" variant="light" color="violet">{formatToolName(event.toolName)}</Badge>
                                 )}
+                                <ToolMenuBadge names={event.toolDefinitionNames} count={event.toolDefinitionCount} />
                                 {event.model && (
                                     <Badge size="xs" variant="light" color="cyan">{event.model}</Badge>
                                 )}

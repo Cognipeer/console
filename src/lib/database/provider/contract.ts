@@ -85,6 +85,9 @@ import type {
   NodeStatus,
   IBetaAccessCode,
   BetaAccessCodeStatus,
+  IExternalModelPricing,
+  IExternalPricingVersion,
+  IModelPricing,
   IGpuHost,
   IGpuSlice,
   ILlmDeployment,
@@ -123,6 +126,8 @@ import type {
   SandboxCommandStatus,
   IEvaluationTarget,
   IEvaluationDataset,
+  IEvaluationDatasetItem,
+  IEvaluationDatasetItemRecord,
   IEvaluationSuite,
   IEvaluationRun,
   EvaluationTargetKind,
@@ -407,17 +412,35 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   // Cross-service daily usage rollup (tenant-specific)
   /** Additive bulk upsert — one call per rollup flush, safe under concurrency. */
   incrementUsageDaily(rows: IUsageDailyIncrement[]): Promise<void>;
+  /** Absolute costUsd overwrite by row id — retroactive repricing only. */
+  setUsageDailyCost(updates: Array<{ id: string; costUsd: number }>): Promise<number>;
   listUsageDaily(filter: {
     projectId?: string;
     userId?: string;
     apiTokenId?: string;
     service?: string;
     refKey?: string;
+    agentKey?: string;
     source?: string;
     fromDay?: string;
     toDay?: string;
     limit?: number;
   }): Promise<IUsageDaily[]>;
+
+  // External model pricing (tenant-specific) — reference prices for models
+  // observed via tracing that are not in the Model Hub.
+  /** Case-insensitive upsert on (projectId, modelName). */
+  upsertExternalModelPricing(entry: {
+    tenantId: string;
+    projectId?: string;
+    modelName: string;
+    pricing: IModelPricing;
+    versions?: IExternalPricingVersion[];
+    updatedBy?: string;
+  }): Promise<IExternalModelPricing>;
+  /** With projectId: that project's entries plus tenant-wide ('') ones. */
+  listExternalModelPricing(projectId?: string): Promise<IExternalModelPricing[]>;
+  deleteExternalModelPricing(modelName: string, projectId?: string): Promise<boolean>;
 
   // Vector index operations (tenant-specific)
   createVectorIndex(
@@ -644,6 +667,11 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     search?: string;
   }): Promise<IEvaluationTarget[]>;
 
+  // Dataset writes still ACCEPT an inline `items` array for compatibility —
+  // the provider routes it to the separate item collection (create inserts,
+  // update replaces) and maintains `itemCount`; returned/listed datasets
+  // never carry `items`. Reads go through the item methods below, which
+  // transparently serve legacy documents whose items are still embedded.
   createEvaluationDataset(
     dataset: Omit<IEvaluationDataset, '_id' | 'createdAt' | 'updatedAt'>,
   ): Promise<IEvaluationDataset>;
@@ -659,6 +687,24 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     source?: EvaluationDatasetSource;
     search?: string;
   }): Promise<IEvaluationDataset[]>;
+
+  // ── Dataset items (separate collection; ordered by `position`) ──
+  /** Append items after the current last position. Rejects duplicate item ids. */
+  createEvaluationDatasetItems(datasetId: string, items: IEvaluationDatasetItem[]): Promise<number>;
+  /** Replace ALL items of the dataset (positions renumbered 0..n-1). */
+  replaceEvaluationDatasetItems(datasetId: string, items: IEvaluationDatasetItem[]): Promise<number>;
+  listEvaluationDatasetItems(
+    datasetId: string,
+    options?: { skip?: number; limit?: number; search?: string },
+  ): Promise<IEvaluationDatasetItemRecord[]>;
+  countEvaluationDatasetItems(datasetId: string, search?: string): Promise<number>;
+  findEvaluationDatasetItem(datasetId: string, itemId: string): Promise<IEvaluationDatasetItemRecord | null>;
+  updateEvaluationDatasetItem(
+    datasetId: string,
+    itemId: string,
+    data: Partial<Omit<IEvaluationDatasetItem, 'id'>>,
+  ): Promise<IEvaluationDatasetItemRecord | null>;
+  deleteEvaluationDatasetItem(datasetId: string, itemId: string): Promise<boolean>;
 
   createEvaluationSuite(
     suite: Omit<IEvaluationSuite, '_id' | 'createdAt' | 'updatedAt'>,

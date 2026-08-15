@@ -18,6 +18,7 @@ import type {
   IDynamicRoutingConfig,
   IDynamicRoutingRule,
   IModel,
+  IModelPricing,
 } from '@/lib/database';
 
 /** Hard cap on router→model→router chaining to prevent runaway recursion. */
@@ -30,6 +31,9 @@ export interface RoutingSignals {
   hasTools: boolean;
   hasResponseFormat: boolean;
   hasImages: boolean;
+  /** Estimated request cost in USD priced at the router's default model.
+   *  Only computed when a rule references it (needs a pricing lookup). */
+  estimatedCostUsd?: number;
   /** Latest user message text — used for keyword conditions and decider input. */
   lastUserText: string;
 }
@@ -43,6 +47,9 @@ export function publicSignals(signals: RoutingSignals): Record<string, unknown> 
     hasTools: signals.hasTools,
     hasResponseFormat: signals.hasResponseFormat,
     hasImages: signals.hasImages,
+    ...(signals.estimatedCostUsd !== undefined
+      ? { estimatedCostUsd: signals.estimatedCostUsd }
+      : {}),
   };
 }
 
@@ -132,8 +139,42 @@ export function extractRoutingSignals(body: {
   };
 }
 
-const NUMERIC_SIGNALS = new Set(['inputTokensEst', 'messageCount', 'lastUserLength']);
+const NUMERIC_SIGNALS = new Set([
+  'inputTokensEst',
+  'messageCount',
+  'lastUserLength',
+  'estimatedCostUsd',
+]);
 const BOOLEAN_SIGNALS = new Set(['hasTools', 'hasResponseFormat', 'hasImages']);
+
+/** True when any rule condition references the given signal. */
+export function rulesReferenceSignal(
+  rules: IDynamicRoutingRule[] | undefined,
+  signal: string,
+): boolean {
+  return (rules ?? []).some((rule) =>
+    (rule.conditions ?? []).some((condition) => condition.signal === signal),
+  );
+}
+
+/**
+ * Estimate a request's USD cost against one model's pricing: estimated input
+ * tokens at the input rate, plus — when the caller capped the response via
+ * max_tokens — that cap at the output rate (worst-case output spend). Output
+ * size is unknowable pre-flight, so without a cap the estimate is input-only.
+ */
+export function estimateRequestCostUsd(
+  pricing: IModelPricing,
+  inputTokensEst: number,
+  maxOutputTokens?: number,
+): number {
+  const inputCost = ((pricing.inputTokenPer1M ?? 0) * inputTokensEst) / 1_000_000;
+  const outputCost =
+    maxOutputTokens && maxOutputTokens > 0
+      ? ((pricing.outputTokenPer1M ?? 0) * maxOutputTokens) / 1_000_000
+      : 0;
+  return inputCost + outputCost;
+}
 
 export function evaluateCondition(
   condition: IDynamicRoutingCondition,
@@ -168,7 +209,11 @@ export function evaluateCondition(
   }
 
   if (NUMERIC_SIGNALS.has(signal)) {
-    const actual = signals[signal as 'inputTokensEst' | 'messageCount' | 'lastUserLength'];
+    const actual =
+      signals[signal as 'inputTokensEst' | 'messageCount' | 'lastUserLength' | 'estimatedCostUsd'];
+    // estimatedCostUsd is only computed when rules reference it; a missing
+    // value must never match a condition.
+    if (typeof actual !== 'number') return false;
     const target = typeof value === 'number' ? value : Number(value);
     if (Number.isNaN(target)) return false;
     switch (operator) {

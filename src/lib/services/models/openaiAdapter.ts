@@ -406,7 +406,7 @@ export function toOpenAIChatResponse(
   }
 
   return {
-    id: `chatcmpl_${crypto.randomUUID()}`,
+    id: newCompletionId(),
     object: 'chat.completion',
     created: timestamp,
     model: options.model,
@@ -481,7 +481,7 @@ function firstString(...candidates: unknown[]): string | undefined {
 
 function streamChunkEnvelope(options: ChatTransformOptions) {
   return {
-    id: options.completionId || `chatcmpl_${crypto.randomUUID()}`,
+    id: options.completionId || newCompletionId(),
     object: 'chat.completion.chunk' as const,
     created: options.created ?? Math.floor(Date.now() / 1000),
     model: options.model,
@@ -557,7 +557,7 @@ export function toOpenAIStreamChunk(
   }
 
   return {
-    id: options.completionId || `chatcmpl_${crypto.randomUUID()}`,
+    id: options.completionId || newCompletionId(),
     object: 'chat.completion.chunk',
     created: options.created ?? Math.floor(Date.now() / 1000),
     model: options.model,
@@ -658,6 +658,14 @@ function normalizeToolCalls(
       },
     };
   });
+}
+
+/**
+ * OpenAI's own completion ids are `chatcmpl-` + an opaque token. We emitted
+ * `chatcmpl_` with a dashed UUID, which trips clients that pattern-match the id.
+ */
+function newCompletionId(): string {
+  return `chatcmpl-${crypto.randomUUID().replace(/-/g, '')}`;
 }
 
 function normalizeToolCallChunks(

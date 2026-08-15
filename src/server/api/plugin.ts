@@ -4,6 +4,7 @@ import type {
   FastifyReply,
   FastifyRequest,
 } from 'fastify';
+import { isApplicationReady } from '@/server/bootstrap';
 import { LicenseManager } from '@/lib/license/license-manager';
 import { checkEnterpriseApiAccess } from '@/lib/license/enterprise-access';
 import { TokenManager, type JWTPayload } from '@/lib/license/token-manager';
@@ -56,6 +57,10 @@ import { ocrJobsApiPlugin } from './plugins/ocr-jobs';
 import { agentsApiPlugin } from './plugins/agents';
 import { alertsApiPlugin } from './plugins/alerts';
 import { configApiPlugin } from './plugins/config';
+import { costApiPlugin } from './plugins/cost';
+import { modelPriceCatalogApiPlugin } from './plugins/model-price-catalog';
+import { snapshotsApiPlugin } from './plugins/snapshots';
+import { datasetImportApiPlugin } from './plugins/dataset-import';
 import { dashboardApiPlugin } from './plugins/dashboard';
 import { filesApiPlugin } from './plugins/files';
 import { guardrailsApiPlugin } from './plugins/guardrails';
@@ -289,6 +294,19 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
     reply.header('x-request-id', requestId);
     applySecurityHeaders(reply);
 
+    // The server now starts listening before `bootstrapApplication()`
+    // finishes (see app.ts) so every other route here would otherwise run
+    // against a cache/queue/cluster provider — or tenant reconciliation —
+    // that hasn't initialized yet. `/health/*` is exempt: `/health/live` is
+    // a pure liveness check and `/health/ready` reports this same flag
+    // itself, so both need to keep responding during the boot window.
+    if (!pathname.startsWith('/api/health/') && !isApplicationReady()) {
+      return reply.code(503).send({
+        error: 'ServiceUnavailable',
+        message: 'Server is still starting up. Retry shortly.',
+      });
+    }
+
     const clientApiRequest = isClientApiPath(pathname);
     if (clientApiRequest) {
       const corsApplied = applyCorsHeaders(request, reply);
@@ -419,6 +437,10 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(ocrJobsApiPlugin);
   await app.register(clientOcrJobsApiPlugin);
   await app.register(configApiPlugin);
+  await app.register(costApiPlugin);
+  await app.register(modelPriceCatalogApiPlugin);
+  await app.register(snapshotsApiPlugin);
+  await app.register(datasetImportApiPlugin);
   await app.register(dashboardApiPlugin);
   await app.register(filesApiPlugin);
   await app.register(guardrailsApiPlugin);

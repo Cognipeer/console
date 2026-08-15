@@ -7,8 +7,9 @@ import type { DatasetItem, EmbedInvoker, JudgeInvoker, ScorerConfig, ScorerType,
 import { scoreAssertion } from './assertionScorer';
 import { scoreLlmJudge } from './llmJudgeScorer';
 import { scoreSemantic } from './semanticScorer';
+import { scoreToolCall } from './toolCallScorer';
 
-export const SUPPORTED_SCORERS: ScorerType[] = ['assertion', 'llm-judge', 'semantic'];
+export const SUPPORTED_SCORERS: ScorerType[] = ['assertion', 'llm-judge', 'semantic', 'tool-call'];
 
 export interface ScorerDeps {
   invokeJudge?: JudgeInvoker;
@@ -26,6 +27,9 @@ export async function runScorers(
     switch (config.type) {
       case 'assertion':
         results.push(scoreAssertion(item, output, config));
+        break;
+      case 'tool-call':
+        results.push(scoreToolCall(item, output, config));
         break;
       case 'llm-judge':
         if (!deps.invokeJudge) {
@@ -66,3 +70,4 @@ export async function runScorers(
 export { scoreAssertion } from './assertionScorer';
 export { scoreLlmJudge, buildJudgePrompt, parseJudgeResponse, normaliseScore } from './llmJudgeScorer';
 export { scoreSemantic, cosineSimilarity } from './semanticScorer';
+export { scoreToolCall, canonicalJson } from './toolCallScorer';

@@ -7,12 +7,14 @@
 import { describe, it, expect } from 'vitest';
 import {
   buildDeciderMessages,
+  estimateRequestCostUsd,
   evaluateCondition,
   evaluateRules,
   extractRoutingSignals,
   getDynamicRoutingConfig,
   parseDeciderLabel,
   publicSignals,
+  rulesReferenceSignal,
 } from '@/lib/services/models/dynamicRouting';
 import type {
   IDynamicDeciderConfig,
@@ -102,6 +104,45 @@ describe('evaluateCondition', () => {
   it('invalid regex is safe (returns false, no throw)', () => {
     const s = baseSignals();
     expect(evaluateCondition({ signal: 'keyword', operator: 'matches', value: '(' }, s)).toBe(false);
+  });
+
+  it('estimatedCostUsd matches only when the signal was computed', () => {
+    const s = baseSignals();
+    // Not computed → cost conditions never match.
+    expect(evaluateCondition({ signal: 'estimatedCostUsd', operator: 'gt', value: 0 }, s)).toBe(false);
+    s.estimatedCostUsd = 0.02;
+    expect(evaluateCondition({ signal: 'estimatedCostUsd', operator: 'gt', value: 0.01 }, s)).toBe(true);
+    expect(evaluateCondition({ signal: 'estimatedCostUsd', operator: 'lte', value: 0.01 }, s)).toBe(false);
+    expect(publicSignals(s)).toHaveProperty('estimatedCostUsd', 0.02);
+  });
+});
+
+describe('estimateRequestCostUsd', () => {
+  const pricing = { inputTokenPer1M: 3, outputTokenPer1M: 15 };
+
+  it('prices estimated input tokens at the input rate', () => {
+    expect(estimateRequestCostUsd(pricing, 1_000_000)).toBe(3);
+    expect(estimateRequestCostUsd(pricing, 500_000)).toBe(1.5);
+  });
+
+  it('adds worst-case output cost only when max_tokens caps the response', () => {
+    expect(estimateRequestCostUsd(pricing, 1_000_000, 200_000)).toBe(3 + 3);
+    expect(estimateRequestCostUsd(pricing, 1_000_000, 0)).toBe(3);
+  });
+});
+
+describe('rulesReferenceSignal', () => {
+  it('detects a signal across rules and conditions', () => {
+    const rules: IDynamicRoutingRule[] = [
+      {
+        label: 'cheap',
+        targetModelKey: 'mini',
+        conditions: [{ signal: 'estimatedCostUsd', operator: 'gt', value: 0.05 }],
+      },
+    ];
+    expect(rulesReferenceSignal(rules, 'estimatedCostUsd')).toBe(true);
+    expect(rulesReferenceSignal(rules, 'hasImages')).toBe(false);
+    expect(rulesReferenceSignal(undefined, 'estimatedCostUsd')).toBe(false);
   });
 });
 
