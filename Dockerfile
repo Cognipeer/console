@@ -15,7 +15,20 @@ ARG E2E_BUILD=
 ENV E2E_BUILD=${E2E_BUILD}
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-RUN npm run build \
+# Bound the build's heap explicitly. Without a ceiling, V8 sizes the old space
+# from the HOST's memory, which inside a container is the whole machine — so on
+# a 7GB CI runner it happily grows past what is actually available and the
+# kernel SIGKILLs it. That failure mode produces no error output at all: the
+# step just dies and the log comes back empty.
+#
+# The ceiling must sit BELOW the container's memory, not at it. 4096 leaves room
+# for npm, the SWC/esbuild child processes and Next's page-render workers, and
+# it makes V8 collect garbage before it reaches the limit instead of being
+# killed at it. Raising this number is usually the wrong fix; if the build runs
+# out of memory again, reduce Next's build parallelism instead — peak usage is
+# roughly workers x heap.
+ARG NODE_BUILD_HEAP_MB=4096
+RUN NODE_OPTIONS="--max-old-space-size=${NODE_BUILD_HEAP_MB}" npm run build \
   && rm -rf .next/cache
 
 # --------------------- runner stage ---------------------
