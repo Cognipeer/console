@@ -2709,3 +2709,76 @@ textarea.ds-input { height: auto; padding: 10px 12px; line-height: 1.5; resize: 
   box-shadow: 0 0 0 4px var(--ds-accent-soft);
   animation: ds-live-pulse 2s infinite var(--ds-ease);
 }
+
+/* ── Rendered markdown ─────────────────────────────────────────────────────
+   Shared primitive for prose a model wrote (agent replies, analysis
+   narratives). Constrains the vertical rhythm so generated headings and lists
+   do not tower over the surrounding UI. */
+.ds-markdown {
+  font-size: var(--mantine-font-size-sm);
+  line-height: 1.6;
+  color: var(--ds-text);
+}
+.ds-markdown > :first-child { margin-top: 0; }
+.ds-markdown > :last-child { margin-bottom: 0; }
+.ds-markdown h1,
+.ds-markdown h2,
+.ds-markdown h3,
+.ds-markdown h4 {
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 600;
+  margin: 1em 0 0.35em;
+  line-height: 1.35;
+}
+.ds-markdown p { margin: 0 0 0.7em; }
+.ds-markdown ul,
+.ds-markdown ol { margin: 0 0 0.7em; padding-left: 1.25rem; }
+.ds-markdown li { margin: 0.15em 0; }
+.ds-markdown code {
+  font-family: var(--mantine-font-family-monospace);
+  font-size: 0.9em;
+  background: var(--ds-surface-2, rgba(0, 0, 0, 0.05));
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+}
+.ds-markdown pre {
+  overflow-x: auto;
+  padding: 0.75rem;
+  border-radius: 8px;
+  background: var(--ds-surface-2, rgba(0, 0, 0, 0.05));
+}
+.ds-markdown pre code { background: none; padding: 0; }
+.ds-markdown table { border-collapse: collapse; width: 100%; margin: 0 0 0.7em; }
+.ds-markdown th,
+.ds-markdown td {
+  border-bottom: 1px solid var(--ds-border, rgba(0, 0, 0, 0.08));
+  padding: 0.35em 0.5em;
+  text-align: left;
+}
+.ds-markdown blockquote {
+  margin: 0 0 0.7em;
+  padding-left: 0.75rem;
+  border-left: 2px solid var(--ds-border, rgba(0, 0, 0, 0.12));
+  color: var(--ds-text-dimmed, inherit);
+}
+
+/* ── Badge clusters in dense tables ────────────────────────────────────────
+   A row of status badges in a narrow table cell used to be laid out with
+   nowrap, so the flex container shrank each badge until its label ellipsised
+   to something like "P.." — present, coloured, and completely unreadable.
+   Let them wrap onto a second line instead, and stop them shrinking. */
+.ds-badge-cluster {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  row-gap: 4px;
+}
+.ds-badge-cluster > * {
+  flex: 0 0 auto;
+  max-width: none;
+}
+.ds-badge-cluster .mantine-Badge-label {
+  overflow: visible;
+  text-overflow: clip;
+}
