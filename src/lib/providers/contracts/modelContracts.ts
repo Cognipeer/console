@@ -272,10 +272,11 @@ function resolveOverrides(
  */
 function openAiChatOverrides(
   overrides: ModelSettingsOverrides,
-  streaming: boolean,
+  options: { streaming?: boolean; disableStreaming?: boolean } | undefined,
   maxRetries: number,
 ) {
   return {
+    disableStreaming: options?.disableStreaming ?? false,
     // LangChain's own AsyncCaller retries 6 times by default. Nested inside the
     // gateway's 3-attempt `withResilience` that is up to 21 upstream calls per
     // request, 18 of them invisible to the circuit breaker, which then trips 7x
@@ -293,7 +294,7 @@ function openAiChatOverrides(
     reasoning: overrides.reasoning,
     modelKwargs: overrides.extraBody,
     ...(overrides.streamUsage === false ? { streamUsage: false } : {}),
-    streaming,
+    streaming: options?.streaming ?? false,
   };
 }
 
@@ -377,7 +378,7 @@ export const OpenAiModelProviderContract: ProviderContract<ModelProviderRuntime,
           configuration: settings.organization
             ? { organization: settings.organization }
             : undefined,
-          ...openAiChatOverrides(overrides, config.options?.streaming ?? false, resolveMaxRetries(config)),
+          ...openAiChatOverrides(overrides, config.options, resolveMaxRetries(config)),
         });
       },
       createEmbeddingModel: (config) =>
@@ -518,7 +519,7 @@ export const OpenAiCompatibleModelProviderContract: ProviderContract<ModelProvid
             baseURL: baseUrl,
             organization: settings.organization,
           },
-          ...openAiChatOverrides(overrides, config.options?.streaming ?? false, resolveMaxRetries(config)),
+          ...openAiChatOverrides(overrides, config.options, resolveMaxRetries(config)),
         });
       },
       createEmbeddingModel: (config) =>
@@ -601,7 +602,7 @@ export const TogetherModelProviderContract: ProviderContract<ModelProviderRuntim
         return new ChatTogetherAI({
           model: config.modelId,
           apiKey,
-          ...openAiChatOverrides(overrides, config.options?.streaming ?? false, resolveMaxRetries(config)),
+          ...openAiChatOverrides(overrides, config.options, resolveMaxRetries(config)),
         });
       },
       createEmbeddingModel: (config) =>
@@ -909,7 +910,7 @@ export const AzureModelProviderContract: ProviderContract<ModelProviderRuntime, 
           azureOpenAIApiInstanceName: instanceName,
           azureOpenAIApiDeploymentName: deploymentName,
           azureOpenAIApiVersion: apiVersion,
-          ...openAiChatOverrides(overrides, config.options?.streaming ?? false, resolveMaxRetries(config)),
+          ...openAiChatOverrides(overrides, config.options, resolveMaxRetries(config)),
         });
       },
       createEmbeddingModel: (config) =>

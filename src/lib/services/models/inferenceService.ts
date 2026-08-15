@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import { createLogger } from '@/lib/core/logger';
 import { withResilience } from '@/lib/core/resilience';
 import { fireAndForget } from '@/lib/core/asyncTask';
-import type { AIMessage, AIMessageChunk } from '@langchain/core/messages';
+import { AIMessageChunk, type AIMessage } from '@langchain/core/messages';
 
 const logger = createLogger('inference');
 import { IModel } from '@/lib/database';
@@ -19,28 +19,29 @@ import type {
 import { resolveUnsupportedParamNames } from '@/lib/providers/unsupportedParams';
 import { getModelByKey } from './modelService';
 import {
-  isEmptyStreamDelta,
-  openAIStreamRoleChunk,
-  openAIStreamStopChunk,
   toLangChainMessages,
   toOpenAIChatResponse,
-  toOpenAIErrorCode,
-  toOpenAIErrorType,
+  openAIStreamRoleChunk,
+  openAIStreamStopChunk,
   toOpenAIStreamChunk,
   summarizeUsage,
 } from './openaiAdapter';
+import {
+  normalizeInferenceError,
+  OutputTokenLimitError,
+} from './openaiErrors';
+
+export { OutputTokenLimitError } from './openaiErrors';
 
 import { logModelUsage, TokenUsage } from './usageLogger';
 import {
   MAX_ROUTING_DEPTH,
   buildDeciderMessages,
-  estimateRequestCostUsd,
   evaluateRules,
   extractRoutingSignals,
   getDynamicRoutingConfig,
   parseDeciderLabel,
   publicSignals,
-  rulesReferenceSignal,
 } from './dynamicRouting';
 import type { IDynamicRoutingConfig, IModelUsageRouting } from '@/lib/database';
 import { buildModelRuntime } from './runtimeService';
@@ -142,8 +143,7 @@ async function enforceModelGuardrail(params: {
   });
   if (!result.passed && result.findings.some((f) => f.block)) {
     // Prefer the finding's own message: a fail-closed guardrail whose judge model
-    // could not run already explains that ("… could not run and this guardrail is
-    // configured to fail closed: <cause>"), and reducing it to the bare category
+    // could not run already explains that, and reducing it to the bare category
     // `evaluation_error` threw that explanation away — leaving a provider
     // misconfiguration looking like a content violation.
     const reasons = result.findings
@@ -363,6 +363,13 @@ function buildOverrides(body: Record<string, unknown>) {
   if (body.stop !== undefined) overrides.stop = body.stop;
   if (body.tools !== undefined) overrides.tools = body.tools;
   if (body.tool_choice !== undefined) overrides.tool_choice = body.tool_choice;
+  if (body.parallel_tool_calls !== undefined) {
+    overrides.parallel_tool_calls = body.parallel_tool_calls;
+  }
+  if (body.strict !== undefined) overrides.strict = body.strict;
+  if (body.stream_options !== undefined) {
+    overrides.stream_options = body.stream_options;
+  }
   if (body.response_format !== undefined)
     overrides.response_format = body.response_format;
   if (body.modality !== undefined) overrides.modality = body.modality;
@@ -383,6 +390,160 @@ function buildOverrides(body: Record<string, unknown>) {
     overrides.reasoning_effort = body.reasoning_effort;
 
   return overrides;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+
+  return { ...(value as Record<string, unknown>) };
+}
+
+function buildChatModelSettings(
+  modelSettings: unknown,
+  overrides: Record<string, unknown>,
+) {
+  const settings = asRecord(modelSettings);
+
+  if (overrides.temperature !== undefined) {
+    settings.temperature = overrides.temperature;
+  }
+
+  // top_p / presence_penalty / frequency_penalty were collected from the request
+  // and then read by nobody, so the API accepted them and silently sampled at
+  // the provider's defaults.
+  if (overrides.top_p !== undefined) {
+    settings.topP = overrides.top_p;
+  }
+
+  if (overrides.presence_penalty !== undefined) {
+    settings.presencePenalty = overrides.presence_penalty;
+  }
+
+  if (overrides.frequency_penalty !== undefined) {
+    settings.frequencyPenalty = overrides.frequency_penalty;
+  }
+
+  if (overrides.max_tokens !== undefined) {
+    settings.maxTokens = overrides.max_tokens;
+  }
+
+  if (overrides.max_completion_tokens !== undefined) {
+    settings.maxCompletionTokens = overrides.max_completion_tokens;
+  }
+
+  if (overrides.reasoning !== undefined) {
+    settings.reasoning = overrides.reasoning;
+  } else if (overrides.reasoning_effort !== undefined) {
+    settings.reasoning = {
+      ...(typeof settings.reasoning === 'object' && settings.reasoning !== null
+        ? settings.reasoning as Record<string, unknown>
+        : {}),
+      effort: overrides.reasoning_effort,
+    };
+  }
+
+  return settings;
+}
+
+function normalizeStrictJsonSchema(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(normalizeStrictJsonSchema);
+  }
+
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+
+  const schema = Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([key, nestedValue]) => [
+      key,
+      normalizeStrictJsonSchema(nestedValue),
+    ]),
+  );
+
+  if (schema.type === 'object' || schema.properties) {
+    schema.additionalProperties = false;
+  }
+
+  return schema;
+}
+
+function normalizeTools(tools: unknown, strictOverride: unknown): unknown {
+  if (!Array.isArray(tools)) {
+    return tools;
+  }
+
+  return tools.map((tool) => {
+    if (!tool || typeof tool !== 'object') {
+      return tool;
+    }
+
+    const normalizedTool = { ...(tool as Record<string, unknown>) };
+    if (!normalizedTool.function || typeof normalizedTool.function !== 'object') {
+      return normalizedTool;
+    }
+
+    const fn = { ...(normalizedTool.function as Record<string, unknown>) };
+    const strict = typeof strictOverride === 'boolean' ? strictOverride : fn.strict;
+    if (strict === true) {
+      fn.strict = true;
+      if (fn.parameters !== undefined) {
+        fn.parameters = normalizeStrictJsonSchema(fn.parameters);
+      }
+    }
+
+    normalizedTool.function = fn;
+    return normalizedTool;
+  });
+}
+
+function buildChatCallOptions(overrides: Record<string, unknown>) {
+  const options: Record<string, unknown> = {};
+
+  if (overrides.stop !== undefined) options.stop = overrides.stop;
+  if (overrides.tools !== undefined) {
+    options.tools = normalizeTools(overrides.tools, overrides.strict);
+  }
+  if (overrides.tool_choice !== undefined) options.tool_choice = overrides.tool_choice;
+  if (overrides.parallel_tool_calls !== undefined) {
+    options.parallel_tool_calls = overrides.parallel_tool_calls;
+  }
+  if (overrides.strict !== undefined) options.strict = overrides.strict;
+  if (overrides.stream_options !== undefined) {
+    options.stream_options = overrides.stream_options;
+  }
+  if (overrides.response_format !== undefined) {
+    options.response_format = overrides.response_format;
+  }
+  if (overrides.seed !== undefined) options.seed = overrides.seed;
+  if (overrides.modality !== undefined) {
+    options.modalities = Array.isArray(overrides.modality)
+      ? overrides.modality
+      : [overrides.modality];
+  }
+  if (overrides.max_output_tokens !== undefined) {
+    options.max_output_tokens = overrides.max_output_tokens;
+  }
+
+  return options;
+}
+
+function resolveOutputTokenLimit(
+  overrides: Record<string, unknown>,
+  modelSettings: Record<string, unknown>,
+): number | undefined {
+  const candidates = [
+    overrides.max_completion_tokens,
+    overrides.max_tokens,
+    modelSettings.maxCompletionTokens,
+    modelSettings.maxTokens,
+  ];
+
+  return candidates.find(
+    (value): value is number => typeof value === 'number' && Number.isFinite(value),
+  );
 }
 
 /**
@@ -454,61 +615,6 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return {};
-  }
-
-  return { ...(value as Record<string, unknown>) };
-}
-
-function buildChatModelSettings(
-  modelSettings: unknown,
-  overrides: Record<string, unknown>,
-) {
-  const settings = asRecord(modelSettings);
-
-  if (overrides.temperature !== undefined) {
-    settings.temperature = overrides.temperature;
-  }
-
-  // top_p / presence_penalty / frequency_penalty were collected from the request
-  // and then read by nobody, so the API accepted them and silently sampled at
-  // the provider's defaults.
-  if (overrides.top_p !== undefined) {
-    settings.topP = overrides.top_p;
-  }
-
-  if (overrides.presence_penalty !== undefined) {
-    settings.presencePenalty = overrides.presence_penalty;
-  }
-
-  if (overrides.frequency_penalty !== undefined) {
-    settings.frequencyPenalty = overrides.frequency_penalty;
-  }
-
-  if (overrides.max_tokens !== undefined) {
-    settings.maxTokens = overrides.max_tokens;
-  }
-
-  if (overrides.max_completion_tokens !== undefined) {
-    settings.maxCompletionTokens = overrides.max_completion_tokens;
-  }
-
-  if (overrides.reasoning !== undefined) {
-    settings.reasoning = overrides.reasoning;
-  } else if (overrides.reasoning_effort !== undefined) {
-    settings.reasoning = {
-      ...(typeof settings.reasoning === 'object' && settings.reasoning !== null
-        ? settings.reasoning as Record<string, unknown>
-        : {}),
-      effort: overrides.reasoning_effort,
-    };
-  }
-
-  return settings;
-}
-
 /**
  * The one place a chat runnable's parameters are decided. Every caller that
  * builds a chat model — the gateway, agents, guardrail judges — goes through
@@ -576,28 +682,6 @@ export function resolveModelInvocationConfig(
   };
 }
 
-function buildChatCallOptions(overrides: Record<string, unknown>) {
-  const options: Record<string, unknown> = {};
-
-  if (overrides.stop !== undefined) options.stop = overrides.stop;
-  if (overrides.tools !== undefined) options.tools = overrides.tools;
-  if (overrides.tool_choice !== undefined) options.tool_choice = overrides.tool_choice;
-  if (overrides.response_format !== undefined) {
-    options.response_format = overrides.response_format;
-  }
-  if (overrides.seed !== undefined) options.seed = overrides.seed;
-  if (overrides.modality !== undefined) {
-    options.modalities = Array.isArray(overrides.modality)
-      ? overrides.modality
-      : [overrides.modality];
-  }
-  if (overrides.max_output_tokens !== undefined) {
-    options.max_output_tokens = overrides.max_output_tokens;
-  }
-
-  return options;
-}
-
 function ensureLlmModel(model: IModel) {
   if (model.category !== 'llm') {
     throw new Error('Model is not configured for chat completions');
@@ -650,29 +734,6 @@ async function resolveDynamicCompletion(args: {
       : crypto.randomUUID();
 
   const signals = extractRoutingSignals(body);
-
-  // Cost signal: priced at the DEFAULT model — "what would this request cost
-  // if routing changed nothing". Computed only when a rule references it, so
-  // routers without cost rules pay no extra model lookup.
-  if (
-    config.strategy === 'rule-based' &&
-    rulesReferenceSignal(config.rules, 'estimatedCostUsd')
-  ) {
-    try {
-      const defaultModel = await getModelByKey(tenantDbName, config.defaultModelKey, projectId);
-      if (defaultModel?.pricing) {
-        const maxOutputTokens =
-          typeof body.max_tokens === 'number' ? body.max_tokens : undefined;
-        signals.estimatedCostUsd = estimateRequestCostUsd(
-          defaultModel.pricing,
-          signals.inputTokensEst,
-          maxOutputTokens,
-        );
-      }
-    } catch {
-      // Leave the signal unset — cost conditions simply never match.
-    }
-  }
 
   let chosenModelKey = config.defaultModelKey;
   let decision: IModelUsageRouting['decision'] = 'default';
@@ -917,9 +978,11 @@ export async function handleChatCompletion(params: {
   // Resolved before the cache lookup on purpose: the sampling parameters and
   // any passthrough body fields change what the model produces from the same
   // prompt, so they have to take part in the cache key.
-  const { modelSettings, callOptions, overrides, extraBody } =
-    resolveModelInvocationConfig(model, body);
-  const cacheVariantKey = buildCacheVariantKey({ ...overrides, ...(extraBody ?? {}) });
+  const invocation = resolveModelInvocationConfig(model, body);
+  const cacheVariantKey = buildCacheVariantKey({
+    ...invocation.overrides,
+    ...(invocation.extraBody ?? {}),
+  });
 
   // Semantic cache: check for cached response before calling the model
   const cacheEnabled = !stream && tenantId && isSemanticCacheEnabled(model);
@@ -980,18 +1043,33 @@ export async function handleChatCompletion(params: {
 
   const messagesInput = body.messages as Parameters<typeof toLangChainMessages>[0];
   const messages = toLangChainMessages(messagesInput);
+  const { modelSettings, callOptions, overrides } = invocation;
+  const outputTokenLimit = resolveOutputTokenLimit(overrides, modelSettings);
+  const disableProviderStreaming = Boolean(
+    stream && Array.isArray(overrides.tools) && overrides.tools.length > 0,
+  );
+  const includeStreamUsage =
+    asRecord(overrides.stream_options).include_usage === true;
+
+  if (disableProviderStreaming) {
+    delete callOptions.stream_options;
+  }
 
   const chatModel = ensureChatRunnable(await runtime.createChatModel({
     modelId: model.modelId,
     category: model.category,
     modelSettings,
-    // `withResilience` below owns retry and circuit-breaking on this path, so
-    // the provider SDK must not retry underneath it.
-    options: { streaming: Boolean(stream), maxRetries: 0 },
+    options: {
+      streaming: Boolean(stream),
+      disableStreaming: disableProviderStreaming,
+      // `withResilience` owns retry and circuit-breaking on this path, so the
+      // provider SDK must not retry underneath it.
+      maxRetries: 0,
+    },
   }));
 
   if (stream) {
-    if (typeof chatModel.stream !== 'function') {
+    if (!disableProviderStreaming && typeof chatModel.stream !== 'function') {
       throw new Error('Model provider does not support streaming responses');
     }
 
@@ -999,78 +1077,58 @@ export async function handleChatCompletion(params: {
     // until it finished on its own. Cancelling the readable — which Fastify does
     // when the response socket closes — now aborts the upstream call.
     const abortController = new AbortController();
-    let clientAborted = false;
+    const streamCallOptions = { ...callOptions, signal: abortController.signal };
 
-    const asyncIterator = await withResilience(
-      () => chatModel.stream!(messages, {
-        ...callOptions,
-        signal: abortController.signal,
-      }) as Promise<AsyncIterable<AIMessageChunk>>,
-      { key: `chat-stream:${model.providerKey}` },
-    );
+    let asyncIterator: AsyncIterable<AIMessageChunk>;
+    if (disableProviderStreaming) {
+      const eagerMessage = await withResilience(
+        () => chatModel.invoke(messages, callOptions),
+        { key: `chat:${model.providerKey}` },
+      );
+      asyncIterator = (async function* () {
+        yield new AIMessageChunk({
+          content: eagerMessage.content,
+          additional_kwargs: eagerMessage.additional_kwargs,
+          response_metadata: eagerMessage.response_metadata,
+          id: eagerMessage.id,
+          name: eagerMessage.name,
+          usage_metadata: eagerMessage.usage_metadata,
+          tool_calls: eagerMessage.tool_calls,
+          invalid_tool_calls: eagerMessage.invalid_tool_calls,
+        });
+      })();
+    } else {
+      asyncIterator = await withResilience(
+        () => chatModel.stream!(messages, streamCallOptions) as Promise<AsyncIterable<AIMessageChunk>>,
+        { key: `chat-stream:${model.providerKey}` },
+      );
+    }
     const startedAt = Date.now();
+    const completionId = `chatcmpl_${crypto.randomUUID()}`;
+    const completionCreated = Math.floor(Date.now() / 1000);
 
-    // OpenAI keeps one id for every frame of a completion; clients group and
-    // de-duplicate on it, so a fresh uuid per chunk is not merely cosmetic.
-    const completionId = `chatcmpl-${crypto.randomUUID().replace(/-/g, '')}`;
-    const createdAt = Math.floor(Date.now() / 1000);
     const chunkOptions = {
-      model: modelKey,
+      model: model.modelId,
       stream: true as const,
-      id: completionId,
-      created: createdAt,
+      completionId,
+      created: completionCreated,
     };
 
     const readable = new ReadableStream<Uint8Array>({
       async start(controller) {
         let aggregatedChunk: AIMessageChunk | null = null;
         let lastUsage: TokenUsage | undefined;
-        let sawFinishReason = false;
-        let streamedToolCalls = false;
+        let finalUsagePayload: Record<string, unknown> | undefined;
+        let terminalFinishReason: string | undefined;
+        let hasFinalOutput = false;
+        let outputLimitError: OutputTokenLimitError | null = null;
         const toolCalls: ToolCallPayload[] = [];
-
-        const send = (payload: unknown) => {
-          controller.enqueue(
-            encoder.encode(`data: ${JSON.stringify(payload)}\n\n`),
-          );
-        };
-
-        const logStreamOutcome = (
-          latencyMs: number,
-          usage: TokenUsage,
-          errorMessage?: string,
-        ) => {
-          fireAndForget(errorMessage ? 'log-stream-error' : 'log-stream-usage', () =>
-            logModelUsage(tenantDbName, model, {
-              requestId,
-              route: 'chat.completions',
-              status: errorMessage ? 'error' : 'success',
-              providerRequest: sanitizeForLogging({
-                model: modelKey,
-                messages: body.messages,
-                overrides,
-                ...(extraBody ? { extraBody } : {}),
-                stream: true,
-              }),
-              providerResponse: sanitizeForLogging(
-                errorMessage
-                  ? { error: errorMessage }
-                  : aggregatedChunk ?? { tool_calls: toolCalls },
-              ),
-              ...(errorMessage ? { errorMessage } : {}),
-              latencyMs,
-              usage,
-            }),
-          );
-        };
-
-        const collectedUsage = (): TokenUsage => (lastUsage
-          ? { ...lastUsage, toolCalls: toolCalls.length || undefined }
-          : { toolCalls: toolCalls.length || undefined });
 
         try {
           // OpenAI opens every stream with the assistant role before any content.
-          send(openAIStreamRoleChunk(chunkOptions));
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify(openAIStreamRoleChunk(chunkOptions))}\n\n`),
+          );
 
           for await (const chunk of asyncIterator) {
             aggregatedChunk = aggregatedChunk
@@ -1084,7 +1142,26 @@ export async function handleChatCompletion(params: {
               });
             }
 
-            const payload = toOpenAIStreamChunk(chunk, chunkOptions);
+            const payload = toOpenAIStreamChunk(chunk, {
+              model: model.modelId,
+              stream: true,
+              completionId,
+              created: completionCreated,
+            });
+            const choice = payload.choices[0];
+            if (typeof choice?.finish_reason === 'string') {
+              terminalFinishReason = choice.finish_reason;
+            }
+            const delta = choice?.delta as Record<string, unknown> | undefined;
+            if (
+              guardrailContentToText(delta?.content).trim()
+              || (Array.isArray(delta?.tool_calls) && delta.tool_calls.length > 0)
+            ) {
+              hasFinalOutput = true;
+            }
+            if (terminalFinishReason === 'length' && !hasFinalOutput) {
+              outputLimitError = new OutputTokenLimitError(outputTokenLimit);
+            }
 
             if (payload.usage) {
               lastUsage = {
@@ -1093,49 +1170,89 @@ export async function handleChatCompletion(params: {
                 cachedInputTokens: payload.usage.cached_tokens,
                 totalTokens: payload.usage.total_tokens,
               };
+              if (includeStreamUsage) {
+                finalUsagePayload = payload.usage;
+                payload.usage = undefined;
+              }
             }
 
-            const finishReason = payload.choices[0]?.finish_reason;
-
-            // The provider's terminal usage-only frame carries no delta; OpenAI
-            // sends it as `{choices: [], usage}` rather than an empty delta.
-            // Only collapse when there is genuinely nothing in the choice —
-            // some providers (Gemini) attach usage to the same frame that
-            // carries the finish_reason, and dropping the choice there would
-            // lose the only terminal signal the client gets.
-            if (payload.usage && isEmptyStreamDelta(payload) && !finishReason) {
-              send({ ...payload, choices: [] });
-              continue;
+            if (!outputLimitError) {
+              controller.enqueue(
+                encoder.encode(`data: ${JSON.stringify(payload)}\n\n`),
+              );
             }
-
-            if (finishReason) {
-              sawFinishReason = true;
-            }
-
-            // Tracked from what actually went out: a streamed chunk's collapsed
-            // `tool_calls` is usually empty, so `toolCalls` alone would miss it.
-            if (payload.choices[0]?.delta.tool_calls) {
-              streamedToolCalls = true;
-            }
-
-            send(payload);
           }
 
-          // Some upstreams never send a terminal finish_reason. Clients that
-          // wait for one would hang until the socket closed.
-          if (!sawFinishReason) {
-            // A completion that ended in tool calls must say so, or an agent
-            // client reads it as a finished answer and never dispatches them.
-            send(openAIStreamStopChunk(
-              chunkOptions,
-              streamedToolCalls || toolCalls.length ? 'tool_calls' : 'stop',
-            ));
+          if (outputLimitError) {
+            const normalizedError = normalizeInferenceError(outputLimitError);
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify({
+                error: normalizedError.error,
+                request_id: requestId,
+              })}\n\n`),
+            );
           }
 
-          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+          if (!outputLimitError && includeStreamUsage && finalUsagePayload) {
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify({
+                id: completionId,
+                object: 'chat.completion.chunk',
+                created: completionCreated,
+                model: model.modelId,
+                choices: [],
+                usage: finalUsagePayload,
+              })}\n\n`),
+            );
+          }
+
+          // Some upstreams never send a terminal finish_reason. Clients that wait
+          // for one would hang until the socket closed. A completion that ended in
+          // tool calls must say so, or an agent client reads it as a finished
+          // answer and never dispatches them.
+          if (!outputLimitError && terminalFinishReason === undefined) {
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify(openAIStreamStopChunk(
+                chunkOptions,
+                toolCalls.length ? 'tool_calls' : 'stop',
+              ))}\n\n`),
+            );
+          }
+
+          if (!outputLimitError) {
+            controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+          }
           controller.close();
 
-          logStreamOutcome(Date.now() - startedAt, collectedUsage());
+          const latencyMs = Date.now() - startedAt;
+          const usage: TokenUsage = lastUsage
+            ? {
+              ...lastUsage,
+              toolCalls: toolCalls.length || undefined,
+            }
+            : { toolCalls: toolCalls.length || undefined };
+
+          const providerResponse = aggregatedChunk
+            ? aggregatedChunk
+            : { tool_calls: toolCalls };
+
+          fireAndForget('log-stream-usage', () =>
+            logModelUsage(tenantDbName, model, {
+              requestId,
+              route: 'chat.completions',
+              status: outputLimitError ? 'error' : 'success',
+              providerRequest: sanitizeForLogging({
+                model: modelKey,
+                messages: body.messages,
+                overrides,
+                stream: true,
+              }),
+              providerResponse: sanitizeForLogging(providerResponse),
+              errorMessage: outputLimitError?.message,
+              latencyMs,
+              usage,
+            }),
+          );
 
           // Output guardrail (streaming): the response is already delivered,
           // so this is a post-hoc audit — violations land in the evaluation
@@ -1161,43 +1278,36 @@ export async function handleChatCompletion(params: {
           }
         } catch (error: unknown) {
           const latencyMs = Date.now() - startedAt;
+          const normalizedError = normalizeInferenceError(error);
+          const errorMessage = normalizedError.error.message;
+          fireAndForget('log-stream-error', () =>
+            logModelUsage(tenantDbName, model, {
+              requestId,
+              route: 'chat.completions',
+              status: 'error',
+              providerRequest: sanitizeForLogging({
+                model: modelKey,
+                messages: body.messages,
+                overrides,
+                stream: true,
+              }),
+              providerResponse: sanitizeForLogging({ error: errorMessage }),
+              errorMessage,
+              latencyMs,
+              usage: {},
+            }),
+          );
 
-          // A client hang-up is not a provider failure. Record what the upstream
-          // actually produced (and billed us for) instead of an error row.
-          if (clientAborted) {
-            logStreamOutcome(latencyMs, collectedUsage());
-            try {
-              controller.close();
-            } catch {
-              /* already closed by the cancel path */
-            }
-            return;
-          }
-
-          const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-          logStreamOutcome(latencyMs, collectedUsage(), errorMessage);
-
-          // Headers are long gone by now, so `controller.error()` could only
-          // destroy the socket — the client saw a truncated stream with no
-          // explanation. Deliver the failure in-band instead.
-          try {
-            send(openAIStreamStopChunk(chunkOptions, 'error'));
-            send({
-              error: {
-                message: errorMessage,
-                type: toOpenAIErrorType(error),
-                code: toOpenAIErrorCode(error),
-              },
-            });
-            controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-            controller.close();
-          } catch {
-            controller.error(error);
-          }
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify({
+              error: normalizedError.error,
+              request_id: requestId,
+            })}\n\n`),
+          );
+          controller.close();
         }
       },
       cancel(reason) {
-        clientAborted = true;
         abortController.abort(reason);
       },
     });
@@ -1211,13 +1321,18 @@ export async function handleChatCompletion(params: {
   );
 
   const latencyMs = Date.now() - start;
-  // Echo the key the caller addressed, as OpenAI echoes the requested model —
-  // returning the upstream `modelId` both breaks that contract and leaks which
-  // provider deployment is behind the Model Hub entry.
   const response = toOpenAIChatResponse(aiMessage, {
-    model: modelKey,
+    model: model.modelId,
     stream: false,
   });
+
+  if (
+    aiMessage.response_metadata?.finish_reason === 'length'
+    && !guardrailContentToText(aiMessage.content).trim()
+    && getToolCallCount(aiMessage) === 0
+  ) {
+    throw new OutputTokenLimitError(outputTokenLimit);
+  }
 
   const usage = summarizeUsage(aiMessage) as TokenUsage;
   const toolCallCount = getToolCallCount(aiMessage);

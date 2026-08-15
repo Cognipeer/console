@@ -188,14 +188,46 @@ describe('/api/models', () => {
     });
 
     it('passes correct args to createModel', async () => {
-      await injectPost({ ...VALID_BODY, description: 'My model' });
+      await injectPost({
+        ...VALID_BODY,
+        description: 'My model',
+        capabilities: {
+          contextWindow: 131072,
+          maxOutputTokens: 16384,
+          inputModalities: ['text', 'image', 'image'],
+          outputModalities: ['text'],
+          supportsReasoning: true,
+          supportsStructuredOutputs: true,
+          supportsToolCalls: true,
+        },
+      });
       expect(createModel).toHaveBeenCalledWith(
         'tenant_acme',
         'tenant-1',
         'proj-1',
         'user-1',
-        expect.objectContaining({ name: 'GPT-4', description: 'My model' }),
+        expect.objectContaining({
+          name: 'GPT-4',
+          description: 'My model',
+          capabilities: expect.objectContaining({
+            contextWindow: 131072,
+            maxOutputTokens: 16384,
+            inputModalities: ['text', 'image'],
+            supportsReasoning: true,
+          }),
+        }),
       );
+    });
+
+    it('returns 400 for invalid capability metadata', async () => {
+      const res = await injectPost({
+        ...VALID_BODY,
+        capabilities: { contextWindow: 4096, maxOutputTokens: 8192 },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(parseJsonBody<{ error: string }>(res.body).error).toContain('cannot exceed');
+      expect(createModel).not.toHaveBeenCalled();
     });
 
     it('returns ProjectContextError status on POST', async () => {

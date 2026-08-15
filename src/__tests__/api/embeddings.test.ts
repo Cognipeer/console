@@ -197,7 +197,7 @@ describe('POST /api/client/v1/embeddings', () => {
   });
 
   describe('service error propagation', () => {
-    it('returns 500 when embedding service throws an unexpected error', async () => {
+    it('returns 404 when the requested embedding model is not found', async () => {
       (requireApiToken as ReturnType<typeof vi.fn>).mockResolvedValue(MOCK_TOKEN_CONTEXT);
       (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(null);
       (handleEmbeddingRequest as ReturnType<typeof vi.fn>).mockRejectedValue(
@@ -209,7 +209,7 @@ describe('POST /api/client/v1/embeddings', () => {
         input: 'test',
       });
       const res = await POST(req);
-      expect(res.status).toBe(500);
+      expect(res.status).toBe(404);
     });
   });
 });

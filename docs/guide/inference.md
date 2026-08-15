@@ -2,6 +2,60 @@
 
 The inference service provides OpenAI-compatible chat completion and embedding endpoints backed by multiple LLM providers. Models are configured in [Model Hub](/guide/model-hub) and called through the runtime documented below.
 
+## Model discovery
+
+OpenAI-compatible clients can discover project-scoped LLMs before starting a chat:
+
+```http
+GET /api/client/v1/models
+Authorization: Bearer <api-token>
+```
+
+The response preserves the OpenAI list envelope and Console's legacy model records:
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "support-fast",
+      "object": "model",
+      "created": 1785403593,
+      "owned_by": "cognipeer",
+      "name": "Support Fast",
+      "context_length": 131072,
+      "max_output_tokens": 16384,
+      "supports_image_input": true,
+      "supports_reasoning": true,
+      "supports_structured_outputs": true,
+      "supports_tool_calls": true,
+      "architecture": {
+        "input_modalities": ["text", "image"],
+        "output_modalities": ["text"]
+      },
+      "cognipeer": {
+        "schema_version": "1.0",
+        "canonical_model_id": "upstream/model-27b",
+        "capabilities": {
+          "contextWindow": 131072,
+          "maxOutputTokens": 16384,
+          "inputModalities": ["text", "image"],
+          "outputModalities": ["text"],
+          "supportsReasoning": true,
+          "supportsStructuredOutputs": true,
+          "supportsToolCalls": true
+        }
+      }
+    }
+  ],
+  "models": []
+}
+```
+
+`data[].id` is the stable public alias and must be sent as the `model` in inference requests. `cognipeer.canonical_model_id` is the provider-facing model identifier used for capability correlation; clients must not substitute it for the public alias. Consumers that only implement the OpenAI core schema can ignore all additional fields.
+
+Capability values come from the explicit Model Hub profile. Legacy model records without that profile continue to work through normalized fallback fields, so upgrading does not require a database migration.
+
 ## Where inference is observed
 
 Operators monitor live inference through **Operate → Model Monitoring**. The page summarises every connected inference server, splitting them by status: `active`, `disabled`, or `errored`. From here you also wire up new self-hosted endpoints (vLLM, TGI, llama.cpp, Ollama) that don't fit the cloud-provider model.
@@ -168,6 +222,7 @@ Models are configured in the dashboard with:
 | `category` | `llm` or `embedding` |
 | `providerKey` | Which provider config to use |
 | `modelId` | Provider-specific model name |
+| `capabilities` | Context/output limits, modalities, reasoning, structured output, and tool-call support |
 | `pricing` | Cost per 1M tokens (input/output) |
 | `overrides` | Default parameters (temperature, maxTokens, etc.) |
 

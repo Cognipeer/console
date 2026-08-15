@@ -31,7 +31,7 @@ import { notifications } from '@mantine/notifications';
 import { IconArrowLeft, IconBook, IconDeviceFloppy, IconRefresh } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
-import CatalogPriceFill from '@/components/models/CatalogPriceFill';
+import { PROVIDER_DEFINITIONS } from '@/lib/services/models/providerCatalog';
 import {
   detectUnsupportedParams,
   formatRequestDefaults,
@@ -41,7 +41,10 @@ import {
   UNSUPPORTED_PARAM_OPTIONS,
   validateRequestDefaults,
 } from '@/components/models/requestParams';
-import { PROVIDER_DEFINITIONS } from '@/lib/services/models/providerCatalog';
+import {
+  getDefaultModelInputModalities,
+  getDefaultModelOutputModalities,
+} from '@/lib/services/models/modelCapabilities';
 
 interface ModelProviderOption {
   key: string;
@@ -79,6 +82,12 @@ interface ModelDetailDto {
   modelId: string;
   isMultimodal?: boolean;
   supportsToolCalls?: boolean;
+  capabilities?: {
+    contextWindow?: number;
+    maxOutputTokens?: number;
+    supportsReasoning?: boolean;
+    supportsStructuredOutputs?: boolean;
+  };
   pricing: ModelPricing;
   settings: Record<string, unknown>;
   semanticCache?: SemanticCacheConfig;
@@ -98,8 +107,8 @@ function slugify(value: string) {
   return value
     .toLowerCase()
     .trim()
-    .replace(/[^a-z0-9.]+/g, '-')
-    .replace(/^[-.]+|[-.]+$/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
     .slice(0, 64);
 }
 
@@ -118,6 +127,10 @@ interface FormValues {
   settings: Record<string, unknown>;
   isMultimodal: boolean;
   supportsToolCalls: boolean;
+  contextWindow: number | '';
+  maxOutputTokens: number | '';
+  supportsReasoning: boolean;
+  supportsStructuredOutputs: boolean;
   semanticCacheEnabled: boolean;
   semanticCacheVectorProviderKey: string;
   semanticCacheVectorIndexKey: string;
@@ -177,6 +190,10 @@ export default function EditModelPage() {
       settings: {},
       isMultimodal: false,
       supportsToolCalls: false,
+      contextWindow: '',
+      maxOutputTokens: '',
+      supportsReasoning: false,
+      supportsStructuredOutputs: false,
       semanticCacheEnabled: false,
       semanticCacheVectorProviderKey: '',
       semanticCacheVectorIndexKey: '',
@@ -262,11 +279,7 @@ export default function EditModelPage() {
       const nextModel: ModelDetailDto = modelData.model;
       setModel(nextModel);
 
-      // Round-tripped verbatim. Stringifying every value here (and PUTting the
-      // result back) turned `temperature: 0.7` into `"0.7"` — silently ignored
-      // by the contract layer's `typeof === 'number'` check — and turned the
-      // `dynamic` router config into a string, which took the model offline.
-      const settings: Record<string, unknown> = { ...(nextModel.settings || {}) };
+      const settings = { ...nextModel.settings };
       setRequestDefaultsText(formatRequestDefaults(settings.requestDefaults));
 
       const cache = nextModel.semanticCache;
@@ -286,6 +299,12 @@ export default function EditModelPage() {
         settings,
         isMultimodal: Boolean(nextModel.isMultimodal),
         supportsToolCalls: Boolean(nextModel.supportsToolCalls),
+        contextWindow: nextModel.capabilities?.contextWindow ?? '',
+        maxOutputTokens: nextModel.capabilities?.maxOutputTokens ?? '',
+        supportsReasoning: Boolean(nextModel.capabilities?.supportsReasoning),
+        supportsStructuredOutputs: Boolean(
+          nextModel.capabilities?.supportsStructuredOutputs,
+        ),
         semanticCacheEnabled: Boolean(cache?.enabled),
         semanticCacheVectorProviderKey: cache?.vectorProviderKey || '',
         semanticCacheVectorIndexKey: cache?.vectorIndexKey || '',
@@ -383,15 +402,27 @@ export default function EditModelPage() {
     }
 
     // The JSON editor lives outside the Mantine form, so it has to be checked
-    // here. Without this, a typo fell through to `parseRequestDefaults`
-    // returning undefined, which the payload below turns into `null` — i.e. a
-    // delete — and the save reported success while wiping the stored defaults.
+    // here. Without this, a typo fell through to `parseRequestDefaults` returning
+    // undefined, which the payload below turns into `null` — i.e. a delete — and
+    // the save reported success while wiping the stored defaults.
     const requestDefaultsError = validateRequestDefaults(requestDefaultsText);
     if (requestDefaultsError) {
       notifications.show({
         color: 'red',
         message: `Extra request body: ${requestDefaultsError}`,
         title: 'Cannot save',
+      });
+      return;
+    }
+    if (
+      values.contextWindow !== ''
+      && values.maxOutputTokens !== ''
+      && values.maxOutputTokens > values.contextWindow
+    ) {
+      notifications.show({
+        title: t('notifications.errorTitle'),
+        message: tWizard('validation.maxOutputTokens'),
+        color: 'red',
       });
       return;
     }
@@ -424,6 +455,22 @@ export default function EditModelPage() {
           },
           isMultimodal: values.isMultimodal,
           supportsToolCalls: values.supportsToolCalls,
+          capabilities: {
+            ...(values.contextWindow !== ''
+              ? { contextWindow: values.contextWindow }
+              : {}),
+            ...(values.maxOutputTokens !== ''
+              ? { maxOutputTokens: values.maxOutputTokens }
+              : {}),
+            inputModalities: getDefaultModelInputModalities(
+              model.category,
+              values.isMultimodal,
+            ),
+            outputModalities: getDefaultModelOutputModalities(model.category),
+            supportsReasoning: values.supportsReasoning,
+            supportsStructuredOutputs: values.supportsStructuredOutputs,
+            supportsToolCalls: values.supportsToolCalls,
+          },
           semanticCache: {
             enabled: values.semanticCacheEnabled,
             vectorProviderKey: values.semanticCacheVectorProviderKey,
@@ -592,16 +639,6 @@ export default function EditModelPage() {
             </Grid>
 
             <Paper withBorder radius="md" p="md">
-              <Group justify="flex-end" mb={4}>
-                <CatalogPriceFill
-                  modelId={form.values.modelId}
-                  onApply={(pricing) => {
-                    form.setFieldValue('pricing.inputTokenPer1M', pricing.inputTokenPer1M);
-                    form.setFieldValue('pricing.outputTokenPer1M', pricing.outputTokenPer1M);
-                    form.setFieldValue('pricing.cachedTokenPer1M', pricing.cachedTokenPer1M);
-                  }}
-                />
-              </Group>
               <Grid>
                 <Grid.Col span={{ base: 12, md: 4 }}>
                   <NumberInput
@@ -633,7 +670,40 @@ export default function EditModelPage() {
               </Grid>
             </Paper>
 
-            <Group>
+            <Grid>
+              <Grid.Col span={{ base: 12, md: 4 }}>
+                <NumberInput
+                  label={tWizard('fields.contextWindow.label')}
+                  description={tWizard('fields.contextWindow.description')}
+                  min={1}
+                  step={1024}
+                  thousandSeparator=","
+                  {...form.getInputProps('contextWindow')}
+                />
+              </Grid.Col>
+              <Grid.Col span={{ base: 12, md: 4 }}>
+                <NumberInput
+                  label={tWizard('fields.maxOutputTokens.label')}
+                  description={tWizard('fields.maxOutputTokens.description')}
+                  min={1}
+                  step={1024}
+                  thousandSeparator=","
+                  {...form.getInputProps('maxOutputTokens')}
+                />
+              </Grid.Col>
+              <Grid.Col span={{ base: 12, md: 4 }}>
+                <NumberInput
+                  label={tWizard('fields.runtimeMaxTokens.label')}
+                  description={tWizard('fields.runtimeMaxTokens.description')}
+                  min={1}
+                  step={1024}
+                  thousandSeparator=","
+                  {...form.getInputProps('settings.maxTokens')}
+                />
+              </Grid.Col>
+            </Grid>
+
+            <Group align="flex-start">
               <Checkbox
                 label={tWizard('fields.isMultimodal.label')}
                 description={tWizard('fields.isMultimodal.description')}
@@ -643,6 +713,16 @@ export default function EditModelPage() {
                 label={tWizard('fields.supportsToolCalls.label')}
                 description={tWizard('fields.supportsToolCalls.description')}
                 {...form.getInputProps('supportsToolCalls', { type: 'checkbox' })}
+              />
+              <Checkbox
+                label={tWizard('fields.supportsReasoning.label')}
+                description={tWizard('fields.supportsReasoning.description')}
+                {...form.getInputProps('supportsReasoning', { type: 'checkbox' })}
+              />
+              <Checkbox
+                label={tWizard('fields.supportsStructuredOutputs.label')}
+                description={tWizard('fields.supportsStructuredOutputs.description')}
+                {...form.getInputProps('supportsStructuredOutputs', { type: 'checkbox' })}
               />
             </Group>
 
@@ -693,6 +773,7 @@ export default function EditModelPage() {
                     value={toStringArray(form.values.settings.unsupportedParams)}
                     onChange={(value) => form.setFieldValue('settings.unsupportedParams', value)}
                   />
+
                   <JsonInput
                     label="Extra request body (JSON)"
                     description="Merged into every request to this model — for parameters outside the OpenAI schema, such as vLLM's chat_template_kwargs or top_k. A caller's value wins over these."
@@ -705,6 +786,7 @@ export default function EditModelPage() {
                     onChange={(value) => setRequestDefaultsText(value)}
                     error={validateRequestDefaults(requestDefaultsText)}
                   />
+
                   <Checkbox
                     label="Forward unrecognised caller parameters"
                     description="Off by default. When on, body fields the gateway does not know are passed to the provider as-is."

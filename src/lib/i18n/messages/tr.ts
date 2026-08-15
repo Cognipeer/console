@@ -10,6 +10,63 @@ import { en } from './en';
 
 export const tr: typeof en = {
   ...en,
+  modelWizard: {
+    ...en.modelWizard,
+    fields: {
+      ...en.modelWizard.fields,
+      supportsToolCalls: {
+        label: 'Araç çağrılarını destekler',
+        description:
+          'Kullanılabilir olduğunda OpenAI uyumlu API’lerde fonksiyon ve araç çağrısını sunar.',
+      },
+      supportsReasoning: {
+        label: 'Akıl yürütmeyi destekler',
+        description:
+          'Akıl yürütme kontrollerini kabul eder ve istemcilere akıl yürütme meta verisi sunar.',
+      },
+      supportsStructuredOutputs: {
+        label: 'Yapılandırılmış çıktıları destekler',
+        description: 'Model yanıtlarını istenen JSON şemasıyla sınırlar.',
+      },
+      contextWindow: {
+        label: 'Bağlam penceresi',
+        description: 'Uyumlu istemcilere bildirilen maksimum birleşik token bütçesi.',
+        placeholder: 'ör. 128000',
+      },
+      maxOutputTokens: {
+        label: 'Maksimum çıktı token sayısı',
+        description:
+          'Üretilebilecek maksimum token sayısı; bağlam penceresini aşmamalıdır.',
+        placeholder: 'ör. 16384',
+      },
+      runtimeMaxTokens: {
+        label: 'Varsayılan maksimum token',
+        description: 'İstekte belirtilmediğinde kullanılan çalışma zamanı çıktı sınırı.',
+      },
+    },
+    review: {
+      ...en.modelWizard.review,
+      capabilityTags: {
+        tools: 'araçlar',
+        vision: 'görüntü',
+        reasoning: 'akıl yürütme',
+        structuredOutput: 'yapılandırılmış çıktı',
+      },
+    },
+    validation: {
+      ...en.modelWizard.validation,
+      maxOutputTokens: 'Maksimum çıktı token sayısı bağlam penceresini aşamaz.',
+    },
+  },
+  account: {
+    ...en.account,
+    support: 'Yardım ve Destek',
+  },
+  notifications: {
+    ...en.notifications,
+    supportErrorTitle: 'Destek açılamadı',
+    supportErrorMessage: 'Destek şu anda açılamadı. Lütfen kısa süre sonra tekrar deneyin.',
+  },
   navigation: {
     ...en.navigation,
     evaluations: 'Değerlendirme',

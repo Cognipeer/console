@@ -74,6 +74,103 @@ describe('toLangChainMessages', () => {
     ]);
     expect(msgs[0].constructor.name).toBe('HumanMessage');
   });
+
+  it('wraps string image URLs in the OpenAI-compatible object shape', () => {
+    const imageUrl = 'data:image/png;base64,iVBORw0KGgo=';
+    const msgs = toLangChainMessages([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Describe this image' },
+          { type: 'image_url', image_url: imageUrl },
+        ] as never,
+      },
+    ]);
+
+    expect(msgs[0].content).toEqual([
+      { type: 'text', text: 'Describe this image' },
+      { type: 'image_url', image_url: { url: imageUrl } },
+    ]);
+  });
+
+  it('preserves the detail option on object image URLs', () => {
+    const imageUrl = 'https://example.com/image.png';
+    const msgs = toLangChainMessages([
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'image_url',
+            image_url: { url: imageUrl, detail: 'high' },
+          },
+        ] as never,
+      },
+    ]);
+
+    expect(msgs[0].content).toEqual([
+      {
+        type: 'image_url',
+        image_url: { url: imageUrl, detail: 'high' },
+      },
+    ]);
+  });
+
+  it('normalizes multiple HTTP and data URL images without changing their order', () => {
+    const firstUrl = 'https://cdn.example.com/first.png';
+    const secondUrl = 'data:image/jpeg;base64,/9j/4AAQSkZJRg==';
+    const msgs = toLangChainMessages([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Compare these images' },
+          { type: 'image_url', image_url: firstUrl },
+          { type: 'image_url', image_url: { url: secondUrl, detail: 'low' } },
+        ] as never,
+      },
+    ]);
+
+    expect(msgs[0].content).toEqual([
+      { type: 'text', text: 'Compare these images' },
+      { type: 'image_url', image_url: { url: firstUrl } },
+      { type: 'image_url', image_url: { url: secondUrl, detail: 'low' } },
+    ]);
+  });
+
+  it('rejects malformed image URLs before calling a provider', () => {
+    expect(() => toLangChainMessages([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Describe this image' },
+          { type: 'image_url', image_url: { detail: 'high' } },
+        ] as never,
+      },
+    ])).toThrow('`messages[0].content[1].image_url` must be');
+  });
+
+  it.each([
+    '',
+    '   ',
+    { url: '' },
+    { url: '   ' },
+  ])('rejects an empty image URL: %j', (imageUrl) => {
+    expect(() => toLangChainMessages([{
+      role: 'user',
+      content: [{ type: 'image_url', image_url: imageUrl }] as never,
+    }])).toThrow('`messages[0].content[0].image_url` must be');
+  });
+
+  it('preserves unknown content parts for forward compatibility', () => {
+    const inputAudio = {
+      type: 'input_audio',
+      input_audio: { data: 'UklGRg==', format: 'wav' },
+    };
+    const msgs = toLangChainMessages([
+      { role: 'user', content: [inputAudio] as never },
+    ]);
+
+    expect(msgs[0].content).toEqual([inputAudio]);
+  });
 });
 
 // ── toOpenAIChatResponse ──────────────────────────────────────────────────────
@@ -118,6 +215,40 @@ describe('toOpenAIChatResponse', () => {
     expect(result.usage.prompt_tokens).toBe(10);
     expect(result.usage.completion_tokens).toBe(5);
     expect(result.usage.total_tokens).toBe(15);
+  });
+
+  it('preserves GPT-5 reasoning usage from LangChain metadata', () => {
+    const msg = new AIMessage({
+      content: '',
+      response_metadata: {
+        usage: {
+          prompt_tokens: 932,
+          completion_tokens: 512,
+          total_tokens: 1444,
+          prompt_tokens_details: { cached_tokens: 0 },
+          completion_tokens_details: { reasoning_tokens: 512 },
+        },
+        finish_reason: 'length',
+      },
+      usage_metadata: {
+        input_tokens: 932,
+        output_tokens: 512,
+        total_tokens: 1444,
+        input_token_details: { cache_read: 0 },
+        output_token_details: { reasoning: 512 },
+      },
+    });
+
+    const result = toOpenAIChatResponse(msg, baseOptions);
+
+    expect(result.usage).toMatchObject({
+      prompt_tokens: 932,
+      completion_tokens: 512,
+      total_tokens: 1444,
+      prompt_tokens_details: { cached_tokens: 0 },
+      completion_tokens_details: { reasoning_tokens: 512 },
+    });
+    expect(result.choices[0].finish_reason).toBe('length');
   });
 
   it('sets usage counts to 0 when no token metadata', () => {
@@ -193,6 +324,130 @@ describe('toOpenAIStreamChunk', () => {
     expect(result.usage).toBeUndefined();
   });
 
+  it('uses stable completion metadata supplied by the stream owner', () => {
+    const options = {
+      model: 'gpt-5',
+      stream: true,
+      completionId: 'chatcmpl_stable',
+      created: 1234567890,
+    };
+
+    const first = toOpenAIStreamChunk(
+      new AIMessageChunk({ content: 'one' }),
+      options,
+    );
+    const second = toOpenAIStreamChunk(
+      new AIMessageChunk({ content: 'two' }),
+      options,
+    );
+
+    expect(first.id).toBe('chatcmpl_stable');
+    expect(second.id).toBe(first.id);
+    expect(first.created).toBe(1234567890);
+    expect(second.created).toBe(first.created);
+  });
+
+  it('preserves incremental tool call arguments and index', () => {
+    const first = toOpenAIStreamChunk(
+      new AIMessageChunk({
+        content: '',
+        tool_call_chunks: [{
+          id: 'call_weather',
+          name: 'get_weather',
+          args: '{"city":',
+          index: 0,
+          type: 'tool_call_chunk',
+        }],
+      }),
+      { model: 'gpt-5' },
+    );
+    const second = toOpenAIStreamChunk(
+      new AIMessageChunk({
+        content: '',
+        tool_call_chunks: [{
+          args: '"Ankara"}',
+          index: 0,
+          type: 'tool_call_chunk',
+        }],
+      }),
+      { model: 'gpt-5' },
+    );
+
+    expect(first.choices[0].delta.tool_calls).toEqual([{
+      index: 0,
+      id: 'call_weather',
+      type: 'function',
+      function: {
+        name: 'get_weather',
+        arguments: '{"city":',
+      },
+    }]);
+    expect(second.choices[0].delta.tool_calls).toEqual([{
+      index: 0,
+      function: { arguments: '"Ankara"}' },
+    }]);
+  });
+
+  it('prefers raw OpenAI tool deltas over parsed tool calls', () => {
+    const chunk = new AIMessageChunk({
+      content: '',
+      additional_kwargs: {
+        tool_calls: [{
+          index: 0,
+          id: 'call_weather',
+          type: 'function',
+          function: {
+            name: 'get_weather',
+            arguments: '{"city":"Ankara"}',
+          },
+        }],
+      },
+      tool_calls: [{
+        id: 'call_weather',
+        name: 'get_weather',
+        args: {},
+        type: 'tool_call',
+      }],
+    });
+
+    const result = toOpenAIStreamChunk(chunk, { model: 'gpt-5' });
+
+    expect(result.choices[0].delta.tool_calls).toEqual([{
+      index: 0,
+      id: 'call_weather',
+      type: 'function',
+      function: {
+        name: 'get_weather',
+        arguments: '{"city":"Ankara"}',
+      },
+    }]);
+  });
+
+  it('includes reasoning token details in the final usage chunk', () => {
+    const chunk = new AIMessageChunk({
+      content: '',
+      response_metadata: {
+        usage: {
+          prompt_tokens: 932,
+          completion_tokens: 512,
+          total_tokens: 1444,
+          completion_tokens_details: { reasoning_tokens: 512 },
+        },
+        finish_reason: 'length',
+      },
+    });
+
+    const result = toOpenAIStreamChunk(chunk, { model: 'gpt-5' });
+
+    expect(result.usage).toMatchObject({
+      prompt_tokens: 932,
+      completion_tokens: 512,
+      total_tokens: 1444,
+      completion_tokens_details: { reasoning_tokens: 512 },
+    });
+    expect(result.choices[0].finish_reason).toBe('length');
+  });
+
   it('surfaces reasoning_content from additional_kwargs in the delta', () => {
     const chunk = new AIMessageChunk({
       content: '',
@@ -254,6 +509,28 @@ describe('summarizeUsage', () => {
     const msg = makeAIMessage('x', { promptTokens: 7, completionTokens: 3 });
     const usage = summarizeUsage(msg);
     expect(usage.totalTokens).toBe(10);
+  });
+
+  it('reads normalized LangChain usage_metadata', () => {
+    const msg = new AIMessage({
+      content: '',
+      usage_metadata: {
+        input_tokens: 932,
+        output_tokens: 512,
+        total_tokens: 1444,
+        input_token_details: { cache_read: 12 },
+        output_token_details: { reasoning: 512 },
+      },
+    });
+
+    expect(summarizeUsage(msg)).toMatchObject({
+      inputTokens: 932,
+      outputTokens: 512,
+      cachedInputTokens: 12,
+      totalTokens: 1444,
+      promptTokensDetails: { cache_read: 12, cached_tokens: 12 },
+      completionTokensDetails: { reasoning: 512, reasoning_tokens: 512 },
+    });
   });
 });
 

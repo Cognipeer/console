@@ -28,9 +28,17 @@ vi.mock('@/lib/services/models/inferenceService', () => {
       this.findings = findings;
     }
   }
+  class OutputTokenLimitError extends Error {
+    limit?: number;
+    constructor(limit?: number) {
+      super(`The model reached its output token limit (${limit} tokens).`);
+      this.limit = limit;
+    }
+  }
   return {
     handleChatCompletion: vi.fn(),
     GuardrailBlockError,
+    OutputTokenLimitError,
   };
 });
 
@@ -55,7 +63,7 @@ import { handleChatCompletion } from '@/lib/services/models/inferenceService';
 import * as inferenceServiceMod from '@/lib/services/models/inferenceService';
 // GuardrailBlockError is not in the real module types but IS in the mock
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const { GuardrailBlockError } = inferenceServiceMod as any;
+const { GuardrailBlockError, OutputTokenLimitError } = inferenceServiceMod as any;
 import { checkPerRequestLimits, checkRateLimit, checkBudget } from '@/lib/quota/quotaGuard';
 import { getModelByKey } from '@/lib/services/models/modelService';
 
@@ -135,7 +143,6 @@ describe('POST /api/client/v1/chat/completions', () => {
 
   it('returns 400 when model is not a string', async () => {
     const res = await POST(makeReq({ model: 42, messages: [] }));
-    const json = await res.json();
 
     expect(res.status).toBe(400);
   });
@@ -256,6 +263,23 @@ describe('POST /api/client/v1/chat/completions', () => {
     expect(json.error.guardrail_key).toBe('pii-guard');
     expect(json.error.action).toBe('block');
     expect(json.error.findings).toHaveLength(1);
+  });
+
+  it('returns 422 with an actionable output token limit error', async () => {
+    (handleChatCompletion as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new OutputTokenLimitError(512),
+    );
+
+    const res = await POST(makeReq(VALID_BODY));
+    const json = await res.json();
+
+    expect(res.status).toBe(422);
+    expect(json.error).toMatchObject({
+      type: 'output_token_limit_exceeded',
+      code: 'output_token_limit_exceeded',
+      param: 'max_completion_tokens',
+    });
+    expect(json.error.message).toContain('512 tokens');
   });
 
   it('returns 500 on inference service error', async () => {

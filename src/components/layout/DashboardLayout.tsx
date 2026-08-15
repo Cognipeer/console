@@ -27,7 +27,8 @@ import ServiceSubNav, {
 } from './launcher/ServiceSubNav';
 import { useLauncherState } from './launcher/useLauncherState';
 import { LauncherProvider } from './launcher/LauncherContext';
-import { useTranslations } from '@/lib/i18n';
+import { openSupport } from '@/lib/support/openSupport';
+import { useLocale, useTranslations } from '@/lib/i18n';
 import classes from './launcher/LauncherShell.module.css';
 import { DocsDrawerProvider } from '@/components/docs/DocsDrawerContext';
 import { DEFAULT_SDK_DOC, resolveSdkDoc, type SdkDocId } from '@/lib/docs/sdkDocs';
@@ -49,6 +50,7 @@ const SETTINGS_NAV_ORDER: string[] = [
 
 interface DashboardLayoutProps {
   children: ReactNode;
+  supportEnabled?: boolean;
   user?: {
     name: string;
     email: string;
@@ -58,7 +60,7 @@ interface DashboardLayoutProps {
   };
 }
 
-export default function DashboardLayout({ children, user }: DashboardLayoutProps) {
+export default function DashboardLayout({ children, supportEnabled = false, user }: DashboardLayoutProps) {
   const router = useRouter();
   const pathname = usePathname() ?? '';
   const [docsOpened, docsControls] = useDisclosure(false);
@@ -66,6 +68,7 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
   const [launcherOpen, setLauncherOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const t = useTranslations('layout');
+  const locale = useLocale();
   const tNotifications = useTranslations('notifications');
   const tNavigation = useTranslations('navigation');
 
@@ -96,6 +99,17 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
       });
     }
   }, [router, tNotifications]);
+
+  const handleSupportClick = useCallback(async () => {
+    const opened = await openSupport(locale === 'tr' ? 'tr' : 'en');
+    if (!opened) {
+      notifications.show({
+        title: tNotifications('supportErrorTitle'),
+        message: tNotifications('supportErrorMessage'),
+        color: 'red',
+      });
+    }
+  }, [locale, tNotifications]);
 
   const defaultUser = user || {
     name: t('defaultUser.name'),
@@ -294,9 +308,11 @@ export default function DashboardLayout({ children, user }: DashboardLayoutProps
             <TopbarV2
               user={defaultUser}
               isTenantAdmin={isTenantAdmin}
+              supportEnabled={supportEnabled}
               onSearchClick={openCommandPalette}
               onLauncherClick={() => setLauncherOpen(true)}
               onDocsClick={() => openDocs(DEFAULT_SDK_DOC)}
+              onSupportClick={handleSupportClick}
               onLogout={handleLogout}
               onNavigate={handleNavigate}
               onMobileNavClick={() => setMobileNavOpen(true)}

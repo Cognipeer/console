@@ -56,17 +56,7 @@ interface OpenAIToolCall {
   };
 }
 
-export interface ChatTransformOptions {
-  model: string;
-  stream?: boolean;
-  /** Completion-scoped id, shared by every frame of one streamed response. */
-  id?: string;
-  /** Completion-scoped unix timestamp, likewise shared across frames. */
-  created?: number;
-}
-
-/** OpenAI streaming tool-call deltas are indexed and carry partial argument text. */
-interface OpenAIToolCallDelta {
+interface OpenAIStreamToolCall {
   index: number;
   id?: string;
   type?: 'function';
@@ -76,15 +66,23 @@ interface OpenAIToolCallDelta {
   };
 }
 
+export interface ChatTransformOptions {
+  model: string;
+  stream?: boolean;
+  completionId?: string;
+  created?: number;
+}
+
 function normalizeContent(
   content: OpenAIMessage['content'],
+  messageIndex: number,
 ): string | MessageContentPart[] {
   if (typeof content === 'string') {
     return content;
   }
 
   if (Array.isArray(content)) {
-    return content.map((item) => {
+    return content.map((item, partIndex) => {
       const record = item as Record<string, unknown>;
       const type = typeof record.type === 'string' ? record.type : undefined;
 
@@ -97,10 +95,10 @@ function normalizeContent(
 
       if (type === 'image_url') {
         const rawImage = record.image_url;
-        if (typeof rawImage === 'string') {
+        if (typeof rawImage === 'string' && rawImage.trim()) {
           return {
             type: 'image_url',
-            image_url: rawImage,
+            image_url: { url: rawImage },
           } as MessageContentPart;
         }
 
@@ -111,16 +109,27 @@ function normalizeContent(
         ) {
           const url =
             typeof (rawImage as Record<string, unknown>).url === 'string'
+              && (rawImage as Record<string, string>).url.trim()
               ? (rawImage as Record<string, unknown>).url
               : undefined;
+          const detail = (rawImage as Record<string, unknown>).detail;
 
           if (url) {
             return {
               type: 'image_url',
-              image_url: url,
+              image_url: {
+                url,
+                ...(detail === 'auto' || detail === 'low' || detail === 'high'
+                  ? { detail }
+                  : {}),
+              },
             } as MessageContentPart;
           }
         }
+
+        throw new Error(
+          `\`messages[${messageIndex}].content[${partIndex}].image_url\` must be a non-empty string or an object with a non-empty \`url\` string`,
+        );
       }
 
       return record;
@@ -131,8 +140,8 @@ function normalizeContent(
 }
 
 export function toLangChainMessages(messages: OpenAIMessage[]): BaseMessage[] {
-  return messages.map((message) => {
-    const content = normalizeContent(message.content);
+  return messages.map((message, messageIndex) => {
+    const content = normalizeContent(message.content, messageIndex);
 
     switch (message.role) {
       case 'system':
@@ -178,38 +187,22 @@ export function toLangChainMessages(messages: OpenAIMessage[]): BaseMessage[] {
   });
 }
 
-function firstString(...candidates: unknown[]): string | undefined {
-  for (const candidate of candidates) {
-    if (typeof candidate === 'string' && candidate.length > 0) return candidate;
-  }
-  return undefined;
-}
-
-function asUsageRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
 function extractUsage(message: AIMessage | AIMessageChunk): UsageMetrics {
   const metadata = message.response_metadata || {};
-
-  // Every place a provider may report usage, most-specific first. The streaming
-  // path only ever populates the first two: LangChain puts the terminal frame's
-  // totals on the message's own `usage_metadata` and the raw provider numbers
-  // under `response_metadata.usage`. Reading only the non-streaming keys meant
-  // every streamed request was logged with zero tokens — and, because budget and
-  // rate-limit updates are gated on usage being present, never billed.
-  const sources = [
-    asUsageRecord((message as { usage_metadata?: unknown }).usage_metadata),
-    asUsageRecord(metadata.usage),
-    asUsageRecord(metadata.tokenUsage),
-    asUsageRecord(metadata.token_usage),
-    asUsageRecord(metadata.usage_metadata),
-  ].filter((entry): entry is Record<string, unknown> => Boolean(entry));
+  const messageUsage = (message as { usage_metadata?: unknown }).usage_metadata;
+  const usageSources = [
+    metadata.tokenUsage,
+    metadata.token_usage,
+    metadata.usage,
+    metadata.usage_metadata,
+    messageUsage,
+  ].filter(
+    (source): source is Record<string, unknown> =>
+      typeof source === 'object' && source !== null && !Array.isArray(source),
+  );
 
   const coalesceNumber = (keys: string[]): number | undefined => {
-    for (const usage of sources) {
+    for (const usage of usageSources) {
       for (const key of keys) {
         const value = usage[key];
         if (typeof value === 'number') {
@@ -223,7 +216,7 @@ function extractUsage(message: AIMessage | AIMessageChunk): UsageMetrics {
   const coalesceDetails = (
     keys: string[],
   ): Record<string, number> | undefined => {
-    for (const usage of sources) {
+    for (const usage of usageSources) {
       for (const key of keys) {
         const value = usage[key];
         if (value && typeof value === 'object' && !Array.isArray(value)) {
@@ -254,41 +247,17 @@ function extractUsage(message: AIMessage | AIMessageChunk): UsageMetrics {
     'outputTokens',
     'output_tokens',
   ]);
-  const coalesceNested = (
-    containerKeys: string[],
-    innerKeys: string[],
-  ): number | undefined => {
-    for (const usage of sources) {
-      for (const containerKey of containerKeys) {
-        const container = asUsageRecord(usage[containerKey]);
-        if (!container) continue;
-        for (const innerKey of innerKeys) {
-          const value = container[innerKey];
-          if (typeof value === 'number') {
-            return value;
-          }
-        }
-      }
-    }
-    return undefined;
-  };
-
   const cachedInputTokens = coalesceNumber([
     'cachedTokens',
     'cached_tokens',
     'cachedInputTokens',
     'cached_input_tokens',
     'cache_read_input_tokens',
-  ]) ?? coalesceNested(
-    ['input_token_details', 'prompt_tokens_details', 'promptTokensDetails'],
-    ['cache_read', 'cached_tokens', 'cacheRead'],
-  );
+  ]);
   const totalTokens =
     coalesceNumber(['totalTokens', 'total_tokens']) ??
-    // Cached tokens are already counted inside the prompt total, so they must
-    // not be added again here.
     (typeof inputTokens === 'number' && typeof outputTokens === 'number'
-      ? inputTokens + outputTokens
+      ? inputTokens + outputTokens + (cachedInputTokens || 0)
       : undefined);
 
   const promptTokensDetails = coalesceDetails([
@@ -296,6 +265,7 @@ function extractUsage(message: AIMessage | AIMessageChunk): UsageMetrics {
     'prompt_tokens_details',
     'promptTokensDetail',
     'prompt_tokens_detail',
+    'input_token_details',
   ]);
 
   const completionTokensDetails = coalesceDetails([
@@ -303,15 +273,35 @@ function extractUsage(message: AIMessage | AIMessageChunk): UsageMetrics {
     'completion_tokens_details',
     'completionTokensDetail',
     'completion_tokens_detail',
+    'output_token_details',
   ]);
+
+  const normalizedPromptTokensDetails = promptTokensDetails
+    ? {
+        ...promptTokensDetails,
+        ...(promptTokensDetails.cache_read !== undefined
+          ? { cached_tokens: promptTokensDetails.cache_read }
+          : {}),
+      }
+    : undefined;
+  const normalizedCompletionTokensDetails = completionTokensDetails
+    ? {
+        ...completionTokensDetails,
+        ...(completionTokensDetails.reasoning !== undefined
+          ? { reasoning_tokens: completionTokensDetails.reasoning }
+          : {}),
+      }
+    : undefined;
+
+  const nestedCachedTokens = normalizedPromptTokensDetails?.cached_tokens;
 
   return {
     inputTokens,
     outputTokens,
-    cachedInputTokens,
+    cachedInputTokens: cachedInputTokens ?? nestedCachedTokens,
     totalTokens,
-    promptTokensDetails,
-    completionTokensDetails,
+    promptTokensDetails: normalizedPromptTokensDetails,
+    completionTokensDetails: normalizedCompletionTokensDetails,
   };
 }
 
@@ -416,9 +406,9 @@ export function toOpenAIChatResponse(
   }
 
   return {
-    id: options.id ?? newCompletionId(),
+    id: newCompletionId(),
     object: 'chat.completion',
-    created: options.created ?? timestamp,
+    created: timestamp,
     model: options.model,
     usage: usagePayload,
     system_fingerprint: systemFingerprint,
@@ -439,17 +429,11 @@ export function toOpenAIChatResponse(
  * otherwise put an array on the wire, and any client accumulating with
  * `content += delta.content` breaks mid-message.
  */
-function flattenDeltaContent(content: unknown): {
-  text?: string;
-  reasoning?: string;
-} {
+function flattenDeltaContent(content: unknown): { text?: string; reasoning?: string } {
   if (typeof content === 'string') {
     return content.length > 0 ? { text: content } : {};
   }
-
-  if (!Array.isArray(content)) {
-    return {};
-  }
+  if (!Array.isArray(content)) return {};
 
   const textParts: string[] = [];
   const reasoningParts: string[] = [];
@@ -478,10 +462,8 @@ function flattenDeltaContent(content: unknown): {
       continue;
     }
 
-    const text = typeof record.text === 'string' ? record.text : undefined;
-    if (text !== undefined) {
-      textParts.push(text);
-    }
+    const value = typeof record.text === 'string' ? record.text : undefined;
+    if (value !== undefined) textParts.push(value);
   }
 
   return {
@@ -490,51 +472,16 @@ function flattenDeltaContent(content: unknown): {
   };
 }
 
-/**
- * Streaming tool calls arrive as `tool_call_chunks`, one fragment of argument
- * text at a time, correlated by `index`. Reading the collapsed `tool_calls`
- * instead only ever yielded the first fragment — and, since LangChain drops a
- * chunk whose partial arguments do not parse, that first frame carried
- * `arguments: "{}"`. Clients saw every tool called with no parameters.
- */
-function toStreamToolCallDeltas(
-  chunk: AIMessageChunk,
-): OpenAIToolCallDelta[] | undefined {
-  const rawChunks = (chunk as { tool_call_chunks?: unknown }).tool_call_chunks;
-
-  if (Array.isArray(rawChunks) && rawChunks.length > 0) {
-    return rawChunks.map((entry, position) => {
-      const call = (entry || {}) as Record<string, unknown>;
-      const index = typeof call.index === 'number' ? call.index : position;
-      const name = typeof call.name === 'string' && call.name ? call.name : undefined;
-      const id = typeof call.id === 'string' && call.id ? call.id : undefined;
-      // Raw partial text — never re-serialize, it is a fragment of a JSON document.
-      const args = typeof call.args === 'string' ? call.args : '';
-
-      return {
-        index,
-        ...(id ? { id, type: 'function' as const } : {}),
-        function: {
-          ...(name ? { name } : {}),
-          arguments: args,
-        },
-      };
-    });
+function firstString(...candidates: unknown[]): string | undefined {
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.length > 0) return candidate;
   }
-
-  // Providers that emit whole tool calls per chunk rather than argument deltas.
-  const normalized = normalizeToolCalls((chunk as { tool_calls?: unknown }).tool_calls);
-  return normalized?.map((call, index) => ({
-    index,
-    id: call.id,
-    type: 'function' as const,
-    function: { name: call.function.name, arguments: call.function.arguments },
-  }));
+  return undefined;
 }
 
 function streamChunkEnvelope(options: ChatTransformOptions) {
   return {
-    id: options.id ?? newCompletionId(),
+    id: options.completionId || newCompletionId(),
     object: 'chat.completion.chunk' as const,
     created: options.created ?? Math.floor(Date.now() / 1000),
     model: options.model,
@@ -593,13 +540,27 @@ export function toOpenAIStreamChunk(
     delta.reasoning = reasoning;
   }
 
-  const toolCallDeltas = toStreamToolCallDeltas(chunk);
-  if (toolCallDeltas?.length) {
-    delta.tool_calls = toolCallDeltas;
+  const chunkWithTools = chunk as AIMessageChunk & {
+    tool_calls?: unknown;
+    tool_call_chunks?: unknown;
+  };
+  const additional =
+    chunk.additional_kwargs && typeof chunk.additional_kwargs === 'object'
+      ? chunk.additional_kwargs as Record<string, unknown>
+      : {};
+  const normalizedToolCalls =
+    normalizeRawStreamToolCalls(additional.tool_calls)
+    ?? normalizeToolCallChunks(chunkWithTools.tool_call_chunks)
+    ?? normalizeToolCalls(chunkWithTools.tool_calls);
+  if (normalizedToolCalls) {
+    delta.tool_calls = normalizedToolCalls;
   }
 
   return {
-    ...streamChunkEnvelope(options),
+    id: options.completionId || newCompletionId(),
+    object: 'chat.completion.chunk',
+    created: options.created ?? Math.floor(Date.now() / 1000),
+    model: options.model,
     choices: [
       {
         index: 0,
@@ -607,54 +568,21 @@ export function toOpenAIStreamChunk(
         finish_reason: chunk.response_metadata?.finish_reason || null,
       },
     ],
-    usage: usage.totalTokens
+    usage: usage.totalTokens !== undefined
       ? {
           prompt_tokens: usage.inputTokens ?? 0,
           completion_tokens: usage.outputTokens ?? 0,
           cached_tokens: usage.cachedInputTokens ?? 0,
           total_tokens: usage.totalTokens,
+          ...(usage.promptTokensDetails
+            ? { prompt_tokens_details: usage.promptTokensDetails }
+            : {}),
+          ...(usage.completionTokensDetails
+            ? { completion_tokens_details: usage.completionTokensDetails }
+            : {}),
         }
       : undefined,
   };
-}
-
-/**
- * Maps a provider/transport failure onto the OpenAI error envelope. Upstream
- * 4xx responses used to arrive at the client as an opaque 500 `server_error`,
- * so a permanent 400 was indistinguishable from a bug and clients retried it.
- */
-export function toOpenAIErrorType(error: unknown): string {
-  const status = errorStatus(error);
-  if (status === 401 || status === 403) return 'authentication_error';
-  if (status === 404) return 'not_found_error';
-  if (status === 429) return 'rate_limit_error';
-  if (status !== undefined && status >= 400 && status < 500) {
-    return 'invalid_request_error';
-  }
-  return 'server_error';
-}
-
-export function toOpenAIErrorCode(error: unknown): string | undefined {
-  const record = error as { code?: unknown; error?: { code?: unknown } } | null;
-  const code = record?.code ?? record?.error?.code;
-  return typeof code === 'string' ? code : undefined;
-}
-
-export function toOpenAIErrorParam(error: unknown): string | undefined {
-  const record = error as { param?: unknown; error?: { param?: unknown } } | null;
-  const param = record?.param ?? record?.error?.param;
-  return typeof param === 'string' ? param : undefined;
-}
-
-/** HTTP status from an OpenAI-SDK-shaped error, when there is one. */
-export function errorStatus(error: unknown): number | undefined {
-  const record = error as { status?: unknown; statusCode?: unknown } | null;
-  const status = record?.status ?? record?.statusCode;
-  return typeof status === 'number' ? status : undefined;
-}
-
-function newCompletionId(): string {
-  return `chatcmpl-${crypto.randomUUID().replace(/-/g, '')}`;
 }
 
 export function buildErrorResponse(message: string, status = 400) {
@@ -727,6 +655,85 @@ function normalizeToolCalls(
       function: {
         name: nameCandidate,
         arguments: argsString,
+      },
+    };
+  });
+}
+
+/**
+ * OpenAI's own completion ids are `chatcmpl-` + an opaque token. We emitted
+ * `chatcmpl_` with a dashed UUID, which trips clients that pattern-match the id.
+ */
+function newCompletionId(): string {
+  return `chatcmpl-${crypto.randomUUID().replace(/-/g, '')}`;
+}
+
+function normalizeToolCallChunks(
+  rawToolCallChunks: unknown,
+): OpenAIStreamToolCall[] | undefined {
+  if (!Array.isArray(rawToolCallChunks) || rawToolCallChunks.length === 0) {
+    return undefined;
+  }
+
+  return rawToolCallChunks.map((entry, position) => {
+    const chunk = entry && typeof entry === 'object'
+      ? entry as Record<string, unknown>
+      : {};
+    const id = typeof chunk.id === 'string' && chunk.id.length > 0
+      ? chunk.id
+      : undefined;
+    const name = typeof chunk.name === 'string' && chunk.name.length > 0
+      ? chunk.name
+      : undefined;
+    const index = typeof chunk.index === 'number' ? chunk.index : position;
+    const argumentsChunk = typeof chunk.args === 'string'
+      ? chunk.args
+      : serializeArguments(chunk.args);
+
+    return {
+      index,
+      ...(id ? { id, type: 'function' as const } : {}),
+      function: {
+        ...(name ? { name } : {}),
+        arguments: argumentsChunk,
+      },
+    };
+  });
+}
+
+function normalizeRawStreamToolCalls(
+  rawToolCalls: unknown,
+): OpenAIStreamToolCall[] | undefined {
+  if (!Array.isArray(rawToolCalls) || rawToolCalls.length === 0) {
+    return undefined;
+  }
+
+  return rawToolCalls.map((entry, position) => {
+    const call = entry && typeof entry === 'object'
+      ? entry as Record<string, unknown>
+      : {};
+    const fn = call.function && typeof call.function === 'object'
+      ? call.function as Record<string, unknown>
+      : {};
+    const id = typeof call.id === 'string' && call.id.length > 0
+      ? call.id
+      : undefined;
+    const name = typeof fn.name === 'string' && fn.name.length > 0
+      ? fn.name
+      : undefined;
+    const index = typeof call.index === 'number' ? call.index : position;
+    const argumentsChunk = typeof fn.arguments === 'string'
+      ? fn.arguments
+      : fn.arguments === undefined
+        ? ''
+        : serializeArguments(fn.arguments);
+
+    return {
+      index,
+      ...(id ? { id, type: 'function' as const } : {}),
+      function: {
+        ...(name ? { name } : {}),
+        arguments: argumentsChunk,
       },
     };
   });

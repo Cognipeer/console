@@ -9,6 +9,7 @@ import {
   handleChatCompletion,
   handleEmbeddingRequest,
 } from '@/lib/services/models/inferenceService';
+import { normalizeInferenceError } from '@/lib/services/models/openaiErrors';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import {
   calculateCost,
@@ -24,12 +25,6 @@ import {
   readJsonBody,
   withOpenAiApiRequestContext,
 } from '../fastify-utils';
-import {
-  errorStatus,
-  toOpenAIErrorCode,
-  toOpenAIErrorParam,
-  toOpenAIErrorType,
-} from '@/lib/services/models/openaiAdapter';
 
 const logger = createLogger('api:client-inference');
 
@@ -57,43 +52,6 @@ function quotaExceededPayload(message = 'Quota exceeded') {
   return { error: { message, type: 'rate_limit_error' } };
 }
 
-/**
- * Forwards an upstream failure with its real status and OpenAI error fields.
- * Collapsing everything into a 500 `server_error` made a permanent 400 — a model
- * rejecting `temperature`, say — look like a transient server fault, so clients
- * retried it forever and no backoff could work on a 429.
- */
-function sendInferenceError(
-  reply: FastifyReply,
-  error: unknown,
-  fallbackMessage: string,
-) {
-  const status = errorStatus(error);
-  const isUpstreamClientError = status !== undefined && status >= 400 && status < 500;
-  const code = toOpenAIErrorCode(error);
-  const param = toOpenAIErrorParam(error);
-
-  if (isUpstreamClientError) {
-    // Keeps a provider's 401/403 out of the security audit trail's `denied`
-    // bucket — our own auth already passed to get here.
-    reply.request.upstreamStatusForwarded = true;
-  }
-
-  if (status === 429) {
-    const retryAfter = (error as { headers?: Record<string, string> } | null)
-      ?.headers?.['retry-after'];
-    reply.header('Retry-After', retryAfter || '1');
-  }
-
-  return reply.code(isUpstreamClientError ? status : 500).send({
-    error: {
-      message: error instanceof Error ? error.message : fallbackMessage,
-      type: toOpenAIErrorType(error),
-      ...(code ? { code } : {}),
-      ...(param ? { param } : {}),
-    },
-  });
-}
 
 function estimateTokens(text: string): number {
   if (!text) {
@@ -335,12 +293,14 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
+      const normalizedError = normalizeInferenceError(error);
+
       try {
         const model = modelKey
           ? await getModelByKey(auth.tenantDbName, modelKey, auth.projectId)
           : null;
         if (model) {
-          const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+          const errorMessage = normalizedError.error.message;
           await logModelUsage(auth.tenantDbName, model, {
             errorMessage,
             latencyMs: Date.now() - startedAt,
@@ -358,7 +318,13 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
         logger.error('Failed to log client chat completion error', { error: logError });
       }
 
-      return sendInferenceError(reply, error, 'Inference error');
+      if (normalizedError.status >= 400 && normalizedError.status < 500) {
+        // Keeps a provider's 401/403 out of the security audit trail's `denied`
+        // bucket — our own auth already passed to get here.
+        request.upstreamStatusForwarded = true;
+      }
+
+      return reply.code(normalizedError.status).send({ error: normalizedError.error });
     }
   }));
 
@@ -487,13 +453,14 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
       });
     } catch (error) {
       logger.error('Client embeddings error', { error });
+      const normalizedError = normalizeInferenceError(error);
 
       try {
         const model = modelKey
           ? await getModelByKey(auth.tenantDbName, modelKey, auth.projectId)
           : null;
         if (model) {
-          const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+          const errorMessage = normalizedError.error.message;
           await logModelUsage(auth.tenantDbName, model, {
             errorMessage,
             latencyMs: Date.now() - startedAt,
@@ -511,7 +478,13 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
         logger.error('Failed to log client embedding error', { error: logError });
       }
 
-      return sendInferenceError(reply, error, 'Inference error');
+      if (normalizedError.status >= 400 && normalizedError.status < 500) {
+        // Keeps a provider's 401/403 out of the security audit trail's `denied`
+        // bucket — our own auth already passed to get here.
+        request.upstreamStatusForwarded = true;
+      }
+
+      return reply.code(normalizedError.status).send({ error: normalizedError.error });
     }
   }));
 };

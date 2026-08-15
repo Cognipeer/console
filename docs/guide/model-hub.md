@@ -45,7 +45,7 @@ Fields, top to bottom:
    - **Key** (optional) — the value clients pass in the `model` field of API requests. If you leave it blank, the system derives one from the display name.
    - **Model ID** (required) — the provider-side identifier (e.g. `gpt-4o-mini`, `claude-sonnet-4-6`). This is what the runtime forwards upstream after auth and quota checks.
    - **Category** — `LLM` or `Embedding`. Picking Embedding hides chat-only fields below.
-3. **Capabilities** — toggles such as `Supports tool calls` and `Multimodal (vision)`. These default to the provider's declared capabilities but can be overridden per model when you need to deliberately disable a feature for a tenant.
+3. **Capabilities** — context window, maximum output tokens, input/output modalities, reasoning, structured output, and tool-call support. These values form the model's explicit capability profile and are published by the OpenAI-compatible discovery endpoint; clients do not need to infer features from the alias name.
 4. **Pricing & limits** — pricing is captured per 1M tokens with separate input/output/cached buckets. Spend reports in the overview and in tracing both read from these numbers, so keep them in sync with the upstream contract.
 
 The right column gives a **pre-flight checklist** that flips from grey to green as each requirement is met. The **Create model** button only enables when all checks pass.
@@ -92,6 +92,15 @@ Common edits:
 - **Guardrails** — bind input and/or output guardrail keys defined in the [Guardrails](/guide/guardrails) module.
 
 Changes apply on save. There is no separate publish step.
+
+### Public alias and canonical model ID
+
+Keep these identities separate:
+
+- **Key** is the stable public alias returned as `data[].id` by `GET /api/client/v1/models`. Renaming it is an API contract change for clients.
+- **Model ID** is the canonical provider-facing identifier. Console sends it upstream and publishes it as `cognipeer.canonical_model_id` for metadata correlation.
+
+Multiple public aliases may intentionally point to the same provider model with different settings, pricing, guardrails, or routing behavior. Discovery therefore never replaces the public key with the provider model ID.
 
 ## How requests resolve
 

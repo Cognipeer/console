@@ -42,6 +42,12 @@ import {
   listModels,
   updateModel,
 } from '@/lib/services/models/modelService';
+import { toOpenAiModelListResponse } from '@/lib/services/models/openaiDiscovery';
+import {
+  ModelCapabilityValidationError,
+  parseModelCapabilityOverrides,
+  resolveModelCapabilities,
+} from '@/lib/services/models/modelCapabilities';
 import { createLogger } from '@/lib/core/logger';
 import { normalizeModelSettings } from '@/lib/services/models/modelSettings';
 import { readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
@@ -67,25 +73,8 @@ function sanitizeSettings(settings: Record<string, unknown>) {
 function sanitizeModel(model: IModel) {
   return {
     ...model,
+    capabilities: resolveModelCapabilities(model),
     settings: sanitizeSettings(model.settings || {}),
-  };
-}
-
-/**
- * The OpenAI `GET /models` shape. OpenAI-compatible clients — Open WebUI among
- * them — read `data` and treat anything else as an empty catalogue, so a client
- * pointed at this gateway saw no models at all and reported the connection dead.
- * Emitted alongside the existing `models` key rather than replacing it, so the
- * Console SDK keeps working.
- */
-function toOpenAiModelEntry(model: IModel) {
-  return {
-    id: model.key,
-    object: 'model' as const,
-    created: Math.floor(
-      (model.createdAt ? new Date(model.createdAt).getTime() : Date.now()) / 1000,
-    ),
-    owned_by: model.providerKey || 'cognipeer',
   };
 }
 
@@ -227,9 +216,10 @@ export const clientModelsApiPlugin: FastifyPluginAsync = async (app) => {
         providerKey: query.providerKey,
       });
 
+      const openAiDiscovery = toOpenAiModelListResponse(models);
       const payload: Record<string, unknown> = {
-        object: 'list',
-        data: models.map(toOpenAiModelEntry),
+        object: openAiDiscovery.object,
+        data: openAiDiscovery.data,
         models: models.map(sanitizeModel),
       };
 
@@ -259,6 +249,7 @@ export const clientModelsApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const model = await createModel(auth.tenantDbName, auth.tenantId, projectId, String(auth.tokenRecord.userId), {
+        capabilities: parseModelCapabilityOverrides(body.capabilities) ?? undefined,
         category: body.category as ModelCategory,
         description: body.description as string | undefined,
         isMultimodal: body.isMultimodal as boolean | undefined,
@@ -275,6 +266,9 @@ export const clientModelsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(201).send({ model: sanitizeModel(model) });
     } catch (error) {
       logger.error('Client create model error', { error });
+      if (error instanceof ModelCapabilityValidationError) {
+        return reply.code(400).send({ error: error.message });
+      }
       return sendApiTokenError(reply, error)
         ?? reply.code(500).send({ error: error instanceof Error ? error.message : 'Internal server error' });
     }
@@ -313,6 +307,9 @@ export const clientModelsApiPlugin: FastifyPluginAsync = async (app) => {
       const body = readJsonBody<Partial<UpdateModelInput> & Record<string, unknown>>(request);
       const updates: Partial<UpdateModelInput> = {};
 
+      if (body.capabilities !== undefined) {
+        updates.capabilities = parseModelCapabilityOverrides(body.capabilities);
+      }
       if (body.name !== undefined) updates.name = body.name;
       if (body.description !== undefined) updates.description = body.description;
       if (body.key !== undefined) updates.key = body.key;
@@ -349,6 +346,9 @@ export const clientModelsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ model: sanitizeModel(updated) });
     } catch (error) {
       logger.error('Client update model error', { error });
+      if (error instanceof ModelCapabilityValidationError) {
+        return reply.code(400).send({ error: error.message });
+      }
       return sendApiTokenError(reply, error)
         ?? reply.code(500).send({ error: error instanceof Error ? error.message : 'Internal server error' });
     }

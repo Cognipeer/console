@@ -6,6 +6,7 @@ export type ModelRuntimeCategory = ModelCategory;
 
 export interface ModelRuntimeOptions {
   streaming?: boolean;
+  disableStreaming?: boolean;
   /**
    * Retries the provider SDK may perform on its own. The gateway sets 0 because
    * `withResilience` already owns retry and circuit-breaking there; callers that

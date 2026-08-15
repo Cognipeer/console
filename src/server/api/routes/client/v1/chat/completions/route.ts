@@ -2,7 +2,11 @@ import { NextResponse, type NextRequest } from '@/server/api/http';
 import crypto from 'crypto';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
-import { handleChatCompletion, GuardrailBlockError } from '@/lib/services/models/inferenceService';
+import {
+  GuardrailBlockError,
+  handleChatCompletion,
+} from '@/lib/services/models/inferenceService';
+import { normalizeInferenceError } from '@/lib/services/models/openaiErrors';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { calculateCost, logModelUsage } from '@/lib/services/models/usageLogger';
 import { checkBudget, checkPerRequestLimits, checkRateLimit } from '@/lib/quota/quotaGuard';
@@ -250,10 +254,12 @@ const _POST = async (request: NextRequest) => {
       );
     }
 
+    const normalizedError = normalizeInferenceError(error);
+
     try {
       const model = await getModelByKey(auth.tenantDbName, modelKey, auth.projectId);
       if (model) {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        const errorMessage = normalizedError.error.message;
         await logModelUsage(auth.tenantDbName, model, {
           requestId: typeof body?.request_id === 'string' ? body.request_id : crypto.randomUUID(),
           route: 'chat.completions',
@@ -269,8 +275,10 @@ const _POST = async (request: NextRequest) => {
       logger.error('Failed to log chat completion error', { error: logError });
     }
 
-    const errorMessage = error instanceof Error ? error.message : 'Inference error';
-    return NextResponse.json({ error: { message: errorMessage, type: 'server_error' } }, { status: 500 });
+    return NextResponse.json(
+      { error: normalizedError.error },
+      { status: normalizedError.status },
+    );
   }
 };
 

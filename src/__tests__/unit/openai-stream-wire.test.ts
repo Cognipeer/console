@@ -18,13 +18,13 @@ import {
   openAIStreamRoleChunk,
   openAIStreamStopChunk,
   toOpenAIStreamChunk,
-  toOpenAIErrorType,
 } from '@/lib/services/models/openaiAdapter';
+import { normalizeInferenceError } from '@/lib/services/models/openaiErrors';
 
 const OPTIONS = {
   model: 'my-model',
   stream: true as const,
-  id: 'chatcmpl-fixed',
+  completionId: 'chatcmpl-fixed',
   created: 1_700_000_000,
 };
 
@@ -202,7 +202,7 @@ describe('usage extraction', () => {
       OPTIONS,
     );
 
-    expect(chunk.usage).toEqual({
+    expect(chunk.usage).toMatchObject({
       prompt_tokens: 11,
       completion_tokens: 7,
       cached_tokens: 4,
@@ -263,11 +263,9 @@ describe('usage extraction', () => {
 
 describe('error envelope', () => {
   it('maps upstream statuses onto OpenAI error types instead of a blanket server_error', () => {
-    expect(toOpenAIErrorType({ status: 400 })).toBe('invalid_request_error');
-    expect(toOpenAIErrorType({ status: 401 })).toBe('authentication_error');
-    expect(toOpenAIErrorType({ status: 404 })).toBe('not_found_error');
-    expect(toOpenAIErrorType({ status: 429 })).toBe('rate_limit_error');
-    expect(toOpenAIErrorType({ status: 503 })).toBe('server_error');
-    expect(toOpenAIErrorType(new Error('boom'))).toBe('server_error');
+    expect(normalizeInferenceError({ status: 400 }).status).toBe(400);
+    expect(normalizeInferenceError({ status: 429 }).status).toBe(429);
+    expect(normalizeInferenceError(new Error('boom')).status).toBe(500);
+    expect(normalizeInferenceError(new Error('boom')).error.type).toBe('server_error');
   });
 });

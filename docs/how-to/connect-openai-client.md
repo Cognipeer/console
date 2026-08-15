@@ -310,10 +310,11 @@ not match your build, look for the equivalent section:
 - **A token is bound to one project.** It was fixed at creation time from the
   active project and cannot be repointed. A client that needs a second project
   needs a second token.
-- **Upstream 4xx responses keep their real status**, with `Retry-After` set on
-  429s. A provider rejecting a parameter reaches your client as a 400, not a
-  masked 500, so a permanent failure stops looking like a transient one. Retry
-  on 429 (honouring `Retry-After`) and on 5xx; do not retry the other 4xx codes.
+- **Upstream 4xx responses keep their real status.** A provider rejecting a
+  parameter reaches your client as a 400, not a masked 500, so a permanent
+  failure stops looking like a transient one. Retry on 429 and on 5xx; do not
+  retry the other 4xx codes. Console does not currently set a `Retry-After`
+  header on 429s, so use your client's own backoff rather than waiting for one.
 - **A blocked guardrail returns HTTP 400** with a non-standard body:
   `{"error":{"type":"guardrail_block","message":…,"action":…,"findings":[…],"guardrail_key":…}}`.
   Generic OpenAI clients will surface it as an opaque bad request. See
