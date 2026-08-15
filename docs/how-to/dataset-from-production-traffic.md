@@ -211,6 +211,17 @@ when it is non-zero; the other three skip rows are always shown.
 | `tools` | **never** — see below | The recorded tool menu for that turn, or one inferred from the calls observed |
 | `tags` | `snapshot`, `gateway`, `model:<key>` | `snapshot`, `tracing`, `agent:<name>` |
 
+Items also pick up a `lang:<iso>` tag, derived from the human turns in the conversation. Items whose
+language cannot be classified are left untagged rather than guessed.
+
+::: tip Why the language tag matters
+A quality verdict averaged over mixed-language traffic hides the thing you most need to see. Plenty of
+models are documented on English benchmarks and degrade elsewhere, so a candidate can pass overall while
+failing badly on a quarter of your traffic. Tagging at snapshot time means a later evaluation, parity
+test or model matrix can be read **per language** — which turns "this model is fine" into "this model is
+fine in English and not in Turkish".
+:::
+
 Every string is scrubbed by the persisted-log redactor first and anonymised second, then capped at 16,000
 characters with a trailing ` …[truncated]`. Both non-streamed and streamed gateway responses are read, so
 streaming traffic — which is most traffic — still yields a reference answer.

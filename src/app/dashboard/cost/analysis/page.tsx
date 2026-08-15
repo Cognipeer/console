@@ -72,6 +72,26 @@ interface Insights {
     distinctTools: number;
     available: boolean;
   };
+  /** Argument-schema complexity of the tool menu — what decides whether a
+   *  smaller model can actually drive this agent. */
+  toolComplexity?: {
+    toolsAnalyzed: number;
+    avgParams: number;
+    maxParams: number;
+    maxDepth: number;
+    advancedSchemaTools: number;
+    avgRequiredParams: number;
+    score: number;
+    band: 'simple' | 'moderate' | 'complex';
+  };
+  /** Language mix of the sampled traffic. */
+  language?: {
+    primary: string;
+    primaryShare: number;
+    nonEnglishShare: number;
+    classified: number;
+    samples: number;
+  };
   promptProfile: {
     found: boolean;
     sourceSessionId?: string;
@@ -211,6 +231,32 @@ function InsightTiles({ insights, modelScoped }: { insights: Insights; modelScop
             insights.toolMenu.available
               ? `max ${insights.toolMenu.maxMenuSize} · ${insights.toolMenu.distinctTools} distinct · ${insights.toolMenu.coveragePct}% of AI calls`
               : 'upgrade agent-sdk to 0.9.2+ to record per-turn menus'
+          }
+        />
+        <StatTile
+          label="Tool schema complexity"
+          value={
+            insights.toolComplexity && insights.toolComplexity.toolsAnalyzed > 0
+              ? insights.toolComplexity.band
+              : 'not traced'
+          }
+          delta={
+            insights.toolComplexity && insights.toolComplexity.toolsAnalyzed > 0
+              ? `${insights.toolComplexity.toolsAnalyzed} schemas · depth ${insights.toolComplexity.maxDepth} · ${insights.toolComplexity.avgParams} params avg · ${insights.toolComplexity.advancedSchemaTools} advanced`
+              : 'no readable argument schemas in the sample'
+          }
+        />
+        <StatTile
+          label="Traffic language"
+          value={
+            insights.language && insights.language.classified > 0
+              ? insights.language.primary
+              : 'undetermined'
+          }
+          delta={
+            insights.language && insights.language.classified > 0
+              ? `${Math.round(insights.language.primaryShare * 100)}% of ${insights.language.classified} classified samples · ${Math.round(insights.language.nonEnglishShare * 100)}% non-English`
+              : 'samples too short or ambiguous to classify'
           }
         />
         <StatTile

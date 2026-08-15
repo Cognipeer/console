@@ -1637,3 +1637,40 @@ export interface IPiiPolicy {
   createdAt?: Date;
   updatedAt?: Date;
 }
+
+// ── Prescriptions (automated analysis reports) types ─────────────────────
+
+export type PrescriptionReportStatus = 'pending' | 'running' | 'ready' | 'failed';
+export type PrescriptionSubjectKind = 'agent' | 'model' | 'workspace';
+
+/**
+ * One automated analysis report: a battery of deterministic detectors ran
+ * over a subject's observed traffic window and produced findings, each with
+ * evidence and a prescribed action. `findings` and `totals` are stored as
+ * opaque JSON — their shapes are owned by the prescriptions service
+ * (src/lib/services/prescriptions/types.ts) and evolve with the detector
+ * battery; the DB layer never reads inside them.
+ */
+export interface IPrescriptionReport {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId: string;
+  subjectKind: PrescriptionSubjectKind;
+  /** Agent or model name; null for workspace-wide reports. */
+  subjectName?: string | null;
+  windowDays: number;
+  from?: Date | null;
+  to?: Date | null;
+  status: PrescriptionReportStatus;
+  error?: string | null;
+  /** PrescriptionTotals JSON (header tiles snapshot). */
+  totals?: Record<string, unknown> | null;
+  /** PrescriptionFinding[] JSON. */
+  findings: unknown[];
+  /** Optional LLM-written narrative over the findings (never a data source). */
+  narrative?: { text: string; modelKey: string; generatedAt: Date } | null;
+  createdBy?: string | null;
+  createdAt?: Date;
+  updatedAt?: Date;
+  finishedAt?: Date | null;
+}

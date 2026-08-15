@@ -122,18 +122,28 @@ The demo tenant used for these screenshots shows:
 
 | Insight | Value | What it means |
 |---|---|---|
-| **AI calls / session** | 2.4 | Every extra call re-sends the whole context |
-| **Tool calls / session** | 1.4 | More than one means loops — check the waste card |
-| **Input tokens / AI call** | 370 | Context replayed on every turn |
-| **Tool menu / call** | 1 tool, 100% of calls | The menu is paid on every call |
+| **Tool menu / call** | 1 tool, 100% of AI calls | The menu is re-sent on every call |
+| **Tool schema complexity** | `simple` — 1 schema, depth 1 | Fat, deeply nested tool schemas cost tokens on every call |
+| **Traffic language** | `tr` — 60% of classified samples, 60% non-English | Which language your users actually write in |
+| **AI calls / session** | 1.5 | Every extra call re-sends the whole context |
+| **Tool calls / session** | 0.5 | More than one means loops — check the waste card |
+| **Input tokens / AI call** | 363 | Context replayed on every turn |
 | **System prompt** | ~333 tokens | Multiply by AI calls per session |
 
 Read it as a hit list, in this order:
 
 1. **Tool menu × AI calls per session** is usually the single largest line item. It is also the easiest
-   to cut, because most agents carry tools they never call.
+   to cut, because most agents carry tools they never call. **Tool schema complexity** tells you whether
+   the menu is expensive because it is long or because each entry is bloated.
 2. **Repeated tool calls** is free money — see below.
 3. **System prompt** is a fixed cost paid on every single call.
+
+::: tip Traffic language is a model-choice input, not trivia
+If most of your traffic is not English, a candidate model documented on English benchmarks is a risk you
+can measure rather than assume. The signal abstains rather than guessing — samples shorter than about
+eight words come back **undetermined**, and unclassifiable samples are excluded from the shares instead
+of being counted as English. A tenant serving Turkish support sees `tr`, not a confident `en`.
+:::
 
 ### System prompt checks
 
@@ -158,10 +168,49 @@ of the prompt.** That one edit is often the largest single saving available, and
 Identical calls — same tool, same arguments, same session. Every repeat pays the tool's latency *and*
 another model turn to process a result the agent already had.
 
-In the demo sample the badge reads **10 wasted of 17 analysed** — one order was looked up three times in
-a single session. The table names the tool, the exact arguments, how many sessions are affected and the
+In the demo sample the badge reads **2 wasted of 6 analysed** — one order was looked up three times in a
+single session. The table names the tool, the exact arguments, how many sessions are affected and the
 worst case, which is usually enough to find the bug without opening a single trace. This is almost always
 a fault in how tool results are fed back into the loop, not a model problem.
+
+The card reads the most recent sessions only, so the ratio moves as traffic does. Treat it as a signal to
+act on, not a metric to track.
+
+## Act 3b — Or have the detectors read it for you
+
+Act 3 is the manual read. **Cost & Optimization → Prescriptions** runs the same kind of analysis
+automatically: a battery of deterministic detectors over the window's tracing and cost evidence, each
+one producing a finding with its evidence and a prescribed action.
+
+![Prescriptions](/screenshots/how-to/cost/01-prescriptions-list.png)
+
+Pick a subject — one agent, one model, or the whole workspace — and a window, then **Run analysis**.
+
+![A report with two critical findings](/screenshots/how-to/cost/02-prescription-detail.png)
+
+The report above is the demo agent from this guide, generated at a point in time — a report is a stored
+snapshot of its window, which is why its numbers do not move with later traffic the way the Analysis
+cards do. The detectors independently found the same two problems Act 3 found by hand:
+
+- **Dynamic content in the prompt prefix (cache killer)** — critical, cost
+- **Identical tool calls repeated inside sessions** — critical, performance, *"10 of 17 analysed tool
+  calls (58.82%) repeat an earlier call with identical arguments in the same session"*
+
+Each finding carries its evidence, a **Prescription:** line naming the fix, and a conservative monthly
+savings estimate. Findings track as **Applied** / **Dismiss** / **Reopen**, so a report doubles as a
+worklist.
+
+Two properties worth knowing:
+
+- **A savings figure is never guessed.** When a problem is real but cannot be priced — an unpriced
+  model, say — the estimate is left blank rather than invented. A dash there means "we will not put a
+  number on this", not "this is free".
+- **The narrative does not do the analysis.** The optional **Generate** button has a model write prose
+  *from* the findings; it adds no numbers of its own. Useful for sharing a report with people who will
+  not read detector output.
+
+Prescriptions is the faster path. Act 3 is still worth doing once, because it teaches you what the
+detectors are looking at.
 
 ## Act 4 — Turn real traffic into a dataset you are allowed to keep
 
@@ -283,6 +332,27 @@ transfers — run it on your own traffic and your own candidates.
 Note also that evaluation runs deliberately do **not** write usage or spend logs. Testing twenty models
 will not pollute your production cost reports; the per-run cost above is computed by the run itself.
 
+### Doing this at scale (Enterprise)
+
+Everything above is community. If you have an Enterprise licence, three surfaces automate this loop:
+
+| Surface | What it does |
+|---|---|
+| **Recommendations** | Reprices your observed traffic against candidate models and ranks the switches worth making. No model is called — it is a static what-if. |
+| **Parity tests** | Replays a candidate against a snapshot dataset and scores it, so the token and quality deltas are *measured* rather than assumed. Started from a row action on Recommendations. |
+| **Model matrix** | One dataset against many candidates in a single run, compared side by side on pass rate, judge score, tool fidelity and measured cost per item. |
+
+The relationship between the first two is the interesting part: a what-if assumes the candidate uses
+the same token volume as the incumbent, because a static calculation cannot know otherwise. Once a
+parity test has actually measured the ratio for that pair, the recommendation is repriced from the
+measurement instead of the assumption. **The estimate corrects itself as you test.**
+
+This is also why there is no "save tokens" objective to sort by: under a 1:1 assumption every candidate
+ties on tokens. Cost needs pricing, latency works from observed averages and needs none, and token
+savings cannot be estimated at all — only measured, which is what a parity test is for.
+
+See [Cost & Optimization](/guide/cost-optimization) for these screens in full.
+
 ## Act 7 — Cut the tokens
 
 Four levers, in descending order of payoff.
@@ -349,5 +419,8 @@ rate is a decision, and it needs a person to make it — which is exactly why yo
 - [Build a dataset from production traffic](/how-to/dataset-from-production-traffic) — the snapshot and
   import wizards in full
 - [Route requests with a Dynamic LLM](/how-to/route-with-dynamic-llm) — splitting cheap from expensive
+- [Cost & Optimization](/guide/cost-optimization) — every screen in this guide, in reference form,
+  including the Enterprise recommendation and parity surfaces
 - [Agent Tracing](/guide/tracing) — the trace data model
 - [Evaluation & Analysis](/guide/evaluation-and-analysis) — scorers, suites and runs in detail
+- [Cost & Prescriptions API](/api/cost) — driving all of this from a script

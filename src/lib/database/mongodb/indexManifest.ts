@@ -61,6 +61,12 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { service: 1, action: 1, createdAt: -1 }, options: { name: 'idx_service_action_createdAt' } },
     { key: { actorUserId: 1, createdAt: -1 }, options: { name: 'idx_actor_createdAt' } },
   ],
+  // Prescriptions (automated analysis reports): list is project + newest-first;
+  // eligibility looks up the latest ready report per subject.
+  prescription_reports: [
+    { key: { projectId: 1, createdAt: -1 }, options: { name: 'idx_project_createdAt' } },
+    { key: { projectId: 1, subjectKind: 1, subjectName: 1, createdAt: -1 }, options: { name: 'idx_subject_createdAt' } },
+  ],
   model_usage_logs: [
     { key: { modelKey: 1, createdAt: -1 }, options: { name: 'idx_modelKey_createdAt' } },
     { key: { projectId: 1, createdAt: -1 }, options: { name: 'idx_project_createdAt' } },

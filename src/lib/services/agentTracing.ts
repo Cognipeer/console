@@ -14,6 +14,12 @@ import { calculateCost } from '@/lib/services/models/usageLogger';
 import { resolveExternalPricingForDay } from '@/lib/services/cost/costService';
 import { toUtcDay } from '@/lib/services/usage/usageBreakdown';
 import { lintSystemPrompt, type PromptLintReport } from '@/lib/services/promptLint';
+import {
+  scoreToolSchemas,
+  detectLanguageMix,
+  type ToolSchemaComplexity,
+  type LanguageMix,
+} from '@/lib/services/workload/workloadSignals';
 import dayjs from 'dayjs';
 
 const logger = createLogger('agent-tracing');
@@ -283,6 +289,10 @@ const AGENT_DIRECTORY_SESSION_PROJECTION = {
 const INSIGHT_EVENT_SESSION_CAP = 12;
 /** Top-N error patterns surfaced on the agent overview. */
 const INSIGHT_ERROR_PATTERN_CAP = 6;
+/** Distinct tool definitions kept for schema-complexity scoring. */
+const INSIGHT_TOOL_SCHEMA_CAP = 80;
+/** User-message samples fed to language detection. */
+const INSIGHT_LANGUAGE_SAMPLE_CAP = 40;
 
 const SESSION_LIST_PROJECTION = {
   sessionId: 1,
@@ -1313,6 +1323,19 @@ export interface AgentInsights {
     /** No menus at all → the tracer predates tool_definitions (SDK < 0.9.2). */
     available: boolean;
   };
+  /**
+   * How hard the tool ARGUMENTS are, not just how many tools there are —
+   * schema complexity is what separates workloads a small model can drive
+   * from ones it will hallucinate arguments for. Zero `toolsAnalyzed` means
+   * no readable schema was traced (menu names only, or no tools at all).
+   */
+  toolComplexity: ToolSchemaComplexity;
+  /**
+   * Language mix of the traffic, from system + user message samples. Small
+   * open-weight models are documented on English benchmarks and degrade
+   * elsewhere, so this is a first-class model-selection input.
+   */
+  language: LanguageMix;
   /** System prompt profile + deterministic checks, from the freshest trace
    *  that carries a system message (longest wins — compaction shrinks some). */
   promptProfile: {
@@ -1405,6 +1428,11 @@ async function buildAgentInsights(
   const menuSizes: number[] = [];
   const menuTools = new Set<string>();
   let bestPrompt: { text: string; sessionId: string; at?: string } | null = null;
+  // One full definition per distinct tool name — schemas repeat on every
+  // turn, so keeping the first of each bounds the work and the memory.
+  const toolSchemas = new Map<string, unknown>();
+  // Message texts fed to language detection (system + user roles).
+  const languageSamples: string[] = [];
   // Repetition detection: identical (tool + canonical args) within a session.
   let callsAnalyzed = 0;
   let wastedCalls = 0;
@@ -1455,22 +1483,33 @@ async function buildAgentInsights(
           menuEvents += 1;
           menuSizes.push(section.tools.length);
           for (const tool of section.tools) {
-            const name = toRecord(tool)?.name;
-            if (typeof name === 'string' && name) menuTools.add(name);
+            const record = toRecord(tool);
+            const name = record?.name ?? toRecord(record?.function)?.name;
+            if (typeof name === 'string' && name) {
+              menuTools.add(name);
+              if (
+                !toolSchemas.has(name)
+                && toolSchemas.size < INSIGHT_TOOL_SCHEMA_CAP
+                && record
+              ) {
+                toolSchemas.set(name, record);
+              }
+            }
           }
         }
-        if (
-          section.kind === 'message'
-          && typeof section.role === 'string'
-          && section.role.toLowerCase() === 'system'
-          && typeof section.content === 'string'
-          && section.content.length > (bestPrompt?.text.length ?? 0)
-        ) {
+        if (section.kind !== 'message' || typeof section.content !== 'string') continue;
+        const role = typeof section.role === 'string' ? section.role.toLowerCase() : '';
+        if (role === 'system' && section.content.length > (bestPrompt?.text.length ?? 0)) {
           bestPrompt = {
             text: section.content,
             sessionId: session.sessionId,
             at: session.startedAt ? new Date(session.startedAt).toISOString() : undefined,
           };
+        }
+        // User turns are the truest language signal — a system prompt may be
+        // authored in English for traffic that is not.
+        if (role === 'user' && languageSamples.length < INSIGHT_LANGUAGE_SAMPLE_CAP) {
+          languageSamples.push(section.content);
         }
       }
     }
@@ -1532,6 +1571,12 @@ async function buildAgentInsights(
       distinctTools: menuTools.size,
       available: menuEvents > 0,
     },
+    toolComplexity: scoreToolSchemas([...toolSchemas.values()]),
+    // The system prompt counts as one sample so single-turn agents (no user
+    // messages in the sample) still produce a verdict.
+    language: detectLanguageMix(
+      bestPrompt ? [bestPrompt.text, ...languageSamples] : languageSamples,
+    ),
     promptProfile: bestPrompt
       ? {
           found: true,

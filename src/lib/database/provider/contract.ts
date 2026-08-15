@@ -15,6 +15,8 @@ import type {
   IAlertEvent,
   IAlertRule,
   IApiToken,
+  IPrescriptionReport,
+  PrescriptionSubjectKind,
   IBrowser,
   IBrowserSession,
   IBrowserSessionEvent,
@@ -1525,6 +1527,24 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   consumeBetaAccessCode(code: string, usedBy: { email: string }): Promise<boolean>;
   /** Revert a used code back to active (rollback when registration fails after the claim). */
   releaseBetaAccessCode(code: string): Promise<boolean>;
+
+  // ── Prescription reports (automated analysis; tenant-scoped) ──
+  createPrescriptionReport(
+    report: Omit<IPrescriptionReport, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IPrescriptionReport>;
+  updatePrescriptionReport(
+    id: string,
+    data: Partial<Omit<IPrescriptionReport, '_id' | 'tenantId' | 'projectId' | 'createdAt'>>,
+  ): Promise<IPrescriptionReport | null>;
+  findPrescriptionReportById(id: string): Promise<IPrescriptionReport | null>;
+  listPrescriptionReports(filters: {
+    projectId: string;
+    subjectKind?: PrescriptionSubjectKind;
+    subjectName?: string;
+    limit?: number;
+    skip?: number;
+  }): Promise<{ reports: IPrescriptionReport[]; total: number }>;
+  deletePrescriptionReport(id: string): Promise<boolean>;
 
   // ── GPU fleet + Agent Runtime Sandbox (tenant-scoped) ──
   // EDITION SPLIT: these enterprise methods were moved to the overlay. In the enterprise

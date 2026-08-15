@@ -220,6 +220,8 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/cost', service: 'cost' },
   // Market reference prices (LiteLLM feed) backing the Cost pricing surfaces.
   { prefix: '/api/model-price-catalog', service: 'cost' },
+  // Automated analysis reports (prescriptions engine) — a Cost surface.
+  { prefix: '/api/prescriptions', service: 'cost' },
   // Cost intelligence (EE module; enterprise-402 gated in addition to RBAC).
   { prefix: '/api/abacus', service: 'abacus' },
   { prefix: '/api/gpu-fleet', service: 'gpu-fleet' },
