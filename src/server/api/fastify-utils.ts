@@ -304,6 +304,23 @@ function sendRbacError(reply: FastifyReply, error: unknown) {
   return null;
 }
 
+/**
+ * Response headers every SSE endpoint needs. `X-Accel-Buffering: no` is the one
+ * that is easy to forget and expensive to miss: nginx (and most ingress
+ * controllers) default to `proxy_buffering on`, which holds the whole event
+ * stream until the response completes — the client sees nothing, then
+ * everything, which reads exactly like "streaming does not work".
+ */
+export function applyStreamHeaders(reply: FastifyReply, requestId?: string): void {
+  reply.raw.setHeader('Content-Type', 'text/event-stream');
+  reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
+  reply.raw.setHeader('Connection', 'keep-alive');
+  reply.raw.setHeader('X-Accel-Buffering', 'no');
+  if (requestId) {
+    reply.raw.setHeader('X-Request-Id', requestId);
+  }
+}
+
 export function parseBooleanQuery(value: string | undefined): boolean | undefined {
   if (value === undefined) {
     return undefined;

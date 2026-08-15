@@ -70,6 +70,32 @@ describe('calculateCost', () => {
     expect(result.cachedCost).toBeCloseTo(1.0);
   });
 
+  it('does not bill cached tokens twice — they are a subset of the prompt count', () => {
+    // OpenAI reports prompt_tokens=1M *including* cached_tokens=800k. Charging
+    // the whole prompt at the input rate and then adding the cached portion
+    // would price a cache hit above an uncached call.
+    const result = calculateCost(PRICING, {
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      cachedInputTokens: 800_000,
+    });
+
+    expect(result.inputCost).toBeCloseTo(1.0); // 200k uncached @ $5/1M
+    expect(result.cachedCost).toBeCloseTo(0.4); // 800k cached @ $0.5/1M
+    expect(result.totalCost).toBeCloseTo(1.4);
+    expect(result.totalCost).toBeLessThan(
+      calculateCost(PRICING, { inputTokens: 1_000_000, outputTokens: 0 }).totalCost,
+    );
+  });
+
+  it('never lets a malformed cached count push the input cost negative', () => {
+    const result = calculateCost(PRICING, {
+      inputTokens: 1000,
+      cachedInputTokens: 5000,
+    });
+    expect(result.inputCost).toBe(0);
+  });
+
   it('handles zero usage gracefully', () => {
     const result = calculateCost(PRICING, {
       inputTokens: 0,

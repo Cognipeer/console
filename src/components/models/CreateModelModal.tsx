@@ -1,5 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Button, NumberInput, Select, TextInput, Textarea } from '@mantine/core';
+import {
+  Badge,
+  Button,
+  Group,
+  JsonInput,
+  MultiSelect,
+  NumberInput,
+  Select,
+  Text,
+  TextInput,
+  Textarea,
+} from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { IconBolt, IconBrain } from '@tabler/icons-react';
@@ -19,6 +30,13 @@ import FormShell, {
   ToggleList,
   ToggleRow,
 } from '@/components/common/ui/FormShell';
+import {
+  detectUnsupportedParams,
+  parseRequestDefaults,
+  REQUEST_DEFAULTS_PLACEHOLDER,
+  UNSUPPORTED_PARAM_OPTIONS,
+  validateRequestDefaults,
+} from '@/components/models/requestParams';
 import type { ModelProviderView } from '@/lib/services/models/types';
 import type { IModel } from '@/lib/database';
 
@@ -86,6 +104,10 @@ interface FormValues {
   settings: {
     temperature: number | '';
     maxTokens: number | '';
+    unsupportedParams: string[];
+    autoDropUnsupportedParams: boolean;
+    requestDefaults: string;
+    allowUnknownPassthrough: boolean;
   };
   ocr: {
     mode: OcrMode;
@@ -166,6 +188,10 @@ export default function CreateModelModal({
       settings: {
         temperature: '',
         maxTokens: '',
+        unsupportedParams: [],
+        autoDropUnsupportedParams: true,
+        requestDefaults: '',
+        allowUnknownPassthrough: false,
       },
       ocr: {
         mode: 'vlm',
@@ -173,6 +199,9 @@ export default function CreateModelModal({
       },
     },
     validate: {
+      settings: {
+        requestDefaults: validateRequestDefaults,
+      },
       providerKey: (value) => (!value ? 'Select a provider' : null),
       name: (value) => (!value ? 'Name is required' : null),
       modelId: (value) => (!value ? 'Model ID is required' : null),
@@ -224,6 +253,15 @@ export default function CreateModelModal({
     () =>
       availableProviders.find((provider) => provider.key === formValues.providerKey),
     [availableProviders, formValues.providerKey],
+  );
+
+  // Same registry the gateway consults at call time, so the form shows exactly
+  // what will be dropped rather than a description of it.
+  const autoDropped = useMemo(
+    () => (formValues.settings.autoDropUnsupportedParams
+      ? detectUnsupportedParams(selectedProvider?.driver, formValues.modelId)
+      : { params: [] as string[], reason: undefined as string | undefined }),
+    [selectedProvider?.driver, formValues.modelId, formValues.settings.autoDropUnsupportedParams],
   );
 
   const allowedCategories = useMemo(
@@ -374,6 +412,19 @@ export default function CreateModelModal({
               : {}),
             ...(toNumber(values.settings.maxTokens) !== undefined
               ? { maxTokens: toNumber(values.settings.maxTokens) }
+              : {}),
+            ...(values.settings.unsupportedParams.length
+              ? { unsupportedParams: values.settings.unsupportedParams }
+              : {}),
+            // Only persisted when switched off — detection is the default.
+            ...(values.settings.autoDropUnsupportedParams === false
+              ? { autoDropUnsupportedParams: false }
+              : {}),
+            ...(parseRequestDefaults(values.settings.requestDefaults)
+              ? { requestDefaults: parseRequestDefaults(values.settings.requestDefaults) }
+              : {}),
+            ...(values.settings.allowUnknownPassthrough
+              ? { allowUnknownPassthrough: true }
               : {}),
             ...(values.category === 'ocr'
               ? {
@@ -852,6 +903,78 @@ export default function CreateModelModal({
             />
           </FormField>
         </FormRow>
+
+        <FormField
+          label="Detected automatically"
+          hint={
+            autoDropped.params.length
+              ? autoDropped.reason
+              : 'Nothing known against this provider and model id. Anything the provider still rejects goes in the list below.'
+          }
+        >
+          {autoDropped.params.length ? (
+            <Group gap={6}>
+              {autoDropped.params.map((param) => (
+                <Badge key={param} variant="light" color="gray" radius="sm">
+                  {param}
+                </Badge>
+              ))}
+            </Group>
+          ) : (
+            <Text size="sm" c="dimmed">None</Text>
+          )}
+        </FormField>
+
+        <ToggleList>
+          <ToggleRow
+            label="Drop detected parameters automatically"
+            description="On by default. Turn off if the provider has started accepting a parameter this list still flags."
+            checked={formValues.settings.autoDropUnsupportedParams}
+            onChange={(checked) =>
+              setFieldValue('settings.autoDropUnsupportedParams', checked)
+            }
+          />
+        </ToggleList>
+
+        <FormField
+          label="Also reject these"
+          optional
+          hint="Added on top of what was detected, for anything the registry does not know about this provider yet."
+        >
+          <MultiSelect
+            data={UNSUPPORTED_PARAM_OPTIONS}
+            searchable
+            clearable
+            placeholder="None"
+            {...form.getInputProps('settings.unsupportedParams')}
+          />
+        </FormField>
+
+        <FormField
+          label="Extra request body (JSON)"
+          optional
+          hint="Merged into every request to this model. For parameters outside the OpenAI schema — vLLM takes chat_template_kwargs, top_k, repetition_penalty. A caller's value wins over these."
+        >
+          <JsonInput
+            autosize
+            minRows={4}
+            formatOnBlur
+            validationError="Must be valid JSON"
+            placeholder={REQUEST_DEFAULTS_PLACEHOLDER}
+            {...form.getInputProps('settings.requestDefaults')}
+          />
+        </FormField>
+
+        <ToggleList>
+          <ToggleRow
+            label="Forward unrecognised caller parameters"
+            description="Off by default. When on, body fields the gateway does not know are passed to the provider as-is."
+            checked={formValues.settings.allowUnknownPassthrough}
+            onChange={(checked) =>
+              setFieldValue('settings.allowUnknownPassthrough', checked)
+            }
+          />
+        </ToggleList>
       </FormSection>
     </FormShell>
   );

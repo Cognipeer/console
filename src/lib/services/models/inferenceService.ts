@@ -16,10 +16,13 @@ import type {
   OcrExtractInput,
   OcrResult,
 } from '@/lib/providers';
+import { resolveUnsupportedParamNames } from '@/lib/providers/unsupportedParams';
 import { getModelByKey } from './modelService';
 import {
   toLangChainMessages,
   toOpenAIChatResponse,
+  openAIStreamRoleChunk,
+  openAIStreamStopChunk,
   toOpenAIStreamChunk,
   summarizeUsage,
 } from './openaiAdapter';
@@ -42,7 +45,12 @@ import {
 } from './dynamicRouting';
 import type { IDynamicRoutingConfig, IModelUsageRouting } from '@/lib/database';
 import { buildModelRuntime } from './runtimeService';
-import { isSemanticCacheEnabled, lookupCache, storeInCache } from './semanticCacheService';
+import {
+  buildCacheVariantKey,
+  isSemanticCacheEnabled,
+  lookupCache,
+  storeInCache,
+} from './semanticCacheService';
 import { evaluateGuardrail } from '@/lib/services/guardrail';
 
 const encoder = new TextEncoder();
@@ -134,10 +142,15 @@ async function enforceModelGuardrail(params: {
     source: params.source ?? 'chat.completions',
   });
   if (!result.passed && result.findings.some((f) => f.block)) {
+    // Prefer the finding's own message: a fail-closed guardrail whose judge model
+    // could not run already explains that, and reducing it to the bare category
+    // `evaluation_error` threw that explanation away — leaving a provider
+    // misconfiguration looking like a content violation.
     const reasons = result.findings
-      .map((f) => f.category || f.type)
+      .filter((f) => f.block)
+      .map((f) => f.message || f.category || f.type)
       .filter(Boolean)
-      .join(', ');
+      .join('; ');
     throw new GuardrailBlockError(
       `${params.phase === 'input' ? 'Input' : 'Output'} blocked by guardrail "${result.guardrailName}"${reasons ? `: ${reasons}` : ''}`,
       result.guardrailKey,
@@ -287,6 +300,49 @@ function sanitizeForLogging(payload: unknown, maxLength = 20000) {
   }
 }
 
+/**
+ * Body fields the gateway understands natively. Everything else is a candidate
+ * for passthrough (see `buildPassthroughBody`) rather than being dropped.
+ */
+const KNOWN_REQUEST_FIELDS = new Set([
+  // Unwrapped below rather than forwarded as-is; forwarding the literal key too
+  // makes OpenAI and Azure answer 400 "Unrecognized request argument".
+  'extra_body',
+  'frequency_penalty',
+  'max_completion_tokens',
+  'max_output_tokens',
+  'max_tokens',
+  'messages',
+  'modality',
+  'model',
+  'presence_penalty',
+  'reasoning',
+  'reasoning_effort',
+  'request_id',
+  'response_format',
+  'seed',
+  'stop',
+  'stream',
+  'temperature',
+  'tool_choice',
+  'tools',
+  'top_p',
+]);
+
+/**
+ * Fields a caller must never be able to inject into the upstream body — they
+ * either address our own routing or would let a request rewrite the transport.
+ */
+const PASSTHROUGH_DENYLIST = new Set([
+  'api_key',
+  'apikey',
+  'authorization',
+  'base_url',
+  'messages',
+  'model',
+  'stream',
+]);
+
 function buildOverrides(body: Record<string, unknown>) {
   const overrides: Record<string, unknown> = {};
   const fields = [
@@ -352,6 +408,21 @@ function buildChatModelSettings(
 
   if (overrides.temperature !== undefined) {
     settings.temperature = overrides.temperature;
+  }
+
+  // top_p / presence_penalty / frequency_penalty were collected from the request
+  // and then read by nobody, so the API accepted them and silently sampled at
+  // the provider's defaults.
+  if (overrides.top_p !== undefined) {
+    settings.topP = overrides.top_p;
+  }
+
+  if (overrides.presence_penalty !== undefined) {
+    settings.presencePenalty = overrides.presence_penalty;
+  }
+
+  if (overrides.frequency_penalty !== undefined) {
+    settings.frequencyPenalty = overrides.frequency_penalty;
   }
 
   if (overrides.max_tokens !== undefined) {
@@ -473,6 +544,142 @@ function resolveOutputTokenLimit(
   return candidates.find(
     (value): value is number => typeof value === 'number' && Number.isFinite(value),
   );
+}
+
+/**
+ * Extra request-body fields destined for the upstream verbatim: the model's own
+ * `settings.requestDefaults` merged under anything the caller sent that our
+ * schema does not know (`chat_template_kwargs`, `top_k`, `repetition_penalty`,
+ * `min_p`, …). Caller passthrough is opt-in per model, because forwarding
+ * arbitrary fields to a provider is a decision the operator should make.
+ *
+ * Precedence is model defaults < caller body, and plain objects merge one level
+ * deep so a caller's `chat_template_kwargs: { enable_thinking: true }` does not
+ * erase a sibling key the operator set on the model.
+ */
+function buildPassthroughBody(
+  modelSettings: unknown,
+  body: Record<string, unknown>,
+  blockedNames: Set<string>,
+): Record<string, unknown> | undefined {
+  const settings = asRecord(modelSettings);
+  const defaults = asRecord(settings.requestDefaults);
+  const explicit = asRecord(settings.extraBody);
+  const merged: Record<string, unknown> = { ...defaults, ...explicit };
+
+  // Operator-authored defaults are not exempt from the reserved-key rule: these
+  // address our own routing, and the UI validator that rejects them only guards
+  // one of the two surfaces that can write them.
+  for (const key of Object.keys(merged)) {
+    if (PASSTHROUGH_DENYLIST.has(key.toLowerCase())) delete merged[key];
+  }
+
+  if (settings.allowUnknownPassthrough === true) {
+    // A parameter the operator declared unsupported must not come back through
+    // the passthrough channel; and a parameter the gateway already resolves has
+    // its own precedence rules, so it must not be duplicated here either —
+    // extra-body fields are spread *after* them in the provider SDK and would
+    // win.
+    const accept = (key: string) =>
+      !KNOWN_REQUEST_FIELDS.has(key)
+      && !PASSTHROUGH_DENYLIST.has(key.toLowerCase())
+      && !blockedNames.has(key.toLowerCase());
+
+    const mergeField = (key: string, value: unknown) => {
+      const existing = merged[key];
+      merged[key] = isPlainObject(existing) && isPlainObject(value)
+        ? { ...existing, ...value }
+        : value;
+    };
+
+    for (const [key, value] of Object.entries(body)) {
+      if (value === undefined || !accept(key)) continue;
+      mergeField(key, value);
+    }
+
+    // `extra_body` is how OpenAI SDK users carry non-schema fields; unwrap it so
+    // those land as real top-level body fields rather than a nested object the
+    // upstream would reject. `extra_body` itself is a known field, so the loop
+    // above already skipped the literal key.
+    for (const [key, value] of Object.entries(asRecord(body.extra_body))) {
+      if (!accept(key)) continue;
+      mergeField(key, value);
+    }
+  }
+
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * The one place a chat runnable's parameters are decided. Every caller that
+ * builds a chat model — the gateway, agents, guardrail judges — goes through
+ * here so a model's `unsupportedParams` and `requestDefaults` apply everywhere,
+ * not only on the routes that happen to remember to read them.
+ *
+ * `unsupportedParams` is stripped at the contract layer (`resolveOverrides`),
+ * which is the last point before the provider SDK; passing it through the
+ * settings object keeps that single strip point authoritative.
+ */
+export function resolveModelInvocationConfig(
+  model: Pick<IModel, 'settings'> & Partial<Pick<IModel, 'modelId' | 'providerDriver'>>,
+  body: Record<string, unknown>,
+): {
+  modelSettings: Record<string, unknown>;
+  callOptions: Record<string, unknown>;
+  overrides: Record<string, unknown>;
+  extraBody?: Record<string, unknown>;
+  unsupportedParams: string[];
+} {
+  const settings = asRecord(model.settings);
+
+  // Resolved here as well as in the contract layer, because the passthrough body
+  // is assembled here and must not smuggle back a parameter the provider is
+  // known to reject.
+  const { params: unsupportedParams, detected } = resolveUnsupportedParamNames({
+    driver: model.providerDriver,
+    modelId: model.modelId,
+    manual: settings.unsupportedParams,
+    autoDetect: settings.autoDropUnsupportedParams,
+  });
+
+  const overrides = buildOverrides(body);
+  const modelSettings = buildChatModelSettings(model.settings, overrides);
+  const extraBody = buildPassthroughBody(
+    model.settings,
+    body,
+    new Set(unsupportedParams.map((name) => name.toLowerCase())),
+  );
+
+  if (extraBody) {
+    modelSettings.extraBody = extraBody;
+  }
+
+  // Stripping silently changes sampling behaviour, so leave a trace of which
+  // rule did it and what the caller had asked for.
+  if (detected.params.length > 0) {
+    const overridden = detected.params.filter((name) => body[name] !== undefined);
+    if (overridden.length > 0) {
+      logger.debug('Dropping parameters this model does not accept', {
+        driver: model.providerDriver,
+        dropped: overridden,
+        modelId: model.modelId,
+        rule: detected.ruleId,
+      });
+    }
+  }
+
+  return {
+    modelSettings,
+    callOptions: buildChatCallOptions(overrides),
+    overrides,
+    extraBody,
+    unsupportedParams,
+  };
 }
 
 function ensureLlmModel(model: IModel) {
@@ -768,6 +975,15 @@ export async function handleChatCompletion(params: {
     }
   }
 
+  // Resolved before the cache lookup on purpose: the sampling parameters and
+  // any passthrough body fields change what the model produces from the same
+  // prompt, so they have to take part in the cache key.
+  const invocation = resolveModelInvocationConfig(model, body);
+  const cacheVariantKey = buildCacheVariantKey({
+    ...invocation.overrides,
+    ...(invocation.extraBody ?? {}),
+  });
+
   // Semantic cache: check for cached response before calling the model
   const cacheEnabled = !stream && tenantId && isSemanticCacheEnabled(model);
   if (cacheEnabled && model.semanticCache) {
@@ -778,6 +994,7 @@ export async function handleChatCompletion(params: {
         projectId,
         config: model.semanticCache,
         messages: body.messages as unknown[],
+        variantKey: cacheVariantKey,
       });
 
       if (cacheResult.hit && cacheResult.response) {
@@ -826,9 +1043,7 @@ export async function handleChatCompletion(params: {
 
   const messagesInput = body.messages as Parameters<typeof toLangChainMessages>[0];
   const messages = toLangChainMessages(messagesInput);
-  const overrides = buildOverrides(body);
-  const modelSettings = buildChatModelSettings(model.settings, overrides);
-  const callOptions = buildChatCallOptions(overrides);
+  const { modelSettings, callOptions, overrides } = invocation;
   const outputTokenLimit = resolveOutputTokenLimit(overrides, modelSettings);
   const disableProviderStreaming = Boolean(
     stream && Array.isArray(overrides.tools) && overrides.tools.length > 0,
@@ -847,6 +1062,9 @@ export async function handleChatCompletion(params: {
     options: {
       streaming: Boolean(stream),
       disableStreaming: disableProviderStreaming,
+      // `withResilience` owns retry and circuit-breaking on this path, so the
+      // provider SDK must not retry underneath it.
+      maxRetries: 0,
     },
   }));
 
@@ -854,6 +1072,12 @@ export async function handleChatCompletion(params: {
     if (!disableProviderStreaming && typeof chatModel.stream !== 'function') {
       throw new Error('Model provider does not support streaming responses');
     }
+
+    // A disconnected client used to leave the provider generating (and billing)
+    // until it finished on its own. Cancelling the readable — which Fastify does
+    // when the response socket closes — now aborts the upstream call.
+    const abortController = new AbortController();
+    const streamCallOptions = { ...callOptions, signal: abortController.signal };
 
     let asyncIterator: AsyncIterable<AIMessageChunk>;
     if (disableProviderStreaming) {
@@ -875,13 +1099,20 @@ export async function handleChatCompletion(params: {
       })();
     } else {
       asyncIterator = await withResilience(
-        () => chatModel.stream!(messages, callOptions) as Promise<AsyncIterable<AIMessageChunk>>,
+        () => chatModel.stream!(messages, streamCallOptions) as Promise<AsyncIterable<AIMessageChunk>>,
         { key: `chat-stream:${model.providerKey}` },
       );
     }
     const startedAt = Date.now();
     const completionId = `chatcmpl_${crypto.randomUUID()}`;
     const completionCreated = Math.floor(Date.now() / 1000);
+
+    const chunkOptions = {
+      model: model.modelId,
+      stream: true as const,
+      completionId,
+      created: completionCreated,
+    };
 
     const readable = new ReadableStream<Uint8Array>({
       async start(controller) {
@@ -894,6 +1125,11 @@ export async function handleChatCompletion(params: {
         const toolCalls: ToolCallPayload[] = [];
 
         try {
+          // OpenAI opens every stream with the assistant role before any content.
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify(openAIStreamRoleChunk(chunkOptions))}\n\n`),
+          );
+
           for await (const chunk of asyncIterator) {
             aggregatedChunk = aggregatedChunk
               ? aggregatedChunk.concat(chunk)
@@ -967,6 +1203,19 @@ export async function handleChatCompletion(params: {
                 choices: [],
                 usage: finalUsagePayload,
               })}\n\n`),
+            );
+          }
+
+          // Some upstreams never send a terminal finish_reason. Clients that wait
+          // for one would hang until the socket closed. A completion that ended in
+          // tool calls must say so, or an agent client reads it as a finished
+          // answer and never dispatches them.
+          if (!outputLimitError && terminalFinishReason === undefined) {
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify(openAIStreamStopChunk(
+                chunkOptions,
+                toolCalls.length ? 'tool_calls' : 'stop',
+              ))}\n\n`),
             );
           }
 
@@ -1057,6 +1306,9 @@ export async function handleChatCompletion(params: {
           );
           controller.close();
         }
+      },
+      cancel(reason) {
+        abortController.abort(reason);
       },
     });
 
@@ -1151,6 +1403,7 @@ export async function handleChatCompletion(params: {
       config: model.semanticCache,
       messages: body.messages as unknown[],
       response: response as Record<string, unknown>,
+      variantKey: cacheVariantKey,
     }).catch((err) =>
       logger.warn('Failed to store response in cache', { error: err }),
     );

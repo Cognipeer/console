@@ -49,6 +49,7 @@ import {
   resolveModelCapabilities,
 } from '@/lib/services/models/modelCapabilities';
 import { createLogger } from '@/lib/core/logger';
+import { normalizeModelSettings } from '@/lib/services/models/modelSettings';
 import { readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
 
 const logger = createLogger('api:client-models');
@@ -96,7 +97,7 @@ function mergeSettings(
     merged[key] = value;
   }
 
-  return merged;
+  return normalizeModelSettings(merged);
 }
 
 type ModelQuery = {

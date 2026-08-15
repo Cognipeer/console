@@ -51,7 +51,10 @@ vi.mock('@langchain/google-vertexai', () => {
   });
   const mockEmbedDocuments = vi.fn().mockResolvedValue([[0.1, 0.2, 0.3]]);
 
-  class FakeVertexAI {
+  // The contract builds `ChatVertexAI`; `VertexAI` is the text-completion LLM
+  // and is no longer used for chat. Both are exported so a regression back to
+  // the wrong class fails loudly rather than silently resolving a mock.
+  class FakeChatVertexAI {
     invoke = mockInvoke;
     stream = vi.fn();
     bindTools = vi.fn().mockReturnThis();
@@ -63,7 +66,10 @@ vi.mock('@langchain/google-vertexai', () => {
     embedQuery = vi.fn().mockResolvedValue([0.1, 0.2, 0.3]);
   }
 
-  return { VertexAI: FakeVertexAI, VertexAIEmbeddings: FakeVertexAIEmbeddings };
+  return {
+    ChatVertexAI: FakeChatVertexAI,
+    VertexAIEmbeddings: FakeVertexAIEmbeddings,
+  };
 });
 
 // ── Config mock (system providers read from getConfig()) ─────────────────────

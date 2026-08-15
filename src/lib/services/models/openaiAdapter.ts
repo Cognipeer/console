@@ -423,6 +423,103 @@ export function toOpenAIChatResponse(
   };
 }
 
+/**
+ * Streaming `delta.content` is a string in the OpenAI protocol. Providers that
+ * speak in content blocks (the Responses API, Anthropic-style parts) would
+ * otherwise put an array on the wire, and any client accumulating with
+ * `content += delta.content` breaks mid-message.
+ */
+function flattenDeltaContent(content: unknown): { text?: string; reasoning?: string } {
+  if (typeof content === 'string') {
+    return content.length > 0 ? { text: content } : {};
+  }
+  if (!Array.isArray(content)) return {};
+
+  const textParts: string[] = [];
+  const reasoningParts: string[] = [];
+
+  for (const part of content) {
+    if (typeof part === 'string') {
+      textParts.push(part);
+      continue;
+    }
+    if (!part || typeof part !== 'object') continue;
+
+    const record = part as Record<string, unknown>;
+    const type = typeof record.type === 'string' ? record.type : '';
+
+    // Reasoning blocks name their payload differently per provider: Anthropic
+    // uses `thinking`, Bedrock Converse nests it under `reasoningText.text`,
+    // the OpenAI-compatible shape uses `reasoning` or plain `text`.
+    if (type === 'reasoning' || type === 'thinking' || type === 'reasoning_content') {
+      const reasoningText = firstString(
+        record.thinking,
+        record.reasoning,
+        record.text,
+        (record.reasoningText as Record<string, unknown> | undefined)?.text,
+      );
+      if (reasoningText) reasoningParts.push(reasoningText);
+      continue;
+    }
+
+    const value = typeof record.text === 'string' ? record.text : undefined;
+    if (value !== undefined) textParts.push(value);
+  }
+
+  return {
+    ...(textParts.length ? { text: textParts.join('') } : {}),
+    ...(reasoningParts.length ? { reasoning: reasoningParts.join('') } : {}),
+  };
+}
+
+function firstString(...candidates: unknown[]): string | undefined {
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.length > 0) return candidate;
+  }
+  return undefined;
+}
+
+function streamChunkEnvelope(options: ChatTransformOptions) {
+  return {
+    id: options.completionId || `chatcmpl_${crypto.randomUUID()}`,
+    object: 'chat.completion.chunk' as const,
+    created: options.created ?? Math.floor(Date.now() / 1000),
+    model: options.model,
+  };
+}
+
+/** The opening frame of an OpenAI stream: role, no content. */
+export function openAIStreamRoleChunk(options: ChatTransformOptions) {
+  return {
+    ...streamChunkEnvelope(options),
+    choices: [
+      { index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null },
+    ],
+    usage: undefined as undefined | Record<string, number>,
+  };
+}
+
+/** A terminal frame for upstreams that never send their own finish_reason. */
+export function openAIStreamStopChunk(
+  options: ChatTransformOptions,
+  finishReason: string = 'stop',
+) {
+  return {
+    ...streamChunkEnvelope(options),
+    choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
+    usage: undefined as undefined | Record<string, number>,
+  };
+}
+
+/** True when a frame carries no delta payload — a usage-only terminal frame. */
+export function isEmptyStreamDelta(payload: {
+  choices: Array<{ delta: Record<string, unknown> }>;
+}): boolean {
+  const delta = payload.choices[0]?.delta;
+  if (!delta) return true;
+  return Object.entries(delta).every(([, value]) => value === '' || value === undefined);
+}
+
 export function toOpenAIStreamChunk(
   chunk: AIMessageChunk,
   options: ChatTransformOptions,
@@ -430,15 +527,14 @@ export function toOpenAIStreamChunk(
   const usage = extractUsage(chunk);
   const delta: Record<string, unknown> = {};
 
-  if (typeof chunk.content === 'string') {
-    delta.content = chunk.content;
-  } else if (Array.isArray(chunk.content)) {
-    delta.content = chunk.content;
+  const { text, reasoning: reasoningFromContent } = flattenDeltaContent(chunk.content);
+  if (text !== undefined) {
+    delta.content = text;
   }
 
   const { reasoningContent, reasoning } = extractReasoning(chunk);
-  if (reasoningContent !== undefined) {
-    delta.reasoning_content = reasoningContent;
+  if (reasoningContent !== undefined || reasoningFromContent !== undefined) {
+    delta.reasoning_content = `${reasoningContent ?? ''}${reasoningFromContent ?? ''}`;
   }
   if (reasoning !== undefined) {
     delta.reasoning = reasoning;

@@ -22,6 +22,7 @@ import { getModelByKey } from '@/lib/services/models/modelService';
 import { logModelUsage } from '@/lib/services/models/usageLogger';
 import { parseDashboardDateFilterFromSearchParams } from '@/lib/utils/dashboardDateFilter';
 import {
+  applyStreamHeaders,
   readJsonBody,
   requireProjectContextForRequest,
   sendProjectContextError,
@@ -131,10 +132,7 @@ export const dashboardApiPlugin: FastifyPluginAsync = async (app) => {
       });
 
       if (result.stream) {
-        reply.raw.setHeader('Content-Type', 'text/event-stream');
-        reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
-        reply.raw.setHeader('Connection', 'keep-alive');
-        reply.raw.setHeader('X-Request-Id', result.requestId);
+        applyStreamHeaders(reply, result.requestId);
         return reply.send(
           Readable.fromWeb(result.stream as unknown as NodeReadableStream<Uint8Array>),
         );

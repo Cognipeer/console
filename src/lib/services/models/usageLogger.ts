@@ -53,8 +53,15 @@ export function calculateCost(
   const outputTokens = usage.outputTokens ?? 0;
   const cachedTokens = usage.cachedInputTokens ?? 0;
 
+  // Cached tokens are a *subset* of the prompt count, not an addition to it —
+  // that is true of OpenAI's `prompt_tokens_details.cached_tokens` and of
+  // LangChain's standardized `input_token_details.cache_read`. Billing the full
+  // prompt at the input rate and then adding the cached portion again charges
+  // the cache-hit tokens twice, at more than the uncached price.
+  const uncachedInputTokens = Math.max(0, inputTokens - cachedTokens);
+
   const inputCost =
-    ((pricing.inputTokenPer1M ?? 0) * inputTokens) / TOKENS_PER_MILLION;
+    ((pricing.inputTokenPer1M ?? 0) * uncachedInputTokens) / TOKENS_PER_MILLION;
   const outputCost =
     ((pricing.outputTokenPer1M ?? 0) * outputTokens) / TOKENS_PER_MILLION;
   const cachedCost =

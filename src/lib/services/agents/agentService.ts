@@ -22,6 +22,7 @@ import type {
 } from '@cognipeer/agent-sdk';
 import { getDatabase, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentTracingEvent, type IAgentTracingSession, type IAgentVersion } from '@/lib/database';
 import { getModelByKey } from '@/lib/services/models/modelService';
+import { resolveModelInvocationConfig } from '@/lib/services/models/inferenceService';
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
 import { queryRag } from '@/lib/services/rag/ragService';
 import { evaluateGuardrail } from '@/lib/services/guardrail';
@@ -1058,14 +1059,21 @@ export async function executeAgentChatLocal(
         throw new Error('Provider runtime does not support chat model creation');
     }
 
+    // Resolved through the gateway's helper so an agent obeys the same model
+    // record everything else does. Previously this built its own settings object
+    // and never read `model.settings`, which meant: a hard-coded temperature of
+    // 0.7 reached models that reject the parameter outright, the operator could
+    // not override it from the Model Hub, and `top_p`/`max_tokens` were passed
+    // under snake_case keys the contract layer does not read — so an agent's
+    // Top P and Max Tokens settings had never taken effect at all.
     const lcModel = runtime.createChatModel({
         modelId: model.modelId,
         category: model.category,
-        modelSettings: {
-            temperature: config.temperature ?? 0.7,
-            top_p: config.topP,
-            max_tokens: config.maxTokens,
-        },
+        modelSettings: resolveModelInvocationConfig(model, {
+            ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
+            ...(config.topP !== undefined ? { top_p: config.topP } : {}),
+            ...(config.maxTokens !== undefined ? { max_tokens: config.maxTokens } : {}),
+        }).modelSettings,
     });
 
     // 5. Resolve system prompt
@@ -1332,14 +1340,21 @@ export async function executePlaygroundChatLocal(
         throw new Error('Provider runtime does not support chat model creation');
     }
 
+    // Resolved through the gateway's helper so an agent obeys the same model
+    // record everything else does. Previously this built its own settings object
+    // and never read `model.settings`, which meant: a hard-coded temperature of
+    // 0.7 reached models that reject the parameter outright, the operator could
+    // not override it from the Model Hub, and `top_p`/`max_tokens` were passed
+    // under snake_case keys the contract layer does not read — so an agent's
+    // Top P and Max Tokens settings had never taken effect at all.
     const lcModel = runtime.createChatModel({
         modelId: model.modelId,
         category: model.category,
-        modelSettings: {
-            temperature: config.temperature ?? 0.7,
-            top_p: config.topP,
-            max_tokens: config.maxTokens,
-        },
+        modelSettings: resolveModelInvocationConfig(model, {
+            ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
+            ...(config.topP !== undefined ? { top_p: config.topP } : {}),
+            ...(config.maxTokens !== undefined ? { max_tokens: config.maxTokens } : {}),
+        }).modelSettings,
     });
 
     // Resolve system prompt
