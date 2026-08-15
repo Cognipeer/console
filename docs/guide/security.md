@@ -11,7 +11,7 @@ Do not open public GitHub issues for security vulnerabilities.
 
 Use GitHub's private vulnerability reporting flow for the repository when it is enabled. If private reporting is temporarily unavailable, contact the maintainers through private repository-owner channels instead of disclosing details publicly.
 
-The root [SECURITY.md](../../SECURITY.md) file is the canonical policy.
+The root [SECURITY.md](https://github.com/Cognipeer/console/blob/main/SECURITY.md) file is the canonical policy.
 
 ## Default Hardening Expectations
 

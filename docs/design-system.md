@@ -1,7 +1,7 @@
 # Cognipeer Design System
 
-The canonical design system document lives in the Studio repo:
-`cognipeer-studio/Cognipeer Design System Prompt.md` (repo root). Console `--ds-*` token values are the canonical source the document encodes.
+Console's `--ds-*` token values, defined in `src/theme/`, are the canonical source. The rules below
+summarise how they are meant to be used; when the two disagree, the token definitions win.
 
 Core rules:
 - Accent teal `#0fba94` (strong `#0a9978`); page `#fbfbfa` light / `#0a0e13` dark; never pure `#000`.

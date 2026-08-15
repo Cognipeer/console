@@ -2,6 +2,13 @@
 
 The tracing system records and visualizes AI agent execution sessions, including LLM calls, tool use, retrieval operations, and multi-agent workflows. The console exposes this under **Operate → Agent Observability**.
 
+::: tip Tracing an agent you built elsewhere
+Agents written in LangChain, LangGraph, the OpenAI Agents SDK, the Claude Agent
+SDK, the Vercel AI SDK, n8n or anything OpenTelemetry-instrumented can send
+traces here in two lines. See
+[Observability Integrations](/guide/observability/overview).
+:::
+
 ## Operator view
 
 The overview screen consolidates every signal you need to triage a run: total sessions and tokens for the current window, the rolling event count, tool error rate, plus per-agent breakdowns, top models, and top token consumers. Recent traffic is summarised by day so anomalies in the last week stand out.

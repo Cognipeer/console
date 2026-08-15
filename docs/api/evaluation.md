@@ -64,6 +64,11 @@ PATCH  /api/evaluation/datasets/:id
 DELETE /api/evaluation/datasets/:id
 ```
 
+Dataset items are stored in their own collection (`evaluation_dataset_items`,
+one document/row per item) — dataset responses carry an `itemCount` instead of
+an inline `items` array, and items are read/written through the item endpoints
+below. Deleting a dataset cascades to its items.
+
 ### Create
 
 ```json
@@ -80,7 +85,30 @@ DELETE /api/evaluation/datasets/:id
 ```
 
 `items[].input` is an array of `{ role, content }` chat messages. `expected` is
-optional and consumed by the assertion scorer.
+optional and consumed by the assertion scorer. The inline `items` array on
+create (and a full-replace `items` array on `PATCH /:id`) is still accepted —
+the server routes it into the item collection.
+
+### Items
+
+```http
+GET    /api/evaluation/datasets/:id/items?limit=50&skip=0&search=refund
+POST   /api/evaluation/datasets/:id/items
+PATCH  /api/evaluation/datasets/:id/items/:itemId
+DELETE /api/evaluation/datasets/:id/items/:itemId
+```
+
+- `GET …/items` returns `{ items, total }`, ordered by position; `limit` caps
+  at 500. `search` filters by item id, input content, or tag (case-insensitive
+  substring).
+- `POST …/items` appends `{ "items": [ … ] }` after the current last item and
+  returns `{ added, total }`. Item ids are unique per dataset — a duplicate id
+  responds `409`.
+- `PATCH …/items/:itemId` updates one item in place (`input`, `expected`,
+  `tools`, `toolResults`, `tags`; the id itself is immutable). Passing `null`
+  for an optional field clears it.
+- All item routes are project-scoped: a dataset id from another project
+  responds `404`.
 
 ## Suites
 

@@ -159,10 +159,15 @@ pages you when extraction quality slips below 85%.
 ## Multi-tenancy & persistence
 
 Every entity is tenant-scoped and persisted through the dual-provider database
-layer (MongoDB documents or SQLite JSON columns) with full parity. Runs embed
-their per-item results and aggregate. Reads and writes always go through
-`switchToTenant`, so one tenant never sees another's targets, datasets,
-conversations, or runs.
+layer (MongoDB documents or SQLite JSON columns) with full parity. Dataset
+items live in their own `evaluation_dataset_items` collection/table (one
+document/row per item, ordered by position, unique per `(dataset, item id)`) —
+the dataset record carries only a denormalised `itemCount`, so a dataset is no
+longer bounded by a single 16MB document and item pages load without shipping
+the whole set. Datasets created before the split are served transparently and
+migrated on their first item write. Runs embed their per-item results and
+aggregate. Reads and writes always go through `switchToTenant`, so one tenant
+never sees another's targets, datasets, conversations, or runs.
 
 ## Where things live
 
