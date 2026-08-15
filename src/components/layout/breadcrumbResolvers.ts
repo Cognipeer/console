@@ -228,6 +228,16 @@ const STANDARD_RESOLVERS: BreadcrumbResolver[] = [
     buildUrl: (name) => `/api/tracing/agents/${encodeURIComponent(name)}/overview`,
     pickLabel: (b) => wrappedName(b, 'agent', 'label', 'name', 'key'),
   }),
+  createStandardResolver({
+    path: ['gpu-fleet', 'hosts'],
+    buildUrl: (id) => `/api/gpu-fleet/hosts/${encodeURIComponent(id)}`,
+    pickLabel: (b) => wrappedName(b, 'host'),
+  }),
+  createStandardResolver({
+    path: ['gpu-fleet', 'deployments'],
+    buildUrl: (id) => `/api/gpu-fleet/deployments/${encodeURIComponent(id)}`,
+    pickLabel: (b) => wrappedName(b, 'deployment'),
+  }),
 ];
 
 /* ----- Custom resolvers --------------------------------------------------- */
