@@ -6,20 +6,14 @@
 import { getDatabase, type IAgentTracingEvent } from '@/lib/database';
 import type { IAgentTracingSession } from '@/lib/database/provider/types.base';
 import { createLogger } from '@/lib/core/logger';
+import { deriveEnterpriseAgentInsights } from '@/enterprise/registry';
 import {
   recordUsageEvent,
   type UsageAttribution,
 } from '@/lib/services/usage/usageEvents';
 import { calculateCost } from '@/lib/services/models/usageLogger';
-import { resolveExternalPricingForDay } from '@/lib/services/cost/costService';
+import { resolveExternalPricingForDay } from '@/lib/services/modelPriceCatalog/externalPricing';
 import { toUtcDay } from '@/lib/services/usage/usageBreakdown';
-import { lintSystemPrompt, type PromptLintReport } from '@/lib/services/promptLint';
-import {
-  scoreToolSchemas,
-  detectLanguageMix,
-  type ToolSchemaComplexity,
-  type LanguageMix,
-} from '@/lib/services/workload/workloadSignals';
 import dayjs from 'dayjs';
 
 const logger = createLogger('agent-tracing');
@@ -285,14 +279,6 @@ const AGENT_DIRECTORY_SESSION_PROJECTION = {
   status: 1,
 } as const;
 
-/** How many recent sessions the deterministic-insights event sample reads. */
-const INSIGHT_EVENT_SESSION_CAP = 12;
-/** Top-N error patterns surfaced on the agent overview. */
-const INSIGHT_ERROR_PATTERN_CAP = 6;
-/** Distinct tool definitions kept for schema-complexity scoring. */
-const INSIGHT_TOOL_SCHEMA_CAP = 80;
-/** User-message samples fed to language detection. */
-const INSIGHT_LANGUAGE_SAMPLE_CAP = 40;
 
 const SESSION_LIST_PROJECTION = {
   sessionId: 1,
@@ -984,6 +970,12 @@ export class AgentTracingService {
           new Date(a.startedAt || 0).getTime(),
       );
 
+    const insights = await deriveEnterpriseAgentInsights(
+      db,
+      projectId,
+      sortedSessions as unknown as Array<Record<string, unknown>>,
+    );
+
     const totals = buildAggregateTotals(sessions);
 
     const recentSessions = sortedSessions.slice(0, 10).map((s) => ({
@@ -1129,7 +1121,6 @@ export class AgentTracingService {
       .slice(-30);
 
     // ── Deterministic insights (bounded event sample of recent sessions) ──
-    const insights = await buildAgentInsights(db, projectId, sortedSessions);
 
     return {
       agent,
@@ -1278,9 +1269,13 @@ export class AgentTracingService {
       .sort((a, b) => b.sessionsCount - a.sessionsCount);
 
     const latestSession = sortedSessions[0];
-    const insights = await buildAgentInsights(db, projectId, sortedSessions, {
-      modelName,
-    });
+
+    const insights = await deriveEnterpriseAgentInsights(
+      db,
+      projectId,
+      sortedSessions as unknown as Array<Record<string, unknown>>,
+      { modelName },
+    );
 
     return {
       model: {
@@ -1298,303 +1293,4 @@ export class AgentTracingService {
       },
     };
   }
-}
-
-// ── Agent deterministic insights ───────────────────────────────────────────
-
-export interface AgentInsights {
-  /** Sessions whose events were actually read for the sample. */
-  sampledSessions: number;
-  /** ai_call / tool_call volumes inside the sample. */
-  perCall: {
-    aiCalls: number;
-    toolCalls: number;
-    avgAiCallsPerSession: number;
-    avgToolCallsPerSession: number;
-    avgInputTokensPerAiCall: number | null;
-  };
-  /** Per-turn tool MENU stats from `tool_definitions` sections (when traced). */
-  toolMenu: {
-    /** ai_calls that carried a recorded menu / all ai_calls in the sample. */
-    coveragePct: number;
-    avgMenuSize: number | null;
-    maxMenuSize: number | null;
-    distinctTools: number;
-    /** No menus at all → the tracer predates tool_definitions (SDK < 0.9.2). */
-    available: boolean;
-  };
-  /**
-   * How hard the tool ARGUMENTS are, not just how many tools there are —
-   * schema complexity is what separates workloads a small model can drive
-   * from ones it will hallucinate arguments for. Zero `toolsAnalyzed` means
-   * no readable schema was traced (menu names only, or no tools at all).
-   */
-  toolComplexity: ToolSchemaComplexity;
-  /**
-   * Language mix of the traffic, from system + user message samples. Small
-   * open-weight models are documented on English benchmarks and degrade
-   * elsewhere, so this is a first-class model-selection input.
-   */
-  language: LanguageMix;
-  /** System prompt profile + deterministic checks, from the freshest trace
-   *  that carries a system message (longest wins — compaction shrinks some). */
-  promptProfile: {
-    found: boolean;
-    sourceSessionId?: string;
-    capturedAt?: string;
-    lint?: PromptLintReport;
-    preview?: string;
-  };
-  /** Top recurring error messages on this agent's sessions (window-scoped). */
-  errorPatterns: Array<{ message: string; count: number; lastSeen: string | null }>;
-  /** Deterministic waste signals inside the sample. */
-  waste: {
-    /** Identical (tool + args) calls repeated within ONE session. */
-    repeatedToolCalls: {
-      /** Tool calls whose args could be read and were analysed. */
-      callsAnalyzed: number;
-      /** Calls beyond the first of each identical group — pure repetition. */
-      wastedCalls: number;
-      topOffenders: Array<{
-        tool: string;
-        /** Largest identical-call count seen in a single session. */
-        maxRepeatsInOneSession: number;
-        /** Sessions containing at least one repeat of this tool+args. */
-        sessionsAffected: number;
-        totalWasted: number;
-        argsPreview: string;
-      }>;
-    };
-  };
-}
-
-/** Stable stringify (sorted keys) so identical args always hash the same. */
-function canonicalArgsKey(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
-  if (Array.isArray(value)) return `[${value.map((v) => canonicalArgsKey(v)).join(',')}]`;
-  const record = value as Record<string, unknown>;
-  const keys = Object.keys(record).sort();
-  return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalArgsKey(record[k])}`).join(',')}}`;
-}
-
-/**
- * Pull the call arguments off a tool_call event (shape varies by producer).
- *
- * `content` is last because it is the CANONICAL section field — the one the
- * detail UI renders and the one third-party integrations emit — while the
- * others are producer-specific aliases that, when present, are more precisely
- * the arguments. Without `content`, repeated-call detection silently skips
- * every trace that did not come from the Cognipeer agent runtime.
- */
-function extractToolCallArgs(event: IAgentTracingEvent): unknown {
-  for (const rawSection of event.sections ?? []) {
-    const section = toRecord(rawSection);
-    if (!section || section.kind !== 'tool_call') continue;
-    for (const key of ['arguments', 'args', 'input', 'content']) {
-      if (section[key] !== undefined) return section[key];
-    }
-  }
-  const metadata = toRecord(event.metadata);
-  if (metadata?.arguments !== undefined) return metadata.arguments;
-  return undefined;
-}
-
-/**
- * Compute deterministic per-agent insights from a bounded sample: the
- * INSIGHT_EVENT_SESSION_CAP most recent sessions' full events (indexed
- * per-session reads — never a collection scan), plus the already-loaded
- * session rows for error patterns. Pure aggregation — no model calls.
- *
- * `options.modelName` narrows ai_call metrics (calls, tokens, tool menus,
- * prompt extraction) to events of that model — the model-analysis view.
- * tool_call and waste metrics stay session-scoped: the caller pre-filters
- * sessions to those that used the model, and repeats inside such a session
- * are that model's behaviour.
- */
-async function buildAgentInsights(
-  db: Awaited<ReturnType<typeof getDatabase>>,
-  projectId: string,
-  sortedSessions: Array<Partial<IAgentTracingSession>>,
-  options?: { modelName?: string },
-): Promise<AgentInsights> {
-  const modelName = options?.modelName;
-  const sample = sortedSessions.slice(0, INSIGHT_EVENT_SESSION_CAP);
-
-  let aiCalls = 0;
-  let toolCalls = 0;
-  let aiCallInputTokens = 0;
-  let aiCallsWithTokens = 0;
-  let menuEvents = 0;
-  const menuSizes: number[] = [];
-  const menuTools = new Set<string>();
-  let bestPrompt: { text: string; sessionId: string; at?: string } | null = null;
-  // One full definition per distinct tool name — schemas repeat on every
-  // turn, so keeping the first of each bounds the work and the memory.
-  const toolSchemas = new Map<string, unknown>();
-  // Message texts fed to language detection (system + user roles).
-  const languageSamples: string[] = [];
-  // Repetition detection: identical (tool + canonical args) within a session.
-  let callsAnalyzed = 0;
-  let wastedCalls = 0;
-  const offenderMap = new Map<
-    string,
-    { tool: string; maxRepeatsInOneSession: number; sessionsAffected: number; totalWasted: number; argsPreview: string }
-  >();
-
-  for (const session of sample) {
-    if (!session.sessionId) continue;
-    let events: IAgentTracingEvent[] = [];
-    try {
-      events = await db.listAgentTracingEvents(session.sessionId, projectId);
-    } catch {
-      continue; // a single unreadable session must not sink the overview
-    }
-    const sessionCallGroups = new Map<string, { tool: string; n: number; argsPreview: string }>();
-    for (const event of events) {
-      if (event.type === 'tool_call') {
-        toolCalls += 1;
-        const tool = event.toolName;
-        const args = extractToolCallArgs(event);
-        // Args-less calls are skipped — without arguments, two calls to the
-        // same tool are NOT provably identical.
-        if (tool && args !== undefined) {
-          callsAnalyzed += 1;
-          const key = `${tool} ${canonicalArgsKey(args)}`;
-          const group = sessionCallGroups.get(key) ?? {
-            tool,
-            n: 0,
-            argsPreview: JSON.stringify(args)?.slice(0, 120) ?? '',
-          };
-          group.n += 1;
-          sessionCallGroups.set(key, group);
-        }
-      }
-      if (event.type !== 'ai_call') continue;
-      if (modelName && event.model !== modelName) continue;
-      aiCalls += 1;
-      if (typeof event.inputTokens === 'number') {
-        aiCallInputTokens += event.inputTokens;
-        aiCallsWithTokens += 1;
-      }
-      for (const rawSection of event.sections ?? []) {
-        const section = toRecord(rawSection);
-        if (!section) continue;
-        if (section.kind === 'tool_definitions' && Array.isArray(section.tools)) {
-          menuEvents += 1;
-          menuSizes.push(section.tools.length);
-          for (const tool of section.tools) {
-            const record = toRecord(tool);
-            const name = record?.name ?? toRecord(record?.function)?.name;
-            if (typeof name === 'string' && name) {
-              menuTools.add(name);
-              if (
-                !toolSchemas.has(name)
-                && toolSchemas.size < INSIGHT_TOOL_SCHEMA_CAP
-                && record
-              ) {
-                toolSchemas.set(name, record);
-              }
-            }
-          }
-        }
-        if (section.kind !== 'message' || typeof section.content !== 'string') continue;
-        const role = typeof section.role === 'string' ? section.role.toLowerCase() : '';
-        if (role === 'system' && section.content.length > (bestPrompt?.text.length ?? 0)) {
-          bestPrompt = {
-            text: section.content,
-            sessionId: session.sessionId,
-            at: session.startedAt ? new Date(session.startedAt).toISOString() : undefined,
-          };
-        }
-        // User turns are the truest language signal — a system prompt may be
-        // authored in English for traffic that is not.
-        if (role === 'user' && languageSamples.length < INSIGHT_LANGUAGE_SAMPLE_CAP) {
-          languageSamples.push(section.content);
-        }
-      }
-    }
-
-    // Fold this session's identical-call groups into the offender ranking.
-    for (const [key, group] of sessionCallGroups) {
-      if (group.n < 2) continue;
-      const wasted = group.n - 1;
-      wastedCalls += wasted;
-      const offender = offenderMap.get(key) ?? {
-        tool: group.tool,
-        maxRepeatsInOneSession: 0,
-        sessionsAffected: 0,
-        totalWasted: 0,
-        argsPreview: group.argsPreview,
-      };
-      offender.maxRepeatsInOneSession = Math.max(offender.maxRepeatsInOneSession, group.n);
-      offender.sessionsAffected += 1;
-      offender.totalWasted += wasted;
-      offenderMap.set(key, offender);
-    }
-  }
-
-  // Error patterns from the (already-loaded) window sessions.
-  const patterns = new Map<string, { count: number; lastSeen: string | null }>();
-  for (const session of sortedSessions) {
-    for (const rawError of (session as { errors?: Array<{ message?: unknown }> }).errors ?? []) {
-      const message = typeof rawError?.message === 'string' ? rawError.message.slice(0, 160) : null;
-      if (!message) continue;
-      const entry = patterns.get(message) ?? { count: 0, lastSeen: null };
-      entry.count += 1;
-      const at = session.startedAt ? new Date(session.startedAt).toISOString() : null;
-      if (at && (!entry.lastSeen || at > entry.lastSeen)) entry.lastSeen = at;
-      patterns.set(message, entry);
-    }
-  }
-  const errorPatterns = [...patterns.entries()]
-    .map(([message, entry]) => ({ message, ...entry }))
-    .sort((a, b) => b.count - a.count)
-    .slice(0, INSIGHT_ERROR_PATTERN_CAP);
-
-  return {
-    sampledSessions: sample.length,
-    perCall: {
-      aiCalls,
-      toolCalls,
-      avgAiCallsPerSession: sample.length > 0 ? aiCalls / sample.length : 0,
-      avgToolCallsPerSession: sample.length > 0 ? toolCalls / sample.length : 0,
-      avgInputTokensPerAiCall:
-        aiCallsWithTokens > 0 ? Math.round(aiCallInputTokens / aiCallsWithTokens) : null,
-    },
-    toolMenu: {
-      coveragePct: aiCalls > 0 ? Math.round((menuEvents / aiCalls) * 100) : 0,
-      avgMenuSize:
-        menuSizes.length > 0
-          ? Math.round((menuSizes.reduce((a, b) => a + b, 0) / menuSizes.length) * 10) / 10
-          : null,
-      maxMenuSize: menuSizes.length > 0 ? Math.max(...menuSizes) : null,
-      distinctTools: menuTools.size,
-      available: menuEvents > 0,
-    },
-    toolComplexity: scoreToolSchemas([...toolSchemas.values()]),
-    // The system prompt counts as one sample so single-turn agents (no user
-    // messages in the sample) still produce a verdict.
-    language: detectLanguageMix(
-      bestPrompt ? [bestPrompt.text, ...languageSamples] : languageSamples,
-    ),
-    promptProfile: bestPrompt
-      ? {
-          found: true,
-          sourceSessionId: bestPrompt.sessionId,
-          capturedAt: bestPrompt.at,
-          lint: lintSystemPrompt(bestPrompt.text),
-          preview: bestPrompt.text.slice(0, 400),
-        }
-      : { found: false },
-    errorPatterns,
-    waste: {
-      repeatedToolCalls: {
-        callsAnalyzed,
-        wastedCalls,
-        topOffenders: [...offenderMap.values()]
-          .sort((a, b) => b.totalWasted - a.totalWasted)
-          .slice(0, 8),
-      },
-    },
-  };
 }

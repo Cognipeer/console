@@ -25,7 +25,6 @@ import { startOcrJobQueueConsumer } from '@/lib/services/ocrJobs';
 import { startBatchQueueConsumer } from '@/lib/services/batch';
 import { startDatasetGenerationConsumer } from '@/lib/services/evaluation/datasetGenerationConsumer';
 import { startSnapshotQueueConsumer } from '@/lib/services/snapshots/snapshotConsumer';
-import { startPrescriptionQueueConsumer } from '@/lib/services/prescriptions/reportConsumer';
 import { startRedTeamQueueConsumer } from '@/lib/services/redteam/campaignConsumer';
 import { startEvaluationRunQueueConsumer } from '@/lib/services/evaluation/evaluationRunConsumer';
 import { startAnalysisRunQueueConsumer } from '@/lib/services/analysis/analysisRunConsumer';
@@ -35,7 +34,7 @@ import { startPollScheduler } from '@/lib/services/inferenceMonitoring/pollSched
 import { startAlertScheduler } from '@/lib/services/alerts/alertScheduler';
 import { startAnalysisScheduler } from '@/lib/services/analysis/analysisScheduler';
 import { startRedTeamScheduler } from '@/lib/services/redteam/redTeamScheduler';
-import { enterpriseReconcilers } from '@/enterprise/registry';
+import { enterpriseReconcilers , enterpriseQueueConsumers } from '@/enterprise/registry';
 import { ensureBootstrapOrganization } from '@/lib/services/auth/bootstrapOrganization';
 import { ensureServerEnvLoaded } from './env';
 
@@ -274,9 +273,11 @@ async function runBootstrap(): Promise<void> {
       startBatchQueueConsumer(),
       startDatasetGenerationConsumer(),
       startSnapshotQueueConsumer(),
-      startPrescriptionQueueConsumer(),
       startRedTeamQueueConsumer(),
       startEvaluationRunQueueConsumer(),
+      // Enterprise modules contribute their consumers through the seam;
+      // the collection is empty in the community edition.
+      ...enterpriseQueueConsumers.map((start) => start()),
       startAnalysisRunQueueConsumer(),
     ]);
   } catch (error) {
