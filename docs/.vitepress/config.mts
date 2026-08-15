@@ -56,9 +56,11 @@ export default defineConfig({
       { text: 'SDK Docs', link: 'https://cognipeer.github.io/console-sdk/' },
       { text: 'Licensing', link: '/guide/licensing' },
       {
-        text: 'v0.1.0',
+        // The current community release line. Bump this when a new minor line
+        // opens, not on every patch — it labels the line, not the build.
+        text: '1.2',
         items: [
-          { text: 'Changelog', link: '/changelog' },
+          { text: 'Release Notes', link: '/releases/' },
           { text: 'Contributing', link: '/contributing' },
           { text: 'Security', link: '/guide/security' },
           { text: 'Commercial', link: '/guide/licensing#commercial-options' },
@@ -68,6 +70,26 @@ export default defineConfig({
 
     sidebar: {
       '/how-to/': howToSidebar,
+
+      '/releases/': [
+        {
+          text: 'Release Notes',
+          items: [
+            { text: 'Overview', link: '/releases/' },
+            { text: '1.2 line', link: '/releases/1.2' },
+            { text: '1.1 line', link: '/releases/1.1' },
+            { text: '1.0 line', link: '/releases/1.0' },
+            { text: 'Enterprise releases', link: '/releases/enterprise' },
+          ],
+        },
+        {
+          text: 'Related',
+          items: [
+            { text: 'Releasing runbook', link: '/guide/releasing' },
+            { text: 'Licensing', link: '/guide/licensing' },
+          ],
+        },
+      ],
 
       '/guide/': [
         ...howToSidebar,
@@ -170,6 +192,7 @@ export default defineConfig({
           items: [
             { text: 'Licensing', link: '/guide/licensing' },
             { text: 'Security', link: '/guide/security' },
+            { text: 'Release Notes', link: '/releases/' },
             { text: 'Contributing', link: '/contributing' },
           ],
         },
