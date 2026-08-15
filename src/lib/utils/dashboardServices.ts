@@ -1,4 +1,5 @@
 import {
+  IconAbacus,
   IconApi,
   IconArrowsSort,
   IconBell,
@@ -10,6 +11,7 @@ import {
   IconClipboardList,
   IconClock,
   IconCode,
+  IconCoins,
   IconCpu,
   IconCube,
   IconFileText,
@@ -48,6 +50,7 @@ import {
    ────────────────────────────────────────────────────────────────────────── */
 
 const ICON_REGISTRY = {
+  IconAbacus,
   IconApi,
   IconArrowsSort,
   IconBell,
@@ -59,6 +62,7 @@ const ICON_REGISTRY = {
   IconClipboardList,
   IconClock,
   IconCode,
+  IconCoins,
   IconCpu,
   IconFileText,
   IconFolder,

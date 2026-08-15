@@ -19,6 +19,7 @@ import {
   IconAlertCircle,
   IconArrowUpRight,
   IconBook,
+  IconChartHistogram,
   IconRefresh,
   IconRobot,
 } from '@tabler/icons-react';
@@ -106,6 +107,40 @@ interface AgentOverviewResponse {
       totalTokens: number;
       averageDurationMs: number;
     }>;
+    insights?: {
+      sampledSessions: number;
+      perCall: {
+        aiCalls: number;
+        toolCalls: number;
+        avgAiCallsPerSession: number;
+        avgToolCallsPerSession: number;
+        avgInputTokensPerAiCall: number | null;
+      };
+      toolMenu: {
+        coveragePct: number;
+        avgMenuSize: number | null;
+        maxMenuSize: number | null;
+        distinctTools: number;
+        available: boolean;
+      };
+      promptProfile: {
+        found: boolean;
+        sourceSessionId?: string;
+        capturedAt?: string;
+        preview?: string;
+        lint?: {
+          chars: number;
+          lines: number;
+          estTokens: number;
+          paragraphs: number;
+          passed: number;
+          warned: number;
+          failed: number;
+          checks: Array<{ id: string; label: string; status: 'pass' | 'warn' | 'fail'; detail: string }>;
+        };
+      };
+      errorPatterns: Array<{ message: string; count: number; lastSeen: string | null }>;
+    } | null;
   };
 }
 
@@ -368,6 +403,23 @@ export default function AgentTracingAgentPage() {
           />
         </div>
       </DetailCard>
+
+      {/* Deterministic analysis lives on the Cost workbench */}
+      <Alert
+        color="teal"
+        variant="light"
+        icon={<IconChartHistogram size={16} />}
+        title="Deterministic analysis moved to Cost → Analysis"
+      >
+        <Text size="sm">
+          System-prompt checks, per-turn tool-menu stats, repeated-call waste and recurring
+          errors for this agent live on the optimization workbench:{' '}
+          <Anchor size="sm" href={`/dashboard/cost/analysis`}>
+            open Analysis
+          </Anchor>
+          .
+        </Text>
+      </Alert>
 
       {/* Two-column: Status + Versions */}
       <DetailTwoCol>

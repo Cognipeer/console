@@ -408,7 +408,7 @@ describe('loadProviderRuntimeData', () => {
 
     await expect(
       loadProviderRuntimeData(TENANT_DB, { id: 'missing', tenantId: TENANT_ID }),
-    ).rejects.toThrow('Provider configuration not found.');
+    ).rejects.toThrow('Provider configuration "missing" not found.');
   });
 
   it('throws when provider is not found by key', async () => {
@@ -416,7 +416,7 @@ describe('loadProviderRuntimeData', () => {
 
     await expect(
       loadProviderRuntimeData(TENANT_DB, { key: 'missing-key', tenantId: TENANT_ID }),
-    ).rejects.toThrow('Provider configuration not found.');
+    ).rejects.toThrow('Provider configuration "missing-key" not found.');
   });
 
   it('passes optional projectId when loading by key', async () => {

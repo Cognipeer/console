@@ -93,23 +93,36 @@ export default function ModelPlayground({
           if (!line.startsWith('data: ')) continue;
           const data = line.slice(6);
           if (data === '[DONE]') continue;
+
+          let parsed: Record<string, unknown> | undefined;
           try {
-            const parsed = JSON.parse(data);
-            const choiceDelta = parsed.choices?.[0]?.delta ?? {};
-            const reasoningDelta = extractReasoningDelta(choiceDelta);
-            if (reasoningDelta) {
-              fullReasoning += reasoningDelta;
-              setReasoning(fullReasoning);
-            }
-            const delta = choiceDelta.content ?? '';
-            if (delta) {
-              full += delta;
-              setOutput(full);
-              // Collapse the thinking trace once the final answer starts.
-              if (fullReasoning) setReasoningOpen(false);
-            }
+            parsed = JSON.parse(data);
           } catch {
-            /* skip */
+            continue;
+          }
+
+          // A failure after the first token cannot change the HTTP status, so
+          // the gateway reports it in-band. Skipping unparsed frames is fine;
+          // skipping this one would end the run quietly and look like a short
+          // but successful answer.
+          const frameError = parsed?.error as { message?: string } | undefined;
+          if (frameError) {
+            throw new Error(frameError.message || 'The model stopped mid-response');
+          }
+
+          const choices = parsed?.choices as Array<{ delta?: Record<string, unknown> }> | undefined;
+          const choiceDelta = choices?.[0]?.delta ?? {};
+          const reasoningDelta = extractReasoningDelta(choiceDelta);
+          if (reasoningDelta) {
+            fullReasoning += reasoningDelta;
+            setReasoning(fullReasoning);
+          }
+          const delta = typeof choiceDelta.content === 'string' ? choiceDelta.content : '';
+          if (delta) {
+            full += delta;
+            setOutput(full);
+            // Collapse the thinking trace once the final answer starts.
+            if (fullReasoning) setReasoningOpen(false);
           }
         }
       }

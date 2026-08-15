@@ -200,4 +200,62 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/tracing/agents/:agentName/overview', agentOverviewHandler);
   app.post('/tracing/agents/:agentName/overview', agentOverviewHandler);
+
+  // Lightweight agent directory (sub-nav / pickers) — last 30 days by default.
+  app.get('/tracing/agents', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const query = (request.query ?? {}) as Record<string, string | undefined>;
+      const from = query.from
+        || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+      const limit = Number.parseInt(query.limit || '50', 10);
+      const result = await AgentTracingService.listRecentAgents(
+        session.tenantDbName,
+        projectId,
+        {
+          from,
+          limit: Number.isFinite(limit) ? limit : 50,
+          to: query.to,
+        },
+      );
+
+      return reply.code(200).send(result);
+    } catch (error) {
+      logger.error('List tracing agents error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({
+          error: error instanceof Error ? error.message : 'Failed to fetch agents',
+        });
+    }
+  }));
+
+  const modelOverviewHandler = withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const { modelName } = request.params as { modelName: string };
+      const searchParams = new URLSearchParams(request.query as Record<string, string>);
+      const filter = parseDashboardDateFilterFromSearchParams(searchParams);
+      const result = await AgentTracingService.getModelOverview(
+        session.tenantDbName,
+        projectId,
+        decodeURIComponent(modelName),
+        {
+          from: searchParams.get('from') || filter.from?.toISOString(),
+          timezone: searchParams.get('timezone') || undefined,
+          to: searchParams.get('to') || filter.to?.toISOString(),
+        },
+      );
+
+      return reply.code(200).send(result);
+    } catch (error) {
+      logger.error('Get tracing model overview error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({
+          error: error instanceof Error ? error.message : 'Failed to fetch model overview',
+        });
+    }
+  });
+
+  app.get('/tracing/models/:modelName/overview', modelOverviewHandler);
+  app.post('/tracing/models/:modelName/overview', modelOverviewHandler);
 };

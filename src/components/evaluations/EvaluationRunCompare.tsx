@@ -25,6 +25,14 @@ function signedPct(v: number): string {
   return n > 0 ? `+${n}pp` : `${n}pp`;
 }
 
+function signedUsd(v: number): string {
+  return `${v > 0 ? '+' : v < 0 ? '-' : ''}$${Math.abs(v).toFixed(4)}`;
+}
+
+function signedNum(v: number): string {
+  return `${v > 0 ? '+' : ''}${v.toLocaleString()}`;
+}
+
 function fmtDate(value?: string): string {
   if (!value) return '';
   const d = new Date(value);
@@ -78,6 +86,42 @@ export default function EvaluationRunCompare({ run }: Props) {
     }
   };
 
+  // Cost / token deltas are computed purely from the two runs' aggregates (the
+  // compare endpoint only returns pass-rate / score deltas). Both runs must
+  // carry usage totals for the deltas to be meaningful.
+  const costDeltas = useMemo(() => {
+    if (!comparison) return null;
+    const baseline = candidates.find((r) => r.id === comparison.baselineRunId)
+      ?? candidates.find((r) => r.id === baselineId);
+    const baseAgg = baseline?.aggregate;
+    const curAgg = run.aggregate;
+    if (!baseAgg || !curAgg) return null;
+    // Each delta is independent: on-prem runs have no $ cost but token and
+    // latency deltas are exactly the optimization currency there.
+    const costDelta = baseAgg.totalCostUsd != null && curAgg.totalCostUsd != null
+      ? curAgg.totalCostUsd - baseAgg.totalCostUsd
+      : null;
+    const latencyDelta = baseAgg.avgLatencyMs != null && curAgg.avgLatencyMs != null
+      ? curAgg.avgLatencyMs - baseAgg.avgLatencyMs
+      : null;
+    const deltas = {
+      costDelta,
+      costDeltaPct: costDelta != null && (baseAgg.totalCostUsd ?? 0) > 0
+        ? (costDelta / (baseAgg.totalCostUsd as number)) * 100
+        : null,
+      tokenDelta: baseAgg.totalTokens != null && curAgg.totalTokens != null
+        ? curAgg.totalTokens - baseAgg.totalTokens
+        : null,
+      latencyDelta,
+      latencyDeltaPct: latencyDelta != null && (baseAgg.avgLatencyMs ?? 0) > 0
+        ? (latencyDelta / (baseAgg.avgLatencyMs as number)) * 100
+        : null,
+    };
+    return deltas.costDelta != null || deltas.tokenDelta != null || deltas.latencyDelta != null
+      ? deltas
+      : null;
+  }, [comparison, candidates, baselineId, run.aggregate]);
+
   if (run.status !== 'completed') return null;
 
   return (
@@ -124,6 +168,32 @@ export default function EvaluationRunCompare({ run }: Props) {
                 {signedPct(comparison.deltas.avgScore)}
               </Text>
             </Text>
+            {costDeltas?.costDelta != null ? (
+              <Text size="sm">
+                Cost:{' '}
+                <Text span fw={600} c={costDeltas.costDelta > 0 ? 'red' : costDeltas.costDelta < 0 ? 'teal' : 'dimmed'}>
+                  {signedUsd(costDeltas.costDelta)}
+                  {costDeltas.costDeltaPct != null ? ` (${costDeltas.costDeltaPct > 0 ? '+' : ''}${costDeltas.costDeltaPct.toFixed(1)}%)` : ''}
+                </Text>
+              </Text>
+            ) : null}
+            {costDeltas?.tokenDelta != null ? (
+              <Text size="sm">
+                Tokens:{' '}
+                <Text span fw={600} c={costDeltas.tokenDelta > 0 ? 'red' : costDeltas.tokenDelta < 0 ? 'teal' : 'dimmed'}>
+                  {signedNum(costDeltas.tokenDelta)}
+                </Text>
+              </Text>
+            ) : null}
+            {costDeltas?.latencyDelta != null ? (
+              <Text size="sm">
+                Latency:{' '}
+                <Text span fw={600} c={costDeltas.latencyDelta > 0 ? 'red' : costDeltas.latencyDelta < 0 ? 'teal' : 'dimmed'}>
+                  {`${costDeltas.latencyDelta > 0 ? '+' : ''}${Math.round(costDeltas.latencyDelta)}ms`}
+                  {costDeltas.latencyDeltaPct != null ? ` (${costDeltas.latencyDeltaPct > 0 ? '+' : ''}${costDeltas.latencyDeltaPct.toFixed(1)}%)` : ''}
+                </Text>
+              </Text>
+            ) : null}
           </Group>
 
           {comparison.changes.length === 0 ? (

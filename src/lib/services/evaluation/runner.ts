@@ -71,6 +71,7 @@ async function runItem(
       score,
       passed,
       latencyMs: output.latencyMs ?? Date.now() - started,
+      usage: output.usage,
     };
   } catch (err) {
     return {
@@ -103,6 +104,24 @@ function aggregate(items: RunItemResult[]): RunAggregate {
   const avgLatencyMs = latencies.length ? latencies.reduce((a, b) => a + b, 0) / latencies.length : null;
   const avgScore = completed ? completedItems.reduce((a, b) => a + b.score, 0) / completed : 0;
 
+  // Usage totals are only meaningful when at least one item reported usage —
+  // otherwise leave them undefined so "no usage data" stays distinguishable
+  // from "zero cost".
+  const withUsage = items.filter((i) => i.usage);
+  const totals = withUsage.length
+    ? {
+        totalCostUsd: withUsage.reduce((sum, i) => sum + (i.usage?.costUsd ?? 0), 0),
+        totalTokens: withUsage.reduce(
+          (sum, i) =>
+            sum +
+            (i.usage?.inputTokens ?? 0) +
+            (i.usage?.outputTokens ?? 0) +
+            (i.usage?.cachedInputTokens ?? 0),
+          0,
+        ),
+      }
+    : {};
+
   return {
     total,
     completed,
@@ -111,5 +130,6 @@ function aggregate(items: RunItemResult[]): RunAggregate {
     passRate: completed ? passed / completed : 0,
     avgScore,
     avgLatencyMs,
+    ...totals,
   };
 }

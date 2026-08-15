@@ -9,7 +9,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { Button, ActionIcon } from '@mantine/core';
-import { IconCheck, IconX } from '@tabler/icons-react';
+import { IconCheck, IconChevronDown, IconChevronRight, IconX } from '@tabler/icons-react';
 
 /* ──────────────────────────────────────────────────────────────────
    FormShell — full-screen overlay form layout.
@@ -177,27 +177,58 @@ export function FormSection({
   description,
   done,
   children,
+  collapsible = false,
+  defaultOpen = true,
 }: {
   number?: number | string;
   title: ReactNode;
   description?: ReactNode;
   done?: boolean;
   children: ReactNode;
+  /** Collapsible box: the header toggles the body (chevron shown). */
+  collapsible?: boolean;
+  defaultOpen?: boolean;
 }) {
+  const [open, setOpen] = useState(defaultOpen);
+  const expanded = !collapsible || open;
   return (
     <section className="form-section">
-      <header className="form-section-header">
+      <header
+        className="form-section-header"
+        onClick={collapsible ? () => setOpen((o) => !o) : undefined}
+        // A header carrying role="button" must also be reachable and operable
+        // from the keyboard, or it is a button only for mouse users.
+        onKeyDown={
+          collapsible
+            ? (event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                setOpen((o) => !o);
+              }
+            }
+            : undefined
+        }
+        style={collapsible ? { cursor: 'pointer', userSelect: 'none' } : undefined}
+        role={collapsible ? 'button' : undefined}
+        tabIndex={collapsible ? 0 : undefined}
+        aria-expanded={collapsible ? expanded : undefined}
+      >
         {number != null ? (
           <div className={`form-section-num ${done ? 'done' : ''}`}>
             {done ? <IconCheck size={11} stroke={3} /> : number}
           </div>
         ) : null}
         <div className="form-section-title">{title}</div>
+        {collapsible ? (
+          <div style={{ marginLeft: 'auto', display: 'flex', color: 'var(--ds-text-muted)' }}>
+            {expanded ? <IconChevronDown size={15} /> : <IconChevronRight size={15} />}
+          </div>
+        ) : null}
       </header>
-      {description ? (
+      {expanded && description ? (
         <div className="form-section-desc">{description}</div>
       ) : null}
-      <div className="form-section-body">{children}</div>
+      {expanded ? <div className="form-section-body">{children}</div> : null}
     </section>
   );
 }

@@ -46,7 +46,7 @@ const VALID_DOMAINS: QuotaDomain[] = [
 ];
 const VALID_SCOPES: QuotaScope[] = ['tenant', 'user', 'token', 'resource', 'provider'];
 const VALID_GROUP_BY = ['hour', 'day', 'month'] as const;
-const VALID_GROUP_BY_ENTITY: SpendGroupByEntity[] = ['user', 'api_key'];
+const VALID_GROUP_BY_ENTITY: SpendGroupByEntity[] = ['user', 'api_key', 'agent'];
 
 function parseDate(value: string | undefined, field: string): Date | undefined {
   if (!value) return undefined;
@@ -133,7 +133,7 @@ export const clientSpendApiPlugin: FastifyPluginAsync = async (app) => {
 
       if (query.group_by_entity !== undefined) {
         if (!(VALID_GROUP_BY_ENTITY as readonly string[]).includes(query.group_by_entity)) {
-          return reply.code(400).send({ error: '`group_by_entity` must be user or api_key' });
+          return reply.code(400).send({ error: '`group_by_entity` must be user, api_key, or agent' });
         }
         const entity = query.group_by_entity as SpendGroupByEntity;
 
@@ -151,7 +151,11 @@ export const clientSpendApiPlugin: FastifyPluginAsync = async (app) => {
           },
         );
 
-        const idField = entity === 'user' ? 'user_id' : 'api_token_id';
+        const idField = entity === 'user'
+          ? 'user_id'
+          : entity === 'agent'
+            ? 'agent_key'
+            : 'api_token_id';
         return reply.code(200).send({
           object: 'spend.breakdown',
           group_by_entity: entity,

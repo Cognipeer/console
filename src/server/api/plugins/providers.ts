@@ -1,4 +1,4 @@
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import type { ProviderDomain } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { providerRegistry } from '@/lib/providers';
@@ -12,6 +12,7 @@ import {
   deleteProviderConfig,
   getProviderConfigById,
   listProviderConfigs,
+  ProviderCredentialDecryptError,
   updateProviderConfig,
 } from '@/lib/services/providers/providerService';
 import {
@@ -23,6 +24,27 @@ import {
 } from '../fastify-utils';
 
 const logger = createLogger('api:providers');
+
+/**
+ * These handlers used to swallow every failure into an unlogged
+ * `{ error: 'Internal server error' }`, so the most common real cause — stored
+ * credentials that cannot be decrypted with this environment's key — was
+ * invisible in both the UI and the server log.
+ */
+function sendProviderError(reply: FastifyReply, error: unknown) {
+  logger.error('Provider request failed', {
+    error: error instanceof Error ? error.message : String(error),
+    name: error instanceof Error ? error.name : undefined,
+  });
+
+  if (error instanceof ProviderCredentialDecryptError) {
+    return reply.code(409).send({ error: error.message });
+  }
+
+  return reply.code(500).send({
+    error: error instanceof Error ? error.message : 'Internal server error',
+  });
+}
 
 function parseStatus(value: string | undefined): ProviderStatus | undefined {
   if (value === 'active' || value === 'disabled' || value === 'errored') {
@@ -148,7 +170,7 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ providers });
     } catch (error) {
       return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Internal server error' });
+        ?? sendProviderError(reply, error);
     }
   }));
 
@@ -247,7 +269,7 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ provider });
     } catch (error) {
       return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Internal server error' });
+        ?? sendProviderError(reply, error);
     }
   }));
 
@@ -300,7 +322,7 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ provider: updated });
     } catch (error) {
       return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Internal server error' });
+        ?? sendProviderError(reply, error);
     }
   }));
 
@@ -350,7 +372,7 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ success: true });
     } catch (error) {
       return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Internal server error' });
+        ?? sendProviderError(reply, error);
     }
   }));
 };

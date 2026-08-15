@@ -94,8 +94,8 @@ export interface IGuardrail {
 export type EvaluationTargetKind = 'agent' | 'model' | 'external';
 export type EvaluationRunStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
 export type EvaluationRunMode = 'sync' | 'async';
-export type EvaluationDatasetSource = 'manual' | 'file' | 'generated';
-export type EvaluationScorerType = 'assertion' | 'llm-judge' | 'semantic';
+export type EvaluationDatasetSource = 'manual' | 'file' | 'generated' | 'imported';
+export type EvaluationScorerType = 'assertion' | 'llm-judge' | 'semantic' | 'tool-call';
 
 export interface IEvaluationExternalTarget {
   protocol: 'openai-chat' | 'webhook';
@@ -128,8 +128,21 @@ export interface IEvaluationTarget {
 
 export interface IEvaluationDatasetItem {
   id: string;
-  input: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
+  input: Array<{
+    role: 'system' | 'user' | 'assistant' | 'tool';
+    content: string;
+    /** Assistant turns: tool calls issued in this turn. */
+    toolCalls?: Array<{ id?: string; name: string; args: Record<string, unknown> }>;
+    /** Tool turns: id of the assistant tool call this responds to. */
+    toolCallId?: string;
+    /** Tool turns: tool name, when recorded. */
+    name?: string;
+  }>;
   expected?: Record<string, unknown>;
+  /** Tools exposed to the target for trajectory testing (never executed). */
+  tools?: Array<{ name: string; description?: string; parameters?: Record<string, unknown> }>;
+  /** Canned tool results; key format: `name + '(' + canonicalJson(args) + ')'`. */
+  toolResults?: Record<string, unknown>;
   tags?: string[];
 }
 
@@ -141,10 +154,40 @@ export interface IEvaluationDataset {
   name: string;
   description?: string;
   source: EvaluationDatasetSource;
-  items: IEvaluationDatasetItem[];
+  /**
+   * LEGACY embedded storage. Live items are rows in the separate
+   * `evaluation_dataset_items` collection/table (see
+   * IEvaluationDatasetItemRecord); this field survives only on documents
+   * created before the split and is migrated (then cleared) on the first
+   * item write. Writers may still PASS `items` to create/update — the
+   * provider routes them to the item collection — but readers must use the
+   * item methods, never this field.
+   */
+  items?: IEvaluationDatasetItem[];
+  /** Denormalised item count, maintained by the provider's item methods. */
+  itemCount?: number;
   metadata?: Record<string, unknown>;
   createdBy: string;
   updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+/**
+ * One dataset item as persisted in the dedicated `evaluation_dataset_items`
+ * collection/table. Items used to live embedded on the dataset document,
+ * which capped a whole dataset at one Mongo document (16MB) and forced every
+ * read/write to ship the full array; each item is now its own row keyed by
+ * (datasetId, itemId) with a stable `position` for ordering.
+ */
+export interface IEvaluationDatasetItemRecord extends IEvaluationDatasetItem {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  /** Parent dataset `_id` (string form). */
+  datasetId: string;
+  /** Stable sort position within the dataset (0-based). */
+  position: number;
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -154,6 +197,10 @@ export interface IEvaluationScorerConfig {
   weight?: number;
   rubric?: string;
   threshold?: number;
+  // tool-call scorer component weights (selection F1 / order / arg matching)
+  selectionWeight?: number;
+  sequenceWeight?: number;
+  argsWeight?: number;
 }
 
 export interface IEvaluationSuite {
@@ -187,13 +234,27 @@ export interface IEvaluationScore {
   error?: string;
 }
 
+/** Token / cost usage captured for one run item's target invocation. */
+export interface IEvaluationUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedInputTokens?: number;
+  costUsd?: number;
+}
+
 export interface IEvaluationRunItem {
   itemId: string;
-  output?: { text: string; latencyMs?: number };
+  output?: {
+    text: string;
+    latencyMs?: number;
+    /** Tool calls emitted by the target (trajectory scoring / display). */
+    toolCalls?: Array<{ name: string; args: Record<string, unknown> }>;
+  };
   scores: IEvaluationScore[];
   score: number;
   passed: boolean;
   latencyMs?: number;
+  usage?: IEvaluationUsage;
   error?: string;
 }
 
@@ -205,6 +266,9 @@ export interface IEvaluationRunAggregate {
   passRate: number;
   avgScore: number;
   avgLatencyMs: number | null;
+  /** Present only when at least one item reported provider usage. */
+  totalCostUsd?: number;
+  totalTokens?: number;
 }
 
 export interface IEvaluationRun {

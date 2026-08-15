@@ -13,6 +13,7 @@ import type {
   IEvaluationTarget,
   IEvaluationDataset,
   IEvaluationDatasetItem,
+  IEvaluationDatasetItemRecord,
   IEvaluationSuite,
   IEvaluationScorerConfig,
   IEvaluationRun,
@@ -60,13 +61,29 @@ function mapScorer(config: IEvaluationScorerConfig): ScorerConfig {
   if (config.type === 'semantic') {
     return { type: 'semantic', weight: config.weight, threshold: config.threshold };
   }
+  if (config.type === 'tool-call') {
+    return {
+      type: 'tool-call',
+      weight: config.weight,
+      threshold: config.threshold,
+      selectionWeight: config.selectionWeight,
+      sequenceWeight: config.sequenceWeight,
+      argsWeight: config.argsWeight,
+    };
+  }
   return { type: 'assertion', weight: config.weight };
 }
 
 function toRunItem(result: RunItemResult): IEvaluationRunItem {
   return {
     itemId: result.itemId,
-    output: result.output ? { text: result.output.text, latencyMs: result.output.latencyMs } : undefined,
+    output: result.output
+      ? {
+          text: result.output.text,
+          latencyMs: result.output.latencyMs,
+          toolCalls: result.output.toolCalls,
+        }
+      : undefined,
     scores: result.scores.map((s) => ({
       scorerType: s.scorerType,
       score: s.score,
@@ -78,6 +95,7 @@ function toRunItem(result: RunItemResult): IEvaluationRunItem {
     score: result.score,
     passed: result.passed,
     latencyMs: result.latencyMs,
+    usage: result.usage,
     error: result.error,
   };
 }
@@ -220,6 +238,87 @@ export async function deleteDataset(tenantDbName: string, id: string): Promise<b
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
   return db.deleteEvaluationDataset(id);
+}
+
+// ── Dataset items ──────────────────────────────────────────────────────────
+
+/** Page size used when the engine needs every item of a dataset. */
+const DATASET_ITEM_PAGE_SIZE = 200;
+
+/** One page of dataset items plus the dataset's total item count. */
+export async function listDatasetItems(
+  tenantDbName: string,
+  datasetId: string,
+  options?: { skip?: number; limit?: number; search?: string },
+): Promise<{ items: IEvaluationDatasetItem[]; total: number }> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const [records, total] = await Promise.all([
+    db.listEvaluationDatasetItems(datasetId, options),
+    db.countEvaluationDatasetItems(datasetId, options?.search),
+  ]);
+  return { items: records.map(toDatasetItemView), total };
+}
+
+/** Append items to a dataset. Rejects duplicate item ids. */
+export async function appendDatasetItems(
+  tenantDbName: string,
+  datasetId: string,
+  items: IEvaluationDatasetItem[],
+): Promise<{ added: number; total: number }> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const added = await db.createEvaluationDatasetItems(datasetId, items);
+  const total = await db.countEvaluationDatasetItems(datasetId);
+  return { added, total };
+}
+
+/** Update one dataset item in place (item id itself is immutable). */
+export async function updateDatasetItem(
+  tenantDbName: string,
+  datasetId: string,
+  itemId: string,
+  data: Partial<Omit<IEvaluationDatasetItem, 'id'>>,
+): Promise<IEvaluationDatasetItem | null> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const updated = await db.updateEvaluationDatasetItem(datasetId, itemId, data);
+  return updated ? toDatasetItemView(updated) : null;
+}
+
+export async function deleteDatasetItem(
+  tenantDbName: string,
+  datasetId: string,
+  itemId: string,
+): Promise<boolean> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  return db.deleteEvaluationDatasetItem(datasetId, itemId);
+}
+
+/** Strip storage fields off an item record for API/engine consumption. */
+function toDatasetItemView(record: IEvaluationDatasetItemRecord): IEvaluationDatasetItem {
+  return {
+    id: record.id,
+    input: record.input,
+    ...(record.expected != null ? { expected: record.expected } : {}),
+    ...(record.tools != null ? { tools: record.tools } : {}),
+    ...(record.toolResults != null ? { toolResults: record.toolResults } : {}),
+    ...(record.tags != null ? { tags: record.tags } : {}),
+  };
+}
+
+/** Load EVERY item of a dataset, paging through the item collection. */
+async function loadAllDatasetItems(
+  db: Awaited<ReturnType<typeof getDatabase>>,
+  datasetId: string,
+): Promise<IEvaluationDatasetItem[]> {
+  const all: IEvaluationDatasetItem[] = [];
+  for (let skip = 0; ; skip += DATASET_ITEM_PAGE_SIZE) {
+    const page = await db.listEvaluationDatasetItems(datasetId, { skip, limit: DATASET_ITEM_PAGE_SIZE });
+    all.push(...page.map(toDatasetItemView));
+    if (page.length < DATASET_ITEM_PAGE_SIZE) return all;
+  }
 }
 
 // ── Suites ─────────────────────────────────────────────────────────────────
@@ -377,7 +476,11 @@ async function createPendingRun(params: RunSuiteParams, mode: IEvaluationRun['mo
     datasetKey: dataset.key,
     status: 'pending',
     mode,
-    progress: { total: dataset.items.length, completed: 0, failed: 0 },
+    progress: {
+      total: dataset.itemCount ?? (await db.countEvaluationDatasetItems(String(dataset._id))),
+      completed: 0,
+      failed: 0,
+    },
     items: [],
     createdBy,
   });
@@ -406,10 +509,13 @@ export async function executeRun(
     const dataset = await db.findEvaluationDatasetByKey(suite.datasetKey, projectId);
     if (!dataset) throw new Error(`Evaluation dataset "${suite.datasetKey}" not found`);
 
-    const items: DatasetItem[] = dataset.items.map((it) => ({
+    const datasetItems = await loadAllDatasetItems(db, String(dataset._id));
+    const items: DatasetItem[] = datasetItems.map((it) => ({
       id: it.id,
       input: it.input,
       expected: it.expected as DatasetItem['expected'],
+      tools: it.tools,
+      toolResults: it.toolResults,
       tags: it.tags,
     }));
     const scorers: ScorerConfig[] = suite.scorers.map(mapScorer);

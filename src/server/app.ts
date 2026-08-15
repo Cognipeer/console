@@ -82,7 +82,28 @@ function registerBodyParsers(app: FastifyInstance): void {
 }
 
 export async function createServer(dev: boolean): Promise<FastifyInstance> {
-  await bootstrapApplication();
+  const nextApp = next({
+    dev,
+    dir: process.cwd(),
+  });
+
+  // Don't gate the server's ability to accept connections on the full
+  // bootstrap chain (cache/queue/cluster + tenant reconciliation +
+  // schedulers can take a while, especially with many tenants). Fire it in
+  // the background and let `isApplicationReady()` — checked by the global
+  // API `onRequest` hook and `/health/ready` — return 503 for requests that
+  // land before it's done, instead of either blocking every response on it
+  // or running them against half-initialized providers. Still need to catch
+  // here: nothing else awaits this particular call, so an unhandled
+  // rejection would otherwise crash the process.
+  const bootstrap = bootstrapApplication();
+  bootstrap.catch((error) => {
+    logger.error('Bootstrap failed', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
+
+  await nextApp.prepare();
 
   const config = getConfig();
   const app = Fastify({
@@ -95,12 +116,6 @@ export async function createServer(dev: boolean): Promise<FastifyInstance> {
   registerBodyParsers(app);
   await app.register(fastifyApiPlugin, { prefix: '/api' });
 
-  const nextApp = next({
-    dev,
-    dir: process.cwd(),
-  });
-
-  await nextApp.prepare();
   const nextHandler = nextApp.getRequestHandler();
 
   app.all('/*', async (request, reply) => {

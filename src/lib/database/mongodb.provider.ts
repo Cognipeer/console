@@ -44,6 +44,7 @@ import { CrawlerMixin } from './mongodb/crawler.mixin';
 import { OcrJobMixin } from './mongodb/ocr-jobs.mixin';
 import { BatchJobMixin } from './mongodb/batch.mixin';
 import { UsageRollupMixin } from './mongodb/usage.mixin';
+import { ExternalModelPricingMixin } from './mongodb/external-model-pricing.mixin';
 import { AuditMixin } from './mongodb/audit.mixin';
 import { UserProjectMixin } from './mongodb/user-project.mixin';
 import { ClusterMixin } from './mongodb/cluster.mixin';
@@ -78,10 +79,11 @@ const PlatformBase = McpServerMixin(ConfigMixin(KnowledgeBase));
 const ToolingBase = VectorMigrationMixin(AgentMixin(ToolMixin(PlatformBase)));
 const AdvancedBase = OcrJobMixin(CrawlerMixin(AuditMixin(BrowserMixin(ToolingBase))));
 const BulkBase = UsageRollupMixin(BatchJobMixin(AdvancedBase));
+const PricingBase = ExternalModelPricingMixin(BulkBase);
 
 // Group 6 – Cluster (system-wide; uses main DB). Single-node node registry
 // stays in the community edition; cluster orchestration/admin is enterprise.
-const ClusterBase = ClusterMixin(BulkBase);
+const ClusterBase = ClusterMixin(PricingBase);
 
 // Group 7 – Signup gating (main database; beta access codes)
 const SignupBase = BetaAccessCodeMixin(ClusterBase);

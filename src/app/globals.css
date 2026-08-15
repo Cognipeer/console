@@ -1221,6 +1221,21 @@ textarea.ds-input { height: auto; padding: 10px 12px; line-height: 1.5; resize: 
   color: var(--ds-err);
 }
 
+/* Form field rows */
+/* Helper text renders under the control (FIELD_WRAPPER_ORDER in theme.ts),
+   which is what lines fields up inside a SimpleGrid/Grid row. A Group is flex
+   and centres its children by default, so there a field carrying helper text —
+   taller than one without — would still pull its neighbour's label and control
+   off the row's shared top edge. Hanging such a row from its top edge fixes
+   that. Scoped to Groups whose every direct child is a field, so mixed rows
+   (field + button, field + text) keep Mantine's centring. Left unscoped by
+   AppShell on purpose: form rows also live in modals and drawers. */
+.mantine-Group-root:has(> .mantine-InputWrapper-root):not(
+    :has(> :not(.mantine-InputWrapper-root))
+  ) {
+  align-items: flex-start;
+}
+
 /* ── Select / NativeSelect ─────────────────────────────────────── */
 :where(.mantine-AppShell-main) .mantine-Select-input,
 :where(.mantine-AppShell-main) .mantine-NativeSelect-input,

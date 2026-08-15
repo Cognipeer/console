@@ -71,7 +71,7 @@
       "searchKeywords": [
         "prompt",
         "template",
-        "\u015fablon"
+        "şablon"
       ],
       "defaultPinned": true,
       "popular": true
@@ -399,7 +399,7 @@
         "mask",
         "kvkk",
         "gdpr",
-        "ki\u015fisel veri"
+        "kişisel veri"
       ],
       "badge": "new"
     },
@@ -440,7 +440,7 @@
       ],
       "searchKeywords": [
         "browser",
-        "taray\u0131c\u0131",
+        "tarayıcı",
         "playwright",
         "automation",
         "session",
@@ -478,8 +478,22 @@
       "category": "data",
       "navLabelKey": "websearch",
       "navDescriptionKey": "websearchDescription",
-      "tags": ["search", "web", "providers"],
-      "searchKeywords": ["web search", "search", "bing", "brave", "serper", "tavily", "searxng", "duckduckgo", "serp"],
+      "tags": [
+        "search",
+        "web",
+        "providers"
+      ],
+      "searchKeywords": [
+        "web search",
+        "search",
+        "bing",
+        "brave",
+        "serper",
+        "tavily",
+        "searxng",
+        "duckduckgo",
+        "serp"
+      ],
       "badge": "new"
     },
     {
@@ -529,6 +543,32 @@
       "badge": "new"
     },
     {
+      "id": "cost",
+      "href": "/dashboard/cost",
+      "icon": "IconCoins",
+      "category": "operate",
+      "navLabelKey": "cost",
+      "navDescriptionKey": "costDescription",
+      "tags": [
+        "finops",
+        "spend",
+        "pricing"
+      ],
+      "searchKeywords": [
+        "cost",
+        "spend",
+        "pricing",
+        "budget",
+        "finops",
+        "optimization",
+        "recommendation",
+        "parity",
+        "savings",
+        "latency"
+      ],
+      "badge": "new"
+    },
+    {
       "id": "automations",
       "href": "/dashboard/automations",
       "icon": "IconClock",
@@ -568,7 +608,7 @@
         "node",
         "scaling",
         "instance",
-        "k\u00fcmeleme"
+        "kümeleme"
       ],
       "tenantAdminOnly": true,
       "requiresEnterprise": true,
@@ -641,8 +681,21 @@
       "category": "operate",
       "navLabelKey": "aegis",
       "navDescriptionKey": "aegisDescription",
-      "tags": ["policy", "enforcement", "dlp", "approvals"],
-      "searchKeywords": ["aegis", "policy", "enforcement", "dlp", "redaction", "approval", "tool call"],
+      "tags": [
+        "policy",
+        "enforcement",
+        "dlp",
+        "approvals"
+      ],
+      "searchKeywords": [
+        "aegis",
+        "policy",
+        "enforcement",
+        "dlp",
+        "redaction",
+        "approval",
+        "tool call"
+      ],
       "badge": "new",
       "requiresEnterprise": true,
       "enterpriseModule": "aegis"
@@ -692,7 +745,7 @@
         "users",
         "invite",
         "tenant",
-        "\u00fcyeler"
+        "üyeler"
       ],
       "tenantAdminOnly": true,
       "settings": true
@@ -728,7 +781,7 @@
       "searchKeywords": [
         "providers",
         "integrations",
-        "sa\u011flay\u0131c\u0131lar"
+        "sağlayıcılar"
       ],
       "tenantAdminOnly": true,
       "settings": true

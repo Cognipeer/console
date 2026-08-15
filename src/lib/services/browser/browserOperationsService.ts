@@ -1,4 +1,4 @@
-import { getDatabase, getTenantDatabase } from '@/lib/database';
+import { getDatabase, runWithTenantScope } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { browserManager } from './browserManager';
 
@@ -21,22 +21,23 @@ export async function reconcileOrphanedBrowserSessions(): Promise<{
     tenantsScanned += 1;
 
     try {
-      const tenantDb = await getTenantDatabase(tenant.dbName);
       const tenantId = String(tenant._id);
-      const sessions = await tenantDb.listBrowserSessions(tenantId);
+      await runWithTenantScope(tenant.dbName, async (tenantDb) => {
+        const sessions = await tenantDb.listBrowserSessions(tenantId);
 
-      for (const session of sessions) {
-        if (!ACTIVE_SESSION_STATUSES.has(session.status)) continue;
-        if (browserManager.hasSession(session.sessionKey)) continue;
+        for (const session of sessions) {
+          if (!ACTIVE_SESSION_STATUSES.has(session.status)) continue;
+          if (browserManager.hasSession(session.sessionKey)) continue;
 
-        await tenantDb.updateBrowserSession(String(session._id), {
-          endedAt: new Date(),
-          errorMessage: session.errorMessage ?? 'Browser runtime restarted before the session completed',
-          status: 'expired',
-          updatedBy: 'system:browser-reconcile',
-        });
-        sessionsReconciled += 1;
-      }
+          await tenantDb.updateBrowserSession(String(session._id), {
+            endedAt: new Date(),
+            errorMessage: session.errorMessage ?? 'Browser runtime restarted before the session completed',
+            status: 'expired',
+            updatedBy: 'system:browser-reconcile',
+          });
+          sessionsReconciled += 1;
+        }
+      });
     } catch (error) {
       logger.warn('Failed to reconcile tenant browser sessions', {
         error: error instanceof Error ? error.message : String(error),

@@ -19,7 +19,7 @@ import { sendApiTokenError, withClientApiRequestContext } from '../fastify-utils
 
 const logger = createLogger('api:client-analytics');
 
-const VALID_GROUP_BY = ['model', 'user', 'token', 'service'] as const;
+const VALID_GROUP_BY = ['model', 'user', 'token', 'service', 'agent'] as const;
 const VALID_INTERVAL = ['hour', 'day', 'month'] as const;
 
 class AnalyticsRequestError extends Error {
@@ -51,7 +51,7 @@ export const clientAnalyticsApiPlugin: FastifyPluginAsync = async (app) => {
       };
       const groupBy = query.group_by ?? 'model';
       if (!(VALID_GROUP_BY as readonly string[]).includes(groupBy)) {
-        return reply.code(400).send({ error: '`group_by` must be model, user, token, or service' });
+        return reply.code(400).send({ error: '`group_by` must be model, user, token, service, or agent' });
       }
       const interval = query.interval ?? 'day';
       if (!(VALID_INTERVAL as readonly string[]).includes(interval)) {
@@ -146,8 +146,8 @@ export const clientAnalyticsApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
-      // group_by=user | token → per-entity attribution from usage_daily.
-      const entity = groupBy === 'token' ? 'api_key' : 'user';
+      // group_by=user | token | agent → per-entity attribution from usage_daily.
+      const entity = groupBy === 'token' ? 'api_key' : groupBy === 'agent' ? 'agent' : 'user';
       const breakdown = await getSpendEntityBreakdown(
         {
           tenantDbName: auth.tenantDbName,
@@ -162,7 +162,11 @@ export const clientAnalyticsApiPlugin: FastifyPluginAsync = async (app) => {
         },
       );
 
-      const idField = entity === 'user' ? 'user_id' : 'api_token_id';
+      const idField = entity === 'user'
+        ? 'user_id'
+        : entity === 'agent'
+          ? 'agent_key'
+          : 'api_token_id';
       return reply.code(200).send({
         object: 'analytics.usage',
         group_by: groupBy,

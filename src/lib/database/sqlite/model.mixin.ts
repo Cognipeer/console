@@ -215,6 +215,12 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
 
       const where = `WHERE ${clauses.join(' AND ')}`;
 
+      // `pricingSnapshot` is stored as JSON text here (Mongo stores it as a
+      // subdocument and sums `$pricingSnapshot.totalCost`). Without these
+      // json_extract sums this provider returned no cost at all, so every
+      // SQLite deployment — which includes the docker-compose quickstart —
+      // showed an empty Spend column in the Model Hub while the numbers were
+      // sitting in the column unread.
       const agg = db.prepare(`
         SELECT
           COUNT(*) as totalCalls,
@@ -226,10 +232,26 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
           SUM(totalTokens) as totalTokens,
           SUM(COALESCE(toolCalls, 0)) as totalToolCalls,
           SUM(CASE WHEN cacheHit = 1 THEN 1 ELSE 0 END) as cacheHits,
-          SUM(CASE WHEN cacheHit = 0 OR cacheHit IS NULL THEN 1 ELSE 0 END) as cacheMisses,
-          AVG(latencyMs) as avgLatencyMs
+          SUM(CASE WHEN status = 'success' AND (cacheHit = 0 OR cacheHit IS NULL) THEN 1 ELSE 0 END) as cacheMisses,
+          AVG(latencyMs) as avgLatencyMs,
+          SUM(COALESCE(json_extract(pricingSnapshot, '$.totalCost'), 0)) as totalCost,
+          SUM(COALESCE(json_extract(pricingSnapshot, '$.inputCost'), 0)) as inputCost,
+          SUM(COALESCE(json_extract(pricingSnapshot, '$.outputCost'), 0)) as outputCost,
+          SUM(COALESCE(json_extract(pricingSnapshot, '$.cachedCost'), 0)) as cachedCost
         FROM ${TABLES.modelUsageLogs} ${where}
       `).get(params) as SqliteRow;
+
+      // Mongo takes `$first` of the currency across the matched rows, which is
+      // unordered; LIMIT 1 over the same set is the equivalent.
+      const currencyRow = db.prepare(`
+        SELECT json_extract(pricingSnapshot, '$.currency') as currency
+        FROM ${TABLES.modelUsageLogs} ${where}
+          AND pricingSnapshot IS NOT NULL
+          AND json_extract(pricingSnapshot, '$.currency') IS NOT NULL
+        LIMIT 1
+      `).get(params) as SqliteRow | undefined;
+
+      const totalCost = (agg.totalCost as number) ?? 0;
 
       const result: IModelUsageAggregate = {
         modelKey,
@@ -244,6 +266,19 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         cacheHits: (agg.cacheHits as number) ?? 0,
         cacheMisses: (agg.cacheMisses as number) ?? 0,
         avgLatencyMs: (agg.avgLatencyMs as number) ?? null,
+        // Mirrors the Mongo provider: omitted entirely when nothing is priced,
+        // so callers can distinguish "no pricing configured" from "$0".
+        ...(totalCost
+          ? {
+              costSummary: {
+                currency: (currencyRow?.currency as string) || 'USD',
+                totalCost,
+                inputCost: (agg.inputCost as number) ?? 0,
+                outputCost: (agg.outputCost as number) ?? 0,
+                cachedCost: (agg.cachedCost as number) ?? 0,
+              },
+            }
+          : {}),
       };
 
       // Timeseries
@@ -262,7 +297,8 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
             SUM(outputTokens) as outputTokens,
             SUM(COALESCE(cachedInputTokens, 0)) as cachedInputTokens,
             SUM(totalTokens) as totalTokens,
-            SUM(CASE WHEN cacheHit = 1 THEN 1 ELSE 0 END) as cacheHits
+            SUM(CASE WHEN cacheHit = 1 THEN 1 ELSE 0 END) as cacheHits,
+            SUM(COALESCE(json_extract(pricingSnapshot, '$.totalCost'), 0)) as totalCost
           FROM ${TABLES.modelUsageLogs} ${where}
           GROUP BY period
           ORDER BY period ASC
@@ -275,6 +311,7 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
           outputTokens: (r.outputTokens as number) ?? 0,
           cachedInputTokens: (r.cachedInputTokens as number) ?? 0,
           totalTokens: (r.totalTokens as number) ?? 0,
+          totalCost: (r.totalCost as number) ?? 0,
           cacheHits: (r.cacheHits as number) ?? 0,
         }));
       }

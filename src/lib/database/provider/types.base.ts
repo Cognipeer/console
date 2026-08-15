@@ -445,6 +445,7 @@ export type DynamicRoutingSignal =
   | 'hasTools' // request supplies tools / tool_choice
   | 'hasResponseFormat' // request requests a structured response_format
   | 'hasImages' // any message carries image content (multimodal)
+  | 'estimatedCostUsd' // estimated request cost priced at the default model (input est. + max_tokens output)
   | 'keyword'; // regex / substring match on the latest user message
 
 export type DynamicRoutingOperator =
@@ -703,7 +704,9 @@ export interface IModel {
 }
 
 export type UsageActorType = 'user' | 'api_token' | 'system';
-export type UsageSource = 'api' | 'dashboard' | 'system';
+/** 'tracing' marks rows derived from agent observability ingests (traces),
+ *  as opposed to calls served by the gateway itself. */
+export type UsageSource = 'api' | 'dashboard' | 'system' | 'tracing';
 
 /**
  * Shared attribution envelope for every per-service usage/log record. Filled
@@ -777,6 +780,9 @@ export interface IUsageDaily {
   service: string;
   /** Service-local resource key: modelKey, searchKey, toolKey, ... */
   refKey: string;
+  /** Agent the usage is attributed to (tracing agentName); '' when absent.
+   *  Rows written before the dimension shipped lack the field entirely. */
+  agentKey: string;
   /** UTC calendar day, 'YYYY-MM-DD'. */
   day: string;
   /**
@@ -809,6 +815,8 @@ export interface IUsageDailyIncrement {
   source: string;
   service: string;
   refKey: string;
+  /** Agent attribution dimension; providers default it to ''. */
+  agentKey?: string;
   day: string;
   requests?: number;
   errors?: number;

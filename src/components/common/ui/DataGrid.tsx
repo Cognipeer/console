@@ -391,6 +391,19 @@ export default function DataGrid<T>({
               {footerRight}
               {pagination ? (
                 <>
+                  {pagination.onPageSizeChange && pagination.pageSizeOptions?.length ? (
+                    <select
+                      className="ds-select"
+                      value={pagination.pageSize}
+                      aria-label="Rows per page"
+                      style={{ fontSize: 12, padding: '2px 6px' }}
+                      onChange={(e) => pagination.onPageSizeChange?.(Number(e.target.value))}
+                    >
+                      {pagination.pageSizeOptions.map((n) => (
+                        <option key={n} value={n}>{n} / page</option>
+                      ))}
+                    </select>
+                  ) : null}
                   <Button
                     variant="default"
                     size="xs"

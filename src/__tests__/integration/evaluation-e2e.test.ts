@@ -21,16 +21,20 @@ process.env.MAIN_DB_NAME = 'eval_e2e_main';
 import { reloadConfig } from '@/lib/core/config';
 import { disconnectDatabase, getDatabase } from '@/lib/database';
 import {
+  appendDatasetItems,
   createDataset,
   createSuite,
   createTarget,
+  deleteDatasetItem,
   deleteTarget,
   getRun,
+  listDatasetItems,
   listDatasets,
   listRuns,
   listSuites,
   listTargets,
   runSuite,
+  updateDatasetItem,
   updateTarget,
 } from '@/lib/services/evaluation/service';
 
@@ -68,7 +72,12 @@ describe('Evaluation service — full vertical (SQLite)', () => {
       ],
     });
     expect(dataset.id).toBeTruthy();
-    expect(dataset.items).toHaveLength(2);
+    // Items live in their own table — the dataset carries only the count.
+    expect(dataset.itemCount).toBe(2);
+    expect(dataset.items).toBeUndefined();
+    const page = await listDatasetItems(TENANT_DB_NAME, dataset.id);
+    expect(page.total).toBe(2);
+    expect(page.items.map((i) => i.id)).toEqual(['q1', 'q2']);
 
     const suite = await createSuite(TENANT_DB_NAME, TENANT_ID, ACTOR, {
       name: 'Smoke Suite',
@@ -154,5 +163,106 @@ describe('Evaluation service — full vertical (SQLite)', () => {
     expect(run.aggregate?.failed).toBe(1);
     expect(run.aggregate?.completed).toBe(0);
     expect(run.items[0].error).toMatch(/model exploded/);
+  });
+
+  it('supports item-level CRUD with pagination, search and dup-id rejection', async () => {
+    const dataset = await createDataset(TENANT_DB_NAME, TENANT_ID, ACTOR, {
+      name: 'Item CRUD Dataset',
+      items: [
+        { id: 'a1', input: [{ role: 'user', content: 'alpha question' }], tags: ['alpha'] },
+        { id: 'a2', input: [{ role: 'user', content: 'beta question' }] },
+      ],
+    });
+
+    // Append two more; they land AFTER the existing items.
+    const appended = await appendDatasetItems(TENANT_DB_NAME, dataset.id, [
+      { id: 'a3', input: [{ role: 'user', content: 'gamma question' }] },
+      { id: 'a4', input: [{ role: 'user', content: 'delta question' }], tags: ['alpha'] },
+    ]);
+    expect(appended).toEqual({ added: 2, total: 4 });
+
+    // Pagination respects position order.
+    const page2 = await listDatasetItems(TENANT_DB_NAME, dataset.id, { skip: 2, limit: 2 });
+    expect(page2.total).toBe(4);
+    expect(page2.items.map((i) => i.id)).toEqual(['a3', 'a4']);
+
+    // Search over id / input content / tags.
+    const byTag = await listDatasetItems(TENANT_DB_NAME, dataset.id, { search: 'alpha' });
+    expect(byTag.items.map((i) => i.id).sort()).toEqual(['a1', 'a4']);
+    expect(byTag.total).toBe(2);
+
+    // Duplicate item ids are rejected atomically.
+    await expect(
+      appendDatasetItems(TENANT_DB_NAME, dataset.id, [
+        { id: 'a1', input: [{ role: 'user', content: 'dup' }] },
+      ]),
+    ).rejects.toThrow(/already exists/);
+
+    // In-place update keeps the id and position.
+    const updated = await updateDatasetItem(TENANT_DB_NAME, dataset.id, 'a2', {
+      expected: { reference: 'beta answer' },
+      tags: ['updated'],
+    });
+    expect(updated?.expected).toEqual({ reference: 'beta answer' });
+    const afterUpdate = await listDatasetItems(TENANT_DB_NAME, dataset.id);
+    expect(afterUpdate.items.map((i) => i.id)).toEqual(['a1', 'a2', 'a3', 'a4']);
+
+    // Delete recounts the parent.
+    expect(await deleteDatasetItem(TENANT_DB_NAME, dataset.id, 'a3')).toBe(true);
+    const datasets = await listDatasets(TENANT_DB_NAME, { search: 'Item CRUD' });
+    expect(datasets[0]?.itemCount).toBe(3);
+  });
+
+  it('serves and migrates datasets whose items are still embedded (legacy)', async () => {
+    const db = await getDatabase();
+    await db.switchToTenant(TENANT_DB_NAME);
+    // Simulate a pre-split dataset row: items embedded as a JSON column, no
+    // itemCount, no item rows. Written straight through the raw connection.
+    const raw = (db as unknown as { getTenantDb: () => import('better-sqlite3').Database }).getTenantDb();
+    const now = new Date().toISOString();
+    raw.prepare(`
+      INSERT INTO evaluation_datasets
+      (id, tenantId, projectId, key, name, source, items, metadata, createdBy, createdAt, updatedAt)
+      VALUES (@id, @tenantId, NULL, @key, @name, 'manual', @items, '{}', @createdBy, @now, @now)
+    `).run({
+      id: 'legacy-ds-1',
+      tenantId: TENANT_ID,
+      key: 'legacy-embedded',
+      name: 'Legacy Embedded',
+      items: JSON.stringify([
+        { id: 'l1', input: [{ role: 'user', content: 'legacy one' }] },
+        { id: 'l2', input: [{ role: 'user', content: 'legacy two' }], tags: ['keep'] },
+        // Legacy storage never enforced id uniqueness — the migration must
+        // sanitize (rename) instead of bricking every write on this dataset.
+        { id: 'l2', input: [{ role: 'user', content: 'legacy dup' }] },
+      ]),
+      createdBy: ACTOR,
+      now,
+    });
+
+    // Reads are transparent before migration.
+    const listed = await listDatasets(TENANT_DB_NAME, { search: 'Legacy Embedded' });
+    expect(listed[0]?.itemCount).toBe(3);
+    const page = await listDatasetItems(TENANT_DB_NAME, 'legacy-ds-1');
+    expect(page.total).toBe(3);
+    expect(page.items.map((i) => i.id)).toEqual(['l1', 'l2', 'l2']);
+
+    // First WRITE migrates the embedded array into the item table; the
+    // duplicate legacy id is renamed deterministically instead of failing.
+    await appendDatasetItems(TENANT_DB_NAME, 'legacy-ds-1', [
+      { id: 'l3', input: [{ role: 'user', content: 'post-migration' }] },
+    ]);
+    const migrated = await listDatasetItems(TENANT_DB_NAME, 'legacy-ds-1');
+    expect(migrated.total).toBe(4);
+    expect(migrated.items.map((i) => i.id)).toEqual(['l1', 'l2', 'l2-2', 'l3']);
+    const rowCount = raw
+      .prepare(`SELECT COUNT(*) AS n FROM evaluation_dataset_items WHERE datasetId = 'legacy-ds-1'`)
+      .get() as { n: number };
+    expect(rowCount.n).toBe(4);
+    const legacyColumn = raw
+      .prepare(`SELECT items, itemCount FROM evaluation_datasets WHERE id = 'legacy-ds-1'`)
+      .get() as { items: string; itemCount: number };
+    expect(legacyColumn.items).toBe('[]');
+    expect(legacyColumn.itemCount).toBe(4);
   });
 });

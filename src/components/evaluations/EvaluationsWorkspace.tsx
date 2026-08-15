@@ -13,8 +13,10 @@ import { useRouter } from 'next/navigation';
 import { Button, Group, Loader, Modal, Text } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
+  IconCamera,
   IconChecklist,
   IconDatabase,
+  IconFileImport,
   IconPencil,
   IconPlayerPlay,
   IconPlus,
@@ -111,10 +113,13 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
     void loadAll();
   }, []);
 
-  // Poll while any dataset is still generating in the background.
-  const hasGenerating = datasets.some(
-    (d) => d.metadata?.generation?.status === 'pending' || d.metadata?.generation?.status === 'running',
-  );
+  // Poll while any dataset is still being built in the background
+  // (generation or traffic-snapshot job).
+  const hasGenerating = datasets.some((d) => {
+    const gen = d.metadata?.generation?.status;
+    const snap = (d.metadata?.snapshot as { status?: string } | undefined)?.status;
+    return gen === 'pending' || gen === 'running' || snap === 'pending' || snap === 'running';
+  });
   useEffect(() => {
     if (!hasGenerating) return;
     const timer = setInterval(() => { void loadAll(); }, 4000);
@@ -206,7 +211,14 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
       if (gen?.status === 'failed') {
         return <span className="ds-badge ds-badge-red" title={gen.error}>Failed</span>;
       }
-      return <span>{d.items.length}</span>;
+      const snap = d.metadata?.snapshot as { status?: string; error?: string } | undefined;
+      if (snap && (snap.status === 'pending' || snap.status === 'running')) {
+        return <Group gap={6}><Loader size={12} /><span className="ds-faint" style={{ fontSize: 12 }}>Snapshotting…</span></Group>;
+      }
+      if (snap?.status === 'failed') {
+        return <span className="ds-badge ds-badge-red" title={snap.error}>Failed</span>;
+      }
+      return <span>{d.itemCount}</span>;
     } },
     { key: 'source', label: 'Source', render: (d) => <span className="ds-badge">{d.source}</span> },
     { key: 'created', label: 'Created', render: (d) => <span className="ds-faint" style={{ fontSize: 12 }}>{fmtDate(d.createdAt)}</span> },
@@ -226,11 +238,25 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
     ) },
   ];
 
+  // Cost is only recorded when the target's provider reports usage — hide the
+  // column entirely when no listed run carries it, instead of an all-dash column.
+  const anyRunHasCost = runs.some((r) => r.aggregate?.totalCostUsd != null);
   const runColumns: DataGridColumn<EvalRunView>[] = [
     { key: 'suite', label: 'Suite', render: (r) => <span className="ds-mono" style={{ fontSize: 12 }}>{r.suiteKey}</span> },
     { key: 'status', label: 'Status', render: (r) => <span className={`ds-badge ${RUN_STATUS_BADGE[r.status] ?? ''}`}>{r.status}</span> },
     { key: 'pass', label: 'Pass rate', render: (r) => <span>{r.aggregate ? `${r.aggregate.passed}/${r.aggregate.total} (${pct(r.aggregate.passRate)})` : '—'}</span> },
     { key: 'score', label: 'Avg score', render: (r) => <span>{r.aggregate ? pct(r.aggregate.avgScore) : '—'}</span> },
+    ...(anyRunHasCost
+      ? [{
+          key: 'cost',
+          label: 'Cost',
+          render: (r: EvalRunView) => (
+            <span className="ds-mono ds-muted" style={{ fontSize: 12 }}>
+              {r.aggregate?.totalCostUsd != null ? `$${r.aggregate.totalCostUsd.toFixed(4)}` : '—'}
+            </span>
+          ),
+        } satisfies DataGridColumn<EvalRunView>]
+      : []),
     { key: 'created', label: 'Started', render: (r) => <span className="ds-faint" style={{ fontSize: 12 }}>{fmtDate(r.startedAt ?? r.createdAt)}</span> },
   ];
 
@@ -243,11 +269,33 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
       else setSuiteModal(true);
     };
     return (
-      <Button color="teal" size="sm" leftSection={<IconPlus size={14} stroke={1.7} />} onClick={onClick}>
-        {label}
-      </Button>
+      <Group gap="xs">
+        {section === 'datasets' && (
+          <>
+            <Button
+              variant="default"
+              size="sm"
+              leftSection={<IconFileImport size={14} stroke={1.7} />}
+              onClick={() => router.push('/dashboard/evaluations/datasets/import')}
+            >
+              Import
+            </Button>
+            <Button
+              variant="default"
+              size="sm"
+              leftSection={<IconCamera size={14} stroke={1.7} />}
+              onClick={() => router.push('/dashboard/evaluations/snapshots/new')}
+            >
+              Create from traffic
+            </Button>
+          </>
+        )}
+        <Button color="teal" size="sm" leftSection={<IconPlus size={14} stroke={1.7} />} onClick={onClick}>
+          {label}
+        </Button>
+      </Group>
     );
-  }, [section]);
+  }, [section, router]);
 
   return (
     <PageContainer>

@@ -8,9 +8,12 @@ import {
   Card,
   Center,
   Checkbox,
+  Badge,
   Grid,
   Group,
+  JsonInput,
   Loader,
+  MultiSelect,
   NumberInput,
   Paper,
   Select,
@@ -28,6 +31,16 @@ import { notifications } from '@mantine/notifications';
 import { IconArrowLeft, IconBook, IconDeviceFloppy, IconRefresh } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
+import CatalogPriceFill from '@/components/models/CatalogPriceFill';
+import {
+  detectUnsupportedParams,
+  formatRequestDefaults,
+  parseRequestDefaults,
+  REQUEST_DEFAULTS_PLACEHOLDER,
+  toStringArray,
+  UNSUPPORTED_PARAM_OPTIONS,
+  validateRequestDefaults,
+} from '@/components/models/requestParams';
 import { PROVIDER_DEFINITIONS } from '@/lib/services/models/providerCatalog';
 
 interface ModelProviderOption {
@@ -67,7 +80,7 @@ interface ModelDetailDto {
   isMultimodal?: boolean;
   supportsToolCalls?: boolean;
   pricing: ModelPricing;
-  settings: Record<string, string>;
+  settings: Record<string, unknown>;
   semanticCache?: SemanticCacheConfig;
   inputGuardrailKey?: string;
   outputGuardrailKey?: string;
@@ -85,8 +98,8 @@ function slugify(value: string) {
   return value
     .toLowerCase()
     .trim()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
+    .replace(/[^a-z0-9.]+/g, '-')
+    .replace(/^[-.]+|[-.]+$/g, '')
     .slice(0, 64);
 }
 
@@ -102,7 +115,7 @@ interface FormValues {
     outputTokenPer1M: number;
     cachedTokenPer1M: number;
   };
-  settings: Record<string, string>;
+  settings: Record<string, unknown>;
   isMultimodal: boolean;
   supportsToolCalls: boolean;
   semanticCacheEnabled: boolean;
@@ -145,6 +158,8 @@ export default function EditModelPage() {
   const [vectorIndexes, setVectorIndexes] = useState<VectorIndexOption[]>([]);
   const [embeddingModels, setEmbeddingModels] = useState<EmbeddingModelOption[]>([]);
   const [guardrails, setGuardrails] = useState<GuardrailOption[]>([]);
+  // Held as text so a half-typed JSON object doesn't get thrown away on rerender.
+  const [requestDefaultsText, setRequestDefaultsText] = useState('');
 
   const form = useForm<FormValues>({
     initialValues: {
@@ -191,6 +206,19 @@ export default function EditModelPage() {
     [selectedProvider?.driver],
   );
 
+  // Same registry the gateway consults at call time, so the form shows exactly
+  // what will be dropped rather than a description of it.
+  const autoDropped = useMemo(
+    () => (form.values.settings.autoDropUnsupportedParams === false
+      ? { params: [] as string[], reason: undefined as string | undefined }
+      : detectUnsupportedParams(selectedProvider?.driver, form.values.modelId)),
+    [
+      selectedProvider?.driver,
+      form.values.modelId,
+      form.values.settings.autoDropUnsupportedParams,
+    ],
+  );
+
   const loadVectorIndexes = useCallback(async (providerKey: string) => {
     if (!providerKey) {
       setVectorIndexes([]);
@@ -234,10 +262,12 @@ export default function EditModelPage() {
       const nextModel: ModelDetailDto = modelData.model;
       setModel(nextModel);
 
-      const settings = Object.entries(nextModel.settings || {}).reduce<Record<string, string>>((acc, [key, value]) => {
-        acc[key] = typeof value === 'string' ? value : JSON.stringify(value);
-        return acc;
-      }, {});
+      // Round-tripped verbatim. Stringifying every value here (and PUTting the
+      // result back) turned `temperature: 0.7` into `"0.7"` — silently ignored
+      // by the contract layer's `typeof === 'number'` check — and turned the
+      // `dynamic` router config into a string, which took the model offline.
+      const settings: Record<string, unknown> = { ...(nextModel.settings || {}) };
+      setRequestDefaultsText(formatRequestDefaults(settings.requestDefaults));
 
       const cache = nextModel.semanticCache;
 
@@ -352,6 +382,20 @@ export default function EditModelPage() {
       return;
     }
 
+    // The JSON editor lives outside the Mantine form, so it has to be checked
+    // here. Without this, a typo fell through to `parseRequestDefaults`
+    // returning undefined, which the payload below turns into `null` — i.e. a
+    // delete — and the save reported success while wiping the stored defaults.
+    const requestDefaultsError = validateRequestDefaults(requestDefaultsText);
+    if (requestDefaultsError) {
+      notifications.show({
+        color: 'red',
+        message: `Extra request body: ${requestDefaultsError}`,
+        title: 'Cannot save',
+      });
+      return;
+    }
+
     setSaving(true);
     try {
       const response = await fetch(`/api/models/${model._id}`, {
@@ -366,7 +410,18 @@ export default function EditModelPage() {
           providerKey: values.providerKey || undefined,
           modelId: values.modelId,
           pricing: values.pricing,
-          settings: values.settings,
+          settings: {
+            ...values.settings,
+            // `null` clears the key server-side, so emptying the editor removes
+            // the defaults rather than persisting an empty object. Reached only
+            // when the text is genuinely empty — invalid JSON is rejected above.
+            requestDefaults: requestDefaultsText.trim()
+              ? parseRequestDefaults(requestDefaultsText) ?? null
+              : null,
+            unsupportedParams: toStringArray(values.settings.unsupportedParams).length
+              ? toStringArray(values.settings.unsupportedParams)
+              : null,
+          },
           isMultimodal: values.isMultimodal,
           supportsToolCalls: values.supportsToolCalls,
           semanticCache: {
@@ -537,6 +592,16 @@ export default function EditModelPage() {
             </Grid>
 
             <Paper withBorder radius="md" p="md">
+              <Group justify="flex-end" mb={4}>
+                <CatalogPriceFill
+                  modelId={form.values.modelId}
+                  onApply={(pricing) => {
+                    form.setFieldValue('pricing.inputTokenPer1M', pricing.inputTokenPer1M);
+                    form.setFieldValue('pricing.outputTokenPer1M', pricing.outputTokenPer1M);
+                    form.setFieldValue('pricing.cachedTokenPer1M', pricing.cachedTokenPer1M);
+                  }}
+                />
+              </Group>
               <Grid>
                 <Grid.Col span={{ base: 12, md: 4 }}>
                   <NumberInput
@@ -580,6 +645,80 @@ export default function EditModelPage() {
                 {...form.getInputProps('supportsToolCalls', { type: 'checkbox' })}
               />
             </Group>
+
+            {model.category === 'llm' && (
+              <Card withBorder radius="md" padding="md">
+                <Stack gap="sm">
+                  <Title order={4}>Request parameters</Title>
+
+                  <div>
+                    <Text size="sm" fw={500}>Detected automatically</Text>
+                    <Text size="xs" c="dimmed" mb={6}>
+                      {autoDropped.params.length
+                        ? autoDropped.reason
+                        : 'Nothing known against this provider and model id. Anything the provider still rejects goes in the list below.'}
+                    </Text>
+                    {autoDropped.params.length ? (
+                      <Group gap={6}>
+                        {autoDropped.params.map((param) => (
+                          <Badge key={param} variant="light" color="gray" radius="sm">
+                            {param}
+                          </Badge>
+                        ))}
+                      </Group>
+                    ) : (
+                      <Text size="sm" c="dimmed">None</Text>
+                    )}
+                  </div>
+
+                  <Checkbox
+                    label="Drop detected parameters automatically"
+                    description="On by default. Turn off if the provider has started accepting a parameter this list still flags."
+                    checked={form.values.settings.autoDropUnsupportedParams !== false}
+                    onChange={(event) =>
+                      form.setFieldValue(
+                        'settings.autoDropUnsupportedParams',
+                        event.currentTarget.checked,
+                      )
+                    }
+                  />
+
+                  <MultiSelect
+                    label="Also reject these"
+                    description="Added on top of what was detected, for anything the registry does not know about this provider yet."
+                    data={UNSUPPORTED_PARAM_OPTIONS}
+                    searchable
+                    clearable
+                    placeholder="None"
+                    value={toStringArray(form.values.settings.unsupportedParams)}
+                    onChange={(value) => form.setFieldValue('settings.unsupportedParams', value)}
+                  />
+                  <JsonInput
+                    label="Extra request body (JSON)"
+                    description="Merged into every request to this model — for parameters outside the OpenAI schema, such as vLLM's chat_template_kwargs or top_k. A caller's value wins over these."
+                    autosize
+                    minRows={4}
+                    formatOnBlur
+                    validationError="Must be valid JSON"
+                    placeholder={REQUEST_DEFAULTS_PLACEHOLDER}
+                    value={requestDefaultsText}
+                    onChange={(value) => setRequestDefaultsText(value)}
+                    error={validateRequestDefaults(requestDefaultsText)}
+                  />
+                  <Checkbox
+                    label="Forward unrecognised caller parameters"
+                    description="Off by default. When on, body fields the gateway does not know are passed to the provider as-is."
+                    checked={Boolean(form.values.settings.allowUnknownPassthrough)}
+                    onChange={(event) =>
+                      form.setFieldValue(
+                        'settings.allowUnknownPassthrough',
+                        event.currentTarget.checked,
+                      )
+                    }
+                  />
+                </Stack>
+              </Card>
+            )}
 
             {/* Semantic Cache section - only for LLM models */}
             {model.category === 'llm' && (

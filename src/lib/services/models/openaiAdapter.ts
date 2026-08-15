@@ -59,6 +59,21 @@ interface OpenAIToolCall {
 export interface ChatTransformOptions {
   model: string;
   stream?: boolean;
+  /** Completion-scoped id, shared by every frame of one streamed response. */
+  id?: string;
+  /** Completion-scoped unix timestamp, likewise shared across frames. */
+  created?: number;
+}
+
+/** OpenAI streaming tool-call deltas are indexed and carry partial argument text. */
+interface OpenAIToolCallDelta {
+  index: number;
+  id?: string;
+  type?: 'function';
+  function: {
+    name?: string;
+    arguments: string;
+  };
 }
 
 function normalizeContent(
@@ -163,23 +178,43 @@ export function toLangChainMessages(messages: OpenAIMessage[]): BaseMessage[] {
   });
 }
 
+function firstString(...candidates: unknown[]): string | undefined {
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.length > 0) return candidate;
+  }
+  return undefined;
+}
+
+function asUsageRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
 function extractUsage(message: AIMessage | AIMessageChunk): UsageMetrics {
   const metadata = message.response_metadata || {};
-  const usageSource =
-    metadata.tokenUsage ||
-    metadata.token_usage ||
-    metadata.usage_metadata ||
-    {};
-  const usage =
-    typeof usageSource === 'object' && usageSource !== null
-      ? (usageSource as Record<string, unknown>)
-      : {};
+
+  // Every place a provider may report usage, most-specific first. The streaming
+  // path only ever populates the first two: LangChain puts the terminal frame's
+  // totals on the message's own `usage_metadata` and the raw provider numbers
+  // under `response_metadata.usage`. Reading only the non-streaming keys meant
+  // every streamed request was logged with zero tokens — and, because budget and
+  // rate-limit updates are gated on usage being present, never billed.
+  const sources = [
+    asUsageRecord((message as { usage_metadata?: unknown }).usage_metadata),
+    asUsageRecord(metadata.usage),
+    asUsageRecord(metadata.tokenUsage),
+    asUsageRecord(metadata.token_usage),
+    asUsageRecord(metadata.usage_metadata),
+  ].filter((entry): entry is Record<string, unknown> => Boolean(entry));
 
   const coalesceNumber = (keys: string[]): number | undefined => {
-    for (const key of keys) {
-      const value = usage[key];
-      if (typeof value === 'number') {
-        return value;
+    for (const usage of sources) {
+      for (const key of keys) {
+        const value = usage[key];
+        if (typeof value === 'number') {
+          return value;
+        }
       }
     }
     return undefined;
@@ -188,17 +223,19 @@ function extractUsage(message: AIMessage | AIMessageChunk): UsageMetrics {
   const coalesceDetails = (
     keys: string[],
   ): Record<string, number> | undefined => {
-    for (const key of keys) {
-      const value = usage[key];
-      if (value && typeof value === 'object' && !Array.isArray(value)) {
-        const entries = Object.entries(value as Record<string, unknown>)
-          .filter(([, detailValue]) => typeof detailValue === 'number')
-          .map(([detailKey, detailValue]) => [
-            detailKey,
-            detailValue as number,
-          ]);
-        if (entries.length) {
-          return Object.fromEntries(entries);
+    for (const usage of sources) {
+      for (const key of keys) {
+        const value = usage[key];
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+          const entries = Object.entries(value as Record<string, unknown>)
+            .filter(([, detailValue]) => typeof detailValue === 'number')
+            .map(([detailKey, detailValue]) => [
+              detailKey,
+              detailValue as number,
+            ]);
+          if (entries.length) {
+            return Object.fromEntries(entries);
+          }
         }
       }
     }
@@ -217,17 +254,41 @@ function extractUsage(message: AIMessage | AIMessageChunk): UsageMetrics {
     'outputTokens',
     'output_tokens',
   ]);
+  const coalesceNested = (
+    containerKeys: string[],
+    innerKeys: string[],
+  ): number | undefined => {
+    for (const usage of sources) {
+      for (const containerKey of containerKeys) {
+        const container = asUsageRecord(usage[containerKey]);
+        if (!container) continue;
+        for (const innerKey of innerKeys) {
+          const value = container[innerKey];
+          if (typeof value === 'number') {
+            return value;
+          }
+        }
+      }
+    }
+    return undefined;
+  };
+
   const cachedInputTokens = coalesceNumber([
     'cachedTokens',
     'cached_tokens',
     'cachedInputTokens',
     'cached_input_tokens',
     'cache_read_input_tokens',
-  ]);
+  ]) ?? coalesceNested(
+    ['input_token_details', 'prompt_tokens_details', 'promptTokensDetails'],
+    ['cache_read', 'cached_tokens', 'cacheRead'],
+  );
   const totalTokens =
     coalesceNumber(['totalTokens', 'total_tokens']) ??
+    // Cached tokens are already counted inside the prompt total, so they must
+    // not be added again here.
     (typeof inputTokens === 'number' && typeof outputTokens === 'number'
-      ? inputTokens + outputTokens + (cachedInputTokens || 0)
+      ? inputTokens + outputTokens
       : undefined);
 
   const promptTokensDetails = coalesceDetails([
@@ -355,9 +416,9 @@ export function toOpenAIChatResponse(
   }
 
   return {
-    id: `chatcmpl_${crypto.randomUUID()}`,
+    id: options.id ?? newCompletionId(),
     object: 'chat.completion',
-    created: timestamp,
+    created: options.created ?? timestamp,
     model: options.model,
     usage: usagePayload,
     system_fingerprint: systemFingerprint,
@@ -372,6 +433,146 @@ export function toOpenAIChatResponse(
   };
 }
 
+/**
+ * Streaming `delta.content` is a string in the OpenAI protocol. Providers that
+ * speak in content blocks (the Responses API, Anthropic-style parts) would
+ * otherwise put an array on the wire, and any client accumulating with
+ * `content += delta.content` breaks mid-message.
+ */
+function flattenDeltaContent(content: unknown): {
+  text?: string;
+  reasoning?: string;
+} {
+  if (typeof content === 'string') {
+    return content.length > 0 ? { text: content } : {};
+  }
+
+  if (!Array.isArray(content)) {
+    return {};
+  }
+
+  const textParts: string[] = [];
+  const reasoningParts: string[] = [];
+
+  for (const part of content) {
+    if (typeof part === 'string') {
+      textParts.push(part);
+      continue;
+    }
+    if (!part || typeof part !== 'object') continue;
+
+    const record = part as Record<string, unknown>;
+    const type = typeof record.type === 'string' ? record.type : '';
+
+    // Reasoning blocks name their payload differently per provider: Anthropic
+    // uses `thinking`, Bedrock Converse nests it under `reasoningText.text`,
+    // the OpenAI-compatible shape uses `reasoning` or plain `text`.
+    if (type === 'reasoning' || type === 'thinking' || type === 'reasoning_content') {
+      const reasoningText = firstString(
+        record.thinking,
+        record.reasoning,
+        record.text,
+        (record.reasoningText as Record<string, unknown> | undefined)?.text,
+      );
+      if (reasoningText) reasoningParts.push(reasoningText);
+      continue;
+    }
+
+    const text = typeof record.text === 'string' ? record.text : undefined;
+    if (text !== undefined) {
+      textParts.push(text);
+    }
+  }
+
+  return {
+    ...(textParts.length ? { text: textParts.join('') } : {}),
+    ...(reasoningParts.length ? { reasoning: reasoningParts.join('') } : {}),
+  };
+}
+
+/**
+ * Streaming tool calls arrive as `tool_call_chunks`, one fragment of argument
+ * text at a time, correlated by `index`. Reading the collapsed `tool_calls`
+ * instead only ever yielded the first fragment — and, since LangChain drops a
+ * chunk whose partial arguments do not parse, that first frame carried
+ * `arguments: "{}"`. Clients saw every tool called with no parameters.
+ */
+function toStreamToolCallDeltas(
+  chunk: AIMessageChunk,
+): OpenAIToolCallDelta[] | undefined {
+  const rawChunks = (chunk as { tool_call_chunks?: unknown }).tool_call_chunks;
+
+  if (Array.isArray(rawChunks) && rawChunks.length > 0) {
+    return rawChunks.map((entry, position) => {
+      const call = (entry || {}) as Record<string, unknown>;
+      const index = typeof call.index === 'number' ? call.index : position;
+      const name = typeof call.name === 'string' && call.name ? call.name : undefined;
+      const id = typeof call.id === 'string' && call.id ? call.id : undefined;
+      // Raw partial text — never re-serialize, it is a fragment of a JSON document.
+      const args = typeof call.args === 'string' ? call.args : '';
+
+      return {
+        index,
+        ...(id ? { id, type: 'function' as const } : {}),
+        function: {
+          ...(name ? { name } : {}),
+          arguments: args,
+        },
+      };
+    });
+  }
+
+  // Providers that emit whole tool calls per chunk rather than argument deltas.
+  const normalized = normalizeToolCalls((chunk as { tool_calls?: unknown }).tool_calls);
+  return normalized?.map((call, index) => ({
+    index,
+    id: call.id,
+    type: 'function' as const,
+    function: { name: call.function.name, arguments: call.function.arguments },
+  }));
+}
+
+function streamChunkEnvelope(options: ChatTransformOptions) {
+  return {
+    id: options.id ?? newCompletionId(),
+    object: 'chat.completion.chunk' as const,
+    created: options.created ?? Math.floor(Date.now() / 1000),
+    model: options.model,
+  };
+}
+
+/** The opening frame of an OpenAI stream: role, no content. */
+export function openAIStreamRoleChunk(options: ChatTransformOptions) {
+  return {
+    ...streamChunkEnvelope(options),
+    choices: [
+      { index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null },
+    ],
+    usage: undefined as undefined | Record<string, number>,
+  };
+}
+
+/** A terminal frame for upstreams that never send their own finish_reason. */
+export function openAIStreamStopChunk(
+  options: ChatTransformOptions,
+  finishReason: string = 'stop',
+) {
+  return {
+    ...streamChunkEnvelope(options),
+    choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
+    usage: undefined as undefined | Record<string, number>,
+  };
+}
+
+/** True when a frame carries no delta payload — a usage-only terminal frame. */
+export function isEmptyStreamDelta(payload: {
+  choices: Array<{ delta: Record<string, unknown> }>;
+}): boolean {
+  const delta = payload.choices[0]?.delta;
+  if (!delta) return true;
+  return Object.entries(delta).every(([, value]) => value === '' || value === undefined);
+}
+
 export function toOpenAIStreamChunk(
   chunk: AIMessageChunk,
   options: ChatTransformOptions,
@@ -379,31 +580,26 @@ export function toOpenAIStreamChunk(
   const usage = extractUsage(chunk);
   const delta: Record<string, unknown> = {};
 
-  if (typeof chunk.content === 'string') {
-    delta.content = chunk.content;
-  } else if (Array.isArray(chunk.content)) {
-    delta.content = chunk.content;
+  const { text, reasoning: reasoningFromContent } = flattenDeltaContent(chunk.content);
+  if (text !== undefined) {
+    delta.content = text;
   }
 
   const { reasoningContent, reasoning } = extractReasoning(chunk);
-  if (reasoningContent !== undefined) {
-    delta.reasoning_content = reasoningContent;
+  if (reasoningContent !== undefined || reasoningFromContent !== undefined) {
+    delta.reasoning_content = `${reasoningContent ?? ''}${reasoningFromContent ?? ''}`;
   }
   if (reasoning !== undefined) {
     delta.reasoning = reasoning;
   }
 
-  const chunkWithTools = chunk as AIMessageChunk & { tool_calls?: unknown };
-  const normalizedToolCalls = normalizeToolCalls(chunkWithTools.tool_calls);
-  if (normalizedToolCalls) {
-    delta.tool_calls = normalizedToolCalls;
+  const toolCallDeltas = toStreamToolCallDeltas(chunk);
+  if (toolCallDeltas?.length) {
+    delta.tool_calls = toolCallDeltas;
   }
 
   return {
-    id: `chatcmpl_${crypto.randomUUID()}`,
-    object: 'chat.completion.chunk',
-    created: Math.floor(Date.now() / 1000),
-    model: options.model,
+    ...streamChunkEnvelope(options),
     choices: [
       {
         index: 0,
@@ -420,6 +616,45 @@ export function toOpenAIStreamChunk(
         }
       : undefined,
   };
+}
+
+/**
+ * Maps a provider/transport failure onto the OpenAI error envelope. Upstream
+ * 4xx responses used to arrive at the client as an opaque 500 `server_error`,
+ * so a permanent 400 was indistinguishable from a bug and clients retried it.
+ */
+export function toOpenAIErrorType(error: unknown): string {
+  const status = errorStatus(error);
+  if (status === 401 || status === 403) return 'authentication_error';
+  if (status === 404) return 'not_found_error';
+  if (status === 429) return 'rate_limit_error';
+  if (status !== undefined && status >= 400 && status < 500) {
+    return 'invalid_request_error';
+  }
+  return 'server_error';
+}
+
+export function toOpenAIErrorCode(error: unknown): string | undefined {
+  const record = error as { code?: unknown; error?: { code?: unknown } } | null;
+  const code = record?.code ?? record?.error?.code;
+  return typeof code === 'string' ? code : undefined;
+}
+
+export function toOpenAIErrorParam(error: unknown): string | undefined {
+  const record = error as { param?: unknown; error?: { param?: unknown } } | null;
+  const param = record?.param ?? record?.error?.param;
+  return typeof param === 'string' ? param : undefined;
+}
+
+/** HTTP status from an OpenAI-SDK-shaped error, when there is one. */
+export function errorStatus(error: unknown): number | undefined {
+  const record = error as { status?: unknown; statusCode?: unknown } | null;
+  const status = record?.status ?? record?.statusCode;
+  return typeof status === 'number' ? status : undefined;
+}
+
+function newCompletionId(): string {
+  return `chatcmpl-${crypto.randomUUID().replace(/-/g, '')}`;
 }
 
 export function buildErrorResponse(message: string, status = 400) {

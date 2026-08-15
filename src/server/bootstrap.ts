@@ -24,6 +24,7 @@ import {
 import { startOcrJobQueueConsumer } from '@/lib/services/ocrJobs';
 import { startBatchQueueConsumer } from '@/lib/services/batch';
 import { startDatasetGenerationConsumer } from '@/lib/services/evaluation/datasetGenerationConsumer';
+import { startSnapshotQueueConsumer } from '@/lib/services/snapshots/snapshotConsumer';
 import { startRedTeamQueueConsumer } from '@/lib/services/redteam/campaignConsumer';
 import { startEvaluationRunQueueConsumer } from '@/lib/services/evaluation/evaluationRunConsumer';
 import { startAnalysisRunQueueConsumer } from '@/lib/services/analysis/analysisRunConsumer';
@@ -39,16 +40,33 @@ import { ensureServerEnvLoaded } from './env';
 
 const logger = createLogger('startup');
 
-let bootstrapped = false;
+// Promise-based singleton: `nextApp.prepare()` runs concurrently with this
+// bootstrap and Next's instrumentation hook also calls it — concurrent
+// callers must await the SAME in-flight run, not return early.
+let bootstrapPromise: Promise<void> | null = null;
 
-export async function bootstrapApplication(): Promise<void> {
+// The HTTP server now starts listening before this resolves (see app.ts) so
+// that boot latency isn't fully on the critical path for "server responds to
+// anything at all". Request-handling code that needs bootstrap to have
+// finished (the global API `onRequest` hook, `/health/ready`) checks this
+// flag instead and returns 503 rather than running against half-initialized
+// providers (cache/queue/cluster) or racing the tenant reconciliation pass.
+let applicationReady = false;
+
+export function bootstrapApplication(): Promise<void> {
   ensureServerEnvLoaded();
 
-  if (bootstrapped) {
-    return;
+  if (!bootstrapPromise) {
+    bootstrapPromise = runBootstrap();
   }
-  bootstrapped = true;
+  return bootstrapPromise;
+}
 
+export function isApplicationReady(): boolean {
+  return applicationReady;
+}
+
+async function runBootstrap(): Promise<void> {
   const cfg = getConfig();
   const errors = validateConfig(cfg);
 
@@ -63,31 +81,6 @@ export async function bootstrapApplication(): Promise<void> {
 
   initLifecycle();
 
-  try {
-    await getCache();
-    registerHealthCheck('cache', async () => {
-      try {
-        const cache = await getCache();
-        const probe = `_health_${Date.now()}`;
-        await cache.set(probe, 1, 5);
-        const value = await cache.get<number>(probe);
-        await cache.del(probe);
-        return value === 1
-          ? { status: 'ok' }
-          : { status: 'degraded', message: 'Cache read-back mismatch' };
-      } catch (error) {
-        return {
-          status: 'down',
-          message: error instanceof Error ? error.message : String(error),
-        };
-      }
-    });
-  } catch (error) {
-    logger.error('Failed to initialize cache provider', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
-
   registerShutdownHandler('async-tasks', async () => {
     await drainPendingTasks();
   });
@@ -97,55 +90,6 @@ export async function bootstrapApplication(): Promise<void> {
   registerShutdownHandler('runtime-pool', async () => {
     runtimePool.destroy();
   });
-
-  // Cluster + queue init. Both are safe no-ops on a single-node deployment:
-  // the registry creates a single row in the `nodes` table and the queue
-  // resolves to its in-memory driver when Redis is not configured. No
-  // existing service is migrated yet — these are opt-in for future code.
-  try {
-    await registerThisNode();
-    registerShutdownHandler('node-registry', async () => {
-      await deregisterThisNode();
-    });
-    registerHealthCheck('cluster', async () => {
-      try {
-        const nodes = await listClusterNodes();
-        const online = nodes.filter((n) => n.status === 'online').length;
-        return {
-          status: 'ok',
-          details: {
-            thisNode: getThisNodeName(),
-            online,
-            total: nodes.length,
-          },
-        };
-      } catch (error) {
-        return {
-          status: 'degraded',
-          message: error instanceof Error ? error.message : String(error),
-        };
-      }
-    });
-  } catch (error) {
-    logger.warn('Cluster node registration failed; continuing without it', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
-
-  try {
-    const queue = await getQueue();
-    registerShutdownHandler('queue', async () => {
-      await destroyQueue();
-    });
-    registerHealthCheck('queue', async () => ({
-      status: 'ok',
-      details: { provider: queue.name },
-    }));
-  } catch (error) {
-    logger.warn('Queue provider init failed; continuing without it', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
 
   registerHealthCheck('browser-runtime', async () => {
     const stats = browserManager.getRuntimeStats();
@@ -175,31 +119,127 @@ export async function bootstrapApplication(): Promise<void> {
     };
   });
 
-  try {
-    await reconcileOrphanedBrowserSessions();
-  } catch (error) {
-    logger.warn('Browser session reconciliation failed during startup', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
+  // The two groups below don't touch each other's state — `coreInfraInit`
+  // only sets up process-local providers (cache/cluster/queue), while
+  // `tenantReconciliation` scans tenant databases. Running them
+  // concurrently (instead of one long sequential await chain) is what
+  // actually shortens boot time; each step keeps its original try/catch so
+  // a failure in one never blocks the rest, same as before.
+  //
+  // `tenantReconciliation`'s three steps stay sequential *with each other*:
+  // they all read/write through the shared `db` singleton's tenant-switch
+  // state (`switchToTenant`/`runWithTenantScope`), which is only safe for
+  // one in-flight tenant-scoped call at a time — see the scheduler comments
+  // in redTeamScheduler.ts / analysisScheduler.ts for the same rule.
+  const coreInfraInit = (async () => {
+    try {
+      await getCache();
+      registerHealthCheck('cache', async () => {
+        try {
+          const cache = await getCache();
+          const probe = `_health_${Date.now()}`;
+          await cache.set(probe, 1, 5);
+          const value = await cache.get<number>(probe);
+          await cache.del(probe);
+          return value === 1
+            ? { status: 'ok' }
+            : { status: 'degraded', message: 'Cache read-back mismatch' };
+        } catch (error) {
+          return {
+            status: 'down',
+            message: error instanceof Error ? error.message : String(error),
+          };
+        }
+      });
+    } catch (error) {
+      logger.error('Failed to initialize cache provider', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
 
-  // On-prem: seed the single organization + owner from BOOTSTRAP_* envs.
-  // No-op when the envs are unset or a tenant already exists.
-  try {
-    await ensureBootstrapOrganization();
-  } catch (error) {
-    logger.error('Bootstrap organization creation failed during startup', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
+    // Cluster + queue init. Both are safe no-ops on a single-node deployment:
+    // the registry creates a single row in the `nodes` table and the queue
+    // resolves to its in-memory driver when Redis is not configured. No
+    // existing service is migrated yet — these are opt-in for future code.
+    try {
+      await registerThisNode();
+      registerShutdownHandler('node-registry', async () => {
+        await deregisterThisNode();
+      });
+      registerHealthCheck('cluster', async () => {
+        try {
+          const nodes = await listClusterNodes();
+          const online = nodes.filter((n) => n.status === 'online').length;
+          return {
+            status: 'ok',
+            details: {
+              thisNode: getThisNodeName(),
+              online,
+              total: nodes.length,
+            },
+          };
+        } catch (error) {
+          return {
+            status: 'degraded',
+            message: error instanceof Error ? error.message : String(error),
+          };
+        }
+      });
+    } catch (error) {
+      logger.warn('Cluster node registration failed; continuing without it', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
 
-  try {
-    await reconcileOrphanedCrawlJobs();
-  } catch (error) {
-    logger.warn('Crawl job reconciliation failed during startup', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
+    try {
+      const queue = await getQueue();
+      registerShutdownHandler('queue', async () => {
+        await destroyQueue();
+      });
+      registerHealthCheck('queue', async () => ({
+        status: 'ok',
+        details: { provider: queue.name },
+      }));
+    } catch (error) {
+      logger.warn('Queue provider init failed; continuing without it', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  })();
+
+  const tenantReconciliation = (async () => {
+    try {
+      await reconcileOrphanedBrowserSessions();
+    } catch (error) {
+      logger.warn('Browser session reconciliation failed during startup', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    // On-prem: seed the single organization + owner from BOOTSTRAP_* envs.
+    // No-op when the envs are unset or a tenant already exists.
+    try {
+      await ensureBootstrapOrganization();
+    } catch (error) {
+      logger.error('Bootstrap organization creation failed during startup', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    // Must complete BEFORE the crawler scheduler/consumers below start taking
+    // new work: it treats every `running`/`queued` job as orphaned (resets it
+    // and deletes its partial results), so a post-listen job must never be
+    // observable here.
+    try {
+      await reconcileOrphanedCrawlJobs();
+    } catch (error) {
+      logger.warn('Crawl job reconciliation failed during startup', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  })();
+
+  await Promise.all([coreInfraInit, tenantReconciliation]);
 
   // ── Enterprise overlay seam ──────────────────────────────────────────────
   // Runs enterprise bootstrap reconcilers (e.g. sandbox runtime reconcile).
@@ -232,6 +272,7 @@ export async function bootstrapApplication(): Promise<void> {
       startOcrJobQueueConsumer(),
       startBatchQueueConsumer(),
       startDatasetGenerationConsumer(),
+      startSnapshotQueueConsumer(),
       startRedTeamQueueConsumer(),
       startEvaluationRunQueueConsumer(),
       startAnalysisRunQueueConsumer(),
@@ -241,6 +282,8 @@ export async function bootstrapApplication(): Promise<void> {
       error: error instanceof Error ? error.message : String(error),
     });
   }
+
+  applicationReady = true;
 
   logger.info('Application started', {
     cacheProvider: cfg.cache.provider,

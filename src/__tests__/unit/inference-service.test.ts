@@ -11,6 +11,7 @@ vi.mock('@/lib/services/models/runtimeService', () => ({
 }));
 
 vi.mock('@/lib/services/models/semanticCacheService', () => ({
+  buildCacheVariantKey: vi.fn().mockReturnValue('variant-key'),
   isSemanticCacheEnabled: vi.fn().mockReturnValue(false),
   lookupCache: vi.fn().mockResolvedValue({ hit: false, response: null }),
   storeInCache: vi.fn().mockResolvedValue(undefined),

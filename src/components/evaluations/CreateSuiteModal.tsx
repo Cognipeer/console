@@ -142,7 +142,7 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
   };
 
   const targetOptions = targets.map((t) => ({ value: t.key, label: `${t.name} (${t.kind})` }));
-  const datasetOptions = datasets.map((d) => ({ value: d.key, label: `${d.name} (${d.items.length} items)` }));
+  const datasetOptions = datasets.map((d) => ({ value: d.key, label: `${d.name} (${d.itemCount} items)` }));
 
   const v = form.getValues();
   const useJudge = v.useJudge;

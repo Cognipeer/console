@@ -22,6 +22,7 @@ import type {
 } from '@cognipeer/agent-sdk';
 import { getDatabase, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentTracingEvent, type IAgentTracingSession, type IAgentVersion } from '@/lib/database';
 import { getModelByKey } from '@/lib/services/models/modelService';
+import { resolveModelInvocationConfig } from '@/lib/services/models/inferenceService';
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
 import { queryRag } from '@/lib/services/rag/ragService';
 import { evaluateGuardrail } from '@/lib/services/guardrail';
@@ -29,6 +30,11 @@ import { getMcpServerByKey, executeMcpTool, isMcpToolEnabled } from '@/lib/servi
 import { getToolByKey, executeToolAction, logToolRequest, toolRequestSecretValues } from '@/lib/services/tools';
 import { resolveBrowser, createBrowserSession, buildBrowserAgentTools, closeBrowserSession } from '@/lib/services/browser';
 import { recordTracingSessionCreated } from '@/lib/services/agentTracing';
+import {
+    buildToolDefinitionsSection,
+    TOOL_DEFINITIONS_SECTION_KIND,
+    type TraceToolDefinition,
+} from '@/lib/services/tracingToolDefinitions';
 import {
     describeRuntimeAuth,
     resolveRuntimeHeaders,
@@ -55,6 +61,20 @@ const CONSOLE_AGENT_TOOL_RESPONSES_CONFIG = {
     toolResponseRetentionByTool: CONSOLE_AGENT_TOOL_RESPONSE_RETENTION_BY_TOOL,
     maxToolResponseChars: 80_000,
     maxToolResponseTokens: 20_000,
+};
+
+const CONSOLE_AGENT_KNOWLEDGE_SEARCH_DESCRIPTION =
+    'PRIMARY retrieval tool. For factual, product, policy, API, docs, or troubleshooting questions, call this tool BEFORE drafting the final answer. Use the user question (or a focused rewrite) as query. If results are empty/insufficient, then answer briefly with uncertainty.';
+
+/** Trace menu entry mirroring the zod schema `knowledge_search` is bound with. */
+const KNOWLEDGE_SEARCH_TOOL_DEFINITION: TraceToolDefinition = {
+    name: 'knowledge_search',
+    description: CONSOLE_AGENT_KNOWLEDGE_SEARCH_DESCRIPTION,
+    parameters: {
+        type: 'object',
+        properties: { query: { type: 'string', description: 'The search query' } },
+        required: ['query'],
+    },
 };
 
 type InternalTraceEvent = TraceSessionFile['events'][number] & {
@@ -166,6 +186,12 @@ function createConsoleSdkAgent(
  * Supports two source types:
  *   - 'tool'  – unified tool system (OpenAPI / MCP sources)
  *   - 'mcp'   – legacy direct MCP server bindings (backward compat)
+ *
+ * Also returns trace `definitions` for the bound tools — the menu recorded on
+ * each model-call event's `tool_definitions` section. `parameters` carries the
+ * source JSON schema (action/MCP inputSchema); the SDK binding itself uses a
+ * permissive passthrough zod schema, so the source schema is the meaningful
+ * definition to observe.
  */
 async function buildBoundTools(
     tenantDbName: string,
@@ -175,10 +201,15 @@ async function buildBoundTools(
     createToolFn: typeof import('@cognipeer/agent-sdk').createTool,
     zod: typeof import('zod').z,
     runtimeContext?: AgentRuntimeContext,
-): Promise<{ cleanupTasks: Array<() => Promise<void>>; tools: AgentSdkToolInterface[] }> {
-    if (!bindings || bindings.length === 0) return { cleanupTasks: [], tools: [] };
+): Promise<{
+    cleanupTasks: Array<() => Promise<void>>;
+    tools: AgentSdkToolInterface[];
+    definitions: TraceToolDefinition[];
+}> {
+    if (!bindings || bindings.length === 0) return { cleanupTasks: [], tools: [], definitions: [] };
 
     const tools: AgentSdkToolInterface[] = [];
+    const definitions: TraceToolDefinition[] = [];
     const cleanupTasks: Array<() => Promise<void>> = [];
 
     for (const binding of bindings) {
@@ -252,6 +283,11 @@ async function buildBoundTools(
                     },
                 });
                 tools.push(tool);
+                definitions.push({
+                    name: action.name,
+                    description: action.description || `Call ${action.name} on ${toolRecord.name}`,
+                    parameters: action.inputSchema,
+                });
             }
         } else if (binding.source === 'mcp') {
             // ── Legacy MCP server bindings ───────────────────────
@@ -295,6 +331,11 @@ async function buildBoundTools(
                     },
                 });
                 tools.push(tool);
+                definitions.push({
+                    name: mcpToolDef.name,
+                    description: mcpToolDef.description || `Call ${mcpToolDef.name} on ${server.name}`,
+                    parameters: mcpToolDef.inputSchema,
+                });
             }
         } else if (binding.source === 'system' && binding.sourceKey === 'browser_use') {
             // ── System tool: Browser Use ───────────────────────
@@ -328,8 +369,18 @@ async function buildBoundTools(
                     projectId,
                     sessionKey: session.sessionKey,
                     createdBy: 'agent-runtime',
-                });
-                tools.push(...(browserTools as unknown as AgentSdkToolInterface[]));
+                }) as unknown as AgentSdkToolInterface[];
+                tools.push(...browserTools);
+                for (const browserTool of browserTools) {
+                    // Browser tools carry zod schemas only — record name +
+                    // description, no parameters.
+                    definitions.push({
+                        name: browserTool.name,
+                        ...(typeof browserTool.description === 'string' && browserTool.description
+                            ? { description: browserTool.description }
+                            : {}),
+                    });
+                }
                 cleanupTasks.push(async () => {
                     await closeBrowserSession(
                         { tenantDbName, tenantId, projectId },
@@ -345,7 +396,7 @@ async function buildBoundTools(
         }
     }
 
-    return { cleanupTasks, tools };
+    return { cleanupTasks, tools, definitions };
 }
 
 async function runBoundToolCleanup(
@@ -371,13 +422,23 @@ async function runBoundToolCleanup(
  * Creates a customSink that saves trace sessions directly to the database,
  * bypassing the HTTP tracing endpoint and its API-token authentication.
  * This is used for internal agent executions (dashboard playground & client API chat).
+ *
+ * `toolDefinitions` is the tool menu bound for THIS invocation: every model-
+ * call event ('ai_call') gets a `tool_definitions` section carrying it.
+ * Capture is per event, never per session — the SDK binds one menu per
+ * invoke, but a session/thread spans invocations whose menus can differ, so
+ * each call must record the menu it actually saw.
  */
 async function createInternalTracingSink(
     tenantDbName: string,
     tenantId: string,
     projectId: string,
+    toolDefinitions?: TraceToolDefinition[],
 ) {
     const { customSink } = await import('@cognipeer/agent-sdk');
+    const toolDefinitionsSection = toolDefinitions && toolDefinitions.length > 0
+        ? buildToolDefinitionsSection(toolDefinitions)
+        : undefined;
 
     return customSink({
         onSession: async (session: InternalTraceSession) => {
@@ -451,11 +512,21 @@ async function createInternalTracingSink(
                 // Replace events
                 await db.deleteAgentTracingEvents(session.sessionId, projectId);
                 for (const event of events) {
-                    const sections = (Array.isArray(event?.sections)
+                    let sections = (Array.isArray(event?.sections)
                         ? event.sections
                         : Array.isArray(event?.data?.sections)
                             ? event.data.sections
                             : []) as Array<Record<string, unknown>>;
+
+                    // Attach the bound tool menu to each model-call event
+                    // (skipped if the SDK ever emits its own section).
+                    if (
+                        toolDefinitionsSection
+                        && event.type === 'ai_call'
+                        && !sections.some((section) => section?.kind === TOOL_DEFINITIONS_SECTION_KIND)
+                    ) {
+                        sections = [...sections, toolDefinitionsSection];
+                    }
 
                     const usage = event?.usage || event?.metadata?.usage || {};
                         const inputTokens = toOptionalNumber(
@@ -1058,14 +1129,21 @@ export async function executeAgentChatLocal(
         throw new Error('Provider runtime does not support chat model creation');
     }
 
+    // Resolved through the gateway's helper so an agent obeys the same model
+    // record everything else does. Previously this built its own settings object
+    // and never read `model.settings`, which meant: a hard-coded temperature of
+    // 0.7 reached models that reject the parameter outright, the operator could
+    // not override it from the Model Hub, and `top_p`/`max_tokens` were passed
+    // under snake_case keys the contract layer does not read — so an agent's
+    // Top P and Max Tokens settings had never taken effect at all.
     const lcModel = runtime.createChatModel({
         modelId: model.modelId,
         category: model.category,
-        modelSettings: {
-            temperature: config.temperature ?? 0.7,
-            top_p: config.topP,
-            max_tokens: config.maxTokens,
-        },
+        modelSettings: resolveModelInvocationConfig(model, {
+            ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
+            ...(config.topP !== undefined ? { top_p: config.topP } : {}),
+            ...(config.maxTokens !== undefined ? { max_tokens: config.maxTokens } : {}),
+        }).modelSettings,
     });
 
     // 5. Resolve system prompt
@@ -1100,11 +1178,12 @@ export async function executeAgentChatLocal(
     const { z } = await import('zod');
 
     const tools: AgentSdkToolInterface[] = [];
+    const toolDefinitions: TraceToolDefinition[] = [];
     if (config.knowledgeEngineKey) {
         const ragModuleKey = config.knowledgeEngineKey;
         const ragTool = createTool({
             name: 'knowledge_search',
-            description: 'PRIMARY retrieval tool. For factual, product, policy, API, docs, or troubleshooting questions, call this tool BEFORE drafting the final answer. Use the user question (or a focused rewrite) as query. If results are empty/insufficient, then answer briefly with uncertainty.',
+            description: CONSOLE_AGENT_KNOWLEDGE_SEARCH_DESCRIPTION,
             schema: z.object({ query: z.string().describe('The search query') }),
             func: async (args: { query: string }) => {
                 // Use undefined projectId for tenant-wide lookup;
@@ -1121,6 +1200,7 @@ export async function executeAgentChatLocal(
             },
         });
         tools.push(ragTool);
+        toolDefinitions.push(KNOWLEDGE_SEARCH_TOOL_DEFINITION);
     }
 
     if (config.knowledgeEngineKey) {
@@ -1136,7 +1216,7 @@ export async function executeAgentChatLocal(
     }
 
     // 5c. Build bound tools from toolBindings (MCP, future sources)
-    const { cleanupTasks, tools: boundTools } = await buildBoundTools(
+    const { cleanupTasks, tools: boundTools, definitions: boundToolDefinitions } = await buildBoundTools(
         tenantDbName,
         tenantId,
         projectId,
@@ -1146,6 +1226,7 @@ export async function executeAgentChatLocal(
         request.runtimeContext,
     );
     tools.push(...boundTools);
+    toolDefinitions.push(...boundToolDefinitions);
 
     // 6. Build message history
     const now = new Date();
@@ -1156,7 +1237,7 @@ export async function executeAgentChatLocal(
 
     // 7. Create agent-sdk instance and invoke
     const sdkModel = fromLangchainModel(lcModel);
-    const tracingSink = await createInternalTracingSink(tenantDbName, tenantId, projectId);
+    const tracingSink = await createInternalTracingSink(tenantDbName, tenantId, projectId, toolDefinitions);
 
     const sdkAgent = createConsoleSdkAgent(createSmartAgent, {
         name: agent.name,
@@ -1332,14 +1413,21 @@ export async function executePlaygroundChatLocal(
         throw new Error('Provider runtime does not support chat model creation');
     }
 
+    // Resolved through the gateway's helper so an agent obeys the same model
+    // record everything else does. Previously this built its own settings object
+    // and never read `model.settings`, which meant: a hard-coded temperature of
+    // 0.7 reached models that reject the parameter outright, the operator could
+    // not override it from the Model Hub, and `top_p`/`max_tokens` were passed
+    // under snake_case keys the contract layer does not read — so an agent's
+    // Top P and Max Tokens settings had never taken effect at all.
     const lcModel = runtime.createChatModel({
         modelId: model.modelId,
         category: model.category,
-        modelSettings: {
-            temperature: config.temperature ?? 0.7,
-            top_p: config.topP,
-            max_tokens: config.maxTokens,
-        },
+        modelSettings: resolveModelInvocationConfig(model, {
+            ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
+            ...(config.topP !== undefined ? { top_p: config.topP } : {}),
+            ...(config.maxTokens !== undefined ? { max_tokens: config.maxTokens } : {}),
+        }).modelSettings,
     });
 
     // Resolve system prompt
@@ -1371,11 +1459,12 @@ export async function executePlaygroundChatLocal(
     const { z } = await import('zod');
 
     const playgroundTools: AgentSdkToolInterface[] = [];
+    const playgroundToolDefinitions: TraceToolDefinition[] = [];
     if (config.knowledgeEngineKey) {
         const ragModuleKey = config.knowledgeEngineKey;
         const ragTool = createTool({
             name: 'knowledge_search',
-            description: 'PRIMARY retrieval tool. For factual, product, policy, API, docs, or troubleshooting questions, call this tool BEFORE drafting the final answer. Use the user question (or a focused rewrite) as query. If results are empty/insufficient, then answer briefly with uncertainty.',
+            description: CONSOLE_AGENT_KNOWLEDGE_SEARCH_DESCRIPTION,
             schema: z.object({ query: z.string().describe('The search query') }),
             func: async (args: { query: string }) => {
                 // Use undefined projectId for tenant-wide lookup;
@@ -1392,6 +1481,7 @@ export async function executePlaygroundChatLocal(
             },
         });
         playgroundTools.push(ragTool);
+        playgroundToolDefinitions.push(KNOWLEDGE_SEARCH_TOOL_DEFINITION);
     }
 
     if (config.knowledgeEngineKey) {
@@ -1407,7 +1497,11 @@ export async function executePlaygroundChatLocal(
     }
 
     // Build bound tools from toolBindings (MCP, future sources)
-    const { cleanupTasks, tools: boundPlaygroundTools } = await buildBoundTools(
+    const {
+        cleanupTasks,
+        tools: boundPlaygroundTools,
+        definitions: boundPlaygroundToolDefinitions,
+    } = await buildBoundTools(
         tenantDbName,
         tenantId,
         projectId,
@@ -1417,6 +1511,7 @@ export async function executePlaygroundChatLocal(
         request.runtimeContext,
     );
     playgroundTools.push(...boundPlaygroundTools);
+    playgroundToolDefinitions.push(...boundPlaygroundToolDefinitions);
 
     // Build messages (in-memory history only)
     const inputMessages: AgentSdkMessage[] = [
@@ -1427,7 +1522,12 @@ export async function executePlaygroundChatLocal(
 
     // Create agent-sdk instance and invoke (tracing enabled)
     const sdkModel = fromLangchainModel(lcModel);
-    const tracingSink = await createInternalTracingSink(tenantDbName, tenantId, projectId);
+    const tracingSink = await createInternalTracingSink(
+        tenantDbName,
+        tenantId,
+        projectId,
+        playgroundToolDefinitions,
+    );
 
     const sdkAgent = createConsoleSdkAgent(createSmartAgent, {
         name: agent.name,
