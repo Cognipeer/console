@@ -66,3 +66,15 @@ tests/e2e/reports/
 
 # enterprise overlay build output
 ee/.overlay-build/
+
+# Local SQLite data. The existing data/vectors + data/agent-bundles rules only
+# covered two subdirectories; a whole tenant database directory was landing
+# outside them.
+data/sqlite*/
+
+# Scratch. This is a PUBLIC repo — internal audits, agent handoff notes and
+# throwaway clones must never be committable.
+tmp/
+.integration-handoff/
+SECURITY_AUDIT.md
+scripts/smoke/reports/
