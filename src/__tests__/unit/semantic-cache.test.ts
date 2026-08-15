@@ -155,6 +155,7 @@ describe('lookupCache', () => {
           id: 'c1',
           score: 0.97,
           metadata: {
+            _cacheType: 'semantic_cache',
             _cachedResponse: JSON.stringify(cachedResponse),
             _cachedAt: Date.now(),
           },
@@ -169,6 +170,59 @@ describe('lookupCache', () => {
     expect(result.hit).toBe(true);
     expect(result.score).toBeGreaterThanOrEqual(0.9);
     expect(result.response).toMatchObject({ id: 'res-1' });
+  });
+
+  it('rejects a match whose parameters differ, even when the driver ignored the filter', () => {
+    // Not every vector driver honours `filter`, so isolation is re-checked
+    // against the match's own metadata.
+    mockEmbeddingResponse();
+    (queryVectorIndex as ReturnType<typeof vi.fn>).mockResolvedValue({
+      matches: [
+        {
+          id: 'c1',
+          score: 0.99,
+          metadata: {
+            _cacheType: 'semantic_cache',
+            _cacheVariant: 'thinking-on',
+            _cachedResponse: JSON.stringify({ id: 'res-1' }),
+            _cachedAt: Date.now(),
+          },
+        },
+      ],
+    });
+
+    return lookupCache({
+      ...PARAMS,
+      messages: [{ role: 'user', content: 'What is 2+2?' }],
+      variantKey: 'thinking-off',
+    }).then((result) => {
+      expect(result.hit).toBe(false);
+    });
+  });
+
+  it('still serves entries stored before variants existed for a default request', () => {
+    mockEmbeddingResponse();
+    (queryVectorIndex as ReturnType<typeof vi.fn>).mockResolvedValue({
+      matches: [
+        {
+          id: 'c1',
+          score: 0.99,
+          metadata: {
+            _cacheType: 'semantic_cache',
+            _cachedResponse: JSON.stringify({ id: 'res-legacy' }),
+            _cachedAt: Date.now(),
+          },
+        },
+      ],
+    });
+
+    return lookupCache({
+      ...PARAMS,
+      messages: [{ role: 'user', content: 'What is 2+2?' }],
+    }).then((result) => {
+      expect(result.hit).toBe(true);
+      expect(result.response).toMatchObject({ id: 'res-legacy' });
+    });
   });
 
   it('returns hit=false when TTL has expired', async () => {

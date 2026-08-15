@@ -36,6 +36,7 @@ import {
   parseDashboardDateFilterFromSearchParams,
 } from '@/lib/utils/dashboardDateFilter';
 import { createLogger } from '@/lib/core/logger';
+import { normalizeModelSettings } from '@/lib/services/models/modelSettings';
 import {
   readJsonBody,
   requireProjectContextForRequest,
@@ -110,6 +111,11 @@ function sanitizeModel(model: IModel) {
   };
 }
 
+/**
+ * `null` deletes a key, the placeholder and `undefined` mean "unchanged".
+ * Normalising on the way out heals rows whose values were persisted with the
+ * wrong type — see `normalizeModelSettings`.
+ */
 function mergeSettings(
   existing: Record<string, unknown>,
   incoming: Record<string, unknown>,
@@ -129,7 +135,7 @@ function mergeSettings(
     merged[key] = value;
   }
 
-  return merged;
+  return normalizeModelSettings(merged);
 }
 
 function buildDate(value?: string): Date | undefined {

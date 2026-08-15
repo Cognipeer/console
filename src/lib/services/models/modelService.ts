@@ -34,8 +34,13 @@ const logger = createLogger('model-service');
 
 const SLUG_OPTIONS = {
   lower: true,
-  strict: true,
+  strict: false,
   trim: true,
+  // `strict: true` strips every non-alphanumeric char (incl. ".") and even
+  // merges adjacent digits (e.g. "gpt-5.6-luna" -> "gpt-56-luna"), which
+  // breaks model keys that intentionally contain a version dot. Keep "."
+  // and "-" while still stripping other punctuation.
+  remove: /[^a-zA-Z0-9.\-\s]/g,
 };
 
 const MAX_KEY_ATTEMPTS = 50;

@@ -7,11 +7,26 @@ export type ModelRuntimeCategory = ModelCategory;
 export interface ModelRuntimeOptions {
   streaming?: boolean;
   disableStreaming?: boolean;
+  /**
+   * Retries the provider SDK may perform on its own. The gateway sets 0 because
+   * `withResilience` already owns retry and circuit-breaking there; callers that
+   * hand the model to something else (the agent runtime) leave it unset and keep
+   * a small budget, since nothing else would retry for them.
+   */
+  maxRetries?: number;
 }
 
 export interface ModelRuntimeConfig {
   modelId: string;
   category: ModelRuntimeCategory;
+  /**
+   * Resolved per-call settings. Beyond the sampling knobs, contracts read two
+   * operator-controlled keys from here:
+   * - `extraBody` / `requestDefaults` — extra request-body fields forwarded
+   *   verbatim to the upstream (vLLM `chat_template_kwargs`, `top_k`, …).
+   * - `unsupportedParams` — wire names to strip before the call, for models
+   *   that reject them (the OpenAI reasoning family rejects `temperature`).
+   */
   modelSettings?: Record<string, unknown>;
   options?: ModelRuntimeOptions;
 }

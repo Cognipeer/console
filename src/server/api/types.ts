@@ -29,6 +29,12 @@ declare module 'fastify' {
     apiSession?: JWTPayload;
     apiTokenContext?: ApiTokenContext;
     rbacUser?: IUser;
+    /**
+     * Set when the response status was forwarded from an upstream model
+     * provider rather than decided by our own auth layer, so a provider's 401
+     * is not recorded in the security audit trail as a denied user request.
+     */
+    upstreamStatusForwarded?: boolean;
   }
 }
 

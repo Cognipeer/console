@@ -191,8 +191,14 @@ function unauthorized(
   return reply.code(status).send(body);
 }
 
-function getAuditOutcome(statusCode: number): 'success' | 'failure' | 'denied' {
-  if (statusCode === 401 || statusCode === 403) return 'denied';
+function getAuditOutcome(
+  statusCode: number,
+  upstreamForwarded = false,
+): 'success' | 'failure' | 'denied' {
+  // `denied` means *we* refused the caller. A 401 forwarded from a model
+  // provider says our credentials for that provider are wrong, which is an
+  // operational failure, not an authorization event.
+  if (!upstreamForwarded && (statusCode === 401 || statusCode === 403)) return 'denied';
   if (statusCode >= 400) return 'failure';
   return 'success';
 }
@@ -259,7 +265,7 @@ function enqueueAuditLog(request: FastifyRequest, reply: FastifyReply): void {
       event: `${method} ${pathname}`,
       ipAddress: getClientIp(request),
       method,
-      outcome: getAuditOutcome(statusCode),
+      outcome: getAuditOutcome(statusCode, request.upstreamStatusForwarded),
       path: pathname,
       projectId: apiToken?.projectId,
       requestId: request.apiRequestId,

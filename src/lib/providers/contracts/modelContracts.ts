@@ -1,10 +1,15 @@
 import { ChatOpenAI, OpenAIEmbeddings, AzureChatOpenAI, AzureOpenAIEmbeddings } from '@langchain/openai';
 import { ChatTogetherAI } from '@langchain/community/chat_models/togetherai';
 import { TogetherAIEmbeddings } from '@langchain/community/embeddings/togetherai';
-import { ChatBedrockConverse, BedrockEmbeddings } from '@langchain/aws';
-import { VertexAI, VertexAIEmbeddings } from '@langchain/google-vertexai';
+import {
+  ChatBedrockConverse,
+  BedrockEmbeddings,
+  type ChatBedrockConverseInput,
+} from '@langchain/aws';
+import { ChatVertexAI, VertexAIEmbeddings } from '@langchain/google-vertexai';
 import type { ProviderContract } from '../types';
 import type { ModelProviderRuntime } from '../domains/model';
+import { resolveUnsupportedParamNames } from '../unsupportedParams';
 import {
   createOpenAiSttRuntime,
   createOpenAiTtsRuntime,
@@ -67,34 +72,230 @@ interface RerankCredentials {
 
 interface ModelSettingsOverrides {
   temperature?: number;
+  topP?: number;
+  presencePenalty?: number;
+  frequencyPenalty?: number;
   maxTokens?: number;
   maxCompletionTokens?: number;
   reasoning?: {
     effort?: 'low' | 'medium' | 'high';
     summary?: 'auto' | 'concise';
   };
+  /**
+   * Merged verbatim into the upstream request body. This is how non-OpenAI-schema
+   * parameters reach a self-hosted server — vLLM/SGLang take things like
+   * `{ chat_template_kwargs: { enable_thinking: false } }`, `top_k` or
+   * `repetition_penalty`, none of which exist in the OpenAI schema.
+   */
+  extraBody?: Record<string, unknown>;
+  /** false when the model declares `stream_options` unsupported. */
+  streamUsage?: boolean;
+  /**
+   * Suppresses LangChain's own token-cap emission (`maxTokens: -1` is its
+   * documented "omit" sentinel) because we are supplying the renamed key
+   * through `extraBody` instead. See `applyMaxTokensRename`.
+   */
+  suppressMaxTokens?: boolean;
 }
 
-function resolveOverrides(overrides?: Record<string, unknown>): ModelSettingsOverrides {
+/**
+ * Mirrors `isReasoningModel` in @langchain/openai (dist/utils/misc.js) — the
+ * predicate it uses to decide whether a chat request carries `max_tokens` or
+ * `max_completion_tokens`. We need the same answer *before* constructing the
+ * model, because the rename cannot be expressed through constructor fields:
+ * `maxCompletionTokens` and `maxTokens` collapse into one property
+ * (dist/chat_models/base.js:217) and the wire key is then chosen from the model
+ * id alone (dist/chat_models/completions.js:58).
+ */
+function langChainEmitsCompletionTokens(modelId: string | undefined): boolean {
+  if (!modelId) return false;
+  if (/^o\d/.test(modelId)) return true;
+  return modelId.startsWith('gpt-5') && !modelId.startsWith('gpt-5-chat');
+}
+
+/**
+ * Carries the token budget across when an operator declares `max_tokens`
+ * unsupported.
+ *
+ * When the model id already makes LangChain emit `max_completion_tokens`, the
+ * constructor field is enough. Otherwise LangChain would emit `max_tokens`
+ * regardless of what we pass, so we silence it and put the renamed key in the
+ * extra body, which is spread into the request verbatim. This is exactly the
+ * case the setting exists for — an Azure deployment or a vanity model id whose
+ * name does not match the provider-side regex.
+ */
+function applyMaxTokensRename(
+  result: ModelSettingsOverrides,
+  modelId: string | undefined,
+): void {
+  const budget = result.maxTokens;
+  if (budget === undefined) return;
+
+  result.maxCompletionTokens ??= budget;
+
+  if (!langChainEmitsCompletionTokens(modelId)) {
+    result.extraBody = { max_completion_tokens: budget, ...(result.extraBody ?? {}) };
+    result.suppressMaxTokens = true;
+  }
+}
+
+/**
+ * Wire names an operator may list in a model's `settings.unsupportedParams`,
+ * mapped to the internal override field they suppress.
+ *
+ * The keys are deliberately the names the *provider* uses in its 400 response
+ * (OpenAI's reasoning family answers `Unsupported value: 'temperature' … Only
+ * the default (1) is supported`), so an operator can paste what they saw
+ * instead of translating it into our camelCase.
+ */
+const UNSUPPORTED_PARAM_ALIASES: Readonly<Record<string, keyof ModelSettingsOverrides | 'streamOptions'>> = {
+  frequency_penalty: 'frequencyPenalty',
+  frequencypenalty: 'frequencyPenalty',
+  max_completion_tokens: 'maxCompletionTokens',
+  maxcompletiontokens: 'maxCompletionTokens',
+  max_tokens: 'maxTokens',
+  maxtokens: 'maxTokens',
+  presence_penalty: 'presencePenalty',
+  presencepenalty: 'presencePenalty',
+  reasoning: 'reasoning',
+  reasoning_effort: 'reasoning',
+  stream_options: 'streamOptions',
+  streamoptions: 'streamOptions',
+  temperature: 'temperature',
+  top_p: 'topP',
+  topp: 'topP',
+};
+
+/**
+ * The parameters to strip for this call: what the capability registry knows
+ * about the driver/model pair, plus the operator's own list. Names that the
+ * registry does not map to an override field are still returned by
+ * `resolveUnsupportedParamNames` — they are dropped from the passthrough body
+ * upstream in `buildPassthroughBody` rather than here.
+ */
+function resolveUnsupportedParams(
+  settings: Record<string, unknown>,
+  modelId?: string,
+  driver?: string,
+): Set<string> {
+  const { params } = resolveUnsupportedParamNames({
+    driver,
+    modelId,
+    manual: settings.unsupportedParams,
+    autoDetect: settings.autoDropUnsupportedParams,
+  });
+
+  const blocked = new Set<string>();
+  for (const entry of params) {
+    const mapped = UNSUPPORTED_PARAM_ALIASES[entry.toLowerCase()];
+    if (mapped) blocked.add(mapped);
+  }
+
+  return blocked;
+}
+
+/**
+ * Two upstream calls of slack when nobody else is retrying — enough to ride out
+ * a transient 429/5xx for callers outside the gateway's `withResilience`.
+ */
+const DEFAULT_PROVIDER_RETRIES = 2;
+
+function resolveMaxRetries(config: { options?: { maxRetries?: number } }): number {
+  return config.options?.maxRetries ?? DEFAULT_PROVIDER_RETRIES;
+}
+
+function asPlainObject(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  return Object.keys(record).length > 0 ? { ...record } : undefined;
+}
+
+function resolveOverrides(
+  overrides?: Record<string, unknown>,
+  modelId?: string,
+  driver?: string,
+): ModelSettingsOverrides {
   const result: ModelSettingsOverrides = {};
 
-  if (overrides && typeof overrides.temperature === 'number') {
-    result.temperature = overrides.temperature;
+  if (!overrides) {
+    return result;
   }
 
-  if (overrides && typeof overrides.maxTokens === 'number') {
-    result.maxTokens = overrides.maxTokens;
-  }
+  const num = (key: string): number | undefined =>
+    typeof overrides[key] === 'number' ? (overrides[key] as number) : undefined;
 
-  if (overrides && typeof overrides.maxCompletionTokens === 'number') {
-    result.maxCompletionTokens = overrides.maxCompletionTokens;
-  }
+  result.temperature = num('temperature');
+  result.topP = num('topP');
+  result.presencePenalty = num('presencePenalty');
+  result.frequencyPenalty = num('frequencyPenalty');
+  result.maxTokens = num('maxTokens');
+  result.maxCompletionTokens = num('maxCompletionTokens');
 
-  if (overrides && overrides.reasoning && typeof overrides.reasoning === 'object') {
+  if (overrides.reasoning && typeof overrides.reasoning === 'object') {
     result.reasoning = overrides.reasoning as ModelSettingsOverrides['reasoning'];
   }
 
+  // `extraBody` is what the gateway resolved for this call (model defaults +
+  // caller passthrough). `requestDefaults` is the raw model-level field, honoured
+  // as a fallback so callers that build a runtime straight from `model.settings`
+  // — agents, OCR, evaluations — still get the operator's defaults.
+  result.extraBody = asPlainObject(overrides.extraBody) ?? asPlainObject(overrides.requestDefaults);
+
+  const blocked = resolveUnsupportedParams(overrides, modelId, driver);
+  if (blocked.size === 0) {
+    return result;
+  }
+
+  if (blocked.has('maxTokens') && !blocked.has('maxCompletionTokens')) {
+    applyMaxTokensRename(result, modelId);
+  }
+
+  if (blocked.has('streamOptions')) {
+    result.streamUsage = false;
+  }
+
+  for (const field of blocked) {
+    if (field === 'streamOptions') continue;
+    delete result[field as keyof ModelSettingsOverrides];
+  }
+
   return result;
+}
+
+/**
+ * Constructor fields shared by every OpenAI-schema chat model (OpenAI, any
+ * OpenAI-compatible base URL, Together, Azure). Undefined fields are dropped by
+ * `JSON.stringify` on the way to the wire, which is what lets a stripped
+ * parameter genuinely disappear from the request.
+ */
+function openAiChatOverrides(
+  overrides: ModelSettingsOverrides,
+  options: { streaming?: boolean; disableStreaming?: boolean } | undefined,
+  maxRetries: number,
+) {
+  return {
+    disableStreaming: options?.disableStreaming ?? false,
+    // LangChain's own AsyncCaller retries 6 times by default. Nested inside the
+    // gateway's 3-attempt `withResilience` that is up to 21 upstream calls per
+    // request, 18 of them invisible to the circuit breaker, which then trips 7x
+    // later than configured.
+    maxRetries,
+    temperature: overrides.temperature,
+    topP: overrides.topP,
+    presencePenalty: overrides.presencePenalty,
+    frequencyPenalty: overrides.frequencyPenalty,
+    // Use maxCompletionTokens for reasoning models (o1, o3, gpt-5, …), maxTokens otherwise.
+    // `-1` is LangChain's "omit the cap" sentinel, used when the renamed key is
+    // being supplied through the extra body instead.
+    maxCompletionTokens: overrides.suppressMaxTokens ? -1 : overrides.maxCompletionTokens,
+    maxTokens: overrides.suppressMaxTokens ? -1 : overrides.maxTokens,
+    reasoning: overrides.reasoning,
+    modelKwargs: overrides.extraBody,
+    ...(overrides.streamUsage === false ? { streamUsage: false } : {}),
+    streaming: options?.streaming ?? false,
+  };
 }
 
 function ensureValue(value: unknown, message: string): string {
@@ -170,20 +371,14 @@ export const OpenAiModelProviderContract: ProviderContract<ModelProviderRuntime,
 
     const runtime: ModelProviderRuntime = {
       createChatModel: (config) => {
-        const overrides = resolveOverrides(config.modelSettings);
+        const overrides = resolveOverrides(config.modelSettings, config.modelId, 'openai');
         return new ChatOpenAI({
           model: config.modelId,
           apiKey,
           configuration: settings.organization
             ? { organization: settings.organization }
             : undefined,
-          temperature: overrides.temperature,
-          // Use maxCompletionTokens for reasoning models (o1, o3, etc.), fallback to maxTokens
-          maxCompletionTokens: overrides.maxCompletionTokens,
-          maxTokens: overrides.maxTokens,
-          reasoning: overrides.reasoning,
-          streaming: config.options?.streaming ?? false,
-          disableStreaming: config.options?.disableStreaming ?? false,
+          ...openAiChatOverrides(overrides, config.options, resolveMaxRetries(config)),
         });
       },
       createEmbeddingModel: (config) =>
@@ -316,7 +511,7 @@ export const OpenAiCompatibleModelProviderContract: ProviderContract<ModelProvid
 
     const runtime: ModelProviderRuntime = {
       createChatModel: (config) => {
-        const overrides = resolveOverrides(config.modelSettings);
+        const overrides = resolveOverrides(config.modelSettings, config.modelId, 'openai-compatible');
         return new ChatOpenAI({
           model: config.modelId,
           apiKey,
@@ -324,13 +519,7 @@ export const OpenAiCompatibleModelProviderContract: ProviderContract<ModelProvid
             baseURL: baseUrl,
             organization: settings.organization,
           },
-          temperature: overrides.temperature,
-          // Use maxCompletionTokens for reasoning models (o1, o3, etc.), fallback to maxTokens
-          maxCompletionTokens: overrides.maxCompletionTokens,
-          maxTokens: overrides.maxTokens,
-          reasoning: overrides.reasoning,
-          streaming: config.options?.streaming ?? false,
-          disableStreaming: config.options?.disableStreaming ?? false,
+          ...openAiChatOverrides(overrides, config.options, resolveMaxRetries(config)),
         });
       },
       createEmbeddingModel: (config) =>
@@ -409,14 +598,11 @@ export const TogetherModelProviderContract: ProviderContract<ModelProviderRuntim
 
     const runtime: ModelProviderRuntime = {
       createChatModel: (config) => {
-        const overrides = resolveOverrides(config.modelSettings);
+        const overrides = resolveOverrides(config.modelSettings, config.modelId, 'together');
         return new ChatTogetherAI({
           model: config.modelId,
           apiKey,
-          temperature: overrides.temperature,
-          maxTokens: overrides.maxTokens,
-          streaming: config.options?.streaming ?? false,
-          disableStreaming: config.options?.disableStreaming ?? false,
+          ...openAiChatOverrides(overrides, config.options, resolveMaxRetries(config)),
         });
       },
       createEmbeddingModel: (config) =>
@@ -496,8 +682,9 @@ export const BedrockModelProviderContract: ProviderContract<ModelProviderRuntime
 
     const runtime: ModelProviderRuntime = {
       createChatModel: (config) => {
-        const overrides = resolveOverrides(config.modelSettings);
+        const overrides = resolveOverrides(config.modelSettings, config.modelId, 'bedrock');
         return new ChatBedrockConverse({
+          maxRetries: resolveMaxRetries(config),
           model: config.modelId,
           region,
           credentials: {
@@ -506,7 +693,15 @@ export const BedrockModelProviderContract: ProviderContract<ModelProviderRuntime
             sessionToken: credentials.sessionToken,
           },
           temperature: overrides.temperature,
-          maxTokens: overrides.maxTokens,
+          topP: overrides.topP,
+          // Converse carries model-specific parameters in its own envelope
+          // rather than as top-level body fields. The cast is unavoidable:
+          // Smithy types this as a recursive `DocumentType`, which plain
+          // operator-supplied JSON does not structurally satisfy.
+          additionalModelRequestFields:
+            overrides.extraBody as ChatBedrockConverseInput['additionalModelRequestFields'],
+          maxTokens: overrides.maxCompletionTokens ?? overrides.maxTokens,
+          streaming: config.options?.streaming ?? false,
         });
       },
       createEmbeddingModel: (config) =>
@@ -595,14 +790,20 @@ export const VertexModelProviderContract: ProviderContract<ModelProviderRuntime,
 
     const runtime: ModelProviderRuntime = {
       createChatModel: (config) => {
-        const overrides = resolveOverrides(config.modelSettings);
-        // `project` is accepted at runtime but not in the published types
-        return new VertexAI({
+        const overrides = resolveOverrides(config.modelSettings, config.modelId, 'vertex');
+        // `ChatVertexAI`, not `VertexAI`: the latter is a text-completion LLM
+        // whose `.stream()` yields plain strings, so every streamed chunk came
+        // out of the gateway as an empty delta.
+        // `project` is accepted at runtime but not in the published types.
+        return new ChatVertexAI({
+          maxRetries: resolveMaxRetries(config),
           model: config.modelId,
           location,
           authOptions,
           temperature: overrides.temperature,
-          maxOutputTokens: overrides.maxTokens,
+          topP: overrides.topP,
+          maxOutputTokens: overrides.maxCompletionTokens ?? overrides.maxTokens,
+          streaming: config.options?.streaming ?? false,
           ...({ project: projectId } as Record<string, unknown>),
         });
       },
@@ -702,18 +903,14 @@ export const AzureModelProviderContract: ProviderContract<ModelProviderRuntime, 
 
     const runtime: ModelProviderRuntime = {
       createChatModel: (config) => {
-        const overrides = resolveOverrides(config.modelSettings);
+        const overrides = resolveOverrides(config.modelSettings, config.modelId, 'azure');
         return new AzureChatOpenAI({
           model: config.modelId,
           azureOpenAIApiKey: apiKey,
           azureOpenAIApiInstanceName: instanceName,
           azureOpenAIApiDeploymentName: deploymentName,
           azureOpenAIApiVersion: apiVersion,
-          temperature: overrides.temperature,
-          maxTokens: overrides.maxTokens,
-          maxCompletionTokens: overrides.maxCompletionTokens,
-          streaming: config.options?.streaming ?? false,
-          disableStreaming: config.options?.disableStreaming ?? false,
+          ...openAiChatOverrides(overrides, config.options, resolveMaxRetries(config)),
         });
       },
       createEmbeddingModel: (config) =>

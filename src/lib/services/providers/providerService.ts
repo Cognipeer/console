@@ -4,8 +4,36 @@ import {
   ProviderDomain,
 } from '@/lib/database';
 import { decryptObject, encryptObject } from '@/lib/utils/crypto';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('provider-service');
 
 export type ProviderStatus = IProviderRecord['status'];
+
+/**
+ * Stored credentials could not be opened with any configured secret — almost
+ * always because the row was sealed under a different `PROVIDER_ENCRYPTION_SECRET`
+ * (a rotated key, or an environment pointed at another deployment's database).
+ * Raw AES-GCM failures surface as "Unsupported state or unable to authenticate
+ * data", which tells an operator nothing about what to do next.
+ */
+export class ProviderCredentialDecryptError extends Error {
+  readonly providerKey: string;
+  readonly driver: string;
+
+  constructor(providerKey: string, driver: string, cause?: unknown) {
+    super(
+      `Stored credentials for provider "${providerKey}" (${driver}) could not be decrypted. `
+      + 'They were encrypted with a different key than this environment is configured with — '
+      + 'check PROVIDER_ENCRYPTION_SECRET (and JWT_SECRET, which it falls back to), '
+      + 're-enter the credentials to re-seal them under the current key.',
+    );
+    this.name = 'ProviderCredentialDecryptError';
+    this.providerKey = providerKey;
+    this.driver = driver;
+    this.cause = cause;
+  }
+}
 
 export interface CreateProviderConfigInput {
   projectId?: string;
@@ -155,9 +183,22 @@ export async function updateProviderConfig(
     // would silently wipe the API key whenever an unrelated field (baseUrl,
     // region, …) is edited.
     const existing = await db.findProviderById(providerId);
-    const current = existing?.credentialsEnc
-      ? (decryptObject(existing.credentialsEnc) as Record<string, unknown>)
-      : {};
+    let current: Record<string, unknown> = {};
+    if (existing?.credentialsEnc) {
+      try {
+        current = decryptObject(existing.credentialsEnc) as Record<string, unknown>;
+      } catch (error) {
+        // Undecryptable existing credentials must not block the save — that made
+        // the one action that repairs the record (re-entering the key) the one
+        // action guaranteed to fail. Treat the old blob as empty; whatever the
+        // operator supplies now is re-sealed under the current key.
+        logger.warn('Existing provider credentials could not be decrypted; replacing them', {
+          driver: existing.driver,
+          providerKey: existing.key,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
     const merged: Record<string, unknown> = { ...current };
     for (const [field, value] of Object.entries(payload.credentials)) {
       if (value === '' || value === undefined || value === null) {
@@ -247,7 +288,25 @@ export async function loadProviderRuntimeData<TCredentials = Record<string, unkn
   }
 
   if (!record) {
-    throw new Error('Provider configuration not found.');
+    // Providers are strictly project-scoped, so the common cause of this miss is
+    // a provider that exists but was never assigned to the active project. Saying
+    // "not found" sent operators looking for a deleted record instead.
+    if (providerIdOrKey.key && providerIdOrKey.projectId) {
+      const unscoped = await db.findProviderByKey(
+        providerIdOrKey.tenantId,
+        providerIdOrKey.key,
+      );
+      if (unscoped) {
+        throw new Error(
+          `Provider "${providerIdOrKey.key}" exists but is not assigned to project `
+          + `${providerIdOrKey.projectId}. Assign it from the provider's Projects tab.`,
+        );
+      }
+    }
+
+    throw new Error(
+      `Provider configuration "${providerIdOrKey.key ?? providerIdOrKey.id}" not found.`,
+    );
   }
 
   let credentials: TCredentials;
@@ -261,7 +320,9 @@ export async function loadProviderRuntimeData<TCredentials = Record<string, unkn
     // field happens to parse as JSON with usable credentials, recover it
     // and re-encrypt in place so subsequent loads use the proper format.
     const recovered = tryRecoverLegacyPlaintextCredentials<TCredentials>(record.credentialsEnc);
-    if (!recovered) throw error;
+    if (!recovered) {
+      throw new ProviderCredentialDecryptError(record.key, record.driver, error);
+    }
     await db
       .updateProvider(String(record._id), {
         credentialsEnc: encryptObject(recovered),

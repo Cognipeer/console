@@ -21,6 +21,7 @@ import {
   checkRateLimit,
 } from '@/lib/quota/quotaGuard';
 import {
+  applyStreamHeaders,
   readJsonBody,
   withOpenAiApiRequestContext,
 } from '../fastify-utils';
@@ -50,6 +51,7 @@ type EmbeddingRequest = {
 function quotaExceededPayload(message = 'Quota exceeded') {
   return { error: { message, type: 'rate_limit_error' } };
 }
+
 
 function estimateTokens(text: string): number {
   if (!text) {
@@ -265,10 +267,7 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       if (result.stream) {
-        reply.raw.setHeader('Content-Type', 'text/event-stream');
-        reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
-        reply.raw.setHeader('Connection', 'keep-alive');
-        reply.raw.setHeader('X-Request-Id', result.requestId);
+        applyStreamHeaders(reply, result.requestId);
 
         return reply.send(
           Readable.fromWeb(result.stream as unknown as NodeReadableStream<Uint8Array>),
@@ -317,6 +316,12 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
         }
       } catch (logError) {
         logger.error('Failed to log client chat completion error', { error: logError });
+      }
+
+      if (normalizedError.status >= 400 && normalizedError.status < 500) {
+        // Keeps a provider's 401/403 out of the security audit trail's `denied`
+        // bucket — our own auth already passed to get here.
+        request.upstreamStatusForwarded = true;
       }
 
       return reply.code(normalizedError.status).send({ error: normalizedError.error });
@@ -471,6 +476,12 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
         }
       } catch (logError) {
         logger.error('Failed to log client embedding error', { error: logError });
+      }
+
+      if (normalizedError.status >= 400 && normalizedError.status < 500) {
+        // Keeps a provider's 401/403 out of the security audit trail's `denied`
+        // bucket — our own auth already passed to get here.
+        request.upstreamStatusForwarded = true;
       }
 
       return reply.code(normalizedError.status).send({ error: normalizedError.error });

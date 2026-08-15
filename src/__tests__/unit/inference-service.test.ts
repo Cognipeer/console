@@ -15,6 +15,7 @@ vi.mock('@/lib/services/models/runtimeService', () => ({
 }));
 
 vi.mock('@/lib/services/models/semanticCacheService', () => ({
+  buildCacheVariantKey: vi.fn().mockReturnValue('variant-key'),
   isSemanticCacheEnabled: vi.fn().mockReturnValue(false),
   lookupCache: vi.fn().mockResolvedValue({ hit: false, response: null }),
   storeInCache: vi.fn().mockResolvedValue(undefined),
@@ -679,7 +680,7 @@ describe('handleChatCompletion', () => {
 
     expect(createChatModel).toHaveBeenCalledWith(
       expect.objectContaining({
-        options: { streaming: true, disableStreaming: true },
+        options: { streaming: true, disableStreaming: true, maxRetries: 0 },
       }),
     );
   });
