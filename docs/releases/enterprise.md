@@ -23,8 +23,21 @@ time. Tags that carried only packaging or pipeline changes are not listed.
 
 *August 2026*
 
+**The module moved here in full.** Spend attribution, the Analysis workbench,
+automated Prescriptions, the pricing catalog and Reports had been shipping in
+the community edition. They are enterprise, and the code moved with them —
+see the [community release note](/releases/1.2#v1-2-25-community) for what a
+community installation sees now.
+
+The same release fixed five things across the module: Prescriptions no longer
+uses the word "Analysis" for itself, prescription narratives render as markdown
+rather than as a wall of preformatted text, Reports can be focused on a single
+model or agent, Analysis stopped prescribing an SDK upgrade to people who trace
+through something else, and badge clusters in dense tables wrap instead of
+ellipsising their labels down to two characters.
+
 **Model-switch recommendations, parity tests and the model matrix.** The
-enterprise half of [Cost & Optimization](/guide/cost-optimization): given the
+predictive half of [Cost & Optimization](/guide/cost-optimization): given the
 traffic Console has recorded, which model would be cheaper or faster for this
 workload, and does it actually hold up.
 
