@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Alert, Select, Textarea, TextInput } from '@mantine/core';
+import { Alert, NumberInput, SegmentedControl, Select, Textarea, TextInput } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { IconCheck, IconInfoCircle, IconRobot } from '@tabler/icons-react';
@@ -30,6 +30,14 @@ interface FormValues {
   kind: 'agent' | 'model' | 'external';
   modelKey: string;
   agentKey: string;
+  /** 'none' keeps whatever system turn the dataset items carry. */
+  promptMode: 'none' | 'promptKey' | 'inline';
+  promptKey: string;
+  systemPrompt: string;
+  /** Structured-output contract the target sends, mirroring production. */
+  responseMode: 'none' | 'json_object' | 'json_schema';
+  jsonSchema: string;
+  maxTokens: number | '';
 }
 
 const KIND_OPTIONS = [
@@ -40,16 +48,39 @@ const KIND_OPTIONS = [
 
 const KIND_LABEL: Record<string, string> = { model: 'Model', agent: 'Agent', external: 'External' };
 
+/** Assemble the OpenAI-shaped response_format the target will send. */
+function buildResponseFormat(v: FormValues): Record<string, unknown> | undefined {
+  if (v.responseMode === 'none') return undefined;
+  if (v.responseMode === 'json_object') return { type: 'json_object' };
+  try {
+    return { type: 'json_schema', json_schema: { name: 'evaluation_output', strict: true, schema: JSON.parse(v.jsonSchema) } };
+  } catch {
+    return undefined;
+  }
+}
+
 export default function CreateTargetModal({ opened, onClose, onCreated, models = [], editing = null }: CreateTargetModalProps) {
   const [loading, setLoading] = useState(false);
   const [agents, setAgents] = useState<{ value: string; label: string }[]>([]);
+  const [prompts, setPrompts] = useState<{ value: string; label: string }[]>([]);
   const isEdit = Boolean(editing);
   const form = useForm<FormValues>({
-    initialValues: { name: '', description: '', kind: 'model', modelKey: '', agentKey: '' },
+    initialValues: {
+      name: '', description: '', kind: 'model', modelKey: '', agentKey: '',
+      promptMode: 'none', promptKey: '', systemPrompt: '',
+      responseMode: 'none', jsonSchema: '', maxTokens: '',
+    },
     validate: {
       name: (v) => (!v.trim() ? 'Name is required' : null),
       modelKey: (v, values) => (values.kind === 'model' && !v ? 'A model is required for model targets' : null),
       agentKey: (v, values) => (values.kind === 'agent' && !v.trim() ? 'An agent key is required for agent targets' : null),
+      promptKey: (v, values) => (values.promptMode === 'promptKey' && !v ? 'Select a prompt' : null),
+      systemPrompt: (v, values) => (values.promptMode === 'inline' && !v.trim() ? 'Enter a system prompt' : null),
+      jsonSchema: (v, values) => {
+        if (values.responseMode !== 'json_schema') return null;
+        if (!v.trim()) return 'Paste the JSON schema';
+        try { JSON.parse(v); return null; } catch { return 'Not valid JSON'; }
+      },
     },
   });
 
@@ -65,6 +96,14 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
         kind: editing.kind,
         modelKey: editing.modelKey ?? '',
         agentKey: editing.agentKey ?? '',
+        promptMode: editing.promptKey ? 'promptKey' : editing.systemPrompt ? 'inline' : 'none',
+        promptKey: editing.promptKey ?? '',
+        systemPrompt: editing.systemPrompt ?? '',
+        responseMode: (editing.responseFormat?.type as FormValues['responseMode']) ?? 'none',
+        jsonSchema: editing.responseFormat?.json_schema
+          ? JSON.stringify(editing.responseFormat.json_schema, null, 2)
+          : '',
+        maxTokens: editing.maxTokens ?? '',
       });
     }
     void (async () => {
@@ -76,6 +115,15 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
         }
       } catch {
         /* non-fatal — agent dropdown stays empty */
+      }
+      try {
+        const res = await fetch('/api/prompts', { cache: 'no-store' });
+        if (res.ok) {
+          const data = await res.json();
+          setPrompts(((data.prompts ?? []) as Array<{ key: string; name: string }>).map((p) => ({ value: p.key, label: p.name })));
+        }
+      } catch {
+        /* non-fatal — prompt dropdown stays empty */
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -91,6 +139,12 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
         description: v.description || undefined,
         modelKey: v.kind === 'model' ? v.modelKey : undefined,
         agentKey: v.kind === 'agent' ? v.agentKey.trim() : undefined,
+        // Override is model-only; sending it for an agent target would be
+        // rejected at run time (an agent always runs its published prompt).
+        promptKey: v.kind === 'model' && v.promptMode === 'promptKey' ? v.promptKey : undefined,
+        systemPrompt: v.kind === 'model' && v.promptMode === 'inline' ? v.systemPrompt : undefined,
+        responseFormat: v.kind === 'model' ? buildResponseFormat(v) : undefined,
+        maxTokens: v.kind === 'model' && typeof v.maxTokens === 'number' ? v.maxTokens : undefined,
       };
       const res = await fetch(
         isEdit ? `/api/evaluation/targets/${editing!.id}` : '/api/evaluation/targets',
@@ -119,7 +173,14 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
   const kind = v.kind;
   const validName = v.name.trim().length > 0;
   const validRef = kind === 'model' ? Boolean(v.modelKey) : kind === 'agent' ? v.agentKey.trim().length > 0 : true;
-  const canSubmit = validName && validRef;
+  const validPrompt =
+    v.promptMode === 'promptKey' ? Boolean(v.promptKey)
+      : v.promptMode === 'inline' ? v.systemPrompt.trim().length > 0
+        : true;
+  const validSchema = v.responseMode !== 'json_schema' || (() => {
+    try { JSON.parse(v.jsonSchema); return true; } catch { return false; }
+  })();
+  const canSubmit = validName && validRef && (kind !== 'model' || (validPrompt && validSchema));
 
   const checklist = [
     { id: 'name', label: 'Name provided', done: validName },
@@ -131,6 +192,17 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
       <SummaryKV label="Name" value={v.name || '—'} />
       <SummaryKV label="Kind" value={KIND_LABEL[kind]} />
       <SummaryKV label={kind === 'agent' ? 'Agent' : 'Model'} value={(kind === 'agent' ? v.agentKey : v.modelKey) || '—'} />
+      {kind === 'model' && (
+        <SummaryKV label="Response format" value={v.responseMode === 'none' ? 'free text' : v.responseMode} />
+      )}
+      {kind === 'model' && (
+        <SummaryKV
+          label="System prompt"
+          value={v.promptMode === 'promptKey' ? (v.promptKey || 'prompt not selected')
+            : v.promptMode === 'inline' ? 'pasted'
+              : 'from the dataset'}
+        />
+      )}
       <Checklist items={checklist} />
     </SummaryGroup>
   );
@@ -190,6 +262,98 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
           </Alert>
         )}
       </FormSection>
+
+      {kind === 'model' && (
+        <FormSection number={3} title="System prompt" done={v.promptMode === 'none' || validPrompt}>
+          <FormField
+            label="Prompt under test"
+            hint="Datasets captured from live traffic embed the system prompt they were recorded with. Override it here to test a different prompt against the same traffic — the captured system turn is replaced, not stacked."
+          >
+            <SegmentedControl
+              fullWidth
+              value={v.promptMode}
+              onChange={(value) => form.setFieldValue('promptMode', value as FormValues['promptMode'])}
+              data={[
+                { label: 'From the dataset', value: 'none' },
+                { label: 'Managed prompt', value: 'promptKey' },
+                { label: 'Paste', value: 'inline' },
+              ]}
+            />
+          </FormField>
+
+          {v.promptMode === 'promptKey' && (
+            <FormField label="Prompt" required hint="Resolved per run — promote a new version and the next run tests it.">
+              <Select
+                placeholder={prompts.length ? 'Select a prompt…' : 'No prompts found'}
+                data={prompts}
+                searchable
+                {...form.getInputProps('promptKey')}
+              />
+            </FormField>
+          )}
+
+          {v.promptMode === 'inline' && (
+            <FormField label="System prompt" required>
+              <Textarea
+                autosize
+                minRows={4}
+                maxRows={14}
+                placeholder="You are a careful support assistant…"
+                styles={{ input: { fontFamily: 'var(--font-mono, monospace)', fontSize: 12 } }}
+                {...form.getInputProps('systemPrompt')}
+              />
+            </FormField>
+          )}
+        </FormSection>
+      )}
+
+      {kind === 'model' && (
+        <FormSection number={4} title="Response contract" done={v.responseMode === 'none' || validSchema}>
+          <FormField
+            label="Structured output"
+            hint="Send the same response_format your production calls send. A suite that omits it tests a looser contract than the live system runs under — malformed-JSON failures then only show up in production."
+          >
+            <SegmentedControl
+              fullWidth
+              value={v.responseMode}
+              onChange={(value) => form.setFieldValue('responseMode', value as FormValues['responseMode'])}
+              data={[
+                { label: 'None (free text)', value: 'none' },
+                { label: 'JSON object', value: 'json_object' },
+                { label: 'JSON schema (strict)', value: 'json_schema' },
+              ]}
+            />
+          </FormField>
+
+          {v.responseMode === 'json_schema' && (
+            <FormField label="JSON schema" required hint="The schema body only — it is wrapped as response_format.json_schema with strict: true.">
+              <Textarea
+                autosize
+                minRows={5}
+                maxRows={16}
+                placeholder={'{\n  "type": "object",\n  "properties": { "reply": { "type": "boolean" } },\n  "required": ["reply"]\n}'}
+                styles={{ input: { fontFamily: 'var(--font-mono, monospace)', fontSize: 12 } }}
+                {...form.getInputProps('jsonSchema')}
+              />
+            </FormField>
+          )}
+
+          <FormField
+            label="Max output tokens"
+            optional
+            hint="Left empty, the provider's own default applies — a long structured answer can truncate mid-object and arrive as unparseable JSON."
+          >
+            <NumberInput min={1} max={200000} placeholder="provider default" {...form.getInputProps('maxTokens')} />
+          </FormField>
+        </FormSection>
+      )}
+
+      {kind === 'agent' && (
+        <Alert color="blue" variant="light" icon={<IconInfoCircle size={16} />} mt="md">
+          An agent target always runs its own published prompt, so there is no system-prompt override here. To evaluate a
+          prompt change, use a model target — or change the agent&apos;s prompt and re-publish it.
+        </Alert>
+      )}
     </FormShell>
   );
 }

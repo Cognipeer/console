@@ -2,9 +2,11 @@ import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import type {
   IAnalysisFieldDef,
   IAnalysisModes,
+  IAnalysisRunTarget,
   IAnalysisTranscriptMessage,
   AnalysisFieldType,
 } from '@/lib/database';
+import { getDataset } from '@/lib/services/evaluation/service';
 import { createLogger } from '@/lib/core/logger';
 import {
   createDefinition,
@@ -146,6 +148,18 @@ function sanitizeSelection(raw: unknown): RunSelection | undefined {
     sampleSize: Number.isFinite(sampleSize) && sampleSize > 0 ? Math.floor(sampleSize) : undefined,
     conversationKeys,
   };
+}
+
+/**
+ * A run may target an evaluation dataset instead of the conversation corpus
+ * (AI labeling). The dataset is resolved + project-checked by the caller; this
+ * only shapes the payload.
+ */
+function sanitizeTarget(raw: unknown): { datasetId: string } | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const t = raw as Record<string, unknown>;
+  if (t.kind !== 'dataset') return null;
+  return typeof t.datasetId === 'string' && t.datasetId.trim() ? { datasetId: t.datasetId.trim() } : null;
 }
 
 export const analysisApiPlugin: FastifyPluginAsync = async (app) => {
@@ -337,6 +351,20 @@ export const analysisApiPlugin: FastifyPluginAsync = async (app) => {
       const conversationKeys = Array.isArray(body.conversationKeys)
         ? (body.conversationKeys as unknown[]).filter((k): k is string => typeof k === 'string')
         : undefined;
+      // A dataset target must be resolved here so a caller can't point a run at
+      // another project's dataset by id.
+      const rawTarget = sanitizeTarget(body.target);
+      let target: IAnalysisRunTarget | undefined;
+      if (body.target !== undefined && !rawTarget) {
+        return reply.code(400).send({ error: 'target must be { kind: "dataset", datasetId }' });
+      }
+      if (rawTarget) {
+        const dataset = await getDataset(session.tenantDbName, rawTarget.datasetId);
+        if (!dataset || (dataset.projectId && dataset.projectId !== projectId)) {
+          return reply.code(404).send({ error: 'Dataset not found' });
+        }
+        target = { kind: 'dataset', datasetId: rawTarget.datasetId, datasetKey: dataset.key, datasetName: dataset.name };
+      }
       // Enqueue + return immediately (status 'pending'); the queue consumer runs
       // it in the background so the dashboard never blocks. The UI polls the run
       // detail endpoint to watch progress.
@@ -348,6 +376,7 @@ export const analysisApiPlugin: FastifyPluginAsync = async (app) => {
         definitionKey: key,
         selection,
         conversationKeys,
+        target,
       });
       return reply.code(202).send({ run });
     } catch (error) {

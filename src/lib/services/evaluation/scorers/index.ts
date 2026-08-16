@@ -8,8 +8,9 @@ import { scoreAssertion } from './assertionScorer';
 import { scoreLlmJudge } from './llmJudgeScorer';
 import { scoreSemantic } from './semanticScorer';
 import { scoreToolCall } from './toolCallScorer';
+import { scoreJsonShape } from './jsonShapeScorer';
 
-export const SUPPORTED_SCORERS: ScorerType[] = ['assertion', 'llm-judge', 'semantic', 'tool-call'];
+export const SUPPORTED_SCORERS: ScorerType[] = ['assertion', 'llm-judge', 'semantic', 'tool-call', 'json-shape'];
 
 export interface ScorerDeps {
   invokeJudge?: JudgeInvoker;
@@ -30,6 +31,9 @@ export async function runScorers(
         break;
       case 'tool-call':
         results.push(scoreToolCall(item, output, config));
+        break;
+      case 'json-shape':
+        results.push(scoreJsonShape(item, output, config));
         break;
       case 'llm-judge':
         if (!deps.invokeJudge) {

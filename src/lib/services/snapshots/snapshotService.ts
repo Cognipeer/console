@@ -20,6 +20,13 @@
  *     each item gets the menu active at its action point) and falls back to
  *     definitions inferred from the observed calls.
  *
+ * Request contract: both sources also carry the structured-output contract the
+ * live call ran under onto `DatasetItem.responseFormat` — the recorded
+ * `response_format` section (tracing) or the logged contract (gateway). An
+ * evaluation or optimization run that replays the item without it is measuring
+ * a looser system than production, which is exactly how a JSON-shape
+ * regression escapes a green suite.
+ *
  * Determinism: a row is in the sample iff
  *   uint32BE(sha256(stableId)[0..4]) % 100 < samplePct
  * where stableId is requestId (gateway) / sessionId (tracing). The same
@@ -45,6 +52,10 @@ import { toUtcDay } from '@/lib/services/usage/usageBreakdown';
 import { anonymizeText, type AnonymizeOptions } from '@/lib/services/pii/anonymize';
 import { redactLogPayload } from '@/lib/services/logRedaction';
 import { detectLanguageMix } from '@/lib/services/workload/workloadSignals';
+import {
+  RESPONSE_FORMAT_SECTION_KIND,
+  sectionToWireResponseFormat,
+} from '@/lib/services/tracingResponseFormat';
 import type {
   CreateSnapshotParams,
   CreateSnapshotResult,
@@ -190,6 +201,43 @@ function flattenContent(content: unknown): string | undefined {
  * reference-based scorer. Streaming is the default for chat clients, so that
  * was most of a typical tenant's traffic.
  */
+/**
+ * Reconstruct the wire `response_format` from a recorded gateway request.
+ *
+ * The gateway logs the contract in the summarized `describeRequestContract`
+ * shape (`{type, schemaName?, strict?, schema?}`), so this maps it back to the
+ * object a replay puts on the wire. A `json_schema` contract whose schema was
+ * dropped by the log budget yields NOTHING rather than a schema-less
+ * `json_schema` block, which every provider rejects — running the item with no
+ * contract is a smaller lie than running it with a broken one. Raw
+ * `response_format` bodies (older logs / other writers) pass through as-is.
+ */
+function gatewayResponseFormat(request: UnknownRecord | undefined): UnknownRecord | undefined {
+  if (!request) return undefined;
+
+  const raw = asRecord(request.response_format);
+  if (raw && typeof raw.type === 'string') {
+    if (raw.type !== 'json_schema') return { type: raw.type };
+    const jsonSchema = asRecord(raw.json_schema) ?? asRecord(raw.jsonSchema);
+    return asRecord(jsonSchema?.schema) ? raw : undefined;
+  }
+
+  const described = asRecord(request.responseFormat);
+  const type = typeof described?.type === 'string' ? described.type : undefined;
+  if (!type || type === 'unknown') return undefined;
+  if (type !== 'json_schema') return { type };
+  const schema = asRecord(described?.schema);
+  if (!schema) return undefined;
+  return {
+    type: 'json_schema',
+    json_schema: {
+      name: typeof described?.schemaName === 'string' && described.schemaName ? described.schemaName : 'response',
+      ...(typeof described?.strict === 'boolean' ? { strict: described.strict } : {}),
+      schema,
+    },
+  };
+}
+
 function extractAssistantMessage(response: Record<string, unknown> | undefined) {
   if (!response) return undefined;
 
@@ -326,6 +374,11 @@ export function mapGatewayRow(row: IModelUsageLog, anonymize: AnonymizeOptions):
     }
   }
 
+  // Structured-output contract the live call ran under. The gateway records it
+  // in the summarized `describeRequestContract` shape (schema included when it
+  // fit the log budget); items keep it so a replay sends the same contract.
+  const recordedResponseFormat = gatewayResponseFormat(request);
+
   // Expected output from the recorded provider response.
   const expected: Record<string, unknown> = {};
   const response = unwrapPayload(redactLogPayload(row.providerResponse));
@@ -361,6 +414,7 @@ export function mapGatewayRow(row: IModelUsageLog, anonymize: AnonymizeOptions):
     ...(Object.keys(expected).length > 0 ? { expected } : {}),
     ...(tools.length > 0 ? { tools } : {}),
     ...(Object.keys(toolResults).length > 0 ? { toolResults } : {}),
+    ...(recordedResponseFormat ? { responseFormat: recordedResponseFormat } : {}),
     tags: ['snapshot', 'gateway', `model:${row.modelKey}`],
   };
   return { kind: 'item', item, findings: counter.findings };
@@ -517,18 +571,31 @@ export function mapTracingSession(
     return tools;
   };
 
+  // Recorded structured-output contracts, tracked exactly like the tool menus:
+  // a `response_format` section rides on the model-call event it applies to, and
+  // an agent may enforce a schema on its final turn only — so each occurrence
+  // activates from that event's first turn onward.
+  const formatChanges: Array<{ at: number; format: UnknownRecord }> = [];
+
   for (const event of ordered) {
-    // Menu sections first, so the menu is active for the action this very
-    // event produced (cut points at/after the event see it).
+    // Menu + contract sections first, so both are active for the action this
+    // very event produced (cut points at/after the event see them).
     for (const section of event.sections ?? []) {
       const record = asRecord(section);
-      if (!record || record.kind !== 'tool_definitions') continue;
-      const tools = parseRecordedToolDefinitions(record.tools);
-      if (tools.length > 0) rawMenuChanges.push({ at: turns.length, tools });
+      if (!record) continue;
+      if (record.kind === 'tool_definitions') {
+        const tools = parseRecordedToolDefinitions(record.tools);
+        if (tools.length > 0) rawMenuChanges.push({ at: turns.length, tools });
+        continue;
+      }
+      if (record.kind === RESPONSE_FORMAT_SECTION_KIND) {
+        const format = sectionToWireResponseFormat(record);
+        if (format) formatChanges.push({ at: turns.length, format });
+      }
     }
     for (const section of event.sections ?? []) {
       const record = asRecord(section);
-      if (!record || record.kind === 'tool_definitions') continue;
+      if (!record || record.kind === 'tool_definitions' || record.kind === RESPONSE_FORMAT_SECTION_KIND) continue;
       if (record.kind === 'message') {
         const role = normalizeTracingRole(record.role);
         if (!role || typeof record.content !== 'string' || record.content.length === 0) continue;
@@ -675,6 +742,21 @@ export function mapTracingSession(
     return [...recorded.tools, ...missing];
   };
 
+  /**
+   * Structured-output contract for an item cut at turn `position`: the LAST
+   * contract activated at/before it. Unlike the tool menu there is nothing to
+   * infer when none was recorded — an item with no contract simply replays
+   * without one, which is exactly what the traced call did.
+   */
+  const formatFor = (position: number): UnknownRecord | undefined => {
+    let active: UnknownRecord | undefined;
+    for (const change of formatChanges) {
+      if (change.at <= position) active = change.format;
+      else break;
+    }
+    return active;
+  };
+
   // Tool actions: each run of CONSECUTIVE call turns is ONE action (parallel
   // calls issued together). Input = everything before the run's first call.
   const toolActions: Array<{ start: number; calls: typeof callInfos }> = [];
@@ -711,6 +793,7 @@ export function mapTracingSession(
           })),
         },
         ...(actionTools ? { tools: actionTools } : {}),
+        ...(formatFor(action.start) ? { responseFormat: formatFor(action.start) } : {}),
         tags,
       },
     });
@@ -725,6 +808,7 @@ export function mapTracingSession(
     const reference = lastAssistant >= 0 ? turns[lastAssistant] : undefined;
     const finalPosition = lastAssistant >= 0 ? lastAssistant : turns.length;
     const finalTools = menuFor(finalPosition);
+    const finalFormat = formatFor(finalPosition);
     pending.push({
       position: finalPosition,
       item: {
@@ -734,6 +818,7 @@ export function mapTracingSession(
           ? { expected: { reference: converted[lastAssistant].content } }
           : {}),
         ...(finalTools ? { tools: finalTools } : {}),
+        ...(finalFormat ? { responseFormat: finalFormat } : {}),
         tags,
       },
     });

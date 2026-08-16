@@ -54,6 +54,63 @@ workload, and does it actually hold up.
 Every `/api/abacus/*`, `/api/cost/*` and `/api/prescriptions/*` route is licence
 gated per tenant.
 
+## Prompt Optimizer
+
+*August 2026*
+
+The module has shipped since June; this round is about making its numbers mean
+something you can act on.
+
+**It can optimize a prompt it was never given.** A run's base prompt no longer
+has to be an entity in the Prompts module. Point the optimizer at a dataset
+captured from live traffic and it lifts the production system prompt out of the
+items themselves — grouping on a normalized key so per-request values (dates,
+session ids, names) do not make every copy look unique, then returning the most
+common raw version. The run records how much of the captured traffic agreed, and
+warns when the corpus mixed several prompts.
+
+**It optimizes for length and cache-prefix stability, not only quality.** Three
+independent axes, each scorable on its own: answer quality (judge or reference),
+prompt length, and whether the prompt's cacheable prefix stays byte-stable
+across requests. Whenever length or cache is being optimized, quality is still
+measured as a **regression floor** — a candidate that saves 40% of the tokens
+and quietly answers worse never enters the beam.
+
+**Two checks that stop a shorter prompt from being a worse one.** *Coverage*
+tracks the load-bearing identifiers of the original prompt — tool names, section
+headers, qualifiers — and rejects a candidate that dropped a capability rather
+than a word. *Invention* flags identifiers the candidate made up, and values it
+copied out of the test data, which is how an "improved" prompt ends up
+hard-coding an answer from the evaluation set.
+
+**Runs are auditable per item.** Each candidate records what happened to every
+dataset item — the question, the expected and actual output, expected and actual
+tool calls, per-scorer breakdown — plus the exact critique handed back to the
+generator. A score without that is an unexplainable number.
+
+**Grading is derived from the dataset, not chosen by hand.** The run states why
+it scored the way it did: reference similarity when the items carry a gold
+answer, tool-call trajectory when they carry recorded calls, assertions when
+they carry them, and an LLM judge only when there is nothing to compare against
+— which the run says out loud, because that score is opinion rather than
+measurement.
+
+**Candidates now run under the contract production runs under.** With no
+`response_format` configured, a run inherits the structured-output contract the
+captured traffic actually used, and records which contract it used and where it
+came from. Optimizing a prompt under a looser contract than production measures
+the wrong system: a candidate that only produces valid JSON because nothing
+enforced it fails the moment it goes live.
+
+::: warning On-prem fix: run provenance was blank
+Two fields the optimizer writes back onto a run — the base-prompt provenance and
+the scoring plan — were persisted on MongoDB and silently dropped on SQLite,
+which has a column per field. Every SQLite installation therefore saw an empty
+"How this run is scored" block and no provenance, while the same build showed
+both in the cloud. Both are now stored on both backends, with a parity test
+covering every field the loop writes back.
+:::
+
 ## MCP Hubs
 
 *July 2026*

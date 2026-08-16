@@ -7,7 +7,10 @@
 import type {
   DatasetItem,
   EmbedInvoker,
+  EvalMessage,
+  EvalUsage,
   JudgeInvoker,
+  ReplayTurn,
   RunAggregate,
   RunConfig,
   RunItemResult,
@@ -15,6 +18,7 @@ import type {
   ScorerConfig,
   ScoreResult,
   TargetInvoker,
+  TargetOutput,
 } from './types';
 import { runScorers } from './scorers';
 
@@ -33,6 +37,12 @@ export async function runEvaluation(params: RunEvaluationParams): Promise<RunRes
   const { items, scorers, invokeTarget, invokeJudge, invokeEmbed, config, onItem } = params;
   const concurrency = Math.max(1, config?.concurrency ?? 4);
   const results = new Array<RunItemResult>(items.length);
+  // `perTurn` wraps the invoker rather than changing the scoring path: an item
+  // still produces exactly ONE output and ONE score either way, so runs in the
+  // two modes stay directly comparable.
+  const invoke: TargetInvoker = config?.turnMode === 'perTurn'
+    ? (item) => replayPerTurn(item, invokeTarget)
+    : invokeTarget;
 
   let cursor = 0;
   const worker = async (): Promise<void> => {
@@ -40,7 +50,7 @@ export async function runEvaluation(params: RunEvaluationParams): Promise<RunRes
       const index = cursor;
       cursor += 1;
       if (index >= items.length) return;
-      const result = await runItem(items[index], scorers, invokeTarget, invokeJudge, invokeEmbed);
+      const result = await runItem(items[index], scorers, invoke, invokeJudge, invokeEmbed);
       results[index] = result;
       onItem?.(result, index);
     }
@@ -83,6 +93,115 @@ async function runItem(
       latencyMs: Date.now() - started,
     };
   }
+}
+
+const REPLAY_QUESTION_PREVIEW_CHARS = 200;
+
+/**
+ * Replay a multi-turn item turn by turn, feeding the model its OWN answers.
+ *
+ * `single` mode sends the whole recorded prefix and calls the model once, so
+ * every earlier assistant turn is the one production actually produced. That
+ * isolates each decision against a known-good history — a clean regression
+ * signal, and cheap — but it structurally cannot catch drift: an agent that
+ * answers every turn correctly in isolation and still loses the thread once it
+ * is reading its own output passes with full marks.
+ *
+ * Here each user turn triggers a call, and the answer is appended as history
+ * for the next one, so errors compound the way they do in a live session.
+ *
+ * What is NOT regenerated: recorded tool exchanges. A tool result is a fact
+ * about the environment that a test cannot reproduce (nothing is executed
+ * here), so those turns replay verbatim; only the model's own words are
+ * replaced. Recorded assistant MESSAGE turns are dropped, because the model's
+ * answer now stands in their place — keeping both would show the model two
+ * answers to the same question.
+ *
+ * The LAST turn's output is what gets scored: the item's `expected` describes
+ * the assistant action recorded at the END of its prefix, so grading any
+ * earlier turn against it would compare the answer to question 1 with the
+ * answer to question 3. Every turn is kept on `turns` as evidence.
+ *
+ * A single-turn item takes the same path and produces exactly one call, so the
+ * two modes agree on such datasets by construction.
+ */
+export async function replayPerTurn(
+  item: DatasetItem,
+  invokeTarget: TargetInvoker,
+): Promise<TargetOutput> {
+  const system = item.input.filter((m) => m.role === 'system');
+  const conversation = item.input.filter((m) => m.role !== 'system');
+  // Nothing to drive without a user turn (e.g. a system-only probe): fall back
+  // to the single-shot path rather than inventing a turn.
+  if (!conversation.some((m) => m.role === 'user')) return invokeTarget(item);
+
+  const history: EvalMessage[] = [...system];
+  const turns: ReplayTurn[] = [];
+  let last: TargetOutput | undefined;
+  /** True while the model's answer stands in for a not-yet-seen recorded one. */
+  let answerPending = false;
+
+  for (const turn of conversation) {
+    if (turn.role === 'assistant' && !turn.toolCalls?.length && answerPending) {
+      answerPending = false;
+      continue; // replaced by the model's own answer, already in `history`
+    }
+    history.push(turn);
+    if (turn.role !== 'user') continue;
+
+    const output = await invokeTarget({
+      ...item,
+      id: `${item.id}#turn-${turns.length + 1}`,
+      input: [...history],
+    });
+    last = output;
+    turns.push({
+      index: turns.length + 1,
+      question: turn.content.slice(0, REPLAY_QUESTION_PREVIEW_CHARS),
+      text: output.text,
+      ...(output.toolCalls?.length ? { toolCalls: output.toolCalls } : {}),
+      ...(output.latencyMs !== undefined ? { latencyMs: output.latencyMs } : {}),
+      ...(output.usage ? { usage: output.usage } : {}),
+    });
+    history.push({
+      role: 'assistant',
+      content: output.text,
+      ...(output.toolCalls?.length
+        ? { toolCalls: output.toolCalls.map((call) => ({ name: call.name, args: call.args })) }
+        : {}),
+    });
+    answerPending = true;
+  }
+
+  // `last` is set whenever a user turn was found, which the guard above ensures.
+  const final = last as TargetOutput;
+  return {
+    ...final,
+    // Latency and spend are the WHOLE replay's, not the last call's — a
+    // per-turn run costs several calls per item and the cost report has to say
+    // so, or `perTurn` looks free next to `single`.
+    latencyMs: sumDefined(turns.map((t) => t.latencyMs)),
+    usage: sumUsage(turns.map((t) => t.usage)),
+    turns,
+  };
+}
+
+function sumDefined(values: Array<number | undefined>): number | undefined {
+  const present = values.filter((v): v is number => typeof v === 'number');
+  return present.length > 0 ? present.reduce((a, b) => a + b, 0) : undefined;
+}
+
+/** Totals across a replay's turns. Absent everywhere stays absent — a zero
+ *  would report "free" where the truth is "the provider told us nothing". */
+function sumUsage(usages: Array<EvalUsage | undefined>): EvalUsage | undefined {
+  const present = usages.filter((u): u is EvalUsage => Boolean(u));
+  if (present.length === 0) return undefined;
+  const total: EvalUsage = {};
+  for (const key of ['inputTokens', 'outputTokens', 'cachedInputTokens', 'costUsd'] as const) {
+    const sum = sumDefined(present.map((u) => u[key]));
+    if (sum !== undefined) total[key] = sum;
+  }
+  return total;
 }
 
 /** Weighted mean of scorer scores; an item passes only if every scorer did. */

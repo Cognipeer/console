@@ -128,6 +128,17 @@ export interface DatasetItem {
    * Key format: `name + '(' + canonicalJson(args) + ')'`.
    */
   toolResults?: Record<string, unknown>;
+  /**
+   * Structured-output contract this item was RECORDED under (OpenAI
+   * `response_format` shape), captured by Traffic Snapshots from the trace or
+   * gateway log. The other half of the request contract next to `tools`, and
+   * the reason it belongs on the item rather than only on the target: a
+   * dataset captured from production carries a per-call contract, and replaying
+   * it without one measures a looser system than production runs under. A
+   * target's own `responseFormat` still wins when set — that is how you test a
+   * contract CHANGE.
+   */
+  responseFormat?: Record<string, unknown>;
   tags?: string[];
 }
 
@@ -141,6 +152,27 @@ export interface TargetOutput {
   usage?: EvalUsage;
   /** Raw provider payload, kept for debugging / trajectory scoring. */
   raw?: unknown;
+  /**
+   * `perTurn` replays only: what the model said at every turn, in order.
+   *
+   * Only the LAST turn is scored (it is the one the item's `expected` refers
+   * to), so without this a failed multi-turn item is unexplainable — the turn
+   * where the model actually lost the thread is invisible.
+   */
+  turns?: ReplayTurn[];
+}
+
+/** One model answer inside a `perTurn` replay. */
+export interface ReplayTurn {
+  /** 1-based position among the item's user turns. */
+  index: number;
+  /** The user turn that prompted it, trimmed for display. */
+  question: string;
+  /** What the model answered — fed back as history for the next turn. */
+  text: string;
+  toolCalls?: NormalizedToolCall[];
+  latencyMs?: number;
+  usage?: EvalUsage;
 }
 
 /** Injected: how to run the target under test for one item. */
@@ -189,7 +221,19 @@ export interface ToolCallScorerConfig {
   argsWeight?: number;
 }
 
-export type ScorerConfig = AssertionScorerConfig | LlmJudgeScorerConfig | SemanticScorerConfig | ToolCallScorerConfig;
+/**
+ * Structural conformance against the reference output. Separate from
+ * `semantic` on purpose: embedding similarity happily passes a response that
+ * kept the gist but dropped required JSON fields.
+ */
+export interface JsonShapeScorerConfig {
+  type: 'json-shape';
+  weight?: number;
+  /** Fraction of the reference's keys that must arrive correctly (default 1 — exact shape). */
+  threshold?: number;
+}
+
+export type ScorerConfig = AssertionScorerConfig | LlmJudgeScorerConfig | SemanticScorerConfig | ToolCallScorerConfig | JsonShapeScorerConfig;
 export type ScorerType = ScorerConfig['type'];
 
 // ── Results ────────────────────────────────────────────────────────────
@@ -245,4 +289,11 @@ export interface RunResult {
 export interface RunConfig {
   /** Parallel item executions (default 4). */
   concurrency?: number;
+  /**
+   * How a multi-turn item is replayed. `single` (default) sends the recorded
+   * prefix and calls the model once; `perTurn` walks the conversation and
+   * feeds the model its OWN previous answers, which is the only way drift
+   * shows up. See `replayPerTurn` in runner.ts.
+   */
+  turnMode?: 'single' | 'perTurn';
 }

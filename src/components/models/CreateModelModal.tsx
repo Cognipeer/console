@@ -37,6 +37,7 @@ import {
   UNSUPPORTED_PARAM_OPTIONS,
   validateRequestDefaults,
 } from '@/components/models/requestParams';
+import CatalogPriceFill from '@/components/models/CatalogPriceFill';
 import type { ModelProviderView } from '@/lib/services/models/types';
 import type { IModel } from '@/lib/database';
 
@@ -807,7 +808,19 @@ export default function CreateModelModal({
               {...form.getInputProps('pricing.currency')}
             />
           </FormField>
-          <FormField label="Input · per 1M tokens">
+          <FormField
+            label="Input · per 1M tokens"
+            action={
+              <CatalogPriceFill
+                modelId={formValues.modelId}
+                onApply={(pricing) => {
+                  setFieldValue('pricing.inputTokenPer1M', pricing.inputTokenPer1M);
+                  setFieldValue('pricing.outputTokenPer1M', pricing.outputTokenPer1M);
+                  setFieldValue('pricing.cachedTokenPer1M', pricing.cachedTokenPer1M);
+                }}
+              />
+            }
+          >
             <NumberInput
               min={0}
               decimalScale={4}

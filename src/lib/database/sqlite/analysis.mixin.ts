@@ -15,6 +15,7 @@ import type {
   IAnalysisRun,
   IAnalysisItemResult,
   IAnalysisRunAggregate,
+  IAnalysisRunTarget,
   AnalysisConversationSource,
   AnalysisRunStatus,
 } from '../provider.interface';
@@ -229,15 +230,16 @@ export function AnalysisMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       const now = this.now();
       db.prepare(`
         INSERT INTO ${TABLES.analysisRuns}
-        (id, tenantId, projectId, definitionKey, status, mode, progress, aggregate, items,
+        (id, tenantId, projectId, definitionKey, target, status, mode, progress, aggregate, items,
          error, startedAt, finishedAt, createdBy, createdAt, updatedAt)
-        VALUES (@id, @tenantId, @projectId, @definitionKey, @status, @mode, @progress, @aggregate, @items,
+        VALUES (@id, @tenantId, @projectId, @definitionKey, @target, @status, @mode, @progress, @aggregate, @items,
          @error, @startedAt, @finishedAt, @createdBy, @createdAt, @updatedAt)
       `).run({
         id,
         tenantId: run.tenantId,
         projectId: run.projectId ?? null,
         definitionKey: run.definitionKey,
+        target: run.target !== undefined ? this.toJson(run.target) : null,
         status: run.status,
         mode: run.mode,
         progress: this.toJson(run.progress ?? { total: 0, completed: 0, failed: 0 }),
@@ -261,6 +263,7 @@ export function AnalysisMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       const sets: string[] = ['updatedAt = @updatedAt'];
       const params: Record<string, unknown> = { id, updatedAt: this.now() };
       if (data.status !== undefined) { sets.push('status = @status'); params.status = data.status; }
+      if (data.target !== undefined) { sets.push('target = @target'); params.target = this.toJson(data.target); }
       if (data.mode !== undefined) { sets.push('mode = @mode'); params.mode = data.mode; }
       if (data.progress !== undefined) { sets.push('progress = @progress'); params.progress = this.toJson(data.progress); }
       if (data.aggregate !== undefined) { sets.push('aggregate = @aggregate'); params.aggregate = this.toJson(data.aggregate); }
@@ -350,6 +353,7 @@ export function AnalysisMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         tenantId: r.tenantId as string,
         projectId: (r.projectId as string | null) ?? undefined,
         definitionKey: r.definitionKey as string,
+        target: r.target ? this.parseJson<IAnalysisRunTarget | undefined>(r.target, undefined) : undefined,
         status: r.status as AnalysisRunStatus,
         mode: r.mode as IAnalysisRun['mode'],
         progress: this.parseJson(r.progress, { total: 0, completed: 0, failed: 0 }),

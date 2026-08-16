@@ -49,6 +49,7 @@ export async function runDefinitionJob(payload: AnalysisRunJobPayload): Promise<
     createdBy: payload.createdBy,
     definitionKey: payload.definitionKey,
     conversationKeys: payload.conversationKeys,
+    target: payload.target,
     runId: payload.runId,
   });
   logger.info('Analysis run completed', { runId: payload.runId, definitionKey: payload.definitionKey });

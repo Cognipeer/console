@@ -42,6 +42,17 @@ export interface EvalJsonPathAssertionView {
   equals?: unknown;
 }
 
+/** Where an item's labels came from; a human edit outranks an AI labeling run. */
+export interface EvalLabelMetaView {
+  source: 'ai' | 'human';
+  definitionKey?: string;
+  runId?: string;
+  modelKey?: string;
+  judge?: { score: number; passed?: boolean; reasoning?: string };
+  labeledAt?: string;
+  labeledBy?: string;
+}
+
 export interface EvalDatasetItemView {
   id: string;
   input: EvalMessageView[];
@@ -51,6 +62,31 @@ export interface EvalDatasetItemView {
   /** Canned tool results; key format: `name + '(' + canonicalJson(args) + ')'`. */
   toolResults?: Record<string, unknown>;
   tags?: string[];
+  /** Structured segment labels (intent, complexity, …) — see EvalLabelMetaView. */
+  labels?: Record<string, unknown>;
+  labelMeta?: EvalLabelMetaView;
+}
+
+/** Label distribution across a dataset, from GET /evaluation/datasets/:id/labels. */
+export interface EvalLabelSummaryView {
+  total: number;
+  labeled: number;
+  humanLabeled: number;
+  keys: Array<{
+    key: string;
+    count: number;
+    values: Array<{ value: string; count: number; share: number }>;
+    otherValues: number;
+  }>;
+  definitionKeys: string[];
+}
+
+/** Handle to the labeling run parked on `dataset.metadata.labeling`. */
+export interface EvalDatasetLabelingMeta {
+  runId: string;
+  definitionKey: string;
+  status?: string;
+  startedAt?: string;
 }
 
 export interface EvalTargetView {
@@ -61,6 +97,13 @@ export interface EvalTargetView {
   kind: 'agent' | 'model' | 'external';
   agentKey?: string;
   modelKey?: string;
+  /** System-prompt override (model targets only) — replaces the dataset's system turn. */
+  systemPrompt?: string;
+  promptKey?: string;
+  promptVersion?: number;
+  /** Structured-output contract sent with every call (OpenAI response_format shape). */
+  responseFormat?: Record<string, unknown>;
+  maxTokens?: number;
   createdAt?: string;
 }
 
@@ -82,11 +125,14 @@ export interface EvalDatasetView {
    *  responses carry only the count. */
   itemCount: number;
   createdAt?: string;
-  metadata?: { generation?: EvalDatasetGenerationMeta } & Record<string, unknown>;
+  metadata?: {
+    generation?: EvalDatasetGenerationMeta;
+    labeling?: EvalDatasetLabelingMeta;
+  } & Record<string, unknown>;
 }
 
 export interface EvalScorerView {
-  type: 'assertion' | 'llm-judge' | 'semantic';
+  type: 'assertion' | 'llm-judge' | 'semantic' | 'tool-call' | 'json-shape';
   weight?: number;
   rubric?: string;
   threshold?: number;
@@ -102,12 +148,12 @@ export interface EvalSuiteView {
   scorers: EvalScorerView[];
   judgeModelKey?: string;
   embeddingModelKey?: string;
-  runConfig?: { concurrency?: number };
+  runConfig?: { concurrency?: number; turnMode?: 'single' | 'perTurn' };
   createdAt?: string;
 }
 
 export interface EvalScoreView {
-  scorerType: 'assertion' | 'llm-judge' | 'semantic';
+  scorerType: 'assertion' | 'llm-judge' | 'semantic' | 'tool-call' | 'json-shape';
   score: number;
   passed: boolean;
   weight: number;

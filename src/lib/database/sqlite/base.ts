@@ -744,6 +744,22 @@ export class SQLiteProviderBase {
     // silently dropped on SQLite) — ensure both on boot for existing DBs.
     this.ensureTableColumn(db, TABLES.evaluationDatasets, 'itemCount', 'itemCount INTEGER');
     this.ensureTableColumn(db, TABLES.evaluationSuites, 'embeddingModelKey', 'embeddingModelKey TEXT');
+    // System-prompt override on model targets: lets a suite test a prompt that
+    // differs from the one baked into captured dataset items.
+    this.ensureTableColumn(db, TABLES.evaluationTargets, 'systemPrompt', 'systemPrompt TEXT');
+    this.ensureTableColumn(db, TABLES.evaluationTargets, 'promptKey', 'promptKey TEXT');
+    this.ensureTableColumn(db, TABLES.evaluationTargets, 'promptVersion', 'promptVersion INTEGER');
+    this.ensureTableColumn(db, TABLES.evaluationTargets, 'responseFormat', 'responseFormat TEXT');
+    this.ensureTableColumn(db, TABLES.evaluationTargets, 'maxTokens', 'maxTokens INTEGER');
+    // AI labeling: structured labels + their provenance on dataset items, and
+    // the run target that says an analysis run labelled a dataset rather than
+    // the conversation corpus.
+    this.ensureTableColumn(db, TABLES.evaluationDatasetItems, 'labels', 'labels TEXT');
+    this.ensureTableColumn(db, TABLES.evaluationDatasetItems, 'labelMeta', 'labelMeta TEXT');
+    this.ensureTableColumn(db, TABLES.analysisRuns, 'target', 'target TEXT');
+    // Structured-output contract captured with the item, so a replay reproduces
+    // the request shape production ran under (see tracingResponseFormat.ts).
+    this.ensureTableColumn(db, TABLES.evaluationDatasetItems, 'responseFormat', 'responseFormat TEXT');
   }
 
   private migrateOcrJobsSchema(db: Database.Database): void {

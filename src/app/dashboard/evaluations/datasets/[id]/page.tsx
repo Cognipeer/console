@@ -1,18 +1,30 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { Alert, Button, Group, Loader, Modal, Paper, Stack, Text } from '@mantine/core';
+import { Alert, Button, Group, Loader, Modal, Paper, Progress, Stack, Text } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { IconArrowLeft, IconPencil, IconPlus, IconTrash } from '@tabler/icons-react';
+import { IconArrowLeft, IconCopy, IconPencil, IconPlus, IconTags, IconTrash } from '@tabler/icons-react';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
+import CloneDatasetModal, { type CloneDatasetPayload, type CloneDatasetResult } from '@/components/evaluations/CloneDatasetModal';
 import CreateDatasetModal from '@/components/evaluations/CreateDatasetModal';
 import DatasetItemEditor from '@/components/evaluations/DatasetItemEditor';
+import LabelDatasetModal, { type LabelSelectionPayload } from '@/components/evaluations/LabelDatasetModal';
+import LabelItemModal from '@/components/evaluations/LabelItemModal';
+import LabelSummaryPanel, { type LabelFilter } from '@/components/evaluations/LabelSummaryPanel';
 import { summarizeItem } from '@/components/evaluations/datasetItemHelpers';
-import type { EvalDatasetItemView, EvalDatasetView, ModelOption } from '@/components/evaluations/types';
+import type { AnalysisDefinitionView, AnalysisRunView } from '@/components/analysis/types';
+import type {
+  EvalDatasetItemView,
+  EvalDatasetView,
+  EvalLabelSummaryView,
+  ModelOption,
+} from '@/components/evaluations/types';
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100];
+/** How often the in-flight labeling run is polled. */
+const LABEL_RUN_POLL_MS = 2500;
 
 function Row({ label, value, mono }: { label: string; value: React.ReactNode; mono?: boolean }) {
   return (
@@ -52,6 +64,19 @@ export default function EvaluationDatasetDetailPage() {
   const [itemToDelete, setItemToDelete] = useState<EvalDatasetItemView | null>(null);
   const [deletingItem, setDeletingItem] = useState(false);
 
+  // AI labeling: definitions to run, the distribution panel, the active segment
+  // filter, the in-flight run, and the per-item human review modal.
+  const [definitions, setDefinitions] = useState<AnalysisDefinitionView[]>([]);
+  const [definitionsLoading, setDefinitionsLoading] = useState(true);
+  const [labelSummary, setLabelSummary] = useState<EvalLabelSummaryView | null>(null);
+  const [labelSummaryTruncated, setLabelSummaryTruncated] = useState(false);
+  const [labelFilter, setLabelFilter] = useState<LabelFilter | null>(null);
+  const [labelModalOpen, setLabelModalOpen] = useState(false);
+  const [cloneModalOpen, setCloneModalOpen] = useState(false);
+  const [labelRun, setLabelRun] = useState<AnalysisRunView | null>(null);
+  const [labelingItem, setLabelingItem] = useState<EvalDatasetItemView | null>(null);
+  const [savingLabels, setSavingLabels] = useState(false);
+
   const loadDataset = useCallback(async () => {
     if (!id) return;
     const res = await fetch(`/api/evaluation/datasets/${id}`, { cache: 'no-store' });
@@ -68,6 +93,10 @@ export default function EvaluationDatasetDetailPage() {
       query.set('limit', String(pageSize));
       query.set('skip', String((page - 1) * pageSize));
       if (debouncedSearch) query.set('search', debouncedSearch);
+      if (labelFilter) {
+        query.set('label', labelFilter.key);
+        query.set('labelValue', labelFilter.value);
+      }
       const res = await fetch(`/api/evaluation/datasets/${id}/items?${query.toString()}`, {
         cache: 'no-store',
         signal,
@@ -86,7 +115,16 @@ export default function EvaluationDatasetDetailPage() {
     } finally {
       if (!signal?.aborted) setItemsLoading(false);
     }
-  }, [id, page, pageSize, debouncedSearch]);
+  }, [id, page, pageSize, debouncedSearch, labelFilter]);
+
+  const loadLabelSummary = useCallback(async () => {
+    if (!id) return;
+    const res = await fetch(`/api/evaluation/datasets/${id}/labels`, { cache: 'no-store' });
+    if (!res.ok) return;
+    const data = await res.json();
+    setLabelSummary(data.summary ?? null);
+    setLabelSummaryTruncated(!!data.truncated);
+  }, [id]);
 
   useEffect(() => {
     (async () => {
@@ -99,6 +137,23 @@ export default function EvaluationDatasetDetailPage() {
       }
     })();
   }, [loadDataset]);
+
+  // Label definitions + the current distribution. Both are read-only context
+  // for the labeling controls, so a failure here must not block the page.
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch('/api/analysis/definitions', { cache: 'no-store' });
+        if (res.ok) setDefinitions((await res.json()).definitions ?? []);
+      } finally {
+        setDefinitionsLoading(false);
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    void loadLabelSummary();
+  }, [loadLabelSummary]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -122,8 +177,112 @@ export default function EvaluationDatasetDetailPage() {
     if (page > maxPage) setPage(maxPage);
   }, [totalItems, pageSize, page]);
 
+  // Selecting a segment re-queries from the first page.
+  useEffect(() => { setPage(1); }, [labelFilter]);
+
   const refresh = async () => {
-    await Promise.all([loadDataset(), loadItems()]);
+    await Promise.all([loadDataset(), loadItems(), loadLabelSummary()]);
+  };
+
+  // ── Labeling run progress ────────────────────────────────────────────
+  // The run handle is parked on the dataset, so a reload picks the banner back
+  // up instead of leaving a background job invisible.
+  const activeLabelRunId = labelRun?.id ?? dataset?.metadata?.labeling?.runId ?? null;
+  const labelRunSettled = labelRun?.status === 'completed' || labelRun?.status === 'failed';
+  const notifiedRunRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!activeLabelRunId || labelRunSettled) return;
+    let cancelled = false;
+    const tick = async () => {
+      const res = await fetch(`/api/analysis/runs/${activeLabelRunId}`, { cache: 'no-store' });
+      if (!res.ok || cancelled) return;
+      const run = (await res.json()).run as AnalysisRunView | undefined;
+      if (!run || cancelled) return;
+      setLabelRun(run);
+      if (run.status !== 'completed' && run.status !== 'failed') return;
+      if (notifiedRunRef.current !== run.id) {
+        notifiedRunRef.current = run.id;
+        notifications.show(
+          run.status === 'completed'
+            ? {
+                title: 'Labeling finished',
+                message: `${run.aggregate?.completed ?? run.progress.completed} item(s) labeled`,
+                color: 'teal',
+              }
+            : { title: 'Labeling failed', message: run.error ?? 'The labeling run failed', color: 'red' },
+        );
+      }
+      await Promise.all([loadItems(), loadLabelSummary(), loadDataset()]);
+    };
+    void tick();
+    const timer = setInterval(() => void tick(), LABEL_RUN_POLL_MS);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [activeLabelRunId, labelRunSettled, loadItems, loadLabelSummary, loadDataset]);
+
+  const onStartLabeling = async (definitionKey: string, selection: LabelSelectionPayload): Promise<string | null> => {
+    if (!dataset) return null;
+    const res = await fetch(`/api/evaluation/datasets/${dataset.id}/label`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ definitionKey, selection }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((data as { error?: string }).error || 'Failed to start labeling');
+    const run = (data as { run?: AnalysisRunView }).run ?? null;
+    if (run) {
+      notifiedRunRef.current = null;
+      setLabelRun(run);
+      notifications.show({ title: 'Labeling started', message: `${run.progress.total} item(s) queued`, color: 'teal' });
+    }
+    await loadDataset();
+    return run?.id ?? null;
+  };
+
+  const onCloneDataset = async (payload: CloneDatasetPayload): Promise<CloneDatasetResult | null> => {
+    if (!dataset) return null;
+    const res = await fetch(`/api/evaluation/datasets/${dataset.id}/clone`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((data as { error?: string }).error || 'Failed to clone dataset');
+    const result = data as { dataset?: { id: string; name: string }; copied?: number };
+    if (!result.dataset) return null;
+    notifications.show({
+      title: 'Dataset created',
+      message: `"${result.dataset.name}" · ${result.copied ?? 0} item(s) copied`,
+      color: 'teal',
+    });
+    router.push(`/dashboard/evaluations/datasets/${result.dataset.id}`);
+    return { dataset: result.dataset, copied: result.copied ?? 0 };
+  };
+
+  const onSaveLabels = async (labels: Record<string, string>) => {
+    if (!dataset || !labelingItem) return;
+    setSavingLabels(true);
+    try {
+      const res = await fetch(
+        `/api/evaluation/datasets/${dataset.id}/items/${encodeURIComponent(labelingItem.id)}`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ labels: Object.keys(labels).length > 0 ? labels : null }),
+        },
+      );
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error((data as { error?: string }).error || 'Failed to save labels');
+      }
+      notifications.show({ title: 'Labels saved', message: `"${labelingItem.id}" is now human-labeled`, color: 'teal' });
+      setLabelingItem(null);
+      await Promise.all([loadItems(), loadLabelSummary()]);
+    } catch (err) {
+      notifications.show({ title: 'Error', message: err instanceof Error ? err.message : 'Failed to save labels', color: 'red' });
+    } finally {
+      setSavingLabels(false);
+    }
   };
 
   const onDelete = async () => {
@@ -252,8 +411,33 @@ export default function EvaluationDatasetDetailPage() {
         );
       },
     },
+    {
+      key: 'labels',
+      label: 'Labels',
+      render: (it) => {
+        const entries = Object.entries(it.labels ?? {}).filter(([, v]) => v !== null && v !== '');
+        if (entries.length === 0) return <span className="ds-faint" style={{ fontSize: 12 }}>—</span>;
+        const human = it.labelMeta?.source === 'human';
+        return (
+          <Group gap={4} wrap="wrap">
+            {entries.slice(0, 3).map(([key, value]) => (
+              <span key={key} className="ds-badge" title={`${key}: ${String(value)}`}>
+                {String(value)}
+              </span>
+            ))}
+            {entries.length > 3 ? <span className="ds-faint" style={{ fontSize: 12 }}>+{entries.length - 3}</span> : null}
+            {human ? <span className="ds-badge" title="Reviewed by a human">✓</span> : null}
+          </Group>
+        );
+      },
+    },
     { key: 'tags', label: 'Tags', render: (it) => <span className="ds-faint" style={{ fontSize: 12 }}>{(it.tags ?? []).join(', ') || '—'}</span> },
   ];
+
+  const labelingDefinition = useMemo(() => {
+    const key = labelingItem?.labelMeta?.definitionKey;
+    return key ? definitions.find((d) => d.key === key) ?? null : null;
+  }, [labelingItem, definitions]);
 
   const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
 
@@ -284,6 +468,24 @@ export default function EvaluationDatasetDetailPage() {
         actions={
           <Group gap="xs">
             {backButton}
+            <Button
+              size="sm"
+              variant="light"
+              leftSection={<IconTags size={14} />}
+              onClick={() => setLabelModalOpen(true)}
+              disabled={dataset.itemCount === 0}
+            >
+              Label with AI
+            </Button>
+            <Button
+              size="sm"
+              variant="light"
+              leftSection={<IconCopy size={14} />}
+              onClick={() => setCloneModalOpen(true)}
+              disabled={dataset.itemCount === 0}
+            >
+              Clone
+            </Button>
             <Button size="sm" variant="default" leftSection={<IconPencil size={14} />} onClick={() => setEditOpen(true)}>Edit</Button>
             <Button size="sm" color="red" variant="light" leftSection={<IconTrash size={14} />} onClick={() => setDeleteOpen(true)}>Delete</Button>
           </Group>
@@ -317,7 +519,45 @@ export default function EvaluationDatasetDetailPage() {
         </Stack>
       </Paper>
 
-      <Text fw={600} size="sm" mb="xs">Test cases</Text>
+      {labelRun && (labelRun.status === 'pending' || labelRun.status === 'running') ? (
+        <Alert color="blue" variant="light" title="Labeling in progress" mb="lg" maw={620}>
+          <Stack gap={6}>
+            <Text size="sm">
+              {labelRun.progress.completed + labelRun.progress.failed} of {labelRun.progress.total} item(s) processed
+              {labelRun.progress.failed > 0 ? ` · ${labelRun.progress.failed} failed` : ''}
+            </Text>
+            <Progress
+              value={labelRun.progress.total > 0
+                ? ((labelRun.progress.completed + labelRun.progress.failed) / labelRun.progress.total) * 100
+                : 0}
+              size="sm"
+              radius="sm"
+              animated
+            />
+          </Stack>
+        </Alert>
+      ) : null}
+
+      {labelSummary ? (
+        <LabelSummaryPanel
+          summary={labelSummary}
+          truncated={labelSummaryTruncated}
+          active={labelFilter}
+          onSelect={setLabelFilter}
+        />
+      ) : null}
+
+      <Group justify="space-between" align="baseline" mb="xs">
+        <Text fw={600} size="sm">Test cases</Text>
+        {labelFilter ? (
+          <Group gap="xs">
+            <Text size="xs" c="dimmed">
+              Filtered to <span className="ds-mono">{labelFilter.key} = {labelFilter.value}</span>
+            </Text>
+            <Button size="compact-xs" variant="subtle" onClick={() => setLabelFilter(null)}>Clear</Button>
+          </Group>
+        ) : null}
+      </Group>
       {itemsError ? (
         <Alert color="red" variant="light" title="Failed to load items" mb="xs" maw={620}>
           {itemsError}{' '}
@@ -354,6 +594,7 @@ export default function EvaluationDatasetDetailPage() {
         onRowClick={openItem}
         rowActions={(it) => [
           { id: 'open', label: 'Open', icon: <IconPencil size={14} />, onClick: () => openItem(it) },
+          { id: 'labels', label: 'Edit labels', icon: <IconTags size={14} />, onClick: () => setLabelingItem(it) },
           { divider: true },
           { id: 'delete', label: 'Delete', color: 'red', icon: <IconTrash size={14} />, onClick: () => setItemToDelete(it) },
         ]}
@@ -363,12 +604,41 @@ export default function EvaluationDatasetDetailPage() {
           </Button>
         }
         empty={{
-          title: debouncedSearch ? 'No matching items' : 'No items',
-          description: debouncedSearch
+          title: debouncedSearch || labelFilter ? 'No matching items' : 'No items',
+          description: debouncedSearch || labelFilter
             ? 'No test cases match this filter.'
             : 'This dataset has no test cases yet.',
           primaryAction: { label: 'Add item', icon: <IconPlus size={14} />, onClick: openNewItem },
         }}
+      />
+
+      <LabelDatasetModal
+        opened={labelModalOpen}
+        datasetName={dataset.name}
+        itemCount={dataset.itemCount}
+        labeledCount={labelSummary?.labeled ?? 0}
+        definitions={definitions}
+        definitionsLoading={definitionsLoading}
+        onClose={() => setLabelModalOpen(false)}
+        onRun={onStartLabeling}
+      />
+
+      <CloneDatasetModal
+        opened={cloneModalOpen}
+        datasetName={dataset.name}
+        itemCount={dataset.itemCount}
+        labelSummary={labelSummary}
+        onClose={() => setCloneModalOpen(false)}
+        onClone={onCloneDataset}
+      />
+
+      <LabelItemModal
+        opened={labelingItem !== null}
+        item={labelingItem}
+        definition={labelingDefinition}
+        saving={savingLabels}
+        onClose={() => setLabelingItem(null)}
+        onSave={(labels) => void onSaveLabels(labels)}
       />
 
       <CreateDatasetModal

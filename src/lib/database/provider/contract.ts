@@ -128,6 +128,7 @@ import type {
   IEvaluationDataset,
   IEvaluationDatasetItem,
   IEvaluationDatasetItemRecord,
+  EvaluationDatasetItemQuery,
   IEvaluationSuite,
   IEvaluationRun,
   EvaluationTargetKind,
@@ -695,9 +696,13 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   replaceEvaluationDatasetItems(datasetId: string, items: IEvaluationDatasetItem[]): Promise<number>;
   listEvaluationDatasetItems(
     datasetId: string,
-    options?: { skip?: number; limit?: number; search?: string },
+    options?: EvaluationDatasetItemQuery,
   ): Promise<IEvaluationDatasetItemRecord[]>;
-  countEvaluationDatasetItems(datasetId: string, search?: string): Promise<number>;
+  countEvaluationDatasetItems(
+    datasetId: string,
+    search?: string,
+    filters?: Omit<EvaluationDatasetItemQuery, 'skip' | 'limit' | 'search'>,
+  ): Promise<number>;
   findEvaluationDatasetItem(datasetId: string, itemId: string): Promise<IEvaluationDatasetItemRecord | null>;
   updateEvaluationDatasetItem(
     datasetId: string,

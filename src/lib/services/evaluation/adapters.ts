@@ -349,6 +349,52 @@ function buildInvocationPathResolver(
   };
 }
 
+/**
+ * Resolve a target's system-prompt override, once per run.
+ *
+ * `promptKey` is resolved lazily and cached so a suite always tests the
+ * CURRENT template of that prompt (promote a new version → next run tests it)
+ * without re-reading it for every dataset item.
+ */
+function buildSystemPromptResolver(
+  target: IEvaluationTarget,
+  ctx: EvaluationModelContext,
+): (() => Promise<string | null>) | undefined {
+  if (target.promptKey) {
+    let cached: Promise<string | null> | undefined;
+    return () => {
+      if (!cached) {
+        cached = (async () => {
+          const { resolvePromptForEnvironment } = await import('@/lib/services/prompts/promptService');
+          const resolved = await resolvePromptForEnvironment(
+            ctx.tenantDbName, ctx.projectId, target.promptKey!, undefined, target.promptVersion,
+          );
+          if (!resolved) throw new Error(`Evaluation target "${target.key}" references prompt "${target.promptKey}", which was not found`);
+          return resolved.resolvedVersion?.template ?? resolved.prompt.template;
+        })().catch((error) => { cached = undefined; throw error; });
+      }
+      return cached;
+    };
+  }
+  if (target.systemPrompt?.trim()) {
+    const literal = target.systemPrompt;
+    return () => Promise.resolve(literal);
+  }
+  return undefined;
+}
+
+/**
+ * Apply a system-prompt override to an item's messages.
+ *
+ * The item's own system turn is REPLACED, not stacked on: dataset items
+ * captured from live traffic embed the system prompt they were recorded with,
+ * so keeping it would mean testing the override on top of the prompt it is
+ * meant to replace — the old prompt would never actually leave the request.
+ */
+function withSystemPrompt(input: DatasetItem['input'], systemPrompt: string): DatasetItem['input'] {
+  return [{ role: 'system' as const, content: systemPrompt }, ...input.filter((m) => m.role !== 'system')];
+}
+
 export function buildTargetInvoker(target: IEvaluationTarget, ctx: EvaluationModelContext): TargetInvoker {
   const resolvePricing = target.kind === 'model' && target.modelKey
     ? buildPricingResolver(ctx, target.modelKey)
@@ -356,20 +402,32 @@ export function buildTargetInvoker(target: IEvaluationTarget, ctx: EvaluationMod
   const resolveInvocationPath = target.kind === 'model' && target.modelKey
     ? buildInvocationPathResolver(ctx, target.modelKey)
     : undefined;
+  const resolveSystemPrompt = buildSystemPromptResolver(target, ctx);
 
   return async (item: DatasetItem): Promise<TargetOutput> => {
     if (target.kind === 'model') {
       if (!target.modelKey || !resolveInvocationPath) {
         throw new Error(`Evaluation target "${target.key}" has no modelKey configured`);
       }
-      const messages = toProviderMessages(item.input);
+      const override = resolveSystemPrompt ? await resolveSystemPrompt() : null;
+      const messages = toProviderMessages(override ? withSystemPrompt(item.input, override) : item.input);
+      // The target's contract wins — that is how you test a contract CHANGE.
+      // With none set, the item replays under the contract it was RECORDED
+      // with (captured from the trace by Traffic Snapshots): a suite that
+      // silently drops production's JSON schema grades a different system.
+      const responseFormat = target.responseFormat ?? item.responseFormat;
       const path = await resolveInvocationPath();
       if (path.mode === 'sdk') {
         const result = await invokeChatViaSdk(
           { tenantDbName: ctx.tenantDbName, projectId: ctx.projectId },
           path.prepared.model,
           messages,
-          { tools: item.tools, config: path.prepared.config },
+          {
+            tools: item.tools,
+            config: path.prepared.config,
+            responseFormat,
+            maxTokens: target.maxTokens,
+          },
         );
         return {
           text: result.text,
@@ -382,7 +440,12 @@ export function buildTargetInvoker(target: IEvaluationTarget, ctx: EvaluationMod
       // Gateway fallback — single-step trajectory test: expose the item's
       // tools so the model can *decide* to call them, but never execute
       // anything — the emitted calls are captured for the tool-call scorer.
+      // Reproduce the production request contract, not just its messages: if
+      // the live call enforces a JSON schema and caps output length, a test
+      // that omits both is measuring a different system.
       const extraBody: Record<string, unknown> = {};
+      if (responseFormat) extraBody.response_format = responseFormat;
+      if (typeof target.maxTokens === 'number') extraBody.max_tokens = target.maxTokens;
       if (item.tools && item.tools.length > 0) {
         extraBody.tools = item.tools.map((t) => ({
           type: 'function',
@@ -401,6 +464,14 @@ export function buildTargetInvoker(target: IEvaluationTarget, ctx: EvaluationMod
     }
     if (target.kind === 'agent') {
       if (!target.agentKey) throw new Error(`Evaluation target "${target.key}" has no agentKey configured`);
+      // An agent runs with its OWN published prompt, resolved inside
+      // executeAgentChat — there is no per-call override seam. Failing loudly
+      // beats silently evaluating a different prompt than the user selected.
+      if (resolveSystemPrompt) {
+        throw new Error(
+          `Evaluation target "${target.key}" sets a system-prompt override, which agent targets do not support — an agent always runs its own published prompt. Use a model target to test a prompt, or change the agent's prompt.`,
+        );
+      }
       // Lazy import: the agent runtime pulls in a heavy module graph (rag /
       // document conversion) that we only want loaded when an agent target
       // actually runs — not at evaluation-engine import time.

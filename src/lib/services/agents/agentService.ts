@@ -5,6 +5,7 @@
  * Uses agent-sdk for runtime execution with automatic tracing.
  */
 
+import Mustache from 'mustache';
 import { createLogger } from '@/lib/core/logger';
 import { routeInstanceCall } from '@/lib/core/cluster';
 import type { QueuePayload } from '@/lib/core/queue';
@@ -35,6 +36,7 @@ import {
     TOOL_DEFINITIONS_SECTION_KIND,
     type TraceToolDefinition,
 } from '@/lib/services/tracingToolDefinitions';
+import { normalizeSectionListResponseFormat } from '@/lib/services/tracingResponseFormat';
 import {
     describeRuntimeAuth,
     resolveRuntimeHeaders,
@@ -527,6 +529,12 @@ async function createInternalTracingSink(
                     ) {
                         sections = [...sections, toolDefinitionsSection];
                     }
+                    // Same cap/shape treatment the HTTP ingest gives an SDK
+                    // sender's own sections. The two paths write to the same
+                    // collection and are read by the same UI, so a section
+                    // shaped one way here and another way there is a bug
+                    // waiting to be found by whoever reads a mixed session.
+                    sections = normalizeSectionListResponseFormat(sections);
 
                     const usage = event?.usage || event?.metadata?.usage || {};
                         const inputTokens = toOptionalNumber(
@@ -557,7 +565,14 @@ async function createInternalTracingSink(
                         timestamp: event.timestamp ? new Date(event.timestamp) : new Date(),
                         status: event.status ?? undefined,
                         actor: event.actor ?? {},
-                        metadata: event.metadata ?? {},
+                        // `finishReason` / `reasoningTokens` are top-level SDK
+                        // event fields with no column of their own, so they ride
+                        // in metadata — exactly as the HTTP ingest folds them
+                        // (client-tracing.ts buildEventMetadata). Without this
+                        // an agent hosted BY the console would be the only
+                        // source missing them, which is the worst place for a
+                        // gap: it is the path we control end to end.
+                        metadata: buildInternalEventMetadata(event),
                         sections,
                         modelNames: event.modelNames ?? [],
                         model: event.model ?? undefined,
@@ -593,6 +608,31 @@ async function createInternalTracingSink(
         },
     });
 }
+
+    /**
+     * Fold the SDK's top-level diagnostic fields into `metadata`, mirroring the
+     * HTTP ingest so both trace sources render identically.
+     *
+     * `finishReason` explains a truncated answer (`length` is the usual cause
+     * of unparseable JSON); `reasoningTokens` is a SUBSET of `outputTokens`,
+     * recorded for attribution and deliberately never added to the bill.
+     */
+    export function buildInternalEventMetadata(event: InternalTraceEvent): Record<string, unknown> {
+        const metadata: Record<string, unknown> = { ...(event.metadata ?? {}) };
+        const finishReason = event.finishReason ?? metadata.finishReason;
+        if (typeof finishReason === 'string' && finishReason.trim() !== '') {
+            metadata.finishReason = finishReason.trim();
+        }
+        const reasoningTokens = toOptionalNumber(
+            event.reasoningTokens
+            ?? event.usage?.reasoningTokens
+            ?? event.usage?.reasoning_tokens,
+        );
+        if (reasoningTokens !== undefined && reasoningTokens > 0) {
+            metadata.reasoningTokens = reasoningTokens;
+        }
+        return metadata;
+    }
 
     function toOptionalNumber(value: unknown): number | undefined {
         if (value === null || value === undefined || value === '') {
@@ -1150,7 +1190,10 @@ export async function executeAgentChatLocal(
     let systemPrompt = config.systemPrompt;
     if (!systemPrompt && config.promptKey) {
         const prompt = await db.findPromptByKey(config.promptKey, projectId);
-        if (prompt) systemPrompt = prompt.template;
+        // Prompts-feature templates may contain {{variable}} placeholders; agents
+        // don't supply render data today, so this only strips stray placeholders
+        // instead of leaking raw Mustache syntax into the live prompt and traces.
+        if (prompt) systemPrompt = Mustache.render(prompt.template, {});
     }
 
     // 5a. Input guardrail check
@@ -1434,7 +1477,10 @@ export async function executePlaygroundChatLocal(
     let systemPrompt = config.systemPrompt;
     if (!systemPrompt && config.promptKey) {
         const prompt = await db.findPromptByKey(config.promptKey, projectId);
-        if (prompt) systemPrompt = prompt.template;
+        // Prompts-feature templates may contain {{variable}} placeholders; agents
+        // don't supply render data today, so this only strips stray placeholders
+        // instead of leaking raw Mustache syntax into the live prompt and traces.
+        if (prompt) systemPrompt = Mustache.render(prompt.template, {});
     }
 
     // Input guardrail check

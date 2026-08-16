@@ -280,7 +280,7 @@ const SectionCard = ({ section, index }: { section: SectionEntry; index: number 
     if (kind) badges.push({
         key: 'kind',
         label: humanize(kind),
-        color: kind === 'message' ? 'blue' : kind === 'tool_call' ? 'violet' : kind === 'tool_result' || kind === 'tool_response' ? 'green' : kind === 'tool_definitions' ? 'indigo' : 'gray',
+        color: kind === 'message' ? 'blue' : kind === 'tool_call' ? 'violet' : kind === 'tool_result' || kind === 'tool_response' ? 'green' : kind === 'tool_definitions' ? 'indigo' : kind === 'response_format' ? 'grape' : 'gray',
     });
     if (role) badges.push({
         key: 'role',
@@ -296,6 +296,19 @@ const SectionCard = ({ section, index }: { section: SectionEntry; index: number 
         ? (section.tools as Array<Record<string, unknown>>).filter(
             (entry) => entry && typeof entry === 'object' && typeof entry.name === 'string',
         )
+        : undefined;
+
+    // response_format: the structured-output contract enforced on this call —
+    // the contract's identity up front (it is what the reader is checking), the
+    // schema itself collapsed below.
+    const responseFormat = kind === 'response_format'
+        ? {
+            type: typeof section.type === 'string' ? section.type : 'unknown',
+            strategy: typeof section.strategy === 'string' ? section.strategy : undefined,
+            schemaName: typeof section.schemaName === 'string' ? section.schemaName : undefined,
+            strict: typeof section.strict === 'boolean' ? section.strict : undefined,
+            schema: section.schema && typeof section.schema === 'object' ? section.schema : undefined,
+        }
         : undefined;
 
     const copyValue = formatSectionContent(section.content ?? section);
@@ -342,6 +355,30 @@ const SectionCard = ({ section, index }: { section: SectionEntry; index: number 
                                 ))}
                             </Group>
                             <JsonTreeViewer data={toolDefinitions} initialExpandLevel={1} />
+                        </Stack>
+                    ) : responseFormat ? (
+                        <Stack gap={6}>
+                            <Group gap={6}>
+                                <Badge size="xs" variant="light" color="grape">{responseFormat.type}</Badge>
+                                {responseFormat.schemaName ? (
+                                    <Badge size="xs" variant="light" color="grape">{responseFormat.schemaName}</Badge>
+                                ) : null}
+                                {responseFormat.strict !== undefined ? (
+                                    <Badge size="xs" variant="light" color={responseFormat.strict ? 'green' : 'gray'}>
+                                        {responseFormat.strict ? 'strict' : 'non-strict'}
+                                    </Badge>
+                                ) : null}
+                                {responseFormat.strategy ? (
+                                    <Badge size="xs" variant="light" color="gray">{humanize(responseFormat.strategy)}</Badge>
+                                ) : null}
+                            </Group>
+                            {responseFormat.schema ? (
+                                <JsonTreeViewer data={responseFormat.schema} initialExpandLevel={1} />
+                            ) : (
+                                <Text size="xs" c="dimmed">
+                                    {truncated ? 'Schema omitted — over the section size budget.' : 'No JSON schema on this contract.'}
+                                </Text>
+                            )}
                         </Stack>
                     ) : (
                         Object.entries(section)
@@ -761,9 +798,18 @@ function RawJsonView({ event }: { event: TracingEvent }) {
 
 // ─── Event detail panel ────────────────────────────────────────
 
+/** Finish reasons that mean the model ended its answer on its own terms. */
+const NORMAL_FINISH_REASONS = new Set(['stop', 'tool_calls', 'end_turn', 'function_call']);
+
 function EventDetailPanel({ event }: { event: TracingEvent }) {
     const hasSections = event.sections && event.sections.length > 0;
     const hasMetadata = event.metadata && Object.keys(event.metadata).length > 0;
+    // An abnormal stop (`length`, `content_filter`) explains a truncated or
+    // unparseable answer, so it is surfaced next to the status rather than
+    // being left for whoever thinks to open the metadata tab. A normal stop is
+    // the default and would just be noise on every single event.
+    const finishReason = typeof event.metadata?.finishReason === 'string' ? event.metadata.finishReason : undefined;
+    const abnormalFinish = finishReason && !NORMAL_FINISH_REASONS.has(finishReason) ? finishReason : undefined;
 
     return (
         <Stack gap="md">
@@ -777,6 +823,18 @@ function EventDetailPanel({ event }: { event: TracingEvent }) {
                         <Badge size="sm" variant="light" radius="xl" color={resolveStatusColor(event.status)}>
                             {event.status.toUpperCase()}
                         </Badge>
+                    )}
+                    {abnormalFinish && (
+                        <Tooltip
+                            label={abnormalFinish === 'length'
+                                ? 'The model hit its output ceiling — the answer is truncated, which is the usual cause of unparseable JSON.'
+                                : `The model stopped for: ${abnormalFinish}`}
+                            withArrow
+                        >
+                            <Badge size="sm" variant="light" radius="xl" color="orange">
+                                {abnormalFinish.toUpperCase()}
+                            </Badge>
+                        </Tooltip>
                     )}
                 </Group>
                 <Text size="sm" c="dimmed">

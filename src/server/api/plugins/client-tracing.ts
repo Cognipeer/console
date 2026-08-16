@@ -16,6 +16,11 @@ import {
 import { AgentTracingService, recordTracingSessionCreated, recordTraceModelUsage } from '@/lib/services/agentTracing';
 import { mapOtlpToInternalModels, type OtlpExportTraceServiceRequest } from '@/lib/services/otlpMapper';
 import {
+  buildResponseFormatSection,
+  normalizeSectionListResponseFormat,
+  RESPONSE_FORMAT_SECTION_KIND,
+} from '@/lib/services/tracingResponseFormat';
+import {
   buildToolDefinitionsSection,
   normalizeSectionListToolDefinitions,
   TOOL_DEFINITIONS_SECTION_KIND,
@@ -39,6 +44,9 @@ type TracingUsage = {
   input_tokens?: number | null;
   outputTokens?: number | null;
   output_tokens?: number | null;
+  /** Subset of the output count — recorded, never re-billed. */
+  reasoningTokens?: number | null;
+  reasoning_tokens?: number | null;
 };
 
 type TracingActorPayload = Record<string, unknown> & {
@@ -72,9 +80,14 @@ type TracingEventPayload = {
   inputTokens?: number | null;
   label?: string | null;
   metadata?: Record<string, unknown> & {
+    finishReason?: string | null;
     modelName?: string | null;
     usage?: TracingUsage;
   };
+  /** Why the model stopped: stop | tool_calls | length | content_filter | error. */
+  finishReason?: string | null;
+  /** Reasoning tokens billed inside `outputTokens` (a subset of it). */
+  reasoningTokens?: number | null;
   model?: string | null;
   modelName?: string | null;
   modelNames?: string[];
@@ -87,6 +100,10 @@ type TracingEventPayload = {
   spanId?: string;
   status?: string | null;
   timestamp?: string | Date;
+  /** Structured-output contract sent with THIS call (OpenAI `response_format`
+   *  shape, or the SDK's `{ response_format: … }` envelope) — normalized into a
+   *  `response_format` section. Ignored silently when malformed. */
+  responseFormat?: unknown;
   /** Tool menu offered to the model on THIS call — normalized into a
    *  `tool_definitions` section so SDK senders don't need to know the
    *  section encoding. Ignored silently when malformed. */
@@ -344,20 +361,28 @@ function getEventSections(event: TracingEventPayload): Array<Record<string, unkn
     ? event.sections
     : (Array.isArray(event.data?.sections) ? event.data.sections : []);
 
-  // tool_definitions sections get the shared cap/shape treatment whether the
-  // sender encoded the section itself or used the first-class
-  // `toolDefinitions` event field (the field is normalized into a section so
-  // SDK senders don't need to know the encoding). Malformed input is ignored
-  // silently.
-  const sections = normalizeSectionListToolDefinitions(rawSections.flatMap((section) => {
-    const normalized = toRecord(section);
-    return normalized ? [normalized] : [];
-  }));
+  // tool_definitions and response_format sections get the shared cap/shape
+  // treatment whether the sender encoded the section itself or used the
+  // first-class `toolDefinitions` / `responseFormat` event field (the fields
+  // are normalized into sections so SDK senders don't need to know the
+  // encoding). Malformed input is ignored silently.
+  let sections = normalizeSectionListResponseFormat(
+    normalizeSectionListToolDefinitions(rawSections.flatMap((section) => {
+      const normalized = toRecord(section);
+      return normalized ? [normalized] : [];
+    })),
+  );
 
-  const fromField = buildToolDefinitionsSection(event.toolDefinitions);
-  if (fromField && !sections.some((section) => section.kind === TOOL_DEFINITIONS_SECTION_KIND)) {
-    return [...sections, fromField];
+  const menuFromField = buildToolDefinitionsSection(event.toolDefinitions);
+  if (menuFromField && !sections.some((section) => section.kind === TOOL_DEFINITIONS_SECTION_KIND)) {
+    sections = [...sections, menuFromField];
   }
+
+  const formatFromField = buildResponseFormatSection(event.responseFormat);
+  if (formatFromField && !sections.some((section) => section.kind === RESPONSE_FORMAT_SECTION_KIND)) {
+    sections = [...sections, formatFromField];
+  }
+
   return sections;
 }
 
@@ -421,6 +446,24 @@ function buildEventMetadata(event: TracingEventPayload, sections: Array<Record<s
   const toolDetails = getEventToolDetails(event, sections);
   if (toolDetails) {
     metadata.toolDetails = toolDetails;
+  }
+  // Two fields that explain a bad answer and have nowhere else to live:
+  //   • finishReason — `length` is the single most common cause of a truncated
+  //     or unparseable structured response; without it that failure looks
+  //     exactly like a model that simply answered badly;
+  //   • reasoningTokens — a SUBSET of outputTokens, and on a reasoning model
+  //     routinely most of the output bill while being invisible in the text.
+  // They ride in `metadata` rather than as columns: it is a JSON blob on both
+  // providers, so this needs no migration and cannot drift between cloud and
+  // on-prem. reasoningTokens is deliberately NOT fed to the cost pipeline —
+  // it is already inside outputTokens, and adding it would double-count.
+  const finishReason = event.finishReason ?? event.metadata?.finishReason;
+  if (typeof finishReason === 'string' && finishReason.trim() !== '') {
+    metadata.finishReason = finishReason.trim();
+  }
+  const reasoningTokens = Number(event.reasoningTokens ?? event.usage?.reasoningTokens ?? event.usage?.reasoning_tokens);
+  if (Number.isFinite(reasoningTokens) && reasoningTokens > 0) {
+    metadata.reasoningTokens = reasoningTokens;
   }
   return metadata;
 }

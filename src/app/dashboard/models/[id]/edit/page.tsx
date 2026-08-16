@@ -45,6 +45,7 @@ import {
   getDefaultModelInputModalities,
   getDefaultModelOutputModalities,
 } from '@/lib/services/models/modelCapabilities';
+import CatalogPriceFill from '@/components/models/CatalogPriceFill';
 
 interface ModelProviderOption {
   key: string;
@@ -638,6 +639,16 @@ export default function EditModelPage() {
               </Grid.Col>
             </Grid>
 
+            <Group justify="flex-end" mb={4}>
+              <CatalogPriceFill
+                modelId={form.values.modelId}
+                onApply={(pricing) => {
+                  form.setFieldValue('pricing.inputTokenPer1M', pricing.inputTokenPer1M);
+                  form.setFieldValue('pricing.outputTokenPer1M', pricing.outputTokenPer1M);
+                  form.setFieldValue('pricing.cachedTokenPer1M', pricing.cachedTokenPer1M);
+                }}
+              />
+            </Group>
             <Paper withBorder radius="md" p="md">
               <Grid>
                 <Grid.Col span={{ base: 12, md: 4 }}>

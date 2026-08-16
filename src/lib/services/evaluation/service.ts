@@ -20,6 +20,8 @@ import type {
   IEvaluationRunItem,
   EvaluationTargetKind,
   EvaluationDatasetSource,
+  EvaluationTurnMode,
+  EvaluationDatasetItemQuery,
 } from '@/lib/database';
 import { runEvaluation } from './runner';
 import { compareEvaluationRuns, type EvalComparison } from './compare';
@@ -74,6 +76,10 @@ function mapScorer(config: IEvaluationScorerConfig): ScorerConfig {
   return { type: 'assertion', weight: config.weight };
 }
 
+/** Turn evidence kept per item on a `perTurn` run (a run is one document). */
+const EVAL_RUN_TURNS_CAP = 20;
+const EVAL_RUN_TURN_TEXT_CAP = 4000;
+
 function toRunItem(result: RunItemResult): IEvaluationRunItem {
   return {
     itemId: result.itemId,
@@ -82,6 +88,19 @@ function toRunItem(result: RunItemResult): IEvaluationRunItem {
           text: result.output.text,
           latencyMs: result.output.latencyMs,
           toolCalls: result.output.toolCalls,
+          // A run is ONE document; a long conversation replayed per turn would
+          // otherwise put unbounded transcript on every item.
+          ...(result.output.turns?.length
+            ? {
+                turns: result.output.turns.slice(0, EVAL_RUN_TURNS_CAP).map((turn) => ({
+                  index: turn.index,
+                  question: turn.question,
+                  text: turn.text.slice(0, EVAL_RUN_TURN_TEXT_CAP),
+                  ...(turn.toolCalls?.length ? { toolCalls: turn.toolCalls } : {}),
+                  ...(turn.latencyMs !== undefined ? { latencyMs: turn.latencyMs } : {}),
+                })),
+              }
+            : {}),
         }
       : undefined,
     scores: result.scores.map((s) => ({
@@ -109,6 +128,12 @@ export interface CreateTargetInput {
   agentKey?: string;
   modelKey?: string;
   external?: IEvaluationTarget['external'];
+  /** System-prompt override (model targets only) — see IEvaluationTarget. */
+  systemPrompt?: string;
+  promptKey?: string;
+  promptVersion?: number;
+  responseFormat?: Record<string, unknown>;
+  maxTokens?: number;
   defaultParams?: Record<string, unknown>;
   projectId?: string;
 }
@@ -132,6 +157,11 @@ export async function createTarget(
     agentKey: input.agentKey,
     modelKey: input.modelKey,
     external: input.external,
+    systemPrompt: input.systemPrompt,
+    promptKey: input.promptKey,
+    promptVersion: input.promptVersion,
+    responseFormat: input.responseFormat,
+    maxTokens: input.maxTokens,
     defaultParams: input.defaultParams,
     createdBy,
   });
@@ -206,6 +236,162 @@ export async function createDataset(
   return toView(dataset);
 }
 
+/**
+ * Which items a clone carries over. Everything here is a filter on labels or
+ * expectations, because those are the axes that decide whether a slice is
+ * worth testing against — see `cloneDataset`.
+ */
+export interface CloneDatasetFilter {
+  /** Keep items carrying this label; omit `value` to mean "has the key at all". */
+  label?: { key: string; value?: string };
+  /** true → only labeled items; false → only unlabeled ones. */
+  labeled?: boolean;
+  /**
+   * Who labeled the item. `human` is the golden-set filter: an AI labeling run
+   * is a hypothesis, a reviewer's correction is ground truth.
+   */
+  labelSource?: 'human' | 'ai';
+  /** Keep items carrying ALL of these free-form tags. */
+  tags?: string[];
+  /**
+   * Keep only items that carry a reference output or expectations. A golden
+   * set exists to be graded against, and an item with nothing to compare to
+   * scores 0 for every reference-based scorer — silently dragging the suite's
+   * pass rate down rather than being excluded.
+   */
+  requireExpected?: boolean;
+  /** Cap on cloned items (also bounded by CLONE_MAX_ITEMS). */
+  limit?: number;
+}
+
+export interface CloneDatasetInput {
+  name: string;
+  description?: string;
+  projectId?: string;
+  filter?: CloneDatasetFilter;
+  /** Extra tags stamped on every cloned item, e.g. `['golden']`. */
+  tags?: string[];
+}
+
+export interface CloneDatasetResult {
+  dataset: WithId<IEvaluationDataset>;
+  /** Items in the source dataset that were scanned. */
+  scanned: number;
+  /** Items that passed the filter and were copied. */
+  copied: number;
+  /** True when the scan stopped at the cap — `scanned` is a lower bound. */
+  truncated: boolean;
+}
+
+/** Hard ceiling on a clone, so one call cannot copy an unbounded corpus. */
+const CLONE_MAX_ITEMS = 5000;
+
+/**
+ * Copy a filtered slice of a dataset into a NEW dataset.
+ *
+ * This is what turns labeling into leverage. An analysis run labels a captured
+ * corpus by segment (intent, complexity, language); a reviewer corrects the
+ * labels that matter. Cloning the reviewed slice produces a **golden set** — a
+ * small, trustworthy dataset that a suite can be run against on every change,
+ * without re-running the labeler or hand-curating items.
+ *
+ * A copy, not a view, and deliberately so: a golden set has to be STABLE. If it
+ * tracked the source dataset, tomorrow's traffic capture would silently change
+ * what "the regression suite" means, and two runs a week apart would not be
+ * comparable. Provenance (source dataset + the exact filter) is recorded in
+ * metadata so the slice can be reproduced or refreshed on purpose.
+ *
+ * Item ids are preserved, so a cloned item can be traced back to its source and
+ * compared run to run.
+ */
+export async function cloneDataset(
+  tenantDbName: string,
+  tenantId: string,
+  createdBy: string,
+  sourceDatasetId: string,
+  input: CloneDatasetInput,
+): Promise<CloneDatasetResult> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+
+  const source = await db.findEvaluationDatasetById(sourceDatasetId);
+  if (!source) throw new Error('Dataset not found');
+
+  const filter = input.filter ?? {};
+  const limit = Math.min(filter.limit ?? CLONE_MAX_ITEMS, CLONE_MAX_ITEMS);
+  const extraTags = (input.tags ?? []).filter((tag) => typeof tag === 'string' && tag.trim() !== '');
+
+  // Label filters push down to the provider; the rest are applied here, since
+  // neither backend indexes tags or expectations.
+  const query = {
+    ...(filter.label ? { label: filter.label } : {}),
+    ...(filter.labeled !== undefined ? { labeled: filter.labeled } : {}),
+  };
+
+  const items: IEvaluationDatasetItem[] = [];
+  let scanned = 0;
+  let truncated = false;
+  for (let skip = 0; items.length < limit; skip += DATASET_ITEM_PAGE_SIZE) {
+    if (scanned >= CLONE_MAX_ITEMS) { truncated = true; break; }
+    const page = await db.listEvaluationDatasetItems(sourceDatasetId, {
+      ...query,
+      skip,
+      limit: DATASET_ITEM_PAGE_SIZE,
+    });
+    scanned += page.length;
+    for (const record of page) {
+      if (items.length >= limit) break;
+      if (!matchesCloneFilter(record, filter)) continue;
+      const item = toDatasetItemView(record);
+      items.push(
+        extraTags.length > 0
+          ? { ...item, tags: Array.from(new Set([...(item.tags ?? []), ...extraTags])) }
+          : item,
+      );
+    }
+    if (page.length < DATASET_ITEM_PAGE_SIZE) break;
+  }
+
+  if (items.length === 0) {
+    throw new Error('No items matched the clone filter — nothing to copy.');
+  }
+
+  const dataset = await createDataset(tenantDbName, tenantId, createdBy, {
+    name: input.name,
+    description: input.description,
+    // 'imported' rather than 'generated': nothing was synthesized here, the
+    // items came from an existing dataset.
+    source: 'imported',
+    items,
+    projectId: input.projectId ?? source.projectId,
+    metadata: {
+      clonedFrom: {
+        datasetId: sourceDatasetId,
+        datasetKey: source.key,
+        datasetName: source.name,
+        filter,
+        clonedAt: new Date().toISOString(),
+      },
+    },
+  });
+
+  return { dataset, scanned, copied: items.length, truncated };
+}
+
+/** The clone filters the providers do not index: tags, label source, expectations. */
+function matchesCloneFilter(item: IEvaluationDatasetItem, filter: CloneDatasetFilter): boolean {
+  if (filter.labelSource && item.labelMeta?.source !== filter.labelSource) return false;
+  if (filter.tags && filter.tags.length > 0) {
+    const tags = new Set(item.tags ?? []);
+    if (!filter.tags.every((tag) => tags.has(tag))) return false;
+  }
+  if (filter.requireExpected) {
+    const expected = item.expected as Record<string, unknown> | undefined;
+    if (!expected || Object.keys(expected).length === 0) return false;
+  }
+  return true;
+}
+
 export async function listDatasets(
   tenantDbName: string,
   filters?: { projectId?: string; source?: EvaluationDatasetSource; search?: string },
@@ -249,13 +435,16 @@ const DATASET_ITEM_PAGE_SIZE = 200;
 export async function listDatasetItems(
   tenantDbName: string,
   datasetId: string,
-  options?: { skip?: number; limit?: number; search?: string },
+  options?: EvaluationDatasetItemQuery,
 ): Promise<{ items: IEvaluationDatasetItem[]; total: number }> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
   const [records, total] = await Promise.all([
     db.listEvaluationDatasetItems(datasetId, options),
-    db.countEvaluationDatasetItems(datasetId, options?.search),
+    db.countEvaluationDatasetItems(datasetId, options?.search, {
+      label: options?.label,
+      labeled: options?.labeled,
+    }),
   ]);
   return { items: records.map(toDatasetItemView), total };
 }
@@ -271,6 +460,17 @@ export async function appendDatasetItems(
   const added = await db.createEvaluationDatasetItems(datasetId, items);
   const total = await db.countEvaluationDatasetItems(datasetId);
   return { added, total };
+}
+
+export async function getDatasetItem(
+  tenantDbName: string,
+  datasetId: string,
+  itemId: string,
+): Promise<IEvaluationDatasetItem | null> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const record = await db.findEvaluationDatasetItem(datasetId, itemId);
+  return record ? toDatasetItemView(record) : null;
 }
 
 /** Update one dataset item in place (item id itself is immutable). */
@@ -304,7 +504,10 @@ function toDatasetItemView(record: IEvaluationDatasetItemRecord): IEvaluationDat
     ...(record.expected != null ? { expected: record.expected } : {}),
     ...(record.tools != null ? { tools: record.tools } : {}),
     ...(record.toolResults != null ? { toolResults: record.toolResults } : {}),
+    ...(record.responseFormat != null ? { responseFormat: record.responseFormat } : {}),
     ...(record.tags != null ? { tags: record.tags } : {}),
+    ...(record.labels != null ? { labels: record.labels } : {}),
+    ...(record.labelMeta != null ? { labelMeta: record.labelMeta } : {}),
   };
 }
 
@@ -321,6 +524,34 @@ async function loadAllDatasetItems(
   }
 }
 
+/**
+ * Label-only projection of every item, for the distribution summary. Transcripts
+ * dominate an item's size and the summary never looks at them, so each page is
+ * reduced to its label fields before being accumulated — scanning a large
+ * dataset costs a few hundred bytes per item instead of the whole corpus.
+ */
+export async function listAllDatasetItemLabels(
+  tenantDbName: string,
+  datasetId: string,
+  max = Number.POSITIVE_INFINITY,
+): Promise<Array<Pick<IEvaluationDatasetItem, 'id' | 'labels' | 'labelMeta'>>> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const all: Array<Pick<IEvaluationDatasetItem, 'id' | 'labels' | 'labelMeta'>> = [];
+  for (let skip = 0; all.length < max; skip += DATASET_ITEM_PAGE_SIZE) {
+    const page = await db.listEvaluationDatasetItems(datasetId, { skip, limit: DATASET_ITEM_PAGE_SIZE });
+    for (const record of page) {
+      all.push({
+        id: record.id,
+        ...(record.labels != null ? { labels: record.labels } : {}),
+        ...(record.labelMeta != null ? { labelMeta: record.labelMeta } : {}),
+      });
+    }
+    if (page.length < DATASET_ITEM_PAGE_SIZE) break;
+  }
+  return all.length > max ? all.slice(0, max) : all;
+}
+
 // ── Suites ─────────────────────────────────────────────────────────────────
 
 export interface CreateSuiteInput {
@@ -331,7 +562,7 @@ export interface CreateSuiteInput {
   scorers: IEvaluationScorerConfig[];
   judgeModelKey?: string;
   embeddingModelKey?: string;
-  runConfig?: { concurrency?: number };
+  runConfig?: { concurrency?: number; turnMode?: EvaluationTurnMode };
   projectId?: string;
 }
 
@@ -516,6 +747,7 @@ export async function executeRun(
       expected: it.expected as DatasetItem['expected'],
       tools: it.tools,
       toolResults: it.toolResults,
+      responseFormat: it.responseFormat,
       tags: it.tags,
     }));
     const scorers: ScorerConfig[] = suite.scorers.map(mapScorer);
@@ -539,7 +771,7 @@ export async function executeRun(
       invokeTarget: makeTarget(target, ctx),
       invokeJudge: needJudge ? makeJudge(suite.judgeModelKey, ctx) : undefined,
       invokeEmbed: needEmbed ? makeEmbed(suite.embeddingModelKey, ctx) : undefined,
-      config: { concurrency: suite.runConfig?.concurrency },
+      config: { concurrency: suite.runConfig?.concurrency, turnMode: suite.runConfig?.turnMode },
       onItem: (item) => {
         partial.push(item);
         const now = Date.now();

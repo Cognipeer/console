@@ -329,6 +329,15 @@ export async function invokeChatViaSdk(
   opts?: {
     tools?: EvalToolDefinition[];
     toolChoice?: ChatCompletionRequest['toolChoice'];
+    /**
+     * Structured-output contract to send with the call (OpenAI
+     * `response_format` shape). Carried through `extra` so it reaches the wire
+     * on every provider the SDK supports — a suite that omits it is testing a
+     * looser contract than production runs under.
+     */
+    responseFormat?: Record<string, unknown>;
+    /** Output-token ceiling; overrides the model's configured default. */
+    maxTokens?: number;
     /** Pre-resolved config (from `prepareSdkInvocation`) to skip re-resolution. */
     config?: ProviderConfig;
   },
@@ -341,6 +350,7 @@ export async function invokeChatViaSdk(
   const extra = {
     ...asRecord(settings.requestDefaults),
     ...asRecord(settings.extraBody),
+    ...(opts?.responseFormat ? { response_format: opts.responseFormat } : {}),
   };
   const tools = toSdkTools(opts?.tools);
 
@@ -348,7 +358,9 @@ export async function invokeChatViaSdk(
     model: model.modelId,
     messages: toUnifiedMessages(wireMessages),
     ...(typeof settings.temperature === 'number' ? { temperature: settings.temperature } : {}),
-    ...(typeof settings.maxTokens === 'number' ? { maxTokens: settings.maxTokens } : {}),
+    ...(typeof opts?.maxTokens === 'number'
+      ? { maxTokens: opts.maxTokens }
+      : typeof settings.maxTokens === 'number' ? { maxTokens: settings.maxTokens } : {}),
     ...(tools ? { tools, toolChoice: opts?.toolChoice ?? 'auto' } : {}),
     ...(Object.keys(extra).length > 0 ? { extra } : {}),
   };

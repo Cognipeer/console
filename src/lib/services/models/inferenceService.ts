@@ -282,6 +282,105 @@ interface EmbeddingRequestBody extends Record<string, unknown> {
   inputTokenCount?: number;
 }
 
+/**
+ * The parts of a model request that decide the SHAPE of the answer, recorded
+ * in one canonical form for every call site and every surface (gateway logs,
+ * tracing, evaluation runs).
+ *
+ * Messages alone cannot explain a malformed or prose-instead-of-JSON reply:
+ * whether the provider was asked for a JSON schema, which tools were on the
+ * table, and where the output ceiling sat are what actually determine it.
+ * Logging those was the missing half — without them a structured-output
+ * failure is indistinguishable from a model that simply chose to write prose.
+ *
+ * Tool SCHEMAS are deliberately reduced to names + count: the full definitions
+ * routinely dwarf the rest of the payload and would be truncated away by the
+ * size cap, taking the response with them.
+ */
+export interface LoggedRequestContract {
+  responseFormat?: {
+    type: string;
+    schemaName?: string;
+    strict?: boolean;
+    /** The JSON Schema as sent, when it fits RESPONSE_SCHEMA_LOG_MAX_BYTES. */
+    schema?: Record<string, unknown>;
+    /** Set when the schema was dropped by that budget. */
+    schemaTruncated?: true;
+  };
+  tools?: { count: number; names: string[] };
+  toolChoice?: unknown;
+  maxTokens?: number;
+  temperature?: number;
+  topP?: number;
+}
+
+/**
+ * Per-field budget for the logged response schema. Deliberately far below
+ * `sanitizeForLogging`'s whole-payload cap: that cap replaces the ENTIRE
+ * providerRequest with a preview once exceeded, so an unbounded schema would
+ * take the messages down with it. Beyond this budget the contract's identity
+ * (type / name / strict) survives and only the schema body is dropped.
+ */
+const RESPONSE_SCHEMA_LOG_MAX_BYTES = 8 * 1024;
+
+export function describeRequestContract(body: Record<string, unknown> | undefined): LoggedRequestContract {
+  const out: LoggedRequestContract = {};
+  if (!body) return out;
+
+  const rf = body.response_format ?? body.responseFormat;
+  if (rf && typeof rf === 'object') {
+    const r = rf as Record<string, unknown>;
+    const schema = (r.json_schema ?? r.jsonSchema) as Record<string, unknown> | undefined;
+    // The schema itself is what a REPLAY needs (evaluation suite, prompt
+    // optimizer, traffic snapshot): a summary says a contract existed, only
+    // the schema lets the same contract be sent again.
+    const body_ = schema?.schema;
+    let schemaBody: Record<string, unknown> | undefined;
+    let schemaTruncated = false;
+    if (body_ && typeof body_ === 'object' && !Array.isArray(body_)) {
+      try {
+        if (Buffer.byteLength(JSON.stringify(body_), 'utf8') <= RESPONSE_SCHEMA_LOG_MAX_BYTES) {
+          schemaBody = body_ as Record<string, unknown>;
+        } else {
+          schemaTruncated = true;
+        }
+      } catch {
+        schemaTruncated = true;
+      }
+    }
+    out.responseFormat = {
+      type: typeof r.type === 'string' ? r.type : 'unknown',
+      ...(schema && typeof schema.name === 'string' ? { schemaName: schema.name } : {}),
+      ...(schema && typeof schema.strict === 'boolean' ? { strict: schema.strict } : {}),
+      ...(schemaBody ? { schema: schemaBody } : {}),
+      ...(schemaTruncated ? { schemaTruncated: true as const } : {}),
+    };
+  }
+
+  const tools = body.tools;
+  if (Array.isArray(tools)) {
+    out.tools = {
+      count: tools.length,
+      names: tools
+        .map((t) => {
+          const entry = t as Record<string, unknown> | null;
+          const fn = entry?.function as Record<string, unknown> | undefined;
+          const name = fn?.name ?? entry?.name;
+          return typeof name === 'string' ? name : null;
+        })
+        .filter((n): n is string => Boolean(n)),
+    };
+  }
+  if (body.tool_choice !== undefined) out.toolChoice = body.tool_choice;
+
+  const maxTokens = body.max_tokens ?? body.max_completion_tokens ?? body.maxTokens;
+  if (typeof maxTokens === 'number') out.maxTokens = maxTokens;
+  if (typeof body.temperature === 'number') out.temperature = body.temperature;
+  if (typeof body.top_p === 'number') out.topP = body.top_p;
+
+  return out;
+}
+
 function sanitizeForLogging(payload: unknown, maxLength = 20000) {
   if (payload === null || payload === undefined) {
     return payload;
@@ -834,6 +933,7 @@ async function resolveDynamicCompletion(args: {
           model: router.key,
           messages: body.messages,
           signals: routing.signals,
+          ...describeRequestContract(body),
         }),
         providerResponse: sanitizeForLogging({
           chosenModelKey: routing.chosenModelKey,
@@ -1010,6 +1110,7 @@ export async function handleChatCompletion(params: {
               model: modelKey,
               messages: body.messages,
               stream: false,
+              ...describeRequestContract(body),
             }),
             providerResponse: sanitizeForLogging(cacheResult.response),
             latencyMs,
@@ -1265,6 +1366,7 @@ export async function handleChatCompletion(params: {
                 messages: body.messages,
                 overrides,
                 stream: true,
+                ...describeRequestContract(body),
               }),
               providerResponse: sanitizeForLogging(providerResponse),
               errorMessage: outputLimitError?.message,
@@ -1309,6 +1411,7 @@ export async function handleChatCompletion(params: {
                 messages: body.messages,
                 overrides,
                 stream: true,
+                ...describeRequestContract(body),
               }),
               providerResponse: sanitizeForLogging({ error: errorMessage }),
               errorMessage,
@@ -1370,6 +1473,7 @@ export async function handleChatCompletion(params: {
         messages: body.messages,
         overrides,
         stream: false,
+        ...describeRequestContract(body),
       }),
       providerResponse: sanitizeForLogging(response),
       latencyMs,

@@ -28,9 +28,11 @@ import type {
   EvaluationTargetKind,
   EvaluationDatasetSource,
   EvaluationRunStatus,
+  EvaluationDatasetItemQuery,
 } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
+import { hasAnyLabel, matchesLabel, mongoLabelCandidates } from '../provider/labelMatch';
 
 /** True when the error is a Mongo duplicate-key violation (code 11000). */
 function isDuplicateKeyError(error: unknown): boolean {
@@ -79,11 +81,38 @@ function itemMatchesSearch(item: IEvaluationDatasetItem, search: string): boolea
   return (item.input ?? []).some((m) => (m.content ?? '').toLowerCase().includes(needle));
 }
 
-/** Mongo filter for one dataset's items, optionally narrowed by search. */
-function itemFilter(datasetId: string, search?: string): Record<string, unknown> {
-  if (!search) return { datasetId };
-  const rx = { $regex: escapeRegex(search), $options: 'i' };
-  return { datasetId, $or: [{ id: rx }, { tags: rx }, { 'input.content': rx }] };
+/** Search + label filtering for the legacy embedded-items read path. */
+function legacyItemMatches(item: IEvaluationDatasetItem, options?: EvaluationDatasetItemQuery): boolean {
+  if (options?.search && !itemMatchesSearch(item, options.search)) return false;
+  if (options?.labeled !== undefined && hasAnyLabel(item.labels) !== options.labeled) return false;
+  if (options?.label && !matchesLabel(item.labels, options.label.key, options.label.value)) return false;
+  return true;
+}
+
+/** Mongo filter for one dataset's items, optionally narrowed by search/labels. */
+function itemFilter(
+  datasetId: string,
+  search?: string,
+  filters?: Pick<EvaluationDatasetItemQuery, 'label' | 'labeled'>,
+): Record<string, unknown> {
+  const filter: Record<string, unknown> = { datasetId };
+  if (search) {
+    const rx = { $regex: escapeRegex(search), $options: 'i' };
+    filter.$or = [{ id: rx }, { tags: rx }, { 'input.content': rx }];
+  }
+  // Label filters (see labelMatch.ts): a queried text value is matched against
+  // every typed form it could have been stored as.
+  if (filters?.labeled === true) filter.labels = { $exists: true, $nin: [null, {}] };
+  if (filters?.labeled === false) {
+    filter.$and = [{ $or: [{ labels: { $exists: false } }, { labels: null }, { labels: {} }] }];
+  }
+  if (filters?.label) {
+    const path = `labels.${filters.label.key}`;
+    filter[path] = filters.label.value === undefined
+      ? { $exists: true }
+      : { $in: mongoLabelCandidates(filters.label.value) };
+  }
+  return filter;
 }
 
 export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
@@ -105,8 +134,14 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
       data: Partial<Omit<IEvaluationTarget, 'tenantId' | 'key' | 'createdBy'>>,
     ): Promise<IEvaluationTarget | null> {
       const db = this.getTenantDb();
-      const updateData: Record<string, unknown> = { ...data, updatedAt: new Date() };
-      delete updateData._id;
+      // Skip undefined keys instead of $set-ing them: the driver serializes an
+      // explicit `undefined` to null, so a partial update carrying an absent
+      // optional field would WIPE it. The SQLite mixin treats undefined as
+      // "leave alone" — the two providers must not disagree about that.
+      const updateData: Record<string, unknown> = { updatedAt: new Date() };
+      for (const [k, v] of Object.entries(data)) {
+        if (k !== '_id' && v !== undefined) updateData[k] = v;
+      }
       const result = await db
         .collection<IEvaluationTarget>(COLLECTIONS.evaluationTargets)
         .findOneAndUpdate({ _id: new ObjectId(id) }, { $set: updateData }, { returnDocument: 'after' });
@@ -544,7 +579,7 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
 
     async listEvaluationDatasetItems(
       datasetId: string,
-      options?: { skip?: number; limit?: number; search?: string },
+      options?: EvaluationDatasetItemQuery,
     ): Promise<IEvaluationDatasetItemRecord[]> {
       const db = this.getTenantDb();
       const skip = Math.max(0, options?.skip ?? 0);
@@ -554,9 +589,7 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
         // Legacy dataset — serve a slice of the embedded array read-only.
         const legacy = await this.readLegacyEmbeddedItems(db, datasetId);
         if (!legacy) return [];
-        const filtered = options?.search
-          ? legacy.items.filter((item) => itemMatchesSearch(item, options.search as string))
-          : legacy.items;
+        const filtered = legacy.items.filter((item) => legacyItemMatches(item, options));
         return filtered.slice(skip, skip + limit).map((item, i) => ({
           ...item,
           datasetId,
@@ -566,7 +599,7 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
         }));
       }
       const docs = await coll
-        .find(itemFilter(datasetId, options?.search))
+        .find(itemFilter(datasetId, options?.search, options))
         // `id` tiebreak keeps the order total even if positions ever collide.
         .sort({ position: 1, id: 1 })
         .skip(skip)
@@ -575,16 +608,21 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
       return docs.map((doc) => ({ ...doc, _id: doc._id?.toString() })) as unknown as IEvaluationDatasetItemRecord[];
     }
 
-    async countEvaluationDatasetItems(datasetId: string, search?: string): Promise<number> {
+    async countEvaluationDatasetItems(
+      datasetId: string,
+      search?: string,
+      filters?: Omit<EvaluationDatasetItemQuery, 'skip' | 'limit' | 'search'>,
+    ): Promise<number> {
       const db = this.getTenantDb();
       const coll = db.collection(COLLECTIONS.evaluationDatasetItems);
       if (await this.hasDatasetItemRows(db, datasetId)) {
-        return coll.countDocuments(itemFilter(datasetId, search));
+        return coll.countDocuments(itemFilter(datasetId, search, filters));
       }
-      if (!search) return this.legacyEmbeddedItemCount(db, datasetId);
+      const filtering = !!search || !!filters?.label || filters?.labeled !== undefined;
+      if (!filtering) return this.legacyEmbeddedItemCount(db, datasetId);
       const legacy = await this.readLegacyEmbeddedItems(db, datasetId);
       if (!legacy) return 0;
-      return legacy.items.filter((item) => itemMatchesSearch(item, search)).length;
+      return legacy.items.filter((item) => legacyItemMatches(item, { ...filters, search })).length;
     }
 
     async findEvaluationDatasetItem(datasetId: string, itemId: string): Promise<IEvaluationDatasetItemRecord | null> {

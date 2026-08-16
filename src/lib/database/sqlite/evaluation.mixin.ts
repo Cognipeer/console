@@ -27,9 +27,16 @@ import type {
   EvaluationTargetKind,
   EvaluationDatasetSource,
   EvaluationRunStatus,
+  EvaluationDatasetItemQuery,
 } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
+import {
+  hasAnyLabel,
+  labelJsonPath,
+  labelValueCandidates,
+  matchesLabel,
+} from '../provider/labelMatch';
 
 /** True when the error is a SQLite UNIQUE-constraint violation. */
 function isUniqueConstraintError(error: unknown): boolean {
@@ -43,6 +50,14 @@ function itemMatchesSearch(item: IEvaluationDatasetItem, search: string): boolea
   if (item.id.toLowerCase().includes(needle)) return true;
   if ((item.tags ?? []).some((tag) => tag.toLowerCase().includes(needle))) return true;
   return (item.input ?? []).some((m) => (m.content ?? '').toLowerCase().includes(needle));
+}
+
+/** Search + label filtering for the legacy embedded-items read path. */
+function legacyItemMatches(item: IEvaluationDatasetItem, options?: EvaluationDatasetItemQuery): boolean {
+  if (options?.search && !itemMatchesSearch(item, options.search)) return false;
+  if (options?.labeled !== undefined && hasAnyLabel(item.labels) !== options.labeled) return false;
+  if (options?.label && !matchesLabel(item.labels, options.label.key, options.label.value)) return false;
+  return true;
 }
 
 /** Throw the sanctioned duplicate error when a payload repeats an item id. */
@@ -85,6 +100,37 @@ function itemSearchClause(table: string): string {
     OR EXISTS (SELECT 1 FROM json_each(COALESCE(${table}.tags, '[]')) jt WHERE jt.value LIKE @search ESCAPE '\\'))`;
 }
 
+/**
+ * Label filter clauses (see labelMatch.ts for the shared semantics). The label
+ * KEY is passed as a bound json_extract path rather than interpolated, and
+ * values are compared in canonical lowercase text form so a JSON boolean
+ * (json_extract → 1/0) still matches a `true`/`false` query.
+ */
+function labelClauses(
+  table: string,
+  filters: { label?: { key: string; value?: string }; labeled?: boolean },
+): { clauses: string[]; params: Record<string, unknown> } {
+  const clauses: string[] = [];
+  const params: Record<string, unknown> = {};
+  const nonEmpty = `(${table}.labels IS NOT NULL AND ${table}.labels != '' AND ${table}.labels != '{}')`;
+  if (filters.labeled === true) clauses.push(nonEmpty);
+  if (filters.labeled === false) clauses.push(`NOT ${nonEmpty}`);
+  if (filters.label) {
+    params.labelPath = labelJsonPath(filters.label.key);
+    if (filters.label.value === undefined) {
+      clauses.push(`json_extract(${table}.labels, @labelPath) IS NOT NULL`);
+    } else {
+      const [primary, alias] = labelValueCandidates(filters.label.value);
+      params.labelValue = primary;
+      params.labelValueAlias = alias ?? primary;
+      clauses.push(
+        `LOWER(CAST(json_extract(${table}.labels, @labelPath) AS TEXT)) IN (@labelValue, @labelValueAlias)`,
+      );
+    }
+  }
+  return { clauses, params };
+}
+
 function toIso(value: Date | string | undefined | null): string | null {
   if (!value) return null;
   const d = value instanceof Date ? value : new Date(value);
@@ -104,9 +150,9 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       db.prepare(`
         INSERT INTO ${TABLES.evaluationTargets}
         (id, tenantId, projectId, key, name, description, kind, agentKey, modelKey,
-         external, defaultParams, metadata, createdBy, updatedBy, createdAt, updatedAt)
+         external, systemPrompt, promptKey, promptVersion, responseFormat, maxTokens, defaultParams, metadata, createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @key, @name, @description, @kind, @agentKey, @modelKey,
-         @external, @defaultParams, @metadata, @createdBy, @updatedBy, @createdAt, @updatedAt)
+         @external, @systemPrompt, @promptKey, @promptVersion, @responseFormat, @maxTokens, @defaultParams, @metadata, @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
         tenantId: target.tenantId,
@@ -118,6 +164,11 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
         agentKey: target.agentKey ?? null,
         modelKey: target.modelKey ?? null,
         external: target.external ? this.toJson(target.external) : null,
+        systemPrompt: target.systemPrompt ?? null,
+        promptKey: target.promptKey ?? null,
+        promptVersion: target.promptVersion ?? null,
+        responseFormat: target.responseFormat ? this.toJson(target.responseFormat) : null,
+        maxTokens: target.maxTokens ?? null,
         defaultParams: this.toJson(target.defaultParams ?? {}),
         metadata: this.toJson(target.metadata ?? {}),
         createdBy: target.createdBy,
@@ -141,6 +192,11 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       if (data.agentKey !== undefined) { sets.push('agentKey = @agentKey'); params.agentKey = data.agentKey; }
       if (data.modelKey !== undefined) { sets.push('modelKey = @modelKey'); params.modelKey = data.modelKey; }
       if (data.external !== undefined) { sets.push('external = @external'); params.external = data.external ? this.toJson(data.external) : null; }
+      if (data.systemPrompt !== undefined) { sets.push('systemPrompt = @systemPrompt'); params.systemPrompt = data.systemPrompt ?? null; }
+      if (data.promptKey !== undefined) { sets.push('promptKey = @promptKey'); params.promptKey = data.promptKey ?? null; }
+      if (data.promptVersion !== undefined) { sets.push('promptVersion = @promptVersion'); params.promptVersion = data.promptVersion ?? null; }
+      if (data.responseFormat !== undefined) { sets.push('responseFormat = @responseFormat'); params.responseFormat = data.responseFormat ? this.toJson(data.responseFormat) : null; }
+      if (data.maxTokens !== undefined) { sets.push('maxTokens = @maxTokens'); params.maxTokens = data.maxTokens ?? null; }
       if (data.defaultParams !== undefined) { sets.push('defaultParams = @defaultParams'); params.defaultParams = this.toJson(data.defaultParams); }
       if (data.metadata !== undefined) { sets.push('metadata = @metadata'); params.metadata = this.toJson(data.metadata); }
       if (data.updatedBy !== undefined) { sets.push('updatedBy = @updatedBy'); params.updatedBy = data.updatedBy; }
@@ -321,10 +377,10 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       const db = this.getTenantDb();
       const stmt = db.prepare(`
         INSERT ${opts?.orIgnore ? 'OR IGNORE ' : ''}INTO ${TABLES.evaluationDatasetItems}
-        (id, tenantId, projectId, datasetId, itemId, position, input, expected, tools, toolResults, tags,
-         createdAt, updatedAt)
-        VALUES (@id, @tenantId, @projectId, @datasetId, @itemId, @position, @input, @expected, @tools, @toolResults, @tags,
-         @createdAt, @updatedAt)
+        (id, tenantId, projectId, datasetId, itemId, position, input, expected, tools, toolResults, responseFormat, tags,
+         labels, labelMeta, createdAt, updatedAt)
+        VALUES (@id, @tenantId, @projectId, @datasetId, @itemId, @position, @input, @expected, @tools, @toolResults, @responseFormat, @tags,
+         @labels, @labelMeta, @createdAt, @updatedAt)
       `);
       const now = this.now();
       const insertAll = db.transaction((rows: IEvaluationDatasetItem[]) => {
@@ -340,7 +396,10 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
             expected: item.expected !== undefined ? this.toJson(item.expected) : null,
             tools: item.tools !== undefined ? this.toJson(item.tools) : null,
             toolResults: item.toolResults !== undefined ? this.toJson(item.toolResults) : null,
+            responseFormat: item.responseFormat !== undefined ? this.toJson(item.responseFormat) : null,
             tags: item.tags !== undefined ? this.toJson(item.tags) : null,
+            labels: item.labels !== undefined ? this.toJson(item.labels) : null,
+            labelMeta: item.labelMeta !== undefined ? this.toJson(item.labelMeta) : null,
             createdAt: now,
             updatedAt: now,
           });
@@ -465,7 +524,7 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
 
     async listEvaluationDatasetItems(
       datasetId: string,
-      options?: { skip?: number; limit?: number; search?: string },
+      options?: EvaluationDatasetItemQuery,
     ): Promise<IEvaluationDatasetItemRecord[]> {
       const db = this.getTenantDb();
       const skip = Math.max(0, options?.skip ?? 0);
@@ -477,6 +536,9 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
           clauses.push(itemSearchClause(TABLES.evaluationDatasetItems));
           params.search = this.likePattern(options.search);
         }
+        const labels = labelClauses(TABLES.evaluationDatasetItems, options ?? {});
+        clauses.push(...labels.clauses);
+        Object.assign(params, labels.params);
         // itemId tiebreak keeps the order total even if positions collide.
         const rows = db
           .prepare(
@@ -490,9 +552,7 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       if (!legacy) return [];
       const header = this.getDatasetHeader(datasetId);
       if (!header) return [];
-      const filtered = options?.search
-        ? legacy.filter((item) => itemMatchesSearch(item, options.search as string))
-        : legacy;
+      const filtered = legacy.filter((item) => legacyItemMatches(item, options));
       return filtered.slice(skip, skip + limit).map((item, i) => ({
         ...item,
         datasetId,
@@ -502,7 +562,11 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       }));
     }
 
-    async countEvaluationDatasetItems(datasetId: string, search?: string): Promise<number> {
+    async countEvaluationDatasetItems(
+      datasetId: string,
+      search?: string,
+      filters?: Omit<EvaluationDatasetItemQuery, 'skip' | 'limit' | 'search'>,
+    ): Promise<number> {
       const db = this.getTenantDb();
       if (this.hasDatasetItemRows(datasetId)) {
         const clauses = ['datasetId = @datasetId'];
@@ -511,14 +575,16 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
           clauses.push(itemSearchClause(TABLES.evaluationDatasetItems));
           params.search = this.likePattern(search);
         }
+        const labels = labelClauses(TABLES.evaluationDatasetItems, filters ?? {});
+        clauses.push(...labels.clauses);
+        Object.assign(params, labels.params);
         const row = db
           .prepare(`SELECT COUNT(*) AS n FROM ${TABLES.evaluationDatasetItems} WHERE ${clauses.join(' AND ')}`)
           .get(params) as SqliteRow;
         return Number(row.n ?? 0);
       }
       const legacy = this.readLegacyItemColumn(datasetId) ?? [];
-      if (!search) return legacy.length;
-      return legacy.filter((item) => itemMatchesSearch(item, search)).length;
+      return legacy.filter((item) => legacyItemMatches(item, { ...filters, search })).length;
     }
 
     async findEvaluationDatasetItem(datasetId: string, itemId: string): Promise<IEvaluationDatasetItemRecord | null> {
@@ -549,7 +615,10 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       if (data.expected !== undefined) { sets.push('expected = @expected'); params.expected = data.expected !== null ? this.toJson(data.expected) : null; }
       if (data.tools !== undefined) { sets.push('tools = @tools'); params.tools = data.tools !== null ? this.toJson(data.tools) : null; }
       if (data.toolResults !== undefined) { sets.push('toolResults = @toolResults'); params.toolResults = data.toolResults !== null ? this.toJson(data.toolResults) : null; }
+      if (data.responseFormat !== undefined) { sets.push('responseFormat = @responseFormat'); params.responseFormat = data.responseFormat !== null ? this.toJson(data.responseFormat) : null; }
       if (data.tags !== undefined) { sets.push('tags = @tags'); params.tags = data.tags !== null ? this.toJson(data.tags) : null; }
+      if (data.labels !== undefined) { sets.push('labels = @labels'); params.labels = data.labels !== null ? this.toJson(data.labels) : null; }
+      if (data.labelMeta !== undefined) { sets.push('labelMeta = @labelMeta'); params.labelMeta = data.labelMeta !== null ? this.toJson(data.labelMeta) : null; }
       const changed = db
         .prepare(`UPDATE ${TABLES.evaluationDatasetItems} SET ${sets.join(', ')} WHERE datasetId = @datasetId AND itemId = @itemId`)
         .run(params).changes;
@@ -752,6 +821,11 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
         agentKey: (r.agentKey as string | null) ?? undefined,
         modelKey: (r.modelKey as string | null) ?? undefined,
         external: this.parseJson(r.external, undefined as IEvaluationTarget['external']),
+        systemPrompt: (r.systemPrompt as string | null) ?? undefined,
+        promptKey: (r.promptKey as string | null) ?? undefined,
+        promptVersion: (r.promptVersion as number | null) ?? undefined,
+        responseFormat: this.parseJson(r.responseFormat, undefined as Record<string, unknown> | undefined),
+        maxTokens: (r.maxTokens as number | null) ?? undefined,
         defaultParams: this.parseJson(r.defaultParams, {}),
         metadata: this.parseJson(r.metadata, {}),
         createdBy: r.createdBy as string,
@@ -797,7 +871,10 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
         expected: this.parseJson<IEvaluationDatasetItem['expected']>(r.expected, undefined),
         tools: this.parseJson<IEvaluationDatasetItem['tools']>(r.tools, undefined),
         toolResults: this.parseJson<IEvaluationDatasetItem['toolResults']>(r.toolResults, undefined),
+        responseFormat: this.parseJson<IEvaluationDatasetItem['responseFormat']>(r.responseFormat, undefined),
         tags: this.parseJson<string[] | undefined>(r.tags, undefined),
+        labels: this.parseJson<Record<string, unknown> | undefined>(r.labels, undefined),
+        labelMeta: this.parseJson<IEvaluationDatasetItem['labelMeta']>(r.labelMeta, undefined),
         createdAt: this.toDate(r.createdAt),
         updatedAt: this.toDate(r.updatedAt),
       };

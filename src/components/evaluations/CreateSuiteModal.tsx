@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Alert, Checkbox, Select, Stack, Textarea, TextInput } from '@mantine/core';
+import { Alert, Checkbox, Radio, Select, Stack, Text, Textarea, TextInput } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { IconCheck, IconChecklist, IconInfoCircle } from '@tabler/icons-react';
@@ -32,11 +32,13 @@ interface FormValues {
   targetKey: string;
   datasetKey: string;
   useAssertion: boolean;
+  useJsonShape: boolean;
   useJudge: boolean;
   rubric: string;
   judgeModelKey: string;
   useSemantic: boolean;
   embeddingModelKey: string;
+  turnMode: 'single' | 'perTurn';
 }
 
 export default function CreateSuiteModal({ opened, onClose, onCreated, targets, datasets, models = [], editing = null }: CreateSuiteModalProps) {
@@ -50,11 +52,13 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
       targetKey: '',
       datasetKey: '',
       useAssertion: true,
+      useJsonShape: false,
       useJudge: false,
       rubric: '',
       judgeModelKey: '',
       useSemantic: false,
       embeddingModelKey: '',
+      turnMode: 'single',
     },
     validate: {
       name: (v) => (!v.trim() ? 'Name is required' : null),
@@ -63,7 +67,7 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
       rubric: (v, values) => (values.useJudge && !v.trim() ? 'A rubric is required for the LLM judge' : null),
       judgeModelKey: (v, values) => (values.useJudge && !v ? 'A judge model is required for the LLM judge' : null),
       embeddingModelKey: (v, values) => (values.useSemantic && !v ? 'An embedding model is required for semantic scoring' : null),
-      useAssertion: (v, values) => (!v && !values.useJudge && !values.useSemantic ? 'Select at least one scorer' : null),
+      useAssertion: (v, values) => (!v && !values.useJudge && !values.useSemantic && !values.useJsonShape ? 'Select at least one scorer' : null),
     },
   });
 
@@ -80,11 +84,13 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
         targetKey: editing.targetKey ?? '',
         datasetKey: editing.datasetKey ?? '',
         useAssertion: editing.scorers.some((s) => s.type === 'assertion'),
+        useJsonShape: editing.scorers.some((s) => s.type === 'json-shape'),
         useJudge: Boolean(judge),
         rubric: judge?.rubric ?? '',
         judgeModelKey: editing.judgeModelKey ?? '',
         useSemantic: editing.scorers.some((s) => s.type === 'semantic'),
         embeddingModelKey: editing.embeddingModelKey ?? '',
+        turnMode: editing.runConfig?.turnMode ?? 'single',
       });
     }
     void (async () => {
@@ -106,6 +112,7 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
     const v = form.getValues();
     const scorers: EvalScorerView[] = [];
     if (v.useAssertion) scorers.push({ type: 'assertion' });
+    if (v.useJsonShape) scorers.push({ type: 'json-shape' });
     if (v.useJudge) scorers.push({ type: 'llm-judge', rubric: v.rubric.trim() });
     if (v.useSemantic) scorers.push({ type: 'semantic' });
     setLoading(true);
@@ -123,6 +130,7 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
             scorers,
             judgeModelKey: v.useJudge ? v.judgeModelKey : undefined,
             embeddingModelKey: v.useSemantic ? v.embeddingModelKey : undefined,
+            runConfig: { turnMode: v.turnMode },
           }),
         },
       );
@@ -149,7 +157,7 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
   const useSemantic = v.useSemantic;
   const validName = v.name.trim().length > 0;
   const validBinding = Boolean(v.targetKey) && Boolean(v.datasetKey);
-  const anyScorer = v.useAssertion || v.useJudge || v.useSemantic;
+  const anyScorer = v.useAssertion || v.useJudge || v.useSemantic || v.useJsonShape;
   const judgeOk = !v.useJudge || (v.rubric.trim().length > 0 && Boolean(v.judgeModelKey));
   const semanticOk = !v.useSemantic || Boolean(v.embeddingModelKey);
   const validScorers = anyScorer && judgeOk && semanticOk;
@@ -157,6 +165,7 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
 
   const scorerLabels = [
     v.useAssertion ? 'assertion' : null,
+    v.useJsonShape ? 'json-shape' : null,
     v.useJudge ? 'llm-judge' : null,
     v.useSemantic ? 'semantic' : null,
   ].filter(Boolean).join(', ') || '—';
@@ -173,6 +182,7 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
       <SummaryKV label="Target" value={v.targetKey || '—'} />
       <SummaryKV label="Dataset" value={v.datasetKey || '—'} />
       <SummaryKV label="Scorers" value={scorerLabels} />
+      <SummaryKV label="Replay" value={v.turnMode === 'perTurn' ? 'turn by turn' : 'single call'} />
       <Checklist items={checklist} />
     </SummaryGroup>
   );
@@ -235,6 +245,11 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
             label="Semantic (vector) scorer — cosine similarity between the output and the expected reference answer"
             {...form.getInputProps('useSemantic', { type: 'checkbox' })}
           />
+          <Checkbox
+            label="JSON-shape scorer — when the reference answer is JSON, the output must have the same fields and types"
+            description="Similarity scoring passes a reply that kept the gist but dropped required fields; this catches that."
+            {...form.getInputProps('useJsonShape', { type: 'checkbox' })}
+          />
           {form.errors.useAssertion ? <div style={{ color: 'var(--mantine-color-red-6)', fontSize: 12 }}>{form.errors.useAssertion}</div> : null}
         </Stack>
 
@@ -260,6 +275,28 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
             </Alert>
           </>
         )}
+      </FormSection>
+
+      <FormSection number={4} title="Replay" done>
+        {/* The two modes measure different things, so this is a deliberate
+            choice rather than a tuning knob — see EvaluationTurnMode. */}
+        <Radio.Group {...form.getInputProps('turnMode')}>
+          <Stack gap="sm">
+            <Radio
+              value="single"
+              label="Single call — send the recorded conversation and grade one answer"
+              description="Each decision is tested against the history production actually produced. Cheap, and the cleanest regression signal."
+            />
+            <Radio
+              value="perTurn"
+              label="Turn by turn — replay the conversation, feeding the model its own answers back"
+              description="The only mode that catches drift: an agent can answer every turn correctly in isolation and still lose the thread once it is reading its own output. Costs one model call per user turn."
+            />
+          </Stack>
+        </Radio.Group>
+        <Text size="xs" c="dimmed" mt="xs">
+          Single-turn datasets behave identically under both. Only the final answer is graded either way, so scores stay comparable.
+        </Text>
       </FormSection>
     </FormShell>
   );

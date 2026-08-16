@@ -14,6 +14,10 @@ import type {
   IAgentTracingEvent,
 } from '@/lib/database/provider/types.base';
 import {
+  buildResponseFormatSection,
+  normalizeSectionListResponseFormat,
+} from '@/lib/services/tracingResponseFormat';
+import {
   buildToolDefinitionsSection,
   normalizeSectionListToolDefinitions,
 } from '@/lib/services/tracingToolDefinitions';
@@ -620,10 +624,10 @@ export function mapOtlpToInternalModels(
       if (sectionsJson) {
         try {
           sections = JSON.parse(sectionsJson);
-          // Same cap/shape treatment tool_definitions sections get on every
-          // other ingestion path.
+          // Same cap/shape treatment tool_definitions and response_format
+          // sections get on every other ingestion path.
           if (Array.isArray(sections)) {
-            sections = normalizeSectionListToolDefinitions(sections);
+            sections = normalizeSectionListResponseFormat(normalizeSectionListToolDefinitions(sections));
           }
         } catch {
           logger.warn('Failed to parse cognipeer.sections attribute', { spanId: span.spanId });
@@ -767,6 +771,9 @@ export function mapOtlpToInternalModels(
  *   - kind: "tool_definitions" — the tool menu offered to the model on THIS
  *     call (per-event, never per-session — the menu can change between
  *     turns); contract in tracingToolDefinitions.ts
+ *   - kind: "response_format" — the structured-output contract enforced on
+ *     THIS call, per-event for the same reason; contract in
+ *     tracingResponseFormat.ts
  *
  * Uses standard OTel semantic conventions (gen_ai.*) and common patterns
  * to extract meaningful input/output data from generic spans.
@@ -897,6 +904,13 @@ function buildSectionsFromSpan(
     if (toolDefinitionsSection) sections.push([toolDefinitionsSection]);
   }
 
+  // ── 3c. Structured-output contract for this call ──────────────
+  //    The other half of the request shape (see tracingResponseFormat.ts).
+  //    Per event for the same reason the menu is: a run can enforce a schema
+  //    on its final turn only.
+  const responseFormatSection = buildResponseFormatSection(extractResponseFormatAttrs(attrs, span.spanId));
+  if (responseFormatSection) sections.push([responseFormatSection]);
+
   // ── 4. Non-cognipeer attributes as metadata section ────────────
   //    If no content sections were created, show raw span attributes as metadata
   const flat = sections.flat();
@@ -972,6 +986,75 @@ function extractGenAiMessages(
     .filter(([, v]) => v.content)
     .sort(([a], [b]) => a - b)
     .map(([idx, v]) => ({ content: v.content!, role: v.role, index: idx + 1 }));
+}
+
+/**
+ * Where the structured-output contract hides across instrumentors:
+ *   - OTel GenAI semconv: `gen_ai.output.type` ('json' | 'text' | …) plus
+ *     `gen_ai.request.structured_output_schema` (a JSON-encoded schema);
+ *   - OpenInference: the whole request body in `llm.invocation_parameters`,
+ *     which carries `response_format` verbatim;
+ *   - OpenLLMetry and ad-hoc emitters: a JSON-encoded `response_format`.
+ * Contract + caps live in tracingResponseFormat.ts.
+ */
+const RESPONSE_FORMAT_JSON_ATTRS = [
+  'cognipeer.response_format',
+  'gen_ai.request.response_format',
+  'llm.request.response_format',
+  'llm.response_format',
+  'ai.response.format',
+];
+const INVOCATION_PARAM_ATTRS = ['llm.invocation_parameters', 'gen_ai.request.parameters'];
+
+/**
+ * Extract the structured-output contract from span attributes, in the raw form
+ * `buildResponseFormatSection` normalizes. Same tolerance as the tool-menu
+ * extraction: unparseable JSON is warned about and ignored rather than failing
+ * the ingest.
+ */
+function extractResponseFormatAttrs(
+  attrs: OtlpKeyValue[],
+  spanId: string,
+): Record<string, unknown> | undefined {
+  for (const key of RESPONSE_FORMAT_JSON_ATTRS) {
+    const raw = getStringAttr(attrs, key);
+    if (!raw) continue;
+    const parsed = parseJsonRecord(raw, { attribute: key, spanId });
+    if (parsed) return parsed;
+  }
+
+  // OpenInference ships the entire request body; response_format rides inside.
+  for (const key of INVOCATION_PARAM_ATTRS) {
+    const raw = getStringAttr(attrs, key);
+    if (!raw) continue;
+    const parsed = parseJsonRecord(raw, { attribute: key, spanId });
+    const nested = parsed?.response_format ?? parsed?.responseFormat;
+    if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+      return nested as Record<string, unknown>;
+    }
+  }
+
+  // GenAI semconv splits it in two: the output MODE and the schema.
+  const outputType = getStringAttr(attrs, 'gen_ai.output.type');
+  const schemaRaw = getStringAttr(attrs, 'gen_ai.request.structured_output_schema');
+  if (schemaRaw) {
+    const schema = parseJsonRecord(schemaRaw, { attribute: 'gen_ai.request.structured_output_schema', spanId });
+    if (schema) {
+      return {
+        type: 'json_schema',
+        json_schema: {
+          ...(getStringAttr(attrs, 'gen_ai.request.structured_output_name')
+            ? { name: getStringAttr(attrs, 'gen_ai.request.structured_output_name') }
+            : {}),
+          schema,
+        },
+      };
+    }
+  }
+  // `json` with no schema is still a contract — the model was told to emit JSON.
+  if (outputType === 'json') return { type: 'json_object' };
+
+  return undefined;
 }
 
 /** Indexed tool-definition attribute prefixes, most common first:

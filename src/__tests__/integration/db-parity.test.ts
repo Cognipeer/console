@@ -945,6 +945,100 @@ describeForEachProvider('MCP Hub servers + audit logs', (getDb) => {
   });
 });
 
+describeForEachProvider('Evaluation target system-prompt override', (getDb) => {
+  let dbName: string;
+  let tenantId: string;
+
+  beforeEach(async () => {
+    const slug = `evaltgt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    dbName = `tenant_${slug}`;
+    const db = getDb();
+    const tenant = await db.createTenant({
+      companyName: 'Eval Target Co',
+      slug,
+      dbName,
+      licenseType: 'FREE',
+      ownerId: 'pending',
+    });
+    tenantId = String(tenant._id);
+    await db.switchToTenant(dbName);
+  });
+
+  it('round-trips an inline systemPrompt override', async () => {
+    const db = getDb();
+    const created = await db.createEvaluationTarget({
+      tenantId,
+      key: 'tgt-inline',
+      name: 'Inline prompt target',
+      kind: 'model',
+      modelKey: 'gpt-test',
+      systemPrompt: 'You are terse.',
+      createdBy: 'tester',
+    });
+    const found = await db.findEvaluationTargetById(String(created._id));
+    expect(found?.systemPrompt).toBe('You are terse.');
+    expect(found?.promptKey).toBeUndefined();
+  });
+
+  it('round-trips a promptKey + promptVersion reference', async () => {
+    const db = getDb();
+    const created = await db.createEvaluationTarget({
+      tenantId,
+      key: 'tgt-promptkey',
+      name: 'Managed prompt target',
+      kind: 'model',
+      modelKey: 'gpt-test',
+      promptKey: 'support-tone',
+      promptVersion: 3,
+      createdBy: 'tester',
+    });
+    const found = await db.findEvaluationTargetById(String(created._id));
+    expect(found?.promptKey).toBe('support-tone');
+    expect(found?.promptVersion).toBe(3);
+  });
+
+  it('leaves the override fields undefined when never set', async () => {
+    const db = getDb();
+    const created = await db.createEvaluationTarget({
+      tenantId,
+      key: 'tgt-plain',
+      name: 'Plain target',
+      kind: 'model',
+      modelKey: 'gpt-test',
+      createdBy: 'tester',
+    });
+    const found = await db.findEvaluationTargetById(String(created._id));
+    expect(found?.systemPrompt).toBeUndefined();
+    expect(found?.promptKey).toBeUndefined();
+    expect(found?.promptVersion).toBeUndefined();
+  });
+
+  it('updates and clears the override through updateEvaluationTarget', async () => {
+    const db = getDb();
+    const created = await db.createEvaluationTarget({
+      tenantId,
+      key: 'tgt-update',
+      name: 'Updatable target',
+      kind: 'model',
+      modelKey: 'gpt-test',
+      systemPrompt: 'first',
+      createdBy: 'tester',
+    });
+    const id = String(created._id);
+
+    const updated = await db.updateEvaluationTarget(id, { systemPrompt: 'second', promptVersion: 7 });
+    expect(updated?.systemPrompt).toBe('second');
+    expect(updated?.promptVersion).toBe(7);
+
+    // An absent (undefined) field means "leave alone" on BOTH providers —
+    // Mongo's $set would otherwise serialize undefined to null and wipe it.
+    const untouched = await db.updateEvaluationTarget(id, { name: 'Renamed' });
+    expect(untouched?.name).toBe('Renamed');
+    expect(untouched?.systemPrompt).toBe('second');
+    expect(untouched?.promptVersion).toBe(7);
+  });
+});
+
 describeForEachProvider('Evaluation dataset items (separate collection)', (getDb) => {
   let dbName: string;
   let tenantId: string;
@@ -1060,6 +1154,116 @@ describeForEachProvider('Evaluation dataset items (separate collection)', (getDb
     const found = await db.listEvaluationDatasetItems(datasetId, { search: 'patched' });
     expect(found.map((r) => r.id)).toEqual(['y2']);
     expect(await db.countEvaluationDatasetItems(datasetId, 'patched')).toBe(1);
+  });
+
+  it('round-trips labels and filters items by label identically on both backends', async () => {
+    const db = getDb();
+    const dataset = await db.createEvaluationDataset({
+      tenantId,
+      key: 'ds-labels',
+      name: 'Labels DS',
+      source: 'manual',
+      items: [
+        { id: 'l1', input: [{ role: 'user', content: 'refund please' }] },
+        { id: 'l2', input: [{ role: 'user', content: 'where is my order' }] },
+        { id: 'l3', input: [{ role: 'user', content: 'unlabeled one' }] },
+      ],
+      createdBy: 'tester',
+    });
+    const datasetId = String(dataset._id);
+
+    const labeled = await db.updateEvaluationDatasetItem(datasetId, 'l1', {
+      labels: { intent: 'refund', escalated: true, turns: 3 },
+      labelMeta: { source: 'ai', definitionKey: 'triage', runId: 'run-1', labeledAt: '2026-08-16T00:00:00.000Z' },
+    });
+    expect(labeled?.labels).toEqual({ intent: 'refund', escalated: true, turns: 3 });
+    expect(labeled?.labelMeta?.source).toBe('ai');
+    expect(labeled?.labelMeta?.definitionKey).toBe('triage');
+    await db.updateEvaluationDatasetItem(datasetId, 'l2', {
+      labels: { intent: 'order_status', escalated: false },
+      labelMeta: { source: 'human', labeledBy: 'user-1' },
+    });
+
+    // Exact value match, including the boolean/number forms a query sends as text.
+    const refunds = await db.listEvaluationDatasetItems(datasetId, { label: { key: 'intent', value: 'refund' } });
+    expect(refunds.map((r) => r.id)).toEqual(['l1']);
+    const escalated = await db.listEvaluationDatasetItems(datasetId, { label: { key: 'escalated', value: 'true' } });
+    expect(escalated.map((r) => r.id)).toEqual(['l1']);
+    const threeTurns = await db.listEvaluationDatasetItems(datasetId, { label: { key: 'turns', value: '3' } });
+    expect(threeTurns.map((r) => r.id)).toEqual(['l1']);
+
+    // Key-only match (any value) and the labeled/unlabeled split.
+    const anyIntent = await db.listEvaluationDatasetItems(datasetId, { label: { key: 'intent' } });
+    expect(anyIntent.map((r) => r.id)).toEqual(['l1', 'l2']);
+    const unlabeled = await db.listEvaluationDatasetItems(datasetId, { labeled: false });
+    expect(unlabeled.map((r) => r.id)).toEqual(['l3']);
+    const anyLabeled = await db.listEvaluationDatasetItems(datasetId, { labeled: true });
+    expect(anyLabeled.map((r) => r.id)).toEqual(['l1', 'l2']);
+
+    // Counts must agree with the list, or pagination lies.
+    expect(await db.countEvaluationDatasetItems(datasetId, undefined, { label: { key: 'intent', value: 'refund' } })).toBe(1);
+    expect(await db.countEvaluationDatasetItems(datasetId, undefined, { labeled: false })).toBe(1);
+    expect(await db.countEvaluationDatasetItems(datasetId, undefined, { labeled: true })).toBe(2);
+
+    // Clearing labels puts the item back in the unlabeled bucket.
+    const cleared = await db.updateEvaluationDatasetItem(datasetId, 'l2', { labels: null as never, labelMeta: null as never });
+    expect(cleared?.labels ?? null).toBeNull();
+    expect(await db.countEvaluationDatasetItems(datasetId, undefined, { labeled: false })).toBe(2);
+  });
+
+  it('round-trips the structured-output contract captured with an item', async () => {
+    // The contract is what a replay has to reproduce: an item graded without
+    // production's JSON schema is measuring a looser system. Mongo stores the
+    // item as a document and gains the field for free; SQLite needs a column,
+    // so only a parity test catches it going missing on-prem.
+    const db = getDb();
+    const schema = {
+      type: 'object',
+      properties: { total: { type: 'number' }, currency: { type: 'string' } },
+      required: ['total', 'currency'],
+      additionalProperties: false,
+    };
+    const dataset = await db.createEvaluationDataset({
+      tenantId,
+      key: 'ds-response-format',
+      name: 'Response format DS',
+      source: 'generated',
+      items: [
+        {
+          id: 'rf1',
+          input: [{ role: 'user', content: 'total this invoice' }],
+          responseFormat: { type: 'json_schema', json_schema: { name: 'invoice', strict: true, schema } },
+        },
+        { id: 'rf2', input: [{ role: 'user', content: 'unconstrained' }] },
+      ],
+      createdBy: 'tester',
+    });
+    const datasetId = String(dataset._id);
+
+    const items = await db.listEvaluationDatasetItems(datasetId);
+    const withFormat = items.find((i) => i.id === 'rf1');
+    // The SCHEMA has to survive intact — the contract's name alone cannot be
+    // put back on the wire.
+    expect(withFormat?.responseFormat).toEqual({
+      type: 'json_schema',
+      json_schema: { name: 'invoice', strict: true, schema },
+    });
+    // Absent stays absent: "no contract" and "contract not recorded" are
+    // different facts, and an empty object would read as the former.
+    expect(items.find((i) => i.id === 'rf2')?.responseFormat).toBeUndefined();
+
+    const found = await db.findEvaluationDatasetItem(datasetId, 'rf1');
+    expect(found?.responseFormat).toEqual(withFormat?.responseFormat);
+
+    // Editable in place, and clearable back to nothing.
+    const updated = await db.updateEvaluationDatasetItem(datasetId, 'rf1', {
+      responseFormat: { type: 'json_object' },
+    });
+    expect(updated?.responseFormat).toEqual({ type: 'json_object' });
+    const cleared = await db.updateEvaluationDatasetItem(datasetId, 'rf1', {
+      responseFormat: null as never,
+    });
+    expect(cleared?.responseFormat ?? null).toBeNull();
   });
 
   it('deleting the dataset cascades its item rows', async () => {

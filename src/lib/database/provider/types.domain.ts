@@ -95,7 +95,23 @@ export type EvaluationTargetKind = 'agent' | 'model' | 'external';
 export type EvaluationRunStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
 export type EvaluationRunMode = 'sync' | 'async';
 export type EvaluationDatasetSource = 'manual' | 'file' | 'generated' | 'imported';
-export type EvaluationScorerType = 'assertion' | 'llm-judge' | 'semantic' | 'tool-call';
+export type EvaluationScorerType = 'assertion' | 'llm-judge' | 'semantic' | 'tool-call' | 'json-shape';
+
+/**
+ * How a multi-turn dataset item is replayed against the target.
+ *
+ * `single` (default) sends the item's whole recorded prefix and calls the model
+ * ONCE — every earlier assistant turn is the one production actually produced.
+ * `perTurn` drives the conversation turn by turn and feeds the model its OWN
+ * answers back, so errors compound the way they do in a live session.
+ *
+ * They measure different things and both are needed: `single` isolates each
+ * decision against a known-good history (a clean regression signal, cheap), and
+ * `perTurn` is the only mode that can catch drift — an agent that answers every
+ * turn correctly in isolation but loses the thread once it is reading its own
+ * output. A single-turn dataset behaves identically under both.
+ */
+export type EvaluationTurnMode = 'single' | 'perTurn';
 
 export interface IEvaluationExternalTarget {
   protocol: 'openai-chat' | 'webhook';
@@ -118,6 +134,29 @@ export interface IEvaluationTarget {
   agentKey?: string;
   modelKey?: string;
   external?: IEvaluationExternalTarget;
+  /**
+   * System prompt to run this target with, overriding whatever system turn the
+   * dataset items carry. Needed to evaluate a prompt CHANGE against traffic
+   * captured with the old prompt: snapshot items embed the system prompt they
+   * were recorded with, so without an override every run re-tests the prompt
+   * already in production. `promptKey` pulls the template from the Prompts
+   * module (resolved per run, so promoting a new version changes what is
+   * tested); `systemPrompt` is a literal. `promptKey` wins if both are set.
+   * `model` targets only — see the note on agent targets in adapters.ts.
+   */
+  systemPrompt?: string;
+  promptKey?: string;
+  promptVersion?: number;
+  /**
+   * Structured-output contract sent with every call for this target, mirroring
+   * the OpenAI `response_format` field. A suite that omits it is not testing
+   * production: an agent whose JSON envelope is enforced on the wire behaves
+   * very differently from the same model asked in prose, and the difference
+   * only shows up as malformed output once it is live.
+   */
+  responseFormat?: Record<string, unknown>;
+  /** Output-token ceiling. Left unset, a long structured answer can truncate mid-object. */
+  maxTokens?: number;
   defaultParams?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
   createdBy: string;
@@ -143,7 +182,61 @@ export interface IEvaluationDatasetItem {
   tools?: Array<{ name: string; description?: string; parameters?: Record<string, unknown> }>;
   /** Canned tool results; key format: `name + '(' + canonicalJson(args) + ')'`. */
   toolResults?: Record<string, unknown>;
+  /**
+   * Structured-output contract this item was recorded under (OpenAI
+   * `response_format` shape), captured from the trace / gateway log by Traffic
+   * Snapshots. Replaying an item without the contract production enforced
+   * measures a different system — see the note in evaluation/types.ts.
+   */
+  responseFormat?: Record<string, unknown>;
   tags?: string[];
+  /**
+   * Structured labels keyed by an analysis definition's field keys (intent,
+   * complexity, language, …). Written either by an AI labeling run (an
+   * analysis definition run against this dataset) or by a human in the item
+   * editor; `labelMeta.source` says which. Unlike free-form `tags` these are
+   * queryable key→value pairs, so runs and reports can slice by segment.
+   */
+  labels?: Record<string, unknown>;
+  labelMeta?: IDatasetItemLabelMeta;
+}
+
+/**
+ * Provenance for `IEvaluationDatasetItem.labels`. A human edit always wins: AI
+ * labeling runs skip items whose meta says `source: 'human'`, so reviewer
+ * corrections survive re-runs and can be used as ground truth for scoring the
+ * labeler itself (accuracy mode).
+ */
+export interface IDatasetItemLabelMeta {
+  source: 'ai' | 'human';
+  /** Analysis definition that produced these labels (AI runs). */
+  definitionKey?: string;
+  /** Analysis run that produced these labels (AI runs). */
+  runId?: string;
+  /** Extraction model used (AI runs). */
+  modelKey?: string;
+  /** LLM-judge verdict for the item, when the definition enables judge mode. */
+  judge?: { score: number; passed?: boolean; reasoning?: string };
+  /** ISO timestamp — stored as a string so both providers round-trip it identically. */
+  labeledAt?: string;
+  /** User id for human labels. */
+  labeledBy?: string;
+}
+
+/**
+ * Query options for listing/counting dataset items. `label` and `labeled`
+ * make labels a first-class filter dimension — the point of labeling being to
+ * slice a dataset by segment (and to find what still needs labeling) without
+ * pulling every item into memory.
+ */
+export interface EvaluationDatasetItemQuery {
+  skip?: number;
+  limit?: number;
+  search?: string;
+  /** Match one label; `value` omitted means "has this label key at all". */
+  label?: { key: string; value?: string };
+  /** true → only items carrying labels; false → only unlabeled items. */
+  labeled?: boolean;
 }
 
 export interface IEvaluationDataset {
@@ -217,7 +310,7 @@ export interface IEvaluationSuite {
   judgeModelKey?: string;
   /** Embedding model used to back any semantic (vector) scorers. */
   embeddingModelKey?: string;
-  runConfig?: { concurrency?: number };
+  runConfig?: { concurrency?: number; turnMode?: EvaluationTurnMode };
   metadata?: Record<string, unknown>;
   createdBy: string;
   updatedBy?: string;
@@ -249,6 +342,19 @@ export interface IEvaluationRunItem {
     latencyMs?: number;
     /** Tool calls emitted by the target (trajectory scoring / display). */
     toolCalls?: Array<{ name: string; args: Record<string, unknown> }>;
+    /**
+     * `perTurn` runs only: what the model said at every turn. Only the last
+     * turn is scored, so without this a failed multi-turn item is
+     * unexplainable — the turn where the model lost the thread is invisible.
+     * Capped (see EVAL_RUN_TURNS_CAP) because a run is one document.
+     */
+    turns?: Array<{
+      index: number;
+      question: string;
+      text: string;
+      toolCalls?: Array<{ name: string; args: Record<string, unknown> }>;
+      latencyMs?: number;
+    }>;
   };
   scores: IEvaluationScore[];
   score: number;
@@ -587,11 +693,23 @@ export interface IAnalysisRunAggregate {
   avgExtractionAccuracy: number | null;
 }
 
+/**
+ * What a run analyzed. Absent/`conversations` is the original behaviour (the
+ * `analysis_conversations` corpus); `dataset` points the same engine at an
+ * evaluation dataset's items, which is how AI labeling works — extraction
+ * fields become the items' `labels`.
+ */
+export type IAnalysisRunTarget =
+  | { kind: 'conversations' }
+  | { kind: 'dataset'; datasetId: string; datasetKey?: string; datasetName?: string };
+
 export interface IAnalysisRun {
   _id?: ObjectId | string;
   tenantId: string;
   projectId?: string;
   definitionKey: string;
+  /** Defaults to the conversation corpus when absent (pre-dataset-target runs). */
+  target?: IAnalysisRunTarget;
   status: AnalysisRunStatus;
   mode: AnalysisRunMode;
   progress: { total: number; completed: number; failed: number };
