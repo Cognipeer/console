@@ -663,8 +663,12 @@ function normalizeToolCalls(
 /**
  * OpenAI's own completion ids are `chatcmpl-` + an opaque token. We emitted
  * `chatcmpl_` with a dashed UUID, which trips clients that pattern-match the id.
+ *
+ * Exported because the streaming path mints the id once and reuses it across
+ * every frame — it used to build that id inline and kept the old shape long
+ * after this was fixed for non-streamed responses.
  */
-function newCompletionId(): string {
+export function newCompletionId(): string {
   return `chatcmpl-${crypto.randomUUID().replace(/-/g, '')}`;
 }
 
