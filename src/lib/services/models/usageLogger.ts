@@ -1,4 +1,10 @@
-import { getDatabase, IModel, IModelPricing, IModelUsageRouting } from '@/lib/database';
+import {
+  getDatabase,
+  IModel,
+  IModelPricing,
+  IModelUsageRouting,
+  ModelUsageStatus,
+} from '@/lib/database';
 import {
   recordUsageEvent,
   type UsageAttribution,
@@ -104,7 +110,7 @@ export async function logModelUsage(
   payload: {
     requestId: string;
     route: string;
-    status: 'success' | 'error';
+    status: ModelUsageStatus;
     providerRequest: unknown;
     providerResponse: unknown;
     errorMessage?: string;

@@ -26,6 +26,10 @@ vi.mock('@/lib/services/models/usageLogger', () => ({
   logModelUsage: vi.fn().mockResolvedValue(undefined),
 }));
 
+vi.mock('@/lib/services/guardrail', () => ({
+  evaluateGuardrail: vi.fn().mockResolvedValue({ action: 'allow', findings: [] }),
+}));
+
 vi.mock('@/lib/services/models/openaiAdapter', async (importOriginal) => {
   const original = await importOriginal<typeof import('@/lib/services/models/openaiAdapter')>();
   return {
@@ -40,6 +44,7 @@ import { getModelByKey } from '@/lib/services/models/modelService';
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
 import { isSemanticCacheEnabled, lookupCache, storeInCache } from '@/lib/services/models/semanticCacheService';
 import { logModelUsage } from '@/lib/services/models/usageLogger';
+import { evaluateGuardrail } from '@/lib/services/guardrail';
 import {
   toOpenAIChatResponse,
   toOpenAIStreamChunk,
@@ -499,6 +504,87 @@ describe('handleChatCompletion', () => {
 
     expect(contents).toEqual(['one', 'two', 'three']);
     expect(invoke).not.toHaveBeenCalled();
+  });
+
+  describe('client disconnects mid-stream', () => {
+    const startCancellableStream = async (modelOverrides = {}) => {
+      (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeLlmModel(modelOverrides));
+      let aborted = false;
+      (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
+        runtime: {
+          createChatModel: vi.fn().mockResolvedValue({
+            invoke: vi.fn(),
+            stream: vi.fn().mockImplementation((_messages, options) => {
+              options?.signal?.addEventListener('abort', () => { aborted = true; });
+              return Promise.resolve((async function* () {
+                yield new AIMessageChunk({ content: 'partial answer' });
+                // Stay open so the consumer's cancel lands mid-stream, then
+                // surface the abort the way a provider SDK does.
+                await new Promise((resolve) => { setTimeout(resolve, 30); });
+                if (aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
+                yield new AIMessageChunk({ content: ' never delivered' });
+              })());
+            }),
+          }),
+        },
+      });
+      (toOpenAIStreamChunk as ReturnType<typeof vi.fn>).mockImplementation((chunk: {
+        content: string;
+      }) => ({
+        id: 'chatcmpl-1',
+        object: 'chat.completion.chunk',
+        choices: [{ index: 0, delta: { content: chunk.content }, finish_reason: null }],
+      }));
+
+      const result = await handleChatCompletion({
+        ...BASE_PARAMS,
+        body: { messages: [] },
+        stream: true,
+      });
+
+      const reader = result.stream!.getReader();
+      await reader.read();
+      await reader.read();
+      await reader.cancel('client gone');
+      // Let the aborted iterator unwind and the fire-and-forget log settle.
+      await new Promise((resolve) => { setTimeout(resolve, 80); });
+      return (logModelUsage as ReturnType<typeof vi.fn>).mock.calls.at(-1);
+    };
+
+    it('records the call as cancelled, not as a provider error', async () => {
+      // Pressing stop is not an outage. Logging it as one drove the error rate
+      // and its alerting off user behaviour rather than provider health.
+      const call = await startCancellableStream();
+
+      expect(call?.[2]).toMatchObject({ status: 'cancelled', route: 'chat.completions' });
+      expect(call?.[2].errorMessage).toBeUndefined();
+    });
+
+    it('still bills the output the provider generated before the client left', async () => {
+      // The provider charges for what it produced; recording zero wrote it off.
+      const call = await startCancellableStream();
+
+      expect(call?.[2].usage.outputTokens).toBeGreaterThan(0);
+      expect(call?.[2].providerResponse).toMatchObject({
+        cancelled: 'client_disconnected',
+        output_tokens_estimated: true,
+      });
+    });
+
+    it('still audits the output guardrail over the text that was delivered', async () => {
+      // Text the caller already received has to be audited whether or not they
+      // stayed for the rest, otherwise hanging up is a way to skip the audit.
+      await startCancellableStream({ outputGuardrailKey: 'no-pii' });
+
+      expect(evaluateGuardrail).toHaveBeenCalledWith(
+        expect.objectContaining({
+          guardrailKey: 'no-pii',
+          phase: 'output',
+          text: expect.stringContaining('partial answer'),
+          source: 'chat.completions:stream:cancelled',
+        }),
+      );
+    });
   });
 
   it('forwards each frame as the provider produces it, without collecting the answer first', async () => {

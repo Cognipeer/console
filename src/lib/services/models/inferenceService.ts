@@ -1138,6 +1138,59 @@ export async function handleChatCompletion(params: {
         let outputLimitError: OutputTokenLimitError | null = null;
         const toolCalls: ToolCallPayload[] = [];
 
+        // A cancelled stream almost never carries provider usage: the counts
+        // ride on the terminal chunk, which is precisely the chunk the client
+        // did not stay for. Reporting zero there writes off output the
+        // provider generated and bills us for, so fall back to an estimate
+        // over the text we did stream — the same chars/4 rule the quota
+        // pre-flight uses. The log marks it `output_tokens_estimated` so a
+        // measured count and a guessed one stay distinguishable downstream.
+        // Input tokens are never guessed; they are reported or absent.
+        const partialUsageOnCancel = (): TokenUsage => {
+          const toolCallCount = toolCalls.length || undefined;
+          if (lastUsage) {
+            return { ...lastUsage, toolCalls: toolCallCount };
+          }
+
+          const streamed = guardrailContentToText(
+            (aggregatedChunk as { content?: unknown } | null)?.content,
+          );
+          const outputTokens = streamed ? Math.ceil(streamed.length / 4) : 0;
+          return {
+            outputTokens,
+            totalTokens: outputTokens,
+            toolCalls: toolCallCount,
+          };
+        };
+
+        // Output guardrail (streaming): the text has already reached the
+        // client, so this is a post-hoc audit — violations land in the
+        // evaluation log and alert metrics rather than blocking the stream.
+        // It runs on a cancelled stream too: those tokens were delivered, and
+        // auditing only completed answers would let a caller skip the audit by
+        // hanging up.
+        const auditStreamedOutput = (source: string) => {
+          if (!model.outputGuardrailKey) return;
+
+          const streamedText = guardrailContentToText(
+            (aggregatedChunk as { content?: unknown } | null)?.content,
+          );
+          if (!streamedText.trim()) return;
+
+          fireAndForget('guardrail-stream-output-audit', async () => {
+            await evaluateGuardrail({
+              tenantDbName,
+              tenantId: model.tenantId,
+              projectId,
+              guardrailKey: model.outputGuardrailKey!,
+              text: streamedText,
+              phase: 'output',
+              requestId,
+              source,
+            });
+          });
+        };
+
         try {
           // OpenAI opens every stream with the assistant role before any content.
           controller.enqueue(
@@ -1273,30 +1326,44 @@ export async function handleChatCompletion(params: {
             }),
           );
 
-          // Output guardrail (streaming): the response is already delivered,
-          // so this is a post-hoc audit — violations land in the evaluation
-          // log and alert metrics rather than blocking the stream.
-          if (model.outputGuardrailKey) {
-            const streamedText = guardrailContentToText(
-              (aggregatedChunk as { content?: unknown } | null)?.content,
-            );
-            if (streamedText.trim()) {
-              fireAndForget('guardrail-stream-output-audit', async () => {
-                await evaluateGuardrail({
-                  tenantDbName,
-                  tenantId: model.tenantId,
-                  projectId,
-                  guardrailKey: model.outputGuardrailKey!,
-                  text: streamedText,
-                  phase: 'output',
-                  requestId,
-                  source: 'chat.completions:stream',
-                });
-              });
-            }
-          }
+          auditStreamedOutput('chat.completions:stream');
         } catch (error: unknown) {
           const latencyMs = Date.now() - startedAt;
+
+          // Only `cancel()` aborts this signal, and only a closed response
+          // socket reaches `cancel()`. So an aborted signal means the client
+          // walked away — the upstream call we abort in response then throws
+          // out of the loop above. That is not a provider failure, and
+          // recording it as one blamed us for every user who pressed stop:
+          // the error rate rose, alerting fired, and the tokens the provider
+          // had already generated (and bills us for) were written as zero.
+          if (abortController.signal.aborted) {
+            fireAndForget('log-stream-cancelled', () =>
+              logModelUsage(tenantDbName, model, {
+                requestId,
+                route: 'chat.completions',
+                status: 'cancelled',
+                providerRequest: sanitizeForLogging({
+                  model: modelKey,
+                  messages: body.messages,
+                  overrides,
+                  stream: true,
+                }),
+                providerResponse: sanitizeForLogging({
+                  cancelled: 'client_disconnected',
+                  partial: aggregatedChunk ?? { tool_calls: toolCalls },
+                  ...(lastUsage ? {} : { output_tokens_estimated: true }),
+                }),
+                latencyMs,
+                usage: partialUsageOnCancel(),
+              }),
+            );
+            auditStreamedOutput('chat.completions:stream:cancelled');
+            // Nothing is left to write to: the controller is already cancelled,
+            // and enqueueing on it throws.
+            return;
+          }
+
           const normalizedError = normalizeInferenceError(error);
           const errorMessage = normalizedError.error.message;
           fireAndForget('log-stream-error', () =>

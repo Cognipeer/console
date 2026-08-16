@@ -734,6 +734,17 @@ export interface IModelUsageCostSnapshot {
   totalCost?: number;
 }
 
+/**
+ * `cancelled` is a call the client walked away from mid-stream — it is neither
+ * a completion nor a provider fault, and counting it as either is wrong: the
+ * error rate would blame us for a user pressing stop, and the success rate
+ * would claim an answer that was never delivered. Both aggregations match on
+ * the exact value, so a third state is additive: it stays in `totalCalls` and
+ * in the token sums (we are billed for what the provider generated) without
+ * landing in either bucket.
+ */
+export type ModelUsageStatus = 'success' | 'error' | 'cancelled';
+
 export interface IModelUsageLog extends IUsageAttributionFields {
   _id?: ObjectId | string;
   tenantId: string;
@@ -742,7 +753,7 @@ export interface IModelUsageLog extends IUsageAttributionFields {
   modelId?: string;
   requestId: string;
   route: string;
-  status: 'success' | 'error';
+  status: ModelUsageStatus;
   providerRequest: Record<string, unknown>;
   providerResponse: Record<string, unknown>;
   errorMessage?: string;

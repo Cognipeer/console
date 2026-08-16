@@ -358,7 +358,7 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         modelId: r.modelId as string | undefined,
         requestId: r.requestId as string,
         route: r.route as string,
-        status: r.status as 'success' | 'error',
+        status: r.status as IModelUsageLog['status'],
         providerRequest: this.parseJson(r.providerRequest, {}),
         providerResponse: this.parseJson(r.providerResponse, {}),
         errorMessage: r.errorMessage as string | undefined,
