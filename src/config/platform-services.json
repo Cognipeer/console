@@ -71,7 +71,7 @@
       "searchKeywords": [
         "prompt",
         "template",
-        "şablon"
+        "\u015fablon"
       ],
       "defaultPinned": true,
       "popular": true
@@ -399,7 +399,7 @@
         "mask",
         "kvkk",
         "gdpr",
-        "kişisel veri"
+        "ki\u015fisel veri"
       ],
       "badge": "new"
     },
@@ -440,7 +440,7 @@
       ],
       "searchKeywords": [
         "browser",
-        "tarayıcı",
+        "taray\u0131c\u0131",
         "playwright",
         "automation",
         "session",
@@ -566,7 +566,9 @@
         "savings",
         "latency"
       ],
-      "badge": "new"
+      "badge": "new",
+      "requiresEnterprise": true,
+      "enterpriseModule": "cost"
     },
     {
       "id": "automations",
@@ -608,7 +610,7 @@
         "node",
         "scaling",
         "instance",
-        "kümeleme"
+        "k\u00fcmeleme"
       ],
       "tenantAdminOnly": true,
       "requiresEnterprise": true,
@@ -745,7 +747,7 @@
         "users",
         "invite",
         "tenant",
-        "üyeler"
+        "\u00fcyeler"
       ],
       "tenantAdminOnly": true,
       "settings": true
@@ -781,7 +783,7 @@
       "searchKeywords": [
         "providers",
         "integrations",
-        "sağlayıcılar"
+        "sa\u011flay\u0131c\u0131lar"
       ],
       "tenantAdminOnly": true,
       "settings": true

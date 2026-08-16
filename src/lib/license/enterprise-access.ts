@@ -83,6 +83,14 @@ export const ENTERPRISE_API_RULES: EnterpriseApiRule[] = [
     prefixes: ['/api/aegis/', '/api/client/v1/aegis/'],
   },
   {
+    // Cost & Optimization: spend attribution, the deterministic analysis
+    // workbench, automated prescriptions, the pricing catalog and reports.
+    // `/api/prescriptions` is a separate prefix but the same product module —
+    // RBAC already maps it to the `cost` service.
+    module: 'cost',
+    prefixes: ['/api/cost/', '/api/prescriptions'],
+  },
+  {
     // Abacus cost intelligence: what-if repricing + optimization recommendations.
     module: 'abacus',
     prefixes: ['/api/abacus/'],

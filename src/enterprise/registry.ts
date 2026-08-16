@@ -16,6 +16,51 @@
 
 import type { FastifyInstance } from 'fastify';
 
+// ── Deterministic agent insights ──────────────────────────────────────────
+/**
+ * Derives the deterministic per-agent / per-model analysis (tool-menu size,
+ * system-prompt lint, repeated-call waste, recurring errors) from a bounded
+ * sample of tracing sessions.
+ *
+ * EMPTY in the community edition: the tracing service records the sessions and
+ * events, but deriving the analysis from them is part of the enterprise Cost &
+ * Optimization module. With no provider registered the overview endpoints
+ * simply report `insights: null`, which every consumer already handles.
+ *
+ * Kept deliberately loose (`Record<string, unknown>`) so the community contract
+ * carries no enterprise shape; the overlay narrows it to its own type.
+ */
+export type AgentInsightsProvider = (
+  db: unknown,
+  projectId: string,
+  sortedSessions: Array<Record<string, unknown>>,
+  options?: { modelName?: string },
+) => Promise<Record<string, unknown> | null>;
+
+export const enterpriseAgentInsightsProviders: AgentInsightsProvider[] = [];
+
+/** Run the registered provider, or report no insights in the community build. */
+export async function deriveEnterpriseAgentInsights(
+  db: unknown,
+  projectId: string,
+  sortedSessions: Array<Record<string, unknown>>,
+  options?: { modelName?: string },
+): Promise<Record<string, unknown> | null> {
+  const provider = enterpriseAgentInsightsProviders[0];
+  if (!provider) return null;
+  return provider(db, projectId, sortedSessions, options);
+}
+
+// ── Background queue consumers ────────────────────────────────────────────
+/**
+ * Queue consumers an enterprise module needs started at boot. EMPTY in the
+ * community edition. `bootstrap.ts` awaits each one after the community
+ * consumers are registered.
+ */
+export type EnterpriseQueueConsumerStarter = () => void | Promise<void>;
+
+export const enterpriseQueueConsumers: EnterpriseQueueConsumerStarter[] = [];
+
 // ── DB provider mixins ────────────────────────────────────────────────────
 // A mixin takes a base constructor and returns an extended one. For the
 // community type contract we treat them as identity over the base type:
