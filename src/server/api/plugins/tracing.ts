@@ -10,6 +10,22 @@ import {
 
 const logger = createLogger('api:tracing');
 
+// Same key charset the ingest sanitizer enforces (client-tracing.ts) — the
+// key reaches a Mongo `metadata.<key>` dot-path / SQLite JSON path in the DB
+// layer, so an unvalidated key is a query-shape injection surface.
+const METADATA_KEY_PATTERN = /^[a-zA-Z0-9_]{1,40}$/;
+
+function parseMetadataFilter(query: Record<string, string | undefined>):
+  | { metadataKey?: string; metadataValue?: string }
+  | { error: string } {
+  const key = query.metadataKey?.trim();
+  if (!key) return {};
+  if (!METADATA_KEY_PATTERN.test(key)) {
+    return { error: '`metadataKey` must match /^[a-zA-Z0-9_]{1,40}$/' };
+  }
+  return { metadataKey: key, metadataValue: query.metadataValue };
+}
+
 export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
   const dashboardHandler = withApiRequestContext(async (request, reply) => {
     try {
@@ -47,6 +63,10 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const query = (request.query ?? {}) as Record<string, string | undefined>;
+      const metadataFilter = parseMetadataFilter(query);
+      if ('error' in metadataFilter) {
+        return reply.code(400).send({ error: metadataFilter.error });
+      }
       const result = await AgentTracingService.listSessions(session.tenantDbName, projectId, {
         agent: query.agent,
         from: query.from,
@@ -55,6 +75,7 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
         skip: query.skip || '0',
         status: query.status,
         to: query.to,
+        ...metadataFilter,
       });
 
       return reply.code(200).send(result);
@@ -127,6 +148,10 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const query = (request.query ?? {}) as Record<string, string | undefined>;
+      const metadataFilter = parseMetadataFilter(query);
+      if ('error' in metadataFilter) {
+        return reply.code(400).send({ error: metadataFilter.error });
+      }
       const result = await AgentTracingService.listThreads(session.tenantDbName, projectId, {
         agent: query.agent,
         from: query.from,
@@ -135,6 +160,7 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
         status: query.status,
         threadId: query.threadId,
         to: query.to,
+        ...metadataFilter,
       });
 
       return reply.code(200).send(result);

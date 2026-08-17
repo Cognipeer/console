@@ -1,12 +1,13 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useRouter } from 'next/navigation';
-import { Button, Text, Tooltip } from '@mantine/core';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { ActionIcon, Button, Group, Text, TextInput, Tooltip } from '@mantine/core';
 import {
   IconBook,
   IconEye,
   IconTimeline,
+  IconX,
 } from '@tabler/icons-react';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
@@ -46,6 +47,7 @@ const DEFAULT_PAGE_SIZE = 25;
 
 export default function TracingThreadsPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { openDocs } = useDocsDrawer();
   const [threads, setThreads] = useState<ThreadRecord[]>([]);
   const [totalThreads, setTotalThreads] = useState(0);
@@ -55,6 +57,12 @@ export default function TracingThreadsPage() {
   const [pageSize] = useState(DEFAULT_PAGE_SIZE);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
+  const [metadataKey, setMetadataKey] = useState(
+    () => searchParams.get('metadataKey')?.trim() || '',
+  );
+  const [metadataValue, setMetadataValue] = useState(
+    () => searchParams.get('metadataValue')?.trim() || '',
+  );
 
   const buildQueryParams = useCallback(() => {
     const params = new URLSearchParams();
@@ -62,8 +70,19 @@ export default function TracingThreadsPage() {
     params.set('skip', ((page - 1) * pageSize).toString());
     if (query) params.set('threadId', query.trim());
     if (statusFilter !== 'all') params.set('status', statusFilter);
+    if (metadataKey.trim() && metadataValue.trim()) {
+      params.set('metadataKey', metadataKey.trim());
+      params.set('metadataValue', metadataValue.trim());
+    }
     return params;
-  }, [page, pageSize, query, statusFilter]);
+  }, [page, pageSize, query, statusFilter, metadataKey, metadataValue]);
+
+  useEffect(() => {
+    const metadataKeyParam = searchParams.get('metadataKey')?.trim() || '';
+    setMetadataKey((current) => (current === metadataKeyParam ? current : metadataKeyParam));
+    const metadataValueParam = searchParams.get('metadataValue')?.trim() || '';
+    setMetadataValue((current) => (current === metadataValueParam ? current : metadataValueParam));
+  }, [searchParams]);
 
   const fetchThreads = useCallback(
     async (isRefresh = false, signal?: AbortSignal) => {
@@ -256,6 +275,46 @@ export default function TracingThreadsPage() {
             ],
           },
         ]}
+        toolbarRight={
+          <Group gap={4} wrap="nowrap">
+            <TextInput
+              size="xs"
+              placeholder="metadata key"
+              value={metadataKey}
+              onChange={(e) => {
+                setMetadataKey(e.currentTarget.value);
+                setPage(1);
+              }}
+              style={{ width: 130 }}
+            />
+            <TextInput
+              size="xs"
+              placeholder="value"
+              value={metadataValue}
+              onChange={(e) => {
+                setMetadataValue(e.currentTarget.value);
+                setPage(1);
+              }}
+              style={{ width: 130 }}
+            />
+            {(metadataKey || metadataValue) && (
+              <Tooltip label="Clear metadata filter" withArrow>
+                <ActionIcon
+                  size="sm"
+                  variant="subtle"
+                  color="gray"
+                  onClick={() => {
+                    setMetadataKey('');
+                    setMetadataValue('');
+                    setPage(1);
+                  }}
+                >
+                  <IconX size={14} />
+                </ActionIcon>
+              </Tooltip>
+            )}
+          </Group>
+        }
         onRefresh={() => void fetchThreads(true)}
         refreshing={refreshing}
         empty={{

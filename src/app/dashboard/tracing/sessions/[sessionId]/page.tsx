@@ -130,6 +130,7 @@ interface SessionDetailResponse {
         agentName?: string;
         agentVersion?: string;
         agentModel?: string;
+        metadata?: Record<string, string>;
         status?: string;
         startedAt?: string;
         endedAt?: string;
@@ -646,8 +647,11 @@ function getRecord(value: unknown): Record<string, unknown> | undefined {
 }
 
 function ToolDetailsBlock({ event }: { event: TracingEvent }) {
-    const metadataDetails = getRecord(event.metadata?.toolDetails);
-    const details = event.toolDetails || metadataDetails;
+    // Both sides go through getRecord: a network payload can hand this the
+    // literal string "undefined" (a bad upstream serializer's stringified
+    // absence), and `||` alone would accept it as truthy — then spreading it
+    // below splits it into single-character indexed keys.
+    const details = getRecord(event.toolDetails) || getRecord(event.metadata?.toolDetails);
     if (!details) return null;
 
     const name = typeof details.name === 'string' && details.name.trim().length > 0
@@ -1257,6 +1261,27 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
                                                 <Badge key={t} size="xs" variant="light" color="violet">{formatToolName(t)}</Badge>
                                             ))}
                                         </Group>
+                                    </Stack>
+                                )}
+                                {session.metadata && Object.keys(session.metadata).length > 0 && (
+                                    <Stack gap={2}>
+                                        <Text size="sm" c="dimmed">Metadata</Text>
+                                        <Stack gap={4}>
+                                            {Object.entries(session.metadata).map(([key, value]) => (
+                                                <Group key={key} justify="space-between" wrap="nowrap" gap="xs">
+                                                    <Text size="xs" c="dimmed" style={{ whiteSpace: 'nowrap' }}>{key}</Text>
+                                                    <Text
+                                                        size="xs"
+                                                        c="blue"
+                                                        fw={500}
+                                                        style={{ cursor: 'pointer', fontFamily: 'monospace', textAlign: 'right', wordBreak: 'break-all' }}
+                                                        onClick={() => router.push(`/dashboard/tracing/sessions?metadataKey=${encodeURIComponent(key)}&metadataValue=${encodeURIComponent(value)}`)}
+                                                    >
+                                                        {value}
+                                                    </Text>
+                                                </Group>
+                                            ))}
+                                        </Stack>
                                     </Stack>
                                 )}
                             </Stack>

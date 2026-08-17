@@ -1358,14 +1358,16 @@ function UsageBreakdownCard({
   modelId: string;
   costCurrency: string;
 }) {
-  const [groupBy, setGroupBy] = useState<'user' | 'token'>('user');
+  const [groupBy, setGroupBy] = useState<string>('user');
+  const [metadataKeyInput, setMetadataKeyInput] = useState('');
   const [breakdown, setBreakdown] = useState<UsageBreakdownDto | null>(null);
   const [loading, setLoading] = useState(true);
+  const isMetadataMode = groupBy.startsWith('metadata.');
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    fetch(`/api/models/${modelId}/usage/breakdown?groupBy=${groupBy}`)
+    fetch(`/api/models/${modelId}/usage/breakdown?groupBy=${encodeURIComponent(groupBy)}`)
       .then((response) => (response.ok ? response.json() : null))
       .then((data) => {
         if (!cancelled) setBreakdown(data?.breakdown ?? null);
@@ -1386,9 +1388,15 @@ function UsageBreakdownCard({
 
   return (
     <div className="ds-card">
-      <div className="ds-row-between" style={{ padding: '14px 18px' }}>
+      <div className="ds-row-between" style={{ padding: '14px 18px', flexWrap: 'wrap', gap: 8 }}>
         <div className="ds-h3">
-          Usage by {groupBy === 'user' ? 'user' : 'API key'}
+          Usage by {
+            groupBy === 'user'
+              ? 'user'
+              : groupBy === 'token'
+                ? 'API key'
+                : `metadata: ${groupBy.slice('metadata.'.length)}`
+          }
         </div>
         <div className="ds-row ds-gap-xs">
           <span className="ds-faint" style={{ fontSize: 11, marginRight: 6 }}>
@@ -1409,6 +1417,34 @@ function UsageBreakdownCard({
               {option.label}
             </button>
           ))}
+          <button
+            type="button"
+            className={`ds-period-btn ${isMetadataMode ? 'active' : ''}`}
+            onClick={() => {
+              if (!isMetadataMode) setMetadataKeyInput('');
+            }}
+          >
+            Metadata
+          </button>
+          {(isMetadataMode || metadataKeyInput) && (
+            <input
+              className="ds-input"
+              style={{ width: 110, fontSize: 12 }}
+              placeholder="key"
+              value={metadataKeyInput}
+              onChange={(e) => setMetadataKeyInput(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && metadataKeyInput.trim()) {
+                  setGroupBy(`metadata.${metadataKeyInput.trim()}`);
+                }
+              }}
+              onBlur={() => {
+                if (metadataKeyInput.trim()) {
+                  setGroupBy(`metadata.${metadataKeyInput.trim()}`);
+                }
+              }}
+            />
+          )}
         </div>
       </div>
       {loading ? (

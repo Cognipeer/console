@@ -472,6 +472,25 @@ export function TracingMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
         match.startedAt = startedAt;
       }
 
+      // The materialized thread rollup has no metadata of its own (a thread
+      // spans several sessions, each with its own bag) — resolve to the
+      // threadIds of matching sessions first, same key charset the ingest
+      // sanitizer enforces.
+      const metadataKey =
+        typeof filters?.metadataKey === 'string' ? filters.metadataKey.trim() : '';
+      const metadataValue =
+        typeof filters?.metadataValue === 'string' ? filters.metadataValue : undefined;
+      if (metadataKey && /^[a-zA-Z0-9_]{1,40}$/.test(metadataKey) && metadataValue !== undefined) {
+        const matchingThreadIds = await db
+          .collection(COLLECTIONS.agentTracingSessions)
+          .distinct('threadId', {
+            ...this.buildProjectScopeFilter(projectId),
+            [`metadata.${metadataKey}`]: metadataValue,
+            threadId: { $exists: true, $ne: null },
+          });
+        match.threadId = { $in: matchingThreadIds };
+      }
+
       const limit = parseInt(String(filters?.limit ?? '50'));
       const skip = parseInt(String(filters?.skip ?? '0'));
 
@@ -906,6 +925,17 @@ export function TracingMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
           { threadId: { $regex: escaped, $options: 'i' } },
           { agentName: { $regex: escaped, $options: 'i' } },
         ];
+      }
+
+      // Same key charset the ingest sanitizer enforces (client-tracing.ts) —
+      // this becomes a literal Mongo field path (`metadata.<key>`), so an
+      // unvalidated key would be a query-shape injection surface.
+      const metadataKey =
+        typeof filters?.metadataKey === 'string' ? filters.metadataKey.trim() : '';
+      const metadataValue =
+        typeof filters?.metadataValue === 'string' ? filters.metadataValue : undefined;
+      if (metadataKey && /^[a-zA-Z0-9_]{1,40}$/.test(metadataKey) && metadataValue !== undefined) {
+        query[`metadata.${metadataKey}`] = metadataValue;
       }
 
       const limit = Math.max(0, parseInt(String(filters?.limit ?? '50'), 10) || 0);

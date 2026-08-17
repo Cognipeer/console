@@ -2,11 +2,12 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { Button, Group, Text, Tooltip } from '@mantine/core';
+import { ActionIcon, Button, Group, Text, TextInput, Tooltip } from '@mantine/core';
 import {
   IconBook,
   IconCamera,
   IconEye,
+  IconX,
 } from '@tabler/icons-react';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
@@ -56,6 +57,12 @@ export default function TracingSessionsPage() {
   const [agentFilter, setAgentFilter] = useState(
     () => searchParams.get('agent')?.trim() || '',
   );
+  const [metadataKey, setMetadataKey] = useState(
+    () => searchParams.get('metadataKey')?.trim() || '',
+  );
+  const [metadataValue, setMetadataValue] = useState(
+    () => searchParams.get('metadataValue')?.trim() || '',
+  );
 
   const buildQueryParams = useCallback(() => {
     const params = new URLSearchParams();
@@ -64,8 +71,12 @@ export default function TracingSessionsPage() {
     if (query) params.set('query', query.trim());
     if (statusFilter !== 'all') params.set('status', statusFilter);
     if (agentFilter) params.set('agent', agentFilter.trim());
+    if (metadataKey.trim() && metadataValue.trim()) {
+      params.set('metadataKey', metadataKey.trim());
+      params.set('metadataValue', metadataValue.trim());
+    }
     return params;
-  }, [page, pageSize, query, statusFilter, agentFilter]);
+  }, [page, pageSize, query, statusFilter, agentFilter, metadataKey, metadataValue]);
 
   const fetchSessions = useCallback(
     async (isRefresh = false, signal?: AbortSignal) => {
@@ -103,6 +114,10 @@ export default function TracingSessionsPage() {
   useEffect(() => {
     const agentParam = searchParams.get('agent')?.trim() || '';
     setAgentFilter((current) => (current === agentParam ? current : agentParam));
+    const metadataKeyParam = searchParams.get('metadataKey')?.trim() || '';
+    setMetadataKey((current) => (current === metadataKeyParam ? current : metadataKeyParam));
+    const metadataValueParam = searchParams.get('metadataValue')?.trim() || '';
+    setMetadataValue((current) => (current === metadataValueParam ? current : metadataValueParam));
   }, [searchParams]);
 
   useEffect(() => {
@@ -301,6 +316,46 @@ export default function TracingSessionsPage() {
             ],
           },
         ]}
+        toolbarRight={
+          <Group gap={4} wrap="nowrap">
+            <TextInput
+              size="xs"
+              placeholder="metadata key"
+              value={metadataKey}
+              onChange={(e) => {
+                setMetadataKey(e.currentTarget.value);
+                setPage(1);
+              }}
+              style={{ width: 130 }}
+            />
+            <TextInput
+              size="xs"
+              placeholder="value"
+              value={metadataValue}
+              onChange={(e) => {
+                setMetadataValue(e.currentTarget.value);
+                setPage(1);
+              }}
+              style={{ width: 130 }}
+            />
+            {(metadataKey || metadataValue) && (
+              <Tooltip label="Clear metadata filter" withArrow>
+                <ActionIcon
+                  size="sm"
+                  variant="subtle"
+                  color="gray"
+                  onClick={() => {
+                    setMetadataKey('');
+                    setMetadataValue('');
+                    setPage(1);
+                  }}
+                >
+                  <IconX size={14} />
+                </ActionIcon>
+              </Tooltip>
+            )}
+          </Group>
+        }
         onRefresh={() => void fetchSessions(true)}
         refreshing={refreshing}
         empty={{

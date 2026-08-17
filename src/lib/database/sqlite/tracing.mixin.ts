@@ -99,12 +99,12 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
 
       db.prepare(`
         INSERT INTO ${TABLES.agentTracingSessions}
-        (id, sessionId, traceId, rootSpanId, threadId, tenantId, projectId, source, agent, agentName, agentVersion, agentModel,
+        (id, sessionId, traceId, rootSpanId, threadId, tenantId, projectId, source, agent, agentName, agentVersion, agentModel, metadata,
          config, summary, status, startedAt, endedAt, durationMs, errors, modelsUsed, toolsUsed,
          eventCounts, totalEvents, totalInputTokens, totalOutputTokens, totalCachedInputTokens,
          totalBytesIn, totalBytesOut, totalRequestBytes, totalResponseBytes,
          userId, apiTokenId, actorType, createdAt, updatedAt)
-        VALUES (@id, @sessionId, @traceId, @rootSpanId, @threadId, @tenantId, @projectId, @source, @agent, @agentName, @agentVersion, @agentModel,
+        VALUES (@id, @sessionId, @traceId, @rootSpanId, @threadId, @tenantId, @projectId, @source, @agent, @agentName, @agentVersion, @agentModel, @metadata,
          @config, @summary, @status, @startedAt, @endedAt, @durationMs, @errors, @modelsUsed, @toolsUsed,
          @eventCounts, @totalEvents, @totalInputTokens, @totalOutputTokens, @totalCachedInputTokens,
          @totalBytesIn, @totalBytesOut, @totalRequestBytes, @totalResponseBytes,
@@ -122,6 +122,7 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         agentName: session.agentName ?? null,
         agentVersion: session.agentVersion ?? null,
         agentModel: session.agentModel ?? null,
+        metadata: this.toJson(session.metadata ?? {}),
         config: this.toJson(session.config),
         summary: this.toJson(session.summary),
         status: session.status ?? null,
@@ -312,6 +313,7 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       if (data.agentName !== undefined) { sets.push('agentName = @agentName'); params.agentName = data.agentName; }
       if (data.agentVersion !== undefined) { sets.push('agentVersion = @agentVersion'); params.agentVersion = data.agentVersion; }
       if (data.agentModel !== undefined) { sets.push('agentModel = @agentModel'); params.agentModel = data.agentModel; }
+      if (data.metadata !== undefined) { sets.push('metadata = @metadata'); params.metadata = this.toJson(data.metadata); }
       if (data.config !== undefined) { sets.push('config = @config'); params.config = this.toJson(data.config); }
       if (data.summary !== undefined) { sets.push('summary = @summary'); params.summary = this.toJson(data.summary); }
       if (data.status !== undefined) { sets.push('status = @status'); params.status = data.status; }
@@ -379,6 +381,20 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       if (freeText) {
         clauses.push('(sessionId LIKE @freeText OR threadId LIKE @freeText OR agentName LIKE @freeText)');
         params.freeText = `%${freeText}%`;
+      }
+
+      // Same key charset the ingest sanitizer enforces (client-tracing.ts) —
+      // the value is a bound param either way, but a key outside this shape
+      // is not a valid flat-object JSON path and should just match nothing
+      // rather than be handed to json_extract.
+      const metadataKey =
+        typeof filters?.metadataKey === 'string' ? filters.metadataKey.trim() : '';
+      const metadataValue =
+        typeof filters?.metadataValue === 'string' ? filters.metadataValue : undefined;
+      if (metadataKey && /^[a-zA-Z0-9_]{1,40}$/.test(metadataKey) && metadataValue !== undefined) {
+        clauses.push('json_extract(metadata, @metadataPath) = @metadataValue');
+        params.metadataPath = `$.${metadataKey}`;
+        params.metadataValue = metadataValue;
       }
 
       const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
@@ -648,6 +664,16 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       if (filters?.from) { clauses.push('createdAt >= @from'); params.from = (filters.from as Date).toISOString(); }
       if (filters?.to) { clauses.push('createdAt <= @to'); params.to = (filters.to as Date).toISOString(); }
 
+      const metadataKey =
+        typeof filters?.metadataKey === 'string' ? filters.metadataKey.trim() : '';
+      const metadataValue =
+        typeof filters?.metadataValue === 'string' ? filters.metadataValue : undefined;
+      if (metadataKey && /^[a-zA-Z0-9_]{1,40}$/.test(metadataKey) && metadataValue !== undefined) {
+        clauses.push('json_extract(metadata, @metadataPath) = @metadataValue');
+        params.metadataPath = `$.${metadataKey}`;
+        params.metadataValue = metadataValue;
+      }
+
       const where = `WHERE ${clauses.join(' AND ')}`;
       const limit = (filters?.limit as number) ?? 50;
       const skip = (filters?.skip as number) ?? 0;
@@ -800,6 +826,7 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         agentName: r.agentName as string | undefined,
         agentVersion: r.agentVersion as string | undefined,
         agentModel: r.agentModel as string | undefined,
+        metadata: this.parseJson(r.metadata, {}),
         config: this.parseJson(r.config, {}),
         summary: this.parseJson(r.summary, {}),
         status: r.status as string | undefined,

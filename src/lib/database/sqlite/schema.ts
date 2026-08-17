@@ -457,6 +457,7 @@ export const TENANT_SCHEMA_SQL = `
     agentName TEXT,
     agentVersion TEXT,
     agentModel TEXT,
+    metadata TEXT DEFAULT '{}',
     config TEXT DEFAULT '{}',
     summary TEXT DEFAULT '{}',
     status TEXT,
