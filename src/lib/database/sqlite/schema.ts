@@ -603,6 +603,8 @@ export const TENANT_SCHEMA_SQL = `
     service TEXT NOT NULL,
     refKey TEXT NOT NULL DEFAULT '',
     agentKey TEXT NOT NULL DEFAULT '',
+    metadataJson TEXT,
+    metadataKey TEXT NOT NULL DEFAULT '',
     day TEXT NOT NULL,
     dayDate TEXT,
     requests INTEGER NOT NULL DEFAULT 0,
@@ -617,9 +619,10 @@ export const TENANT_SCHEMA_SQL = `
     units TEXT,
     updatedAt TEXT NOT NULL
   );
-  -- The unique dimension index (v2, includes agentKey) is created in
-  -- applyTenantIndexes AFTER migrations: agentKey is added to legacy DBs by
-  -- ensureTableColumn, and referencing it here would abort the schema exec.
+  -- The unique dimension index (v3, includes agentKey + metadataKey) is
+  -- created in applyTenantIndexes AFTER migrations: agentKey/metadataKey are
+  -- added to legacy DBs by ensureTableColumn, and referencing them here
+  -- would abort the schema exec.
   CREATE INDEX IF NOT EXISTS idx_usage_daily_day ON usage_daily(tenantId, day DESC);
   CREATE INDEX IF NOT EXISTS idx_usage_daily_user_day ON usage_daily(tenantId, userId, day DESC);
 

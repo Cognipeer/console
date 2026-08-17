@@ -31,6 +31,7 @@ import {
   getSpendReport,
   type SpendGroupByEntity,
 } from '@/lib/services/spend';
+import { parseMetadataGroupByKey } from '@/lib/services/usage/usageBreakdown';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import {
   getApiTokenContextForRequest,
@@ -132,8 +133,16 @@ export const clientSpendApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       if (query.group_by_entity !== undefined) {
-        if (!(VALID_GROUP_BY_ENTITY as readonly string[]).includes(query.group_by_entity)) {
-          return reply.code(400).send({ error: '`group_by_entity` must be user, api_key, or agent' });
+        const metadataKey = query.group_by_entity.startsWith('metadata.')
+          ? parseMetadataGroupByKey(query.group_by_entity)
+          : undefined;
+        if (query.group_by_entity.startsWith('metadata.') && !metadataKey) {
+          return reply.code(400).send({
+            error: '`group_by_entity` metadata key must match /^[a-zA-Z0-9_]{1,40}$/',
+          });
+        }
+        if (!metadataKey && !(VALID_GROUP_BY_ENTITY as readonly string[]).includes(query.group_by_entity)) {
+          return reply.code(400).send({ error: '`group_by_entity` must be user, api_key, agent, or metadata.<key>' });
         }
         const entity = query.group_by_entity as SpendGroupByEntity;
 
@@ -151,11 +160,13 @@ export const clientSpendApiPlugin: FastifyPluginAsync = async (app) => {
           },
         );
 
-        const idField = entity === 'user'
-          ? 'user_id'
-          : entity === 'agent'
-            ? 'agent_key'
-            : 'api_token_id';
+        const idField = metadataKey
+          ? metadataKey
+          : entity === 'user'
+            ? 'user_id'
+            : entity === 'agent'
+              ? 'agent_key'
+              : 'api_token_id';
         return reply.code(200).send({
           object: 'spend.breakdown',
           group_by_entity: entity,

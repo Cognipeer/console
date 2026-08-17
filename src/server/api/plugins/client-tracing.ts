@@ -130,6 +130,9 @@ type TracingSessionPayload = {
   endedAt?: string | Date;
   errors?: unknown[];
   events?: TracingEventPayload[];
+  /** Free-form caller-supplied attribution tags (e.g. `{ complexity: 'complex' }`),
+   *  sibling of `agent` — sanitized by `sanitizeTracingMetadata` before storage. */
+  metadata?: Record<string, unknown>;
   rootSpanId?: string;
   sessionId?: string;
   startedAt?: string | Date;
@@ -472,6 +475,45 @@ function getEventUsage(event: TracingEventPayload): TracingUsage {
   return event.usage || event.metadata?.usage || {};
 }
 
+/** Caller-supplied `metadata` key format — shared with the read-side
+ *  `group_by`/`group_by_entity=metadata.<key>` validation (`usageBreakdown.ts`). */
+const METADATA_KEY_PATTERN = /^[a-zA-Z0-9_]{1,40}$/;
+const MAX_METADATA_KEYS = 10;
+const MAX_METADATA_VALUE_LENGTH = 200;
+
+/**
+ * Sanitize the free-form `metadata` attribution bag callers attach to a
+ * tracing session: plain string values only, bounded key count/length, safe
+ * key charset (it later becomes a Mongo `metadata.<key>` dot-path / SQLite
+ * JSON key in read queries — unsanitized keys would be an injection surface).
+ * Drops offending entries rather than rejecting the whole ingest; logs once
+ * per call when anything was dropped.
+ */
+function sanitizeTracingMetadata(raw: unknown): Record<string, string> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const result: Record<string, string> = {};
+  let droppedCount = 0;
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (Object.keys(result).length >= MAX_METADATA_KEYS) {
+      droppedCount += 1;
+      continue;
+    }
+    if (
+      !METADATA_KEY_PATTERN.test(key)
+      || typeof value !== 'string'
+      || value.length > MAX_METADATA_VALUE_LENGTH
+    ) {
+      droppedCount += 1;
+      continue;
+    }
+    result[key] = value;
+  }
+  if (droppedCount > 0) {
+    logger.warn('Tracing metadata: dropped invalid entries', { droppedCount });
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
 export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/client/v1/traces', withClientApiRequestContext(async (request, reply) => {
     try {
@@ -683,6 +725,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
               tenantId: ctx.tenantId,
               projectId: ctx.projectId,
               agentName: mergedSession.agentName,
+              metadata: mergedSession.metadata,
             });
             await backgroundDb.createAgentTracingSession({
               ...mergedSession,
@@ -698,6 +741,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
             tenantId: ctx.tenantId,
             projectId: ctx.projectId,
             agentName: mergedSession.agentName,
+            metadata: mergedSession.metadata,
             events: insertedEvents,
           });
         }
@@ -786,6 +830,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
         endedAt: payload.endedAt ? new Date(payload.endedAt) : undefined,
         errors: toErrorList(payload.errors),
         eventCounts: getSummaryEventCounts(payload.summary),
+        metadata: sanitizeTracingMetadata(payload.metadata),
         modelsUsed: Array.from(modelsUsed),
         projectId: ctx.projectId,
         rootSpanId: typeof payload.rootSpanId === 'string' ? payload.rootSpanId : undefined,
@@ -861,6 +906,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
             tenantId: ctx.tenantId,
             projectId: ctx.projectId,
             agentName: sessionDoc.agentName,
+            metadata: sessionDoc.metadata,
           });
           await backgroundDb.createAgentTracingSession({
             ...sessionDoc,
@@ -939,6 +985,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
           tenantId: ctx.tenantId,
           projectId: ctx.projectId,
           agentName: sessionDoc.agentName,
+          metadata: sessionDoc.metadata,
           events: createdEvents,
           previousEvents,
         });
@@ -1007,6 +1054,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
         endedAt: undefined,
         errors: [],
         eventCounts: {},
+        metadata: sanitizeTracingMetadata(payload.metadata),
         modelsUsed: payload.agent?.model ? [payload.agent.model] : [],
         projectId: ctx.projectId,
         rootSpanId: typeof payload.rootSpanId === 'string' ? payload.rootSpanId : undefined,
@@ -1046,11 +1094,13 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
       // keep every running total and re-arm it for the incoming leg.
       const hasAgent = Object.keys(sessionDoc.agent ?? {}).length > 0;
       const hasConfig = Object.keys(sessionDoc.config ?? {}).length > 0;
+      const hasMetadata = Object.keys(sessionDoc.metadata ?? {}).length > 0;
       const reopenDoc: Partial<IAgentTracingSession> = {
         // A re-start body is often empty. Writing `{}` over these would drop the
         // agent identity the reopen exists to preserve.
         ...(hasAgent ? { agent: sessionDoc.agent } : {}),
         ...(hasConfig ? { config: sessionDoc.config } : {}),
+        ...(hasMetadata ? { metadata: sessionDoc.metadata } : {}),
         agentModel: sessionDoc.agentModel ?? existing?.agentModel,
         agentName: sessionDoc.agentName ?? existing?.agentName,
         agentVersion: sessionDoc.agentVersion ?? existing?.agentVersion,
@@ -1074,6 +1124,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
             tenantId: ctx.tenantId,
             projectId: ctx.projectId,
             agentName: sessionDoc.agentName,
+            metadata: sessionDoc.metadata,
           });
           await backgroundDb.createAgentTracingSession({
             ...sessionDoc,
@@ -1200,6 +1251,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
           tenantId: ctx.tenantId,
           projectId: ctx.projectId,
           agentName: session.agentName,
+          metadata: session.metadata,
           events: [eventDoc],
         });
 

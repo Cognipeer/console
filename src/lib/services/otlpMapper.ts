@@ -300,6 +300,39 @@ function getConventionTokens(attrs: OtlpKeyValue[] | undefined) {
 }
 
 /** Conversation identifier — the closest thing OTel has to a thread id. */
+/** Same charset/length the JSON/stream ingest sanitizer enforces
+ *  (see `sanitizeTracingMetadata` in `client-tracing.ts`). */
+const METADATA_KEY_PATTERN = /^[a-zA-Z0-9_]{1,40}$/;
+const MAX_METADATA_KEYS = 10;
+const MAX_METADATA_VALUE_LENGTH = 200;
+const METADATA_ATTR_PREFIX = 'cognipeer.metadata.';
+
+/**
+ * Extract free-form caller-supplied attribution tags from `cognipeer.metadata.<key>`
+ * resource attributes (agent-sdk's OTLP metadata convention), sanitized with the
+ * same rules as the JSON/stream ingest path. Returns `undefined` when none are
+ * present/valid so callers can omit the field entirely (matches the JSON path).
+ */
+function getMetadataAttrs(attrs: OtlpKeyValue[] | undefined): Record<string, string> | undefined {
+  if (!attrs?.length) return undefined;
+  const result: Record<string, string> = {};
+  for (const attr of attrs) {
+    if (!attr.key?.startsWith(METADATA_ATTR_PREFIX)) continue;
+    if (Object.keys(result).length >= MAX_METADATA_KEYS) break;
+    const key = attr.key.slice(METADATA_ATTR_PREFIX.length);
+    const value = attr.value?.stringValue;
+    if (
+      !METADATA_KEY_PATTERN.test(key)
+      || typeof value !== 'string'
+      || value.length > MAX_METADATA_VALUE_LENGTH
+    ) {
+      continue;
+    }
+    result[key] = value;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
 function getConventionThreadId(attrs: OtlpKeyValue[] | undefined): string | undefined {
   return firstStringAttr(attrs, [
     'cognipeer.thread.id',
@@ -553,6 +586,7 @@ export function mapOtlpToInternalModels(
       || spans.map((span) => getConventionThreadId(span.attributes)).find(Boolean);
     const agentModel = getStringAttr(resourceAttrs, 'cognipeer.agent.model');
     const agentProvider = getStringAttr(resourceAttrs, 'cognipeer.agent.provider');
+    const metadata = getMetadataAttrs(resourceAttrs);
 
     const startedAt = nanoToDate(rootSpan.startTimeUnixNano);
     const endedAt = nanoToDate(rootSpan.endTimeUnixNano);
@@ -735,6 +769,7 @@ export function mapOtlpToInternalModels(
       agentName: serviceName,
       agentVersion: serviceVersion,
       agentModel,
+      metadata,
       status,
       startedAt,
       endedAt,

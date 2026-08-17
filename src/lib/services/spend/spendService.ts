@@ -13,6 +13,7 @@ import { listModels } from '@/lib/services/models/modelService';
 import {
   getUsageBreakdown,
   type UsageBreakdown,
+  type UsageBreakdownGroupBy,
 } from '@/lib/services/usage/usageBreakdown';
 
 export interface SpendContext {
@@ -136,7 +137,9 @@ export async function getSpendReport(
 }
 
 /** Client-facing entity names for the per-user / per-token / per-agent spend breakdown. */
-export type SpendGroupByEntity = 'user' | 'api_key' | 'agent';
+/** `metadata.<key>` groups by a free-form attribution tag; see
+ *  `parseMetadataGroupByKey` for the key-format contract. */
+export type SpendGroupByEntity = 'user' | 'api_key' | 'agent' | `metadata.${string}`;
 
 export interface SpendEntityBreakdownOptions {
   from?: Date;
@@ -171,7 +174,9 @@ export async function getSpendEntityBreakdown(
         ? 'token'
         : options.entity === 'agent'
           ? 'agent'
-          : 'user',
+          : options.entity.startsWith('metadata.')
+            ? (options.entity as UsageBreakdownGroupBy)
+            : 'user',
     from: options.from,
     to: options.to,
   });

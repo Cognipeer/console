@@ -475,6 +475,7 @@ async function createInternalTracingSink(
                     agentVersion: session.agent?.version ?? undefined,
                     agentModel: session.agent?.model ?? undefined,
                     config: session.config ?? {},
+                    metadata: session.metadata ?? {},
                     summary: session.summary ?? {},
                     status: session.status || 'unknown',
                     startedAt: session.startedAt ? new Date(session.startedAt) : new Date(),
@@ -502,6 +503,7 @@ async function createInternalTracingSink(
                         tenantId,
                         projectId,
                         agentName: sessionDoc.agentName,
+                        metadata: sessionDoc.metadata,
                     });
                     await db.createAgentTracingSession({
                         ...sessionDoc,

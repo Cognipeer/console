@@ -13,8 +13,8 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import { getDashboardData } from '@/lib/services/dashboard/dashboardService';
-import { getSpendEntityBreakdown, getSpendReport } from '@/lib/services/spend';
-import { getUsageServiceBreakdown } from '@/lib/services/usage/usageBreakdown';
+import { getSpendEntityBreakdown, getSpendReport, type SpendGroupByEntity } from '@/lib/services/spend';
+import { getUsageServiceBreakdown, parseMetadataGroupByKey } from '@/lib/services/usage/usageBreakdown';
 import { sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
 
 const logger = createLogger('api:client-analytics');
@@ -50,8 +50,16 @@ export const clientAnalyticsApiPlugin: FastifyPluginAsync = async (app) => {
         from?: string; to?: string; group_by?: string; interval?: string; model?: string;
       };
       const groupBy = query.group_by ?? 'model';
-      if (!(VALID_GROUP_BY as readonly string[]).includes(groupBy)) {
-        return reply.code(400).send({ error: '`group_by` must be model, user, token, service, or agent' });
+      const groupByMetadataKey = groupBy.startsWith('metadata.')
+        ? parseMetadataGroupByKey(groupBy)
+        : undefined;
+      if (groupBy.startsWith('metadata.') && !groupByMetadataKey) {
+        return reply.code(400).send({
+          error: '`group_by` metadata key must match /^[a-zA-Z0-9_]{1,40}$/',
+        });
+      }
+      if (!groupByMetadataKey && !(VALID_GROUP_BY as readonly string[]).includes(groupBy)) {
+        return reply.code(400).send({ error: '`group_by` must be model, user, token, service, agent, or metadata.<key>' });
       }
       const interval = query.interval ?? 'day';
       if (!(VALID_INTERVAL as readonly string[]).includes(interval)) {
@@ -146,8 +154,11 @@ export const clientAnalyticsApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
-      // group_by=user | token | agent → per-entity attribution from usage_daily.
-      const entity = groupBy === 'token' ? 'api_key' : groupBy === 'agent' ? 'agent' : 'user';
+      // group_by=user | token | agent | metadata.<key> → per-entity attribution
+      // from usage_daily.
+      const entity: SpendGroupByEntity = groupByMetadataKey
+        ? (groupBy as SpendGroupByEntity)
+        : groupBy === 'token' ? 'api_key' : groupBy === 'agent' ? 'agent' : 'user';
       const breakdown = await getSpendEntityBreakdown(
         {
           tenantDbName: auth.tenantDbName,
@@ -162,11 +173,13 @@ export const clientAnalyticsApiPlugin: FastifyPluginAsync = async (app) => {
         },
       );
 
-      const idField = entity === 'user'
-        ? 'user_id'
-        : entity === 'agent'
-          ? 'agent_key'
-          : 'api_token_id';
+      const idField = groupByMetadataKey
+        ? groupByMetadataKey
+        : entity === 'user'
+          ? 'user_id'
+          : entity === 'agent'
+            ? 'agent_key'
+            : 'api_token_id';
       return reply.code(200).send({
         object: 'analytics.usage',
         group_by: groupBy,

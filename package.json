@@ -34,7 +34,7 @@
     "@aws-sdk/client-textract": "^3.901.0",
     "@aws-sdk/util-stream-node": "^3.370.0",
     "@azure/search-documents": "^12.2.0",
-    "@cognipeer/agent-sdk": "^0.9.3",
+    "@cognipeer/agent-sdk": "^0.9.4",
     "@cognipeer/to-markdown": "^3.1.0",
     "@elastic/elasticsearch": "^8.19.1",
     "@fastify/websocket": "^11.2.0",

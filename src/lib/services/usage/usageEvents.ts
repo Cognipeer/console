@@ -43,6 +43,25 @@ export function sourceForActor(actorType?: UsageActorType): UsageSource | undefi
 }
 
 /**
+ * Canonical rollup key for a `metadata` bag: sorted entries, JSON-serialized,
+ * so `{b:'2',a:'1'}` and `{a:'1',b:'2'}` collapse into the same dimension.
+ * '' when absent/empty — matches the '' convention every other dimension uses.
+ *
+ * Must be JSON (not a delimited `key=value&...` string): metadata values are
+ * arbitrary text, so an unescaped delimiter join lets two different objects
+ * collide onto the same key — e.g. `{a:'1&b=2'}` and `{a:'1',b:'2'}` would
+ * both join to `'a=1&b=2'`, silently merging unrelated rollup rows.
+ * JSON.stringify's quote-escaping keeps the encoding collision-free.
+ */
+export function canonicalMetadataKey(metadata?: Record<string, string>): string {
+  if (!metadata) return '';
+  const entries = Object.entries(metadata).filter(([key]) => key.length > 0);
+  if (entries.length === 0) return '';
+  entries.sort(([a], [b]) => a.localeCompare(b));
+  return JSON.stringify(entries);
+}
+
+/**
  * Resolve the attribution envelope from the ambient request context, with
  * optional explicit overrides for call sites where the AsyncLocalStorage
  * scope is unavailable (queued jobs that captured a snapshot, runners).
@@ -71,6 +90,9 @@ export interface UsageEventInput {
   refKey?: string;
   /** Agent the usage belongs to (tracing agentName); rollup dimension. */
   agentKey?: string;
+  /** Free-form caller-supplied attribution tags (tracing `metadata`, e.g.
+   *  `{ complexity: 'complex' }`); rollup dimension via `metadataKey`. */
+  metadata?: Record<string, string>;
   /** Overrides the actor-derived origin — e.g. 'tracing' for usage derived
    *  from observability ingests rather than gateway-served calls. */
   source?: UsageSource;

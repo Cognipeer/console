@@ -711,6 +711,20 @@ export class SQLiteProviderBase {
       "agentKey TEXT NOT NULL DEFAULT ''",
     );
 
+    // usage_daily.metadata (free-form caller-supplied attribution tags, e.g.
+    // `{ complexity: 'complex' }`). metadataJson is the JSON blob; metadataKey
+    // is its canonical serialization and the actual rollup/unique-index
+    // dimension (SQLite can't uniquely-index a JSON column's contents). The
+    // v3 unique index that includes metadataKey is created in
+    // applyTenantIndexes (must run after this migration).
+    this.ensureTableColumn(db, TABLES.usageDaily, 'metadataJson', 'metadataJson TEXT');
+    this.ensureTableColumn(
+      db,
+      TABLES.usageDaily,
+      'metadataKey',
+      "metadataKey TEXT NOT NULL DEFAULT ''",
+    );
+
     // external_model_pricing.versions (effective-dated price history) was
     // added after the table shipped; ensure on boot for DBs created before.
     this.ensureTableColumn(db, TABLES.externalModelPricing, 'versions', 'versions TEXT');
@@ -807,13 +821,15 @@ export class SQLiteProviderBase {
         ON ${TABLES.modelUsageLogs}(tenantId, userId, createdAt DESC);
     `);
 
-    // usage_daily unique dimension index v2 (adds agentKey). Same ordering
-    // constraint as above: agentKey reaches legacy DBs via ensureTableColumn.
-    // The pre-agent index would reject rows differing only in agentKey.
+    // usage_daily unique dimension index v3 (adds metadataKey, on top of v2's
+    // agentKey). Same ordering constraint as above: agentKey/metadataKey
+    // reach legacy DBs via ensureTableColumn. v2 would reject rows differing
+    // only in metadataKey.
     db.exec(`
       DROP INDEX IF EXISTS uniq_usage_daily_dims;
-      CREATE UNIQUE INDEX IF NOT EXISTS uniq_usage_daily_dims_v2
-        ON ${TABLES.usageDaily}(tenantId, projectId, userId, apiTokenId, source, service, refKey, agentKey, day);
+      DROP INDEX IF EXISTS uniq_usage_daily_dims_v2;
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_usage_daily_dims_v3
+        ON ${TABLES.usageDaily}(tenantId, projectId, userId, apiTokenId, source, service, refKey, agentKey, metadataKey, day);
       CREATE INDEX IF NOT EXISTS idx_usage_daily_agent_day
         ON ${TABLES.usageDaily}(tenantId, agentKey, day DESC);
     `);
