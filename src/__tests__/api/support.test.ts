@@ -5,6 +5,14 @@ vi.mock('@/lib/services/support/supportHandoff', () => ({
   isSupportEntryPointEnabled: vi.fn(),
 }));
 
+// The request wrapper binds the session's tenant DB around every handler, which
+// would otherwise open a real connection.
+vi.mock('@/lib/database', () => ({
+  getDatabase: vi.fn(async () => ({
+    runWithTenant: (_tenantDbName: string, run: () => unknown) => run(),
+  })),
+}));
+
 import {
   createSupportHandoff,
   isSupportEntryPointEnabled,
