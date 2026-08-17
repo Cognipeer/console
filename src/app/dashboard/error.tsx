@@ -1,9 +1,47 @@
 'use client';
 
-import { Button, Center, Stack, Text, ThemeIcon } from '@mantine/core';
-import { IconAlertTriangle, IconRefresh } from '@tabler/icons-react';
+import { useEffect, useState } from 'react';
+import { Button, Center, Group, Stack, Text, ThemeIcon } from '@mantine/core';
+import { IconAlertTriangle, IconLifebuoy, IconRefresh } from '@tabler/icons-react';
+import { isSupportAvailable, openSupport } from '@/lib/support/openSupport';
 
-export default function DashboardError({ reset }: { reset: () => void }) {
+type DashboardErrorProps = {
+  error: Error & { digest?: string };
+  reset: () => void;
+};
+
+export default function DashboardError({ error, reset }: DashboardErrorProps) {
+  const [supportEnabled, setSupportEnabled] = useState(false);
+  const [reporting, setReporting] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    void isSupportAvailable().then((enabled) => {
+      if (active) setSupportEnabled(enabled);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const reportToSupport = async () => {
+    setReporting(true);
+    try {
+      await openSupport(document.documentElement.lang === 'en' ? 'en' : 'tr', {
+        summary: error.message || 'Console dashboard error',
+        category: 'dashboard_error',
+        error: {
+          name: error.name,
+          message: error.message,
+          stack: error.stack,
+          digest: error.digest,
+        },
+      });
+    } finally {
+      setReporting(false);
+    }
+  };
+
   return (
     <Center mih={360} px="md">
       <Stack gap="sm" align="center" maw={420} ta="center">
@@ -16,9 +54,21 @@ export default function DashboardError({ reset }: { reset: () => void }) {
             Retry the request. If it fails again, the route-level API response should be checked.
           </Text>
         </Stack>
-        <Button leftSection={<IconRefresh size={16} />} variant="light" onClick={reset}>
-          Retry
-        </Button>
+        <Group gap="xs">
+          <Button leftSection={<IconRefresh size={16} />} variant="light" onClick={reset}>
+            Retry
+          </Button>
+          {supportEnabled ? (
+            <Button
+              leftSection={<IconLifebuoy size={16} />}
+              variant="subtle"
+              loading={reporting}
+              onClick={() => void reportToSupport()}
+            >
+              Report to Support
+            </Button>
+          ) : null}
+        </Group>
       </Stack>
     </Center>
   );

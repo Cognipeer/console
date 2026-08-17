@@ -11,6 +11,14 @@ services:
       - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env.local or environment}
       - CACHE_PROVIDER=memory
       - RATE_LIMIT_PROVIDER=memory
+      # Self-hosted installs are on-prem: with SUPPORT_BASE_URL alone the Help
+      # action lands on the Support login instead of failing.
+      - DEPLOYMENT_MODE=${DEPLOYMENT_MODE:-onprem}
+      # Cognipeer Support. Leave empty to hide every Support entry point.
+      # SUPPORT_HANDOFF_SECRET must equal CRM's SUPPORT_HANDOFF_SECRET_CONSOLE.
+      - SUPPORT_BASE_URL=${SUPPORT_BASE_URL:-}
+      - SUPPORT_CRM_API_URL=${SUPPORT_CRM_API_URL:-}
+      - SUPPORT_HANDOFF_SECRET=${SUPPORT_HANDOFF_SECRET:-}
     volumes:
       - app-data:/app/data
     restart: unless-stopped

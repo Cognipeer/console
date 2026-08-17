@@ -41,6 +41,16 @@ export function isSupportReachable() {
 }
 
 /**
+ * Whether a Support entry point can be shown. Reachability alone is not enough:
+ * on SaaS without CRM credentials every click would end in a 503, while on-prem
+ * the same setup still lands the user on the Support login.
+ */
+export function isSupportEntryPointEnabled() {
+  return isSupportConfigured()
+    || (getConfig().deployment.isOnPrem && isSupportReachable());
+}
+
+/**
  * On-prem deployments often point at Support without holding CRM credentials.
  * Sending the user to the Support login beats failing the action outright.
  */
@@ -87,6 +97,30 @@ async function createDiagnosticDraft(
   return draft.body.id;
 }
 
+/**
+ * The CRM stores this as the customer's display name, so support staff and
+ * notification emails address a person rather than an address. A lookup failure
+ * must not block the handoff.
+ */
+async function resolveUserName(
+  input: SupportHandoffInput,
+  tenantDbName: string,
+  email: string,
+): Promise<string> {
+  try {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+    db.assertTenantContext?.(tenantDbName);
+    const user = await db.findUserById(input.userId);
+    return user?.name?.trim() || email;
+  } catch (error) {
+    logger.warn('Support handoff could not resolve the user name', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return email;
+  }
+}
+
 export async function createSupportHandoff(
   input: SupportHandoffInput,
 ): Promise<SupportHandoffResult> {
@@ -114,6 +148,8 @@ export async function createSupportHandoff(
     return { ok: false, status: 403, message: 'Support access denied.' };
   }
 
+  const userName = await resolveUserName(input, tenant.dbName, email);
+
   try {
     let diagnosticDraftId: string | undefined;
     if (input.diagnostics) {
@@ -134,9 +170,12 @@ export async function createSupportHandoff(
       diagnosticDraftId,
       context: {
         workspaceName: tenant.companyName,
-        organizationId: tenant.slug || null,
+        // A Console tenant is both the customer and the workspace, so the CRM
+        // derives an issuer-scoped organization key from the tenant id. Sending
+        // the slug here would anchor support history to a renameable value.
+        organizationId: null,
         userId: input.userId,
-        userName: email,
+        userName,
       },
     });
 
