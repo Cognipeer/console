@@ -5,7 +5,7 @@ call, tool call and retrieval, with tokens, latency and cost. This section is
 about getting an agent you did **not** build on Console to send that data.
 
 The integrations live in a separate open-source package,
-[`cognipeer-observability`](https://github.com/Cognipeer/cognipeer-observability),
+[`cognipeer-observability`](https://github.com/Cognipeer/console-observability),
 published as `@cognipeer/observability` (npm) and `cognipeer-observability`
 (PyPI). Nothing about it is Console-specific beyond the endpoint it posts to,
 and it is MIT licensed so customers can read and fork it.

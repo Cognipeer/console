@@ -297,7 +297,7 @@ idempotent. For long-running runs there is a streaming trio
 field, every event type, the section kinds, the identifier rules and the two
 delivery shapes. An implementation in a new language is a mapping onto that and
 nothing else — and is very welcome as a contribution to the
-[open-source repository](https://github.com/Cognipeer/cognipeer-observability).
+[open-source repository](https://github.com/Cognipeer/console-observability).
 
 ## Flushing
 

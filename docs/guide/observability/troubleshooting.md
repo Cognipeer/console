@@ -178,6 +178,6 @@ easier path.
 ## Getting help
 
 Open an issue at
-[Cognipeer/cognipeer-observability](https://github.com/Cognipeer/cognipeer-observability/issues)
+[Cognipeer/console-observability](https://github.com/Cognipeer/console-observability/issues)
 with the debug output, your framework and its version, and the SDK version. The
 package is MIT licensed, so a patch is welcome too.
