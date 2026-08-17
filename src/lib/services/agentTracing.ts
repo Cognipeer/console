@@ -326,10 +326,52 @@ const SESSION_EVENT_SUMMARY_PROJECTION = {
   'sections.tools.name': 1,
 } as const;
 
+/**
+ * True for an object that is really a string somebody spread into a record:
+ * `{...'undefined'}` produces `{0:'u',1:'n',…}`.
+ *
+ * agent-sdk's `sanitizeTracePayload` answered an absent payload with the
+ * literal string `"undefined"` until 0.9.5, and the ingest that ran before
+ * the guard landed spread it into exactly this shape — so it is already
+ * persisted on every session captured in between, and no migration can be
+ * assumed. Matched on shape rather than on the word "undefined": keys are
+ * exactly 0..n-1 and every value is a single character, which no genuine
+ * tool-details or tool-definitions record ever looks like.
+ */
+function isSpreadStringRecord(value: Record<string, unknown>): boolean {
+  const keys = Object.keys(value);
+  if (keys.length === 0) return false;
+  return keys.every((key, index) => key === String(index))
+    && Object.values(value).every((entry) => typeof entry === 'string' && entry.length === 1);
+}
+
 function toRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  return isSpreadStringRecord(record) ? undefined : record;
+}
+
+/**
+ * Drop stored metadata entries that are spread-string wreckage (see
+ * `isSpreadStringRecord`). The raw metadata bag is rendered verbatim in the
+ * event detail's Metadata tab, so without this the same `{0:'u',…}` noise the
+ * Tool Details panel now hides is still on screen one tab over.
+ */
+function stripSpreadStringValues(
+  metadata: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!metadata) return metadata;
+  const entries = Object.entries(metadata).filter(([, entry]) => !(
+    entry
+    && typeof entry === 'object'
+    && !Array.isArray(entry)
+    && isSpreadStringRecord(entry as Record<string, unknown>)
+  ));
+  return entries.length === Object.keys(metadata).length
+    ? metadata
+    : Object.fromEntries(entries);
 }
 
 function getSectionToolName(section: Record<string, unknown>): string | undefined {
@@ -417,7 +459,7 @@ function mapTracingEventDetail(event: IAgentTracingEvent) {
     timestamp: event.timestamp,
     status: event.status,
     actor: event.actor,
-    metadata: event.metadata,
+    metadata: stripSpreadStringValues(event.metadata),
     sections: event.sections,
     model: event.model,
     error: event.error,

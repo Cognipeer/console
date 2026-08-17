@@ -640,10 +640,25 @@ function EventTokenStats({ event }: { event: TracingEvent }) {
     );
 }
 
+/**
+ * An object that is really a string spread into a record — `{...'undefined'}`
+ * gives `{0:'u',1:'n',…}`. Sessions captured before the agent-sdk 0.9.5 fix
+ * have this persisted, and the API strips it now; this is the same guard on
+ * the render side so a stale API build cannot put the noise back on screen.
+ */
+function isSpreadStringRecord(value: Record<string, unknown>): boolean {
+    const keys = Object.keys(value);
+    if (keys.length === 0) return false;
+    return keys.every((key, index) => key === String(index))
+        && Object.values(value).every((entry) => typeof entry === 'string' && entry.length === 1);
+}
+
 function getRecord(value: unknown): Record<string, unknown> | undefined {
-    return value && typeof value === 'object' && !Array.isArray(value)
-        ? value as Record<string, unknown>
-        : undefined;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return undefined;
+    }
+    const record = value as Record<string, unknown>;
+    return isSpreadStringRecord(record) ? undefined : record;
 }
 
 function ToolDetailsBlock({ event }: { event: TracingEvent }) {
