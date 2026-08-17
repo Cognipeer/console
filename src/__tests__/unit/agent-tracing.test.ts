@@ -261,6 +261,62 @@ describe('AgentTracingService.getSessionDetail', () => {
     expect(result!.events[0].type).toBe('llm_call');
   });
 
+  it('hides tool details that are a stringified `undefined` spread into a record', async () => {
+    // What agent-sdk < 0.9.5 persisted for an absent payload: sanitizeTracePayload
+    // returned the literal string "undefined", and ingest spread it into
+    // {0:'u',1:'n',…}. Those rows are already in the database, so the read path
+    // has to hide them — the UI rendered them as a 9-key object of letters.
+    db.findAgentTracingSessionById.mockResolvedValue(makeSession());
+    db.listAgentTracingEvents.mockResolvedValue([
+      {
+        sessionId: SESSION_ID,
+        tenantId: TENANT_ID,
+        sequence: 1,
+        type: 'tool_call',
+        timestamp: new Date(),
+        toolName: 'list_todos',
+        // `{...'undefined'}`, written out because TS will not spread a string.
+        metadata: {
+          toolDetails: Object.fromEntries(Array.from('undefined', (c, i) => [i, c])),
+          finishReason: 'stop',
+        },
+      },
+    ]);
+
+    const result = await AgentTracingService.getSessionDetail(TENANT_DB, PROJECT_ID, SESSION_ID);
+    // The mapper's return type is a summary|detail union; this suite asserts on
+    // the detail shape.
+    const event = result!.events[0] as Record<string, unknown>;
+
+    // Neither the folded field nor the raw metadata bag (its own UI tab) may
+    // carry the wreckage.
+    expect(event.toolDetails).not.toHaveProperty('0');
+    expect(event.metadata).not.toHaveProperty('toolDetails');
+    // Unrelated metadata survives — this strips one bad value, not the bag.
+    expect(event.metadata).toMatchObject({ finishReason: 'stop' });
+  });
+
+  it('keeps genuine tool details untouched', async () => {
+    db.findAgentTracingSessionById.mockResolvedValue(makeSession());
+    db.listAgentTracingEvents.mockResolvedValue([
+      {
+        sessionId: SESSION_ID,
+        tenantId: TENANT_ID,
+        sequence: 1,
+        type: 'tool_call',
+        timestamp: new Date(),
+        metadata: { toolDetails: { name: 'list_todos', description: 'List todos' } },
+      },
+    ]);
+
+    const result = await AgentTracingService.getSessionDetail(TENANT_DB, PROJECT_ID, SESSION_ID);
+
+    expect((result!.events[0] as Record<string, unknown>).toolDetails).toMatchObject({
+      name: 'list_todos',
+      description: 'List todos',
+    });
+  });
+
   it('calls db with correct sessionId and projectId', async () => {
     db.findAgentTracingSessionById.mockResolvedValue(makeSession());
     db.listAgentTracingEvents.mockResolvedValue([]);
