@@ -39,6 +39,10 @@ export function UsageRollupMixin<TBase extends Constructor<MongoDBProviderBase>>
         // v2 adds the agentKey dimension — drop the pre-agent unique index,
         // which would otherwise reject rows differing only in agentKey.
         await col.dropIndex('uniq_usage_daily_dims').catch(() => undefined);
+        // v3 adds the metadataKey dimension (free-form caller-supplied
+        // attribution tags) — drop v2, which would otherwise reject rows
+        // differing only in metadataKey.
+        await col.dropIndex('uniq_usage_daily_dims_v2').catch(() => undefined);
         await col.createIndex(
           {
             tenantId: 1,
@@ -49,9 +53,10 @@ export function UsageRollupMixin<TBase extends Constructor<MongoDBProviderBase>>
             service: 1,
             refKey: 1,
             agentKey: 1,
+            metadataKey: 1,
             day: 1,
           },
-          { unique: true, name: 'uniq_usage_daily_dims_v2' },
+          { unique: true, name: 'uniq_usage_daily_dims_v3' },
         );
         await col.createIndex(
           { tenantId: 1, day: -1 },
@@ -98,11 +103,16 @@ export function UsageRollupMixin<TBase extends Constructor<MongoDBProviderBase>>
               service: row.service,
               refKey: row.refKey,
               agentKey: row.agentKey ?? '',
+              metadataKey: row.metadataKey ?? '',
               day: row.day,
             },
             update: {
               $inc: inc,
-              $set: { updatedAt: new Date() },
+              // Same metadataKey ⇒ same metadata object by construction
+              // (metadataKey is its canonical serialization), so overwriting
+              // on every increment is safe and keeps a stale object from
+              // lingering if the shape changed upstream.
+              $set: { updatedAt: new Date(), metadata: row.metadata ?? {} },
               $setOnInsert: {
                 actorType: row.actorType,
                 // Real Date for the reports engine's range filters/bucketing.

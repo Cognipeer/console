@@ -29,6 +29,8 @@ export function recordTracingSessionCreated(params: {
   tenantId: string;
   projectId?: string;
   agentName?: string;
+  /** Free-form caller-supplied attribution tags (tracing `metadata`). */
+  metadata?: Record<string, string>;
 }): UsageAttribution {
   return recordUsageEvent({
     tenantDbName: params.tenantDbName,
@@ -36,6 +38,7 @@ export function recordTracingSessionCreated(params: {
     projectId: params.projectId,
     service: 'tracing',
     refKey: params.agentName ?? '',
+    metadata: params.metadata,
     status: 'success',
   });
 }
@@ -147,6 +150,8 @@ export async function recordTraceModelUsage(params: {
   tenantId: string;
   projectId?: string;
   agentName?: string;
+  /** Free-form caller-supplied attribution tags (tracing `metadata`). */
+  metadata?: Record<string, string>;
   events: TraceUsageEventLike[];
   previousEvents?: TraceUsageEventLike[];
 }): Promise<void> {
@@ -200,6 +205,7 @@ export async function recordTraceModelUsage(params: {
         service: 'models',
         refKey: hubModel?.key ?? modelName,
         agentKey: params.agentName ?? '',
+        metadata: params.metadata,
         source: 'tracing',
         status: 'success',
         inputTokens,

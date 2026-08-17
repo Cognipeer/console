@@ -15,7 +15,39 @@
 import { getDatabase } from '@/lib/database';
 import type { IUsageDaily } from '@/lib/database';
 
-export type UsageBreakdownGroupBy = 'user' | 'token' | 'agent';
+/**
+ * `metadata.<key>` groups by one key of the free-form `metadata` bag callers
+ * attach at tracing ingest time (e.g. `metadata.complexity`) — dynamic, no
+ * schema change needed for a new key. Key format is validated where the
+ * string is parsed from a request (`parseMetadataGroupByKey`); this type only
+ * documents the shape.
+ */
+export type UsageBreakdownGroupBy = 'user' | 'token' | 'agent' | `metadata.${string}`;
+
+const METADATA_GROUP_BY_PREFIX = 'metadata.';
+/** Same charset/length the ingest side enforces on metadata keys
+ *  (see `sanitizeTracingMetadata` in `client-tracing.ts`). */
+const METADATA_KEY_PATTERN = /^[a-zA-Z0-9_]{1,40}$/;
+
+function metadataGroupByKey(groupBy: UsageBreakdownGroupBy): string | undefined {
+  return groupBy.startsWith(METADATA_GROUP_BY_PREFIX)
+    ? groupBy.slice(METADATA_GROUP_BY_PREFIX.length)
+    : undefined;
+}
+
+/**
+ * Parse+validate a `group_by`/`group_by_entity` request value of the form
+ * `metadata.<key>` into its key, or `undefined` if it isn't that shape.
+ * Callers MUST reject the request (400) when a value that merely starts with
+ * `metadata.` fails this — never fall back to treating it as a literal id:
+ * the key ends up in a Mongo `metadata.<key>` dot-path / row property lookup
+ * downstream, so an unvalidated key is a query-injection surface.
+ */
+export function parseMetadataGroupByKey(value: string): string | undefined {
+  if (!value.startsWith(METADATA_GROUP_BY_PREFIX)) return undefined;
+  const key = value.slice(METADATA_GROUP_BY_PREFIX.length);
+  return METADATA_KEY_PATTERN.test(key) ? key : undefined;
+}
 
 export interface UsageBreakdownEntry {
   /** userId, apiTokenId or agentKey depending on groupBy; '' = unattributed. */
@@ -72,10 +104,11 @@ export function groupUsageDailyRows(
       | 'totalTokens'
       | 'costUsd'
     > &
-      Partial<Pick<IUsageDaily, 'agentKey'>>
+      Partial<Pick<IUsageDaily, 'agentKey' | 'metadata'>>
   >,
   groupBy: UsageBreakdownGroupBy,
 ): { totals: UsageBreakdownTotals; entries: UsageBreakdownEntry[] } {
+  const metadataKey = metadataGroupByKey(groupBy);
   const byId = new Map<string, UsageBreakdownEntry>();
   const totals: UsageBreakdownTotals = {
     requests: 0,
@@ -87,13 +120,15 @@ export function groupUsageDailyRows(
   };
 
   for (const row of rows) {
-    // Legacy rows predate the agentKey dimension — treat missing as ''.
+    // Legacy rows predate the agentKey/metadata dimensions — treat missing as ''.
     const id =
       (groupBy === 'user'
         ? row.userId
         : groupBy === 'token'
           ? row.apiTokenId
-          : row.agentKey) ?? '';
+          : metadataKey !== undefined
+            ? row.metadata?.[metadataKey]
+            : row.agentKey) ?? '';
     const entry = byId.get(id) ?? {
       id,
       requests: 0,
@@ -139,9 +174,9 @@ export async function resolveUsageEntityNames(
   const ids = [...new Set(entries.map((entry) => entry.id).filter((id) => id !== ''))];
   if (ids.length === 0) return;
 
-  // Agent keys are tracing agent names — there is no entity record to
-  // resolve; the key itself is the display name.
-  if (groupBy === 'agent') {
+  // Agent keys (and metadata values) are plain strings the caller sent —
+  // there is no entity record to resolve; the key itself is the display name.
+  if (groupBy === 'agent' || metadataGroupByKey(groupBy) !== undefined) {
     for (const entry of entries) {
       if (entry.id !== '') entry.name = entry.id;
     }

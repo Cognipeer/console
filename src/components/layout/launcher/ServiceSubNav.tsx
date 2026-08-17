@@ -1,6 +1,5 @@
 'use client';
 
-import { useEffect, useState } from 'react';
 import { useTranslations } from '@/lib/i18n';
 import type { DashboardServiceDefinition } from '@/lib/utils/dashboardServices';
 import { ActionIcon, Text, Tooltip } from '@mantine/core';
@@ -259,6 +258,13 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       href: '/dashboard/tracing/threads',
       icon: IconMessage,
       matcher: (p) => p.startsWith('/dashboard/tracing/threads'),
+    },
+    {
+      id: 'agents',
+      label: 'Agents',
+      href: '/dashboard/tracing/agents',
+      icon: IconRobot,
+      matcher: (p) => p.startsWith('/dashboard/tracing/agents'),
     },
   ],
   cost: [
@@ -617,63 +623,6 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
   ],
 };
 
-// ── Dynamic agent directory for the Tracing sub-nav ────────────────────────
-// The observability landing page intentionally has NO agent list — agents
-// live here in the left menu instead. Fetched once per page load (module
-// cache, 5-minute TTL) so navigating between tracing pages doesn't refetch.
-
-interface TracingNavAgent {
-  name: string;
-  sessionsCount: number;
-}
-
-const TRACING_AGENT_NAV_CAP = 20;
-const TRACING_AGENT_CACHE_TTL_MS = 5 * 60 * 1000;
-let tracingAgentCache: { at: number; agents: TracingNavAgent[] } | null = null;
-let tracingAgentInflight: Promise<TracingNavAgent[]> | null = null;
-
-async function fetchTracingNavAgents(): Promise<TracingNavAgent[]> {
-  if (tracingAgentCache && Date.now() - tracingAgentCache.at < TRACING_AGENT_CACHE_TTL_MS) {
-    return tracingAgentCache.agents;
-  }
-  if (!tracingAgentInflight) {
-    tracingAgentInflight = (async () => {
-      try {
-        const res = await fetch(`/api/tracing/agents?limit=${TRACING_AGENT_NAV_CAP}`, {
-          cache: 'no-store',
-        });
-        if (!res.ok) return tracingAgentCache?.agents ?? [];
-        const payload = (await res.json()) as { agents?: TracingNavAgent[] };
-        const agents = (payload.agents ?? []).filter((a) => a.name);
-        tracingAgentCache = { at: Date.now(), agents };
-        return agents;
-      } catch {
-        return tracingAgentCache?.agents ?? [];
-      } finally {
-        tracingAgentInflight = null;
-      }
-    })();
-  }
-  return tracingAgentInflight;
-}
-
-function useTracingNavAgents(enabled: boolean): TracingNavAgent[] {
-  const [agents, setAgents] = useState<TracingNavAgent[]>(
-    () => tracingAgentCache?.agents ?? [],
-  );
-  useEffect(() => {
-    if (!enabled) return;
-    let alive = true;
-    void fetchTracingNavAgents().then((result) => {
-      if (alive) setAgents(result);
-    });
-    return () => {
-      alive = false;
-    };
-  }, [enabled]);
-  return agents;
-}
-
 interface ServiceSubNavProps {
   service: DashboardServiceDefinition;
   pathname: string;
@@ -700,7 +649,6 @@ export default function ServiceSubNav({
   const tNav = useTranslations('navigation');
   const ServiceIcon = service.icon;
   const navItems = items ?? SUBNAV_CONFIG[service.id] ?? [];
-  const tracingAgents = useTracingNavAgents(service.id === 'tracing');
 
   return (
     <aside className={classes.subnav}>
@@ -755,32 +703,6 @@ export default function ServiceSubNav({
             </button>
           );
         })}
-
-        {service.id === 'tracing' && tracingAgents.length > 0 ? (
-          <>
-            <div className={classes.subnavSectionTitle}>Agents</div>
-            {tracingAgents.map((agent) => {
-              const href = `/dashboard/tracing/agents/${encodeURIComponent(agent.name)}`;
-              const active = pathname === href
-                || pathname === `/dashboard/tracing/agents/${agent.name}`;
-              return (
-                <button
-                  key={agent.name}
-                  type="button"
-                  className={`${classes.subnavItem} ${active ? classes.subnavItemActive : ''}`}
-                  onClick={() => router.push(href)}
-                  aria-current={active ? 'page' : undefined}
-                  title={agent.name}>
-                  <IconRobot size={15} stroke={1.7} />
-                  <span className={classes.subnavItemLabel}>{agent.name}</span>
-                  <span className={classes.subnavBadge}>
-                    {agent.sessionsCount.toLocaleString()}
-                  </span>
-                </button>
-              );
-            })}
-          </>
-        ) : null}
 
         <div className={classes.subnavSectionTitle}>Resources</div>
         <button

@@ -240,6 +240,11 @@ export interface IAgentTracingSession extends IUsageAttributionFields {
   agentName?: string;
   agentVersion?: string;
   agentModel?: string;
+  /** Free-form caller-supplied attribution tags (e.g. `{ complexity: 'complex' }`),
+   *  sanitized at ingest — sibling of `agent`, not nested under it. Flows into
+   *  `usage_daily.metadata` via `recordTracingSessionCreated`/`recordTraceModelUsage`
+   *  so callers can group/report on whatever key they send without a schema change. */
+  metadata?: Record<string, string>;
   config?: Record<string, unknown>;
   summary?: Record<string, unknown>;
   status?: string;
@@ -783,6 +788,13 @@ export interface IUsageDaily {
   /** Agent the usage is attributed to (tracing agentName); '' when absent.
    *  Rows written before the dimension shipped lack the field entirely. */
   agentKey: string;
+  /** Free-form caller-supplied attribution tags (tracing `metadata`), e.g.
+   *  `{ complexity: 'complex' }`. '' / {} when absent. */
+  metadata: Record<string, string>;
+  /** Canonical serialization of `metadata` (sorted-entries JSON) — the actual
+   *  rollup dimension, since Mongo/SQLite can't uniquely-index an object.
+   *  '' when `metadata` is absent/empty. */
+  metadataKey: string;
   /** UTC calendar day, 'YYYY-MM-DD'. */
   day: string;
   /**
@@ -817,6 +829,10 @@ export interface IUsageDailyIncrement {
   refKey: string;
   /** Agent attribution dimension; providers default it to ''. */
   agentKey?: string;
+  /** Free-form caller-supplied attribution tags; providers default it to {}. */
+  metadata?: Record<string, string>;
+  /** Canonical serialization of `metadata`; providers default it to ''. */
+  metadataKey?: string;
   day: string;
   requests?: number;
   errors?: number;

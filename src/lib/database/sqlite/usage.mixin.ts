@@ -34,14 +34,14 @@ export function UsageRollupMixin<TBase extends Constructor<SQLiteProviderBase>>(
         SELECT id, units FROM ${TABLES.usageDaily}
         WHERE tenantId = @tenantId AND projectId = @projectId AND userId = @userId
           AND apiTokenId = @apiTokenId AND source = @source AND service = @service
-          AND refKey = @refKey AND agentKey = @agentKey AND day = @day
+          AND refKey = @refKey AND agentKey = @agentKey AND metadataKey = @metadataKey AND day = @day
       `);
       const insert = db.prepare(`
         INSERT INTO ${TABLES.usageDaily}
-        (id, tenantId, projectId, userId, apiTokenId, actorType, source, service, refKey, agentKey, day, dayDate,
+        (id, tenantId, projectId, userId, apiTokenId, actorType, source, service, refKey, agentKey, metadataJson, metadataKey, day, dayDate,
          requests, errors, inputTokens, outputTokens, cachedInputTokens, totalTokens,
          costUsd, latencyMsSum, latencyCount, units, updatedAt)
-        VALUES (@id, @tenantId, @projectId, @userId, @apiTokenId, @actorType, @source, @service, @refKey, @agentKey, @day, @dayDate,
+        VALUES (@id, @tenantId, @projectId, @userId, @apiTokenId, @actorType, @source, @service, @refKey, @agentKey, @metadataJson, @metadataKey, @day, @dayDate,
          @requests, @errors, @inputTokens, @outputTokens, @cachedInputTokens, @totalTokens,
          @costUsd, @latencyMsSum, @latencyCount, @units, @updatedAt)
       `);
@@ -72,6 +72,7 @@ export function UsageRollupMixin<TBase extends Constructor<SQLiteProviderBase>>(
             service: row.service,
             refKey: row.refKey,
             agentKey: row.agentKey ?? '',
+            metadataKey: row.metadataKey ?? '',
             day: row.day,
           };
           const counters = Object.fromEntries(
@@ -98,6 +99,10 @@ export function UsageRollupMixin<TBase extends Constructor<SQLiteProviderBase>>(
             insert.run({
               id: this.newId(),
               ...dims,
+              metadataJson:
+                row.metadata && Object.keys(row.metadata).length > 0
+                  ? this.toJson(row.metadata)
+                  : null,
               actorType: row.actorType,
               // Real Date (ISO) for the reports engine's range filters/bucketing.
               dayDate: `${row.day}T00:00:00.000Z`,
@@ -199,6 +204,8 @@ export function UsageRollupMixin<TBase extends Constructor<SQLiteProviderBase>>(
         service: String(row.service),
         refKey: String(row.refKey ?? ''),
         agentKey: String(row.agentKey ?? ''),
+        metadata: this.parseJson<Record<string, string>>(row.metadataJson, {}),
+        metadataKey: String(row.metadataKey ?? ''),
         day: String(row.day),
         dayDate: row.dayDate ? new Date(String(row.dayDate)) : undefined,
         requests: Number(row.requests ?? 0),
