@@ -28,7 +28,7 @@ const howToSidebar = [
 export default defineConfig({
   title: 'Cognipeer Console',
   description:
-    'Multi-tenant AI platform for LLM inference, vector stores, agent tracing, Knowledge Engine, and more.',
+    'Open-source, self-hosted AI gateway: LLM routing, RAG, MCP hub, GPU fleet, agent sandboxes, AI red-teaming, guardrails, and cost optimization for multi-tenant orgs.',
   base: docsBase,
   // Kept strict on purpose. This was `true`, and it was quietly hiding a whole
   // sidebar section's worth of links to pages that did not exist yet.
