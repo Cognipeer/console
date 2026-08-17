@@ -2,7 +2,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import {
   createSupportHandoff,
-  isSupportConfigured,
+  isSupportEntryPointEnabled,
   type SupportLocale,
 } from '@/lib/services/support/supportHandoff';
 import { readJsonBody, requireSessionContext, withApiRequestContext } from '../fastify-utils';
@@ -23,7 +23,7 @@ export const supportApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/support/status', withApiRequestContext(async (request, reply) => {
     try {
       requireSessionContext(request);
-      return reply.code(200).send({ enabled: isSupportConfigured() });
+      return reply.code(200).send({ enabled: isSupportEntryPointEnabled() });
     } catch {
       return reply.code(401).send({ error: 'Unauthorized' });
     }
