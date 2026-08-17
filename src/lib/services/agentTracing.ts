@@ -298,6 +298,7 @@ const SESSION_LIST_PROJECTION = {
   totalInputTokens: 1,
   totalOutputTokens: 1,
   totalCachedInputTokens: 1,
+  metadata: 1,
 } as const;
 
 const SESSION_EVENT_SUMMARY_PROJECTION = {
@@ -654,6 +655,8 @@ export class AgentTracingService {
       to?: string;
       limit?: string;
       skip?: string;
+      metadataKey?: string;
+      metadataValue?: string;
     },
   ) {
     const db = await getDatabase();
@@ -667,6 +670,8 @@ export class AgentTracingService {
       to: filters?.to,
       limit: filters?.limit || '50',
       skip: filters?.skip || '0',
+      metadataKey: filters?.metadataKey,
+      metadataValue: filters?.metadataValue,
     }, projectId);
 
     return result;
@@ -783,6 +788,8 @@ export class AgentTracingService {
       to?: string;
       limit?: string;
       skip?: string;
+      metadataKey?: string;
+      metadataValue?: string;
     },
   ) {
     const db = await getDatabase();
@@ -797,6 +804,8 @@ export class AgentTracingService {
       to: filters?.to,
       limit: filters?.limit || '50',
       skip: filters?.skip || '0',
+      metadataKey: filters?.metadataKey,
+      metadataValue: filters?.metadataValue,
     }, projectId);
 
     return {
@@ -813,6 +822,7 @@ export class AgentTracingService {
         totalInputTokens: s.totalInputTokens,
         totalOutputTokens: s.totalOutputTokens,
         totalCachedInputTokens: s.totalCachedInputTokens,
+        metadata: s.metadata,
       })),
       total: result.total,
     };
@@ -853,6 +863,7 @@ export class AgentTracingService {
         agentName: session.agentName,
         agentVersion: session.agentVersion,
         agentModel: session.agentModel,
+        metadata: session.metadata,
         status: session.status,
         startedAt: session.startedAt,
         endedAt: session.endedAt,

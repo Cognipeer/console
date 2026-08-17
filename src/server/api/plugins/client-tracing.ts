@@ -404,7 +404,13 @@ function getEventToolDetails(
   sections: Array<Record<string, unknown>> = getEventSections(event),
 ): Record<string, unknown> | undefined {
   const candidates = [
-    event.toolDetails,
+    // Network payloads aren't trustworthy just because the TS type says
+    // `toolDetails?: Record<string, unknown>` — a bad upstream serializer can
+    // hand this the literal string "undefined" (see agent-sdk's
+    // sanitizeTracePayload), and Boolean("undefined") is true, so an
+    // unguarded string here survives `.find(Boolean)` and then gets
+    // spread into single-character indexed keys below.
+    toRecord(event.toolDetails),
     toRecord(event.metadata?.toolDetails),
     toRecord(event.data?.toolDetails),
     ...sections.map((section) => toRecord(section.toolDetails) || toRecord(section.details)),

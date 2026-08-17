@@ -12,6 +12,7 @@ import {
   listUsageLogs,
   updateModel,
 } from '@/lib/services/models/modelService';
+import { parseMetadataGroupByKey, type UsageBreakdownGroupBy } from '@/lib/services/usage/usageBreakdown';
 import type { IDynamicRoutingConfig } from '@/lib/database';
 import type { UpdateModelInput } from '@/lib/services/models/types';
 import {
@@ -75,7 +76,7 @@ type ModelUsageQuery = {
 
 type ModelUsageBreakdownQuery = {
   from?: string;
-  groupBy?: 'user' | 'token';
+  groupBy?: 'user' | 'token' | string;
   to?: string;
 };
 
@@ -644,10 +645,20 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const query = (request.query ?? {}) as ModelUsageBreakdownQuery;
-      if (query.groupBy !== undefined && query.groupBy !== 'user' && query.groupBy !== 'token') {
-        return reply.code(400).send({ error: '`groupBy` must be user or token' });
+      const metadataKey = query.groupBy?.startsWith('metadata.')
+        ? parseMetadataGroupByKey(query.groupBy)
+        : undefined;
+      if (query.groupBy?.startsWith('metadata.') && !metadataKey) {
+        return reply.code(400).send({
+          error: '`groupBy` metadata key must match /^[a-zA-Z0-9_]{1,40}$/',
+        });
       }
-      const groupBy = query.groupBy ?? 'user';
+      if (!metadataKey && query.groupBy !== undefined && query.groupBy !== 'user' && query.groupBy !== 'token') {
+        return reply.code(400).send({ error: '`groupBy` must be user, token, or metadata.<key>' });
+      }
+      const groupBy: UsageBreakdownGroupBy = metadataKey
+        ? (query.groupBy as UsageBreakdownGroupBy)
+        : ((query.groupBy as 'user' | 'token' | undefined) ?? 'user');
       const to = buildDate(query.to) ?? new Date();
       const from = buildDate(query.from)
         ?? new Date(to.getTime() - 30 * 24 * 60 * 60 * 1000);

@@ -725,6 +725,12 @@ export class SQLiteProviderBase {
       "metadataKey TEXT NOT NULL DEFAULT ''",
     );
 
+    // agent_tracing_sessions.metadata (free-form caller-supplied attribution
+    // tags, sibling of `agent`) was added after the table shipped — the CREATE
+    // TABLE below already declares it for fresh DBs, but existing SQLite files
+    // need it backfilled the same way agentModel/agentVersion were.
+    this.ensureTableColumn(db, TABLES.agentTracingSessions, 'metadata', "metadata TEXT DEFAULT '{}'");
+
     // external_model_pricing.versions (effective-dated price history) was
     // added after the table shipped; ensure on boot for DBs created before.
     this.ensureTableColumn(db, TABLES.externalModelPricing, 'versions', 'versions TEXT');
