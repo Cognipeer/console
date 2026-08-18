@@ -54,6 +54,7 @@ import {
 } from '@/lib/utils/tracingUtils';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 import JsonTreeViewer from '@/components/common/JsonTreeViewer';
+import { isAbnormalFinishReason, isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
 
 dayjs.extend(relativeTime);
 
@@ -141,6 +142,10 @@ interface SessionDetailResponse {
         totalCachedInputTokens?: number;
         totalBytesIn?: number;
         totalBytesOut?: number;
+        /** Sum of `reasoningTokens` across events — a SUBSET of totalOutputTokens, never added to it. */
+        totalReasoningTokens?: number;
+        /** Count of events whose finish reason indicates a token/length cutoff. */
+        truncatedEvents?: number;
         summary?: {
             totalInputTokens?: number;
             totalOutputTokens?: number;
@@ -171,6 +176,10 @@ interface SessionDetailResponse {
         outputTokens?: number;
         totalTokens?: number;
         cachedInputTokens?: number;
+        /** SUBSET of outputTokens (not additive) — model "thinking" spend on this call. */
+        reasoningTokens?: number;
+        /** Raw provider stop reason; use `eventFinishReason()` for the legacy-metadata fallback. */
+        finishReason?: string;
         requestBytes?: number;
         responseBytes?: number;
         traceId?: string;
@@ -190,6 +199,21 @@ interface EventDetailResponse {
 }
 
 type TracingEvent = SessionDetailResponse['events'][number];
+
+// ─── Finish reason / reasoning token read helpers ──────────────
+// Rows written before the agent-sdk migration still carry these values
+// inside `metadata` rather than as first-class fields — every read site in
+// this file goes through these two so a legacy row and a migrated row
+// render identically.
+
+function eventFinishReason(event: TracingEvent): string | undefined {
+    return normalizeFinishReason(event.finishReason ?? event.metadata?.finishReason);
+}
+
+function eventReasoningTokens(event: TracingEvent): number | undefined {
+    const raw = event.reasoningTokens ?? event.metadata?.reasoningTokens;
+    return typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? raw : undefined;
+}
 
 // ─── Event type → color mapping ────────────────────────────────
 
@@ -463,6 +487,23 @@ function ToolMenuBadge({ names, count }: { names?: string[]; count?: number }) {
     );
 }
 
+/**
+ * Compact truncation marker for timeline rows — a length/output-ceiling stop
+ * is the usual cause of a cut-off or unparseable answer, but a timeline row
+ * has no room for the full reason text the detail panel shows.
+ */
+function TruncatedMarker({ event }: { event: TracingEvent }) {
+    const finishReason = eventFinishReason(event);
+    if (!isTruncatedFinishReason(finishReason)) return null;
+    return (
+        <Tooltip label="Output was cut off — the model hit its length ceiling." withArrow>
+            <Badge size="xs" variant="light" color="orange" style={{ flexShrink: 0, cursor: 'help' }}>
+                TRUNCATED
+            </Badge>
+        </Tooltip>
+    );
+}
+
 function SpanTreeItem({
     node,
     depth,
@@ -512,6 +553,7 @@ function SpanTreeItem({
                         {event.label ? humanize(event.label) : humanize(event.type) || 'Event'}
                     </Text>
                     <ToolMenuBadge names={event.toolDefinitionNames} count={event.toolDefinitionCount} />
+                    <TruncatedMarker event={event} />
                     {event.status && (
                         <Badge size="sm" variant="dot" color={resolveStatusColor(event.status)} style={{ flexShrink: 0 }}>
                             {event.status}
@@ -593,6 +635,17 @@ function EventInfoRows({ event }: { event: TracingEvent }) {
             value: <Text size="sm">{event.actorName}</Text>,
         });
     }
+    // Abnormal reasons already get an orange badge in the header — this row
+    // is for the common case (`stop`, `tool_calls`, …) so the value is still
+    // visible here without switching to the badge-free normal path.
+    const finishReason = eventFinishReason(event);
+    if (finishReason && !isAbnormalFinishReason(finishReason)) {
+        rows.push({
+            key: 'finishReason',
+            label: 'Finish Reason',
+            value: <Text size="sm">{finishReason}</Text>,
+        });
+    }
 
     return (
         <Stack gap={6}>
@@ -609,13 +662,23 @@ function EventInfoRows({ event }: { event: TracingEvent }) {
 // ─── Token / bytes stats ───────────────────────────────────────
 
 function EventTokenStats({ event }: { event: TracingEvent }) {
-    const hasTokens = event.inputTokens != null || event.outputTokens != null || event.cachedInputTokens != null;
+    const reasoningTokens = eventReasoningTokens(event);
+    const hasTokens = event.inputTokens != null || event.outputTokens != null || event.cachedInputTokens != null || reasoningTokens != null;
     const hasBytes = event.requestBytes != null || event.responseBytes != null;
     if (!hasTokens && !hasBytes) return null;
 
     const items: Array<{ label: string; value: number; sub?: string }> = [];
     if (event.inputTokens != null) items.push({ label: 'Input', value: event.inputTokens });
     if (event.outputTokens != null) items.push({ label: 'Output', value: event.outputTokens });
+    if (reasoningTokens != null) {
+        items.push({
+            label: 'Reasoning',
+            value: reasoningTokens,
+            // Reasoning tokens are a SUBSET of output, not a fourth bucket —
+            // the share makes that containment visible at a glance.
+            sub: event.outputTokens ? `${formatPercent(reasoningTokens / event.outputTokens)} of output` : undefined,
+        });
+    }
     if (event.cachedInputTokens != null && event.cachedInputTokens > 0) {
         items.push({
             label: 'Cached',
@@ -817,9 +880,6 @@ function RawJsonView({ event }: { event: TracingEvent }) {
 
 // ─── Event detail panel ────────────────────────────────────────
 
-/** Finish reasons that mean the model ended its answer on its own terms. */
-const NORMAL_FINISH_REASONS = new Set(['stop', 'tool_calls', 'end_turn', 'function_call']);
-
 function EventDetailPanel({ event }: { event: TracingEvent }) {
     const hasSections = event.sections && event.sections.length > 0;
     const hasMetadata = event.metadata && Object.keys(event.metadata).length > 0;
@@ -827,8 +887,8 @@ function EventDetailPanel({ event }: { event: TracingEvent }) {
     // unparseable answer, so it is surfaced next to the status rather than
     // being left for whoever thinks to open the metadata tab. A normal stop is
     // the default and would just be noise on every single event.
-    const finishReason = typeof event.metadata?.finishReason === 'string' ? event.metadata.finishReason : undefined;
-    const abnormalFinish = finishReason && !NORMAL_FINISH_REASONS.has(finishReason) ? finishReason : undefined;
+    const finishReason = eventFinishReason(event);
+    const abnormalFinish = isAbnormalFinishReason(finishReason) ? finishReason : undefined;
 
     return (
         <Stack gap="md">
@@ -845,7 +905,7 @@ function EventDetailPanel({ event }: { event: TracingEvent }) {
                     )}
                     {abnormalFinish && (
                         <Tooltip
-                            label={abnormalFinish === 'length'
+                            label={isTruncatedFinishReason(abnormalFinish)
                                 ? 'The model hit its output ceiling — the answer is truncated, which is the usual cause of unparseable JSON.'
                                 : `The model stopped for: ${abnormalFinish}`}
                             withArrow
@@ -980,6 +1040,7 @@ function EventListFlat({
                                     <Badge size="xs" variant="light" color="violet">{formatToolName(event.toolName)}</Badge>
                                 )}
                                 <ToolMenuBadge names={event.toolDefinitionNames} count={event.toolDefinitionCount} />
+                                <TruncatedMarker event={event} />
                                 {event.model && (
                                     <Badge size="xs" variant="light" color="cyan">{event.model}</Badge>
                                 )}
@@ -1050,6 +1111,8 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
             input: summary?.totalInputTokens ?? detail?.session?.totalInputTokens ?? 0,
             output: summary?.totalOutputTokens ?? detail?.session?.totalOutputTokens ?? 0,
             cached: summary?.totalCachedInputTokens ?? detail?.session?.totalCachedInputTokens ?? 0,
+            reasoning: detail?.session?.totalReasoningTokens ?? 0,
+            truncatedEvents: detail?.session?.truncatedEvents ?? 0,
         };
     }, [detail]);
 
@@ -1318,7 +1381,7 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
                         )}
 
                         {/* Token cards */}
-                        <SimpleGrid cols={3} spacing="xs">
+                        <SimpleGrid cols={{ base: 2, sm: tokenStats.reasoning > 0 ? 4 : 3 }} spacing="xs">
                             <Card withBorder p="sm">
                                 <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Input</Text>
                                 <Text size="lg" fw={700} mt={2}>{formatNumber(tokenStats.input)}</Text>
@@ -1327,6 +1390,15 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
                                 <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Output</Text>
                                 <Text size="lg" fw={700} mt={2}>{formatNumber(tokenStats.output)}</Text>
                             </Card>
+                            {tokenStats.reasoning > 0 && (
+                                <Card withBorder p="sm">
+                                    <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Reasoning</Text>
+                                    <Text size="lg" fw={700} mt={2}>{formatNumber(tokenStats.reasoning)}</Text>
+                                    <Text size="xs" c="dimmed">
+                                        {tokenStats.output > 0 ? `${formatPercent(tokenStats.reasoning / tokenStats.output)} of output` : 'Subset of output'}
+                                    </Text>
+                                </Card>
+                            )}
                             <Card withBorder p="sm">
                                 <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Cache</Text>
                                 <Text size="lg" fw={700} mt={2}>{formatNumber(tokenStats.cached)}</Text>
@@ -1335,6 +1407,20 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
                                 </Text>
                             </Card>
                         </SimpleGrid>
+
+                        {/* Truncated calls — same badge language as the per-event abnormal-finish badge in EventDetailPanel */}
+                        {tokenStats.truncatedEvents > 0 && (
+                            <Tooltip
+                                label={`${tokenStats.truncatedEvents} model call${tokenStats.truncatedEvents === 1 ? '' : 's'} hit its output ceiling — the answer${tokenStats.truncatedEvents === 1 ? ' is' : 's are'} cut off.`}
+                                withArrow
+                                multiline
+                                maw={280}
+                            >
+                                <Badge size="sm" variant="light" radius="xl" color="orange" style={{ alignSelf: 'flex-start', cursor: 'help' }}>
+                                    TRUNCATED {tokenStats.truncatedEvents}
+                                </Badge>
+                            </Tooltip>
+                        )}
 
                         {/* Errors */}
                         {session.errors && session.errors.length > 0 && (

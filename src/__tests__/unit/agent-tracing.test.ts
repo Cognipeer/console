@@ -392,6 +392,191 @@ describe('AgentTracingService.getSessionDetail', () => {
   });
 });
 
+// ── finishReason / reasoningTokens (Phase 3 read path) ──────────────────────
+
+describe('AgentTracingService — finishReason / reasoningTokens exposure', () => {
+  let db: ReturnType<typeof createMockDb>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    db = createMockDb();
+    (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
+  });
+
+  it('exposes first-class finishReason/reasoningTokens on the event DETAIL mapper', async () => {
+    db.findAgentTracingSessionById.mockResolvedValue(makeSession());
+    db.listAgentTracingEvents.mockResolvedValue([
+      {
+        sessionId: SESSION_ID,
+        tenantId: TENANT_ID,
+        sequence: 1,
+        type: 'ai_call',
+        timestamp: new Date(),
+        finishReason: 'length',
+        reasoningTokens: 42,
+      },
+    ]);
+
+    const result = await AgentTracingService.getSessionDetail(TENANT_DB, PROJECT_ID, SESSION_ID);
+    const event = result!.events[0] as Record<string, unknown>;
+
+    expect(event.finishReason).toBe('length');
+    expect(event.reasoningTokens).toBe(42);
+  });
+
+  it('exposes first-class finishReason/reasoningTokens on the event SUMMARY mapper', async () => {
+    db.findAgentTracingSessionById.mockResolvedValue(makeSession());
+    db.listAgentTracingEvents.mockResolvedValue([
+      {
+        _id: 'event-1',
+        sessionId: SESSION_ID,
+        tenantId: TENANT_ID,
+        sequence: 1,
+        type: 'ai_call',
+        timestamp: new Date(),
+        finishReason: 'stop',
+        reasoningTokens: 7,
+      },
+    ]);
+
+    const result = await AgentTracingService.getSessionDetail(
+      TENANT_DB,
+      PROJECT_ID,
+      SESSION_ID,
+      { includeEventContent: false },
+    );
+    const event = result!.events[0] as Record<string, unknown>;
+
+    expect(event.finishReason).toBe('stop');
+    expect(event.reasoningTokens).toBe(7);
+  });
+
+  it('falls back to legacy metadata.finishReason/metadata.reasoningTokens for pre-migration rows (detail)', async () => {
+    db.findAgentTracingSessionById.mockResolvedValue(makeSession());
+    db.listAgentTracingEvents.mockResolvedValue([
+      {
+        sessionId: SESSION_ID,
+        tenantId: TENANT_ID,
+        sequence: 1,
+        type: 'ai_call',
+        timestamp: new Date(),
+        // No first-class finishReason/reasoningTokens columns — legacy row.
+        metadata: { finishReason: 'STOP  ', reasoningTokens: 13 },
+      },
+    ]);
+
+    const result = await AgentTracingService.getSessionDetail(TENANT_DB, PROJECT_ID, SESSION_ID);
+    const event = result!.events[0] as Record<string, unknown>;
+
+    // Normalized (trim + lowercase) so old un-normalized rows compare equal
+    // to new ones.
+    expect(event.finishReason).toBe('stop');
+    expect(event.reasoningTokens).toBe(13);
+  });
+
+  it('falls back to legacy metadata for pre-migration rows (summary)', async () => {
+    db.findAgentTracingSessionById.mockResolvedValue(makeSession());
+    db.listAgentTracingEvents.mockResolvedValue([
+      {
+        _id: 'event-1',
+        sessionId: SESSION_ID,
+        tenantId: TENANT_ID,
+        sequence: 1,
+        type: 'ai_call',
+        timestamp: new Date(),
+        metadata: { finishReason: 'Length', reasoningTokens: 9 },
+      },
+    ]);
+
+    const result = await AgentTracingService.getSessionDetail(
+      TENANT_DB,
+      PROJECT_ID,
+      SESSION_ID,
+      { includeEventContent: false },
+    );
+    const event = result!.events[0] as Record<string, unknown>;
+
+    expect(event.finishReason).toBe('length');
+    expect(event.reasoningTokens).toBe(9);
+  });
+
+  it('prefers the first-class field over legacy metadata when both are present', async () => {
+    db.findAgentTracingSessionById.mockResolvedValue(makeSession());
+    db.listAgentTracingEvents.mockResolvedValue([
+      {
+        sessionId: SESSION_ID,
+        tenantId: TENANT_ID,
+        sequence: 1,
+        type: 'ai_call',
+        timestamp: new Date(),
+        finishReason: 'tool_calls',
+        reasoningTokens: 5,
+        metadata: { finishReason: 'stop', reasoningTokens: 999 },
+      },
+    ]);
+
+    const result = await AgentTracingService.getSessionDetail(TENANT_DB, PROJECT_ID, SESSION_ID);
+    const event = result!.events[0] as Record<string, unknown>;
+
+    expect(event.finishReason).toBe('tool_calls');
+    expect(event.reasoningTokens).toBe(5);
+  });
+
+  it('leaves finishReason/reasoningTokens undefined when neither source has a value', async () => {
+    db.findAgentTracingSessionById.mockResolvedValue(makeSession());
+    db.listAgentTracingEvents.mockResolvedValue([
+      {
+        sessionId: SESSION_ID,
+        tenantId: TENANT_ID,
+        sequence: 1,
+        type: 'ai_call',
+        timestamp: new Date(),
+      },
+    ]);
+
+    const result = await AgentTracingService.getSessionDetail(TENANT_DB, PROJECT_ID, SESSION_ID);
+    const event = result!.events[0] as Record<string, unknown>;
+
+    expect(event.finishReason).toBeUndefined();
+    expect(event.reasoningTokens).toBeUndefined();
+  });
+
+  it('surfaces session-level totalReasoningTokens/truncatedEvents in getSessionDetail', async () => {
+    db.findAgentTracingSessionById.mockResolvedValue(
+      makeSession({ totalReasoningTokens: 123, truncatedEvents: 2 }),
+    );
+    db.listAgentTracingEvents.mockResolvedValue([]);
+
+    const result = await AgentTracingService.getSessionDetail(TENANT_DB, PROJECT_ID, SESSION_ID);
+
+    expect(result!.session.totalReasoningTokens).toBe(123);
+    expect(result!.session.truncatedEvents).toBe(2);
+  });
+
+  it('surfaces session-level totalReasoningTokens/truncatedEvents in listSessions', async () => {
+    db.listAgentTracingSessions.mockResolvedValue({
+      sessions: [makeSession({ totalReasoningTokens: 8, truncatedEvents: 1 })],
+      total: 1,
+    });
+
+    const result = await AgentTracingService.listSessions(TENANT_DB, PROJECT_ID);
+
+    expect(result.sessions[0].totalReasoningTokens).toBe(8);
+    expect(result.sessions[0].truncatedEvents).toBe(1);
+  });
+
+  it('passes the truncated=true filter through to db.listAgentTracingSessions', async () => {
+    db.listAgentTracingSessions.mockResolvedValue({ sessions: [], total: 0 });
+
+    await AgentTracingService.listSessions(TENANT_DB, PROJECT_ID, { truncated: true });
+
+    expect(db.listAgentTracingSessions).toHaveBeenCalledWith(
+      expect.objectContaining({ truncated: true }),
+      PROJECT_ID,
+    );
+  });
+});
+
 // ── getDashboardOverview ─────────────────────────────────────────────────────
 
 describe('AgentTracingService.getDashboardOverview', () => {

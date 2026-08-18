@@ -8,6 +8,7 @@ import {
   ToolMessage,
 } from '@langchain/core/messages';
 import crypto from 'crypto';
+import { normalizeFinishReason } from '@/lib/shared/finishReason';
 
 type MessageContentPart = Record<string, unknown>;
 
@@ -45,6 +46,13 @@ interface UsageMetrics {
   totalTokens?: number;
   promptTokensDetails?: Record<string, number>;
   completionTokensDetails?: Record<string, number>;
+  /**
+   * Reasoning ("thinking") tokens billed as part of the completion. This is
+   * a SUBSET of `outputTokens`, never an addend — callers must not fold it
+   * into `totalTokens` or any cost calculation. Recorded for attribution
+   * only.
+   */
+  reasoningTokens?: number;
 }
 
 interface OpenAIToolCall {
@@ -274,6 +282,7 @@ function extractUsage(message: AIMessage | AIMessageChunk): UsageMetrics {
     'completionTokensDetail',
     'completion_tokens_detail',
     'output_token_details',
+    'output_tokens_details',
   ]);
 
   const normalizedPromptTokensDetails = promptTokensDetails
@@ -295,6 +304,17 @@ function extractUsage(message: AIMessage | AIMessageChunk): UsageMetrics {
 
   const nestedCachedTokens = normalizedPromptTokensDetails?.cached_tokens;
 
+  // Reasoning tokens are a SUBSET of outputTokens (never an addend) — see
+  // the `reasoningTokens` doc comment on `UsageMetrics`. Only accept a
+  // finite, positive count; anything else is treated as "not reported".
+  const rawReasoningTokens = normalizedCompletionTokensDetails?.reasoning_tokens;
+  const reasoningTokens =
+    typeof rawReasoningTokens === 'number' &&
+    Number.isFinite(rawReasoningTokens) &&
+    rawReasoningTokens > 0
+      ? rawReasoningTokens
+      : undefined;
+
   return {
     inputTokens,
     outputTokens,
@@ -302,7 +322,24 @@ function extractUsage(message: AIMessage | AIMessageChunk): UsageMetrics {
     totalTokens,
     promptTokensDetails: normalizedPromptTokensDetails,
     completionTokensDetails: normalizedCompletionTokensDetails,
+    reasoningTokens,
   };
+}
+
+/**
+ * Read the raw provider finish reason off a LangChain message's
+ * `response_metadata` (the same field `toOpenAIChatResponse` /
+ * `toOpenAIStreamChunk` read to populate the wire `finish_reason`) and
+ * normalize it via the shared `normalizeFinishReason` so persistence and
+ * the response payload agree on the same value.
+ */
+export function extractFinishReason(message: {
+  response_metadata?: unknown;
+}): string | undefined {
+  const metadata =
+    (message.response_metadata as Record<string, unknown> | undefined) || {};
+  const raw = metadata['finish_reason'] ?? metadata['finishReason'];
+  return normalizeFinishReason(raw);
 }
 
 /**

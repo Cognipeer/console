@@ -13,6 +13,7 @@ import type {
 } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
+import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
 
 export function TracingMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class TracingOps extends Base {
@@ -753,11 +754,18 @@ export function TracingMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
           }
         : asObject('eventCounts');
 
+      // An abnormal-but-not-truncated finishReason (e.g. a content filter) isn't
+      // counted here — truncatedEvents specifically tracks token/length cutoffs,
+      // the usual explanation for a truncated or unparseable answer.
+      const isTruncated = isTruncatedFinishReason(normalizeFinishReason(delta.finishReason));
+
       const totals = {
         totalEvents: plus('totalEvents', 1),
         totalInputTokens: plus('totalInputTokens', delta.inputTokens),
         totalOutputTokens: plus('totalOutputTokens', delta.outputTokens),
         totalCachedInputTokens: plus('totalCachedInputTokens', delta.cachedInputTokens),
+        totalReasoningTokens: plus('totalReasoningTokens', delta.reasoningTokens),
+        truncatedEvents: plus('truncatedEvents', isTruncated ? 1 : 0),
       };
 
       await collection.updateOne(filter, [
@@ -936,6 +944,11 @@ export function TracingMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
         typeof filters?.metadataValue === 'string' ? filters.metadataValue : undefined;
       if (metadataKey && /^[a-zA-Z0-9_]{1,40}$/.test(metadataKey) && metadataValue !== undefined) {
         query[`metadata.${metadataKey}`] = metadataValue;
+      }
+
+      // "Only sessions with truncatedEvents > 0" filter.
+      if (filters?.truncated === true) {
+        query.truncatedEvents = { $gt: 0 };
       }
 
       const limit = Math.max(0, parseInt(String(filters?.limit ?? '50'), 10) || 0);
@@ -1354,6 +1367,49 @@ export function TracingMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
       return {
         ...event,
         _id: event._id?.toString(),
+      };
+    }
+
+    async updateAgentTracingEvent(
+      sessionId: string,
+      eventId: string,
+      data: Partial<Pick<IAgentTracingEvent, 'finishReason' | 'reasoningTokens' | 'metadata'>>,
+      projectId?: string,
+    ): Promise<IAgentTracingEvent | null> {
+      const db = this.getTenantDb();
+      const scoped = projectId ? { sessionId, projectId } : { sessionId };
+      const query: Record<string, unknown> = {
+        ...scoped,
+        $or: [{ id: eventId }],
+      };
+
+      if (/^[a-f0-9]{24}$/i.test(eventId)) {
+        query.$or = [...(query.$or as Array<Record<string, unknown>>), { _id: new ObjectId(eventId) }];
+      }
+
+      const updateData: Partial<IAgentTracingEvent> = {};
+      if (data.finishReason !== undefined) updateData.finishReason = data.finishReason;
+      if (data.reasoningTokens !== undefined) updateData.reasoningTokens = data.reasoningTokens;
+      if (data.metadata !== undefined) updateData.metadata = data.metadata;
+
+      const collection = db.collection<IAgentTracingEvent>(COLLECTIONS.agentTracingEvents);
+
+      if (Object.keys(updateData).length === 0) {
+        const event = await collection.findOne(query);
+        return event ? { ...event, _id: event._id?.toString() } : null;
+      }
+
+      const result = await collection.findOneAndUpdate(
+        query,
+        { $set: updateData },
+        { returnDocument: 'after' },
+      );
+
+      if (!result) return null;
+
+      return {
+        ...result,
+        _id: result._id.toString(),
       };
     }
 

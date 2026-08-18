@@ -13,6 +13,7 @@ import {
   toOpenAIStreamChunk,
   summarizeUsage,
   buildErrorResponse,
+  extractFinishReason,
 } from '@/lib/services/models/openaiAdapter';
 
 // ── toLangChainMessages ───────────────────────────────────────────────────────
@@ -530,7 +531,134 @@ describe('summarizeUsage', () => {
       totalTokens: 1444,
       promptTokensDetails: { cache_read: 12, cached_tokens: 12 },
       completionTokensDetails: { reasoning: 512, reasoning_tokens: 512 },
+      reasoningTokens: 512,
     });
+  });
+});
+
+// ── summarizeUsage: reasoningTokens ──────────────────────────────────────────
+// reasoningTokens is a SUBSET of outputTokens — it must never be folded into
+// totalTokens or affect any cost arithmetic downstream.
+
+describe('summarizeUsage reasoningTokens', () => {
+  it('extracts reasoningTokens from completion_tokens_details.reasoning_tokens', () => {
+    const msg = new AIMessage({
+      content: '',
+      response_metadata: {
+        usage: {
+          prompt_tokens: 10,
+          completion_tokens: 20,
+          total_tokens: 30,
+          completion_tokens_details: { reasoning_tokens: 8 },
+        },
+      },
+    });
+    const usage = summarizeUsage(msg);
+    expect(usage.reasoningTokens).toBe(8);
+  });
+
+  it('extracts reasoningTokens from the `reasoning` alias (output_token_details.reasoning)', () => {
+    const msg = new AIMessage({
+      content: '',
+      usage_metadata: {
+        input_tokens: 10,
+        output_tokens: 20,
+        total_tokens: 30,
+        output_token_details: { reasoning: 6 },
+      },
+    });
+    const usage = summarizeUsage(msg);
+    expect(usage.reasoningTokens).toBe(6);
+  });
+
+  it('extracts reasoningTokens from output_tokens_details.reasoning_tokens (Responses API shape)', () => {
+    const msg = new AIMessage({
+      content: '',
+      response_metadata: {
+        usage: {
+          prompt_tokens: 10,
+          completion_tokens: 20,
+          total_tokens: 30,
+          output_tokens_details: { reasoning_tokens: 4 },
+        },
+      },
+    });
+    const usage = summarizeUsage(msg);
+    expect(usage.reasoningTokens).toBe(4);
+  });
+
+  it('omits reasoningTokens when not present', () => {
+    const msg = makeAIMessage('x', { promptTokens: 5, completionTokens: 3 });
+    const usage = summarizeUsage(msg);
+    expect(usage.reasoningTokens).toBeUndefined();
+  });
+
+  it('omits reasoningTokens when reported as 0 (not > 0)', () => {
+    const msg = new AIMessage({
+      content: '',
+      response_metadata: {
+        usage: {
+          prompt_tokens: 10,
+          completion_tokens: 20,
+          total_tokens: 30,
+          completion_tokens_details: { reasoning_tokens: 0 },
+        },
+      },
+    });
+    const usage = summarizeUsage(msg);
+    expect(usage.reasoningTokens).toBeUndefined();
+  });
+
+  it('never folds reasoningTokens into totalTokens or outputTokens', () => {
+    const msg = new AIMessage({
+      content: '',
+      response_metadata: {
+        usage: {
+          prompt_tokens: 10,
+          completion_tokens: 20,
+          total_tokens: 30,
+          completion_tokens_details: { reasoning_tokens: 8 },
+        },
+      },
+    });
+    const usage = summarizeUsage(msg);
+    // reasoning_tokens (8) is a subset of completion_tokens (20), not an
+    // addend — outputTokens/totalTokens must reflect only the raw counts.
+    expect(usage.outputTokens).toBe(20);
+    expect(usage.totalTokens).toBe(30);
+  });
+});
+
+// ── extractFinishReason ───────────────────────────────────────────────────────
+
+describe('extractFinishReason', () => {
+  it('reads and normalizes response_metadata.finish_reason', () => {
+    const msg = new AIMessage({
+      content: 'x',
+      response_metadata: { finish_reason: 'STOP' },
+    });
+    expect(extractFinishReason(msg)).toBe('stop');
+  });
+
+  it('falls back to response_metadata.finishReason', () => {
+    const msg = new AIMessage({
+      content: 'x',
+      response_metadata: { finishReason: 'length' },
+    });
+    expect(extractFinishReason(msg)).toBe('length');
+  });
+
+  it('returns undefined when no finish reason is present', () => {
+    const msg = new AIMessage({ content: 'x' });
+    expect(extractFinishReason(msg)).toBeUndefined();
+  });
+
+  it('returns undefined for a non-string finish_reason', () => {
+    const msg = new AIMessage({
+      content: 'x',
+      response_metadata: { finish_reason: 42 },
+    });
+    expect(extractFinishReason(msg)).toBeUndefined();
   });
 });
 

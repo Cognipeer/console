@@ -7,6 +7,7 @@ import {
   redactLogPayload,
   redactLogString,
 } from '@/lib/services/logRedaction';
+import { normalizeFinishReason } from '@/lib/shared/finishReason';
 
 const TOKENS_PER_MILLION = 1_000_000;
 const SECONDS_PER_THOUSAND = 1_000;
@@ -27,6 +28,10 @@ export interface TokenUsage {
   inputCharacters?: number;
   pages?: number;
   images?: number;
+  /** Subset of `outputTokens` (e.g. OpenAI `completion_tokens_details.reasoning_tokens`).
+   *  Recorded for attribution only — never added into `totalTokens` and never
+   *  fed into `calculateCost` / any pricing arithmetic below. */
+  reasoningTokens?: number;
 }
 
 function toRecord(value: unknown): Record<string, unknown> {
@@ -114,12 +119,20 @@ export async function logModelUsage(
     routing?: IModelUsageRouting;
     /** Explicit attribution for call sites outside the request ALS scope. */
     attribution?: Partial<UsageAttribution>;
+    /** Raw provider finish reason for this call (e.g. `stop`, `length`,
+     *  `tool_calls`) — a property of the call, not of token usage. Normalized
+     *  via `normalizeFinishReason` before persisting. */
+    finishReason?: string;
   },
 ) {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
 
   const usage = payload.usage;
+  // reasoningTokens is a SUBSET of outputTokens (e.g. OpenAI
+  // `completion_tokens_details.reasoning_tokens`) — recorded below for
+  // attribution only. It must never be added into totalTokens and never
+  // flows into calculateCost / pricingSnapshot.
   const pricingSnapshot = {
     ...model.pricing,
     ...calculateCost(model.pricing, usage),
@@ -149,6 +162,7 @@ export async function logModelUsage(
     inputTokens: usage.inputTokens ?? 0,
     outputTokens: usage.outputTokens ?? 0,
     cachedInputTokens: usage.cachedInputTokens ?? 0,
+    reasoningTokens: usage.reasoningTokens ?? 0,
     totalTokens,
     costUsd: pricingSnapshot.totalCost,
     units,
@@ -177,10 +191,12 @@ export async function logModelUsage(
     inputTokens: usage.inputTokens ?? 0,
     outputTokens: usage.outputTokens ?? 0,
     cachedInputTokens: usage.cachedInputTokens ?? 0,
+    reasoningTokens: usage.reasoningTokens,
     totalTokens,
     toolCalls: usage.toolCalls ?? 0,
     cacheHit: payload.cacheHit,
     pricingSnapshot,
     routing: payload.routing,
+    finishReason: normalizeFinishReason(payload.finishReason),
   });
 }

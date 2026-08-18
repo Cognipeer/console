@@ -328,6 +328,20 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     eventId: string,
     projectId?: string,
   ): Promise<IAgentTracingEvent | null>;
+  /**
+   * Narrow, migration-only update for a single tracing event.
+   *
+   * Tracing events are otherwise write-once — ingest creates them and nothing
+   * mutates them — so this deliberately accepts only the fields a data
+   * migration needs, rather than a general `Partial<IAgentTracingEvent>` that
+   * would invite drift between the two providers.
+   */
+  updateAgentTracingEvent(
+    sessionId: string,
+    eventId: string,
+    data: Partial<Pick<IAgentTracingEvent, 'finishReason' | 'reasoningTokens' | 'metadata'>>,
+    projectId?: string,
+  ): Promise<IAgentTracingEvent | null>;
   listAgentTracingEvents(
     sessionId: string,
     projectId?: string,

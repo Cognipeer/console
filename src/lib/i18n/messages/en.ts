@@ -1328,6 +1328,9 @@ export const en = {
       tokenSummary: 'In: {input} • Out: {output}',
       viewAndEdit: 'Need to adjust credentials? Jump to the edit page.',
       viewDetails: 'View request details',
+      finishReason: 'Finish',
+      finishReasonNone: '—',
+      reasoningTokens: '+{count} reasoning',
       modal: {
         title: 'Request Details',
         requestId: 'Request ID',
@@ -1339,6 +1342,8 @@ export const en = {
         response: 'Response',
         noRequest: 'Request data not available.',
         noResponse: 'Response data not available.',
+        finishReason: 'Finish reason',
+        reasoningTokens: '{count} of the output tokens above were reasoning tokens.',
       },
     },
     settings: {

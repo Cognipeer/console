@@ -323,6 +323,15 @@ Two fields depend on what the producer recorded:
 | `parentSpanId` | Event | Parent span identifier (for hierarchy) |
 | `source` | Session | Ingestion source: `custom` or `otlp` |
 
+## Token & Finish Reason Fields
+
+| Field | Scope | Description |
+|------|-------|-------------|
+| `reasoningTokens` | Event | Reasoning/thinking tokens the model spent before its answer (e.g. OpenAI's `completion_tokens_details.reasoning_tokens`). A **subset** of `outputTokens` — never billed on top of it. |
+| `finishReason` | Event | Normalized (trim + lowercase) raw provider stop reason — `stop`, `length`, `tool_calls`, etc. |
+| `totalReasoningTokens` | Session | Running total of the session's event `reasoningTokens`. Already counted within `totalOutputTokens` — never add it again in cost math. |
+| `truncatedEvents` | Session | Count of events whose `finishReason` signalled a token/length cutoff (`length`, `max_tokens`, …) rather than the model stopping on its own terms. |
+
 ## Event Types
 
 Console aggregates per type, so producers should use these names rather than

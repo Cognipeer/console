@@ -19786,6 +19786,14 @@ components:
         totalTokens:
           type: integer
           nullable: true
+        reasoningTokens:
+          type: integer
+          nullable: true
+          description: Reasoning/thinking tokens spent by this event's model call. A subset of outputTokens — never billed, or summed into totalTokens, on top of it.
+        finishReason:
+          type: string
+          nullable: true
+          description: "Raw provider finish reason for this event's model call, e.g. stop, length, tool_calls."
         durationMs:
           type: integer
           description: Event duration in milliseconds.
@@ -20022,6 +20030,14 @@ components:
         totalCachedInputTokens:
           type: integer
           nullable: true
+        totalReasoningTokens:
+          type: integer
+          nullable: true
+          description: Sum of reasoningTokens across the session's events. A subset of totalOutputTokens — never billed, or summed into a token total, on top of it.
+        truncatedEvents:
+          type: integer
+          nullable: true
+          description: "Count of events whose finishReason indicates a token/length cutoff (e.g. length, max_tokens) rather than a normal stop."
         totalBytesIn:
           type: integer
           nullable: true

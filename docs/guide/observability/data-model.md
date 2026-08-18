@@ -35,6 +35,8 @@ tying them together.
 | `startedAt` / `endedAt` | ISO 8601 | |
 | `durationMs` | number | |
 | `summary` | totals | `totalInputTokens`, `totalOutputTokens`, `totalCachedInputTokens`, `totalDurationMs`, `eventCounts` |
+| `totalReasoningTokens` | number | Running total of the session's event `reasoningTokens`. Already counted within `totalOutputTokens` — see [Tokens](#tokens) — never add it again in cost math. |
+| `truncatedEvents` | number | Count of events whose `finishReason` signalled a token/length cutoff (`length`, `max_tokens`, …) rather than the model stopping on its own terms. |
 | `config` | object | Free-form run configuration, shown on the session header. |
 | `errors` | array | A non-empty list marks the session failed. |
 
@@ -74,6 +76,8 @@ Console aggregates per type, so use these rather than inventing names:
 | `error` | string or object | Attached to a failed step. |
 | `model` | string | **The provider's model id** (`gpt-4.1-mini`), not a nickname — see [Cost](#cost-and-double-counting). |
 | `inputTokens` / `outputTokens` / `cachedInputTokens` / `totalTokens` | number | See [Tokens](#tokens). |
+| `reasoningTokens` | number | Reasoning/thinking tokens the model spent before its answer (e.g. OpenAI's `completion_tokens_details.reasoning_tokens`). A **subset** of `outputTokens` — see [Tokens](#tokens) — never billed on top of it. |
+| `finishReason` | string | Normalized (trim + lowercase) raw provider stop reason — `stop`, `length`, `tool_calls`, etc. Feeds the session's `truncatedEvents` count. |
 | `toolName` / `toolExecutionId` | string | `toolExecutionId` correlates the run with the model's tool-call id. |
 | `toolDefinitions` | array | The tool menu offered on this call. See below. |
 | `actor` | `{scope, name}` | `scope` is `agent`, `model`, `tool`, `retriever` or `user`; drives the actor column. |
@@ -149,6 +153,12 @@ reads — so the Claude integrations add the cache buckets back in:
 inputTokens       = input_tokens + cache_read_input_tokens + cache_creation_input_tokens
 cachedInputTokens = cache_read_input_tokens
 ```
+
+`reasoningTokens` is also a **subset** — of `outputTokens`, not `inputTokens` —
+covering the model's internal reasoning/thinking tokens. It is never added on
+top of `outputTokens` or `totalTokens` in cost math; it exists so the
+reasoning/answer split is visible without double-billing it. The session's
+`totalReasoningTokens` is the running sum of the field across its events.
 
 ::: warning Absent is not zero
 When a framework reports no usage — a streaming call without usage opt-in, a

@@ -140,11 +140,11 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         INSERT INTO ${TABLES.modelUsageLogs}
         (id, tenantId, projectId, modelKey, modelId, requestId, route, status,
          providerRequest, providerResponse, errorMessage, latencyMs,
-         inputTokens, outputTokens, cachedInputTokens, totalTokens, toolCalls, cacheHit, pricingSnapshot, routing,
+         inputTokens, outputTokens, cachedInputTokens, totalTokens, finishReason, reasoningTokens, toolCalls, cacheHit, pricingSnapshot, routing,
          userId, apiTokenId, actorType, createdAt)
         VALUES (@id, @tenantId, @projectId, @modelKey, @modelId, @requestId, @route, @status,
          @providerRequest, @providerResponse, @errorMessage, @latencyMs,
-         @inputTokens, @outputTokens, @cachedInputTokens, @totalTokens, @toolCalls, @cacheHit, @pricingSnapshot, @routing,
+         @inputTokens, @outputTokens, @cachedInputTokens, @totalTokens, @finishReason, @reasoningTokens, @toolCalls, @cacheHit, @pricingSnapshot, @routing,
          @userId, @apiTokenId, @actorType, @createdAt)
       `).run({
         id,
@@ -166,6 +166,8 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         outputTokens: log.outputTokens,
         cachedInputTokens: log.cachedInputTokens ?? 0,
         totalTokens: log.totalTokens,
+        finishReason: log.finishReason ?? null,
+        reasoningTokens: log.reasoningTokens ?? null,
         toolCalls: log.toolCalls ?? 0,
         cacheHit: this.toBoolInt(log.cacheHit),
         pricingSnapshot: log.pricingSnapshot ? this.toJson(log.pricingSnapshot) : null,
@@ -367,6 +369,8 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         outputTokens: (r.outputTokens as number) ?? 0,
         cachedInputTokens: (r.cachedInputTokens as number) ?? 0,
         totalTokens: (r.totalTokens as number) ?? 0,
+        finishReason: (r.finishReason as string | null) ?? undefined,
+        reasoningTokens: r.reasoningTokens == null ? undefined : Number(r.reasoningTokens),
         toolCalls: (r.toolCalls as number) ?? 0,
         cacheHit: this.fromBoolInt(r.cacheHit),
         pricingSnapshot: r.pricingSnapshot ? this.parseJson(r.pricingSnapshot, undefined) : undefined,

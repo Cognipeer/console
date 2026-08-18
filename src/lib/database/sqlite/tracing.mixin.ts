@@ -10,6 +10,7 @@ import type {
 } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
+import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
 
 export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TBase) {
   return class TracingOps extends Base {
@@ -101,12 +102,12 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         INSERT INTO ${TABLES.agentTracingSessions}
         (id, sessionId, traceId, rootSpanId, threadId, tenantId, projectId, source, agent, agentName, agentVersion, agentModel, metadata,
          config, summary, status, startedAt, endedAt, durationMs, errors, modelsUsed, toolsUsed,
-         eventCounts, totalEvents, totalInputTokens, totalOutputTokens, totalCachedInputTokens,
+         eventCounts, totalEvents, totalInputTokens, totalOutputTokens, totalCachedInputTokens, totalReasoningTokens, truncatedEvents,
          totalBytesIn, totalBytesOut, totalRequestBytes, totalResponseBytes,
          userId, apiTokenId, actorType, createdAt, updatedAt)
         VALUES (@id, @sessionId, @traceId, @rootSpanId, @threadId, @tenantId, @projectId, @source, @agent, @agentName, @agentVersion, @agentModel, @metadata,
          @config, @summary, @status, @startedAt, @endedAt, @durationMs, @errors, @modelsUsed, @toolsUsed,
-         @eventCounts, @totalEvents, @totalInputTokens, @totalOutputTokens, @totalCachedInputTokens,
+         @eventCounts, @totalEvents, @totalInputTokens, @totalOutputTokens, @totalCachedInputTokens, @totalReasoningTokens, @truncatedEvents,
          @totalBytesIn, @totalBytesOut, @totalRequestBytes, @totalResponseBytes,
          @userId, @apiTokenId, @actorType, @createdAt, @updatedAt)
       `).run({
@@ -137,6 +138,8 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         totalInputTokens: session.totalInputTokens ?? 0,
         totalOutputTokens: session.totalOutputTokens ?? 0,
         totalCachedInputTokens: session.totalCachedInputTokens ?? 0,
+        totalReasoningTokens: session.totalReasoningTokens ?? 0,
+        truncatedEvents: session.truncatedEvents ?? 0,
         totalBytesIn: session.totalBytesIn ?? 0,
         totalBytesOut: session.totalBytesOut ?? 0,
         totalRequestBytes: session.totalRequestBytes ?? 0,
@@ -221,12 +224,20 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       const toNumber = (value: number | undefined) =>
         typeof value === 'number' && Number.isFinite(value) ? value : 0;
 
+      // An abnormal-but-not-truncated finishReason (e.g. a content filter) isn't
+      // counted here — truncatedEvents specifically tracks token/length cutoffs,
+      // the usual explanation for a truncated or unparseable answer.
+      const normalizedFinishReason = normalizeFinishReason(delta.finishReason);
+      const truncated = isTruncatedFinishReason(normalizedFinishReason) ? 1 : 0;
+
       const params: Record<string, unknown> = {
         sessionId,
         updatedAt: this.now(),
         inputTokens: toNumber(delta.inputTokens),
         outputTokens: toNumber(delta.outputTokens),
         cachedInputTokens: toNumber(delta.cachedInputTokens),
+        reasoningTokens: toNumber(delta.reasoningTokens),
+        truncated,
       };
       let where = 'sessionId = @sessionId';
       if (projectId) { where += ' AND projectId = @projectId'; params.projectId = projectId; }
@@ -238,7 +249,9 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
              totalEvents = COALESCE(totalEvents, 0) + 1,
              totalInputTokens = COALESCE(totalInputTokens, 0) + @inputTokens,
              totalOutputTokens = COALESCE(totalOutputTokens, 0) + @outputTokens,
-             totalCachedInputTokens = COALESCE(totalCachedInputTokens, 0) + @cachedInputTokens
+             totalCachedInputTokens = COALESCE(totalCachedInputTokens, 0) + @cachedInputTokens,
+             totalReasoningTokens = COALESCE(totalReasoningTokens, 0) + @reasoningTokens,
+             truncatedEvents = COALESCE(truncatedEvents, 0) + @truncated
            WHERE ${where}`,
         ).run(params);
 
@@ -332,6 +345,8 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       if (data.totalInputTokens !== undefined) { sets.push('totalInputTokens = @totalInputTokens'); params.totalInputTokens = data.totalInputTokens; }
       if (data.totalOutputTokens !== undefined) { sets.push('totalOutputTokens = @totalOutputTokens'); params.totalOutputTokens = data.totalOutputTokens; }
       if (data.totalCachedInputTokens !== undefined) { sets.push('totalCachedInputTokens = @totalCachedInputTokens'); params.totalCachedInputTokens = data.totalCachedInputTokens; }
+      if (data.totalReasoningTokens !== undefined) { sets.push('totalReasoningTokens = @totalReasoningTokens'); params.totalReasoningTokens = data.totalReasoningTokens; }
+      if (data.truncatedEvents !== undefined) { sets.push('truncatedEvents = @truncatedEvents'); params.truncatedEvents = data.truncatedEvents; }
       if (data.totalBytesIn !== undefined) { sets.push('totalBytesIn = @totalBytesIn'); params.totalBytesIn = data.totalBytesIn; }
       if (data.totalBytesOut !== undefined) { sets.push('totalBytesOut = @totalBytesOut'); params.totalBytesOut = data.totalBytesOut; }
       if (data.totalRequestBytes !== undefined) { sets.push('totalRequestBytes = @totalRequestBytes'); params.totalRequestBytes = data.totalRequestBytes; }
@@ -395,6 +410,11 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         clauses.push('json_extract(metadata, @metadataPath) = @metadataValue');
         params.metadataPath = `$.${metadataKey}`;
         params.metadataValue = metadataValue;
+      }
+
+      // "Only sessions with truncatedEvents > 0" filter.
+      if (filters?.truncated === true) {
+        clauses.push('COALESCE(truncatedEvents, 0) > 0');
       }
 
       const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
@@ -719,11 +739,11 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         INSERT INTO ${TABLES.agentTracingEvents}
         (id, sessionId, traceId, spanId, parentSpanId, tenantId, projectId, eventId, type, label, sequence, timestamp, status,
          actor, metadata, sections, modelNames, model, error, durationMs, actorName, actorRole,
-         toolName, toolExecutionId, inputTokens, outputTokens, totalTokens, cachedInputTokens,
+         toolName, toolExecutionId, inputTokens, outputTokens, totalTokens, cachedInputTokens, finishReason, reasoningTokens,
          bytesIn, bytesOut, requestBytes, responseBytes, createdAt)
         VALUES (@id, @sessionId, @traceId, @spanId, @parentSpanId, @tenantId, @projectId, @eventId, @type, @label, @sequence, @timestamp, @status,
          @actor, @metadata, @sections, @modelNames, @model, @error, @durationMs, @actorName, @actorRole,
-         @toolName, @toolExecutionId, @inputTokens, @outputTokens, @totalTokens, @cachedInputTokens,
+         @toolName, @toolExecutionId, @inputTokens, @outputTokens, @totalTokens, @cachedInputTokens, @finishReason, @reasoningTokens,
          @bytesIn, @bytesOut, @requestBytes, @responseBytes, @createdAt)
       `).run({
         id,
@@ -754,6 +774,8 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         outputTokens: event.outputTokens ?? 0,
         totalTokens: event.totalTokens ?? 0,
         cachedInputTokens: event.cachedInputTokens ?? 0,
+        finishReason: event.finishReason ?? null,
+        reasoningTokens: event.reasoningTokens ?? null,
         bytesIn: event.bytesIn ?? 0,
         bytesOut: event.bytesOut ?? 0,
         requestBytes: event.requestBytes ?? 0,
@@ -802,6 +824,29 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       return row ? this.mapAgentTracingEventRow(row) : null;
     }
 
+    async updateAgentTracingEvent(
+      sessionId: string,
+      eventId: string,
+      data: Partial<Pick<IAgentTracingEvent, 'finishReason' | 'reasoningTokens' | 'metadata'>>,
+      projectId?: string,
+    ): Promise<IAgentTracingEvent | null> {
+      const db = this.getTenantDb();
+      const sets: string[] = [];
+      const params: Record<string, unknown> = { sessionId, eventId };
+      let where = 'sessionId = @sessionId AND (eventId = @eventId OR id = @eventId)';
+      if (projectId) { where += ' AND projectId = @projectId'; params.projectId = projectId; }
+
+      if (data.finishReason !== undefined) { sets.push('finishReason = @finishReason'); params.finishReason = data.finishReason ?? null; }
+      if (data.reasoningTokens !== undefined) { sets.push('reasoningTokens = @reasoningTokens'); params.reasoningTokens = data.reasoningTokens ?? null; }
+      if (data.metadata !== undefined) { sets.push('metadata = @metadata'); params.metadata = this.toJson(data.metadata); }
+
+      if (sets.length > 0) {
+        db.prepare(`UPDATE ${TABLES.agentTracingEvents} SET ${sets.join(', ')} WHERE ${where}`).run(params);
+      }
+
+      return this.findAgentTracingEventById(sessionId, eventId, projectId);
+    }
+
     async deleteAgentTracingEvents(sessionId: string, projectId?: string): Promise<number> {
       const db = this.getTenantDb();
       let sql = `DELETE FROM ${TABLES.agentTracingEvents} WHERE sessionId = @sessionId`;
@@ -841,6 +886,8 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         totalInputTokens: (r.totalInputTokens as number) ?? 0,
         totalOutputTokens: (r.totalOutputTokens as number) ?? 0,
         totalCachedInputTokens: (r.totalCachedInputTokens as number) ?? 0,
+        totalReasoningTokens: (r.totalReasoningTokens as number) ?? 0,
+        truncatedEvents: (r.truncatedEvents as number) ?? 0,
         totalBytesIn: (r.totalBytesIn as number) ?? 0,
         totalBytesOut: (r.totalBytesOut as number) ?? 0,
         totalRequestBytes: (r.totalRequestBytes as number) ?? 0,
@@ -883,6 +930,8 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         outputTokens: (r.outputTokens as number) ?? 0,
         totalTokens: (r.totalTokens as number) ?? 0,
         cachedInputTokens: (r.cachedInputTokens as number) ?? 0,
+        finishReason: (r.finishReason as string | null) ?? undefined,
+        reasoningTokens: r.reasoningTokens == null ? undefined : Number(r.reasoningTokens),
         bytesIn: (r.bytesIn as number) ?? 0,
         bytesOut: (r.bytesOut as number) ?? 0,
         requestBytes: (r.requestBytes as number) ?? 0,

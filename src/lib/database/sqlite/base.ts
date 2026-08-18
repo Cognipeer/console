@@ -731,6 +731,19 @@ export class SQLiteProviderBase {
     // need it backfilled the same way agentModel/agentVersion were.
     this.ensureTableColumn(db, TABLES.agentTracingSessions, 'metadata', "metadata TEXT DEFAULT '{}'");
 
+    // finishReason/reasoningTokens promoted from the events' `metadata` JSON
+    // blob to first-class columns, plus their session/log rollups. reasoningTokens
+    // is always a subset of outputTokens (OpenAI-style reasoning models) and must
+    // never be summed into totalTokens/cost. Ensure on boot for pre-existing
+    // tenant DB files, which predate these columns.
+    this.ensureTableColumn(db, TABLES.agentTracingEvents, 'finishReason', 'finishReason TEXT');
+    this.ensureTableColumn(db, TABLES.agentTracingEvents, 'reasoningTokens', 'reasoningTokens INTEGER DEFAULT 0');
+    this.ensureTableColumn(db, TABLES.agentTracingSessions, 'totalReasoningTokens', 'totalReasoningTokens INTEGER DEFAULT 0');
+    this.ensureTableColumn(db, TABLES.agentTracingSessions, 'truncatedEvents', 'truncatedEvents INTEGER DEFAULT 0');
+    this.ensureTableColumn(db, TABLES.modelUsageLogs, 'finishReason', 'finishReason TEXT');
+    this.ensureTableColumn(db, TABLES.modelUsageLogs, 'reasoningTokens', 'reasoningTokens INTEGER DEFAULT 0');
+    this.ensureTableColumn(db, TABLES.usageDaily, 'reasoningTokens', 'reasoningTokens INTEGER NOT NULL DEFAULT 0');
+
     // external_model_pricing.versions (effective-dated price history) was
     // added after the table shipped; ensure on boot for DBs created before.
     this.ensureTableColumn(db, TABLES.externalModelPricing, 'versions', 'versions TEXT');

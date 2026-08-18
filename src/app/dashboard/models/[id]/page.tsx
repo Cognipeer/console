@@ -64,6 +64,7 @@ import {
   defaultDashboardDateFilter,
 } from '@/lib/utils/dashboardDateFilter';
 import { calcCacheHitRate, formatPercent } from '@/lib/utils/tracingUtils';
+import { isAbnormalFinishReason } from '@/lib/shared/finishReason';
 import type { IDynamicRoutingConfig } from '@/lib/database';
 
 interface ModelPricing {
@@ -171,6 +172,9 @@ interface UsageLogDto {
   outputTokens: number;
   cachedInputTokens?: number;
   totalTokens: number;
+  // Subset of outputTokens, never additive — see the table/modal rendering below.
+  reasoningTokens?: number;
+  finishReason?: string;
   errorMessage?: string;
   toolCalls?: number;
   cacheHit?: boolean;
@@ -877,6 +881,30 @@ export default function ModelDetailPage() {
                     cached: (selectedLog.cachedInputTokens || 0).toLocaleString(),
                     total: selectedLog.totalTokens.toLocaleString(),
                   })}
+                </Text>
+                {selectedLog.reasoningTokens ? (
+                  // Separate line rather than a tokenBreakdown placeholder: reasoning
+                  // tokens are already counted inside outputTokens above, so adding a
+                  // slot to that message would make readers double them.
+                  <Text size="xs" c="dimmed">
+                    {t('logs.modal.reasoningTokens', {
+                      count: selectedLog.reasoningTokens.toLocaleString(),
+                    })}
+                  </Text>
+                ) : null}
+                <Text size="sm">
+                  <strong>{t('logs.modal.finishReason')}:</strong>{' '}
+                  {selectedLog.finishReason ? (
+                    <span
+                      className={`ds-badge ${
+                        isAbnormalFinishReason(selectedLog.finishReason) ? 'ds-badge-warn' : ''
+                      }`}
+                    >
+                      {selectedLog.finishReason}
+                    </span>
+                  ) : (
+                    <span className="ds-faint">{t('logs.finishReasonNone')}</span>
+                  )}
                 </Text>
                 {selectedLog.errorMessage ? (
                   <Text size="sm" c="red">
@@ -2087,6 +2115,7 @@ function LogsTab({
                 <th>{tLogs('logs.timestamp')}</th>
                 <th>{tLogs('logs.route')}</th>
                 <th>{tLogs('logs.status')}</th>
+                <th>{tLogs('logs.finishReason')}</th>
                 <th style={{ textAlign: 'right' }}>{tLogs('logs.latency')}</th>
                 <th style={{ textAlign: 'right' }}>{tLogs('logs.tokens')}</th>
                 <th>Request ID</th>
@@ -2113,6 +2142,19 @@ function LogsTab({
                       ) : null}
                     </div>
                   </td>
+                  <td style={{ fontSize: 12 }}>
+                    {l.finishReason ? (
+                      <span
+                        className={`ds-badge ${
+                          isAbnormalFinishReason(l.finishReason) ? 'ds-badge-warn' : ''
+                        }`}
+                      >
+                        {l.finishReason}
+                      </span>
+                    ) : (
+                      <span className="ds-faint">{tLogs('logs.finishReasonNone')}</span>
+                    )}
+                  </td>
                   <td
                     className="ds-mono"
                     style={{
@@ -2132,6 +2174,16 @@ function LogsTab({
                     }}
                   >
                     {l.totalTokens.toLocaleString()}
+                    {l.reasoningTokens ? (
+                      // Reasoning tokens are a subset of outputTokens (never billed or
+                      // summed separately), so this renders as a muted annotation under
+                      // the total rather than a value that would inflate it.
+                      <div className="ds-faint" style={{ fontSize: 10.5, fontWeight: 400 }}>
+                        {tLogs('logs.reasoningTokens', {
+                          count: l.reasoningTokens.toLocaleString(),
+                        })}
+                      </div>
+                    ) : null}
                   </td>
                   <td className="ds-mono ds-faint" style={{ fontSize: 12 }}>
                     {l.requestId ?? '—'}
