@@ -75,6 +75,9 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
         skip: query.skip || '0',
         status: query.status,
         to: query.to,
+        // Only sessions with truncatedEvents > 0 (a truncated/cut-off model
+        // response somewhere in the session).
+        truncated: query.truncated === 'true' ? true : undefined,
         ...metadataFilter,
       });
 

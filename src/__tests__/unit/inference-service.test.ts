@@ -202,6 +202,47 @@ describe('handleChatCompletion', () => {
     );
   });
 
+  it('forwards finishReason and reasoningTokens to logModelUsage without perturbing totalTokens', async () => {
+    // reasoningTokens is a SUBSET of outputTokens — it must reach logModelUsage
+    // as its own field, and totalTokens must stay exactly what summarizeUsage
+    // reported (inputTokens + outputTokens), never inflated by reasoningTokens.
+    const model = makeLlmModel();
+    const chatRuntime = makeChatRuntime({
+      content: 'Hi!',
+      tool_calls: [],
+      response_metadata: { finish_reason: 'stop' },
+    });
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(model);
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
+      runtime: chatRuntime,
+    });
+    (summarizeUsage as ReturnType<typeof vi.fn>).mockReturnValue({
+      inputTokens: 10,
+      outputTokens: 20,
+      totalTokens: 30,
+      reasoningTokens: 8,
+    });
+
+    await handleChatCompletion({
+      ...BASE_PARAMS,
+      body: { messages: [{ role: 'user', content: 'Hello' }] },
+    });
+
+    expect(logModelUsage).toHaveBeenCalledWith(
+      'tenant_acme',
+      model,
+      expect.objectContaining({
+        finishReason: 'stop',
+        usage: expect.objectContaining({
+          inputTokens: 10,
+          outputTokens: 20,
+          totalTokens: 30,
+          reasoningTokens: 8,
+        }),
+      }),
+    );
+  });
+
   it('passes canonical OpenAI vision content to the provider runnable', async () => {
     (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeLlmModel());
     const chatModel = {
@@ -409,6 +450,64 @@ describe('handleChatCompletion', () => {
       choices: [],
       usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
     });
+  });
+
+  it('logs the terminal finish_reason and reasoningTokens from the final stream usage frame, without perturbing totalTokens', async () => {
+    // reasoningTokens is a SUBSET of completion_tokens (outputTokens) — it must
+    // reach logModelUsage as its own field, and totalTokens must stay exactly
+    // what the final usage frame reported, never inflated by reasoningTokens.
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeLlmModel());
+    const asyncIterator = (async function* () {
+      yield { content: 'Hello' };
+    })();
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
+      runtime: {
+        createChatModel: vi.fn().mockResolvedValue({
+          invoke: vi.fn(),
+          stream: vi.fn().mockResolvedValue(asyncIterator),
+        }),
+      },
+    });
+    (toOpenAIStreamChunk as ReturnType<typeof vi.fn>).mockReturnValue({
+      id: 'chatcmpl-1',
+      object: 'chat.completion.chunk',
+      choices: [{ index: 0, delta: { content: 'Hello' }, finish_reason: 'length' }],
+      usage: {
+        prompt_tokens: 5,
+        completion_tokens: 12,
+        cached_tokens: 0,
+        total_tokens: 17,
+        completion_tokens_details: { reasoning_tokens: 9 },
+      },
+    });
+
+    const result = await handleChatCompletion({
+      ...BASE_PARAMS,
+      body: {
+        messages: [],
+        stream_options: { include_usage: true },
+      },
+      stream: true,
+    });
+    // Draining the stream runs the fire-and-forget logging call synchronously
+    // within the stream's `start()`, so it has landed by the time we check.
+    await new Response(result.stream).text();
+
+    expect(logModelUsage).toHaveBeenCalledWith(
+      'tenant_acme',
+      expect.anything(),
+      expect.objectContaining({
+        route: 'chat.completions',
+        status: 'success',
+        finishReason: 'length',
+        usage: expect.objectContaining({
+          inputTokens: 5,
+          outputTokens: 12,
+          totalTokens: 17,
+          reasoningTokens: 9,
+        }),
+      }),
+    );
   });
 
   it('never puts usage on a delta when include_usage was not requested', async () => {

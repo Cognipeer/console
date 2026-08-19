@@ -25,6 +25,7 @@ import {
   normalizeSectionListToolDefinitions,
   TOOL_DEFINITIONS_SECTION_KIND,
 } from '@/lib/services/tracingToolDefinitions';
+import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
 import {
   getApiTokenContextForRequest,
   readJsonBody,
@@ -47,6 +48,10 @@ type TracingUsage = {
   /** Subset of the output count — recorded, never re-billed. */
   reasoningTokens?: number | null;
   reasoning_tokens?: number | null;
+  /** OpenAI/Azure raw usage shape: reasoning tokens nested under a details bag. */
+  completion_tokens_details?: { reasoning_tokens?: number | null } | null;
+  /** OTel GenAI convention's mirror of the same nested shape. */
+  output_tokens_details?: { reasoning_tokens?: number | null } | null;
 };
 
 type TracingActorPayload = Record<string, unknown> & {
@@ -81,6 +86,13 @@ type TracingEventPayload = {
   label?: string | null;
   metadata?: Record<string, unknown> & {
     finishReason?: string | null;
+    /** Python-style SDKs that only wrote the snake_case field. */
+    finish_reason?: string | null;
+    /** Claude Agent SDK integration writes Anthropic's own vocabulary here. */
+    stop_reason?: string | null;
+    /** OTel exporter's plural form — a JSON array or comma-joined string. */
+    finishReasons?: string[] | string | null;
+    reasoningTokens?: number | null;
     modelName?: string | null;
     usage?: TracingUsage;
   };
@@ -204,6 +216,8 @@ function aggregateEvents(events: IAgentTracingEvent[]) {
   let totalDurationMs = 0;
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
+  let totalReasoningTokens = 0;
+  let truncatedEvents = 0;
 
   for (const event of events) {
     if (typeof event.type === 'string') {
@@ -224,6 +238,8 @@ function aggregateEvents(events: IAgentTracingEvent[]) {
     totalBytesIn += typeof event.requestBytes === 'number' ? event.requestBytes : 0;
     totalBytesOut += typeof event.responseBytes === 'number' ? event.responseBytes : 0;
     totalDurationMs += typeof event.durationMs === 'number' ? event.durationMs : 0;
+    totalReasoningTokens += typeof event.reasoningTokens === 'number' ? event.reasoningTokens : 0;
+    if (isTruncatedFinishReason(event.finishReason)) truncatedEvents += 1;
 
     if (event.status === 'error') {
       errors.push({
@@ -249,6 +265,8 @@ function aggregateEvents(events: IAgentTracingEvent[]) {
     totalEvents: events.length,
     totalInputTokens,
     totalOutputTokens,
+    totalReasoningTokens,
+    truncatedEvents,
   };
 }
 
@@ -450,29 +468,72 @@ function collectEventToolNames(event: TracingEventPayload): string[] {
   return Array.from(names);
 }
 
+/**
+ * Pull `finishReason` / `reasoningTokens` off a raw ingest event — they are
+ * now first-class columns on `IAgentTracingEvent`, not metadata. Tolerant of
+ * every shape a real producer SDK sends, because the fallbacks below each
+ * correspond to one upstream integration that never populated the top-level
+ * field:
+ *   - `event.metadata.finish_reason` — Python-style SDKs that only ever wrote
+ *     the snake_case form;
+ *   - `event.metadata.stop_reason` — the Claude Agent SDK integration, which
+ *     writes Anthropic's own vocabulary rather than normalizing it first;
+ *   - `event.metadata.finishReasons` (plural) — the OTel exporter, which
+ *     ships a JSON array or comma-joined string because a single export can
+ *     bundle multiple choices; the first element wins;
+ *   - `event.usage.completion_tokens_details.reasoning_tokens` /
+ *     `.output_tokens_details.reasoning_tokens` — raw OpenAI/Azure and OTel
+ *     GenAI usage payloads passed through verbatim instead of being
+ *     flattened by the sender.
+ */
+export function extractTraceDiagnostics(event: TracingEventPayload): {
+  finishReason?: string;
+  reasoningTokens?: number;
+} {
+  const metadata = event.metadata;
+  const usage = event.usage;
+
+  const rawFinishReasons = metadata?.finishReasons;
+  const firstOfFinishReasons = Array.isArray(rawFinishReasons)
+    ? rawFinishReasons[0]
+    : (typeof rawFinishReasons === 'string' ? rawFinishReasons.split(',')[0] : undefined);
+
+  const finishReason = normalizeFinishReason(
+    event.finishReason
+      ?? metadata?.finishReason
+      ?? metadata?.finish_reason
+      ?? metadata?.stop_reason
+      ?? firstOfFinishReasons,
+  );
+
+  const rawReasoningTokens = event.reasoningTokens
+    ?? usage?.reasoningTokens
+    ?? usage?.reasoning_tokens
+    ?? usage?.completion_tokens_details?.reasoning_tokens
+    ?? usage?.output_tokens_details?.reasoning_tokens
+    ?? metadata?.reasoningTokens;
+  const reasoningTokens = Number(rawReasoningTokens);
+
+  return {
+    finishReason,
+    reasoningTokens: Number.isFinite(reasoningTokens) && reasoningTokens > 0 ? reasoningTokens : undefined,
+  };
+}
+
 function buildEventMetadata(event: TracingEventPayload, sections: Array<Record<string, unknown>>): Record<string, unknown> {
-  const metadata = { ...(event.metadata || {}) };
+  const metadata: Record<string, unknown> = { ...(event.metadata || {}) };
+  // finishReason / reasoningTokens are now first-class columns (see
+  // extractTraceDiagnostics above) — strip the keys this used to fold them
+  // from so the same value never gets persisted twice.
+  delete metadata.finishReason;
+  delete metadata.finish_reason;
+  delete metadata.stop_reason;
+  delete metadata.finishReasons;
+  delete metadata.reasoningTokens;
+
   const toolDetails = getEventToolDetails(event, sections);
   if (toolDetails) {
     metadata.toolDetails = toolDetails;
-  }
-  // Two fields that explain a bad answer and have nowhere else to live:
-  //   • finishReason — `length` is the single most common cause of a truncated
-  //     or unparseable structured response; without it that failure looks
-  //     exactly like a model that simply answered badly;
-  //   • reasoningTokens — a SUBSET of outputTokens, and on a reasoning model
-  //     routinely most of the output bill while being invisible in the text.
-  // They ride in `metadata` rather than as columns: it is a JSON blob on both
-  // providers, so this needs no migration and cannot drift between cloud and
-  // on-prem. reasoningTokens is deliberately NOT fed to the cost pipeline —
-  // it is already inside outputTokens, and adding it would double-count.
-  const finishReason = event.finishReason ?? event.metadata?.finishReason;
-  if (typeof finishReason === 'string' && finishReason.trim() !== '') {
-    metadata.finishReason = finishReason.trim();
-  }
-  const reasoningTokens = Number(event.reasoningTokens ?? event.usage?.reasoningTokens ?? event.usage?.reasoning_tokens);
-  if (Number.isFinite(reasoningTokens) && reasoningTokens > 0) {
-    metadata.reasoningTokens = reasoningTokens;
   }
   return metadata;
 }
@@ -693,6 +754,8 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
             totalDurationMs: stats.totalDurationMs,
             totalInputTokens: stats.totalInputTokens,
             totalOutputTokens: stats.totalOutputTokens,
+            totalReasoningTokens: stats.totalReasoningTokens,
+            truncatedEvents: stats.truncatedEvents,
           };
           const mergedSession = {
             ...session,
@@ -716,6 +779,8 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
             totalEvents: stats.totalEvents,
             totalInputTokens: stats.totalInputTokens,
             totalOutputTokens: stats.totalOutputTokens,
+            totalReasoningTokens: stats.totalReasoningTokens,
+            truncatedEvents: stats.truncatedEvents,
             traceId: existing?.traceId || session.traceId,
           };
 
@@ -812,6 +877,13 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
 
       const modelsUsed = new Set<string>();
       const toolsUsed = new Set<string>();
+      // Rolled up here rather than read off `payload.summary`: the batch
+      // endpoint trusts the sender for the other totals, but no producer SDK
+      // reports these two yet, so a summary-only read would leave every
+      // batch-ingested session at zero while the per-event columns say
+      // otherwise.
+      let batchReasoningTokens = 0;
+      let batchTruncatedEvents = 0;
       events.forEach((event) => {
         if (event?.model) modelsUsed.add(event.model);
         if (event?.modelName) modelsUsed.add(event.modelName);
@@ -819,6 +891,9 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
         for (const toolName of collectEventToolNames(event)) {
           toolsUsed.add(toolName);
         }
+        const diagnostics = extractTraceDiagnostics(event);
+        batchReasoningTokens += diagnostics.reasoningTokens ?? 0;
+        if (isTruncatedFinishReason(diagnostics.finishReason)) batchTruncatedEvents += 1;
       });
 
       if (payload?.agent?.model) {
@@ -856,7 +931,11 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
         totalEvents: events.length,
         totalInputTokens: getSummaryNumber(payload.summary, 'totalInputTokens') ?? 0,
         totalOutputTokens: getSummaryNumber(payload.summary, 'totalOutputTokens') ?? 0,
+        totalReasoningTokens:
+          getSummaryNumber(payload.summary, 'totalReasoningTokens') ?? batchReasoningTokens,
         traceId: typeof payload.traceId === 'string' ? payload.traceId : undefined,
+        truncatedEvents:
+          getSummaryNumber(payload.summary, 'truncatedEvents') ?? batchTruncatedEvents,
       };
 
       const existing = await db.findAgentTracingSessionById(sessionId, ctx.projectId);
@@ -934,6 +1013,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
           const metadata = buildEventMetadata(event, sections);
           const toolDetails = getEventToolDetails(event, sections);
           const usage = getEventUsage(event);
+          const diagnostics = extractTraceDiagnostics(event);
           const inputTokens =
             event?.inputTokens ?? usage?.inputTokens ?? usage?.input_tokens ?? undefined;
           const outputTokens =
@@ -955,6 +1035,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
             cachedInputTokens,
             durationMs: event.durationMs ?? undefined,
             error: toErrorRecord(event.error),
+            finishReason: diagnostics.finishReason,
             id: event.id ?? undefined,
             inputTokens,
             label: event.label ?? undefined,
@@ -964,6 +1045,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
             outputTokens,
             parentSpanId: typeof event.parentSpanId === 'string' ? event.parentSpanId : undefined,
             projectId: ctx.projectId,
+            reasoningTokens: diagnostics.reasoningTokens,
             requestBytes: event.requestBytes ?? undefined,
             responseBytes: event.responseBytes ?? undefined,
             sections,
@@ -1196,6 +1278,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
       const metadata = buildEventMetadata(event, sections);
       const toolDetails = getEventToolDetails(event, sections);
       const usage = getEventUsage(event);
+      const diagnostics = extractTraceDiagnostics(event);
       const inputTokens =
         event?.inputTokens ?? usage?.inputTokens ?? usage?.input_tokens ?? undefined;
       const outputTokens =
@@ -1223,6 +1306,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
           cachedInputTokens,
           durationMs: event.durationMs ?? undefined,
           error: toErrorRecord(event.error),
+          finishReason: diagnostics.finishReason,
           id: event.id ?? undefined,
           inputTokens,
           label: event.label ?? undefined,
@@ -1232,6 +1316,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
           outputTokens,
           parentSpanId: typeof event.parentSpanId === 'string' ? event.parentSpanId : undefined,
           projectId: ctx.projectId,
+          reasoningTokens: diagnostics.reasoningTokens,
           requestBytes: event.requestBytes ?? undefined,
           responseBytes: event.responseBytes ?? undefined,
           sections,
@@ -1265,9 +1350,11 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
           cachedInputTokens,
           durationMs: event.durationMs ?? undefined,
           eventType: event.type ?? undefined,
+          finishReason: diagnostics.finishReason,
           inputTokens,
           modelsUsed: models,
           outputTokens,
+          reasoningTokens: diagnostics.reasoningTokens,
           toolsUsed: collectEventToolNames(event),
         }, ctx.projectId);
       });

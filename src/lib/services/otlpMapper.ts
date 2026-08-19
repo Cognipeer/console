@@ -13,6 +13,7 @@ import type {
   IAgentTracingSession,
   IAgentTracingEvent,
 } from '@/lib/database/provider/types.base';
+import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
 import {
   buildResponseFormatSection,
   normalizeSectionListResponseFormat,
@@ -296,7 +297,45 @@ function getConventionTokens(attrs: OtlpKeyValue[] | undefined) {
       'gen_ai.usage.cache_read.input_tokens',
       'gen_ai.usage.cache_read_input_tokens',
     ]),
+    // Subset of outputTokens — excluded from cost/total arithmetic the same
+    // way cachedInputTokens is a subset of inputTokens, never added on top.
+    reasoningTokens: firstIntAttr(attrs, [
+      'cognipeer.tokens.reasoning',
+      'llm.token_count.completion_details.reasoning',
+      'gen_ai.usage.reasoning_tokens',
+      'gen_ai.usage.output_tokens_details.reasoning_tokens',
+    ]),
   };
+}
+
+/**
+ * First element out of a plural finish-reasons attribute. OTel's
+ * `gen_ai.response.finish_reasons` is plural because a single span can carry
+ * multiple choices, and emitters disagree on the wire shape: some JSON-encode
+ * the array, some just comma-join it.
+ */
+function firstOfDelimitedOrJsonArray(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed) && typeof parsed[0] === 'string') {
+        return parsed[0];
+      }
+    } catch {
+      // Not valid JSON — fall through to comma-split handling below.
+    }
+  }
+  return trimmed.split(',')[0]?.trim();
+}
+
+/** Finish reason across all three conventions. */
+function getConventionFinishReason(attrs: OtlpKeyValue[] | undefined): string | undefined {
+  const raw = getStringAttr(attrs, 'cognipeer.finish_reason')
+    ?? firstOfDelimitedOrJsonArray(getStringAttr(attrs, 'gen_ai.response.finish_reasons'))
+    ?? getStringAttr(attrs, 'llm.response.finish_reason');
+  return normalizeFinishReason(raw);
 }
 
 /** Conversation identifier — the closest thing OTel has to a thread id. */
@@ -602,6 +641,8 @@ export function mapOtlpToInternalModels(
     let totalCachedInputTokens = getIntAttr(rootSpan.attributes, 'cognipeer.session.total_cached_input_tokens') ?? 0;
     let totalBytesIn = getIntAttr(rootSpan.attributes, 'cognipeer.session.total_bytes_in') ?? 0;
     let totalBytesOut = getIntAttr(rootSpan.attributes, 'cognipeer.session.total_bytes_out') ?? 0;
+    let totalReasoningTokens = getIntAttr(rootSpan.attributes, 'cognipeer.session.total_reasoning_tokens') ?? 0;
+    let truncatedEvents = getIntAttr(rootSpan.attributes, 'cognipeer.session.truncated_events') ?? 0;
 
     const modelsUsed = new Set<string>();
     const toolsUsed = new Set<string>();
@@ -631,7 +672,9 @@ export function mapOtlpToInternalModels(
         outputTokens,
         totalTokens,
         cachedInputTokens,
+        reasoningTokens,
       } = getConventionTokens(span.attributes);
+      const finishReason = getConventionFinishReason(span.attributes);
       const requestBytes = getIntAttr(span.attributes, 'cognipeer.bytes.request');
       const responseBytes = getIntAttr(span.attributes, 'cognipeer.bytes.response');
       const toolExecutionId = getStringAttr(span.attributes, 'cognipeer.tool.execution_id');
@@ -648,6 +691,8 @@ export function mapOtlpToInternalModels(
       if (totalCachedInputTokens === 0 && cachedInputTokens) totalCachedInputTokens += cachedInputTokens;
       if (totalBytesIn === 0 && requestBytes) totalBytesIn += requestBytes;
       if (totalBytesOut === 0 && responseBytes) totalBytesOut += responseBytes;
+      if (totalReasoningTokens === 0 && reasoningTokens) totalReasoningTokens += reasoningTokens;
+      if (truncatedEvents === 0 && isTruncatedFinishReason(finishReason)) truncatedEvents += 1;
 
       if (model) modelsUsed.add(model);
       if (actorScope === 'tool' && toolName) toolsUsed.add(toolName);
@@ -731,6 +776,8 @@ export function mapOtlpToInternalModels(
         outputTokens,
         totalTokens,
         cachedInputTokens,
+        reasoningTokens,
+        finishReason,
         requestBytes,
         responseBytes,
         error: eventError,
@@ -782,6 +829,8 @@ export function mapOtlpToInternalModels(
       totalInputTokens,
       totalOutputTokens,
       totalCachedInputTokens,
+      totalReasoningTokens,
+      truncatedEvents,
       totalBytesIn,
       totalBytesOut,
     });

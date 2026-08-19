@@ -24,6 +24,7 @@ import {
   mapOtlpToInternalModels,
   type OtlpExportTraceServiceRequest,
 } from '@/lib/services/otlpMapper';
+import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
 
 const logger = createLogger('client-otlp-traces');
 
@@ -69,6 +70,9 @@ function aggregateEvents(events: IAgentTracingEvent[]) {
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
   let totalCachedInputTokens = 0;
+  // Subset of totalOutputTokens — never added into totalTokens or cost math.
+  let totalReasoningTokens = 0;
+  let truncatedEvents = 0;
   let totalBytesIn = 0;
   let totalBytesOut = 0;
   let totalDurationMs = 0;
@@ -86,6 +90,7 @@ function aggregateEvents(events: IAgentTracingEvent[]) {
     const inputTokens = typeof event.inputTokens === 'number' ? event.inputTokens : 0;
     const outputTokens = typeof event.outputTokens === 'number' ? event.outputTokens : 0;
     const cachedInputTokens = typeof event.cachedInputTokens === 'number' ? event.cachedInputTokens : 0;
+    const reasoningTokens = typeof event.reasoningTokens === 'number' ? event.reasoningTokens : 0;
     const requestBytes = typeof event.requestBytes === 'number' ? event.requestBytes : 0;
     const responseBytes = typeof event.responseBytes === 'number' ? event.responseBytes : 0;
     const durationMs = typeof event.durationMs === 'number' ? event.durationMs : 0;
@@ -93,9 +98,14 @@ function aggregateEvents(events: IAgentTracingEvent[]) {
     totalInputTokens += inputTokens;
     totalOutputTokens += outputTokens;
     totalCachedInputTokens += cachedInputTokens;
+    totalReasoningTokens += reasoningTokens;
     totalBytesIn += requestBytes;
     totalBytesOut += responseBytes;
     totalDurationMs += durationMs;
+
+    if (isTruncatedFinishReason(normalizeFinishReason(event.finishReason))) {
+      truncatedEvents += 1;
+    }
 
     const status = typeof event.status === 'string' ? event.status : undefined;
     if (status === 'error') {
@@ -115,6 +125,8 @@ function aggregateEvents(events: IAgentTracingEvent[]) {
     totalInputTokens,
     totalOutputTokens,
     totalCachedInputTokens,
+    totalReasoningTokens,
+    truncatedEvents,
     totalBytesIn,
     totalBytesOut,
     totalDurationMs,
@@ -341,6 +353,8 @@ const _POST = async (request: NextRequest) => {
           totalInputTokens: stats.totalInputTokens,
           totalOutputTokens: stats.totalOutputTokens,
           totalCachedInputTokens: stats.totalCachedInputTokens,
+          totalReasoningTokens: stats.totalReasoningTokens,
+          truncatedEvents: stats.truncatedEvents,
           totalBytesIn: stats.totalBytesIn,
           totalBytesOut: stats.totalBytesOut,
           eventCounts: stats.eventCounts,
@@ -360,6 +374,8 @@ const _POST = async (request: NextRequest) => {
           totalInputTokens: stats.totalInputTokens,
           totalOutputTokens: stats.totalOutputTokens,
           totalCachedInputTokens: stats.totalCachedInputTokens,
+          totalReasoningTokens: stats.totalReasoningTokens,
+          truncatedEvents: stats.truncatedEvents,
           totalBytesIn: stats.totalBytesIn,
           totalBytesOut: stats.totalBytesOut,
           modelsUsed: stats.modelsUsed,

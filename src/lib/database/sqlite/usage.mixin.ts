@@ -16,6 +16,7 @@ const COUNTER_FIELDS = [
   'inputTokens',
   'outputTokens',
   'cachedInputTokens',
+  'reasoningTokens',
   'totalTokens',
   'costUsd',
   'latencyMsSum',
@@ -39,10 +40,10 @@ export function UsageRollupMixin<TBase extends Constructor<SQLiteProviderBase>>(
       const insert = db.prepare(`
         INSERT INTO ${TABLES.usageDaily}
         (id, tenantId, projectId, userId, apiTokenId, actorType, source, service, refKey, agentKey, metadataJson, metadataKey, day, dayDate,
-         requests, errors, inputTokens, outputTokens, cachedInputTokens, totalTokens,
+         requests, errors, inputTokens, outputTokens, cachedInputTokens, reasoningTokens, totalTokens,
          costUsd, latencyMsSum, latencyCount, units, updatedAt)
         VALUES (@id, @tenantId, @projectId, @userId, @apiTokenId, @actorType, @source, @service, @refKey, @agentKey, @metadataJson, @metadataKey, @day, @dayDate,
-         @requests, @errors, @inputTokens, @outputTokens, @cachedInputTokens, @totalTokens,
+         @requests, @errors, @inputTokens, @outputTokens, @cachedInputTokens, @reasoningTokens, @totalTokens,
          @costUsd, @latencyMsSum, @latencyCount, @units, @updatedAt)
       `);
       const update = db.prepare(`
@@ -52,6 +53,7 @@ export function UsageRollupMixin<TBase extends Constructor<SQLiteProviderBase>>(
           inputTokens = inputTokens + @inputTokens,
           outputTokens = outputTokens + @outputTokens,
           cachedInputTokens = cachedInputTokens + @cachedInputTokens,
+          reasoningTokens = reasoningTokens + @reasoningTokens,
           totalTokens = totalTokens + @totalTokens,
           costUsd = costUsd + @costUsd,
           latencyMsSum = latencyMsSum + @latencyMsSum,
@@ -213,6 +215,7 @@ export function UsageRollupMixin<TBase extends Constructor<SQLiteProviderBase>>(
         inputTokens: Number(row.inputTokens ?? 0),
         outputTokens: Number(row.outputTokens ?? 0),
         cachedInputTokens: Number(row.cachedInputTokens ?? 0),
+        reasoningTokens: Number(row.reasoningTokens ?? 0),
         totalTokens: Number(row.totalTokens ?? 0),
         costUsd: Number(row.costUsd ?? 0),
         latencyMsSum: Number(row.latencyMsSum ?? 0),

@@ -294,3 +294,86 @@ describe('convention edge cases', () => {
     expect(event.cachedInputTokens).toBeUndefined();
   });
 });
+
+describe('reasoningTokens across conventions', () => {
+  it('reads cognipeer.tokens.reasoning', () => {
+    const { event } = mapChild([int('cognipeer.tokens.reasoning', 512)]);
+    expect(event.reasoningTokens).toBe(512);
+  });
+
+  it('reads llm.token_count.completion_details.reasoning (OpenInference)', () => {
+    const { event } = mapChild([int('llm.token_count.completion_details.reasoning', 256)]);
+    expect(event.reasoningTokens).toBe(256);
+  });
+
+  it('reads gen_ai.usage.reasoning_tokens (OTel GenAI semconv)', () => {
+    const { event } = mapChild([int('gen_ai.usage.reasoning_tokens', 128)]);
+    expect(event.reasoningTokens).toBe(128);
+  });
+
+  it('reads gen_ai.usage.output_tokens_details.reasoning_tokens', () => {
+    const { event } = mapChild([int('gen_ai.usage.output_tokens_details.reasoning_tokens', 64)]);
+    expect(event.reasoningTokens).toBe(64);
+  });
+
+  it('prefers cognipeer.tokens.reasoning over every other convention', () => {
+    const { event } = mapChild([
+      int('cognipeer.tokens.reasoning', 10),
+      int('llm.token_count.completion_details.reasoning', 20),
+      int('gen_ai.usage.reasoning_tokens', 30),
+      int('gen_ai.usage.output_tokens_details.reasoning_tokens', 40),
+    ]);
+    expect(event.reasoningTokens).toBe(10);
+  });
+
+  it('leaves reasoningTokens absent when nothing reported it', () => {
+    const { event } = mapChild([str('openinference.span.kind', 'CHAIN')]);
+    expect(event.reasoningTokens).toBeUndefined();
+  });
+});
+
+describe('finishReason across conventions', () => {
+  it('reads cognipeer.finish_reason', () => {
+    const { event } = mapChild([str('cognipeer.finish_reason', 'stop')]);
+    expect(event.finishReason).toBe('stop');
+  });
+
+  it('reads gen_ai.response.finish_reasons as a JSON array, taking the first element', () => {
+    const { event } = mapChild([str('gen_ai.response.finish_reasons', '["length","stop"]')]);
+    expect(event.finishReason).toBe('length');
+  });
+
+  it('reads gen_ai.response.finish_reasons as a comma-joined string', () => {
+    const { event } = mapChild([str('gen_ai.response.finish_reasons', 'tool_calls,stop')]);
+    expect(event.finishReason).toBe('tool_calls');
+  });
+
+  it('reads gen_ai.response.finish_reasons as a plain single string', () => {
+    const { event } = mapChild([str('gen_ai.response.finish_reasons', 'stop')]);
+    expect(event.finishReason).toBe('stop');
+  });
+
+  it('reads llm.response.finish_reason (OpenInference)', () => {
+    const { event } = mapChild([str('llm.response.finish_reason', 'max_tokens')]);
+    expect(event.finishReason).toBe('max_tokens');
+  });
+
+  it('prefers cognipeer.finish_reason over every other convention', () => {
+    const { event } = mapChild([
+      str('cognipeer.finish_reason', 'stop'),
+      str('gen_ai.response.finish_reasons', '["length"]'),
+      str('llm.response.finish_reason', 'content_filter'),
+    ]);
+    expect(event.finishReason).toBe('stop');
+  });
+
+  it('normalizes casing/whitespace the same way the shared helper does', () => {
+    const { event } = mapChild([str('cognipeer.finish_reason', '  STOP  ')]);
+    expect(event.finishReason).toBe('stop');
+  });
+
+  it('leaves finishReason absent when nothing reported it', () => {
+    const { event } = mapChild([str('openinference.span.kind', 'CHAIN')]);
+    expect(event.finishReason).toBeUndefined();
+  });
+});

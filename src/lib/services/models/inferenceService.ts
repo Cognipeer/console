@@ -26,6 +26,7 @@ import {
   openAIStreamStopChunk,
   toOpenAIStreamChunk,
   summarizeUsage,
+  extractFinishReason,
 } from './openaiAdapter';
 import {
   normalizeInferenceError,
@@ -1284,6 +1285,9 @@ export async function handleChatCompletion(params: {
                 outputTokens: payload.usage.completion_tokens,
                 cachedInputTokens: payload.usage.cached_tokens,
                 totalTokens: payload.usage.total_tokens,
+                // Subset of outputTokens — never folded into totalTokens/cost.
+                reasoningTokens:
+                  payload.usage.completion_tokens_details?.reasoning_tokens,
               };
               // `usage` is only allowed on the wire when the caller asked for
               // it with `stream_options.include_usage`, and then only on a
@@ -1372,6 +1376,7 @@ export async function handleChatCompletion(params: {
               errorMessage: outputLimitError?.message,
               latencyMs,
               usage,
+              finishReason: terminalFinishReason,
             }),
           );
 
@@ -1417,6 +1422,7 @@ export async function handleChatCompletion(params: {
               errorMessage,
               latencyMs,
               usage: {},
+              finishReason: terminalFinishReason,
             }),
           );
 
@@ -1479,6 +1485,7 @@ export async function handleChatCompletion(params: {
       latencyMs,
       usage,
       cacheHit: false,
+      finishReason: extractFinishReason(aiMessage),
     }),
   );
 

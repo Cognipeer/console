@@ -687,4 +687,18 @@ export const tr: typeof en = {
     piiFindings: 'PII bulguları',
     openDataset: 'Veri setini aç',
   },
+  modelDetail: {
+    ...en.modelDetail,
+    logs: {
+      ...en.modelDetail.logs,
+      finishReason: 'Bitiş',
+      finishReasonNone: '—',
+      reasoningTokens: '+{count} akıl yürütme',
+      modal: {
+        ...en.modelDetail.logs.modal,
+        finishReason: 'Bitiş nedeni',
+        reasoningTokens: 'Yukarıdaki çıktı token’larının {count} tanesi akıl yürütme token’ıydı.',
+      },
+    },
+  },
 };

@@ -44,6 +44,7 @@ import {
     type AgentRuntimeContext,
 } from '@/lib/services/runtimeContext';
 import { invokeExternalAgent } from './externalAgent';
+import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
 
 const logger = createLogger('agents');
 
@@ -450,14 +451,27 @@ async function createInternalTracingSink(
 
                 const events = Array.isArray(session.events) ? session.events : [];
 
-                // Extract models and tools used
+                // Extract models and tools used, plus the diagnostic rollups
+                // (`totalReasoningTokens` / `truncatedEvents`) mirroring what
+                // `applyAgentTracingSessionEvent` would accumulate incrementally
+                // — this sink instead computes the whole session doc in one
+                // pass, so the sums are taken up front over `events`.
                 const modelsUsed = new Set<string>();
                 const toolsUsed = new Set<string>();
+                let totalReasoningTokens = 0;
+                let truncatedEvents = 0;
                 for (const event of events) {
                     if (event?.model) modelsUsed.add(event.model);
                     if (event?.toolName) toolsUsed.add(event.toolName);
                     if (event?.actor?.scope === 'tool' && event?.actor?.name) {
                         toolsUsed.add(event.actor.name);
+                    }
+                    const diagnostics = extractInternalTraceDiagnostics(event);
+                    if (diagnostics.reasoningTokens !== undefined) {
+                        totalReasoningTokens += diagnostics.reasoningTokens;
+                    }
+                    if (isTruncatedFinishReason(diagnostics.finishReason)) {
+                        truncatedEvents += 1;
                     }
                 }
                 if (session?.agent?.model) modelsUsed.add(session.agent.model);
@@ -489,6 +503,8 @@ async function createInternalTracingSink(
                     totalInputTokens: session.summary?.totalInputTokens ?? 0,
                     totalOutputTokens: session.summary?.totalOutputTokens ?? 0,
                     totalCachedInputTokens: session.summary?.totalCachedInputTokens ?? 0,
+                    totalReasoningTokens,
+                    truncatedEvents,
                     totalBytesIn: session.summary?.totalBytesIn ?? undefined,
                     totalBytesOut: session.summary?.totalBytesOut ?? undefined,
                 };
@@ -552,6 +568,14 @@ async function createInternalTracingSink(
                             usage?.cacheReadInputTokens ??
                             usage?.cache_read_input_tokens,
                         );
+                        const diagnostics = extractInternalTraceDiagnostics(event);
+                        // Strip the keys `extractInternalTraceDiagnostics` already
+                        // consumed so the same value never lands in both the
+                        // column and the metadata blob.
+                        const restMetadata = { ...(event.metadata ?? {}) } as Record<string, unknown>;
+                        delete restMetadata.finishReason;
+                        delete restMetadata.stop_reason;
+                        delete restMetadata.reasoningTokens;
 
                     const eventDoc: Omit<IAgentTracingEvent, '_id' | 'createdAt'> = {
                         sessionId: session.sessionId,
@@ -567,14 +591,14 @@ async function createInternalTracingSink(
                         timestamp: event.timestamp ? new Date(event.timestamp) : new Date(),
                         status: event.status ?? undefined,
                         actor: event.actor ?? {},
-                        // `finishReason` / `reasoningTokens` are top-level SDK
-                        // event fields with no column of their own, so they ride
-                        // in metadata — exactly as the HTTP ingest folds them
-                        // (client-tracing.ts buildEventMetadata). Without this
-                        // an agent hosted BY the console would be the only
-                        // source missing them, which is the worst place for a
-                        // gap: it is the path we control end to end.
-                        metadata: buildInternalEventMetadata(event),
+                        // `finishReason` / `reasoningTokens` are real columns now
+                        // (see `extractInternalTraceDiagnostics`), mirroring the
+                        // HTTP ingest's sibling `extractTraceDiagnostics`
+                        // (client-tracing.ts). Without this an agent hosted BY
+                        // the console would be the only source missing them,
+                        // which is the worst place for a gap: it is the path we
+                        // control end to end.
+                        metadata: restMetadata,
                         sections,
                         modelNames: event.modelNames ?? [],
                         model: event.model ?? undefined,
@@ -590,6 +614,8 @@ async function createInternalTracingSink(
                         outputTokens,
                         cachedInputTokens,
                         totalTokens: event.totalTokens ?? undefined,
+                        finishReason: diagnostics.finishReason,
+                        reasoningTokens: diagnostics.reasoningTokens,
                         bytesIn: event.bytesIn ?? undefined,
                         bytesOut: event.bytesOut ?? undefined,
                         requestBytes: event.requestBytes ?? undefined,
@@ -611,30 +637,40 @@ async function createInternalTracingSink(
     });
 }
 
-    /**
-     * Fold the SDK's top-level diagnostic fields into `metadata`, mirroring the
-     * HTTP ingest so both trace sources render identically.
-     *
-     * `finishReason` explains a truncated answer (`length` is the usual cause
-     * of unparseable JSON); `reasoningTokens` is a SUBSET of `outputTokens`,
-     * recorded for attribution and deliberately never added to the bill.
-     */
-    export function buildInternalEventMetadata(event: InternalTraceEvent): Record<string, unknown> {
-        const metadata: Record<string, unknown> = { ...(event.metadata ?? {}) };
-        const finishReason = event.finishReason ?? metadata.finishReason;
-        if (typeof finishReason === 'string' && finishReason.trim() !== '') {
-            metadata.finishReason = finishReason.trim();
-        }
-        const reasoningTokens = toOptionalNumber(
-            event.reasoningTokens
-            ?? event.usage?.reasoningTokens
-            ?? event.usage?.reasoning_tokens,
-        );
-        if (reasoningTokens !== undefined && reasoningTokens > 0) {
-            metadata.reasoningTokens = reasoningTokens;
-        }
-        return metadata;
-    }
+/**
+ * Pull the SDK's top-level diagnostic fields off a raw trace event so they can
+ * be persisted as real `finishReason` / `reasoningTokens` columns instead of
+ * being buried in the `metadata` JSON blob.
+ *
+ * This is the internal-sink twin of the HTTP ingest's `extractTraceDiagnostics`
+ * (`src/server/api/plugins/client-tracing.ts`) — both paths write to the same
+ * `agentTracingEvents` table read by the same UI, so they must stay in
+ * lockstep: a value read from `finishReason` here but from `metadata` there
+ * (or vice versa) would make one trace source silently poorer than the other.
+ *
+ * `finishReason` explains a truncated answer (`length` is the usual cause of
+ * unparseable JSON); `reasoningTokens` is a SUBSET of `outputTokens`, recorded
+ * for attribution and deliberately never added to the bill.
+ */
+export function extractInternalTraceDiagnostics(event: InternalTraceEvent): {
+    finishReason?: string;
+    reasoningTokens?: number;
+} {
+    const metadata = event.metadata ?? {};
+    const finishReason = normalizeFinishReason(
+        event.finishReason ?? metadata.finishReason ?? metadata.stop_reason,
+    );
+    const reasoningTokens = toOptionalNumber(
+        event.reasoningTokens
+        ?? event.usage?.reasoningTokens
+        ?? event.usage?.reasoning_tokens
+        ?? metadata.reasoningTokens,
+    );
+    return {
+        finishReason,
+        reasoningTokens: reasoningTokens !== undefined && reasoningTokens > 0 ? reasoningTokens : undefined,
+    };
+}
 
     function toOptionalNumber(value: unknown): number | undefined {
         if (value === null || value === undefined || value === '') {

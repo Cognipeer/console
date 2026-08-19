@@ -259,6 +259,12 @@ export interface IAgentTracingSession extends IUsageAttributionFields {
   totalInputTokens?: number;
   totalOutputTokens?: number;
   totalCachedInputTokens?: number;
+  /** Sum of `reasoningTokens` across the session's events — a subset of
+   *  `totalOutputTokens`, never added on top of it. */
+  totalReasoningTokens?: number;
+  /** Count of events whose `finishReason` is a truncation reason (see
+   *  `isTruncatedFinishReason`), e.g. the model hit its token limit. */
+  truncatedEvents?: number;
   totalBytesIn?: number;
   totalBytesOut?: number;
   totalRequestBytes?: number;
@@ -276,6 +282,12 @@ export interface AgentTracingSessionEventDelta {
   inputTokens?: number;
   outputTokens?: number;
   cachedInputTokens?: number;
+  /** Subset of `outputTokens` (e.g. OpenAI `completion_tokens_details.reasoning_tokens`);
+   *  never added into `totalTokens` or any cost arithmetic. */
+  reasoningTokens?: number;
+  /** Normalized (trim + lowercase) provider finish reason for this event's
+   *  model call, used to bump `truncatedEvents` when it indicates a cutoff. */
+  finishReason?: string;
   durationMs?: number;
   /** Event type whose per-type counter should be bumped, e.g. `ai_call`. */
   eventType?: string;
@@ -393,6 +405,12 @@ export interface IAgentTracingEvent {
   outputTokens?: number;
   totalTokens?: number;
   cachedInputTokens?: number;
+  /** Subset of `outputTokens` (e.g. OpenAI `completion_tokens_details.reasoning_tokens`);
+   *  never added into `totalTokens` or any cost arithmetic. */
+  reasoningTokens?: number;
+  /** Normalized (trim + lowercase) raw provider finish reason, e.g. `stop`,
+   *  `length`, `tool_calls`. See `src/lib/shared/finishReason.ts`. */
+  finishReason?: string;
   bytesIn?: number;
   bytesOut?: number;
   requestBytes?: number;
@@ -756,6 +774,12 @@ export interface IModelUsageLog extends IUsageAttributionFields {
   outputTokens: number;
   cachedInputTokens?: number;
   totalTokens: number;
+  /** Subset of `outputTokens` (e.g. OpenAI `completion_tokens_details.reasoning_tokens`);
+   *  never added into `totalTokens` or any cost arithmetic. */
+  reasoningTokens?: number;
+  /** Normalized (trim + lowercase) raw provider finish reason, e.g. `stop`,
+   *  `length`, `tool_calls`. See `src/lib/shared/finishReason.ts`. */
+  finishReason?: string;
   toolCalls?: number;
   cacheHit?: boolean;
   pricingSnapshot?: IModelPricing & IModelUsageCostSnapshot;
@@ -808,6 +832,9 @@ export interface IUsageDaily {
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens: number;
+  /** Subset of `outputTokens` (e.g. OpenAI `completion_tokens_details.reasoning_tokens`);
+   *  never added into `totalTokens` or any cost arithmetic. */
+  reasoningTokens: number;
   totalTokens: number;
   costUsd: number;
   latencyMsSum: number;
@@ -839,6 +866,9 @@ export interface IUsageDailyIncrement {
   inputTokens?: number;
   outputTokens?: number;
   cachedInputTokens?: number;
+  /** Subset of `outputTokens`; never added into `totalTokens` or any cost
+   *  arithmetic. Mirrors `IUsageDaily.reasoningTokens`. */
+  reasoningTokens?: number;
   totalTokens?: number;
   costUsd?: number;
   latencyMsSum?: number;

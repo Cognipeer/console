@@ -14,6 +14,7 @@ import {
 import { calculateCost } from '@/lib/services/models/usageLogger';
 import { resolveExternalPricingForDay } from '@/lib/services/modelPriceCatalog/externalPricing';
 import { toUtcDay } from '@/lib/services/usage/usageBreakdown';
+import { normalizeFinishReason } from '@/lib/shared/finishReason';
 import dayjs from 'dayjs';
 
 const logger = createLogger('agent-tracing');
@@ -68,6 +69,9 @@ export interface TraceUsageEventLike {
   inputTokens?: number;
   outputTokens?: number;
   cachedInputTokens?: number;
+  /** Subset of `outputTokens` (e.g. OpenAI `completion_tokens_details.reasoning_tokens`);
+   *  never added into `totalTokens` or any cost arithmetic. */
+  reasoningTokens?: number;
   /** Model-call wall time — feeds the rollup's latency counters so latency
    *  optimization works for direct-to-provider (on-prem) traffic too. */
   durationMs?: number;
@@ -78,6 +82,7 @@ interface ModelTokenTotals {
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens: number;
+  reasoningTokens: number;
   calls: number;
   /** Sum of durationMs over the calls that reported one. */
   durationMsSum: number;
@@ -110,11 +115,14 @@ function sumTokensByModel(events: TraceUsageEventLike[]): Map<string, ModelToken
     const outputTokens = typeof event.outputTokens === 'number' ? event.outputTokens : 0;
     const cachedInputTokens =
       typeof event.cachedInputTokens === 'number' ? event.cachedInputTokens : 0;
+    const reasoningTokens =
+      typeof event.reasoningTokens === 'number' ? event.reasoningTokens : 0;
     if (inputTokens === 0 && outputTokens === 0 && cachedInputTokens === 0) continue;
     const totals = byModel.get(model) ?? {
       inputTokens: 0,
       outputTokens: 0,
       cachedInputTokens: 0,
+      reasoningTokens: 0,
       calls: 0,
       durationMsSum: 0,
       durationSamples: 0,
@@ -122,6 +130,7 @@ function sumTokensByModel(events: TraceUsageEventLike[]): Map<string, ModelToken
     totals.inputTokens += inputTokens;
     totals.outputTokens += outputTokens;
     totals.cachedInputTokens += cachedInputTokens;
+    totals.reasoningTokens += reasoningTokens;
     totals.calls += 1;
     if (typeof event.durationMs === 'number' && event.durationMs > 0) {
       totals.durationMsSum += event.durationMs;
@@ -184,6 +193,10 @@ export async function recordTraceModelUsage(params: {
         0,
         totals.cachedInputTokens - (prior?.cachedInputTokens ?? 0),
       );
+      const reasoningTokens = Math.max(
+        0,
+        totals.reasoningTokens - (prior?.reasoningTokens ?? 0),
+      );
       const calls = Math.max(0, totals.calls - (prior?.calls ?? 0));
       const durationMsSum = Math.max(0, totals.durationMsSum - (prior?.durationMsSum ?? 0));
       const durationSamples = Math.max(0, totals.durationSamples - (prior?.durationSamples ?? 0));
@@ -211,6 +224,9 @@ export async function recordTraceModelUsage(params: {
         inputTokens,
         outputTokens,
         cachedInputTokens,
+        // reasoningTokens is a SUBSET of outputTokens — never add it into
+        // totalTokens or cost arithmetic (mirrors cachedInputTokens handling).
+        reasoningTokens,
         totalTokens: inputTokens + outputTokens + cachedInputTokens,
         costUsd,
         // Latency: aggregate model-call durations, weighted by sample count —
@@ -298,9 +314,15 @@ const SESSION_LIST_PROJECTION = {
   totalInputTokens: 1,
   totalOutputTokens: 1,
   totalCachedInputTokens: 1,
+  totalReasoningTokens: 1,
+  truncatedEvents: 1,
   metadata: 1,
 } as const;
 
+// A field missing from this projection is invisible in the timeline list on
+// Mongo (which honors projections) while SQLite (which ignores them and
+// always returns full rows) still returns it — a silent provider-dependent
+// difference. finishReason/reasoningTokens are listed here for that reason.
 const SESSION_EVENT_SUMMARY_PROJECTION = {
   id: 1,
   sequence: 1,
@@ -315,6 +337,8 @@ const SESSION_EVENT_SUMMARY_PROJECTION = {
   outputTokens: 1,
   totalTokens: 1,
   cachedInputTokens: 1,
+  reasoningTokens: 1,
+  finishReason: 1,
   spanId: 1,
   parentSpanId: 1,
   // Per-turn tool menu, names only: sections survive as {kind} shells except
@@ -426,6 +450,28 @@ function getToolDefinitionNames(
   return { names: names.slice(0, SUMMARY_TOOL_NAME_CAP), count: names.length };
 }
 
+/**
+ * `finishReason`/`reasoningTokens` became first-class columns on
+ * `IAgentTracingEvent`; rows written before that migration only carry them
+ * inside `metadata`. Fall back to the legacy location so old and new rows
+ * compare equal — this fallback can be dropped once the backfill has run
+ * everywhere.
+ */
+function legacyEventFinishReason(event: IAgentTracingEvent): string | undefined {
+  const direct = normalizeFinishReason(event.finishReason);
+  if (direct) return direct;
+  return normalizeFinishReason(
+    typeof event.metadata?.finishReason === 'string' ? event.metadata.finishReason : undefined,
+  );
+}
+
+function legacyEventReasoningTokens(event: IAgentTracingEvent): number | undefined {
+  if (typeof event.reasoningTokens === 'number') return event.reasoningTokens;
+  return typeof event.metadata?.reasoningTokens === 'number'
+    ? event.metadata.reasoningTokens
+    : undefined;
+}
+
 function mapTracingEventSummary(event: IAgentTracingEvent) {
   const toolMenu = getToolDefinitionNames(event);
   return {
@@ -442,6 +488,8 @@ function mapTracingEventSummary(event: IAgentTracingEvent) {
     outputTokens: event.outputTokens,
     totalTokens: event.totalTokens,
     cachedInputTokens: event.cachedInputTokens,
+    reasoningTokens: legacyEventReasoningTokens(event),
+    finishReason: legacyEventFinishReason(event),
     spanId: event.spanId,
     parentSpanId: event.parentSpanId,
     ...(toolMenu
@@ -471,6 +519,8 @@ function mapTracingEventDetail(event: IAgentTracingEvent) {
     outputTokens: event.outputTokens,
     totalTokens: event.totalTokens,
     cachedInputTokens: event.cachedInputTokens,
+    reasoningTokens: legacyEventReasoningTokens(event),
+    finishReason: legacyEventFinishReason(event),
     requestBytes: event.requestBytes,
     responseBytes: event.responseBytes,
     traceId: event.traceId,
@@ -832,6 +882,8 @@ export class AgentTracingService {
       skip?: string;
       metadataKey?: string;
       metadataValue?: string;
+      /** Only sessions with `truncatedEvents > 0`. */
+      truncated?: boolean;
     },
   ) {
     const db = await getDatabase();
@@ -848,6 +900,7 @@ export class AgentTracingService {
       skip: filters?.skip || '0',
       metadataKey: filters?.metadataKey,
       metadataValue: filters?.metadataValue,
+      truncated: filters?.truncated,
     }, projectId);
 
     return {
@@ -864,6 +917,8 @@ export class AgentTracingService {
         totalInputTokens: s.totalInputTokens,
         totalOutputTokens: s.totalOutputTokens,
         totalCachedInputTokens: s.totalCachedInputTokens,
+        totalReasoningTokens: s.totalReasoningTokens,
+        truncatedEvents: s.truncatedEvents,
         metadata: s.metadata,
       })),
       total: result.total,
@@ -914,6 +969,8 @@ export class AgentTracingService {
         totalInputTokens: session.totalInputTokens,
         totalOutputTokens: session.totalOutputTokens,
         totalCachedInputTokens: session.totalCachedInputTokens,
+        totalReasoningTokens: session.totalReasoningTokens,
+        truncatedEvents: session.truncatedEvents,
         totalBytesIn: session.totalBytesIn,
         totalBytesOut: session.totalBytesOut,
         summary: session.summary,
