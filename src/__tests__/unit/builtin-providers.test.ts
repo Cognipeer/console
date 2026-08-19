@@ -7,7 +7,8 @@
  * never throws into the calling read path.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { reloadConfig } from '@/lib/core/config';
 
 const mockDb = {
   switchToTenant: vi.fn(),
@@ -58,6 +59,12 @@ function freshScope() {
   };
 }
 
+// The built-in vector driver depends on DB_PROVIDER (mongodb-community-vector
+// vs. sqlite-vector — see builtinProviders.ts). Pin it to sqlite here so
+// these tests are deterministic regardless of the environment they run in;
+// the DB_PROVIDER=mongodb branch gets its own dedicated test below.
+const previousDbProvider = process.env.DB_PROVIDER;
+
 beforeEach(() => {
   vi.clearAllMocks();
   mockDb.switchToTenant.mockResolvedValue(undefined);
@@ -66,6 +73,17 @@ beforeEach(() => {
   mockCreateProviderConfig.mockResolvedValue({} as never);
   mockUpdateProviderConfig.mockResolvedValue({} as never);
   mockCreateFileBucket.mockResolvedValue({} as never);
+  process.env.DB_PROVIDER = 'sqlite';
+  reloadConfig();
+});
+
+afterEach(() => {
+  if (previousDbProvider === undefined) {
+    delete process.env.DB_PROVIDER;
+  } else {
+    process.env.DB_PROVIDER = previousDbProvider;
+  }
+  reloadConfig();
 });
 
 describe('ensureBuiltinProviders', () => {
@@ -168,6 +186,20 @@ describe('ensureBuiltinProviders', () => {
     await expect(
       ensureBuiltinProviders(tenantDbName, TENANT_ID, projectId, USER_ID),
     ).resolves.toBeUndefined();
+  });
+
+  it('uses the MongoDB community vector driver when DB_PROVIDER=mongodb', async () => {
+    const { tenantDbName, projectId } = freshScope();
+
+    process.env.DB_PROVIDER = 'mongodb';
+    reloadConfig();
+
+    await ensureBuiltinProviders(tenantDbName, TENANT_ID, projectId, USER_ID);
+
+    const vectorPayload = mockCreateProviderConfig.mock.calls.find(
+      ([, , payload]) => payload.key === BUILTIN_VECTOR_PROVIDER_KEY,
+    )![2];
+    expect(vectorPayload.driver).toBe('mongodb-community-vector');
   });
 
   it('memoises successful provisioning per tenant/project pair', async () => {

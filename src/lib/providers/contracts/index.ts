@@ -21,6 +21,7 @@ import { MilvusVectorProviderContract } from './milvusVector.contract';
 import { MilvusCloudVectorProviderContract } from './milvusCloudVector.contract';
 import { MilvusLocalVectorProviderContract } from './milvusLocalVector.contract';
 import { MongoDbVectorProviderContract } from './mongodbVector.contract';
+import { MongoCommunityVectorProviderContract } from './mongoCommunityVector.contract';
 import { OramaVectorProviderContract } from './oramaVector.contract';
 import { PostgresVectorProviderContract } from './postgresVector.contract';
 import { SystemDefaultVectorProviderContract } from './systemDefaultVector.contract';
@@ -42,6 +43,7 @@ export const CORE_PROVIDER_CONTRACTS = [
   MilvusCloudVectorProviderContract,
   MilvusLocalVectorProviderContract,
   MongoDbVectorProviderContract,
+  MongoCommunityVectorProviderContract,
   OramaVectorProviderContract,
   PostgresVectorProviderContract,
   SystemDefaultVectorProviderContract,

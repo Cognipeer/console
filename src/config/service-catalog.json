@@ -200,6 +200,17 @@
       "aliases": ["atlas"]
     },
     {
+      "id": "mongodb-community-vector",
+      "driver": "mongodb-community-vector",
+      "name": "MongoDB Vector Store",
+      "tagline": "Shared vector store on any MongoDB (no Atlas required)",
+      "description": "Brute-force similarity search computed at query time against a standard MongoDB deployment (self-hosted Community or Atlas). No Atlas Search index needed — safe for clustered/multi-instance deployments since data lives in MongoDB, not on node-local disk.",
+      "domains": ["vector"],
+      "color": "#10b981",
+      "tags": ["built-in", "self-hosted", "default"],
+      "aliases": ["mongo-community", "mongo-vector"]
+    },
+    {
       "id": "postgres",
       "driver": "postgres",
       "name": "PostgreSQL (pgvector)",

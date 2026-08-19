@@ -1,5 +1,6 @@
 import { getDatabase } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
+import { getConfig } from '@/lib/core/config';
 import {
   createProviderConfig,
   updateProviderConfig,
@@ -9,11 +10,18 @@ import { createFileBucket } from '@/lib/services/files';
 /**
  * Built-in zero-configuration providers.
  *
- * Every tenant/project gets a local vector provider (SQLite) and a local
- * file provider (server filesystem) without any manual setup, so knowledge
- * bases can be created out of the box — no external services, credentials
- * or settings required. Data lives under DATA_DIR (the mounted app-data
- * volume in Docker).
+ * Every tenant/project gets a vector provider and a local file provider
+ * without any manual setup, so knowledge bases can be created out of the
+ * box — no external services, credentials or settings required.
+ *
+ * The vector driver depends on the main database:
+ *  - DB_PROVIDER=sqlite → local SQLite files under DATA_DIR. Fine as long as
+ *    the app runs as a single instance (the store is node-local disk).
+ *  - DB_PROVIDER=mongodb → the app already has a shared MongoDB connection,
+ *    so the vector store lives there too (brute-force query, no Atlas Search
+ *    index required — see mongoCommunityVector.contract.ts). This keeps
+ *    indexing and querying consistent across every node in a cluster, which
+ *    a node-local SQLite file cannot guarantee.
  */
 
 export const BUILTIN_VECTOR_PROVIDER_KEY = 'builtin-vector';
@@ -35,24 +43,40 @@ interface BuiltinProviderSpec {
   description: string;
 }
 
-const BUILTIN_PROVIDER_SPECS: BuiltinProviderSpec[] = [
-  {
-    key: BUILTIN_VECTOR_PROVIDER_KEY,
-    type: 'vector',
-    driver: 'sqlite-vector',
-    label: 'Built-in Vector Store',
-    description:
-      'Local persistent vector store (SQLite). No external service or credentials required.',
-  },
-  {
-    key: BUILTIN_FILE_PROVIDER_KEY,
-    type: 'file',
-    driver: 'local-filesystem',
-    label: 'Built-in File Storage',
-    description:
-      'Local persistent file storage on the server disk. No external service or credentials required.',
-  },
-];
+function builtinVectorSpec(): BuiltinProviderSpec {
+  const isMongo = getConfig().database.provider === 'mongodb';
+  return isMongo
+    ? {
+        key: BUILTIN_VECTOR_PROVIDER_KEY,
+        type: 'vector',
+        driver: 'mongodb-community-vector',
+        label: 'Built-in Vector Store',
+        description:
+          'Shared vector store on the app\'s own MongoDB connection. No external service, credentials, or Atlas Search index required.',
+      }
+    : {
+        key: BUILTIN_VECTOR_PROVIDER_KEY,
+        type: 'vector',
+        driver: 'sqlite-vector',
+        label: 'Built-in Vector Store',
+        description:
+          'Local persistent vector store (SQLite). No external service or credentials required.',
+      };
+}
+
+function builtinProviderSpecs(): BuiltinProviderSpec[] {
+  return [
+    builtinVectorSpec(),
+    {
+      key: BUILTIN_FILE_PROVIDER_KEY,
+      type: 'file',
+      driver: 'local-filesystem',
+      label: 'Built-in File Storage',
+      description:
+        'Local persistent file storage on the server disk. No external service or credentials required.',
+    },
+  ];
+}
 
 function isAlreadyExistsError(error: unknown): boolean {
   return error instanceof Error && /already exists/i.test(error.message);
@@ -160,7 +184,7 @@ export async function ensureBuiltinProviders(
   if (ensured.has(memoKey)) return;
 
   try {
-    for (const spec of BUILTIN_PROVIDER_SPECS) {
+    for (const spec of builtinProviderSpecs()) {
       await ensureProviderRecord(tenantDbName, tenantId, projectId, userId, spec);
     }
     await ensureBuiltinBucket(tenantDbName, tenantId, projectId, userId);
