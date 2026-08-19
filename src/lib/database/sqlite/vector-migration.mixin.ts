@@ -76,17 +76,21 @@ export function VectorMigrationMixin<TBase extends Constructor<SQLiteProviderBas
       const sets: string[] = ['updatedAt = @updatedAt'];
       const params: Record<string, unknown> = { key, updatedAt: now };
 
-      if (data.name !== undefined) { sets.push('name = @name'); params.name = data.name; }
-      if (data.description !== undefined) { sets.push('description = @description'); params.description = data.description; }
-      if (data.status !== undefined) { sets.push('status = @status'); params.status = data.status; }
-      if (data.totalVectors !== undefined) { sets.push('totalVectors = @totalVectors'); params.totalVectors = data.totalVectors; }
-      if (data.migratedVectors !== undefined) { sets.push('migratedVectors = @migratedVectors'); params.migratedVectors = data.migratedVectors; }
-      if (data.failedVectors !== undefined) { sets.push('failedVectors = @failedVectors'); params.failedVectors = data.failedVectors; }
-      if (data.errorMessage !== undefined) { sets.push('errorMessage = @errorMessage'); params.errorMessage = data.errorMessage; }
-      if (data.startedAt !== undefined) { sets.push('startedAt = @startedAt'); params.startedAt = data.startedAt ? data.startedAt.toISOString() : null; }
-      if (data.completedAt !== undefined) { sets.push('completedAt = @completedAt'); params.completedAt = data.completedAt ? data.completedAt.toISOString() : null; }
-      if (data.metadata !== undefined) { sets.push('metadata = @metadata'); params.metadata = this.toJson(data.metadata); }
-      if (data.updatedBy !== undefined) { sets.push('updatedBy = @updatedBy'); params.updatedBy = data.updatedBy; }
+      // Presence (not value) decides: an explicit `undefined` clears the column
+      // — the restart path resets errorMessage/startedAt/completedAt that way.
+      const has = (field: keyof typeof data) => Object.hasOwn(data, field);
+
+      if (has('name')) { sets.push('name = @name'); params.name = data.name; }
+      if (has('description')) { sets.push('description = @description'); params.description = data.description ?? null; }
+      if (has('status')) { sets.push('status = @status'); params.status = data.status; }
+      if (has('totalVectors')) { sets.push('totalVectors = @totalVectors'); params.totalVectors = data.totalVectors; }
+      if (has('migratedVectors')) { sets.push('migratedVectors = @migratedVectors'); params.migratedVectors = data.migratedVectors; }
+      if (has('failedVectors')) { sets.push('failedVectors = @failedVectors'); params.failedVectors = data.failedVectors; }
+      if (has('errorMessage')) { sets.push('errorMessage = @errorMessage'); params.errorMessage = data.errorMessage ?? null; }
+      if (has('startedAt')) { sets.push('startedAt = @startedAt'); params.startedAt = data.startedAt ? data.startedAt.toISOString() : null; }
+      if (has('completedAt')) { sets.push('completedAt = @completedAt'); params.completedAt = data.completedAt ? data.completedAt.toISOString() : null; }
+      if (has('metadata')) { sets.push('metadata = @metadata'); params.metadata = this.toJson(data.metadata ?? {}); }
+      if (has('updatedBy')) { sets.push('updatedBy = @updatedBy'); params.updatedBy = data.updatedBy ?? null; }
 
       db.prepare(`UPDATE ${TABLES.vectorMigrations} SET ${sets.join(', ')} WHERE key = @key`).run(params);
       return this.findVectorMigrationByKey(key);
@@ -104,6 +108,7 @@ export function VectorMigrationMixin<TBase extends Constructor<SQLiteProviderBas
     async listVectorMigrations(filters?: {
       projectId?: string;
       status?: VectorMigrationStatus;
+      statuses?: VectorMigrationStatus[];
     }): Promise<IVectorMigration[]> {
       const db = this.getTenantDb();
       const clauses: string[] = [];
@@ -111,6 +116,11 @@ export function VectorMigrationMixin<TBase extends Constructor<SQLiteProviderBas
 
       if (filters?.projectId) { clauses.push('projectId = @projectId'); params.projectId = filters.projectId; }
       if (filters?.status) { clauses.push('status = @status'); params.status = filters.status; }
+      if (filters?.statuses && filters.statuses.length > 0) {
+        const placeholders = filters.statuses.map((_, i) => `@status${i}`);
+        clauses.push(`status IN (${placeholders.join(', ')})`);
+        filters.statuses.forEach((value, i) => { params[`status${i}`] = value; });
+      }
 
       const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
       const rows = db.prepare(`SELECT * FROM ${TABLES.vectorMigrations} ${where} ORDER BY createdAt DESC`).all(params) as SqliteRow[];

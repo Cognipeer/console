@@ -38,12 +38,18 @@ const POLL_INTERVAL_MS = 3000;
 function statusColor(status: VectorMigrationStatus): string {
   switch (status) {
     case 'pending': return 'yellow';
+    case 'queued': return 'blue';
     case 'running': return 'teal';
     case 'completed': return 'green';
     case 'failed': return 'red';
     case 'cancelled': return 'gray';
     default: return 'gray';
   }
+}
+
+/** Queued or running — the background job owns the record. */
+function isActive(status: VectorMigrationStatus): boolean {
+  return status === 'queued' || status === 'running';
 }
 
 function formatDate(value?: string | Date | null): string {
@@ -74,7 +80,7 @@ export default function VectorMigrationsPage() {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const hasRunning = useMemo(
-    () => migrations.some((m) => m.status === 'running'),
+    () => migrations.some((m) => isActive(m.status)),
     [migrations],
   );
 
@@ -193,7 +199,7 @@ export default function VectorMigrationsPage() {
 
   const counts = useMemo(() => ({
     total: migrations.length,
-    running: migrations.filter((m) => m.status === 'running').length,
+    running: migrations.filter((m) => isActive(m.status)).length,
     completed: migrations.filter((m) => m.status === 'completed').length,
     failed: migrations.filter((m) => m.status === 'failed').length,
   }), [migrations]);
@@ -356,7 +362,7 @@ export default function VectorMigrationsPage() {
                           </ActionIcon>
                         </Tooltip>
                       ) : null}
-                      {m.status === 'running' ? (
+                      {isActive(m.status) ? (
                         <Tooltip label="Cancel migration">
                           <ActionIcon
                             size="sm"
@@ -378,7 +384,7 @@ export default function VectorMigrationsPage() {
                           <IconArrowRight size={14} />
                         </ActionIcon>
                       </Tooltip>
-                      {m.status !== 'running' ? (
+                      {!isActive(m.status) ? (
                         <Tooltip label="Delete migration">
                           <ActionIcon
                             size="sm"

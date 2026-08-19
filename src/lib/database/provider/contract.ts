@@ -497,6 +497,7 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   listVectorMigrations(filters?: {
     projectId?: string;
     status?: VectorMigrationStatus;
+    statuses?: VectorMigrationStatus[];
   }): Promise<IVectorMigration[]>;
   findVectorMigrationByKey(key: string): Promise<IVectorMigration | null>;
   createVectorMigrationLog(

@@ -591,7 +591,13 @@ export interface IVectorIndexRecord {
 
 // ── Vector Migration types ──────────────────────────────────────────────
 
-export type VectorMigrationStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+export type VectorMigrationStatus =
+  | 'pending'
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
 
 export interface IVectorMigration {
   _id?: ObjectId | string;
