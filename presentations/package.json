@@ -1,0 +1,14 @@
+{
+  "name": "cognipeer-console-presentations",
+  "private": true,
+  "type": "module",
+  "description": "Deck generators for Cognipeer Console. Build tooling only - not part of the app build.",
+  "scripts": {
+    "build": "node build-control-plane-deck.mjs"
+  },
+  "dependencies": {
+    "@tabler/icons": "^3.35.0",
+    "pptxgenjs": "^3.12.0",
+    "sharp": "^0.33.5"
+  }
+}
