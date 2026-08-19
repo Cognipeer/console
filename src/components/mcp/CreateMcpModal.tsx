@@ -693,7 +693,9 @@ export default function CreateMcpModal({
                   .map((p) => ({ value: p.id, label: p.label }))}
                 value={v.internalProvider}
                 onChange={(val) => {
-                  form.setFieldValue('internalProvider', val);
+                  // ChipPicker<T> types onChange as T | Set<T> for multi-select;
+                  // this usage is single-select, so val is always a plain string.
+                  form.setFieldValue('internalProvider', val as string);
                   // Instance picking only applies to Knowledge Base today —
                   // reset it when switching so a stale key can't leak through.
                   form.setFieldValue('internalInstanceKey', '');
