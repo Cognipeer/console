@@ -44,6 +44,7 @@ import {
 import { remoteCallTool, remoteListTools } from './remoteMcpClient';
 import { isStdioRunnerEnabled, stdioCallTool, stdioListTools } from './stdioRunner';
 import { mcpGuardrailHook, mcpSandboxRunner } from '@/enterprise/registry';
+import { requireInternalMcpProvider } from './internal/registry';
 
 const logger = createLogger('mcp-service');
 const SLUG_OPTIONS = { lower: true, strict: true, trim: true };
@@ -372,6 +373,14 @@ function validateCreateInput(input: CreateMcpServerInput): McpSourceType {
       throw new Error('Stdio subprocess execution is disabled on this deployment');
     }
   }
+  if (sourceType === 'internal') {
+    if (!input.internalConfig?.provider?.trim()) {
+      throw new Error('internalConfig.provider is required for source type "internal"');
+    }
+    if (!input.internalConfig?.instanceKey?.trim()) {
+      throw new Error('internalConfig.instanceKey is required for source type "internal"');
+    }
+  }
   return sourceType;
 }
 
@@ -428,12 +437,26 @@ export async function createMcpServer(
 
   const stdioConfig = input.stdioConfig ? sealStdioEnv(input.stdioConfig) : undefined;
 
+  let internalMetadata: Record<string, unknown> | undefined;
+  let description = input.description?.trim();
+  if (sourceType === 'internal') {
+    const ctx = { tenantDbName, tenantId, projectId };
+    const provider = requireInternalMcpProvider(input.internalConfig!.provider);
+    const instanceKey = input.internalConfig!.instanceKey;
+    const config = input.internalConfig!.config ?? {};
+    await provider.validateInstance(ctx, instanceKey, config);
+    const built = await provider.buildTools(ctx, instanceKey, config);
+    tools = built.tools;
+    description = description || built.suggestedDescription;
+    internalMetadata = { provider: provider.id, instanceKey, config };
+  }
+
   const server = await db.createMcpServer({
     tenantId,
     projectId: projectId ?? undefined,
     key,
     name: input.name.trim(),
-    description: input.description?.trim(),
+    description,
     sourceType,
     openApiSpec: normalizedSpec,
     remoteConfig: input.remoteConfig,
@@ -447,6 +470,7 @@ export async function createMcpServer(
     status: 'active',
     endpointSlug,
     totalRequests: 0,
+    metadata: internalMetadata ? { internal: internalMetadata } : undefined,
     createdBy: userId,
   });
 
@@ -618,6 +642,27 @@ export async function updateMcpServer(
     && (updateData.stdioConfig as IMcpStdioConfig).executionMode === 'subprocess') {
     updateData.tools = await stdioListTools(updateData.stdioConfig as IMcpStdioConfig);
     updateData.toolsDiscoveredAt = new Date();
+  }
+  if (sourceType === 'internal' && input.internalConfig !== undefined) {
+    const existingInternal = (existing.metadata as Record<string, unknown> | undefined)?.internal as
+      | { provider?: string; instanceKey?: string; config?: Record<string, unknown> }
+      | undefined;
+    const providerId = input.internalConfig.provider || existingInternal?.provider;
+    const instanceKey = input.internalConfig.instanceKey || existingInternal?.instanceKey;
+    if (!providerId || !instanceKey) {
+      throw new Error('internalConfig.provider and internalConfig.instanceKey are required');
+    }
+    const config = { ...(existingInternal?.config ?? {}), ...(input.internalConfig.config ?? {}) };
+    const provider = requireInternalMcpProvider(providerId);
+    const ctx = { tenantDbName, tenantId: existing.tenantId, projectId: existing.projectId };
+    await provider.validateInstance(ctx, instanceKey, config);
+    const built = await provider.buildTools(ctx, instanceKey, config);
+    updateData.tools = built.tools;
+    updateData.toolsDiscoveredAt = new Date();
+    updateData.metadata = {
+      ...((updateData.metadata as Record<string, unknown> | undefined) ?? existing.metadata),
+      internal: { provider: provider.id, instanceKey, config },
+    };
   }
 
   // Tool enable/disable list (metadata-backed). Runs after tool rediscovery so
@@ -1086,6 +1131,26 @@ export async function executeMcpToolLocal(
           auth: openAuthConfig(server.upstreamAuth),
           extraHeaders: runtimeHeaders,
         },
+        toolName,
+        effectiveArgs,
+      );
+    } else if (sourceType === 'internal') {
+      const internal = (server.metadata as Record<string, unknown> | undefined)?.internal as
+        | { provider?: string; instanceKey?: string; config?: Record<string, unknown> }
+        | undefined;
+      if (!internal?.provider || !internal.instanceKey) {
+        throw new Error(`MCP server "${server.name}" has no internal provider configured`);
+      }
+      const provider = requireInternalMcpProvider(internal.provider);
+      const db = await getDatabase();
+      const tenant = await db.findTenantById(server.tenantId);
+      if (!tenant?.dbName) {
+        throw new Error('Could not resolve tenant database for internal MCP execution');
+      }
+      result = await provider.execute(
+        { tenantDbName: tenant.dbName, tenantId: server.tenantId, projectId: server.projectId },
+        internal.instanceKey,
+        internal.config ?? {},
         toolName,
         effectiveArgs,
       );

@@ -30,7 +30,8 @@ import {
   isStdioRunnerEnabled,
   updateMcpServer,
 } from '@/lib/services/mcp';
-import type { McpAuditContext } from '@/lib/services/mcp';
+import type { McpAuditContext, InternalMcpConfigInput } from '@/lib/services/mcp';
+import { INTERNAL_MCP_PROVIDERS } from '@/lib/services/mcp/internal/registry';
 import {
   buildRuntimeContextFromRequest,
   describeRuntimeAuth,
@@ -49,7 +50,7 @@ import {
 
 const logger = createLogger('api:mcp');
 const VALID_AUTH_TYPES: McpAuthType[] = ['none', 'token', 'header', 'basic'];
-const VALID_SOURCE_TYPES = ['openapi', 'remote', 'stdio'] as const;
+const VALID_SOURCE_TYPES = ['openapi', 'remote', 'stdio', 'internal'] as const;
 
 function auditContextFor(request: FastifyRequest, userId: string): McpAuditContext {
   const ua = request.headers['user-agent'];
@@ -89,6 +90,20 @@ function parseRemoteConfig(raw: unknown): IMcpRemoteConfig | undefined {
   return {
     url: value.url.trim(),
     transport: value.transport === 'sse' ? 'sse' : 'streamable-http',
+  };
+}
+
+function parseInternalConfig(raw: unknown): InternalMcpConfigInput | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const value = raw as { provider?: unknown; instanceKey?: unknown; config?: unknown };
+  if (typeof value.provider !== 'string' || !value.provider.trim()) return undefined;
+  if (typeof value.instanceKey !== 'string' || !value.instanceKey.trim()) return undefined;
+  return {
+    provider: value.provider.trim(),
+    instanceKey: value.instanceKey.trim(),
+    config: value.config && typeof value.config === 'object'
+      ? value.config as Record<string, unknown>
+      : undefined,
   };
 }
 
@@ -197,6 +212,20 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
           enterpriseBuild: IS_ENTERPRISE_BUILD,
           licenseEnterprise,
         },
+        // MCP Hubs ship as a whole separate plugin in the enterprise overlay
+        // (no seam ref to check, unlike sandbox/Aegis) — the build flag alone
+        // says whether the /api/mcp/hubs routes even exist.
+        mcpHub: {
+          available: IS_ENTERPRISE_BUILD && licenseEnterprise,
+          enterpriseBuild: IS_ENTERPRISE_BUILD,
+          licenseEnterprise,
+        },
+        internalProviders: INTERNAL_MCP_PROVIDERS.map((p) => ({
+          id: p.id,
+          label: p.label,
+          description: p.description,
+          configFields: p.configFields,
+        })),
       });
     } catch (error) {
       return sendProjectContextError(reply, error)
@@ -254,7 +283,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
 
       const sourceType = typeof body.sourceType === 'string' ? body.sourceType : 'openapi';
       if (!VALID_SOURCE_TYPES.includes(sourceType as typeof VALID_SOURCE_TYPES[number])) {
-        return reply.code(400).send({ error: 'sourceType must be "openapi", "remote", or "stdio"' });
+        return reply.code(400).send({ error: 'sourceType must be "openapi", "remote", "stdio", or "internal"' });
       }
 
       if (sourceType === 'openapi' && typeof body.openApiSpec !== 'string') {
@@ -269,6 +298,16 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
       const stdioConfig = parseStdioConfig(body.stdioConfig);
       if (sourceType === 'stdio' && !stdioConfig) {
         return reply.code(400).send({ error: 'stdioConfig.packageName is required' });
+      }
+
+      const internalConfig = parseInternalConfig(body.internalConfig);
+      if (sourceType === 'internal') {
+        if (!internalConfig) {
+          return reply.code(400).send({ error: 'internalConfig.provider and internalConfig.instanceKey are required' });
+        }
+        if (!INTERNAL_MCP_PROVIDERS.some((p) => p.id === internalConfig.provider)) {
+          return reply.code(400).send({ error: `Unknown internal provider "${internalConfig.provider}"` });
+        }
       }
 
       // Enterprise sub-feature: persistent sandbox execution needs the runtime
@@ -309,7 +348,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         {
           description: typeof body.description === 'string' ? body.description.trim() : undefined,
           name: body.name.trim(),
-          sourceType: sourceType as 'openapi' | 'remote' | 'stdio',
+          sourceType: sourceType as 'openapi' | 'remote' | 'stdio' | 'internal',
           openApiSpec: typeof body.openApiSpec === 'string' ? body.openApiSpec : undefined,
           specFormat: typeof body.specFormat === 'string' ? body.specFormat as SpecFormatHint : undefined,
           upstreamAuth: body.upstreamAuth as IMcpAuthConfig,
@@ -318,6 +357,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
             : undefined,
           remoteConfig,
           stdioConfig,
+          internalConfig,
           exposure: parseExposure(body.exposure),
           aegis: aegisConfig,
         },
@@ -430,6 +470,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         upstreamBaseUrl: body.upstreamBaseUrl as string | undefined,
         remoteConfig: body.remoteConfig !== undefined ? parseRemoteConfig(body.remoteConfig) : undefined,
         stdioConfig: nextStdioConfig,
+        internalConfig: body.internalConfig !== undefined ? parseInternalConfig(body.internalConfig) : undefined,
         exposure: body.exposure !== undefined ? parseExposure(body.exposure) : undefined,
         aegis: nextAegis,
         runtimeHeaders: body.runtimeHeaders as { allow?: boolean; allowedNames?: string[] } | null | undefined,

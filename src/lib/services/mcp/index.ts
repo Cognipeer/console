@@ -43,4 +43,5 @@ export type {
   McpAuditContext,
   McpServerView,
   McpRequestLogView,
+  InternalMcpConfigInput,
 } from './types';

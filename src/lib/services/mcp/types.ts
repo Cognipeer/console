@@ -82,8 +82,20 @@ export interface CreateMcpServerInput {
   remoteConfig?: IMcpRemoteConfig;
   /** Stdio launch config (sourceType 'stdio'). */
   stdioConfig?: IMcpStdioConfig;
+  /** Console-native capability config (sourceType 'internal'). */
+  internalConfig?: InternalMcpConfigInput;
   exposure?: IMcpExposureConfig;
   aegis?: IMcpAegisConfig;
+}
+
+/** Which internal capability backs the server, and its instance + settings. */
+export interface InternalMcpConfigInput {
+  /** Provider id from the internal MCP provider registry, e.g. 'knowledge-base'. */
+  provider: string;
+  /** The provider-specific instance key, e.g. a RAG module key. */
+  instanceKey: string;
+  /** Provider-defined settings (e.g. answerModelKey for 'knowledge-base'). */
+  config?: Record<string, unknown>;
 }
 
 export interface UpdateMcpServerInput {
@@ -95,6 +107,8 @@ export interface UpdateMcpServerInput {
   upstreamAuth?: IMcpAuthConfig;
   remoteConfig?: IMcpRemoteConfig;
   stdioConfig?: IMcpStdioConfig;
+  /** Console-native capability config (sourceType 'internal'). */
+  internalConfig?: InternalMcpConfigInput;
   exposure?: IMcpExposureConfig;
   aegis?: IMcpAegisConfig;
   status?: string;

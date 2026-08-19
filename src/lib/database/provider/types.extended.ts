@@ -188,8 +188,12 @@ export interface IMcpAuthConfig {
   sealed?: string;
 }
 
-/** Where the server's tools come from. Legacy records (no field) are 'openapi'. */
-export type McpSourceType = 'openapi' | 'remote' | 'stdio';
+/**
+ * Where the server's tools come from. Legacy records (no field) are 'openapi'.
+ * 'internal' backs a console-native capability (e.g. a Knowledge Base module)
+ * instead of an external upstream — see `src/lib/services/mcp/internal/`.
+ */
+export type McpSourceType = 'openapi' | 'remote' | 'stdio' | 'internal';
 
 /** Protocols the gateway exposes for a server. */
 export type McpExposureProtocol = 'streamable-http' | 'sse';
