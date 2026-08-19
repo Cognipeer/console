@@ -9,6 +9,7 @@ import type {
   IMcpServer,
   IMcpStdioConfig,
   IMcpTool,
+  IMcpToolAnnotations,
   McpSourceType,
 } from '@/lib/database';
 import type {
@@ -31,6 +32,11 @@ import { normalizeApiSpec, type SpecFormatHint } from '@/lib/services/specImport
 import { routeInstanceCall } from '@/lib/core/cluster';
 import type { QueuePayload } from '@/lib/core/queue';
 import { mcpEntityId } from './mcpEntityId';
+import {
+  defaultAnnotationsForSource,
+  describeMcpTools,
+  type McpToolDescriptor,
+} from './toolAnnotations';
 import {
   maskAuthConfig,
   maskStdioConfig,
@@ -84,11 +90,13 @@ export function isMcpToolEnabled(server: IMcpServer, toolName: string): boolean 
   return !getDisabledToolNames(server).includes(toolName);
 }
 
-/** Tools visible to callers (tools/list, client APIs, agents). */
+/** Tools visible to callers (tools/list, client APIs, agents), overrides applied. */
 export function listEnabledMcpTools(server: IMcpServer): IMcpTool[] {
   const disabled = new Set(getDisabledToolNames(server));
-  if (disabled.size === 0) return server.tools ?? [];
-  return (server.tools ?? []).filter((tool) => !disabled.has(tool.name));
+  const enabled = disabled.size === 0
+    ? (server.tools ?? [])
+    : (server.tools ?? []).filter((tool) => !disabled.has(tool.name));
+  return applyToolOverrides(server, enabled);
 }
 
 /** Merge a disabled-name list into a metadata blob (empty list removes the key). */
@@ -100,6 +108,92 @@ function metadataWithDisabledTools(
   if (disabledTools.length) next.disabledTools = disabledTools;
   else delete next.disabledTools;
   return next;
+}
+
+// ── Tool annotation overrides ─────────────────────────────────────────────
+// Operator-set hints ride in metadata.toolAnnotations so they survive tool
+// rediscovery (which replaces `tools` wholesale).
+
+export function getToolAnnotationOverrides(
+  server: Pick<IMcpServer, 'metadata'>,
+): Record<string, IMcpToolAnnotations> {
+  const raw = (server.metadata as Record<string, unknown> | undefined)?.toolAnnotations;
+  if (!raw || typeof raw !== 'object') return {};
+  return raw as Record<string, IMcpToolAnnotations>;
+}
+
+const ANNOTATION_FLAGS = ['readOnlyHint', 'destructiveHint', 'idempotentHint', 'openWorldHint'] as const;
+
+/** Keep only recognised keys; an entry with nothing set is dropped. */
+function sanitizeAnnotationOverride(value: unknown): IMcpToolAnnotations | null {
+  if (!value || typeof value !== 'object') return null;
+  const input = value as Record<string, unknown>;
+  const next: IMcpToolAnnotations = {};
+  const title = typeof input.title === 'string' ? input.title.trim() : '';
+  if (title) next.title = title;
+  for (const flag of ANNOTATION_FLAGS) {
+    if (typeof input[flag] === 'boolean') next[flag] = input[flag] as boolean;
+  }
+  return Object.keys(next).length ? next : null;
+}
+
+function metadataWithToolAnnotations(
+  metadata: Record<string, unknown> | undefined,
+  overrides: Record<string, IMcpToolAnnotations>,
+): Record<string, unknown> {
+  const next = { ...(metadata ?? {}) };
+  if (Object.keys(overrides).length) next.toolAnnotations = overrides;
+  else delete next.toolAnnotations;
+  return next;
+}
+
+// ── Tool description overrides ────────────────────────────────────────────
+// Same metadata-backed pattern: the operator's wording wins over whatever the
+// spec/upstream advertises, and survives tool rediscovery.
+
+export function getToolDescriptionOverrides(
+  server: Pick<IMcpServer, 'metadata'>,
+): Record<string, string> {
+  const raw = (server.metadata as Record<string, unknown> | undefined)?.toolDescriptions;
+  if (!raw || typeof raw !== 'object') return {};
+  return raw as Record<string, string>;
+}
+
+function metadataWithToolDescriptions(
+  metadata: Record<string, unknown> | undefined,
+  overrides: Record<string, string>,
+): Record<string, unknown> {
+  const next = { ...(metadata ?? {}) };
+  if (Object.keys(overrides).length) next.toolDescriptions = overrides;
+  else delete next.toolDescriptions;
+  return next;
+}
+
+/** Overlay the operator's description/annotation overrides on discovered tools. */
+function applyToolOverrides(server: Pick<IMcpServer, 'metadata'>, tools: IMcpTool[]): IMcpTool[] {
+  const annotationOverrides = getToolAnnotationOverrides(server);
+  const descriptionOverrides = getToolDescriptionOverrides(server);
+  if (!Object.keys(annotationOverrides).length && !Object.keys(descriptionOverrides).length) {
+    return tools;
+  }
+  return tools.map((tool) => {
+    const annotations = annotationOverrides[tool.name];
+    const description = descriptionOverrides[tool.name];
+    if (!annotations && !description) return tool;
+    return {
+      ...tool,
+      ...(description ? { description } : {}),
+      ...(annotations ? { annotations: { ...(tool.annotations ?? {}), ...annotations } } : {}),
+    };
+  });
+}
+
+/** Enabled tools as spec-complete `tools/list` entries, overrides applied. */
+export function listMcpToolDescriptors(server: IMcpServer): McpToolDescriptor[] {
+  return describeMcpTools(
+    listEnabledMcpTools(server),
+    defaultAnnotationsForSource(resolveSourceType(server)),
+  );
 }
 
 // ── Serialization ─────────────────────────────────────────────────────────
@@ -116,9 +210,10 @@ export function serializeMcpServer(record: IMcpServer): McpServerView {
     upstreamAuth: maskAuthConfig(record.upstreamAuth),
     stdioConfig: maskStdioConfig(record.stdioConfig),
     disabledTools: getDisabledToolNames(record),
+    toolAnnotations: getToolAnnotationOverrides(record),
+    toolDescriptions: getToolDescriptionOverrides(record),
   } as McpServerView;
 }
-
 export function serializeMcpServerFull(record: IMcpServer): McpServerView & { openApiSpec?: string } {
   const { _id, ...rest } = record;
   return {
@@ -129,6 +224,8 @@ export function serializeMcpServerFull(record: IMcpServer): McpServerView & { op
     upstreamAuth: maskAuthConfig(record.upstreamAuth),
     stdioConfig: maskStdioConfig(record.stdioConfig),
     disabledTools: getDisabledToolNames(record),
+    toolAnnotations: getToolAnnotationOverrides(record),
+    toolDescriptions: getToolDescriptionOverrides(record),
   } as McpServerView & { openApiSpec?: string };
 }
 
@@ -277,6 +374,27 @@ async function discoverToolsForServer(server: IMcpServer): Promise<IMcpTool[]> {
       transport: server.remoteConfig.transport,
       auth: openAuthConfig(server.upstreamAuth),
     });
+  }
+
+  if (sourceType === 'internal') {
+    const internal = (server.metadata as Record<string, unknown> | undefined)?.internal as
+      | { provider?: string; instanceKey?: string; config?: Record<string, unknown> }
+      | undefined;
+    if (!internal?.provider || !internal.instanceKey) {
+      throw new Error(`MCP server "${server.name}" has no internal provider configured`);
+    }
+    const provider = requireInternalMcpProvider(internal.provider);
+    const db = await getDatabase();
+    const tenant = await db.findTenantById(server.tenantId);
+    if (!tenant?.dbName) {
+      throw new Error('Could not resolve tenant database for internal MCP execution');
+    }
+    const built = await provider.buildTools(
+      { tenantDbName: tenant.dbName, tenantId: server.tenantId, projectId: server.projectId },
+      internal.instanceKey,
+      internal.config ?? {},
+    );
+    return built.tools;
   }
 
   // stdio
@@ -690,6 +808,44 @@ export async function updateMcpServer(
         pruned,
       );
     }
+  }
+
+  // Per-tool annotation overrides (metadata-backed, partial patch: a null or
+  // empty entry clears that tool's override).
+  if (input.toolAnnotations !== undefined) {
+    const knownNames = new Set(
+      ((updateData.tools as IMcpTool[] | undefined) ?? existing.tools ?? []).map((t) => t.name),
+    );
+    const overrides = { ...getToolAnnotationOverrides(existing) };
+    for (const [name, value] of Object.entries(input.toolAnnotations)) {
+      if (!knownNames.has(name)) continue;
+      const sanitized = value === null ? null : sanitizeAnnotationOverride(value);
+      if (sanitized) overrides[name] = sanitized;
+      else delete overrides[name];
+    }
+    updateData.metadata = metadataWithToolAnnotations(
+      (updateData.metadata as Record<string, unknown> | undefined) ?? existing.metadata,
+      overrides,
+    );
+  }
+
+  // Per-tool description overrides (metadata-backed, partial patch: null or an
+  // empty string restores the discovered description).
+  if (input.toolDescriptions !== undefined) {
+    const knownNames = new Set(
+      ((updateData.tools as IMcpTool[] | undefined) ?? existing.tools ?? []).map((t) => t.name),
+    );
+    const overrides = { ...getToolDescriptionOverrides(existing) };
+    for (const [name, value] of Object.entries(input.toolDescriptions)) {
+      if (!knownNames.has(name)) continue;
+      const text = typeof value === 'string' ? value.trim() : '';
+      if (text) overrides[name] = text;
+      else delete overrides[name];
+    }
+    updateData.metadata = metadataWithToolDescriptions(
+      (updateData.metadata as Record<string, unknown> | undefined) ?? existing.metadata,
+      overrides,
+    );
   }
 
   const updated = await db.updateMcpServer(serverId, updateData as Partial<IMcpServer>);

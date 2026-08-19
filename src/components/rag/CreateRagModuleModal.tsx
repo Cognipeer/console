@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   NumberInput,
   Select,
+  Slider,
   TagsInput,
   TextInput,
   Textarea,
@@ -64,6 +65,8 @@ interface FormValues {
   separators: string[];
   rerankerKey: string;
   rerankerOversample: number | '';
+  defaultTopK: number | '';
+  defaultMinScore: number;
 }
 
 export default function CreateRagModuleModal({ opened, onClose, onCreated }: CreateRagModuleModalProps) {
@@ -86,6 +89,8 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
       separators: ['\\n\\n', '\\n', '. ', ' '],
       rerankerKey: '',
       rerankerOversample: '',
+      defaultTopK: 5,
+      defaultMinScore: 0.5,
     },
     validate: {
       name: (v) => (!v ? 'Name is required' : null),
@@ -94,6 +99,7 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
       vectorIndexKey: (v) => (!v ? 'Vector index is required' : null),
       chunkSize: (v) => (!v || Number(v) <= 0 ? 'Chunk size must be positive' : null),
       chunkOverlap: (v) => (v === '' || Number(v) < 0 ? 'Overlap must be non-negative' : null),
+      defaultTopK: (v) => (v === '' || Number(v) < 1 ? 'Must be at least 1' : null),
     },
   });
 
@@ -211,6 +217,8 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
             values.rerankerKey && values.rerankerOversample !== ''
               ? Number(values.rerankerOversample)
               : undefined,
+          defaultTopK: values.defaultTopK !== '' ? Number(values.defaultTopK) : undefined,
+          defaultMinScore: values.defaultMinScore,
         }),
       });
 
@@ -342,6 +350,15 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
             ?? <span className="ds-faint">none</span>
           }
         />
+      </SummaryGroup>
+
+      <SummaryGroup title="Query defaults">
+        <SummaryKV
+          label="Top K"
+          value={form.values.defaultTopK || <span className="ds-faint">—</span>}
+          mono
+        />
+        <SummaryKV label="Min score" value={form.values.defaultMinScore.toFixed(2)} mono />
       </SummaryGroup>
 
       <SummaryGroup title="Pre-flight">
@@ -521,6 +538,38 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
               step={1}
               disabled={!form.values.rerankerKey}
               {...form.getInputProps('rerankerOversample')}
+            />
+          </FormField>
+        </FormRow>
+      </FormSection>
+
+      <FormSection
+        number={6}
+        title="Query defaults"
+        description="Applied whenever a query doesn't explicitly override these."
+      >
+        <FormRow cols={2}>
+          <FormField label="Top K" required hint="How many chunks a query returns by default.">
+            <NumberInput
+              min={1}
+              max={100}
+              step={1}
+              {...form.getInputProps('defaultTopK')}
+            />
+          </FormField>
+          <FormField label="Min score" hint="Matches below this similarity score are discarded.">
+            <Slider
+              min={0}
+              max={1}
+              step={0.05}
+              marks={[
+                { value: 0, label: '0' },
+                { value: 0.5, label: '0.5' },
+                { value: 1, label: '1' },
+              ]}
+              label={(v) => v.toFixed(2)}
+              value={form.values.defaultMinScore}
+              onChange={(v) => form.setFieldValue('defaultMinScore', v)}
             />
           </FormField>
         </FormRow>

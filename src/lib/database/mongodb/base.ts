@@ -29,6 +29,8 @@ export const COLLECTIONS = {
   rateLimits: 'rate_limits',
   projects: 'projects',
   vectorCounters: 'vector_counters',
+  vectorMigrations: 'vector_migrations',
+  vectorMigrationLogs: 'vector_migration_logs',
   agentTracingThreads: 'agent_tracing_threads',
   agentTracingSessions: 'agent_tracing_sessions',
   agentTracingEvents: 'agent_tracing_events',

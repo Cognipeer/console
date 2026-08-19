@@ -5,6 +5,7 @@ import type {
   IMcpRemoteConfig,
   IMcpStdioConfig,
   IMcpTool,
+  IMcpToolAnnotations,
   McpAuthType,
   McpSourceType,
 } from '@/lib/database';
@@ -23,6 +24,10 @@ export interface McpServerView {
   tools: IMcpTool[];
   /** Tool names hidden from callers (tools/list, agents, execute). */
   disabledTools: string[];
+  /** Operator overrides for the hints advertised in `tools/list`, keyed by tool name. */
+  toolAnnotations?: Record<string, IMcpToolAnnotations>;
+  /** Operator-authored tool descriptions, keyed by tool name. */
+  toolDescriptions?: Record<string, string>;
   toolsDiscoveredAt?: Date;
   upstreamBaseUrl?: string;
   /** Secrets are masked in views. */
@@ -94,7 +99,7 @@ export interface InternalMcpConfigInput {
   provider: string;
   /** The provider-specific instance key, e.g. a RAG module key. */
   instanceKey: string;
-  /** Provider-defined settings (e.g. answerModelKey for 'knowledge-base'). */
+  /** Provider-defined settings. Empty for 'knowledge-base' today. */
   config?: Record<string, unknown>;
 }
 
@@ -116,6 +121,10 @@ export interface UpdateMcpServerInput {
   runtimeHeaders?: { allow?: boolean; allowedNames?: string[] } | null;
   /** Full replacement list of disabled tool names (empty array enables all). */
   disabledTools?: string[];
+  /** Partial patch of per-tool annotation overrides (null/empty clears one). */
+  toolAnnotations?: Record<string, IMcpToolAnnotations | null>;
+  /** Partial patch of per-tool description overrides (null/empty restores the discovered text). */
+  toolDescriptions?: Record<string, string | null>;
 }
 
 /** Request-scoped context threaded into audit writes. */

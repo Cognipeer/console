@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Lexend_Deca, JetBrains_Mono } from "next/font/google";
 import "@mantine/core/styles.css";
 import '@mantine/dates/styles.css';
@@ -51,6 +51,15 @@ export const metadata: Metadata = {
     ],
     shortcut: '/images/cognipeer-icon-32.png',
   },
+};
+
+// Disables pinch-to-zoom on mobile/touch viewports (the app has its own
+// responsive layouts, not a zoomable canvas).
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  maximumScale: 1,
+  userScalable: false,
 };
 
 export default function RootLayout({

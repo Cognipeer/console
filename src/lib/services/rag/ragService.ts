@@ -98,13 +98,20 @@ function splitBySeparators(text: string, separators: string[]): string[] {
   const remaining = separators.slice(1);
   const segments = text.split(sep);
 
-  if (remaining.length === 0) return segments;
-
+  // `String.split` discards the separator itself. Re-emit it as its own
+  // part (rather than folding it into a segment) so the caller can
+  // reconstruct the original text by concatenating parts in order —
+  // otherwise paragraphs/sentences/words end up glued together with no
+  // whitespace once reassembled in chunkRecursiveCharacter.
   const result: string[] = [];
-  for (const segment of segments) {
-    if (segment.length === 0) continue;
-    result.push(...splitBySeparators(segment, remaining));
-  }
+  segments.forEach((segment, i) => {
+    if (segment.length > 0) {
+      result.push(...splitBySeparators(segment, remaining));
+    }
+    if (i < segments.length - 1) {
+      result.push(sep);
+    }
+  });
   return result;
 }
 
@@ -215,6 +222,8 @@ export async function createRagModule(
     status: 'active',
     rerankerKey: request.rerankerKey,
     rerankerOversample: request.rerankerOversample,
+    defaultTopK: request.defaultTopK,
+    defaultMinScore: request.defaultMinScore,
     totalDocuments: 0,
     totalChunks: 0,
     metadata: request.metadata,
@@ -240,6 +249,8 @@ export async function updateRagModule(
   if (request.metadata !== undefined) updates.metadata = request.metadata;
   if (request.rerankerKey !== undefined) updates.rerankerKey = request.rerankerKey ?? undefined;
   if (request.rerankerOversample !== undefined) updates.rerankerOversample = request.rerankerOversample ?? undefined;
+  if (request.defaultTopK !== undefined) updates.defaultTopK = request.defaultTopK ?? undefined;
+  if (request.defaultMinScore !== undefined) updates.defaultMinScore = request.defaultMinScore ?? undefined;
   updates.updatedBy = request.updatedBy;
   return db.updateRagModule(moduleId, updates as Partial<IRagModule>);
 }
@@ -576,7 +587,8 @@ export async function queryRag(
 
   // 3. Query vector store. If reranker is configured, oversample candidates
   //    so the reranker has more to work with.
-  const topK = request.topK ?? 5;
+  const topK = request.topK ?? ragModule.defaultTopK ?? 5;
+  const minScore = request.minScore ?? ragModule.defaultMinScore;
   const useReranker = Boolean(ragModule.rerankerKey);
   const oversampleMultiplier = ragModule.rerankerOversample ?? 3;
   const fetchTopK = useReranker ? Math.max(topK, topK * oversampleMultiplier) : topK;
@@ -663,7 +675,12 @@ export async function queryRag(
     }
   }
 
-  // 5c. Apply final topK (in case reranker skipped or returned more).
+  // 5c. Apply minimum score threshold, if configured.
+  if (typeof minScore === 'number' && minScore > 0) {
+    matches = matches.filter((m) => (m.score ?? 0) >= minScore);
+  }
+
+  // 5d. Apply final topK (in case reranker skipped or returned more).
   matches = matches.slice(0, topK);
 
   const latencyMs = Date.now() - startTime;
@@ -692,12 +709,15 @@ export async function queryRag(
       topK,
       matchCount: matches.length,
       latencyMs,
-      metadata: useReranker
+      metadata: useReranker || typeof minScore === 'number'
         ? {
-          reranked: true,
-          rerankerKey: ragModule.rerankerKey,
-          vectorLatencyMs,
-          rerankLatencyMs,
+          ...(useReranker ? {
+            reranked: true,
+            rerankerKey: ragModule.rerankerKey,
+            vectorLatencyMs,
+            rerankLatencyMs,
+          } : {}),
+          ...(typeof minScore === 'number' ? { minScore } : {}),
         }
         : undefined,
     });

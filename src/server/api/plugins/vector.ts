@@ -890,6 +890,9 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
       if (error instanceof Error && (error.message.includes('not found') || error.message.includes('cannot be the same'))) {
         return reply.code(400).send({ error: error.message });
       }
+      logger.error('Create vector migration failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({ error: 'Internal server error' });
     }
@@ -956,6 +959,9 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
       if (error instanceof Error && (error.message.includes('already running') || error.message.includes('already completed'))) {
         return reply.code(409).send({ error: error.message });
       }
+      logger.error('Start vector migration failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({ error: 'Internal server error' });
     }

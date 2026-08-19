@@ -33,12 +33,18 @@ const POLL_INTERVAL_MS = 2500;
 function statusColor(status: VectorMigrationStatus): string {
   switch (status) {
     case 'pending': return 'yellow';
+    case 'queued': return 'blue';
     case 'running': return 'teal';
     case 'completed': return 'green';
     case 'failed': return 'red';
     case 'cancelled': return 'gray';
     default: return 'gray';
   }
+}
+
+/** Queued or running — the background job owns the record. */
+function isActive(status: VectorMigrationStatus): boolean {
+  return status === 'queued' || status === 'running';
 }
 
 function logStatusColor(status: string): string {
@@ -115,8 +121,8 @@ export default function VectorMigrationDetailPage() {
 
   // Poll while running
   useEffect(() => {
-    const isRunning = detail?.migration.status === 'running';
-    if (isRunning) {
+    const status = detail?.migration.status;
+    if (status && isActive(status)) {
       pollRef.current = setInterval(() => void loadDetail(logsOffset, true), POLL_INTERVAL_MS);
     } else {
       if (pollRef.current) {
@@ -216,7 +222,7 @@ export default function VectorMigrationDetailPage() {
                 Start
               </Button>
             )}
-            {migration.status === 'running' && (
+            {isActive(migration.status) && (
               <Button
                 size="xs"
                 color="yellow"
@@ -227,7 +233,7 @@ export default function VectorMigrationDetailPage() {
                 Cancel
               </Button>
             )}
-            {migration.status !== 'running' && (
+            {!isActive(migration.status) && (
               <Tooltip label="Delete migration">
                 <ActionIcon
                   size="md"
@@ -251,7 +257,7 @@ export default function VectorMigrationDetailPage() {
               <Badge size="md" variant="light" radius="xl" color={statusColor(migration.status)}>
                 {migration.status.toUpperCase()}
               </Badge>
-              {migration.status === 'running' && <Loader size={14} color="teal" />}
+              {isActive(migration.status) && <Loader size={14} color="teal" />}
             </Group>
             <Text size="xs" c="dimmed">Key: {migration.key}</Text>
           </Group>
@@ -282,7 +288,7 @@ export default function VectorMigrationDetailPage() {
                   {migration.migratedVectors} migrated · {migration.failedVectors} failed · {migration.totalVectors} total
                 </Text>
               </Group>
-              <Progress value={progressValue} size="md" color={statusColor(migration.status)} radius="xl" animated={migration.status === 'running'} />
+              <Progress value={progressValue} size="md" color={statusColor(migration.status)} radius="xl" animated={isActive(migration.status)} />
               <Text size="xs" c="dimmed" ta="right">{progressValue}%</Text>
             </Stack>
           )}

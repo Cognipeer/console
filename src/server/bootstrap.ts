@@ -30,6 +30,8 @@ import { startEvaluationRunQueueConsumer } from '@/lib/services/evaluation/evalu
 import { startAnalysisRunQueueConsumer } from '@/lib/services/analysis/analysisRunConsumer';
 import { startAgentQueueConsumer } from '@/lib/services/agents/agentConsumer';
 import { startMcpQueueConsumer } from '@/lib/services/mcp/mcpConsumer';
+import { startVectorMigrationQueueConsumer } from '@/lib/services/vector/vectorMigrationConsumer';
+import { resumeInterruptedVectorMigrations } from '@/lib/services/vector/vectorMigrationJob';
 import { startPollScheduler } from '@/lib/services/inferenceMonitoring/pollScheduler';
 import { startAlertScheduler } from '@/lib/services/alerts/alertScheduler';
 import { startAnalysisScheduler } from '@/lib/services/analysis/analysisScheduler';
@@ -275,6 +277,7 @@ async function runBootstrap(): Promise<void> {
       startSnapshotQueueConsumer(),
       startRedTeamQueueConsumer(),
       startEvaluationRunQueueConsumer(),
+      startVectorMigrationQueueConsumer(),
       // Enterprise modules contribute their consumers through the seam;
       // the collection is empty in the community edition.
       ...enterpriseQueueConsumers.map((start) => start()),
@@ -282,6 +285,16 @@ async function runBootstrap(): Promise<void> {
     ]);
   } catch (error) {
     logger.warn('Queue consumer registration failed; cluster routing limited', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  // Index migrations interrupted by a restart resume from their persisted
+  // cursor. Must run AFTER the consumer above is registered.
+  try {
+    await resumeInterruptedVectorMigrations();
+  } catch (error) {
+    logger.warn('Vector migration resume failed during startup', {
       error: error instanceof Error ? error.message : String(error),
     });
   }

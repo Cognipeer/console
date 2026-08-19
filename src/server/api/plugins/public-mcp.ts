@@ -22,7 +22,7 @@ import { getDatabase } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
   executeMcpTool,
-  listEnabledMcpTools,
+  listMcpToolDescriptors,
   logMcpRequest,
   mcpRequestSecretValues,
   resolveExposure,
@@ -194,11 +194,7 @@ async function handlePublicMessage(request: FastifyRequest, reply: FastifyReply)
   }
   if (method === 'tools/list') {
     return respond(jsonRpcOk(id, {
-      tools: listEnabledMcpTools(server).map((tool) => ({
-        description: tool.description,
-        inputSchema: tool.inputSchema,
-        name: tool.name,
-      })),
+      tools: listMcpToolDescriptors(server),
     }));
   }
   if (method === 'tools/call') {

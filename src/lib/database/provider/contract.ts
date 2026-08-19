@@ -497,6 +497,7 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   listVectorMigrations(filters?: {
     projectId?: string;
     status?: VectorMigrationStatus;
+    statuses?: VectorMigrationStatus[];
   }): Promise<IVectorMigration[]>;
   findVectorMigrationByKey(key: string): Promise<IVectorMigration | null>;
   createVectorMigrationLog(
@@ -962,6 +963,11 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IRagDocument | null>;
   deleteRagDocument(id: string): Promise<boolean>;
   findRagDocumentById(id: string): Promise<IRagDocument | null>;
+  findRagDocumentByFileName(
+    ragModuleKey: string,
+    fileName: string,
+    projectId?: string,
+  ): Promise<IRagDocument | null>;
   listRagDocuments(
     ragModuleKey: string,
     filters?: { projectId?: string; status?: RagDocumentStatus; search?: string },

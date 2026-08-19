@@ -25,6 +25,8 @@ export interface CreateRagModuleRequest {
   chunkConfig: IRagChunkConfig;
   rerankerKey?: string;
   rerankerOversample?: number;
+  defaultTopK?: number;
+  defaultMinScore?: number;
   metadata?: Record<string, unknown>;
   createdBy: string;
 }
@@ -39,6 +41,8 @@ export interface UpdateRagModuleRequest {
   status?: 'active' | 'disabled';
   rerankerKey?: string | null;
   rerankerOversample?: number | null;
+  defaultTopK?: number | null;
+  defaultMinScore?: number | null;
   metadata?: Record<string, unknown>;
   updatedBy: string;
 }
@@ -56,6 +60,7 @@ export interface RagQueryRequest {
   ragModuleKey: string;
   query: string;
   topK?: number;
+  minScore?: number;
   filter?: Record<string, unknown>;
   includeContent?: boolean;
 }

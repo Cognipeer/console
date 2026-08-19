@@ -1387,3 +1387,127 @@ describeForEachProvider('Evaluation dataset items — destructive-write safety',
   });
 });
 
+describeForEachProvider('Vector migrations + batch logs', (getDb) => {
+  let dbName: string;
+  let tenantId: string;
+
+  beforeEach(async () => {
+    const slug = `vecmig-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    dbName = `tenant_${slug}`;
+    const db = getDb();
+    const tenant = await db.createTenant({
+      companyName: 'Vector Migration Co',
+      slug,
+      dbName,
+      licenseType: 'FREE',
+      ownerId: 'pending',
+    });
+    tenantId = String(tenant._id);
+    await db.switchToTenant(dbName);
+  });
+
+  const baseMigration = (key: string) => ({
+    tenantId,
+    projectId: 'proj-1',
+    key,
+    name: key,
+    sourceProviderKey: 'src-provider',
+    sourceIndexKey: 'src-index',
+    sourceIndexName: 'Source index',
+    destinationProviderKey: 'dst-provider',
+    destinationIndexKey: 'dst-index',
+    destinationIndexName: 'Destination index',
+    status: 'pending' as const,
+    totalVectors: 0,
+    migratedVectors: 0,
+    failedVectors: 0,
+    batchSize: 100,
+    createdBy: 'tester',
+  });
+
+  it('creates, finds and lists by status', async () => {
+    const db = getDb();
+    const created = await db.createVectorMigration(baseMigration('mig-a'));
+    expect(created._id).toBeTruthy();
+
+    const found = await db.findVectorMigrationByKey('mig-a');
+    expect(found?.sourceIndexName).toBe('Source index');
+    expect(found?.status).toBe('pending');
+
+    await db.createVectorMigration({ ...baseMigration('mig-b'), status: 'queued' });
+    expect(await db.listVectorMigrations({ projectId: 'proj-1' })).toHaveLength(2);
+    expect(await db.listVectorMigrations({ status: 'queued' })).toHaveLength(1);
+    expect(
+      await db.listVectorMigrations({ statuses: ['queued', 'running'] }),
+    ).toHaveLength(1);
+  });
+
+  it('persists the resume checkpoint and clears fields on an explicit undefined', async () => {
+    const db = getDb();
+    await db.createVectorMigration(baseMigration('mig-resume'));
+
+    await db.updateVectorMigration('mig-resume', {
+      status: 'running',
+      startedAt: new Date('2026-01-01T00:00:00.000Z'),
+      errorMessage: 'transient',
+      migratedVectors: 10,
+      metadata: { progress: { cursor: 'c-1', batchIndex: 2 } },
+    });
+
+    const running = await db.findVectorMigrationByKey('mig-resume');
+    expect(running?.status).toBe('running');
+    expect(running?.migratedVectors).toBe(10);
+    expect((running?.metadata?.progress as { cursor?: string })?.cursor).toBe('c-1');
+
+    const restarted = await db.updateVectorMigration('mig-resume', {
+      status: 'queued',
+      errorMessage: undefined,
+      startedAt: undefined,
+      completedAt: undefined,
+    });
+    expect(restarted?.status).toBe('queued');
+    expect(restarted?.errorMessage ?? undefined).toBeUndefined();
+    expect(restarted?.startedAt ?? undefined).toBeUndefined();
+    // Fields not mentioned keep their value on both providers.
+    expect(restarted?.migratedVectors).toBe(10);
+  });
+
+  it('records batch logs and deletes them with the migration', async () => {
+    const db = getDb();
+    await db.createVectorMigration(baseMigration('mig-logs'));
+
+    await db.createVectorMigrationLog({
+      tenantId,
+      projectId: 'proj-1',
+      migrationKey: 'mig-logs',
+      batchIndex: 0,
+      vectorIds: ['a', 'b'],
+      status: 'success',
+      migratedCount: 2,
+      failedCount: 0,
+      durationMs: 12,
+    });
+    await db.createVectorMigrationLog({
+      tenantId,
+      projectId: 'proj-1',
+      migrationKey: 'mig-logs',
+      batchIndex: 1,
+      vectorIds: [],
+      status: 'failed',
+      migratedCount: 0,
+      failedCount: 2,
+      errorMessage: 'upstream rejected batch',
+    });
+
+    const logs = await db.listVectorMigrationLogs('mig-logs');
+    expect(logs.map((l) => l.batchIndex)).toEqual([0, 1]);
+    expect(logs[0].vectorIds).toEqual(['a', 'b']);
+    expect(await db.countVectorMigrationLogs('mig-logs')).toBe(2);
+    expect(await db.countVectorMigrationLogs('mig-logs', 'failed')).toBe(1);
+
+    expect(await db.deleteVectorMigration('mig-logs')).toBe(true);
+    expect(await db.findVectorMigrationByKey('mig-logs')).toBeNull();
+    expect(await db.listVectorMigrationLogs('mig-logs')).toHaveLength(0);
+  });
+});
+

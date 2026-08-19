@@ -18,6 +18,7 @@ import {
   executeMcpTool,
   getMcpServerByKey,
   listEnabledMcpTools,
+  listMcpToolDescriptors,
   logMcpRequest,
   mcpRequestSecretValues,
   refreshMcpServerTools,
@@ -26,7 +27,7 @@ import {
   serializeMcpServer,
   updateMcpServer,
 } from '@/lib/services/mcp';
-import type { McpAuditContext } from '@/lib/services/mcp';
+import type { McpAuditContext, UpdateMcpServerInput } from '@/lib/services/mcp';
 import {
   createSseSession,
   encodeSseEndpointEvent,
@@ -347,11 +348,7 @@ async function handleClientMcpMessage(request: FastifyRequest, reply: FastifyRep
     }
 
     return respond(jsonRpcOk(id, {
-      tools: listEnabledMcpTools(server).map((tool) => ({
-        description: tool.description,
-        inputSchema: tool.inputSchema,
-        name: tool.name,
-      })),
+      tools: listMcpToolDescriptors(server),
     }));
   }
 
@@ -714,6 +711,18 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'disabledTools must be an array of tool names' });
       }
 
+      if (body.toolAnnotations !== undefined
+        && (typeof body.toolAnnotations !== 'object' || body.toolAnnotations === null
+          || Array.isArray(body.toolAnnotations))) {
+        return reply.code(400).send({ error: 'toolAnnotations must be an object keyed by tool name' });
+      }
+
+      if (body.toolDescriptions !== undefined
+        && (typeof body.toolDescriptions !== 'object' || body.toolDescriptions === null
+          || Array.isArray(body.toolDescriptions))) {
+        return reply.code(400).send({ error: 'toolDescriptions must be an object keyed by tool name' });
+      }
+
       // Same enterprise-sandbox gate as create (mirrors the dashboard PATCH).
       const licenseEnterprise = isEnterpriseLicenseType(ctx.tenant.licenseType);
       const nextStdioConfig = body.stdioConfig !== undefined ? parseStdioConfig(body.stdioConfig) : undefined;
@@ -740,6 +749,8 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         aegis: nextAegis,
         runtimeHeaders: body.runtimeHeaders as { allow?: boolean; allowedNames?: string[] } | null | undefined,
         disabledTools: body.disabledTools as string[] | undefined,
+        toolAnnotations: body.toolAnnotations as UpdateMcpServerInput['toolAnnotations'],
+        toolDescriptions: body.toolDescriptions as UpdateMcpServerInput['toolDescriptions'],
       }, auditContextFor(request, ctx.tokenRecord.userId));
 
       if (!updated) {

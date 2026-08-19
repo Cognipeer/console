@@ -86,6 +86,16 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { documentId: 1, chunkIndex: 1 }, options: { name: 'idx_doc_chunk' } },
     { key: { vectorId: 1 }, options: { name: 'idx_vectorId' } },
   ],
+  // Vector index migrations: looked up by key (unique per tenant DB) and
+  // scanned by status when the queue consumer resumes interrupted jobs.
+  vector_migrations: [
+    { key: { key: 1 }, options: { name: 'idx_key', unique: true } },
+    { key: { projectId: 1, createdAt: -1 }, options: { name: 'idx_project_createdAt' } },
+    { key: { status: 1 }, options: { name: 'idx_status' } },
+  ],
+  vector_migration_logs: [
+    { key: { migrationKey: 1, batchIndex: 1 }, options: { name: 'idx_migration_batch' } },
+  ],
   rag_query_logs: [{ key: { moduleKey: 1, createdAt: -1 }, options: { name: 'idx_module_createdAt' } }],
   reranker_run_logs: [{ key: { rerankerKey: 1, createdAt: -1 }, options: { name: 'idx_reranker_createdAt' } }],
   websearch_run_logs: [{ key: { searchKey: 1, createdAt: -1 }, options: { name: 'idx_search_createdAt' } }],
