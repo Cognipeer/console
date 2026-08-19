@@ -1564,6 +1564,25 @@ textarea.ds-input { height: auto; padding: 10px 12px; line-height: 1.5; resize: 
   overflow-y: auto;
   padding: 24px;
 }
+/* Toggle button only renders (via display) once stacked below the form —
+   see the `max-width: 960px` rule further down. */
+.form-summary-toggle {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 0;
+  margin-bottom: 12px;
+  background: none;
+  border: none;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ds-text-faint);
+  cursor: pointer;
+}
 
 .form-section {
   margin-bottom: 32px;
@@ -1837,6 +1856,12 @@ textarea.ds-input { height: auto; padding: 10px 12px; line-height: 1.5; resize: 
   .form-summary {
     border-left: none;
     border-top: 1px solid var(--ds-border-soft);
+  }
+  .form-summary-toggle {
+    display: flex;
+  }
+  .form-summary[data-collapsed='true'] .form-summary-content {
+    display: none;
   }
   .form-section-desc,
   .form-section-body {

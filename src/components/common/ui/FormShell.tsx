@@ -68,6 +68,12 @@ export default function FormShell({
   footerStatus,
   disableEscape = false,
 }: FormShellProps) {
+  // Collapsed by default: on narrow/mobile viewports the summary stacks
+  // below the form (see the `max-width: 960px` rule in globals.css) and,
+  // left expanded, pushed the form out of view. Desktop keeps the summary
+  // always visible via CSS — this state only affects the stacked layout.
+  const [summaryOpen, setSummaryOpen] = useState(false);
+
   useEffect(() => {
     if (!open || disableEscape) return;
     const onKey = (e: KeyboardEvent) => {
@@ -128,7 +134,20 @@ export default function FormShell({
         <div className="form-form" data-no-summary={summary ? undefined : 'true'}>
           {children}
         </div>
-        {summary ? <aside className="form-summary">{summary}</aside> : null}
+        {summary ? (
+          <aside className="form-summary" data-collapsed={summaryOpen ? undefined : 'true'}>
+            <button
+              type="button"
+              className="form-summary-toggle"
+              onClick={() => setSummaryOpen((o) => !o)}
+              aria-expanded={summaryOpen}
+            >
+              <span>Summary</span>
+              {summaryOpen ? <IconChevronDown size={15} /> : <IconChevronRight size={15} />}
+            </button>
+            <div className="form-summary-content">{summary}</div>
+          </aside>
+        ) : null}
       </div>
 
       <div className="form-footer">
