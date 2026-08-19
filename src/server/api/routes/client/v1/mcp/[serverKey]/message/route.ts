@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from '@/server/api/http';
 import {
   getMcpServerByKey,
   executeMcpTool,
+  listMcpToolDescriptors,
   logMcpRequest,
 } from '@/lib/services/mcp';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
@@ -124,11 +125,7 @@ export async function POST(
         return respond(jsonRpcError(id, -32001, 'MCP server not found'));
       }
 
-      const tools = (server.tools ?? []).map((t) => ({
-        name: t.name,
-        description: t.description,
-        inputSchema: t.inputSchema,
-      }));
+      const tools = listMcpToolDescriptors(server);
 
       return respond(jsonRpcOk(id, { tools }));
     }

@@ -1,31 +1,41 @@
 /**
  * Internal MCP provider: Knowledge Base (RAG module).
  *
- * Exposes a single grounded Q&A tool ("ask") backed by `answerWithRag`, so a
+ * Exposes a single retrieval tool ("search") backed by `queryRag`, so a
  * Knowledge Base can be published as an MCP tool without hand-writing an
  * OpenAPI spec. One provider instance = one RAG module = one MCP tool.
+ * Returns raw query matches — no extra chat model is used to turn them into
+ * a generated answer, and topK falls back to the module's own default.
  */
 
-import { listRagModules, getRagModule } from '@/lib/services/rag/ragService';
-import { answerWithRag } from '@/lib/services/rag/ragAnswerService';
+import { listRagModules, getRagModule, queryRag } from '@/lib/services/rag/ragService';
 import type {
   InternalMcpInstanceOption,
   InternalMcpProvider,
   InternalMcpProviderContext,
 } from './types';
 
-const TOOL_NAME = 'ask';
+const TOOL_NAME = 'search';
 
-function askInputSchema(): Record<string, unknown> {
+/** Retrieval only, no side effects, no calls outside the console. */
+const SEARCH_ANNOTATIONS = {
+  title: 'Search knowledge base',
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+} as const;
+
+function searchInputSchema(): Record<string, unknown> {
   return {
     type: 'object',
     properties: {
-      question: {
+      query: {
         type: 'string',
-        description: 'The question to answer from this knowledge base.',
+        description: 'The search query to run against this knowledge base.',
       },
     },
-    required: ['question'],
+    required: ['query'],
     additionalProperties: false,
   };
 }
@@ -33,17 +43,8 @@ function askInputSchema(): Record<string, unknown> {
 export const knowledgeBaseProvider: InternalMcpProvider = {
   id: 'knowledge-base',
   label: 'Knowledge Base',
-  description: 'Publish a Knowledge Base as a grounded question-answering MCP tool.',
-  configFields: [
-    {
-      key: 'answerModelKey',
-      label: 'Answer model',
-      type: 'model',
-      required: true,
-      modelCategory: 'chat',
-      hint: 'The chat model used to generate the grounded answer.',
-    },
-  ],
+  description: 'Publish a Knowledge Base as a search/retrieval MCP tool.',
+  configFields: [],
 
   async listInstances(ctx: InternalMcpProviderContext): Promise<InternalMcpInstanceOption[]> {
     const modules = await listRagModules(ctx.tenantDbName, {
@@ -57,14 +58,10 @@ export const knowledgeBaseProvider: InternalMcpProvider = {
     }));
   },
 
-  async validateInstance(ctx, instanceKey, config) {
+  async validateInstance(ctx, instanceKey) {
     const ragModule = await getRagModule(ctx.tenantDbName, instanceKey, ctx.projectId);
     if (!ragModule) {
       throw new Error(`Knowledge Base "${instanceKey}" not found`);
-    }
-    const answerModelKey = config.answerModelKey;
-    if (typeof answerModelKey !== 'string' || !answerModelKey.trim()) {
-      throw new Error('answerModelKey is required for the Knowledge Base provider');
     }
   },
 
@@ -72,14 +69,15 @@ export const knowledgeBaseProvider: InternalMcpProvider = {
     const ragModule = await getRagModule(ctx.tenantDbName, instanceKey, ctx.projectId);
     const label = ragModule?.name ?? instanceKey;
     const description = ragModule?.description
-      ? `Ask a question and get a grounded answer from the "${label}" knowledge base. ${ragModule.description}`
-      : `Ask a question and get a grounded answer from the "${label}" knowledge base.`;
+      ? `Search the "${label}" knowledge base and return matching passages. ${ragModule.description}`
+      : `Search the "${label}" knowledge base and return matching passages.`;
     return {
       tools: [
         {
           name: TOOL_NAME,
           description,
-          inputSchema: askInputSchema(),
+          inputSchema: searchInputSchema(),
+          annotations: { ...SEARCH_ANNOTATIONS, title: `Search ${label}` },
         },
       ],
       suggestedName: label,
@@ -87,26 +85,22 @@ export const knowledgeBaseProvider: InternalMcpProvider = {
     };
   },
 
-  async execute(ctx, instanceKey, config, toolName, args) {
+  async execute(ctx, instanceKey, _config, toolName, args) {
     if (toolName !== TOOL_NAME) {
       throw new Error(`Unknown tool "${toolName}" on Knowledge Base provider`);
     }
-    const question = typeof args.question === 'string' ? args.question.trim() : '';
-    if (!question) {
-      throw new Error('"question" is required');
+    const query = typeof args.query === 'string' ? args.query.trim() : '';
+    if (!query) {
+      throw new Error('"query" is required');
     }
-    const answerModelKey = config.answerModelKey;
-    if (typeof answerModelKey !== 'string' || !answerModelKey.trim()) {
-      throw new Error('This Knowledge Base tool is missing its configured answer model');
-    }
-    const result = await answerWithRag(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
+    // topK is intentionally omitted — queryRag falls back to the module's default.
+    const result = await queryRag(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
       ragModuleKey: instanceKey,
-      question,
-      answerModelKey,
+      query,
     });
     return {
-      answer: result.answer,
-      citations: result.citations,
+      query: result.query,
+      matches: result.matches,
     };
   },
 };

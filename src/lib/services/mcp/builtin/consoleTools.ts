@@ -9,6 +9,7 @@
  */
 
 import { AgentTracingService } from '@/lib/services/agentTracing';
+import { describeMcpTools } from '@/lib/services/mcp/toolAnnotations';
 
 export interface ConsoleToolContext {
   tenantDbName: string;
@@ -175,9 +176,11 @@ export function getConsoleTool(name: string): ConsoleToolDefinition | undefined 
 }
 
 export function listConsoleToolDescriptors() {
-  return CONSOLE_MCP_TOOLS.map((tool) => ({
-    name: tool.name,
-    description: tool.description,
-    inputSchema: tool.inputSchema,
-  }));
+  // Every built-in tool is reporting-only over console-local data.
+  return describeMcpTools(CONSOLE_MCP_TOOLS, {
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  });
 }

@@ -285,11 +285,22 @@ export interface IMcpServer {
   updatedAt?: Date;
 }
 
+/** MCP spec `ToolAnnotations` — behaviour hints clients use to gate approval. */
+export interface IMcpToolAnnotations {
+  title?: string;
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+}
+
 export interface IMcpTool {
   name: string;
   description: string;
   /** JSON Schema for tool input parameters */
   inputSchema: Record<string, unknown>;
+  /** Behaviour hints advertised in `tools/list`. */
+  annotations?: IMcpToolAnnotations;
   /** HTTP method mapped from the OpenAPI operation (sourceType 'openapi'). */
   httpMethod?: string;
   /** Path template from the OpenAPI spec (sourceType 'openapi'). */

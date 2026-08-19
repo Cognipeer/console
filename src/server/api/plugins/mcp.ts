@@ -30,7 +30,7 @@ import {
   isStdioRunnerEnabled,
   updateMcpServer,
 } from '@/lib/services/mcp';
-import type { McpAuditContext, InternalMcpConfigInput } from '@/lib/services/mcp';
+import type { McpAuditContext, InternalMcpConfigInput, UpdateMcpServerInput } from '@/lib/services/mcp';
 import { INTERNAL_MCP_PROVIDERS } from '@/lib/services/mcp/internal/registry';
 import {
   buildRuntimeContextFromRequest,
@@ -446,6 +446,18 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'disabledTools must be an array of tool names' });
       }
 
+      if (body.toolAnnotations !== undefined
+        && (typeof body.toolAnnotations !== 'object' || body.toolAnnotations === null
+          || Array.isArray(body.toolAnnotations))) {
+        return reply.code(400).send({ error: 'toolAnnotations must be an object keyed by tool name' });
+      }
+
+      if (body.toolDescriptions !== undefined
+        && (typeof body.toolDescriptions !== 'object' || body.toolDescriptions === null
+          || Array.isArray(body.toolDescriptions))) {
+        return reply.code(400).send({ error: 'toolDescriptions must be an object keyed by tool name' });
+      }
+
       // Enterprise sub-feature gate (mirrors POST): a non-enterprise tenant may
       // not turn on persistent sandbox execution via edit. Aegis is left as
       // save-but-inert (UI warns) to match create behaviour.
@@ -475,6 +487,8 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         aegis: nextAegis,
         runtimeHeaders: body.runtimeHeaders as { allow?: boolean; allowedNames?: string[] } | null | undefined,
         disabledTools: body.disabledTools as string[] | undefined,
+        toolAnnotations: body.toolAnnotations as UpdateMcpServerInput['toolAnnotations'],
+        toolDescriptions: body.toolDescriptions as UpdateMcpServerInput['toolDescriptions'],
       }, auditContextFor(request, session.userId));
 
       if (!updated) {

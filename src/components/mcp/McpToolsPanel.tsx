@@ -7,41 +7,82 @@
  * tools are grouped by path prefix, groups render rows only when expanded,
  * and every toggle edits a local draft that is persisted with a single
  * PATCH (full `disabledTools` replacement) on Save.
+ *
+ * Each row also opens an annotations editor — the MCP `ToolAnnotations` hints
+ * strict clients (OpenAI's connector) require in `tools/list`.
  */
 
 import { useEffect, useMemo, useState } from 'react';
 import {
+  ActionIcon,
   Badge,
   Button,
   Center,
   Code,
   Group,
+  Modal,
   Paper,
   SegmentedControl,
   Stack,
   Switch,
   Table,
   Text,
+  Textarea,
   TextInput,
+  Tooltip,
   UnstyledButton,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { IconChevronDown, IconChevronRight, IconSearch } from '@tabler/icons-react';
+import { IconAdjustments, IconChevronDown, IconChevronRight, IconSearch } from '@tabler/icons-react';
+import type { IMcpToolAnnotations, McpSourceType } from '@/lib/database';
+import {
+  defaultAnnotationsForSource,
+  resolveToolAnnotations,
+} from '@/lib/services/mcp/toolAnnotations';
 
 interface McpToolRow {
   name: string;
   description?: string;
   httpMethod?: string;
   httpPath?: string;
+  annotations?: IMcpToolAnnotations;
 }
 
 interface McpToolsPanelProps {
   serverId: string;
   tools: McpToolRow[];
   disabledTools: string[];
+  sourceType?: McpSourceType;
+  /** Operator overrides keyed by tool name. */
+  toolAnnotations?: Record<string, IMcpToolAnnotations>;
+  /** Operator-authored descriptions keyed by tool name. */
+  toolDescriptions?: Record<string, string>;
   /** Receives the fresh server payload returned by the PATCH. */
   onServerUpdated: (server: unknown) => void;
 }
+
+const ANNOTATION_FLAGS = [
+  {
+    key: 'readOnlyHint' as const,
+    label: 'Read-only',
+    hint: 'The tool only reads data — no state is changed.',
+  },
+  {
+    key: 'destructiveHint' as const,
+    label: 'Destructive',
+    hint: 'The tool may perform irreversible updates or deletions.',
+  },
+  {
+    key: 'idempotentHint' as const,
+    label: 'Idempotent',
+    hint: 'Calling it repeatedly with the same arguments has no extra effect.',
+  },
+  {
+    key: 'openWorldHint' as const,
+    label: 'Open world',
+    hint: 'The tool reaches systems outside this console (the public internet).',
+  },
+];
 
 /** Flat list below this size — grouping only helps at scale. */
 const GROUP_THRESHOLD = 30;
@@ -72,6 +113,9 @@ export default function McpToolsPanel({
   serverId,
   tools,
   disabledTools,
+  sourceType,
+  toolAnnotations,
+  toolDescriptions,
   onServerUpdated,
 }: McpToolsPanelProps) {
   const savedKey = useMemo(() => [...disabledTools].sort().join('\n'), [disabledTools]);
@@ -80,6 +124,20 @@ export default function McpToolsPanel({
   const [statusFilter, setStatusFilter] = useState<'all' | 'enabled' | 'disabled'>('all');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
+  const [editingTool, setEditingTool] = useState<McpToolRow | null>(null);
+  const [annDraft, setAnnDraft] = useState<IMcpToolAnnotations>({});
+  const [descDraft, setDescDraft] = useState('');
+  const [savingAnn, setSavingAnn] = useState(false);
+
+  const overrides = useMemo(() => toolAnnotations ?? {}, [toolAnnotations]);
+  const descOverrides = useMemo(() => toolDescriptions ?? {}, [toolDescriptions]);
+  const sourceDefaults = useMemo(() => defaultAnnotationsForSource(sourceType), [sourceType]);
+
+  const effectiveFor = (tool: McpToolRow, override: IMcpToolAnnotations | undefined) =>
+    resolveToolAnnotations(
+      { ...tool, annotations: { ...(tool.annotations ?? {}), ...(override ?? {}) } },
+      sourceDefaults,
+    );
 
   // Re-sync the draft whenever the persisted selection changes (save,
   // refresh-tools, spec update).
@@ -171,6 +229,48 @@ export default function McpToolsPanel({
     });
   };
 
+  const openAnnotationEditor = (tool: McpToolRow) => {
+    setEditingTool(tool);
+    setAnnDraft({ ...(overrides[tool.name] ?? {}) });
+    setDescDraft(descOverrides[tool.name] ?? '');
+  };
+
+  const handleSaveAnnotations = async () => {
+    if (!editingTool) return;
+    setSavingAnn(true);
+    try {
+      const payload = Object.keys(annDraft).length ? annDraft : null;
+      const description = descDraft.trim();
+      const res = await fetch(`/api/mcp/${serverId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          toolAnnotations: { [editingTool.name]: payload },
+          toolDescriptions: { [editingTool.name]: description || null },
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Failed to save tool settings');
+      onServerUpdated(data.server);
+      setEditingTool(null);
+      notifications.show({
+        title: 'Tool settings saved',
+        message: payload || description
+          ? `Overrides applied to ${editingTool.name}`
+          : `${editingTool.name} is back to its discovered definition`,
+        color: 'teal',
+      });
+    } catch (err) {
+      notifications.show({
+        title: 'Save failed',
+        message: err instanceof Error ? err.message : 'Unknown error',
+        color: 'red',
+      });
+    } finally {
+      setSavingAnn(false);
+    }
+  };
+
   const handleSave = async () => {
     setSaving(true);
     try {
@@ -250,8 +350,35 @@ export default function McpToolsPanel({
                   </Table.Td>
                   <Table.Td>
                     <Text size="sm" c="dimmed" lineClamp={1}>
-                      {tool.description || '—'}
+                      {descOverrides[tool.name] || tool.description || '—'}
                     </Text>
+                  </Table.Td>
+                  <Table.Td width={150}>
+                    <Group gap={6} justify="flex-end" wrap="nowrap">
+                      {(() => {
+                        const override = overrides[tool.name];
+                        const effective = effectiveFor(tool, override);
+                        return (
+                          <Badge
+                            size="sm"
+                            variant={override || descOverrides[tool.name] ? 'filled' : 'light'}
+                            color={effective.readOnlyHint ? 'teal' : effective.destructiveHint ? 'red' : 'gray'}
+                          >
+                            {effective.readOnlyHint ? 'read-only' : effective.destructiveHint ? 'destructive' : 'write'}
+                          </Badge>
+                        );
+                      })()}
+                      <Tooltip label="Edit description & annotations">
+                        <ActionIcon
+                          variant="subtle"
+                          size="sm"
+                          onClick={() => openAnnotationEditor(tool)}
+                          aria-label={`Edit settings for ${tool.name}`}
+                        >
+                          <IconAdjustments size={15} />
+                        </ActionIcon>
+                      </Tooltip>
+                    </Group>
                   </Table.Td>
                 </Table.Tr>
               );
@@ -407,6 +534,109 @@ export default function McpToolsPanel({
           </Paper>
         );
       })}
+
+      <Modal
+        opened={!!editingTool}
+        onClose={() => setEditingTool(null)}
+        title={`Tool settings · ${editingTool?.name ?? ''}`}
+        size="lg"
+      >
+        {editingTool ? (
+          <Stack gap="md">
+            <Text size="sm" c="dimmed">
+              What MCP clients see for this tool in <Code>tools/list</Code>. The description
+              drives tool selection by the model; the hints tell clients such as OpenAI&apos;s
+              connector whether a call needs approval. Leave a hint on <b>Auto</b> to keep the
+              value Console derives from the tool definition.
+            </Text>
+
+            <Textarea
+              label="Description"
+              description="Overrides the description discovered from the spec or upstream server."
+              placeholder={editingTool.description || 'No description discovered'}
+              autosize
+              minRows={3}
+              maxRows={10}
+              value={descDraft}
+              onChange={(e) => setDescDraft(e.currentTarget.value)}
+            />
+
+            <TextInput
+              label="Title"
+              description="Human-readable label shown by MCP clients."
+              placeholder={editingTool.name}
+              value={annDraft.title ?? ''}
+              onChange={(e) => {
+                const value = e.currentTarget.value;
+                setAnnDraft((prev) => {
+                  const next = { ...prev };
+                  if (value.trim()) next.title = value;
+                  else delete next.title;
+                  return next;
+                });
+              }}
+            />
+
+            {ANNOTATION_FLAGS.map(({ key, label, hint }) => (
+              <Group key={key} justify="space-between" wrap="nowrap" align="flex-start">
+                <div style={{ flex: 1 }}>
+                  <Text size="sm" fw={500}>{label}</Text>
+                  <Text size="xs" c="dimmed">{hint}</Text>
+                </div>
+                <SegmentedControl
+                  size="xs"
+                  value={annDraft[key] === undefined ? 'auto' : annDraft[key] ? 'yes' : 'no'}
+                  onChange={(v) => setAnnDraft((prev) => {
+                    const next = { ...prev };
+                    if (v === 'auto') delete next[key];
+                    else next[key] = v === 'yes';
+                    return next;
+                  })}
+                  data={[
+                    { value: 'auto', label: 'Auto' },
+                    { value: 'yes', label: 'Yes' },
+                    { value: 'no', label: 'No' },
+                  ]}
+                />
+              </Group>
+            ))}
+
+            <Paper withBorder radius="md" p="sm">
+              <Text size="xs" c="dimmed" mb={6}>Effective response</Text>
+              <Code block>
+                {JSON.stringify(
+                  {
+                    name: editingTool.name,
+                    description: descDraft.trim() || editingTool.description || '',
+                    annotations: effectiveFor(editingTool, annDraft),
+                  },
+                  null,
+                  2,
+                )}
+              </Code>
+            </Paper>
+
+            <Group justify="space-between">
+              <Button
+                variant="subtle"
+                color="red"
+                disabled={savingAnn || (!Object.keys(annDraft).length && !descDraft.trim())}
+                onClick={() => { setAnnDraft({}); setDescDraft(''); }}
+              >
+                Reset to discovered
+              </Button>
+              <Group gap="xs">
+                <Button variant="default" disabled={savingAnn} onClick={() => setEditingTool(null)}>
+                  Cancel
+                </Button>
+                <Button loading={savingAnn} onClick={() => void handleSaveAnnotations()}>
+                  Save
+                </Button>
+              </Group>
+            </Group>
+          </Stack>
+        ) : null}
+      </Modal>
     </Stack>
   );
 }

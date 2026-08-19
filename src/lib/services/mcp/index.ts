@@ -18,6 +18,9 @@ export {
   getDisabledToolNames,
   isMcpToolEnabled,
   listEnabledMcpTools,
+  listMcpToolDescriptors,
+  getToolAnnotationOverrides,
+  getToolDescriptionOverrides,
   serializeMcpServer,
   serializeMcpServerFull,
   parseOpenApiSpec,
@@ -27,6 +30,14 @@ export {
 } from './mcpService';
 
 export type { McpServerMonitorEntry } from './mcpService';
+
+export {
+  defaultAnnotationsForSource,
+  describeMcpTool,
+  describeMcpTools,
+  resolveToolAnnotations,
+} from './toolAnnotations';
+export type { McpToolDescriptor, ResolvedMcpToolAnnotations } from './toolAnnotations';
 
 export {
   MCP_SECRET_MASK,

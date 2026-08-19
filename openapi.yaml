@@ -15751,6 +15751,16 @@ components:
           description: Names of tools disabled on this server.
           items:
             type: string
+        toolAnnotations:
+          type: object
+          description: Per-tool annotation overrides applied to `tools/list`, keyed by tool name.
+          additionalProperties:
+            $ref: "#/components/schemas/McpToolAnnotations"
+        toolDescriptions:
+          type: object
+          description: Operator-authored tool descriptions, keyed by tool name.
+          additionalProperties:
+            type: string
         createdAt:
           type: string
           format: date-time
@@ -15865,6 +15875,45 @@ components:
           items:
             type: string
           description: Names of tools to disable on this server.
+        toolAnnotations:
+          type: object
+          description: >-
+            Partial patch of per-tool annotation overrides, keyed by tool name.
+            Send `null` for a tool to drop its override and fall back to the derived hints.
+          additionalProperties:
+            allOf:
+              - $ref: "#/components/schemas/McpToolAnnotations"
+            nullable: true
+        toolDescriptions:
+          type: object
+          description: >-
+            Partial patch of per-tool description overrides, keyed by tool name.
+            Send `null` or an empty string to restore the discovered description.
+          additionalProperties:
+            type: string
+            nullable: true
+    McpToolAnnotations:
+      type: object
+      description: >-
+        MCP `ToolAnnotations` behaviour hints returned for every tool in `tools/list`.
+        Unset hints are derived by Console (HTTP method for OpenAPI sources, read-only for
+        internal Knowledge Base / Agent Observability tools).
+      properties:
+        title:
+          type: string
+          description: Human-readable tool title.
+        readOnlyHint:
+          type: boolean
+          description: The tool does not modify state.
+        destructiveHint:
+          type: boolean
+          description: The tool may perform irreversible updates.
+        idempotentHint:
+          type: boolean
+          description: Repeated calls with the same arguments have no additional effect.
+        openWorldHint:
+          type: boolean
+          description: The tool interacts with systems outside this console.
     McpUpstreamAuthInput:
       type: object
       required:

@@ -18,7 +18,7 @@
 
 import { spawn } from 'node:child_process';
 import { createLogger } from '@/lib/core/logger';
-import type { IMcpStdioConfig, IMcpTool } from '@/lib/database';
+import type { IMcpStdioConfig, IMcpTool, IMcpToolAnnotations } from '@/lib/database';
 import { openStdioEnv } from './secretVault';
 
 const logger = createLogger('mcp-stdio-runner');
@@ -249,7 +249,12 @@ export async function stdioListTools(config: IMcpStdioConfig): Promise<IMcpTool[
   }
 
   const tools = (listRes.result as {
-    tools?: Array<{ name: string; description?: string; inputSchema?: Record<string, unknown> }>;
+    tools?: Array<{
+      name: string;
+      description?: string;
+      inputSchema?: Record<string, unknown>;
+      annotations?: IMcpToolAnnotations;
+    }>;
   })?.tools ?? [];
 
   logger.info('Discovered stdio MCP tools', {
@@ -262,6 +267,7 @@ export async function stdioListTools(config: IMcpStdioConfig): Promise<IMcpTool[
     name: t.name,
     description: t.description || t.name,
     inputSchema: t.inputSchema ?? { type: 'object', properties: {} },
+    ...(t.annotations ? { annotations: t.annotations } : {}),
   }));
 }
 

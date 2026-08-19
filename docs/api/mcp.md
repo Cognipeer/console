@@ -184,12 +184,43 @@ Send MCP JSON-RPC messages. Responses are pushed through the SSE stream when a s
       {
         "name": "search",
         "description": "Search the web",
-        "inputSchema": { "type": "object", "properties": { "query": { "type": "string" } } }
+        "inputSchema": { "type": "object", "properties": { "query": { "type": "string" } } },
+        "annotations": {
+          "title": "search",
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
       }
     ]
   }
 }
 ```
+
+Every tool is returned with a complete `annotations` block (`title`, `readOnlyHint`,
+`destructiveHint`, `idempotentHint`, `openWorldHint`). Strict clients — OpenAI's MCP
+connector among them — reject servers that omit these hints. Values come from the tool
+definition when present; otherwise they are derived (read-only for `GET`/`HEAD` OpenAPI
+operations, read-only for internal Knowledge Base / Agent Observability tools, and the
+conservative "not read-only, potentially destructive" default elsewhere).
+
+To override a hint or reword a tool, open the MCP server's **Tools** tab in the dashboard
+and use the row action, or `PATCH` the server directly:
+
+```bash
+curl -X PATCH "https://your-cognipeer-host/api/client/v1/mcp/<serverKey>" \
+  -H "Authorization: Bearer cpeer_..." -H "Content-Type: application/json" \
+  -d '{
+        "toolAnnotations": {"search": {"readOnlyHint": true, "openWorldHint": false}},
+        "toolDescriptions": {"search": "Search the product handbook and return matching passages."}
+      }'
+```
+
+Both maps are stored per server and survive tool rediscovery. Send `null` for a tool
+(`{"toolAnnotations":{"search":null}}`) to drop its override and go back to the discovered
+definition. Description overrides also apply everywhere else the tool is surfaced —
+the tools REST endpoints and agents that use this server.
 
 ### Call Tool (JSON-RPC)
 

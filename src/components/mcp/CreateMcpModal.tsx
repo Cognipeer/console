@@ -105,7 +105,6 @@ interface FormValues {
   // internal
   internalProvider: string;
   internalInstanceKey: string;
-  internalAnswerModelKey: string;
   hubChoice: string;
   newHubName: string;
   // auth
@@ -153,7 +152,6 @@ export default function CreateMcpModal({
   const [capabilities, setCapabilities] = useState<McpCapabilities | null>(null);
   const [shields, setShields] = useState<Array<{ value: string; label: string }>>([]);
   const [ragModules, setRagModules] = useState<InternalInstanceOption[]>([]);
-  const [chatModels, setChatModels] = useState<Array<{ value: string; label: string }>>([]);
   const [hubs, setHubs] = useState<McpHubOption[]>([]);
 
   const form = useForm<FormValues>({
@@ -175,7 +173,6 @@ export default function CreateMcpModal({
       sandboxMemory: '512',
       internalProvider: 'knowledge-base',
       internalInstanceKey: '',
-      internalAnswerModelKey: '',
       hubChoice: NO_HUB_VALUE,
       newHubName: '',
       authType: 'none',
@@ -206,9 +203,6 @@ export default function CreateMcpModal({
         if (values.internalProvider === 'knowledge-base') {
           if (!values.internalInstanceKey.trim()) {
             errors.internalInstanceKey = 'Choose which Knowledge Base to publish';
-          }
-          if (!values.internalAnswerModelKey.trim()) {
-            errors.internalAnswerModelKey = 'Choose an answer model';
           }
         }
         if (values.hubChoice === NEW_HUB_VALUE && !values.newHubName.trim()) {
@@ -265,17 +259,6 @@ export default function CreateMcpModal({
         })));
       })
       .catch(() => setRagModules([]));
-    // Chat models — candidates for the Knowledge Base "answer model".
-    fetch('/api/models?category=chat')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        const list = Array.isArray(data?.models) ? data.models : [];
-        setChatModels(list.map((m: { key: string; name: string }) => ({
-          value: m.key,
-          label: m.name,
-        })));
-      })
-      .catch(() => setChatModels([]));
     // MCP hubs — enterprise only; degrade silently when unavailable.
     fetch('/api/mcp/hubs')
       .then((r) => (r.ok ? r.json() : null))
@@ -372,9 +355,7 @@ export default function CreateMcpModal({
         payload.internalConfig = {
           provider: v.internalProvider,
           instanceKey: v.internalInstanceKey,
-          config: v.internalProvider === 'knowledge-base'
-            ? { answerModelKey: v.internalAnswerModelKey }
-            : {},
+          config: {},
         };
       } else {
         const env = parseEnvLines(v.stdioEnv);
@@ -470,15 +451,11 @@ export default function CreateMcpModal({
   const validSource = useMemo(() => {
     if (v.sourceType === 'openapi') return Boolean(v.openApiSpec.trim());
     if (v.sourceType === 'remote') return Boolean(v.remoteUrl.trim());
-    if (v.sourceType === 'internal') {
-      return v.internalProvider === 'knowledge-base'
-        ? Boolean(v.internalInstanceKey.trim() && v.internalAnswerModelKey.trim())
-        : Boolean(v.internalInstanceKey.trim());
-    }
+    if (v.sourceType === 'internal') return Boolean(v.internalInstanceKey.trim());
     return Boolean(v.stdioPackage.trim());
   }, [
     v.sourceType, v.openApiSpec, v.remoteUrl, v.stdioPackage,
-    v.internalProvider, v.internalInstanceKey, v.internalAnswerModelKey,
+    v.internalProvider, v.internalInstanceKey,
   ]);
   const validExposure = v.protocolHttp || v.protocolSse;
 
@@ -567,17 +544,10 @@ export default function CreateMcpModal({
                 ?? v.internalProvider}
             />
             {v.internalProvider === 'knowledge-base' ? (
-              <>
-                <SummaryKV
-                  label="Knowledge Base"
-                  value={selectedRagModule?.label || <span className="ds-faint">—</span>}
-                />
-                <SummaryKV
-                  label="Answer model"
-                  value={chatModels.find((m) => m.value === v.internalAnswerModelKey)?.label
-                    || <span className="ds-faint">—</span>}
-                />
-              </>
+              <SummaryKV
+                label="Knowledge Base"
+                value={selectedRagModule?.label || <span className="ds-faint">—</span>}
+              />
             ) : null}
             <SummaryKV
               label="Hub"
@@ -699,40 +669,27 @@ export default function CreateMcpModal({
                   // Instance picking only applies to Knowledge Base today —
                   // reset it when switching so a stale key can't leak through.
                   form.setFieldValue('internalInstanceKey', '');
-                  form.setFieldValue('internalAnswerModelKey', '');
                 }}
               />
             </FormField>
 
             {v.internalProvider === 'knowledge-base' ? (
-              <>
-                <FormRow cols={1}>
-                  <FormField label="Knowledge Base" required hint="The RAG module this tool answers questions from.">
-                    {ragModules.length === 0 ? (
-                      <Alert color="yellow" icon={<IconInfoCircle size={16} />}>
-                        No Knowledge Bases yet — create one under Dashboard → Knowledge Base first.
-                      </Alert>
-                    ) : (
-                      <Select
-                        placeholder="Choose a Knowledge Base"
-                        data={ragModules.map((m) => ({ value: m.key, label: m.label }))}
-                        value={v.internalInstanceKey || null}
-                        onChange={(val) => form.setFieldValue('internalInstanceKey', val ?? '')}
-                      />
-                    )}
-                  </FormField>
-                </FormRow>
-                <FormRow cols={1}>
-                  <FormField label="Answer model" required hint="Chat model used to generate the grounded answer.">
+              <FormRow cols={1}>
+                <FormField label="Knowledge Base" required hint="The RAG module this tool searches.">
+                  {ragModules.length === 0 ? (
+                    <Alert color="yellow" icon={<IconInfoCircle size={16} />}>
+                      No Knowledge Bases yet — create one under Dashboard → Knowledge Base first.
+                    </Alert>
+                  ) : (
                     <Select
-                      placeholder="Choose a model"
-                      data={chatModels}
-                      value={v.internalAnswerModelKey || null}
-                      onChange={(val) => form.setFieldValue('internalAnswerModelKey', val ?? '')}
+                      placeholder="Choose a Knowledge Base"
+                      data={ragModules.map((m) => ({ value: m.key, label: m.label }))}
+                      value={v.internalInstanceKey || null}
+                      onChange={(val) => form.setFieldValue('internalInstanceKey', val ?? '')}
                     />
-                  </FormField>
-                </FormRow>
-              </>
+                  )}
+                </FormField>
+              </FormRow>
             ) : (
               <Alert color="gray" icon={<IconInfoCircle size={16} />}>
                 {capabilities?.internalProviders?.find((p) => p.id === v.internalProvider)?.description

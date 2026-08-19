@@ -28,6 +28,7 @@ import {
   removeSseSession,
   sendSseResponse,
 } from '@/lib/services/mcp/sseSessionManager';
+import { describeMcpTools } from '@/lib/services/mcp/toolAnnotations';
 import {
   getApiTokenContextForRequest,
   readJsonBody,
@@ -185,6 +186,30 @@ const BROWSER_TOOL_DESCRIPTORS: BrowserToolDescriptor[] = [
   },
 ];
 
+/** Tools that only observe the page; everything else mutates page or session state. */
+const READ_ONLY_BROWSER_TOOLS = new Set([
+  'browser_wait',
+  'browser_snapshot',
+  'browser_extract',
+  'browser_screenshot',
+  'browser_pdf',
+]);
+
+const BROWSER_TOOL_LIST = describeMcpTools(
+  BROWSER_TOOL_DESCRIPTORS.map((tool) => {
+    const readOnly = READ_ONLY_BROWSER_TOOLS.has(tool.name);
+    return {
+      ...tool,
+      annotations: {
+        readOnlyHint: readOnly,
+        destructiveHint: !readOnly,
+        idempotentHint: readOnly,
+        openWorldHint: true,
+      },
+    };
+  }),
+);
+
 function jsonRpcOk(id: string | number | null, result: unknown) {
   return { id, jsonrpc: JSONRPC_VERSION, result };
 }
@@ -269,7 +294,7 @@ export const clientBrowserMcpApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       if (method === 'tools/list') {
-        return respond(jsonRpcOk(id, { tools: BROWSER_TOOL_DESCRIPTORS }));
+        return respond(jsonRpcOk(id, { tools: BROWSER_TOOL_LIST }));
       }
 
       if (method === 'tools/call') {

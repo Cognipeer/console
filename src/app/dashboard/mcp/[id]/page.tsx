@@ -5,6 +5,7 @@ import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import {
   ActionIcon,
   Alert,
+  Anchor,
   Badge,
   Box,
   Button,
@@ -40,6 +41,7 @@ import {
   IconCopy,
   IconDots,
   IconEdit,
+  IconExternalLink,
   IconHistory,
   IconList,
   IconPlayerPlay,
@@ -67,7 +69,25 @@ const SOURCE_LABELS: Record<string, string> = {
   openapi: 'OpenAPI proxy',
   remote: 'Remote MCP proxy',
   stdio: 'Stdio package',
+  internal: 'Internal service',
 };
+
+/** Where to send the user to fix/inspect the console-native capability behind an 'internal' MCP server. */
+const INTERNAL_PROVIDER_LINKS: Record<string, (instanceKey: string) => { href: string; label: string }> = {
+  'knowledge-base': (instanceKey) => ({
+    href: `/dashboard/rag/${encodeURIComponent(instanceKey)}`,
+    label: 'Knowledge Engine',
+  }),
+  'agent-observability': () => ({ href: '/dashboard/tracing', label: 'Agent Observability' }),
+};
+
+function getInternalServiceLink(server: McpServerView): { href: string; label: string } | null {
+  if (server.sourceType !== 'internal') return null;
+  const internal = server.metadata?.internal as { provider?: string; instanceKey?: string } | undefined;
+  if (!internal?.provider) return null;
+  const build = INTERNAL_PROVIDER_LINKS[internal.provider];
+  return build ? build(internal.instanceKey ?? '') : null;
+}
 
 const STATUS_COLORS: Record<string, string> = {
   success: 'teal',
@@ -552,6 +572,7 @@ export default function McpDetailPage() {
     );
   }
 
+  const internalServiceLink = getInternalServiceLink(server);
   const totalRequests = overviewAggregate?.totalRequests ?? 0;
   const successCount = overviewAggregate?.successCount ?? 0;
   const errorCount = overviewAggregate?.errorCount ?? 0;
@@ -561,6 +582,7 @@ export default function McpDetailPage() {
   const topTools = Object.entries(overviewAggregate?.toolBreakdown ?? {})
     .sort((a, b) => b[1] - a[1])
     .slice(0, 5);
+  const origin = typeof window !== 'undefined' ? window.location.origin : 'https://your-instance.com';
 
   const headerActions = (
     <>
@@ -720,6 +742,18 @@ export default function McpDetailPage() {
               <Text size="sm" c="dimmed" mt={4} style={{ wordBreak: 'break-word' }}>
                 {server.lastError.message}
               </Text>
+              {internalServiceLink ? (
+                <Anchor
+                  href={internalServiceLink.href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  size="sm"
+                  mt={6}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                >
+                  Open {internalServiceLink.label} <IconExternalLink size={14} />
+                </Anchor>
+              ) : null}
             </Paper>
           ) : null}
 
@@ -950,9 +984,9 @@ export default function McpDetailPage() {
                 <Text fw={600} size="sm" mb={4}>Streamable HTTP (JSON-RPC)</Text>
                 <Group gap="sm" mb="md">
                   <Code block style={{ flex: 1 }}>
-                    {`POST /api/public/mcp/${server.tenantId}/${server.endpointSlug}/message`}
+                    {`POST ${origin}/api/public/mcp/${server.tenantId}/${server.endpointSlug}/message`}
                   </Code>
-                  <CopyButton value={`/api/public/mcp/${server.tenantId}/${server.endpointSlug}/message`}>
+                  <CopyButton value={`${origin}/api/public/mcp/${server.tenantId}/${server.endpointSlug}/message`}>
                     {({ copied, copy }) => (
                       <Tooltip label={copied ? 'Copied' : 'Copy URL'}>
                         <Button variant="subtle" size="compact-xs" color={copied ? 'teal' : 'gray'} onClick={copy}>
@@ -965,9 +999,9 @@ export default function McpDetailPage() {
                 <Text fw={600} size="sm" mb={4}>SSE</Text>
                 <Group gap="sm">
                   <Code block style={{ flex: 1 }}>
-                    {`GET /api/public/mcp/${server.tenantId}/${server.endpointSlug}/sse`}
+                    {`GET ${origin}/api/public/mcp/${server.tenantId}/${server.endpointSlug}/sse`}
                   </Code>
-                  <CopyButton value={`/api/public/mcp/${server.tenantId}/${server.endpointSlug}/sse`}>
+                  <CopyButton value={`${origin}/api/public/mcp/${server.tenantId}/${server.endpointSlug}/sse`}>
                     {({ copied, copy }) => (
                       <Tooltip label={copied ? 'Copied' : 'Copy URL'}>
                         <Button variant="subtle" size="compact-xs" color={copied ? 'teal' : 'gray'} onClick={copy}>
@@ -999,9 +1033,9 @@ export default function McpDetailPage() {
               </Text>
               <Group gap="sm" mb="md">
                 <Code block style={{ flex: 1 }}>
-                  {`GET /api/client/v1/mcp/${server.key}/sse`}
+                  {`GET ${origin}/api/client/v1/mcp/${server.key}/sse`}
                 </Code>
-                <CopyButton value={`/api/client/v1/mcp/${server.key}/sse`}>
+                <CopyButton value={`${origin}/api/client/v1/mcp/${server.key}/sse`}>
                   {({ copied, copy }) => (
                     <Tooltip label={copied ? 'Copied' : 'Copy URL'}>
                       <Button variant="subtle" size="compact-xs" color={copied ? 'teal' : 'gray'} onClick={copy}>
@@ -1018,7 +1052,7 @@ export default function McpDetailPage() {
                 via POST to the message endpoint. The session ID is provided automatically in the SSE <Code>endpoint</Code> event.
               </Text>
               <Code block mb="md">
-                {`POST /api/client/v1/mcp/${server.key}/message?sessionId=<SESSION_ID>`}
+                {`POST ${origin}/api/client/v1/mcp/${server.key}/message?sessionId=<SESSION_ID>`}
               </Code>
 
               <Text fw={600} size="sm" mb={4}>3. Authentication</Text>
@@ -1031,11 +1065,11 @@ export default function McpDetailPage() {
 
               <Text fw={600} size="sm" mb={4}>Protocol Flow</Text>
               <Code block>
-{`1. Client  → GET  /api/client/v1/mcp/${server.key}/sse
+{`1. Client  → GET  ${origin}/api/client/v1/mcp/${server.key}/sse
              Header: Authorization: Bearer <token>
 
 2. Server  → SSE event: "endpoint"
-             data: /api/client/v1/mcp/${server.key}/message?sessionId=<id>
+             data: ${origin}/api/client/v1/mcp/${server.key}/message?sessionId=<id>
 
 3. Client  → POST to the endpoint above
              { "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
@@ -1076,7 +1110,7 @@ export default function McpDetailPage() {
 {`{
   "mcpServers": {
     "${server.key}": {
-      "url": "https://YOUR_GATEWAY_HOST/api/client/v1/mcp/${server.key}/sse",
+      "url": "${origin}/api/client/v1/mcp/${server.key}/sse",
       "headers": {
         "Authorization": "Bearer YOUR_API_TOKEN"
       }
@@ -1097,7 +1131,7 @@ export default function McpDetailPage() {
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 
 const transport = new SSEClientTransport(
-  new URL("https://YOUR_GATEWAY_HOST/api/client/v1/mcp/${server.key}/sse"),
+  new URL("${origin}/api/client/v1/mcp/${server.key}/sse"),
   {
     requestInit: {
       headers: {
@@ -1138,7 +1172,7 @@ console.log(result);`}
 from mcp import ClientSession
 
 async with sse_client(
-    url="https://YOUR_GATEWAY_HOST/api/client/v1/mcp/${server.key}/sse",
+    url="${origin}/api/client/v1/mcp/${server.key}/sse",
     headers={"Authorization": "Bearer YOUR_API_TOKEN"},
 ) as (read_stream, write_stream):
     async with ClientSession(read_stream, write_stream) as session:
@@ -1167,7 +1201,7 @@ async with sse_client(
 
               <Text fw={600} size="sm" mb={4}>Execute a tool</Text>
               <Code block mb="md">
-{`curl -X POST https://YOUR_GATEWAY_HOST/api/client/v1/mcp/${server.key}/execute \\
+{`curl -X POST ${origin}/api/client/v1/mcp/${server.key}/execute \\
   -H "Authorization: Bearer YOUR_API_TOKEN" \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -1178,7 +1212,7 @@ async with sse_client(
 
               <Text fw={600} size="sm" mb={4}>List available tools</Text>
               <Code block mb="md">
-{`curl https://YOUR_GATEWAY_HOST/api/client/v1/mcp/${server.key}/execute \\
+{`curl ${origin}/api/client/v1/mcp/${server.key}/execute \\
   -H "Authorization: Bearer YOUR_API_TOKEN"`}
               </Code>
 
@@ -1188,7 +1222,7 @@ async with sse_client(
                 and the response will be returned directly as HTTP JSON.
               </Text>
               <Code block>
-{`curl -X POST https://YOUR_GATEWAY_HOST/api/client/v1/mcp/${server.key}/message \\
+{`curl -X POST ${origin}/api/client/v1/mcp/${server.key}/message \\
   -H "Authorization: Bearer YOUR_API_TOKEN" \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -1212,6 +1246,7 @@ async with sse_client(
                 ? ` · last discovery ${new Date(server.toolsDiscoveredAt).toLocaleString()}`
                 : ''}
               {' '}· disabled tools are hidden from tools/list and rejected on execution
+              {' '}· use the row action to override a tool&apos;s description and annotation hints
             </Text>
             {server.sourceType !== 'openapi' ? (
               <Button
@@ -1229,6 +1264,9 @@ async with sse_client(
             serverId={params.id}
             tools={server.tools ?? []}
             disabledTools={server.disabledTools ?? []}
+            sourceType={server.sourceType}
+            toolAnnotations={server.toolAnnotations ?? {}}
+            toolDescriptions={server.toolDescriptions ?? {}}
             onServerUpdated={(s) => setServer(s as McpServerView & { openApiSpec?: string })}
           />
         </Tabs.Panel>

@@ -9,7 +9,7 @@
  */
 
 import { safeFetch } from '@/lib/security/outboundFetch';
-import type { IMcpAuthConfig, IMcpTool } from '@/lib/database';
+import type { IMcpAuthConfig, IMcpTool, IMcpToolAnnotations } from '@/lib/database';
 
 const JSONRPC_VERSION = '2.0';
 const MCP_PROTOCOL_VERSION = '2025-03-26';
@@ -106,7 +106,12 @@ export async function remoteInitialize(target: RemoteMcpTarget): Promise<void> {
 /** List tools on a remote MCP server. */
 export async function remoteListTools(target: RemoteMcpTarget): Promise<IMcpTool[]> {
   const result = (await rpcCall(target, 'tools/list', {})) as {
-    tools?: Array<{ name: string; description?: string; inputSchema?: Record<string, unknown> }>;
+    tools?: Array<{
+      name: string;
+      description?: string;
+      inputSchema?: Record<string, unknown>;
+      annotations?: IMcpToolAnnotations;
+    }>;
   } | undefined;
 
   const tools = result?.tools ?? [];
@@ -114,6 +119,7 @@ export async function remoteListTools(target: RemoteMcpTarget): Promise<IMcpTool
     name: t.name,
     description: t.description || t.name,
     inputSchema: t.inputSchema ?? { type: 'object', properties: {} },
+    ...(t.annotations ? { annotations: t.annotations } : {}),
   }));
 }
 

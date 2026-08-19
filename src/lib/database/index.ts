@@ -314,6 +314,7 @@ export type {
   ConfigValueType,
   IMcpServer,
   IMcpTool,
+  IMcpToolAnnotations,
   IMcpRequestLog,
   IMcpRequestAggregate,
   IMcpAuditLog,

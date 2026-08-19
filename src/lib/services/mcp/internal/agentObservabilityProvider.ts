@@ -21,6 +21,14 @@ const TOOL_LIST_AGENTS = 'list_agents';
 const TOOL_LIST_SESSIONS = 'list_sessions';
 const TOOL_GET_SESSION_DETAIL = 'get_session_detail';
 
+/** Reporting only — no writes, no calls outside the console. */
+const READ_ONLY_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+} as const;
+
 const optionalString = (value: unknown): string | undefined =>
   typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined;
 
@@ -76,6 +84,7 @@ export const agentObservabilityProvider: InternalMcpProvider = {
             },
             additionalProperties: false,
           },
+          annotations: { ...READ_ONLY_ANNOTATIONS, title: 'List agents' },
         },
         {
           name: TOOL_LIST_SESSIONS,
@@ -94,6 +103,7 @@ export const agentObservabilityProvider: InternalMcpProvider = {
             },
             additionalProperties: false,
           },
+          annotations: { ...READ_ONLY_ANNOTATIONS, title: 'List sessions' },
         },
         {
           name: TOOL_GET_SESSION_DETAIL,
@@ -108,6 +118,7 @@ export const agentObservabilityProvider: InternalMcpProvider = {
             required: ['sessionId'],
             additionalProperties: false,
           },
+          annotations: { ...READ_ONLY_ANNOTATIONS, title: 'Get session detail' },
         },
       ],
       suggestedName: 'Agent Observability',
