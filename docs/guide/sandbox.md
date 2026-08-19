@@ -121,6 +121,7 @@ A live browser of the container filesystem (served through the in-container tool
 
 - **New template** registers a custom recipe — base image, runtime, isolation, default resources, env, entrypoint, and the toolbox port (default `8787`).
 - **Seed defaults** idempotently loads the built-in library (Python, Node, data-science, web, and the multi-runtime `cognipeer/sandbox-base` image).
+- Each row has **Edit** (update the recipe in place — the `key` stays fixed since other config resolves the template by it) and **Delete**.
 
 The **multi-base** template uses `cognipeer/sandbox-base:latest`, which bundles the toolbox/agent so the container stays alive and supports terminals, the filesystem browser, and git operations out of the box.
 
@@ -216,6 +217,7 @@ Every screen above is backed by the `/api/sandbox/*` admin API (cookie-authentic
 | `POST /api/sandbox/instances/:id/snapshot` · `/fork` | Capture / clone |
 | `POST /api/sandbox/instances/:id/volume` · `DELETE …` | Attach / detach a volume |
 | `GET POST /api/sandbox/templates` · `/templates/seed` | Manage templates |
+| `PATCH DELETE /api/sandbox/templates/:id` | Edit / remove a template |
 | `GET POST /api/sandbox/volumes` · `/volumes/:id/files` | Manage volumes and volume files |
 | `GET /api/sandbox/snapshots` · `/snapshots/:id/restore` | List / restore snapshots |
 | `GET PUT /api/sandbox/settings` | Read / update project settings |
