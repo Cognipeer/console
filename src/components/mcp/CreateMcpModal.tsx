@@ -78,6 +78,10 @@ interface McpHubOption {
 
 const NEW_HUB_VALUE = '__new__';
 const NO_HUB_VALUE = '__none__';
+// Providers other than Knowledge Base aren't scoped to a per-instance
+// resource yet (one MCP server covers the whole project) — this must match
+// the instance key each such provider's `listInstances()` returns.
+const SINGLE_INSTANCE_KEY = 'project';
 
 interface FormValues {
   name: string;
@@ -199,11 +203,13 @@ export default function CreateMcpModal({
         errors.stdioPackage = 'Package name is required';
       }
       if (values.sourceType === 'internal') {
-        if (!values.internalInstanceKey.trim()) {
-          errors.internalInstanceKey = 'Choose which Knowledge Base to publish';
-        }
-        if (!values.internalAnswerModelKey.trim()) {
-          errors.internalAnswerModelKey = 'Choose an answer model';
+        if (values.internalProvider === 'knowledge-base') {
+          if (!values.internalInstanceKey.trim()) {
+            errors.internalInstanceKey = 'Choose which Knowledge Base to publish';
+          }
+          if (!values.internalAnswerModelKey.trim()) {
+            errors.internalAnswerModelKey = 'Choose an answer model';
+          }
         }
         if (values.hubChoice === NEW_HUB_VALUE && !values.newHubName.trim()) {
           errors.newHubName = 'Name the new hub';
@@ -295,10 +301,21 @@ export default function CreateMcpModal({
       form.setFieldValue('hubChoice', hubs[0].id);
     } else if (hubs.length === 0 && capabilities?.mcpHub?.available) {
       form.setFieldValue('hubChoice', NEW_HUB_VALUE);
-      form.setFieldValue('newHubName', 'Knowledge Base Tools');
+      form.setFieldValue('newHubName', 'Internal Services');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened, hubs, capabilities, form.values.sourceType]);
+
+  // Providers without a per-instance picker (anything but Knowledge Base, for
+  // now) always target the same single project-scoped instance.
+  useEffect(() => {
+    if (form.values.sourceType !== 'internal') return;
+    if (form.values.internalProvider === 'knowledge-base') return;
+    if (form.values.internalInstanceKey !== SINGLE_INSTANCE_KEY) {
+      form.setFieldValue('internalInstanceKey', SINGLE_INSTANCE_KEY);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.values.sourceType, form.values.internalProvider]);
 
   const v = form.values;
 
@@ -355,7 +372,9 @@ export default function CreateMcpModal({
         payload.internalConfig = {
           provider: v.internalProvider,
           instanceKey: v.internalInstanceKey,
-          config: { answerModelKey: v.internalAnswerModelKey },
+          config: v.internalProvider === 'knowledge-base'
+            ? { answerModelKey: v.internalAnswerModelKey }
+            : {},
         };
       } else {
         const env = parseEnvLines(v.stdioEnv);
@@ -452,10 +471,15 @@ export default function CreateMcpModal({
     if (v.sourceType === 'openapi') return Boolean(v.openApiSpec.trim());
     if (v.sourceType === 'remote') return Boolean(v.remoteUrl.trim());
     if (v.sourceType === 'internal') {
-      return Boolean(v.internalInstanceKey.trim() && v.internalAnswerModelKey.trim());
+      return v.internalProvider === 'knowledge-base'
+        ? Boolean(v.internalInstanceKey.trim() && v.internalAnswerModelKey.trim())
+        : Boolean(v.internalInstanceKey.trim());
     }
     return Boolean(v.stdioPackage.trim());
-  }, [v.sourceType, v.openApiSpec, v.remoteUrl, v.stdioPackage, v.internalInstanceKey, v.internalAnswerModelKey]);
+  }, [
+    v.sourceType, v.openApiSpec, v.remoteUrl, v.stdioPackage,
+    v.internalProvider, v.internalInstanceKey, v.internalAnswerModelKey,
+  ]);
   const validExposure = v.protocolHttp || v.protocolSse;
 
   const checklist = [
@@ -538,14 +562,23 @@ export default function CreateMcpModal({
         {v.sourceType === 'internal' ? (
           <>
             <SummaryKV
-              label="Knowledge Base"
-              value={selectedRagModule?.label || <span className="ds-faint">—</span>}
+              label="Service"
+              value={capabilities?.internalProviders?.find((p) => p.id === v.internalProvider)?.label
+                ?? v.internalProvider}
             />
-            <SummaryKV
-              label="Answer model"
-              value={chatModels.find((m) => m.value === v.internalAnswerModelKey)?.label
-                || <span className="ds-faint">—</span>}
-            />
+            {v.internalProvider === 'knowledge-base' ? (
+              <>
+                <SummaryKV
+                  label="Knowledge Base"
+                  value={selectedRagModule?.label || <span className="ds-faint">—</span>}
+                />
+                <SummaryKV
+                  label="Answer model"
+                  value={chatModels.find((m) => m.value === v.internalAnswerModelKey)?.label
+                    || <span className="ds-faint">—</span>}
+                />
+              </>
+            ) : null}
             <SummaryKV
               label="Hub"
               value={
@@ -659,7 +692,13 @@ export default function CreateMcpModal({
                 options={(capabilities?.internalProviders ?? [{ id: 'knowledge-base', label: 'Knowledge Base', description: '' }])
                   .map((p) => ({ value: p.id, label: p.label }))}
                 value={v.internalProvider}
-                onChange={(val) => form.setFieldValue('internalProvider', val)}
+                onChange={(val) => {
+                  form.setFieldValue('internalProvider', val);
+                  // Instance picking only applies to Knowledge Base today —
+                  // reset it when switching so a stale key can't leak through.
+                  form.setFieldValue('internalInstanceKey', '');
+                  form.setFieldValue('internalAnswerModelKey', '');
+                }}
               />
             </FormField>
 
@@ -692,7 +731,12 @@ export default function CreateMcpModal({
                   </FormField>
                 </FormRow>
               </>
-            ) : null}
+            ) : (
+              <Alert color="gray" icon={<IconInfoCircle size={16} />}>
+                {capabilities?.internalProviders?.find((p) => p.id === v.internalProvider)?.description
+                  ?? 'No extra configuration needed — this publishes reporting tools for this project.'}
+              </Alert>
+            )}
 
             <FormField
               label="Add to hub"

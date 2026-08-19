@@ -7,9 +7,13 @@
  */
 
 import { knowledgeBaseProvider } from './knowledgeBaseProvider';
+import { agentObservabilityProvider } from './agentObservabilityProvider';
 import type { InternalMcpProvider } from './types';
 
-export const INTERNAL_MCP_PROVIDERS: InternalMcpProvider[] = [knowledgeBaseProvider];
+export const INTERNAL_MCP_PROVIDERS: InternalMcpProvider[] = [
+  knowledgeBaseProvider,
+  agentObservabilityProvider,
+];
 
 export function getInternalMcpProvider(id: string): InternalMcpProvider | undefined {
   return INTERNAL_MCP_PROVIDERS.find((p) => p.id === id);
