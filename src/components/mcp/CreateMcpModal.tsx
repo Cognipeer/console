@@ -30,11 +30,27 @@ interface CreateMcpModalProps {
 }
 
 type AuthType = 'none' | 'token' | 'header' | 'basic';
-type SourceType = 'openapi' | 'remote' | 'stdio';
+type SourceType = 'openapi' | 'remote' | 'stdio' | 'internal';
 type StdioRuntime = 'npx' | 'uvx';
 type ExecutionMode = 'subprocess' | 'sandbox';
 type AccessMode = 'token' | 'public';
 type AegisMode = 'off' | 'monitor' | 'enforce';
+
+interface InternalProviderConfigField {
+  key: string;
+  label: string;
+  type: 'model' | 'text' | 'number';
+  required?: boolean;
+  modelCategory?: string;
+  hint?: string;
+}
+
+interface InternalProviderInfo {
+  id: string;
+  label: string;
+  description: string;
+  configFields: InternalProviderConfigField[];
+}
 
 interface McpCapabilities {
   stdioSubprocess: { enabled: boolean; npx: boolean; uvx: boolean };
@@ -43,7 +59,25 @@ interface McpCapabilities {
   // it is off: no license (upgradeable) vs. community build (edition).
   stdioSandbox: { available: boolean; enterpriseBuild: boolean; seamAvailable?: boolean; licenseEnterprise?: boolean };
   aegis: { hookAvailable: boolean; enterpriseBuild: boolean; seamAvailable?: boolean; licenseEnterprise?: boolean };
+  mcpHub?: { available: boolean; enterpriseBuild: boolean; licenseEnterprise?: boolean };
+  internalProviders?: InternalProviderInfo[];
 }
+
+interface InternalInstanceOption {
+  key: string;
+  label: string;
+  description?: string;
+}
+
+interface McpHubOption {
+  id: string;
+  key: string;
+  name: string;
+  serverKeys: string[];
+}
+
+const NEW_HUB_VALUE = '__new__';
+const NO_HUB_VALUE = '__none__';
 
 interface FormValues {
   name: string;
@@ -64,6 +98,12 @@ interface FormValues {
   executionMode: ExecutionMode;
   sandboxCpu: string;
   sandboxMemory: string;
+  // internal
+  internalProvider: string;
+  internalInstanceKey: string;
+  internalAnswerModelKey: string;
+  hubChoice: string;
+  newHubName: string;
   // auth
   authType: AuthType;
   authToken: string;
@@ -108,6 +148,9 @@ export default function CreateMcpModal({
   const [loading, setLoading] = useState(false);
   const [capabilities, setCapabilities] = useState<McpCapabilities | null>(null);
   const [shields, setShields] = useState<Array<{ value: string; label: string }>>([]);
+  const [ragModules, setRagModules] = useState<InternalInstanceOption[]>([]);
+  const [chatModels, setChatModels] = useState<Array<{ value: string; label: string }>>([]);
+  const [hubs, setHubs] = useState<McpHubOption[]>([]);
 
   const form = useForm<FormValues>({
     initialValues: {
@@ -126,6 +169,11 @@ export default function CreateMcpModal({
       executionMode: 'subprocess',
       sandboxCpu: '1',
       sandboxMemory: '512',
+      internalProvider: 'knowledge-base',
+      internalInstanceKey: '',
+      internalAnswerModelKey: '',
+      hubChoice: NO_HUB_VALUE,
+      newHubName: '',
       authType: 'none',
       authToken: '',
       authHeaderName: '',
@@ -150,7 +198,18 @@ export default function CreateMcpModal({
       if (values.sourceType === 'stdio' && !values.stdioPackage.trim()) {
         errors.stdioPackage = 'Package name is required';
       }
-      if (values.sourceType !== 'stdio') {
+      if (values.sourceType === 'internal') {
+        if (!values.internalInstanceKey.trim()) {
+          errors.internalInstanceKey = 'Choose which Knowledge Base to publish';
+        }
+        if (!values.internalAnswerModelKey.trim()) {
+          errors.internalAnswerModelKey = 'Choose an answer model';
+        }
+        if (values.hubChoice === NEW_HUB_VALUE && !values.newHubName.trim()) {
+          errors.newHubName = 'Name the new hub';
+        }
+      }
+      if (values.sourceType !== 'stdio' && values.sourceType !== 'internal') {
         if (values.authType === 'token' && !values.authToken.trim()) {
           errors.authToken = 'Token is required';
         }
@@ -188,8 +247,58 @@ export default function CreateMcpModal({
         })).filter((s: { value: string }) => s.value));
       })
       .catch(() => setShields([]));
+    // Knowledge Base modules — instances for the "internal" (Knowledge Base) source.
+    fetch('/api/rag/modules?status=active')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        const list = Array.isArray(data?.modules) ? data.modules : [];
+        setRagModules(list.map((m: { key: string; name: string; description?: string }) => ({
+          key: m.key,
+          label: m.name,
+          description: m.description,
+        })));
+      })
+      .catch(() => setRagModules([]));
+    // Chat models — candidates for the Knowledge Base "answer model".
+    fetch('/api/models?category=chat')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        const list = Array.isArray(data?.models) ? data.models : [];
+        setChatModels(list.map((m: { key: string; name: string }) => ({
+          value: m.key,
+          label: m.name,
+        })));
+      })
+      .catch(() => setChatModels([]));
+    // MCP hubs — enterprise only; degrade silently when unavailable.
+    fetch('/api/mcp/hubs')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        const list = Array.isArray(data?.hubs) ? data.hubs : [];
+        setHubs(list.map((h: { id: string; key: string; name: string; serverKeys?: string[] }) => ({
+          id: h.id,
+          key: h.key,
+          name: h.name,
+          serverKeys: h.serverKeys ?? [],
+        })));
+      })
+      .catch(() => setHubs([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened]);
+
+  // Default the hub picker once hubs are known: one hub → preselect it,
+  // none → offer creating one, several → leave unattached by default.
+  useEffect(() => {
+    if (!opened || form.values.sourceType !== 'internal') return;
+    if (form.values.hubChoice !== NO_HUB_VALUE) return;
+    if (hubs.length === 1) {
+      form.setFieldValue('hubChoice', hubs[0].id);
+    } else if (hubs.length === 0 && capabilities?.mcpHub?.available) {
+      form.setFieldValue('hubChoice', NEW_HUB_VALUE);
+      form.setFieldValue('newHubName', 'Knowledge Base Tools');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [opened, hubs, capabilities, form.values.sourceType]);
 
   const v = form.values;
 
@@ -200,9 +309,9 @@ export default function CreateMcpModal({
     setLoading(true);
     try {
       const upstreamAuth: Record<string, string> = {
-        type: v.sourceType === 'stdio' ? 'none' : v.authType,
+        type: v.sourceType === 'stdio' || v.sourceType === 'internal' ? 'none' : v.authType,
       };
-      if (v.sourceType !== 'stdio') {
+      if (v.sourceType !== 'stdio' && v.sourceType !== 'internal') {
         if (v.authType === 'token') {
           upstreamAuth.token = v.authToken;
         } else if (v.authType === 'header') {
@@ -242,6 +351,12 @@ export default function CreateMcpModal({
           url: v.remoteUrl.trim(),
           transport: v.remoteTransport,
         };
+      } else if (v.sourceType === 'internal') {
+        payload.internalConfig = {
+          provider: v.internalProvider,
+          instanceKey: v.internalInstanceKey,
+          config: { answerModelKey: v.internalAnswerModelKey },
+        };
       } else {
         const env = parseEnvLines(v.stdioEnv);
         payload.stdioConfig = {
@@ -273,6 +388,41 @@ export default function CreateMcpModal({
       }
 
       const data = await res.json();
+
+      // Optional hub attach — only reachable when sourceType is 'internal'
+      // and mcpHub is licensed (see the "Add to Hub" section below).
+      if (v.sourceType === 'internal' && v.hubChoice !== NO_HUB_VALUE) {
+        try {
+          if (v.hubChoice === NEW_HUB_VALUE) {
+            await fetch('/api/mcp/hubs', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                name: v.newHubName.trim(),
+                serverKeys: [data.server.key],
+              }),
+            });
+          } else {
+            const hub = hubs.find((h) => h.id === v.hubChoice);
+            if (hub) {
+              await fetch(`/api/mcp/hubs/${hub.id}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  serverKeys: [...hub.serverKeys, data.server.key],
+                }),
+              });
+            }
+          }
+        } catch {
+          notifications.show({
+            title: 'Hub attach failed',
+            message: `"${v.name}" was created, but attaching it to the hub failed. You can attach it from the MCP Hubs page.`,
+            color: 'yellow',
+          });
+        }
+      }
+
       notifications.show({
         title: 'MCP Server Created',
         message: `"${v.name}" is ready to serve requests`,
@@ -292,7 +442,7 @@ export default function CreateMcpModal({
 
   const validIdentity = Boolean(v.name.trim());
   const validAuth = (() => {
-    if (v.sourceType === 'stdio') return true;
+    if (v.sourceType === 'stdio' || v.sourceType === 'internal') return true;
     if (v.authType === 'token') return Boolean(v.authToken.trim());
     if (v.authType === 'header') return Boolean(v.authHeaderName.trim() && v.authHeaderValue.trim());
     if (v.authType === 'basic') return Boolean(v.authUsername.trim() && v.authPassword.trim());
@@ -301,8 +451,11 @@ export default function CreateMcpModal({
   const validSource = useMemo(() => {
     if (v.sourceType === 'openapi') return Boolean(v.openApiSpec.trim());
     if (v.sourceType === 'remote') return Boolean(v.remoteUrl.trim());
+    if (v.sourceType === 'internal') {
+      return Boolean(v.internalInstanceKey.trim() && v.internalAnswerModelKey.trim());
+    }
     return Boolean(v.stdioPackage.trim());
-  }, [v.sourceType, v.openApiSpec, v.remoteUrl, v.stdioPackage]);
+  }, [v.sourceType, v.openApiSpec, v.remoteUrl, v.stdioPackage, v.internalInstanceKey, v.internalAnswerModelKey]);
   const validExposure = v.protocolHttp || v.protocolSse;
 
   const checklist = [
@@ -323,7 +476,10 @@ export default function CreateMcpModal({
     openapi: 'OpenAPI spec',
     remote: 'Remote MCP',
     stdio: 'Package (stdio)',
+    internal: 'Internal service',
   };
+
+  const selectedRagModule = ragModules.find((m) => m.key === v.internalInstanceKey);
 
   const sandboxAvailable = capabilities?.stdioSandbox.available ?? false;
   const subprocessEnabled = capabilities?.stdioSubprocess.enabled ?? true;
@@ -379,6 +535,29 @@ export default function CreateMcpModal({
             />
           </>
         ) : null}
+        {v.sourceType === 'internal' ? (
+          <>
+            <SummaryKV
+              label="Knowledge Base"
+              value={selectedRagModule?.label || <span className="ds-faint">—</span>}
+            />
+            <SummaryKV
+              label="Answer model"
+              value={chatModels.find((m) => m.value === v.internalAnswerModelKey)?.label
+                || <span className="ds-faint">—</span>}
+            />
+            <SummaryKV
+              label="Hub"
+              value={
+                v.hubChoice === NO_HUB_VALUE
+                  ? 'Not attached'
+                  : v.hubChoice === NEW_HUB_VALUE
+                    ? `New: ${v.newHubName || '…'}`
+                    : hubs.find((h) => h.id === v.hubChoice)?.name || '—'
+              }
+            />
+          </>
+        ) : null}
       </SummaryGroup>
 
       <SummaryGroup title="Exposure">
@@ -397,7 +576,7 @@ export default function CreateMcpModal({
         ) : null}
       </SummaryGroup>
 
-      {v.sourceType !== 'stdio' ? (
+      {v.sourceType !== 'stdio' && v.sourceType !== 'internal' ? (
         <SummaryGroup title="Authentication">
           <SummaryKV label="Type" value={authLabel[v.authType]} />
         </SummaryGroup>
@@ -466,11 +645,85 @@ export default function CreateMcpModal({
               { value: 'openapi', label: 'OpenAPI spec' },
               { value: 'remote', label: 'Remote MCP URL' },
               { value: 'stdio', label: 'npx / uvx package' },
+              { value: 'internal', label: 'Internal service' },
             ]}
             value={v.sourceType}
             onChange={(val) => form.setFieldValue('sourceType', val as SourceType)}
           />
         </FormField>
+
+        {v.sourceType === 'internal' ? (
+          <>
+            <FormField label="Internal service" hint="More internal services will show up here over time.">
+              <ChipPicker<string>
+                options={(capabilities?.internalProviders ?? [{ id: 'knowledge-base', label: 'Knowledge Base', description: '' }])
+                  .map((p) => ({ value: p.id, label: p.label }))}
+                value={v.internalProvider}
+                onChange={(val) => form.setFieldValue('internalProvider', val)}
+              />
+            </FormField>
+
+            {v.internalProvider === 'knowledge-base' ? (
+              <>
+                <FormRow cols={1}>
+                  <FormField label="Knowledge Base" required hint="The RAG module this tool answers questions from.">
+                    {ragModules.length === 0 ? (
+                      <Alert color="yellow" icon={<IconInfoCircle size={16} />}>
+                        No Knowledge Bases yet — create one under Dashboard → Knowledge Base first.
+                      </Alert>
+                    ) : (
+                      <Select
+                        placeholder="Choose a Knowledge Base"
+                        data={ragModules.map((m) => ({ value: m.key, label: m.label }))}
+                        value={v.internalInstanceKey || null}
+                        onChange={(val) => form.setFieldValue('internalInstanceKey', val ?? '')}
+                      />
+                    )}
+                  </FormField>
+                </FormRow>
+                <FormRow cols={1}>
+                  <FormField label="Answer model" required hint="Chat model used to generate the grounded answer.">
+                    <Select
+                      placeholder="Choose a model"
+                      data={chatModels}
+                      value={v.internalAnswerModelKey || null}
+                      onChange={(val) => form.setFieldValue('internalAnswerModelKey', val ?? '')}
+                    />
+                  </FormField>
+                </FormRow>
+              </>
+            ) : null}
+
+            <FormField
+              label="Add to hub"
+              optional
+              hint={capabilities?.mcpHub?.available
+                ? 'Publish this tool under an MCP hub so it shows up alongside your other catalogued servers.'
+                : 'MCP Hubs require an active Enterprise license. This tool is still created and callable on its own endpoint.'}
+            >
+              <Select
+                disabled={!capabilities?.mcpHub?.available}
+                data={[
+                  { value: NO_HUB_VALUE, label: "Don't attach" },
+                  ...hubs.map((h) => ({ value: h.id, label: h.name })),
+                  { value: NEW_HUB_VALUE, label: '+ Create new hub' },
+                ]}
+                value={v.hubChoice}
+                onChange={(val) => form.setFieldValue('hubChoice', val ?? NO_HUB_VALUE)}
+              />
+            </FormField>
+            {v.hubChoice === NEW_HUB_VALUE ? (
+              <FormRow cols={1}>
+                <FormField label="New hub name" required>
+                  <TextInput
+                    placeholder="Knowledge Base Tools"
+                    {...form.getInputProps('newHubName')}
+                  />
+                </FormField>
+              </FormRow>
+            ) : null}
+          </>
+        ) : null}
 
         {v.sourceType === 'openapi' ? (
           <>
@@ -606,7 +859,7 @@ export default function CreateMcpModal({
         ) : null}
       </FormSection>
 
-      {v.sourceType !== 'stdio' ? (
+      {v.sourceType !== 'stdio' && v.sourceType !== 'internal' ? (
         <FormSection
           number={3}
           title="Upstream authentication"
@@ -674,7 +927,7 @@ export default function CreateMcpModal({
       ) : null}
 
       <FormSection
-        number={v.sourceType === 'stdio' ? 3 : 4}
+        number={v.sourceType === 'stdio' || v.sourceType === 'internal' ? 3 : 4}
         title="Endpoint exposure"
         description="Which protocols this server is reachable on, and how callers authenticate."
         done={validExposure}
@@ -715,7 +968,7 @@ export default function CreateMcpModal({
       </FormSection>
 
       <FormSection
-        number={v.sourceType === 'stdio' ? 4 : 5}
+        number={v.sourceType === 'stdio' || v.sourceType === 'internal' ? 4 : 5}
         title="Aegis shield"
         description="Guardrail enforcement on tool calls (evaluated by the Aegis enforcement plane)."
         done

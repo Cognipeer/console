@@ -31,6 +31,7 @@ const SOURCE_LABELS: Record<string, string> = {
   openapi: 'OpenAPI',
   remote: 'Remote MCP',
   stdio: 'Package',
+  internal: 'Internal service',
 };
 
 export default function McpServersPage() {
@@ -162,11 +163,14 @@ export default function McpServersPage() {
       key: 'source',
       label: 'Source',
       render: (s) => {
+        const internal = s.metadata?.internal as { provider?: string; instanceKey?: string } | undefined;
         const target = s.sourceType === 'remote'
           ? s.remoteConfig?.url ?? ''
           : s.sourceType === 'stdio'
             ? `${s.stdioConfig?.runtime ?? 'npx'} ${s.stdioConfig?.packageName ?? ''}`
-            : s.upstreamBaseUrl ?? '';
+            : s.sourceType === 'internal'
+              ? `${internal?.provider ?? 'internal'} · ${internal?.instanceKey ?? ''}`
+              : s.upstreamBaseUrl ?? '';
         return (
           <div className="ds-col" style={{ gap: 2, whiteSpace: 'nowrap' }}>
             <span className="ds-badge">{SOURCE_LABELS[s.sourceType] ?? 'OpenAPI'}</span>
