@@ -221,6 +221,27 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
       return row ? this.mapDocRow(row) : null;
     }
 
+    async findRagDocumentByFileName(
+      ragModuleKey: string,
+      fileName: string,
+      projectId?: string,
+    ): Promise<IRagDocument | null> {
+      const db = this.getTenantDb();
+      const clauses: string[] = ['ragModuleKey = @ragModuleKey', 'fileName = @fileName'];
+      const params: Record<string, unknown> = { ragModuleKey, fileName };
+
+      if (projectId !== undefined) {
+        const scopeFilter = this.buildProjectScopeFilter(projectId);
+        clauses.push(scopeFilter.clause);
+        Object.assign(params, scopeFilter.params);
+      }
+
+      const row = db.prepare(
+        `SELECT * FROM ${TABLES.ragDocuments} WHERE ${clauses.join(' AND ')} ORDER BY createdAt DESC LIMIT 1`,
+      ).get(params) as SqliteRow | undefined;
+      return row ? this.mapDocRow(row) : null;
+    }
+
     async listRagDocuments(
       ragModuleKey: string,
       filters?: { projectId?: string; status?: RagDocumentStatus; search?: string },

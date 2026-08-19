@@ -963,6 +963,11 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IRagDocument | null>;
   deleteRagDocument(id: string): Promise<boolean>;
   findRagDocumentById(id: string): Promise<IRagDocument | null>;
+  findRagDocumentByFileName(
+    ragModuleKey: string,
+    fileName: string,
+    projectId?: string,
+  ): Promise<IRagDocument | null>;
   listRagDocuments(
     ragModuleKey: string,
     filters?: { projectId?: string; status?: RagDocumentStatus; search?: string },

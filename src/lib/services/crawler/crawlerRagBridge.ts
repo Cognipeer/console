@@ -8,7 +8,8 @@
  */
 
 import { createLogger } from '@/lib/core/logger';
-import { ingestDocument } from '@/lib/services/rag';
+import { ingestDocument, reingestDocument } from '@/lib/services/rag';
+import { getDatabase } from '@/lib/database';
 import type { ICrawlerRagBinding } from '@/lib/database';
 
 const log = createLogger('crawler:rag-bridge');
@@ -41,27 +42,55 @@ export async function ingestCrawlPage(input: IngestPageInput): Promise<IngestPag
     return { ragStatus: 'skipped' };
   }
 
+  const metadata = {
+    source: 'crawler',
+    sourceUrl: input.url,
+    crawlerKey: input.crawlerKey,
+    jobId: input.jobId,
+    depth: input.depth,
+    title: input.title,
+  };
+
   try {
-    const doc = await ingestDocument(
-      input.tenantDbName,
-      input.tenantId,
+    // Recurring crawls revisit the same URLs on every run. Re-ingesting a
+    // page we've already indexed for this module must replace its old
+    // chunks/vectors rather than piling up duplicate copies alongside them.
+    const db = await getDatabase();
+    await db.switchToTenant(input.tenantDbName);
+    const existing = await db.findRagDocumentByFileName(
+      input.rag.ragModuleKey,
+      input.url,
       input.projectId,
-      {
-        ragModuleKey: input.rag.ragModuleKey,
-        fileName: input.url,
-        content: input.bodyMarkdown,
-        contentType: 'text/markdown',
-        metadata: {
-          source: 'crawler',
-          sourceUrl: input.url,
-          crawlerKey: input.crawlerKey,
-          jobId: input.jobId,
-          depth: input.depth,
-          title: input.title,
-        },
-        createdBy: input.createdBy,
-      },
     );
+
+    const doc = existing
+      ? await reingestDocument(
+          input.tenantDbName,
+          input.tenantId,
+          input.projectId,
+          {
+            ragModuleKey: input.rag.ragModuleKey,
+            documentId: String(existing._id),
+            content: input.bodyMarkdown,
+            fileName: input.url,
+            contentType: 'text/markdown',
+            metadata,
+            updatedBy: input.createdBy,
+          },
+        )
+      : await ingestDocument(
+          input.tenantDbName,
+          input.tenantId,
+          input.projectId,
+          {
+            ragModuleKey: input.rag.ragModuleKey,
+            fileName: input.url,
+            content: input.bodyMarkdown,
+            contentType: 'text/markdown',
+            metadata,
+            createdBy: input.createdBy,
+          },
+        );
     return {
       ragStatus: doc.status === 'indexed' ? 'indexed' : 'failed',
       ragDocumentId: typeof doc._id === 'string' ? doc._id : String(doc._id),

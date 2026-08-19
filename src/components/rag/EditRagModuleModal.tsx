@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   NumberInput,
   Select,
+  Slider,
   TagsInput,
   Text,
   TextInput,
@@ -54,6 +55,8 @@ interface RagModuleData {
   };
   rerankerKey?: string | null;
   rerankerOversample?: number | null;
+  defaultTopK?: number | null;
+  defaultMinScore?: number | null;
 }
 
 interface RerankerOption {
@@ -81,6 +84,8 @@ interface FormValues {
   encoding: string;
   rerankerKey: string;
   rerankerOversample: number | '';
+  defaultTopK: number | '';
+  defaultMinScore: number;
 }
 
 export default function EditRagModuleModal({ opened, onClose, module, onUpdated }: EditRagModuleModalProps) {
@@ -104,6 +109,8 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
       encoding: module.chunkConfig.encoding ?? 'cl100k_base',
       rerankerKey: module.rerankerKey ?? '',
       rerankerOversample: module.rerankerOversample ?? '',
+      defaultTopK: module.defaultTopK ?? 5,
+      defaultMinScore: module.defaultMinScore ?? 0.5,
     },
     validate: {
       name: (v) => (!v ? 'Name is required' : null),
@@ -112,6 +119,7 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
       vectorIndexKey: (v) => (!v ? 'Vector index is required' : null),
       chunkSize: (v) => (!v || Number(v) <= 0 ? 'Chunk size must be positive' : null),
       chunkOverlap: (v) => (v === '' || Number(v) < 0 ? 'Overlap must be non-negative' : null),
+      defaultTopK: (v) => (v === '' || Number(v) < 1 ? 'Must be at least 1' : null),
     },
   });
 
@@ -198,6 +206,8 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
         encoding: module.chunkConfig.encoding ?? 'cl100k_base',
         rerankerKey: module.rerankerKey ?? '',
         rerankerOversample: module.rerankerOversample ?? '',
+        defaultTopK: module.defaultTopK ?? 5,
+        defaultMinScore: module.defaultMinScore ?? 0.5,
       });
       void loadEmbeddingModels();
       void loadVectorProviders();
@@ -243,6 +253,8 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
             values.rerankerOversample === ''
               ? null
               : Number(values.rerankerOversample),
+          defaultTopK: values.defaultTopK === '' ? null : Number(values.defaultTopK),
+          defaultMinScore: values.defaultMinScore,
         }),
       });
 
@@ -291,6 +303,8 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
       <SummaryKV label="Index" value={v.vectorIndexKey || '—'} />
       <SummaryKV label="Chunk" value={v.chunkSize ? `${v.chunkSize} / ${v.chunkOverlap}` : '—'} />
       <SummaryKV label="Reranker" value={v.rerankerKey || 'none'} />
+      <SummaryKV label="Default Top K" value={v.defaultTopK || '—'} mono />
+      <SummaryKV label="Default min score" value={v.defaultMinScore.toFixed(2)} mono />
       <Checklist items={checklist} />
     </SummaryGroup>
   );
@@ -414,6 +428,29 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
         <Text size="xs" c="dimmed">
           Changing the embedding model or vector index does not automatically re-embed existing documents. Re-ingest documents after saving to apply the new configuration.
         </Text>
+      </FormSection>
+
+      <FormSection number={5} title="Query defaults" description="Applied whenever a query doesn't explicitly override these.">
+        <FormRow cols={2}>
+          <FormField label="Top K" required hint="How many chunks a query returns by default.">
+            <NumberInput min={1} max={100} step={1} {...form.getInputProps('defaultTopK')} />
+          </FormField>
+          <FormField label="Min score" hint="Matches below this similarity score are discarded.">
+            <Slider
+              min={0}
+              max={1}
+              step={0.05}
+              marks={[
+                { value: 0, label: '0' },
+                { value: 0.5, label: '0.5' },
+                { value: 1, label: '1' },
+              ]}
+              label={(val) => val.toFixed(2)}
+              value={v.defaultMinScore}
+              onChange={(val) => form.setFieldValue('defaultMinScore', val)}
+            />
+          </FormField>
+        </FormRow>
       </FormSection>
     </FormShell>
   );

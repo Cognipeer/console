@@ -778,6 +778,10 @@ export interface IRagModule {
   rerankerKey?: string;
   /** When reranker is enabled, fetch this many candidates from vector store before re-ranking down to topK. */
   rerankerOversample?: number;
+  /** Default number of matches a query returns when the request doesn't specify topK. */
+  defaultTopK?: number;
+  /** Default minimum similarity score a match must meet when the request doesn't specify minScore. */
+  defaultMinScore?: number;
   totalDocuments?: number;
   totalChunks?: number;
   metadata?: Record<string, unknown>;

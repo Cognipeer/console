@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
   Badge,
@@ -16,6 +16,7 @@ import {
   ScrollArea,
   SegmentedControl,
   SimpleGrid,
+  Slider,
   Stack,
   Table,
   Tabs,
@@ -72,6 +73,8 @@ interface RagModuleView {
   status: string;
   rerankerKey?: string | null;
   rerankerOversample?: number | null;
+  defaultTopK?: number | null;
+  defaultMinScore?: number | null;
   totalDocuments?: number;
   totalChunks?: number;
   createdAt?: string;
@@ -215,12 +218,27 @@ export default function RagModuleDetailPage() {
   const [usageLoading, setUsageLoading] = useState(false);
 
   const queryForm = useForm({
-    initialValues: { query: '', topK: 5 },
+    initialValues: { query: '', topK: 5, minScore: 0 },
     validate: {
       query: (v) => (!v.trim() ? 'Query is required' : null),
       topK: (v) => (v < 1 ? 'Must be at least 1' : null),
     },
   });
+
+  // Prefill the Playground's Top K / Min score with the module's own
+  // defaults once the module loads, without clobbering values the user
+  // has since typed in (e.g. after a later refresh/edit).
+  const queryDefaultsAppliedRef = useRef(false);
+  useEffect(() => {
+    if (mod && !queryDefaultsAppliedRef.current) {
+      queryDefaultsAppliedRef.current = true;
+      queryForm.setValues({
+        topK: mod.defaultTopK ?? 5,
+        minScore: mod.defaultMinScore ?? 0,
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mod]);
 
   /* ── Data loading ────────────────────────────────────────────────────── */
 
@@ -389,6 +407,43 @@ export default function RagModuleDetailPage() {
   };
 
   const [reingestingDocId, setReingestingDocId] = useState<string | null>(null);
+  const [reindexingAll, setReindexingAll] = useState(false);
+  const [reindexProgress, setReindexProgress] = useState<{ done: number; total: number } | null>(null);
+
+  const handleReindexAll = async () => {
+    if (!moduleKey || documents.length === 0) return;
+    if (!window.confirm(`Re-index all ${documents.length} document(s)? Existing chunks will be deleted and re-processed.`)) return;
+
+    setReindexingAll(true);
+    setReindexProgress({ done: 0, total: documents.length });
+    let failed = 0;
+    try {
+      for (const doc of documents) {
+        try {
+          const res = await fetch(
+            `/api/rag/modules/${encodeURIComponent(moduleKey)}/documents/${encodeURIComponent(doc._id)}`,
+            { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
+          );
+          if (!res.ok) failed += 1;
+        } catch {
+          failed += 1;
+        }
+        setReindexProgress((prev) => (prev ? { ...prev, done: prev.done + 1 } : prev));
+      }
+      notifications.show({
+        color: failed > 0 ? 'orange' : 'green',
+        title: failed > 0 ? 'Re-index completed with errors' : 'Re-index complete',
+        message: failed > 0
+          ? `${documents.length - failed}/${documents.length} document(s) re-indexed, ${failed} failed.`
+          : `${documents.length} document(s) re-indexed.`,
+      });
+      await loadDocuments();
+      await loadModule(true);
+    } finally {
+      setReindexingAll(false);
+      setReindexProgress(null);
+    }
+  };
 
   const handleReingestDocument = async (doc: RagDocumentView) => {
     if (!window.confirm(`Re-ingest "${doc.fileName}"? Existing chunks will be deleted and re-processed.`)) return;
@@ -420,7 +475,7 @@ export default function RagModuleDetailPage() {
       const res = await fetch(`/api/rag/modules/${encodeURIComponent(moduleKey)}/query`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: values.query, topK: values.topK }),
+        body: JSON.stringify({ query: values.query, topK: values.topK, minScore: values.minScore || undefined }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: 'Unknown error' }));
@@ -742,6 +797,14 @@ export default function RagModuleDetailPage() {
                   )}
                 </Stack>
                 <Stack gap={4}>
+                  <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Default Top K</Text>
+                  <Text size="sm">{mod.defaultTopK ?? 5}</Text>
+                </Stack>
+                <Stack gap={4}>
+                  <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Default Min Score</Text>
+                  <Text size="sm">{(mod.defaultMinScore ?? 0).toFixed(2)}</Text>
+                </Stack>
+                <Stack gap={4}>
                   <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Created</Text>
                   <Text size="sm">{formatDate(mod.createdAt)}</Text>
                 </Stack>
@@ -837,15 +900,32 @@ export default function RagModuleDetailPage() {
                   <Text fw={600} size="lg">Documents</Text>
                   <Text size="sm" c="dimmed">{documents.length} document(s) in this module</Text>
                 </div>
-                <Button
-                  variant="light"
-                  size="xs"
-                  leftSection={docsLoading ? <Loader size={12} /> : <IconRefresh size={14} />}
-                  onClick={() => void loadDocuments()}
-                  disabled={docsLoading}
-                >
-                  Refresh
-                </Button>
+                <Group gap="xs">
+                  <Tooltip label="Delete and re-process every document's chunks" withArrow>
+                    <Button
+                      variant="light"
+                      color="violet"
+                      size="xs"
+                      leftSection={reindexingAll ? <Loader size={12} /> : <IconRefresh size={14} />}
+                      onClick={() => void handleReindexAll()}
+                      disabled={reindexingAll || docsLoading || documents.length === 0}
+                      loading={reindexingAll}
+                    >
+                      {reindexingAll && reindexProgress
+                        ? `Re-indexing… (${reindexProgress.done}/${reindexProgress.total})`
+                        : 'Re-index All'}
+                    </Button>
+                  </Tooltip>
+                  <Button
+                    variant="light"
+                    size="xs"
+                    leftSection={docsLoading ? <Loader size={12} /> : <IconRefresh size={14} />}
+                    onClick={() => void loadDocuments()}
+                    disabled={docsLoading}
+                  >
+                    Refresh
+                  </Button>
+                </Group>
               </Group>
 
               {docsLoading ? (
@@ -960,6 +1040,22 @@ export default function RagModuleDetailPage() {
                     maxRows={8}
                     {...queryForm.getInputProps('query')}
                   />
+                  <Box maw={280}>
+                    <Text size="sm" fw={500} mb={4}>Min score</Text>
+                    <Slider
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      marks={[
+                        { value: 0, label: '0' },
+                        { value: 0.5, label: '0.5' },
+                        { value: 1, label: '1' },
+                      ]}
+                      label={(v) => v.toFixed(2)}
+                      value={queryForm.values.minScore}
+                      onChange={(v) => queryForm.setFieldValue('minScore', v)}
+                    />
+                  </Box>
                   <Group align="flex-end">
                     <NumberInput
                       label="Top K"

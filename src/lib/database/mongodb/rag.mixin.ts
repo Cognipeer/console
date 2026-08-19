@@ -158,6 +158,23 @@ export function RagMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: T
       return { ...doc, _id: doc._id?.toString() } as IRagDocument;
     }
 
+    async findRagDocumentByFileName(
+      ragModuleKey: string,
+      fileName: string,
+      projectId?: string,
+    ): Promise<IRagDocument | null> {
+      const db = this.getTenantDb();
+      const query: Record<string, unknown> = { ragModuleKey, fileName };
+      if (projectId !== undefined) {
+        Object.assign(query, this.buildProjectScopeFilter(projectId));
+      }
+      const doc = await db
+        .collection<IRagDocument>(COLLECTIONS.ragDocuments)
+        .findOne(query as Filter<IRagDocument>, { sort: { createdAt: -1 } });
+      if (!doc) return null;
+      return { ...doc, _id: doc._id?.toString() } as IRagDocument;
+    }
+
     async listRagDocuments(
       ragModuleKey: string,
       filters?: { projectId?: string; status?: RagDocumentStatus; search?: string },

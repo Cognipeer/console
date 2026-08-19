@@ -81,6 +81,8 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
         vectorProviderKey: body.vectorProviderKey,
         rerankerKey: typeof body.rerankerKey === 'string' && body.rerankerKey ? body.rerankerKey : undefined,
         rerankerOversample: typeof body.rerankerOversample === 'number' ? body.rerankerOversample : undefined,
+        defaultTopK: typeof body.defaultTopK === 'number' ? body.defaultTopK : undefined,
+        defaultMinScore: typeof body.defaultMinScore === 'number' ? body.defaultMinScore : undefined,
       });
 
       return reply.code(201).send({ module: ragModule });
@@ -306,6 +308,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
         query: body.query,
         ragModuleKey: key,
         topK: body.topK as number | undefined,
+        minScore: typeof body.minScore === 'number' ? body.minScore : undefined,
       });
 
       return reply.code(200).send({ result });
