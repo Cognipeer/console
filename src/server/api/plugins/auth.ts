@@ -703,14 +703,10 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         )
         .sign(secret);
 
-      const originHeader = request.headers.origin;
-      const origin = Array.isArray(originHeader)
-        ? originHeader[0]
-        : originHeader;
-      const baseUrl =
-        origin
-        || `${request.protocol}://${request.headers.host ?? 'localhost'}`;
-      const resetUrl = `${baseUrl}/reset-password?token=${resetToken}`;
+      // Built from the configured app URL, never from Origin/Host: this endpoint is
+      // unauthenticated, so a caller-supplied header would let an attacker have a
+      // genuine reset token mailed to the victim pointing at a host they control.
+      const resetUrl = `${getConfig().app.url}/reset-password?token=${resetToken}`;
 
       const emailSent = await sendEmail(email, 'password-reset', {
         expiryTime: '1 hour',

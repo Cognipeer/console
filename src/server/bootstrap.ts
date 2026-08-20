@@ -76,6 +76,16 @@ async function runBootstrap(): Promise<void> {
     for (const error of errors) {
       logger.error(`Config error: ${error.key} - ${error.message}`);
     }
+    // Production refuses to serve on an invalid config. These errors cover the
+    // signing and at-rest encryption secrets, so booting anyway would run the
+    // deployment on the shipped development defaults — a forgeable session
+    // token and credentials encrypted under a publicly known key.
+    if (cfg.nodeEnv === 'production') {
+      throw new Error(
+        `${errors.length} config validation error(s): ${errors.map((e) => e.key).join(', ')}. `
+        + 'Refusing to start in production — fix the reported keys.',
+      );
+    }
     logger.warn(
       `${errors.length} config validation error(s). Some features may not work.`,
     );
