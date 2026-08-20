@@ -1,5 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify';
-import type { GuardrailAction, GuardrailType } from '@/lib/database';
+import type { GuardrailAction, GuardrailType, IUser } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
 import {
@@ -23,12 +23,12 @@ import {
   normalizeWordArray,
   WordListValidationError,
 } from '@/lib/services/guardrail';
+import type { GuardrailView, WordListView } from '@/lib/services/guardrail';
 import { parseDashboardDateFilterFromSearchParams } from '@/lib/utils/dashboardDateFilter';
 import {
   parseBooleanQuery,
   readJsonBody,
   requireProjectContextForRequest,
-  requireSessionContext,
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
@@ -54,6 +54,45 @@ type EvaluationsQuery = {
 const VALID_ACTIONS: GuardrailAction[] = ['block', 'warn', 'flag'];
 const VALID_TYPES: GuardrailType[] = ['preset', 'custom'];
 const VALID_FAIL_MODES = ['open', 'closed'];
+
+/**
+ * Resolve a guardrail by id within the caller's project scope.
+ *
+ * getGuardrail is scoped only by the tenant database, so without this any
+ * member of one project could read another project's guardrail, disable it
+ * (enabled:false / failMode:'open') or delete it — silently removing another
+ * team's safety control — and read the flagged text in its evaluation logs.
+ * Returns null for an out-of-scope id so it is indistinguishable from a
+ * missing one. Owners and admins keep tenant-wide reach, which
+ * resolveProjectContext already grants them, and legacy rows stored before
+ * guardrails carried a projectId stay reachable.
+ */
+async function guardrailInProjectScope(
+  tenantDbName: string,
+  id: string,
+  projectId: string,
+  user: Pick<IUser, 'role'>,
+): Promise<GuardrailView | null> {
+  const guardrail = await getGuardrail(tenantDbName, id);
+  if (!guardrail) return null;
+  if (user.role === 'owner' || user.role === 'admin') return guardrail;
+  if (!guardrail.projectId) return guardrail;
+  return String(guardrail.projectId) === String(projectId) ? guardrail : null;
+}
+
+/** Same project scoping as guardrailInProjectScope, for word lists. */
+async function wordListInProjectScope(
+  tenantDbName: string,
+  id: string,
+  projectId: string,
+  user: Pick<IUser, 'role'>,
+): Promise<WordListView | null> {
+  const wordList = await getWordList(tenantDbName, id);
+  if (!wordList) return null;
+  if (user.role === 'owner' || user.role === 'admin') return wordList;
+  if (!wordList.projectId) return wordList;
+  return String(wordList.projectId) === String(projectId) ? wordList : null;
+}
 
 /**
  * LLM-backed checks silently no-op without a model, which reads as "guardrail
@@ -287,9 +326,9 @@ export const guardrailsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/guardrails/word-lists/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const session = requireSessionContext(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
-      const wordList = await getWordList(session.tenantDbName, id);
+      const wordList = await wordListInProjectScope(session.tenantDbName, id, projectId, user);
       if (!wordList) {
         return reply.code(404).send({ error: 'Word list not found' });
       }
@@ -304,9 +343,11 @@ export const guardrailsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.patch('/guardrails/word-lists/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const session = requireSessionContext(request);
-      await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
+      if (!(await wordListInProjectScope(session.tenantDbName, id, projectId, user))) {
+        return reply.code(404).send({ error: 'Word list not found' });
+      }
       const body = readJsonBody<Record<string, unknown>>(request);
 
       let words: string[] | undefined;
@@ -344,8 +385,11 @@ export const guardrailsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.delete('/guardrails/word-lists/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const session = requireSessionContext(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
+      if (!(await wordListInProjectScope(session.tenantDbName, id, projectId, user))) {
+        return reply.code(404).send({ error: 'Word list not found' });
+      }
       const deleted = await deleteWordList(session.tenantDbName, id);
       if (!deleted) {
         return reply.code(404).send({ error: 'Word list not found' });
@@ -362,9 +406,9 @@ export const guardrailsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/guardrails/:id', withApiRequestContext(async (request, reply) => {
     try {
-      requireSessionContext(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
-      const guardrail = await getGuardrail(requireSessionContext(request).tenantDbName, id);
+      const guardrail = await guardrailInProjectScope(session.tenantDbName, id, projectId, user);
 
       if (!guardrail) {
         return reply.code(404).send({ error: 'Guardrail not found' });
@@ -381,9 +425,11 @@ export const guardrailsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.patch('/guardrails/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const session = requireSessionContext(request);
-      await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
+      if (!(await guardrailInProjectScope(session.tenantDbName, id, projectId, user))) {
+        return reply.code(404).send({ error: 'Guardrail not found' });
+      }
       const body = readJsonBody<Record<string, unknown>>(request);
 
       if (body.action !== undefined && !VALID_ACTIONS.includes(body.action as GuardrailAction)) {
@@ -421,8 +467,11 @@ export const guardrailsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.delete('/guardrails/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const session = requireSessionContext(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
+      if (!(await guardrailInProjectScope(session.tenantDbName, id, projectId, user))) {
+        return reply.code(404).send({ error: 'Guardrail not found' });
+      }
       const deleted = await deleteGuardrail(session.tenantDbName, id);
 
       if (!deleted) {
@@ -441,15 +490,14 @@ export const guardrailsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/guardrails/:id/evaluations', withApiRequestContext(async (request, reply) => {
     try {
-      const session = requireSessionContext(request);
-      await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
       const query = (request.query ?? {}) as EvaluationsQuery;
 
       const db = await getDatabase();
       await db.switchToTenant(session.tenantDbName);
 
-      const guardrail = await db.findGuardrailById(id);
+      const guardrail = await guardrailInProjectScope(session.tenantDbName, id, projectId, user);
       if (!guardrail) {
         return reply.code(404).send({ error: 'Guardrail not found' });
       }

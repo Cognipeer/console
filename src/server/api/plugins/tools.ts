@@ -1,4 +1,4 @@
-import type { IToolAuthConfig } from '@/lib/database';
+import type { ITool, IToolAuthConfig, IUser } from '@/lib/database';
 import type { FastifyPluginAsync } from 'fastify';
 import type { SpecFormatHint } from '@/lib/services/specImport';
 import { createLogger } from '@/lib/core/logger';
@@ -31,6 +31,30 @@ import {
 } from '../fastify-utils';
 
 const logger = createLogger('api:tools');
+
+/**
+ * Resolve a tool by id within the caller's project scope.
+ *
+ * getTool is scoped only by tenant DB, so without this an ordinary member could
+ * address any project's tool in the same tenant — read or repoint its upstream
+ * config, delete it, or execute its actions with the upstream credentials it
+ * stores. Returns null for an out-of-scope id so it is indistinguishable from a
+ * missing one. Owners/admins keep tenant-wide reach (resolveProjectContext
+ * already grants it), and tools stored without a projectId stay tenant-wide as
+ * findToolByKey already treats them.
+ */
+async function toolInProjectScope(
+  tenantDbName: string,
+  toolId: string,
+  projectId: string,
+  user: Pick<IUser, 'role'>,
+): Promise<ITool | null> {
+  const tool = await getTool(tenantDbName, toolId);
+  if (!tool) return null;
+  if (user.role === 'owner' || user.role === 'admin') return tool;
+  if (!tool.projectId) return tool;
+  return String(tool.projectId) === String(projectId) ? tool : null;
+}
 
 export const toolsApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/tools', withApiRequestContext(async (request, reply) => {
@@ -96,10 +120,10 @@ export const toolsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/tools/:toolId', withApiRequestContext(async (request, reply) => {
     try {
-      const { session } = await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { toolId } = request.params as { toolId: string };
       const query = (request.query ?? {}) as { includeAggregate?: string };
-      const tool = await getTool(session.tenantDbName, toolId);
+      const tool = await toolInProjectScope(session.tenantDbName, toolId, projectId, user);
 
       if (!tool) {
         return reply.code(404).send({ error: 'Tool not found' });
@@ -125,9 +149,13 @@ export const toolsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.put('/tools/:toolId', withApiRequestContext(async (request, reply) => {
     try {
-      const { session } = await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { toolId } = request.params as { toolId: string };
       const body = readJsonBody<Record<string, unknown>>(request);
+
+      if (!(await toolInProjectScope(session.tenantDbName, toolId, projectId, user))) {
+        return reply.code(404).send({ error: 'Tool not found' });
+      }
 
       if (body.sync === true) {
         const synced = await syncToolActions(session.tenantDbName, toolId, session.userId);
@@ -155,8 +183,11 @@ export const toolsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.delete('/tools/:toolId', withApiRequestContext(async (request, reply) => {
     try {
-      const { session } = await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { toolId } = request.params as { toolId: string };
+      if (!(await toolInProjectScope(session.tenantDbName, toolId, projectId, user))) {
+        return reply.code(404).send({ error: 'Tool not found' });
+      }
       const deleted = await deleteTool(session.tenantDbName, toolId);
 
       if (!deleted) {
@@ -173,9 +204,9 @@ export const toolsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/tools/:toolId/logs', withApiRequestContext(async (request, reply) => {
     try {
-      const { session } = await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { toolId } = request.params as { toolId: string };
-      const tool = await getTool(session.tenantDbName, toolId);
+      const tool = await toolInProjectScope(session.tenantDbName, toolId, projectId, user);
 
       if (!tool) {
         return reply.code(404).send({ error: 'Tool not found' });
@@ -239,11 +270,11 @@ export const toolsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.post('/tools/:toolId/actions/:actionKey/execute', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, session } = await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { actionKey, toolId } = request.params as { actionKey: string; toolId: string };
       const body = readJsonBody<Record<string, unknown>>(request);
       const args = (body.arguments ?? body.args ?? {}) as Record<string, unknown>;
-      const tool = await getTool(session.tenantDbName, toolId);
+      const tool = await toolInProjectScope(session.tenantDbName, toolId, projectId, user);
 
       if (!tool) {
         return reply.code(404).send({ error: 'Tool not found' });

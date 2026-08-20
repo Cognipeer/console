@@ -53,6 +53,28 @@ function getRecordId(record: { _id?: unknown }): string {
   return typeof record._id === 'string' ? record._id : String(record._id);
 }
 
+/**
+ * Resolve a memory item by id within the store and project the caller addressed.
+ *
+ * findMemoryItemById is scoped only by the tenant database, so an id taken from
+ * the URL would otherwise reach any project's item in the same tenant. Returns
+ * null for an out-of-scope id so callers report it exactly as they report a
+ * missing one and the route is not an existence oracle. Items written before
+ * project stamping carry no projectId and stay reachable.
+ */
+async function findMemoryItemInScope(
+  db: DatabaseProvider,
+  storeKey: string,
+  memoryId: string,
+  projectId: string,
+): Promise<IMemoryItem | null> {
+  const item = await db.findMemoryItemById(memoryId);
+  if (!item) return null;
+  if (item.storeKey !== storeKey) return null;
+  if (!item.projectId) return item;
+  return String(item.projectId) === String(projectId) ? item : null;
+}
+
 // ── Store operations ─────────────────────────────────────────────────────
 
 export async function createMemoryStore(
@@ -361,7 +383,7 @@ export async function updateMemoryItem(
   updates: UpdateMemoryRequest,
 ): Promise<IMemoryItem> {
   const db = await withTenantDb(tenantDbName);
-  const item = await db.findMemoryItemById(memoryId);
+  const item = await findMemoryItemInScope(db, storeKey, memoryId, projectId);
   if (!item) throw new Error('Memory item not found.');
 
   const payload: Record<string, unknown> = {};
@@ -408,7 +430,7 @@ export async function deleteMemoryItem(
   memoryId: string,
 ): Promise<void> {
   const db = await withTenantDb(tenantDbName);
-  const item = await db.findMemoryItemById(memoryId);
+  const item = await findMemoryItemInScope(db, storeKey, memoryId, projectId);
   if (!item) throw new Error('Memory item not found.');
 
   // Delete from vector DB
@@ -435,22 +457,25 @@ export async function deleteMemoryItem(
 export async function deleteMemoryItemsBulk(
   tenantDbName: string,
   _tenantId: string,
-  _projectId: string,
+  projectId: string,
   storeKey: string,
   filter?: { scope?: IMemoryItem['scope']; scopeId?: string; tags?: string[]; before?: Date },
 ): Promise<number> {
   const db = await withTenantDb(tenantDbName);
+  // Resolving the store within the caller's project first keeps a store key
+  // belonging to another project from being emptied through this route, and
+  // keeps the counter update on the store the caller actually owns.
+  const store = await db.findMemoryStoreByKey(storeKey, projectId);
+  if (!store) throw new Error('Memory store not found.');
+
   const deleted = await db.deleteMemoryItems(storeKey, filter);
 
   if (deleted > 0) {
-    const store = await db.findMemoryStoreByKey(storeKey);
-    if (store) {
-      const newCount = await db.countMemoryItems(storeKey);
-      await db.updateMemoryStore(getRecordId(store), {
-        memoryCount: newCount,
-        lastActivityAt: new Date(),
-      });
-    }
+    const newCount = await db.countMemoryItems(storeKey);
+    await db.updateMemoryStore(getRecordId(store), {
+      memoryCount: newCount,
+      lastActivityAt: new Date(),
+    });
   }
 
   return deleted;
