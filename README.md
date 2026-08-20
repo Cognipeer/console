@@ -1,6 +1,6 @@
 # Cognipeer Console
 
-Open-source, multi-tenant AI gateway for LLM services, agent orchestration, vector stores, Knowledge Engine pipelines, prompt management, and more.
+Open-source, self-hosted AI gateway for multi-tenant organizations — OpenAI-compatible LLM routing, RAG, agent orchestration, GPU fleet management, AI red-teaming, and cost optimization behind one production-ready console.
 
 [![License](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
 
@@ -8,17 +8,40 @@ Community edition is available under AGPL-3.0. Commercial licensing, hosted depl
 
 ## Features
 
-- **Multi-Tenant Architecture** — Complete data isolation per tenant with per-tenant databases
-- **LLM Gateway** — OpenAI-compatible chat completions and embeddings with multi-provider support (OpenAI, Anthropic, AWS Bedrock, Google Vertex AI, vLLM, Ollama, and more)
-- **Vector Store Management** — Multi-provider vector operations with built-in SQLite vector support
-- **Knowledge Engine** — Document ingestion, chunking, embedding, and retrieval
-- **Agent Tracing** — Batch and streaming ingest with thread correlation
-- **Guardrails** — PII detection, content moderation, prompt shields, and custom LLM-based evaluators
-- **Prompt Management** — Versioned templates with environment-based deployment (dev/staging/prod)
+**Gateway**
+- **LLM Gateway** — OpenAI-compatible chat completions, embeddings, batch, and moderations across OpenAI, Anthropic, AWS Bedrock, Google Vertex AI, vLLM, Ollama, and more
+- **Model Hub & Dynamic Routing** — Fallback chains and per-model quota/rate limiting
+- **Realtime** — WebSocket voice agents with barge-in and tool-call events
+
+**Agents & Automation**
+- **MCP Hub** — Curate, host, and discover Model Context Protocol servers (OpenAPI, remote, stdio) with per-tool controls
+- **Agent Sandboxes** — Isolated coding-agent dev environments with snapshot/fork/resume and port-forwarded previews
+- **Browser Automation** — Managed browser profiles, live sessions, and per-browser MCP endpoints
+- **A2A Protocol** — Publish Console-managed agents as Agent-to-Agent servers with agent cards
+- **Prompt Management** — Versioned templates with environment-based deployment (dev/staging/prod) and a built-in prompt optimizer
+
+**Knowledge & Retrieval**
+- **RAG / Knowledge Engine** — Document ingestion, chunking, embedding, and retrieval
+- **Web Crawler & Web Search** — Scheduled or ad-hoc crawling plus a built-in search provider
+- **Vector Store Management** — Multi-provider vector operations (Pinecone, Chroma, Qdrant, and more) with built-in SQLite vector support
+- **OCR & Rerankers** — Layout/table-aware document extraction and Cohere-compatible reranking
 - **Semantic Memory** — Scoped memory stores with vector-based recall
+
+**Observability & Evaluation**
+- **Agent Tracing** — Batch and streaming ingest, OTLP/HTTP JSON, and an OpenTelemetry exporter
+- **Evaluations** — Datasets, AI-assisted labeling, and accuracy scoring
+- **Inference Monitoring & Alerts** — Real-time monitoring for self-hosted inference servers with rule-based alerting
+
+**Safety & Compliance**
+- **Guardrails** — PII detection, content moderation, prompt shields, and custom LLM-based evaluators
+- **AI Red-Teaming** — OWASP LLM Top 10 probes, campaigns, and attack runs
+- **Audit Logging** — Tenant-scoped audit trails
+
+**Infrastructure & Cost**
+- **GPU Fleet** — Pooled GPU inference with MIG slicing, Hugging Face catalog deploys, and capacity planning
+- **Cost Intelligence** — Spend tracking, budgets, and automated optimization prescriptions
+- **Multi-Tenant Architecture** — Complete data isolation per tenant, projects, groups, and LDAP/SSO-ready auth
 - **File Management** — Multi-provider file storage with automatic Markdown conversion
-- **Inference Monitoring** — Real-time monitoring for self-hosted inference servers
-- **Alerts** — Rule-based alerting with email notifications
 - **Quota & Rate Limiting** — Multi-dimensional quota enforcement with plan-level defaults
 
 ## Quick Start
