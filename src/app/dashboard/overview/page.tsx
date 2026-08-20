@@ -49,7 +49,7 @@ interface RecentActivity {
   type: string;
   service: string;
   endpoint: string;
-  status: 'success' | 'error';
+  status: 'success' | 'error' | 'cancelled';
   timestamp: string;
 }
 
@@ -412,7 +412,7 @@ export default function DashboardOverviewPage() {
                           {a.endpoint}
                         </span>
                       </div>
-                      <StatusBadge status={a.status === 'success' ? 'ok' : 'err'} />
+                      <StatusBadge status={a.status} />
                       <span className="ds-faint" style={{ fontSize: 11.5 }}>
                         {a.relTime}
                       </span>

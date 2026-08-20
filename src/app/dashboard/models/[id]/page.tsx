@@ -166,7 +166,7 @@ interface UsageLogDto {
   _id?: string;
   requestId?: string;
   route: string;
-  status: 'success' | 'error';
+  status: 'success' | 'error' | 'cancelled';
   latencyMs?: number;
   inputTokens: number;
   outputTokens: number;
@@ -838,7 +838,7 @@ export default function ModelDetailPage() {
             <div className="ds-card ds-card-pad-sm">
               <Stack gap="xs">
                 <div className="ds-row ds-gap-xs">
-                  <StatusBadge status={selectedLog.status === 'success' ? 'ok' : 'err'} />
+                  <StatusBadge status={selectedLog.status} />
                   {selectedLog.latencyMs ? (
                     <span className="ds-badge ds-badge-info">
                       {Math.round(selectedLog.latencyMs)} ms
@@ -1229,7 +1229,7 @@ function OverviewTab({
                         {l.latencyMs ? `${Math.round(l.latencyMs)}ms` : '—'}
                       </td>
                       <td>
-                        <StatusBadge status={l.status === 'success' ? 'ok' : 'err'} />
+                        <StatusBadge status={l.status} />
                       </td>
                     </tr>
                   ))}
@@ -2136,7 +2136,7 @@ function LogsTab({
                   </td>
                   <td>
                     <div className="ds-row ds-gap-xs">
-                      <StatusBadge status={l.status === 'success' ? 'ok' : 'err'} />
+                      <StatusBadge status={l.status} />
                       {l.cacheHit === true ? (
                         <span className="ds-badge ds-badge-teal">cache</span>
                       ) : null}

@@ -172,6 +172,7 @@ export type {
   IAgentTracingEvent,
   IModel,
   IModelUsageLog,
+  ModelUsageStatus,
   IModelUsageAggregate,
   IUsageAttributionFields,
   UsageActorType,

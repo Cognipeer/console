@@ -17,6 +17,7 @@
 import { getRequestContext } from '@/lib/core/requestContext';
 import type {
   IUsageAttributionFields,
+  ModelUsageStatus,
   UsageActorType,
   UsageSource,
 } from '@/lib/database';
@@ -96,7 +97,7 @@ export interface UsageEventInput {
   /** Overrides the actor-derived origin — e.g. 'tracing' for usage derived
    *  from observability ingests rather than gateway-served calls. */
   source?: UsageSource;
-  status?: 'success' | 'error';
+  status?: ModelUsageStatus;
   latencyMs?: number;
   /** When `latencyMs` aggregates multiple calls (trace-derived usage), the
    *  number of calls it covers — weights the rollup's latency average. */
