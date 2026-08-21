@@ -210,6 +210,17 @@ async function isCancelled(db: DatabaseProvider, runKey: string): Promise<boolea
 }
 
 /**
+ * What a re-index actually rebuilds against. Two runs with the same fingerprint
+ * would produce the same chunks and the same vectors.
+ */
+export function moduleReindexFingerprint(ragModule: IRagModule): string {
+  return JSON.stringify({
+    embeddingModelKey: ragModule.embeddingModelKey,
+    chunkConfig: ragModule.chunkConfig,
+  });
+}
+
+/**
  * Release the module from the run and, when the rebuild actually finished,
  * refresh what the run invalidated.
  *
@@ -236,8 +247,25 @@ async function finalizeModule(
     const documents = await db.listRagDocuments(run.ragModuleKey, { projectId });
     patch.totalDocuments = documents.length;
     patch.totalChunks = documents.reduce((sum, doc) => sum + (doc.chunkCount ?? 0), 0);
-    patch.reindexRequired = false;
     patch.lastReindexAt = new Date();
+
+    // Only declare the module fresh if it was still being rebuilt for the
+    // configuration this run started with. An operator who changes chunking
+    // again mid-run gets a 409 from the start endpoint — the module is left
+    // needing another rebuild, and clearing the flag here would hide that and
+    // leave the corpus permanently split across two configurations.
+    const fingerprint = moduleReindexFingerprint(ragModule);
+    const ranFor = typeof run.metadata?.moduleFingerprint === 'string'
+      ? run.metadata.moduleFingerprint
+      : undefined;
+    if (ranFor === undefined || ranFor === fingerprint) {
+      patch.reindexRequired = false;
+    } else {
+      logger.warn('Module changed while it was being re-indexed; it still needs a rebuild', {
+        ragModuleKey: run.ragModuleKey,
+        runKey: run.key,
+      });
+    }
   }
 
   await db.updateRagModule(String(ragModule._id), patch);

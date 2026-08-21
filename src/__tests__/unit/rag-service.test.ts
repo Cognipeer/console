@@ -1349,10 +1349,13 @@ describe('RAG Service', () => {
       expect(deleteFile).not.toHaveBeenCalled();
     });
 
-    it('never promotes a chunk join to the stored source', async () => {
-      // The join repeats every overlap region. Storing it would make that
-      // corruption the document's canonical, authoritative source for every
-      // future re-index.
+    it('keeps a chunk join recoverable without letting it become canonical', async () => {
+      // The join repeats every overlap region, so hashing it would make that
+      // corruption authoritative: a re-upload of the real original would then
+      // be de-duplicated away against it. But it must still be PERSISTED — the
+      // steps that follow delete this document's chunks and vectors, and for a
+      // document with no stored source those rows are its only copy. Dropping
+      // the text here means one embedding timeout destroys the document.
       db.findRagDocumentById.mockResolvedValue({ ...mockDocument });
       db.findRagChunksByDocumentId.mockResolvedValue([
         { vectorId: 'v0', content: 'first half overlap', tenantId: TENANT_ID, ragModuleKey: 'my-rag', documentId: 'ragdoc-1', chunkIndex: 0 },
@@ -1361,10 +1364,9 @@ describe('RAG Service', () => {
 
       await reingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, reingestReq);
 
-      expect(uploadFile).not.toHaveBeenCalled();
       const [, update] = (db.updateRagDocument as ReturnType<typeof vi.fn>).mock.lastCall!;
-      expect(update.sourceText).toBeUndefined();
-      expect(update.sourceTextKey).toBeUndefined();
+      expect(update.sourceText).toBe('first half overlap\noverlap second half');
+      // No hash: dedupe compares against it, and "has this changed?" does too.
       expect(update.sourceHash).toBeUndefined();
     });
 

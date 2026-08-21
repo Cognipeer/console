@@ -10,7 +10,7 @@
 import slugify from 'slugify';
 import { getDatabase, type DatabaseProvider } from '@/lib/database';
 import type { IRagReindexRun } from '@/lib/database/provider/types.domain';
-import { enqueueRagReindex, requestRagReindexCancel } from './ragReindexJob';
+import { enqueueRagReindex, requestRagReindexCancel, moduleReindexFingerprint } from './ragReindexJob';
 
 const SLUG_OPTIONS = { lower: true, strict: true, trim: true };
 const FALLBACK_KEY = 'module';
@@ -108,6 +108,10 @@ export async function startRagReindex(
     failedDocuments: 0,
     batchSize: request.batchSize ?? 1,
     progress: {},
+    // The configuration this run rebuilds against. If the module is changed
+    // again while it is in flight, the run must not report the module fresh on
+    // completion — it rebuilt the previous configuration.
+    metadata: { moduleFingerprint: moduleReindexFingerprint(ragModule) },
     createdBy: request.createdBy,
   });
 

@@ -108,15 +108,27 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
       if (data.metadata !== undefined) { sets.push('metadata = @metadata'); params.metadata = this.toJson(data.metadata); }
       if (data.updatedBy !== undefined) { sets.push('updatedBy = @updatedBy'); params.updatedBy = data.updatedBy; }
       if (data.projectId !== undefined) { sets.push('projectId = @projectId'); params.projectId = data.projectId; }
-      if (data.rerankerKey !== undefined) { sets.push('rerankerKey = @rerankerKey'); params.rerankerKey = data.rerankerKey ?? null; }
-      if (data.rerankerOversample !== undefined) { sets.push('rerankerOversample = @rerankerOversample'); params.rerankerOversample = data.rerankerOversample ?? null; }
-      if (data.defaultTopK !== undefined) { sets.push('defaultTopK = @defaultTopK'); params.defaultTopK = data.defaultTopK ?? null; }
-      if (data.defaultMinScore !== undefined) { sets.push('defaultMinScore = @defaultMinScore'); params.defaultMinScore = data.defaultMinScore ?? null; }
-      if (data.responseDetail !== undefined) { sets.push('responseDetail = @responseDetail'); params.responseDetail = data.responseDetail ?? null; }
-      if (data.defaultFilter !== undefined) { sets.push('defaultFilter = @defaultFilter'); params.defaultFilter = this.toJson(data.defaultFilter); }
-      if (data.filterableFields !== undefined) { sets.push('filterableFields = @filterableFields'); params.filterableFields = this.toJson(data.filterableFields); }
-      if (data.hybrid !== undefined) { sets.push('hybrid = @hybrid'); params.hybrid = this.toJson(data.hybrid); }
-      if (data.isolateByModule !== undefined) { sets.push('isolateByModule = @isolateByModule'); params.isolateByModule = this.toBoolInt(data.isolateByModule); }
+      // Presence, not value, for everything an operator can CLEAR. The service
+      // turns the API's `null` into an explicit `undefined` (updateRagModule,
+      // `request.X ?? undefined`), which Mongo's $set writes as null. A
+      // `!== undefined` guard here silently drops the clear while the API
+      // reports success, so the two backends disagree about what a PATCH did.
+      const clearable = [
+        ['rerankerKey', () => data.rerankerKey ?? null],
+        ['rerankerOversample', () => data.rerankerOversample ?? null],
+        ['defaultTopK', () => data.defaultTopK ?? null],
+        ['defaultMinScore', () => data.defaultMinScore ?? null],
+        ['responseDetail', () => data.responseDetail ?? null],
+        ['defaultFilter', () => (data.defaultFilter ? this.toJson(data.defaultFilter) : null)],
+        ['filterableFields', () => (data.filterableFields ? this.toJson(data.filterableFields) : null)],
+        ['hybrid', () => (data.hybrid ? this.toJson(data.hybrid) : null)],
+        ['isolateByModule', () => (data.isolateByModule === undefined ? null : this.toBoolInt(data.isolateByModule))],
+      ] as const;
+      for (const [column, value] of clearable) {
+        if (!Object.hasOwn(data, column)) continue;
+        sets.push(`${column} = @${column}`);
+        params[column] = value();
+      }
       if (data.reindexRequired !== undefined) { sets.push('reindexRequired = @reindexRequired'); params.reindexRequired = this.toBoolInt(data.reindexRequired); }
       if (data.lastReindexAt !== undefined) { sets.push('lastReindexAt = @lastReindexAt'); params.lastReindexAt = data.lastReindexAt instanceof Date ? data.lastReindexAt.toISOString() : data.lastReindexAt; }
       // Presence, not value: a finished run clears the pointer by passing an

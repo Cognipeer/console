@@ -304,6 +304,14 @@ export class SQLiteProviderBase {
     ] as const) {
       this.ensureTableColumn(db, TABLES.ragDocuments, column, ddl);
     }
+    // Cross-replica ownership of a re-index run.
+    for (const [column, ddl] of [
+      ['claimedBy', 'claimedBy TEXT'],
+      ['claimedAt', 'claimedAt TEXT'],
+      ['heartbeatAt', 'heartbeatAt TEXT'],
+    ] as const) {
+      this.ensureTableColumn(db, TABLES.ragReindexRuns, column, ddl);
+    }
     // Vector query logs record whether the keyword channel ran.
     this.ensureTableColumn(db, TABLES.vectorQueryLogs, 'hybrid', 'hybrid INTEGER');
     // `rag` evaluation targets: without these the three retrieval fields are

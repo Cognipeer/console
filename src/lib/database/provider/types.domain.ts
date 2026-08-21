@@ -1063,6 +1063,16 @@ export interface IRagReindexRun {
   completedAt?: Date;
   /** Resume checkpoint: `{ lastDocumentId, heartbeatAt }`. */
   progress?: Record<string, unknown>;
+  /**
+   * Cross-process ownership. The queue is in-process unless Redis is
+   * configured, so after a rolling restart every replica's boot sweep sees the
+   * same running run; without a claim held in the record they would all
+   * re-embed the same corpus at once. A claim whose heartbeat has gone silent
+   * is reclaimable, so a SIGKILLed worker does not strand its run.
+   */
+  claimedBy?: string;
+  claimedAt?: Date;
+  heartbeatAt?: Date;
   metadata?: Record<string, unknown>;
   createdBy: string;
   createdAt?: Date;

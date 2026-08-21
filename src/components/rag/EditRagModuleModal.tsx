@@ -112,12 +112,15 @@ interface FormValues {
 }
 
 /**
- * Starts the rebuild the pre-save alert promised. Returns null when a run is
- * underway and the message to show when none is: setting `reindexRequired`
- * server-side only records that the vectors are stale, it does not rebuild them.
+ * Starts the rebuild the pre-save alert promised. Returns null on success and
+ * the message to show otherwise: setting `reindexRequired` server-side only
+ * records that the vectors are stale, it does not rebuild them.
  *
- * 409 is a success. It means a run is already rebuilding this module, so
- * reporting a failure would tell the user nothing started when something did.
+ * A 409 is NOT success. It means a run started for the PREVIOUS configuration
+ * is still in flight, so nothing is rebuilding what was just saved. The module
+ * keeps `reindexRequired` (the run will not clear it for a configuration it did
+ * not rebuild), and the banner's "Re-index now" is how the operator starts the
+ * one they actually want — so say that plainly rather than showing a tick.
  */
 async function startReindexRun(key: string, reason: RagReindexReason): Promise<string | null> {
   try {
@@ -126,7 +129,11 @@ async function startReindexRun(key: string, reason: RagReindexReason): Promise<s
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ reason }),
     });
-    if (res.ok || res.status === 409) return null;
+    if (res.ok) return null;
+    if (res.status === 409) {
+      return 'A re-index started earlier is still running, so it is rebuilding the previous '
+        + 'settings. This module still needs a rebuild — use "Re-index now" once that run finishes.';
+    }
     const err = await res.json().catch(() => ({}));
     return typeof (err as { error?: unknown }).error === 'string'
       ? (err as { error: string }).error

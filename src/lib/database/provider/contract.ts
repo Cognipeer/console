@@ -1074,6 +1074,21 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     limit?: number;
   }): Promise<IRagReindexRun[]>;
   deleteRagReindexRun(key: string): Promise<boolean>;
+  /**
+   * Take ownership of a run in ONE atomic statement. Matches only when the run
+   * is pending/queued/running AND it is unclaimed, already ours, or its
+   * heartbeat is older than `staleBefore`. Returns null — without writing —
+   * when another live worker owns it.
+   */
+  claimRagReindexRun(
+    key: string,
+    ownerId: string,
+    staleBefore: Date,
+  ): Promise<IRagReindexRun | null>;
+  /** Refresh the heartbeat while still held; false means the claim was lost. */
+  touchRagReindexRunClaim(key: string, ownerId: string): Promise<boolean>;
+  /** Give the claim up, only if we still hold it. */
+  releaseRagReindexRunClaim(key: string, ownerId: string): Promise<void>;
 
   // ── Reranker operations (tenant-specific) ──
   createReranker(

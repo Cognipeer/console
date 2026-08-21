@@ -23,12 +23,14 @@ export function RagReindexMixin<TBase extends Constructor<SQLiteProviderBase>>(B
         INSERT INTO ${TABLES.ragReindexRuns}
         (id, tenantId, projectId, key, ragModuleKey, status, reason, attempt,
          totalDocuments, processedDocuments, failedDocuments, batchSize,
-         errorMessage, startedAt, completedAt, progress, metadata,
+         errorMessage, startedAt, completedAt, progress,
+         claimedBy, claimedAt, heartbeatAt, metadata,
          createdBy, createdAt, updatedAt)
         VALUES
         (@id, @tenantId, @projectId, @key, @ragModuleKey, @status, @reason, @attempt,
          @totalDocuments, @processedDocuments, @failedDocuments, @batchSize,
-         @errorMessage, @startedAt, @completedAt, @progress, @metadata,
+         @errorMessage, @startedAt, @completedAt, @progress,
+         @claimedBy, @claimedAt, @heartbeatAt, @metadata,
          @createdBy, @createdAt, @updatedAt)
       `).run({
         id,
@@ -47,6 +49,9 @@ export function RagReindexMixin<TBase extends Constructor<SQLiteProviderBase>>(B
         startedAt: run.startedAt ? run.startedAt.toISOString() : null,
         completedAt: run.completedAt ? run.completedAt.toISOString() : null,
         progress: run.progress ? this.toJson(run.progress) : null,
+        claimedBy: run.claimedBy ?? null,
+        claimedAt: run.claimedAt ? run.claimedAt.toISOString() : null,
+        heartbeatAt: run.heartbeatAt ? run.heartbeatAt.toISOString() : null,
         metadata: this.toJson(run.metadata ?? {}),
         createdBy: run.createdBy,
         createdAt: now,
@@ -82,6 +87,9 @@ export function RagReindexMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       if (has('startedAt')) { sets.push('startedAt = @startedAt'); params.startedAt = data.startedAt ? data.startedAt.toISOString() : null; }
       if (has('completedAt')) { sets.push('completedAt = @completedAt'); params.completedAt = data.completedAt ? data.completedAt.toISOString() : null; }
       if (has('progress')) { sets.push('progress = @progress'); params.progress = data.progress ? this.toJson(data.progress) : null; }
+      if (has('claimedBy')) { sets.push('claimedBy = @claimedBy'); params.claimedBy = data.claimedBy ?? null; }
+      if (has('claimedAt')) { sets.push('claimedAt = @claimedAt'); params.claimedAt = data.claimedAt ? data.claimedAt.toISOString() : null; }
+      if (has('heartbeatAt')) { sets.push('heartbeatAt = @heartbeatAt'); params.heartbeatAt = data.heartbeatAt ? data.heartbeatAt.toISOString() : null; }
       if (has('metadata')) { sets.push('metadata = @metadata'); params.metadata = this.toJson(data.metadata ?? {}); }
 
       db.prepare(`UPDATE ${TABLES.ragReindexRuns} SET ${sets.join(', ')} WHERE key = @key`).run(params);
@@ -120,6 +128,53 @@ export function RagReindexMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       return rows.map((row) => this.rowToRagReindexRun(row));
     }
 
+    /**
+     * A single `UPDATE … WHERE` — SQLite serialises writers on the database
+     * lock, so the match and the write cannot interleave with another worker's.
+     * A run whose owner stopped heart-beating is reclaimable, which is what
+     * lets a killed worker's run continue elsewhere.
+     */
+    async claimRagReindexRun(
+      key: string,
+      ownerId: string,
+      staleBefore: Date,
+    ): Promise<IRagReindexRun | null> {
+      const db = this.getTenantDb();
+      const now = this.now();
+      const result = db.prepare(`
+        UPDATE ${TABLES.ragReindexRuns}
+           SET status = 'running', claimedBy = @ownerId, claimedAt = @now,
+               heartbeatAt = @now, updatedAt = @now
+         WHERE key = @key
+           AND status IN ('pending', 'queued', 'running')
+           AND (claimedBy IS NULL OR claimedBy = @ownerId
+                OR heartbeatAt IS NULL OR heartbeatAt < @staleBefore)
+      `).run({ key, ownerId, now, staleBefore: staleBefore.toISOString() });
+
+      if (result.changes === 0) return null;
+      return this.findRagReindexRunByKey(key);
+    }
+
+    async touchRagReindexRunClaim(key: string, ownerId: string): Promise<boolean> {
+      const db = this.getTenantDb();
+      const now = this.now();
+      const result = db.prepare(`
+        UPDATE ${TABLES.ragReindexRuns}
+           SET heartbeatAt = @now, updatedAt = @now
+         WHERE key = @key AND claimedBy = @ownerId AND status = 'running'
+      `).run({ key, ownerId, now });
+      return result.changes > 0;
+    }
+
+    async releaseRagReindexRunClaim(key: string, ownerId: string): Promise<void> {
+      const db = this.getTenantDb();
+      db.prepare(`
+        UPDATE ${TABLES.ragReindexRuns}
+           SET claimedBy = NULL, claimedAt = NULL, heartbeatAt = NULL, updatedAt = @now
+         WHERE key = @key AND claimedBy = @ownerId
+      `).run({ key, ownerId, now: this.now() });
+    }
+
     async deleteRagReindexRun(key: string): Promise<boolean> {
       const db = this.getTenantDb();
       return db.prepare(`DELETE FROM ${TABLES.ragReindexRuns} WHERE key = @key`).run({ key }).changes > 0;
@@ -145,6 +200,9 @@ export function RagReindexMixin<TBase extends Constructor<SQLiteProviderBase>>(B
         startedAt: row.startedAt ? new Date(String(row.startedAt)) : undefined,
         completedAt: row.completedAt ? new Date(String(row.completedAt)) : undefined,
         progress: row.progress ? this.parseJson<Record<string, unknown>>(String(row.progress), {}) : undefined,
+        claimedBy: (row.claimedBy as string | null) ?? undefined,
+        claimedAt: row.claimedAt ? this.toDate(row.claimedAt) : undefined,
+        heartbeatAt: row.heartbeatAt ? this.toDate(row.heartbeatAt) : undefined,
         metadata: row.metadata ? this.parseJson<Record<string, unknown>>(String(row.metadata), {}) : undefined,
         createdBy: String(row.createdBy),
         createdAt: row.createdAt ? new Date(String(row.createdAt)) : undefined,

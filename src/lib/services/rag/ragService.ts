@@ -1439,10 +1439,16 @@ export async function reingestDocument(
     : doc.metadata;
 
   // A chunk join is a lossy reconstruction — it repeats every overlap region —
-  // so it may rebuild an index but must never be promoted to the document's
-  // stored source: that would make the corruption canonical and authoritative
-  // for every future re-index. The document keeps no source instead, and the
-  // next run rebuilds from chunks again rather than from a corrupted "original".
+  // so it must never become the document's CANONICAL source: hashing it would
+  // make the corruption authoritative, and a later re-upload of the real
+  // original would be de-duplicated away against it.
+  //
+  // It must still be PERSISTED, though. The steps below delete this document's
+  // vectors and chunk rows, and for a document with no stored source those rows
+  // are the only copy of its text. Keeping the join only in a local variable
+  // means an embedding timeout or a SIGKILL between the delete and the rebuild
+  // destroys the document outright, with a failure counter as the only trace.
+  // So: store the text, withhold the hash, and record where it came from.
   const sourceIsTrustworthy = source.origin !== 'chunk-join';
 
   // Refresh the stored source so the NEXT re-index reads this run's input
@@ -1451,7 +1457,7 @@ export async function reingestDocument(
   const sourceHash = hashSourceText(textContent);
   const sourceIsStored = Boolean(doc.sourceText || doc.sourceTextKey);
   let storedSource: Awaited<ReturnType<typeof storeDocumentSource>> | undefined;
-  if (sourceIsTrustworthy && (doc.sourceHash !== sourceHash || !sourceIsStored)) {
+  if (doc.sourceHash !== sourceHash || !sourceIsStored) {
     storedSource = await storeDocumentSource({
       tenantDbName,
       tenantId,
@@ -1512,7 +1518,12 @@ export async function reingestDocument(
     // empty, or the document would carry two disagreeing copies of itself.
     const sourceFields = storedSource
       ? {
-        sourceHash: storedSource.sourceHash,
+        // The hash is what de-duplication and "has this changed?" compare
+        // against, so it is withheld for a reconstruction: the text is kept so
+        // the next run has something to rebuild from, but re-uploading the real
+        // original must never be mistaken for a duplicate of the join, and the
+        // stale hash of the true original must not survive either.
+        sourceHash: sourceIsTrustworthy ? storedSource.sourceHash : undefined,
         sourceText: storedSource.sourceText,
         sourceTextKey: storedSource.sourceTextKey,
         fileKey: storedSource.fileKey ?? doc.fileKey,

@@ -17,6 +17,9 @@ const NULLABLE_FIELDS: readonly string[] = [
   'startedAt',
   'completedAt',
   'progress',
+  'claimedBy',
+  'claimedAt',
+  'heartbeatAt',
 ];
 
 const IMMUTABLE_FIELDS: readonly string[] = ['_id', 'tenantId', 'key', 'createdBy'];
@@ -97,6 +100,70 @@ export function RagReindexMixin<TBase extends Constructor<MongoDBProviderBase>>(
 
       const runs = await cursor.toArray();
       return runs.map((run) => ({ ...run, _id: run._id?.toString() }));
+    }
+
+    /**
+     * One `findOneAndUpdate`, so two replicas racing the same run cannot both
+     * win: the filter is evaluated and the write applied under a single
+     * document lock. A run whose owner has stopped heart-beating is reclaimable,
+     * which is what lets a SIGKILLed pod's run continue elsewhere.
+     */
+    async claimRagReindexRun(
+      key: string,
+      ownerId: string,
+      staleBefore: Date,
+    ): Promise<IRagReindexRun | null> {
+      const db = this.getTenantDb();
+      const now = new Date();
+      const doc = await db
+        .collection<IRagReindexRun>(COLLECTIONS.ragReindexRuns)
+        .findOneAndUpdate(
+          {
+            key,
+            status: { $in: ['pending', 'queued', 'running'] },
+            $or: [
+              { claimedBy: { $exists: false } },
+              { claimedBy: null },
+              { claimedBy: ownerId },
+              { heartbeatAt: { $exists: false } },
+              { heartbeatAt: null },
+              { heartbeatAt: { $lt: staleBefore } },
+            ],
+          } as Filter<IRagReindexRun>,
+          {
+            $set: {
+              status: 'running',
+              claimedBy: ownerId,
+              claimedAt: now,
+              heartbeatAt: now,
+              updatedAt: now,
+            },
+          },
+          { returnDocument: 'after' },
+        );
+      return doc ? ({ ...doc, _id: doc._id?.toString() } as IRagReindexRun) : null;
+    }
+
+    async touchRagReindexRunClaim(key: string, ownerId: string): Promise<boolean> {
+      const db = this.getTenantDb();
+      const now = new Date();
+      const result = await db
+        .collection<IRagReindexRun>(COLLECTIONS.ragReindexRuns)
+        .updateOne(
+          { key, claimedBy: ownerId, status: 'running' } as Filter<IRagReindexRun>,
+          { $set: { heartbeatAt: now, updatedAt: now } },
+        );
+      return result.matchedCount > 0;
+    }
+
+    async releaseRagReindexRunClaim(key: string, ownerId: string): Promise<void> {
+      const db = this.getTenantDb();
+      await db
+        .collection<IRagReindexRun>(COLLECTIONS.ragReindexRuns)
+        .updateOne(
+          { key, claimedBy: ownerId } as Filter<IRagReindexRun>,
+          { $unset: { claimedBy: '', claimedAt: '', heartbeatAt: '' }, $set: { updatedAt: new Date() } },
+        );
     }
 
     async deleteRagReindexRun(key: string): Promise<boolean> {

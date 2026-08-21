@@ -2076,6 +2076,65 @@ describeForEachProvider('RAG module teardown + shared index accounting', (getDb)
   });
 });
 
+describeForEachProvider('RAG module clearable fields', (getDb) => {
+  let dbName: string;
+  let tenantId: string;
+
+  beforeEach(async () => {
+    const slug = `ragclr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    dbName = `tenant_${slug}`;
+    const db = getDb();
+    const tenant = await db.createTenant({
+      companyName: 'RAG Clear Co', slug, dbName, licenseType: 'FREE', ownerId: 'pending',
+    });
+    tenantId = String(tenant._id);
+    await db.switchToTenant(dbName);
+  });
+
+  it('clears an optional field on an explicit undefined, identically on both backends', async () => {
+    const db = getDb();
+    // The API sends null to clear; the service turns that into an explicit
+    // undefined. A guard that skips undefined drops the clear while still
+    // answering 200 — the module keeps a reranker the operator removed.
+    const created = await db.createRagModule({
+      tenantId,
+      projectId: 'proj-1',
+      key: 'km-clear',
+      name: 'Clearable',
+      embeddingModelKey: 'emb',
+      vectorProviderKey: 'vec',
+      vectorIndexKey: 'idx',
+      chunkConfig: { strategy: 'recursive_character', chunkSize: 400, chunkOverlap: 40 },
+      status: 'active',
+      rerankerKey: 'rr-1',
+      defaultTopK: 8,
+      defaultMinScore: 0.6,
+      responseDetail: 'text',
+      isolateByModule: true,
+      createdBy: 'tester',
+    });
+
+    const id = String(created._id);
+    expect((await db.findRagModuleById(id))?.rerankerKey).toBe('rr-1');
+
+    await db.updateRagModule(id, {
+      rerankerKey: undefined,
+      defaultTopK: undefined,
+      defaultMinScore: undefined,
+      responseDetail: undefined,
+    });
+
+    const cleared = await db.findRagModuleById(id);
+    expect(cleared?.rerankerKey ?? null).toBeNull();
+    expect(cleared?.defaultTopK ?? null).toBeNull();
+    expect(cleared?.defaultMinScore ?? null).toBeNull();
+    expect(cleared?.responseDetail ?? null).toBeNull();
+    // Untouched keys must survive: presence decides, not truthiness.
+    expect(cleared?.isolateByModule).toBe(true);
+    expect(cleared?.name).toBe('Clearable');
+  });
+});
+
 describeForEachProvider('RAG re-index runs', (getDb) => {
   let dbName: string;
   let tenantId: string;
@@ -2109,6 +2168,60 @@ describeForEachProvider('RAG re-index runs', (getDb) => {
     batchSize: 25,
     metadata: { requestedBy: 'ui' },
     createdBy: 'tester',
+  });
+
+  it('lets exactly one worker claim a run, and refuses the others without writing', async () => {
+    const db = getDb();
+    await db.createRagReindexRun(baseRun('rx-claim', 'km-1'));
+    const stale = new Date(Date.now() - 90_000);
+
+    const first = await db.claimRagReindexRun('rx-claim', 'pod-a', stale);
+    expect(first?.claimedBy).toBe('pod-a');
+    expect(first?.status).toBe('running');
+
+    // The queue is in-process without Redis, so after a rolling restart every
+    // replica's boot sweep sees this same run. Only one may take it.
+    expect(await db.claimRagReindexRun('rx-claim', 'pod-b', stale)).toBeNull();
+    expect((await db.findRagReindexRunByKey('rx-claim'))?.claimedBy).toBe('pod-a');
+
+    // The holder re-claiming is idempotent — that is how a resume continues.
+    expect((await db.claimRagReindexRun('rx-claim', 'pod-a', stale))?.claimedBy).toBe('pod-a');
+  });
+
+  it('lets another worker take over only once the holder stops heart-beating', async () => {
+    const db = getDb();
+    await db.createRagReindexRun(baseRun('rx-stale', 'km-1'));
+    await db.claimRagReindexRun('rx-stale', 'pod-a', new Date(Date.now() - 90_000));
+
+    // A live holder keeps its run even when the sweep runs again.
+    expect(await db.claimRagReindexRun('rx-stale', 'pod-b', new Date(Date.now() - 90_000))).toBeNull();
+    expect(await db.touchRagReindexRunClaim('rx-stale', 'pod-a')).toBe(true);
+
+    // A SIGKILLed pod leaves a run claimed but silent; it must not strand.
+    const takeover = await db.claimRagReindexRun('rx-stale', 'pod-b', new Date(Date.now() + 60_000));
+    expect(takeover?.claimedBy).toBe('pod-b');
+
+    // The evicted holder learns it lost the claim and can stop working.
+    expect(await db.touchRagReindexRunClaim('rx-stale', 'pod-a')).toBe(false);
+  });
+
+  it('releases a claim only for its holder', async () => {
+    const db = getDb();
+    await db.createRagReindexRun(baseRun('rx-release', 'km-1'));
+    const stale = new Date(Date.now() - 90_000);
+    await db.claimRagReindexRun('rx-release', 'pod-a', stale);
+
+    await db.releaseRagReindexRunClaim('rx-release', 'pod-b');
+    expect((await db.findRagReindexRunByKey('rx-release'))?.claimedBy).toBe('pod-a');
+
+    await db.releaseRagReindexRunClaim('rx-release', 'pod-a');
+    expect((await db.findRagReindexRunByKey('rx-release'))?.claimedBy).toBeUndefined();
+  });
+
+  it('will not claim a run that has already finished', async () => {
+    const db = getDb();
+    await db.createRagReindexRun({ ...baseRun('rx-done', 'km-1'), status: 'completed' });
+    expect(await db.claimRagReindexRun('rx-done', 'pod-a', new Date(Date.now() - 90_000))).toBeNull();
   });
 
   it('creates, finds by key and lists newest-first per module', async () => {
