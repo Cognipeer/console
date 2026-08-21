@@ -669,6 +669,25 @@ export const TENANT_SCHEMA_SQL = `
     updatedAt TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS vector_query_logs (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    providerKey TEXT NOT NULL,
+    indexKey TEXT NOT NULL,
+    topK INTEGER NOT NULL,
+    matchCount INTEGER NOT NULL DEFAULT 0,
+    latencyMs INTEGER NOT NULL,
+    avgScore REAL,
+    filterApplied INTEGER NOT NULL DEFAULT 0,
+    userId TEXT,
+    apiTokenId TEXT,
+    actorType TEXT,
+    timestamp TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_vector_query_logs_index
+    ON vector_query_logs(indexKey, timestamp);
+
   -- File buckets
   CREATE TABLE IF NOT EXISTS file_buckets (
     id TEXT PRIMARY KEY,

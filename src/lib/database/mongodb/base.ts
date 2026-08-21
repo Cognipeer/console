@@ -20,6 +20,7 @@ export const COLLECTIONS = {
   auditLogs: 'audit_logs',
   providers: 'providers',
   vectorIndexes: 'vector_indexes',
+  vectorQueryLogs: 'vector_query_logs',
   fileBuckets: 'file_buckets',
   files: 'files',
   prompts: 'prompts',

@@ -99,6 +99,7 @@ import type {
   GpuFleetCommandStatus,
   ProjectRole,
   IVectorIndexRecord,
+  IVectorQueryLog,
   IVectorMigration,
   IVectorMigrationLog,
   VectorMigrationStatus,
@@ -468,6 +469,10 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     >,
   ): Promise<IVectorIndexRecord | null>;
   deleteVectorIndex(id: string): Promise<boolean>;
+  /** Record one similarity query for the index analytics panel. */
+  createVectorQueryLog(
+    log: Omit<IVectorQueryLog, '_id'>,
+  ): Promise<IVectorQueryLog>;
   listVectorIndexes(filters?: {
     providerKey?: string;
     projectId?: string;

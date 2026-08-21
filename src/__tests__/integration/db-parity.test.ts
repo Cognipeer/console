@@ -1509,5 +1509,48 @@ describeForEachProvider('Vector migrations + batch logs', (getDb) => {
     expect(await db.findVectorMigrationByKey('mig-logs')).toBeNull();
     expect(await db.listVectorMigrationLogs('mig-logs')).toHaveLength(0);
   });
+
+  it('records vector query logs with the fields the analytics panel reads', async () => {
+    const db = getDb();
+
+    const created = await db.createVectorQueryLog({
+      tenantId,
+      projectId: 'proj-1',
+      providerKey: 'my-provider',
+      indexKey: 'my-index',
+      topK: 5,
+      matchCount: 3,
+      latencyMs: 42,
+      avgScore: 0.8125,
+      filterApplied: true,
+      userId: 'user-1',
+      apiTokenId: 'token-1',
+      actorType: 'user',
+      timestamp: new Date('2026-01-01T00:00:00.000Z'),
+    });
+
+    expect(created._id).toBeTruthy();
+    expect(created.indexKey).toBe('my-index');
+    expect(created.filterApplied).toBe(true);
+    expect(created.avgScore).toBeCloseTo(0.8125);
+  });
+
+  it('accepts a query log without a score or attribution', async () => {
+    const db = getDb();
+
+    const created = await db.createVectorQueryLog({
+      tenantId,
+      providerKey: 'my-provider',
+      indexKey: 'empty-index',
+      topK: 10,
+      matchCount: 0,
+      latencyMs: 7,
+      filterApplied: false,
+      timestamp: new Date('2026-01-02T00:00:00.000Z'),
+    });
+
+    expect(created._id).toBeTruthy();
+    expect(created.matchCount).toBe(0);
+  });
 });
 

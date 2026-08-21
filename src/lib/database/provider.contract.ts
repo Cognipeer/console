@@ -51,6 +51,7 @@ import type {
   IToolRequestLog,
   IUser,
   IVectorIndexRecord,
+  IVectorQueryLog,
   IncidentSeverity,
   IncidentStatus,
   McpServerStatus,
@@ -293,6 +294,10 @@ export interface DatabaseProvider {
     >,
   ): Promise<IVectorIndexRecord | null>;
   deleteVectorIndex(id: string): Promise<boolean>;
+  /** Record one similarity query for the index analytics panel. */
+  createVectorQueryLog(
+    log: Omit<IVectorQueryLog, '_id'>,
+  ): Promise<IVectorQueryLog>;
   listVectorIndexes(filters?: {
     providerKey?: string;
     projectId?: string;

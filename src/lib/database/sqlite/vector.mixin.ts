@@ -2,7 +2,7 @@
  * SQLite Provider – Vector index operations mixin
  */
 
-import type { IVectorIndexRecord } from '../provider.interface';
+import type { IVectorIndexRecord, IVectorQueryLog } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
 
@@ -107,6 +107,38 @@ export function VectorMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
       if (projectId) { sql += ' AND projectId = @projectId'; params.projectId = projectId; }
       const row = db.prepare(sql).get(params) as SqliteRow | undefined;
       return row ? this.mapVectorRow(row) : null;
+    }
+
+    async createVectorQueryLog(
+      log: Omit<IVectorQueryLog, '_id'>,
+    ): Promise<IVectorQueryLog> {
+      const db = this.getTenantDb();
+      const id = this.newId();
+
+      db.prepare(`
+        INSERT INTO ${TABLES.vectorQueryLogs}
+        (id, tenantId, projectId, providerKey, indexKey, topK, matchCount, latencyMs,
+         avgScore, filterApplied, userId, apiTokenId, actorType, timestamp)
+        VALUES (@id, @tenantId, @projectId, @providerKey, @indexKey, @topK, @matchCount, @latencyMs,
+         @avgScore, @filterApplied, @userId, @apiTokenId, @actorType, @timestamp)
+      `).run({
+        id,
+        tenantId: log.tenantId,
+        projectId: log.projectId ?? null,
+        providerKey: log.providerKey,
+        indexKey: log.indexKey,
+        topK: log.topK,
+        matchCount: log.matchCount,
+        latencyMs: log.latencyMs,
+        avgScore: log.avgScore ?? null,
+        filterApplied: log.filterApplied ? 1 : 0,
+        userId: log.userId ?? null,
+        apiTokenId: log.apiTokenId ?? null,
+        actorType: log.actorType ?? null,
+        timestamp: log.timestamp.toISOString(),
+      });
+
+      return { ...log, _id: id };
     }
 
     protected mapVectorRow(r: SqliteRow): IVectorIndexRecord {

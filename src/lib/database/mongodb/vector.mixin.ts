@@ -3,7 +3,7 @@
  */
 
 import { ObjectId, type Filter } from 'mongodb';
-import type { IVectorIndexRecord } from '../provider.interface';
+import type { IVectorIndexRecord, IVectorQueryLog } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
 
@@ -174,6 +174,16 @@ export function VectorMixin<TBase extends Constructor<MongoDBProviderBase>>(Base
         ...index,
         _id: index._id?.toString(),
       };
+    }
+
+    async createVectorQueryLog(
+      log: Omit<IVectorQueryLog, '_id'>,
+    ): Promise<IVectorQueryLog> {
+      const db = this.getTenantDb();
+      const result = await db
+        .collection(COLLECTIONS.vectorQueryLogs)
+        .insertOne({ ...log });
+      return { ...log, _id: result.insertedId.toString() };
     }
   };
 }

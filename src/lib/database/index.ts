@@ -197,6 +197,7 @@ export type {
   ProviderDomain,
   IProviderRecord,
   IVectorIndexRecord,
+  IVectorQueryLog,
   IFileBucketRecord,
   IFileRecord,
   FileMarkdownStatus,

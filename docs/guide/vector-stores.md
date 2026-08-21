@@ -233,3 +233,19 @@ Knowledge Engine modules add two settings on top of the same language:
 Documents ingested by the crawler carry `source`, `sourceUrl`, `crawlerKey`,
 `jobId`, `depth`, and `title`, which makes those the natural `filterableFields`
 for a crawled knowledge base.
+
+## Query Analytics
+
+Every call to `queryVectorIndex` writes a row to `vector_query_logs` — index
+key, provider key, `topK`, match count, latency, the mean similarity score, and
+whether a metadata filter was applied, plus the caller attribution
+(`userId`/`apiTokenId`/`actorType`) resolved from the request context.
+
+The write is best-effort and happens after the search returns: a logging failure
+is warned about and swallowed, never surfaced as a failed query.
+
+These rows are what the index detail page's analytics panel aggregates (daily
+query volume, latency, average score, filtered-query share, and the topK
+distribution). That endpoint reads MongoDB directly, so the panel is available
+on MongoDB-backed tenants; SQLite tenants persist the same rows but the panel
+does not read them yet.

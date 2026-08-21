@@ -760,6 +760,30 @@ export interface IRagChunkConfig {
 
 export type RagDocumentStatus = 'pending' | 'processing' | 'indexed' | 'failed';
 
+/**
+ * One vector similarity query, recorded for the index analytics panel
+ * (query volume, latency, score, filter usage).
+ */
+export interface IVectorQueryLog {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  providerKey: string;
+  /** Index key, matching `IVectorIndexRecord.key`. */
+  indexKey: string;
+  topK: number;
+  matchCount: number;
+  latencyMs: number;
+  /** Mean similarity score across the returned matches. */
+  avgScore?: number;
+  /** Whether the caller supplied a metadata filter. */
+  filterApplied: boolean;
+  userId?: string;
+  apiTokenId?: string;
+  actorType?: string;
+  timestamp: Date;
+}
+
 export interface IRagModule {
   _id?: ObjectId | string;
   tenantId: string;

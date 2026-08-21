@@ -318,6 +318,64 @@ describe('queryVectorIndex', () => {
     });
   });
 
+  it('records a query log the analytics panel can aggregate', async () => {
+    MOCK_RUNTIME.queryVectors.mockResolvedValue({
+      matches: [
+        { id: 'a', score: 0.9, metadata: {} },
+        { id: 'b', score: 0.7, metadata: {} },
+      ],
+    });
+
+    await queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
+      providerKey: PROVIDER_KEY,
+      indexKey: 'my-index',
+      query: { topK: 5, vector: Array<number>(4).fill(0.1) },
+    });
+
+    expect(db.createVectorQueryLog).toHaveBeenCalledTimes(1);
+    const [log] = db.createVectorQueryLog.mock.calls[0];
+    // indexKey must be the record's key — the stats aggregation matches on it.
+    expect(log.indexKey).toBe('my-index');
+    expect(log.providerKey).toBe(PROVIDER_KEY);
+    expect(log.topK).toBe(5);
+    expect(log.matchCount).toBe(2);
+    expect(log.avgScore).toBeCloseTo(0.8);
+    expect(log.filterApplied).toBe(false);
+    expect(log.latencyMs).toBeGreaterThanOrEqual(0);
+    expect(log.timestamp).toBeInstanceOf(Date);
+  });
+
+  it('marks filtered queries in the log', async () => {
+    MOCK_RUNTIME.queryVectors.mockResolvedValue({ matches: [] });
+    (providerRegistry.getContract as ReturnType<typeof vi.fn>).mockReturnValue({
+      capabilities: { 'vector.filterOperators': ['$eq'] },
+    });
+
+    await queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
+      providerKey: PROVIDER_KEY,
+      indexKey: 'my-index',
+      query: { topK: 5, vector: Array<number>(4).fill(0.1), filter: { category: 'docs' } },
+    });
+
+    const [log] = db.createVectorQueryLog.mock.calls[0];
+    expect(log.filterApplied).toBe(true);
+    expect(log.avgScore).toBeUndefined();
+    expect(log.matchCount).toBe(0);
+  });
+
+  it('still returns results when writing the query log fails', async () => {
+    MOCK_RUNTIME.queryVectors.mockResolvedValue({ matches: [{ id: 'a', score: 0.5 }] });
+    db.createVectorQueryLog.mockRejectedValue(new Error('logging is down'));
+
+    const result = await queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
+      providerKey: PROVIDER_KEY,
+      indexKey: 'my-index',
+      query: { topK: 5, vector: Array<number>(4).fill(0.1) },
+    });
+
+    expect(result.matches).toHaveLength(1);
+  });
+
   it('returns empty matches when no results', async () => {
     MOCK_RUNTIME.queryVectors.mockResolvedValue({ matches: [] });
 

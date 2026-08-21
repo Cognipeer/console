@@ -6,6 +6,7 @@ import {
   type IVectorIndexRecord,
 } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
+import { resolveUsageAttribution } from '@/lib/services/usage/usageEvents';
 import { runtimePool, hashCredentials } from '@/lib/core/runtimePool';
 import { withResilience } from '@/lib/core/resilience';
 import {
@@ -605,6 +606,51 @@ export function resolveVectorFilter(
   return parsed;
 }
 
+/**
+ * Record a query for the index analytics panel.
+ *
+ * Best-effort and deliberately not awaited by the caller's critical path: a
+ * logging failure must never fail a search that already returned results.
+ */
+async function logVectorQuery(
+  db: DatabaseProvider,
+  input: {
+    tenantId: string;
+    projectId?: string;
+    providerKey: string;
+    index: VectorIndexRecord;
+    topK: number;
+    filterApplied: boolean;
+    matches: VectorQueryResult['matches'];
+    latencyMs: number;
+  },
+): Promise<void> {
+  const attribution = resolveUsageAttribution();
+  const scores = input.matches.map((match) => match.score).filter((score) => typeof score === 'number');
+
+  try {
+    await db.createVectorQueryLog({
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      providerKey: input.providerKey,
+      indexKey: input.index.key,
+      topK: input.topK,
+      matchCount: input.matches.length,
+      latencyMs: input.latencyMs,
+      avgScore: scores.length > 0
+        ? scores.reduce((sum, score) => sum + score, 0) / scores.length
+        : undefined,
+      filterApplied: input.filterApplied,
+      userId: attribution.userId,
+      apiTokenId: attribution.apiTokenId,
+      actorType: attribution.actorType,
+      timestamp: new Date(),
+    });
+  } catch (error) {
+    logger.warn('Failed to record vector query log', { error });
+  }
+}
+
 export async function queryVectorIndex(
   tenantDbName: string,
   tenantId: string,
@@ -628,6 +674,7 @@ export async function queryVectorIndex(
 
   const filter = resolveVectorFilter(record.driver, request.query.filter);
 
+  const startedAt = Date.now();
   const result: VectorQueryResult = await withResilience(
     () => runtime.queryVectors(
       toRuntimeHandle(index),
@@ -635,6 +682,17 @@ export async function queryVectorIndex(
     ),
     { key: `vector-query:${request.providerKey}` },
   );
+
+  await logVectorQuery(db, {
+    tenantId,
+    projectId,
+    providerKey: request.providerKey,
+    index,
+    topK: request.query.topK,
+    filterApplied: Boolean(filter),
+    matches: result.matches,
+    latencyMs: Date.now() - startedAt,
+  });
 
   return result;
 }
