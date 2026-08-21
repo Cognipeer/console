@@ -86,13 +86,27 @@ export function isSupportedEncoding(value: unknown): value is TokenEncoding {
 
 /**
  * `gpt-tokenizer` ships one module per encoding and each is a few MB of merge
- * data, so they are required lazily and memoised for the process.
+ * data, so they are loaded on first use and memoised for the process.
+ *
+ * The specifiers are spelled out rather than built from the encoding name:
+ * webpack resolves requires statically, and a template literal makes it try to
+ * resolve the `gpt-tokenizer/encoding` directory instead, which fails the
+ * production build even though tsc and vitest — both on the real Node resolver
+ * — are perfectly happy.
  */
+const TOKENIZER_MODULES: Record<TokenEncoding, () => Tokenizer> = {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  cl100k_base: () => require('gpt-tokenizer/encoding/cl100k_base') as Tokenizer,
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  p50k_base: () => require('gpt-tokenizer/encoding/p50k_base') as Tokenizer,
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  o200k_base: () => require('gpt-tokenizer/encoding/o200k_base') as Tokenizer,
+};
+
 function loadTokenizer(encoding: TokenEncoding): Tokenizer {
   const cached = tokenizerCache.get(encoding);
   if (cached) return cached;
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const mod = require(`gpt-tokenizer/encoding/${encoding}`) as Tokenizer;
+  const mod = TOKENIZER_MODULES[encoding]();
   tokenizerCache.set(encoding, mod);
   return mod;
 }
