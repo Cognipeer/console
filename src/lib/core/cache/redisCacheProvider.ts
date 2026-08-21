@@ -7,6 +7,7 @@
  */
 
 import { randomUUID } from 'crypto';
+import { getThisNodeName } from '../cluster/nodeRegistry';
 import type { CacheProvider } from './cacheProvider.interface';
 
 // ioredis is an optional dependency — only imported when this provider is used
@@ -60,6 +61,7 @@ export class RedisCacheProvider implements CacheProvider {
       maxRetriesPerRequest: 3,
       retryStrategy: (times) => Math.min(times * 200, 3000),
       lazyConnect: true,
+      connectionName: `console:${getThisNodeName()}:cache`,
     });
     await this.client.connect();
   }
