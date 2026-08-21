@@ -1535,6 +1535,83 @@ describeForEachProvider('Vector migrations + batch logs', (getDb) => {
     expect(created.avgScore).toBeCloseTo(0.8125);
   });
 
+  it('aggregates query logs into daily buckets, totals and a topK histogram', async () => {
+    const db = getDb();
+
+    const log = (overrides: Partial<Parameters<typeof db.createVectorQueryLog>[0]>) =>
+      db.createVectorQueryLog({
+        tenantId,
+        projectId: 'proj-1',
+        providerKey: 'my-provider',
+        indexKey: 'stats-index',
+        topK: 5,
+        matchCount: 2,
+        latencyMs: 100,
+        avgScore: 0.8,
+        filterApplied: false,
+        timestamp: new Date('2026-03-01T10:00:00.000Z'),
+        ...overrides,
+      });
+
+    await log({});
+    await log({ latencyMs: 200, avgScore: 0.6, filterApplied: true });
+    await log({
+      timestamp: new Date('2026-03-02T10:00:00.000Z'),
+      latencyMs: 300,
+      avgScore: undefined,
+      topK: 10,
+    });
+    // Outside the window, and a different index — neither may leak in.
+    await log({ timestamp: new Date('2026-02-01T10:00:00.000Z') });
+    await log({ indexKey: 'other-index' });
+
+    const stats = await db.aggregateVectorQueryStats({
+      indexKey: 'stats-index',
+      from: new Date('2026-03-01T00:00:00.000Z'),
+      to: new Date('2026-03-31T23:59:59.999Z'),
+    });
+
+    expect(stats.daily).toHaveLength(2);
+    expect(stats.daily[0].date).toBe('2026-03-01');
+    expect(stats.daily[0].queryCount).toBe(2);
+    expect(stats.daily[0].avgLatencyMs).toBeCloseTo(150);
+    expect(stats.daily[0].avgScore).toBeCloseTo(0.7);
+    expect(stats.daily[0].filterCount).toBe(1);
+
+    expect(stats.daily[1].date).toBe('2026-03-02');
+    expect(stats.daily[1].queryCount).toBe(1);
+    // The only query that day carried no score, so the average is absent.
+    expect(stats.daily[1].avgScore).toBeNull();
+
+    expect(stats.totals.totalQueries).toBe(3);
+    expect(stats.totals.minLatencyMs).toBe(100);
+    expect(stats.totals.maxLatencyMs).toBe(300);
+    expect(stats.totals.avgLatencyMs).toBeCloseTo(200);
+    // Averaged over the two scored queries only.
+    expect(stats.totals.avgScore).toBeCloseTo(0.7);
+
+    expect(stats.topKDistribution).toEqual([
+      { topK: 5, count: 2 },
+      { topK: 10, count: 1 },
+    ]);
+  });
+
+  it('returns empty stats for an index with no queries in the window', async () => {
+    const db = getDb();
+
+    const stats = await db.aggregateVectorQueryStats({
+      indexKey: 'never-queried',
+      from: new Date('2026-03-01T00:00:00.000Z'),
+      to: new Date('2026-03-31T23:59:59.999Z'),
+    });
+
+    expect(stats.daily).toEqual([]);
+    expect(stats.topKDistribution).toEqual([]);
+    expect(stats.totals.totalQueries).toBe(0);
+    expect(stats.totals.avgLatencyMs).toBeNull();
+    expect(stats.totals.avgScore).toBeNull();
+  });
+
   it('accepts a query log without a score or attribution', async () => {
     const db = getDb();
 

@@ -52,6 +52,7 @@ import type {
   IUser,
   IVectorIndexRecord,
   IVectorQueryLog,
+  IVectorQueryStats,
   IncidentSeverity,
   IncidentStatus,
   McpServerStatus,
@@ -298,6 +299,12 @@ export interface DatabaseProvider {
   createVectorQueryLog(
     log: Omit<IVectorQueryLog, '_id'>,
   ): Promise<IVectorQueryLog>;
+  /** Aggregate the query logs of one index for the analytics panel. */
+  aggregateVectorQueryStats(params: {
+    indexKey: string;
+    from: Date;
+    to: Date;
+  }): Promise<IVectorQueryStats>;
   listVectorIndexes(filters?: {
     providerKey?: string;
     projectId?: string;

@@ -100,6 +100,7 @@ import type {
   ProjectRole,
   IVectorIndexRecord,
   IVectorQueryLog,
+  IVectorQueryStats,
   IVectorMigration,
   IVectorMigrationLog,
   VectorMigrationStatus,
@@ -473,6 +474,12 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   createVectorQueryLog(
     log: Omit<IVectorQueryLog, '_id'>,
   ): Promise<IVectorQueryLog>;
+  /** Aggregate the query logs of one index for the analytics panel. */
+  aggregateVectorQueryStats(params: {
+    indexKey: string;
+    from: Date;
+    to: Date;
+  }): Promise<IVectorQueryStats>;
   listVectorIndexes(filters?: {
     providerKey?: string;
     projectId?: string;

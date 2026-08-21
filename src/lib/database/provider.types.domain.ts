@@ -149,6 +149,27 @@ export interface IVectorQueryLog {
   timestamp: Date;
 }
 
+/** Aggregated query analytics for one vector index, over a time window. */
+export interface IVectorQueryStats {
+  daily: Array<{
+    /** UTC day, `YYYY-MM-DD`. */
+    date: string;
+    queryCount: number;
+    avgLatencyMs: number;
+    /** Null when no query in the bucket returned a score. */
+    avgScore: number | null;
+    filterCount: number;
+  }>;
+  totals: {
+    totalQueries: number;
+    avgLatencyMs: number | null;
+    avgScore: number | null;
+    minLatencyMs: number | null;
+    maxLatencyMs: number | null;
+  };
+  topKDistribution: Array<{ topK: number; count: number }>;
+}
+
 export interface IRagModule {
   _id?: ObjectId | string;
   tenantId: string;

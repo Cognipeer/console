@@ -246,6 +246,13 @@ is warned about and swallowed, never surfaced as a failed query.
 
 These rows are what the index detail page's analytics panel aggregates (daily
 query volume, latency, average score, filtered-query share, and the topK
-distribution). That endpoint reads MongoDB directly, so the panel is available
-on MongoDB-backed tenants; SQLite tenants persist the same rows but the panel
-does not read them yet.
+distribution). The aggregation runs through the database abstraction
+(`aggregateVectorQueryStats`), so the panel works on both MongoDB and SQLite
+tenants; the day series is zero-filled over the requested window and scoped to
+the index key resolved within the active project.
+
+Queries also feed the usage rollup as the `vector` service, keyed by index key,
+with the match count as a unit and failed searches counted as errors — so vector
+retrieval shows up in usage and spend views alongside models, Knowledge Engine,
+and reranker traffic. Query embeddings stay billed through the models service;
+no tokens are attributed here.

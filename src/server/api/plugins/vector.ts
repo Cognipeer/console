@@ -26,6 +26,7 @@ import {
   deleteVectorMigration,
   listVectorMigrationLogs,
   countVectorMigrationLogs,
+  getVectorIndexQueryStats,
 } from '@/lib/services/vector';
 import type { VectorMetric } from '@/lib/services/vector/types';
 import type { VectorMigrationStatus } from '@/lib/database/provider/types.base';
@@ -563,7 +564,7 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { externalId } = request.params as { externalId: string };
       const query = (request.query ?? {}) as VectorIndexQuery;
-      const { session } = await requireProjectContextForRequest(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
 
       const parsedFilter = parseDashboardDateFilterFromSearchParams(
         new URLSearchParams(request.query as Record<string, string>),
@@ -587,99 +588,15 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
         ? Math.min(Math.max(computedDays, 1), 365)
         : (daysParam ? Math.min(Math.max(parseInt(daysParam, 10) || 30, 7), 90) : 30);
 
-      const dbProvider = await getDatabase() as MongoDBProvider;
-      const client = dbProvider.getClient();
-      if (!client) {
-        return reply.code(503).send({ error: 'Database not available' });
-      }
-
-      const db = client.db(session.tenantDbName);
-      const indexQuery: Record<string, unknown> = { externalId };
-      if (query.providerKey) {
-        indexQuery.providerKey = query.providerKey;
-      }
-
-      const indexDoc = await db
-        .collection('vector_indexes')
-        .findOne(indexQuery, { projection: { _id: 0, key: 1 } });
-
-      const indexKey = (indexDoc?.key as string | undefined) ?? externalId;
-      const [daily, totalsRaw, topKDist] = await Promise.all([
-        db.collection('vector_query_logs').aggregate([
-          { $match: { indexKey, timestamp: { $gte: since, $lte: until } } },
-          {
-            $group: {
-              _id: { $dateToString: { date: '$timestamp', format: '%Y-%m-%d' } },
-              avgLatencyMs: { $avg: '$latencyMs' },
-              avgScore: { $avg: '$avgScore' },
-              filterCount: { $sum: { $cond: [{ $eq: ['$filterApplied', true] }, 1, 0] } },
-              queryCount: { $sum: 1 },
-            },
-          },
-          { $sort: { _id: 1 } },
-        ]).toArray(),
-        db.collection('vector_query_logs').aggregate([
-          { $match: { indexKey, timestamp: { $gte: since, $lte: until } } },
-          {
-            $group: {
-              _id: null,
-              avgLatencyMs: { $avg: '$latencyMs' },
-              avgScore: { $avg: '$avgScore' },
-              maxLatencyMs: { $max: '$latencyMs' },
-              minLatencyMs: { $min: '$latencyMs' },
-              totalQueries: { $sum: 1 },
-            },
-          },
-        ]).toArray(),
-        db.collection('vector_query_logs').aggregate([
-          { $match: { indexKey, timestamp: { $gte: since, $lte: until } } },
-          { $group: { _id: '$topK', count: { $sum: 1 } } },
-          { $sort: { _id: 1 } },
-        ]).toArray(),
-      ]);
-
-      const dateMap = new Map(daily.map((item) => [item._id as string, item]));
-      const filledDaily: Array<{
-        avgLatencyMs: number;
-        avgScore: number;
-        date: string;
-        filterCount: number;
-        queryCount: number;
-      }> = [];
-      const dayStart = new Date(since);
-      dayStart.setHours(0, 0, 0, 0);
-
-      for (let index = 0; index < days; index += 1) {
-        const date = new Date(dayStart);
-        date.setDate(dayStart.getDate() + index);
-        const key = date.toISOString().substring(0, 10);
-        const row = dateMap.get(key);
-
-        filledDaily.push({
-          avgLatencyMs: row ? Math.round((row.avgLatencyMs as number | undefined) ?? 0) : 0,
-          avgScore: row ? parseFloat(((row.avgScore as number | undefined) ?? 0).toFixed(4)) : 0,
-          date: key,
-          filterCount: (row?.filterCount as number | undefined) ?? 0,
-          queryCount: (row?.queryCount as number | undefined) ?? 0,
-        });
-      }
-
-      const totals = totalsRaw[0] ?? {};
-      return reply.code(200).send({
-        daily: filledDaily,
+      const stats = await getVectorIndexQueryStats(session.tenantDbName, projectId, {
+        externalId,
+        providerKey: query.providerKey,
+        from: since,
+        to: until,
         days,
-        topKDistribution: topKDist.map((item) => ({
-          count: item.count as number,
-          topK: item._id as number,
-        })),
-        totals: {
-          avgLatencyMs: totals.avgLatencyMs ? Math.round(totals.avgLatencyMs as number) : 0,
-          avgScore: totals.avgScore ? parseFloat((totals.avgScore as number).toFixed(4)) : 0,
-          maxLatencyMs: (totals.maxLatencyMs as number | undefined) ?? 0,
-          minLatencyMs: (totals.minLatencyMs as number | undefined) ?? 0,
-          totalQueries: (totals.totalQueries as number | undefined) ?? 0,
-        },
       });
+
+      return reply.code(200).send(stats);
     } catch (error) {
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({ error: 'Internal server error' });

@@ -6,7 +6,7 @@ import {
   type IVectorIndexRecord,
 } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
-import { resolveUsageAttribution } from '@/lib/services/usage/usageEvents';
+import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { runtimePool, hashCredentials } from '@/lib/core/runtimePool';
 import { withResilience } from '@/lib/core/resilience';
 import {
@@ -607,14 +607,16 @@ export function resolveVectorFilter(
 }
 
 /**
- * Record a query for the index analytics panel.
+ * Account for a query: feed the usage rollup and record the row the index
+ * analytics panel aggregates.
  *
- * Best-effort and deliberately not awaited by the caller's critical path: a
- * logging failure must never fail a search that already returned results.
+ * Best-effort — a bookkeeping failure must never fail a search that already
+ * returned results.
  */
-async function logVectorQuery(
+async function recordVectorQuery(
   db: DatabaseProvider,
   input: {
+    tenantDbName: string;
     tenantId: string;
     projectId?: string;
     providerKey: string;
@@ -623,9 +625,23 @@ async function logVectorQuery(
     filterApplied: boolean;
     matches: VectorQueryResult['matches'];
     latencyMs: number;
+    status: 'success' | 'error';
   },
 ): Promise<void> {
-  const attribution = resolveUsageAttribution();
+  // No tokens — query embeddings are billed through the models service.
+  const attribution = recordUsageEvent({
+    tenantDbName: input.tenantDbName,
+    tenantId: input.tenantId,
+    projectId: input.projectId,
+    service: 'vector',
+    refKey: input.index.key,
+    status: input.status,
+    latencyMs: input.latencyMs,
+    units: { matches: input.matches.length },
+  });
+
+  if (input.status === 'error') return;
+
   const scores = input.matches.map((match) => match.score).filter((score) => typeof score === 'number');
 
   try {
@@ -649,6 +665,111 @@ async function logVectorQuery(
   } catch (error) {
     logger.warn('Failed to record vector query log', { error });
   }
+}
+
+/* ── Query analytics ─────────────────────────────────────────────────── */
+
+export interface VectorIndexQueryStats {
+  daily: Array<{
+    date: string;
+    queryCount: number;
+    avgLatencyMs: number;
+    avgScore: number;
+    filterCount: number;
+  }>;
+  totals: {
+    totalQueries: number;
+    avgLatencyMs: number;
+    minLatencyMs: number;
+    maxLatencyMs: number;
+    avgScore: number;
+  };
+  topKDistribution: Array<{ topK: number; count: number }>;
+  days: number;
+}
+
+/**
+ * Resolve the index key the query logs are recorded under.
+ *
+ * Falls back to the external id so an index whose record has gone missing
+ * still renders an (empty) panel instead of erroring.
+ */
+async function resolveStatsIndexKey(
+  db: DatabaseProvider,
+  externalId: string,
+  providerKey: string | undefined,
+  projectId: string | undefined,
+): Promise<string> {
+  if (providerKey) {
+    const record = await db.findVectorIndexByExternalId(providerKey, externalId, projectId);
+    return record?.key ?? externalId;
+  }
+
+  const indexes = await db.listVectorIndexes({ projectId });
+  return indexes.find((index) => index.externalId === externalId)?.key ?? externalId;
+}
+
+/**
+ * Query analytics for one vector index, shaped for the dashboard panel:
+ * every day in the window is present (zero-filled) and averages are rounded.
+ */
+export async function getVectorIndexQueryStats(
+  tenantDbName: string,
+  projectId: string | undefined,
+  params: {
+    externalId: string;
+    providerKey?: string;
+    from: Date;
+    to: Date;
+    days: number;
+  },
+): Promise<VectorIndexQueryStats> {
+  const db = await withTenantDb(tenantDbName);
+  const indexKey = await resolveStatsIndexKey(
+    db,
+    params.externalId,
+    params.providerKey,
+    projectId,
+  );
+
+  const stats = await db.aggregateVectorQueryStats({
+    indexKey,
+    from: params.from,
+    to: params.to,
+  });
+
+  const byDate = new Map(stats.daily.map((row) => [row.date, row]));
+  const daily: VectorIndexQueryStats['daily'] = [];
+  const dayStart = new Date(params.from);
+  dayStart.setHours(0, 0, 0, 0);
+
+  for (let offset = 0; offset < params.days; offset += 1) {
+    const day = new Date(dayStart);
+    day.setDate(dayStart.getDate() + offset);
+    const date = day.toISOString().substring(0, 10);
+    const row = byDate.get(date);
+
+    daily.push({
+      date,
+      queryCount: row?.queryCount ?? 0,
+      avgLatencyMs: Math.round(row?.avgLatencyMs ?? 0),
+      avgScore: parseFloat((row?.avgScore ?? 0).toFixed(4)),
+      filterCount: row?.filterCount ?? 0,
+    });
+  }
+
+  return {
+    daily,
+    totals: {
+      totalQueries: stats.totals.totalQueries,
+      avgLatencyMs: Math.round(stats.totals.avgLatencyMs ?? 0),
+      minLatencyMs: stats.totals.minLatencyMs ?? 0,
+      maxLatencyMs: stats.totals.maxLatencyMs ?? 0,
+      avgScore: parseFloat((stats.totals.avgScore ?? 0).toFixed(4)),
+    },
+    topKDistribution: stats.topKDistribution,
+    days: params.days,
+  };
 }
 
 export async function queryVectorIndex(
@@ -675,15 +796,36 @@ export async function queryVectorIndex(
   const filter = resolveVectorFilter(record.driver, request.query.filter);
 
   const startedAt = Date.now();
-  const result: VectorQueryResult = await withResilience(
-    () => runtime.queryVectors(
-      toRuntimeHandle(index),
-      { ...request.query, filter },
-    ),
-    { key: `vector-query:${request.providerKey}` },
-  );
 
-  await logVectorQuery(db, {
+  let result: VectorQueryResult;
+  try {
+    result = await withResilience(
+      () => runtime.queryVectors(
+        toRuntimeHandle(index),
+        { ...request.query, filter },
+      ),
+      { key: `vector-query:${request.providerKey}` },
+    );
+  } catch (error) {
+    // A failed search still counts against the index's usage, and the rollup
+    // tracks it as an error so the failure rate stays visible.
+    await recordVectorQuery(db, {
+      tenantDbName,
+      tenantId,
+      projectId,
+      providerKey: request.providerKey,
+      index,
+      topK: request.query.topK,
+      filterApplied: Boolean(filter),
+      matches: [],
+      latencyMs: Date.now() - startedAt,
+      status: 'error',
+    });
+    throw error;
+  }
+
+  await recordVectorQuery(db, {
+    tenantDbName,
     tenantId,
     projectId,
     providerKey: request.providerKey,
@@ -692,6 +834,7 @@ export async function queryVectorIndex(
     filterApplied: Boolean(filter),
     matches: result.matches,
     latencyMs: Date.now() - startedAt,
+    status: 'success',
   });
 
   return result;

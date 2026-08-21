@@ -198,6 +198,7 @@ export type {
   IProviderRecord,
   IVectorIndexRecord,
   IVectorQueryLog,
+  IVectorQueryStats,
   IFileBucketRecord,
   IFileRecord,
   FileMarkdownStatus,

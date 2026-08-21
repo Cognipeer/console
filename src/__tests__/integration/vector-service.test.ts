@@ -13,6 +13,14 @@ vi.mock('@/lib/database', () => ({
   getDatabase: vi.fn(),
 }));
 
+vi.mock('@/lib/services/usage/usageEvents', () => ({
+  recordUsageEvent: vi.fn(() => ({
+    userId: 'user-1',
+    apiTokenId: 'token-1',
+    actorType: 'user',
+  })),
+}));
+
 vi.mock('@/lib/services/providers/providerService', () => ({
   loadProviderRuntimeData: vi.fn(),
   listProviderConfigs: vi.fn(),
@@ -38,6 +46,7 @@ import {
   getProviderConfigByKey,
 } from '@/lib/services/providers/providerService';
 import { providerRegistry } from '@/lib/providers';
+import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { createMockDb } from '../helpers/db.mock';
 
 import {
@@ -316,6 +325,62 @@ describe('queryVectorIndex', () => {
       kind: 'comparison',
       comparison: { op: '$eq', field: 'category', value: 'docs' },
     });
+  });
+
+  it('counts the query in the usage rollup', async () => {
+    MOCK_RUNTIME.queryVectors.mockResolvedValue({
+      matches: [{ id: 'a', score: 0.9 }, { id: 'b', score: 0.7 }],
+    });
+
+    await queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
+      providerKey: PROVIDER_KEY,
+      indexKey: 'my-index',
+      query: { topK: 5, vector: Array<number>(4).fill(0.1) },
+    });
+
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tenantDbName: TENANT_DB,
+        tenantId: TENANT_ID,
+        projectId: PROJECT_ID,
+        service: 'vector',
+        refKey: 'my-index',
+        status: 'success',
+        units: { matches: 2 },
+      }),
+    );
+  });
+
+  it('counts a failed query as a usage error and writes no query log', async () => {
+    MOCK_RUNTIME.queryVectors.mockRejectedValue(new Error('index unreachable'));
+
+    await expect(
+      queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
+        providerKey: PROVIDER_KEY,
+        indexKey: 'my-index',
+        query: { topK: 5, vector: Array<number>(4).fill(0.1) },
+      }),
+    ).rejects.toThrow('index unreachable');
+
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ service: 'vector', status: 'error', units: { matches: 0 } }),
+    );
+    expect(db.createVectorQueryLog).not.toHaveBeenCalled();
+  });
+
+  it('stamps the query log with the resolved usage attribution', async () => {
+    MOCK_RUNTIME.queryVectors.mockResolvedValue({ matches: [] });
+
+    await queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
+      providerKey: PROVIDER_KEY,
+      indexKey: 'my-index',
+      query: { topK: 5, vector: Array<number>(4).fill(0.1) },
+    });
+
+    const [log] = db.createVectorQueryLog.mock.calls[0];
+    expect(log.userId).toBe('user-1');
+    expect(log.apiTokenId).toBe('token-1');
+    expect(log.actorType).toBe('user');
   });
 
   it('records a query log the analytics panel can aggregate', async () => {
