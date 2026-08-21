@@ -147,6 +147,15 @@ export const OramaVectorProviderContract: ProviderContract<
           vector: item.values,
           metadata: JSON.stringify(item.metadata ?? {}),
         }));
+        // Orama's insertMultiple is an insert, not an upsert — re-ingesting a
+        // document would duplicate every chunk. Drop existing ids first.
+        for (const item of items) {
+          try {
+            await remove(entry.db, item.id);
+          } catch {
+            // not present yet — nothing to replace
+          }
+        }
         await insertMultiple(entry.db, documents);
         logger?.debug?.('Orama upserted vectors', { providerKey, count: items.length });
       },

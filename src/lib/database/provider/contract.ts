@@ -101,6 +101,7 @@ import type {
   IVectorIndexRecord,
   IVectorMigration,
   IVectorMigrationLog,
+  IVectorMigrationRunSummary,
   VectorMigrationStatus,
   VectorMigrationLogStatus,
   IncidentSeverity,
@@ -505,12 +506,15 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IVectorMigrationLog>;
   listVectorMigrationLogs(
     migrationKey: string,
-    options?: { limit?: number; offset?: number },
+    options?: { limit?: number; offset?: number; attempt?: number },
   ): Promise<IVectorMigrationLog[]>;
   countVectorMigrationLogs(
     migrationKey: string,
     status?: VectorMigrationLogStatus,
+    attempt?: number,
   ): Promise<number>;
+  /** Per-run (per-attempt) batch stats, most recent run first. */
+  listVectorMigrationRuns(migrationKey: string): Promise<IVectorMigrationRunSummary[]>;
 
   // File object operations (tenant-specific)
   createFileRecord(
@@ -990,6 +994,10 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     ragModuleKey: string,
     options?: { limit?: number; skip?: number; from?: Date; to?: Date },
   ): Promise<IRagQueryLog[]>;
+  countRagQueryLogs(
+    ragModuleKey: string,
+    options?: { from?: Date; to?: Date },
+  ): Promise<{ total: number; avgLatencyMs: number }>;
 
   // ── Reranker operations (tenant-specific) ──
   createReranker(
@@ -1226,7 +1234,7 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IMcpServer>;
   updateMcpServer(
     id: string,
-    data: Partial<Omit<IMcpServer, 'tenantId' | 'key' | 'createdBy'>>,
+    data: Partial<Omit<IMcpServer, 'tenantId' | 'createdBy'>>,
   ): Promise<IMcpServer | null>;
   deleteMcpServer(id: string): Promise<boolean>;
   findMcpServerById(id: string): Promise<IMcpServer | null>;

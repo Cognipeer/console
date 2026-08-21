@@ -19,6 +19,8 @@ import FormShell, {
   FormSection,
   SummaryGroup,
   SummaryKV,
+  ToggleList,
+  ToggleRow,
 } from '@/components/common/ui/FormShell';
 import SpecImportField, { type SpecFormat } from '@/components/common/SpecImportField';
 import type { McpServerView } from '@/lib/services/mcp';
@@ -30,7 +32,7 @@ interface CreateMcpModalProps {
 }
 
 type AuthType = 'none' | 'token' | 'header' | 'basic';
-type SourceType = 'openapi' | 'remote' | 'stdio' | 'internal';
+type SourceType = 'openapi' | 'remote' | 'stdio' | 'internal' | 'composite';
 type StdioRuntime = 'npx' | 'uvx';
 type ExecutionMode = 'subprocess' | 'sandbox';
 type AccessMode = 'token' | 'public';
@@ -76,6 +78,16 @@ interface McpHubOption {
   serverKeys: string[];
 }
 
+/** Candidate member for a composite server — pulled from the existing server list. */
+interface McpMemberOption {
+  id: string;
+  key: string;
+  name: string;
+  sourceType: SourceType;
+  status: string;
+  toolCount: number;
+}
+
 const NEW_HUB_VALUE = '__new__';
 const NO_HUB_VALUE = '__none__';
 // Providers other than Knowledge Base aren't scoped to a per-instance
@@ -85,6 +97,7 @@ const SINGLE_INSTANCE_KEY = 'project';
 
 interface FormValues {
   name: string;
+  key: string;
   description: string;
   sourceType: SourceType;
   // openapi
@@ -107,6 +120,8 @@ interface FormValues {
   internalInstanceKey: string;
   hubChoice: string;
   newHubName: string;
+  // composite
+  compositeMembers: string[];
   // auth
   authType: AuthType;
   authToken: string;
@@ -153,10 +168,12 @@ export default function CreateMcpModal({
   const [shields, setShields] = useState<Array<{ value: string; label: string }>>([]);
   const [ragModules, setRagModules] = useState<InternalInstanceOption[]>([]);
   const [hubs, setHubs] = useState<McpHubOption[]>([]);
+  const [memberOptions, setMemberOptions] = useState<McpMemberOption[]>([]);
 
   const form = useForm<FormValues>({
     initialValues: {
       name: '',
+      key: '',
       description: '',
       sourceType: 'openapi',
       upstreamBaseUrl: '',
@@ -175,6 +192,7 @@ export default function CreateMcpModal({
       internalInstanceKey: '',
       hubChoice: NO_HUB_VALUE,
       newHubName: '',
+      compositeMembers: [],
       authType: 'none',
       authToken: '',
       authHeaderName: '',
@@ -209,7 +227,10 @@ export default function CreateMcpModal({
           errors.newHubName = 'Name the new hub';
         }
       }
-      if (values.sourceType !== 'stdio' && values.sourceType !== 'internal') {
+      if (values.sourceType === 'composite' && values.compositeMembers.length === 0) {
+        errors.compositeMembers = 'Select at least one member server';
+      }
+      if (values.sourceType !== 'stdio' && values.sourceType !== 'internal' && values.sourceType !== 'composite') {
         if (values.authType === 'token' && !values.authToken.trim()) {
           errors.authToken = 'Token is required';
         }
@@ -272,6 +293,26 @@ export default function CreateMcpModal({
         })));
       })
       .catch(() => setHubs([]));
+    // Candidate members for a composite server — any other active MCP server
+    // on this project. Composite-sourced servers are excluded (no nesting).
+    fetch('/api/mcp?status=active')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        const list = Array.isArray(data?.servers) ? data.servers : [];
+        setMemberOptions(
+          list
+            .filter((s: { sourceType?: string }) => s.sourceType !== 'composite')
+            .map((s: { id: string; key: string; name: string; sourceType?: string; status: string; tools?: unknown[] }) => ({
+              id: s.id,
+              key: s.key,
+              name: s.name,
+              sourceType: (s.sourceType ?? 'openapi') as SourceType,
+              status: s.status,
+              toolCount: s.tools?.length ?? 0,
+            })),
+        );
+      })
+      .catch(() => setMemberOptions([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened]);
 
@@ -288,6 +329,20 @@ export default function CreateMcpModal({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened, hubs, capabilities, form.values.sourceType]);
+
+  // A composite that picks up an internal-service member can't stay public —
+  // the backend rejects that combination outright, so fix it up here instead
+  // of letting the user hit a submit-time error.
+  useEffect(() => {
+    if (form.values.sourceType !== 'composite') return;
+    const hasInternal = form.values.compositeMembers.some(
+      (id) => memberOptions.find((m) => m.id === id)?.sourceType === 'internal',
+    );
+    if (hasInternal && form.values.accessMode === 'public') {
+      form.setFieldValue('accessMode', 'token');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.values.sourceType, form.values.compositeMembers, memberOptions]);
 
   // Providers without a per-instance picker (anything but Knowledge Base, for
   // now) always target the same single project-scoped instance.
@@ -309,9 +364,11 @@ export default function CreateMcpModal({
     setLoading(true);
     try {
       const upstreamAuth: Record<string, string> = {
-        type: v.sourceType === 'stdio' || v.sourceType === 'internal' ? 'none' : v.authType,
+        type: v.sourceType === 'stdio' || v.sourceType === 'internal' || v.sourceType === 'composite'
+          ? 'none'
+          : v.authType,
       };
-      if (v.sourceType !== 'stdio' && v.sourceType !== 'internal') {
+      if (v.sourceType !== 'stdio' && v.sourceType !== 'internal' && v.sourceType !== 'composite') {
         if (v.authType === 'token') {
           upstreamAuth.token = v.authToken;
         } else if (v.authType === 'header') {
@@ -330,6 +387,7 @@ export default function CreateMcpModal({
 
       const payload: Record<string, unknown> = {
         name: v.name,
+        key: v.key.trim() || undefined,
         description: v.description || undefined,
         sourceType: v.sourceType,
         upstreamAuth,
@@ -356,6 +414,10 @@ export default function CreateMcpModal({
           provider: v.internalProvider,
           instanceKey: v.internalInstanceKey,
           config: {},
+        };
+      } else if (v.sourceType === 'composite') {
+        payload.compositeConfig = {
+          members: v.compositeMembers.map((serverId) => ({ serverId })),
         };
       } else {
         const env = parseEnvLines(v.stdioEnv);
@@ -442,7 +504,7 @@ export default function CreateMcpModal({
 
   const validIdentity = Boolean(v.name.trim());
   const validAuth = (() => {
-    if (v.sourceType === 'stdio' || v.sourceType === 'internal') return true;
+    if (v.sourceType === 'stdio' || v.sourceType === 'internal' || v.sourceType === 'composite') return true;
     if (v.authType === 'token') return Boolean(v.authToken.trim());
     if (v.authType === 'header') return Boolean(v.authHeaderName.trim() && v.authHeaderValue.trim());
     if (v.authType === 'basic') return Boolean(v.authUsername.trim() && v.authPassword.trim());
@@ -452,12 +514,17 @@ export default function CreateMcpModal({
     if (v.sourceType === 'openapi') return Boolean(v.openApiSpec.trim());
     if (v.sourceType === 'remote') return Boolean(v.remoteUrl.trim());
     if (v.sourceType === 'internal') return Boolean(v.internalInstanceKey.trim());
+    if (v.sourceType === 'composite') return v.compositeMembers.length > 0;
     return Boolean(v.stdioPackage.trim());
   }, [
     v.sourceType, v.openApiSpec, v.remoteUrl, v.stdioPackage,
-    v.internalProvider, v.internalInstanceKey,
+    v.internalProvider, v.internalInstanceKey, v.compositeMembers,
   ]);
   const validExposure = v.protocolHttp || v.protocolSse;
+  // An internal-service member reads tenant-private data with no credential
+  // of its own — the backend rejects saving this combination as public.
+  const compositeHasInternalMember = v.sourceType === 'composite'
+    && v.compositeMembers.some((id) => memberOptions.find((m) => m.id === id)?.sourceType === 'internal');
 
   const checklist = [
     { id: 1, label: 'Name provided', done: validIdentity },
@@ -478,6 +545,7 @@ export default function CreateMcpModal({
     remote: 'Remote MCP',
     stdio: 'Package (stdio)',
     internal: 'Internal service',
+    composite: 'Composite (other servers)',
   };
 
   const selectedRagModule = ragModules.find((m) => m.key === v.internalInstanceKey);
@@ -561,6 +629,16 @@ export default function CreateMcpModal({
             />
           </>
         ) : null}
+        {v.sourceType === 'composite' ? (
+          <SummaryKV
+            label="Members"
+            value={v.compositeMembers.length
+              ? v.compositeMembers
+                .map((id) => memberOptions.find((m) => m.id === id)?.name ?? id)
+                .join(', ')
+              : <span className="ds-faint">—</span>}
+          />
+        ) : null}
       </SummaryGroup>
 
       <SummaryGroup title="Exposure">
@@ -579,7 +657,7 @@ export default function CreateMcpModal({
         ) : null}
       </SummaryGroup>
 
-      {v.sourceType !== 'stdio' && v.sourceType !== 'internal' ? (
+      {v.sourceType !== 'stdio' && v.sourceType !== 'internal' && v.sourceType !== 'composite' ? (
         <SummaryGroup title="Authentication">
           <SummaryKV label="Type" value={authLabel[v.authType]} />
         </SummaryGroup>
@@ -634,6 +712,18 @@ export default function CreateMcpModal({
             />
           </FormField>
         </FormRow>
+        <FormRow cols={1}>
+          <FormField
+            label="Server key"
+            optional
+            hint="Used in the API path (e.g. /api/client/v1/mcp/<key>/...). Leave blank to derive it from the name — you can change it later."
+          >
+            <TextInput
+              placeholder="my-api-service"
+              {...form.getInputProps('key')}
+            />
+          </FormField>
+        </FormRow>
       </FormSection>
 
       <FormSection
@@ -649,11 +739,45 @@ export default function CreateMcpModal({
               { value: 'remote', label: 'Remote MCP URL' },
               { value: 'stdio', label: 'npx / uvx package' },
               { value: 'internal', label: 'Internal service' },
+              { value: 'composite', label: 'Composite (other servers)' },
             ]}
             value={v.sourceType}
             onChange={(val) => form.setFieldValue('sourceType', val as SourceType)}
           />
         </FormField>
+
+        {v.sourceType === 'composite' ? (
+          <FormRow cols={1}>
+            <FormField
+              label="Member servers"
+              required
+              hint="Each member keeps its own auth, its own enabled tools and its own request logs — this only decides which of their tools are republished here. Tool names are kept as-is unless two members collide, in which case the colliding ones get prefixed."
+            >
+              {memberOptions.length === 0 ? (
+                <Alert color="yellow" icon={<IconInfoCircle size={16} />}>
+                  No other MCP servers yet — create one first, then come back to build a composite.
+                </Alert>
+              ) : (
+                <ToggleList>
+                  {memberOptions.map((m) => (
+                    <ToggleRow
+                      key={m.id}
+                      label={m.name}
+                      description={`${m.key} · ${m.sourceType} · ${m.toolCount} tool${m.toolCount === 1 ? '' : 's'}${m.status !== 'active' ? ' · disabled' : ''}`}
+                      checked={v.compositeMembers.includes(m.id)}
+                      onChange={(checked) => form.setFieldValue(
+                        'compositeMembers',
+                        checked
+                          ? [...v.compositeMembers, m.id]
+                          : v.compositeMembers.filter((id) => id !== m.id),
+                      )}
+                    />
+                  ))}
+                </ToggleList>
+              )}
+            </FormField>
+          </FormRow>
+        ) : null}
 
         {v.sourceType === 'internal' ? (
           <>
@@ -862,7 +986,7 @@ export default function CreateMcpModal({
         ) : null}
       </FormSection>
 
-      {v.sourceType !== 'stdio' && v.sourceType !== 'internal' ? (
+      {v.sourceType !== 'stdio' && v.sourceType !== 'internal' && v.sourceType !== 'composite' ? (
         <FormSection
           number={3}
           title="Upstream authentication"
@@ -930,7 +1054,7 @@ export default function CreateMcpModal({
       ) : null}
 
       <FormSection
-        number={v.sourceType === 'stdio' || v.sourceType === 'internal' ? 3 : 4}
+        number={v.sourceType === 'stdio' || v.sourceType === 'internal' || v.sourceType === 'composite' ? 3 : 4}
         title="Endpoint exposure"
         description="Which protocols this server is reachable on, and how callers authenticate."
         done={validExposure}
@@ -953,6 +1077,12 @@ export default function CreateMcpModal({
             }}
           />
         </FormField>
+        {compositeHasInternalMember ? (
+          <Alert color="orange" icon={<IconInfoCircle size={16} />}>
+            This composite includes an internal-service member, which reads tenant-private data.
+            It can only be exposed with an API token, never as a public URL.
+          </Alert>
+        ) : null}
         <FormField
           label="Access mode"
           hint={v.accessMode === 'public'
@@ -965,13 +1095,16 @@ export default function CreateMcpModal({
               { value: 'public', label: 'Public URL (no auth)' },
             ]}
             value={v.accessMode}
-            onChange={(val) => form.setFieldValue('accessMode', val as AccessMode)}
+            onChange={(val) => {
+              if (val === 'public' && compositeHasInternalMember) return;
+              form.setFieldValue('accessMode', val as AccessMode);
+            }}
           />
         </FormField>
       </FormSection>
 
       <FormSection
-        number={v.sourceType === 'stdio' || v.sourceType === 'internal' ? 4 : 5}
+        number={v.sourceType === 'stdio' || v.sourceType === 'internal' || v.sourceType === 'composite' ? 4 : 5}
         title="Aegis shield"
         description="Guardrail enforcement on tool calls (evaluated by the Aegis enforcement plane)."
         done

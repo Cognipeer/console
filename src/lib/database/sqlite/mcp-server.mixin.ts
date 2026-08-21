@@ -72,13 +72,14 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
 
     async updateMcpServer(
       id: string,
-      data: Partial<Omit<IMcpServer, 'tenantId' | 'key' | 'createdBy'>>,
+      data: Partial<Omit<IMcpServer, 'tenantId' | 'createdBy'>>,
     ): Promise<IMcpServer | null> {
       const db = this.getTenantDb();
       const now = this.now();
       const sets: string[] = ['updatedAt = @updatedAt'];
       const params: Record<string, unknown> = { id, updatedAt: now };
 
+      if (data.key !== undefined) { sets.push('key = @key'); params.key = data.key; }
       if (data.name !== undefined) { sets.push('name = @name'); params.name = data.name; }
       if (data.description !== undefined) { sets.push('description = @description'); params.description = data.description; }
       if (data.sourceType !== undefined) { sets.push('sourceType = @sourceType'); params.sourceType = data.sourceType; }
@@ -179,11 +180,11 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         INSERT INTO ${TABLES.mcpRequestLogs}
         (id, tenantId, projectId, serverKey, toolName, status,
          requestPayload, responsePayload, errorMessage, latencyMs, callerTokenId,
-         callerType, callerUserId, transport, sourceType, sessionId,
+         callerType, callerUserId, transport, sourceType, sessionId, viaServerKey,
          userId, apiTokenId, actorType, createdAt)
         VALUES (@id, @tenantId, @projectId, @serverKey, @toolName, @status,
          @requestPayload, @responsePayload, @errorMessage, @latencyMs, @callerTokenId,
-         @callerType, @callerUserId, @transport, @sourceType, @sessionId,
+         @callerType, @callerUserId, @transport, @sourceType, @sessionId, @viaServerKey,
          @userId, @apiTokenId, @actorType, @createdAt)
       `).run({
         id,
@@ -202,6 +203,7 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         transport: log.transport ?? null,
         sourceType: log.sourceType ?? null,
         sessionId: log.sessionId ?? null,
+        viaServerKey: log.viaServerKey ?? null,
         userId: log.userId ?? null,
         apiTokenId: log.apiTokenId ?? null,
         actorType: log.actorType ?? null,
@@ -455,6 +457,7 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         transport: (r.transport as IMcpRequestLog['transport'] | null) ?? undefined,
         sourceType: (r.sourceType as IMcpRequestLog['sourceType'] | null) ?? undefined,
         sessionId: (r.sessionId as string | null) ?? undefined,
+        viaServerKey: (r.viaServerKey as string | null) ?? undefined,
         userId: (r.userId as string | null) ?? undefined,
         apiTokenId: (r.apiTokenId as string | null) ?? undefined,
         actorType: (r.actorType as IMcpRequestLog['actorType'] | null) ?? undefined,

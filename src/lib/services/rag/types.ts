@@ -27,6 +27,7 @@ export interface CreateRagModuleRequest {
   rerankerOversample?: number;
   defaultTopK?: number;
   defaultMinScore?: number;
+  responseDetail?: 'full' | 'text';
   metadata?: Record<string, unknown>;
   createdBy: string;
 }
@@ -43,6 +44,7 @@ export interface UpdateRagModuleRequest {
   rerankerOversample?: number | null;
   defaultTopK?: number | null;
   defaultMinScore?: number | null;
+  responseDetail?: 'full' | 'text' | null;
   metadata?: Record<string, unknown>;
   updatedBy: string;
 }
@@ -82,6 +84,8 @@ export interface RagQueryResult {
   query: string;
   ragModuleKey: string;
   latencyMs: number;
+  /** The module's configured response shape; applied by the API layer only. */
+  responseDetail?: 'full' | 'text';
 }
 
 export interface RagDocumentDeleteRequest {

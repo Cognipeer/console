@@ -12,6 +12,7 @@ import { getDatabase, type DatabaseProvider } from '@/lib/database';
 import type {
   IVectorMigration,
   IVectorMigrationLog,
+  IVectorMigrationRunSummary,
   VectorMigrationStatus,
 } from '@/lib/database/provider/types.base';
 import {
@@ -129,6 +130,7 @@ export async function createVectorMigration(
     destinationIndexKey: request.destinationIndexKey,
     destinationIndexName: destIndex.name,
     status: 'pending',
+    attempt: 0,
     totalVectors: 0,
     migratedVectors: 0,
     failedVectors: 0,
@@ -176,9 +178,11 @@ export async function startVectorMigration(
   }
 
   // A restart always copies from scratch: counters, error and the resume
-  // checkpoint in metadata are all cleared.
+  // checkpoint in metadata are all cleared. `attempt` bumps so this run's
+  // batch logs land in a fresh group instead of mixing with the last run's.
   const updated = await db.updateVectorMigration(key, {
     status: 'queued',
+    attempt: (migration.attempt ?? 0) + 1,
     migratedVectors: 0,
     failedVectors: 0,
     totalVectors: 0,
@@ -249,7 +253,7 @@ export async function deleteVectorMigration(
 export async function listVectorMigrationLogs(
   tenantDbName: string,
   migrationKey: string,
-  options?: { limit?: number; offset?: number },
+  options?: { limit?: number; offset?: number; attempt?: number },
 ): Promise<IVectorMigrationLog[]> {
   const db = await withTenantDb(tenantDbName);
   return db.listVectorMigrationLogs(migrationKey, options);
@@ -259,7 +263,16 @@ export async function countVectorMigrationLogs(
   tenantDbName: string,
   migrationKey: string,
   status?: 'success' | 'failed' | 'skipped',
+  attempt?: number,
 ): Promise<number> {
   const db = await withTenantDb(tenantDbName);
-  return db.countVectorMigrationLogs(migrationKey, status);
+  return db.countVectorMigrationLogs(migrationKey, status, attempt);
+}
+
+export async function listVectorMigrationRuns(
+  tenantDbName: string,
+  migrationKey: string,
+): Promise<IVectorMigrationRunSummary[]> {
+  const db = await withTenantDb(tenantDbName);
+  return db.listVectorMigrationRuns(migrationKey);
 }

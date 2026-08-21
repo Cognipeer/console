@@ -12,6 +12,7 @@ import {
   deleteVectorIndex,
   deleteVectors,
   getVectorIndex,
+  getVectorIndexCount,
   listProjectVectorIndexes,
   listVectorIndexes,
   listVectorProviders,
@@ -559,7 +560,7 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { externalId } = request.params as { externalId: string };
       const query = (request.query ?? {}) as VectorIndexQuery;
-      const { session } = await requireProjectContextForRequest(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
 
       const parsedFilter = parseDashboardDateFilterFromSearchParams(
         new URLSearchParams(request.query as Record<string, string>),
@@ -600,6 +601,13 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
         .findOne(indexQuery, { projection: { _id: 0, key: 1 } });
 
       const indexKey = (indexDoc?.key as string | undefined) ?? externalId;
+
+      // Live count from the provider — no index record carries one. Dashboard-only
+      // on purpose: counting is expensive/side-effecting on several providers.
+      const vectorCountPromise = query.providerKey
+        ? getVectorIndexCount(session.tenantDbName, session.tenantId, projectId, query.providerKey, indexKey)
+        : Promise.resolve(undefined);
+
       const [daily, totalsRaw, topKDist] = await Promise.all([
         db.collection('vector_query_logs').aggregate([
           { $match: { indexKey, timestamp: { $gte: since, $lte: until } } },
@@ -661,6 +669,7 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const totals = totalsRaw[0] ?? {};
+      const vectorCount = await vectorCountPromise;
       return reply.code(200).send({
         daily: filledDaily,
         days,
@@ -675,6 +684,7 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
           minLatencyMs: (totals.minLatencyMs as number | undefined) ?? 0,
           totalQueries: (totals.totalQueries as number | undefined) ?? 0,
         },
+        vectorCount,
       });
     } catch (error) {
       return sendProjectContextError(reply, error)

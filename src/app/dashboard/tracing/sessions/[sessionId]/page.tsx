@@ -23,6 +23,8 @@ import {
     ThemeIcon,
     Tabs,
     Box,
+    Collapse,
+    Divider,
 } from '@mantine/core';
 import {
     IconBook,
@@ -423,6 +425,18 @@ const SectionCard = ({ section, index }: { section: SectionEntry; index: number 
 };
 
 // ─── Key-value row ─────────────────────────────────────────────
+
+/** One tile in the session-summary strip — a compact label/value pair, used
+ *  in place of the four-card `SimpleGrid` that used to eat a third of a
+ *  25%-wide sidebar column. */
+function StatTile({ label, children }: { label: string; children: React.ReactNode }) {
+    return (
+        <Stack gap={2} justify="center" style={{ padding: '0 18px', flexShrink: 0 }}>
+            <Text size="xs" c="dimmed" tt="uppercase" fw={600}>{label}</Text>
+            {children}
+        </Stack>
+    );
+}
 
 function KVRow({ label, children, mono }: { label: string; children: React.ReactNode; mono?: boolean }) {
     return (
@@ -1076,6 +1090,10 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
     const [eventDetailLoading, setEventDetailLoading] = useState(false);
     const [eventDetailsById, setEventDetailsById] = useState<Record<string, SessionDetailResponse['events'][number]>>({});
     const [eventsView, setEventsView] = useState<'list' | 'tree'>('list');
+    // Collapsed by default — thread/trace ids, models/tools and metadata are
+    // follow-up detail, not the reason someone opened this page. Errors are
+    // NOT gated behind this: they render unconditionally below the stat strip.
+    const [sessionInfoOpen, setSessionInfoOpen] = useState(false);
 
     const fetchDetail = useCallback(async (isRefresh = false) => {
         try {
@@ -1296,12 +1314,79 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
             }
             actions={headerActions}
         >
-            <Grid gutter="md" style={{ minHeight: 'calc(100vh - 320px)' }}>
-                {/* ── Left: Session info ── */}
-                <Grid.Col span={{ base: 12, xl: 3 }}>
-                    <Stack gap="md">
-                        <Card withBorder p="md">
-                            <Text fw={600} mb="sm">Session details</Text>
+            <Stack gap="md">
+                {/* Compact stat strip — replaces the four-card SimpleGrid that used
+                    to live in a 25%-wide sidebar column, squeezed next to session
+                    details, event breakdown and errors. */}
+                <Card withBorder p="md">
+                    <Group gap={0} align="stretch" wrap="wrap">
+                        <StatTile label="Duration">
+                            <Text size="lg" fw={700}>{formatDuration(session.durationMs)}</Text>
+                        </StatTile>
+                        <Divider orientation="vertical" />
+                        <StatTile label="Input">
+                            <Text size="lg" fw={700}>{formatNumber(tokenStats.input)}</Text>
+                        </StatTile>
+                        <Divider orientation="vertical" />
+                        <StatTile label="Output">
+                            <Text size="lg" fw={700}>{formatNumber(tokenStats.output)}</Text>
+                        </StatTile>
+                        {tokenStats.reasoning > 0 && (
+                            <>
+                                <Divider orientation="vertical" />
+                                <StatTile label="Reasoning">
+                                    <Text size="lg" fw={700}>{formatNumber(tokenStats.reasoning)}</Text>
+                                    <Text size="xs" c="dimmed">
+                                        {tokenStats.output > 0 ? `${formatPercent(tokenStats.reasoning / tokenStats.output)} of output` : 'Subset of output'}
+                                    </Text>
+                                </StatTile>
+                            </>
+                        )}
+                        <Divider orientation="vertical" />
+                        <StatTile label="Cache">
+                            <Text size="lg" fw={700}>{formatNumber(tokenStats.cached)}</Text>
+                            <Text size="xs" c="dimmed">Hit rate: {formatPercent(calcCacheHitRate(tokenStats.input, tokenStats.cached))}</Text>
+                        </StatTile>
+                        {tokenStats.truncatedEvents > 0 && (
+                            <>
+                                <Divider orientation="vertical" />
+                                <Tooltip
+                                    label={`${tokenStats.truncatedEvents} model call${tokenStats.truncatedEvents === 1 ? '' : 's'} hit its output ceiling — the answer${tokenStats.truncatedEvents === 1 ? ' is' : 's are'} cut off.`}
+                                    withArrow
+                                    multiline
+                                    maw={280}
+                                >
+                                    <div>
+                                        <StatTile label="Truncated">
+                                            <Group gap={5} wrap="nowrap">
+                                                <IconInfoCircle size={14} color="var(--mantine-color-orange-6)" />
+                                                <Text size="lg" fw={700} c="orange">{tokenStats.truncatedEvents}</Text>
+                                            </Group>
+                                        </StatTile>
+                                    </div>
+                                </Tooltip>
+                            </>
+                        )}
+                        <div style={{ flex: 1 }} />
+                        <Button
+                            variant="subtle"
+                            color="gray"
+                            size="xs"
+                            rightSection={
+                                <IconChevronDown
+                                    size={13}
+                                    style={{ transform: sessionInfoOpen ? 'rotate(180deg)' : undefined, transition: 'transform 150ms' }}
+                                />
+                            }
+                            onClick={() => setSessionInfoOpen((o) => !o)}
+                            style={{ alignSelf: 'center' }}
+                        >
+                            Session info
+                        </Button>
+                    </Group>
+
+                    <Collapse in={sessionInfoOpen}>
+                        <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }} spacing="lg" pt="md" mt="md" style={{ borderTop: '1px solid var(--ds-border-soft)' }}>
                             <Stack gap={6}>
                                 <KVRow label="Session ID" mono>{session.sessionId}</KVRow>
                                 {session.threadId && (
@@ -1316,14 +1401,12 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
                                 {session.rootSpanId && <KVRow label="Root Span" mono>{session.rootSpanId}</KVRow>}
                                 <KVRow label="Started">{session.startedAt ? dayjs(session.startedAt).format('MMM D, YYYY HH:mm:ss') : '—'}</KVRow>
                                 <KVRow label="Ended">{session.endedAt ? dayjs(session.endedAt).format('MMM D, YYYY HH:mm:ss') : '—'}</KVRow>
-                                <KVRow label="Agent">{session.agentName || '—'}</KVRow>
-                                {session.agentVersion && <KVRow label="Version">{session.agentVersion}</KVRow>}
-                                {session.agentModel && <KVRow label="Model">{session.agentModel}</KVRow>}
-                                <KVRow label="Duration">{formatDuration(session.durationMs)}</KVRow>
-                                <KVRow label="Events">{formatNumber(session.totalEvents)}</KVRow>
+                            </Stack>
+
+                            <Stack gap="md">
                                 {session.modelsUsed && session.modelsUsed.length > 0 && (
-                                    <Stack gap={2}>
-                                        <Text size="sm" c="dimmed">Models used</Text>
+                                    <Stack gap={4}>
+                                        <Text size="xs" c="dimmed" fw={600} tt="uppercase">Models used</Text>
                                         <Group gap={4}>
                                             {session.modelsUsed.map((m) => (
                                                 <Badge key={m} size="xs" variant="light" color="cyan">{m}</Badge>
@@ -1332,8 +1415,8 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
                                     </Stack>
                                 )}
                                 {session.toolsUsed && session.toolsUsed.length > 0 && (
-                                    <Stack gap={2}>
-                                        <Text size="sm" c="dimmed">Tools used</Text>
+                                    <Stack gap={4}>
+                                        <Text size="xs" c="dimmed" fw={600} tt="uppercase">Tools used</Text>
                                         <Group gap={4}>
                                             {session.toolsUsed.map((t) => (
                                                 <Badge key={t} size="xs" variant="light" color="violet">{formatToolName(t)}</Badge>
@@ -1341,186 +1424,149 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
                                         </Group>
                                     </Stack>
                                 )}
-                                {session.metadata && Object.keys(session.metadata).length > 0 && (
-                                    <Stack gap={2}>
-                                        <Text size="sm" c="dimmed">Metadata</Text>
-                                        <Stack gap={4}>
-                                            {Object.entries(session.metadata).map(([key, value]) => (
-                                                <Group key={key} justify="space-between" wrap="nowrap" gap="xs">
-                                                    <Text size="xs" c="dimmed" style={{ whiteSpace: 'nowrap' }}>{key}</Text>
-                                                    <Text
-                                                        size="xs"
-                                                        c="blue"
-                                                        fw={500}
-                                                        style={{ cursor: 'pointer', fontFamily: 'monospace', textAlign: 'right', wordBreak: 'break-all' }}
-                                                        onClick={() => router.push(`/dashboard/tracing/sessions?metadataKey=${encodeURIComponent(key)}&metadataValue=${encodeURIComponent(value)}`)}
-                                                    >
-                                                        {value}
-                                                    </Text>
-                                                </Group>
-                                            ))}
-                                        </Stack>
+                            </Stack>
+
+                            {session.eventCounts && Object.keys(session.eventCounts).length > 0 ? (
+                                <Stack gap={4}>
+                                    <Text size="xs" c="dimmed" fw={600} tt="uppercase">Event breakdown</Text>
+                                    <Stack gap={4}>
+                                        {Object.entries(session.eventCounts).map(([type, count]) => (
+                                            <Group key={type} justify="space-between">
+                                                <Badge size="xs" variant="light" color={eventTypeColor(type)}>{humanize(type)}</Badge>
+                                                <Text size="sm" fw={500}>{count}</Text>
+                                            </Group>
+                                        ))}
                                     </Stack>
+                                </Stack>
+                            ) : null}
+
+                            {session.metadata && Object.keys(session.metadata).length > 0 ? (
+                                <Stack gap={4}>
+                                    <Text size="xs" c="dimmed" fw={600} tt="uppercase">Metadata</Text>
+                                    <Stack gap={4}>
+                                        {Object.entries(session.metadata).map(([key, value]) => (
+                                            <Group key={key} justify="space-between" wrap="nowrap" gap="xs">
+                                                <Text size="xs" c="dimmed" style={{ whiteSpace: 'nowrap' }}>{key}</Text>
+                                                <Text
+                                                    size="xs"
+                                                    c="blue"
+                                                    fw={500}
+                                                    style={{ cursor: 'pointer', fontFamily: 'monospace', textAlign: 'right', wordBreak: 'break-all' }}
+                                                    onClick={() => router.push(`/dashboard/tracing/sessions?metadataKey=${encodeURIComponent(key)}&metadataValue=${encodeURIComponent(value)}`)}
+                                                >
+                                                    {value}
+                                                </Text>
+                                            </Group>
+                                        ))}
+                                    </Stack>
+                                </Stack>
+                            ) : null}
+                        </SimpleGrid>
+                    </Collapse>
+                </Card>
+
+                {/* Errors stay unconditionally visible — never worth hiding behind
+                    the "Session info" disclosure. */}
+                {session.errors && session.errors.length > 0 && (
+                    <Card withBorder p="md">
+                        <Text fw={600} mb="sm" size="sm" c="red">Errors ({session.errors.length})</Text>
+                        <Stack gap={4}>
+                            {session.errors.map((err, i) => (
+                                <Alert key={i} color="red" variant="light" icon={<IconInfoCircle size={12} />} p="xs">
+                                    <Text size="xs">{err.message}</Text>
+                                    {err.timestamp && <Text size="xs" c="dimmed">{dayjs(err.timestamp).format('HH:mm:ss')}</Text>}
+                                </Alert>
+                            ))}
+                        </Stack>
+                    </Card>
+                )}
+
+                {/* Two-pane workbench: this is now the dominant surface instead of
+                    sharing 12 columns with a session-info sidebar. Splits at `lg`
+                    (1200px) rather than the old `xl` (1440px) so it lands on more
+                    real screens. */}
+                <Grid gutter="md" style={{ minHeight: 'calc(100vh - 420px)' }}>
+                    <Grid.Col span={{ base: 12, lg: 5 }}>
+                        <Card withBorder p="md" h="100%">
+                            <Stack gap="md" h="100%">
+                                <Group justify="space-between">
+                                    <Stack gap={2}>
+                                        <Text fw={600}>Events</Text>
+                                        <Text size="sm" c="dimmed">{sortedEvents.length} events captured</Text>
+                                    </Stack>
+                                    {hasSpanIds && (
+                                        <Tooltip label={eventsView === 'list' ? 'Switch to tree view' : 'Switch to list view'}>
+                                            <ActionIcon
+                                                variant={eventsView === 'tree' ? 'filled' : 'light'}
+                                                size="sm"
+                                                color="blue"
+                                                onClick={() => setEventsView(eventsView === 'list' ? 'tree' : 'list')}
+                                            >
+                                                <IconBinaryTree size={14} />
+                                            </ActionIcon>
+                                        </Tooltip>
+                                    )}
+                                </Group>
+                                {sortedEvents.length === 0 ? (
+                                    <Center h={200}>
+                                        <Text c="dimmed">No events recorded for this session.</Text>
+                                    </Center>
+                                ) : (
+                                    <ScrollArea style={{ flex: 1 }} type="auto" offsetScrollbars>
+                                        {eventsView === 'tree' && hasSpanIds ? (
+                                            <Stack gap={4}>
+                                                {spanTree.map((node) => (
+                                                    <SpanTreeItem
+                                                        key={node.event.spanId || node.event.id}
+                                                        node={node}
+                                                        depth={0}
+                                                        selectedEventId={selectedEventId}
+                                                        onSelect={setSelectedEventId}
+                                                    />
+                                                ))}
+                                            </Stack>
+                                        ) : (
+                                            <EventListFlat
+                                                events={sortedEvents}
+                                                selectedEventId={selectedEventId}
+                                                onSelect={setSelectedEventId}
+                                            />
+                                        )}
+                                    </ScrollArea>
                                 )}
                             </Stack>
                         </Card>
+                    </Grid.Col>
 
-                        {/* Event type breakdown */}
-                        {session.eventCounts && Object.keys(session.eventCounts).length > 0 && (
-                            <Card withBorder p="md">
-                                <Text fw={600} mb="sm" size="sm">Event Breakdown</Text>
-                                <Stack gap={4}>
-                                    {Object.entries(session.eventCounts).map(([type, count]) => (
-                                        <Group key={type} justify="space-between">
-                                            <Badge size="xs" variant="light" color={eventTypeColor(type)}>{humanize(type)}</Badge>
-                                            <Text size="sm" fw={500}>{count}</Text>
-                                        </Group>
-                                    ))}
-                                </Stack>
-                            </Card>
-                        )}
-
-                        {/* Token cards */}
-                        <SimpleGrid cols={{ base: 2, sm: tokenStats.reasoning > 0 ? 4 : 3 }} spacing="xs">
-                            <Card withBorder p="sm">
-                                <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Input</Text>
-                                <Text size="lg" fw={700} mt={2}>{formatNumber(tokenStats.input)}</Text>
-                            </Card>
-                            <Card withBorder p="sm">
-                                <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Output</Text>
-                                <Text size="lg" fw={700} mt={2}>{formatNumber(tokenStats.output)}</Text>
-                            </Card>
-                            {tokenStats.reasoning > 0 && (
-                                <Card withBorder p="sm">
-                                    <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Reasoning</Text>
-                                    <Text size="lg" fw={700} mt={2}>{formatNumber(tokenStats.reasoning)}</Text>
-                                    <Text size="xs" c="dimmed">
-                                        {tokenStats.output > 0 ? `${formatPercent(tokenStats.reasoning / tokenStats.output)} of output` : 'Subset of output'}
-                                    </Text>
-                                </Card>
-                            )}
-                            <Card withBorder p="sm">
-                                <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Cache</Text>
-                                <Text size="lg" fw={700} mt={2}>{formatNumber(tokenStats.cached)}</Text>
-                                <Text size="xs" c="dimmed">
-                                    Hit rate: {formatPercent(calcCacheHitRate(tokenStats.input, tokenStats.cached))}
-                                </Text>
-                            </Card>
-                        </SimpleGrid>
-
-                        {/* Truncated calls — same badge language as the per-event abnormal-finish badge in EventDetailPanel */}
-                        {tokenStats.truncatedEvents > 0 && (
-                            <Tooltip
-                                label={`${tokenStats.truncatedEvents} model call${tokenStats.truncatedEvents === 1 ? '' : 's'} hit its output ceiling — the answer${tokenStats.truncatedEvents === 1 ? ' is' : 's are'} cut off.`}
-                                withArrow
-                                multiline
-                                maw={280}
-                            >
-                                <Badge size="sm" variant="light" radius="xl" color="orange" style={{ alignSelf: 'flex-start', cursor: 'help' }}>
-                                    TRUNCATED {tokenStats.truncatedEvents}
-                                </Badge>
-                            </Tooltip>
-                        )}
-
-                        {/* Errors */}
-                        {session.errors && session.errors.length > 0 && (
-                            <Card withBorder p="md">
-                                <Text fw={600} mb="sm" size="sm" c="red">Errors ({session.errors.length})</Text>
-                                <Stack gap={4}>
-                                    {session.errors.map((err, i) => (
-                                        <Alert key={i} color="red" variant="light" icon={<IconInfoCircle size={12} />} p="xs">
-                                            <Text size="xs">{err.message}</Text>
-                                            {err.timestamp && <Text size="xs" c="dimmed">{dayjs(err.timestamp).format('HH:mm:ss')}</Text>}
-                                        </Alert>
-                                    ))}
-                                </Stack>
-                            </Card>
-                        )}
-                    </Stack>
-                </Grid.Col>
-
-                {/* ── Middle: Events list / tree ── */}
-                <Grid.Col span={{ base: 12, xl: 4 }}>
-                    <Card withBorder p="md" h="100%">
-                        <Stack gap="md" h="100%">
-                            <Group justify="space-between">
-                                <Stack gap={2}>
-                                    <Text fw={600}>Events</Text>
-                                    <Text size="sm" c="dimmed">{sortedEvents.length} events captured</Text>
-                                </Stack>
-                                {hasSpanIds && (
-                                    <Tooltip label={eventsView === 'list' ? 'Switch to tree view' : 'Switch to list view'}>
-                                        <ActionIcon
-                                            variant={eventsView === 'tree' ? 'filled' : 'light'}
-                                            size="sm"
-                                            color="blue"
-                                            onClick={() => setEventsView(eventsView === 'list' ? 'tree' : 'list')}
-                                        >
-                                            <IconBinaryTree size={14} />
-                                        </ActionIcon>
-                                    </Tooltip>
-                                )}
-                            </Group>
-                            {sortedEvents.length === 0 ? (
-                                <Center h={200}>
-                                    <Text c="dimmed">No events recorded for this session.</Text>
-                                </Center>
-                            ) : (
-                                <ScrollArea style={{ flex: 1 }} type="auto" offsetScrollbars>
-                                    {eventsView === 'tree' && hasSpanIds ? (
-                                        <Stack gap={4}>
-                                            {spanTree.map((node) => (
-                                                <SpanTreeItem
-                                                    key={node.event.spanId || node.event.id}
-                                                    node={node}
-                                                    depth={0}
-                                                    selectedEventId={selectedEventId}
-                                                    onSelect={setSelectedEventId}
-                                                />
-                                            ))}
+                    <Grid.Col span={{ base: 12, lg: 7 }}>
+                        <Card withBorder p="md" h="100%">
+                            <Stack gap="md" h="100%">
+                                <Text fw={600}>Event detail</Text>
+                                {selectedEvent ? (
+                                    <ScrollArea style={{ flex: 1 }} type="auto" offsetScrollbars>
+                                        <EventDetailPanel event={selectedEvent} />
+                                    </ScrollArea>
+                                ) : selectedEventId && eventDetailLoading ? (
+                                    <Center h={200}>
+                                        <Stack gap="xs" align="center">
+                                            <Loader size="sm" />
+                                            <Text c="dimmed" size="sm">Loading event detail...</Text>
                                         </Stack>
-                                    ) : (
-                                        <EventListFlat
-                                            events={sortedEvents}
-                                            selectedEventId={selectedEventId}
-                                            onSelect={setSelectedEventId}
-                                        />
-                                    )}
-                                </ScrollArea>
-                            )}
-                        </Stack>
-                    </Card>
-                </Grid.Col>
-
-                {/* ── Right: Event detail ── */}
-                <Grid.Col span={{ base: 12, xl: 5 }}>
-                    <Card withBorder p="md" h="100%">
-                        <Stack gap="md" h="100%">
-                            <Text fw={600}>Event detail</Text>
-                            {selectedEvent ? (
-                                <ScrollArea style={{ flex: 1 }} type="auto" offsetScrollbars>
-                                    <EventDetailPanel event={selectedEvent} />
-                                </ScrollArea>
-                            ) : selectedEventId && eventDetailLoading ? (
-                                <Center h={200}>
-                                    <Stack gap="xs" align="center">
-                                        <Loader size="sm" />
-                                        <Text c="dimmed" size="sm">Loading event detail...</Text>
-                                    </Stack>
-                                </Center>
-                            ) : eventDetailError ? (
-                                <Alert icon={<IconInfoCircle size={16} />} color="red" variant="light">
-                                    {eventDetailError}
-                                </Alert>
-                            ) : (
-                                <Center h={200}>
-                                    <Text c="dimmed">Select an event to see details.</Text>
-                                </Center>
-                            )}
-                        </Stack>
-                    </Card>
-                </Grid.Col>
-            </Grid>
+                                    </Center>
+                                ) : eventDetailError ? (
+                                    <Alert icon={<IconInfoCircle size={16} />} color="red" variant="light">
+                                        {eventDetailError}
+                                    </Alert>
+                                ) : (
+                                    <Center h={200}>
+                                        <Text c="dimmed">Select an event to see details.</Text>
+                                    </Center>
+                                )}
+                            </Stack>
+                        </Card>
+                    </Grid.Col>
+                </Grid>
+            </Stack>
         </DetailShell>
     );
 }

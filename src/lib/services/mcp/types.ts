@@ -10,6 +10,7 @@ import type {
   McpSourceType,
 } from '@/lib/database';
 import type { SpecFormatHint } from '@/lib/services/specImport';
+import type { IMcpCompositeMemberSummary } from './composite';
 
 // ── View types ──────────────────────────────────────────────────────────
 
@@ -28,6 +29,10 @@ export interface McpServerView {
   toolAnnotations?: Record<string, IMcpToolAnnotations>;
   /** Operator-authored tool descriptions, keyed by tool name. */
   toolDescriptions?: Record<string, string>;
+  /** Operator-set exposed names, keyed by the real (discovered) tool name. */
+  toolNames?: Record<string, string>;
+  /** sourceType 'composite' only: cached display summary of each member. */
+  members?: IMcpCompositeMemberSummary[];
   toolsDiscoveredAt?: Date;
   upstreamBaseUrl?: string;
   /** Secrets are masked in views. */
@@ -67,6 +72,8 @@ export interface McpRequestLogView {
 
 export interface CreateMcpServerInput {
   name: string;
+  /** Custom identifier for the token-authed API path (default: slugified from `name`). */
+  key?: string;
   description?: string;
   /** Tool source (default 'openapi' for backward compatibility). */
   sourceType?: McpSourceType;
@@ -89,6 +96,8 @@ export interface CreateMcpServerInput {
   stdioConfig?: IMcpStdioConfig;
   /** Console-native capability config (sourceType 'internal'). */
   internalConfig?: InternalMcpConfigInput;
+  /** Member MCP servers to republish (sourceType 'composite'). */
+  compositeConfig?: CompositeConfigInput;
   exposure?: IMcpExposureConfig;
   aegis?: IMcpAegisConfig;
 }
@@ -103,7 +112,21 @@ export interface InternalMcpConfigInput {
   config?: Record<string, unknown>;
 }
 
+/** The member servers a composite republishes, and how their tools are named. */
+export interface CompositeConfigInput {
+  members: Array<{
+    /** Member MCP server's _id. */
+    serverId: string;
+    /** Exposed-name prefix for this member's tools; defaults to slug(serverKey). */
+    toolPrefix?: string;
+    /** Always prefix this member's tools, even when the name wouldn't collide. */
+    alwaysPrefix?: boolean;
+  }>;
+}
+
 export interface UpdateMcpServerInput {
+  /** Rename the server's identifier (slugified + de-duplicated; empty/whitespace is ignored). */
+  key?: string;
   name?: string;
   description?: string;
   openApiSpec?: string;
@@ -114,6 +137,8 @@ export interface UpdateMcpServerInput {
   stdioConfig?: IMcpStdioConfig;
   /** Console-native capability config (sourceType 'internal'). */
   internalConfig?: InternalMcpConfigInput;
+  /** Full replacement member list (sourceType 'composite'). */
+  compositeConfig?: CompositeConfigInput;
   exposure?: IMcpExposureConfig;
   aegis?: IMcpAegisConfig;
   status?: string;
@@ -125,6 +150,8 @@ export interface UpdateMcpServerInput {
   toolAnnotations?: Record<string, IMcpToolAnnotations | null>;
   /** Partial patch of per-tool description overrides (null/empty restores the discovered text). */
   toolDescriptions?: Record<string, string | null>;
+  /** Partial patch of per-tool name overrides, keyed by real tool name (null/empty restores the discovered name). */
+  toolNames?: Record<string, string | null>;
 }
 
 /** Request-scoped context threaded into audit writes. */

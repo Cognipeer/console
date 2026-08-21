@@ -574,6 +574,10 @@ export interface DatabaseProvider {
     ragModuleKey: string,
     options?: { limit?: number; skip?: number; from?: Date; to?: Date },
   ): Promise<IRagQueryLog[]>;
+  countRagQueryLogs(
+    ragModuleKey: string,
+    options?: { from?: Date; to?: Date },
+  ): Promise<{ total: number; avgLatencyMs: number }>;
 
   // ── Memory Store operations (tenant-specific) ──
   createMemoryStore(
@@ -776,7 +780,7 @@ export interface DatabaseProvider {
   ): Promise<IMcpServer>;
   updateMcpServer(
     id: string,
-    data: Partial<Omit<IMcpServer, 'tenantId' | 'key' | 'createdBy'>>,
+    data: Partial<Omit<IMcpServer, 'tenantId' | 'createdBy'>>,
   ): Promise<IMcpServer | null>;
   deleteMcpServer(id: string): Promise<boolean>;
   findMcpServerById(id: string): Promise<IMcpServer | null>;

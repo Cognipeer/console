@@ -179,7 +179,7 @@
     },
     {
       "id": "azure-ai-search",
-      "driver": "azure",
+      "driver": "azure-ai-search",
       "name": "Azure AI Search",
       "tagline": "Vector search on Microsoft Azure",
       "description": "Vector indexes via Azure Cognitive Search.",

@@ -77,6 +77,8 @@ interface StatsData {
   };
   topKDistribution: Array<{ topK: number; count: number }>;
   days: number;
+  /** Live count from the provider; undefined when it cannot report one. */
+  vectorCount?: number;
 }
 
 /* ── Helpers ────────────────────────────────────────────────────────────── */
@@ -502,7 +504,11 @@ export default function VectorIndexDetailPage() {
     );
   }
 
-  const vectorCount = typeof index.metadata?.vectorCount === 'number' ? index.metadata.vectorCount : undefined;
+  // Prefer the live count from the stats endpoint; no provider stores one on
+  // the index record, so the metadata value is only a legacy fallback.
+  const vectorCount = typeof stats?.vectorCount === 'number'
+    ? stats.vectorCount
+    : (typeof index.metadata?.vectorCount === 'number' ? index.metadata.vectorCount : undefined);
   const indexSize = typeof index.metadata?.indexSize === 'number' ? index.metadata.indexSize : undefined;
   const lastIndexed = index.metadata?.lastIndexed as string | undefined;
 

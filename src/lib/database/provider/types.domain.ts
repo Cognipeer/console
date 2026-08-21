@@ -782,6 +782,11 @@ export interface IRagModule {
   defaultTopK?: number;
   /** Default minimum similarity score a match must meet when the request doesn't specify minScore. */
   defaultMinScore?: number;
+  /**
+   * How much of each match a query response carries. 'full' (default) keeps the
+   * scores/ids/metadata; 'text' returns only the chunk text.
+   */
+  responseDetail?: 'full' | 'text';
   totalDocuments?: number;
   totalChunks?: number;
   metadata?: Record<string, unknown>;

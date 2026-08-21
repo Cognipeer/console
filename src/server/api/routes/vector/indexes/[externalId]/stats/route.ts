@@ -3,6 +3,7 @@ import { ProjectContextError, requireProjectContext } from '@/lib/services/proje
 import { parseDashboardDateFilterFromSearchParams } from '@/lib/utils/dashboardDateFilter';
 import { getDatabase } from '@/lib/database';
 import { MongoDBProvider } from '@/lib/database/mongodb.provider';
+import { getVectorIndexCount } from '@/lib/services/vector';
 import { createLogger } from '@/lib/core/logger';
 
 const log = createLogger('vector-stats');
@@ -22,8 +23,10 @@ export async function GET(request: NextRequest, context: RouteContext) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
+    let projectId: string;
     try {
-      await requireProjectContext(request, { tenantDbName, tenantId, userId });
+      const projectContext = await requireProjectContext(request, { tenantDbName, tenantId, userId });
+      projectId = projectContext.projectId;
     } catch (error) {
       if (error instanceof ProjectContextError) {
         return NextResponse.json({ error: error.message }, { status: error.status });
@@ -67,6 +70,13 @@ export async function GET(request: NextRequest, context: RouteContext) {
       .findOne(indexQuery, { projection: { key: 1, _id: 0 } });
 
     const indexKey = (indexDoc?.key as string | undefined) ?? externalId;
+
+    // Live count from the provider — no index record carries one. Dashboard-only
+    // on purpose: counting is expensive/side-effecting on several providers.
+    const vectorCountPromise = providerKey
+      ? getVectorIndexCount(tenantDbName, tenantId, projectId, providerKey, indexKey)
+      : Promise.resolve(undefined);
+
     const [daily, totalsRaw, topKDist] = await Promise.all([
       db.collection('vector_query_logs').aggregate([
         { $match: { indexKey, timestamp: { $gte: since, $lte: until } } },
@@ -128,9 +138,11 @@ export async function GET(request: NextRequest, context: RouteContext) {
     }
 
     const totals = totalsRaw[0] ?? {};
+    const vectorCount = await vectorCountPromise;
 
     return NextResponse.json({
       daily: filledDaily,
+      vectorCount,
       totals: {
         totalQueries: (totals.totalQueries as number | undefined) ?? 0,
         avgLatencyMs: totals.avgLatencyMs ? Math.round(totals.avgLatencyMs as number) : 0,

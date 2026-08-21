@@ -57,6 +57,7 @@ interface RagModuleData {
   rerankerOversample?: number | null;
   defaultTopK?: number | null;
   defaultMinScore?: number | null;
+  responseDetail?: 'full' | 'text' | null;
 }
 
 interface RerankerOption {
@@ -86,6 +87,7 @@ interface FormValues {
   rerankerOversample: number | '';
   defaultTopK: number | '';
   defaultMinScore: number;
+  responseDetail: 'full' | 'text';
 }
 
 export default function EditRagModuleModal({ opened, onClose, module, onUpdated }: EditRagModuleModalProps) {
@@ -111,6 +113,7 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
       rerankerOversample: module.rerankerOversample ?? '',
       defaultTopK: module.defaultTopK ?? 5,
       defaultMinScore: module.defaultMinScore ?? 0.5,
+      responseDetail: module.responseDetail ?? 'full',
     },
     validate: {
       name: (v) => (!v ? 'Name is required' : null),
@@ -208,6 +211,7 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
         rerankerOversample: module.rerankerOversample ?? '',
         defaultTopK: module.defaultTopK ?? 5,
         defaultMinScore: module.defaultMinScore ?? 0.5,
+      responseDetail: module.responseDetail ?? 'full',
       });
       void loadEmbeddingModels();
       void loadVectorProviders();
@@ -255,6 +259,7 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
               : Number(values.rerankerOversample),
           defaultTopK: values.defaultTopK === '' ? null : Number(values.defaultTopK),
           defaultMinScore: values.defaultMinScore,
+          responseDetail: values.responseDetail,
         }),
       });
 
@@ -448,6 +453,21 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
               label={(val) => val.toFixed(2)}
               value={v.defaultMinScore}
               onChange={(val) => form.setFieldValue('defaultMinScore', val)}
+            />
+          </FormField>
+        </FormRow>
+        <FormRow cols={2}>
+          <FormField
+            label="Response detail"
+            hint="What a query response carries. 'Text only' returns just the chunk text."
+          >
+            <Select
+              data={[
+                { value: 'full', label: 'Full — scores, ids and metadata' },
+                { value: 'text', label: 'Text only — just the chunk text' },
+              ]}
+              allowDeselect={false}
+              {...form.getInputProps('responseDetail')}
             />
           </FormField>
         </FormRow>

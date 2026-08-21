@@ -1,4 +1,5 @@
 import slugify from 'slugify';
+import type { MongoClient } from 'mongodb';
 import {
   getDatabase,
   type DatabaseProvider,
@@ -8,6 +9,7 @@ import {
 import { createLogger } from '@/lib/core/logger';
 import { runtimePool, hashCredentials } from '@/lib/core/runtimePool';
 import { withResilience } from '@/lib/core/resilience';
+import { fireAndForget } from '@/lib/core/asyncTask';
 import {
   providerRegistry,
   type VectorProviderRuntime,
@@ -203,6 +205,10 @@ function mergeMetadataForUpdate(
     ...(existing ?? {}),
     ...updates,
   };
+
+  // vectorCount is computed live per request. A read-modify-write client would
+  // otherwise persist a stale value that then outlives the provider it came from.
+  delete merged.vectorCount;
 
   const hasValues = Object.keys(merged).some(
     (key) => merged[key] !== undefined && merged[key] !== null,
@@ -435,6 +441,42 @@ export async function getVectorIndex(
   };
 }
 
+/**
+ * Live vector count for an index, straight from the provider.
+ *
+ * Deliberately NOT part of `getVectorIndex`: that runs on the client API too,
+ * and counting is expensive and side-effecting on several providers (Milvus
+ * loads the collection into RAM, Postgres does a full COUNT(*), Mongo opens a
+ * fresh connection). Keep it on the session-authenticated dashboard stats path
+ * only. Returns undefined when the provider cannot cheaply report a total.
+ */
+export async function getVectorIndexCount(
+  tenantDbName: string,
+  tenantId: string,
+  projectId: string,
+  providerKey: string,
+  key: string,
+): Promise<number | undefined> {
+  try {
+    const db = await withTenantDb(tenantDbName);
+    const index = await requireVectorIndexRecord(db, providerKey, key, projectId);
+    const { runtime } = await buildRuntimeContext(tenantDbName, tenantId, providerKey, projectId);
+
+    const result = await withResilience(
+      () => runtime.listVectors(toRuntimeHandle(index), { limit: 1 }),
+      { key: `vector-count:${providerKey}` },
+    );
+    return result.total;
+  } catch (error) {
+    logger.warn('Failed to fetch live vector count for index', {
+      providerKey,
+      indexKey: key,
+      error: error instanceof Error ? error.message : error,
+    });
+    return undefined;
+  }
+}
+
 export async function updateVectorIndex(
   tenantDbName: string,
   tenantId: string,
@@ -572,6 +614,48 @@ export async function deleteVectors(
   );
 }
 
+interface VectorQueryLogEntry {
+  indexKey: string;
+  providerKey: string;
+  tenantId: string;
+  projectId: string;
+  topK: number;
+  matchCount: number;
+  latencyMs: number;
+  filterApplied: boolean;
+  avgScore: number;
+}
+
+/**
+ * Writes the row the vector stats dashboards aggregate over.
+ *
+ * `vector_query_logs` had readers (the index stats route and the vector plugin)
+ * but no writer at all, so every chart was permanently empty. Both readers go
+ * straight to the Mongo collection, so this writer does too — and it is
+ * best-effort: telemetry must never fail a query.
+ */
+async function recordVectorQueryLog(
+  tenantDbName: string,
+  entry: VectorQueryLogEntry,
+): Promise<void> {
+  try {
+    const provider = await getDatabase();
+    const client = (provider as { getClient?: () => MongoClient | null }).getClient?.();
+    if (!client) return;
+
+    await client.db(tenantDbName).collection('vector_query_logs').insertOne({
+      ...entry,
+      timestamp: new Date(),
+      createdAt: new Date(),
+    });
+  } catch (error) {
+    logger.warn('Failed to record vector query log', {
+      indexKey: entry.indexKey,
+      error: error instanceof Error ? error.message : error,
+    });
+  }
+}
+
 export async function queryVectorIndex(
   tenantDbName: string,
   tenantId: string,
@@ -593,6 +677,17 @@ export async function queryVectorIndex(
     projectId,
   );
 
+  // Upserts are dimension-checked but queries were not: a mismatch surfaced
+  // either as an opaque provider 500 or (on in-process providers) as silently
+  // meaningless scores. Fail with something the caller can act on instead.
+  if (Array.isArray(request.query?.vector) && request.query.vector.length !== index.dimension) {
+    throw new Error(
+      `Query vector has ${request.query.vector.length} values but index "${index.name}" expects ${index.dimension}. `
+      + 'The embedding model likely differs from the one the index was built with.',
+    );
+  }
+
+  const startedAt = Date.now();
   const result: VectorQueryResult = await withResilience(
     () => runtime.queryVectors(
       toRuntimeHandle(index),
@@ -600,6 +695,24 @@ export async function queryVectorIndex(
     ),
     { key: `vector-query:${request.providerKey}` },
   );
+
+  // Telemetry must not sit on the query's critical path — awaiting this added a
+  // full DB round trip to every search.
+  fireAndForget('vector-query-log', () => recordVectorQueryLog(tenantDbName, {
+    indexKey: index.key,
+    providerKey: request.providerKey,
+    tenantId,
+    projectId,
+    topK: request.query.topK,
+    matchCount: result.matches.length,
+    latencyMs: Date.now() - startedAt,
+    filterApplied: Boolean(
+      request.query.filter && Object.keys(request.query.filter).length > 0,
+    ),
+    avgScore: result.matches.length > 0
+      ? result.matches.reduce((sum, m) => sum + (m.score ?? 0), 0) / result.matches.length
+      : 0,
+  }));
 
   return result;
 }

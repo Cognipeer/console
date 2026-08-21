@@ -19,15 +19,10 @@ import type {
 
 interface AzureAiSearchCredentials {
     apiKey: string;
-    subscriptionId?: string;
-    subscription?: string;
 }
 
 interface AzureAiSearchSettings {
     foundryProjectEndpoint: string;
-    resourceGroup?: string;
-    location?: string;
-    projectResourceId?: string;
     defaultDistanceMetric?: 'cosine' | 'euclidean' | 'dotProduct';
     serviceVersion?: string;
 }
@@ -66,6 +61,25 @@ function normalizeEndpoint(endpoint: string): string {
     return endpoint.trim().replace(/\/$/, '');
 }
 
+// Azure AI Search document keys only allow letters, digits, underscore, dash,
+// or equals sign — app-level vector IDs (e.g. "moduleKey:documentId:chunkIndex")
+// contain colons, so round-trip them through a URL-safe base64 key on the wire.
+function encodeKey(id: string): string {
+    return Buffer.from(id, 'utf-8').toString('base64url');
+}
+
+function decodeKey(key: string): string {
+    // Only decode keys we actually encoded. base64url decoding never throws, so
+    // an externally-written key would silently turn into mojibake — round-trip
+    // it and fall back to the raw key when it isn't one of ours.
+    try {
+        const decoded = Buffer.from(key, 'base64url').toString('utf-8');
+        return encodeKey(decoded) === key ? decoded : key;
+    } catch {
+        return key;
+    }
+}
+
 export const AzureAiSearchVectorProviderContract: ProviderContract<
     VectorProviderRuntime,
     AzureAiSearchCredentials,
@@ -93,22 +107,6 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                         required: true,
                         scope: 'credentials',
                     },
-                    {
-                        name: 'subscriptionId',
-                        label: 'Subscription ID',
-                        type: 'text',
-                        required: false,
-                        description: 'Azure subscription ID. Optional, used for resource identification.',
-                        scope: 'credentials',
-                    },
-                    {
-                        name: 'subscription',
-                        label: 'Subscription',
-                        type: 'text',
-                        required: false,
-                        description: 'Azure subscription display name.',
-                        scope: 'credentials',
-                    },
                 ],
             },
             {
@@ -123,32 +121,6 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                         placeholder: 'https://myservice.search.windows.net',
                         description:
                             'The endpoint URL of your Azure AI Search service or Microsoft Foundry project.',
-                        scope: 'settings',
-                    },
-                    {
-                        name: 'location',
-                        label: 'Location',
-                        type: 'text',
-                        required: false,
-                        placeholder: 'eastus',
-                        description: 'Azure region where the resource is deployed (e.g. eastus, westeurope).',
-                        scope: 'settings',
-                    },
-                    {
-                        name: 'resourceGroup',
-                        label: 'Resource Group',
-                        type: 'text',
-                        required: false,
-                        description: 'Azure resource group that contains the search service.',
-                        scope: 'settings',
-                    },
-                    {
-                        name: 'projectResourceId',
-                        label: 'Project Resource ID',
-                        type: 'text',
-                        required: false,
-                        placeholder: '/subscriptions/{subId}/resourceGroups/{rg}/providers/...',
-                        description: 'Full Azure resource ID of the AI project or search service. Optional.',
                         scope: 'settings',
                     },
                     {
@@ -326,7 +298,7 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                 const client = getSearchClient(handle.externalId);
 
                 const documents: AzureSearchDocument[] = items.map((item) => ({
-                    [ID_FIELD]: item.id,
+                    [ID_FIELD]: encodeKey(item.id),
                     [VECTOR_FIELD]: item.values,
                     [METADATA_FIELD]: JSON.stringify(item.metadata ?? {}),
                 }));
@@ -346,7 +318,7 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
             ): Promise<VectorQueryResult> {
                 const client = getSearchClient(handle.externalId);
 
-                const searchResults = await client.search('*', {
+                const searchResults = await client.search(undefined, {
                     vectorSearchOptions: {
                         queries: [
                             {
@@ -374,7 +346,7 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                     }
 
                     matches.push({
-                        id: doc[ID_FIELD],
+                        id: decodeKey(doc[ID_FIELD]),
                         score: result.score ?? 0,
                         metadata,
                     });
@@ -387,7 +359,7 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                 if (ids.length === 0) return;
 
                 const client = getSearchClient(handle.externalId);
-                await client.deleteDocuments(ID_FIELD, ids);
+                await client.deleteDocuments(ID_FIELD, ids.map(encodeKey));
 
                 logger?.debug('Azure AI Search vectors deleted', {
                     providerKey,
@@ -420,7 +392,7 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                         // ignore malformed metadata
                     }
                     items.push({
-                        id: doc[ID_FIELD],
+                        id: decodeKey(doc[ID_FIELD]),
                         values: Array.isArray(doc[VECTOR_FIELD]) ? doc[VECTOR_FIELD] : [],
                         metadata,
                     });

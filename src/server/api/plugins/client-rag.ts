@@ -15,6 +15,7 @@ import {
   queryRag,
   reingestDocument,
   updateRagModule,
+  shapeRagQueryResponse,
 } from '@/lib/services/rag/ragService';
 import {
   getApiTokenContextForRequest,
@@ -311,7 +312,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
         minScore: typeof body.minScore === 'number' ? body.minScore : undefined,
       });
 
-      return reply.code(200).send({ result });
+      return reply.code(200).send({ result: shapeRagQueryResponse(result) });
     } catch (error) {
       logger.error('Query client RAG module error', { error });
       return reply.code(500).send({

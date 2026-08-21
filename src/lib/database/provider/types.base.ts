@@ -613,6 +613,8 @@ export interface IVectorMigration {
   destinationIndexKey: string;
   destinationIndexName: string;
   status: VectorMigrationStatus;
+  /** Incremented every time the migration is (re)started, so its batch logs can be grouped per run. */
+  attempt: number;
   totalVectors: number;
   migratedVectors: number;
   failedVectors: number;
@@ -634,6 +636,8 @@ export interface IVectorMigrationLog {
   tenantId: string;
   projectId?: string;
   migrationKey: string;
+  /** Which run this log belongs to — matches the migration's `attempt` when the batch ran. */
+  attempt: number;
   batchIndex: number;
   vectorIds: string[];
   status: VectorMigrationLogStatus;
@@ -642,6 +646,19 @@ export interface IVectorMigrationLog {
   errorMessage?: string;
   durationMs?: number;
   createdAt?: Date;
+}
+
+/** Aggregated stats for one run (`attempt`) of a migration, built from its batch logs. */
+export interface IVectorMigrationRunSummary {
+  attempt: number;
+  batchCount: number;
+  successBatches: number;
+  failedBatches: number;
+  skippedBatches: number;
+  migratedCount: number;
+  failedCount: number;
+  startedAt?: Date;
+  endedAt?: Date;
 }
 
 export type FileMarkdownStatus = 'pending' | 'succeeded' | 'failed' | 'skipped';

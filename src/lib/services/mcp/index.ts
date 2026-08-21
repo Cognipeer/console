@@ -13,6 +13,7 @@ export {
   logMcpAudit,
   listMcpAuditLogs,
   refreshMcpServerTools,
+  reconcileCompositesForMember,
   getMcpMonitorSnapshot,
   executeMcpTool,
   getDisabledToolNames,
@@ -21,6 +22,8 @@ export {
   listMcpToolDescriptors,
   getToolAnnotationOverrides,
   getToolDescriptionOverrides,
+  getToolNameOverrides,
+  resolveMcpToolName,
   serializeMcpServer,
   serializeMcpServerFull,
   parseOpenApiSpec,
@@ -55,4 +58,20 @@ export type {
   McpServerView,
   McpRequestLogView,
   InternalMcpConfigInput,
+  CompositeConfigInput,
 } from './types';
+
+export {
+  getCompositeConfig,
+  getCompositeMemberSummaries,
+  isInternalSourced,
+  sanitizeCompositePrefix,
+  MAX_COMPOSITE_MEMBER_TOOLS,
+  allocateExposedNames,
+} from './composite';
+export type {
+  IMcpCompositeConfig,
+  IMcpCompositeMemberConfig,
+  IMcpCompositeMemberSummary,
+  CompositeToolEntry,
+} from './composite';

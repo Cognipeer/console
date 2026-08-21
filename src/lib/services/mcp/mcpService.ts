@@ -2,6 +2,7 @@ import slugify from 'slugify';
 import { randomUUID } from 'crypto';
 import { getDatabase } from '@/lib/database';
 import type {
+  DatabaseProvider,
   IMcpAuditLog,
   IMcpAuthConfig,
   IMcpExposureConfig,
@@ -26,7 +27,7 @@ import {
   redactLogPayload,
   redactLogString,
 } from '@/lib/services/logRedaction';
-import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
+import { recordUsageEvent, resolveUsageAttribution } from '@/lib/services/usage/usageEvents';
 import { safeFetch } from '@/lib/security/outboundFetch';
 import { normalizeApiSpec, type SpecFormatHint } from '@/lib/services/specImport';
 import { routeInstanceCall } from '@/lib/core/cluster';
@@ -51,6 +52,19 @@ import { remoteCallTool, remoteListTools } from './remoteMcpClient';
 import { isStdioRunnerEnabled, stdioCallTool, stdioListTools } from './stdioRunner';
 import { mcpGuardrailHook, mcpSandboxRunner } from '@/enterprise/registry';
 import { requireInternalMcpProvider } from './internal/registry';
+import {
+  allocateExposedNames,
+  assertMemberUsable,
+  assertPublicExposureAllowed,
+  defaultMemberPrefix,
+  getCompositeConfig,
+  getCompositeMemberSummaries,
+  MAX_COMPOSITE_MEMBER_TOOLS,
+  metadataWithComposite,
+  type CompositeToolEntry,
+  type IMcpCompositeMemberConfig,
+  type IMcpCompositeMemberSummary,
+} from './composite';
 
 const logger = createLogger('mcp-service');
 const SLUG_OPTIONS = { lower: true, strict: true, trim: true };
@@ -169,19 +183,73 @@ function metadataWithToolDescriptions(
   return next;
 }
 
-/** Overlay the operator's description/annotation overrides on discovered tools. */
+// ── Tool name overrides ───────────────────────────────────────────────────
+// Same metadata-backed pattern as descriptions/annotations: keyed by the
+// *real* (discovered) tool name, so a rename survives tool rediscovery
+// without needing an identity of its own. The real name stays the source of
+// truth everywhere internally (disabledTools, annotations, descriptions,
+// execution) — only the outward-facing `name` in tools/list changes.
+
+export function getToolNameOverrides(
+  server: Pick<IMcpServer, 'metadata'>,
+): Record<string, string> {
+  const raw = (server.metadata as Record<string, unknown> | undefined)?.toolNames;
+  if (!raw || typeof raw !== 'object') return {};
+  return raw as Record<string, string>;
+}
+
+/** MCP/OpenAI-compatible identifier charset, generous length cap. */
+const TOOL_NAME_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
+
+function sanitizeToolNameOverride(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed || !TOOL_NAME_PATTERN.test(trimmed)) return null;
+  return trimmed;
+}
+
+function metadataWithToolNames(
+  metadata: Record<string, unknown> | undefined,
+  overrides: Record<string, string>,
+): Record<string, unknown> {
+  const next = { ...(metadata ?? {}) };
+  if (Object.keys(overrides).length) next.toolNames = overrides;
+  else delete next.toolNames;
+  return next;
+}
+
+/**
+ * Reverse-map whatever name a caller used back to the real, stored tool
+ * name. Callers that never saw the override (legacy agent bindings, a
+ * client that cached an old tools/list) still pass the real name through
+ * unchanged, since it only matches an override's *target*.
+ */
+export function resolveMcpToolName(server: Pick<IMcpServer, 'metadata'>, calledName: string): string {
+  const overrides = getToolNameOverrides(server);
+  for (const [realName, exposedName] of Object.entries(overrides)) {
+    if (exposedName === calledName) return realName;
+  }
+  return calledName;
+}
+
+/** Overlay the operator's name/description/annotation overrides on discovered tools. */
 function applyToolOverrides(server: Pick<IMcpServer, 'metadata'>, tools: IMcpTool[]): IMcpTool[] {
   const annotationOverrides = getToolAnnotationOverrides(server);
   const descriptionOverrides = getToolDescriptionOverrides(server);
-  if (!Object.keys(annotationOverrides).length && !Object.keys(descriptionOverrides).length) {
+  const nameOverrides = getToolNameOverrides(server);
+  if (!Object.keys(annotationOverrides).length
+    && !Object.keys(descriptionOverrides).length
+    && !Object.keys(nameOverrides).length) {
     return tools;
   }
   return tools.map((tool) => {
     const annotations = annotationOverrides[tool.name];
     const description = descriptionOverrides[tool.name];
-    if (!annotations && !description) return tool;
+    const name = nameOverrides[tool.name];
+    if (!annotations && !description && !name) return tool;
     return {
       ...tool,
+      ...(name ? { name } : {}),
       ...(description ? { description } : {}),
       ...(annotations ? { annotations: { ...(tool.annotations ?? {}), ...annotations } } : {}),
     };
@@ -212,6 +280,8 @@ export function serializeMcpServer(record: IMcpServer): McpServerView {
     disabledTools: getDisabledToolNames(record),
     toolAnnotations: getToolAnnotationOverrides(record),
     toolDescriptions: getToolDescriptionOverrides(record),
+    toolNames: getToolNameOverrides(record),
+    members: getCompositeMemberSummaries(record),
   } as McpServerView;
 }
 export function serializeMcpServerFull(record: IMcpServer): McpServerView & { openApiSpec?: string } {
@@ -226,6 +296,8 @@ export function serializeMcpServerFull(record: IMcpServer): McpServerView & { op
     disabledTools: getDisabledToolNames(record),
     toolAnnotations: getToolAnnotationOverrides(record),
     toolDescriptions: getToolDescriptionOverrides(record),
+    toolNames: getToolNameOverrides(record),
+    members: getCompositeMemberSummaries(record),
   } as McpServerView & { openApiSpec?: string };
 }
 
@@ -236,10 +308,12 @@ function normalizeKey(input: string): string {
   return slugify(fallback, SLUG_OPTIONS);
 }
 
+/** `excludeId` lets a rename check uniqueness without colliding with itself. */
 async function generateUniqueKey(
   tenantDbName: string,
   projectId: string | undefined,
   desiredKey: string,
+  excludeId?: string,
 ): Promise<string> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
@@ -250,7 +324,7 @@ async function generateUniqueKey(
 
   while (attempt < MAX_KEY_ATTEMPTS) {
     const existing = await db.findMcpServerByKey(candidate, projectId);
-    if (!existing) return candidate;
+    if (!existing || String(existing._id) === excludeId) return candidate;
     attempt++;
     candidate = `${base}-${attempt}`;
   }
@@ -498,6 +572,17 @@ function validateCreateInput(input: CreateMcpServerInput): McpSourceType {
     if (!input.internalConfig?.instanceKey?.trim()) {
       throw new Error('internalConfig.instanceKey is required for source type "internal"');
     }
+    assertPublicExposureAllowed('internal', true, input.exposure?.accessMode);
+  }
+  if (sourceType === 'composite') {
+    if (!input.compositeConfig?.members?.length) {
+      throw new Error('compositeConfig.members is required for source type "composite"');
+    }
+    for (const m of input.compositeConfig.members) {
+      if (!m.serverId?.trim()) {
+        throw new Error('Every composite member needs a serverId');
+      }
+    }
   }
   return sourceType;
 }
@@ -513,6 +598,175 @@ function normalizeExposure(input?: IMcpExposureConfig): IMcpExposureConfig {
   };
 }
 
+// ── Composite servers ──────────────────────────────────────────────────────
+// A composite republishes tools from other MCP servers on the same tenant.
+// Its `tools[]` is a *materialized snapshot*, not a live join — the five
+// protocol surfaces that read `server.tools` (tools/list, client v1, public
+// MCP, agent bindings, the EE Hub catalog) all stay synchronous. The
+// snapshot is rebuilt here and re-persisted whenever the composite's own
+// member list changes (create/update) or a member changes underneath it
+// (`reconcileCompositesForMember`, called from updateMcpServer/deleteMcpServer).
+
+interface BuiltCompositeTools {
+  tools: IMcpTool[];
+  members: IMcpCompositeMemberConfig[];
+  memberSummaries: IMcpCompositeMemberSummary[];
+  hasInternalMember: boolean;
+}
+
+async function buildCompositeTools(
+  db: DatabaseProvider,
+  self: { id?: string; tenantId: string; projectId?: string },
+  memberConfigs: Array<{ serverId: string; toolPrefix?: string; alwaysPrefix?: boolean }>,
+  previousTools: IMcpTool[] = [],
+): Promise<BuiltCompositeTools> {
+  if (memberConfigs.length === 0) {
+    throw new Error('A composite server needs at least one member');
+  }
+
+  const entries: CompositeToolEntry[] = [];
+  const entryTools: IMcpTool[] = [];
+  const members: IMcpCompositeMemberConfig[] = [];
+  const memberSummaries: IMcpCompositeMemberSummary[] = [];
+  let hasInternalMember = false;
+
+  for (const cfg of memberConfigs) {
+    const member = await db.findMcpServerById(cfg.serverId);
+    assertMemberUsable(self, member, cfg.serverId);
+    const m = member!;
+    const memberSourceType = resolveSourceType(m);
+    if (memberSourceType === 'internal') hasInternalMember = true;
+
+    members.push({
+      serverId: cfg.serverId,
+      serverKey: m.key,
+      toolPrefix: cfg.toolPrefix,
+      alwaysPrefix: cfg.alwaysPrefix,
+    });
+    memberSummaries.push({
+      serverId: cfg.serverId,
+      serverKey: m.key,
+      name: m.name,
+      sourceType: memberSourceType,
+      status: m.status,
+      toolCount: m.tools?.length ?? 0,
+    });
+
+    // Inactive members contribute no tools but stay in the member list —
+    // re-enabling them on the member's own page brings their tools back on
+    // the next reconcile, no need to re-add them here.
+    if (m.status !== 'active') continue;
+
+    const prefixBase = cfg.toolPrefix || defaultMemberPrefix(m.key);
+    const fallbackAnnotations = defaultAnnotationsForSource(memberSourceType);
+    for (const tool of listEnabledMcpTools(m)) {
+      entries.push({
+        serverId: cfg.serverId,
+        serverKey: m.key,
+        realName: tool.name,
+        prefixBase,
+        alwaysPrefix: cfg.alwaysPrefix === true,
+      });
+      entryTools.push({
+        ...tool,
+        annotations: tool.annotations ?? fallbackAnnotations,
+      });
+    }
+  }
+
+  if (entries.length > MAX_COMPOSITE_MEMBER_TOOLS) {
+    throw new Error(
+      `This composite would publish ${entries.length} tools, over the ${MAX_COMPOSITE_MEMBER_TOOLS} limit. `
+      + 'Disable unused tools on the member servers first.',
+    );
+  }
+
+  const exposedNames = allocateExposedNames(entries, previousTools);
+  const tools: IMcpTool[] = entryTools.map((tool, i) => ({
+    ...tool,
+    name: exposedNames[i],
+    origin: { serverId: entries[i].serverId, serverKey: entries[i].serverKey, realName: entries[i].realName },
+  }));
+
+  return { tools, members, memberSummaries, hasInternalMember };
+}
+
+/** Rebuild + persist one composite's snapshot from its stored member config. */
+async function reconcileOneComposite(
+  db: DatabaseProvider,
+  composite: IMcpServer,
+): Promise<IMcpServer | null> {
+  const config = getCompositeConfig(composite);
+  if (config.members.length === 0) {
+    // Nothing left to publish — disable rather than leave an always-empty,
+    // always-failing endpoint. The operator adds a member or deletes it.
+    return db.updateMcpServer(String(composite._id), {
+      status: 'disabled',
+      tools: [],
+      lastError: { message: 'All members were removed from this composite server.', at: new Date() },
+      metadata: metadataWithComposite(composite.metadata, { members: [], hasInternalMember: false }, []),
+    });
+  }
+  const built = await buildCompositeTools(
+    db,
+    { id: String(composite._id ?? ''), tenantId: composite.tenantId, projectId: composite.projectId },
+    config.members,
+    composite.tools,
+  );
+  return db.updateMcpServer(String(composite._id), {
+    tools: built.tools,
+    toolsDiscoveredAt: new Date(),
+    lastError: null,
+    metadata: metadataWithComposite(
+      composite.metadata,
+      { members: built.members, hasInternalMember: built.hasInternalMember },
+      built.memberSummaries,
+    ),
+  });
+}
+
+/**
+ * Called after a server changes (update) or is deleted, so every composite
+ * that includes it as a member gets a fresh snapshot. Best-effort per
+ * composite — one failing composite (e.g. a member vanished mid-request)
+ * doesn't block the others; the failure lands on that composite's
+ * `lastError` instead.
+ */
+export async function reconcileCompositesForMember(
+  tenantDbName: string,
+  memberId: string,
+  opts: { removed?: boolean } = {},
+): Promise<void> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const all = await db.listMcpServers({});
+  const composites = all.filter((s) => resolveSourceType(s) === 'composite'
+    && getCompositeConfig(s).members.some((m) => m.serverId === memberId));
+
+  for (const composite of composites) {
+    try {
+      if (opts.removed) {
+        const prunedMembers = getCompositeConfig(composite).members.filter((m) => m.serverId !== memberId);
+        await db.updateMcpServer(String(composite._id), {
+          metadata: metadataWithComposite(
+            composite.metadata,
+            { members: prunedMembers, hasInternalMember: getCompositeConfig(composite).hasInternalMember },
+            getCompositeMemberSummaries(composite),
+          ),
+        });
+        const refreshed = await db.findMcpServerById(String(composite._id));
+        if (refreshed) await reconcileOneComposite(db, refreshed);
+      } else {
+        await reconcileOneComposite(db, composite);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await db.updateMcpServer(String(composite._id), { lastError: { message, at: new Date() } });
+      logger.warn('Composite reconcile failed', { compositeKey: composite.key, memberId, error: message });
+    }
+  }
+}
+
 export async function createMcpServer(
   tenantDbName: string,
   tenantId: string,
@@ -523,7 +777,7 @@ export async function createMcpServer(
 ): Promise<IMcpServer> {
   const sourceType = validateCreateInput(input);
 
-  const key = await generateUniqueKey(tenantDbName, projectId, input.name);
+  const key = await generateUniqueKey(tenantDbName, projectId, input.key?.trim() || input.name);
   const endpointSlug = generateEndpointSlug();
 
   let tools: IMcpTool[] = [];
@@ -556,6 +810,7 @@ export async function createMcpServer(
   const stdioConfig = input.stdioConfig ? sealStdioEnv(input.stdioConfig) : undefined;
 
   let internalMetadata: Record<string, unknown> | undefined;
+  let compositeMetadata: Record<string, unknown> | undefined;
   let description = input.description?.trim();
   if (sourceType === 'internal') {
     const ctx = { tenantDbName, tenantId, projectId };
@@ -567,6 +822,21 @@ export async function createMcpServer(
     tools = built.tools;
     description = description || built.suggestedDescription;
     internalMetadata = { provider: provider.id, instanceKey, config };
+  }
+  if (sourceType === 'composite') {
+    const memberConfigs = input.compositeConfig!.members.map((m) => ({
+      serverId: m.serverId,
+      toolPrefix: m.toolPrefix,
+      alwaysPrefix: m.alwaysPrefix,
+    }));
+    const built = await buildCompositeTools(db, { tenantId, projectId }, memberConfigs);
+    assertPublicExposureAllowed('composite', built.hasInternalMember, input.exposure?.accessMode);
+    tools = built.tools;
+    compositeMetadata = metadataWithComposite(
+      undefined,
+      { members: built.members, hasInternalMember: built.hasInternalMember },
+      built.memberSummaries,
+    );
   }
 
   const server = await db.createMcpServer({
@@ -588,7 +858,7 @@ export async function createMcpServer(
     status: 'active',
     endpointSlug,
     totalRequests: 0,
-    metadata: internalMetadata ? { internal: internalMetadata } : undefined,
+    metadata: internalMetadata ? { internal: internalMetadata } : compositeMetadata,
     createdBy: userId,
   });
 
@@ -645,6 +915,7 @@ function diffForAudit(before: IMcpServer, after: Partial<IMcpServer>): Record<st
     if (fromJson !== toJson) changes[field] = { from, to };
   };
 
+  compare('key', before.key, after.key);
   compare('name', before.name, after.name);
   compare('description', before.description, after.description);
   compare('status', before.status, after.status);
@@ -701,6 +972,9 @@ export async function updateMcpServer(
 
   const updateData: Record<string, unknown> = { updatedBy: userId };
 
+  if (input.key !== undefined && input.key.trim()) {
+    updateData.key = await generateUniqueKey(tenantDbName, existing.projectId, input.key, serverId);
+  }
   if (input.name !== undefined) updateData.name = input.name.trim();
   if (input.description !== undefined) updateData.description = input.description.trim();
   if (input.status !== undefined) updateData.status = input.status;
@@ -783,6 +1057,51 @@ export async function updateMcpServer(
     };
   }
 
+  // Composite: an explicit compositeConfig patch replaces the member list
+  // and rebuilds the tool snapshot (passing the current tools as the
+  // "previous" set keeps stable exposed names across the rebuild — see
+  // allocateExposedNames). Omitting compositeConfig leaves the member list
+  // untouched (e.g. a PATCH that only renames the server or flips status).
+  let compositeHasInternalMember = sourceType === 'composite'
+    ? getCompositeConfig(existing).hasInternalMember
+    : false;
+  if (sourceType === 'composite' && input.compositeConfig !== undefined) {
+    if (!input.compositeConfig.members.length) {
+      throw new Error('compositeConfig.members must include at least one member server');
+    }
+    const memberConfigs = input.compositeConfig.members.map((m) => ({
+      serverId: m.serverId,
+      toolPrefix: m.toolPrefix,
+      alwaysPrefix: m.alwaysPrefix,
+    }));
+    const built = await buildCompositeTools(
+      db,
+      { id: serverId, tenantId: existing.tenantId, projectId: existing.projectId },
+      memberConfigs,
+      existing.tools,
+    );
+    updateData.tools = built.tools;
+    updateData.toolsDiscoveredAt = new Date();
+    compositeHasInternalMember = built.hasInternalMember;
+    updateData.metadata = metadataWithComposite(
+      (updateData.metadata as Record<string, unknown> | undefined) ?? existing.metadata,
+      { members: built.members, hasInternalMember: built.hasInternalMember },
+      built.memberSummaries,
+    );
+  }
+
+  // Public-exposure gate: an internal-sourced server (direct 'internal', or
+  // a composite with an internal member) must never be reachable without a
+  // Cognipeer token — runs on every update, not just ones that touch
+  // exposure or compositeConfig, since either one alone can flip the
+  // effective combination into a disallowed state.
+  const effectiveExposure = (updateData.exposure as IMcpExposureConfig | undefined) ?? resolveExposure(existing);
+  assertPublicExposureAllowed(
+    sourceType,
+    sourceType === 'internal' ? true : compositeHasInternalMember,
+    effectiveExposure.accessMode,
+  );
+
   // Tool enable/disable list (metadata-backed). Runs after tool rediscovery so
   // the incoming names are validated against the tool list being persisted.
   if (input.disabledTools !== undefined) {
@@ -848,6 +1167,37 @@ export async function updateMcpServer(
     );
   }
 
+  // Per-tool name overrides (metadata-backed, partial patch: null or an
+  // empty string restores the discovered name). Exposed names must stay
+  // unique across the server's effective tool list — callers use them for
+  // both tools/list and tools/call, so a collision would strand one tool.
+  if (input.toolNames !== undefined) {
+    const knownTools = ((updateData.tools as IMcpTool[] | undefined) ?? existing.tools ?? []);
+    const knownNames = new Set(knownTools.map((t) => t.name));
+    const overrides = { ...getToolNameOverrides(existing) };
+    for (const [name, value] of Object.entries(input.toolNames)) {
+      if (!knownNames.has(name)) continue;
+      const custom = value === null ? null : sanitizeToolNameOverride(value);
+      if (custom && custom !== name) overrides[name] = custom;
+      else delete overrides[name];
+    }
+
+    const claimedBy = new Map<string, string>();
+    for (const tool of knownTools) {
+      const exposed = overrides[tool.name] ?? tool.name;
+      const owner = claimedBy.get(exposed);
+      if (owner && owner !== tool.name) {
+        throw new Error(`Tool name "${exposed}" collides with another tool on this server`);
+      }
+      claimedBy.set(exposed, tool.name);
+    }
+
+    updateData.metadata = metadataWithToolNames(
+      (updateData.metadata as Record<string, unknown> | undefined) ?? existing.metadata,
+      overrides,
+    );
+  }
+
   const updated = await db.updateMcpServer(serverId, updateData as Partial<IMcpServer>);
 
   if (updated) {
@@ -870,6 +1220,12 @@ export async function updateMcpServer(
       ipAddress: audit?.ipAddress,
       userAgent: audit?.userAgent,
     });
+
+    // Composites can't nest (assertMemberUsable rejects it), so this never
+    // recurses — it only ever touches composites that include `existing`.
+    if (sourceType !== 'composite') {
+      await reconcileCompositesForMember(tenantDbName, serverId);
+    }
   }
 
   return updated;
@@ -888,27 +1244,36 @@ export async function refreshMcpServerTools(
   if (!server) return null;
 
   try {
-    const tools = await discoverToolsForServer(server);
-    const refreshUpdate: Partial<IMcpServer> = {
-      tools,
-      toolsDiscoveredAt: new Date(),
-      lastError: null,
-      updatedBy: userId,
-    };
-    // Prune disabled names that vanished from the rediscovered tool list.
-    const disabledBefore = getDisabledToolNames(server);
-    const disabledKept = disabledBefore.filter((n) => tools.some((t) => t.name === n));
-    if (disabledKept.length !== disabledBefore.length) {
-      refreshUpdate.metadata = metadataWithDisabledTools(server.metadata, disabledKept);
+    let updated: IMcpServer | null;
+    if (resolveSourceType(server) === 'composite') {
+      // Composite tools aren't "rediscovered" from an upstream — they're
+      // rebuilt from the current state of each member (which also refreshes
+      // the cached member display summary, unlike the incremental reconcile
+      // triggered by a member's own update).
+      updated = await reconcileOneComposite(db, server);
+    } else {
+      const tools = await discoverToolsForServer(server);
+      const refreshUpdate: Partial<IMcpServer> = {
+        tools,
+        toolsDiscoveredAt: new Date(),
+        lastError: null,
+        updatedBy: userId,
+      };
+      // Prune disabled names that vanished from the rediscovered tool list.
+      const disabledBefore = getDisabledToolNames(server);
+      const disabledKept = disabledBefore.filter((n) => tools.some((t) => t.name === n));
+      if (disabledKept.length !== disabledBefore.length) {
+        refreshUpdate.metadata = metadataWithDisabledTools(server.metadata, disabledKept);
+      }
+      updated = await db.updateMcpServer(serverId, refreshUpdate);
     }
-    const updated = await db.updateMcpServer(serverId, refreshUpdate);
     void logMcpAudit(tenantDbName, {
       tenantId: server.tenantId,
       projectId: server.projectId,
       serverId,
       serverKey: server.key,
       action: 'tools_refresh',
-      changes: { toolCount: { from: server.tools?.length ?? 0, to: tools.length } },
+      changes: { toolCount: { from: server.tools?.length ?? 0, to: updated?.tools?.length ?? 0 } },
       performedBy: audit?.performedBy ?? userId,
       ipAddress: audit?.ipAddress,
       userAgent: audit?.userAgent,
@@ -957,6 +1322,10 @@ export async function deleteMcpServer(
       ipAddress: audit?.ipAddress,
       userAgent: audit?.userAgent,
     });
+
+    if (resolveSourceType(existing) !== 'composite') {
+      await reconcileCompositesForMember(tenantDbName, serverId, { removed: true });
+    }
   }
   return deleted;
 }
@@ -1011,19 +1380,31 @@ export async function logMcpRequest(
   tenantDbName: string,
   entry: Omit<IMcpRequestLog, '_id' | 'createdAt'>,
   secretValues?: string[],
+  opts?: {
+    /**
+     * The member-scoped log a composite writes alongside its own
+     * external-facing log entry (see `viaServerKey`) — skip the usage/cost
+     * rollup here so one call through a composite isn't billed twice under
+     * two different refKeys. The row is still written for that member's own
+     * Logs tab and per-tool aggregate.
+     */
+    skipUsageEvent?: boolean;
+  },
 ) {
   // Resolve attribution + rollup before any await so the request ALS is in
   // scope. `callerTokenId`/`callerUserId` stay for compat; the standard
   // userId/apiTokenId/actorType columns are stamped alongside.
-  const attribution = recordUsageEvent({
-    tenantDbName,
-    tenantId: entry.tenantId,
-    projectId: entry.projectId,
-    service: 'mcp',
-    refKey: entry.serverKey,
-    status: entry.status,
-    latencyMs: entry.latencyMs,
-  });
+  const attribution = opts?.skipUsageEvent
+    ? resolveUsageAttribution({ projectId: entry.projectId })
+    : recordUsageEvent({
+      tenantDbName,
+      tenantId: entry.tenantId,
+      projectId: entry.projectId,
+      service: 'mcp',
+      refKey: entry.serverKey,
+      status: entry.status,
+      latencyMs: entry.latencyMs,
+    });
   try {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
@@ -1120,7 +1501,7 @@ export interface McpServerMonitorEntry {
     timeseries?: Array<{ period: string; total: number; success: number; errors: number }>;
   };
   runtime: {
-    kind: 'openapi' | 'remote' | 'stdio-subprocess' | 'stdio-sandbox';
+    kind: 'openapi' | 'remote' | 'stdio-subprocess' | 'stdio-sandbox' | 'internal' | 'composite';
     state: 'ready' | 'disabled' | 'degraded' | 'unavailable';
     detail?: string;
   };
@@ -1190,6 +1571,22 @@ export async function getMcpMonitorSnapshot(
           detail = 'Stdio execution disabled (MCP_STDIO_ENABLED=false)';
         }
       }
+    } else if (sourceType === 'internal') {
+      kind = 'internal';
+    } else if (sourceType === 'composite') {
+      kind = 'composite';
+      const config = getCompositeConfig(server);
+      const inactiveMembers = config.members.length
+        ? await Promise.all(config.members.map(async (m) => {
+          const member = await db.findMcpServerById(m.serverId);
+          return !member || member.status !== 'active';
+        }))
+        : [];
+      const inactiveCount = inactiveMembers.filter(Boolean).length;
+      if (inactiveCount > 0 && state === 'ready') {
+        state = 'degraded';
+        detail = `${inactiveCount} of ${config.members.length} member(s) inactive or missing`;
+      }
     }
 
     if (server.lastError && state === 'ready') {
@@ -1250,8 +1647,12 @@ export async function executeMcpToolLocal(
 ): Promise<{ result: unknown; latencyMs: number }> {
   const sourceType = resolveSourceType(server);
   const start = Date.now();
+  // A caller may address the tool by its renamed (exposed) name — resolve
+  // back to the real, stored name once, up front, so every downstream check
+  // and dispatch below operates on the tool's actual identity.
+  const realToolName = resolveMcpToolName(server, toolName);
 
-  if (!isMcpToolEnabled(server, toolName)) {
+  if (!isMcpToolEnabled(server, realToolName)) {
     throw new Error(`Tool "${toolName}" is disabled on MCP server "${server.name}"`);
   }
 
@@ -1262,7 +1663,7 @@ export async function executeMcpToolLocal(
     tenantId: server.tenantId,
     projectId: server.projectId,
     serverKey: server.key,
-    toolName,
+    toolName: realToolName,
     shieldId: server.aegis?.shieldId,
     mode: aegisMode,
   };
@@ -1278,7 +1679,7 @@ export async function executeMcpToolLocal(
   let result: unknown;
   try {
     if (sourceType === 'openapi') {
-      result = await executeOpenApiTool(server, toolName, effectiveArgs, runtimeHeaders);
+      result = await executeOpenApiTool(server, realToolName, effectiveArgs, runtimeHeaders);
     } else if (sourceType === 'remote') {
       result = await remoteCallTool(
         {
@@ -1287,7 +1688,7 @@ export async function executeMcpToolLocal(
           auth: openAuthConfig(server.upstreamAuth),
           extraHeaders: runtimeHeaders,
         },
-        toolName,
+        realToolName,
         effectiveArgs,
       );
     } else if (sourceType === 'internal') {
@@ -1307,15 +1708,17 @@ export async function executeMcpToolLocal(
         { tenantDbName: tenant.dbName, tenantId: server.tenantId, projectId: server.projectId },
         internal.instanceKey,
         internal.config ?? {},
-        toolName,
+        realToolName,
         effectiveArgs,
       );
+    } else if (sourceType === 'composite') {
+      result = await executeCompositeTool(server, realToolName, effectiveArgs, runtimeHeaders);
     } else if (server.stdioConfig?.executionMode === 'sandbox') {
       const { runner, ref, runnerConfig } = await resolveSandboxRunner(server);
       await ensureSandboxInstance(server, runner, ref, runnerConfig);
-      result = await runner.callTool(ref, runnerConfig, toolName, effectiveArgs);
+      result = await runner.callTool(ref, runnerConfig, realToolName, effectiveArgs);
     } else {
-      result = await stdioCallTool(server.stdioConfig!, toolName, effectiveArgs);
+      result = await stdioCallTool(server.stdioConfig!, realToolName, effectiveArgs);
     }
   } catch (error) {
     // Persist the failure on the record so the monitor can surface it.
@@ -1333,6 +1736,91 @@ export async function executeMcpToolLocal(
   }
 
   return { result, latencyMs: Date.now() - start };
+}
+
+/**
+ * Route one composite tool call to its member server and record a
+ * member-scoped log entry alongside the caller's own external-facing log
+ * (written by whichever route handler called `executeMcpTool` on the
+ * composite) — so the member's own Logs tab and per-tool aggregate reflect
+ * calls that arrived via this composite, without double-billing usage (see
+ * `logMcpRequest`'s `skipUsageEvent`).
+ *
+ * Runtime-header passthrough: the composite's own opt-in policy already
+ * gated which headers reached this function at all (default-deny, resolved
+ * by the caller before `executeMcpTool` runs) — the member's own
+ * `runtimeHeaders` policy is not independently re-checked for calls that
+ * arrive via a composite. This mirrors every other multi-hop MCP source
+ * today (there is one policy checkpoint per call, not one per hop).
+ */
+async function executeCompositeTool(
+  server: IMcpServer,
+  toolName: string,
+  args: Record<string, unknown>,
+  runtimeHeaders: Record<string, string> | undefined,
+): Promise<unknown> {
+  const tool = (server.tools ?? []).find((t) => t.name === toolName);
+  if (!tool?.origin) {
+    throw new Error(
+      `Tool "${toolName}" has no member mapping on composite server "${server.name}" — try refreshing its tools`,
+    );
+  }
+
+  const db = await getDatabase();
+  const member = await db.findMcpServerById(tool.origin.serverId);
+  assertMemberUsable(
+    { id: String(server._id ?? ''), tenantId: server.tenantId, projectId: server.projectId },
+    member,
+    tool.origin.serverId,
+  );
+  const m = member!;
+  if (m.status !== 'active') {
+    throw new Error(`Member server "${m.name}" is disabled`);
+  }
+
+  const tenant = await db.findTenantById(server.tenantId);
+  const tenantDbName = tenant?.dbName;
+  const start = Date.now();
+
+  try {
+    const { result } = await executeMcpTool(m, tool.origin.realName, args, runtimeHeaders);
+    if (tenantDbName) {
+      void logMcpRequest(tenantDbName, {
+        tenantId: m.tenantId,
+        projectId: m.projectId,
+        serverKey: m.key,
+        toolName: tool.origin.realName,
+        status: 'success',
+        latencyMs: Date.now() - start,
+        requestPayload: { tool: tool.origin.realName, arguments: args },
+        responsePayload: typeof result === 'object' && result !== null
+          ? result as Record<string, unknown>
+          : { value: result },
+        viaServerKey: server.key,
+        transport: 'internal',
+        sourceType: resolveSourceType(m),
+      }, undefined, { skipUsageEvent: true });
+    }
+    return result;
+  } catch (error) {
+    if (tenantDbName) {
+      const message = error instanceof Error ? error.message : 'Execution failed';
+      void logMcpRequest(tenantDbName, {
+        tenantId: m.tenantId,
+        projectId: m.projectId,
+        serverKey: m.key,
+        toolName: tool.origin.realName,
+        status: 'error',
+        latencyMs: Date.now() - start,
+        requestPayload: { tool: tool.origin.realName, arguments: args },
+        errorMessage: message,
+        viaServerKey: server.key,
+        transport: 'internal',
+        sourceType: resolveSourceType(m),
+      }, undefined, { skipUsageEvent: true });
+    }
+    throw error;
+  }
 }
 
 async function markServerError(server: IMcpServer, message: string): Promise<void> {

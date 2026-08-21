@@ -64,6 +64,18 @@ function pgMetricOp(metric: string): string {
   return '<=>';  // cosine
 }
 
+/**
+ * SQL expression turning a pgvector operator result into a similarity score
+ * (higher = more similar), which is what `VectorQueryMatch.score` must be.
+ * Each operator returns something different: `<=>` cosine distance, `<->` L2
+ * distance, and `<#>` the NEGATIVE inner product.
+ */
+function pgScoreExpr(metric: string, op: string, tbl: string): string {
+  if (metric === 'dot') return `-(${tbl}.vector ${op} $1::vector)`;
+  if (metric === 'euclidean') return `1 / (1 + (${tbl}.vector ${op} $1::vector))`;
+  return `1 - (${tbl}.vector ${op} $1::vector)`;
+}
+
 export const PostgresVectorProviderContract: ProviderContract<
   VectorProviderRuntime,
   PostgresVectorCredentials,
@@ -270,7 +282,7 @@ export const PostgresVectorProviderContract: ProviderContract<
 
         const rows = await withClient(async (client) => {
           const result = await client.query(
-            `SELECT id, metadata, 1 - (vector ${op} $1::vector) AS score
+            `SELECT id, metadata, ${pgScoreExpr(handle.metric, op, tbl)} AS score
              FROM ${tbl}
              ORDER BY vector ${op} $1::vector
              LIMIT $2`,
