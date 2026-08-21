@@ -30,6 +30,13 @@ export interface CreateRagModuleRequest {
   defaultFilter?: Record<string, unknown>;
   filterableFields?: string[];
   responseDetail?: 'full' | 'text';
+  hybrid?: IRagModule['hybrid'];
+  /**
+   * Defaults to true: a module we ingest into stamps `_ragModule` on every
+   * vector, so isolating it costs nothing and stops two modules that share an
+   * index from reading each other's chunks.
+   */
+  isolateByModule?: boolean;
   metadata?: Record<string, unknown>;
   createdBy: string;
 }
@@ -49,6 +56,8 @@ export interface UpdateRagModuleRequest {
   defaultFilter?: Record<string, unknown> | null;
   filterableFields?: string[] | null;
   responseDetail?: 'full' | 'text' | null;
+  hybrid?: IRagModule['hybrid'] | null;
+  isolateByModule?: boolean | null;
   metadata?: Record<string, unknown>;
   updatedBy: string;
 }
@@ -65,6 +74,17 @@ export interface RagIngestRequest {
    * document so a re-index reproduces the same chunks.
    */
   chunkConfig?: IRagChunkConfig;
+  /**
+   * The upload the text was extracted from. Stored in the module's bucket so a
+   * re-index can re-run the converter instead of re-reading our own output.
+   */
+  fileData?: Buffer;
+  /**
+   * Ingest even when a document with this fileName and the same content hash is
+   * already indexed. Without it the same file uploaded twice used to be
+   * embedded twice and answered from twice.
+   */
+  force?: boolean;
   createdBy: string;
 }
 
@@ -82,6 +102,14 @@ export interface RagQueryMatch {
   score: number;
   /** Pre-rerank vector similarity score. Present only when reranking was applied. */
   vectorScore?: number;
+  /**
+   * The dense (cosine) similarity, kept separately when a hybrid query fused it
+   * with a keyword channel — the fused `score` is on a different scale, so this
+   * is what a similarity threshold has to be compared against.
+   */
+  denseScore?: number;
+  /** The keyword channel's contribution to a hybrid match, when the driver reports one. */
+  lexicalScore?: number;
   content?: string;
   metadata?: Record<string, unknown>;
   documentId?: string;

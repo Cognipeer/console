@@ -212,6 +212,10 @@ export const SqliteVectorProviderContract: ProviderContract<
     supportsDelete: true,
     supportsMetadataFilter: true,
     'vector.filterOperators': FULL_FILTER_OPERATORS,
+    // Same as the Mongo community store: scores come from an in-process scan,
+    // and ranking by keywords properly needs an FTS5 table alongside
+    // vector_entries rather than a heuristic over the metadata blob.
+    'vector.supportsHybrid': false,
     maxDimension: 4096,
     local: true,
     builtin: true,

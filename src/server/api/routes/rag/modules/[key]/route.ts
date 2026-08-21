@@ -73,8 +73,9 @@ export async function DELETE(
   { params }: { params: Promise<{ key: string }> },
 ) {
   const tenantDbName = request.headers.get('x-tenant-db-name');
+  const tenantId = request.headers.get('x-tenant-id');
   const projectId = request.headers.get('x-project-id') ?? undefined;
-  if (!tenantDbName) {
+  if (!tenantDbName || !tenantId) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
@@ -85,7 +86,9 @@ export async function DELETE(
       return NextResponse.json({ error: 'RAG module not found' }, { status: 404 });
     }
 
-    await deleteRagModuleService(tenantDbName, String(ragModule._id));
+    // Deleting a module now cascades to its documents, chunks, stored sources
+    // and vectors, so it needs the tenant/project scope those live under.
+    await deleteRagModuleService(tenantDbName, tenantId, projectId, String(ragModule._id));
     return NextResponse.json({ success: true });
   } catch (error) {
     logger.error('Delete error', { error });

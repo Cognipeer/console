@@ -118,9 +118,9 @@ export function VectorMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
       db.prepare(`
         INSERT INTO ${TABLES.vectorQueryLogs}
         (id, tenantId, projectId, providerKey, indexKey, topK, matchCount, latencyMs,
-         avgScore, filterApplied, userId, apiTokenId, actorType, timestamp)
+         avgScore, filterApplied, hybrid, userId, apiTokenId, actorType, timestamp)
         VALUES (@id, @tenantId, @projectId, @providerKey, @indexKey, @topK, @matchCount, @latencyMs,
-         @avgScore, @filterApplied, @userId, @apiTokenId, @actorType, @timestamp)
+         @avgScore, @filterApplied, @hybrid, @userId, @apiTokenId, @actorType, @timestamp)
       `).run({
         id,
         tenantId: log.tenantId,
@@ -132,6 +132,7 @@ export function VectorMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
         latencyMs: log.latencyMs,
         avgScore: log.avgScore ?? null,
         filterApplied: log.filterApplied ? 1 : 0,
+        hybrid: log.hybrid === undefined ? null : (log.hybrid ? 1 : 0),
         userId: log.userId ?? null,
         apiTokenId: log.apiTokenId ?? null,
         actorType: log.actorType ?? null,

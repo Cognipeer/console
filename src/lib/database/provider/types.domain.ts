@@ -91,11 +91,24 @@ export interface IGuardrail {
 
 // ── Evaluation types ─────────────────────────────────────────────────────────
 
-export type EvaluationTargetKind = 'agent' | 'model' | 'external';
+export type EvaluationTargetKind = 'agent' | 'model' | 'external' | 'rag';
 export type EvaluationRunStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
 export type EvaluationRunMode = 'sync' | 'async';
 export type EvaluationDatasetSource = 'manual' | 'file' | 'generated' | 'imported';
-export type EvaluationScorerType = 'assertion' | 'llm-judge' | 'semantic' | 'tool-call' | 'json-shape';
+export type EvaluationScorerType =
+  | 'assertion'
+  | 'llm-judge'
+  | 'semantic'
+  | 'tool-call'
+  | 'json-shape'
+  /**
+   * Retrieval quality, all three judged by embedding cosine similarity rather
+   * than string overlap — a chunk that answers the question in different words
+   * is a hit, and an exact-match scorer would call it a miss.
+   */
+  | 'context-recall'
+  | 'context-precision'
+  | 'groundedness';
 
 /**
  * How a multi-turn dataset item is replayed against the target.
@@ -134,6 +147,10 @@ export interface IEvaluationTarget {
   agentKey?: string;
   modelKey?: string;
   external?: IEvaluationExternalTarget;
+  /** `rag` targets: which module to retrieve from, and how much. */
+  ragModuleKey?: string;
+  retrievalTopK?: number;
+  retrievalMinScore?: number;
   /**
    * System prompt to run this target with, overriding whatever system turn the
    * dataset items carry. Needed to evaluate a prompt CHANGE against traffic
@@ -774,7 +791,7 @@ export interface IRagChunkConfig {
   chunkSize: number;
   /** Overlap carried into the next chunk, in the same unit as chunkSize. Must be < chunkSize. */
   chunkOverlap: number;
-  /** recursive_character / markdown / sentence: boundary preferences, best first. */
+  /** recursive_character / markdown: boundary preferences, best first. `sentence` splits on punctuation and ignores this. */
   separators?: string[];
   /** token: tiktoken encoding name (cl100k_base, p50k_base, o200k_base). */
   encoding?: string;
@@ -823,6 +840,8 @@ export interface IVectorQueryLog {
   avgScore?: number;
   /** Whether the caller supplied a metadata filter. */
   filterApplied: boolean;
+  /** Whether the query ran dense+keyword rather than dense only. */
+  hybrid?: boolean;
   userId?: string;
   apiTokenId?: string;
   actorType?: string;
@@ -889,6 +908,36 @@ export interface IRagModule {
    * scores/ids/metadata; 'text' returns only the chunk text.
    */
   responseDetail?: 'full' | 'text';
+  /**
+   * Dense + keyword retrieval, for the providers whose store can do it.
+   * Pure vector search misses exact terms — error codes, SKUs, acronyms, proper
+   * nouns — because they carry little semantic signal.
+   */
+  hybrid?: {
+    enabled: boolean;
+    /** How the two rankings are combined. Default 'rrf'. */
+    mode?: 'rrf' | 'weighted';
+    /** weighted mode: 1 = pure dense, 0 = pure keyword. Default 0.5. */
+    alpha?: number;
+    /** rrf mode: rank constant. Default 60. */
+    k?: number;
+  };
+  /**
+   * AND `_ragModule` into every query so a vector index shared by several
+   * modules cannot leak between them. Defaults on for modules we ingest into;
+   * must stay off for an index populated by someone else's pipeline, whose
+   * vectors carry no `_ragModule`.
+   */
+  isolateByModule?: boolean;
+  /**
+   * Set when chunkConfig or the embedding model changed and the stored vectors
+   * no longer match it. Queries keep working against the old vectors until the
+   * re-index run finishes.
+   */
+  reindexRequired?: boolean;
+  /** Key of the re-index run currently rebuilding this module, if any. */
+  activeReindexRunKey?: string;
+  lastReindexAt?: Date;
   totalDocuments?: number;
   totalChunks?: number;
   metadata?: Record<string, unknown>;
@@ -966,10 +1015,58 @@ export interface IRagQueryLog extends IUsageAttributionFields {
   ragModuleKey: string;
   query: string;
   topK: number;
+  /** Matches actually returned, i.e. after minScore and the final topK slice. */
   matchCount: number;
+  /**
+   * Matches the store returned BEFORE the minScore filter. Together with
+   * matchCount this separates the two very different failures a zero-result
+   * panel has to tell apart: nothing was retrieved at all, versus plenty was
+   * retrieved and the score threshold discarded all of it.
+   */
+  preFilterMatchCount?: number;
+  /** Best score among the returned matches, 0 when there were none. */
+  topScore?: number;
+  /** Mean score of the returned matches. */
+  avgScore?: number;
+  /** The minScore actually in force for this query, whatever its source. */
+  minScoreApplied?: number;
+  /** Whether the query ran dense+keyword rather than dense only. */
+  hybrid?: boolean;
   latencyMs?: number;
   metadata?: Record<string, unknown>;
   createdAt?: Date;
+}
+
+/**
+ * One run of "rebuild every document in this module".
+ *
+ * The record is the source of truth, not the queue: the queue driver is only
+ * durable when Redis is configured, so a boot-time sweep re-drives whatever is
+ * still marked running. `progress` carries the resume cursor.
+ */
+export interface IRagReindexRun {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  ragModuleKey: string;
+  status: 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+  /** Why the run was created — shown in the UI banner. */
+  reason?: 'chunk-config' | 'embedding-model' | 'manual';
+  attempt: number;
+  totalDocuments: number;
+  processedDocuments: number;
+  failedDocuments: number;
+  batchSize: number;
+  errorMessage?: string;
+  startedAt?: Date;
+  completedAt?: Date;
+  /** Resume checkpoint: `{ lastDocumentId, heartbeatAt }`. */
+  progress?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  createdAt?: Date;
+  updatedAt?: Date;
 }
 
 // ── Reranker types ──────────────────────────────────────────────────────

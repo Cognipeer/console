@@ -166,7 +166,7 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
   const datasetName = (key: string) => datasets.find((d) => d.key === key)?.name ?? key;
 
   const targetsCtl = useTableControls(targets, {
-    searchText: (t) => `${t.name} ${t.key} ${t.kind} ${t.modelKey ?? ''} ${t.agentKey ?? ''}`,
+    searchText: (t) => `${t.name} ${t.key} ${t.kind} ${t.modelKey ?? ''} ${t.agentKey ?? ''} ${t.ragModuleKey ?? ''}`,
     searchPlaceholder: 'Filter by name, key, or model…',
   });
   const datasetsCtl = useTableControls(datasets, {
@@ -190,8 +190,8 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
       </div>
     ) },
     { key: 'kind', label: 'Kind', render: (t) => <span className="ds-badge ds-badge-info">{t.kind}</span> },
-    { key: 'ref', label: 'Model / Agent', render: (t) => (
-      <span className="ds-mono ds-muted" style={{ fontSize: 12 }}>{t.modelKey ?? t.agentKey ?? '—'}</span>
+    { key: 'ref', label: 'Reference', render: (t) => (
+      <span className="ds-mono ds-muted" style={{ fontSize: 12 }}>{t.modelKey ?? t.agentKey ?? t.ragModuleKey ?? '—'}</span>
     ) },
     { key: 'created', label: 'Created', render: (t) => <span className="ds-faint" style={{ fontSize: 12 }}>{fmtDate(t.createdAt)}</span> },
   ];

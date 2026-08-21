@@ -10,7 +10,7 @@ import type {
   VectorListResult,
 } from '../domains/vector';
 import { FULL_FILTER_OPERATORS } from '../domains/vectorFilter';
-import { toElasticsearchFilter } from './vectorFilterTranslators';
+import { esQueryVectors, esVectorDocument, esVectorMapping } from './elasticsearchSearch';
 
 interface ElasticsearchCloudCredentials {
   cloudId: string;
@@ -165,6 +165,7 @@ export const ElasticsearchCloudVectorProviderContract: ProviderContract<
     supportsDelete: true,
     'vector.filterOperators': FULL_FILTER_OPERATORS,
     'vector.filterRaw': true,
+    'vector.supportsHybrid': true,
   },
   async createRuntime({ credentials, settings, providerKey, logger }) {
     if (!credentials?.cloudId?.trim()) {
@@ -223,16 +224,7 @@ export const ElasticsearchCloudVectorProviderContract: ProviderContract<
         try {
           const exists = await client.indices.exists({ index: indexName });
           if (!exists) {
-            const similarity = metric === 'dot' ? 'dot_product' : metric === 'euclidean' ? 'l2_norm' : 'cosine';
-            await client.indices.create({
-              index: indexName,
-              mappings: {
-                properties: {
-                  vector: { type: 'dense_vector', dims: dim, index: true, similarity },
-                  metadata: { type: 'object', dynamic: true },
-                },
-              },
-            });
+            await client.indices.create({ index: indexName, mappings: esVectorMapping(dim, metric) });
           }
         } catch (err) {
           throw extractEsError(err);
@@ -271,7 +263,7 @@ export const ElasticsearchCloudVectorProviderContract: ProviderContract<
         const body: unknown[] = [];
         for (const item of items) {
           body.push({ index: { _index: handle.externalId, _id: item.id } });
-          body.push({ vector: item.values, metadata: item.metadata ?? {} });
+          body.push(esVectorDocument(item));
         }
         try {
           await client.bulk({ body });
@@ -282,29 +274,13 @@ export const ElasticsearchCloudVectorProviderContract: ProviderContract<
       },
 
       async queryVectors(handle: VectorIndexHandle, query: VectorQueryInput): Promise<VectorQueryResult> {
-        let result;
         try {
-          result = await client.search({
-            index: handle.externalId,
-            knn: {
-              field: 'vector',
-              query_vector: query.vector,
-              k: query.topK,
-              num_candidates: query.topK * 2,
-              filter: query.filter ? toElasticsearchFilter(query.filter) : undefined,
-            },
-            size: query.topK,
-          });
+          // Bound, not passed by reference: the ES client's search is a method
+          // that reads `this` for its transport.
+          return await esQueryVectors((params) => client.search(params), handle.externalId, query);
         } catch (err) {
           throw extractEsError(err);
         }
-        return {
-          matches: (result.hits.hits as Array<{ _id: string; _score: number; _source?: Record<string, unknown> }>).map((hit) => ({
-            id: hit._id,
-            score: hit._score ?? 0,
-            metadata: hit._source?.metadata as Record<string, unknown> | undefined,
-          })),
-        };
       },
 
       async deleteVectors(handle: VectorIndexHandle, ids: string[]): Promise<void> {

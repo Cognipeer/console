@@ -147,6 +147,10 @@ export const MilvusLocalVectorProviderContract: ProviderContract<
     supportsDelete: true,
     'vector.filterOperators': MILVUS_FILTER_OPERATORS,
     'vector.filterRaw': true,
+    // Milvus serves full-text search from a BM25 function over a sparse vector
+    // column, which has to be declared when the collection is created; this
+    // driver's collections carry the dense field only.
+    'vector.supportsHybrid': false,
   },
   async createRuntime({ settings, providerKey, logger }) {
     // eslint-disable-next-line @typescript-eslint/ban-ts-comment

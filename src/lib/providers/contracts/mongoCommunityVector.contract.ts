@@ -211,6 +211,10 @@ export const MongoCommunityVectorProviderContract: ProviderContract<
     supportsMetadataFilter: true,
     'vector.filterOperators': FULL_FILTER_OPERATORS,
     'vector.filterRaw': true,
+    // Similarity here is computed in process over a plain collection scan.
+    // A keyword channel would need a real inverted index — a Mongo `$text`
+    // index on the entries collection — not a term count invented per query.
+    'vector.supportsHybrid': false,
     local: false,
     builtin: true,
     shared: true,

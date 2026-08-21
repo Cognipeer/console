@@ -54,12 +54,28 @@ import {
 
 const logger = createLogger('api:evaluations');
 
-const VALID_KINDS: EvaluationTargetKind[] = ['agent', 'model', 'external'];
+const VALID_KINDS: EvaluationTargetKind[] = ['agent', 'model', 'external', 'rag'];
 // Mirror the scorer registry rather than a hand-kept copy: this list drifted
 // behind `SUPPORTED_SCORERS` and left 'tool-call' unreachable — the scorer, its
 // tests, and the snapshot builder's `expected.toolCalls` all shipped, but no
 // client could ever create a suite that used them.
 const VALID_SCORERS: readonly string[] = SUPPORTED_SCORERS;
+
+/**
+ * Retrieval knobs for a `rag` target. An out-of-range value is DROPPED rather
+ * than clamped, so the target falls back to the Knowledge Engine module's own
+ * defaults instead of quietly running under a number nobody chose.
+ */
+function sanitizeTopK(raw: unknown): number | undefined {
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return undefined;
+  const topK = Math.trunc(raw);
+  return topK >= 1 && topK <= 200 ? topK : undefined;
+}
+
+function sanitizeMinScore(raw: unknown): number | undefined {
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return undefined;
+  return raw >= 0 && raw <= 1 ? raw : undefined;
+}
 
 function internalError(reply: import('fastify').FastifyReply, error: unknown) {
   return (
@@ -184,11 +200,17 @@ function sanitizeScorers(raw: unknown): IEvaluationScorerConfig[] | null {
     if (!entry || typeof entry !== 'object') return null;
     const e = entry as Record<string, unknown>;
     if (typeof e.type !== 'string' || !VALID_SCORERS.includes(e.type)) return null;
+    // Every field a scorer can be configured with has to be listed here: an
+    // unlisted key is dropped silently and the scorer runs on its defaults,
+    // which is indistinguishable from the knob having no effect.
     scorers.push({
       type: e.type as IEvaluationScorerConfig['type'],
       weight: typeof e.weight === 'number' ? e.weight : undefined,
       rubric: typeof e.rubric === 'string' ? e.rubric : undefined,
       threshold: typeof e.threshold === 'number' ? e.threshold : undefined,
+      selectionWeight: typeof e.selectionWeight === 'number' ? e.selectionWeight : undefined,
+      sequenceWeight: typeof e.sequenceWeight === 'number' ? e.sequenceWeight : undefined,
+      argsWeight: typeof e.argsWeight === 'number' ? e.argsWeight : undefined,
     });
   }
   return scorers;
@@ -216,13 +238,16 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'name is required' });
       }
       if (!VALID_KINDS.includes(body.kind as EvaluationTargetKind)) {
-        return reply.code(400).send({ error: 'kind must be "agent", "model", or "external"' });
+        return reply.code(400).send({ error: `kind must be one of ${VALID_KINDS.map((k) => `"${k}"`).join(', ')}` });
       }
       if (body.kind === 'model' && typeof body.modelKey !== 'string') {
         return reply.code(400).send({ error: 'modelKey is required for model targets' });
       }
       if (body.kind === 'agent' && typeof body.agentKey !== 'string') {
         return reply.code(400).send({ error: 'agentKey is required for agent targets' });
+      }
+      if (body.kind === 'rag' && typeof body.ragModuleKey !== 'string') {
+        return reply.code(400).send({ error: 'ragModuleKey is required for Knowledge Engine targets' });
       }
       const target = await createTarget(session.tenantDbName, session.tenantId, session.userId, {
         name: body.name.trim(),
@@ -231,6 +256,9 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
         agentKey: body.agentKey as string | undefined,
         modelKey: body.modelKey as string | undefined,
         external: body.external as never,
+        ragModuleKey: typeof body.ragModuleKey === 'string' ? body.ragModuleKey : undefined,
+        retrievalTopK: sanitizeTopK(body.retrievalTopK),
+        retrievalMinScore: sanitizeMinScore(body.retrievalMinScore),
         systemPrompt: typeof body.systemPrompt === 'string' ? body.systemPrompt : undefined,
         promptKey: typeof body.promptKey === 'string' ? body.promptKey : undefined,
         promptVersion: typeof body.promptVersion === 'number' ? body.promptVersion : undefined,
@@ -268,6 +296,9 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
         description: body.description as string | undefined,
         agentKey: body.agentKey as string | undefined,
         modelKey: body.modelKey as string | undefined,
+        ragModuleKey: body.ragModuleKey as string | undefined,
+        retrievalTopK: sanitizeTopK(body.retrievalTopK),
+        retrievalMinScore: sanitizeMinScore(body.retrievalMinScore),
         systemPrompt: body.systemPrompt as string | undefined,
         promptKey: body.promptKey as string | undefined,
         promptVersion: body.promptVersion as number | undefined,

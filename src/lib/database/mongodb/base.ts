@@ -60,6 +60,7 @@ export const COLLECTIONS = {
   ragDocuments: 'rag_documents',
   ragChunks: 'rag_chunks',
   ragQueryLogs: 'rag_query_logs',
+  ragReindexRuns: 'rag_reindex_runs',
   rerankers: 'rerankers',
   rerankerRunLogs: 'reranker_run_logs',
   websearchRunLogs: 'websearch_run_logs',

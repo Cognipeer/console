@@ -9,6 +9,14 @@ import type {
   VectorListInput,
   VectorListResult,
 } from '../domains/vector';
+import {
+  describeHybrid,
+  extractVectorText,
+  fuseHybridMatches,
+  hybridCandidateCount,
+  resolveHybridOptions,
+  type VectorHybridChannelHit,
+} from '../domains/vectorHybrid';
 
 // eslint-disable-next-line @typescript-eslint/no-empty-object-type
 interface OramaCredentials {}
@@ -31,6 +39,11 @@ type OramaListSearchParams = {
   term: string;
   limit?: number;
   offset?: number;
+  /**
+   * Without this Orama also matches the metadata JSON blob, so a query for
+   * "content" would hit every document through its own field names.
+   */
+  properties?: string[];
 };
 
 type OramaSearchHit = {
@@ -52,6 +65,17 @@ type OramaModule = {
 };
 
 const DEFAULT_DIMENSIONS = 1536;
+
+function toChannelHit(hit: OramaSearchHit): VectorHybridChannelHit {
+  let metadata: Record<string, unknown> | undefined;
+  try {
+    const raw = hit.document.metadata;
+    metadata = typeof raw === 'string' ? JSON.parse(raw) : undefined;
+  } catch {
+    metadata = undefined;
+  }
+  return { id: hit.id, score: hit.score, metadata };
+}
 
 export const OramaVectorProviderContract: ProviderContract<
   VectorProviderRuntime,
@@ -93,6 +117,7 @@ export const OramaVectorProviderContract: ProviderContract<
     // cannot address individual metadata keys. Declaring no operators makes
     // filtered queries fail loudly instead of returning unfiltered results.
     'vector.filterOperators': [],
+    'vector.supportsHybrid': true,
   },
   async createRuntime({ settings, providerKey, logger }) {
     // @ts-expect-error -- @orama/orama is an optional peer dependency
@@ -116,6 +141,9 @@ export const OramaVectorProviderContract: ProviderContract<
             id: 'string',
             vector: `vector[${dim}]`,
             metadata: 'string',
+            // The keyword channel needs the chunk text as a field of its own;
+            // the metadata blob is stored JSON, not searchable prose.
+            content: 'string',
           },
         });
 
@@ -150,6 +178,7 @@ export const OramaVectorProviderContract: ProviderContract<
           id: item.id,
           vector: item.values,
           metadata: JSON.stringify(item.metadata ?? {}),
+          content: extractVectorText(item.metadata) ?? '',
         }));
         // Orama's insertMultiple is an insert, not an upsert — re-ingesting a
         // document would duplicate every chunk. Drop existing ids first.
@@ -169,23 +198,34 @@ export const OramaVectorProviderContract: ProviderContract<
         if (!entry) {
           throw new Error(`Orama index "${handle.externalId}" not found. Call createIndex first.`);
         }
-        const result = await search(entry.db, {
+        const text = query.text?.trim();
+        const limit = text ? hybridCandidateCount(query.topK) : query.topK;
+
+        const dense = await search(entry.db, {
           mode: 'vector',
           vector: { value: query.vector, property: 'vector' },
-          limit: query.topK,
+          limit,
+        });
+
+        if (!text) {
+          return { matches: dense.hits.map(toChannelHit) };
+        }
+
+        const lexical = await search(entry.db, {
+          mode: 'fulltext',
+          term: text,
+          properties: ['content'],
+          limit,
         });
 
         return {
-          matches: result.hits.map((hit: { id: string; score: number; document: Record<string, unknown> }) => {
-            let metadata: Record<string, unknown> | undefined;
-            try {
-              const raw = hit.document.metadata;
-              metadata = typeof raw === 'string' ? JSON.parse(raw) : undefined;
-            } catch {
-              metadata = undefined;
-            }
-            return { id: hit.id, score: hit.score, metadata };
+          matches: fuseHybridMatches({
+            dense: dense.hits.map(toChannelHit),
+            lexical: lexical.hits.map(toChannelHit),
+            topK: query.topK,
+            options: query.hybrid,
           }),
+          usage: describeHybrid({ ran: true, mode: resolveHybridOptions(query.hybrid).mode }),
         };
       },
 

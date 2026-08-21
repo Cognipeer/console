@@ -134,6 +134,10 @@ export const ChromaLocalVectorProviderContract: ProviderContract<
     supportsDelete: true,
     'vector.filterOperators': ['$eq', '$ne', '$gt', '$gte', '$lt', '$lte', '$in', '$nin', '$and', '$or'],
     'vector.filterRaw': true,
+    // Chroma's only document-side predicate is `where_document` substring
+    // containment — a yes/no test, not a ranked keyword channel there is
+    // anything to fuse with.
+    'vector.supportsHybrid': false,
   },
   async createRuntime({ credentials: _credentials, settings, providerKey, logger }) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/ban-ts-comment

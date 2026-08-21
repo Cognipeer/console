@@ -1,8 +1,9 @@
 import { Buffer } from 'node:buffer';
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
-import type { IRagChunkConfig, IRagDocument, IUser } from '@/lib/database';
+import type { IRagChunkConfig, IRagDocument, IRagModule, IUser } from '@/lib/database';
 import {
+  aggregateRagQueryScoreDistribution,
   countRagQueryLogs,
   createRagModule,
   deleteRagDocument,
@@ -19,10 +20,19 @@ import {
   updateRagModule,
   shapeRagQueryResponse,
 } from '@/lib/services/rag/ragService';
+import type { CreateRagModuleRequest, UpdateRagModuleRequest } from '@/lib/services/rag/types';
+import { validateChunkConfig } from '@/lib/services/rag/chunking';
+import {
+  cancelRagReindex,
+  getRagReindexRun,
+  listRagReindexRuns,
+  startRagReindex,
+} from '@/lib/services/rag/ragReindexService';
 import { answerWithRag, type RagAnswerRequest } from '@/lib/services/rag/ragAnswerService';
 import {
   readJsonBody,
   requireProjectContextForRequest,
+  safeReadJsonBody,
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
@@ -39,6 +49,180 @@ function decodeFileData(payload: string): Buffer {
   }
 
   return Buffer.from(payload, 'base64');
+}
+
+/* ── Module write payloads ───────────────────────────────────────────── */
+
+/**
+ * Both HTTP surfaces share these readers instead of each hand-rolling its own
+ * field list. While they did, the two drifted: the client create silently
+ * dropped `responseDetail`, and neither validated `chunkConfig` at all — an
+ * overlap at or above the chunk size reached the token splitter and spun it.
+ */
+
+type FieldReader<T> = (value: unknown, field: string) => T;
+
+const asString: FieldReader<string> = (value, field) => {
+  if (typeof value !== 'string') throw new Error(`${field} must be a string`);
+  return value;
+};
+
+const asNumber: FieldReader<number> = (value, field) => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error(`${field} must be a number`);
+  }
+  return value;
+};
+
+const asBoolean: FieldReader<boolean> = (value, field) => {
+  if (typeof value !== 'boolean') throw new Error(`${field} must be a boolean`);
+  return value;
+};
+
+const asPlainObject: FieldReader<Record<string, unknown>> = (value, field) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${field} must be an object`);
+  }
+  return value as Record<string, unknown>;
+};
+
+const asStringArray: FieldReader<string[]> = (value, field) => {
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) {
+    throw new Error(`${field} must be an array of strings`);
+  }
+  return value as string[];
+};
+
+const asStatus: FieldReader<'active' | 'disabled'> = (value, field) => {
+  if (value === 'active' || value === 'disabled') return value;
+  throw new Error(`${field} must be "active" or "disabled"`);
+};
+
+const asResponseDetail: FieldReader<'full' | 'text'> = (value, field) => {
+  if (value === 'full' || value === 'text') return value;
+  throw new Error(`${field} must be "full" or "text"`);
+};
+
+const asHybridMode: FieldReader<'rrf' | 'weighted'> = (value, field) => {
+  if (value === 'rrf' || value === 'weighted') return value;
+  throw new Error(`${field} must be "rrf" or "weighted"`);
+};
+
+const asChunkConfig: FieldReader<IRagChunkConfig> = (value, field) => validateChunkConfig(value, field);
+
+const asHybrid: FieldReader<NonNullable<IRagModule['hybrid']>> = (value, field) => {
+  const hybrid = asPlainObject(value, field);
+  const alpha = hybrid.alpha === undefined ? undefined : asNumber(hybrid.alpha, `${field}.alpha`);
+  if (alpha !== undefined && (alpha < 0 || alpha > 1)) {
+    throw new Error(`${field}.alpha must be between 0 and 1`);
+  }
+  const k = hybrid.k === undefined ? undefined : asNumber(hybrid.k, `${field}.k`);
+  if (k !== undefined && k < 1) {
+    throw new Error(`${field}.k must be at least 1`);
+  }
+  return {
+    enabled: asBoolean(hybrid.enabled, `${field}.enabled`),
+    mode: hybrid.mode === undefined ? undefined : asHybridMode(hybrid.mode, `${field}.mode`),
+    alpha,
+    k,
+  };
+};
+
+/** Kept verbatim: the client API has answered with this string since launch. */
+const REQUIRED_MODULE_FIELDS_MESSAGE =
+  'name, embeddingModelKey, vectorProviderKey, vectorIndexKey, and chunkConfig are required';
+
+function requiredModuleField<T>(body: Record<string, unknown>, field: string, read: FieldReader<T>): T {
+  const value = body[field];
+  if (value === undefined || value === null || value === '') {
+    throw new Error(REQUIRED_MODULE_FIELDS_MESSAGE);
+  }
+  return read(value, field);
+}
+
+function optional<T>(body: Record<string, unknown>, field: string, read: FieldReader<T>): T | undefined {
+  const value = body[field];
+  return value === undefined ? undefined : read(value, field);
+}
+
+/** `null` clears the stored value; `undefined` leaves it untouched. */
+function clearable<T>(
+  body: Record<string, unknown>,
+  field: string,
+  read: FieldReader<T>,
+): T | null | undefined {
+  const value = body[field];
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  return read(value, field);
+}
+
+export function readRagModuleCreateFields(
+  body: Record<string, unknown>,
+): Omit<CreateRagModuleRequest, 'createdBy'> {
+  return {
+    name: requiredModuleField(body, 'name', asString),
+    key: optional(body, 'key', asString),
+    description: optional(body, 'description', asString),
+    embeddingModelKey: requiredModuleField(body, 'embeddingModelKey', asString),
+    vectorProviderKey: requiredModuleField(body, 'vectorProviderKey', asString),
+    vectorIndexKey: requiredModuleField(body, 'vectorIndexKey', asString),
+    fileBucketKey: optional(body, 'fileBucketKey', asString),
+    fileProviderKey: optional(body, 'fileProviderKey', asString),
+    chunkConfig: requiredModuleField(body, 'chunkConfig', asChunkConfig),
+    rerankerKey: optional(body, 'rerankerKey', asString),
+    rerankerOversample: optional(body, 'rerankerOversample', asNumber),
+    defaultTopK: optional(body, 'defaultTopK', asNumber),
+    defaultMinScore: optional(body, 'defaultMinScore', asNumber),
+    defaultFilter: optional(body, 'defaultFilter', asPlainObject),
+    filterableFields: optional(body, 'filterableFields', asStringArray),
+    responseDetail: optional(body, 'responseDetail', asResponseDetail),
+    hybrid: optional(body, 'hybrid', asHybrid),
+    isolateByModule: optional(body, 'isolateByModule', asBoolean),
+    metadata: optional(body, 'metadata', asPlainObject),
+  };
+}
+
+/**
+ * PATCH used to forward the raw body, so anything the service happened to
+ * recognise later — including fields that identify the row — would have been
+ * writable. Whitelisting mirrors what create accepts.
+ */
+export function readRagModuleUpdateFields(
+  body: Record<string, unknown>,
+): Omit<UpdateRagModuleRequest, 'updatedBy'> {
+  return {
+    name: optional(body, 'name', asString),
+    description: optional(body, 'description', asString),
+    embeddingModelKey: optional(body, 'embeddingModelKey', asString),
+    vectorProviderKey: optional(body, 'vectorProviderKey', asString),
+    vectorIndexKey: optional(body, 'vectorIndexKey', asString),
+    chunkConfig: optional(body, 'chunkConfig', asChunkConfig),
+    status: optional(body, 'status', asStatus),
+    rerankerKey: clearable(body, 'rerankerKey', asString),
+    rerankerOversample: clearable(body, 'rerankerOversample', asNumber),
+    defaultTopK: clearable(body, 'defaultTopK', asNumber),
+    defaultMinScore: clearable(body, 'defaultMinScore', asNumber),
+    defaultFilter: clearable(body, 'defaultFilter', asPlainObject),
+    filterableFields: clearable(body, 'filterableFields', asStringArray),
+    responseDetail: clearable(body, 'responseDetail', asResponseDetail),
+    hybrid: clearable(body, 'hybrid', asHybrid),
+    isolateByModule: clearable(body, 'isolateByModule', asBoolean),
+    metadata: optional(body, 'metadata', asPlainObject),
+  };
+}
+
+/** Per-document chunk override, held to exactly the module's rules. */
+export function readDocumentChunkConfig(
+  body: Record<string, unknown>,
+): IRagChunkConfig | undefined {
+  return optional(body, 'chunkConfig', asChunkConfig);
+}
+
+export function sendInvalidRequest(reply: FastifyReply, error: unknown) {
+  return reply.code(400).send({
+    error: error instanceof Error ? error.message : 'Invalid request body',
+  });
 }
 
 /**
@@ -65,6 +249,16 @@ async function documentInProjectScope(
   if (user.role === 'owner' || user.role === 'admin') return document;
   if (!document.projectId) return document;
   return String(document.projectId) === String(projectId) ? document : null;
+}
+
+/**
+ * A document record carries the extracted source text so a re-index never has
+ * to rebuild it from overlapping chunks. That is up to INLINE_SOURCE_MAX_CHARS
+ * of text — never something to put on the wire for a detail view.
+ */
+function withoutSourceText(document: IRagDocument): Omit<IRagDocument, 'sourceText'> {
+  const { sourceText: _sourceText, ...rest } = document;
+  return rest;
 }
 
 export const ragApiPlugin: FastifyPluginAsync = async (app) => {
@@ -96,41 +290,16 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const body = readJsonBody<Record<string, unknown>>(request);
 
-      if (
-        typeof body.name !== 'string'
-        || typeof body.embeddingModelKey !== 'string'
-        || typeof body.vectorProviderKey !== 'string'
-        || typeof body.vectorIndexKey !== 'string'
-        || !body.chunkConfig
-      ) {
-        return reply.code(400).send({
-          error: 'name, embeddingModelKey, vectorProviderKey, vectorIndexKey, and chunkConfig are required',
-        });
+      let fields: Omit<CreateRagModuleRequest, 'createdBy'>;
+      try {
+        fields = readRagModuleCreateFields(body);
+      } catch (error) {
+        return sendInvalidRequest(reply, error);
       }
 
       const ragModule = await createRagModule(session.tenantDbName, session.tenantId, projectId, {
-        chunkConfig: body.chunkConfig as IRagChunkConfig,
+        ...fields,
         createdBy: session.userId,
-        description: body.description as string | undefined,
-        embeddingModelKey: body.embeddingModelKey,
-        fileBucketKey: body.fileBucketKey as string | undefined,
-        fileProviderKey: body.fileProviderKey as string | undefined,
-        key: body.key as string | undefined,
-        metadata: body.metadata as Record<string, unknown> | undefined,
-        name: body.name,
-        vectorIndexKey: body.vectorIndexKey,
-        vectorProviderKey: body.vectorProviderKey,
-        rerankerKey: typeof body.rerankerKey === 'string' && body.rerankerKey ? body.rerankerKey : undefined,
-        rerankerOversample: typeof body.rerankerOversample === 'number' ? body.rerankerOversample : undefined,
-        defaultTopK: typeof body.defaultTopK === 'number' ? body.defaultTopK : undefined,
-        defaultMinScore: typeof body.defaultMinScore === 'number' ? body.defaultMinScore : undefined,
-        defaultFilter: body.defaultFilter && typeof body.defaultFilter === 'object' && !Array.isArray(body.defaultFilter)
-          ? (body.defaultFilter as Record<string, unknown>)
-          : undefined,
-        filterableFields: Array.isArray(body.filterableFields)
-          ? (body.filterableFields as unknown[]).filter((f): f is string => typeof f === 'string')
-          : undefined,
-        responseDetail: body.responseDetail === 'text' || body.responseDetail === 'full' ? body.responseDetail : undefined,
       });
 
       return reply.code(201).send({ module: ragModule });
@@ -177,8 +346,16 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const body = readJsonBody<Record<string, unknown>>(request);
+
+      let fields: Omit<UpdateRagModuleRequest, 'updatedBy'>;
+      try {
+        fields = readRagModuleUpdateFields(body);
+      } catch (error) {
+        return sendInvalidRequest(reply, error);
+      }
+
       const ragModule = await updateRagModule(session.tenantDbName, String(existing._id), {
-        ...body,
+        ...fields,
         updatedBy: session.userId,
       });
 
@@ -205,7 +382,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'RAG module not found' });
       }
 
-      await deleteRagModule(session.tenantDbName, String(existing._id));
+      await deleteRagModule(session.tenantDbName, session.tenantId, projectId, String(existing._id));
       return reply.code(200).send({ success: true });
     } catch (error) {
       logger.error('Delete RAG module error', { error });
@@ -246,11 +423,20 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'fileName is required' });
       }
 
+      let chunkConfig: IRagChunkConfig | undefined;
+      try {
+        chunkConfig = readDocumentChunkConfig(body);
+      } catch (error) {
+        return sendInvalidRequest(reply, error);
+      }
+
       if (typeof body.data === 'string') {
         const document = await ingestFile(session.tenantDbName, session.tenantId, projectId, {
+          chunkConfig,
           contentType: body.contentType as string | undefined,
           createdBy: session.userId,
           fileData: decodeFileData(body.data),
+          force: body.force === true,
           fileName: body.fileName,
           metadata: body.metadata as Record<string, unknown> | undefined,
           ragModuleKey: key,
@@ -266,9 +452,11 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const document = await ingestDocument(session.tenantDbName, session.tenantId, projectId, {
+        chunkConfig,
         content: body.content,
         contentType: body.contentType as string | undefined,
         createdBy: session.userId,
+        force: body.force === true,
         fileName: body.fileName,
         metadata: body.metadata as Record<string, unknown> | undefined,
         ragModuleKey: key,
@@ -300,7 +488,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Document not found' });
       }
 
-      return reply.code(200).send({ document });
+      return reply.code(200).send({ document: withoutSourceText(document) });
     } catch (error) {
       logger.error('Get RAG document error', { error });
       return sendProjectContextError(reply, error)
@@ -362,7 +550,15 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         ? body.data
         : (typeof body.base64 === 'string' ? body.base64 : undefined);
 
+      let chunkConfig: IRagChunkConfig | undefined;
+      try {
+        chunkConfig = readDocumentChunkConfig(body);
+      } catch (error) {
+        return sendInvalidRequest(reply, error);
+      }
+
       const document = await reingestDocument(session.tenantDbName, session.tenantId, projectId, {
+        chunkConfig,
         content: typeof body.content === 'string' ? body.content : undefined,
         contentType: typeof body.contentType === 'string' ? body.contentType : undefined,
         documentId,
@@ -465,9 +661,9 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
       const to = query.to ? new Date(query.to) : undefined;
 
       // `logs` is a page (default 50, newest-first) for the History table;
-      // `total`/`avgLatencyMs` are true aggregates over the full matched set —
-      // the Overview KPIs must not silently cap at the page size.
-      const [logs, { total, avgLatencyMs }] = await Promise.all([
+      // the counters are true aggregates over the full matched set — the
+      // Overview KPIs must not silently cap at the page size.
+      const [logs, totals] = await Promise.all([
         listRagQueryLogs(session.tenantDbName, key, {
           from,
           limit: query.limit ? Number(query.limit) : 50,
@@ -476,9 +672,182 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         countRagQueryLogs(session.tenantDbName, key, { from, to }),
       ]);
 
-      return reply.code(200).send({ avgLatencyMs, logs, total });
+      return reply.code(200).send({
+        avgLatencyMs: totals.avgLatencyMs,
+        logs,
+        minScoreFilteredCount: totals.minScoreFilteredCount,
+        total: totals.total,
+        zeroMatchCount: totals.zeroMatchCount,
+      });
     } catch (error) {
       logger.error('List RAG query logs error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({
+          error: error instanceof Error ? error.message : 'Internal error',
+        });
+    }
+  }));
+
+  /**
+   * The query feed behind the zero-result panel. `zeroOnly=true` narrows it to
+   * the misses — the content gaps worth writing a document for — while the
+   * unfiltered feed is what the panel shows beside them for contrast.
+   */
+  app.get('/rag/modules/:key/queries', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const { key } = request.params as { key: string };
+      const ragModule = await getRagModule(session.tenantDbName, key, projectId);
+
+      if (!ragModule) {
+        return reply.code(404).send({ error: 'RAG module not found' });
+      }
+
+      const query = (request.query ?? {}) as {
+        from?: string;
+        limit?: string;
+        skip?: string;
+        to?: string;
+        zeroOnly?: string;
+      };
+
+      const logs = await listRagQueryLogs(session.tenantDbName, key, {
+        from: query.from ? new Date(query.from) : undefined,
+        limit: query.limit ? Number(query.limit) : 50,
+        skip: query.skip ? Number(query.skip) : undefined,
+        to: query.to ? new Date(query.to) : undefined,
+        zeroOnly: query.zeroOnly === 'true',
+      });
+
+      return reply.code(200).send({ logs });
+    } catch (error) {
+      logger.error('List RAG query feed error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({
+          error: error instanceof Error ? error.message : 'Internal error',
+        });
+    }
+  }));
+
+  app.get('/rag/modules/:key/score-distribution', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const { key } = request.params as { key: string };
+      const ragModule = await getRagModule(session.tenantDbName, key, projectId);
+
+      if (!ragModule) {
+        return reply.code(404).send({ error: 'RAG module not found' });
+      }
+
+      const query = (request.query ?? {}) as { from?: string; to?: string };
+      const buckets = await aggregateRagQueryScoreDistribution(session.tenantDbName, key, {
+        from: query.from ? new Date(query.from) : undefined,
+        to: query.to ? new Date(query.to) : undefined,
+      });
+
+      return reply.code(200).send({ buckets });
+    } catch (error) {
+      logger.error('RAG score distribution error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({
+          error: error instanceof Error ? error.message : 'Internal error',
+        });
+    }
+  }));
+
+  /* ── Re-index runs ─────────────────────────────────────────────────── */
+
+  app.post('/rag/modules/:key/reindex', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const { key } = request.params as { key: string };
+      const ragModule = await getRagModule(session.tenantDbName, key, projectId);
+
+      if (!ragModule) {
+        return reply.code(404).send({ error: 'RAG module not found' });
+      }
+
+      const body = safeReadJsonBody<Record<string, unknown>>(request);
+      const reason = body.reason;
+      if (reason !== undefined && reason !== 'chunk-config' && reason !== 'embedding-model' && reason !== 'manual') {
+        return reply.code(400).send({
+          error: 'reason must be one of: chunk-config, embedding-model, manual',
+        });
+      }
+
+      const run = await startRagReindex(session.tenantDbName, session.tenantId, projectId, {
+        ragModuleKey: key,
+        reason: reason ?? 'manual',
+        createdBy: session.userId,
+      });
+
+      return reply.code(201).send({ run });
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('already running')) {
+        return reply.code(409).send({ error: error.message });
+      }
+      if (error instanceof Error && error.message.includes('not active')) {
+        return reply.code(400).send({ error: error.message });
+      }
+      logger.error('Start RAG re-index error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({
+          error: error instanceof Error ? error.message : 'Internal error',
+        });
+    }
+  }));
+
+  app.get('/rag/modules/:key/reindex', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const { key } = request.params as { key: string };
+      const ragModule = await getRagModule(session.tenantDbName, key, projectId);
+
+      if (!ragModule) {
+        return reply.code(404).send({ error: 'RAG module not found' });
+      }
+
+      // Module keys are unique per project, not per tenant, so the run list
+      // has to be narrowed by project as well as by key.
+      const runs = await listRagReindexRuns(session.tenantDbName, key, { projectId });
+      return reply.code(200).send({ runs });
+    } catch (error) {
+      logger.error('List RAG re-index runs error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({
+          error: error instanceof Error ? error.message : 'Internal error',
+        });
+    }
+  }));
+
+  app.post('/rag/modules/:key/reindex/:runKey/cancel', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const { key, runKey } = request.params as { key: string; runKey: string };
+      const ragModule = await getRagModule(session.tenantDbName, key, projectId);
+
+      if (!ragModule) {
+        return reply.code(404).send({ error: 'RAG module not found' });
+      }
+
+      // A run key is tenant-wide, so bind it to the module and project the URL
+      // resolved to — otherwise any member could cancel another project's
+      // rebuild by id alone.
+      const existing = await getRagReindexRun(session.tenantDbName, runKey);
+      const outOfScope = !existing
+        || existing.ragModuleKey !== key
+        || (Boolean(existing.projectId) && String(existing.projectId) !== String(projectId));
+      if (outOfScope) {
+        return reply.code(404).send({ error: 'Re-index run not found' });
+      }
+
+      const run = await cancelRagReindex(session.tenantDbName, runKey);
+      return reply.code(200).send({ run });
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('not running')) {
+        return reply.code(409).send({ error: error.message });
+      }
+      logger.error('Cancel RAG re-index error', { error });
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Internal error',

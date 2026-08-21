@@ -2,6 +2,7 @@ import { Buffer } from 'node:buffer';
 import type { FastifyPluginAsync } from 'fastify';
 import type { IRagChunkConfig } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
+import type { IRagDocument } from '@/lib/database';
 import {
   createRagModule,
   deleteRagDocument,
@@ -17,11 +18,20 @@ import {
   updateRagModule,
   shapeRagQueryResponse,
 } from '@/lib/services/rag/ragService';
+import type { CreateRagModuleRequest, UpdateRagModuleRequest } from '@/lib/services/rag/types';
 import {
   getApiTokenContextForRequest,
   readJsonBody,
   withClientApiRequestContext,
 } from '../fastify-utils';
+// The module write payloads are read by the same code as the dashboard's, so
+// the two surfaces cannot drift apart again the way responseDetail did.
+import {
+  readDocumentChunkConfig,
+  readRagModuleCreateFields,
+  readRagModuleUpdateFields,
+  sendInvalidRequest,
+} from './rag';
 import { VectorFilterError } from '@/lib/providers';
 
 const logger = createLogger('api:client-rag');
@@ -35,6 +45,15 @@ function decodeFileData(payload: string): Buffer {
   }
 
   return Buffer.from(payload, 'base64');
+}
+
+/**
+ * The stored source text exists so a re-index can rebuild a document without
+ * re-uploading it. It is not part of the document's public shape.
+ */
+function withoutSourceText(document: IRagDocument): Omit<IRagDocument, 'sourceText'> {
+  const { sourceText: _sourceText, ...rest } = document;
+  return rest;
 }
 
 export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
@@ -57,40 +76,16 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       const ctx = await getApiTokenContextForRequest(request);
       const body = readJsonBody<Record<string, unknown>>(request);
 
-      if (
-        typeof body.name !== 'string'
-        || typeof body.embeddingModelKey !== 'string'
-        || typeof body.vectorProviderKey !== 'string'
-        || typeof body.vectorIndexKey !== 'string'
-        || !body.chunkConfig
-      ) {
-        return reply.code(400).send({
-          error: 'name, embeddingModelKey, vectorProviderKey, vectorIndexKey, and chunkConfig are required',
-        });
+      let fields: Omit<CreateRagModuleRequest, 'createdBy'>;
+      try {
+        fields = readRagModuleCreateFields(body);
+      } catch (error) {
+        return sendInvalidRequest(reply, error);
       }
 
       const ragModule = await createRagModule(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
-        chunkConfig: body.chunkConfig as IRagChunkConfig,
+        ...fields,
         createdBy: ctx.tokenRecord.userId,
-        description: body.description as string | undefined,
-        embeddingModelKey: body.embeddingModelKey,
-        fileBucketKey: body.fileBucketKey as string | undefined,
-        fileProviderKey: body.fileProviderKey as string | undefined,
-        key: body.key as string | undefined,
-        metadata: body.metadata as Record<string, unknown> | undefined,
-        name: body.name,
-        vectorIndexKey: body.vectorIndexKey,
-        vectorProviderKey: body.vectorProviderKey,
-        rerankerKey: typeof body.rerankerKey === 'string' && body.rerankerKey ? body.rerankerKey : undefined,
-        rerankerOversample: typeof body.rerankerOversample === 'number' ? body.rerankerOversample : undefined,
-        defaultTopK: typeof body.defaultTopK === 'number' ? body.defaultTopK : undefined,
-        defaultMinScore: typeof body.defaultMinScore === 'number' ? body.defaultMinScore : undefined,
-        defaultFilter: body.defaultFilter && typeof body.defaultFilter === 'object' && !Array.isArray(body.defaultFilter)
-          ? (body.defaultFilter as Record<string, unknown>)
-          : undefined,
-        filterableFields: Array.isArray(body.filterableFields)
-          ? (body.filterableFields as unknown[]).filter((f): f is string => typeof f === 'string')
-          : undefined,
       });
 
       return reply.code(201).send({ module: ragModule });
@@ -136,8 +131,16 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const body = readJsonBody<Record<string, unknown>>(request);
+
+      let fields: Omit<UpdateRagModuleRequest, 'updatedBy'>;
+      try {
+        fields = readRagModuleUpdateFields(body);
+      } catch (error) {
+        return sendInvalidRequest(reply, error);
+      }
+
       const ragModule = await updateRagModule(ctx.tenantDbName, String(existing._id), {
-        ...body,
+        ...fields,
         updatedBy: ctx.tokenRecord.userId,
       });
 
@@ -166,7 +169,12 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'RAG module not found' });
       }
 
-      const deleted = await deleteRagModule(ctx.tenantDbName, String(ragModule._id));
+      const deleted = await deleteRagModule(
+        ctx.tenantDbName,
+        ctx.tenantId,
+        ctx.projectId,
+        String(ragModule._id),
+      );
       if (!deleted) {
         return reply.code(404).send({ error: 'RAG module not found' });
       }
@@ -204,10 +212,19 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'fileName is required' });
       }
 
+      let chunkConfig: IRagChunkConfig | undefined;
+      try {
+        chunkConfig = readDocumentChunkConfig(body);
+      } catch (error) {
+        return sendInvalidRequest(reply, error);
+      }
+
       if (typeof body.data === 'string') {
         const document = await ingestFile(ctx.tenantDbName, ctx.tenantId, undefined, {
+          chunkConfig,
           contentType: body.contentType as string | undefined,
           createdBy: ctx.tokenRecord.userId,
+        force: body.force === true,
           fileData: decodeFileData(body.data),
           fileName: body.fileName,
           metadata: body.metadata as Record<string, unknown> | undefined,
@@ -224,9 +241,11 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const document = await ingestDocument(ctx.tenantDbName, ctx.tenantId, undefined, {
+        chunkConfig,
         content: body.content,
         contentType: body.contentType as string | undefined,
         createdBy: ctx.tokenRecord.userId,
+        force: body.force === true,
         fileName: body.fileName,
         metadata: body.metadata as Record<string, unknown> | undefined,
         ragModuleKey: key,
@@ -251,7 +270,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Document not found' });
       }
 
-      return reply.code(200).send({ document });
+      return reply.code(200).send({ document: withoutSourceText(document) });
     } catch (error) {
       logger.error('Get client RAG document error', { error });
       return reply.code(500).send({
@@ -285,7 +304,16 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       const encodedData = typeof body.data === 'string'
         ? body.data
         : (typeof body.base64 === 'string' ? body.base64 : undefined);
+
+      let chunkConfig: IRagChunkConfig | undefined;
+      try {
+        chunkConfig = readDocumentChunkConfig(body);
+      } catch (error) {
+        return sendInvalidRequest(reply, error);
+      }
+
       const document = await reingestDocument(ctx.tenantDbName, ctx.tenantId, undefined, {
+        chunkConfig,
         content: typeof body.content === 'string' ? body.content : undefined,
         contentType: typeof body.contentType === 'string' ? body.contentType : undefined,
         documentId,

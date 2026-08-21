@@ -9,6 +9,14 @@ import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer'
 import CreateTargetModal from '@/components/evaluations/CreateTargetModal';
 import type { EvalTargetView, ModelOption } from '@/components/evaluations/types';
 
+/** What a target's primary reference is called, per kind. */
+const REFERENCE_LABEL: Record<EvalTargetView['kind'], string> = {
+  agent: 'Agent',
+  model: 'Model',
+  rag: 'Knowledge Engine module',
+  external: 'Endpoint',
+};
+
 function Row({ label, value, mono }: { label: string; value: React.ReactNode; mono?: boolean }) {
   return (
     <Group justify="space-between" wrap="nowrap" align="flex-start">
@@ -102,7 +110,13 @@ export default function EvaluationTargetDetailPage() {
           <Row label="Name" value={target.name} />
           <Row label="Key" value={target.key} mono />
           <Row label="Kind" value={target.kind} />
-          <Row label={target.kind === 'agent' ? 'Agent' : 'Model'} value={target.modelKey ?? target.agentKey ?? '—'} mono />
+          <Row label={REFERENCE_LABEL[target.kind]} value={target.modelKey ?? target.agentKey ?? target.ragModuleKey ?? '—'} mono />
+          {target.kind === 'rag' && (
+            <>
+              <Row label="Top K" value={target.retrievalTopK ?? 'module default'} />
+              <Row label="Minimum score" value={target.retrievalMinScore ?? 'module default'} />
+            </>
+          )}
           <Row label="Description" value={target.description || '—'} />
         </Stack>
       </Paper>

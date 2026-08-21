@@ -150,8 +150,10 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       db.prepare(`
         INSERT INTO ${TABLES.evaluationTargets}
         (id, tenantId, projectId, key, name, description, kind, agentKey, modelKey,
+         ragModuleKey, retrievalTopK, retrievalMinScore,
          external, systemPrompt, promptKey, promptVersion, responseFormat, maxTokens, defaultParams, metadata, createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @key, @name, @description, @kind, @agentKey, @modelKey,
+         @ragModuleKey, @retrievalTopK, @retrievalMinScore,
          @external, @systemPrompt, @promptKey, @promptVersion, @responseFormat, @maxTokens, @defaultParams, @metadata, @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
@@ -163,6 +165,9 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
         kind: target.kind,
         agentKey: target.agentKey ?? null,
         modelKey: target.modelKey ?? null,
+        ragModuleKey: target.ragModuleKey ?? null,
+        retrievalTopK: target.retrievalTopK ?? null,
+        retrievalMinScore: target.retrievalMinScore ?? null,
         external: target.external ? this.toJson(target.external) : null,
         systemPrompt: target.systemPrompt ?? null,
         promptKey: target.promptKey ?? null,
@@ -191,6 +196,9 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       if (data.kind !== undefined) { sets.push('kind = @kind'); params.kind = data.kind; }
       if (data.agentKey !== undefined) { sets.push('agentKey = @agentKey'); params.agentKey = data.agentKey; }
       if (data.modelKey !== undefined) { sets.push('modelKey = @modelKey'); params.modelKey = data.modelKey; }
+      if (data.ragModuleKey !== undefined) { sets.push('ragModuleKey = @ragModuleKey'); params.ragModuleKey = data.ragModuleKey ?? null; }
+      if (data.retrievalTopK !== undefined) { sets.push('retrievalTopK = @retrievalTopK'); params.retrievalTopK = data.retrievalTopK ?? null; }
+      if (data.retrievalMinScore !== undefined) { sets.push('retrievalMinScore = @retrievalMinScore'); params.retrievalMinScore = data.retrievalMinScore ?? null; }
       if (data.external !== undefined) { sets.push('external = @external'); params.external = data.external ? this.toJson(data.external) : null; }
       if (data.systemPrompt !== undefined) { sets.push('systemPrompt = @systemPrompt'); params.systemPrompt = data.systemPrompt ?? null; }
       if (data.promptKey !== undefined) { sets.push('promptKey = @promptKey'); params.promptKey = data.promptKey ?? null; }
@@ -820,6 +828,9 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
         kind: r.kind as EvaluationTargetKind,
         agentKey: (r.agentKey as string | null) ?? undefined,
         modelKey: (r.modelKey as string | null) ?? undefined,
+        ragModuleKey: (r.ragModuleKey as string | null) ?? undefined,
+        retrievalTopK: (r.retrievalTopK as number | null) ?? undefined,
+        retrievalMinScore: (r.retrievalMinScore as number | null) ?? undefined,
         external: this.parseJson(r.external, undefined as IEvaluationTarget['external']),
         systemPrompt: (r.systemPrompt as string | null) ?? undefined,
         promptKey: (r.promptKey as string | null) ?? undefined,

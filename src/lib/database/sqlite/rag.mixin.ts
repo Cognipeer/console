@@ -14,6 +14,12 @@ import type {
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
 
+/** Labels, ascending: '0.0'..'0.9' plus '1.0'. Mirrors `mongodb/rag.mixin.ts`. */
+const SCORE_BUCKET_LABELS = Array.from({ length: 11 }, (_, i) => (i / 10).toFixed(1));
+
+/** Exclusive upper bound, so an exact 1.0 still lands in the last bucket. */
+const SCORE_BUCKET_UPPER = 1.0001;
+
 export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TBase) {
   return class RagOps extends Base {
     // ── RAG Module operations ────────────────────────────────────────
@@ -30,11 +36,15 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         (id, tenantId, projectId, key, name, description,
          embeddingModelKey, vectorProviderKey, vectorIndexKey, fileBucketKey, fileProviderKey,
          chunkConfig, status, rerankerKey, rerankerOversample, defaultTopK, defaultMinScore, responseDetail,
+         defaultFilter, filterableFields, hybrid, isolateByModule,
+         reindexRequired, activeReindexRunKey, lastReindexAt,
          totalDocuments, totalChunks, metadata,
          createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @key, @name, @description,
          @embeddingModelKey, @vectorProviderKey, @vectorIndexKey, @fileBucketKey, @fileProviderKey,
          @chunkConfig, @status, @rerankerKey, @rerankerOversample, @defaultTopK, @defaultMinScore, @responseDetail,
+         @defaultFilter, @filterableFields, @hybrid, @isolateByModule,
+         @reindexRequired, @activeReindexRunKey, @lastReindexAt,
          @totalDocuments, @totalChunks, @metadata,
          @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
@@ -56,6 +66,13 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         defaultTopK: ragModule.defaultTopK ?? null,
         defaultMinScore: ragModule.defaultMinScore ?? null,
         responseDetail: ragModule.responseDetail ?? null,
+        defaultFilter: ragModule.defaultFilter ? this.toJson(ragModule.defaultFilter) : null,
+        filterableFields: ragModule.filterableFields ? this.toJson(ragModule.filterableFields) : null,
+        hybrid: ragModule.hybrid ? this.toJson(ragModule.hybrid) : null,
+        isolateByModule: ragModule.isolateByModule === undefined ? null : this.toBoolInt(ragModule.isolateByModule),
+        reindexRequired: ragModule.reindexRequired === undefined ? null : this.toBoolInt(ragModule.reindexRequired),
+        activeReindexRunKey: ragModule.activeReindexRunKey ?? null,
+        lastReindexAt: ragModule.lastReindexAt ? ragModule.lastReindexAt.toISOString() : null,
         totalDocuments: ragModule.totalDocuments ?? 0,
         totalChunks: ragModule.totalChunks ?? 0,
         metadata: this.toJson(ragModule.metadata ?? {}),
@@ -96,6 +113,19 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
       if (data.defaultTopK !== undefined) { sets.push('defaultTopK = @defaultTopK'); params.defaultTopK = data.defaultTopK ?? null; }
       if (data.defaultMinScore !== undefined) { sets.push('defaultMinScore = @defaultMinScore'); params.defaultMinScore = data.defaultMinScore ?? null; }
       if (data.responseDetail !== undefined) { sets.push('responseDetail = @responseDetail'); params.responseDetail = data.responseDetail ?? null; }
+      if (data.defaultFilter !== undefined) { sets.push('defaultFilter = @defaultFilter'); params.defaultFilter = this.toJson(data.defaultFilter); }
+      if (data.filterableFields !== undefined) { sets.push('filterableFields = @filterableFields'); params.filterableFields = this.toJson(data.filterableFields); }
+      if (data.hybrid !== undefined) { sets.push('hybrid = @hybrid'); params.hybrid = this.toJson(data.hybrid); }
+      if (data.isolateByModule !== undefined) { sets.push('isolateByModule = @isolateByModule'); params.isolateByModule = this.toBoolInt(data.isolateByModule); }
+      if (data.reindexRequired !== undefined) { sets.push('reindexRequired = @reindexRequired'); params.reindexRequired = this.toBoolInt(data.reindexRequired); }
+      if (data.lastReindexAt !== undefined) { sets.push('lastReindexAt = @lastReindexAt'); params.lastReindexAt = data.lastReindexAt instanceof Date ? data.lastReindexAt.toISOString() : data.lastReindexAt; }
+      // Presence, not value: a finished run clears the pointer by passing an
+      // explicit `undefined`, which Mongo's $set writes as null. Skipping it
+      // here would strand the module on a run that no longer exists.
+      if (Object.hasOwn(data, 'activeReindexRunKey')) {
+        sets.push('activeReindexRunKey = @activeReindexRunKey');
+        params.activeReindexRunKey = data.activeReindexRunKey ?? null;
+      }
 
       db.prepare(`UPDATE ${TABLES.ragModules} SET ${sets.join(', ')} WHERE id = @id`).run(params);
       return this.findRagModuleById(id);
@@ -375,9 +405,13 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
 
       db.prepare(`
         INSERT INTO ${TABLES.ragQueryLogs}
-        (id, tenantId, projectId, ragModuleKey, query, topK, matchCount, latencyMs, metadata,
+        (id, tenantId, projectId, ragModuleKey, query, topK, matchCount,
+         preFilterMatchCount, topScore, avgScore, minScoreApplied, hybrid,
+         latencyMs, metadata,
          userId, apiTokenId, actorType, createdAt)
-        VALUES (@id, @tenantId, @projectId, @ragModuleKey, @query, @topK, @matchCount, @latencyMs, @metadata,
+        VALUES (@id, @tenantId, @projectId, @ragModuleKey, @query, @topK, @matchCount,
+         @preFilterMatchCount, @topScore, @avgScore, @minScoreApplied, @hybrid,
+         @latencyMs, @metadata,
          @userId, @apiTokenId, @actorType, @createdAt)
       `).run({
         id,
@@ -387,6 +421,11 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         query: log.query,
         topK: log.topK,
         matchCount: log.matchCount,
+        preFilterMatchCount: log.preFilterMatchCount ?? null,
+        topScore: log.topScore ?? null,
+        avgScore: log.avgScore ?? null,
+        minScoreApplied: log.minScoreApplied ?? null,
+        hybrid: log.hybrid === undefined ? null : this.toBoolInt(log.hybrid),
         latencyMs: log.latencyMs ?? null,
         metadata: this.toJson(log.metadata ?? {}),
         userId: log.userId ?? null,
@@ -400,13 +439,11 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
 
     async listRagQueryLogs(
       ragModuleKey: string,
-      options?: { limit?: number; skip?: number; from?: Date; to?: Date },
+      options?: { limit?: number; skip?: number; from?: Date; to?: Date; zeroOnly?: boolean },
     ): Promise<IRagQueryLog[]> {
       const db = this.getTenantDb();
-      const clauses: string[] = ['ragModuleKey = @ragModuleKey'];
-      const params: Record<string, unknown> = { ragModuleKey };
-      if (options?.from) { clauses.push('createdAt >= @from'); params.from = options.from.toISOString(); }
-      if (options?.to) { clauses.push('createdAt <= @to'); params.to = options.to.toISOString(); }
+      const { clauses, params } = this.buildRagQueryLogFilter(ragModuleKey, options);
+      if (options?.zeroOnly) clauses.push('matchCount = 0');
 
       const limit = options?.limit ?? 50;
       const skip = options?.skip ?? 0;
@@ -419,20 +456,116 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
     async countRagQueryLogs(
       ragModuleKey: string,
       options?: { from?: Date; to?: Date },
-    ): Promise<{ total: number; avgLatencyMs: number }> {
+    ): Promise<{
+      total: number;
+      avgLatencyMs: number;
+      zeroMatchCount: number;
+      minScoreFilteredCount: number;
+    }> {
       const db = this.getTenantDb();
+      const { clauses, params } = this.buildRagQueryLogFilter(ragModuleKey, options);
+
+      const row = db.prepare(`
+        SELECT
+          COUNT(*) as total,
+          AVG(latencyMs) as avgLatencyMs,
+          SUM(CASE WHEN matchCount = 0 THEN 1 ELSE 0 END) as zeroMatchCount,
+          SUM(CASE WHEN matchCount = 0 AND COALESCE(preFilterMatchCount, 0) > 0 THEN 1 ELSE 0 END) as minScoreFilteredCount
+        FROM ${TABLES.ragQueryLogs} WHERE ${clauses.join(' AND ')}
+      `).get(params) as {
+        total: number;
+        avgLatencyMs: number | null;
+        zeroMatchCount: number | null;
+        minScoreFilteredCount: number | null;
+      };
+      return {
+        total: row?.total ?? 0,
+        avgLatencyMs: row?.avgLatencyMs ? Math.round(row.avgLatencyMs) : 0,
+        // SUM over zero rows is NULL, not 0.
+        zeroMatchCount: row?.zeroMatchCount ?? 0,
+        minScoreFilteredCount: row?.minScoreFilteredCount ?? 0,
+      };
+    }
+
+    async aggregateRagQueryScoreDistribution(
+      ragModuleKey: string,
+      options?: { from?: Date; to?: Date },
+    ): Promise<Array<{ bucket: string; count: number }>> {
+      const db = this.getTenantDb();
+      const { clauses, params } = this.buildRagQueryLogFilter(ragModuleKey, options);
+      // Logs written before topScore existed carry no score to bucket, and a
+      // provider handing back a raw distance belongs to no bucket at all —
+      // the same rows Mongo's $bucket sends to its `default`.
+      clauses.push('topScore IS NOT NULL', 'topScore >= 0', `topScore < ${SCORE_BUCKET_UPPER}`);
+
+      const rows = db.prepare(`
+        SELECT CAST(topScore * 10 AS INTEGER) as bucket, COUNT(*) as count
+        FROM ${TABLES.ragQueryLogs} WHERE ${clauses.join(' AND ')}
+        GROUP BY bucket ORDER BY bucket ASC
+      `).all(params) as Array<{ bucket: number; count: number }>;
+
+      const counts = new Map(rows.map((r) => [(Number(r.bucket) / 10).toFixed(1), Number(r.count)]));
+      // Always every bucket: a histogram missing its empty bars reads as a
+      // different distribution, and it is exactly where the two backends' own
+      // grouping would otherwise disagree.
+      return SCORE_BUCKET_LABELS.map((bucket) => ({ bucket, count: counts.get(bucket) ?? 0 }));
+    }
+
+    async deleteRagQueryLogsOlderThan(before: Date, ragModuleKey?: string): Promise<number> {
+      const db = this.getTenantDb();
+      const clauses: string[] = ['createdAt < @before'];
+      const params: Record<string, unknown> = { before: before.toISOString() };
+      if (ragModuleKey) { clauses.push('ragModuleKey = @ragModuleKey'); params.ragModuleKey = ragModuleKey; }
+      return db.prepare(
+        `DELETE FROM ${TABLES.ragQueryLogs} WHERE ${clauses.join(' AND ')}`,
+      ).run(params).changes;
+    }
+
+    // ── RAG module teardown ──────────────────────────────────────────
+
+    async deleteRagDocumentsByModuleKey(ragModuleKey: string): Promise<number> {
+      const db = this.getTenantDb();
+      return db.prepare(`DELETE FROM ${TABLES.ragDocuments} WHERE ragModuleKey = @ragModuleKey`)
+        .run({ ragModuleKey }).changes;
+    }
+
+    async deleteRagChunksByModuleKey(ragModuleKey: string): Promise<number> {
+      const db = this.getTenantDb();
+      return db.prepare(`DELETE FROM ${TABLES.ragChunks} WHERE ragModuleKey = @ragModuleKey`)
+        .run({ ragModuleKey }).changes;
+    }
+
+    async countRagModulesByVectorIndexKey(
+      vectorIndexKey: string,
+      options?: { projectId?: string; excludeKey?: string },
+    ): Promise<number> {
+      const db = this.getTenantDb();
+      const clauses: string[] = ['vectorIndexKey = @vectorIndexKey'];
+      const params: Record<string, unknown> = { vectorIndexKey };
+      if (options?.projectId !== undefined) {
+        const scopeFilter = this.buildProjectScopeFilter(options.projectId);
+        clauses.push(scopeFilter.clause);
+        Object.assign(params, scopeFilter.params);
+      }
+      // The module being edited must not count itself as a co-tenant of its
+      // own index.
+      if (options?.excludeKey) { clauses.push('key != @excludeKey'); params.excludeKey = options.excludeKey; }
+      const row = db.prepare(
+        `SELECT COUNT(*) as cnt FROM ${TABLES.ragModules} WHERE ${clauses.join(' AND ')}`,
+      ).get(params) as SqliteRow;
+      return (row.cnt as number) || 0;
+    }
+
+    /** Shared module + date-window WHERE for every query-log read. */
+    private buildRagQueryLogFilter(
+      ragModuleKey: string,
+      options?: { from?: Date; to?: Date },
+    ): { clauses: string[]; params: Record<string, unknown> } {
       const clauses: string[] = ['ragModuleKey = @ragModuleKey'];
       const params: Record<string, unknown> = { ragModuleKey };
       if (options?.from) { clauses.push('createdAt >= @from'); params.from = options.from.toISOString(); }
       if (options?.to) { clauses.push('createdAt <= @to'); params.to = options.to.toISOString(); }
-
-      const row = db.prepare(
-        `SELECT COUNT(*) as total, AVG(latencyMs) as avgLatencyMs FROM ${TABLES.ragQueryLogs} WHERE ${clauses.join(' AND ')}`,
-      ).get(params) as { total: number; avgLatencyMs: number | null };
-      return {
-        total: row?.total ?? 0,
-        avgLatencyMs: row?.avgLatencyMs ? Math.round(row.avgLatencyMs) : 0,
-      };
+      return { clauses, params };
     }
 
     // ── Row mappers ──────────────────────────────────────────────────
@@ -457,6 +590,13 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         defaultTopK: (r.defaultTopK as number | null | undefined) ?? undefined,
         defaultMinScore: (r.defaultMinScore as number | null | undefined) ?? undefined,
         responseDetail: (r.responseDetail as IRagModule['responseDetail'] | null | undefined) ?? undefined,
+        defaultFilter: r.defaultFilter ? this.parseJson(r.defaultFilter, undefined) : undefined,
+        filterableFields: r.filterableFields ? this.parseJson(r.filterableFields, undefined) : undefined,
+        hybrid: r.hybrid ? this.parseJson(r.hybrid, undefined) : undefined,
+        isolateByModule: r.isolateByModule === null || r.isolateByModule === undefined ? undefined : this.fromBoolInt(r.isolateByModule),
+        reindexRequired: r.reindexRequired === null || r.reindexRequired === undefined ? undefined : this.fromBoolInt(r.reindexRequired),
+        activeReindexRunKey: (r.activeReindexRunKey as string | null | undefined) ?? undefined,
+        lastReindexAt: r.lastReindexAt ? this.toDate(r.lastReindexAt) : undefined,
         totalDocuments: r.totalDocuments as number,
         totalChunks: r.totalChunks as number,
         metadata: this.parseJson(r.metadata, {}),
@@ -523,6 +663,11 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         query: r.query as string,
         topK: r.topK as number,
         matchCount: r.matchCount as number,
+        preFilterMatchCount: (r.preFilterMatchCount as number | null | undefined) ?? undefined,
+        topScore: (r.topScore as number | null | undefined) ?? undefined,
+        avgScore: (r.avgScore as number | null | undefined) ?? undefined,
+        minScoreApplied: (r.minScoreApplied as number | null | undefined) ?? undefined,
+        hybrid: r.hybrid === null || r.hybrid === undefined ? undefined : this.fromBoolInt(r.hybrid),
         latencyMs: r.latencyMs as number | undefined,
         metadata: this.parseJson(r.metadata, {}),
         userId: (r.userId as string | null) ?? undefined,

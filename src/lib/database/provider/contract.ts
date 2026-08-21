@@ -65,6 +65,7 @@ import type {
   IRagDocument,
   IRagModule,
   IRagQueryLog,
+  IRagReindexRun,
   IReranker,
   IRerankerRunLog,
   IWebSearchRunLog,
@@ -1004,12 +1005,73 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IRagQueryLog>;
   listRagQueryLogs(
     ragModuleKey: string,
-    options?: { limit?: number; skip?: number; from?: Date; to?: Date },
+    options?: {
+      limit?: number;
+      skip?: number;
+      from?: Date;
+      to?: Date;
+      /** Only queries that returned nothing — the content-gap feed. */
+      zeroOnly?: boolean;
+    },
   ): Promise<IRagQueryLog[]>;
   countRagQueryLogs(
     ragModuleKey: string,
     options?: { from?: Date; to?: Date },
-  ): Promise<{ total: number; avgLatencyMs: number }>;
+  ): Promise<{
+    total: number;
+    avgLatencyMs: number;
+    /** Queries that returned no matches at all. */
+    zeroMatchCount: number;
+    /**
+     * Queries where the store DID return candidates and the minScore threshold
+     * discarded every one of them — a tuning problem, not a content gap.
+     */
+    minScoreFilteredCount: number;
+  }>;
+  /**
+   * Histogram of the best score per query, bucketed to one decimal, so the
+   * minScore slider can be set against the module's real distribution instead
+   * of guessed at.
+   */
+  aggregateRagQueryScoreDistribution(
+    ragModuleKey: string,
+    options?: { from?: Date; to?: Date },
+  ): Promise<Array<{ bucket: string; count: number }>>;
+  /** Retention: query text is stored in full, so this table cannot grow forever. */
+  deleteRagQueryLogsOlderThan(before: Date, ragModuleKey?: string): Promise<number>;
+
+  // ── RAG module teardown (tenant-specific) ──
+  /**
+   * Deleting a module used to orphan every document, chunk and vector it owned.
+   * These make the cascade expressible.
+   */
+  deleteRagDocumentsByModuleKey(ragModuleKey: string): Promise<number>;
+  deleteRagChunksByModuleKey(ragModuleKey: string): Promise<number>;
+  /**
+   * How many modules point at the same vector index. Two modules sharing one
+   * index silently cross-contaminate unless isolation is on.
+   */
+  countRagModulesByVectorIndexKey(
+    vectorIndexKey: string,
+    options?: { projectId?: string; excludeKey?: string },
+  ): Promise<number>;
+
+  // ── RAG re-index runs (tenant-specific) ──
+  createRagReindexRun(
+    run: Omit<IRagReindexRun, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IRagReindexRun>;
+  updateRagReindexRun(
+    key: string,
+    data: Partial<Omit<IRagReindexRun, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IRagReindexRun | null>;
+  findRagReindexRunByKey(key: string): Promise<IRagReindexRun | null>;
+  listRagReindexRuns(filters?: {
+    ragModuleKey?: string;
+    projectId?: string;
+    statuses?: IRagReindexRun['status'][];
+    limit?: number;
+  }): Promise<IRagReindexRun[]>;
+  deleteRagReindexRun(key: string): Promise<boolean>;
 
   // ── Reranker operations (tenant-specific) ──
   createReranker(

@@ -15,6 +15,23 @@ import type {
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
 
+/**
+ * `$bucket` boundaries are [lower, upper), so an exact 1.0 needs a boundary
+ * above it or it falls out of the histogram entirely. Mirrored arithmetically
+ * in `sqlite/rag.mixin.ts` — the two must produce identical labels.
+ */
+const SCORE_BUCKET_BOUNDARIES = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.0001];
+
+/** Labels, ascending: '0.0'..'0.9' plus '1.0'. The trailing sentinel is not one. */
+const SCORE_BUCKET_LABELS = SCORE_BUCKET_BOUNDARIES.slice(0, -1).map((b) => b.toFixed(1));
+
+/**
+ * Scores outside [0, 1.0001) — a provider handing back a raw distance rather
+ * than a normalized similarity. `$bucket` errors without a default; these are
+ * dropped rather than charted, because they belong to no bucket.
+ */
+const SCORE_BUCKET_OUT_OF_RANGE = 'out-of-range';
+
 export function RagMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class RagOps extends Base {
     // ── RAG Module operations ────────────────────────────────────────
@@ -268,7 +285,7 @@ export function RagMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: T
 
     async listRagQueryLogs(
       ragModuleKey: string,
-      options?: { limit?: number; skip?: number; from?: Date; to?: Date },
+      options?: { limit?: number; skip?: number; from?: Date; to?: Date; zeroOnly?: boolean },
     ): Promise<IRagQueryLog[]> {
       const db = this.getTenantDb();
       const query: Record<string, unknown> = { ragModuleKey };
@@ -278,6 +295,7 @@ export function RagMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: T
         if (options.to) dateFilter.$lte = options.to;
         query.createdAt = dateFilter;
       }
+      if (options?.zeroOnly) query.matchCount = 0;
       const cursor = db
         .collection<IRagQueryLog>(COLLECTIONS.ragQueryLogs)
         .find(query as Filter<IRagQueryLog>)
@@ -291,8 +309,136 @@ export function RagMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: T
     async countRagQueryLogs(
       ragModuleKey: string,
       options?: { from?: Date; to?: Date },
-    ): Promise<{ total: number; avgLatencyMs: number }> {
+    ): Promise<{
+      total: number;
+      avgLatencyMs: number;
+      zeroMatchCount: number;
+      minScoreFilteredCount: number;
+    }> {
       const db = this.getTenantDb();
+      const query = this.buildRagQueryLogFilter(ragModuleKey, options);
+      const [agg] = await db
+        .collection(COLLECTIONS.ragQueryLogs)
+        .aggregate([
+          { $match: query },
+          {
+            $group: {
+              _id: null,
+              total: { $sum: 1 },
+              avgLatencyMs: { $avg: '$latencyMs' },
+              zeroMatchCount: { $sum: { $cond: [{ $eq: ['$matchCount', 0] }, 1, 0] } },
+              // A missing preFilterMatchCount compares as null, which is below
+              // any number, so pre-change logs never count as filtered-out.
+              minScoreFilteredCount: {
+                $sum: {
+                  $cond: [
+                    {
+                      $and: [
+                        { $eq: ['$matchCount', 0] },
+                        { $gt: ['$preFilterMatchCount', 0] },
+                      ],
+                    },
+                    1,
+                    0,
+                  ],
+                },
+              },
+            },
+          },
+        ])
+        .toArray();
+      return {
+        total: (agg?.total as number | undefined) ?? 0,
+        avgLatencyMs: agg?.avgLatencyMs ? Math.round(agg.avgLatencyMs as number) : 0,
+        zeroMatchCount: (agg?.zeroMatchCount as number | undefined) ?? 0,
+        minScoreFilteredCount: (agg?.minScoreFilteredCount as number | undefined) ?? 0,
+      };
+    }
+
+    async aggregateRagQueryScoreDistribution(
+      ragModuleKey: string,
+      options?: { from?: Date; to?: Date },
+    ): Promise<Array<{ bucket: string; count: number }>> {
+      const db = this.getTenantDb();
+      const query = this.buildRagQueryLogFilter(ragModuleKey, options);
+      // Logs written before topScore existed carry no score to bucket.
+      query.topScore = { $type: 'number' };
+
+      const rows = await db
+        .collection(COLLECTIONS.ragQueryLogs)
+        .aggregate<{ _id: number | string; count: number }>([
+          { $match: query },
+          {
+            $bucket: {
+              groupBy: '$topScore',
+              boundaries: SCORE_BUCKET_BOUNDARIES,
+              default: SCORE_BUCKET_OUT_OF_RANGE,
+              output: { count: { $sum: 1 } },
+            },
+          },
+        ])
+        .toArray();
+
+      const counts = new Map(
+        rows
+          .filter((row) => typeof row._id === 'number')
+          .map((row) => [(row._id as number).toFixed(1), row.count]),
+      );
+      // Always every bucket: a histogram missing its empty bars reads as a
+      // different distribution, and it is exactly where the two backends' own
+      // grouping would otherwise disagree.
+      return SCORE_BUCKET_LABELS.map((bucket) => ({ bucket, count: counts.get(bucket) ?? 0 }));
+    }
+
+    async deleteRagQueryLogsOlderThan(before: Date, ragModuleKey?: string): Promise<number> {
+      const db = this.getTenantDb();
+      const query: Record<string, unknown> = { createdAt: { $lt: before } };
+      if (ragModuleKey) query.ragModuleKey = ragModuleKey;
+      const result = await db.collection(COLLECTIONS.ragQueryLogs).deleteMany(query);
+      return result.deletedCount;
+    }
+
+    // ── RAG module teardown ──────────────────────────────────────────
+
+    async deleteRagDocumentsByModuleKey(ragModuleKey: string): Promise<number> {
+      const db = this.getTenantDb();
+      const result = await db
+        .collection(COLLECTIONS.ragDocuments)
+        .deleteMany({ ragModuleKey });
+      return result.deletedCount;
+    }
+
+    async deleteRagChunksByModuleKey(ragModuleKey: string): Promise<number> {
+      const db = this.getTenantDb();
+      const result = await db
+        .collection(COLLECTIONS.ragChunks)
+        .deleteMany({ ragModuleKey });
+      return result.deletedCount;
+    }
+
+    async countRagModulesByVectorIndexKey(
+      vectorIndexKey: string,
+      options?: { projectId?: string; excludeKey?: string },
+    ): Promise<number> {
+      const db = this.getTenantDb();
+      const query: Record<string, unknown> = { vectorIndexKey };
+      if (options?.projectId !== undefined) {
+        Object.assign(query, this.buildProjectScopeFilter(options.projectId));
+      }
+      // The module being edited must not count itself as a co-tenant of its
+      // own index.
+      if (options?.excludeKey) query.key = { $ne: options.excludeKey };
+      return db
+        .collection(COLLECTIONS.ragModules)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .countDocuments(query as any);
+    }
+
+    /** Shared module + date-window match for every query-log aggregate. */
+    private buildRagQueryLogFilter(
+      ragModuleKey: string,
+      options?: { from?: Date; to?: Date },
+    ): Record<string, unknown> {
       const query: Record<string, unknown> = { ragModuleKey };
       if (options?.from || options?.to) {
         const dateFilter: Record<string, Date> = {};
@@ -300,17 +446,7 @@ export function RagMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: T
         if (options.to) dateFilter.$lte = options.to;
         query.createdAt = dateFilter;
       }
-      const [agg] = await db
-        .collection(COLLECTIONS.ragQueryLogs)
-        .aggregate([
-          { $match: query },
-          { $group: { _id: null, total: { $sum: 1 }, avgLatencyMs: { $avg: '$latencyMs' } } },
-        ])
-        .toArray();
-      return {
-        total: (agg?.total as number | undefined) ?? 0,
-        avgLatencyMs: agg?.avgLatencyMs ? Math.round(agg.avgLatencyMs as number) : 0,
-      };
+      return query;
     }
   };
 }

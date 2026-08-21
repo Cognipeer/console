@@ -10,7 +10,13 @@ import type {
   VectorListResult,
 } from '../domains/vector';
 import { FULL_FILTER_OPERATORS } from '../domains/vectorFilter';
-import { toElasticsearchFilter } from './vectorFilterTranslators';
+import {
+  esQueryVectors,
+  esVectorDocument,
+  esVectorMapping,
+  type EsSearchFn,
+  type EsSearchHit,
+} from './elasticsearchSearch';
 
 interface ElasticsearchCredentials {
   apiKey?: string;
@@ -37,9 +43,7 @@ type EsClient = {
   };
   index: (p: { index: string; id: string; document: Record<string, unknown> }) => Promise<unknown>;
   bulk: (p: { body: unknown[] }) => Promise<{ errors: boolean }>;
-  search: (p: { index: string; knn?: unknown; size: number; _source?: string[]; sort?: unknown[]; search_after?: unknown[] }) => Promise<{
-    hits: { hits: Array<{ _id: string; _score: number; _source?: Record<string, unknown>; sort?: unknown[] }> };
-  }>;
+  search: EsSearchFn;
   count: (p: { index: string }) => Promise<{ count: number }>;
   delete: (p: { index: string; id: string }) => Promise<unknown>;
   deleteByQuery: (p: { index: string; query: unknown }) => Promise<unknown>;
@@ -92,16 +96,7 @@ async function ensureIndexExists(
 ): Promise<void> {
   const exists = await client.indices.exists({ index: indexName });
   if (!exists) {
-    const similarity = metric === 'dot' ? 'dot_product' : metric === 'euclidean' ? 'l2_norm' : 'cosine';
-    await client.indices.create({
-      index: indexName,
-      mappings: {
-        properties: {
-          vector: { type: 'dense_vector', dims: dimension, index: true, similarity },
-          metadata: { type: 'object', dynamic: true },
-        },
-      },
-    });
+    await client.indices.create({ index: indexName, mappings: esVectorMapping(dimension, metric) });
   }
 }
 
@@ -198,6 +193,7 @@ export const ElasticsearchVectorProviderContract: ProviderContract<
     supportsDelete: true,
     'vector.filterOperators': FULL_FILTER_OPERATORS,
     'vector.filterRaw': true,
+    'vector.supportsHybrid': true,
   },
   async createRuntime({ credentials, settings, providerKey, logger }) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/ban-ts-comment
@@ -245,7 +241,7 @@ export const ElasticsearchVectorProviderContract: ProviderContract<
         const body: unknown[] = [];
         for (const item of items) {
           body.push({ index: { _index: handle.externalId, _id: item.id } });
-          body.push({ vector: item.values, metadata: item.metadata ?? {} });
+          body.push(esVectorDocument(item));
         }
         const result = await client.bulk({ body });
         if (result.errors) {
@@ -255,24 +251,9 @@ export const ElasticsearchVectorProviderContract: ProviderContract<
       },
 
       async queryVectors(handle: VectorIndexHandle, query: VectorQueryInput): Promise<VectorQueryResult> {
-        const result = await client.search({
-          index: handle.externalId,
-          knn: {
-            field: 'vector',
-            query_vector: query.vector,
-            k: query.topK,
-            num_candidates: query.topK * 2,
-            filter: query.filter ? toElasticsearchFilter(query.filter) : undefined,
-          },
-          size: query.topK,
-        });
-        return {
-          matches: result.hits.hits.map((hit) => ({
-            id: hit._id,
-            score: hit._score ?? 0,
-            metadata: hit._source?.metadata as Record<string, unknown> | undefined,
-          })),
-        };
+        // Bound, not passed by reference: the ES client's search is a method
+        // that reads `this` for its transport.
+        return esQueryVectors((params) => client.search(params), handle.externalId, query);
       },
 
       async deleteVectors(handle: VectorIndexHandle, ids: string[]): Promise<void> {
@@ -304,16 +285,16 @@ export const ElasticsearchVectorProviderContract: ProviderContract<
         });
 
         const hits = result.hits?.hits ?? [];
-        const items = hits.map((hit: Record<string, unknown>) => {
-          const src = (hit._source ?? {}) as Record<string, unknown>;
+        const items = hits.map((hit) => {
+          const src = hit._source ?? {};
           return {
-            id: hit._id as string,
+            id: hit._id,
             values: Array.isArray(src.vector) ? src.vector as number[] : [],
             metadata: src.metadata as Record<string, unknown> | undefined,
           };
         });
 
-        const lastHit = hits[hits.length - 1] as Record<string, unknown> | undefined;
+        const lastHit: EsSearchHit | undefined = hits[hits.length - 1];
         const nextCursor = items.length === limit && lastHit?.sort
           ? JSON.stringify(lastHit.sort)
           : undefined;

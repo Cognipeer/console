@@ -106,6 +106,10 @@ export const DummyVectorProviderContract: ProviderContract<
   capabilities: {
     supportsUpsert: true,
     supportsQuery: true,
+    // Nothing is stored, so there is no text to match. Explicit rather than
+    // absent: a missing capability and a false one must not be told apart by
+    // guessing.
+    'vector.supportsHybrid': false,
   },
   async createRuntime({ providerKey, credentials, settings, logger }) {
     const runtimeState: DummyVectorRuntimeState = {

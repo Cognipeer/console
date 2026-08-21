@@ -139,7 +139,7 @@ export interface IRagChunkConfig {
   chunkSize: number;
   /** Overlap carried into the next chunk, in the same unit as chunkSize. Must be < chunkSize. */
   chunkOverlap: number;
-  /** recursive_character / markdown / sentence: boundary preferences, best first. */
+  /** recursive_character / markdown: boundary preferences, best first. `sentence` splits on punctuation and ignores this. */
   separators?: string[];
   /** token: tiktoken encoding name (cl100k_base, p50k_base, o200k_base). */
   encoding?: string;
@@ -188,6 +188,8 @@ export interface IVectorQueryLog {
   avgScore?: number;
   /** Whether the caller supplied a metadata filter. */
   filterApplied: boolean;
+  /** Whether the query ran dense+keyword rather than dense only. */
+  hybrid?: boolean;
   userId?: string;
   apiTokenId?: string;
   actorType?: string;

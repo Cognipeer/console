@@ -503,6 +503,9 @@ export const AwsS3VectorsProviderContract: ProviderContract<
             '$eq', '$ne', '$gt', '$gte', '$lt', '$lte', '$in', '$nin', '$exists', '$and', '$or',
         ],
         'vector.filterRaw': true,
+        // S3 Vectors indexes embeddings and filterable metadata only — there is
+        // no text analyser to build a keyword channel from.
+        'vector.supportsHybrid': false,
     },
     async createRuntime({ credentials, settings, providerKey, logger }) {
         const runtimeContext = createRuntimeContext(credentials, settings, providerKey);

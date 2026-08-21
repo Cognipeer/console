@@ -530,6 +530,13 @@ CREATE TABLE IF NOT EXISTS rag_modules (
   defaultTopK INTEGER,
   defaultMinScore REAL,
   responseDetail TEXT,
+  defaultFilter TEXT,
+  filterableFields TEXT,
+  hybrid TEXT,
+  isolateByModule INTEGER,
+  reindexRequired INTEGER,
+  activeReindexRunKey TEXT,
+  lastReindexAt TEXT,
   totalDocuments INTEGER DEFAULT 0,
   totalChunks INTEGER DEFAULT 0,
   metadata TEXT DEFAULT '{}',
@@ -594,10 +601,40 @@ CREATE TABLE IF NOT EXISTS rag_query_logs (
   query TEXT NOT NULL,
   topK INTEGER NOT NULL,
   matchCount INTEGER NOT NULL DEFAULT 0,
+  preFilterMatchCount INTEGER,
+  topScore REAL,
+  avgScore REAL,
+  minScoreApplied REAL,
+  hybrid INTEGER,
   latencyMs INTEGER,
   metadata TEXT DEFAULT '{}',
   createdAt TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS rag_reindex_runs (
+  id TEXT PRIMARY KEY,
+  tenantId TEXT NOT NULL,
+  projectId TEXT,
+  key TEXT NOT NULL,
+  ragModuleKey TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  reason TEXT,
+  attempt INTEGER NOT NULL DEFAULT 0,
+  totalDocuments INTEGER NOT NULL DEFAULT 0,
+  processedDocuments INTEGER NOT NULL DEFAULT 0,
+  failedDocuments INTEGER NOT NULL DEFAULT 0,
+  batchSize INTEGER NOT NULL DEFAULT 10,
+  errorMessage TEXT,
+  startedAt TEXT,
+  completedAt TEXT,
+  progress TEXT,
+  metadata TEXT DEFAULT '{}',
+  createdBy TEXT NOT NULL,
+  createdAt TEXT NOT NULL,
+  updatedAt TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rag_reindex_runs_key ON rag_reindex_runs(key);
+CREATE INDEX IF NOT EXISTS idx_rag_reindex_runs_module ON rag_reindex_runs(ragModuleKey, createdAt);
 
 CREATE TABLE IF NOT EXISTS memory_stores (
   id TEXT PRIMARY KEY,

@@ -453,6 +453,87 @@ describe('queryVectorIndex', () => {
     expect(result.matches).toEqual([]);
   });
 
+  it('runs dense-only and says so when the driver cannot fuse a keyword channel', async () => {
+    // Absent capabilities mean no hybrid. The adapter must never be handed
+    // `text` it would silently ignore while the caller believes it is in force.
+    (providerRegistry.getContract as ReturnType<typeof vi.fn>).mockReturnValue({ capabilities: {} });
+    MOCK_RUNTIME.queryVectors.mockResolvedValue({ matches: [{ id: 'a', score: 0.9 }] });
+
+    const result = await queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
+      providerKey: PROVIDER_KEY,
+      indexKey: 'my-index',
+      query: { topK: 5, vector: Array<number>(1536).fill(0.1), text: 'ORA-01017' },
+    });
+
+    const runtimeQueryArg = MOCK_RUNTIME.queryVectors.mock.calls[0][1];
+    expect(runtimeQueryArg.text).toBeUndefined();
+    expect(runtimeQueryArg.hybrid).toBeUndefined();
+    expect(result.usage).toMatchObject({ hybrid: false, hybridUnavailable: 'driver' });
+  });
+
+  it('passes text and fusion settings to a driver that declares hybrid', async () => {
+    (providerRegistry.getContract as ReturnType<typeof vi.fn>).mockReturnValue({
+      capabilities: { 'vector.supportsHybrid': true },
+    });
+    MOCK_RUNTIME.queryVectors.mockResolvedValue({ matches: [], usage: { hybrid: true } });
+
+    await queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
+      providerKey: PROVIDER_KEY,
+      indexKey: 'my-index',
+      query: {
+        topK: 5,
+        vector: Array<number>(1536).fill(0.1),
+        text: 'ORA-01017',
+        hybrid: { mode: 'weighted', alpha: 0.7 },
+      },
+    });
+
+    const runtimeQueryArg = MOCK_RUNTIME.queryVectors.mock.calls[0][1];
+    expect(runtimeQueryArg.text).toBe('ORA-01017');
+    expect(runtimeQueryArg.hybrid).toEqual({ mode: 'weighted', alpha: 0.7 });
+  });
+
+  it('counts a query as hybrid only when the adapter reports the channel ran', async () => {
+    (providerRegistry.getContract as ReturnType<typeof vi.fn>).mockReturnValue({
+      capabilities: { 'vector.supportsHybrid': true },
+    });
+    // A driver that supports hybrid can still fall back — an index predating
+    // the searchable text field has nothing for the keyword channel to match.
+    MOCK_RUNTIME.queryVectors.mockResolvedValue({
+      matches: [{ id: 'a', score: 0.9 }],
+      usage: { hybrid: false, hybridUnavailable: 'index-schema' },
+    });
+
+    await queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
+      providerKey: PROVIDER_KEY,
+      indexKey: 'my-index',
+      query: { topK: 5, vector: Array<number>(1536).fill(0.1), text: 'ORA-01017' },
+    });
+
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ units: { matches: 1 } }),
+    );
+
+    vi.clearAllMocks();
+    (providerRegistry.getContract as ReturnType<typeof vi.fn>).mockReturnValue({
+      capabilities: { 'vector.supportsHybrid': true },
+    });
+    MOCK_RUNTIME.queryVectors.mockResolvedValue({
+      matches: [{ id: 'a', score: 0.9 }],
+      usage: { hybrid: true, hybridMode: 'rrf' },
+    });
+
+    await queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
+      providerKey: PROVIDER_KEY,
+      indexKey: 'my-index',
+      query: { topK: 5, vector: Array<number>(1536).fill(0.1), text: 'ORA-01017' },
+    });
+
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ units: { matches: 1, hybrid: 1 } }),
+    );
+  });
+
   it('rejects a query vector whose dimension does not match the index', async () => {
     MOCK_RUNTIME.queryVectors.mockResolvedValue({ matches: [] });
 

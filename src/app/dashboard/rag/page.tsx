@@ -17,6 +17,8 @@ import StatTile from '@/components/common/ui/StatTile';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import CreateRagModuleModal from '@/components/rag/CreateRagModuleModal';
+import { CHUNK_STRATEGIES } from '@/components/rag/ragModuleForm';
+import type { RagChunkStrategy } from '@/lib/database';
 
 interface RagModuleView {
   _id: string;
@@ -32,6 +34,8 @@ interface RagModuleView {
     chunkOverlap: number;
   };
   status: string;
+  /** Stored vectors no longer match the module's chunking or embedding model. */
+  reindexRequired?: boolean;
   totalDocuments?: number;
   totalChunks?: number;
   createdAt?: string;
@@ -45,14 +49,7 @@ function formatDate(value?: string | Date) {
 }
 
 function strategyLabel(strategy: string) {
-  switch (strategy) {
-    case 'recursive_character':
-      return 'Recursive';
-    case 'token':
-      return 'Token';
-    default:
-      return strategy;
-  }
+  return CHUNK_STRATEGIES[strategy as RagChunkStrategy]?.label ?? strategy;
 }
 
 export default function RagDashboardPage() {
@@ -207,7 +204,12 @@ export default function RagDashboardPage() {
       key: 'status',
       label: 'Status',
       render: (m) => (
-        <StatusBadge status={m.status === 'active' ? 'active' : 'paused'} />
+        <div className="ds-row" style={{ gap: 6 }}>
+          <StatusBadge status={m.status === 'active' ? 'active' : 'paused'} />
+          {m.reindexRequired ? (
+            <span className="ds-badge ds-badge-warn">re-index due</span>
+          ) : null}
+        </div>
       ),
     },
     {

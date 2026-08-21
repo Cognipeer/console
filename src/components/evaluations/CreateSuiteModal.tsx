@@ -37,8 +37,22 @@ interface FormValues {
   rubric: string;
   judgeModelKey: string;
   useSemantic: boolean;
+  /** Retrieval scorers — all embedding-backed, all need a Knowledge Engine target. */
+  useContextRecall: boolean;
+  useContextPrecision: boolean;
+  useGroundedness: boolean;
   embeddingModelKey: string;
   turnMode: 'single' | 'perTurn';
+}
+
+/** Scorers that grade retrieval, and so need a target that reports its chunks. */
+function usesRetrieval(v: Pick<FormValues, 'useContextRecall' | 'useContextPrecision' | 'useGroundedness'>): boolean {
+  return v.useContextRecall || v.useContextPrecision || v.useGroundedness;
+}
+
+/** Scorers that compare embeddings, and so need an embedding model. */
+function usesEmbedding(v: Pick<FormValues, 'useSemantic' | 'useContextRecall' | 'useContextPrecision' | 'useGroundedness'>): boolean {
+  return v.useSemantic || usesRetrieval(v);
 }
 
 export default function CreateSuiteModal({ opened, onClose, onCreated, targets, datasets, models = [], editing = null }: CreateSuiteModalProps) {
@@ -57,6 +71,9 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
       rubric: '',
       judgeModelKey: '',
       useSemantic: false,
+      useContextRecall: false,
+      useContextPrecision: false,
+      useGroundedness: false,
       embeddingModelKey: '',
       turnMode: 'single',
     },
@@ -66,8 +83,10 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
       datasetKey: (v) => (!v ? 'A dataset is required' : null),
       rubric: (v, values) => (values.useJudge && !v.trim() ? 'A rubric is required for the LLM judge' : null),
       judgeModelKey: (v, values) => (values.useJudge && !v ? 'A judge model is required for the LLM judge' : null),
-      embeddingModelKey: (v, values) => (values.useSemantic && !v ? 'An embedding model is required for semantic scoring' : null),
-      useAssertion: (v, values) => (!v && !values.useJudge && !values.useSemantic && !values.useJsonShape ? 'Select at least one scorer' : null),
+      embeddingModelKey: (v, values) => (usesEmbedding(values) && !v ? 'An embedding model is required for embedding-backed scoring' : null),
+      useAssertion: (v, values) => (
+        !v && !values.useJudge && !values.useJsonShape && !usesEmbedding(values) ? 'Select at least one scorer' : null
+      ),
     },
   });
 
@@ -89,6 +108,9 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
         rubric: judge?.rubric ?? '',
         judgeModelKey: editing.judgeModelKey ?? '',
         useSemantic: editing.scorers.some((s) => s.type === 'semantic'),
+        useContextRecall: editing.scorers.some((s) => s.type === 'context-recall'),
+        useContextPrecision: editing.scorers.some((s) => s.type === 'context-precision'),
+        useGroundedness: editing.scorers.some((s) => s.type === 'groundedness'),
         embeddingModelKey: editing.embeddingModelKey ?? '',
         turnMode: editing.runConfig?.turnMode ?? 'single',
       });
@@ -115,6 +137,9 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
     if (v.useJsonShape) scorers.push({ type: 'json-shape' });
     if (v.useJudge) scorers.push({ type: 'llm-judge', rubric: v.rubric.trim() });
     if (v.useSemantic) scorers.push({ type: 'semantic' });
+    if (v.useContextRecall) scorers.push({ type: 'context-recall' });
+    if (v.useContextPrecision) scorers.push({ type: 'context-precision' });
+    if (v.useGroundedness) scorers.push({ type: 'groundedness' });
     setLoading(true);
     try {
       const res = await fetch(
@@ -129,7 +154,7 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
             datasetKey: v.datasetKey,
             scorers,
             judgeModelKey: v.useJudge ? v.judgeModelKey : undefined,
-            embeddingModelKey: v.useSemantic ? v.embeddingModelKey : undefined,
+            embeddingModelKey: usesEmbedding(v) ? v.embeddingModelKey : undefined,
             runConfig: { turnMode: v.turnMode },
           }),
         },
@@ -154,20 +179,31 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
 
   const v = form.getValues();
   const useJudge = v.useJudge;
-  const useSemantic = v.useSemantic;
+  const needsEmbedding = usesEmbedding(v);
   const validName = v.name.trim().length > 0;
   const validBinding = Boolean(v.targetKey) && Boolean(v.datasetKey);
-  const anyScorer = v.useAssertion || v.useJudge || v.useSemantic || v.useJsonShape;
+  const anyScorer = v.useAssertion || v.useJudge || v.useJsonShape || needsEmbedding;
   const judgeOk = !v.useJudge || (v.rubric.trim().length > 0 && Boolean(v.judgeModelKey));
-  const semanticOk = !v.useSemantic || Boolean(v.embeddingModelKey);
-  const validScorers = anyScorer && judgeOk && semanticOk;
-  const canSubmit = validName && validBinding && validScorers;
+  const embeddingOk = !needsEmbedding || Boolean(v.embeddingModelKey);
+  const validScorers = anyScorer && judgeOk && embeddingOk;
+  // A retrieval scorer needs a target that reports the chunks it retrieved;
+  // pointed at anything else every item errors out at run time.
+  const targetKind = targets.find((t) => t.key === v.targetKey)?.kind;
+  const retrievalTargetMismatch = usesRetrieval(v) && Boolean(v.targetKey) && targetKind !== 'rag';
+  // Retrieval answers one query per item — there is no conversation to walk,
+  // and the run would pay for a query per turn to grade only the last one.
+  const isRetrievalTarget = targetKind === 'rag';
+  const turnModeConflict = isRetrievalTarget && v.turnMode === 'perTurn';
+  const canSubmit = validName && validBinding && validScorers && !turnModeConflict;
 
   const scorerLabels = [
     v.useAssertion ? 'assertion' : null,
     v.useJsonShape ? 'json-shape' : null,
     v.useJudge ? 'llm-judge' : null,
     v.useSemantic ? 'semantic' : null,
+    v.useContextRecall ? 'context-recall' : null,
+    v.useContextPrecision ? 'context-precision' : null,
+    v.useGroundedness ? 'groundedness' : null,
   ].filter(Boolean).join(', ') || '—';
 
   const checklist = [
@@ -250,8 +286,31 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
             description="Similarity scoring passes a reply that kept the gist but dropped required fields; this catches that."
             {...form.getInputProps('useJsonShape', { type: 'checkbox' })}
           />
+          <Checkbox
+            label="Context recall — is the expected answer covered by the retrieved passages?"
+            description="Retrieval targets. Each claim in the gold answer is scored by its closest retrieved passage, so a half-covered answer reads as half recalled."
+            {...form.getInputProps('useContextRecall', { type: 'checkbox' })}
+          />
+          <Checkbox
+            label="Context precision — how much of what was retrieved was relevant, weighted by rank"
+            description="Retrieval targets. A relevant passage at rank 1 counts for more than the same passage at rank 10 — that is the one the generator actually reads."
+            {...form.getInputProps('useContextPrecision', { type: 'checkbox' })}
+          />
+          <Checkbox
+            label="Groundedness — is the answer supported by the retrieved passages?"
+            description="Retrieval targets. Perfect context still produces a hallucination when the generator answers from its own weights instead."
+            {...form.getInputProps('useGroundedness', { type: 'checkbox' })}
+          />
           {form.errors.useAssertion ? <div style={{ color: 'var(--mantine-color-red-6)', fontSize: 12 }}>{form.errors.useAssertion}</div> : null}
         </Stack>
+
+        {retrievalTargetMismatch && (
+          <Alert color="yellow" variant="light" icon={<IconInfoCircle size={16} />} mt="sm">
+            The retrieval scorers grade the passages a target retrieved, and the selected target does not retrieve.
+            Point this suite at a Knowledge Engine target, or drop those scorers — otherwise every item records a
+            scorer error.
+          </Alert>
+        )}
 
         {useJudge && (
           <>
@@ -264,15 +323,17 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
           </>
         )}
 
-        {useSemantic && (
+        {needsEmbedding && (
           <>
-            <FormField label="Embedding model" required hint="Used to embed both the output and the dataset item's expected reference for cosine similarity.">
+            <FormField label="Embedding model" required hint="Backs every scorer that compares meaning instead of characters — semantic similarity and all three retrieval scorers.">
               <Select placeholder="Select an embedding model…" data={embeddingModels} searchable {...form.getInputProps('embeddingModelKey')} />
             </FormField>
-            <Alert color="blue" variant="light" icon={<IconInfoCircle size={16} />}>
-              Semantic scoring needs a gold answer per item: set <strong>expected.reference</strong> on your dataset items
-              (the &quot;Expected answer&quot; column / field in the dataset editor).
-            </Alert>
+            {(v.useSemantic || v.useContextRecall || v.useContextPrecision) && (
+              <Alert color="blue" variant="light" icon={<IconInfoCircle size={16} />}>
+                These scorers need a gold answer per item: set <strong>expected.reference</strong> on your dataset items
+                (the &quot;Expected answer&quot; column / field in the dataset editor).
+              </Alert>
+            )}
           </>
         )}
       </FormSection>
@@ -289,13 +350,22 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
             />
             <Radio
               value="perTurn"
+              disabled={isRetrievalTarget}
               label="Turn by turn — replay the conversation, feeding the model its own answers back"
               description="The only mode that catches drift: an agent can answer every turn correctly in isolation and still lose the thread once it is reading its own output. Costs one model call per user turn."
             />
           </Stack>
         </Radio.Group>
+        {turnModeConflict && (
+          <Alert color="yellow" variant="light" icon={<IconInfoCircle size={16} />} mt="sm">
+            This suite is set to replay turn by turn, which a Knowledge Engine target does not support. Switch to a
+            single call to save it.
+          </Alert>
+        )}
         <Text size="xs" c="dimmed" mt="xs">
-          Single-turn datasets behave identically under both. Only the final answer is graded either way, so scores stay comparable.
+          {isRetrievalTarget
+            ? 'A Knowledge Engine target answers one query per item, so turn-by-turn replay does not apply — runs that ask for it are rejected.'
+            : 'Single-turn datasets behave identically under both. Only the final answer is graded either way, so scores stay comparable.'}
         </Text>
       </FormSection>
     </FormShell>

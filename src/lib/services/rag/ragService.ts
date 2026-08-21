@@ -12,7 +12,7 @@ import {
   collectFilterFields,
   parseVectorFilter,
 } from '@/lib/providers';
-import { getDatabase } from '@/lib/database';
+import { getDatabase, type DatabaseProvider } from '@/lib/database';
 
 const logger = createLogger('rag');
 import type { IRagModule, IRagQueryLog, IRagChunk, IRagChunkConfig, IRagDocument } from '@/lib/database';
@@ -26,7 +26,14 @@ import {
 import { runReranker } from '@/lib/services/reranker';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { fireAndForget } from '@/lib/core/asyncTask';
-import { chunkText, type ChunkContext } from './chunking';
+import { chunkConfigRequiresReindex, chunkText, resolveParentWindow, type ChunkContext } from './chunking';
+import {
+  discardDocumentSource,
+  hashSourceText,
+  loadOriginalFile,
+  loadSourceText,
+  storeDocumentSource,
+} from './ragSource';
 import type {
   CreateRagModuleRequest,
   UpdateRagModuleRequest,
@@ -198,7 +205,6 @@ async function indexDocumentContent(params: {
   );
   if (chunks.length === 0) return 0;
 
-  const vectorIdFor = (index: number) => `${ragModule.key}:${documentId}:${index}`;
   const vectors: Array<{ id: string; values: number[]; metadata: Record<string, unknown> }> = [];
 
   for (let i = 0; i < chunks.length; i += EMBED_BATCH_SIZE) {
@@ -212,7 +218,7 @@ async function indexDocumentContent(params: {
 
     batch.forEach((chunk, j) => {
       vectors.push({
-        id: vectorIdFor(chunk.index),
+        id: vectorIdFor(ragModule.key, documentId, chunk.index),
         values: embeddings[j],
         metadata: {
           ...chunk.metadata,
@@ -236,7 +242,10 @@ async function indexDocumentContent(params: {
       vectors,
     });
   } catch (error) {
-    await discardVectors(tenantDbName, tenantId, projectId, ragModule, vectors.map((v) => v.id));
+    await removeVectors(
+      tenantDbName, tenantId, projectId, ragModule,
+      vectors.map((v) => v.id), 'rollback after a failed index run',
+    );
     throw error;
   }
 
@@ -248,7 +257,7 @@ async function indexDocumentContent(params: {
     ragModuleKey: ragModule.key,
     documentId,
     chunkIndex: chunk.index,
-    vectorId: vectorIdFor(chunk.index),
+    vectorId: vectorIdFor(ragModule.key, documentId, chunk.index),
     content: chunk.content,
     charStart: chunk.charStart,
     charEnd: chunk.charEnd,
@@ -262,7 +271,10 @@ async function indexDocumentContent(params: {
   } catch (error) {
     // Vectors without their text answer nothing, so this cannot stay a warning
     // the way it used to: roll back and fail the document.
-    await discardVectors(tenantDbName, tenantId, projectId, ragModule, vectors.map((v) => v.id));
+    await removeVectors(
+      tenantDbName, tenantId, projectId, ragModule,
+      vectors.map((v) => v.id), 'rollback after a failed chunk write',
+    );
     throw new Error(
       `Failed to persist chunk text for "${fileName}": ${error instanceof Error ? error.message : 'unknown error'}`,
     );
@@ -271,28 +283,67 @@ async function indexDocumentContent(params: {
   return chunks.length;
 }
 
-/** Best-effort cleanup of vectors written by a run that then failed. */
-async function discardVectors(
+/** Providers cap how many ids a single delete call may carry. */
+const VECTOR_DELETE_BATCH_SIZE = 500;
+
+/** Actor recorded on stored objects the cascade removes, where no user asked for that object specifically. */
+const CASCADE_ACTOR = 'knowledge-engine';
+
+/** The one place the `moduleKey:documentId:chunkIndex` vector id shape is written. */
+function vectorIdFor(ragModuleKey: string, documentId: string, chunkIndex: number): string {
+  return `${ragModuleKey}:${documentId}:${chunkIndex}`;
+}
+
+/** Every vector id a document owns, reconstructed from its recorded chunk count. */
+function documentVectorIds(ragModuleKey: string, documentId: string, chunkCount: number): string[] {
+  const ids: string[] = [];
+  for (let i = 0; i < chunkCount; i++) ids.push(vectorIdFor(ragModuleKey, documentId, i));
+  return ids;
+}
+
+/**
+ * Best-effort vector removal. The store is a third-party system: a failure here
+ * must never block the database-side cleanup that follows it, or a module and
+ * its documents become undeletable.
+ */
+async function removeVectors(
   tenantDbName: string,
   tenantId: string,
   projectId: string | undefined,
   ragModule: IRagModule,
   ids: string[],
+  context: string,
 ): Promise<void> {
-  if (ids.length === 0) return;
-  try {
-    await deleteVectors(tenantDbName, tenantId, projectId ?? '', {
-      providerKey: ragModule.vectorProviderKey,
-      indexKey: ragModule.vectorIndexKey,
-      ids,
-    });
-  } catch (error) {
-    logger.warn('Failed to roll back vectors after a failed index run', {
-      ragModuleKey: ragModule.key,
-      count: ids.length,
-      error: error instanceof Error ? error.message : error,
-    });
+  for (let i = 0; i < ids.length; i += VECTOR_DELETE_BATCH_SIZE) {
+    const batch = ids.slice(i, i + VECTOR_DELETE_BATCH_SIZE);
+    try {
+      await deleteVectors(tenantDbName, tenantId, projectId ?? '', {
+        providerKey: ragModule.vectorProviderKey,
+        indexKey: ragModule.vectorIndexKey,
+        ids: batch,
+      });
+    } catch (error) {
+      logger.warn(`Failed to delete vectors (${context})`, {
+        ragModuleKey: ragModule.key,
+        count: batch.length,
+        error: error instanceof Error ? error.message : error,
+      });
+    }
   }
+}
+
+/**
+ * The similarity of a match on the 0..1 cosine scale, whatever ranking has
+ * since been layered on top of it.
+ *
+ * `score` is whatever ranked the match last: a cosine similarity for a plain
+ * dense query, a reranker's relevance for a reranked one, rank-derived
+ * confidence for hybrid RRF. Only the first is comparable to a module's
+ * configured minScore, so the retrieval-time similarity is preferred whenever
+ * the layer that replaced it preserved one.
+ */
+function similarityOf(match: { score?: number; denseScore?: number; vectorScore?: number }): number {
+  return match.denseScore ?? match.vectorScore ?? match.score ?? 0;
 }
 
 /* ── Metadata filters ────────────────────────────────────────────────── */
@@ -332,17 +383,76 @@ function assertFilterFieldsAllowed(
   }
 }
 
-/** Combine the module's standing filter with the per-request one. */
+/**
+ * Combine the module's standing filter, the per-request one and the isolation
+ * guard into a single filter document. Isolation goes through here rather than
+ * around it so a module with a defaultFilter keeps both constraints.
+ */
 function mergeFilters(
   defaultFilter: Record<string, unknown> | undefined,
   requestFilter: Record<string, unknown> | undefined,
+  isolationFilter?: Record<string, unknown>,
 ): Record<string, unknown> | undefined {
-  const hasDefault = defaultFilter && Object.keys(defaultFilter).length > 0;
-  const hasRequest = requestFilter && Object.keys(requestFilter).length > 0;
+  const parts = [defaultFilter, requestFilter, isolationFilter].filter(
+    (part): part is Record<string, unknown> => Boolean(part) && Object.keys(part!).length > 0,
+  );
 
-  if (hasDefault && hasRequest) return { $and: [defaultFilter, requestFilter] };
-  if (hasDefault) return defaultFilter;
-  if (hasRequest) return requestFilter;
+  if (parts.length === 0) return undefined;
+  if (parts.length === 1) return parts[0];
+  return { $and: parts };
+}
+
+/**
+ * Whether `_ragModule` is ANDed into this module's queries.
+ *
+ * An explicit setting wins. With the field unset we have to guess, and the two
+ * wrong guesses fail very differently: isolating an index that someone else's
+ * pipeline filled returns NOTHING, because its vectors carry no `_ragModule`;
+ * not isolating a shared index returns the OTHER module's chunks. So default to
+ * on only when the index is demonstrably shared with another module of ours.
+ * Every module we create now carries the flag, so this branch only ever runs
+ * for modules that predate it.
+ */
+async function resolveModuleIsolation(
+  db: Awaited<ReturnType<typeof getDatabase>>,
+  ragModule: IRagModule,
+): Promise<boolean> {
+  if (typeof ragModule.isolateByModule === 'boolean') return ragModule.isolateByModule;
+
+  try {
+    const others = await db.countRagModulesByVectorIndexKey(ragModule.vectorIndexKey, {
+      projectId: ragModule.projectId,
+      excludeKey: ragModule.key,
+    });
+    return others > 0;
+  } catch (error) {
+    logger.warn('Could not tell whether the vector index is shared; leaving isolation off', {
+      ragModuleKey: ragModule.key,
+      vectorIndexKey: ragModule.vectorIndexKey,
+      error: error instanceof Error ? error.message : error,
+    });
+    return false;
+  }
+}
+
+/**
+ * Whether a module update invalidates the stored vectors, and why.
+ *
+ * The embedding-model case is the one nothing else would catch: swapping to a
+ * different model of the SAME dimension raises no error anywhere — the store
+ * accepts the query vector and returns neighbours computed in a different
+ * space, so the results are meaningless rather than absent.
+ */
+export function reindexReasonForUpdate(
+  current: Pick<IRagModule, 'chunkConfig' | 'embeddingModelKey'>,
+  update: Pick<UpdateRagModuleRequest, 'chunkConfig' | 'embeddingModelKey'>,
+): 'chunk-config' | 'embedding-model' | undefined {
+  if (update.embeddingModelKey && update.embeddingModelKey !== current.embeddingModelKey) {
+    return 'embedding-model';
+  }
+  if (update.chunkConfig && chunkConfigRequiresReindex(current.chunkConfig, update.chunkConfig)) {
+    return 'chunk-config';
+  }
   return undefined;
 }
 
@@ -387,6 +497,10 @@ export async function createRagModule(
     defaultFilter: request.defaultFilter,
     filterableFields: request.filterableFields,
     responseDetail: request.responseDetail,
+    hybrid: request.hybrid,
+    // Our own ingest stamps `_ragModule` on every vector, so isolation is free
+    // and stops a shared index from ever answering with another module's text.
+    isolateByModule: request.isolateByModule ?? true,
     totalDocuments: 0,
     totalChunks: 0,
     metadata: request.metadata,
@@ -401,6 +515,7 @@ export async function updateRagModule(
 ): Promise<RagModule | null> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
+  const current = await db.findRagModuleById(moduleId);
   const updates: Record<string, unknown> = {};
   if (request.name !== undefined) updates.name = request.name;
   if (request.description !== undefined) updates.description = request.description;
@@ -422,16 +537,67 @@ export async function updateRagModule(
     updates.filterableFields = request.filterableFields ?? undefined;
   }
   if (request.responseDetail !== undefined) updates.responseDetail = request.responseDetail ?? undefined;
+  if (request.hybrid !== undefined) updates.hybrid = request.hybrid ?? undefined;
+  if (request.isolateByModule !== undefined) updates.isolateByModule = request.isolateByModule ?? undefined;
+
+  // The stored vectors keep answering queries against the old settings until a
+  // re-index run rebuilds them, so the flag is what tells anyone they are stale.
+  const reindexReason = current ? reindexReasonForUpdate(current, request) : undefined;
+  if (reindexReason) {
+    updates.reindexRequired = true;
+    logger.warn('Knowledge Engine module change requires a re-index', {
+      moduleId,
+      ragModuleKey: current?.key,
+      reason: reindexReason,
+    });
+  }
+
   updates.updatedBy = request.updatedBy;
   return db.updateRagModule(moduleId, updates as Partial<IRagModule>);
 }
 
+/**
+ * Delete a module and everything it owns.
+ *
+ * This used to delete one row, orphaning every document, chunk and vector: the
+ * tenant kept paying for the storage, and the next module pointed at the same
+ * index answered out of the dead one's vectors.
+ *
+ * The external store and the bucket are cleaned up best effort — a provider
+ * outage must not make a module undeletable — but the row deletions are
+ * allowed to throw, because a module row that disappears while its documents
+ * survive recreates exactly the orphaning this fixes.
+ */
 export async function deleteRagModule(
   tenantDbName: string,
+  tenantId: string,
+  projectId: string | undefined,
   moduleId: string,
 ): Promise<boolean> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
+
+  const ragModule = await db.findRagModuleById(moduleId);
+  if (!ragModule) return false;
+
+  const documents = await db.listRagDocuments(ragModule.key, { projectId: ragModule.projectId });
+
+  const vectorIds = documents.flatMap((doc) => documentVectorIds(
+    ragModule.key,
+    String(doc._id),
+    doc.chunkCount ?? 0,
+  ));
+  await removeVectors(
+    tenantDbName, tenantId, projectId, ragModule, vectorIds, `teardown of module ${ragModule.key}`,
+  );
+
+  await Promise.all(documents.map((doc) => discardDocumentSource(
+    tenantDbName, tenantId, projectId, doc, CASCADE_ACTOR,
+  )));
+
+  await db.deleteRagChunksByModuleKey(ragModule.key);
+  await db.deleteRagDocumentsByModuleKey(ragModule.key);
+
   return db.deleteRagModule(moduleId);
 }
 
@@ -465,6 +631,20 @@ export async function listRagModules(
 
 /* ── Document CRUD ───────────────────────────────────────────────────── */
 
+/**
+ * Drop the inline source from a document before it leaves the service.
+ *
+ * `sourceText` is up to INLINE_SOURCE_MAX_CHARS of markdown that only the
+ * re-index path ever reads; carrying it in a list of a few hundred documents
+ * would turn a small JSON response into tens of megabytes.
+ */
+function withoutInlineSource(document: RagDocument): RagDocument {
+  if (document.sourceText === undefined) return document;
+  const trimmed = { ...document };
+  delete trimmed.sourceText;
+  return trimmed;
+}
+
 export async function listRagDocuments(
   tenantDbName: string,
   ragModuleKey: string,
@@ -472,7 +652,8 @@ export async function listRagDocuments(
 ): Promise<RagDocument[]> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
-  return db.listRagDocuments(ragModuleKey, filters);
+  const documents = await db.listRagDocuments(ragModuleKey, filters);
+  return documents.map(withoutInlineSource);
 }
 
 export async function getRagDocument(
@@ -499,7 +680,39 @@ export async function ingestDocument(
   if (!ragModule) throw new Error(`Knowledge Engine module "${request.ragModuleKey}" not found`);
   if (ragModule.status !== 'active') throw new Error('Knowledge Engine module is not active');
 
-  // Create document record
+  // Uploading the same file twice used to embed it twice, so every query then
+  // answered out of two identical copies and paid for both. The crawler already
+  // de-dupes by URL; this covers every other way content arrives.
+  const sourceHash = hashSourceText(request.content);
+  if (!request.force) {
+    const existing = await db.findRagDocumentByFileName(
+      request.ragModuleKey,
+      request.fileName,
+      projectId,
+    );
+    if (existing && existing.status === 'indexed' && existing.sourceHash === sourceHash) {
+      logger.info('Skipping ingest of unchanged content', {
+        ragModuleKey: request.ragModuleKey,
+        fileName: request.fileName,
+        documentId: String(existing._id),
+      });
+      return withoutInlineSource(existing);
+    }
+  }
+
+  // Stored before the row is written so a single insert carries the result.
+  const source = await storeDocumentSource({
+    tenantDbName,
+    tenantId,
+    projectId,
+    ragModule,
+    fileName: request.fileName,
+    contentType: request.contentType,
+    text: request.content,
+    fileData: request.fileData,
+    createdBy: request.createdBy,
+  });
+
   const docRecord = await db.createRagDocument({
     tenantId,
     projectId,
@@ -511,6 +724,7 @@ export async function ingestDocument(
     chunkConfig: request.chunkConfig,
     metadata: request.metadata,
     createdBy: request.createdBy,
+    ...source,
   });
 
   const documentId = String(docRecord._id);
@@ -541,7 +755,7 @@ export async function ingestDocument(
       totalChunks: (ragModule.totalChunks ?? 0) + chunkCount,
     } as Partial<IRagModule>);
 
-    return { ...docRecord, status: 'indexed' as const, chunkCount, lastIndexedAt };
+    return withoutInlineSource({ ...docRecord, status: 'indexed' as const, chunkCount, lastIndexedAt });
   } catch (error) {
     const msg = error instanceof Error ? error.message : 'Ingestion failed';
     await db.updateRagDocument(documentId, {
@@ -566,11 +780,14 @@ function extractMarkdownContent(conversion: unknown): string | undefined {
   return undefined;
 }
 
-/**
- * Ingest a file into a Knowledge Engine module.
- * Converts the file to markdown/text using @cognipeer/to-markdown, then
- * delegates to ingestDocument for chunking + embedding + vector upsert.
- */
+/** Formats we read as UTF-8 rather than handing to the markdown converter. */
+function isPlainTextFile(fileName: string, contentType?: string): boolean {
+  return Boolean(
+    contentType?.startsWith('text/')
+    || /\.(txt|md|csv|json|xml|html|htm)$/i.test(fileName),
+  );
+}
+
 /**
  * Convert an uploaded file buffer to plain text/markdown without ingesting it.
  * Shares the same conversion rules as `ingestFile` so callers that only need
@@ -581,17 +798,7 @@ export async function convertFileToText(
   fileData: Buffer,
   contentType?: string,
 ): Promise<string> {
-  const isPlainText = (
-    contentType?.startsWith('text/') ||
-    fileName.endsWith('.txt') ||
-    fileName.endsWith('.md') ||
-    fileName.endsWith('.csv') ||
-    fileName.endsWith('.json') ||
-    fileName.endsWith('.xml') ||
-    fileName.endsWith('.html') ||
-    fileName.endsWith('.htm')
-  );
-  if (isPlainText) return fileData.toString('utf-8');
+  if (isPlainTextFile(fileName, contentType)) return fileData.toString('utf-8');
   const conversion = await convertToMarkdown(fileData, { fileName });
   const markdown = extractMarkdownContent(conversion);
   if (!markdown || markdown.trim().length === 0) {
@@ -602,6 +809,12 @@ export async function convertFileToText(
   return markdown;
 }
 
+/**
+ * Ingest a file into a Knowledge Engine module.
+ * Converts the file to markdown/text using @cognipeer/to-markdown, then
+ * delegates to ingestDocument for chunking + embedding + vector upsert. The
+ * bytes travel with it so the module's bucket can keep the original.
+ */
 export async function ingestFile(
   tenantDbName: string,
   tenantId: string,
@@ -613,56 +826,32 @@ export async function ingestFile(
     contentType?: string;
     metadata?: Record<string, unknown>;
     chunkConfig?: IRagChunkConfig;
+    force?: boolean;
     createdBy: string;
   },
 ): Promise<RagDocument> {
-  // 1. Convert file buffer to markdown/text
+  const isPlainText = isPlainTextFile(request.fileName, request.contentType);
+
   let textContent: string;
-
-  const isPlainText = (
-    request.contentType?.startsWith('text/') ||
-    request.fileName.endsWith('.txt') ||
-    request.fileName.endsWith('.md') ||
-    request.fileName.endsWith('.csv') ||
-    request.fileName.endsWith('.json') ||
-    request.fileName.endsWith('.xml') ||
-    request.fileName.endsWith('.html') ||
-    request.fileName.endsWith('.htm')
-  );
-
-  if (isPlainText) {
-    // For text-based files, read directly as UTF-8
-    textContent = request.fileData.toString('utf-8');
-  } else {
-    // For binary files (PDF, DOCX, etc.), use to-markdown converter
-    try {
-      const conversion = await convertToMarkdown(request.fileData, {
-        fileName: request.fileName,
-      });
-      const markdown = extractMarkdownContent(conversion);
-      if (!markdown || markdown.trim().length === 0) {
-        throw new Error(
-          `Failed to convert "${request.fileName}" to text. The file format may not be supported.`,
-        );
-      }
-      textContent = markdown;
-    } catch (error) {
-      if (error instanceof Error && error.message.includes('Failed to convert')) {
-        throw error;
-      }
-      throw new Error(
-        `File conversion failed for "${request.fileName}": ${error instanceof Error ? error.message : 'Unknown error'}`,
-      );
+  try {
+    textContent = await convertFileToText(request.fileName, request.fileData, request.contentType);
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('Failed to convert')) {
+      throw error;
     }
+    throw new Error(
+      `File conversion failed for "${request.fileName}": ${error instanceof Error ? error.message : 'Unknown error'}`,
+    );
   }
 
-  // 2. Delegate to ingestDocument with the extracted text
   return ingestDocument(tenantDbName, tenantId, projectId, {
     ragModuleKey: request.ragModuleKey,
     fileName: request.fileName,
     content: textContent,
+    fileData: request.fileData,
     contentType: request.contentType,
     chunkConfig: request.chunkConfig,
+    force: request.force,
     metadata: {
       ...request.metadata,
       _sourceType: isPlainText ? 'text' : 'converted',
@@ -672,6 +861,68 @@ export async function ingestFile(
 }
 
 /* ── Query (embed → vector search) ───────────────────────────────────── */
+
+/**
+ * Small-to-big retrieval: the small chunk is what got embedded and matched, but
+ * what the model reads is a wider window of the document around it, cut from
+ * the stored source using the chunk's recorded offsets.
+ *
+ * The source is read once per document, not once per match — several matches
+ * from the same document are the normal case, and each read can be a bucket
+ * round trip.
+ *
+ * The module's `parentWindowSize` is what turns this on; a per-document
+ * override only changes the width. Honouring an override on a module that has
+ * the feature off would mean fetching every match's document on every query
+ * just to discover it usually says nothing.
+ */
+async function applyParentWindows(params: {
+  db: Awaited<ReturnType<typeof getDatabase>>;
+  tenantDbName: string;
+  tenantId: string;
+  projectId: string | undefined;
+  ragModule: IRagModule;
+  matches: RagQueryMatch[];
+  chunkByVectorId: Map<string, IRagChunk>;
+}): Promise<RagQueryMatch[]> {
+  const { db, ragModule, matches, chunkByVectorId } = params;
+  const moduleWindowSize = ragModule.chunkConfig.parentWindowSize;
+  if (!moduleWindowSize || moduleWindowSize <= 0 || matches.length === 0) return matches;
+
+  const documentIds = [...new Set(
+    matches.map((m) => m.documentId).filter((id): id is string => Boolean(id)),
+  )];
+
+  const sources = new Map<string, { text: string; windowSize: number }>();
+  await Promise.all(documentIds.map(async (documentId) => {
+    const document = await db.findRagDocumentById(documentId);
+    if (!document) return;
+    const text = await loadSourceText(
+      params.tenantDbName, params.tenantId, params.projectId, document,
+    );
+    if (!text) return;
+    sources.set(documentId, {
+      text,
+      windowSize: chunkConfigFor(ragModule, document).parentWindowSize ?? moduleWindowSize,
+    });
+  }));
+
+  if (sources.size === 0) {
+    logger.warn('Parent windows are configured but no document source could be read', {
+      ragModuleKey: ragModule.key,
+      documentCount: documentIds.length,
+    });
+    return matches;
+  }
+
+  return matches.map((match) => {
+    const source = match.documentId ? sources.get(match.documentId) : undefined;
+    const chunk = chunkByVectorId.get(match.id);
+    if (!source || !chunk) return match;
+    const window = resolveParentWindow(source.text, chunk, source.windowSize);
+    return window ? { ...match, content: window } : match;
+  });
+}
 
 export async function queryRag(
   tenantDbName: string,
@@ -697,11 +948,17 @@ export async function queryRag(
   const embeddingMs = Date.now() - embeddingStartedAt;
 
   // 2. Build the metadata filter: the module's standing filter ANDed with the
-  //    caller's, after validating the request filter and checking it only
-  //    touches fields the module exposes.
+  //    caller's and, when the module is isolated, with its own key — after
+  //    validating the request filter and checking it only touches fields the
+  //    module exposes.
   validateFilterDocument(request.filter, 'Invalid filter');
   assertFilterFieldsAllowed(request.filter, ragModule.filterableFields);
-  const filter = mergeFilters(ragModule.defaultFilter, request.filter);
+  const isolated = await resolveModuleIsolation(db, ragModule);
+  const filter = mergeFilters(
+    ragModule.defaultFilter,
+    request.filter,
+    isolated ? { _ragModule: ragModule.key } : undefined,
+  );
 
   // 3. Query vector store. If reranker is configured, oversample candidates
   //    so the reranker has more to work with.
@@ -710,6 +967,7 @@ export async function queryRag(
   const useReranker = Boolean(ragModule.rerankerKey);
   const oversampleMultiplier = ragModule.rerankerOversample ?? 3;
   const fetchTopK = useReranker ? Math.max(topK, topK * oversampleMultiplier) : topK;
+  const hybrid = ragModule.hybrid?.enabled === true;
 
   const vectorStartedAt = Date.now();
   const vectorResult = await queryVectorIndex(tenantDbName, tenantId, projectId ?? '', {
@@ -719,6 +977,16 @@ export async function queryRag(
       vector: queryEmbedding,
       topK: fetchTopK,
       filter,
+      // The keyword half needs the words themselves — an embedding carries no
+      // signal for an error code, a SKU or a part number.
+      ...(hybrid ? {
+        text: request.query,
+        hybrid: {
+          mode: ragModule.hybrid?.mode,
+          alpha: ragModule.hybrid?.alpha,
+          k: ragModule.hybrid?.k,
+        },
+      } : {}),
     },
   });
 
@@ -729,11 +997,13 @@ export async function queryRag(
   // 4. Hydrate chunk content from MongoDB
   const hydrateStartedAt = Date.now();
   const vectorIds = vectorResult.matches.map((m) => m.id).filter(Boolean);
-  let chunkContentMap: Map<string, string> = new Map();
+  // Keyed by vectorId and holding the whole row, because a parent window needs
+  // the chunk's charStart/charEnd as well as its text.
+  let chunkByVectorId: Map<string, IRagChunk> = new Map();
   if (vectorIds.length > 0) {
     try {
       const storedChunks = await db.findRagChunksByVectorIds(vectorIds);
-      chunkContentMap = new Map(storedChunks.map((c) => [c.vectorId, c.content]));
+      chunkByVectorId = new Map(storedChunks.map((c) => [c.vectorId, c]));
     } catch (err) {
       logger.warn('Failed to hydrate chunk content from MongoDB', { error: err });
     }
@@ -744,7 +1014,9 @@ export async function queryRag(
   let matches: RagQueryMatch[] = vectorResult.matches.map((m) => ({
     id: m.id,
     score: m.score,
-    content: chunkContentMap.get(m.id) ?? resolveMetadataContent(m.metadata),
+    denseScore: m.denseScore,
+    lexicalScore: m.lexicalScore,
+    content: chunkByVectorId.get(m.id)?.content ?? resolveMetadataContent(m.metadata),
     metadata: m.metadata,
     documentId: typeof m.metadata?._documentId === 'string' ? m.metadata._documentId : undefined,
     fileName: typeof m.metadata?._fileName === 'string' ? m.metadata._fileName : undefined,
@@ -812,14 +1084,41 @@ export async function queryRag(
     }
   }
 
-  // 5c. Apply minimum score threshold, if configured.
+  // What the store actually returned. Recorded because "nothing was retrieved"
+  // and "the threshold discarded everything" look identical in matchCount alone
+  // and want opposite fixes.
+  const preFilterMatchCount = matches.length;
+
+  // 5c. Apply the minimum score threshold, if configured.
+  //
+  // Thresholding is done on the SIMILARITY scale, not on whatever the ranker
+  // last wrote into `score`. Under hybrid 'rrf' the fused score is rank-derived
+  // confidence on a different scale entirely, so applying a module's calibrated
+  // 0.5 to it silently changes what the operator asked for. `denseScore` (and
+  // the reranker's `vectorScore`) carry the real cosine similarity, so prefer
+  // those and fall back to `score` for plain dense queries.
   if (typeof minScore === 'number' && minScore > 0) {
-    matches = matches.filter((m) => (m.score ?? 0) >= minScore);
+    matches = matches.filter((m) => similarityOf(m) >= minScore);
   }
 
   // 5d. Apply final topK (in case reranker skipped or returned more).
   matches = matches.slice(0, topK);
 
+  // 5e. Small-to-big: swap each match's text for the window around it in the
+  //     document's source. Deliberately after the slice — the reranker has to
+  //     score the passage that was actually retrieved, and only the surviving
+  //     matches are worth the source read.
+  matches = await applyParentWindows({
+    db,
+    tenantDbName,
+    tenantId,
+    projectId,
+    ragModule,
+    matches,
+    chunkByVectorId,
+  });
+
+  const scores = matches.map((m) => similarityOf(m));
   const latencyMs = Date.now() - startTime;
 
   // 6. Log the query.
@@ -859,6 +1158,13 @@ export async function queryRag(
       query: request.query,
       topK,
       matchCount: matches.length,
+      preFilterMatchCount,
+      // Same scale as the threshold above, so the histogram the min-score
+      // slider is set against cannot mix rank confidence with similarity.
+      topScore: scores.length > 0 ? Math.max(...scores) : 0,
+      avgScore: scores.length > 0 ? scores.reduce((sum, s) => sum + s, 0) / scores.length : 0,
+      ...(typeof minScore === 'number' ? { minScoreApplied: minScore } : {}),
+      hybrid,
       latencyMs,
       metadata: {
         embeddingMs,
@@ -868,7 +1174,6 @@ export async function queryRag(
           rerankerKey: ragModule.rerankerKey,
           rerankLatencyMs,
         } : {}),
-        ...(typeof minScore === 'number' ? { minScore } : {}),
       },
     });
   });
@@ -917,24 +1222,12 @@ export async function deleteRagDocument(
   const doc = await db.findRagDocumentById(request.documentId);
   if (!doc) throw new Error('Document not found');
 
-  // Build vector IDs to delete (pattern: moduleKey:docId:chunkIndex)
   const chunkCount = doc.chunkCount ?? 0;
-  if (chunkCount > 0) {
-    const ids: string[] = [];
-    for (let i = 0; i < chunkCount; i++) {
-      ids.push(`${request.ragModuleKey}:${request.documentId}:${i}`);
-    }
-
-    try {
-      await deleteVectors(tenantDbName, tenantId, projectId ?? '', {
-        providerKey: ragModule.vectorProviderKey,
-        indexKey: ragModule.vectorIndexKey,
-        ids,
-      });
-    } catch (err) {
-      logger.warn('Failed to delete vectors for document', { error: err });
-    }
-  }
+  await removeVectors(
+    tenantDbName, tenantId, projectId, ragModule,
+    documentVectorIds(request.ragModuleKey, request.documentId, chunkCount),
+    `deletion of document ${request.documentId}`,
+  );
 
   // Delete chunk content from MongoDB
   try {
@@ -942,6 +1235,9 @@ export async function deleteRagDocument(
   } catch (err) {
     logger.warn('Failed to delete MongoDB chunks for document', { error: err });
   }
+
+  // The stored source outlives the row unless it is deleted here.
+  await discardDocumentSource(tenantDbName, tenantId, projectId, doc, CASCADE_ACTOR);
 
   // Update module stats
   await db.updateRagModule(String(ragModule._id), {
@@ -953,6 +1249,70 @@ export async function deleteRagDocument(
 }
 
 /* ── Re-ingest document ───────────────────────────────────────────────── */
+
+/**
+ * Where the text for a re-ingest came from, best first.
+ *
+ * `chunk-join` is the old behaviour and the reason source persistence exists:
+ * chunks overlap by design, so joining them repeats every overlap and produces
+ * a document that is longer than, and different from, the one that was indexed.
+ */
+type ReingestOrigin = 'request-content' | 'request-file' | 'stored-file' | 'stored-text' | 'chunk-join';
+
+interface ReingestSource {
+  text: string;
+  origin: ReingestOrigin;
+  /** Bytes that still need storing — only set when they came in with the request. */
+  fileData?: Buffer;
+}
+
+async function resolveReingestSource(
+  db: Awaited<ReturnType<typeof getDatabase>>,
+  tenantDbName: string,
+  tenantId: string,
+  projectId: string | undefined,
+  document: IRagDocument,
+  request: { documentId: string; content?: string; fileData?: Buffer; fileName?: string; contentType?: string },
+): Promise<ReingestSource> {
+  if (request.content) {
+    return { text: request.content, origin: 'request-content' };
+  }
+
+  const fileName = request.fileName ?? document.fileName;
+  if (request.fileData) {
+    return {
+      text: await convertFileToText(fileName, request.fileData, request.contentType),
+      origin: 'request-file',
+      fileData: request.fileData,
+    };
+  }
+
+  // The original upload beats our own extraction: a converter improvement only
+  // reaches an already-ingested document if the bytes are re-run through it.
+  const original = await loadOriginalFile(tenantDbName, tenantId, projectId, document);
+  if (original) {
+    return {
+      text: await convertFileToText(original.fileName, original.data, original.contentType),
+      origin: 'stored-file',
+    };
+  }
+
+  const stored = await loadSourceText(tenantDbName, tenantId, projectId, document);
+  if (stored) {
+    return { text: stored, origin: 'stored-text' };
+  }
+
+  const existingChunks = await db.findRagChunksByDocumentId(request.documentId);
+  if (existingChunks.length === 0) {
+    throw new Error('No content provided and no existing chunks found for re-ingest');
+  }
+  logger.warn('Rebuilding a document from its own chunks — the result repeats every overlap', {
+    documentId: request.documentId,
+    fileName,
+    chunkCount: existingChunks.length,
+  });
+  return { text: existingChunks.map((c) => c.content).join('\n'), origin: 'chunk-join' };
+}
 
 /**
  * Re-ingest a document: deletes old chunks (vectors + MongoDB) and
@@ -970,6 +1330,8 @@ export async function reingestDocument(
     fileName?: string;
     contentType?: string;
     metadata?: Record<string, unknown>;
+    /** Re-chunk this document differently from the rest of the module. */
+    chunkConfig?: IRagChunkConfig;
     updatedBy: string;
   },
 ): Promise<RagDocument> {
@@ -983,54 +1345,45 @@ export async function reingestDocument(
   const doc = await db.findRagDocumentById(request.documentId);
   if (!doc) throw new Error('Document not found');
 
-  // Resolve text content from either direct content or file conversion
-  let textContent: string;
-  if (request.content) {
-    textContent = request.content;
-  } else if (request.fileData) {
-    const fName = request.fileName ?? doc.fileName;
-    const isPlainText = (
-      request.contentType?.startsWith('text/') ||
-      fName.endsWith('.txt') || fName.endsWith('.md') ||
-      fName.endsWith('.csv') || fName.endsWith('.json') ||
-      fName.endsWith('.xml') || fName.endsWith('.html') || fName.endsWith('.htm')
-    );
-    if (isPlainText) {
-      textContent = request.fileData.toString('utf-8');
-    } else {
-      const conversion = await convertToMarkdown(request.fileData, { fileName: fName });
-      const markdown = extractMarkdownContent(conversion);
-      if (!markdown || markdown.trim().length === 0) {
-        throw new Error(`Failed to convert "${fName}" to text.`);
-      }
-      textContent = markdown;
-    }
-  } else {
-    // Reconstruct from existing MongoDB chunks as a fallback
-    const existingChunks = await db.findRagChunksByDocumentId(request.documentId);
-    if (existingChunks.length === 0) {
-      throw new Error('No content provided and no existing chunks found for re-ingest');
-    }
-    textContent = existingChunks.map((c) => c.content).join('\n');
+  const source = await resolveReingestSource(db, tenantDbName, tenantId, projectId, doc, request);
+  const textContent = source.text;
+
+  // Refresh the stored source so the NEXT re-index reads this run's input
+  // rather than the one before it. Unchanged text is left alone — a re-index
+  // triggered by a chunkConfig change must not rewrite the bucket.
+  const sourceHash = hashSourceText(textContent);
+  const sourceIsStored = Boolean(doc.sourceText || doc.sourceTextKey);
+  let storedSource: Awaited<ReturnType<typeof storeDocumentSource>> | undefined;
+  if (doc.sourceHash !== sourceHash || !sourceIsStored) {
+    storedSource = await storeDocumentSource({
+      tenantDbName,
+      tenantId,
+      projectId,
+      ragModule,
+      fileName: request.fileName ?? doc.fileName,
+      contentType: request.contentType ?? doc.contentType,
+      text: textContent,
+      fileData: source.fileData,
+      createdBy: request.updatedBy,
+    });
+
+    // Upload keys are random, so a replacement never overwrites what it
+    // supersedes — the old objects have to be dropped explicitly. Only drop the
+    // ones actually replaced: a failed upload must not take the last copy with it.
+    await discardDocumentSource(tenantDbName, tenantId, projectId, {
+      fileBucketKey: doc.fileBucketKey,
+      sourceTextKey: storedSource.sourceText || storedSource.sourceTextKey ? doc.sourceTextKey : undefined,
+      fileKey: storedSource.fileKey ? doc.fileKey : undefined,
+    }, request.updatedBy);
   }
 
   // 1. Delete old vectors
   const oldChunkCount = doc.chunkCount ?? 0;
-  if (oldChunkCount > 0) {
-    const ids: string[] = [];
-    for (let i = 0; i < oldChunkCount; i++) {
-      ids.push(`${request.ragModuleKey}:${request.documentId}:${i}`);
-    }
-    try {
-      await deleteVectors(tenantDbName, tenantId, projectId ?? '', {
-        providerKey: ragModule.vectorProviderKey,
-        indexKey: ragModule.vectorIndexKey,
-        ids,
-      });
-    } catch (err) {
-      logger.warn('Reingest: failed to delete old vectors', { error: err });
-    }
-  }
+  await removeVectors(
+    tenantDbName, tenantId, projectId, ragModule,
+    documentVectorIds(request.ragModuleKey, request.documentId, oldChunkCount),
+    `re-ingest of document ${request.documentId}`,
+  );
 
   // 2. Delete old MongoDB chunks
   try {
@@ -1049,7 +1402,7 @@ export async function reingestDocument(
       tenantId,
       projectId,
       ragModule,
-      chunkConfig: chunkConfigFor(ragModule, doc),
+      chunkConfig: request.chunkConfig ?? chunkConfigFor(ragModule, doc),
       documentId: request.documentId,
       fileName: request.fileName ?? doc.fileName,
       text: textContent,
@@ -1057,6 +1410,20 @@ export async function reingestDocument(
     });
 
     const now = new Date();
+    // The whole source block is rewritten, not merged: an inline source that
+    // outgrew the cap (or the reverse) has to leave the field it moved out of
+    // empty, or the document would carry two disagreeing copies of itself.
+    const sourceFields = storedSource
+      ? {
+        sourceHash: storedSource.sourceHash,
+        sourceText: storedSource.sourceText,
+        sourceTextKey: storedSource.sourceTextKey,
+        fileKey: storedSource.fileKey ?? doc.fileKey,
+        fileBucketKey: storedSource.fileBucketKey ?? doc.fileBucketKey,
+        fileProviderKey: storedSource.fileProviderKey ?? doc.fileProviderKey,
+      }
+      : {};
+
     await db.updateRagDocument(request.documentId, {
       status: 'indexed',
       chunkCount,
@@ -1064,19 +1431,31 @@ export async function reingestDocument(
       fileName: request.fileName ?? doc.fileName,
       size: Buffer.byteLength(textContent, 'utf-8'),
       updatedBy: request.updatedBy,
+      // Persisted so the next re-index reproduces these chunks rather than
+      // silently reverting to the module's config.
+      ...(request.chunkConfig ? { chunkConfig: request.chunkConfig } : {}),
+      ...sourceFields,
     });
 
     await db.updateRagModule(String(ragModule._id), {
       totalChunks: Math.max(0, (ragModule.totalChunks ?? 0) - oldChunkCount + chunkCount),
     } as Partial<IRagModule>);
 
-    return {
+    logger.debug('Re-indexed document', {
+      documentId: request.documentId,
+      ragModuleKey: request.ragModuleKey,
+      origin: source.origin,
+      chunkCount,
+    });
+
+    return withoutInlineSource({
       ...doc,
+      ...sourceFields,
       status: 'indexed' as const,
       chunkCount,
       lastIndexedAt: now,
       fileName: request.fileName ?? doc.fileName,
-    };
+    });
   } catch (error) {
     const msg = error instanceof Error ? error.message : 'Re-ingest failed';
     await db.updateRagDocument(request.documentId, {
@@ -1092,7 +1471,7 @@ export async function reingestDocument(
 export async function listRagQueryLogs(
   tenantDbName: string,
   ragModuleKey: string,
-  options?: { limit?: number; from?: Date; to?: Date },
+  options?: Parameters<DatabaseProvider['listRagQueryLogs']>[1],
 ): Promise<IRagQueryLog[]> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
@@ -1103,8 +1482,22 @@ export async function countRagQueryLogs(
   tenantDbName: string,
   ragModuleKey: string,
   options?: { from?: Date; to?: Date },
-): Promise<{ total: number; avgLatencyMs: number }> {
+): Promise<Awaited<ReturnType<DatabaseProvider['countRagQueryLogs']>>> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
   return db.countRagQueryLogs(ragModuleKey, options);
+}
+
+/**
+ * Distribution of best-score-per-query, so the minScore slider can be set
+ * against what this module actually returns rather than guessed at.
+ */
+export async function aggregateRagQueryScoreDistribution(
+  tenantDbName: string,
+  ragModuleKey: string,
+  options?: { from?: Date; to?: Date },
+): Promise<Array<{ bucket: string; count: number }>> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  return db.aggregateRagQueryScoreDistribution(ragModuleKey, options);
 }

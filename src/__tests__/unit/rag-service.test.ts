@@ -20,6 +20,15 @@ vi.mock('@/lib/services/vector/vectorService', () => ({
   queryVectorIndex: vi.fn().mockResolvedValue({ matches: [] }),
   deleteVectors: vi.fn().mockResolvedValue({ deleted: 1 }),
 }));
+vi.mock('@/lib/services/files/fileService', () => ({
+  uploadFile: vi.fn().mockResolvedValue({ record: { key: 'stored-object-key' } }),
+  downloadFile: vi.fn().mockResolvedValue({
+    data: Buffer.from('Bytes from the bucket'),
+    fileName: 'doc.txt',
+    contentType: 'text/plain',
+  }),
+  deleteFile: vi.fn().mockResolvedValue(true),
+}));
 
 import {
   createRagModule,
@@ -31,12 +40,17 @@ import {
   listRagDocuments,
   getRagDocument,
   ingestDocument,
+  ingestFile,
   queryRag,
   deleteRagDocument,
+  reingestDocument,
+  reindexReasonForUpdate,
 } from '@/lib/services/rag/ragService';
+import { hashSourceText, INLINE_SOURCE_MAX_CHARS } from '@/lib/services/rag/ragSource';
 import { getDatabase } from '@/lib/database';
 import { handleEmbeddingRequest } from '@/lib/services/models/inferenceService';
 import { upsertVectors, queryVectorIndex, deleteVectors } from '@/lib/services/vector/vectorService';
+import { deleteFile, downloadFile, uploadFile } from '@/lib/services/files/fileService';
 
 const DB_NAME = 'tenant_acme';
 const TENANT_ID = 'tenant-1';
@@ -60,6 +74,13 @@ const mockModule = {
   totalDocuments: 0,
   totalChunks: 0,
   createdBy: 'user-1',
+};
+
+/** A module wired to a Document Store bucket, so the source can be persisted. */
+const mockModuleWithBucket = {
+  ...mockModule,
+  fileBucketKey: 'kb-bucket',
+  fileProviderKey: 'aws-s3',
 };
 
 const mockDocument = {
@@ -101,6 +122,39 @@ describe('RAG Service', () => {
       const result = await createRagModule(DB_NAME, TENANT_ID, PROJECT_ID, req);
       expect(result).toMatchObject({ key: 'my-rag', status: 'active' });
       expect(db.createRagModule).toHaveBeenCalledWith(expect.objectContaining({ tenantId: TENANT_ID, status: 'active' }));
+    });
+
+    it('isolates new modules by module key', async () => {
+      db.findRagModuleByKey.mockResolvedValue(null);
+      db.createRagModule.mockResolvedValue(mockModule);
+      await createRagModule(DB_NAME, TENANT_ID, PROJECT_ID, {
+        name: 'My RAG',
+        embeddingModelKey: 'emb',
+        vectorProviderKey: 'pin',
+        vectorIndexKey: 'idx',
+        chunkConfig: { strategy: 'recursive_character' as const, chunkSize: 512, chunkOverlap: 50 },
+        createdBy: 'user-1',
+      });
+      expect(db.createRagModule).toHaveBeenCalledWith(
+        expect.objectContaining({ isolateByModule: true }),
+      );
+    });
+
+    it('honours an explicit isolateByModule of false', async () => {
+      db.findRagModuleByKey.mockResolvedValue(null);
+      db.createRagModule.mockResolvedValue(mockModule);
+      await createRagModule(DB_NAME, TENANT_ID, PROJECT_ID, {
+        name: 'External index',
+        embeddingModelKey: 'emb',
+        vectorProviderKey: 'pin',
+        vectorIndexKey: 'idx',
+        chunkConfig: { strategy: 'recursive_character' as const, chunkSize: 512, chunkOverlap: 50 },
+        isolateByModule: false,
+        createdBy: 'user-1',
+      });
+      expect(db.createRagModule).toHaveBeenCalledWith(
+        expect.objectContaining({ isolateByModule: false }),
+      );
     });
 
     it('switches to tenant database', async () => {
@@ -148,14 +202,140 @@ describe('RAG Service', () => {
       expect(call.name).toBeUndefined();
       expect(call.updatedBy).toBe('user-1');
     });
+
+    it('flags a re-index when the chunk config moves chunk boundaries', async () => {
+      db.findRagModuleById.mockResolvedValue(mockModule);
+      db.updateRagModule.mockResolvedValue(mockModule);
+      await updateRagModule(DB_NAME, 'ragmod-1', {
+        chunkConfig: { strategy: 'recursive_character', chunkSize: 1024, chunkOverlap: 50 },
+        updatedBy: 'user-1',
+      });
+      expect(db.updateRagModule).toHaveBeenCalledWith(
+        'ragmod-1',
+        expect.objectContaining({ reindexRequired: true }),
+      );
+    });
+
+    it('flags a re-index when the embedding model changes', async () => {
+      db.findRagModuleById.mockResolvedValue(mockModule);
+      db.updateRagModule.mockResolvedValue(mockModule);
+      await updateRagModule(DB_NAME, 'ragmod-1', {
+        embeddingModelKey: 'text-embed-4',
+        updatedBy: 'user-1',
+      });
+      expect(db.updateRagModule).toHaveBeenCalledWith(
+        'ragmod-1',
+        expect.objectContaining({ reindexRequired: true }),
+      );
+    });
+
+    it('does not flag a re-index for cosmetic changes', async () => {
+      db.findRagModuleById.mockResolvedValue(mockModule);
+      db.updateRagModule.mockResolvedValue(mockModule);
+      await updateRagModule(DB_NAME, 'ragmod-1', { name: 'Renamed', updatedBy: 'user-1' });
+      const call = (db.updateRagModule as ReturnType<typeof vi.fn>).mock.calls[0][1];
+      expect(call.reindexRequired).toBeUndefined();
+    });
+
+    it('does not flag a re-index for a parentWindowSize change, which is query-time only', async () => {
+      db.findRagModuleById.mockResolvedValue(mockModule);
+      db.updateRagModule.mockResolvedValue(mockModule);
+      await updateRagModule(DB_NAME, 'ragmod-1', {
+        chunkConfig: { ...mockModule.chunkConfig, parentWindowSize: 2048 },
+        updatedBy: 'user-1',
+      });
+      const call = (db.updateRagModule as ReturnType<typeof vi.fn>).mock.calls[0][1];
+      expect(call.reindexRequired).toBeUndefined();
+    });
+  });
+
+  describe('reindexReasonForUpdate', () => {
+    it('names the embedding model as the reason', () => {
+      expect(reindexReasonForUpdate(mockModule, { embeddingModelKey: 'other' })).toBe('embedding-model');
+    });
+
+    it('names the chunk config as the reason', () => {
+      expect(reindexReasonForUpdate(mockModule, {
+        chunkConfig: { strategy: 'token', chunkSize: 512, chunkOverlap: 50 },
+      })).toBe('chunk-config');
+    });
+
+    it('returns undefined when nothing that shapes a vector changed', () => {
+      expect(reindexReasonForUpdate(mockModule, {
+        embeddingModelKey: mockModule.embeddingModelKey,
+        chunkConfig: { ...mockModule.chunkConfig },
+      })).toBeUndefined();
+    });
   });
 
   describe('deleteRagModule', () => {
-    it('deletes the module and returns true', async () => {
+    const moduleDocuments = [
+      {
+        ...mockDocument,
+        _id: 'ragdoc-1',
+        chunkCount: 2,
+        fileBucketKey: 'kb-bucket',
+        sourceTextKey: 'source-1.md',
+        fileKey: 'original-1.pdf',
+      },
+      { ...mockDocument, _id: 'ragdoc-2', chunkCount: 1 },
+    ];
+
+    beforeEach(() => {
+      db.findRagModuleById.mockResolvedValue(mockModuleWithBucket);
+      db.listRagDocuments.mockResolvedValue(moduleDocuments);
+      db.deleteRagChunksByModuleKey.mockResolvedValue(3);
+      db.deleteRagDocumentsByModuleKey.mockResolvedValue(2);
       db.deleteRagModule.mockResolvedValue(true);
-      const result = await deleteRagModule(DB_NAME, 'ragmod-1');
+    });
+
+    it('deletes the module and returns true', async () => {
+      const result = await deleteRagModule(DB_NAME, TENANT_ID, PROJECT_ID, 'ragmod-1');
       expect(result).toBe(true);
       expect(db.deleteRagModule).toHaveBeenCalledWith('ragmod-1');
+    });
+
+    it('returns false without touching anything when the module is gone', async () => {
+      db.findRagModuleById.mockResolvedValue(null);
+      const result = await deleteRagModule(DB_NAME, TENANT_ID, PROJECT_ID, 'ragmod-1');
+      expect(result).toBe(false);
+      expect(db.deleteRagDocumentsByModuleKey).not.toHaveBeenCalled();
+    });
+
+    it("deletes every document's vectors instead of orphaning them", async () => {
+      await deleteRagModule(DB_NAME, TENANT_ID, PROJECT_ID, 'ragmod-1');
+      expect(deleteVectors).toHaveBeenCalledWith(
+        DB_NAME, TENANT_ID, PROJECT_ID,
+        expect.objectContaining({
+          providerKey: 'pinecone',
+          indexKey: 'my-index',
+          ids: ['my-rag:ragdoc-1:0', 'my-rag:ragdoc-1:1', 'my-rag:ragdoc-2:0'],
+        }),
+      );
+    });
+
+    it('deletes the chunks and documents the module owned', async () => {
+      await deleteRagModule(DB_NAME, TENANT_ID, PROJECT_ID, 'ragmod-1');
+      expect(db.deleteRagChunksByModuleKey).toHaveBeenCalledWith('my-rag');
+      expect(db.deleteRagDocumentsByModuleKey).toHaveBeenCalledWith('my-rag');
+    });
+
+    it('deletes stored sources so the tenant stops paying for them', async () => {
+      await deleteRagModule(DB_NAME, TENANT_ID, PROJECT_ID, 'ragmod-1');
+      expect(deleteFile).toHaveBeenCalledTimes(2);
+      expect(deleteFile).toHaveBeenCalledWith(
+        DB_NAME, TENANT_ID, PROJECT_ID, 'kb-bucket', 'source-1.md', expect.any(String),
+      );
+      expect(deleteFile).toHaveBeenCalledWith(
+        DB_NAME, TENANT_ID, PROJECT_ID, 'kb-bucket', 'original-1.pdf', expect.any(String),
+      );
+    });
+
+    it('still deletes the rows when the vector store is unreachable', async () => {
+      (deleteVectors as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('index offline'));
+      const result = await deleteRagModule(DB_NAME, TENANT_ID, PROJECT_ID, 'ragmod-1');
+      expect(result).toBe(true);
+      expect(db.deleteRagDocumentsByModuleKey).toHaveBeenCalledWith('my-rag');
     });
   });
 
@@ -205,6 +385,13 @@ describe('RAG Service', () => {
       const result = await listRagDocuments(DB_NAME, 'my-rag');
       expect(result).toHaveLength(1);
       expect(db.listRagDocuments).toHaveBeenCalledWith('my-rag', undefined);
+    });
+
+    it('leaves the inline source out of the listing', async () => {
+      db.listRagDocuments.mockResolvedValue([{ ...mockDocument, sourceText: 'a very long document' }]);
+      const [document] = await listRagDocuments(DB_NAME, 'my-rag');
+      expect(document.sourceText).toBeUndefined();
+      expect(document.fileName).toBe('doc.txt');
     });
   });
 
@@ -308,6 +495,165 @@ describe('RAG Service', () => {
       expect(result.chunkCount).toBe(0);
       expect(result.status).toBe('indexed');
     });
+
+    // ── Source persistence ──
+
+    it('stores the extracted text inline with its hash', async () => {
+      await ingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, ingestReq);
+      expect(db.createRagDocument).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sourceText: ingestReq.content,
+          sourceHash: hashSourceText(ingestReq.content),
+        }),
+      );
+      expect(uploadFile).not.toHaveBeenCalled();
+    });
+
+    it('keeps the inline source out of the returned document', async () => {
+      const result = await ingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, ingestReq);
+      expect(result.sourceText).toBeUndefined();
+    });
+
+    it('uploads the text to the bucket once it outgrows the inline cap', async () => {
+      db.findRagModuleByKey.mockResolvedValue({
+        ...mockModuleWithBucket,
+        chunkConfig: { strategy: 'recursive_character' as const, chunkSize: 20_000, chunkOverlap: 0 },
+      });
+      const content = 'lorem ipsum '.repeat(Math.ceil(INLINE_SOURCE_MAX_CHARS / 12) + 10);
+
+      await ingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, { ...ingestReq, content });
+
+      expect(uploadFile).toHaveBeenCalledWith(
+        DB_NAME, TENANT_ID, PROJECT_ID,
+        expect.objectContaining({ bucketKey: 'kb-bucket', contentType: 'text/markdown' }),
+      );
+      expect(db.createRagDocument).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sourceTextKey: 'stored-object-key',
+          fileBucketKey: 'kb-bucket',
+        }),
+      );
+      const [created] = (db.createRagDocument as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(created.sourceText).toBeUndefined();
+    });
+
+    it('ingests anyway when the bucket rejects the upload', async () => {
+      db.findRagModuleByKey.mockResolvedValue(mockModuleWithBucket);
+      (uploadFile as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('bucket full'));
+
+      const result = await ingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, {
+        ...ingestReq,
+        fileData: Buffer.from('raw bytes'),
+      });
+
+      expect(result.status).toBe('indexed');
+      const [created] = (db.createRagDocument as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(created.fileKey).toBeUndefined();
+    });
+
+    // ── Content-hash de-duplication ──
+
+    it('skips re-embedding a document whose content has not changed', async () => {
+      db.findRagDocumentByFileName.mockResolvedValue({
+        ...mockDocument,
+        _id: 'ragdoc-existing',
+        sourceHash: hashSourceText(ingestReq.content),
+      });
+
+      const result = await ingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, ingestReq);
+
+      expect(result._id).toBe('ragdoc-existing');
+      expect(db.createRagDocument).not.toHaveBeenCalled();
+      expect(upsertVectors).not.toHaveBeenCalled();
+    });
+
+    it('re-embeds when the same file name arrives with different content', async () => {
+      db.findRagDocumentByFileName.mockResolvedValue({
+        ...mockDocument,
+        _id: 'ragdoc-existing',
+        sourceHash: hashSourceText('something else entirely'),
+      });
+
+      await ingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, ingestReq);
+
+      expect(db.createRagDocument).toHaveBeenCalled();
+      expect(upsertVectors).toHaveBeenCalled();
+    });
+
+    it('re-embeds unchanged content when force is set', async () => {
+      db.findRagDocumentByFileName.mockResolvedValue({
+        ...mockDocument,
+        _id: 'ragdoc-existing',
+        sourceHash: hashSourceText(ingestReq.content),
+      });
+
+      await ingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, { ...ingestReq, force: true });
+
+      expect(db.findRagDocumentByFileName).not.toHaveBeenCalled();
+      expect(upsertVectors).toHaveBeenCalled();
+    });
+
+    it('re-embeds when the previous attempt for that file name failed', async () => {
+      db.findRagDocumentByFileName.mockResolvedValue({
+        ...mockDocument,
+        _id: 'ragdoc-existing',
+        status: 'failed' as const,
+        sourceHash: hashSourceText(ingestReq.content),
+      });
+
+      await ingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, ingestReq);
+
+      expect(upsertVectors).toHaveBeenCalled();
+    });
+  });
+
+  // ─── ingestFile ─────────────────────────────────────────────────────
+
+  describe('ingestFile', () => {
+    beforeEach(() => {
+      db.findRagModuleByKey.mockResolvedValue(mockModuleWithBucket);
+      db.createRagDocument.mockResolvedValue({ ...mockDocument, _id: 'ragdoc-1', status: 'processing', chunkCount: 0 });
+      db.updateRagDocument.mockResolvedValue(null);
+      db.updateRagModule.mockResolvedValue(null);
+    });
+
+    it('keeps the original bytes so a re-index can re-run the converter', async () => {
+      await ingestFile(DB_NAME, TENANT_ID, PROJECT_ID, {
+        ragModuleKey: 'my-rag',
+        fileName: 'handbook.txt',
+        fileData: Buffer.from('The employee handbook, in plain text.'),
+        contentType: 'text/plain',
+        createdBy: 'user-1',
+      });
+
+      expect(uploadFile).toHaveBeenCalledTimes(1);
+      expect(uploadFile).toHaveBeenCalledWith(
+        DB_NAME, TENANT_ID, PROJECT_ID,
+        expect.objectContaining({ bucketKey: 'kb-bucket', fileName: 'handbook.txt' }),
+      );
+      expect(db.createRagDocument).toHaveBeenCalledWith(
+        expect.objectContaining({
+          fileKey: 'stored-object-key',
+          fileBucketKey: 'kb-bucket',
+          fileProviderKey: 'aws-s3',
+        }),
+      );
+    });
+
+    it('stores nothing when the module has no bucket', async () => {
+      db.findRagModuleByKey.mockResolvedValue(mockModule);
+      await ingestFile(DB_NAME, TENANT_ID, PROJECT_ID, {
+        ragModuleKey: 'my-rag',
+        fileName: 'handbook.txt',
+        fileData: Buffer.from('The employee handbook, in plain text.'),
+        contentType: 'text/plain',
+        createdBy: 'user-1',
+      });
+      expect(uploadFile).not.toHaveBeenCalled();
+      expect(db.createRagDocument).toHaveBeenCalledWith(
+        expect.objectContaining({ sourceText: 'The employee handbook, in plain text.' }),
+      );
+    });
   });
 
   // ─── queryRag ───────────────────────────────────────────────────────
@@ -361,10 +707,49 @@ describe('RAG Service', () => {
       expect(result.matches[0].score).toBe(0.95);
     });
 
-    it('logs the query', async () => {
+    it('logs the query with its retrieval telemetry', async () => {
       await queryRag(DB_NAME, TENANT_ID, PROJECT_ID, queryReq);
       expect(db.createRagQueryLog).toHaveBeenCalledWith(
-        expect.objectContaining({ ragModuleKey: 'my-rag', query: 'what is AI?' }),
+        expect.objectContaining({
+          tenantId: TENANT_ID,
+          projectId: PROJECT_ID,
+          ragModuleKey: 'my-rag',
+          query: 'what is AI?',
+          topK: 3,
+          matchCount: 1,
+          preFilterMatchCount: 1,
+          topScore: 0.95,
+          avgScore: 0.95,
+          hybrid: false,
+          latencyMs: expect.any(Number),
+          metadata: expect.objectContaining({
+            embeddingMs: expect.any(Number),
+            vectorLatencyMs: expect.any(Number),
+          }),
+        }),
+      );
+    });
+
+    it('records what the threshold discarded, not just what survived', async () => {
+      (queryVectorIndex as ReturnType<typeof vi.fn>).mockResolvedValue({
+        matches: [
+          { id: 'a', score: 0.4, metadata: {} },
+          { id: 'b', score: 0.3, metadata: {} },
+        ],
+      });
+      db.findRagChunksByVectorIds.mockResolvedValue([]);
+
+      const result = await queryRag(DB_NAME, TENANT_ID, PROJECT_ID, { ...queryReq, minScore: 0.8 });
+
+      expect(result.matches).toHaveLength(0);
+      expect(db.createRagQueryLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          matchCount: 0,
+          preFilterMatchCount: 2,
+          minScoreApplied: 0.8,
+          topScore: 0,
+          avgScore: 0,
+        }),
       );
     });
 
@@ -457,6 +842,181 @@ describe('RAG Service', () => {
       ).rejects.toThrow(/requires a number/);
       expect(queryVectorIndex).not.toHaveBeenCalled();
     });
+
+    // ── Module isolation ──
+
+    it('ANDs the module key in when isolation is on', async () => {
+      db.findRagModuleByKey.mockResolvedValue({ ...mockModule, isolateByModule: true });
+
+      await queryRag(DB_NAME, TENANT_ID, PROJECT_ID, queryReq);
+
+      expect(queryVectorIndex).toHaveBeenCalledWith(
+        DB_NAME, TENANT_ID, PROJECT_ID,
+        expect.objectContaining({
+          query: expect.objectContaining({ filter: { _ragModule: 'my-rag' } }),
+        }),
+      );
+    });
+
+    it('keeps the default and request filters alongside the isolation guard', async () => {
+      db.findRagModuleByKey.mockResolvedValue({
+        ...mockModule,
+        isolateByModule: true,
+        defaultFilter: { source: 'crawler' },
+      });
+
+      await queryRag(DB_NAME, TENANT_ID, PROJECT_ID, { ...queryReq, filter: { category: 'tech' } });
+
+      expect(queryVectorIndex).toHaveBeenCalledWith(
+        DB_NAME, TENANT_ID, PROJECT_ID,
+        expect.objectContaining({
+          query: expect.objectContaining({
+            filter: {
+              $and: [{ source: 'crawler' }, { category: 'tech' }, { _ragModule: 'my-rag' }],
+            },
+          }),
+        }),
+      );
+    });
+
+    it('defaults isolation on when another module shares the index', async () => {
+      db.countRagModulesByVectorIndexKey.mockResolvedValue(1);
+
+      await queryRag(DB_NAME, TENANT_ID, PROJECT_ID, queryReq);
+
+      expect(db.countRagModulesByVectorIndexKey).toHaveBeenCalledWith(
+        'my-index',
+        { projectId: PROJECT_ID, excludeKey: 'my-rag' },
+      );
+      expect(queryVectorIndex).toHaveBeenCalledWith(
+        DB_NAME, TENANT_ID, PROJECT_ID,
+        expect.objectContaining({
+          query: expect.objectContaining({ filter: { _ragModule: 'my-rag' } }),
+        }),
+      );
+    });
+
+    it('leaves isolation off for a sole owner, whose index may be externally populated', async () => {
+      db.countRagModulesByVectorIndexKey.mockResolvedValue(0);
+
+      await queryRag(DB_NAME, TENANT_ID, PROJECT_ID, queryReq);
+
+      expect(queryVectorIndex).toHaveBeenCalledWith(
+        DB_NAME, TENANT_ID, PROJECT_ID,
+        expect.objectContaining({ query: expect.objectContaining({ filter: undefined }) }),
+      );
+    });
+
+    it('never isolates a module that opted out, however many share the index', async () => {
+      db.findRagModuleByKey.mockResolvedValue({ ...mockModule, isolateByModule: false });
+      db.countRagModulesByVectorIndexKey.mockResolvedValue(4);
+
+      await queryRag(DB_NAME, TENANT_ID, PROJECT_ID, queryReq);
+
+      expect(db.countRagModulesByVectorIndexKey).not.toHaveBeenCalled();
+      expect(queryVectorIndex).toHaveBeenCalledWith(
+        DB_NAME, TENANT_ID, PROJECT_ID,
+        expect.objectContaining({ query: expect.objectContaining({ filter: undefined }) }),
+      );
+    });
+
+    // ── Hybrid ──
+
+    it('passes the query text and fusion settings when hybrid is enabled', async () => {
+      db.findRagModuleByKey.mockResolvedValue({
+        ...mockModule,
+        hybrid: { enabled: true, mode: 'weighted' as const, alpha: 0.7 },
+      });
+
+      await queryRag(DB_NAME, TENANT_ID, PROJECT_ID, queryReq);
+
+      expect(queryVectorIndex).toHaveBeenCalledWith(
+        DB_NAME, TENANT_ID, PROJECT_ID,
+        expect.objectContaining({
+          query: expect.objectContaining({
+            text: 'what is AI?',
+            hybrid: { mode: 'weighted', alpha: 0.7, k: undefined },
+          }),
+        }),
+      );
+      expect(db.createRagQueryLog).toHaveBeenCalledWith(
+        expect.objectContaining({ hybrid: true }),
+      );
+    });
+
+    it('sends no query text when hybrid is off', async () => {
+      db.findRagModuleByKey.mockResolvedValue({
+        ...mockModule,
+        hybrid: { enabled: false, mode: 'rrf' as const },
+      });
+
+      await queryRag(DB_NAME, TENANT_ID, PROJECT_ID, queryReq);
+
+      const [, , , request] = (queryVectorIndex as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(request.query.text).toBeUndefined();
+      expect(request.query.hybrid).toBeUndefined();
+    });
+
+    // ── Parent windows ──
+
+    describe('parent windows', () => {
+      const source = 'Alpha beta gamma. Delta epsilon zeta. Eta theta iota.';
+
+      beforeEach(() => {
+        db.findRagModuleByKey.mockResolvedValue({
+          ...mockModule,
+          chunkConfig: { ...mockModule.chunkConfig, parentWindowSize: 600 },
+        });
+        db.findRagChunksByVectorIds.mockResolvedValue([{
+          vectorId: 'my-rag:ragdoc-1:0',
+          content: 'Delta epsilon zeta.',
+          charStart: 18,
+          charEnd: 37,
+          tenantId: TENANT_ID,
+          ragModuleKey: 'my-rag',
+          documentId: 'ragdoc-1',
+          chunkIndex: 0,
+        }]);
+      });
+
+      it('returns the window around the chunk rather than the chunk', async () => {
+        db.findRagDocumentById.mockResolvedValue({ ...mockDocument, sourceText: source });
+
+        const result = await queryRag(DB_NAME, TENANT_ID, PROJECT_ID, queryReq);
+
+        expect(result.matches[0].content).toBe(source);
+      });
+
+      it('reads each document source once however many matches it produced', async () => {
+        (queryVectorIndex as ReturnType<typeof vi.fn>).mockResolvedValue({
+          matches: [
+            { id: 'my-rag:ragdoc-1:0', score: 0.95, metadata: { _documentId: 'ragdoc-1' } },
+            { id: 'my-rag:ragdoc-1:1', score: 0.91, metadata: { _documentId: 'ragdoc-1' } },
+          ],
+        });
+        db.findRagDocumentById.mockResolvedValue({ ...mockDocument, sourceText: source });
+
+        await queryRag(DB_NAME, TENANT_ID, PROJECT_ID, queryReq);
+
+        expect(db.findRagDocumentById).toHaveBeenCalledTimes(1);
+      });
+
+      it('falls back to the chunk when the source is gone', async () => {
+        db.findRagDocumentById.mockResolvedValue({ ...mockDocument });
+
+        const result = await queryRag(DB_NAME, TENANT_ID, PROJECT_ID, queryReq);
+
+        expect(result.matches[0].content).toBe('Delta epsilon zeta.');
+      });
+
+      it('touches no document when the module has no parent window', async () => {
+        db.findRagModuleByKey.mockResolvedValue(mockModule);
+
+        await queryRag(DB_NAME, TENANT_ID, PROJECT_ID, queryReq);
+
+        expect(db.findRagDocumentById).not.toHaveBeenCalled();
+      });
+    });
   });
 
   // ─── deleteRagDocument ──────────────────────────────────────────────
@@ -513,6 +1073,160 @@ describe('RAG Service', () => {
       db.findRagDocumentById.mockResolvedValue({ ...mockDocument, chunkCount: 0 });
       await deleteRagDocument(DB_NAME, TENANT_ID, PROJECT_ID, deleteReq);
       expect(deleteVectors).not.toHaveBeenCalled();
+    });
+
+    it('deletes the stored source alongside the record', async () => {
+      db.findRagDocumentById.mockResolvedValue({
+        ...mockDocument,
+        chunkCount: 3,
+        fileBucketKey: 'kb-bucket',
+        sourceTextKey: 'source-1.md',
+        fileKey: 'original-1.pdf',
+      });
+
+      await deleteRagDocument(DB_NAME, TENANT_ID, PROJECT_ID, deleteReq);
+
+      expect(deleteFile).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // ─── reingestDocument ───────────────────────────────────────────────
+
+  describe('reingestDocument', () => {
+    const reingestReq = {
+      ragModuleKey: 'my-rag',
+      documentId: 'ragdoc-1',
+      updatedBy: 'user-1',
+    };
+
+    beforeEach(() => {
+      db.findRagModuleByKey.mockResolvedValue(mockModuleWithBucket);
+      db.updateRagDocument.mockResolvedValue(null);
+      db.updateRagModule.mockResolvedValue(null);
+      db.deleteRagChunksByDocumentId.mockResolvedValue(2);
+    });
+
+    const indexedText = () => {
+      const [rows] = (db.bulkInsertRagChunks as ReturnType<typeof vi.fn>).mock.calls[0];
+      return (rows as Array<{ content: string }>).map((r) => r.content).join('');
+    };
+
+    it('re-runs the converter over the stored original bytes', async () => {
+      db.findRagDocumentById.mockResolvedValue({
+        ...mockDocument,
+        fileBucketKey: 'kb-bucket',
+        fileKey: 'original-1.txt',
+        sourceText: 'A stale extraction',
+      });
+
+      await reingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, reingestReq);
+
+      expect(downloadFile).toHaveBeenCalledWith(
+        DB_NAME, TENANT_ID, PROJECT_ID, 'kb-bucket', 'original-1.txt',
+      );
+      expect(indexedText()).toContain('Bytes from the bucket');
+    });
+
+    it('falls back to the stored text when there are no original bytes', async () => {
+      db.findRagDocumentById.mockResolvedValue({
+        ...mockDocument,
+        sourceText: 'The document exactly as it was indexed.',
+      });
+
+      await reingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, reingestReq);
+
+      expect(db.findRagChunksByDocumentId).not.toHaveBeenCalled();
+      expect(indexedText()).toContain('The document exactly as it was indexed.');
+    });
+
+    it('prefers explicit content over anything stored', async () => {
+      db.findRagDocumentById.mockResolvedValue({
+        ...mockDocument,
+        fileBucketKey: 'kb-bucket',
+        fileKey: 'original-1.txt',
+        sourceText: 'The stored text',
+      });
+
+      await reingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, {
+        ...reingestReq,
+        content: 'Fresh content from the caller',
+      });
+
+      expect(downloadFile).not.toHaveBeenCalled();
+      expect(indexedText()).toContain('Fresh content from the caller');
+    });
+
+    it('joins the chunks only when no source survives at all', async () => {
+      db.findRagDocumentById.mockResolvedValue({ ...mockDocument });
+      db.findRagChunksByDocumentId.mockResolvedValue([
+        { vectorId: 'v0', content: 'first half', tenantId: TENANT_ID, ragModuleKey: 'my-rag', documentId: 'ragdoc-1', chunkIndex: 0 },
+        { vectorId: 'v1', content: 'half second', tenantId: TENANT_ID, ragModuleKey: 'my-rag', documentId: 'ragdoc-1', chunkIndex: 1 },
+      ]);
+
+      await reingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, reingestReq);
+
+      expect(indexedText()).toContain('first half');
+    });
+
+    it('throws when there is neither a source nor a chunk to rebuild from', async () => {
+      db.findRagDocumentById.mockResolvedValue({ ...mockDocument });
+      db.findRagChunksByDocumentId.mockResolvedValue([]);
+
+      await expect(
+        reingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, reingestReq),
+      ).rejects.toThrow(/no existing chunks/i);
+    });
+
+    it('stores the new source and drops the object it replaced', async () => {
+      db.findRagDocumentById.mockResolvedValue({
+        ...mockDocument,
+        fileBucketKey: 'kb-bucket',
+        sourceTextKey: 'old-source.md',
+        sourceText: 'The previous extraction',
+      });
+
+      await reingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, {
+        ...reingestReq,
+        content: 'Fresh content from the caller',
+      });
+
+      expect(deleteFile).toHaveBeenCalledWith(
+        DB_NAME, TENANT_ID, PROJECT_ID, 'kb-bucket', 'old-source.md', 'user-1',
+      );
+      expect(db.updateRagDocument).toHaveBeenLastCalledWith(
+        'ragdoc-1',
+        expect.objectContaining({
+          status: 'indexed',
+          sourceText: 'Fresh content from the caller',
+          sourceHash: hashSourceText('Fresh content from the caller'),
+          sourceTextKey: undefined,
+        }),
+      );
+    });
+
+    it('leaves the bucket alone when the content is unchanged', async () => {
+      const unchanged = 'The document exactly as it was indexed.';
+      db.findRagDocumentById.mockResolvedValue({
+        ...mockDocument,
+        sourceText: unchanged,
+        sourceHash: hashSourceText(unchanged),
+      });
+
+      await reingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, reingestReq);
+
+      expect(uploadFile).not.toHaveBeenCalled();
+      expect(deleteFile).not.toHaveBeenCalled();
+    });
+
+    it('deletes the old vectors before writing the new ones', async () => {
+      db.findRagDocumentById.mockResolvedValue({ ...mockDocument, chunkCount: 2, sourceText: 'Some source text' });
+
+      await reingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, reingestReq);
+
+      expect(deleteVectors).toHaveBeenCalledWith(
+        DB_NAME, TENANT_ID, PROJECT_ID,
+        expect.objectContaining({ ids: ['my-rag:ragdoc-1:0', 'my-rag:ragdoc-1:1'] }),
+      );
     });
   });
 });

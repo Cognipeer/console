@@ -11,6 +11,13 @@ import {
     type VectorFilterOperator,
 } from '../domains/vectorFilter';
 import { toAzureMetadataKeyValues, toAzureODataFilter } from './vectorFilterTranslators';
+import {
+    DEFAULT_RRF_K,
+    describeHybrid,
+    extractVectorText,
+    hybridCandidateCount,
+    normalizeFusedScore,
+} from '../domains/vectorHybrid';
 import type {
     CreateVectorIndexInput,
     VectorIndexHandle,
@@ -40,6 +47,7 @@ interface AzureSearchDocument {
     metadata: string;
     metadata_kv?: string[];
     metadata_keys?: string[];
+    content?: string;
 }
 
 const ID_FIELD = 'id';
@@ -50,6 +58,11 @@ const METADATA_FIELD = 'metadata';
 const METADATA_KV_FIELD = 'metadata_kv';
 const METADATA_KEYS_FIELD = 'metadata_keys';
 const FILTER_SCHEMA_VERSION = 'kv-v1';
+// Azure cannot run a keyword query against the metadata blob either — that
+// field is stored, not searchable — so hybrid indexes carry the chunk text in a
+// searchable column of its own.
+const CONTENT_FIELD = 'content';
+const CONTENT_SCHEMA_VERSION = 'text-v1';
 
 /** Operators expressible over the flattened string collections. */
 const AZURE_FILTER_OPERATORS: VectorFilterOperator[] = [
@@ -65,6 +78,10 @@ const AZURE_FILTER_OPERATORS: VectorFilterOperator[] = [
 
 function hasFilterableSchema(handle: VectorIndexHandle): boolean {
     return handle.metadata?.filterSchema === FILTER_SCHEMA_VERSION;
+}
+
+function hasSearchableSchema(handle: VectorIndexHandle): boolean {
+    return handle.metadata?.contentSchema === CONTENT_SCHEMA_VERSION;
 }
 
 function requireFilterableSchema(handle: VectorIndexHandle): void {
@@ -206,6 +223,7 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
         'vector.provider': 'azure-ai-search',
         'vector.filterOperators': AZURE_FILTER_OPERATORS,
         'vector.filterRaw': true,
+        'vector.supportsHybrid': true,
     },
     async createRuntime({ credentials, settings, providerKey, logger }) {
         const endpoint = normalizeEndpoint(settings.foundryProjectEndpoint);
@@ -277,6 +295,18 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                             facetable: false,
                             retrievable: false,
                         } as SearchField,
+                        {
+                            name: CONTENT_FIELD,
+                            type: 'Edm.String',
+                            // Not retrievable: the same text already comes back
+                            // inside the metadata blob, and a second copy per
+                            // hit is pure bandwidth.
+                            searchable: true,
+                            filterable: false,
+                            sortable: false,
+                            facetable: false,
+                            retrievable: false,
+                        } as SearchField,
                     ],
                     vectorSearch: {
                         algorithms: [
@@ -313,6 +343,7 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                         algoName,
                         profileName,
                         filterSchema: FILTER_SCHEMA_VERSION,
+                        contentSchema: CONTENT_SCHEMA_VERSION,
                     },
                 };
             },
@@ -344,6 +375,7 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                     const metric = fromAzureMetric(algo?.parameters?.metric ?? 'cosine');
 
                     const filterable = index.fields?.some((f) => f.name === METADATA_KV_FIELD);
+                    const searchable = index.fields?.some((f) => f.name === CONTENT_FIELD);
 
                     handles.push({
                         externalId: index.name,
@@ -353,6 +385,7 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                         metadata: {
                             provider: 'azure-ai-search',
                             ...(filterable ? { filterSchema: FILTER_SCHEMA_VERSION } : {}),
+                            ...(searchable ? { contentSchema: CONTENT_SCHEMA_VERSION } : {}),
                         },
                     });
                 }
@@ -367,6 +400,7 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                 const client = getSearchClient(handle.externalId);
 
                 const filterable = hasFilterableSchema(handle);
+                const searchable = hasSearchableSchema(handle);
 
                 const documents: AzureSearchDocument[] = items.map((item) => {
                     const document: AzureSearchDocument = {
@@ -381,6 +415,10 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                         const { keys, pairs } = toAzureMetadataKeyValues(item.metadata);
                         document[METADATA_KV_FIELD] = pairs;
                         document[METADATA_KEYS_FIELD] = keys;
+                    }
+
+                    if (searchable) {
+                        document[CONTENT_FIELD] = extractVectorText(item.metadata) ?? '';
                     }
 
                     return document;
@@ -411,16 +449,28 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                     );
                 }
 
-                // searchText stays undefined: passing '*' puts Azure into hybrid/RRF
-                // scoring, which collapses every similarity to ~0.016.
-                const searchResults = await client.search(undefined, {
+                const text = query.text?.trim();
+                // An index created before the searchable column existed has
+                // nothing for the keyword channel to match, and Azure would
+                // still switch to RRF scoring — dense results on a rank scale,
+                // labelled hybrid. Stay dense and say so instead.
+                const fused = Boolean(text) && hasSearchableSchema(handle);
+
+                // A non-undefined searchText is exactly what puts Azure into
+                // hybrid/RRF scoring; keeping it undefined is what preserves
+                // the raw cosine similarity of a pure vector search.
+                const searchResults = await client.search(fused ? text : undefined, {
                     ...(odataFilter ? { filter: odataFilter } : {}),
                     vectorSearchOptions: {
                         queries: [
                             {
                                 kind: 'vector',
                                 vector: query.vector,
-                                kNearestNeighborsCount: query.topK,
+                                // The vector channel has to reach past the final
+                                // slice for the fusion to reorder anything.
+                                kNearestNeighborsCount: fused
+                                    ? hybridCandidateCount(query.topK)
+                                    : query.topK,
                                 fields: [VECTOR_FIELD],
                             },
                         ],
@@ -441,14 +491,32 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                         // ignore malformed metadata
                     }
 
+                    const score = result.score ?? 0;
+
                     matches.push({
                         id: decodeVectorId(doc[ID_FIELD]),
-                        score: result.score ?? 0,
+                        // Azure fuses server-side and hands back its own RRF
+                        // score, ~0.016 — off the scale every caller thresholds
+                        // against until it is mapped back.
+                        score: fused ? normalizeFusedScore(score, DEFAULT_RRF_K) : score,
                         metadata,
                     });
                 }
 
-                return { matches };
+                if (!text) {
+                    return { matches };
+                }
+
+                // Azure fuses with RRF whatever the caller asked for, so report
+                // the mode that actually ran rather than the one requested.
+                return {
+                    matches,
+                    usage: describeHybrid(
+                        fused
+                            ? { ran: true, mode: 'rrf' }
+                            : { ran: false, reason: 'index-schema' },
+                    ),
+                };
             },
 
             async deleteVectors(handle: VectorIndexHandle, ids: string[]): Promise<void> {

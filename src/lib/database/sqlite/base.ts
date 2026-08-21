@@ -70,6 +70,7 @@ export const TABLES = {
   ragDocuments: 'rag_documents',
   ragChunks: 'rag_chunks',
   ragQueryLogs: 'rag_query_logs',
+  ragReindexRuns: 'rag_reindex_runs',
   rerankers: 'rerankers',
   rerankerRunLogs: 'reranker_run_logs',
   websearchRunLogs: 'websearch_run_logs',
@@ -303,6 +304,17 @@ export class SQLiteProviderBase {
     ] as const) {
       this.ensureTableColumn(db, TABLES.ragDocuments, column, ddl);
     }
+    // Vector query logs record whether the keyword channel ran.
+    this.ensureTableColumn(db, TABLES.vectorQueryLogs, 'hybrid', 'hybrid INTEGER');
+    // `rag` evaluation targets: without these the three retrieval fields are
+    // dropped on insert and every run fails with "has no ragModuleKey".
+    for (const [column, ddl] of [
+      ['ragModuleKey', 'ragModuleKey TEXT'],
+      ['retrievalTopK', 'retrievalTopK INTEGER'],
+      ['retrievalMinScore', 'retrievalMinScore REAL'],
+    ] as const) {
+      this.ensureTableColumn(db, TABLES.evaluationTargets, column, ddl);
+    }
     for (const [column, ddl] of [
       ['charStart', 'charStart INTEGER'],
       ['charEnd', 'charEnd INTEGER'],
@@ -310,6 +322,31 @@ export class SQLiteProviderBase {
       ['tokenCount', 'tokenCount INTEGER'],
     ] as const) {
       this.ensureTableColumn(db, TABLES.ragChunks, column, ddl);
+    }
+    // Query analytics: what the store returned before minScore, and the scores
+    // themselves. Without preFilterMatchCount a zero-result query cannot be
+    // told apart from a threshold that discarded everything.
+    for (const [column, ddl] of [
+      ['preFilterMatchCount', 'preFilterMatchCount INTEGER'],
+      ['topScore', 'topScore REAL'],
+      ['avgScore', 'avgScore REAL'],
+      ['minScoreApplied', 'minScoreApplied REAL'],
+      ['hybrid', 'hybrid INTEGER'],
+    ] as const) {
+      this.ensureTableColumn(db, TABLES.ragQueryLogs, column, ddl);
+    }
+    // Retrieval controls and the re-index handshake. Existing rows read NULL,
+    // which the mapper turns back into `undefined` = "feature off".
+    for (const [column, ddl] of [
+      ['defaultFilter', 'defaultFilter TEXT'],
+      ['filterableFields', 'filterableFields TEXT'],
+      ['hybrid', 'hybrid TEXT'],
+      ['isolateByModule', 'isolateByModule INTEGER'],
+      ['reindexRequired', 'reindexRequired INTEGER'],
+      ['activeReindexRunKey', 'activeReindexRunKey TEXT'],
+      ['lastReindexAt', 'lastReindexAt TEXT'],
+    ] as const) {
+      this.ensureTableColumn(db, TABLES.ragModules, column, ddl);
     }
     this.ensureTableColumn(
       db,

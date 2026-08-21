@@ -213,6 +213,9 @@ export const SystemDefaultVectorProviderContract: ProviderContract<
       '$eq', '$ne', '$gt', '$gte', '$lt', '$lte', '$in', '$nin', '$exists', '$and', '$or',
     ],
     'vector.filterRaw': true,
+    // Backed by S3 Vectors, which stores embeddings and filterable metadata
+    // only — no text analyser, so no keyword channel.
+    'vector.supportsHybrid': false,
   },
   async createRuntime({ credentials, settings, tenantId, tenantSlug, providerKey, logger }) {
     if (!credentials?.accessKeyId?.trim()) {

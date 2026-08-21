@@ -13,11 +13,13 @@ import { fireAndForget } from '@/lib/core/asyncTask';
 import {
   providerRegistry,
   assertFilterSupported,
+  describeHybrid,
   parseVectorFilter,
   type VectorFilterNode,
   type VectorFilterOperator,
   type VectorProviderRuntime,
   type VectorIndexHandle,
+  type VectorQueryInput,
   type VectorQueryResult,
   type VectorUpsertItem,
 } from '@/lib/providers';
@@ -648,6 +650,21 @@ export function resolveVectorFilter(
 }
 
 /**
+ * Whether a driver can run the keyword channel of a hybrid search.
+ *
+ * Absent means no: every vector contract states this explicitly, so a driver
+ * whose capabilities say nothing is one that was never taught to fuse, and
+ * handing it `text` would get the field quietly ignored.
+ */
+export function supportsHybridSearch(driver: string): boolean {
+  try {
+    return providerRegistry.getContract(driver).capabilities?.['vector.supportsHybrid'] === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Account for a query: feed the usage rollup and record the row the index
  * analytics panel aggregates.
  *
@@ -664,6 +681,8 @@ async function recordVectorQuery(
     index: VectorIndexRecord;
     topK: number;
     filterApplied: boolean;
+    /** Whether the keyword channel actually ran, not merely whether it was asked for. */
+    hybrid: boolean;
     matches: VectorQueryResult['matches'];
     latencyMs: number;
     status: 'success' | 'error';
@@ -678,7 +697,9 @@ async function recordVectorQuery(
     refKey: input.index.key,
     status: input.status,
     latencyMs: input.latencyMs,
-    units: { matches: input.matches.length },
+    // Counted only when the keyword channel really ran, so the rollup answers
+    // "how much of this index's traffic is hybrid" rather than how much asked.
+    units: { matches: input.matches.length, ...(input.hybrid ? { hybrid: 1 } : {}) },
   });
 
   if (input.status === 'error') return;
@@ -698,6 +719,7 @@ async function recordVectorQuery(
         ? scores.reduce((sum, score) => sum + score, 0) / scores.length
         : undefined,
       filterApplied: input.filterApplied,
+      hybrid: input.hybrid,
       userId: attribution.userId,
       apiTokenId: attribution.apiTokenId,
       actorType: attribution.actorType,
@@ -860,15 +882,24 @@ export async function queryVectorIndex(
 
   const filter = resolveVectorFilter(record.driver, request.query.filter);
 
+  const { text, hybrid, ...rest } = request.query;
+  const keywordsRequested = typeof text === 'string' && text.trim().length > 0;
+  // A driver that cannot fuse never sees `text`: leaving it on the input would
+  // let an adapter drop it silently, and a caller has no way to tell a fused
+  // result set from a dense one by looking at it.
+  const keywordsAccepted = keywordsRequested && supportsHybridSearch(record.driver);
+  const runtimeQuery: VectorQueryInput = {
+    ...rest,
+    filter,
+    ...(keywordsAccepted ? { text, hybrid } : {}),
+  };
+
   const startedAt = Date.now();
 
   let result: VectorQueryResult;
   try {
     result = await withResilience(
-      () => runtime.queryVectors(
-        toRuntimeHandle(index),
-        { ...request.query, filter },
-      ),
+      () => runtime.queryVectors(toRuntimeHandle(index), runtimeQuery),
       { key: `vector-query:${request.providerKey}` },
     );
   } catch (error) {
@@ -883,11 +914,27 @@ export async function queryVectorIndex(
       index,
       topK: request.query.topK,
       filterApplied: Boolean(filter),
+      hybrid: false,
       matches: [],
       latencyMs: Date.now() - startedAt,
       status: 'error',
     }));
     throw error;
+  }
+
+  // The adapter is the only party that knows whether the keyword channel really
+  // ran: an index may predate the searchable text field, or the store may need
+  // a full-text index nobody created. Trust its report, never the request.
+  const hybridRan = result.usage?.hybrid === true;
+
+  if (keywordsRequested && !keywordsAccepted) {
+    result = {
+      ...result,
+      usage: {
+        ...(result.usage ?? {}),
+        ...describeHybrid({ ran: false, reason: 'driver' }),
+      },
+    };
   }
 
   // Telemetry must not sit on the query's critical path — awaiting it added a
@@ -900,6 +947,7 @@ export async function queryVectorIndex(
     index,
     topK: request.query.topK,
     filterApplied: Boolean(filter),
+    hybrid: hybridRan,
     matches: result.matches,
     latencyMs: Date.now() - startedAt,
     status: 'success',

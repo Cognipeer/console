@@ -32,6 +32,8 @@ import { startAgentQueueConsumer } from '@/lib/services/agents/agentConsumer';
 import { startMcpQueueConsumer } from '@/lib/services/mcp/mcpConsumer';
 import { startVectorMigrationQueueConsumer } from '@/lib/services/vector/vectorMigrationConsumer';
 import { resumeInterruptedVectorMigrations } from '@/lib/services/vector/vectorMigrationJob';
+import { startRagReindexQueueConsumer } from '@/lib/services/rag/ragReindexConsumer';
+import { resumeInterruptedRagReindexRuns } from '@/lib/services/rag/ragReindexJob';
 import { startPollScheduler } from '@/lib/services/inferenceMonitoring/pollScheduler';
 import { startAlertScheduler } from '@/lib/services/alerts/alertScheduler';
 import { startAnalysisScheduler } from '@/lib/services/analysis/analysisScheduler';
@@ -288,6 +290,7 @@ async function runBootstrap(): Promise<void> {
       startRedTeamQueueConsumer(),
       startEvaluationRunQueueConsumer(),
       startVectorMigrationQueueConsumer(),
+      startRagReindexQueueConsumer(),
       // Enterprise modules contribute their consumers through the seam;
       // the collection is empty in the community edition.
       ...enterpriseQueueConsumers.map((start) => start()),
@@ -305,6 +308,16 @@ async function runBootstrap(): Promise<void> {
     await resumeInterruptedVectorMigrations();
   } catch (error) {
     logger.warn('Vector migration resume failed during startup', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  // Same contract for Knowledge Engine re-index runs: they resume from the
+  // last document they finished, and only after their consumer is registered.
+  try {
+    await resumeInterruptedRagReindexRuns();
+  } catch (error) {
+    logger.warn('Knowledge Engine re-index resume failed during startup', {
       error: error instanceof Error ? error.message : String(error),
     });
   }

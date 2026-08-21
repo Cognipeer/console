@@ -142,10 +142,38 @@ export interface DatasetItem {
   tags?: string[];
 }
 
+/**
+ * One passage returned by a retrieval target, in rank order.
+ *
+ * Carried next to `text` rather than folded into it because the retrieval
+ * scorers grade the passages individually: a concatenation cannot say which
+ * chunk was relevant, or at what rank it arrived — and rank is exactly what
+ * separates good retrieval from lucky retrieval.
+ */
+export interface RetrievedChunk {
+  /** Vector-store id of the chunk. */
+  id: string;
+  /** Retrieval score as reported by the store (post-rerank when reranking ran). */
+  score: number;
+  content: string;
+  documentId?: string;
+  fileName?: string;
+  chunkIndex?: number;
+  /** 1-based position in the ranked result set. */
+  rank: number;
+}
+
 /** Output produced by a target for one item. */
 export interface TargetOutput {
   text: string;
   latencyMs?: number;
+  /**
+   * Retrieval targets only: the ranked passages behind `text`. Absent (rather
+   * than empty) when the target does not retrieve at all — the retrieval
+   * scorers use that difference to tell "wrong target kind" apart from
+   * "retrieved nothing".
+   */
+  retrieved?: RetrievedChunk[];
   /** Tool calls the target emitted, normalised across provider shapes. */
   toolCalls?: NormalizedToolCall[];
   /** Token / cost usage reported by the provider for this invocation. */
@@ -233,7 +261,52 @@ export interface JsonShapeScorerConfig {
   threshold?: number;
 }
 
-export type ScorerConfig = AssertionScorerConfig | LlmJudgeScorerConfig | SemanticScorerConfig | ToolCallScorerConfig | JsonShapeScorerConfig;
+/**
+ * Is the gold answer semantically COVERED by what we retrieved? Judged by
+ * embedding similarity, never string overlap: a passage that answers the
+ * question in different words is a hit, and an exact-match scorer would call
+ * it a miss.
+ */
+export interface ContextRecallScorerConfig {
+  type: 'context-recall';
+  weight?: number;
+  /** Pass threshold on the 0..1 coverage score (default 0.7). */
+  threshold?: number;
+}
+
+/**
+ * How much of what we retrieved was actually relevant, weighted by rank — a
+ * relevant passage at rank 1 counts for more than the same passage at rank 10,
+ * because that is the one the generator reads first.
+ */
+export interface ContextPrecisionScorerConfig {
+  type: 'context-precision';
+  weight?: number;
+  /** Pass threshold on the 0..1 rank-weighted relevant share (default 0.5). */
+  threshold?: number;
+}
+
+/**
+ * Is the target's ANSWER supported by the passages it retrieved? The other
+ * half of retrieval quality: perfect context still produces a hallucination if
+ * the generator ignores it.
+ */
+export interface GroundednessScorerConfig {
+  type: 'groundedness';
+  weight?: number;
+  /** Pass threshold on the 0..1 support score (default 0.7). */
+  threshold?: number;
+}
+
+export type ScorerConfig =
+  | AssertionScorerConfig
+  | LlmJudgeScorerConfig
+  | SemanticScorerConfig
+  | ToolCallScorerConfig
+  | JsonShapeScorerConfig
+  | ContextRecallScorerConfig
+  | ContextPrecisionScorerConfig
+  | GroundednessScorerConfig;
 export type ScorerType = ScorerConfig['type'];
 
 // ── Results ────────────────────────────────────────────────────────────

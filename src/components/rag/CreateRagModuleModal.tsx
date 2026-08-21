@@ -14,13 +14,29 @@ import { notifications } from '@mantine/notifications';
 import { IconBook, IconCheck } from '@tabler/icons-react';
 import FormShell, {
   Checklist,
-  ChipPicker,
   FormField,
   FormRow,
   FormSection,
   SummaryGroup,
   SummaryKV,
 } from '@/components/common/ui/FormShell';
+import ChunkConfigFields from './ChunkConfigFields';
+import RetrievalFields from './RetrievalFields';
+import {
+  CHUNK_STRATEGIES,
+  DEFAULT_CHUNK_FORM_VALUES,
+  DEFAULT_RETRIEVAL_FORM_VALUES,
+  buildChunkConfig,
+  buildHybrid,
+  chunkFieldErrors,
+  clearedValue,
+  hasChunkFieldErrors,
+  providerSupportsHybrid,
+  type ChunkFormValues,
+  type RetrievalFormValues,
+} from './ragModuleForm';
+
+const MODE = 'create';
 
 interface EmbeddingModel {
   key: string;
@@ -31,6 +47,7 @@ interface VectorProvider {
   key: string;
   label: string;
   status: string;
+  driverCapabilities?: Record<string, unknown>;
 }
 
 interface VectorIndex {
@@ -51,24 +68,21 @@ interface CreateRagModuleModalProps {
   onCreated: (ragModule: Record<string, unknown>) => void;
 }
 
-type ChunkStrategy = 'recursive_character' | 'token';
-
 interface FormValues {
   name: string;
   description: string;
   embeddingModelKey: string;
   vectorProviderKey: string;
   vectorIndexKey: string;
-  chunkStrategy: ChunkStrategy;
-  chunkSize: number | '';
-  chunkOverlap: number | '';
-  separators: string[];
+  chunk: ChunkFormValues;
+  retrieval: RetrievalFormValues;
   rerankerKey: string;
   rerankerOversample: number | '';
   defaultTopK: number | '';
   defaultMinScore: number;
   defaultFilter: string;
   filterableFields: string[];
+  responseDetail: 'full' | 'text';
 }
 
 export default function CreateRagModuleModal({ opened, onClose, onCreated }: CreateRagModuleModalProps) {
@@ -85,24 +99,21 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
       embeddingModelKey: '',
       vectorProviderKey: '',
       vectorIndexKey: '',
-      chunkStrategy: 'recursive_character',
-      chunkSize: 1000,
-      chunkOverlap: 200,
-      separators: ['\\n\\n', '\\n', '. ', ' '],
+      chunk: { ...DEFAULT_CHUNK_FORM_VALUES },
+      retrieval: { ...DEFAULT_RETRIEVAL_FORM_VALUES },
       rerankerKey: '',
       rerankerOversample: '',
       defaultTopK: 5,
       defaultMinScore: 0.5,
       defaultFilter: '',
       filterableFields: [],
+      responseDetail: 'full',
     },
     validate: {
       name: (v) => (!v ? 'Name is required' : null),
       embeddingModelKey: (v) => (!v ? 'Embedding model is required' : null),
       vectorProviderKey: (v) => (!v ? 'Vector provider is required' : null),
       vectorIndexKey: (v) => (!v ? 'Vector index is required' : null),
-      chunkSize: (v) => (!v || Number(v) <= 0 ? 'Chunk size must be positive' : null),
-      chunkOverlap: (v) => (v === '' || Number(v) < 0 ? 'Overlap must be non-negative' : null),
       defaultTopK: (v) => (v === '' || Number(v) < 1 ? 'Must be at least 1' : null),
       defaultFilter: (v) => {
         if (!v.trim()) return null;
@@ -120,6 +131,13 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
   });
 
   const selectedProvider = form.values.vectorProviderKey;
+  const chunkErrors = chunkFieldErrors(form.values.chunk);
+
+  const patchChunk = (patch: Partial<ChunkFormValues>) =>
+    form.setFieldValue('chunk', { ...form.getValues().chunk, ...patch });
+
+  const patchRetrieval = (patch: Partial<RetrievalFormValues>) =>
+    form.setFieldValue('retrieval', { ...form.getValues().retrieval, ...patch });
 
   const loadEmbeddingModels = useCallback(async () => {
     try {
@@ -138,10 +156,11 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
       const res = await fetch('/api/vector/providers', { cache: 'no-store' });
       if (res.ok) {
         const data = await res.json();
-        setVectorProviders((data.providers ?? []).map((p: Record<string, string>) => ({
-          key: p.key,
-          label: p.label || p.key,
-          status: p.status,
+        setVectorProviders((data.providers ?? []).map((p: Record<string, unknown>) => ({
+          key: p.key as string,
+          label: (p.label as string) || (p.key as string),
+          status: p.status as string,
+          driverCapabilities: p.driverCapabilities as Record<string, unknown> | undefined,
         })));
       }
     } catch (err) {
@@ -199,46 +218,57 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
     void loadVectorIndexes();
   }, [loadVectorIndexes]);
 
+  const selectedEmbedding = useMemo(
+    () => embeddingModels.find((m) => m.key === form.values.embeddingModelKey),
+    [embeddingModels, form.values.embeddingModelKey],
+  );
+  const selectedVectorProvider = useMemo(
+    () => vectorProviders.find((p) => p.key === form.values.vectorProviderKey),
+    [vectorProviders, form.values.vectorProviderKey],
+  );
+  const selectedVectorIndex = useMemo(
+    () => vectorIndexes.find((i) => i.key === form.values.vectorIndexKey),
+    [vectorIndexes, form.values.vectorIndexKey],
+  );
+  const selectedReranker = useMemo(
+    () => rerankers.find((r) => r.key === form.values.rerankerKey),
+    [rerankers, form.values.rerankerKey],
+  );
+
+  const hybridSupported = providerSupportsHybrid(selectedVectorProvider?.driverCapabilities);
+
   const handleSubmit = async () => {
     const validation = form.validate();
-    if (validation.hasErrors) return;
+    if (validation.hasErrors || hasChunkFieldErrors(chunkErrors)) return;
     const values = form.getValues();
 
     setSubmitting(true);
     try {
-      const chunkConfig: Record<string, unknown> = {
-        strategy: values.chunkStrategy,
-        chunkSize: Number(values.chunkSize),
-        chunkOverlap: Number(values.chunkOverlap),
-      };
-
-      if (values.chunkStrategy === 'recursive_character') {
-        chunkConfig.separators = values.separators.map((s) =>
-          s.replace(/\\n/g, '\n').replace(/\\t/g, '\t'),
-        );
-      }
-
       const res = await fetch('/api/rag/modules', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: values.name,
-          description: values.description || undefined,
+          description: values.description || clearedValue(MODE),
           embeddingModelKey: values.embeddingModelKey,
           vectorProviderKey: values.vectorProviderKey,
           vectorIndexKey: values.vectorIndexKey,
-          chunkConfig,
-          rerankerKey: values.rerankerKey ? values.rerankerKey : undefined,
+          chunkConfig: buildChunkConfig(values.chunk),
+          hybrid: hybridSupported ? buildHybrid(values.retrieval) : { enabled: false },
+          isolateByModule: values.retrieval.isolateByModule,
+          rerankerKey: values.rerankerKey || clearedValue(MODE),
           rerankerOversample:
             values.rerankerKey && values.rerankerOversample !== ''
               ? Number(values.rerankerOversample)
-              : undefined,
-          defaultTopK: values.defaultTopK !== '' ? Number(values.defaultTopK) : undefined,
+              : clearedValue(MODE),
+          defaultTopK: values.defaultTopK === '' ? clearedValue(MODE) : Number(values.defaultTopK),
           defaultMinScore: values.defaultMinScore,
           defaultFilter: values.defaultFilter.trim()
             ? (JSON.parse(values.defaultFilter) as Record<string, unknown>)
-            : undefined,
-          filterableFields: values.filterableFields.length > 0 ? values.filterableFields : undefined,
+            : clearedValue(MODE),
+          filterableFields:
+            values.filterableFields.length > 0 ? values.filterableFields : clearedValue(MODE),
+          responseDetail: values.responseDetail,
         }),
       });
 
@@ -267,33 +297,12 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
     }
   };
 
-  const selectedEmbedding = useMemo(
-    () => embeddingModels.find((m) => m.key === form.values.embeddingModelKey),
-    [embeddingModels, form.values.embeddingModelKey],
-  );
-  const selectedVectorProvider = useMemo(
-    () => vectorProviders.find((p) => p.key === form.values.vectorProviderKey),
-    [vectorProviders, form.values.vectorProviderKey],
-  );
-  const selectedVectorIndex = useMemo(
-    () => vectorIndexes.find((i) => i.key === form.values.vectorIndexKey),
-    [vectorIndexes, form.values.vectorIndexKey],
-  );
-  const selectedReranker = useMemo(
-    () => rerankers.find((r) => r.key === form.values.rerankerKey),
-    [rerankers, form.values.rerankerKey],
-  );
-
   const validIdentity = Boolean(form.values.name.trim());
   const validEmbedding = Boolean(form.values.embeddingModelKey);
   const validVector = Boolean(
     form.values.vectorProviderKey && form.values.vectorIndexKey,
   );
-  const validChunking =
-    form.values.chunkSize !== '' &&
-    Number(form.values.chunkSize) > 0 &&
-    form.values.chunkOverlap !== '' &&
-    Number(form.values.chunkOverlap) >= 0;
+  const validChunking = !hasChunkFieldErrors(chunkErrors);
 
   const checklist = [
     { id: 1, label: 'Name provided', done: validIdentity },
@@ -301,11 +310,6 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
     { id: 3, label: 'Vector index selected', done: validVector },
     { id: 4, label: 'Chunking configured', done: validChunking },
   ];
-
-  const chunkStrategyLabel: Record<ChunkStrategy, string> = {
-    recursive_character: 'Recursive character',
-    token: 'Token based',
-  };
 
   const summary = (
     <>
@@ -342,23 +346,52 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
       </SummaryGroup>
 
       <SummaryGroup title="Chunking">
-        <SummaryKV
-          label="Strategy"
-          value={chunkStrategyLabel[form.values.chunkStrategy]}
-        />
+        <SummaryKV label="Strategy" value={CHUNK_STRATEGIES[form.values.chunk.strategy].label} />
         <SummaryKV
           label="Size"
-          value={form.values.chunkSize || <span className="ds-faint">—</span>}
+          value={form.values.chunk.chunkSize || <span className="ds-faint">—</span>}
           mono
         />
         <SummaryKV
           label="Overlap"
           value={
-            form.values.chunkOverlap === ''
+            form.values.chunk.chunkOverlap === ''
               ? <span className="ds-faint">—</span>
-              : form.values.chunkOverlap
+              : form.values.chunk.chunkOverlap
           }
           mono
+        />
+        <SummaryKV
+          label="Parent window"
+          value={
+            form.values.chunk.parentWindowSize === ''
+              ? <span className="ds-faint">off</span>
+              : form.values.chunk.parentWindowSize
+          }
+          mono
+        />
+        <SummaryKV
+          label="Contextual headers"
+          value={
+            form.values.chunk.contextualHeaderEnabled
+              ? 'on — one model call per chunk'
+              : <span className="ds-faint">off</span>
+          }
+        />
+      </SummaryGroup>
+
+      <SummaryGroup title="Retrieval">
+        <SummaryKV
+          label="Hybrid"
+          value={
+            hybridSupported && form.values.retrieval.hybridEnabled
+              ? form.values.retrieval.hybridMode
+              : <span className="ds-faint">off</span>
+          }
+        />
+        <SummaryKV
+          label="Isolation"
+          value={form.values.retrieval.isolateByModule ? 'on' : <span className="ds-faint">off</span>}
         />
       </SummaryGroup>
 
@@ -493,51 +526,28 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
         description="How documents are split before embedding."
         done={validChunking}
       >
-        <FormField label="Strategy">
-          <ChipPicker<ChunkStrategy>
-            options={[
-              { value: 'recursive_character', label: 'Recursive character' },
-              { value: 'token', label: 'Token based' },
-            ]}
-            value={form.values.chunkStrategy}
-            onChange={(v) => form.setFieldValue('chunkStrategy', v as ChunkStrategy)}
-          />
-        </FormField>
-
-        <FormRow cols={2}>
-          <FormField label="Chunk size" required>
-            <NumberInput
-              min={50}
-              max={10000}
-              step={100}
-              {...form.getInputProps('chunkSize')}
-            />
-          </FormField>
-          <FormField label="Chunk overlap" required>
-            <NumberInput
-              min={0}
-              max={5000}
-              step={50}
-              {...form.getInputProps('chunkOverlap')}
-            />
-          </FormField>
-        </FormRow>
-
-        {form.values.chunkStrategy === 'recursive_character' ? (
-          <FormField
-            label="Separators"
-            hint="Use \n for newline. Order matters — first separator is tried first."
-          >
-            <TagsInput
-              placeholder="Add separator..."
-              {...form.getInputProps('separators')}
-            />
-          </FormField>
-        ) : null}
+        <ChunkConfigFields
+          values={form.values.chunk}
+          onChange={patchChunk}
+          errors={chunkErrors}
+        />
       </FormSection>
 
       <FormSection
         number={5}
+        title="Retrieval"
+        description="How a query reaches the stored vectors."
+      >
+        <RetrievalFields
+          values={form.values.retrieval}
+          onChange={patchRetrieval}
+          hybridSupported={hybridSupported}
+          providerLabel={selectedVectorProvider?.label}
+        />
+      </FormSection>
+
+      <FormSection
+        number={6}
         title="Reranking"
         description="Optionally re-order vector matches with a reranker before they're returned."
       >
@@ -564,7 +574,7 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
       </FormSection>
 
       <FormSection
-        number={6}
+        number={7}
         title="Query defaults"
         description="Applied whenever a query doesn't explicitly override these."
       >
@@ -613,6 +623,21 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
             {...form.getInputProps('filterableFields')}
           />
         </FormField>
+        <FormRow cols={2}>
+          <FormField
+            label="Response detail"
+            hint="What a query response carries. 'Text only' returns just the chunk text."
+          >
+            <Select
+              data={[
+                { value: 'full', label: 'Full — scores, ids and metadata' },
+                { value: 'text', label: 'Text only — just the chunk text' },
+              ]}
+              allowDeselect={false}
+              {...form.getInputProps('responseDetail')}
+            />
+          </FormField>
+        </FormRow>
       </FormSection>
     </FormShell>
   );
