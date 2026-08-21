@@ -50,8 +50,8 @@ export class BullMQQueueProvider implements QueueProvider {
   }
 
   async init(): Promise<void> {
-    this.connection = this.createConnection();
-    this.subscriberConnection = this.createConnection();
+    this.connection = this.createConnection('queue');
+    this.subscriberConnection = this.createConnection('queue-sub');
     // No-op until first publish/consume — keeps boot cheap on idle nodes.
   }
 
@@ -152,10 +152,11 @@ export class BullMQQueueProvider implements QueueProvider {
 
   // ── Internals ─────────────────────────────────────────────────────
 
-  private createConnection(): Redis {
+  private createConnection(role: string): Redis {
     return new Redis(this.cfg.redisUrl, {
       maxRetriesPerRequest: null,
       enableReadyCheck: false,
+      connectionName: `console:${getThisNodeName()}:${role}`,
     });
   }
 
