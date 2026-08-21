@@ -1,7 +1,7 @@
 import { Buffer } from 'node:buffer';
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
-import type { IRagChunkConfig } from '@/lib/database';
+import type { IRagChunkConfig, IRagDocument, IUser } from '@/lib/database';
 import {
   createRagModule,
   deleteRagDocument,
@@ -37,6 +37,32 @@ function decodeFileData(payload: string): Buffer {
   }
 
   return Buffer.from(payload, 'base64');
+}
+
+/**
+ * Resolve a document by id within the caller's project and module scope.
+ *
+ * getRagDocument is scoped only by the tenant DB, and the :key segment never
+ * bound the document to the module it names, so without this an ordinary
+ * member could read, re-ingest or delete another project's ingested document
+ * by its id alone. Returns null for an out-of-scope id so it is
+ * indistinguishable from a missing one. Owners/admins keep tenant-wide reach
+ * (resolveProjectContext already grants it), and documents stored without a
+ * projectId — legacy rows predating project stamping — stay reachable.
+ */
+async function documentInProjectScope(
+  tenantDbName: string,
+  documentId: string,
+  ragModuleKey: string,
+  projectId: string,
+  user: Pick<IUser, 'role'>,
+): Promise<IRagDocument | null> {
+  const document = await getRagDocument(tenantDbName, documentId);
+  if (!document) return null;
+  if (document.ragModuleKey !== ragModuleKey) return null;
+  if (user.role === 'owner' || user.role === 'admin') return document;
+  if (!document.projectId) return document;
+  return String(document.projectId) === String(projectId) ? document : null;
 }
 
 export const ragApiPlugin: FastifyPluginAsync = async (app) => {
@@ -257,9 +283,15 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/rag/modules/:key/documents/:documentId', withApiRequestContext(async (request, reply) => {
     try {
-      const { documentId } = request.params as { documentId: string; key: string };
-      const { session } = await requireProjectContextForRequest(request);
-      const document = await getRagDocument(session.tenantDbName, documentId);
+      const { documentId, key } = request.params as { documentId: string; key: string };
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const document = await documentInProjectScope(
+        session.tenantDbName,
+        documentId,
+        key,
+        projectId,
+        user,
+      );
 
       if (!document) {
         return reply.code(404).send({ error: 'Document not found' });
@@ -277,8 +309,20 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.delete('/rag/modules/:key/documents/:documentId', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, session } = await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { documentId, key } = request.params as { documentId: string; key: string };
+      const document = await documentInProjectScope(
+        session.tenantDbName,
+        documentId,
+        key,
+        projectId,
+        user,
+      );
+
+      if (!document) {
+        return reply.code(404).send({ error: 'Document not found' });
+      }
+
       await deleteRagDocument(session.tenantDbName, session.tenantId, projectId, {
         documentId,
         ragModuleKey: key,
@@ -296,8 +340,20 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.post('/rag/modules/:key/documents/:documentId', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, session } = await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { documentId, key } = request.params as { documentId: string; key: string };
+      const existing = await documentInProjectScope(
+        session.tenantDbName,
+        documentId,
+        key,
+        projectId,
+        user,
+      );
+
+      if (!existing) {
+        return reply.code(404).send({ error: 'Document not found' });
+      }
+
       const body = readJsonBody<Record<string, unknown>>(request);
       const encodedData = typeof body.data === 'string'
         ? body.data
@@ -393,8 +449,14 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/rag/modules/:key/usage', withApiRequestContext(async (request, reply) => {
     try {
-      const { session } = await requireProjectContextForRequest(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { key } = request.params as { key: string };
+      const ragModule = await getRagModule(session.tenantDbName, key, projectId);
+
+      if (!ragModule) {
+        return reply.code(404).send({ error: 'RAG module not found' });
+      }
+
       const query = (request.query ?? {}) as { from?: string; limit?: string; to?: string };
       const logs = await listRagQueryLogs(session.tenantDbName, key, {
         from: query.from ? new Date(query.from) : undefined,

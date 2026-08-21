@@ -2,7 +2,9 @@ import type {
   IMcpAuthConfig,
   IMcpExposureConfig,
   IMcpRemoteConfig,
+  IMcpServer,
   IMcpStdioConfig,
+  IUser,
   McpAuthType,
 } from '@/lib/database';
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
@@ -51,6 +53,30 @@ import {
 const logger = createLogger('api:mcp');
 const VALID_AUTH_TYPES: McpAuthType[] = ['none', 'token', 'header', 'basic'];
 const VALID_SOURCE_TYPES = ['openapi', 'remote', 'stdio', 'internal'] as const;
+
+/**
+ * Resolve a server by id within the caller's project scope.
+ *
+ * findMcpServerById is scoped only by tenant DB, so without this an ordinary
+ * member could address any project's server in the same tenant — reading its
+ * config, flipping its exposure to public, or running its tools with the
+ * upstream credentials it stores. Returns null for an out-of-scope id so it is
+ * indistinguishable from a missing one. Owners/admins keep tenant-wide reach
+ * (resolveProjectContext already grants it), and servers stored without a
+ * projectId stay tenant-wide as findMcpServerByKey already treats them.
+ */
+async function serverInProjectScope(
+  tenantDbName: string,
+  id: string,
+  projectId: string,
+  user: Pick<IUser, 'role'>,
+): Promise<IMcpServer | null> {
+  const server = await getMcpServer(tenantDbName, id);
+  if (!server) return null;
+  if (user.role === 'owner' || user.role === 'admin') return server;
+  if (!server.projectId) return server;
+  return String(server.projectId) === String(projectId) ? server : null;
+}
 
 function auditContextFor(request: FastifyRequest, userId: string): McpAuditContext {
   const ua = request.headers['user-agent'];
@@ -378,7 +404,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/mcp/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const { session } = await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
       const query = (request.query ?? {}) as {
         includeAggregate?: string;
@@ -386,7 +412,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         includeAudit?: string;
       };
 
-      const server = await getMcpServer(session.tenantDbName, id);
+      const server = await serverInProjectScope(session.tenantDbName, id, projectId, user);
       if (!server) {
         return reply.code(404).send({ error: 'MCP server not found' });
       }
@@ -424,8 +450,11 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.patch('/mcp/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const { session } = await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
+      if (!(await serverInProjectScope(session.tenantDbName, id, projectId, user))) {
+        return reply.code(404).send({ error: 'MCP server not found' });
+      }
       const body = readJsonBody<Record<string, unknown>>(request);
 
       const authType = body.upstreamAuth && typeof body.upstreamAuth === 'object'
@@ -507,8 +536,11 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.delete('/mcp/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const { session } = await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
+      if (!(await serverInProjectScope(session.tenantDbName, id, projectId, user))) {
+        return reply.code(404).send({ error: 'MCP server not found' });
+      }
       const deleted = await deleteMcpServer(
         session.tenantDbName,
         id,
@@ -532,8 +564,11 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
   // Re-run tool discovery against the remote/stdio source.
   app.post('/mcp/:id/refresh-tools', withApiRequestContext(async (request, reply) => {
     try {
-      const { session } = await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
+      if (!(await serverInProjectScope(session.tenantDbName, id, projectId, user))) {
+        return reply.code(404).send({ error: 'MCP server not found' });
+      }
       const updated = await refreshMcpServerTools(
         session.tenantDbName,
         id,
@@ -555,9 +590,9 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/mcp/:id/logs', withApiRequestContext(async (request, reply) => {
     try {
-      const { session } = await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
-      const server = await getMcpServer(session.tenantDbName, id);
+      const server = await serverInProjectScope(session.tenantDbName, id, projectId, user);
 
       if (!server) {
         return reply.code(404).send({ error: 'MCP server not found' });
@@ -621,7 +656,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
   // Playground: test-execute one of the server's tools from the dashboard.
   app.post('/mcp/:id/execute', withApiRequestContext(async (request, reply) => {
     try {
-      const { session } = await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
       const body = readJsonBody<Record<string, unknown>>(request);
 
@@ -636,7 +671,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
 
       const args = (body.arguments ?? body.args ?? {}) as Record<string, unknown>;
 
-      const server = await getMcpServer(session.tenantDbName, id);
+      const server = await serverInProjectScope(session.tenantDbName, id, projectId, user);
       if (!server) {
         return reply.code(404).send({ error: 'MCP server not found' });
       }
