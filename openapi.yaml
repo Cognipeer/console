@@ -6255,7 +6255,7 @@ paths:
       tags:
         - Knowledge Engine
       summary: Create a RAG module
-      description: Create a Knowledge Engine (RAG) module wiring an embedding model, vector store and chunking config. Requires an API token with `write` permission for this service.
+      description: Create a Knowledge Engine (RAG) module wiring an embedding model, vector store and chunking config. Requires an API token with `write` permission for this service. `chunkConfig` is validated on write — an overlap at or above the chunk size, an unknown strategy, or a parent window smaller than the chunk is rejected with 400.
       operationId: createRagModule
       requestBody:
         required: true
@@ -6308,7 +6308,7 @@ paths:
       tags:
         - Knowledge Engine
       summary: Update a RAG module
-      description: Partially update a RAG module resolved by key within the token's project. Requires an API token with `write` permission for this service.
+      description: Partially update a RAG module resolved by key within the token's project. Requires an API token with `write` permission for this service. Only the documented properties are applied; `chunkConfig` is validated exactly as on create.
       operationId: updateRagModule
       parameters:
         - name: key
@@ -6439,7 +6439,7 @@ paths:
       tags:
         - Knowledge Engine
       summary: Re-ingest a Knowledge Engine document
-      description: Re-chunks and re-embeds an existing document. Optionally provide updated `content`, a new `data`/`base64` file, `contentType`, `fileName`, or `metadata`. Send an empty body to re-ingest with the existing content and current chunking settings.
+      description: Re-chunks and re-embeds an existing document. Optionally provide updated `content`, a new `data`/`base64` file, `contentType`, `fileName`, `metadata`, or a `chunkConfig` that replaces this document's own splitting settings. Send an empty body to re-ingest with the existing content and current chunking settings.
       operationId: reingestRagDocument
       parameters:
         - name: key
@@ -6476,6 +6476,10 @@ paths:
                 fileName:
                   type: string
                   description: Updated document file name.
+                chunkConfig:
+                  allOf:
+                    - $ref: "#/components/schemas/RagChunkConfig"
+                  description: Per-document chunking settings to apply to this rebuild.
                 metadata:
                   type: object
                   additionalProperties: true
@@ -6492,6 +6496,8 @@ paths:
                 properties:
                   document:
                     $ref: "#/components/schemas/RagDocument"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -6576,7 +6582,7 @@ paths:
       tags:
         - Knowledge Engine
       summary: Ingest a document into a Knowledge Engine module
-      description: Ingests a document into a Knowledge Engine module. Provide `content` for raw text, or `data` for a base64-encoded (or data-URI) binary file which is converted to Markdown before chunking and embedding. `fileName` is always required.
+      description: Ingests a document into a Knowledge Engine module. Provide `content` for raw text, or `data` for a base64-encoded (or data-URI) binary file which is converted to Markdown before chunking and embedding. `fileName` is always required. Pass `chunkConfig` to split this one document differently from the rest of the module.
       operationId: ingestRagDocument
       parameters:
         - name: key
@@ -6608,6 +6614,12 @@ paths:
                   type: string
                   description: MIME type of the supplied content or file.
                   example: text/plain
+                chunkConfig:
+                  allOf:
+                    - $ref: "#/components/schemas/RagChunkConfig"
+                  description: >-
+                    Split this document with its own settings instead of the module's. Stored
+                    on the document, so a re-index reproduces the same chunks.
                 metadata:
                   type: object
                   additionalProperties: true
@@ -6667,11 +6679,7 @@ paths:
                   description: Maximum number of matches to return.
                   example: 5
                 filter:
-                  type: object
-                  additionalProperties: true
-                  description: Metadata filter applied to candidate chunks.
-                  example:
-                    source: docs
+                  $ref: "#/components/schemas/VectorMetadataFilter"
       responses:
         "200":
           description: Query results.
@@ -10672,6 +10680,8 @@ paths:
                 topK: 10
                 filter:
                   category: electronics
+                  depth:
+                    $lte: 2
       responses:
         "200":
           description: Query results
@@ -17504,23 +17514,99 @@ components:
             $ref: "#/components/schemas/PromptDeploymentEvent"
     RagChunkConfig:
       type: object
-      description: Chunking configuration for a Knowledge Engine module.
+      required:
+        - strategy
+        - chunkSize
+      description: >-
+        Chunking configuration. Validated on every write: a `chunkOverlap` at or above
+        `chunkSize`, a `parentWindowSize` below `chunkSize`, an unknown `strategy` or
+        `encoding`, or a `semanticThreshold` outside (0,1) is rejected with 400.
       properties:
         strategy:
           type: string
           enum:
             - recursive_character
             - token
+            - markdown
+            - sentence
+            - semantic
+          description: >-
+            How the source is split. `markdown` keeps a chunk within one heading section,
+            `sentence` never breaks mid-sentence, and `semantic` starts a new chunk where
+            the topic shifts (this one needs the module's embedding model).
         chunkSize:
           type: integer
+          minimum: 1
+          description: >-
+            Hard cap per chunk — characters for every strategy except `token`, which counts
+            real tokens of `encoding`.
         chunkOverlap:
           type: integer
+          minimum: 0
+          description: Trailing overlap carried into the next chunk. Must be smaller than `chunkSize`.
         separators:
           type: array
           items:
             type: string
+          description: Boundary preferences for `recursive_character` and `markdown`, best first.
         encoding:
           type: string
+          enum:
+            - cl100k_base
+            - p50k_base
+            - o200k_base
+          description: Tokenizer for the `token` strategy. Defaults to `cl100k_base`.
+        semanticThreshold:
+          type: number
+          description: >-
+            `semantic` only: cosine distance between neighbouring sentences above which a
+            new chunk starts. Between 0 and 1, exclusive. Defaults to 0.35.
+        parentWindowSize:
+          type: integer
+          description: >-
+            Small-to-big retrieval — embed the small chunk but return this many characters
+            of surrounding source with each match. Must be at least `chunkSize`; 0 or omitted
+            disables it. Resolved at query time, so changing it needs no re-index.
+        contextualHeader:
+          type: object
+          description: >-
+            Prefix each chunk with one generated sentence situating it in its document. The
+            header is embedded with the chunk and costs one model call per chunk at ingest.
+          properties:
+            enabled:
+              type: boolean
+            modelKey:
+              type: string
+              description: Chat model that writes the header. Required when enabled.
+            maxDocumentChars:
+              type: integer
+              description: How much of the document the model sees as context. Defaults to 8000.
+    RagHybridConfig:
+      type: object
+      required:
+        - enabled
+      description: >-
+        Dense + keyword retrieval, for vector stores that support it. Pure vector search
+        misses exact terms — error codes, SKUs, acronyms — because they carry little
+        semantic signal.
+      properties:
+        enabled:
+          type: boolean
+        mode:
+          type: string
+          enum:
+            - rrf
+            - weighted
+          description: How the two rankings are combined. Defaults to `rrf`.
+        alpha:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: "`weighted` mode: 1 is pure dense, 0 is pure keyword. Defaults to 0.5."
+        k:
+          type: integer
+          minimum: 1
+          description: "`rrf` mode: rank constant. Defaults to 60."
     RagCreateInput:
       type: object
       required:
@@ -17563,6 +17649,42 @@ components:
         rerankerOversample:
           type: integer
           description: Candidate multiplier fetched before reranking.
+        defaultFilter:
+          allOf:
+            - $ref: "#/components/schemas/VectorMetadataFilter"
+          description: >-
+            Metadata filter ANDed into every query against this module. Lets several
+            sources share one vector index while each module retrieves only its own slice.
+        filterableFields:
+          type: array
+          items:
+            type: string
+          description: >-
+            Metadata keys callers may filter on. When set, a query filtering on any other
+            key is rejected with 400; the list is also advertised to agents and MCP clients
+            so they know what is filterable.
+        defaultTopK:
+          type: integer
+          description: Matches returned when a query does not specify `topK`.
+        defaultMinScore:
+          type: number
+          description: Minimum similarity a match must reach when a query does not specify `minScore`.
+        responseDetail:
+          type: string
+          enum:
+            - full
+            - text
+          description: >-
+            How much of each match a query response carries. `full` (default) keeps scores,
+            ids and metadata; `text` returns only the chunk text.
+        hybrid:
+          $ref: "#/components/schemas/RagHybridConfig"
+        isolateByModule:
+          type: boolean
+          description: >-
+            AND `_ragModule` into every query so a vector index shared by several modules
+            cannot leak between them. Defaults to true; turn it off for an index populated
+            by an external pipeline, whose vectors carry no `_ragModule`.
     RagDocument:
       type: object
       description: A document ingested into a Knowledge Engine module.
@@ -17652,6 +17774,45 @@ components:
           type: string
         rerankerOversample:
           type: integer
+        defaultFilter:
+          allOf:
+            - $ref: "#/components/schemas/VectorMetadataFilter"
+          description: >-
+            Metadata filter ANDed into every query against this module. Lets several
+            sources share one vector index while each module retrieves only its own slice.
+        filterableFields:
+          type: array
+          items:
+            type: string
+          description: >-
+            Metadata keys callers may filter on. When set, a query filtering on any other
+            key is rejected with 400; the list is also advertised to agents and MCP clients
+            so they know what is filterable.
+        defaultTopK:
+          type: integer
+        defaultMinScore:
+          type: number
+        responseDetail:
+          type: string
+          enum:
+            - full
+            - text
+        hybrid:
+          $ref: "#/components/schemas/RagHybridConfig"
+        isolateByModule:
+          type: boolean
+          description: Whether queries are constrained to this module's own vectors.
+        reindexRequired:
+          type: boolean
+          description: >-
+            The chunk config or embedding model changed and the stored vectors no longer
+            match it. Queries keep answering from the old vectors until a re-index finishes.
+        activeReindexRunKey:
+          type: string
+          description: Key of the re-index run currently rebuilding this module, if any.
+        lastReindexAt:
+          type: string
+          format: date-time
         totalDocuments:
           type: integer
         totalChunks:
@@ -17708,8 +17869,11 @@ components:
           type: number
     RagUpdateInput:
       type: object
-      additionalProperties: true
-      description: Partial update of a RAG module definition.
+      additionalProperties: false
+      description: >-
+        Partial update of a RAG module definition. Only the properties listed here are
+        applied; anything else in the body is ignored. Sending `null` for a nullable
+        property clears it, while omitting it leaves the stored value alone.
       properties:
         name:
           type: string
@@ -17723,10 +17887,6 @@ components:
           type: string
         chunkConfig:
           $ref: "#/components/schemas/RagChunkConfig"
-        fileBucketKey:
-          type: string
-        fileProviderKey:
-          type: string
         status:
           type: string
           enum:
@@ -17737,8 +17897,52 @@ components:
           additionalProperties: true
         rerankerKey:
           type: string
+          nullable: true
         rerankerOversample:
           type: integer
+          nullable: true
+        defaultTopK:
+          type: integer
+          nullable: true
+        defaultMinScore:
+          type: number
+          nullable: true
+        defaultFilter:
+          allOf:
+            - $ref: "#/components/schemas/VectorMetadataFilter"
+          nullable: true
+          description: >-
+            Metadata filter ANDed into every query against this module. Lets several
+            sources share one vector index while each module retrieves only its own slice.
+        filterableFields:
+          type: array
+          nullable: true
+          items:
+            type: string
+          description: >-
+            Metadata keys callers may filter on. When set, a query filtering on any other
+            key is rejected with 400; the list is also advertised to agents and MCP clients
+            so they know what is filterable.
+        responseDetail:
+          type: string
+          nullable: true
+          enum:
+            - full
+            - text
+          description: >-
+            How much of each match a query response carries. `full` (default) keeps scores,
+            ids and metadata; `text` returns only the chunk text.
+        hybrid:
+          allOf:
+            - $ref: "#/components/schemas/RagHybridConfig"
+          nullable: true
+        isolateByModule:
+          type: boolean
+          nullable: true
+          description: >-
+            AND `_ragModule` into every query so a vector index shared by several modules
+            cannot leak between them. Turn it off for an index populated by an external
+            pipeline, whose vectors carry no `_ragModule`.
     RealtimeModel:
       type: object
       description: A realtime model preset (snake_case client view) — a named session config bundling a response generator (chat model or agent) with STT, TTS, voice, and turn-detection settings.
@@ -20616,6 +20820,32 @@ components:
                 type: array
                 items:
                   $ref: "#/components/schemas/VectorProviderFormField"
+    VectorMetadataFilter:
+      type: object
+      additionalProperties: true
+      description: |
+        Metadata filter in the console's canonical, provider-neutral filter language.
+        The gateway translates it into each vector store's native syntax and pushes it
+        down to the store; it is never applied afterwards in memory, so `topK` always
+        counts matching documents.
+
+        Shorthand `{ "field": value }` means equality. Field operators: `$eq`, `$ne`,
+        `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$exists`. Compose clauses with
+        `$and`, `$or`, `$not`. Several fields in one object are ANDed together.
+
+        Not every store supports every operator. A filter a provider cannot push down
+        is rejected with `400` naming the unsupported operators, rather than silently
+        ignored. As an escape hatch, `{ "$raw": ... }` passes a provider-native filter
+        straight through (supported by Azure AI Search, Chroma, Elasticsearch, MongoDB,
+        Milvus, and S3 Vectors); `$raw` cannot be combined with other keys.
+      example:
+        source: crawler
+        depth:
+          $lte: 2
+        lang:
+          $in:
+            - tr
+            - en
     VectorQueryRequest:
       type: object
       description: Payload to query similar vectors.
@@ -20638,8 +20868,7 @@ components:
               default: 5
               description: Number of matches to return.
             filter:
-              type: object
-              description: Provider-specific filter criteria.
+              $ref: "#/components/schemas/VectorMetadataFilter"
     VectorQueryResponse:
       type: object
       description: Result of a vector similarity query.

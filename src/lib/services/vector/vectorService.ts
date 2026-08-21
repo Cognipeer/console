@@ -6,12 +6,20 @@ import {
   type IVectorIndexRecord,
 } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
+import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { runtimePool, hashCredentials } from '@/lib/core/runtimePool';
 import { withResilience } from '@/lib/core/resilience';
+import { fireAndForget } from '@/lib/core/asyncTask';
 import {
   providerRegistry,
+  assertFilterSupported,
+  describeHybrid,
+  parseVectorFilter,
+  type VectorFilterNode,
+  type VectorFilterOperator,
   type VectorProviderRuntime,
   type VectorIndexHandle,
+  type VectorQueryInput,
   type VectorQueryResult,
   type VectorUpsertItem,
 } from '@/lib/providers';
@@ -203,6 +211,10 @@ function mergeMetadataForUpdate(
     ...(existing ?? {}),
     ...updates,
   };
+
+  // vectorCount is computed live per request. A read-modify-write client would
+  // otherwise persist a stale value that then outlives the provider it came from.
+  delete merged.vectorCount;
 
   const hasValues = Object.keys(merged).some(
     (key) => merged[key] !== undefined && merged[key] !== null,
@@ -435,6 +447,42 @@ export async function getVectorIndex(
   };
 }
 
+/**
+ * Live vector count for an index, straight from the provider.
+ *
+ * Deliberately NOT part of `getVectorIndex`: that runs on the client API too,
+ * and counting is expensive and side-effecting on several providers (Milvus
+ * loads the collection into RAM, Postgres does a full COUNT(*), Mongo opens a
+ * fresh connection). Keep it on the session-authenticated dashboard stats path
+ * only. Returns undefined when the provider cannot cheaply report a total.
+ */
+export async function getVectorIndexCount(
+  tenantDbName: string,
+  tenantId: string,
+  projectId: string,
+  providerKey: string,
+  key: string,
+): Promise<number | undefined> {
+  try {
+    const db = await withTenantDb(tenantDbName);
+    const index = await requireVectorIndexRecord(db, providerKey, key, projectId);
+    const { runtime } = await buildRuntimeContext(tenantDbName, tenantId, providerKey, projectId);
+
+    const result = await withResilience(
+      () => runtime.listVectors(toRuntimeHandle(index), { limit: 1 }),
+      { key: `vector-count:${providerKey}` },
+    );
+    return result.total;
+  } catch (error) {
+    logger.warn('Failed to fetch live vector count for index', {
+      providerKey,
+      indexKey: key,
+      error: error instanceof Error ? error.message : error,
+    });
+    return undefined;
+  }
+}
+
 export async function updateVectorIndex(
   tenantDbName: string,
   tenantId: string,
@@ -572,13 +620,242 @@ export async function deleteVectors(
   );
 }
 
+/**
+ * Parse a caller-supplied filter and confirm the driver can push it down.
+ *
+ * Filters are never applied after the fact: a driver that cannot express an
+ * operator must fail the request rather than return results that silently
+ * ignore the filter, so `topK` always counts matching documents.
+ */
+export function resolveVectorFilter(
+  driver: string,
+  filter: unknown,
+): VectorFilterNode | undefined {
+  const parsed = parseVectorFilter(filter);
+  if (!parsed) return undefined;
+
+  let capabilities;
+  try {
+    capabilities = providerRegistry.getContract(driver).capabilities;
+  } catch {
+    capabilities = undefined;
+  }
+
+  const operators = (capabilities?.['vector.filterOperators'] as VectorFilterOperator[] | undefined) ?? [];
+  const supportsRaw = capabilities?.['vector.filterRaw'] === true;
+
+  assertFilterSupported(parsed, { driverId: driver, operators, supportsRaw });
+
+  return parsed;
+}
+
+/**
+ * Whether a driver can run the keyword channel of a hybrid search.
+ *
+ * Absent means no: every vector contract states this explicitly, so a driver
+ * whose capabilities say nothing is one that was never taught to fuse, and
+ * handing it `text` would get the field quietly ignored.
+ */
+export function supportsHybridSearch(driver: string): boolean {
+  try {
+    return providerRegistry.getContract(driver).capabilities?.['vector.supportsHybrid'] === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Account for a query: feed the usage rollup and record the row the index
+ * analytics panel aggregates.
+ *
+ * Best-effort — a bookkeeping failure must never fail a search that already
+ * returned results.
+ */
+async function recordVectorQuery(
+  db: DatabaseProvider,
+  input: {
+    tenantDbName: string;
+    tenantId: string;
+    projectId?: string;
+    providerKey: string;
+    index: VectorIndexRecord;
+    topK: number;
+    filterApplied: boolean;
+    /** Whether the keyword channel actually ran, not merely whether it was asked for. */
+    hybrid: boolean;
+    matches: VectorQueryResult['matches'];
+    latencyMs: number;
+    status: 'success' | 'error';
+  },
+): Promise<void> {
+  // No tokens — query embeddings are billed through the models service.
+  const attribution = recordUsageEvent({
+    tenantDbName: input.tenantDbName,
+    tenantId: input.tenantId,
+    projectId: input.projectId,
+    service: 'vector',
+    refKey: input.index.key,
+    status: input.status,
+    latencyMs: input.latencyMs,
+    // Counted only when the keyword channel really ran, so the rollup answers
+    // "how much of this index's traffic is hybrid" rather than how much asked.
+    units: { matches: input.matches.length, ...(input.hybrid ? { hybrid: 1 } : {}) },
+  });
+
+  if (input.status === 'error') return;
+
+  const scores = input.matches.map((match) => match.score).filter((score) => typeof score === 'number');
+
+  try {
+    await db.createVectorQueryLog({
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      providerKey: input.providerKey,
+      indexKey: input.index.key,
+      topK: input.topK,
+      matchCount: input.matches.length,
+      latencyMs: input.latencyMs,
+      avgScore: scores.length > 0
+        ? scores.reduce((sum, score) => sum + score, 0) / scores.length
+        : undefined,
+      filterApplied: input.filterApplied,
+      hybrid: input.hybrid,
+      userId: attribution.userId,
+      apiTokenId: attribution.apiTokenId,
+      actorType: attribution.actorType,
+      timestamp: new Date(),
+    });
+  } catch (error) {
+    logger.warn('Failed to record vector query log', { error });
+  }
+}
+
+/* ── Query analytics ─────────────────────────────────────────────────── */
+
+export interface VectorIndexQueryStats {
+  daily: Array<{
+    date: string;
+    queryCount: number;
+    avgLatencyMs: number;
+    avgScore: number;
+    filterCount: number;
+  }>;
+  totals: {
+    totalQueries: number;
+    avgLatencyMs: number;
+    minLatencyMs: number;
+    maxLatencyMs: number;
+    avgScore: number;
+  };
+  topKDistribution: Array<{ topK: number; count: number }>;
+  days: number;
+  /**
+   * Live vector total straight from the provider. Only present when the caller
+   * supplies providerKey + tenantId; counting is expensive on several drivers,
+   * so it stays on this session-authenticated path only.
+   */
+  vectorCount?: number;
+}
+
+/**
+ * Resolve the index key the query logs are recorded under.
+ *
+ * Falls back to the external id so an index whose record has gone missing
+ * still renders an (empty) panel instead of erroring.
+ */
+async function resolveStatsIndexKey(
+  db: DatabaseProvider,
+  externalId: string,
+  providerKey: string | undefined,
+  projectId: string | undefined,
+): Promise<string> {
+  if (providerKey) {
+    const record = await db.findVectorIndexByExternalId(providerKey, externalId, projectId);
+    return record?.key ?? externalId;
+  }
+
+  const indexes = await db.listVectorIndexes({ projectId });
+  return indexes.find((index) => index.externalId === externalId)?.key ?? externalId;
+}
+
+/**
+ * Query analytics for one vector index, shaped for the dashboard panel:
+ * every day in the window is present (zero-filled) and averages are rounded.
+ */
+export async function getVectorIndexQueryStats(
+  tenantDbName: string,
+  projectId: string | undefined,
+  params: {
+    externalId: string;
+    providerKey?: string;
+    from: Date;
+    to: Date;
+    days: number;
+    /** Supply together with providerKey to include the live vectorCount. */
+    tenantId?: string;
+  },
+): Promise<VectorIndexQueryStats> {
+  const db = await withTenantDb(tenantDbName);
+  const indexKey = await resolveStatsIndexKey(
+    db,
+    params.externalId,
+    params.providerKey,
+    projectId,
+  );
+
+  const [stats, vectorCount] = await Promise.all([
+    db.aggregateVectorQueryStats({
+      indexKey,
+      from: params.from,
+      to: params.to,
+    }),
+    params.providerKey && params.tenantId
+      ? getVectorIndexCount(tenantDbName, params.tenantId, projectId ?? '', params.providerKey, indexKey)
+      : Promise.resolve(undefined),
+  ]);
+
+  const byDate = new Map(stats.daily.map((row) => [row.date, row]));
+  const daily: VectorIndexQueryStats['daily'] = [];
+  const dayStart = new Date(params.from);
+  dayStart.setHours(0, 0, 0, 0);
+
+  for (let offset = 0; offset < params.days; offset += 1) {
+    const day = new Date(dayStart);
+    day.setDate(dayStart.getDate() + offset);
+    const date = day.toISOString().substring(0, 10);
+    const row = byDate.get(date);
+
+    daily.push({
+      date,
+      queryCount: row?.queryCount ?? 0,
+      avgLatencyMs: Math.round(row?.avgLatencyMs ?? 0),
+      avgScore: parseFloat((row?.avgScore ?? 0).toFixed(4)),
+      filterCount: row?.filterCount ?? 0,
+    });
+  }
+
+  return {
+    daily,
+    totals: {
+      totalQueries: stats.totals.totalQueries,
+      avgLatencyMs: Math.round(stats.totals.avgLatencyMs ?? 0),
+      minLatencyMs: stats.totals.minLatencyMs ?? 0,
+      maxLatencyMs: stats.totals.maxLatencyMs ?? 0,
+      avgScore: parseFloat((stats.totals.avgScore ?? 0).toFixed(4)),
+    },
+    topKDistribution: stats.topKDistribution,
+    days: params.days,
+    vectorCount,
+  };
+}
+
 export async function queryVectorIndex(
   tenantDbName: string,
   tenantId: string,
   projectId: string,
   request: VectorQueryRequest,
 ): Promise<VectorQueryResponse> {
-  const { runtime } = await buildRuntimeContext(
+  const { runtime, record } = await buildRuntimeContext(
     tenantDbName,
     tenantId,
     request.providerKey,
@@ -593,13 +870,88 @@ export async function queryVectorIndex(
     projectId,
   );
 
-  const result: VectorQueryResult = await withResilience(
-    () => runtime.queryVectors(
-      toRuntimeHandle(index),
-      request.query,
-    ),
-    { key: `vector-query:${request.providerKey}` },
-  );
+  // Upserts are dimension-checked but queries were not: a mismatch surfaced
+  // either as an opaque provider 500 or (on in-process providers) as silently
+  // meaningless scores. Fail with something the caller can act on instead.
+  if (Array.isArray(request.query?.vector) && request.query.vector.length !== index.dimension) {
+    throw new Error(
+      `Query vector has ${request.query.vector.length} values but index "${index.name}" expects ${index.dimension}. `
+      + 'The embedding model likely differs from the one the index was built with.',
+    );
+  }
+
+  const filter = resolveVectorFilter(record.driver, request.query.filter);
+
+  const { text, hybrid, ...rest } = request.query;
+  const keywordsRequested = typeof text === 'string' && text.trim().length > 0;
+  // A driver that cannot fuse never sees `text`: leaving it on the input would
+  // let an adapter drop it silently, and a caller has no way to tell a fused
+  // result set from a dense one by looking at it.
+  const keywordsAccepted = keywordsRequested && supportsHybridSearch(record.driver);
+  const runtimeQuery: VectorQueryInput = {
+    ...rest,
+    filter,
+    ...(keywordsAccepted ? { text, hybrid } : {}),
+  };
+
+  const startedAt = Date.now();
+
+  let result: VectorQueryResult;
+  try {
+    result = await withResilience(
+      () => runtime.queryVectors(toRuntimeHandle(index), runtimeQuery),
+      { key: `vector-query:${request.providerKey}` },
+    );
+  } catch (error) {
+    // A failed search still counts against the index's usage, and the rollup
+    // tracks it as an error so the failure rate stays visible. Off the critical
+    // path: bookkeeping must not delay the error the caller is waiting for.
+    fireAndForget('vector-query-log', () => recordVectorQuery(db, {
+      tenantDbName,
+      tenantId,
+      projectId,
+      providerKey: request.providerKey,
+      index,
+      topK: request.query.topK,
+      filterApplied: Boolean(filter),
+      hybrid: false,
+      matches: [],
+      latencyMs: Date.now() - startedAt,
+      status: 'error',
+    }));
+    throw error;
+  }
+
+  // The adapter is the only party that knows whether the keyword channel really
+  // ran: an index may predate the searchable text field, or the store may need
+  // a full-text index nobody created. Trust its report, never the request.
+  const hybridRan = result.usage?.hybrid === true;
+
+  if (keywordsRequested && !keywordsAccepted) {
+    result = {
+      ...result,
+      usage: {
+        ...(result.usage ?? {}),
+        ...describeHybrid({ ran: false, reason: 'driver' }),
+      },
+    };
+  }
+
+  // Telemetry must not sit on the query's critical path — awaiting it added a
+  // full DB round trip (usage rollup + query log) to every search.
+  fireAndForget('vector-query-log', () => recordVectorQuery(db, {
+    tenantDbName,
+    tenantId,
+    projectId,
+    providerKey: request.providerKey,
+    index,
+    topK: request.query.topK,
+    filterApplied: Boolean(filter),
+    hybrid: hybridRan,
+    matches: result.matches,
+    latencyMs: Date.now() - startedAt,
+    status: 'success',
+  }));
 
   return result;
 }

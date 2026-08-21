@@ -13,6 +13,14 @@ vi.mock('@/lib/database', () => ({
   getDatabase: vi.fn(),
 }));
 
+vi.mock('@/lib/services/usage/usageEvents', () => ({
+  recordUsageEvent: vi.fn(() => ({
+    userId: 'user-1',
+    apiTokenId: 'token-1',
+    actorType: 'user',
+  })),
+}));
+
 vi.mock('@/lib/services/providers/providerService', () => ({
   loadProviderRuntimeData: vi.fn(),
   listProviderConfigs: vi.fn(),
@@ -20,7 +28,10 @@ vi.mock('@/lib/services/providers/providerService', () => ({
   getProviderConfigByKey: vi.fn(),
 }));
 
-vi.mock('@/lib/providers', () => ({
+// Only the registry is mocked: filter parsing and capability checks are pure
+// functions the service depends on, so they run for real here.
+vi.mock('@/lib/providers', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/providers')>()),
   providerRegistry: {
     listDescriptors: vi.fn(),
     getContract: vi.fn(),
@@ -35,6 +46,7 @@ import {
   getProviderConfigByKey,
 } from '@/lib/services/providers/providerService';
 import { providerRegistry } from '@/lib/providers';
+import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { createMockDb } from '../helpers/db.mock';
 
 import {
@@ -288,6 +300,11 @@ describe('queryVectorIndex', () => {
 
   it('passes topK and filter through to runtime', async () => {
     MOCK_RUNTIME.queryVectors.mockResolvedValue({ matches: [] });
+    // The driver must declare it can push the filter down, or the service
+    // rejects the query rather than returning unfiltered results.
+    (providerRegistry.getContract as ReturnType<typeof vi.fn>).mockReturnValue({
+      capabilities: { 'vector.filterOperators': ['$eq', '$and'] },
+    });
 
     const request = {
       providerKey: PROVIDER_KEY,
@@ -303,7 +320,125 @@ describe('queryVectorIndex', () => {
 
     const runtimeQueryArg = MOCK_RUNTIME.queryVectors.mock.calls[0][1];
     expect(runtimeQueryArg.topK).toBe(10);
-    expect(runtimeQueryArg.filter).toEqual({ category: 'docs' });
+    // The service hands the provider a parsed filter tree, never the raw document.
+    expect(runtimeQueryArg.filter).toEqual({
+      kind: 'comparison',
+      comparison: { op: '$eq', field: 'category', value: 'docs' },
+    });
+  });
+
+  it('counts the query in the usage rollup', async () => {
+    MOCK_RUNTIME.queryVectors.mockResolvedValue({
+      matches: [{ id: 'a', score: 0.9 }, { id: 'b', score: 0.7 }],
+    });
+
+    await queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
+      providerKey: PROVIDER_KEY,
+      indexKey: 'my-index',
+      query: { topK: 5, vector: Array<number>(1536).fill(0.1) },
+    });
+
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tenantDbName: TENANT_DB,
+        tenantId: TENANT_ID,
+        projectId: PROJECT_ID,
+        service: 'vector',
+        refKey: 'my-index',
+        status: 'success',
+        units: { matches: 2 },
+      }),
+    );
+  });
+
+  it('counts a failed query as a usage error and writes no query log', async () => {
+    MOCK_RUNTIME.queryVectors.mockRejectedValue(new Error('index unreachable'));
+
+    await expect(
+      queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
+        providerKey: PROVIDER_KEY,
+        indexKey: 'my-index',
+        query: { topK: 5, vector: Array<number>(1536).fill(0.1) },
+      }),
+    ).rejects.toThrow('index unreachable');
+
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ service: 'vector', status: 'error', units: { matches: 0 } }),
+    );
+    expect(db.createVectorQueryLog).not.toHaveBeenCalled();
+  });
+
+  it('stamps the query log with the resolved usage attribution', async () => {
+    MOCK_RUNTIME.queryVectors.mockResolvedValue({ matches: [] });
+
+    await queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
+      providerKey: PROVIDER_KEY,
+      indexKey: 'my-index',
+      query: { topK: 5, vector: Array<number>(1536).fill(0.1) },
+    });
+
+    const [log] = db.createVectorQueryLog.mock.calls[0];
+    expect(log.userId).toBe('user-1');
+    expect(log.apiTokenId).toBe('token-1');
+    expect(log.actorType).toBe('user');
+  });
+
+  it('records a query log the analytics panel can aggregate', async () => {
+    MOCK_RUNTIME.queryVectors.mockResolvedValue({
+      matches: [
+        { id: 'a', score: 0.9, metadata: {} },
+        { id: 'b', score: 0.7, metadata: {} },
+      ],
+    });
+
+    await queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
+      providerKey: PROVIDER_KEY,
+      indexKey: 'my-index',
+      query: { topK: 5, vector: Array<number>(1536).fill(0.1) },
+    });
+
+    expect(db.createVectorQueryLog).toHaveBeenCalledTimes(1);
+    const [log] = db.createVectorQueryLog.mock.calls[0];
+    // indexKey must be the record's key — the stats aggregation matches on it.
+    expect(log.indexKey).toBe('my-index');
+    expect(log.providerKey).toBe(PROVIDER_KEY);
+    expect(log.topK).toBe(5);
+    expect(log.matchCount).toBe(2);
+    expect(log.avgScore).toBeCloseTo(0.8);
+    expect(log.filterApplied).toBe(false);
+    expect(log.latencyMs).toBeGreaterThanOrEqual(0);
+    expect(log.timestamp).toBeInstanceOf(Date);
+  });
+
+  it('marks filtered queries in the log', async () => {
+    MOCK_RUNTIME.queryVectors.mockResolvedValue({ matches: [] });
+    (providerRegistry.getContract as ReturnType<typeof vi.fn>).mockReturnValue({
+      capabilities: { 'vector.filterOperators': ['$eq'] },
+    });
+
+    await queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
+      providerKey: PROVIDER_KEY,
+      indexKey: 'my-index',
+      query: { topK: 5, vector: Array<number>(1536).fill(0.1), filter: { category: 'docs' } },
+    });
+
+    const [log] = db.createVectorQueryLog.mock.calls[0];
+    expect(log.filterApplied).toBe(true);
+    expect(log.avgScore).toBeUndefined();
+    expect(log.matchCount).toBe(0);
+  });
+
+  it('still returns results when writing the query log fails', async () => {
+    MOCK_RUNTIME.queryVectors.mockResolvedValue({ matches: [{ id: 'a', score: 0.5 }] });
+    db.createVectorQueryLog.mockRejectedValue(new Error('logging is down'));
+
+    const result = await queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
+      providerKey: PROVIDER_KEY,
+      indexKey: 'my-index',
+      query: { topK: 5, vector: Array<number>(1536).fill(0.1) },
+    });
+
+    expect(result.matches).toHaveLength(1);
   });
 
   it('returns empty matches when no results', async () => {
@@ -312,10 +447,105 @@ describe('queryVectorIndex', () => {
     const result = await queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
       providerKey: PROVIDER_KEY,
       indexKey: 'my-index',
-      query: { topK: 5, vector: Array<number>(4).fill(0.0) },
+      query: { topK: 5, vector: Array<number>(1536).fill(0.0) },
     });
 
     expect(result.matches).toEqual([]);
+  });
+
+  it('runs dense-only and says so when the driver cannot fuse a keyword channel', async () => {
+    // Absent capabilities mean no hybrid. The adapter must never be handed
+    // `text` it would silently ignore while the caller believes it is in force.
+    (providerRegistry.getContract as ReturnType<typeof vi.fn>).mockReturnValue({ capabilities: {} });
+    MOCK_RUNTIME.queryVectors.mockResolvedValue({ matches: [{ id: 'a', score: 0.9 }] });
+
+    const result = await queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
+      providerKey: PROVIDER_KEY,
+      indexKey: 'my-index',
+      query: { topK: 5, vector: Array<number>(1536).fill(0.1), text: 'ORA-01017' },
+    });
+
+    const runtimeQueryArg = MOCK_RUNTIME.queryVectors.mock.calls[0][1];
+    expect(runtimeQueryArg.text).toBeUndefined();
+    expect(runtimeQueryArg.hybrid).toBeUndefined();
+    expect(result.usage).toMatchObject({ hybrid: false, hybridUnavailable: 'driver' });
+  });
+
+  it('passes text and fusion settings to a driver that declares hybrid', async () => {
+    (providerRegistry.getContract as ReturnType<typeof vi.fn>).mockReturnValue({
+      capabilities: { 'vector.supportsHybrid': true },
+    });
+    MOCK_RUNTIME.queryVectors.mockResolvedValue({ matches: [], usage: { hybrid: true } });
+
+    await queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
+      providerKey: PROVIDER_KEY,
+      indexKey: 'my-index',
+      query: {
+        topK: 5,
+        vector: Array<number>(1536).fill(0.1),
+        text: 'ORA-01017',
+        hybrid: { mode: 'weighted', alpha: 0.7 },
+      },
+    });
+
+    const runtimeQueryArg = MOCK_RUNTIME.queryVectors.mock.calls[0][1];
+    expect(runtimeQueryArg.text).toBe('ORA-01017');
+    expect(runtimeQueryArg.hybrid).toEqual({ mode: 'weighted', alpha: 0.7 });
+  });
+
+  it('counts a query as hybrid only when the adapter reports the channel ran', async () => {
+    (providerRegistry.getContract as ReturnType<typeof vi.fn>).mockReturnValue({
+      capabilities: { 'vector.supportsHybrid': true },
+    });
+    // A driver that supports hybrid can still fall back — an index predating
+    // the searchable text field has nothing for the keyword channel to match.
+    MOCK_RUNTIME.queryVectors.mockResolvedValue({
+      matches: [{ id: 'a', score: 0.9 }],
+      usage: { hybrid: false, hybridUnavailable: 'index-schema' },
+    });
+
+    await queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
+      providerKey: PROVIDER_KEY,
+      indexKey: 'my-index',
+      query: { topK: 5, vector: Array<number>(1536).fill(0.1), text: 'ORA-01017' },
+    });
+
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ units: { matches: 1 } }),
+    );
+
+    vi.clearAllMocks();
+    (providerRegistry.getContract as ReturnType<typeof vi.fn>).mockReturnValue({
+      capabilities: { 'vector.supportsHybrid': true },
+    });
+    MOCK_RUNTIME.queryVectors.mockResolvedValue({
+      matches: [{ id: 'a', score: 0.9 }],
+      usage: { hybrid: true, hybridMode: 'rrf' },
+    });
+
+    await queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
+      providerKey: PROVIDER_KEY,
+      indexKey: 'my-index',
+      query: { topK: 5, vector: Array<number>(1536).fill(0.1), text: 'ORA-01017' },
+    });
+
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ units: { matches: 1, hybrid: 1 } }),
+    );
+  });
+
+  it('rejects a query vector whose dimension does not match the index', async () => {
+    MOCK_RUNTIME.queryVectors.mockResolvedValue({ matches: [] });
+
+    await expect(
+      queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
+        providerKey: PROVIDER_KEY,
+        indexKey: 'my-index',
+        query: { topK: 5, vector: Array<number>(768).fill(0.1) },
+      }),
+    ).rejects.toThrow(/768 values but index .* expects 1536/);
+
+    expect(MOCK_RUNTIME.queryVectors).not.toHaveBeenCalled();
   });
 });
 

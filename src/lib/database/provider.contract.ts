@@ -51,6 +51,8 @@ import type {
   IToolRequestLog,
   IUser,
   IVectorIndexRecord,
+  IVectorQueryLog,
+  IVectorQueryStats,
   IncidentSeverity,
   IncidentStatus,
   McpServerStatus,
@@ -293,6 +295,16 @@ export interface DatabaseProvider {
     >,
   ): Promise<IVectorIndexRecord | null>;
   deleteVectorIndex(id: string): Promise<boolean>;
+  /** Record one similarity query for the index analytics panel. */
+  createVectorQueryLog(
+    log: Omit<IVectorQueryLog, '_id'>,
+  ): Promise<IVectorQueryLog>;
+  /** Aggregate the query logs of one index for the analytics panel. */
+  aggregateVectorQueryStats(params: {
+    indexKey: string;
+    from: Date;
+    to: Date;
+  }): Promise<IVectorQueryStats>;
   listVectorIndexes(filters?: {
     providerKey?: string;
     projectId?: string;
@@ -574,6 +586,10 @@ export interface DatabaseProvider {
     ragModuleKey: string,
     options?: { limit?: number; skip?: number; from?: Date; to?: Date },
   ): Promise<IRagQueryLog[]>;
+  countRagQueryLogs(
+    ragModuleKey: string,
+    options?: { from?: Date; to?: Date },
+  ): Promise<{ total: number; avgLatencyMs: number }>;
 
   // ── Memory Store operations (tenant-specific) ──
   createMemoryStore(
@@ -776,7 +792,7 @@ export interface DatabaseProvider {
   ): Promise<IMcpServer>;
   updateMcpServer(
     id: string,
-    data: Partial<Omit<IMcpServer, 'tenantId' | 'key' | 'createdBy'>>,
+    data: Partial<Omit<IMcpServer, 'tenantId' | 'createdBy'>>,
   ): Promise<IMcpServer | null>;
   deleteMcpServer(id: string): Promise<boolean>;
   findMcpServerById(id: string): Promise<IMcpServer | null>;

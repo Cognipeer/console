@@ -85,6 +85,45 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
   rag_chunks: [
     { key: { documentId: 1, chunkIndex: 1 }, options: { name: 'idx_doc_chunk' } },
     { key: { vectorId: 1 }, options: { name: 'idx_vectorId' } },
+    // Module teardown deletes every chunk the module owns in one statement.
+    { key: { ragModuleKey: 1 }, options: { name: 'idx_ragModuleKey' } },
+  ],
+  // Listed per module (newest first) and deleted per module on teardown.
+  rag_documents: [
+    { key: { ragModuleKey: 1, createdAt: -1 }, options: { name: 'idx_ragModuleKey_createdAt' } },
+  ],
+  // Looked up on every Knowledge Engine query (findRagModuleByKey) and every
+  // vector operation (findVectorIndexByKey). Unindexed these were full scans.
+  rag_modules: [
+    { key: { key: 1, projectId: 1 }, options: { name: 'idx_key_project' } },
+    // "How many modules share this index?" runs on every module save.
+    { key: { vectorIndexKey: 1 }, options: { name: 'idx_vectorIndexKey' } },
+  ],
+  // Re-index runs: resolved by key (the queue payload carries only that),
+  // listed per module, and swept by status when a boot resumes interrupted runs.
+  rag_reindex_runs: [
+    { key: { key: 1 }, options: { name: 'idx_key', unique: true } },
+    { key: { ragModuleKey: 1, createdAt: -1 }, options: { name: 'idx_module_createdAt' } },
+    { key: { status: 1 }, options: { name: 'idx_status' } },
+  ],
+  vector_indexes: [
+    { key: { providerKey: 1, key: 1, projectId: 1 }, options: { name: 'idx_provider_key_project' } },
+    { key: { providerKey: 1, externalId: 1, projectId: 1 }, options: { name: 'idx_provider_external_project' } },
+  ],
+  // Per-request RBAC/project resolution reads these on every authenticated call.
+  group_members: [
+    { key: { userId: 1 }, options: { name: 'idx_userId' } },
+  ],
+  user_projects: [
+    { key: { userId: 1 }, options: { name: 'idx_userId' } },
+    { key: { userId: 1, projectId: 1 }, options: { name: 'idx_user_project' } },
+  ],
+  projects: [
+    { key: { tenantId: 1, key: 1 }, options: { name: 'idx_tenant_key' } },
+  ],
+  // Written once per vector query for the index stats dashboard.
+  vector_query_logs: [
+    { key: { indexKey: 1, timestamp: -1 }, options: { name: 'idx_indexKey_timestamp' } },
   ],
   // Vector index migrations: looked up by key (unique per tenant DB) and
   // scanned by status when the queue consumer resumes interrupted jobs.
@@ -94,9 +133,22 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { status: 1 }, options: { name: 'idx_status' } },
   ],
   vector_migration_logs: [
-    { key: { migrationKey: 1, batchIndex: 1 }, options: { name: 'idx_migration_batch' } },
+    { key: { migrationKey: 1, attempt: -1, batchIndex: 1 }, options: { name: 'idx_migration_attempt_batch' } },
   ],
-  rag_query_logs: [{ key: { moduleKey: 1, createdAt: -1 }, options: { name: 'idx_module_createdAt' } }],
+  // Queries filter on `ragModuleKey` (see rag.mixin.ts listRagQueryLogs); the
+  // index must match that field name or every dashboard/history query does a
+  // full collection scan instead. Renamed (not just re-keyed) because
+  // createIndex throws on a same-name/different-key conflict with the old
+  // `idx_module_createdAt` spec and that failure is swallowed — the stale
+  // index is orphaned in already-provisioned tenant DBs, harmless but unused.
+  rag_query_logs: [
+    { key: { ragModuleKey: 1, createdAt: -1 }, options: { name: 'idx_ragModuleKey_createdAt' } },
+    // The zero-result feed filters on matchCount before sorting, which the
+    // index above cannot serve without scanning the module's whole history.
+    { key: { ragModuleKey: 1, matchCount: 1, createdAt: -1 }, options: { name: 'idx_ragModuleKey_match_createdAt' } },
+    // Retention deletes across every module, so it has no ragModuleKey prefix.
+    { key: { createdAt: 1 }, options: { name: 'idx_createdAt' } },
+  ],
   reranker_run_logs: [{ key: { rerankerKey: 1, createdAt: -1 }, options: { name: 'idx_reranker_createdAt' } }],
   websearch_run_logs: [{ key: { searchKey: 1, createdAt: -1 }, options: { name: 'idx_search_createdAt' } }],
   agent_conversations: [{ key: { agentKey: 1, updatedAt: -1 }, options: { name: 'idx_agent_updatedAt' } }],

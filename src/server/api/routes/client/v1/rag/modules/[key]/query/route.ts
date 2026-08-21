@@ -1,7 +1,9 @@
 
 import { NextResponse, type NextRequest } from '@/server/api/http';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
-import { queryRag } from '@/lib/services/rag/ragService';
+import { queryRag,
+  shapeRagQueryResponse,
+} from '@/lib/services/rag/ragService';
 import { createLogger } from '@/lib/core/logger';
 import { withRequestContext } from '@/lib/api/withRequestContext';
 
@@ -39,7 +41,7 @@ const _POST = async (
       },
     );
 
-    return NextResponse.json({ result });
+    return NextResponse.json({ result: shapeRagQueryResponse(result) });
   } catch (error) {
     if (error instanceof ApiTokenAuthError) {
       return NextResponse.json({ error: error.message }, { status: error.status });

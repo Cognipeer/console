@@ -41,6 +41,7 @@ export const TABLES = {
   usageDaily: 'usage_daily',
   externalModelPricing: 'external_model_pricing',
   vectorIndexes: 'vector_indexes',
+  vectorQueryLogs: 'vector_query_logs',
   fileBuckets: 'file_buckets',
   files: 'files',
   providers: 'providers',
@@ -69,6 +70,7 @@ export const TABLES = {
   ragDocuments: 'rag_documents',
   ragChunks: 'rag_chunks',
   ragQueryLogs: 'rag_query_logs',
+  ragReindexRuns: 'rag_reindex_runs',
   rerankers: 'rerankers',
   rerankerRunLogs: 'reranker_run_logs',
   websearchRunLogs: 'websearch_run_logs',
@@ -288,6 +290,72 @@ export class SQLiteProviderBase {
   }
 
   private applyTenantMigrations(db: Database.Database): void {
+    // Knowledge Engine: richer chunking (offsets, heading path, real token
+    // counts) plus the stored source a re-index rebuilds from. CREATE TABLE IF
+    // NOT EXISTS never alters an existing tenant DB, so without these the
+    // INSERTs would throw on every tenant provisioned before this change.
+    for (const [column, ddl] of [
+      ['fileBucketKey', 'fileBucketKey TEXT'],
+      ['fileProviderKey', 'fileProviderKey TEXT'],
+      ['chunkConfig', 'chunkConfig TEXT'],
+      ['sourceText', 'sourceText TEXT'],
+      ['sourceTextKey', 'sourceTextKey TEXT'],
+      ['sourceHash', 'sourceHash TEXT'],
+    ] as const) {
+      this.ensureTableColumn(db, TABLES.ragDocuments, column, ddl);
+    }
+    // Cross-replica ownership of a re-index run.
+    for (const [column, ddl] of [
+      ['claimedBy', 'claimedBy TEXT'],
+      ['claimedAt', 'claimedAt TEXT'],
+      ['heartbeatAt', 'heartbeatAt TEXT'],
+    ] as const) {
+      this.ensureTableColumn(db, TABLES.ragReindexRuns, column, ddl);
+    }
+    // Vector query logs record whether the keyword channel ran.
+    this.ensureTableColumn(db, TABLES.vectorQueryLogs, 'hybrid', 'hybrid INTEGER');
+    // `rag` evaluation targets: without these the three retrieval fields are
+    // dropped on insert and every run fails with "has no ragModuleKey".
+    for (const [column, ddl] of [
+      ['ragModuleKey', 'ragModuleKey TEXT'],
+      ['retrievalTopK', 'retrievalTopK INTEGER'],
+      ['retrievalMinScore', 'retrievalMinScore REAL'],
+    ] as const) {
+      this.ensureTableColumn(db, TABLES.evaluationTargets, column, ddl);
+    }
+    for (const [column, ddl] of [
+      ['charStart', 'charStart INTEGER'],
+      ['charEnd', 'charEnd INTEGER'],
+      ['headingPath', 'headingPath TEXT'],
+      ['tokenCount', 'tokenCount INTEGER'],
+    ] as const) {
+      this.ensureTableColumn(db, TABLES.ragChunks, column, ddl);
+    }
+    // Query analytics: what the store returned before minScore, and the scores
+    // themselves. Without preFilterMatchCount a zero-result query cannot be
+    // told apart from a threshold that discarded everything.
+    for (const [column, ddl] of [
+      ['preFilterMatchCount', 'preFilterMatchCount INTEGER'],
+      ['topScore', 'topScore REAL'],
+      ['avgScore', 'avgScore REAL'],
+      ['minScoreApplied', 'minScoreApplied REAL'],
+      ['hybrid', 'hybrid INTEGER'],
+    ] as const) {
+      this.ensureTableColumn(db, TABLES.ragQueryLogs, column, ddl);
+    }
+    // Retrieval controls and the re-index handshake. Existing rows read NULL,
+    // which the mapper turns back into `undefined` = "feature off".
+    for (const [column, ddl] of [
+      ['defaultFilter', 'defaultFilter TEXT'],
+      ['filterableFields', 'filterableFields TEXT'],
+      ['hybrid', 'hybrid TEXT'],
+      ['isolateByModule', 'isolateByModule INTEGER'],
+      ['reindexRequired', 'reindexRequired INTEGER'],
+      ['activeReindexRunKey', 'activeReindexRunKey TEXT'],
+      ['lastReindexAt', 'lastReindexAt TEXT'],
+    ] as const) {
+      this.ensureTableColumn(db, TABLES.ragModules, column, ddl);
+    }
     this.ensureTableColumn(
       db,
       TABLES.users,
@@ -387,6 +455,26 @@ export class SQLiteProviderBase {
       TABLES.ragModules,
       'rerankerOversample',
       'rerankerOversample INTEGER',
+    );
+    // Query defaults + response shape. These were added to the Mongo tree and
+    // the UI without ever reaching SQLite, so on SQLite they silently vanished.
+    this.ensureTableColumn(
+      db,
+      TABLES.ragModules,
+      'defaultTopK',
+      'defaultTopK INTEGER',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.ragModules,
+      'defaultMinScore',
+      'defaultMinScore REAL',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.ragModules,
+      'responseDetail',
+      'responseDetail TEXT',
     );
     // GPU fleet host extensions (added 2026-05-22). Safe to ensure on every boot.
     this.ensureTableColumn(
@@ -680,6 +768,7 @@ export class SQLiteProviderBase {
       TABLES.mcpRequestLogs,
       TABLES.toolRequestLogs,
       TABLES.ragQueryLogs,
+      TABLES.vectorQueryLogs,
       TABLES.rerankerRunLogs,
       TABLES.crawlJobs,
       TABLES.browserSessions,
@@ -770,6 +859,10 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.mcpRequestLogs, 'transport', 'transport TEXT');
     this.ensureTableColumn(db, TABLES.mcpRequestLogs, 'sourceType', 'sourceType TEXT');
     this.ensureTableColumn(db, TABLES.mcpRequestLogs, 'sessionId', 'sessionId TEXT');
+    // Composite MCP servers (sourceType 'composite'): a member-scoped log row
+    // records the composite's key here so the member's own Logs tab can show
+    // "via <composite>" alongside calls that hit it directly.
+    this.ensureTableColumn(db, TABLES.mcpRequestLogs, 'viaServerKey', 'viaServerKey TEXT');
 
     // Evaluation: dataset items moved to their own table; the denormalised
     // itemCount rides on the dataset row. Suites were missing the
@@ -793,6 +886,11 @@ export class SQLiteProviderBase {
     // Structured-output contract captured with the item, so a replay reproduces
     // the request shape production ran under (see tracingResponseFormat.ts).
     this.ensureTableColumn(db, TABLES.evaluationDatasetItems, 'responseFormat', 'responseFormat TEXT');
+    // Vector migrations: `attempt` groups a restarted migration's batch logs
+    // into their own run instead of mixing with the previous run's batches
+    // (both reuse batchIndex starting from 0).
+    this.ensureTableColumn(db, TABLES.vectorMigrations, 'attempt', 'attempt INTEGER NOT NULL DEFAULT 0');
+    this.ensureTableColumn(db, TABLES.vectorMigrationLogs, 'attempt', 'attempt INTEGER NOT NULL DEFAULT 1');
   }
 
   private migrateOcrJobsSchema(db: Database.Database): void {

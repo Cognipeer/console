@@ -27,9 +27,13 @@ interface CreateTargetModalProps {
 interface FormValues {
   name: string;
   description: string;
-  kind: 'agent' | 'model' | 'external';
+  kind: 'agent' | 'model' | 'external' | 'rag';
   modelKey: string;
   agentKey: string;
+  /** Retrieval targets: which Knowledge Engine module to query, and how much. */
+  ragModuleKey: string;
+  retrievalTopK: number | '';
+  retrievalMinScore: number | '';
   /** 'none' keeps whatever system turn the dataset items carry. */
   promptMode: 'none' | 'promptKey' | 'inline';
   promptKey: string;
@@ -43,10 +47,21 @@ interface FormValues {
 const KIND_OPTIONS = [
   { value: 'model', label: 'Model — a registered model' },
   { value: 'agent', label: 'Agent — a registered agent' },
+  { value: 'rag', label: 'Knowledge Engine — retrieval from a module' },
   { value: 'external', label: 'External — an HTTP endpoint' },
 ];
 
-const KIND_LABEL: Record<string, string> = { model: 'Model', agent: 'Agent', external: 'External' };
+const KIND_LABEL: Record<string, string> = { model: 'Model', agent: 'Agent', rag: 'Knowledge Engine module', external: 'External' };
+
+/** What a target's primary reference is called, per kind. */
+function referenceLabel(kind: FormValues['kind']): string {
+  return kind === 'agent' ? 'Agent' : kind === 'rag' ? 'Knowledge Engine module' : 'Model';
+}
+
+/** The reference itself, for the summary panel. */
+function referenceValue(v: FormValues): string {
+  return (v.kind === 'agent' ? v.agentKey : v.kind === 'rag' ? v.ragModuleKey : v.modelKey) || '—';
+}
 
 /** Assemble the OpenAI-shaped response_format the target will send. */
 function buildResponseFormat(v: FormValues): Record<string, unknown> | undefined {
@@ -63,10 +78,12 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
   const [loading, setLoading] = useState(false);
   const [agents, setAgents] = useState<{ value: string; label: string }[]>([]);
   const [prompts, setPrompts] = useState<{ value: string; label: string }[]>([]);
+  const [ragModules, setRagModules] = useState<{ value: string; label: string }[]>([]);
   const isEdit = Boolean(editing);
   const form = useForm<FormValues>({
     initialValues: {
       name: '', description: '', kind: 'model', modelKey: '', agentKey: '',
+      ragModuleKey: '', retrievalTopK: '', retrievalMinScore: '',
       promptMode: 'none', promptKey: '', systemPrompt: '',
       responseMode: 'none', jsonSchema: '', maxTokens: '',
     },
@@ -74,6 +91,7 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
       name: (v) => (!v.trim() ? 'Name is required' : null),
       modelKey: (v, values) => (values.kind === 'model' && !v ? 'A model is required for model targets' : null),
       agentKey: (v, values) => (values.kind === 'agent' && !v.trim() ? 'An agent key is required for agent targets' : null),
+      ragModuleKey: (v, values) => (values.kind === 'rag' && !v ? 'A Knowledge Engine module is required for retrieval targets' : null),
       promptKey: (v, values) => (values.promptMode === 'promptKey' && !v ? 'Select a prompt' : null),
       systemPrompt: (v, values) => (values.promptMode === 'inline' && !v.trim() ? 'Enter a system prompt' : null),
       jsonSchema: (v, values) => {
@@ -96,6 +114,9 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
         kind: editing.kind,
         modelKey: editing.modelKey ?? '',
         agentKey: editing.agentKey ?? '',
+        ragModuleKey: editing.ragModuleKey ?? '',
+        retrievalTopK: editing.retrievalTopK ?? '',
+        retrievalMinScore: editing.retrievalMinScore ?? '',
         promptMode: editing.promptKey ? 'promptKey' : editing.systemPrompt ? 'inline' : 'none',
         promptKey: editing.promptKey ?? '',
         systemPrompt: editing.systemPrompt ?? '',
@@ -125,6 +146,15 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
       } catch {
         /* non-fatal — prompt dropdown stays empty */
       }
+      try {
+        const res = await fetch('/api/rag/modules', { cache: 'no-store' });
+        if (res.ok) {
+          const data = await res.json();
+          setRagModules(((data.modules ?? []) as Array<{ key: string; name: string }>).map((m) => ({ value: m.key, label: m.name })));
+        }
+      } catch {
+        /* non-fatal — Knowledge Engine dropdown stays empty */
+      }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened]);
@@ -139,6 +169,11 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
         description: v.description || undefined,
         modelKey: v.kind === 'model' ? v.modelKey : undefined,
         agentKey: v.kind === 'agent' ? v.agentKey.trim() : undefined,
+        ragModuleKey: v.kind === 'rag' ? v.ragModuleKey : undefined,
+        // Left empty, the module's own defaultTopK / defaultMinScore apply —
+        // which is what a suite should test unless it is testing the knobs.
+        retrievalTopK: v.kind === 'rag' && typeof v.retrievalTopK === 'number' ? v.retrievalTopK : undefined,
+        retrievalMinScore: v.kind === 'rag' && typeof v.retrievalMinScore === 'number' ? v.retrievalMinScore : undefined,
         // Override is model-only; sending it for an agent target would be
         // rejected at run time (an agent always runs its published prompt).
         promptKey: v.kind === 'model' && v.promptMode === 'promptKey' ? v.promptKey : undefined,
@@ -172,7 +207,10 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
   const v = form.getValues();
   const kind = v.kind;
   const validName = v.name.trim().length > 0;
-  const validRef = kind === 'model' ? Boolean(v.modelKey) : kind === 'agent' ? v.agentKey.trim().length > 0 : true;
+  const validRef = kind === 'model' ? Boolean(v.modelKey)
+    : kind === 'agent' ? v.agentKey.trim().length > 0
+      : kind === 'rag' ? Boolean(v.ragModuleKey)
+        : true;
   const validPrompt =
     v.promptMode === 'promptKey' ? Boolean(v.promptKey)
       : v.promptMode === 'inline' ? v.systemPrompt.trim().length > 0
@@ -191,7 +229,13 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
     <SummaryGroup title="Target">
       <SummaryKV label="Name" value={v.name || '—'} />
       <SummaryKV label="Kind" value={KIND_LABEL[kind]} />
-      <SummaryKV label={kind === 'agent' ? 'Agent' : 'Model'} value={(kind === 'agent' ? v.agentKey : v.modelKey) || '—'} />
+      <SummaryKV label={referenceLabel(kind)} value={referenceValue(v)} />
+      {kind === 'rag' && (
+        <SummaryKV
+          label="Retrieval"
+          value={`top ${v.retrievalTopK === '' ? 'module default' : v.retrievalTopK} · min score ${v.retrievalMinScore === '' ? 'module default' : v.retrievalMinScore}`}
+        />
+      )}
       {kind === 'model' && (
         <SummaryKV label="Response format" value={v.responseMode === 'none' ? 'free text' : v.responseMode} />
       )}
@@ -255,6 +299,17 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
             />
           </FormField>
         )}
+        {kind === 'rag' && (
+          <FormField label="Knowledge Engine module" required hint="Each dataset item's user message becomes a query against this module.">
+            <Select
+              placeholder={ragModules.length ? 'Select a module…' : 'No Knowledge Engine modules found'}
+              data={ragModules}
+              searchable
+              nothingFoundMessage="No Knowledge Engine modules"
+              {...form.getInputProps('ragModuleKey')}
+            />
+          </FormField>
+        )}
         {kind === 'external' && (
           <Alert color="yellow" variant="light" icon={<IconInfoCircle size={16} />}>
             External HTTP endpoint configuration is coming soon. The target will be created, but runs against it are
@@ -262,6 +317,32 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
           </Alert>
         )}
       </FormSection>
+
+      {kind === 'rag' && (
+        <FormSection number={3} title="Retrieval" done>
+          <FormRow cols={2}>
+            <FormField
+              label="Top K"
+              optional
+              hint="How many passages to retrieve per item. Left empty, the module's own default applies."
+            >
+              <NumberInput min={1} max={200} placeholder="module default" {...form.getInputProps('retrievalTopK')} />
+            </FormField>
+            <FormField
+              label="Minimum score"
+              optional
+              hint="Passages below this retrieval score are discarded before scoring. A high floor trades recall for precision."
+            >
+              <NumberInput min={0} max={1} step={0.05} decimalScale={2} placeholder="module default" {...form.getInputProps('retrievalMinScore')} />
+            </FormField>
+          </FormRow>
+          <Alert color="blue" variant="light" icon={<IconInfoCircle size={16} />}>
+            Retrieval is graded by the context-recall, context-precision and groundedness scorers, which compare
+            embeddings rather than strings — a passage that answers the question in different words still counts as a
+            hit. Each of them needs a gold answer per item (<strong>expected.reference</strong>).
+          </Alert>
+        </FormSection>
+      )}
 
       {kind === 'model' && (
         <FormSection number={3} title="System prompt" done={v.promptMode === 'none' || validPrompt}>

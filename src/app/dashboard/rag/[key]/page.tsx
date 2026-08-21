@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
   Badge,
@@ -18,6 +18,7 @@ import {
   SimpleGrid,
   Slider,
   Stack,
+  Switch,
   Table,
   Tabs,
   Text,
@@ -41,15 +42,37 @@ import {
   IconDatabase,
   IconEdit,
   IconFileText,
+  IconFilter,
   IconPlayerPlay,
   IconRefresh,
   IconSearch,
+  IconSearchOff,
   IconTrash,
   IconChartBar,
+  IconChartHistogram,
   IconActivity,
   IconFileUpload,
 } from '@tabler/icons-react';
 import EditRagModuleModal from '@/components/rag/EditRagModuleModal';
+import ChunkConfigFields from '@/components/rag/ChunkConfigFields';
+import RagReindexBanner, { useRagReindex } from '@/components/rag/RagReindexBanner';
+import ScoreDistributionChart, { type ScoreBucket } from '@/components/rag/ScoreDistributionChart';
+import {
+  CHUNK_STRATEGIES,
+  DEFAULT_CHUNK_FORM_VALUES,
+  buildChunkConfig,
+  chunkFieldErrors,
+  chunkFormValues,
+  hasChunkFieldErrors,
+  type ChunkFormValues,
+} from '@/components/rag/ragModuleForm';
+import type { IRagChunkConfig, RagChunkStrategy } from '@/lib/database';
+
+/** How often a document still being ingested is re-read. */
+const DOC_POLL_INTERVAL_MS = 2500;
+
+/** Which busy indicator a reload drives — 'silent' drives none, for polling. */
+type LoadIndicator = 'initial' | 'refresh' | 'silent';
 
 /* ── Types ─────────────────────────────────────────────────────────────── */
 
@@ -63,22 +86,23 @@ interface RagModuleView {
   vectorIndexKey: string;
   fileBucketKey?: string;
   fileProviderKey?: string;
-  chunkConfig: {
-    strategy: string;
-    chunkSize: number;
-    chunkOverlap: number;
-    separators?: string[];
-    encoding?: string;
-  };
+  chunkConfig: IRagChunkConfig;
   status: string;
+  hybrid?: { enabled: boolean; mode?: 'rrf' | 'weighted'; alpha?: number; k?: number } | null;
+  isolateByModule?: boolean | null;
+  reindexRequired?: boolean;
   rerankerKey?: string | null;
   rerankerOversample?: number | null;
   defaultTopK?: number | null;
   defaultMinScore?: number | null;
+  defaultFilter?: Record<string, unknown> | null;
+  filterableFields?: string[] | null;
+  responseDetail?: 'full' | 'text' | null;
   totalDocuments?: number;
   totalChunks?: number;
   createdAt?: string;
   updatedAt?: string;
+  lastReindexAt?: string;
 }
 
 interface RagDocumentView {
@@ -93,9 +117,14 @@ interface RagDocumentView {
   createdAt?: string;
 }
 
+/**
+ * A match as the query endpoint returns it — not as the service produced it.
+ * A module set to `responseDetail: 'text'` has every field but `content`
+ * stripped by shapeRagQueryResponse, so nothing here may be assumed present.
+ */
 interface RagQueryMatch {
-  id: string;
-  score: number;
+  id?: string;
+  score?: number;
   content?: string;
   fileName?: string;
   chunkIndex?: number;
@@ -105,7 +134,6 @@ interface RagQueryMatch {
 interface RagQueryResult {
   matches: RagQueryMatch[];
   query: string;
-  topK: number;
   latencyMs: number;
 }
 
@@ -114,8 +142,20 @@ interface RagQueryLogView {
   query: string;
   topK: number;
   matchCount: number;
-  latencyMs: number;
+  /** Matches the store returned before the minScore filter, when it was recorded. */
+  preFilterMatchCount?: number;
+  topScore?: number;
+  minScoreApplied?: number;
+  /** Absent on logs written before latency was recorded. */
+  latencyMs?: number;
   createdAt?: string;
+}
+
+interface UsageTotals {
+  total: number;
+  avgLatencyMs: number;
+  zeroMatchCount: number;
+  minScoreFilteredCount: number;
 }
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
@@ -128,14 +168,26 @@ function formatDate(value?: string | Date) {
 }
 
 function strategyLabel(strategy: string) {
-  switch (strategy) {
-    case 'recursive_character':
-      return 'Recursive Character';
-    case 'token':
-      return 'Token Based';
-    default:
-      return strategy;
-  }
+  return CHUNK_STRATEGIES[strategy as RagChunkStrategy]?.label ?? strategy;
+}
+
+/** A KPI the API could not aggregate is blank, never the size of the last page. */
+function kpiValue(value: number | null | undefined) {
+  return typeof value === 'number' ? value.toLocaleString() : '—';
+}
+
+function shareOf(part: number, whole: number) {
+  return whole > 0 ? `${Math.round((part / whole) * 100)}%` : '—';
+}
+
+/** A latency that was never recorded gets no colour, rather than the "slow" red. */
+function latencyColor(ms?: number) {
+  if (typeof ms !== 'number') return 'gray';
+  return ms < 500 ? 'teal' : ms < 2000 ? 'yellow' : 'red';
+}
+
+function scoreColor(score: number) {
+  return score >= 0.8 ? 'teal' : score >= 0.5 ? 'yellow' : 'red';
 }
 
 function statusColor(status: string) {
@@ -186,6 +238,35 @@ function UsageCodeBlock({ title, code }: UsageCodeBlockProps) {
   );
 }
 
+interface KpiCardProps {
+  label: string;
+  value: ReactNode;
+  icon: ReactNode;
+  color: string;
+  hint?: ReactNode;
+}
+
+function KpiCard({ label, value, icon, color, hint }: KpiCardProps) {
+  return (
+    <Paper withBorder radius="lg" p="lg">
+      <Group justify="space-between" wrap="nowrap" align="flex-start">
+        <Stack gap={4}>
+          <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
+            {label}
+          </Text>
+          <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }}>
+            {value}
+          </Text>
+          {hint ? <Text size="xs" c="dimmed">{hint}</Text> : null}
+        </Stack>
+        <ThemeIcon size={48} radius="xl" variant="light" color={color}>
+          {icon}
+        </ThemeIcon>
+      </Group>
+    </Paper>
+  );
+}
+
 /* ── Page ──────────────────────────────────────────────────────────────── */
 
 export default function RagModuleDetailPage() {
@@ -207,6 +288,10 @@ export default function RagModuleDetailPage() {
   const [ingestMode, setIngestMode] = useState<string>('file');
   const [ingestFile, setIngestFile] = useState<File | null>(null);
 
+  /* per-document chunking override, seeded from the module's own config */
+  const [chunkOverrideOn, setChunkOverrideOn] = useState(false);
+  const [chunkOverride, setChunkOverride] = useState<ChunkFormValues>({ ...DEFAULT_CHUNK_FORM_VALUES });
+
   const [editModalOpen, setEditModalOpen] = useState(false);
 
   /* playground */
@@ -216,12 +301,30 @@ export default function RagModuleDetailPage() {
   /* usage */
   const [queryLogs, setQueryLogs] = useState<RagQueryLogView[]>([]);
   const [usageLoading, setUsageLoading] = useState(false);
+  const [usageTotals, setUsageTotals] = useState<UsageTotals | null>(null);
+
+  /* insight panels */
+  const [scoreBuckets, setScoreBuckets] = useState<ScoreBucket[]>([]);
+  const [zeroQueries, setZeroQueries] = useState<RagQueryLogView[]>([]);
+  const [insightsLoading, setInsightsLoading] = useState(false);
 
   const queryForm = useForm({
-    initialValues: { query: '', topK: 5, minScore: 0 },
+    initialValues: { query: '', topK: 5, minScore: 0, filter: '' },
     validate: {
       query: (v) => (!v.trim() ? 'Query is required' : null),
       topK: (v) => (v < 1 ? 'Must be at least 1' : null),
+      filter: (v) => {
+        if (!v.trim()) return null;
+        try {
+          const parsed = JSON.parse(v);
+          if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+            return 'Filter must be a JSON object';
+          }
+          return null;
+        } catch {
+          return 'Filter must be valid JSON';
+        }
+      },
     },
   });
 
@@ -236,6 +339,9 @@ export default function RagModuleDetailPage() {
         topK: mod.defaultTopK ?? 5,
         minScore: mod.defaultMinScore ?? 0,
       });
+      // An override is an edit of the module's config, so it starts as a copy
+      // of it rather than as the factory defaults.
+      setChunkOverride(chunkFormValues(mod.chunkConfig));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mod]);
@@ -243,10 +349,10 @@ export default function RagModuleDetailPage() {
   /* ── Data loading ────────────────────────────────────────────────────── */
 
   const loadModule = useCallback(
-    async (isRefresh = false) => {
+    async (indicator: LoadIndicator = 'initial') => {
       if (!moduleKey) return;
-      if (isRefresh) setRefreshing(true);
-      else setLoading(true);
+      if (indicator === 'refresh') setRefreshing(true);
+      else if (indicator === 'initial') setLoading(true);
       try {
         const res = await fetch(`/api/rag/modules/${encodeURIComponent(moduleKey)}`, { cache: 'no-store' });
         if (!res.ok) {
@@ -257,18 +363,23 @@ export default function RagModuleDetailPage() {
         setMod(data.module ?? null);
       } catch (error) {
         console.error(error);
-        notifications.show({ color: 'red', title: 'Error', message: String(error) });
+        // A poll that fails must not stack up toasts behind the user's back.
+        if (indicator !== 'silent') {
+          notifications.show({ color: 'red', title: 'Error', message: String(error) });
+        }
       } finally {
-        setLoading(false);
-        setRefreshing(false);
+        if (indicator !== 'silent') {
+          setLoading(false);
+          setRefreshing(false);
+        }
       }
     },
     [moduleKey, router],
   );
 
-  const loadDocuments = useCallback(async () => {
+  const loadDocuments = useCallback(async (silent = false) => {
     if (!moduleKey) return;
-    setDocsLoading(true);
+    if (!silent) setDocsLoading(true);
     try {
       const res = await fetch(`/api/rag/modules/${encodeURIComponent(moduleKey)}/documents`, { cache: 'no-store' });
       if (res.ok) {
@@ -290,6 +401,16 @@ export default function RagModuleDetailPage() {
       if (res.ok) {
         const data = await res.json();
         setQueryLogs(data.logs ?? []);
+        setUsageTotals(
+          typeof data.total === 'number' && typeof data.avgLatencyMs === 'number'
+            ? {
+              total: data.total,
+              avgLatencyMs: data.avgLatencyMs,
+              zeroMatchCount: data.zeroMatchCount ?? 0,
+              minScoreFilteredCount: data.minScoreFilteredCount ?? 0,
+            }
+            : null,
+        );
       }
     } catch (e) {
       console.error('[rag usage]', e);
@@ -298,16 +419,63 @@ export default function RagModuleDetailPage() {
     }
   }, [moduleKey]);
 
+  const loadInsights = useCallback(async () => {
+    if (!moduleKey) return;
+    setInsightsLoading(true);
+    const base = `/api/rag/modules/${encodeURIComponent(moduleKey)}`;
+    try {
+      const [distributionRes, zeroRes] = await Promise.all([
+        fetch(`${base}/score-distribution`, { cache: 'no-store' }),
+        fetch(`${base}/queries?zeroOnly=true&limit=25`, { cache: 'no-store' }),
+      ]);
+      if (distributionRes.ok) {
+        const data = await distributionRes.json();
+        setScoreBuckets(data.buckets ?? []);
+      }
+      if (zeroRes.ok) {
+        const data = await zeroRes.json();
+        setZeroQueries(data.logs ?? []);
+      }
+    } catch (e) {
+      console.error('[rag insights]', e);
+    } finally {
+      setInsightsLoading(false);
+    }
+  }, [moduleKey]);
+
   useEffect(() => {
-    void loadModule(false);
+    void loadModule('initial');
   }, [loadModule]);
 
   useEffect(() => {
-    if (mod) {
-      void loadDocuments();
-      void loadUsage();
-    }
-  }, [mod, loadDocuments, loadUsage]);
+    void loadDocuments();
+    void loadUsage();
+    void loadInsights();
+  }, [loadDocuments, loadUsage, loadInsights]);
+
+  /* ── Re-index runs ────────────────────────────────────────────────────── */
+
+  const onReindexSettled = useCallback(() => {
+    void loadDocuments(true);
+    void loadModule('silent');
+  }, [loadDocuments, loadModule]);
+
+  const reindex = useRagReindex(moduleKey, onReindexSettled);
+
+  // A document sits in `pending`/`processing` until the ingest job finishes with
+  // it. Without this the row stayed at its initial status until the user
+  // happened to press Refresh, which read as an ingest that had hung.
+  const documentsSettling = documents.some(
+    (doc) => doc.status === 'pending' || doc.status === 'processing',
+  );
+  useEffect(() => {
+    if (!documentsSettling) return undefined;
+    const timer = setInterval(() => {
+      void loadDocuments(true);
+      void loadModule('silent');
+    }, DOC_POLL_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [documentsSettling, loadDocuments, loadModule]);
 
   /* ── Actions ──────────────────────────────────────────────────────────── */
 
@@ -324,6 +492,13 @@ export default function RagModuleDetailPage() {
     }
   };
 
+  const chunkOverrideErrors = chunkFieldErrors(chunkOverride);
+  const chunkOverrideInvalid = chunkOverrideOn && hasChunkFieldErrors(chunkOverrideErrors);
+
+  /** Only sent when the user opened the override — otherwise the module's own config applies. */
+  const ingestChunkConfig = (): IRagChunkConfig | undefined =>
+    (chunkOverrideOn ? buildChunkConfig(chunkOverride) : undefined);
+
   const handleIngest = async () => {
     if (!ingestFileName.trim() || !ingestContent.trim()) {
       notifications.show({ color: 'orange', title: 'Missing fields', message: 'File name and content are required.' });
@@ -334,7 +509,11 @@ export default function RagModuleDetailPage() {
       const res = await fetch(`/api/rag/modules/${encodeURIComponent(moduleKey!)}/documents`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fileName: ingestFileName.trim(), content: ingestContent }),
+        body: JSON.stringify({
+          fileName: ingestFileName.trim(),
+          content: ingestContent,
+          chunkConfig: ingestChunkConfig(),
+        }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: 'Unknown error' }));
@@ -344,7 +523,7 @@ export default function RagModuleDetailPage() {
       setIngestFileName('');
       setIngestContent('');
       await loadDocuments();
-      await loadModule(true);
+      await loadModule('refresh');
     } catch (error) {
       notifications.show({ color: 'red', title: 'Ingest failed', message: String(error) });
     } finally {
@@ -373,6 +552,7 @@ export default function RagModuleDetailPage() {
           fileName: ingestFile.name,
           data: dataUrl,
           contentType: ingestFile.type || undefined,
+          chunkConfig: ingestChunkConfig(),
         }),
       });
       if (!res.ok) {
@@ -382,7 +562,7 @@ export default function RagModuleDetailPage() {
       notifications.show({ color: 'green', title: 'File ingested', message: `${ingestFile.name} is being processed.` });
       setIngestFile(null);
       await loadDocuments();
-      await loadModule(true);
+      await loadModule('refresh');
     } catch (error) {
       notifications.show({ color: 'red', title: 'Ingest failed', message: String(error) });
     } finally {
@@ -400,49 +580,23 @@ export default function RagModuleDetailPage() {
       if (!res.ok) throw new Error('Failed to delete document');
       notifications.show({ color: 'green', title: 'Document deleted', message: `${doc.fileName} removed.` });
       await loadDocuments();
-      await loadModule(true);
+      await loadModule('refresh');
     } catch (error) {
       notifications.show({ color: 'red', title: 'Error', message: String(error) });
     }
   };
 
   const [reingestingDocId, setReingestingDocId] = useState<string | null>(null);
-  const [reindexingAll, setReindexingAll] = useState(false);
-  const [reindexProgress, setReindexProgress] = useState<{ done: number; total: number } | null>(null);
 
+  /**
+   * The whole-module rebuild is a server-side run now. It used to be a
+   * sequential loop of one POST per document from this tab, which died with the
+   * tab and left half the module on the old configuration.
+   */
   const handleReindexAll = async () => {
     if (!moduleKey || documents.length === 0) return;
-    if (!window.confirm(`Re-index all ${documents.length} document(s)? Existing chunks will be deleted and re-processed.`)) return;
-
-    setReindexingAll(true);
-    setReindexProgress({ done: 0, total: documents.length });
-    let failed = 0;
-    try {
-      for (const doc of documents) {
-        try {
-          const res = await fetch(
-            `/api/rag/modules/${encodeURIComponent(moduleKey)}/documents/${encodeURIComponent(doc._id)}`,
-            { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
-          );
-          if (!res.ok) failed += 1;
-        } catch {
-          failed += 1;
-        }
-        setReindexProgress((prev) => (prev ? { ...prev, done: prev.done + 1 } : prev));
-      }
-      notifications.show({
-        color: failed > 0 ? 'orange' : 'green',
-        title: failed > 0 ? 'Re-index completed with errors' : 'Re-index complete',
-        message: failed > 0
-          ? `${documents.length - failed}/${documents.length} document(s) re-indexed, ${failed} failed.`
-          : `${documents.length} document(s) re-indexed.`,
-      });
-      await loadDocuments();
-      await loadModule(true);
-    } finally {
-      setReindexingAll(false);
-      setReindexProgress(null);
-    }
+    if (!window.confirm(`Re-index all ${documents.length} document(s)? Every chunk is rebuilt in the background; queries keep answering from the current vectors until it finishes.`)) return;
+    await reindex.start();
   };
 
   const handleReingestDocument = async (doc: RagDocumentView) => {
@@ -459,7 +613,7 @@ export default function RagModuleDetailPage() {
       }
       notifications.show({ color: 'green', title: 'Re-ingest complete', message: `${doc.fileName} re-processed.` });
       await loadDocuments();
-      await loadModule(true);
+      await loadModule('refresh');
     } catch (error) {
       notifications.show({ color: 'red', title: 'Re-ingest failed', message: String(error) });
     } finally {
@@ -475,7 +629,12 @@ export default function RagModuleDetailPage() {
       const res = await fetch(`/api/rag/modules/${encodeURIComponent(moduleKey)}/query`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: values.query, topK: values.topK, minScore: values.minScore || undefined }),
+        body: JSON.stringify({
+          query: values.query,
+          topK: values.topK,
+          minScore: values.minScore || undefined,
+          filter: values.filter.trim() ? JSON.parse(values.filter) : undefined,
+        }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: 'Unknown error' }));
@@ -485,6 +644,7 @@ export default function RagModuleDetailPage() {
       setQueryResult(data.result ?? null);
       // refresh usage after query
       void loadUsage();
+      void loadInsights();
     } catch (error) {
       notifications.show({ color: 'red', title: 'Query failed', message: String(error) });
     } finally {
@@ -558,7 +718,11 @@ export default function RagModuleDetailPage() {
     `});`,
     ``,
     `console.log(result.matches);`,
-    `// [{ score: 0.92, content: '...', fileName: 'doc.txt', chunkIndex: 3 }, ...]`,
+    // The snippet has to show what THIS module returns: a text-only module
+    // strips everything but the content before the response leaves the API.
+    mod.responseDetail === 'text'
+      ? `// [{ content: '...' }, ...] — this module's response detail is "text only"`
+      : `// [{ score: 0.92, content: '...', fileName: 'doc.txt', chunkIndex: 3 }, ...]`,
   ].join('\n');
 
   const sdkDelete = [
@@ -636,7 +800,7 @@ export default function RagModuleDetailPage() {
               variant="light"
               size="xs"
               leftSection={refreshing ? <Loader size={12} /> : <IconRefresh size={14} />}
-              onClick={() => void loadModule(true)}
+              onClick={() => void loadModule('refresh')}
               disabled={refreshing}
             >
               Refresh
@@ -652,6 +816,8 @@ export default function RagModuleDetailPage() {
           </>
         }
       />
+
+      <RagReindexBanner {...reindex} reindexRequired={Boolean(mod.reindexRequired)} />
 
       <Tabs defaultValue="overview" keepMounted={false}>
         <Tabs.List mb="md">
@@ -671,70 +837,159 @@ export default function RagModuleDetailPage() {
         <Tabs.Panel value="overview">
           <Stack gap="md">
             {/* KPI Cards */}
-            <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>
-              <Paper withBorder radius="lg" p="lg">
-                <Group justify="space-between" wrap="nowrap" align="flex-start">
-                  <Stack gap={4}>
-                    <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
-                      Documents
-                    </Text>
-                    <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }}>
-                      {mod.totalDocuments ?? 0}
-                    </Text>
-                  </Stack>
-                  <ThemeIcon size={48} radius="xl" variant="light" color="cyan">
-                    <IconFileText size={24} />
-                  </ThemeIcon>
-                </Group>
-              </Paper>
-              <Paper withBorder radius="lg" p="lg">
-                <Group justify="space-between" wrap="nowrap" align="flex-start">
-                  <Stack gap={4}>
-                    <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
-                      Chunks
-                    </Text>
-                    <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }}>
-                      {mod.totalChunks ?? 0}
-                    </Text>
-                  </Stack>
-                  <ThemeIcon size={48} radius="xl" variant="light" color="orange">
-                    <IconDatabase size={24} />
-                  </ThemeIcon>
-                </Group>
-              </Paper>
-              <Paper withBorder radius="lg" p="lg">
-                <Group justify="space-between" wrap="nowrap" align="flex-start">
-                  <Stack gap={4}>
-                    <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
-                      Total Queries
-                    </Text>
-                    <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }}>
-                      {queryLogs.length}
-                    </Text>
-                  </Stack>
-                  <ThemeIcon size={48} radius="xl" variant="light" color="violet">
-                    <IconSearch size={24} />
-                  </ThemeIcon>
-                </Group>
-              </Paper>
-              <Paper withBorder radius="lg" p="lg">
-                <Group justify="space-between" wrap="nowrap" align="flex-start">
-                  <Stack gap={4}>
-                    <Text size="xs" c="dimmed" tt="uppercase" fw={600} style={{ letterSpacing: '0.5px' }}>
-                      Avg Latency
-                    </Text>
-                    <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }}>
-                      {queryLogs.length > 0
-                        ? `${Math.round(queryLogs.reduce((s, l) => s + l.latencyMs, 0) / queryLogs.length)}ms`
-                        : '—'}
-                    </Text>
-                  </Stack>
-                  <ThemeIcon size={48} radius="xl" variant="light" color="teal">
-                    <IconClockHour4 size={24} />
-                  </ThemeIcon>
-                </Group>
-              </Paper>
+            <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }}>
+              <KpiCard
+                label="Documents"
+                value={mod.totalDocuments ?? 0}
+                icon={<IconFileText size={24} />}
+                color="cyan"
+              />
+              <KpiCard
+                label="Chunks"
+                value={mod.totalChunks ?? 0}
+                icon={<IconDatabase size={24} />}
+                color="orange"
+              />
+              <KpiCard
+                label="Total Queries"
+                value={kpiValue(usageTotals?.total)}
+                icon={<IconSearch size={24} />}
+                color="violet"
+              />
+              <KpiCard
+                label="Avg Latency"
+                value={usageTotals && usageTotals.total > 0 ? `${usageTotals.avgLatencyMs}ms` : '—'}
+                icon={<IconClockHour4 size={24} />}
+                color="teal"
+              />
+              <KpiCard
+                label="Zero-result queries"
+                value={kpiValue(usageTotals?.zeroMatchCount)}
+                icon={<IconSearchOff size={24} />}
+                color="red"
+                hint={
+                  usageTotals && usageTotals.total > 0
+                    ? `${shareOf(usageTotals.zeroMatchCount, usageTotals.total)} of all queries — nothing was retrieved at all`
+                    : 'Nothing was retrieved at all'
+                }
+              />
+              <KpiCard
+                label="Filtered by min score"
+                value={kpiValue(usageTotals?.minScoreFilteredCount)}
+                icon={<IconFilter size={24} />}
+                color="yellow"
+                hint={
+                  usageTotals && usageTotals.total > 0
+                    ? `${shareOf(usageTotals.minScoreFilteredCount, usageTotals.total)} of all queries — matches were found, the threshold discarded them`
+                    : 'Matches were found, the threshold discarded them'
+                }
+              />
             </SimpleGrid>
+
+            {/* Score distribution — what the min-score slider is actually cutting */}
+            <Paper withBorder radius="lg" p="lg">
+              <Group gap={8} mb="md">
+                <ThemeIcon variant="light" color="violet" radius="md"><IconChartHistogram size={16} /></ThemeIcon>
+                <div>
+                  <Text fw={600}>Score distribution</Text>
+                  <Text size="sm" c="dimmed">
+                    The best score of every logged query, against the module&apos;s minimum of {(mod.defaultMinScore ?? 0).toFixed(2)}.
+                  </Text>
+                </div>
+              </Group>
+              <ScoreDistributionChart
+                buckets={scoreBuckets}
+                minScore={mod.defaultMinScore ?? 0}
+                loading={insightsLoading}
+              />
+            </Paper>
+
+            {/* Content gaps */}
+            <Paper withBorder radius="lg" p="lg">
+              <Group justify="space-between" mb="md">
+                <div>
+                  <Text fw={600} size="lg">Queries that found nothing</Text>
+                  <Text size="sm" c="dimmed">
+                    Every one of these is a question this module has no answer for — either the content is
+                    missing or the minimum score is set too high.
+                  </Text>
+                </div>
+                <Button
+                  variant="light"
+                  size="xs"
+                  leftSection={insightsLoading ? <Loader size={12} /> : <IconRefresh size={14} />}
+                  onClick={() => void loadInsights()}
+                  disabled={insightsLoading}
+                >
+                  Refresh
+                </Button>
+              </Group>
+
+              {insightsLoading ? (
+                <Center py="xl"><Loader size="sm" color="violet" /></Center>
+              ) : zeroQueries.length === 0 ? (
+                <Center py="xl">
+                  <Text size="sm" c="dimmed">No zero-result queries logged. Every query found something.</Text>
+                </Center>
+              ) : (
+                <Box style={{ overflow: 'hidden', borderRadius: 'var(--mantine-radius-md)' }}>
+                  <Table verticalSpacing="sm" horizontalSpacing="md" highlightOnHover>
+                    <Table.Thead style={{ backgroundColor: 'var(--mantine-color-gray-0)' }}>
+                      <Table.Tr>
+                        <Table.Th>Query</Table.Th>
+                        <Table.Th style={{ textAlign: 'center' }}>Why</Table.Th>
+                        <Table.Th style={{ textAlign: 'center' }}>Best score</Table.Th>
+                        <Table.Th>Time</Table.Th>
+                      </Table.Tr>
+                    </Table.Thead>
+                    <Table.Tbody>
+                      {zeroQueries.map((log) => {
+                        // A query the store answered and the threshold emptied is a
+                        // tuning problem; one the store never answered is a content gap.
+                        // Logs written before the count existed can say neither: absent
+                        // is not zero, and calling it a content gap sends the user
+                        // looking for documents that may well be there.
+                        const preFilter = log.preFilterMatchCount;
+                        const recorded = typeof preFilter === 'number';
+                        const filtered = recorded && preFilter > 0;
+                        return (
+                          <Table.Tr key={log._id}>
+                            <Table.Td style={{ maxWidth: 400 }}>
+                              <Text size="sm" lineClamp={2}>{log.query}</Text>
+                            </Table.Td>
+                            <Table.Td>
+                              <Center>
+                                <Badge
+                                  variant="light"
+                                  color={!recorded ? 'gray' : filtered ? 'yellow' : 'red'}
+                                  size="sm"
+                                >
+                                  {!recorded
+                                    ? 'reason not recorded'
+                                    : filtered
+                                      ? `${preFilter} below min score`
+                                      : 'nothing retrieved'}
+                                </Badge>
+                              </Center>
+                            </Table.Td>
+                            <Table.Td>
+                              <Center>
+                                <Text size="xs" c="dimmed" ff="monospace">
+                                  {typeof log.topScore === 'number' ? log.topScore.toFixed(3) : '—'}
+                                </Text>
+                              </Center>
+                            </Table.Td>
+                            <Table.Td>
+                              <Text size="xs" c="dimmed">{formatDate(log.createdAt)}</Text>
+                            </Table.Td>
+                          </Table.Tr>
+                        );
+                      })}
+                    </Table.Tbody>
+                  </Table>
+                </Box>
+              )}
+            </Paper>
 
             {/* Module Configuration */}
             <Paper withBorder radius="lg" p="lg">
@@ -780,6 +1035,54 @@ export default function RagModuleDetailPage() {
                     <Text size="sm">{mod.chunkConfig.encoding}</Text>
                   </Stack>
                 )}
+                {mod.chunkConfig.semanticThreshold !== undefined && (
+                  <Stack gap={4}>
+                    <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Topic-shift Threshold</Text>
+                    <Text size="sm">{mod.chunkConfig.semanticThreshold.toFixed(2)}</Text>
+                  </Stack>
+                )}
+                <Stack gap={4}>
+                  <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Parent Window</Text>
+                  <Text size="sm">
+                    {mod.chunkConfig.parentWindowSize
+                      ? `${mod.chunkConfig.parentWindowSize} chars`
+                      : 'Off — the chunk itself is returned'}
+                  </Text>
+                </Stack>
+                <Stack gap={4}>
+                  <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Contextual Headers</Text>
+                  {mod.chunkConfig.contextualHeader?.enabled ? (
+                    <Badge variant="light" color="grape" size="sm">
+                      {mod.chunkConfig.contextualHeader.modelKey ?? 'answer model'}
+                    </Badge>
+                  ) : (
+                    <Text size="sm" c="dimmed">Off</Text>
+                  )}
+                </Stack>
+                <Stack gap={4}>
+                  <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Hybrid Retrieval</Text>
+                  {mod.hybrid?.enabled ? (
+                    <Text size="sm">
+                      {mod.hybrid.mode === 'weighted'
+                        ? `Weighted — dense ${(mod.hybrid.alpha ?? 0.5).toFixed(2)}`
+                        : `Reciprocal rank fusion — k ${mod.hybrid.k ?? 60}`}
+                    </Text>
+                  ) : (
+                    <Text size="sm" c="dimmed">Off — vector search only</Text>
+                  )}
+                </Stack>
+                <Stack gap={4}>
+                  <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Module Isolation</Text>
+                  {/* Three states. Absent is not "on": the service decides per
+                      query, isolating only when another module shares the index. */}
+                  <Text size="sm">
+                    {typeof mod.isolateByModule !== 'boolean'
+                      ? 'Not set — on only while another module shares this index'
+                      : mod.isolateByModule
+                        ? 'On — queries stay inside this module'
+                        : 'Off — the index is shared with an outside pipeline'}
+                  </Text>
+                </Stack>
                 <Stack gap={4}>
                   <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Reranker</Text>
                   {mod.rerankerKey ? (
@@ -807,6 +1110,10 @@ export default function RagModuleDetailPage() {
                 <Stack gap={4}>
                   <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Created</Text>
                   <Text size="sm">{formatDate(mod.createdAt)}</Text>
+                </Stack>
+                <Stack gap={4}>
+                  <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Last Re-index</Text>
+                  <Text size="sm">{formatDate(mod.lastReindexAt)}</Text>
                 </Stack>
               </SimpleGrid>
             </Paper>
@@ -850,16 +1157,6 @@ export default function RagModuleDetailPage() {
                         {ingestFile.name} — {(ingestFile.size / 1024).toFixed(1)} KB
                       </Text>
                     )}
-                    <Group justify="flex-end">
-                      <Button
-                        leftSection={ingesting ? <Loader size={14} /> : <IconFileUpload size={14} />}
-                        onClick={() => void handleFileIngest()}
-                        disabled={ingesting || !ingestFile}
-                        loading={ingesting}
-                      >
-                        Upload &amp; Ingest
-                      </Button>
-                    </Group>
                   </>
                 ) : (
                   <>
@@ -878,18 +1175,58 @@ export default function RagModuleDetailPage() {
                       minRows={6}
                       maxRows={16}
                     />
-                    <Group justify="flex-end">
-                      <Button
-                        leftSection={ingesting ? <Loader size={14} /> : <IconFileUpload size={14} />}
-                        onClick={() => void handleIngest()}
-                        disabled={ingesting || !ingestFileName.trim() || !ingestContent.trim()}
-                        loading={ingesting}
-                      >
-                        Ingest Document
-                      </Button>
-                    </Group>
                   </>
                 )}
+
+                {/* Collapsed by default: almost every ingest wants the module's own chunking. */}
+                <Accordion variant="contained" radius="md" chevronPosition="left">
+                  <Accordion.Item value="chunking">
+                    <Accordion.Control>
+                      <Group gap="xs">
+                        <Text size="sm" fw={500}>Chunking for this document</Text>
+                        <Badge size="xs" variant="light" color={chunkOverrideOn ? 'violet' : 'gray'}>
+                          {chunkOverrideOn
+                            ? 'overridden'
+                            : `module default — ${strategyLabel(mod.chunkConfig.strategy)}`}
+                        </Badge>
+                      </Group>
+                    </Accordion.Control>
+                    <Accordion.Panel>
+                      <Stack gap="sm">
+                        <Switch
+                          label="Override the module's chunking for this document"
+                          description="A 200-page manual and a FAQ CSV rarely want the same splitter. Only this document is affected."
+                          checked={chunkOverrideOn}
+                          onChange={(e) => setChunkOverrideOn(e.currentTarget.checked)}
+                        />
+                        {chunkOverrideOn ? (
+                          <ChunkConfigFields
+                            values={chunkOverride}
+                            onChange={(patch) => setChunkOverride((prev) => ({ ...prev, ...patch }))}
+                            errors={chunkOverrideErrors}
+                          />
+                        ) : null}
+                      </Stack>
+                    </Accordion.Panel>
+                  </Accordion.Item>
+                </Accordion>
+
+                <Group justify="flex-end">
+                  <Button
+                    leftSection={ingesting ? <Loader size={14} /> : <IconFileUpload size={14} />}
+                    onClick={() => void (ingestMode === 'file' ? handleFileIngest() : handleIngest())}
+                    disabled={
+                      ingesting
+                      || chunkOverrideInvalid
+                      || (ingestMode === 'file'
+                        ? !ingestFile
+                        : !ingestFileName.trim() || !ingestContent.trim())
+                    }
+                    loading={ingesting}
+                  >
+                    {ingestMode === 'file' ? 'Upload & Ingest' : 'Ingest Document'}
+                  </Button>
+                </Group>
               </Stack>
             </Paper>
 
@@ -901,19 +1238,20 @@ export default function RagModuleDetailPage() {
                   <Text size="sm" c="dimmed">{documents.length} document(s) in this module</Text>
                 </div>
                 <Group gap="xs">
-                  <Tooltip label="Delete and re-process every document's chunks" withArrow>
+                  <Tooltip
+                    label="Rebuild every document's chunks in the background — the run survives closing this tab"
+                    withArrow
+                  >
                     <Button
                       variant="light"
                       color="violet"
                       size="xs"
-                      leftSection={reindexingAll ? <Loader size={12} /> : <IconRefresh size={14} />}
+                      leftSection={<IconRefresh size={14} />}
                       onClick={() => void handleReindexAll()}
-                      disabled={reindexingAll || docsLoading || documents.length === 0}
-                      loading={reindexingAll}
+                      disabled={Boolean(reindex.activeRun) || docsLoading || documents.length === 0}
+                      loading={reindex.busy}
                     >
-                      {reindexingAll && reindexProgress
-                        ? `Re-indexing… (${reindexProgress.done}/${reindexProgress.total})`
-                        : 'Re-index All'}
+                      {reindex.activeRun ? 'Re-index running…' : 'Re-index All'}
                     </Button>
                   </Tooltip>
                   <Button
@@ -965,8 +1303,15 @@ export default function RagModuleDetailPage() {
                           </Table.Td>
                           <Table.Td>
                             <Center>
-                              <Badge variant="filled" color="orange" size="md" radius="sm">
-                                {doc.chunkCount ?? 0}
+                              {/* A document still being ingested has no count yet;
+                                  0 would read as "this file produced nothing". */}
+                              <Badge
+                                variant={typeof doc.chunkCount === 'number' ? 'filled' : 'light'}
+                                color={typeof doc.chunkCount === 'number' ? 'orange' : 'gray'}
+                                size="md"
+                                radius="sm"
+                              >
+                                {doc.chunkCount ?? '—'}
                               </Badge>
                             </Center>
                           </Table.Td>
@@ -1056,6 +1401,18 @@ export default function RagModuleDetailPage() {
                       onChange={(v) => queryForm.setFieldValue('minScore', v)}
                     />
                   </Box>
+                  <Textarea
+                    label="Metadata filter (JSON)"
+                    description={
+                      mod?.filterableFields?.length
+                        ? `Filterable fields: ${mod.filterableFields.join(', ')}. A bare value means equality; operators $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin, $exists compose with $and / $or / $not.`
+                        : 'Optional. A bare value means equality; operators $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin, $exists compose with $and / $or / $not.'
+                    }
+                    placeholder='{ "source": "crawler", "depth": { "$lte": 2 } }'
+                    minRows={2}
+                    autosize
+                    {...queryForm.getInputProps('filter')}
+                  />
                   <Group align="flex-end">
                     <NumberInput
                       label="Top K"
@@ -1086,6 +1443,12 @@ export default function RagModuleDetailPage() {
                     <Text size="sm" c="dimmed">
                       {queryResult.matches.length} match(es) — {queryResult.latencyMs}ms
                     </Text>
+                    {mod.responseDetail === 'text' ? (
+                      <Text size="xs" c="dimmed">
+                        This module answers with text only, so the response carries no scores,
+                        ids or metadata. Switch Response detail to &quot;Full&quot; to see them.
+                      </Text>
+                    ) : null}
                   </div>
                 </Group>
 
@@ -1096,32 +1459,32 @@ export default function RagModuleDetailPage() {
                 ) : (
                   <Accordion variant="separated" radius="md">
                     {queryResult.matches.map((match, idx) => (
-                      <Accordion.Item key={match.id || idx} value={String(idx)}>
+                      <Accordion.Item key={match.id ?? String(idx)} value={String(idx)}>
                         <Accordion.Control>
                           <Group justify="space-between" wrap="nowrap" pr="md">
                             <Group gap="sm">
                               <Badge variant="filled" color="violet" size="sm" radius="sm">
                                 #{idx + 1}
                               </Badge>
-                              <Text size="sm" fw={500}>
-                                {match.fileName ?? 'Unknown file'}
-                              </Text>
-                              {match.chunkIndex !== undefined && (
+                              {/* Stripped by a text-only response — the rank badge stands
+                                  in for it, rather than claiming an unknown file. */}
+                              {match.fileName ? (
+                                <Text size="sm" fw={500}>{match.fileName}</Text>
+                              ) : null}
+                              {typeof match.chunkIndex === 'number' && (
                                 <Badge variant="light" color="gray" size="xs">
                                   Chunk {match.chunkIndex}
                                 </Badge>
                               )}
                             </Group>
-                            <Group gap="xs">
-                              <Text size="xs" c="dimmed">Score:</Text>
-                              <Badge
-                                variant="light"
-                                color={match.score >= 0.8 ? 'teal' : match.score >= 0.5 ? 'yellow' : 'red'}
-                                size="sm"
-                              >
-                                {match.score.toFixed(4)}
-                              </Badge>
-                            </Group>
+                            {typeof match.score === 'number' ? (
+                              <Group gap="xs">
+                                <Text size="xs" c="dimmed">Score:</Text>
+                                <Badge variant="light" color={scoreColor(match.score)} size="sm">
+                                  {match.score.toFixed(4)}
+                                </Badge>
+                              </Group>
+                            ) : null}
                           </Group>
                         </Accordion.Control>
                         <Accordion.Panel>
@@ -1227,12 +1590,8 @@ export default function RagModuleDetailPage() {
                           </Table.Td>
                           <Table.Td>
                             <Center>
-                              <Badge
-                                variant="light"
-                                color={log.latencyMs < 500 ? 'teal' : log.latencyMs < 2000 ? 'yellow' : 'red'}
-                                size="sm"
-                              >
-                                {log.latencyMs}ms
+                              <Badge variant="light" color={latencyColor(log.latencyMs)} size="sm">
+                                {typeof log.latencyMs === 'number' ? `${log.latencyMs}ms` : '—'}
                               </Badge>
                             </Center>
                           </Table.Td>
@@ -1257,6 +1616,9 @@ export default function RagModuleDetailPage() {
         onUpdated={(updated) => {
           setMod(updated as unknown as RagModuleView);
           setEditModalOpen(false);
+          // Changing the chunking or the embedding model enqueues a run
+          // server-side; pick it up so the progress banner appears at once.
+          void reindex.refresh(true);
         }}
       />
     </PageContainer>

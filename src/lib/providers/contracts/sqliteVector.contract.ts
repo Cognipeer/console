@@ -14,6 +14,7 @@ import type {
   VectorListInput,
   VectorListResult,
 } from '../domains/vector';
+import { FULL_FILTER_OPERATORS, matchesFilter } from '../domains/vectorFilter';
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -209,7 +210,12 @@ export const SqliteVectorProviderContract: ProviderContract<
     supportsUpsert: true,
     supportsQuery: true,
     supportsDelete: true,
-    supportsMetadataFilter: false,
+    supportsMetadataFilter: true,
+    'vector.filterOperators': FULL_FILTER_OPERATORS,
+    // Same as the Mongo community store: scores come from an in-process scan,
+    // and ranking by keywords properly needs an FTS5 table alongside
+    // vector_entries rather than a heuristic over the metadata blob.
+    'vector.supportsHybrid': false,
     maxDimension: 4096,
     local: true,
     builtin: true,
@@ -370,6 +376,20 @@ export const SqliteVectorProviderContract: ProviderContract<
           .iterate(handle.externalId) as IterableIterator<EntryRow>;
 
         for (const row of rows) {
+          // Filtering during the scan (rather than after top-K selection) keeps
+          // a filtered query returning a full topK of matching vectors.
+          if (query.filter) {
+            let rowMetadata: Record<string, unknown> = {};
+            try {
+              rowMetadata = row.metadata ? JSON.parse(row.metadata) : {};
+            } catch {
+              rowMetadata = {};
+            }
+            if (!matchesFilter(rowMetadata, query.filter)) continue;
+          }
+
+          // Counts rows actually scored, so a filtered query reports how many
+          // candidates survived the filter rather than the whole index size.
           candidateCount += 1;
           const score = computeScore(queryVec, decodeVector(row.vec_values), metric);
 

@@ -1,5 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify';
-import type { AgentStatus, IAgent, IAgentConfig } from '@/lib/database';
+import type { AgentStatus, IAgent, IAgentConfig, IUser } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
   createAgentRecord,
@@ -67,6 +67,30 @@ function normalizeAgentConfig(rawConfig: unknown): IAgentConfig {
   return cfg as IAgentConfig;
 }
 
+/**
+ * Resolve an agent by id within the caller's project scope.
+ *
+ * getAgentById is scoped only by the tenant database, so without this an
+ * ordinary member could address any agent in the tenant: read its prompt and
+ * connection config, rewrite or delete it, or run it on the owning project's
+ * credentials. Returns null for an out-of-scope id so it is indistinguishable
+ * from a missing one. Owners and admins keep tenant-wide reach, which
+ * resolveProjectContext already grants them, and agents stored without a
+ * projectId stay tenant-wide.
+ */
+async function agentInProjectScope(
+  tenantDbName: string,
+  agentId: string,
+  projectId: string,
+  user: Pick<IUser, 'role'>,
+): Promise<IAgent | null> {
+  const agent = await getAgentById(tenantDbName, agentId);
+  if (!agent) return null;
+  if (user.role === 'owner' || user.role === 'admin') return agent;
+  if (!agent.projectId) return agent;
+  return String(agent.projectId) === String(projectId) ? agent : null;
+}
+
 export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/agents', withApiRequestContext(async (request, reply) => {
     try {
@@ -127,9 +151,9 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/agents/:agentId', withApiRequestContext(async (request, reply) => {
     try {
       await requireProjectContextForRequest(request);
-      const { session } = await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { agentId } = request.params as { agentId: string };
-      const agent = await getAgentById(session.tenantDbName, agentId);
+      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
 
       if (!agent) {
         return reply.code(404).send({ error: 'Agent not found' });
@@ -145,8 +169,11 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.patch('/agents/:agentId', withApiRequestContext(async (request, reply) => {
     try {
-      const { session } = await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { agentId } = request.params as { agentId: string };
+      if (!(await agentInProjectScope(session.tenantDbName, agentId, projectId, user))) {
+        return reply.code(404).send({ error: 'Agent not found' });
+      }
       const body = readJsonBody<Record<string, unknown>>(request);
 
       if (body.config && typeof body.config === 'object') {
@@ -202,8 +229,11 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.delete('/agents/:agentId', withApiRequestContext(async (request, reply) => {
     try {
-      const { session } = await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { agentId } = request.params as { agentId: string };
+      if (!(await agentInProjectScope(session.tenantDbName, agentId, projectId, user))) {
+        return reply.code(404).send({ error: 'Agent not found' });
+      }
       const deleted = await deleteAgentRecord(session.tenantDbName, agentId);
 
       if (!deleted) {
@@ -220,10 +250,10 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/agents/:agentId/versions', withApiRequestContext(async (request, reply) => {
     try {
-      const { session } = await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { agentId } = request.params as { agentId: string };
       const query = (request.query ?? {}) as { limit?: string; skip?: string; version?: string };
-      const agent = await getAgentById(session.tenantDbName, agentId);
+      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
 
       if (!agent) {
         return reply.code(404).send({ error: 'Agent not found' });
@@ -262,8 +292,13 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.post('/agents/:agentId/publish', withApiRequestContext(async (request, reply) => {
     try {
-      const { session } = await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { agentId } = request.params as { agentId: string };
+      if (!(await agentInProjectScope(session.tenantDbName, agentId, projectId, user))) {
+        // Same failure an unknown id already raises inside publishAgent, so the
+        // route cannot confirm that another project's agent exists.
+        throw new Error(`Agent "${agentId}" not found`);
+      }
       const body = readJsonBody<Record<string, unknown>>(request);
       const version = await publishAgent(
         session.tenantDbName,
@@ -284,9 +319,9 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/agents/:agentId/conversations', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, session } = await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { agentId } = request.params as { agentId: string };
-      const agent = await getAgentById(session.tenantDbName, agentId);
+      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
 
       if (!agent) {
         return reply.code(404).send({ error: 'Agent not found' });
@@ -307,9 +342,9 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.post('/agents/:agentId/conversations', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, session } = await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { agentId } = request.params as { agentId: string };
-      const agent = await getAgentById(session.tenantDbName, agentId);
+      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
 
       if (!agent) {
         return reply.code(404).send({ error: 'Agent not found' });
@@ -335,7 +370,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.post('/agents/:agentId/chat', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, session } = await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { agentId } = request.params as { agentId: string };
       const body = readJsonBody<Record<string, unknown>>(request);
 
@@ -343,7 +378,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'Message is required' });
       }
 
-      const agent = await getAgentById(session.tenantDbName, agentId);
+      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
       if (!agent) {
         return reply.code(404).send({ error: 'Agent not found' });
       }

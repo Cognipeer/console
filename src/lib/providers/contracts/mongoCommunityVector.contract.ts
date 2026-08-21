@@ -12,6 +12,8 @@ import type {
   VectorListInput,
   VectorListResult,
 } from '../domains/vector';
+import { FULL_FILTER_OPERATORS } from '../domains/vectorFilter';
+import { toMongoQueryFilter } from './vectorFilterTranslators';
 
 /**
  * MongoDB Community Vector Store — brute-force similarity, no Atlas required.
@@ -206,7 +208,13 @@ export const MongoCommunityVectorProviderContract: ProviderContract<
     supportsUpsert: true,
     supportsQuery: true,
     supportsDelete: true,
-    supportsMetadataFilter: false,
+    supportsMetadataFilter: true,
+    'vector.filterOperators': FULL_FILTER_OPERATORS,
+    'vector.filterRaw': true,
+    // Similarity here is computed in process over a plain collection scan.
+    // A keyword channel would need a real inverted index — a Mongo `$text`
+    // index on the entries collection — not a term count invented per query.
+    'vector.supportsHybrid': false,
     local: false,
     builtin: true,
     shared: true,
@@ -369,8 +377,13 @@ export const MongoCommunityVectorProviderContract: ProviderContract<
         let minIdx = 0;
         let candidateCount = 0;
 
+        // Filtering happens in the scan query itself, before top-K selection,
+        // so a filtered search still returns a full topK of matching vectors.
         const cursor = entries.find(
-          { indexId: handle.externalId },
+          {
+            indexId: handle.externalId,
+            ...(query.filter ? toMongoQueryFilter(query.filter) : {}),
+          },
           { projection: { vectorId: 1, values: 1, metadata: 1 } },
         );
 

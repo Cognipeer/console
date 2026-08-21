@@ -9,6 +9,16 @@ import type {
   VectorListInput,
   VectorListResult,
 } from '../domains/vector';
+import { FULL_FILTER_OPERATORS } from '../domains/vectorFilter';
+import {
+  describeHybrid,
+  extractVectorText,
+  fuseHybridMatches,
+  hybridCandidateCount,
+  resolveHybridOptions,
+  type VectorHybridChannelHit,
+} from '../domains/vectorHybrid';
+import { toPostgresCondition } from './vectorFilterTranslators';
 
 interface PostgresVectorCredentials {
   connectionString?: string;
@@ -26,6 +36,14 @@ interface PostgresVectorSettings {
 
 const DEFAULT_DIMENSIONS = 1536;
 const DEFAULT_PORT = 5432;
+
+/**
+ * Keyword channel expression, shared by the GIN index and the query so the
+ * planner can actually use one for the other. 'simple' rather than a language
+ * configuration because the column holds chunks in whatever language the
+ * corpus is written in, and a wrong stemmer is worse than none.
+ */
+const TSVECTOR_EXPR = "to_tsvector('simple', coalesce(content, ''))";
 
 type PgPool = {
   connect: () => Promise<PgClient>;
@@ -62,6 +80,26 @@ function pgMetricOp(metric: string): string {
   if (metric === 'dot') return '<#>';
   if (metric === 'euclidean') return '<->';
   return '<=>';  // cosine
+}
+
+/**
+ * SQL expression turning a pgvector operator result into a similarity score
+ * (higher = more similar), which is what `VectorQueryMatch.score` must be.
+ * Each operator returns something different: `<=>` cosine distance, `<->` L2
+ * distance, and `<#>` the NEGATIVE inner product.
+ */
+function toChannelHit(row: Record<string, unknown>): VectorHybridChannelHit {
+  return {
+    id: row.id as string,
+    score: parseFloat(row.score as string),
+    metadata: row.metadata as Record<string, unknown> | undefined,
+  };
+}
+
+function pgScoreExpr(metric: string, op: string, tbl: string): string {
+  if (metric === 'dot') return `-(${tbl}.vector ${op} $1::vector)`;
+  if (metric === 'euclidean') return `1 / (1 + (${tbl}.vector ${op} $1::vector))`;
+  return `1 - (${tbl}.vector ${op} $1::vector)`;
 }
 
 export const PostgresVectorProviderContract: ProviderContract<
@@ -160,6 +198,8 @@ export const PostgresVectorProviderContract: ProviderContract<
     supportsUpsert: true,
     supportsQuery: true,
     supportsDelete: true,
+    'vector.filterOperators': FULL_FILTER_OPERATORS,
+    'vector.supportsHybrid': true,
   },
   async createRuntime({ credentials, settings, providerKey, logger }) {
     if (!settings?.tableName?.trim()) {
@@ -189,6 +229,37 @@ export const PostgresVectorProviderContract: ProviderContract<
       }
     }
 
+    // The searchable text column arrived with hybrid search, so every table
+    // created before it lacks one. The migration is idempotent and cheap, but
+    // it needs DDL rights this connection may not have — so the answer is
+    // remembered either way: a restricted deployment keeps ingesting and
+    // querying without hybrid instead of re-attempting an ALTER on every write.
+    const contentColumn = new Map<string, Promise<boolean>>();
+
+    function ensureContentColumn(tbl: string): Promise<boolean> {
+      const pending = contentColumn.get(tbl);
+      if (pending) return pending;
+
+      const promise = withClient(async (client) => {
+        await client.query(`ALTER TABLE ${tbl} ADD COLUMN IF NOT EXISTS content TEXT`);
+        await client.query(
+          `CREATE INDEX IF NOT EXISTS ${tbl.replace(/\W/g, '_')}_content_fts
+           ON ${tbl} USING GIN (${TSVECTOR_EXPR})`,
+        );
+        return true;
+      }).catch((error: unknown) => {
+        logger?.warn?.('PostgreSQL keyword column unavailable; hybrid search stays off', {
+          providerKey,
+          tableName: tbl,
+          error: error instanceof Error ? error.message : error,
+        });
+        return false;
+      });
+
+      contentColumn.set(tbl, promise);
+      return promise;
+    }
+
     const runtime: VectorProviderRuntime = {
       async createIndex(input: CreateVectorIndexInput): Promise<VectorIndexHandle> {
         const dim = input.dimension || dimensions;
@@ -200,10 +271,15 @@ export const PostgresVectorProviderContract: ProviderContract<
             `CREATE TABLE IF NOT EXISTS ${tableName} (
               id TEXT PRIMARY KEY,
               vector vector(${dim}),
-              metadata JSONB DEFAULT '{}'
+              metadata JSONB DEFAULT '{}',
+              content TEXT
             )`,
           );
         });
+
+        // CREATE TABLE IF NOT EXISTS never alters an existing table, so a
+        // pre-hybrid table still needs the column and its index adding.
+        await ensureContentColumn(tableName);
 
         logger?.info?.('PostgreSQL vector table ensured', { providerKey, tableName });
 
@@ -247,16 +323,23 @@ export const PostgresVectorProviderContract: ProviderContract<
 
       async upsertVectors(handle: VectorIndexHandle, items: VectorUpsertItem[]): Promise<void> {
         const tbl = (handle.metadata?.tableName as string) || tableName;
+        const hasContent = await ensureContentColumn(tbl);
+
+        const sql = hasContent
+          ? `INSERT INTO ${tbl} (id, vector, metadata, content)
+             VALUES ($1, $2::vector, $3::jsonb, $4)
+             ON CONFLICT (id) DO UPDATE SET vector = EXCLUDED.vector,
+               metadata = EXCLUDED.metadata, content = EXCLUDED.content`
+          : `INSERT INTO ${tbl} (id, vector, metadata)
+             VALUES ($1, $2::vector, $3::jsonb)
+             ON CONFLICT (id) DO UPDATE SET vector = EXCLUDED.vector, metadata = EXCLUDED.metadata`;
 
         await withClient(async (client) => {
           for (const item of items) {
             const vectorStr = `[${item.values.join(',')}]`;
-            await client.query(
-              `INSERT INTO ${tbl} (id, vector, metadata)
-               VALUES ($1, $2::vector, $3::jsonb)
-               ON CONFLICT (id) DO UPDATE SET vector = EXCLUDED.vector, metadata = EXCLUDED.metadata`,
-              [item.id, vectorStr, JSON.stringify(item.metadata ?? {})],
-            );
+            const params: unknown[] = [item.id, vectorStr, JSON.stringify(item.metadata ?? {})];
+            if (hasContent) params.push(extractVectorText(item.metadata) ?? '');
+            await client.query(sql, params);
           }
         });
 
@@ -268,23 +351,74 @@ export const PostgresVectorProviderContract: ProviderContract<
         const op = pgMetricOp(handle.metric);
         const vectorStr = `[${query.vector.join(',')}]`;
 
-        const rows = await withClient(async (client) => {
-          const result = await client.query(
-            `SELECT id, metadata, 1 - (vector ${op} $1::vector) AS score
-             FROM ${tbl}
+        const text = query.text?.trim();
+        const fused = Boolean(text) && await ensureContentColumn(tbl);
+        const limit = fused ? hybridCandidateCount(query.topK) : query.topK;
+
+        // Filter in SQL so the ORDER BY/LIMIT runs over matching rows only.
+        const params: unknown[] = [vectorStr];
+        let whereClause = '';
+        if (query.filter) {
+          const fragment = toPostgresCondition(query.filter, 'metadata', params.length + 1);
+          whereClause = ` WHERE ${fragment.sql}`;
+          params.push(...fragment.params);
+        }
+        params.push(limit);
+        const limitPlaceholder = `$${params.length}`;
+
+        const denseSql = `SELECT id, metadata, ${pgScoreExpr(handle.metric, op, tbl)} AS score
+             FROM ${tbl}${whereClause}
              ORDER BY vector ${op} $1::vector
-             LIMIT $2`,
-            [vectorStr, query.topK],
-          );
-          return result.rows;
+             LIMIT ${limitPlaceholder}`;
+
+        if (!fused) {
+          const rows = await withClient(async (client) => {
+            const result = await client.query(denseSql, params);
+            return result.rows;
+          });
+
+          const matches = rows.map(toChannelHit);
+          // The caller asked for keywords and the table has no column to match
+          // them against — say so rather than pass dense results off as fused.
+          return text
+            ? { matches, usage: describeHybrid({ ran: false, reason: 'index-schema' }) }
+            : { matches };
+        }
+
+        const lexParams: unknown[] = [text];
+        let lexWhere = '';
+        if (query.filter) {
+          const fragment = toPostgresCondition(query.filter, 'metadata', lexParams.length + 1);
+          lexWhere = ` AND ${fragment.sql}`;
+          lexParams.push(...fragment.params);
+        }
+        lexParams.push(limit);
+        const lexLimitPlaceholder = `$${lexParams.length}`;
+
+        const lexicalSql = `SELECT id, metadata, ts_rank_cd(${TSVECTOR_EXPR}, q) AS score
+             FROM ${tbl}, websearch_to_tsquery('simple', $1) q
+             WHERE ${TSVECTOR_EXPR} @@ q${lexWhere}
+             ORDER BY score DESC
+             LIMIT ${lexLimitPlaceholder}`;
+
+        // Two statements over one connection rather than a single fused query:
+        // joining the channels in SQL takes window functions that defeat the
+        // pgvector top-k index scan, and it would put a second copy of the
+        // score-scale correction somewhere it cannot be tested.
+        const [denseRows, lexicalRows] = await withClient(async (client) => {
+          const dense = await client.query(denseSql, params);
+          const lexical = await client.query(lexicalSql, lexParams);
+          return [dense.rows, lexical.rows];
         });
 
         return {
-          matches: rows.map((row) => ({
-            id: row.id as string,
-            score: parseFloat(row.score as string),
-            metadata: row.metadata as Record<string, unknown> | undefined,
-          })),
+          matches: fuseHybridMatches({
+            dense: denseRows.map(toChannelHit),
+            lexical: lexicalRows.map(toChannelHit),
+            topK: query.topK,
+            options: query.hybrid,
+          }),
+          usage: describeHybrid({ ran: true, mode: resolveHybridOptions(query.hybrid).mode }),
         };
       },
 

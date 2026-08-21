@@ -3,7 +3,7 @@
  */
 
 import { ObjectId, type Filter } from 'mongodb';
-import type { IVectorIndexRecord } from '../provider.interface';
+import type { IVectorIndexRecord, IVectorQueryLog, IVectorQueryStats } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
 
@@ -173,6 +173,88 @@ export function VectorMixin<TBase extends Constructor<MongoDBProviderBase>>(Base
       return {
         ...index,
         _id: index._id?.toString(),
+      };
+    }
+
+    async createVectorQueryLog(
+      log: Omit<IVectorQueryLog, '_id'>,
+    ): Promise<IVectorQueryLog> {
+      const db = this.getTenantDb();
+      const result = await db
+        .collection(COLLECTIONS.vectorQueryLogs)
+        .insertOne({ ...log });
+      return { ...log, _id: result.insertedId.toString() };
+    }
+
+    async aggregateVectorQueryStats(params: {
+      indexKey: string;
+      from: Date;
+      to: Date;
+    }): Promise<IVectorQueryStats> {
+      const db = this.getTenantDb();
+      const collection = db.collection(COLLECTIONS.vectorQueryLogs);
+      const match = {
+        indexKey: params.indexKey,
+        timestamp: { $gte: params.from, $lte: params.to },
+      };
+
+      const [daily, totalsRaw, topKDist] = await Promise.all([
+        collection.aggregate([
+          { $match: match },
+          {
+            $group: {
+              _id: { $dateToString: { format: '%Y-%m-%d', date: '$timestamp' } },
+              queryCount: { $sum: 1 },
+              avgLatencyMs: { $avg: '$latencyMs' },
+              avgScore: { $avg: '$avgScore' },
+              filterCount: { $sum: { $cond: [{ $eq: ['$filterApplied', true] }, 1, 0] } },
+            },
+          },
+          { $sort: { _id: 1 } },
+        ]).toArray(),
+
+        collection.aggregate([
+          { $match: match },
+          {
+            $group: {
+              _id: null,
+              totalQueries: { $sum: 1 },
+              avgLatencyMs: { $avg: '$latencyMs' },
+              avgScore: { $avg: '$avgScore' },
+              minLatencyMs: { $min: '$latencyMs' },
+              maxLatencyMs: { $max: '$latencyMs' },
+            },
+          },
+        ]).toArray(),
+
+        collection.aggregate([
+          { $match: match },
+          { $group: { _id: '$topK', count: { $sum: 1 } } },
+          { $sort: { _id: 1 } },
+        ]).toArray(),
+      ]);
+
+      const totals = totalsRaw[0] ?? {};
+
+      return {
+        daily: daily.map((row) => ({
+          date: row._id as string,
+          queryCount: (row.queryCount as number | undefined) ?? 0,
+          avgLatencyMs: (row.avgLatencyMs as number | undefined) ?? 0,
+          avgScore: (row.avgScore as number | null | undefined) ?? null,
+          filterCount: (row.filterCount as number | undefined) ?? 0,
+        })),
+        totals: {
+          totalQueries: (totals.totalQueries as number | undefined) ?? 0,
+          avgLatencyMs: (totals.avgLatencyMs as number | null | undefined) ?? null,
+          avgScore: (totals.avgScore as number | null | undefined) ?? null,
+          minLatencyMs: (totals.minLatencyMs as number | null | undefined) ?? null,
+          maxLatencyMs: (totals.maxLatencyMs as number | null | undefined) ?? null,
+        },
+        topKDistribution: topKDist.map((row) => ({
+          topK: (row._id as number | undefined) ?? 0,
+          count: (row.count as number | undefined) ?? 0,
+        })),
       };
     }
   };

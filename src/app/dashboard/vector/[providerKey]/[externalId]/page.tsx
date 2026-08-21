@@ -77,6 +77,8 @@ interface StatsData {
   };
   topKDistribution: Array<{ topK: number; count: number }>;
   days: number;
+  /** Live count from the provider; undefined when it cannot report one. */
+  vectorCount?: number;
 }
 
 /* ── Helpers ────────────────────────────────────────────────────────────── */
@@ -215,6 +217,12 @@ export default function VectorIndexDetailPage() {
     if (value === undefined || value === null) return '';
     return String(value);
   }, [index?.metadata]);
+
+  /** Operators this driver can push down, declared by its provider contract. */
+  const filterOperators = useMemo(() => {
+    const declared = provider?.driverCapabilities?.['vector.filterOperators'];
+    return Array.isArray(declared) ? declared.map(String) : [];
+  }, [provider?.driverCapabilities]);
 
   const providerHandle = useMemo(() => resolveProviderHandle(index?.metadata), [index?.metadata]);
   const bucketName = useMemo(() => resolveBucketName(index?.metadata), [index?.metadata]);
@@ -502,7 +510,11 @@ export default function VectorIndexDetailPage() {
     );
   }
 
-  const vectorCount = typeof index.metadata?.vectorCount === 'number' ? index.metadata.vectorCount : undefined;
+  // Prefer the live count from the stats endpoint; no provider stores one on
+  // the index record, so the metadata value is only a legacy fallback.
+  const vectorCount = typeof stats?.vectorCount === 'number'
+    ? stats.vectorCount
+    : (typeof index.metadata?.vectorCount === 'number' ? index.metadata.vectorCount : undefined);
   const indexSize = typeof index.metadata?.indexSize === 'number' ? index.metadata.indexSize : undefined;
   const lastIndexed = index.metadata?.lastIndexed as string | undefined;
 
@@ -1079,8 +1091,13 @@ export default function VectorIndexDetailPage() {
                       {...queryForm.getInputProps('topK')}
                     />
                     <Textarea
-                      label="Filter (JSON)"
-                      placeholder='{ "category": "support" }'
+                      label="Metadata filter (JSON)"
+                      description={
+                        filterOperators.length > 0
+                          ? `Supported operators: ${filterOperators.join(', ')}. A bare value means equality.`
+                          : 'This provider cannot push metadata filters down, so filtered queries are rejected.'
+                      }
+                      placeholder='{ "category": "support", "depth": { "$lte": 2 } }'
                       minRows={2}
                       autosize
                       {...queryForm.getInputProps('filter')}

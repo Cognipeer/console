@@ -1418,6 +1418,7 @@ describeForEachProvider('Vector migrations + batch logs', (getDb) => {
     destinationIndexKey: 'dst-index',
     destinationIndexName: 'Destination index',
     status: 'pending' as const,
+    attempt: 0,
     totalVectors: 0,
     migratedVectors: 0,
     failedVectors: 0,
@@ -1480,6 +1481,7 @@ describeForEachProvider('Vector migrations + batch logs', (getDb) => {
       tenantId,
       projectId: 'proj-1',
       migrationKey: 'mig-logs',
+      attempt: 1,
       batchIndex: 0,
       vectorIds: ['a', 'b'],
       status: 'success',
@@ -1491,6 +1493,7 @@ describeForEachProvider('Vector migrations + batch logs', (getDb) => {
       tenantId,
       projectId: 'proj-1',
       migrationKey: 'mig-logs',
+      attempt: 1,
       batchIndex: 1,
       vectorIds: [],
       status: 'failed',
@@ -1509,5 +1512,795 @@ describeForEachProvider('Vector migrations + batch logs', (getDb) => {
     expect(await db.findVectorMigrationByKey('mig-logs')).toBeNull();
     expect(await db.listVectorMigrationLogs('mig-logs')).toHaveLength(0);
   });
+
+  it('records vector query logs with the fields the analytics panel reads', async () => {
+    const db = getDb();
+
+    const created = await db.createVectorQueryLog({
+      tenantId,
+      projectId: 'proj-1',
+      providerKey: 'my-provider',
+      indexKey: 'my-index',
+      topK: 5,
+      matchCount: 3,
+      latencyMs: 42,
+      avgScore: 0.8125,
+      filterApplied: true,
+      userId: 'user-1',
+      apiTokenId: 'token-1',
+      actorType: 'user',
+      timestamp: new Date('2026-01-01T00:00:00.000Z'),
+    });
+
+    expect(created._id).toBeTruthy();
+    expect(created.indexKey).toBe('my-index');
+    expect(created.filterApplied).toBe(true);
+    expect(created.avgScore).toBeCloseTo(0.8125);
+  });
+
+  it('aggregates query logs into daily buckets, totals and a topK histogram', async () => {
+    const db = getDb();
+
+    const log = (overrides: Partial<Parameters<typeof db.createVectorQueryLog>[0]>) =>
+      db.createVectorQueryLog({
+        tenantId,
+        projectId: 'proj-1',
+        providerKey: 'my-provider',
+        indexKey: 'stats-index',
+        topK: 5,
+        matchCount: 2,
+        latencyMs: 100,
+        avgScore: 0.8,
+        filterApplied: false,
+        timestamp: new Date('2026-03-01T10:00:00.000Z'),
+        ...overrides,
+      });
+
+    await log({});
+    await log({ latencyMs: 200, avgScore: 0.6, filterApplied: true });
+    await log({
+      timestamp: new Date('2026-03-02T10:00:00.000Z'),
+      latencyMs: 300,
+      avgScore: undefined,
+      topK: 10,
+    });
+    // Outside the window, and a different index — neither may leak in.
+    await log({ timestamp: new Date('2026-02-01T10:00:00.000Z') });
+    await log({ indexKey: 'other-index' });
+
+    const stats = await db.aggregateVectorQueryStats({
+      indexKey: 'stats-index',
+      from: new Date('2026-03-01T00:00:00.000Z'),
+      to: new Date('2026-03-31T23:59:59.999Z'),
+    });
+
+    expect(stats.daily).toHaveLength(2);
+    expect(stats.daily[0].date).toBe('2026-03-01');
+    expect(stats.daily[0].queryCount).toBe(2);
+    expect(stats.daily[0].avgLatencyMs).toBeCloseTo(150);
+    expect(stats.daily[0].avgScore).toBeCloseTo(0.7);
+    expect(stats.daily[0].filterCount).toBe(1);
+
+    expect(stats.daily[1].date).toBe('2026-03-02');
+    expect(stats.daily[1].queryCount).toBe(1);
+    // The only query that day carried no score, so the average is absent.
+    expect(stats.daily[1].avgScore).toBeNull();
+
+    expect(stats.totals.totalQueries).toBe(3);
+    expect(stats.totals.minLatencyMs).toBe(100);
+    expect(stats.totals.maxLatencyMs).toBe(300);
+    expect(stats.totals.avgLatencyMs).toBeCloseTo(200);
+    // Averaged over the two scored queries only.
+    expect(stats.totals.avgScore).toBeCloseTo(0.7);
+
+    expect(stats.topKDistribution).toEqual([
+      { topK: 5, count: 2 },
+      { topK: 10, count: 1 },
+    ]);
+  });
+
+  it('returns empty stats for an index with no queries in the window', async () => {
+    const db = getDb();
+
+    const stats = await db.aggregateVectorQueryStats({
+      indexKey: 'never-queried',
+      from: new Date('2026-03-01T00:00:00.000Z'),
+      to: new Date('2026-03-31T23:59:59.999Z'),
+    });
+
+    expect(stats.daily).toEqual([]);
+    expect(stats.topKDistribution).toEqual([]);
+    expect(stats.totals.totalQueries).toBe(0);
+    expect(stats.totals.avgLatencyMs).toBeNull();
+    expect(stats.totals.avgScore).toBeNull();
+  });
+
+  it('accepts a query log without a score or attribution', async () => {
+    const db = getDb();
+
+    const created = await db.createVectorQueryLog({
+      tenantId,
+      providerKey: 'my-provider',
+      indexKey: 'empty-index',
+      topK: 10,
+      matchCount: 0,
+      latencyMs: 7,
+      filterApplied: false,
+      timestamp: new Date('2026-01-02T00:00:00.000Z'),
+    });
+
+    expect(created._id).toBeTruthy();
+    expect(created.matchCount).toBe(0);
+  });
+
+  it('groups a restarted migration\'s batch logs into their own run instead of mixing with the previous one', async () => {
+    const db = getDb();
+    await db.createVectorMigration(baseMigration('mig-restart'));
+
+    // First run: two batches, then it fails/gets cancelled.
+    await db.createVectorMigrationLog({
+      tenantId,
+      projectId: 'proj-1',
+      migrationKey: 'mig-restart',
+      attempt: 1,
+      batchIndex: 0,
+      vectorIds: ['a'],
+      status: 'success',
+      migratedCount: 1,
+      failedCount: 0,
+    });
+    await db.createVectorMigrationLog({
+      tenantId,
+      projectId: 'proj-1',
+      migrationKey: 'mig-restart',
+      attempt: 1,
+      batchIndex: 1,
+      vectorIds: [],
+      status: 'failed',
+      migratedCount: 0,
+      failedCount: 1,
+    });
+
+    // Restart bumps the attempt; batchIndex resets to 0 for the new run.
+    await db.updateVectorMigration('mig-restart', { attempt: 2 });
+    await db.createVectorMigrationLog({
+      tenantId,
+      projectId: 'proj-1',
+      migrationKey: 'mig-restart',
+      attempt: 2,
+      batchIndex: 0,
+      vectorIds: ['a', 'b'],
+      status: 'success',
+      migratedCount: 2,
+      failedCount: 0,
+    });
+
+    const logs = await db.listVectorMigrationLogs('mig-restart');
+    // Most recent run first, and never interleaved with the previous run.
+    expect(logs.map((l) => ({ attempt: l.attempt, batchIndex: l.batchIndex }))).toEqual([
+      { attempt: 2, batchIndex: 0 },
+      { attempt: 1, batchIndex: 0 },
+      { attempt: 1, batchIndex: 1 },
+    ]);
+
+    const restarted = await db.findVectorMigrationByKey('mig-restart');
+    expect(restarted?.attempt).toBe(2);
+
+    // Per-run summary drives the "pick a run" list — most recent run first.
+    const runs = await db.listVectorMigrationRuns('mig-restart');
+    expect(runs).toEqual([
+      expect.objectContaining({ attempt: 2, batchCount: 1, migratedCount: 2, failedCount: 0, failedBatches: 0 }),
+      expect.objectContaining({ attempt: 1, batchCount: 2, migratedCount: 1, failedCount: 1, failedBatches: 1 }),
+    ]);
+
+    // A run's own modal fetches just its logs, filtered server-side.
+    const run1Logs = await db.listVectorMigrationLogs('mig-restart', { attempt: 1 });
+    expect(run1Logs.map((l) => l.batchIndex)).toEqual([0, 1]);
+    expect(await db.countVectorMigrationLogs('mig-restart', undefined, 1)).toBe(2);
+    expect(await db.countVectorMigrationLogs('mig-restart', undefined, 2)).toBe(1);
+  });
 });
 
+
+/**
+ * createRagQueryLog stamps `createdAt` itself, so the only way to give two
+ * logs a distinguishable timestamp — which every ordering and retention
+ * assertion below depends on — is to actually let the clock move.
+ */
+const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+
+describeForEachProvider('RAG query log analytics', (getDb) => {
+  let dbName: string;
+  let tenantId: string;
+
+  beforeEach(async () => {
+    const slug = `ragqlog-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    dbName = `tenant_${slug}`;
+    const db = getDb();
+    const tenant = await db.createTenant({
+      companyName: 'RAG Analytics Co',
+      slug,
+      dbName,
+      licenseType: 'FREE',
+      ownerId: 'pending',
+    });
+    tenantId = String(tenant._id);
+    await db.switchToTenant(dbName);
+  });
+
+  /** Six logs for `km-scores` plus one for a second module that must not leak. */
+  const seedLogs = async () => {
+    const db = getDb();
+    const log = (overrides: Partial<Parameters<typeof db.createRagQueryLog>[0]>) =>
+      db.createRagQueryLog({
+        tenantId,
+        projectId: 'proj-1',
+        ragModuleKey: 'km-scores',
+        query: 'q',
+        topK: 5,
+        matchCount: 1,
+        latencyMs: 10,
+        ...overrides,
+      });
+
+    await log({ query: 'strong hit', matchCount: 3, preFilterMatchCount: 3, topScore: 0.92, latencyMs: 10 });
+    await tick();
+    await log({ query: 'mid hit', matchCount: 2, preFilterMatchCount: 2, topScore: 0.35, latencyMs: 20 });
+    await tick();
+    await log({ query: 'mid hit again', matchCount: 1, preFilterMatchCount: 1, topScore: 0.35, latencyMs: 30 });
+    await tick();
+    await log({ query: 'perfect hit', matchCount: 1, preFilterMatchCount: 1, topScore: 1, latencyMs: 40 });
+    await tick();
+    // Candidates came back and minScore discarded every one — a tuning problem.
+    await log({ query: 'threshold ate it', matchCount: 0, preFilterMatchCount: 4, topScore: 0, minScoreApplied: 0.8, latencyMs: 50 });
+    await tick();
+    // Nothing was retrieved at all, and pre-topScore logs carry no score.
+    await log({ query: 'content gap', matchCount: 0, preFilterMatchCount: 0, latencyMs: 60 });
+    await tick();
+    await log({ ragModuleKey: 'km-other', query: 'other module', matchCount: 5, topScore: 0.5 });
+  };
+
+  it('keeps a same-key module in another project out of every analytics read', async () => {
+    const db = getDb();
+    await seedLogs();
+    // Module keys are unique only within a project, so without a project scope
+    // these rows — including their verbatim query text — would be counted,
+    // charted and listed as if they belonged to proj-1.
+    await db.createRagQueryLog({
+      tenantId,
+      projectId: 'proj-2',
+      ragModuleKey: 'km-scores',
+      query: 'other project secret',
+      topK: 5,
+      matchCount: 0,
+      preFilterMatchCount: 0,
+      topScore: 0.11,
+      latencyMs: 70,
+    });
+    // A log with no project at all: written through /client/v1, or before
+    // project stamping. Unattributable either way, so the owner still sees it.
+    await db.createRagQueryLog({
+      tenantId,
+      ragModuleKey: 'km-scores',
+      query: 'token-authed query',
+      topK: 5,
+      matchCount: 0,
+      preFilterMatchCount: 0,
+      topScore: 0.22,
+      latencyMs: 80,
+    });
+
+    const scoped = await db.listRagQueryLogs('km-scores', { projectId: 'proj-1', limit: 50 });
+    const texts = scoped.map((l) => l.query);
+    expect(texts).not.toContain('other project secret');
+    expect(texts).toContain('token-authed query');
+    expect(texts).toContain('strong hit');
+
+    const counts = await db.countRagQueryLogs('km-scores', { projectId: 'proj-1' });
+    const unscoped = await db.countRagQueryLogs('km-scores');
+    expect(counts.total).toBe(unscoped.total - 1);
+
+    const buckets = await db.aggregateRagQueryScoreDistribution('km-scores', { projectId: 'proj-1' });
+    // 0.11 is the other project's only score; nothing else lands in '0.1'.
+    expect(buckets.find((b) => b.bucket === '0.1')?.count).toBe(0);
+    expect(buckets.find((b) => b.bucket === '0.2')?.count).toBe(1);
+  });
+
+  it('lists only the queries that matched nothing when zeroOnly is set, newest first', async () => {
+    const db = getDb();
+    await seedLogs();
+
+    const all = await db.listRagQueryLogs('km-scores');
+    expect(all).toHaveLength(6);
+
+    const zero = await db.listRagQueryLogs('km-scores', { zeroOnly: true });
+    expect(zero.map((l) => l.query)).toEqual(['content gap', 'threshold ate it']);
+    expect(zero.every((l) => l.matchCount === 0)).toBe(true);
+    // Paging still applies on top of the filter.
+    expect(
+      (await db.listRagQueryLogs('km-scores', { zeroOnly: true, limit: 1 })).map((l) => l.query),
+    ).toEqual(['content gap']);
+  });
+
+  it('round-trips the score fields a query log now carries', async () => {
+    const db = getDb();
+    await seedLogs();
+
+    // Second-newest of the six: the query minScore emptied out.
+    const [newest] = await db.listRagQueryLogs('km-scores', { limit: 1, skip: 1 });
+    expect(newest.query).toBe('threshold ate it');
+    expect(newest.preFilterMatchCount).toBe(4);
+    expect(newest.topScore).toBe(0);
+    expect(newest.minScoreApplied).toBeCloseTo(0.8);
+    // Never written, so it must read back absent rather than as `false`.
+    expect(newest.hybrid ?? undefined).toBeUndefined();
+
+    const hybridLog = await db.createRagQueryLog({
+      tenantId,
+      ragModuleKey: 'km-hybrid',
+      query: 'ERR-4021',
+      topK: 5,
+      matchCount: 2,
+      preFilterMatchCount: 2,
+      topScore: 0.7,
+      avgScore: 0.61,
+      hybrid: true,
+    });
+    expect(hybridLog._id).toBeTruthy();
+    const [stored] = await db.listRagQueryLogs('km-hybrid');
+    expect(stored.hybrid).toBe(true);
+    expect(stored.avgScore).toBeCloseTo(0.61);
+  });
+
+  it('separates a content gap from a minScore threshold that ate every candidate', async () => {
+    const db = getDb();
+    await seedLogs();
+
+    const counts = await db.countRagQueryLogs('km-scores');
+    expect(counts).toEqual({
+      total: 6,
+      avgLatencyMs: 35,
+      zeroMatchCount: 2,
+      minScoreFilteredCount: 1,
+    });
+
+    // A module nobody has queried must not report NULL sums as anything but 0.
+    expect(await db.countRagQueryLogs('km-never-queried')).toEqual({
+      total: 0,
+      avgLatencyMs: 0,
+      zeroMatchCount: 0,
+      minScoreFilteredCount: 0,
+    });
+  });
+
+  it('buckets the best score per query into eleven ascending buckets, empties included', async () => {
+    const db = getDb();
+    await seedLogs();
+
+    expect(await db.aggregateRagQueryScoreDistribution('km-scores')).toEqual([
+      { bucket: '0.0', count: 1 },
+      { bucket: '0.1', count: 0 },
+      { bucket: '0.2', count: 0 },
+      { bucket: '0.3', count: 2 },
+      { bucket: '0.4', count: 0 },
+      { bucket: '0.5', count: 0 },
+      { bucket: '0.6', count: 0 },
+      { bucket: '0.7', count: 0 },
+      { bucket: '0.8', count: 0 },
+      { bucket: '0.9', count: 1 },
+      { bucket: '1.0', count: 1 },
+    ]);
+
+    // Same eleven buckets, all empty — never a shorter array.
+    const empty = await db.aggregateRagQueryScoreDistribution('km-never-queried');
+    expect(empty.map((b) => b.bucket)).toEqual([
+      '0.0', '0.1', '0.2', '0.3', '0.4', '0.5', '0.6', '0.7', '0.8', '0.9', '1.0',
+    ]);
+    expect(empty.every((b) => b.count === 0)).toBe(true);
+  });
+
+  it('honours the date window on counts and on the histogram', async () => {
+    const db = getDb();
+    await seedLogs();
+
+    const past = {
+      from: new Date(Date.now() - 7_200_000),
+      to: new Date(Date.now() - 3_600_000),
+    };
+    expect((await db.countRagQueryLogs('km-scores', past)).total).toBe(0);
+    expect(
+      (await db.aggregateRagQueryScoreDistribution('km-scores', past)).every((b) => b.count === 0),
+    ).toBe(true);
+
+    const now = { from: new Date(Date.now() - 3_600_000), to: new Date(Date.now() + 3_600_000) };
+    expect((await db.countRagQueryLogs('km-scores', now)).total).toBe(6);
+  });
+
+  it('deletes only logs older than the cutoff, scoped to one module when asked', async () => {
+    const db = getDb();
+    const log = (ragModuleKey: string, query: string) =>
+      db.createRagQueryLog({ tenantId, ragModuleKey, query, topK: 5, matchCount: 1 });
+
+    await log('km-a', 'old a');
+    await log('km-b', 'old b');
+    await tick();
+    const cutoff = new Date();
+    await tick();
+    await log('km-a', 'fresh a');
+    await log('km-b', 'fresh b');
+
+    // Module-scoped: the other module's old log survives.
+    expect(await db.deleteRagQueryLogsOlderThan(cutoff, 'km-a')).toBe(1);
+    expect((await db.listRagQueryLogs('km-a')).map((l) => l.query)).toEqual(['fresh a']);
+    expect(await db.listRagQueryLogs('km-b')).toHaveLength(2);
+
+    // Tenant-wide: still only what is older than the cutoff.
+    expect(await db.deleteRagQueryLogsOlderThan(cutoff)).toBe(1);
+    expect((await db.listRagQueryLogs('km-b')).map((l) => l.query)).toEqual(['fresh b']);
+    expect(await db.deleteRagQueryLogsOlderThan(cutoff)).toBe(0);
+  });
+});
+
+describeForEachProvider('RAG module teardown + shared index accounting', (getDb) => {
+  let dbName: string;
+  let tenantId: string;
+
+  beforeEach(async () => {
+    const slug = `ragdown-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    dbName = `tenant_${slug}`;
+    const db = getDb();
+    const tenant = await db.createTenant({
+      companyName: 'RAG Teardown Co',
+      slug,
+      dbName,
+      licenseType: 'FREE',
+      ownerId: 'pending',
+    });
+    tenantId = String(tenant._id);
+    await db.switchToTenant(dbName);
+  });
+
+  const baseModule = (key: string, vectorIndexKey: string, projectId?: string) => ({
+    tenantId,
+    projectId,
+    key,
+    name: key,
+    embeddingModelKey: 'embed-3',
+    vectorProviderKey: 'qdrant',
+    vectorIndexKey,
+    chunkConfig: { strategy: 'recursive_character' as const, chunkSize: 1000, chunkOverlap: 200 },
+    status: 'active' as const,
+    createdBy: 'tester',
+  });
+
+  it('cascades documents and chunks by module key and reports what it removed', async () => {
+    const db = getDb();
+
+    for (const [ragModuleKey, fileName] of [
+      ['km-gone', 'a.pdf'],
+      ['km-gone', 'b.pdf'],
+      ['km-stays', 'c.pdf'],
+    ] as const) {
+      await db.createRagDocument({
+        tenantId,
+        projectId: 'proj-1',
+        ragModuleKey,
+        fileName,
+        status: 'indexed',
+        createdBy: 'tester',
+      });
+    }
+
+    await db.bulkInsertRagChunks(
+      ['km-gone', 'km-gone', 'km-gone', 'km-stays'].map((ragModuleKey, i) => ({
+        tenantId,
+        projectId: 'proj-1',
+        ragModuleKey,
+        documentId: `doc-${i}`,
+        chunkIndex: 0,
+        vectorId: `vec-${i}`,
+        content: 'chunk text',
+      })),
+    );
+
+    expect(await db.deleteRagChunksByModuleKey('km-gone')).toBe(3);
+    expect(await db.deleteRagDocumentsByModuleKey('km-gone')).toBe(2);
+
+    expect(await db.listRagDocuments('km-gone')).toHaveLength(0);
+    expect(await db.listRagDocuments('km-stays')).toHaveLength(1);
+    expect(await db.findRagChunksByVectorIds(['vec-0', 'vec-3']).then((c) => c.map((x) => x.vectorId)))
+      .toEqual(['vec-3']);
+
+    // Deleting a module with nothing left is a no-op, not an error.
+    expect(await db.deleteRagChunksByModuleKey('km-gone')).toBe(0);
+    expect(await db.deleteRagDocumentsByModuleKey('km-gone')).toBe(0);
+  });
+
+  it('counts the modules sharing a vector index, with and without excludeKey', async () => {
+    const db = getDb();
+    await db.createRagModule(baseModule('m1', 'idx-shared', 'proj-1'));
+    await db.createRagModule(baseModule('m2', 'idx-shared', 'proj-1'));
+    await db.createRagModule(baseModule('m3', 'idx-shared', 'proj-2'));
+    await db.createRagModule(baseModule('m4', 'idx-other', 'proj-1'));
+
+    expect(await db.countRagModulesByVectorIndexKey('idx-shared')).toBe(3);
+    expect(await db.countRagModulesByVectorIndexKey('idx-shared', { projectId: 'proj-1' })).toBe(2);
+    expect(await db.countRagModulesByVectorIndexKey('idx-shared', { excludeKey: 'm1' })).toBe(2);
+    expect(
+      await db.countRagModulesByVectorIndexKey('idx-shared', { projectId: 'proj-1', excludeKey: 'm1' }),
+    ).toBe(1);
+    expect(await db.countRagModulesByVectorIndexKey('idx-nobody')).toBe(0);
+  });
+
+  it('persists the retrieval controls and the re-index handshake on a module', async () => {
+    const db = getDb();
+    const created = await db.createRagModule({
+      ...baseModule('m-controls', 'idx-shared', 'proj-1'),
+      defaultTopK: 8,
+      defaultMinScore: 0.45,
+      defaultFilter: { tenant: 'acme' },
+      filterableFields: ['tenant', 'lang'],
+      hybrid: { enabled: true, mode: 'rrf', k: 60 },
+      isolateByModule: true,
+    });
+
+    const found = await db.findRagModuleByKey('m-controls', 'proj-1');
+    expect(found?.defaultTopK).toBe(8);
+    expect(found?.defaultMinScore).toBeCloseTo(0.45);
+    expect(found?.defaultFilter).toEqual({ tenant: 'acme' });
+    expect(found?.filterableFields).toEqual(['tenant', 'lang']);
+    expect(found?.hybrid).toEqual({ enabled: true, mode: 'rrf', k: 60 });
+    expect(found?.isolateByModule).toBe(true);
+    // Never set, so it must not read back as `false`.
+    expect(found?.reindexRequired ?? undefined).toBeUndefined();
+
+    await db.updateRagModule(String(created._id), {
+      reindexRequired: true,
+      activeReindexRunKey: 'rx-1',
+    });
+    const marked = await db.findRagModuleByKey('m-controls', 'proj-1');
+    expect(marked?.reindexRequired).toBe(true);
+    expect(marked?.activeReindexRunKey).toBe('rx-1');
+
+    // The run finished: the pointer has to clear, or the module stays stuck on
+    // a run that no longer exists.
+    await db.updateRagModule(String(created._id), {
+      reindexRequired: false,
+      activeReindexRunKey: undefined,
+      lastReindexAt: new Date('2026-05-01T00:00:00.000Z'),
+    });
+    const done = await db.findRagModuleByKey('m-controls', 'proj-1');
+    expect(done?.reindexRequired).toBe(false);
+    expect(done?.activeReindexRunKey ?? undefined).toBeUndefined();
+    expect(done?.lastReindexAt?.toISOString()).toBe('2026-05-01T00:00:00.000Z');
+  });
+});
+
+describeForEachProvider('RAG module clearable fields', (getDb) => {
+  let dbName: string;
+  let tenantId: string;
+
+  beforeEach(async () => {
+    const slug = `ragclr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    dbName = `tenant_${slug}`;
+    const db = getDb();
+    const tenant = await db.createTenant({
+      companyName: 'RAG Clear Co', slug, dbName, licenseType: 'FREE', ownerId: 'pending',
+    });
+    tenantId = String(tenant._id);
+    await db.switchToTenant(dbName);
+  });
+
+  it('clears an optional field on an explicit undefined, identically on both backends', async () => {
+    const db = getDb();
+    // The API sends null to clear; the service turns that into an explicit
+    // undefined. A guard that skips undefined drops the clear while still
+    // answering 200 — the module keeps a reranker the operator removed.
+    const created = await db.createRagModule({
+      tenantId,
+      projectId: 'proj-1',
+      key: 'km-clear',
+      name: 'Clearable',
+      embeddingModelKey: 'emb',
+      vectorProviderKey: 'vec',
+      vectorIndexKey: 'idx',
+      chunkConfig: { strategy: 'recursive_character', chunkSize: 400, chunkOverlap: 40 },
+      status: 'active',
+      rerankerKey: 'rr-1',
+      defaultTopK: 8,
+      defaultMinScore: 0.6,
+      responseDetail: 'text',
+      isolateByModule: true,
+      createdBy: 'tester',
+    });
+
+    const id = String(created._id);
+    expect((await db.findRagModuleById(id))?.rerankerKey).toBe('rr-1');
+
+    await db.updateRagModule(id, {
+      rerankerKey: undefined,
+      defaultTopK: undefined,
+      defaultMinScore: undefined,
+      responseDetail: undefined,
+    });
+
+    const cleared = await db.findRagModuleById(id);
+    expect(cleared?.rerankerKey ?? null).toBeNull();
+    expect(cleared?.defaultTopK ?? null).toBeNull();
+    expect(cleared?.defaultMinScore ?? null).toBeNull();
+    expect(cleared?.responseDetail ?? null).toBeNull();
+    // Untouched keys must survive: presence decides, not truthiness.
+    expect(cleared?.isolateByModule).toBe(true);
+    expect(cleared?.name).toBe('Clearable');
+  });
+});
+
+describeForEachProvider('RAG re-index runs', (getDb) => {
+  let dbName: string;
+  let tenantId: string;
+
+  beforeEach(async () => {
+    const slug = `ragrx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    dbName = `tenant_${slug}`;
+    const db = getDb();
+    const tenant = await db.createTenant({
+      companyName: 'RAG Reindex Co',
+      slug,
+      dbName,
+      licenseType: 'FREE',
+      ownerId: 'pending',
+    });
+    tenantId = String(tenant._id);
+    await db.switchToTenant(dbName);
+  });
+
+  const baseRun = (key: string, ragModuleKey: string) => ({
+    tenantId,
+    projectId: 'proj-1',
+    key,
+    ragModuleKey,
+    status: 'pending' as const,
+    reason: 'chunk-config' as const,
+    attempt: 0,
+    totalDocuments: 12,
+    processedDocuments: 0,
+    failedDocuments: 0,
+    batchSize: 25,
+    metadata: { requestedBy: 'ui' },
+    createdBy: 'tester',
+  });
+
+  it('lets exactly one worker claim a run, and refuses the others without writing', async () => {
+    const db = getDb();
+    await db.createRagReindexRun(baseRun('rx-claim', 'km-1'));
+    const stale = new Date(Date.now() - 90_000);
+
+    const first = await db.claimRagReindexRun('rx-claim', 'pod-a', stale);
+    expect(first?.claimedBy).toBe('pod-a');
+    expect(first?.status).toBe('running');
+
+    // The queue is in-process without Redis, so after a rolling restart every
+    // replica's boot sweep sees this same run. Only one may take it.
+    expect(await db.claimRagReindexRun('rx-claim', 'pod-b', stale)).toBeNull();
+    expect((await db.findRagReindexRunByKey('rx-claim'))?.claimedBy).toBe('pod-a');
+
+    // The holder re-claiming is idempotent — that is how a resume continues.
+    expect((await db.claimRagReindexRun('rx-claim', 'pod-a', stale))?.claimedBy).toBe('pod-a');
+  });
+
+  it('lets another worker take over only once the holder stops heart-beating', async () => {
+    const db = getDb();
+    await db.createRagReindexRun(baseRun('rx-stale', 'km-1'));
+    await db.claimRagReindexRun('rx-stale', 'pod-a', new Date(Date.now() - 90_000));
+
+    // A live holder keeps its run even when the sweep runs again.
+    expect(await db.claimRagReindexRun('rx-stale', 'pod-b', new Date(Date.now() - 90_000))).toBeNull();
+    expect(await db.touchRagReindexRunClaim('rx-stale', 'pod-a')).toBe(true);
+
+    // A SIGKILLed pod leaves a run claimed but silent; it must not strand.
+    const takeover = await db.claimRagReindexRun('rx-stale', 'pod-b', new Date(Date.now() + 60_000));
+    expect(takeover?.claimedBy).toBe('pod-b');
+
+    // The evicted holder learns it lost the claim and can stop working.
+    expect(await db.touchRagReindexRunClaim('rx-stale', 'pod-a')).toBe(false);
+  });
+
+  it('releases a claim only for its holder', async () => {
+    const db = getDb();
+    await db.createRagReindexRun(baseRun('rx-release', 'km-1'));
+    const stale = new Date(Date.now() - 90_000);
+    await db.claimRagReindexRun('rx-release', 'pod-a', stale);
+
+    await db.releaseRagReindexRunClaim('rx-release', 'pod-b');
+    expect((await db.findRagReindexRunByKey('rx-release'))?.claimedBy).toBe('pod-a');
+
+    await db.releaseRagReindexRunClaim('rx-release', 'pod-a');
+    expect((await db.findRagReindexRunByKey('rx-release'))?.claimedBy).toBeUndefined();
+  });
+
+  it('will not claim a run that has already finished', async () => {
+    const db = getDb();
+    await db.createRagReindexRun({ ...baseRun('rx-done', 'km-1'), status: 'completed' });
+    expect(await db.claimRagReindexRun('rx-done', 'pod-a', new Date(Date.now() - 90_000))).toBeNull();
+  });
+
+  it('creates, finds by key and lists newest-first per module', async () => {
+    const db = getDb();
+    const created = await db.createRagReindexRun(baseRun('rx-1', 'km-1'));
+    expect(created._id).toBeTruthy();
+    await tick();
+    await db.createRagReindexRun({ ...baseRun('rx-2', 'km-1'), status: 'running' });
+    await tick();
+    await db.createRagReindexRun(baseRun('rx-3', 'km-2'));
+
+    const found = await db.findRagReindexRunByKey('rx-1');
+    expect(found?.ragModuleKey).toBe('km-1');
+    expect(found?.status).toBe('pending');
+    expect(found?.reason).toBe('chunk-config');
+    expect(found?.totalDocuments).toBe(12);
+    expect(found?.batchSize).toBe(25);
+    expect(found?.metadata).toEqual({ requestedBy: 'ui' });
+    expect(await db.findRagReindexRunByKey('rx-missing')).toBeNull();
+
+    expect((await db.listRagReindexRuns({ ragModuleKey: 'km-1' })).map((r) => r.key)).toEqual([
+      'rx-2',
+      'rx-1',
+    ]);
+    expect((await db.listRagReindexRuns({ projectId: 'proj-1' })).map((r) => r.key)).toEqual([
+      'rx-3',
+      'rx-2',
+      'rx-1',
+    ]);
+    // The boot sweep asks for exactly the unfinished statuses.
+    expect(
+      (await db.listRagReindexRuns({ statuses: ['queued', 'running'] })).map((r) => r.key),
+    ).toEqual(['rx-2']);
+    expect((await db.listRagReindexRuns({ ragModuleKey: 'km-1', limit: 1 })).map((r) => r.key)).toEqual([
+      'rx-2',
+    ]);
+  });
+
+  it('carries the resume checkpoint and clears fields on an explicit undefined', async () => {
+    const db = getDb();
+    await db.createRagReindexRun(baseRun('rx-resume', 'km-1'));
+
+    const running = await db.updateRagReindexRun('rx-resume', {
+      status: 'running',
+      startedAt: new Date('2026-02-01T00:00:00.000Z'),
+      errorMessage: 'transient upstream failure',
+      processedDocuments: 7,
+      progress: { lastDocumentId: 'doc-42', heartbeatAt: '2026-02-01T00:05:00.000Z' },
+    });
+    expect(running?.status).toBe('running');
+    expect(running?.processedDocuments).toBe(7);
+    expect(running?.startedAt?.toISOString()).toBe('2026-02-01T00:00:00.000Z');
+    expect((running?.progress as { lastDocumentId?: string })?.lastDocumentId).toBe('doc-42');
+
+    const retried = await db.updateRagReindexRun('rx-resume', {
+      status: 'queued',
+      attempt: 1,
+      errorMessage: undefined,
+      startedAt: undefined,
+      completedAt: undefined,
+      progress: undefined,
+    });
+    expect(retried?.status).toBe('queued');
+    expect(retried?.attempt).toBe(1);
+    expect(retried?.errorMessage ?? undefined).toBeUndefined();
+    expect(retried?.startedAt ?? undefined).toBeUndefined();
+    expect(retried?.progress ?? undefined).toBeUndefined();
+    // Fields not mentioned keep their value on both providers.
+    expect(retried?.processedDocuments).toBe(7);
+
+    expect(await db.updateRagReindexRun('rx-missing', { status: 'failed' })).toBeNull();
+  });
+
+  it('deletes a run by key', async () => {
+    const db = getDb();
+    await db.createRagReindexRun(baseRun('rx-delete', 'km-1'));
+
+    expect(await db.deleteRagReindexRun('rx-delete')).toBe(true);
+    expect(await db.findRagReindexRunByKey('rx-delete')).toBeNull();
+    expect(await db.deleteRagReindexRun('rx-delete')).toBe(false);
+  });
+});

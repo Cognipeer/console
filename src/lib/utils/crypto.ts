@@ -11,14 +11,23 @@ function deriveKey(secret: string): Buffer {
 
 /**
  * The secret used to ENCRYPT new payloads: the dedicated provider secret when
- * configured, otherwise the JWT secret.
+ * configured, otherwise — outside production only — the JWT secret.
+ *
+ * Production refuses the JWT-secret fallback so that signing and at-rest
+ * encryption never share one key: with a shared key, disclosure of the session
+ * signing secret would also decrypt every stored provider credential.
+ * Decryption still tries both (see candidateSecrets), so payloads written under
+ * the fallback stay readable and are re-encrypted on their next save.
  */
 function primarySecret(): string {
   const cfg = getConfig();
-  const secret = cfg.auth.providerEncryptionSecret || cfg.auth.jwtSecret;
+  const secret =
+    cfg.nodeEnv === 'production'
+      ? cfg.auth.providerEncryptionSecret
+      : cfg.auth.providerEncryptionSecret || cfg.auth.jwtSecret;
   if (!secret) {
     throw new Error(
-      'Encryption secret is not configured. Set PROVIDER_ENCRYPTION_SECRET or JWT_SECRET.',
+      'Encryption secret is not configured. Set PROVIDER_ENCRYPTION_SECRET.',
     );
   }
   return secret;

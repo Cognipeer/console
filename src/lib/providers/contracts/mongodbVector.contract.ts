@@ -10,6 +10,15 @@ import type {
   VectorListInput,
   VectorListResult,
 } from '../domains/vector';
+import {
+  describeHybrid,
+  extractVectorText,
+  fuseHybridMatches,
+  hybridCandidateCount,
+  resolveHybridOptions,
+  type VectorHybridChannelHit,
+} from '../domains/vectorHybrid';
+import { toMongoQueryFilter } from './vectorFilterTranslators';
 
 interface MongoDbVectorCredentials {
   uri: string;
@@ -19,12 +28,23 @@ interface MongoDbVectorSettings {
   database: string;
   collection: string;
   indexName?: string;
+  textIndexName?: string;
   vectorField?: string;
   dimensions?: number;
 }
 
 const DEFAULT_DIMENSIONS = 1536;
 const DEFAULT_VECTOR_FIELD = 'embedding';
+/** Field the keyword channel searches; written on every upsert. */
+const CONTENT_FIELD = 'content';
+
+function toChannelHit(doc: Record<string, unknown>): VectorHybridChannelHit {
+  return {
+    id: doc._id as string,
+    score: (doc.score as number) ?? 0,
+    metadata: doc.metadata as Record<string, unknown> | undefined,
+  };
+}
 
 type VectorDocument = {
   _id: string;
@@ -102,6 +122,17 @@ export const MongoDbVectorProviderContract: ProviderContract<
             scope: 'settings',
           },
           {
+            name: 'textIndexName',
+            label: 'Atlas Search Index Name',
+            type: 'text',
+            required: false,
+            description:
+              'Atlas Search (full-text) index covering the "content" field. Required for hybrid '
+              + 'search; leave empty and queries stay dense-only. Like the vector index, it must '
+              + 'be created in the Atlas UI or API.',
+            scope: 'settings',
+          },
+          {
             name: 'vectorField',
             label: 'Vector Field Name',
             type: 'text',
@@ -127,6 +158,16 @@ export const MongoDbVectorProviderContract: ProviderContract<
     supportsUpsert: true,
     supportsQuery: true,
     supportsDelete: true,
+    // Atlas `$vectorSearch.filter` covers comparison and logical operators but
+    // not `$exists`; filtered paths must be declared in the Atlas index.
+    'vector.filterOperators': [
+      '$eq', '$ne', '$gt', '$gte', '$lt', '$lte', '$in', '$nin', '$and', '$or', '$not',
+    ],
+    'vector.filterRaw': true,
+    // Atlas can serve the keyword channel, but only through a full-text index
+    // that cannot be created from here. Per query the adapter reports whether
+    // one was configured.
+    'vector.supportsHybrid': true,
   },
   async createRuntime({ credentials, settings, providerKey, logger }) {
     if (!credentials?.uri?.trim()) {
@@ -143,6 +184,7 @@ export const MongoDbVectorProviderContract: ProviderContract<
     const database = settings.database.trim();
     const collectionName = settings.collection.trim();
     const indexName = settings.indexName?.trim() || 'vector_index';
+    const textIndexName = settings.textIndexName?.trim() || '';
     const vectorField = settings.vectorField?.trim() || DEFAULT_VECTOR_FIELD;
     const dimensions = Number(settings.dimensions) > 0 ? Number(settings.dimensions) : DEFAULT_DIMENSIONS;
 
@@ -172,6 +214,7 @@ export const MongoDbVectorProviderContract: ProviderContract<
             database,
             collectionName,
             indexName,
+            textIndexName,
             vectorField,
             provider: 'mongodb',
           },
@@ -194,7 +237,7 @@ export const MongoDbVectorProviderContract: ProviderContract<
             name: collectionName,
             dimension: dimensions,
             metric: 'cosine',
-            metadata: { database, collectionName, indexName, vectorField, provider: 'mongodb' },
+            metadata: { database, collectionName, indexName, textIndexName, vectorField, provider: 'mongodb' },
           },
         ];
       },
@@ -214,6 +257,10 @@ export const MongoDbVectorProviderContract: ProviderContract<
                 _id: item.id,
                 [vf]: item.values,
                 metadata: item.metadata ?? {},
+                // The keyword channel needs prose in a field of its own; an
+                // Atlas Search index over the metadata subdocument would match
+                // on field names as readily as on content.
+                [CONTENT_FIELD]: extractVectorText(item.metadata) ?? '',
               },
               upsert: true,
             },
@@ -232,17 +279,25 @@ export const MongoDbVectorProviderContract: ProviderContract<
         const idx = (meta.indexName as string) || indexName;
         const vf = (meta.vectorField as string) || vectorField;
 
+        const textIdx = (meta.textIndexName as string) || textIndexName;
+        const text = query.text?.trim();
+        // Atlas needs a full-text index that only its UI/API can create, so the
+        // keyword channel exists exactly when an operator has named one.
+        const fused = Boolean(text) && Boolean(textIdx);
+        const limit = fused ? hybridCandidateCount(query.topK) : query.topK;
+        const mongoFilter = query.filter ? toMongoQueryFilter(query.filter) : undefined;
+
         const { client, coll } = await getMongoCollection(uri, db, coll_);
         try {
-          const pipeline: Record<string, unknown>[] = [
+          const densePipeline: Record<string, unknown>[] = [
             {
               $vectorSearch: {
                 index: idx,
                 path: vf,
                 queryVector: query.vector,
-                numCandidates: query.topK * 10,
-                limit: query.topK,
-                filter: query.filter,
+                numCandidates: limit * 10,
+                limit,
+                ...(mongoFilter ? { filter: mongoFilter } : {}),
               },
             },
             {
@@ -254,13 +309,47 @@ export const MongoDbVectorProviderContract: ProviderContract<
             },
           ];
 
-          const results = await coll.aggregate(pipeline).toArray();
+          const dense = await coll.aggregate(densePipeline).toArray();
+
+          if (!fused) {
+            const matches = dense.map(toChannelHit);
+            return text
+              ? { matches, usage: describeHybrid({ ran: false, reason: 'not-configured' }) }
+              : { matches };
+          }
+
+          const lexicalPipeline: Record<string, unknown>[] = [
+            {
+              $search: {
+                index: textIdx,
+                text: { query: text, path: CONTENT_FIELD },
+              },
+            },
+            // $search cannot take our filter tree — its compound syntax is a
+            // language of its own — so the filter runs as a $match afterwards.
+            // Over-fetching first keeps a filtered hybrid query from thinning
+            // to nothing before fusion sees it.
+            ...(mongoFilter ? [{ $limit: limit * 4 }, { $match: mongoFilter }] : []),
+            { $limit: limit },
+            {
+              $project: {
+                _id: 1,
+                metadata: 1,
+                score: { $meta: 'searchScore' },
+              },
+            },
+          ];
+
+          const lexical = await coll.aggregate(lexicalPipeline).toArray();
+
           return {
-            matches: results.map((doc) => ({
-              id: doc._id as string,
-              score: (doc as Record<string, unknown>).score as number ?? 0,
-              metadata: doc.metadata as Record<string, unknown> | undefined,
-            })),
+            matches: fuseHybridMatches({
+              dense: dense.map(toChannelHit),
+              lexical: lexical.map(toChannelHit),
+              topK: query.topK,
+              options: query.hybrid,
+            }),
+            usage: describeHybrid({ ran: true, mode: resolveHybridOptions(query.hybrid).mode }),
           };
         } finally {
           await client.close();

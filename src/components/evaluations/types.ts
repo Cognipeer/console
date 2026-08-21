@@ -94,9 +94,13 @@ export interface EvalTargetView {
   key: string;
   name: string;
   description?: string;
-  kind: 'agent' | 'model' | 'external';
+  kind: 'agent' | 'model' | 'external' | 'rag';
   agentKey?: string;
   modelKey?: string;
+  /** `rag` targets: the Knowledge Engine module queried, and how much of it. */
+  ragModuleKey?: string;
+  retrievalTopK?: number;
+  retrievalMinScore?: number;
   /** System-prompt override (model targets only) — replaces the dataset's system turn. */
   systemPrompt?: string;
   promptKey?: string;
@@ -131,8 +135,19 @@ export interface EvalDatasetView {
   } & Record<string, unknown>;
 }
 
+/** Mirrors EvaluationScorerType — kept in one place so the two views agree. */
+export type EvalScorerTypeView =
+  | 'assertion'
+  | 'llm-judge'
+  | 'semantic'
+  | 'tool-call'
+  | 'json-shape'
+  | 'context-recall'
+  | 'context-precision'
+  | 'groundedness';
+
 export interface EvalScorerView {
-  type: 'assertion' | 'llm-judge' | 'semantic' | 'tool-call' | 'json-shape';
+  type: EvalScorerTypeView;
   weight?: number;
   rubric?: string;
   threshold?: number;
@@ -153,7 +168,7 @@ export interface EvalSuiteView {
 }
 
 export interface EvalScoreView {
-  scorerType: 'assertion' | 'llm-judge' | 'semantic' | 'tool-call' | 'json-shape';
+  scorerType: EvalScorerTypeView;
   score: number;
   passed: boolean;
   weight: number;

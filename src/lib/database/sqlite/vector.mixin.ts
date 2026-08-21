@@ -2,7 +2,7 @@
  * SQLite Provider – Vector index operations mixin
  */
 
-import type { IVectorIndexRecord } from '../provider.interface';
+import type { IVectorIndexRecord, IVectorQueryLog, IVectorQueryStats } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
 
@@ -107,6 +107,107 @@ export function VectorMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
       if (projectId) { sql += ' AND projectId = @projectId'; params.projectId = projectId; }
       const row = db.prepare(sql).get(params) as SqliteRow | undefined;
       return row ? this.mapVectorRow(row) : null;
+    }
+
+    async createVectorQueryLog(
+      log: Omit<IVectorQueryLog, '_id'>,
+    ): Promise<IVectorQueryLog> {
+      const db = this.getTenantDb();
+      const id = this.newId();
+
+      db.prepare(`
+        INSERT INTO ${TABLES.vectorQueryLogs}
+        (id, tenantId, projectId, providerKey, indexKey, topK, matchCount, latencyMs,
+         avgScore, filterApplied, hybrid, userId, apiTokenId, actorType, timestamp)
+        VALUES (@id, @tenantId, @projectId, @providerKey, @indexKey, @topK, @matchCount, @latencyMs,
+         @avgScore, @filterApplied, @hybrid, @userId, @apiTokenId, @actorType, @timestamp)
+      `).run({
+        id,
+        tenantId: log.tenantId,
+        projectId: log.projectId ?? null,
+        providerKey: log.providerKey,
+        indexKey: log.indexKey,
+        topK: log.topK,
+        matchCount: log.matchCount,
+        latencyMs: log.latencyMs,
+        avgScore: log.avgScore ?? null,
+        filterApplied: log.filterApplied ? 1 : 0,
+        hybrid: log.hybrid === undefined ? null : (log.hybrid ? 1 : 0),
+        userId: log.userId ?? null,
+        apiTokenId: log.apiTokenId ?? null,
+        actorType: log.actorType ?? null,
+        timestamp: log.timestamp.toISOString(),
+      });
+
+      return { ...log, _id: id };
+    }
+
+    async aggregateVectorQueryStats(params: {
+      indexKey: string;
+      from: Date;
+      to: Date;
+    }): Promise<IVectorQueryStats> {
+      const db = this.getTenantDb();
+      // Timestamps are stored as ISO-8601 UTC strings, so lexical comparison
+      // orders them correctly and substr() yields the same UTC day bucket the
+      // MongoDB $dateToString pipeline produces.
+      const bind = {
+        indexKey: params.indexKey,
+        from: params.from.toISOString(),
+        to: params.to.toISOString(),
+      };
+      const window = 'indexKey = @indexKey AND timestamp >= @from AND timestamp <= @to';
+
+      const daily = db.prepare(`
+        SELECT substr(timestamp, 1, 10) AS date,
+               COUNT(*) AS queryCount,
+               AVG(latencyMs) AS avgLatencyMs,
+               AVG(avgScore) AS avgScore,
+               SUM(CASE WHEN filterApplied = 1 THEN 1 ELSE 0 END) AS filterCount
+        FROM ${TABLES.vectorQueryLogs}
+        WHERE ${window}
+        GROUP BY date
+        ORDER BY date
+      `).all(bind) as SqliteRow[];
+
+      const totals = db.prepare(`
+        SELECT COUNT(*) AS totalQueries,
+               AVG(latencyMs) AS avgLatencyMs,
+               AVG(avgScore) AS avgScore,
+               MIN(latencyMs) AS minLatencyMs,
+               MAX(latencyMs) AS maxLatencyMs
+        FROM ${TABLES.vectorQueryLogs}
+        WHERE ${window}
+      `).get(bind) as SqliteRow | undefined;
+
+      const topKDist = db.prepare(`
+        SELECT topK, COUNT(*) AS count
+        FROM ${TABLES.vectorQueryLogs}
+        WHERE ${window}
+        GROUP BY topK
+        ORDER BY topK
+      `).all(bind) as SqliteRow[];
+
+      return {
+        daily: daily.map((row) => ({
+          date: row.date as string,
+          queryCount: (row.queryCount as number | undefined) ?? 0,
+          avgLatencyMs: (row.avgLatencyMs as number | undefined) ?? 0,
+          avgScore: (row.avgScore as number | null | undefined) ?? null,
+          filterCount: (row.filterCount as number | undefined) ?? 0,
+        })),
+        totals: {
+          totalQueries: (totals?.totalQueries as number | undefined) ?? 0,
+          avgLatencyMs: (totals?.avgLatencyMs as number | null | undefined) ?? null,
+          avgScore: (totals?.avgScore as number | null | undefined) ?? null,
+          minLatencyMs: (totals?.minLatencyMs as number | null | undefined) ?? null,
+          maxLatencyMs: (totals?.maxLatencyMs as number | null | undefined) ?? null,
+        },
+        topKDistribution: topKDist.map((row) => ({
+          topK: (row.topK as number | undefined) ?? 0,
+          count: (row.count as number | undefined) ?? 0,
+        })),
+      };
     }
 
     protected mapVectorRow(r: SqliteRow): IVectorIndexRecord {

@@ -15,6 +15,15 @@ vi.mock('@/lib/services/apiTokenAuth', () => {
 vi.mock('@/lib/services/rag/ragService', () => ({
   queryRag: vi.fn(),
   listRagModules: vi.fn(),
+  // The routes shape the response through this; mirror the real implementation
+  // rather than stubbing it away, so the shaping stays covered.
+  shapeRagQueryResponse: (result: { responseDetail?: 'full' | 'text'; matches: Array<{ content?: string }> }) => {
+    const { responseDetail, matches, ...rest } = result;
+    return {
+      ...rest,
+      matches: responseDetail === 'text' ? matches.map((m) => ({ content: m.content })) : matches,
+    };
+  },
 }));
 
 vi.mock('@/lib/services/memory/memoryService', () => ({

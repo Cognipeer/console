@@ -55,7 +55,7 @@ export async function DELETE(
       return NextResponse.json({ error: 'RAG module not found' }, { status: 404 });
     }
 
-    const deleted = await deleteRagModule(ctx.tenantDbName, String(ragModule._id));
+    const deleted = await deleteRagModule(ctx.tenantDbName, ctx.tenantId, ctx.projectId, String(ragModule._id));
     if (!deleted) {
       return NextResponse.json({ error: 'RAG module not found' }, { status: 404 });
     }

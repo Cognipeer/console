@@ -3,6 +3,15 @@ import { NextRequest } from 'next/server';
 
 vi.mock('@/lib/services/rag/ragService', () => ({
   queryRag: vi.fn(),
+  // The routes shape the response through this; mirror the real implementation
+  // rather than stubbing it away, so the shaping stays covered.
+  shapeRagQueryResponse: (result: { responseDetail?: 'full' | 'text'; matches: Array<{ content?: string }> }) => {
+    const { responseDetail, matches, ...rest } = result;
+    return {
+      ...rest,
+      matches: responseDetail === 'text' ? matches.map((m) => ({ content: m.content })) : matches,
+    };
+  },
 }));
 
 import { POST } from '@/server/api/routes/rag/modules/[key]/query/route';

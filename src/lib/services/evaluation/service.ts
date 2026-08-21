@@ -24,6 +24,7 @@ import type {
   EvaluationDatasetItemQuery,
 } from '@/lib/database';
 import { runEvaluation } from './runner';
+import { EMBEDDING_SCORERS, JUDGE_SCORERS } from './scorers';
 import { compareEvaluationRuns, type EvalComparison } from './compare';
 import type { DatasetItem, RunItemResult, ScorerConfig } from './types';
 import { buildEmbedInvoker, buildJudgeInvoker, buildTargetInvoker, type EvaluationModelContext } from './adapters';
@@ -73,6 +74,15 @@ function mapScorer(config: IEvaluationScorerConfig): ScorerConfig {
       argsWeight: config.argsWeight,
     };
   }
+  if (config.type === 'context-recall') {
+    return { type: 'context-recall', weight: config.weight, threshold: config.threshold };
+  }
+  if (config.type === 'context-precision') {
+    return { type: 'context-precision', weight: config.weight, threshold: config.threshold };
+  }
+  if (config.type === 'groundedness') {
+    return { type: 'groundedness', weight: config.weight, threshold: config.threshold };
+  }
   return { type: 'assertion', weight: config.weight };
 }
 
@@ -80,12 +90,23 @@ function mapScorer(config: IEvaluationScorerConfig): ScorerConfig {
 const EVAL_RUN_TURNS_CAP = 20;
 const EVAL_RUN_TURN_TEXT_CAP = 4000;
 
+/**
+ * Persisted output text for a RETRIEVAL item. A model answer is bounded by the
+ * provider's output limit; a concatenation of topK chunks is bounded by
+ * nothing, and a run is ONE document — a few hundred items of unbounded
+ * context is how a run hits the 16MB ceiling and fails to save at all. The
+ * chunk ids and scores behind the number survive on each score's `detail`.
+ */
+const EVAL_RUN_RETRIEVAL_TEXT_CAP = 8000;
+
 function toRunItem(result: RunItemResult): IEvaluationRunItem {
   return {
     itemId: result.itemId,
     output: result.output
       ? {
-          text: result.output.text,
+          text: result.output.retrieved
+            ? result.output.text.slice(0, EVAL_RUN_RETRIEVAL_TEXT_CAP)
+            : result.output.text,
           latencyMs: result.output.latencyMs,
           toolCalls: result.output.toolCalls,
           // A run is ONE document; a long conversation replayed per turn would
@@ -128,6 +149,10 @@ export interface CreateTargetInput {
   agentKey?: string;
   modelKey?: string;
   external?: IEvaluationTarget['external'];
+  /** `rag` targets: which Knowledge Engine module to retrieve from, and how much. */
+  ragModuleKey?: string;
+  retrievalTopK?: number;
+  retrievalMinScore?: number;
   /** System-prompt override (model targets only) — see IEvaluationTarget. */
   systemPrompt?: string;
   promptKey?: string;
@@ -157,6 +182,9 @@ export async function createTarget(
     agentKey: input.agentKey,
     modelKey: input.modelKey,
     external: input.external,
+    ragModuleKey: input.ragModuleKey,
+    retrievalTopK: input.retrievalTopK,
+    retrievalMinScore: input.retrievalMinScore,
     systemPrompt: input.systemPrompt,
     promptKey: input.promptKey,
     promptVersion: input.promptVersion,
@@ -677,6 +705,21 @@ export interface RunSuiteParams {
   suiteKey: string;
 }
 
+/**
+ * `perTurn` walks a conversation, feeds the model its own answers back, and
+ * grades the LAST one. Retrieval has no conversation to walk: the mode would
+ * fire one query per user turn, throw away every result but the final one, and
+ * report a score that says nothing about the turns it paid for. Refuse the
+ * combination instead of quietly producing that number.
+ */
+function assertTurnModeSupported(target: IEvaluationTarget, turnMode: EvaluationTurnMode | undefined): void {
+  if (target.kind === 'rag' && turnMode === 'perTurn') {
+    throw new Error(
+      `Evaluation target "${target.key}" retrieves, which the "perTurn" replay mode does not support — retrieval answers one query per item. Set the suite's replay mode to "single".`,
+    );
+  }
+}
+
 /** Resolve suite/target/dataset, guard against a concurrent run, create a pending run. */
 async function createPendingRun(params: RunSuiteParams, mode: IEvaluationRun['mode']): Promise<WithId<IEvaluationRun>> {
   const { tenantDbName, tenantId, projectId, createdBy, suiteKey } = params;
@@ -689,6 +732,7 @@ async function createPendingRun(params: RunSuiteParams, mode: IEvaluationRun['mo
   if (!target) throw new Error(`Evaluation target "${suite.targetKey}" not found`);
   const dataset = await db.findEvaluationDatasetByKey(suite.datasetKey, projectId);
   if (!dataset) throw new Error(`Evaluation dataset "${suite.datasetKey}" not found`);
+  assertTurnModeSupported(target, suite.runConfig?.turnMode);
 
   // Guard against duplicate/concurrent runs of the same suite. Reject if a
   // recent run is still in progress; stale 'running' rows (>1h, from a hard
@@ -739,6 +783,9 @@ export async function executeRun(
     if (!target) throw new Error(`Evaluation target "${suite.targetKey}" not found`);
     const dataset = await db.findEvaluationDatasetByKey(suite.datasetKey, projectId);
     if (!dataset) throw new Error(`Evaluation dataset "${suite.datasetKey}" not found`);
+    // Re-checked here and not only at enqueue time: a queued run reloads the
+    // suite, so an edit made while it waited must not slip past the guard.
+    assertTurnModeSupported(target, suite.runConfig?.turnMode);
 
     const datasetItems = await loadAllDatasetItems(db, String(dataset._id));
     const items: DatasetItem[] = datasetItems.map((it) => ({
@@ -758,8 +805,11 @@ export async function executeRun(
     const makeTarget = deps.buildTargetInvoker ?? buildTargetInvoker;
     const makeJudge = deps.buildJudgeInvoker ?? buildJudgeInvoker;
     const makeEmbed = deps.buildEmbedInvoker ?? buildEmbedInvoker;
-    const needJudge = scorers.some((s) => s.type === 'llm-judge');
-    const needEmbed = scorers.some((s) => s.type === 'semantic');
+    // Asked of the scorer registry, never of a hardcoded list: an
+    // embedding-backed scorer left out of it runs with `invokeEmbed:
+    // undefined` and scores every item 0 with 'no embed invoker configured'.
+    const needJudge = scorers.some((s) => JUDGE_SCORERS.includes(s.type));
+    const needEmbed = scorers.some((s) => EMBEDDING_SCORERS.includes(s.type));
 
     // Persist incremental progress so the dashboard can show step-by-step
     // results live (throttled to avoid hammering the DB on large datasets).

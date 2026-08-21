@@ -65,6 +65,7 @@ import type {
   IRagDocument,
   IRagModule,
   IRagQueryLog,
+  IRagReindexRun,
   IReranker,
   IRerankerRunLog,
   IWebSearchRunLog,
@@ -99,8 +100,11 @@ import type {
   GpuFleetCommandStatus,
   ProjectRole,
   IVectorIndexRecord,
+  IVectorQueryLog,
+  IVectorQueryStats,
   IVectorMigration,
   IVectorMigrationLog,
+  IVectorMigrationRunSummary,
   VectorMigrationStatus,
   VectorMigrationLogStatus,
   IncidentSeverity,
@@ -468,6 +472,16 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     >,
   ): Promise<IVectorIndexRecord | null>;
   deleteVectorIndex(id: string): Promise<boolean>;
+  /** Record one similarity query for the index analytics panel. */
+  createVectorQueryLog(
+    log: Omit<IVectorQueryLog, '_id'>,
+  ): Promise<IVectorQueryLog>;
+  /** Aggregate the query logs of one index for the analytics panel. */
+  aggregateVectorQueryStats(params: {
+    indexKey: string;
+    from: Date;
+    to: Date;
+  }): Promise<IVectorQueryStats>;
   listVectorIndexes(filters?: {
     providerKey?: string;
     projectId?: string;
@@ -505,12 +519,15 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IVectorMigrationLog>;
   listVectorMigrationLogs(
     migrationKey: string,
-    options?: { limit?: number; offset?: number },
+    options?: { limit?: number; offset?: number; attempt?: number },
   ): Promise<IVectorMigrationLog[]>;
   countVectorMigrationLogs(
     migrationKey: string,
     status?: VectorMigrationLogStatus,
+    attempt?: number,
   ): Promise<number>;
+  /** Per-run (per-attempt) batch stats, most recent run first. */
+  listVectorMigrationRuns(migrationKey: string): Promise<IVectorMigrationRunSummary[]>;
 
   // File object operations (tenant-specific)
   createFileRecord(
@@ -988,8 +1005,90 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IRagQueryLog>;
   listRagQueryLogs(
     ragModuleKey: string,
-    options?: { limit?: number; skip?: number; from?: Date; to?: Date },
+    options?: {
+      limit?: number;
+      skip?: number;
+      from?: Date;
+      to?: Date;
+      /** Only queries that returned nothing — the content-gap feed. */
+      zeroOnly?: boolean;
+      /** Scope to one project; module keys are unique only within a project. */
+      projectId?: string;
+    },
   ): Promise<IRagQueryLog[]>;
+  countRagQueryLogs(
+    ragModuleKey: string,
+    options?: { from?: Date; to?: Date; projectId?: string },
+  ): Promise<{
+    total: number;
+    avgLatencyMs: number;
+    /** Queries that returned no matches at all. */
+    zeroMatchCount: number;
+    /**
+     * Queries where the store DID return candidates and the minScore threshold
+     * discarded every one of them — a tuning problem, not a content gap.
+     */
+    minScoreFilteredCount: number;
+  }>;
+  /**
+   * Histogram of the best score per query, bucketed to one decimal, so the
+   * minScore slider can be set against the module's real distribution instead
+   * of guessed at.
+   */
+  aggregateRagQueryScoreDistribution(
+    ragModuleKey: string,
+    options?: { from?: Date; to?: Date; projectId?: string },
+  ): Promise<Array<{ bucket: string; count: number }>>;
+  /** Retention: query text is stored in full, so this table cannot grow forever. */
+  deleteRagQueryLogsOlderThan(before: Date, ragModuleKey?: string): Promise<number>;
+
+  // ── RAG module teardown (tenant-specific) ──
+  /**
+   * Deleting a module used to orphan every document, chunk and vector it owned.
+   * These make the cascade expressible.
+   */
+  deleteRagDocumentsByModuleKey(ragModuleKey: string): Promise<number>;
+  deleteRagChunksByModuleKey(ragModuleKey: string): Promise<number>;
+  /**
+   * How many modules point at the same vector index. Two modules sharing one
+   * index silently cross-contaminate unless isolation is on.
+   */
+  countRagModulesByVectorIndexKey(
+    vectorIndexKey: string,
+    options?: { projectId?: string; excludeKey?: string },
+  ): Promise<number>;
+
+  // ── RAG re-index runs (tenant-specific) ──
+  createRagReindexRun(
+    run: Omit<IRagReindexRun, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IRagReindexRun>;
+  updateRagReindexRun(
+    key: string,
+    data: Partial<Omit<IRagReindexRun, 'tenantId' | 'key' | 'createdBy'>>,
+  ): Promise<IRagReindexRun | null>;
+  findRagReindexRunByKey(key: string): Promise<IRagReindexRun | null>;
+  listRagReindexRuns(filters?: {
+    ragModuleKey?: string;
+    projectId?: string;
+    statuses?: IRagReindexRun['status'][];
+    limit?: number;
+  }): Promise<IRagReindexRun[]>;
+  deleteRagReindexRun(key: string): Promise<boolean>;
+  /**
+   * Take ownership of a run in ONE atomic statement. Matches only when the run
+   * is pending/queued/running AND it is unclaimed, already ours, or its
+   * heartbeat is older than `staleBefore`. Returns null — without writing —
+   * when another live worker owns it.
+   */
+  claimRagReindexRun(
+    key: string,
+    ownerId: string,
+    staleBefore: Date,
+  ): Promise<IRagReindexRun | null>;
+  /** Refresh the heartbeat while still held; false means the claim was lost. */
+  touchRagReindexRunClaim(key: string, ownerId: string): Promise<boolean>;
+  /** Give the claim up, only if we still hold it. */
+  releaseRagReindexRunClaim(key: string, ownerId: string): Promise<void>;
 
   // ── Reranker operations (tenant-specific) ──
   createReranker(
@@ -1226,7 +1325,7 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IMcpServer>;
   updateMcpServer(
     id: string,
-    data: Partial<Omit<IMcpServer, 'tenantId' | 'key' | 'createdBy'>>,
+    data: Partial<Omit<IMcpServer, 'tenantId' | 'createdBy'>>,
   ): Promise<IMcpServer | null>;
   deleteMcpServer(id: string): Promise<boolean>;
   findMcpServerById(id: string): Promise<IMcpServer | null>;

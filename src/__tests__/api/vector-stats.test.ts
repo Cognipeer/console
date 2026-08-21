@@ -1,30 +1,16 @@
+/**
+ * API tests — GET /api/vector/indexes/[externalId]/stats
+ *
+ * The endpoint reads query analytics through the database abstraction
+ * (`aggregateVectorQueryStats`), so it works on every backend. These tests
+ * cover the shaping the panel depends on: a zero-filled day series, rounded
+ * averages, and the index-key lookup the aggregation is scoped by.
+ */
+
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { NextRequest } from 'next/server';
 
-// Mock MongoDB — hoist all helpers to be available in mock factories
-const mockToArray = vi.hoisted(() => vi.fn());
-const mockAggregate = vi.hoisted(() => vi.fn(() => ({ toArray: mockToArray })));
-const mockFindOne = vi.hoisted(() => vi.fn());
-const mockCollection = vi.hoisted(() =>
-  vi.fn(() => ({ aggregate: mockAggregate, findOne: mockFindOne })),
-);
-const mockClientDb = vi.hoisted(() => vi.fn(() => ({ collection: mockCollection })));
-const mockClientConnect = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
-
-// MongoClient must be a real class so `new MongoClient(uri)` works
-vi.mock('mongodb', () => ({
-  MongoClient: class MockMongoClient {
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    constructor(_uri: string) {}
-    connect() {
-      return mockClientConnect();
-    }
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    db(_name?: string) {
-      return mockClientDb();
-    }
-  },
-}));
+vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
 
 vi.mock('@/lib/services/projects/projectContext', () => ({
   requireProjectContext: vi.fn(),
@@ -42,7 +28,9 @@ vi.mock('@/lib/utils/dashboardDateFilter', () => ({
 }));
 
 import { GET } from '@/server/api/routes/vector/indexes/[externalId]/stats/route';
+import { getDatabase } from '@/lib/database';
 import { requireProjectContext } from '@/lib/services/projects/projectContext';
+import { createMockDb } from '../helpers/db.mock';
 
 const mockRequireProjectContext = vi.mocked(requireProjectContext);
 
@@ -54,29 +42,47 @@ const BASE_HEADERS = {
 
 const statsParams = { params: Promise.resolve({ externalId: 'idx-ext-1' }) };
 
-const mockDailyData = [
-  {
-    _id: '2025-01-01',
-    queryCount: 10,
-    avgLatencyMs: 100,
-    avgScore: 0.85,
-    filterCount: 3,
+const INDEX_RECORD = {
+  _id: 'idx-1',
+  tenantId: 'tenant-1',
+  projectId: 'proj-1',
+  providerKey: 'pinecone',
+  key: 'my-index',
+  name: 'My Index',
+  externalId: 'idx-ext-1',
+  dimension: 1536,
+  metric: 'cosine' as const,
+  createdBy: 'user-1',
+};
+
+const EMPTY_STATS = {
+  daily: [],
+  totals: {
+    totalQueries: 0,
+    avgLatencyMs: null,
+    avgScore: null,
+    minLatencyMs: null,
+    maxLatencyMs: null,
   },
-];
-const mockTotalsData = [
-  {
-    _id: null,
+  topKDistribution: [],
+};
+
+const POPULATED_STATS = {
+  daily: [
+    { date: '2025-01-01', queryCount: 10, avgLatencyMs: 100.4, avgScore: 0.85, filterCount: 3 },
+  ],
+  totals: {
     totalQueries: 50,
-    avgLatencyMs: 120,
-    avgScore: 0.88,
+    avgLatencyMs: 120.6,
+    avgScore: 0.881234,
     minLatencyMs: 50,
     maxLatencyMs: 300,
   },
-];
-const mockTopKData = [
-  { _id: 5, count: 30 },
-  { _id: 10, count: 20 },
-];
+  topKDistribution: [
+    { topK: 5, count: 30 },
+    { topK: 10, count: 20 },
+  ],
+};
 
 function makeReq(headers?: Record<string, string>, search = '') {
   return new NextRequest(
@@ -89,26 +95,21 @@ function makeReq(headers?: Record<string, string>, search = '') {
 }
 
 describe('GET /api/vector/indexes/[externalId]/stats', () => {
+  let db: ReturnType<typeof createMockDb>;
+
   beforeEach(() => {
     vi.clearAllMocks();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     mockRequireProjectContext.mockResolvedValue({ projectId: 'proj-1' } as any);
 
-    // Restore MongoDB mock chain (cleared by vi.clearAllMocks)
-    mockClientConnect.mockResolvedValue(undefined);
-    mockClientDb.mockReturnValue({ collection: mockCollection });
-    mockCollection.mockReturnValue({ aggregate: mockAggregate, findOne: mockFindOne });
-    mockAggregate.mockReturnValue({ toArray: mockToArray });
-    mockFindOne.mockResolvedValue({ key: 'my-index' });
-
-    // Three Promise.all aggregate calls: daily, totals, topK
-    mockToArray
-      .mockResolvedValueOnce(mockDailyData)
-      .mockResolvedValueOnce(mockTotalsData)
-      .mockResolvedValueOnce(mockTopKData);
+    db = createMockDb();
+    db.findVectorIndexByExternalId.mockResolvedValue(INDEX_RECORD);
+    db.listVectorIndexes.mockResolvedValue([INDEX_RECORD]);
+    db.aggregateVectorQueryStats.mockResolvedValue(POPULATED_STATS);
+    (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
   });
 
-  it('returns 200 with expected response shape', async () => {
+  it('returns 200 with the expected response shape', async () => {
     const res = await GET(makeReq(), statsParams);
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -118,34 +119,70 @@ describe('GET /api/vector/indexes/[externalId]/stats', () => {
     expect(body).toHaveProperty('days');
   });
 
-  it('returns totals with correct numeric fields', async () => {
+  it('rounds latency and score in totals', async () => {
     const res = await GET(makeReq(), statsParams);
     const body = await res.json();
     expect(body.totals.totalQueries).toBe(50);
-    expect(typeof body.totals.avgLatencyMs).toBe('number');
-    expect(typeof body.totals.minLatencyMs).toBe('number');
-    expect(typeof body.totals.maxLatencyMs).toBe('number');
-    expect(typeof body.totals.avgScore).toBe('number');
+    expect(body.totals.avgLatencyMs).toBe(121);
+    expect(body.totals.avgScore).toBe(0.8812);
+    expect(body.totals.minLatencyMs).toBe(50);
+    expect(body.totals.maxLatencyMs).toBe(300);
   });
 
-  it('returns topKDistribution as array with topK and count', async () => {
+  it('returns topKDistribution as-is', async () => {
     const res = await GET(makeReq(), statsParams);
     const body = await res.json();
-    expect(body.topKDistribution).toBeInstanceOf(Array);
-    expect(body.topKDistribution).toHaveLength(2);
-    expect(body.topKDistribution[0]).toMatchObject({ topK: 5, count: 30 });
+    expect(body.topKDistribution).toEqual([
+      { topK: 5, count: 30 },
+      { topK: 10, count: 20 },
+    ]);
   });
 
-  it('fills daily array with date strings', async () => {
+  it('zero-fills every day in the window', async () => {
     const res = await GET(makeReq(), statsParams);
     const body = await res.json();
-    expect(body.daily).toBeInstanceOf(Array);
-    expect(body.daily.length).toBeGreaterThan(0);
-    expect(body.daily[0]).toHaveProperty('date');
-    expect(body.daily[0]).toHaveProperty('queryCount');
-    expect(body.daily[0]).toHaveProperty('avgLatencyMs');
-    expect(body.daily[0]).toHaveProperty('avgScore');
-    expect(body.daily[0]).toHaveProperty('filterCount');
+    expect(body.daily).toHaveLength(30);
+    for (const day of body.daily) {
+      expect(day).toMatchObject({
+        date: expect.any(String),
+        queryCount: expect.any(Number),
+        avgLatencyMs: expect.any(Number),
+        avgScore: expect.any(Number),
+        filterCount: expect.any(Number),
+      });
+    }
+  });
+
+  it('scopes the aggregation to the index key, not the external id', async () => {
+    await GET(makeReq(BASE_HEADERS, '?providerKey=pinecone'), statsParams);
+
+    expect(db.findVectorIndexByExternalId).toHaveBeenCalledWith(
+      'pinecone',
+      'idx-ext-1',
+      'proj-1',
+    );
+    expect(db.aggregateVectorQueryStats).toHaveBeenCalledWith(
+      expect.objectContaining({ indexKey: 'my-index' }),
+    );
+  });
+
+  it('finds the index by external id when no providerKey is given', async () => {
+    await GET(makeReq(), statsParams);
+
+    expect(db.listVectorIndexes).toHaveBeenCalledWith({ projectId: 'proj-1' });
+    expect(db.aggregateVectorQueryStats).toHaveBeenCalledWith(
+      expect.objectContaining({ indexKey: 'my-index' }),
+    );
+  });
+
+  it('falls back to the external id when no index record matches', async () => {
+    db.listVectorIndexes.mockResolvedValue([]);
+    const res = await GET(makeReq(), statsParams);
+
+    expect(res.status).toBe(200);
+    expect(db.aggregateVectorQueryStats).toHaveBeenCalledWith(
+      expect.objectContaining({ indexKey: 'idx-ext-1' }),
+    );
   });
 
   it('defaults days to 30', async () => {
@@ -153,6 +190,26 @@ describe('GET /api/vector/indexes/[externalId]/stats', () => {
     const body = await res.json();
     expect(body.days).toBe(30);
     expect(body.daily).toHaveLength(30);
+  });
+
+  it('accepts days=14 and returns that many buckets', async () => {
+    const res = await GET(makeReq(BASE_HEADERS, '?days=14'), statsParams);
+    const body = await res.json();
+    expect(body.days).toBe(14);
+    expect(body.daily).toHaveLength(14);
+  });
+
+  it('handles an empty window as zero totals', async () => {
+    db.aggregateVectorQueryStats.mockResolvedValue(EMPTY_STATS);
+    const res = await GET(makeReq(), statsParams);
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.totals.totalQueries).toBe(0);
+    expect(body.totals.avgLatencyMs).toBe(0);
+    expect(body.totals.avgScore).toBe(0);
+    expect(body.topKDistribution).toHaveLength(0);
+    expect(body.daily.every((d: { queryCount: number }) => d.queryCount === 0)).toBe(true);
   });
 
   it('returns 401 when x-tenant-db-name is missing', async () => {
@@ -174,45 +231,8 @@ describe('GET /api/vector/indexes/[externalId]/stats', () => {
     expect(res.status).toBe(403);
   });
 
-  it('handles empty aggregate results gracefully (zero totals)', async () => {
-    mockToArray
-      .mockReset()
-      .mockResolvedValueOnce([]) // daily
-      .mockResolvedValueOnce([]) // totals
-      .mockResolvedValueOnce([]); // topK
-    const res = await GET(makeReq(), statsParams);
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body.totals.totalQueries).toBe(0);
-    expect(body.topKDistribution).toHaveLength(0);
-  });
-
-  it('passes providerKey query param to index lookup', async () => {
-    mockToArray
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([]);
-    await GET(makeReq(BASE_HEADERS, '?providerKey=pinecone'), statsParams);
-    expect(mockFindOne).toHaveBeenCalledWith(
-      expect.objectContaining({ externalId: 'idx-ext-1', providerKey: 'pinecone' }),
-      expect.anything(),
-    );
-  });
-
-  it('accepts days=14 query param and returns correct count', async () => {
-    mockToArray
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([]);
-    const res = await GET(makeReq(BASE_HEADERS, '?days=14'), statsParams);
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body.days).toBe(14);
-    expect(body.daily).toHaveLength(14);
-  });
-
-  it('returns 500 on MongoDB error', async () => {
-    mockToArray.mockReset().mockRejectedValue(new Error('Mongo crash'));
+  it('returns 500 when the aggregation fails', async () => {
+    db.aggregateVectorQueryStats.mockRejectedValue(new Error('backend crash'));
     const res = await GET(makeReq(), statsParams);
     expect(res.status).toBe(500);
   });

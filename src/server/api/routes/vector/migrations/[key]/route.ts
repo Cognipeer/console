@@ -4,6 +4,7 @@ import {
   deleteVectorMigration,
   listVectorMigrationLogs,
   countVectorMigrationLogs,
+  listVectorMigrationRuns,
 } from '@/lib/services/vector';
 import { ProjectContextError, requireProjectContext } from '@/lib/services/projects/projectContext';
 import { createLogger } from '@/lib/core/logger';
@@ -43,16 +44,22 @@ export async function GET(request: NextRequest, context: RouteContext) {
     const { searchParams } = new URL(request.url);
     const logsLimit = parseInt(searchParams.get('logsLimit') ?? '50', 10);
     const logsOffset = parseInt(searchParams.get('logsOffset') ?? '0', 10);
+    const attemptParam = searchParams.get('attempt');
+    const attempt = attemptParam !== null ? parseInt(attemptParam, 10) : undefined;
 
-    const [logs, totalLogs] = await Promise.all([
-      listVectorMigrationLogs(tenantDbName, key, {
-        limit: logsLimit,
-        offset: logsOffset,
-      }),
-      countVectorMigrationLogs(tenantDbName, key),
+    // Batch logs are only fetched for a specific run (`attempt`) — the runs
+    // summary drives the "pick a run" list, logs are loaded on demand per run.
+    const [logs, totalLogs, runs] = await Promise.all([
+      attempt !== undefined
+        ? listVectorMigrationLogs(tenantDbName, key, { limit: logsLimit, offset: logsOffset, attempt })
+        : Promise.resolve([]),
+      attempt !== undefined
+        ? countVectorMigrationLogs(tenantDbName, key, undefined, attempt)
+        : Promise.resolve(0),
+      listVectorMigrationRuns(tenantDbName, key),
     ]);
 
-    return NextResponse.json({ migration, logs, totalLogs }, { status: 200 });
+    return NextResponse.json({ migration, logs, totalLogs, runs }, { status: 200 });
   } catch (error) {
     logger.error('Get vector migration error', { error });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });

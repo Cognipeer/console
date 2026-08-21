@@ -9,6 +9,8 @@ import type {
   VectorListInput,
   VectorListResult,
 } from '../domains/vector';
+import { FULL_FILTER_OPERATORS, VectorFilterError } from '../domains/vectorFilter';
+import { toMilvusExpression } from './vectorFilterTranslators';
 
 interface MilvusCloudCredentials {
   address: string;
@@ -24,6 +26,15 @@ interface MilvusCloudSettings {
 const DEFAULT_DIMENSIONS = 1536;
 const DEFAULT_VECTOR_FIELD = 'vector';
 
+/**
+ * Milvus filter expressions are strings, so an id containing a quote or
+ * backslash would break the expression (or widen the delete). Escape both.
+ */
+function escapeMilvusString(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+
 function milvusCloudMetricType(metric: string): string {
   if (metric === 'euclidean') return 'L2';
   if (metric === 'dot') return 'IP';
@@ -35,6 +46,45 @@ function metricFromMilvusCloudType(milvusMetric: string | undefined): 'cosine' |
   if (milvusMetric === 'IP') return 'dot';
   return 'cosine';
 }
+
+// Milvus can only filter inside a metadata column typed as JSON. Collections
+// created before that switch store `metadata_json` as VarChar, where filter
+// expressions cannot be evaluated, so those keep working unfiltered and reject
+// filtered queries instead of silently ignoring the filter.
+const MILVUS_FILTER_SCHEMA = 'json-v1';
+
+function milvusHasFilterableSchema(handle: VectorIndexHandle): boolean {
+  return handle.metadata?.filterSchema === MILVUS_FILTER_SCHEMA;
+}
+
+function milvusFilterExpression(
+  handle: VectorIndexHandle,
+  filter: VectorQueryInput['filter'],
+): string | undefined {
+  if (!filter) return undefined;
+  if (!milvusHasFilterableSchema(handle)) {
+    throw new VectorFilterError(
+      `Milvus collection "${handle.externalId}" stores metadata as a string column, so `
+      + 'metadata filters cannot be pushed down. Recreate the collection and reingest its '
+      + 'vectors to enable filtering.',
+    );
+  }
+  return toMilvusExpression(filter, 'metadata_json');
+}
+
+/** Metadata is a JSON object on new collections and a JSON string on old ones. */
+function parseMilvusMetadata(raw: unknown): Record<string, unknown> | undefined {
+  if (raw === null || raw === undefined) return undefined;
+  if (typeof raw === 'object') return raw as Record<string, unknown>;
+  if (typeof raw !== 'string') return undefined;
+  try {
+    return JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+}
+
+const MILVUS_FILTER_OPERATORS = FULL_FILTER_OPERATORS;
 
 export const MilvusCloudVectorProviderContract: ProviderContract<
   VectorProviderRuntime,
@@ -106,6 +156,12 @@ export const MilvusCloudVectorProviderContract: ProviderContract<
     supportsUpsert: true,
     supportsQuery: true,
     supportsDelete: true,
+    'vector.filterOperators': MILVUS_FILTER_OPERATORS,
+    'vector.filterRaw': true,
+    // Milvus serves full-text search from a BM25 function over a sparse vector
+    // column, which has to be declared when the collection is created; this
+    // driver's collections carry the dense field only.
+    'vector.supportsHybrid': false,
   },
   async createRuntime({ credentials, settings, providerKey, logger }) {
     if (!credentials?.address?.trim()) {
@@ -138,6 +194,7 @@ export const MilvusCloudVectorProviderContract: ProviderContract<
         const metricType = milvusCloudMetricType(metric);
 
         const hasCollection = await milvusClient.hasCollection({ collection_name: collectionName });
+        const createdWithFilterableSchema = !hasCollection.value;
         if (!hasCollection.value) {
           await milvusClient.createCollection({
             collection_name: collectionName,
@@ -145,7 +202,7 @@ export const MilvusCloudVectorProviderContract: ProviderContract<
             fields: [
               { name: 'id', data_type: DataType.VarChar, max_length: 255, is_primary_key: true, auto_id: false },
               { name: vf, data_type: DataType.FloatVector, dim: dimension },
-              { name: 'metadata_json', data_type: DataType.VarChar, max_length: 65535, default_value: '{}' },
+              { name: 'metadata_json', data_type: DataType.JSON },
             ],
           });
           // Zilliz Cloud Free Tier requires AUTOINDEX
@@ -168,7 +225,12 @@ export const MilvusCloudVectorProviderContract: ProviderContract<
           name: collectionName,
           dimension,
           metric,
-          metadata: { ...input.metadata, vectorField: vf, provider: 'milvus-cloud' },
+          metadata: {
+            ...input.metadata,
+            vectorField: vf,
+            provider: 'milvus-cloud',
+            ...(createdWithFilterableSchema ? { filterSchema: MILVUS_FILTER_SCHEMA } : {}),
+          },
         };
       },
 
@@ -214,7 +276,9 @@ export const MilvusCloudVectorProviderContract: ProviderContract<
         const data = items.map((item) => ({
           id: item.id,
           [vectorField]: item.values,
-          metadata_json: JSON.stringify(item.metadata ?? {}),
+          metadata_json: milvusHasFilterableSchema(handle)
+            ? (item.metadata ?? {})
+            : JSON.stringify(item.metadata ?? {}),
         }));
         await milvusClient.upsert({ collection_name: handle.externalId, data });
         logger?.debug?.('Zilliz Cloud upserted vectors', { providerKey, count: items.length });
@@ -228,15 +292,16 @@ export const MilvusCloudVectorProviderContract: ProviderContract<
           data: [query.vector],
           anns_field: vectorField,
           limit: query.topK,
+          filter: milvusFilterExpression(handle, query.filter),
           output_fields: ['id', 'metadata_json'],
         });
         logger?.debug?.('Zilliz Cloud search raw result', { status: result.status, resultCount: result.results?.length ?? 0 });
         const hits = result.results ?? [];
         return {
-          matches: hits.map((hit: { id: string; score: number; metadata_json?: string }) => {
+          matches: hits.map((hit: { id: string; score: number; metadata_json?: unknown }) => {
             let metadata: Record<string, unknown> | undefined;
             try {
-              metadata = hit.metadata_json ? JSON.parse(hit.metadata_json) : undefined;
+              metadata = parseMilvusMetadata(hit.metadata_json);
             } catch {
               metadata = undefined;
             }
@@ -247,7 +312,7 @@ export const MilvusCloudVectorProviderContract: ProviderContract<
 
       async deleteVectors(handle: VectorIndexHandle, ids: string[]): Promise<void> {
         if (ids.length === 0) return;
-        const expr = `id in [${ids.map((id) => `"${id}"`).join(', ')}]`;
+        const expr = `id in [${ids.map((id) => `"${escapeMilvusString(id)}"`).join(', ')}]`;
         await milvusClient.deleteEntities({ collection_name: handle.externalId, expr });
       },
     
@@ -267,7 +332,7 @@ export const MilvusCloudVectorProviderContract: ProviderContract<
         });
         const items = (result.data ?? []).map((row: Record<string, unknown>) => {
           let metadata: Record<string, unknown> = {};
-          try { if (row.metadata_json) metadata = JSON.parse(row.metadata_json as string); } catch {}
+          metadata = parseMilvusMetadata(row.metadata_json) ?? {};
           return { id: row.id as string, values: Array.isArray(row[vectorField]) ? row[vectorField] as number[] : [], metadata };
         });
         const nextOffset = offset + items.length;

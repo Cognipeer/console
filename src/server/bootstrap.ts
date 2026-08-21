@@ -32,6 +32,8 @@ import { startAgentQueueConsumer } from '@/lib/services/agents/agentConsumer';
 import { startMcpQueueConsumer } from '@/lib/services/mcp/mcpConsumer';
 import { startVectorMigrationQueueConsumer } from '@/lib/services/vector/vectorMigrationConsumer';
 import { resumeInterruptedVectorMigrations } from '@/lib/services/vector/vectorMigrationJob';
+import { startRagReindexQueueConsumer } from '@/lib/services/rag/ragReindexConsumer';
+import { resumeInterruptedRagReindexRuns } from '@/lib/services/rag/ragReindexJob';
 import { startPollScheduler } from '@/lib/services/inferenceMonitoring/pollScheduler';
 import { startAlertScheduler } from '@/lib/services/alerts/alertScheduler';
 import { startAnalysisScheduler } from '@/lib/services/analysis/analysisScheduler';
@@ -55,6 +57,28 @@ let bootstrapPromise: Promise<void> | null = null;
 // providers (cache/queue/cluster) or racing the tenant reconciliation pass.
 let applicationReady = false;
 
+// Winston's console transport writes to a pipe in a container; exiting in the
+// same tick can truncate the very message that explains the exit. Same
+// convention as the uncaughtException handler in lifecycle.ts.
+const FATAL_EXIT_DELAY_MS = 1000;
+
+/**
+ * Turn a boot failure that must never be served through into a dead container.
+ *
+ * Rejecting is not enough on its own: the only caller of
+ * `bootstrapApplication()` that is not itself awaited (app.ts) just logs the
+ * rejection, so the process would stay up with `applicationReady` false
+ * forever — every /api/* request answering 503 while the liveness probe keeps
+ * passing, so Kubernetes never restarts the pod and the rolling update
+ * happily replaces all three healthy replicas with permanently dead ones.
+ * Exiting non-zero restarts the container, keeps readiness failing, and stalls
+ * the rollout on the previous (working) ReplicaSet.
+ */
+function scheduleFatalExit(message: string): void {
+  logger.error(`FATAL: ${message}`);
+  setTimeout(() => process.exit(1), FATAL_EXIT_DELAY_MS).unref();
+}
+
 export function bootstrapApplication(): Promise<void> {
   ensureServerEnvLoaded();
 
@@ -75,6 +99,20 @@ async function runBootstrap(): Promise<void> {
   if (errors.length > 0) {
     for (const error of errors) {
       logger.error(`Config error: ${error.key} - ${error.message}`);
+    }
+    // Production refuses to serve on an invalid config. These errors cover the
+    // signing and at-rest encryption secrets, so booting anyway would run the
+    // deployment on the shipped development defaults — a forgeable session
+    // token and credentials encrypted under a publicly known key.
+    if (cfg.nodeEnv === 'production') {
+      const message = `${errors.length} config validation error(s): `
+        + `${errors.map((e) => e.key).join(', ')}. `
+        + 'Refusing to start in production — fix the reported keys.';
+      // Both: the exit is what makes the failure fatal and visible to the
+      // orchestrator, the throw is what stops the rest of this bootstrap from
+      // running during the flush window.
+      scheduleFatalExit(message);
+      throw new Error(message);
     }
     logger.warn(
       `${errors.length} config validation error(s). Some features may not work.`,
@@ -278,6 +316,7 @@ async function runBootstrap(): Promise<void> {
       startRedTeamQueueConsumer(),
       startEvaluationRunQueueConsumer(),
       startVectorMigrationQueueConsumer(),
+      startRagReindexQueueConsumer(),
       // Enterprise modules contribute their consumers through the seam;
       // the collection is empty in the community edition.
       ...enterpriseQueueConsumers.map((start) => start()),
@@ -295,6 +334,16 @@ async function runBootstrap(): Promise<void> {
     await resumeInterruptedVectorMigrations();
   } catch (error) {
     logger.warn('Vector migration resume failed during startup', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  // Same contract for Knowledge Engine re-index runs: they resume from the
+  // last document they finished, and only after their consumer is registered.
+  try {
+    await resumeInterruptedRagReindexRuns();
+  } catch (error) {
+    logger.warn('Knowledge Engine re-index resume failed during startup', {
       error: error instanceof Error ? error.message : String(error),
     });
   }

@@ -11,7 +11,9 @@
  * usage logs (intentional — see sdkInvoker.ts); the gateway fallback keeps
  * its existing logging behavior.
  *
- * `agent` targets call `executeAgentChat`; semantic scorers embed via
+ * `agent` targets call `executeAgentChat`; `rag` targets call `queryRag` and
+ * return the ranked passages alongside their concatenation, which is what the
+ * retrieval scorers grade. Semantic and retrieval scorers embed via
  * `handleEmbeddingRequest`. `external` targets are recognised but not yet
  * wired — they throw a descriptive error, which the runner records as a
  * per-item failure rather than aborting the whole run.
@@ -40,6 +42,7 @@ import type {
   EvalUsage,
   JudgeInvoker,
   NormalizedToolCall,
+  RetrievedChunk,
   TargetInvoker,
   TargetOutput,
 } from './types';
@@ -504,6 +507,43 @@ export function buildTargetInvoker(target: IEvaluationTarget, ctx: EvaluationMod
         latencyMs: Date.now() - started,
         raw: response,
         toolCalls: extractToolCalls(response),
+      };
+    }
+    if (target.kind === 'rag') {
+      if (!target.ragModuleKey) {
+        throw new Error(
+          `Evaluation target "${target.key}" has no ragModuleKey configured — a retrieval target must name the Knowledge Engine module it queries`,
+        );
+      }
+      // Lazy import for the same reason as the agent branch: the RAG graph
+      // (document conversion, vector providers, rerankers) is heavy and should
+      // not load just because the evaluation engine was imported.
+      const { queryRag } = await import('@/lib/services/rag/ragService');
+      const result = await queryRag(ctx.tenantDbName, ctx.tenantId, ctx.projectId || undefined, {
+        ragModuleKey: target.ragModuleKey,
+        query: toUserMessage(item),
+        topK: target.retrievalTopK,
+        minScore: target.retrievalMinScore,
+        includeContent: true,
+      });
+      const retrieved: RetrievedChunk[] = result.matches.map((match, index) => ({
+        id: match.id,
+        score: match.score,
+        content: match.content ?? '',
+        documentId: match.documentId,
+        fileName: match.fileName,
+        chunkIndex: match.chunkIndex,
+        rank: index + 1,
+      }));
+      return {
+        // The concatenation is exactly what a generator would be handed as
+        // context, so it is what the non-retrieval scorers grade; the ranked
+        // matches ride along for the retrieval scorers, which need per-chunk
+        // text and rank that a concatenation has already thrown away.
+        text: retrieved.map((chunk) => chunk.content).filter((content) => content.trim()).join('\n\n'),
+        latencyMs: result.latencyMs,
+        raw: result,
+        retrieved,
       };
     }
     throw new Error('external evaluation targets are not yet supported (model targets only in this release)');

@@ -669,6 +669,26 @@ export const TENANT_SCHEMA_SQL = `
     updatedAt TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS vector_query_logs (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    providerKey TEXT NOT NULL,
+    indexKey TEXT NOT NULL,
+    topK INTEGER NOT NULL,
+    matchCount INTEGER NOT NULL DEFAULT 0,
+    latencyMs INTEGER NOT NULL,
+    avgScore REAL,
+    filterApplied INTEGER NOT NULL DEFAULT 0,
+    hybrid INTEGER,
+    userId TEXT,
+    apiTokenId TEXT,
+    actorType TEXT,
+    timestamp TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_vector_query_logs_index
+    ON vector_query_logs(indexKey, timestamp);
+
   -- File buckets
   CREATE TABLE IF NOT EXISTS file_buckets (
     id TEXT PRIMARY KEY,
@@ -850,6 +870,9 @@ export const TENANT_SCHEMA_SQL = `
     kind TEXT NOT NULL DEFAULT 'model',
     agentKey TEXT,
     modelKey TEXT,
+    ragModuleKey TEXT,
+    retrievalTopK INTEGER,
+    retrievalMinScore REAL,
     external TEXT,
     systemPrompt TEXT,
     promptKey TEXT,
@@ -1209,6 +1232,16 @@ export const TENANT_SCHEMA_SQL = `
     status TEXT NOT NULL DEFAULT 'active',
     rerankerKey TEXT,
     rerankerOversample INTEGER,
+    defaultTopK INTEGER,
+    defaultMinScore REAL,
+    responseDetail TEXT,
+    defaultFilter TEXT,
+    filterableFields TEXT,
+    hybrid TEXT,
+    isolateByModule INTEGER,
+    reindexRequired INTEGER,
+    activeReindexRunKey TEXT,
+    lastReindexAt TEXT,
     totalDocuments INTEGER DEFAULT 0,
     totalChunks INTEGER DEFAULT 0,
     metadata TEXT DEFAULT '{}',
@@ -1224,6 +1257,12 @@ export const TENANT_SCHEMA_SQL = `
     projectId TEXT,
     ragModuleKey TEXT NOT NULL,
     fileKey TEXT,
+    fileBucketKey TEXT,
+    fileProviderKey TEXT,
+    chunkConfig TEXT,
+    sourceText TEXT,
+    sourceTextKey TEXT,
+    sourceHash TEXT,
     fileName TEXT NOT NULL,
     contentType TEXT,
     size INTEGER,
@@ -1247,6 +1286,10 @@ export const TENANT_SCHEMA_SQL = `
     chunkIndex INTEGER NOT NULL,
     vectorId TEXT NOT NULL,
     content TEXT NOT NULL,
+    charStart INTEGER,
+    charEnd INTEGER,
+    headingPath TEXT,
+    tokenCount INTEGER,
     metadata TEXT DEFAULT '{}',
     createdAt TEXT NOT NULL
   );
@@ -1259,6 +1302,11 @@ export const TENANT_SCHEMA_SQL = `
     query TEXT NOT NULL,
     topK INTEGER NOT NULL,
     matchCount INTEGER NOT NULL DEFAULT 0,
+    preFilterMatchCount INTEGER,
+    topScore REAL,
+    avgScore REAL,
+    minScoreApplied REAL,
+    hybrid INTEGER,
     latencyMs INTEGER,
     metadata TEXT DEFAULT '{}',
     userId TEXT,
@@ -1266,6 +1314,37 @@ export const TENANT_SCHEMA_SQL = `
     actorType TEXT,
     createdAt TEXT NOT NULL
   );
+
+  -- One "rebuild every document in this module" run. Resumed from the record
+  -- on boot, because the queue is only durable when Redis is configured.
+  CREATE TABLE IF NOT EXISTS rag_reindex_runs (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    ragModuleKey TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    reason TEXT,
+    attempt INTEGER NOT NULL DEFAULT 0,
+    totalDocuments INTEGER NOT NULL DEFAULT 0,
+    processedDocuments INTEGER NOT NULL DEFAULT 0,
+    failedDocuments INTEGER NOT NULL DEFAULT 0,
+    batchSize INTEGER NOT NULL DEFAULT 10,
+    errorMessage TEXT,
+    startedAt TEXT,
+    completedAt TEXT,
+    progress TEXT,
+    claimedBy TEXT,
+    claimedAt TEXT,
+    heartbeatAt TEXT,
+    metadata TEXT DEFAULT '{}',
+    createdBy TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_rag_reindex_runs_key ON rag_reindex_runs(key);
+  CREATE INDEX IF NOT EXISTS idx_rag_reindex_runs_module ON rag_reindex_runs(ragModuleKey, createdAt);
+  CREATE INDEX IF NOT EXISTS idx_rag_reindex_runs_status ON rag_reindex_runs(status);
 
   -- Rerankers (first-class service backed by configurable strategy + model)
   CREATE TABLE IF NOT EXISTS rerankers (
@@ -1603,6 +1682,7 @@ export const TENANT_SCHEMA_SQL = `
     transport TEXT,
     sourceType TEXT,
     sessionId TEXT,
+    viaServerKey TEXT,
     userId TEXT,
     apiTokenId TEXT,
     actorType TEXT,
@@ -1665,6 +1745,7 @@ export const TENANT_SCHEMA_SQL = `
     destinationIndexKey TEXT NOT NULL,
     destinationIndexName TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
+    attempt INTEGER NOT NULL DEFAULT 0,
     totalVectors INTEGER NOT NULL DEFAULT 0,
     migratedVectors INTEGER NOT NULL DEFAULT 0,
     failedVectors INTEGER NOT NULL DEFAULT 0,
@@ -1688,6 +1769,7 @@ export const TENANT_SCHEMA_SQL = `
     tenantId TEXT NOT NULL,
     projectId TEXT,
     migrationKey TEXT NOT NULL,
+    attempt INTEGER NOT NULL DEFAULT 1,
     batchIndex INTEGER NOT NULL,
     vectorIds TEXT NOT NULL DEFAULT '[]',
     status TEXT NOT NULL,
@@ -1698,6 +1780,7 @@ export const TENANT_SCHEMA_SQL = `
     createdAt TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_vml_migrationKey ON vector_migration_logs(migrationKey);
+  CREATE INDEX IF NOT EXISTS idx_vml_migrationKey_attempt ON vector_migration_logs(migrationKey, attempt);
   CREATE INDEX IF NOT EXISTS idx_vml_status ON vector_migration_logs(status);
 
   -- Browsers (parent profiles)

@@ -37,6 +37,9 @@ function makeRequest(opts: {
     method,
     headers: {
       'x-tenant-db-name': 'tenant_acme',
+      // Deleting a module cascades to its documents, chunks, stored sources and
+      // vectors, so the route now requires the tenant those live under.
+      'x-tenant-id': 'tenant-acme-id',
       'x-project-id': 'project-1',
       'x-user-id': 'user-1',
       'content-type': 'application/json',
@@ -173,7 +176,7 @@ describe('DELETE /api/rag/modules/[key]', () => {
     mockDeleteRagModule.mockResolvedValue(undefined);
     const req = makeRequest({ method: 'DELETE' });
     await DELETE(req, mockParams);
-    expect(mockDeleteRagModule).toHaveBeenCalledWith('tenant_acme', 'mod-1');
+    expect(mockDeleteRagModule).toHaveBeenCalledWith('tenant_acme', 'tenant-acme-id', 'project-1', 'mod-1');
   });
 
   it('returns 500 on unexpected error', async () => {

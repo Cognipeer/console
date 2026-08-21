@@ -30,6 +30,7 @@ import {
   readJsonBody,
   withClientApiRequestContext,
 } from '../fastify-utils';
+import { VectorFilterError } from '@/lib/providers';
 
 const logger = createLogger('api:client-vector');
 
@@ -351,6 +352,9 @@ export const clientVectorApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ result });
     } catch (error) {
+      if (error instanceof VectorFilterError) {
+        return reply.code(400).send({ error: error.message });
+      }
       logger.error('Query client vector index error', { error });
       if (isNotFoundError(error)) {
         return reply.code(404).send({ error: 'Not found' });

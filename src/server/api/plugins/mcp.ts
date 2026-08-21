@@ -2,7 +2,9 @@ import type {
   IMcpAuthConfig,
   IMcpExposureConfig,
   IMcpRemoteConfig,
+  IMcpServer,
   IMcpStdioConfig,
+  IUser,
   McpAuthType,
 } from '@/lib/database';
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
@@ -30,7 +32,13 @@ import {
   isStdioRunnerEnabled,
   updateMcpServer,
 } from '@/lib/services/mcp';
-import type { McpAuditContext, InternalMcpConfigInput, UpdateMcpServerInput } from '@/lib/services/mcp';
+import type {
+  McpAuditContext,
+  InternalMcpConfigInput,
+  CompositeConfigInput,
+  UpdateMcpServerInput,
+} from '@/lib/services/mcp';
+import { sanitizeCompositePrefix } from '@/lib/services/mcp';
 import { INTERNAL_MCP_PROVIDERS } from '@/lib/services/mcp/internal/registry';
 import {
   buildRuntimeContextFromRequest,
@@ -50,7 +58,31 @@ import {
 
 const logger = createLogger('api:mcp');
 const VALID_AUTH_TYPES: McpAuthType[] = ['none', 'token', 'header', 'basic'];
-const VALID_SOURCE_TYPES = ['openapi', 'remote', 'stdio', 'internal'] as const;
+const VALID_SOURCE_TYPES = ['openapi', 'remote', 'stdio', 'internal', 'composite'] as const;
+
+/**
+ * Resolve a server by id within the caller's project scope.
+ *
+ * findMcpServerById is scoped only by tenant DB, so without this an ordinary
+ * member could address any project's server in the same tenant — reading its
+ * config, flipping its exposure to public, or running its tools with the
+ * upstream credentials it stores. Returns null for an out-of-scope id so it is
+ * indistinguishable from a missing one. Owners/admins keep tenant-wide reach
+ * (resolveProjectContext already grants it), and servers stored without a
+ * projectId stay tenant-wide as findMcpServerByKey already treats them.
+ */
+async function serverInProjectScope(
+  tenantDbName: string,
+  id: string,
+  projectId: string,
+  user: Pick<IUser, 'role'>,
+): Promise<IMcpServer | null> {
+  const server = await getMcpServer(tenantDbName, id);
+  if (!server) return null;
+  if (user.role === 'owner' || user.role === 'admin') return server;
+  if (!server.projectId) return server;
+  return String(server.projectId) === String(projectId) ? server : null;
+}
 
 function auditContextFor(request: FastifyRequest, userId: string): McpAuditContext {
   const ua = request.headers['user-agent'];
@@ -105,6 +137,26 @@ function parseInternalConfig(raw: unknown): InternalMcpConfigInput | undefined {
       ? value.config as Record<string, unknown>
       : undefined,
   };
+}
+
+/** Shape-only parse — deep validation (member exists, same tenant/project, no
+ *  nesting) happens against the DB inside createMcpServer/updateMcpServer. */
+function parseCompositeConfig(raw: unknown): CompositeConfigInput | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const value = raw as { members?: unknown };
+  if (!Array.isArray(value.members)) return undefined;
+  const members: CompositeConfigInput['members'] = [];
+  for (const m of value.members) {
+    if (!m || typeof m !== 'object') continue;
+    const entry = m as { serverId?: unknown; toolPrefix?: unknown; alwaysPrefix?: unknown };
+    if (typeof entry.serverId !== 'string' || !entry.serverId.trim()) continue;
+    members.push({
+      serverId: entry.serverId.trim(),
+      toolPrefix: sanitizeCompositePrefix(entry.toolPrefix),
+      alwaysPrefix: entry.alwaysPrefix === true,
+    });
+  }
+  return { members };
 }
 
 function parseStdioConfig(raw: unknown): IMcpStdioConfig | undefined {
@@ -283,7 +335,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
 
       const sourceType = typeof body.sourceType === 'string' ? body.sourceType : 'openapi';
       if (!VALID_SOURCE_TYPES.includes(sourceType as typeof VALID_SOURCE_TYPES[number])) {
-        return reply.code(400).send({ error: 'sourceType must be "openapi", "remote", "stdio", or "internal"' });
+        return reply.code(400).send({ error: 'sourceType must be "openapi", "remote", "stdio", "internal", or "composite"' });
       }
 
       if (sourceType === 'openapi' && typeof body.openApiSpec !== 'string') {
@@ -308,6 +360,11 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         if (!INTERNAL_MCP_PROVIDERS.some((p) => p.id === internalConfig.provider)) {
           return reply.code(400).send({ error: `Unknown internal provider "${internalConfig.provider}"` });
         }
+      }
+
+      const compositeConfig = parseCompositeConfig(body.compositeConfig);
+      if (sourceType === 'composite' && !compositeConfig?.members.length) {
+        return reply.code(400).send({ error: 'compositeConfig.members must include at least one member server' });
       }
 
       // Enterprise sub-feature: persistent sandbox execution needs the runtime
@@ -348,7 +405,8 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         {
           description: typeof body.description === 'string' ? body.description.trim() : undefined,
           name: body.name.trim(),
-          sourceType: sourceType as 'openapi' | 'remote' | 'stdio' | 'internal',
+          key: typeof body.key === 'string' && body.key.trim() ? body.key.trim() : undefined,
+          sourceType: sourceType as 'openapi' | 'remote' | 'stdio' | 'internal' | 'composite',
           openApiSpec: typeof body.openApiSpec === 'string' ? body.openApiSpec : undefined,
           specFormat: typeof body.specFormat === 'string' ? body.specFormat as SpecFormatHint : undefined,
           upstreamAuth: body.upstreamAuth as IMcpAuthConfig,
@@ -358,6 +416,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
           remoteConfig,
           stdioConfig,
           internalConfig,
+          compositeConfig,
           exposure: parseExposure(body.exposure),
           aegis: aegisConfig,
         },
@@ -378,7 +437,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/mcp/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const { session } = await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
       const query = (request.query ?? {}) as {
         includeAggregate?: string;
@@ -386,7 +445,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         includeAudit?: string;
       };
 
-      const server = await getMcpServer(session.tenantDbName, id);
+      const server = await serverInProjectScope(session.tenantDbName, id, projectId, user);
       if (!server) {
         return reply.code(404).send({ error: 'MCP server not found' });
       }
@@ -424,8 +483,11 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.patch('/mcp/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const { session } = await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
+      if (!(await serverInProjectScope(session.tenantDbName, id, projectId, user))) {
+        return reply.code(404).send({ error: 'MCP server not found' });
+      }
       const body = readJsonBody<Record<string, unknown>>(request);
 
       const authType = body.upstreamAuth && typeof body.upstreamAuth === 'object'
@@ -458,6 +520,19 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'toolDescriptions must be an object keyed by tool name' });
       }
 
+      if (body.toolNames !== undefined
+        && (typeof body.toolNames !== 'object' || body.toolNames === null
+          || Array.isArray(body.toolNames))) {
+        return reply.code(400).send({ error: 'toolNames must be an object keyed by tool name' });
+      }
+
+      if (body.compositeConfig !== undefined) {
+        const parsed = parseCompositeConfig(body.compositeConfig);
+        if (!parsed?.members.length) {
+          return reply.code(400).send({ error: 'compositeConfig.members must include at least one member server' });
+        }
+      }
+
       // Enterprise sub-feature gate (mirrors POST): a non-enterprise tenant may
       // not turn on persistent sandbox execution via edit. Aegis is left as
       // save-but-inert (UI warns) to match create behaviour.
@@ -473,6 +548,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const updated = await updateMcpServer(session.tenantDbName, id, session.userId, {
+        key: typeof body.key === 'string' && body.key.trim() ? body.key.trim() : undefined,
         description: body.description as string | undefined,
         name: body.name as string | undefined,
         openApiSpec: body.openApiSpec as string | undefined,
@@ -483,12 +559,14 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         remoteConfig: body.remoteConfig !== undefined ? parseRemoteConfig(body.remoteConfig) : undefined,
         stdioConfig: nextStdioConfig,
         internalConfig: body.internalConfig !== undefined ? parseInternalConfig(body.internalConfig) : undefined,
+        compositeConfig: body.compositeConfig !== undefined ? parseCompositeConfig(body.compositeConfig) : undefined,
         exposure: body.exposure !== undefined ? parseExposure(body.exposure) : undefined,
         aegis: nextAegis,
         runtimeHeaders: body.runtimeHeaders as { allow?: boolean; allowedNames?: string[] } | null | undefined,
         disabledTools: body.disabledTools as string[] | undefined,
         toolAnnotations: body.toolAnnotations as UpdateMcpServerInput['toolAnnotations'],
         toolDescriptions: body.toolDescriptions as UpdateMcpServerInput['toolDescriptions'],
+        toolNames: body.toolNames as UpdateMcpServerInput['toolNames'],
       }, auditContextFor(request, session.userId));
 
       if (!updated) {
@@ -507,8 +585,11 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.delete('/mcp/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const { session } = await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
+      if (!(await serverInProjectScope(session.tenantDbName, id, projectId, user))) {
+        return reply.code(404).send({ error: 'MCP server not found' });
+      }
       const deleted = await deleteMcpServer(
         session.tenantDbName,
         id,
@@ -532,8 +613,11 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
   // Re-run tool discovery against the remote/stdio source.
   app.post('/mcp/:id/refresh-tools', withApiRequestContext(async (request, reply) => {
     try {
-      const { session } = await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
+      if (!(await serverInProjectScope(session.tenantDbName, id, projectId, user))) {
+        return reply.code(404).send({ error: 'MCP server not found' });
+      }
       const updated = await refreshMcpServerTools(
         session.tenantDbName,
         id,
@@ -555,9 +639,9 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/mcp/:id/logs', withApiRequestContext(async (request, reply) => {
     try {
-      const { session } = await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
-      const server = await getMcpServer(session.tenantDbName, id);
+      const server = await serverInProjectScope(session.tenantDbName, id, projectId, user);
 
       if (!server) {
         return reply.code(404).send({ error: 'MCP server not found' });
@@ -621,7 +705,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
   // Playground: test-execute one of the server's tools from the dashboard.
   app.post('/mcp/:id/execute', withApiRequestContext(async (request, reply) => {
     try {
-      const { session } = await requireProjectContextForRequest(request);
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
       const body = readJsonBody<Record<string, unknown>>(request);
 
@@ -636,7 +720,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
 
       const args = (body.arguments ?? body.args ?? {}) as Record<string, unknown>;
 
-      const server = await getMcpServer(session.tenantDbName, id);
+      const server = await serverInProjectScope(session.tenantDbName, id, projectId, user);
       if (!server) {
         return reply.code(404).send({ error: 'MCP server not found' });
       }

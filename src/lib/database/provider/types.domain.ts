@@ -91,11 +91,24 @@ export interface IGuardrail {
 
 // ── Evaluation types ─────────────────────────────────────────────────────────
 
-export type EvaluationTargetKind = 'agent' | 'model' | 'external';
+export type EvaluationTargetKind = 'agent' | 'model' | 'external' | 'rag';
 export type EvaluationRunStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
 export type EvaluationRunMode = 'sync' | 'async';
 export type EvaluationDatasetSource = 'manual' | 'file' | 'generated' | 'imported';
-export type EvaluationScorerType = 'assertion' | 'llm-judge' | 'semantic' | 'tool-call' | 'json-shape';
+export type EvaluationScorerType =
+  | 'assertion'
+  | 'llm-judge'
+  | 'semantic'
+  | 'tool-call'
+  | 'json-shape'
+  /**
+   * Retrieval quality, all three judged by embedding cosine similarity rather
+   * than string overlap — a chunk that answers the question in different words
+   * is a hit, and an exact-match scorer would call it a miss.
+   */
+  | 'context-recall'
+  | 'context-precision'
+  | 'groundedness';
 
 /**
  * How a multi-turn dataset item is replayed against the target.
@@ -134,6 +147,10 @@ export interface IEvaluationTarget {
   agentKey?: string;
   modelKey?: string;
   external?: IEvaluationExternalTarget;
+  /** `rag` targets: which module to retrieve from, and how much. */
+  ragModuleKey?: string;
+  retrievalTopK?: number;
+  retrievalMinScore?: number;
   /**
    * System prompt to run this target with, overriding whatever system turn the
    * dataset items carry. Needed to evaluate a prompt CHANGE against traffic
@@ -745,20 +762,112 @@ export interface IInferenceServerMetrics {
 
 // ── RAG Module types ────────────────────────────────────────────────────
 
-export type RagChunkStrategy = 'recursive_character' | 'token';
+/**
+ * How a document is split before embedding.
+ *
+ * `recursive_character` and `token` differ in the UNIT `chunkSize`/`chunkOverlap`
+ * are measured in — characters vs. real tokens. The rest change where the
+ * boundaries are allowed to fall.
+ */
+export type RagChunkStrategy =
+  /** Split on separators, largest first, falling back to a hard cut. Sizes in characters. */
+  | 'recursive_character'
+  /** Same boundaries, but sized in real tokens of `encoding`. */
+  | 'token'
+  /** Never cross a markdown heading; each chunk carries its heading path. */
+  | 'markdown'
+  /** Never cut mid-sentence. */
+  | 'sentence'
+  /** Cut where the topic shifts, measured by embedding distance between sentences. */
+  | 'semantic';
 
 export interface IRagChunkConfig {
   strategy: RagChunkStrategy;
-  /** Common */
+  /**
+   * Target chunk size. Characters for every strategy except `token`, which
+   * counts real tokens of `encoding`. This is a HARD cap: a run of text with no
+   * usable boundary is cut rather than emitted oversized.
+   */
   chunkSize: number;
+  /** Overlap carried into the next chunk, in the same unit as chunkSize. Must be < chunkSize. */
   chunkOverlap: number;
-  /** recursive_character specific */
+  /** recursive_character / markdown: boundary preferences, best first. `sentence` splits on punctuation and ignores this. */
   separators?: string[];
-  /** token specific */
+  /** token: tiktoken encoding name (cl100k_base, p50k_base, o200k_base). */
   encoding?: string;
+  /**
+   * semantic: cosine distance between neighbouring sentences above which a new
+   * chunk starts. 0..1, default 0.35. Higher = fewer, larger chunks.
+   */
+  semanticThreshold?: number;
+  /**
+   * Small-to-big retrieval. Embed the small chunk, but return a window of this
+   * many characters centred on it, resolved from the stored source at query
+   * time. 0 or unset disables it.
+   */
+  parentWindowSize?: number;
+  /**
+   * Prefix each chunk with one LLM-written sentence situating it in its
+   * document, which measurably improves retrieval on chunks that would
+   * otherwise be context-free. Costs one model call per chunk at ingest.
+   */
+  contextualHeader?: {
+    enabled: boolean;
+    /** Model used to write the header. Falls back to the module's answer model. */
+    modelKey?: string;
+    /** How much of the document to show the model as context. Default 8000. */
+    maxDocumentChars?: number;
+  };
 }
 
 export type RagDocumentStatus = 'pending' | 'processing' | 'indexed' | 'failed';
+
+/**
+ * One vector similarity query, recorded for the index analytics panel
+ * (query volume, latency, score, filter usage).
+ */
+export interface IVectorQueryLog {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  providerKey: string;
+  /** Index key, matching `IVectorIndexRecord.key`. */
+  indexKey: string;
+  topK: number;
+  matchCount: number;
+  latencyMs: number;
+  /** Mean similarity score across the returned matches. */
+  avgScore?: number;
+  /** Whether the caller supplied a metadata filter. */
+  filterApplied: boolean;
+  /** Whether the query ran dense+keyword rather than dense only. */
+  hybrid?: boolean;
+  userId?: string;
+  apiTokenId?: string;
+  actorType?: string;
+  timestamp: Date;
+}
+
+/** Aggregated query analytics for one vector index, over a time window. */
+export interface IVectorQueryStats {
+  daily: Array<{
+    /** UTC day, `YYYY-MM-DD`. */
+    date: string;
+    queryCount: number;
+    avgLatencyMs: number;
+    /** Null when no query in the bucket returned a score. */
+    avgScore: number | null;
+    filterCount: number;
+  }>;
+  totals: {
+    totalQueries: number;
+    avgLatencyMs: number | null;
+    avgScore: number | null;
+    minLatencyMs: number | null;
+    maxLatencyMs: number | null;
+  };
+  topKDistribution: Array<{ topK: number; count: number }>;
+}
 
 export interface IRagModule {
   _id?: ObjectId | string;
@@ -782,6 +891,53 @@ export interface IRagModule {
   defaultTopK?: number;
   /** Default minimum similarity score a match must meet when the request doesn't specify minScore. */
   defaultMinScore?: number;
+  /**
+   * Metadata filter ANDed into every query against this module. Lets several
+   * sources share one vector index while each module only ever retrieves its
+   * own slice.
+   */
+  defaultFilter?: Record<string, unknown>;
+  /**
+   * Metadata keys callers may filter on. When set, a query filtering on any
+   * other key is rejected; also advertised to agents and MCP clients so they
+   * know what is filterable.
+   */
+  filterableFields?: string[];
+  /**
+   * How much of each match a query response carries. 'full' (default) keeps the
+   * scores/ids/metadata; 'text' returns only the chunk text.
+   */
+  responseDetail?: 'full' | 'text';
+  /**
+   * Dense + keyword retrieval, for the providers whose store can do it.
+   * Pure vector search misses exact terms — error codes, SKUs, acronyms, proper
+   * nouns — because they carry little semantic signal.
+   */
+  hybrid?: {
+    enabled: boolean;
+    /** How the two rankings are combined. Default 'rrf'. */
+    mode?: 'rrf' | 'weighted';
+    /** weighted mode: 1 = pure dense, 0 = pure keyword. Default 0.5. */
+    alpha?: number;
+    /** rrf mode: rank constant. Default 60. */
+    k?: number;
+  };
+  /**
+   * AND `_ragModule` into every query so a vector index shared by several
+   * modules cannot leak between them. Defaults on for modules we ingest into;
+   * must stay off for an index populated by someone else's pipeline, whose
+   * vectors carry no `_ragModule`.
+   */
+  isolateByModule?: boolean;
+  /**
+   * Set when chunkConfig or the embedding model changed and the stored vectors
+   * no longer match it. Queries keep working against the old vectors until the
+   * re-index run finishes.
+   */
+  reindexRequired?: boolean;
+  /** Key of the re-index run currently rebuilding this module, if any. */
+  activeReindexRunKey?: string;
+  lastReindexAt?: Date;
   totalDocuments?: number;
   totalChunks?: number;
   metadata?: Record<string, unknown>;
@@ -797,6 +953,9 @@ export interface IRagDocument {
   projectId?: string;
   ragModuleKey: string;
   fileKey?: string;
+  /** Bucket the original bytes were stored in, alongside fileKey. */
+  fileBucketKey?: string;
+  fileProviderKey?: string;
   fileName: string;
   contentType?: string;
   size?: number;
@@ -804,6 +963,21 @@ export interface IRagDocument {
   chunkCount?: number;
   errorMessage?: string;
   lastIndexedAt?: Date;
+  /**
+   * Per-document override of the module's chunkConfig. A 200-page PDF and a FAQ
+   * CSV rarely want the same splitter. Unset means "use the module's".
+   */
+  chunkConfig?: IRagChunkConfig;
+  /**
+   * The extracted text this document was last indexed from, so a re-index never
+   * has to reconstruct it from overlapping chunks. Stored inline only when it
+   * fits INLINE_SOURCE_MAX_CHARS; larger sources live in the file bucket under
+   * sourceTextKey.
+   */
+  sourceText?: string;
+  sourceTextKey?: string;
+  /** sha256 of the extracted text — lets a re-ingest skip unchanged content. */
+  sourceHash?: string;
   metadata?: Record<string, unknown>;
   createdBy: string;
   updatedBy?: string;
@@ -820,6 +994,16 @@ export interface IRagChunk {
   chunkIndex: number;
   vectorId: string;
   content: string;
+  /**
+   * Offsets of this chunk in the document's source text. These are what make a
+   * parent window resolvable without duplicating the text on every child row.
+   */
+  charStart?: number;
+  charEnd?: number;
+  /** Markdown heading breadcrumb the chunk sits under, outermost first. */
+  headingPath?: string[];
+  /** Real token count of `content`, when the strategy computed one. */
+  tokenCount?: number;
   metadata?: Record<string, unknown>;
   createdAt?: Date;
 }
@@ -831,10 +1015,68 @@ export interface IRagQueryLog extends IUsageAttributionFields {
   ragModuleKey: string;
   query: string;
   topK: number;
+  /** Matches actually returned, i.e. after minScore and the final topK slice. */
   matchCount: number;
+  /**
+   * Matches the store returned BEFORE the minScore filter. Together with
+   * matchCount this separates the two very different failures a zero-result
+   * panel has to tell apart: nothing was retrieved at all, versus plenty was
+   * retrieved and the score threshold discarded all of it.
+   */
+  preFilterMatchCount?: number;
+  /** Best score among the returned matches, 0 when there were none. */
+  topScore?: number;
+  /** Mean score of the returned matches. */
+  avgScore?: number;
+  /** The minScore actually in force for this query, whatever its source. */
+  minScoreApplied?: number;
+  /** Whether the query ran dense+keyword rather than dense only. */
+  hybrid?: boolean;
   latencyMs?: number;
   metadata?: Record<string, unknown>;
   createdAt?: Date;
+}
+
+/**
+ * One run of "rebuild every document in this module".
+ *
+ * The record is the source of truth, not the queue: the queue driver is only
+ * durable when Redis is configured, so a boot-time sweep re-drives whatever is
+ * still marked running. `progress` carries the resume cursor.
+ */
+export interface IRagReindexRun {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  ragModuleKey: string;
+  status: 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+  /** Why the run was created — shown in the UI banner. */
+  reason?: 'chunk-config' | 'embedding-model' | 'manual';
+  attempt: number;
+  totalDocuments: number;
+  processedDocuments: number;
+  failedDocuments: number;
+  batchSize: number;
+  errorMessage?: string;
+  startedAt?: Date;
+  completedAt?: Date;
+  /** Resume checkpoint: `{ lastDocumentId, heartbeatAt }`. */
+  progress?: Record<string, unknown>;
+  /**
+   * Cross-process ownership. The queue is in-process unless Redis is
+   * configured, so after a rolling restart every replica's boot sweep sees the
+   * same running run; without a claim held in the record they would all
+   * re-embed the same corpus at once. A claim whose heartbeat has gone silent
+   * is reclaimable, so a SIGKILLed worker does not strand its run.
+   */
+  claimedBy?: string;
+  claimedAt?: Date;
+  heartbeatAt?: Date;
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  createdAt?: Date;
+  updatedAt?: Date;
 }
 
 // ── Reranker types ──────────────────────────────────────────────────────

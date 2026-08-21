@@ -1,7 +1,8 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  Alert,
   NumberInput,
   Select,
   Slider,
@@ -12,7 +13,7 @@ import {
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
-import { IconCheck, IconBook } from '@tabler/icons-react';
+import { IconAlertTriangle, IconCheck, IconBook } from '@tabler/icons-react';
 import FormShell, {
   Checklist,
   FormField,
@@ -21,6 +22,28 @@ import FormShell, {
   SummaryGroup,
   SummaryKV,
 } from '@/components/common/ui/FormShell';
+import ChunkConfigFields from './ChunkConfigFields';
+import RetrievalFields from './RetrievalFields';
+import {
+  CHUNK_STRATEGIES,
+  buildChunkConfig,
+  buildRetrievalUpdate,
+  chunkConfigRequiresReindex,
+  chunkFieldErrors,
+  chunkFormValues,
+  clearedValue,
+  hasChunkFieldErrors,
+  providerSupportsHybrid,
+  reindexReasonFor,
+  retrievalFormValues,
+  type ChunkFormValues,
+  type HybridMode,
+  type RagReindexReason,
+  type RetrievalFormValues,
+} from './ragModuleForm';
+import type { IRagChunkConfig } from '@/lib/database';
+
+const MODE = 'update';
 
 interface EmbeddingModel {
   key: string;
@@ -31,6 +54,7 @@ interface VectorProvider {
   key: string;
   label: string;
   status: string;
+  driverCapabilities?: Record<string, unknown>;
 }
 
 interface VectorIndex {
@@ -46,17 +70,16 @@ interface RagModuleData {
   embeddingModelKey: string;
   vectorProviderKey: string;
   vectorIndexKey: string;
-  chunkConfig: {
-    strategy: string;
-    chunkSize: number;
-    chunkOverlap: number;
-    separators?: string[];
-    encoding?: string;
-  };
+  chunkConfig: IRagChunkConfig;
+  hybrid?: { enabled: boolean; mode?: HybridMode; alpha?: number; k?: number } | null;
+  isolateByModule?: boolean | null;
   rerankerKey?: string | null;
   rerankerOversample?: number | null;
   defaultTopK?: number | null;
   defaultMinScore?: number | null;
+  defaultFilter?: Record<string, unknown> | null;
+  filterableFields?: string[] | null;
+  responseDetail?: 'full' | 'text' | null;
 }
 
 interface RerankerOption {
@@ -77,15 +100,66 @@ interface FormValues {
   embeddingModelKey: string;
   vectorProviderKey: string;
   vectorIndexKey: string;
-  chunkStrategy: string;
-  chunkSize: number | '';
-  chunkOverlap: number | '';
-  separators: string[];
-  encoding: string;
+  chunk: ChunkFormValues;
+  retrieval: RetrievalFormValues;
   rerankerKey: string;
   rerankerOversample: number | '';
   defaultTopK: number | '';
   defaultMinScore: number;
+  defaultFilter: string;
+  filterableFields: string[];
+  responseDetail: 'full' | 'text';
+}
+
+/**
+ * Starts the rebuild the pre-save alert promised. Returns null on success and
+ * the message to show otherwise: setting `reindexRequired` server-side only
+ * records that the vectors are stale, it does not rebuild them.
+ *
+ * A 409 is NOT success. It means a run started for the PREVIOUS configuration
+ * is still in flight, so nothing is rebuilding what was just saved. The module
+ * keeps `reindexRequired` (the run will not clear it for a configuration it did
+ * not rebuild), and the banner's "Re-index now" is how the operator starts the
+ * one they actually want — so say that plainly rather than showing a tick.
+ */
+async function startReindexRun(key: string, reason: RagReindexReason): Promise<string | null> {
+  try {
+    const res = await fetch(`/api/rag/modules/${encodeURIComponent(key)}/reindex`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    });
+    if (res.ok) return null;
+    if (res.status === 409) {
+      return 'A re-index started earlier is still running, so it is rebuilding the previous '
+        + 'settings. This module still needs a rebuild — use "Re-index now" once that run finishes.';
+    }
+    const err = await res.json().catch(() => ({}));
+    return typeof (err as { error?: unknown }).error === 'string'
+      ? (err as { error: string }).error
+      : `The re-index endpoint answered ${res.status}.`;
+  } catch (error) {
+    return error instanceof Error ? error.message : 'Unexpected error';
+  }
+}
+
+function formValuesFromModule(module: RagModuleData): FormValues {
+  return {
+    name: module.name,
+    description: module.description ?? '',
+    embeddingModelKey: module.embeddingModelKey,
+    vectorProviderKey: module.vectorProviderKey,
+    vectorIndexKey: module.vectorIndexKey,
+    chunk: chunkFormValues(module.chunkConfig),
+    retrieval: retrievalFormValues(module),
+    rerankerKey: module.rerankerKey ?? '',
+    rerankerOversample: module.rerankerOversample ?? '',
+    defaultTopK: module.defaultTopK ?? 5,
+    defaultMinScore: module.defaultMinScore ?? 0.5,
+    defaultFilter: module.defaultFilter ? JSON.stringify(module.defaultFilter, null, 2) : '',
+    filterableFields: module.filterableFields ?? [],
+    responseDetail: module.responseDetail ?? 'full',
+  };
 }
 
 export default function EditRagModuleModal({ opened, onClose, module, onUpdated }: EditRagModuleModalProps) {
@@ -96,34 +170,36 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
   const [submitting, setSubmitting] = useState(false);
 
   const form = useForm<FormValues>({
-    initialValues: {
-      name: module.name,
-      description: module.description ?? '',
-      embeddingModelKey: module.embeddingModelKey,
-      vectorProviderKey: module.vectorProviderKey,
-      vectorIndexKey: module.vectorIndexKey,
-      chunkStrategy: module.chunkConfig.strategy,
-      chunkSize: module.chunkConfig.chunkSize,
-      chunkOverlap: module.chunkConfig.chunkOverlap,
-      separators: module.chunkConfig.separators ?? ['\\n\\n', '\\n', '. ', ' '],
-      encoding: module.chunkConfig.encoding ?? 'cl100k_base',
-      rerankerKey: module.rerankerKey ?? '',
-      rerankerOversample: module.rerankerOversample ?? '',
-      defaultTopK: module.defaultTopK ?? 5,
-      defaultMinScore: module.defaultMinScore ?? 0.5,
-    },
+    initialValues: formValuesFromModule(module),
     validate: {
       name: (v) => (!v ? 'Name is required' : null),
       embeddingModelKey: (v) => (!v ? 'Embedding model is required' : null),
       vectorProviderKey: (v) => (!v ? 'Vector provider is required' : null),
       vectorIndexKey: (v) => (!v ? 'Vector index is required' : null),
-      chunkSize: (v) => (!v || Number(v) <= 0 ? 'Chunk size must be positive' : null),
-      chunkOverlap: (v) => (v === '' || Number(v) < 0 ? 'Overlap must be non-negative' : null),
       defaultTopK: (v) => (v === '' || Number(v) < 1 ? 'Must be at least 1' : null),
+      defaultFilter: (v) => {
+        if (!v.trim()) return null;
+        try {
+          const parsed = JSON.parse(v);
+          if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+            return 'Filter must be a JSON object';
+          }
+          return null;
+        } catch {
+          return 'Filter must be valid JSON';
+        }
+      },
     },
   });
 
   const selectedProvider = form.values.vectorProviderKey;
+  const chunkErrors = chunkFieldErrors(form.values.chunk);
+
+  const patchChunk = (patch: Partial<ChunkFormValues>) =>
+    form.setFieldValue('chunk', { ...form.getValues().chunk, ...patch });
+
+  const patchRetrieval = (patch: Partial<RetrievalFormValues>) =>
+    form.setFieldValue('retrieval', { ...form.getValues().retrieval, ...patch });
 
   const loadEmbeddingModels = useCallback(async () => {
     try {
@@ -142,10 +218,11 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
       const res = await fetch('/api/vector/providers', { cache: 'no-store' });
       if (res.ok) {
         const data = await res.json();
-        setVectorProviders((data.providers ?? []).map((p: Record<string, string>) => ({
-          key: p.key,
-          label: p.label || p.key,
-          status: p.status,
+        setVectorProviders((data.providers ?? []).map((p: Record<string, unknown>) => ({
+          key: p.key as string,
+          label: (p.label as string) || (p.key as string),
+          status: p.status as string,
+          driverCapabilities: p.driverCapabilities as Record<string, unknown> | undefined,
         })));
       }
     } catch (err) {
@@ -193,22 +270,7 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
   // Reset form to current module values each time modal opens
   useEffect(() => {
     if (opened) {
-      form.setValues({
-        name: module.name,
-        description: module.description ?? '',
-        embeddingModelKey: module.embeddingModelKey,
-        vectorProviderKey: module.vectorProviderKey,
-        vectorIndexKey: module.vectorIndexKey,
-        chunkStrategy: module.chunkConfig.strategy,
-        chunkSize: module.chunkConfig.chunkSize,
-        chunkOverlap: module.chunkConfig.chunkOverlap,
-        separators: module.chunkConfig.separators ?? ['\\n\\n', '\\n', '. ', ' '],
-        encoding: module.chunkConfig.encoding ?? 'cl100k_base',
-        rerankerKey: module.rerankerKey ?? '',
-        rerankerOversample: module.rerankerOversample ?? '',
-        defaultTopK: module.defaultTopK ?? 5,
-        defaultMinScore: module.defaultMinScore ?? 0.5,
-      });
+      form.setValues(formValuesFromModule(module));
       void loadEmbeddingModels();
       void loadVectorProviders();
       void loadRerankers();
@@ -220,41 +282,71 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
     void loadVectorIndexes();
   }, [loadVectorIndexes]);
 
+  const selectedVectorProvider = useMemo(
+    () => vectorProviders.find((p) => p.key === form.values.vectorProviderKey),
+    [vectorProviders, form.values.vectorProviderKey],
+  );
+  const hybridSupported = providerSupportsHybrid(selectedVectorProvider?.driverCapabilities);
+  // False while the provider list is still in flight, and for a provider that
+  // is no longer in it — in both cases nothing is known about hybrid support.
+  const capabilitiesKnown = Boolean(selectedVectorProvider);
+
+  // Both of these invalidate every stored vector, so the module is marked
+  // reindexRequired and a re-index run is enqueued the moment this form saves.
+  // Say so here rather than surprising the user with it afterwards.
+  const chunkingChanged = chunkConfigRequiresReindex(
+    buildChunkConfig(form.values.chunk),
+    buildChunkConfig(chunkFormValues(module.chunkConfig)),
+  );
+  const embeddingChanged = form.values.embeddingModelKey !== module.embeddingModelKey;
+  const reindexWarning = chunkingChanged || embeddingChanged ? (
+    <Alert
+      color="yellow"
+      variant="light"
+      icon={<IconAlertTriangle size={16} />}
+      title="Saving this starts a re-index"
+    >
+      <Text size="sm">
+        {chunkingChanged && embeddingChanged
+          ? 'The chunking configuration and the embedding model both changed.'
+          : chunkingChanged
+            ? 'The chunking configuration changed.'
+            : 'The embedding model changed.'}
+        {' '}
+        Every document in this module is re-chunked and re-embedded in the background.
+        Queries keep answering from the current vectors until the run finishes.
+      </Text>
+    </Alert>
+  ) : null;
+
   const handleSubmit = form.onSubmit(async (values) => {
+    if (hasChunkFieldErrors(chunkErrors)) return;
     setSubmitting(true);
     try {
-      const chunkConfig: Record<string, unknown> = {
-        strategy: values.chunkStrategy,
-        chunkSize: Number(values.chunkSize),
-        chunkOverlap: Number(values.chunkOverlap),
-      };
-
-      if (values.chunkStrategy === 'recursive_character') {
-        chunkConfig.separators = values.separators.map((s) =>
-          s.replace(/\\n/g, '\n').replace(/\\t/g, '\t'),
-        );
-      }
-      if (values.chunkStrategy === 'token') {
-        chunkConfig.encoding = values.encoding;
-      }
-
       const res = await fetch(`/api/rag/modules/${encodeURIComponent(module.key)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: values.name,
-          description: values.description || undefined,
+          description: values.description || clearedValue(MODE),
           embeddingModelKey: values.embeddingModelKey,
           vectorProviderKey: values.vectorProviderKey,
           vectorIndexKey: values.vectorIndexKey,
-          chunkConfig,
-          rerankerKey: values.rerankerKey ? values.rerankerKey : null,
+          chunkConfig: buildChunkConfig(values.chunk),
+          ...buildRetrievalUpdate(values.retrieval, { known: capabilitiesKnown, hybridSupported }),
+          rerankerKey: values.rerankerKey || clearedValue(MODE),
           rerankerOversample:
             values.rerankerOversample === ''
-              ? null
+              ? clearedValue(MODE)
               : Number(values.rerankerOversample),
-          defaultTopK: values.defaultTopK === '' ? null : Number(values.defaultTopK),
+          defaultTopK: values.defaultTopK === '' ? clearedValue(MODE) : Number(values.defaultTopK),
           defaultMinScore: values.defaultMinScore,
+          defaultFilter: values.defaultFilter.trim()
+            ? (JSON.parse(values.defaultFilter) as Record<string, unknown>)
+            : clearedValue(MODE),
+          filterableFields:
+            values.filterableFields.length > 0 ? values.filterableFields : clearedValue(MODE),
+          responseDetail: values.responseDetail,
         }),
       });
 
@@ -264,11 +356,30 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
       }
 
       const data = await res.json();
-      notifications.show({
-        color: 'green',
-        title: 'Knowledge Engine Module Updated',
-        message: `${values.name} has been updated successfully.`,
-      });
+
+      // The PATCH only marks the module stale; the rebuild is a separate run,
+      // and the alert above has already promised it.
+      const reason = reindexReasonFor(chunkingChanged, embeddingChanged);
+      const reindexError = reason ? await startReindexRun(module.key, reason) : null;
+
+      if (reindexError) {
+        notifications.show({
+          color: 'orange',
+          title: 'Saved, but the re-index did not start',
+          message: `${values.name} is saved and its documents still answer from the old vectors. `
+            + `Start the rebuild with "Re-index now" on the module page. (${reindexError})`,
+          autoClose: false,
+        });
+      } else {
+        notifications.show({
+          color: 'green',
+          title: 'Knowledge Engine Module Updated',
+          message: reason
+            ? `${values.name} updated — re-indexing its documents in the background.`
+            : `${values.name} has been updated successfully.`,
+        });
+      }
+
       onUpdated(data.module);
       onClose();
     } catch (error) {
@@ -286,7 +397,7 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
   const v = form.values;
   const validIdentity = Boolean(v.name);
   const validStore = Boolean(v.embeddingModelKey && v.vectorProviderKey && v.vectorIndexKey);
-  const validChunk = Boolean(v.chunkSize) && Number(v.chunkSize) > 0 && v.chunkOverlap !== '' && Number(v.chunkOverlap) >= 0;
+  const validChunk = !hasChunkFieldErrors(chunkErrors);
   const canSubmit = validIdentity && validStore && validChunk;
 
   const checklist = [
@@ -301,10 +412,38 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
       <SummaryKV label="Name" value={v.name || '—'} />
       <SummaryKV label="Embedding" value={v.embeddingModelKey || '—'} />
       <SummaryKV label="Index" value={v.vectorIndexKey || '—'} />
-      <SummaryKV label="Chunk" value={v.chunkSize ? `${v.chunkSize} / ${v.chunkOverlap}` : '—'} />
+      <SummaryKV label="Strategy" value={CHUNK_STRATEGIES[v.chunk.strategy].label} />
+      <SummaryKV label="Chunk" value={v.chunk.chunkSize ? `${v.chunk.chunkSize} / ${v.chunk.chunkOverlap}` : '—'} />
+      <SummaryKV
+        label="Parent window"
+        value={v.chunk.parentWindowSize === '' ? 'off' : v.chunk.parentWindowSize}
+        mono
+      />
+      <SummaryKV
+        label="Hybrid"
+        value={
+          !capabilitiesKnown
+            ? 'unchanged'
+            : hybridSupported && v.retrieval.hybridEnabled
+              ? v.retrieval.hybridMode
+              : 'off'
+        }
+      />
+      <SummaryKV
+        label="Isolation"
+        value={
+          v.retrieval.isolateByModule === null
+            ? 'unset — decided per query'
+            : v.retrieval.isolateByModule ? 'on' : 'off'
+        }
+      />
       <SummaryKV label="Reranker" value={v.rerankerKey || 'none'} />
       <SummaryKV label="Default Top K" value={v.defaultTopK || '—'} mono />
       <SummaryKV label="Default min score" value={v.defaultMinScore.toFixed(2)} mono />
+      <SummaryKV
+        label="Re-index"
+        value={chunkingChanged || embeddingChanged ? 'required on save' : 'not needed'}
+      />
       <Checklist items={checklist} />
     </SummaryGroup>
   );
@@ -372,45 +511,24 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
       </FormSection>
 
       <FormSection number={3} title="Chunking" done={validChunk}>
-        <FormField label="Chunk strategy">
-          <Select
-            data={[
-              { value: 'recursive_character', label: 'Recursive Character' },
-              { value: 'token', label: 'Token Based' },
-            ]}
-            {...form.getInputProps('chunkStrategy')}
-          />
-        </FormField>
-        <FormRow cols={2}>
-          <FormField label="Chunk size" required>
-            <NumberInput min={50} max={10000} step={100} {...form.getInputProps('chunkSize')} />
-          </FormField>
-          <FormField label="Chunk overlap" required>
-            <NumberInput min={0} max={5000} step={50} {...form.getInputProps('chunkOverlap')} />
-          </FormField>
-        </FormRow>
-
-        {v.chunkStrategy === 'recursive_character' && (
-          <FormField label="Separators" hint="Use \\n for newline. Order matters — first separator tried first.">
-            <TagsInput placeholder="Add separator..." {...form.getInputProps('separators')} />
-          </FormField>
-        )}
-
-        {v.chunkStrategy === 'token' && (
-          <FormField label="Token encoding">
-            <Select
-              data={[
-                { value: 'cl100k_base', label: 'cl100k_base (GPT-4, GPT-3.5)' },
-                { value: 'p50k_base', label: 'p50k_base (Codex, text-davinci)' },
-                { value: 'o200k_base', label: 'o200k_base (GPT-4o)' },
-              ]}
-              {...form.getInputProps('encoding')}
-            />
-          </FormField>
-        )}
+        <ChunkConfigFields
+          values={v.chunk}
+          onChange={patchChunk}
+          errors={chunkErrors}
+          notice={reindexWarning}
+        />
       </FormSection>
 
-      <FormSection number={4} title="Reranking">
+      <FormSection number={4} title="Retrieval" description="How a query reaches the stored vectors.">
+        <RetrievalFields
+          values={v.retrieval}
+          onChange={patchRetrieval}
+          hybridSupported={hybridSupported}
+          providerLabel={selectedVectorProvider?.label}
+        />
+      </FormSection>
+
+      <FormSection number={5} title="Reranking">
         <FormRow cols={2}>
           <FormField label="Reranker" hint="Optional. Re-orders vector matches before returning.">
             <Select
@@ -425,12 +543,9 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
             <NumberInput min={1} max={20} step={1} disabled={!v.rerankerKey} {...form.getInputProps('rerankerOversample')} />
           </FormField>
         </FormRow>
-        <Text size="xs" c="dimmed">
-          Changing the embedding model or vector index does not automatically re-embed existing documents. Re-ingest documents after saving to apply the new configuration.
-        </Text>
       </FormSection>
 
-      <FormSection number={5} title="Query defaults" description="Applied whenever a query doesn't explicitly override these.">
+      <FormSection number={6} title="Query defaults" description="Applied whenever a query doesn't explicitly override these.">
         <FormRow cols={2}>
           <FormField label="Top K" required hint="How many chunks a query returns by default.">
             <NumberInput min={1} max={100} step={1} {...form.getInputProps('defaultTopK')} />
@@ -448,6 +563,41 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
               label={(val) => val.toFixed(2)}
               value={v.defaultMinScore}
               onChange={(val) => form.setFieldValue('defaultMinScore', val)}
+            />
+          </FormField>
+        </FormRow>
+        <FormField
+          label="Default metadata filter (JSON)"
+          hint="ANDed into every query. Lets several sources share one vector index while this module retrieves only its own slice."
+        >
+          <Textarea
+            placeholder='{ "source": "crawler" }'
+            minRows={2}
+            autosize
+            {...form.getInputProps('defaultFilter')}
+          />
+        </FormField>
+        <FormField
+          label="Filterable fields"
+          hint="Metadata keys callers may filter on. Leave empty to allow any key. Also shown to agents and MCP clients so they know what is filterable."
+        >
+          <TagsInput
+            placeholder="source, depth, title…"
+            {...form.getInputProps('filterableFields')}
+          />
+        </FormField>
+        <FormRow cols={2}>
+          <FormField
+            label="Response detail"
+            hint="What a query response carries. 'Text only' returns just the chunk text."
+          >
+            <Select
+              data={[
+                { value: 'full', label: 'Full — scores, ids and metadata' },
+                { value: 'text', label: 'Text only — just the chunk text' },
+              ]}
+              allowDeselect={false}
+              {...form.getInputProps('responseDetail')}
             />
           </FormField>
         </FormRow>

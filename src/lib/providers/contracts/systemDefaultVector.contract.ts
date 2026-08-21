@@ -22,6 +22,7 @@ import type {
   VectorListInput,
   VectorListResult,
 } from '../domains/vector';
+import { toAwsFilterDocument } from './vectorFilterTranslators';
 
 /**
  * System Default Vector Provider — SaaS mode
@@ -62,24 +63,16 @@ function buildBucketInput(settings: SystemDefaultVectorSettings) {
   throw new Error('System Default provider requires either a vectorBucketName or vectorBucketArn setting.');
 }
 
-function buildS3Filter(filter: Record<string, unknown> | undefined): DocumentType | undefined {
-  if (!filter || Object.keys(filter).length === 0) return undefined;
-
-  const conditions = Object.entries(filter)
-    .filter(([, v]) => v !== undefined && v !== null)
-    .map(([key, value]) => {
-      if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
-        const ops = Object.keys(value as object);
-        if (ops.some((k) => k.startsWith('$'))) {
-          return { [key]: value };
-        }
-      }
-      return { [key]: { $eq: value } };
-    });
-
-  if (conditions.length === 0) return undefined;
-  const result = conditions.length === 1 ? conditions[0] : { $and: conditions };
-  return result as DocumentType;
+/**
+ * S3 Vectors returns a DISTANCE (lower = closer), but `VectorQueryMatch.score`
+ * is a similarity (higher = more similar) that callers threshold with minScore.
+ * Convert using the same convention as the sqlite/mongo-community providers.
+ */
+function toSimilarityScore(distance: number | undefined, metric: string | undefined): number {
+  if (typeof distance !== 'number' || Number.isNaN(distance)) return 0;
+  if (metric === 'euclidean') return 1 / (1 + distance);
+  // cosine distance = 1 - cosine similarity
+  return 1 - distance;
 }
 
 export const SystemDefaultVectorProviderContract: ProviderContract<
@@ -195,6 +188,13 @@ export const SystemDefaultVectorProviderContract: ProviderContract<
     supportsQuery: true,
     supportsDelete: true,
     multiTenant: true,
+    'vector.filterOperators': [
+      '$eq', '$ne', '$gt', '$gte', '$lt', '$lte', '$in', '$nin', '$exists', '$and', '$or',
+    ],
+    'vector.filterRaw': true,
+    // Backed by S3 Vectors, which stores embeddings and filterable metadata
+    // only — no text analyser, so no keyword channel.
+    'vector.supportsHybrid': false,
   },
   async createRuntime({ credentials, settings, tenantId, tenantSlug, providerKey, logger }) {
     if (!credentials?.accessKeyId?.trim()) {
@@ -338,25 +338,24 @@ export const SystemDefaultVectorProviderContract: ProviderContract<
             indexName: handle.externalId,
             queryVector: { float32: query.vector.map((v) => Number(v)) },
             topK: query.topK,
-            filter: buildS3Filter(query.filter),
+            filter: query.filter ? toAwsFilterDocument(query.filter) : undefined,
+            // Both default to false in the SDK — without them `distance` and
+            // `metadata` come back undefined, so every score would be 0.
+            returnDistance: true,
+            returnMetadata: true,
           }),
         );
 
         const vectors = response.vectors ?? [];
+        const metric = handle.metric ?? distanceMetric;
         return {
           matches: vectors.map((v) => ({
             id: v.key ?? '',
-            score: v.distance ?? 0,
-            metadata: v.metadata
-              ? Object.fromEntries(
-                  Object.entries(v.metadata as Record<string, { stringValue?: string; booleanValue?: boolean; doubleValue?: number }>).map(
-                    ([k, val]) => [
-                      k,
-                      val.stringValue ?? val.booleanValue ?? val.doubleValue ?? null,
-                    ],
-                  ),
-                )
-              : undefined,
+            score: toSimilarityScore(v.distance, metric),
+            // S3 Vectors stores and returns metadata as a plain JSON document,
+            // exactly as `upsertVectors` wrote it — unwrapping it as DynamoDB
+            // style `{ stringValue }` attributes read every key back as null.
+            metadata: (v.metadata as Record<string, unknown> | undefined) ?? undefined,
           })),
         };
       },

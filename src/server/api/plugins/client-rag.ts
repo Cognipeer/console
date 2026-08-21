@@ -6,7 +6,6 @@ import {
   createRagModule,
   deleteRagDocument,
   deleteRagModule,
-  getRagDocument,
   getRagModule,
   ingestDocument,
   ingestFile,
@@ -15,12 +14,25 @@ import {
   queryRag,
   reingestDocument,
   updateRagModule,
+  shapeRagQueryResponse,
 } from '@/lib/services/rag/ragService';
+import type { CreateRagModuleRequest, UpdateRagModuleRequest } from '@/lib/services/rag/types';
 import {
   getApiTokenContextForRequest,
   readJsonBody,
   withClientApiRequestContext,
 } from '../fastify-utils';
+// The module write payloads are read by the same code as the dashboard's, so
+// the two surfaces cannot drift apart again the way responseDetail did.
+import {
+  documentInProjectScope,
+  readDocumentChunkConfig,
+  readRagModuleCreateFields,
+  readRagModuleUpdateFields,
+  sendInvalidRequest,
+  withoutSourceText,
+} from './rag';
+import { VectorFilterError } from '@/lib/providers';
 
 const logger = createLogger('api:client-rag');
 
@@ -55,38 +67,23 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       const ctx = await getApiTokenContextForRequest(request);
       const body = readJsonBody<Record<string, unknown>>(request);
 
-      if (
-        typeof body.name !== 'string'
-        || typeof body.embeddingModelKey !== 'string'
-        || typeof body.vectorProviderKey !== 'string'
-        || typeof body.vectorIndexKey !== 'string'
-        || !body.chunkConfig
-      ) {
-        return reply.code(400).send({
-          error: 'name, embeddingModelKey, vectorProviderKey, vectorIndexKey, and chunkConfig are required',
-        });
+      let fields: Omit<CreateRagModuleRequest, 'createdBy'>;
+      try {
+        fields = readRagModuleCreateFields(body);
+      } catch (error) {
+        return sendInvalidRequest(reply, error);
       }
 
       const ragModule = await createRagModule(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
-        chunkConfig: body.chunkConfig as IRagChunkConfig,
+        ...fields,
         createdBy: ctx.tokenRecord.userId,
-        description: body.description as string | undefined,
-        embeddingModelKey: body.embeddingModelKey,
-        fileBucketKey: body.fileBucketKey as string | undefined,
-        fileProviderKey: body.fileProviderKey as string | undefined,
-        key: body.key as string | undefined,
-        metadata: body.metadata as Record<string, unknown> | undefined,
-        name: body.name,
-        vectorIndexKey: body.vectorIndexKey,
-        vectorProviderKey: body.vectorProviderKey,
-        rerankerKey: typeof body.rerankerKey === 'string' && body.rerankerKey ? body.rerankerKey : undefined,
-        rerankerOversample: typeof body.rerankerOversample === 'number' ? body.rerankerOversample : undefined,
-        defaultTopK: typeof body.defaultTopK === 'number' ? body.defaultTopK : undefined,
-        defaultMinScore: typeof body.defaultMinScore === 'number' ? body.defaultMinScore : undefined,
       });
 
       return reply.code(201).send({ module: ragModule });
     } catch (error) {
+      if (error instanceof VectorFilterError) {
+        return reply.code(400).send({ error: error.message });
+      }
       logger.error('Create client RAG module error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal error',
@@ -125,8 +122,16 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const body = readJsonBody<Record<string, unknown>>(request);
+
+      let fields: Omit<UpdateRagModuleRequest, 'updatedBy'>;
+      try {
+        fields = readRagModuleUpdateFields(body);
+      } catch (error) {
+        return sendInvalidRequest(reply, error);
+      }
+
       const ragModule = await updateRagModule(ctx.tenantDbName, String(existing._id), {
-        ...body,
+        ...fields,
         updatedBy: ctx.tokenRecord.userId,
       });
 
@@ -135,6 +140,9 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       }
       return reply.code(200).send({ module: ragModule });
     } catch (error) {
+      if (error instanceof VectorFilterError) {
+        return reply.code(400).send({ error: error.message });
+      }
       logger.error('Update client RAG module error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal error',
@@ -152,7 +160,12 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'RAG module not found' });
       }
 
-      const deleted = await deleteRagModule(ctx.tenantDbName, String(ragModule._id));
+      const deleted = await deleteRagModule(
+        ctx.tenantDbName,
+        ctx.tenantId,
+        ctx.projectId,
+        String(ragModule._id),
+      );
       if (!deleted) {
         return reply.code(404).send({ error: 'RAG module not found' });
       }
@@ -190,17 +203,26 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'fileName is required' });
       }
 
+      let chunkConfig: IRagChunkConfig | undefined;
+      try {
+        chunkConfig = readDocumentChunkConfig(body);
+      } catch (error) {
+        return sendInvalidRequest(reply, error);
+      }
+
       if (typeof body.data === 'string') {
         const document = await ingestFile(ctx.tenantDbName, ctx.tenantId, undefined, {
+          chunkConfig,
           contentType: body.contentType as string | undefined,
           createdBy: ctx.tokenRecord.userId,
+        force: body.force === true,
           fileData: decodeFileData(body.data),
           fileName: body.fileName,
           metadata: body.metadata as Record<string, unknown> | undefined,
           ragModuleKey: key,
         });
 
-        return reply.code(201).send({ document });
+        return reply.code(201).send({ document: withoutSourceText(document) });
       }
 
       if (typeof body.content !== 'string') {
@@ -210,15 +232,17 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const document = await ingestDocument(ctx.tenantDbName, ctx.tenantId, undefined, {
+        chunkConfig,
         content: body.content,
         contentType: body.contentType as string | undefined,
         createdBy: ctx.tokenRecord.userId,
+        force: body.force === true,
         fileName: body.fileName,
         metadata: body.metadata as Record<string, unknown> | undefined,
         ragModuleKey: key,
       });
 
-      return reply.code(201).send({ document });
+      return reply.code(201).send({ document: withoutSourceText(document) });
     } catch (error) {
       logger.error('Ingest client RAG document error', { error });
       return reply.code(500).send({
@@ -229,15 +253,20 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/client/v1/rag/modules/:key/documents/:documentId', withClientApiRequestContext(async (request, reply) => {
     try {
-      const { documentId } = request.params as { documentId: string; key: string };
+      const { documentId, key } = request.params as { documentId: string; key: string };
       const ctx = await getApiTokenContextForRequest(request);
-      const document = await getRagDocument(ctx.tenantDbName, documentId);
+      const document = await documentInProjectScope(
+        ctx.tenantDbName,
+        documentId,
+        key,
+        ctx.projectId,
+      );
 
       if (!document) {
         return reply.code(404).send({ error: 'Document not found' });
       }
 
-      return reply.code(200).send({ document });
+      return reply.code(200).send({ document: withoutSourceText(document) });
     } catch (error) {
       logger.error('Get client RAG document error', { error });
       return reply.code(500).send({
@@ -250,6 +279,20 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { documentId, key } = request.params as { documentId: string; key: string };
+      // The id alone identified nothing: deleteRagDocument never bound the
+      // document to the module in the URL, so any token could delete another
+      // project's document — and decrement the wrong module's counters doing it.
+      const document = await documentInProjectScope(
+        ctx.tenantDbName,
+        documentId,
+        key,
+        ctx.projectId,
+      );
+
+      if (!document) {
+        return reply.code(404).send({ error: 'Document not found' });
+      }
+
       await deleteRagDocument(ctx.tenantDbName, ctx.tenantId, undefined, {
         documentId,
         ragModuleKey: key,
@@ -267,11 +310,31 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { documentId, key } = request.params as { documentId: string; key: string };
+      const existing = await documentInProjectScope(
+        ctx.tenantDbName,
+        documentId,
+        key,
+        ctx.projectId,
+      );
+
+      if (!existing) {
+        return reply.code(404).send({ error: 'Document not found' });
+      }
+
       const body = readJsonBody<Record<string, unknown>>(request);
       const encodedData = typeof body.data === 'string'
         ? body.data
         : (typeof body.base64 === 'string' ? body.base64 : undefined);
+
+      let chunkConfig: IRagChunkConfig | undefined;
+      try {
+        chunkConfig = readDocumentChunkConfig(body);
+      } catch (error) {
+        return sendInvalidRequest(reply, error);
+      }
+
       const document = await reingestDocument(ctx.tenantDbName, ctx.tenantId, undefined, {
+        chunkConfig,
         content: typeof body.content === 'string' ? body.content : undefined,
         contentType: typeof body.contentType === 'string' ? body.contentType : undefined,
         documentId,
@@ -284,7 +347,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
         updatedBy: ctx.tokenRecord.userId,
       });
 
-      return reply.code(200).send({ document });
+      return reply.code(200).send({ document: withoutSourceText(document) });
     } catch (error) {
       logger.error('Reingest client RAG document error', { error });
       return reply.code(500).send({
@@ -311,8 +374,11 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
         minScore: typeof body.minScore === 'number' ? body.minScore : undefined,
       });
 
-      return reply.code(200).send({ result });
+      return reply.code(200).send({ result: shapeRagQueryResponse(result) });
     } catch (error) {
+      if (error instanceof VectorFilterError) {
+        return reply.code(400).send({ error: error.message });
+      }
       logger.error('Query client RAG module error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal error',

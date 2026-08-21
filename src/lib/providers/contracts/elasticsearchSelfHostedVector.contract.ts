@@ -9,6 +9,8 @@ import type {
   VectorListInput,
   VectorListResult,
 } from '../domains/vector';
+import { FULL_FILTER_OPERATORS } from '../domains/vectorFilter';
+import { esQueryVectors, esVectorDocument, esVectorMapping } from './elasticsearchSearch';
 
 interface ElasticsearchSelfHostedCredentials {
   apiKey?: string;
@@ -110,6 +112,9 @@ export const ElasticsearchSelfHostedVectorProviderContract: ProviderContract<
     supportsUpsert: true,
     supportsQuery: true,
     supportsDelete: true,
+    'vector.filterOperators': FULL_FILTER_OPERATORS,
+    'vector.filterRaw': true,
+    'vector.supportsHybrid': true,
   },
   async createRuntime({ credentials, settings, providerKey, logger }) {
     if (!settings?.node?.trim()) {
@@ -141,16 +146,7 @@ export const ElasticsearchSelfHostedVectorProviderContract: ProviderContract<
         const metric = input.metric ?? 'cosine';
         const exists = await client.indices.exists({ index: indexName });
         if (!exists) {
-          const similarity = metric === 'dot' ? 'dot_product' : metric === 'euclidean' ? 'l2_norm' : 'cosine';
-          await client.indices.create({
-            index: indexName,
-            mappings: {
-              properties: {
-                vector: { type: 'dense_vector', dims: dim, index: true, similarity },
-                metadata: { type: 'object', dynamic: true },
-              },
-            },
-          });
+          await client.indices.create({ index: indexName, mappings: esVectorMapping(dim, metric) });
         }
         logger?.info?.('Elasticsearch self-hosted index ensured', { providerKey, indexName });
         return {
@@ -182,31 +178,16 @@ export const ElasticsearchSelfHostedVectorProviderContract: ProviderContract<
         const body: unknown[] = [];
         for (const item of items) {
           body.push({ index: { _index: handle.externalId, _id: item.id } });
-          body.push({ vector: item.values, metadata: item.metadata ?? {} });
+          body.push(esVectorDocument(item));
         }
         await client.bulk({ body });
         logger?.debug?.('Elasticsearch self-hosted upserted vectors', { providerKey, count: items.length });
       },
 
       async queryVectors(handle: VectorIndexHandle, query: VectorQueryInput): Promise<VectorQueryResult> {
-        const result = await client.search({
-          index: handle.externalId,
-          knn: {
-            field: 'vector',
-            query_vector: query.vector,
-            k: query.topK,
-            num_candidates: query.topK * 2,
-            filter: query.filter,
-          },
-          size: query.topK,
-        });
-        return {
-          matches: (result.hits.hits as Array<{ _id: string; _score: number; _source?: Record<string, unknown> }>).map((hit) => ({
-            id: hit._id,
-            score: hit._score ?? 0,
-            metadata: hit._source?.metadata as Record<string, unknown> | undefined,
-          })),
-        };
+        // Bound, not passed by reference: the ES client's search is a method
+        // that reads `this` for its transport.
+        return esQueryVectors((params) => client.search(params), handle.externalId, query);
       },
 
       async deleteVectors(handle: VectorIndexHandle, ids: string[]): Promise<void> {

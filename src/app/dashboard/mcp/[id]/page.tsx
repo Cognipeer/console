@@ -47,6 +47,7 @@ import {
   IconPlayerPlay,
   IconPlugConnected,
   IconRefresh,
+  IconStack2,
   IconTrash,
 } from '@tabler/icons-react';
 import DetailShell from '@/components/common/ui/DetailShell';
@@ -54,6 +55,7 @@ import FormShell, { FormField, FormRow, FormSection } from '@/components/common/
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import McpToolArgsEditor from '@/components/mcp/McpToolArgsEditor';
 import McpToolsPanel from '@/components/mcp/McpToolsPanel';
+import McpMembersPanel from '@/components/mcp/McpMembersPanel';
 import RuntimeContextEditor, { parseRuntimeContextJson } from '@/components/common/RuntimeContextEditor';
 import SpecImportField, { type SpecFormat } from '@/components/common/SpecImportField';
 import type { McpServerView, McpRequestLogView } from '@/lib/services/mcp';
@@ -70,6 +72,7 @@ const SOURCE_LABELS: Record<string, string> = {
   remote: 'Remote MCP proxy',
   stdio: 'Stdio package',
   internal: 'Internal service',
+  composite: 'Composite (other servers)',
 };
 
 /** Where to send the user to fix/inspect the console-native capability behind an 'internal' MCP server. */
@@ -107,7 +110,7 @@ export default function McpDetailPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const tabParam = searchParams.get('tab');
-  const initialTab = ['overview', 'usage', 'tools', 'playground', 'logs', 'audit'].includes(tabParam ?? '')
+  const initialTab = ['overview', 'usage', 'members', 'tools', 'playground', 'logs', 'audit'].includes(tabParam ?? '')
     ? (tabParam as string)
     : 'overview';
 
@@ -116,6 +119,9 @@ export default function McpDetailPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
+  const [keyEditing, setKeyEditing] = useState(false);
+  const [keyDraft, setKeyDraft] = useState('');
+  const [savingKey, setSavingKey] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [activeTab, setActiveTab] = useState<string>(initialTab);
@@ -350,6 +356,40 @@ export default function McpDetailPage() {
       .finally(() => setAuditLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, server?.key]);
+
+  const handleSaveKey = async () => {
+    if (!server || !keyDraft.trim() || keyDraft.trim() === server.key) {
+      setKeyEditing(false);
+      return;
+    }
+    setSavingKey(true);
+    try {
+      const res = await fetch(`/api/mcp/${server.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: keyDraft.trim() }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Failed to update server key');
+      setServer(data.server);
+      setKeyEditing(false);
+      notifications.show({
+        title: 'Server key updated',
+        message: data.server.key !== keyDraft.trim()
+          ? `Saved as "${data.server.key}" (the requested key was taken)`
+          : `Now using "${data.server.key}"`,
+        color: 'teal',
+      });
+    } catch (err) {
+      notifications.show({
+        title: 'Error',
+        message: err instanceof Error ? err.message : 'Failed to update server key',
+        color: 'red',
+      });
+    } finally {
+      setSavingKey(false);
+    }
+  };
 
   const handleRefreshTools = async () => {
     if (!params.id) return;
@@ -689,6 +729,11 @@ export default function McpDetailPage() {
           <Tabs.Tab value="usage" leftSection={<IconPlugConnected size={14} />}>
             Usage
           </Tabs.Tab>
+          {server.sourceType === 'composite' ? (
+            <Tabs.Tab value="members" leftSection={<IconStack2 size={14} />}>
+              Members ({server.members?.length ?? 0})
+            </Tabs.Tab>
+          ) : null}
           <Tabs.Tab value="tools" leftSection={<IconCode size={14} />}>
             {server.disabledTools?.length
               ? `Tools (${(server.tools?.length ?? 0) - server.disabledTools.length}/${server.tools?.length ?? 0})`
@@ -937,24 +982,64 @@ export default function McpDetailPage() {
 
           <Paper withBorder p="md" radius="md" mb="md">
             <Text size="xs" c="dimmed" tt="uppercase" fw={600} mb="xs">Server Key</Text>
-            <Group gap="sm">
-              <Code>{server.key}</Code>
-              <CopyButton value={server.key}>
-                {({ copied, copy }) => (
-                  <Tooltip label={copied ? 'Copied' : 'Copy'}>
-                    <Button
-                      variant="subtle"
-                      size="compact-xs"
-                      color={copied ? 'teal' : 'gray'}
-                      onClick={copy}
-                      leftSection={copied ? <IconCheck size={12} /> : <IconCopy size={12} />}
-                    >
-                      {copied ? 'Copied' : 'Copy'}
-                    </Button>
-                  </Tooltip>
-                )}
-              </CopyButton>
-            </Group>
+            {keyEditing ? (
+              <Group gap="sm">
+                <TextInput
+                  value={keyDraft}
+                  onChange={(e) => setKeyDraft(e.currentTarget.value)}
+                  placeholder={server.key}
+                  size="xs"
+                  w={260}
+                />
+                <Button size="compact-xs" color="teal" loading={savingKey} onClick={handleSaveKey}>
+                  Save
+                </Button>
+                <Button
+                  variant="subtle"
+                  size="compact-xs"
+                  color="gray"
+                  disabled={savingKey}
+                  onClick={() => setKeyEditing(false)}
+                >
+                  Cancel
+                </Button>
+              </Group>
+            ) : (
+              <Group gap="sm">
+                <Code>{server.key}</Code>
+                <CopyButton value={server.key}>
+                  {({ copied, copy }) => (
+                    <Tooltip label={copied ? 'Copied' : 'Copy'}>
+                      <Button
+                        variant="subtle"
+                        size="compact-xs"
+                        color={copied ? 'teal' : 'gray'}
+                        onClick={copy}
+                        leftSection={copied ? <IconCheck size={12} /> : <IconCopy size={12} />}
+                      >
+                        {copied ? 'Copied' : 'Copy'}
+                      </Button>
+                    </Tooltip>
+                  )}
+                </CopyButton>
+                <Tooltip label="Change the key used in the API path">
+                  <ActionIcon
+                    variant="subtle"
+                    color="gray"
+                    size="sm"
+                    onClick={() => {
+                      setKeyDraft(server.key);
+                      setKeyEditing(true);
+                    }}
+                  >
+                    <IconEdit size={13} />
+                  </ActionIcon>
+                </Tooltip>
+              </Group>
+            )}
+            <Text size="xs" c="dimmed" mt={6}>
+              Used in the token-authed API path — changing it updates every URL that addresses this server by key.
+            </Text>
           </Paper>
 
           <Paper withBorder p="md" radius="md" mb="md">
@@ -1235,15 +1320,28 @@ async with sse_client(
           </Stack>
         </Tabs.Panel>
 
+        {/* ── Members Tab (composite only) ── */}
+        {server.sourceType === 'composite' ? (
+          <Tabs.Panel value="members">
+            <McpMembersPanel
+              serverId={params.id}
+              members={server.members ?? []}
+              onServerUpdated={(s) => setServer(s as McpServerView & { openApiSpec?: string })}
+            />
+          </Tabs.Panel>
+        ) : null}
+
         {/* ── Tools Tab ── */}
         <Tabs.Panel value="tools">
           <Group justify="space-between" mb="sm">
             <Text size="sm" c="dimmed">
-              {server.sourceType !== 'openapi'
-                ? `Tools discovered from the ${server.sourceType === 'remote' ? 'remote MCP server' : 'stdio package'}`
-                : 'Tools imported from the OpenAPI spec'}
+              {server.sourceType === 'composite'
+                ? 'Tools republished from this composite’s members'
+                : server.sourceType !== 'openapi'
+                  ? `Tools discovered from the ${server.sourceType === 'remote' ? 'remote MCP server' : 'stdio package'}`
+                  : 'Tools imported from the OpenAPI spec'}
               {server.toolsDiscoveredAt
-                ? ` · last discovery ${new Date(server.toolsDiscoveredAt).toLocaleString()}`
+                ? ` · last synced ${new Date(server.toolsDiscoveredAt).toLocaleString()}`
                 : ''}
               {' '}· disabled tools are hidden from tools/list and rejected on execution
               {' '}· use the row action to override a tool&apos;s description and annotation hints
@@ -1256,7 +1354,7 @@ async with sse_client(
                 loading={refreshingTools}
                 onClick={() => void handleRefreshTools()}
               >
-                Update tools
+                {server.sourceType === 'composite' ? 'Sync members' : 'Update tools'}
               </Button>
             ) : null}
           </Group>
@@ -1267,6 +1365,7 @@ async with sse_client(
             sourceType={server.sourceType}
             toolAnnotations={server.toolAnnotations ?? {}}
             toolDescriptions={server.toolDescriptions ?? {}}
+            toolNames={server.toolNames ?? {}}
             onServerUpdated={(s) => setServer(s as McpServerView & { openApiSpec?: string })}
           />
         </Tabs.Panel>

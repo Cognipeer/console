@@ -6,6 +6,21 @@ import {
     type SearchField,
 } from '@azure/search-documents';
 import type { ProviderContract } from '../types';
+import {
+    VectorFilterError,
+    isSystemGuardFilter,
+    matchesFilter,
+    type VectorFilterNode,
+    type VectorFilterOperator,
+} from '../domains/vectorFilter';
+import { toAzureMetadataKeyValues, toAzureODataFilter } from './vectorFilterTranslators';
+import {
+    DEFAULT_RRF_K,
+    describeHybrid,
+    extractVectorText,
+    hybridCandidateCount,
+    normalizeFusedScore,
+} from '../domains/vectorHybrid';
 import type {
     CreateVectorIndexInput,
     VectorIndexHandle,
@@ -19,15 +34,10 @@ import type {
 
 interface AzureAiSearchCredentials {
     apiKey: string;
-    subscriptionId?: string;
-    subscription?: string;
 }
 
 interface AzureAiSearchSettings {
     foundryProjectEndpoint: string;
-    resourceGroup?: string;
-    location?: string;
-    projectResourceId?: string;
     defaultDistanceMetric?: 'cosine' | 'euclidean' | 'dotProduct';
     serviceVersion?: string;
 }
@@ -38,11 +48,90 @@ interface AzureSearchDocument {
     id: string;
     vector: number[];
     metadata: string;
+    metadata_kv?: string[];
+    metadata_keys?: string[];
+    content?: string;
 }
 
 const ID_FIELD = 'id';
 const VECTOR_FIELD = 'vector';
 const METADATA_FIELD = 'metadata';
+// Azure cannot filter inside the metadata JSON blob, so filterable indexes also
+// carry flattened `key=value` pairs and a key list alongside it.
+const METADATA_KV_FIELD = 'metadata_kv';
+const METADATA_KEYS_FIELD = 'metadata_keys';
+const FILTER_SCHEMA_VERSION = 'kv-v1';
+// Azure cannot run a keyword query against the metadata blob either — that
+// field is stored, not searchable — so hybrid indexes carry the chunk text in a
+// searchable column of its own.
+const CONTENT_FIELD = 'content';
+const CONTENT_SCHEMA_VERSION = 'text-v1';
+
+/** Operators expressible over the flattened string collections. */
+const AZURE_FILTER_OPERATORS: VectorFilterOperator[] = [
+    '$eq',
+    '$ne',
+    '$in',
+    '$nin',
+    '$exists',
+    '$and',
+    '$or',
+    '$not',
+];
+
+function hasFilterableSchema(handle: VectorIndexHandle): boolean {
+    return handle.metadata?.filterSchema === FILTER_SCHEMA_VERSION;
+}
+
+function hasSearchableSchema(handle: VectorIndexHandle): boolean {
+    return handle.metadata?.contentSchema === CONTENT_SCHEMA_VERSION;
+}
+
+function requireFilterableSchema(handle: VectorIndexHandle): void {
+    if (hasFilterableSchema(handle)) return;
+    throw new VectorFilterError(
+        `Azure AI Search index "${handle.externalId}" was created before filterable metadata `
+        + 'was supported, so metadata filters cannot be pushed down. Recreate the index and '
+        + 'reingest its documents to enable filtering.',
+    );
+}
+
+/**
+ * How many hits to pull back when the isolation guard can only run after the
+ * search. Over-fetching keeps a `topK` slice reachable once foreign-module hits
+ * are dropped; the ceiling stops a large `topK` from turning into a scan.
+ */
+const GUARD_CANDIDATE_MULTIPLIER = 4;
+const GUARD_CANDIDATE_CEILING = 200;
+
+function guardCandidateCount(topK: number): number {
+    return Math.min(Math.max(topK * GUARD_CANDIDATE_MULTIPLIER, 20), GUARD_CANDIDATE_CEILING);
+}
+
+// Azure AI Search document keys may only contain letters, digits, underscore (_),
+// dash (-), or equal sign (=). Caller-supplied vector ids (e.g. Knowledge Engine's
+// "module:documentId:chunkIndex") routinely violate that, so unsafe ids are stored
+// under a marked, URL-safe Base64 form and transparently decoded on the way out.
+const SAFE_KEY_PATTERN = /^[A-Za-z0-9_\-=]+$/;
+const ENCODED_KEY_PREFIX = '_b64_';
+
+function encodeVectorId(id: string): string {
+    if (SAFE_KEY_PATTERN.test(id) && !id.startsWith(ENCODED_KEY_PREFIX)) {
+        return id;
+    }
+    return ENCODED_KEY_PREFIX + Buffer.from(id, 'utf8').toString('base64url');
+}
+
+function decodeVectorId(key: string): string {
+    if (!key.startsWith(ENCODED_KEY_PREFIX)) {
+        return key;
+    }
+    try {
+        return Buffer.from(key.slice(ENCODED_KEY_PREFIX.length), 'base64url').toString('utf8');
+    } catch {
+        return key;
+    }
+}
 
 function toAzureMetric(metric: 'cosine' | 'dot' | 'euclidean'): AzureVectorMetric {
     switch (metric) {
@@ -93,22 +182,6 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                         required: true,
                         scope: 'credentials',
                     },
-                    {
-                        name: 'subscriptionId',
-                        label: 'Subscription ID',
-                        type: 'text',
-                        required: false,
-                        description: 'Azure subscription ID. Optional, used for resource identification.',
-                        scope: 'credentials',
-                    },
-                    {
-                        name: 'subscription',
-                        label: 'Subscription',
-                        type: 'text',
-                        required: false,
-                        description: 'Azure subscription display name.',
-                        scope: 'credentials',
-                    },
                 ],
             },
             {
@@ -123,32 +196,6 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                         placeholder: 'https://myservice.search.windows.net',
                         description:
                             'The endpoint URL of your Azure AI Search service or Microsoft Foundry project.',
-                        scope: 'settings',
-                    },
-                    {
-                        name: 'location',
-                        label: 'Location',
-                        type: 'text',
-                        required: false,
-                        placeholder: 'eastus',
-                        description: 'Azure region where the resource is deployed (e.g. eastus, westeurope).',
-                        scope: 'settings',
-                    },
-                    {
-                        name: 'resourceGroup',
-                        label: 'Resource Group',
-                        type: 'text',
-                        required: false,
-                        description: 'Azure resource group that contains the search service.',
-                        scope: 'settings',
-                    },
-                    {
-                        name: 'projectResourceId',
-                        label: 'Project Resource ID',
-                        type: 'text',
-                        required: false,
-                        placeholder: '/subscriptions/{subId}/resourceGroups/{rg}/providers/...',
-                        description: 'Full Azure resource ID of the AI project or search service. Optional.',
                         scope: 'settings',
                     },
                     {
@@ -189,6 +236,9 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
         'vector.metrics': ['cosine', 'euclidean', 'dot'],
         'vector.dataType': 'float32',
         'vector.provider': 'azure-ai-search',
+        'vector.filterOperators': AZURE_FILTER_OPERATORS,
+        'vector.filterRaw': true,
+        'vector.supportsHybrid': true,
     },
     async createRuntime({ credentials, settings, providerKey, logger }) {
         const endpoint = normalizeEndpoint(settings.foundryProjectEndpoint);
@@ -242,6 +292,36 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                             facetable: false,
                             retrievable: true,
                         } as SearchField,
+                        {
+                            name: METADATA_KV_FIELD,
+                            type: 'Collection(Edm.String)',
+                            searchable: false,
+                            filterable: true,
+                            sortable: false,
+                            facetable: false,
+                            retrievable: false,
+                        } as SearchField,
+                        {
+                            name: METADATA_KEYS_FIELD,
+                            type: 'Collection(Edm.String)',
+                            searchable: false,
+                            filterable: true,
+                            sortable: false,
+                            facetable: false,
+                            retrievable: false,
+                        } as SearchField,
+                        {
+                            name: CONTENT_FIELD,
+                            type: 'Edm.String',
+                            // Not retrievable: the same text already comes back
+                            // inside the metadata blob, and a second copy per
+                            // hit is pure bandwidth.
+                            searchable: true,
+                            filterable: false,
+                            sortable: false,
+                            facetable: false,
+                            retrievable: false,
+                        } as SearchField,
                     ],
                     vectorSearch: {
                         algorithms: [
@@ -277,6 +357,8 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                         endpoint,
                         algoName,
                         profileName,
+                        filterSchema: FILTER_SCHEMA_VERSION,
+                        contentSchema: CONTENT_SCHEMA_VERSION,
                     },
                 };
             },
@@ -307,12 +389,19 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
 
                     const metric = fromAzureMetric(algo?.parameters?.metric ?? 'cosine');
 
+                    const filterable = index.fields?.some((f) => f.name === METADATA_KV_FIELD);
+                    const searchable = index.fields?.some((f) => f.name === CONTENT_FIELD);
+
                     handles.push({
                         externalId: index.name,
                         name: index.name,
                         dimension,
                         metric,
-                        metadata: { provider: 'azure-ai-search' },
+                        metadata: {
+                            provider: 'azure-ai-search',
+                            ...(filterable ? { filterSchema: FILTER_SCHEMA_VERSION } : {}),
+                            ...(searchable ? { contentSchema: CONTENT_SCHEMA_VERSION } : {}),
+                        },
                     });
                 }
 
@@ -325,11 +414,30 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
             ): Promise<void> {
                 const client = getSearchClient(handle.externalId);
 
-                const documents: AzureSearchDocument[] = items.map((item) => ({
-                    [ID_FIELD]: item.id,
-                    [VECTOR_FIELD]: item.values,
-                    [METADATA_FIELD]: JSON.stringify(item.metadata ?? {}),
-                }));
+                const filterable = hasFilterableSchema(handle);
+                const searchable = hasSearchableSchema(handle);
+
+                const documents: AzureSearchDocument[] = items.map((item) => {
+                    const document: AzureSearchDocument = {
+                        [ID_FIELD]: encodeVectorId(item.id),
+                        [VECTOR_FIELD]: item.values,
+                        [METADATA_FIELD]: JSON.stringify(item.metadata ?? {}),
+                    };
+
+                    // Older indexes have no filterable columns; writing them
+                    // would be rejected as unknown fields.
+                    if (filterable) {
+                        const { keys, pairs } = toAzureMetadataKeyValues(item.metadata);
+                        document[METADATA_KV_FIELD] = pairs;
+                        document[METADATA_KEYS_FIELD] = keys;
+                    }
+
+                    if (searchable) {
+                        document[CONTENT_FIELD] = extractVectorText(item.metadata) ?? '';
+                    }
+
+                    return document;
+                });
 
                 await client.mergeOrUploadDocuments(documents);
 
@@ -346,22 +454,65 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
             ): Promise<VectorQueryResult> {
                 const client = getSearchClient(handle.externalId);
 
-                const searchResults = await client.search('*', {
+                let odataFilter: string | undefined;
+                let guardFilter: VectorFilterNode | undefined;
+
+                if (query.filter) {
+                    if (hasFilterableSchema(handle)) {
+                        odataFilter = toAzureODataFilter(
+                            query.filter,
+                            METADATA_KV_FIELD,
+                            METADATA_KEYS_FIELD,
+                        );
+                    } else if (isSystemGuardFilter(query.filter)) {
+                        // Module isolation is a guard we add, not something the
+                        // caller asked for: throwing here would take every index
+                        // created before the filterable schema offline. The guard
+                        // still has to hold, so it runs against the metadata blob
+                        // that comes back with each hit — correct, but capped by
+                        // how many candidates Azure returns, so it is reported in
+                        // `usage` rather than passed off as a pushed-down filter.
+                        guardFilter = query.filter;
+                    } else {
+                        // A filter the caller asked for cannot be degraded: a
+                        // short result set would look like "no more matches".
+                        requireFilterableSchema(handle);
+                    }
+                }
+
+                const candidateCount = guardFilter ? guardCandidateCount(query.topK) : query.topK;
+
+                const text = query.text?.trim();
+                // An index created before the searchable column existed has
+                // nothing for the keyword channel to match, and Azure would
+                // still switch to RRF scoring — dense results on a rank scale,
+                // labelled hybrid. Stay dense and say so instead.
+                const fused = Boolean(text) && hasSearchableSchema(handle);
+
+                // A non-undefined searchText is exactly what puts Azure into
+                // hybrid/RRF scoring; keeping it undefined is what preserves
+                // the raw cosine similarity of a pure vector search.
+                const searchResults = await client.search(fused ? text : undefined, {
+                    ...(odataFilter ? { filter: odataFilter } : {}),
                     vectorSearchOptions: {
                         queries: [
                             {
                                 kind: 'vector',
                                 vector: query.vector,
-                                kNearestNeighborsCount: query.topK,
+                                // The vector channel has to reach past the final
+                                // slice for the fusion to reorder anything.
+                                kNearestNeighborsCount: fused
+                                    ? hybridCandidateCount(candidateCount)
+                                    : candidateCount,
                                 fields: [VECTOR_FIELD],
                             },
                         ],
                     },
                     select: [ID_FIELD, METADATA_FIELD] as (keyof AzureSearchDocument)[],
-                    top: query.topK,
+                    top: candidateCount,
                 });
 
-                const matches: VectorQueryResult['matches'] = [];
+                const candidates: VectorQueryResult['matches'] = [];
 
                 for await (const result of searchResults.results) {
                     const doc = result.document;
@@ -373,21 +524,61 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                         // ignore malformed metadata
                     }
 
-                    matches.push({
-                        id: doc[ID_FIELD],
-                        score: result.score ?? 0,
+                    const score = result.score ?? 0;
+
+                    candidates.push({
+                        id: decodeVectorId(doc[ID_FIELD]),
+                        // Azure fuses server-side and hands back its own RRF
+                        // score, ~0.016 — off the scale every caller thresholds
+                        // against until it is mapped back.
+                        score: fused ? normalizeFusedScore(score, DEFAULT_RRF_K) : score,
                         metadata,
                     });
                 }
 
-                return { matches };
+                let matches = candidates;
+                const usage: Record<string, unknown> = {};
+
+                if (guardFilter) {
+                    const guard = guardFilter;
+                    const kept = candidates.filter((match) => matchesFilter(match.metadata, guard));
+                    matches = kept.slice(0, query.topK);
+
+                    usage.filterPushdown = 'in-memory';
+                    usage.filterCandidates = candidates.length;
+                    usage.filterDropped = candidates.length - kept.length;
+
+                    logger?.warn('Azure AI Search applied module isolation after the search', {
+                        providerKey,
+                        indexName: handle.externalId,
+                        candidates: candidates.length,
+                        kept: kept.length,
+                        hint: candidates.length > 0 && kept.length === 0
+                            ? 'No candidate carried the module marker. Reingest this index, or '
+                                + 'turn module isolation off if it is not shared.'
+                            : 'This index predates filterable metadata; recreate and reingest it '
+                                + 'to push isolation down to Azure.',
+                    });
+                }
+
+                if (text) {
+                    // Azure fuses with RRF whatever the caller asked for, so
+                    // report the mode that actually ran, not the one requested.
+                    Object.assign(usage, describeHybrid(
+                        fused
+                            ? { ran: true, mode: 'rrf' }
+                            : { ran: false, reason: 'index-schema' },
+                    ));
+                }
+
+                return Object.keys(usage).length > 0 ? { matches, usage } : { matches };
             },
 
             async deleteVectors(handle: VectorIndexHandle, ids: string[]): Promise<void> {
                 if (ids.length === 0) return;
 
                 const client = getSearchClient(handle.externalId);
-                await client.deleteDocuments(ID_FIELD, ids);
+                await client.deleteDocuments(ID_FIELD, ids.map(encodeVectorId));
 
                 logger?.debug('Azure AI Search vectors deleted', {
                     providerKey,
@@ -420,7 +611,7 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                         // ignore malformed metadata
                     }
                     items.push({
-                        id: doc[ID_FIELD],
+                        id: decodeVectorId(doc[ID_FIELD]),
                         values: Array.isArray(doc[VECTOR_FIELD]) ? doc[VECTOR_FIELD] : [],
                         metadata,
                     });
