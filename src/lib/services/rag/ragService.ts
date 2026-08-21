@@ -25,6 +25,7 @@ import {
 } from '@/lib/services/vector/vectorService';
 import { runReranker } from '@/lib/services/reranker';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
+import { fireAndForget } from '@/lib/core/asyncTask';
 import type {
   CreateRagModuleRequest,
   UpdateRagModuleRequest,
@@ -36,6 +37,34 @@ import type {
   RagModule,
   RagDocument,
 } from './types';
+
+/* ── Content resolution ──────────────────────────────────────────────── */
+
+/**
+ * Chunk text normally lives in `rag_chunks` and is looked up by vectorId. For
+ * vectors written by an external pipeline there is no such row, so fall back to
+ * the text carried in the vector's own metadata under any common key.
+ */
+const CONTENT_METADATA_KEYS = [
+  '_content',
+  'content',
+  'text',
+  'chunk',
+  'chunk_text',
+  'page_content',
+  'body',
+] as const;
+
+function resolveMetadataContent(metadata: Record<string, unknown> | undefined): string | undefined {
+  if (!metadata) return undefined;
+  for (const key of CONTENT_METADATA_KEYS) {
+    const value = metadata[key];
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value;
+    }
+  }
+  return undefined;
+}
 
 /* ── Key generation ──────────────────────────────────────────────────── */
 
@@ -284,6 +313,7 @@ export async function createRagModule(
     defaultMinScore: request.defaultMinScore,
     defaultFilter: request.defaultFilter,
     filterableFields: request.filterableFields,
+    responseDetail: request.responseDetail,
     totalDocuments: 0,
     totalChunks: 0,
     metadata: request.metadata,
@@ -318,6 +348,7 @@ export async function updateRagModule(
   if (request.filterableFields !== undefined) {
     updates.filterableFields = request.filterableFields ?? undefined;
   }
+  if (request.responseDetail !== undefined) updates.responseDetail = request.responseDetail ?? undefined;
   updates.updatedBy = request.updatedBy;
   return db.updateRagModule(moduleId, updates as Partial<IRagModule>);
 }
@@ -639,12 +670,14 @@ export async function queryRag(
   if (!ragModule) throw new Error(`Knowledge Engine module "${request.ragModuleKey}" not found`);
 
   // 1. Embed the query
+  const embeddingStartedAt = Date.now();
   const [queryEmbedding] = await getEmbeddings(
     tenantDbName,
     projectId ?? '',
     ragModule.embeddingModelKey,
     [request.query],
   );
+  const embeddingMs = Date.now() - embeddingStartedAt;
 
   // 2. Build the metadata filter: the module's standing filter ANDed with the
   //    caller's, after validating the request filter and checking it only
@@ -661,6 +694,7 @@ export async function queryRag(
   const oversampleMultiplier = ragModule.rerankerOversample ?? 3;
   const fetchTopK = useReranker ? Math.max(topK, topK * oversampleMultiplier) : topK;
 
+  const vectorStartedAt = Date.now();
   const vectorResult = await queryVectorIndex(tenantDbName, tenantId, projectId ?? '', {
     providerKey: ragModule.vectorProviderKey,
     indexKey: ragModule.vectorIndexKey,
@@ -671,9 +705,12 @@ export async function queryRag(
     },
   });
 
-  const vectorLatencyMs = Date.now() - startTime;
+  // Time spent in the vector store alone. This used to be measured from the
+  // very start of the request, which hid where the time actually went.
+  const vectorLatencyMs = Date.now() - vectorStartedAt;
 
   // 4. Hydrate chunk content from MongoDB
+  const hydrateStartedAt = Date.now();
   const vectorIds = vectorResult.matches.map((m) => m.id).filter(Boolean);
   let chunkContentMap: Map<string, string> = new Map();
   if (vectorIds.length > 0) {
@@ -684,17 +721,32 @@ export async function queryRag(
       logger.warn('Failed to hydrate chunk content from MongoDB', { error: err });
     }
   }
+  const hydrateLatencyMs = Date.now() - hydrateStartedAt;
 
   // 5. Map results
   let matches: RagQueryMatch[] = vectorResult.matches.map((m) => ({
     id: m.id,
     score: m.score,
-    content: chunkContentMap.get(m.id) ?? (typeof m.metadata?._content === 'string' ? m.metadata._content : undefined),
+    content: chunkContentMap.get(m.id) ?? resolveMetadataContent(m.metadata),
     metadata: m.metadata,
     documentId: typeof m.metadata?._documentId === 'string' ? m.metadata._documentId : undefined,
     fileName: typeof m.metadata?._fileName === 'string' ? m.metadata._fileName : undefined,
     chunkIndex: typeof m.metadata?._chunkIndex === 'number' ? m.metadata._chunkIndex : undefined,
   }));
+
+  // Vectors written outside our ingest pipeline have no rag_chunks row, so their
+  // text can only come from vector metadata. Without this warning the empty
+  // passages reach the LLM silently and it answers from nothing.
+  const contentlessCount = matches.filter((m) => !(m.content ?? '').trim()).length;
+  if (contentlessCount > 0) {
+    logger.warn('RAG matches resolved with no content', {
+      ragModuleKey: request.ragModuleKey,
+      contentlessCount,
+      totalMatches: matches.length,
+      hint: 'Vectors not ingested through this product must carry their text in vector metadata '
+        + `(one of: ${CONTENT_METADATA_KEYS.join(', ')}).`,
+    });
+  }
 
   // 5b. Optional reranker pass.
   let rerankLatencyMs: number | undefined;
@@ -765,7 +817,21 @@ export async function queryRag(
     latencyMs,
     units: { matches: matches.length },
   });
-  try {
+  // Where the time actually went. vectorLatencyMs used to be computed and then
+  // thrown away unless a reranker ran, which made slow searches undiagnosable.
+  logger.debug('RAG query timing', {
+    ragModuleKey: request.ragModuleKey,
+    totalMs: latencyMs,
+    embeddingMs,
+    vectorMs: vectorLatencyMs,
+    rerankMs: rerankLatencyMs,
+    hydrateMs: hydrateLatencyMs,
+    matches: matches.length,
+  });
+
+  // Telemetry off the critical path — this insert was adding a full DB round
+  // trip to every search.
+  fireAndForget('rag-query-log', async () => {
     await db.createRagQueryLog({
       userId: attribution.userId,
       apiTokenId: attribution.apiTokenId,
@@ -777,27 +843,43 @@ export async function queryRag(
       topK,
       matchCount: matches.length,
       latencyMs,
-      metadata: useReranker || typeof minScore === 'number'
-        ? {
-          ...(useReranker ? {
-            reranked: true,
-            rerankerKey: ragModule.rerankerKey,
-            vectorLatencyMs,
-            rerankLatencyMs,
-          } : {}),
-          ...(typeof minScore === 'number' ? { minScore } : {}),
-        }
-        : undefined,
+      metadata: {
+        embeddingMs,
+        vectorLatencyMs,
+        ...(useReranker ? {
+          reranked: true,
+          rerankerKey: ragModule.rerankerKey,
+          rerankLatencyMs,
+        } : {}),
+        ...(typeof minScore === 'number' ? { minScore } : {}),
+      },
     });
-  } catch (err) {
-    logger.warn('Failed to log query', { error: err });
-  }
+  });
 
   return {
     matches,
     query: request.query,
     ragModuleKey: request.ragModuleKey,
     latencyMs,
+    // Echoed so the API layer can shape the payload. Internal consumers
+    // (answer service, agents, MCP tool) keep the full match set regardless —
+    // they need documentId/fileName for citations and grouping.
+    responseDetail: ragModule.responseDetail ?? 'full',
+  };
+}
+
+/**
+ * Applies a module's `responseDetail` setting to a query result, producing the
+ * JSON payload the public query endpoints return. 'text' strips everything but
+ * the chunk text; 'full' (default) is the complete match.
+ */
+export function shapeRagQueryResponse(result: RagQueryResult): Record<string, unknown> {
+  const { responseDetail, matches, ...rest } = result;
+  return {
+    ...rest,
+    matches: responseDetail === 'text'
+      ? matches.map((m) => ({ content: m.content }))
+      : matches,
   };
 }
 
@@ -1058,4 +1140,14 @@ export async function listRagQueryLogs(
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
   return db.listRagQueryLogs(ragModuleKey, options);
+}
+
+export async function countRagQueryLogs(
+  tenantDbName: string,
+  ragModuleKey: string,
+  options?: { from?: Date; to?: Date },
+): Promise<{ total: number; avgLatencyMs: number }> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  return db.countRagQueryLogs(ragModuleKey, options);
 }

@@ -1622,6 +1622,7 @@ export const TENANT_SCHEMA_SQL = `
     transport TEXT,
     sourceType TEXT,
     sessionId TEXT,
+    viaServerKey TEXT,
     userId TEXT,
     apiTokenId TEXT,
     actorType TEXT,
@@ -1684,6 +1685,7 @@ export const TENANT_SCHEMA_SQL = `
     destinationIndexKey TEXT NOT NULL,
     destinationIndexName TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
+    attempt INTEGER NOT NULL DEFAULT 0,
     totalVectors INTEGER NOT NULL DEFAULT 0,
     migratedVectors INTEGER NOT NULL DEFAULT 0,
     failedVectors INTEGER NOT NULL DEFAULT 0,
@@ -1707,6 +1709,7 @@ export const TENANT_SCHEMA_SQL = `
     tenantId TEXT NOT NULL,
     projectId TEXT,
     migrationKey TEXT NOT NULL,
+    attempt INTEGER NOT NULL DEFAULT 1,
     batchIndex INTEGER NOT NULL,
     vectorIds TEXT NOT NULL DEFAULT '[]',
     status TEXT NOT NULL,
@@ -1717,6 +1720,7 @@ export const TENANT_SCHEMA_SQL = `
     createdAt TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_vml_migrationKey ON vector_migration_logs(migrationKey);
+  CREATE INDEX IF NOT EXISTS idx_vml_migrationKey_attempt ON vector_migration_logs(migrationKey, attempt);
   CREATE INDEX IF NOT EXISTS idx_vml_status ON vector_migration_logs(status);
 
   -- Browsers (parent profiles)

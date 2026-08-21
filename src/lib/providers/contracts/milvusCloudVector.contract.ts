@@ -26,6 +26,15 @@ interface MilvusCloudSettings {
 const DEFAULT_DIMENSIONS = 1536;
 const DEFAULT_VECTOR_FIELD = 'vector';
 
+/**
+ * Milvus filter expressions are strings, so an id containing a quote or
+ * backslash would break the expression (or widen the delete). Escape both.
+ */
+function escapeMilvusString(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+
 function milvusCloudMetricType(metric: string): string {
   if (metric === 'euclidean') return 'L2';
   if (metric === 'dot') return 'IP';
@@ -299,7 +308,7 @@ export const MilvusCloudVectorProviderContract: ProviderContract<
 
       async deleteVectors(handle: VectorIndexHandle, ids: string[]): Promise<void> {
         if (ids.length === 0) return;
-        const expr = `id in [${ids.map((id) => `"${id}"`).join(', ')}]`;
+        const expr = `id in [${ids.map((id) => `"${escapeMilvusString(id)}"`).join(', ')}]`;
         await milvusClient.deleteEntities({ collection_name: handle.externalId, expr });
       },
     

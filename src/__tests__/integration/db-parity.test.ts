@@ -1418,6 +1418,7 @@ describeForEachProvider('Vector migrations + batch logs', (getDb) => {
     destinationIndexKey: 'dst-index',
     destinationIndexName: 'Destination index',
     status: 'pending' as const,
+    attempt: 0,
     totalVectors: 0,
     migratedVectors: 0,
     failedVectors: 0,
@@ -1480,6 +1481,7 @@ describeForEachProvider('Vector migrations + batch logs', (getDb) => {
       tenantId,
       projectId: 'proj-1',
       migrationKey: 'mig-logs',
+      attempt: 1,
       batchIndex: 0,
       vectorIds: ['a', 'b'],
       status: 'success',
@@ -1491,6 +1493,7 @@ describeForEachProvider('Vector migrations + batch logs', (getDb) => {
       tenantId,
       projectId: 'proj-1',
       migrationKey: 'mig-logs',
+      attempt: 1,
       batchIndex: 1,
       vectorIds: [],
       status: 'failed',
@@ -1628,6 +1631,73 @@ describeForEachProvider('Vector migrations + batch logs', (getDb) => {
 
     expect(created._id).toBeTruthy();
     expect(created.matchCount).toBe(0);
+  });
+
+  it('groups a restarted migration\'s batch logs into their own run instead of mixing with the previous one', async () => {
+    const db = getDb();
+    await db.createVectorMigration(baseMigration('mig-restart'));
+
+    // First run: two batches, then it fails/gets cancelled.
+    await db.createVectorMigrationLog({
+      tenantId,
+      projectId: 'proj-1',
+      migrationKey: 'mig-restart',
+      attempt: 1,
+      batchIndex: 0,
+      vectorIds: ['a'],
+      status: 'success',
+      migratedCount: 1,
+      failedCount: 0,
+    });
+    await db.createVectorMigrationLog({
+      tenantId,
+      projectId: 'proj-1',
+      migrationKey: 'mig-restart',
+      attempt: 1,
+      batchIndex: 1,
+      vectorIds: [],
+      status: 'failed',
+      migratedCount: 0,
+      failedCount: 1,
+    });
+
+    // Restart bumps the attempt; batchIndex resets to 0 for the new run.
+    await db.updateVectorMigration('mig-restart', { attempt: 2 });
+    await db.createVectorMigrationLog({
+      tenantId,
+      projectId: 'proj-1',
+      migrationKey: 'mig-restart',
+      attempt: 2,
+      batchIndex: 0,
+      vectorIds: ['a', 'b'],
+      status: 'success',
+      migratedCount: 2,
+      failedCount: 0,
+    });
+
+    const logs = await db.listVectorMigrationLogs('mig-restart');
+    // Most recent run first, and never interleaved with the previous run.
+    expect(logs.map((l) => ({ attempt: l.attempt, batchIndex: l.batchIndex }))).toEqual([
+      { attempt: 2, batchIndex: 0 },
+      { attempt: 1, batchIndex: 0 },
+      { attempt: 1, batchIndex: 1 },
+    ]);
+
+    const restarted = await db.findVectorMigrationByKey('mig-restart');
+    expect(restarted?.attempt).toBe(2);
+
+    // Per-run summary drives the "pick a run" list — most recent run first.
+    const runs = await db.listVectorMigrationRuns('mig-restart');
+    expect(runs).toEqual([
+      expect.objectContaining({ attempt: 2, batchCount: 1, migratedCount: 2, failedCount: 0, failedBatches: 0 }),
+      expect.objectContaining({ attempt: 1, batchCount: 2, migratedCount: 1, failedCount: 1, failedBatches: 1 }),
+    ]);
+
+    // A run's own modal fetches just its logs, filtered server-side.
+    const run1Logs = await db.listVectorMigrationLogs('mig-restart', { attempt: 1 });
+    expect(run1Logs.map((l) => l.batchIndex)).toEqual([0, 1]);
+    expect(await db.countVectorMigrationLogs('mig-restart', undefined, 1)).toBe(2);
+    expect(await db.countVectorMigrationLogs('mig-restart', undefined, 2)).toBe(1);
   });
 });
 

@@ -1,5 +1,7 @@
 import { NextResponse, type NextRequest } from '@/server/api/http';
-import { queryRag } from '@/lib/services/rag/ragService';
+import { queryRag,
+  shapeRagQueryResponse,
+} from '@/lib/services/rag/ragService';
 import { createLogger } from '@/lib/core/logger';
 
 const logger = createLogger('rag-query');
@@ -31,7 +33,7 @@ export async function POST(
       filter,
     });
 
-    return NextResponse.json({ result });
+    return NextResponse.json({ result: shapeRagQueryResponse(result) });
   } catch (error) {
     logger.error('Query error', { error });
     return NextResponse.json(

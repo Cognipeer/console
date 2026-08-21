@@ -29,11 +29,13 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         INSERT INTO ${TABLES.ragModules}
         (id, tenantId, projectId, key, name, description,
          embeddingModelKey, vectorProviderKey, vectorIndexKey, fileBucketKey, fileProviderKey,
-         chunkConfig, status, rerankerKey, rerankerOversample, totalDocuments, totalChunks, metadata,
+         chunkConfig, status, rerankerKey, rerankerOversample, defaultTopK, defaultMinScore, responseDetail,
+         totalDocuments, totalChunks, metadata,
          createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @key, @name, @description,
          @embeddingModelKey, @vectorProviderKey, @vectorIndexKey, @fileBucketKey, @fileProviderKey,
-         @chunkConfig, @status, @rerankerKey, @rerankerOversample, @totalDocuments, @totalChunks, @metadata,
+         @chunkConfig, @status, @rerankerKey, @rerankerOversample, @defaultTopK, @defaultMinScore, @responseDetail,
+         @totalDocuments, @totalChunks, @metadata,
          @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
@@ -51,6 +53,9 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         status: ragModule.status,
         rerankerKey: ragModule.rerankerKey ?? null,
         rerankerOversample: ragModule.rerankerOversample ?? null,
+        defaultTopK: ragModule.defaultTopK ?? null,
+        defaultMinScore: ragModule.defaultMinScore ?? null,
+        responseDetail: ragModule.responseDetail ?? null,
         totalDocuments: ragModule.totalDocuments ?? 0,
         totalChunks: ragModule.totalChunks ?? 0,
         metadata: this.toJson(ragModule.metadata ?? {}),
@@ -88,6 +93,9 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
       if (data.projectId !== undefined) { sets.push('projectId = @projectId'); params.projectId = data.projectId; }
       if (data.rerankerKey !== undefined) { sets.push('rerankerKey = @rerankerKey'); params.rerankerKey = data.rerankerKey ?? null; }
       if (data.rerankerOversample !== undefined) { sets.push('rerankerOversample = @rerankerOversample'); params.rerankerOversample = data.rerankerOversample ?? null; }
+      if (data.defaultTopK !== undefined) { sets.push('defaultTopK = @defaultTopK'); params.defaultTopK = data.defaultTopK ?? null; }
+      if (data.defaultMinScore !== undefined) { sets.push('defaultMinScore = @defaultMinScore'); params.defaultMinScore = data.defaultMinScore ?? null; }
+      if (data.responseDetail !== undefined) { sets.push('responseDetail = @responseDetail'); params.responseDetail = data.responseDetail ?? null; }
 
       db.prepare(`UPDATE ${TABLES.ragModules} SET ${sets.join(', ')} WHERE id = @id`).run(params);
       return this.findRagModuleById(id);
@@ -388,6 +396,25 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
       return rows.map((r) => this.mapQueryLogRow(r));
     }
 
+    async countRagQueryLogs(
+      ragModuleKey: string,
+      options?: { from?: Date; to?: Date },
+    ): Promise<{ total: number; avgLatencyMs: number }> {
+      const db = this.getTenantDb();
+      const clauses: string[] = ['ragModuleKey = @ragModuleKey'];
+      const params: Record<string, unknown> = { ragModuleKey };
+      if (options?.from) { clauses.push('createdAt >= @from'); params.from = options.from.toISOString(); }
+      if (options?.to) { clauses.push('createdAt <= @to'); params.to = options.to.toISOString(); }
+
+      const row = db.prepare(
+        `SELECT COUNT(*) as total, AVG(latencyMs) as avgLatencyMs FROM ${TABLES.ragQueryLogs} WHERE ${clauses.join(' AND ')}`,
+      ).get(params) as { total: number; avgLatencyMs: number | null };
+      return {
+        total: row?.total ?? 0,
+        avgLatencyMs: row?.avgLatencyMs ? Math.round(row.avgLatencyMs) : 0,
+      };
+    }
+
     // ── Row mappers ──────────────────────────────────────────────────
 
     protected mapModuleRow(r: SqliteRow): IRagModule {
@@ -407,6 +434,9 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         status: r.status as IRagModule['status'],
         rerankerKey: (r.rerankerKey as string | null | undefined) ?? undefined,
         rerankerOversample: (r.rerankerOversample as number | null | undefined) ?? undefined,
+        defaultTopK: (r.defaultTopK as number | null | undefined) ?? undefined,
+        defaultMinScore: (r.defaultMinScore as number | null | undefined) ?? undefined,
+        responseDetail: (r.responseDetail as IRagModule['responseDetail'] | null | undefined) ?? undefined,
         totalDocuments: r.totalDocuments as number,
         totalChunks: r.totalChunks as number,
         metadata: this.parseJson(r.metadata, {}),

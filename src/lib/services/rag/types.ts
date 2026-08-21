@@ -29,6 +29,7 @@ export interface CreateRagModuleRequest {
   defaultMinScore?: number;
   defaultFilter?: Record<string, unknown>;
   filterableFields?: string[];
+  responseDetail?: 'full' | 'text';
   metadata?: Record<string, unknown>;
   createdBy: string;
 }
@@ -47,6 +48,7 @@ export interface UpdateRagModuleRequest {
   defaultMinScore?: number | null;
   defaultFilter?: Record<string, unknown> | null;
   filterableFields?: string[] | null;
+  responseDetail?: 'full' | 'text' | null;
   metadata?: Record<string, unknown>;
   updatedBy: string;
 }
@@ -86,6 +88,8 @@ export interface RagQueryResult {
   query: string;
   ragModuleKey: string;
   latencyMs: number;
+  /** The module's configured response shape; applied by the API layer only. */
+  responseDetail?: 'full' | 'text';
 }
 
 export interface RagDocumentDeleteRequest {

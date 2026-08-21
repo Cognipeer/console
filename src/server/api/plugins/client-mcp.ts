@@ -659,6 +659,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         {
           description: typeof body.description === 'string' ? body.description.trim() : undefined,
           name: body.name.trim(),
+          key: typeof body.key === 'string' && body.key.trim() ? body.key.trim() : undefined,
           sourceType: sourceType as 'openapi' | 'remote' | 'stdio',
           openApiSpec: typeof body.openApiSpec === 'string' ? body.openApiSpec : undefined,
           specFormat: typeof body.specFormat === 'string' ? body.specFormat as SpecFormatHint : undefined,
@@ -736,6 +737,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const updated = await updateMcpServer(ctx.tenantDbName, String(existing._id), ctx.tokenRecord.userId, {
+        key: typeof body.key === 'string' && body.key.trim() ? body.key.trim() : undefined,
         description: body.description as string | undefined,
         name: body.name as string | undefined,
         openApiSpec: body.openApiSpec as string | undefined,

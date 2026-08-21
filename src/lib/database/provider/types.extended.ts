@@ -192,8 +192,10 @@ export interface IMcpAuthConfig {
  * Where the server's tools come from. Legacy records (no field) are 'openapi'.
  * 'internal' backs a console-native capability (e.g. a Knowledge Base module)
  * instead of an external upstream — see `src/lib/services/mcp/internal/`.
+ * 'composite' republishes a curated set of tools from other MCP servers on
+ * this tenant under one endpoint — see `src/lib/services/mcp/composite.ts`.
  */
-export type McpSourceType = 'openapi' | 'remote' | 'stdio' | 'internal';
+export type McpSourceType = 'openapi' | 'remote' | 'stdio' | 'internal' | 'composite';
 
 /** Protocols the gateway exposes for a server. */
 export type McpExposureProtocol = 'streamable-http' | 'sse';
@@ -295,6 +297,16 @@ export interface IMcpToolAnnotations {
   openWorldHint?: boolean;
 }
 
+/** Where a composite server's tool actually came from (sourceType 'composite' only). */
+export interface IMcpToolOrigin {
+  /** The member MCP server's _id — the durable reference; keys can be renamed. */
+  serverId: string;
+  /** Denormalised for display; refreshed on every composite reconcile. */
+  serverKey: string;
+  /** The tool's real name on the member server (after the member's own rename, if any). */
+  realName: string;
+}
+
 export interface IMcpTool {
   name: string;
   description: string;
@@ -306,6 +318,8 @@ export interface IMcpTool {
   httpMethod?: string;
   /** Path template from the OpenAPI spec (sourceType 'openapi'). */
   httpPath?: string;
+  /** Set only on a composite server's snapshot tools — which member it routes to. */
+  origin?: IMcpToolOrigin;
 }
 
 /** Who initiated an MCP tool call. */
@@ -332,6 +346,12 @@ export interface IMcpRequestLog extends IUsageAttributionFields {
   sourceType?: McpSourceType;
   /** SSE session id when the call arrived over an SSE session. */
   sessionId?: string;
+  /**
+   * Set only on the member-server-scoped log a composite writes alongside
+   * its own external-facing log entry: the composite's key. Lets a member's
+   * own Logs tab show which calls arrived directly vs. via a composite.
+   */
+  viaServerKey?: string;
   createdAt?: Date;
 }
 

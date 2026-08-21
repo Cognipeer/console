@@ -335,7 +335,7 @@ describe('queryVectorIndex', () => {
     await queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
       providerKey: PROVIDER_KEY,
       indexKey: 'my-index',
-      query: { topK: 5, vector: Array<number>(4).fill(0.1) },
+      query: { topK: 5, vector: Array<number>(1536).fill(0.1) },
     });
 
     expect(recordUsageEvent).toHaveBeenCalledWith(
@@ -358,7 +358,7 @@ describe('queryVectorIndex', () => {
       queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
         providerKey: PROVIDER_KEY,
         indexKey: 'my-index',
-        query: { topK: 5, vector: Array<number>(4).fill(0.1) },
+        query: { topK: 5, vector: Array<number>(1536).fill(0.1) },
       }),
     ).rejects.toThrow('index unreachable');
 
@@ -374,7 +374,7 @@ describe('queryVectorIndex', () => {
     await queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
       providerKey: PROVIDER_KEY,
       indexKey: 'my-index',
-      query: { topK: 5, vector: Array<number>(4).fill(0.1) },
+      query: { topK: 5, vector: Array<number>(1536).fill(0.1) },
     });
 
     const [log] = db.createVectorQueryLog.mock.calls[0];
@@ -394,7 +394,7 @@ describe('queryVectorIndex', () => {
     await queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
       providerKey: PROVIDER_KEY,
       indexKey: 'my-index',
-      query: { topK: 5, vector: Array<number>(4).fill(0.1) },
+      query: { topK: 5, vector: Array<number>(1536).fill(0.1) },
     });
 
     expect(db.createVectorQueryLog).toHaveBeenCalledTimes(1);
@@ -419,7 +419,7 @@ describe('queryVectorIndex', () => {
     await queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
       providerKey: PROVIDER_KEY,
       indexKey: 'my-index',
-      query: { topK: 5, vector: Array<number>(4).fill(0.1), filter: { category: 'docs' } },
+      query: { topK: 5, vector: Array<number>(1536).fill(0.1), filter: { category: 'docs' } },
     });
 
     const [log] = db.createVectorQueryLog.mock.calls[0];
@@ -435,7 +435,7 @@ describe('queryVectorIndex', () => {
     const result = await queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
       providerKey: PROVIDER_KEY,
       indexKey: 'my-index',
-      query: { topK: 5, vector: Array<number>(4).fill(0.1) },
+      query: { topK: 5, vector: Array<number>(1536).fill(0.1) },
     });
 
     expect(result.matches).toHaveLength(1);
@@ -447,10 +447,24 @@ describe('queryVectorIndex', () => {
     const result = await queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
       providerKey: PROVIDER_KEY,
       indexKey: 'my-index',
-      query: { topK: 5, vector: Array<number>(4).fill(0.0) },
+      query: { topK: 5, vector: Array<number>(1536).fill(0.0) },
     });
 
     expect(result.matches).toEqual([]);
+  });
+
+  it('rejects a query vector whose dimension does not match the index', async () => {
+    MOCK_RUNTIME.queryVectors.mockResolvedValue({ matches: [] });
+
+    await expect(
+      queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
+        providerKey: PROVIDER_KEY,
+        indexKey: 'my-index',
+        query: { topK: 5, vector: Array<number>(768).fill(0.1) },
+      }),
+    ).rejects.toThrow(/768 values but index .* expects 1536/);
+
+    expect(MOCK_RUNTIME.queryVectors).not.toHaveBeenCalled();
   });
 });
 

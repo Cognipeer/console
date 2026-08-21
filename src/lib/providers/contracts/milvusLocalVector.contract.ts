@@ -65,6 +65,14 @@ function parseMilvusMetadata(raw: unknown): Record<string, unknown> | undefined 
 }
 
 const MILVUS_FILTER_OPERATORS = FULL_FILTER_OPERATORS;
+/**
+ * Milvus filter expressions are strings, so an id containing a quote or
+ * backslash would break the expression (or widen the delete). Escape both.
+ */
+function escapeMilvusString(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
 
 export const MilvusLocalVectorProviderContract: ProviderContract<
   VectorProviderRuntime,
@@ -277,7 +285,7 @@ export const MilvusLocalVectorProviderContract: ProviderContract<
 
       async deleteVectors(handle: VectorIndexHandle, ids: string[]): Promise<void> {
         if (ids.length === 0) return;
-        const expr = `id in [${ids.map((id) => `"${id}"`).join(', ')}]`;
+        const expr = `id in [${ids.map((id) => `"${escapeMilvusString(id)}"`).join(', ')}]`;
         await milvusClient.deleteEntities({ collection_name: handle.externalId, expr });
       },
     

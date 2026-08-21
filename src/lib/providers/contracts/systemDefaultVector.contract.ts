@@ -84,6 +84,18 @@ function buildS3Filter(filter: Record<string, unknown> | undefined): DocumentTyp
   return result as DocumentType;
 }
 
+/**
+ * S3 Vectors returns a DISTANCE (lower = closer), but `VectorQueryMatch.score`
+ * is a similarity (higher = more similar) that callers threshold with minScore.
+ * Convert using the same convention as the sqlite/mongo-community providers.
+ */
+function toSimilarityScore(distance: number | undefined, metric: string | undefined): number {
+  if (typeof distance !== 'number' || Number.isNaN(distance)) return 0;
+  if (metric === 'euclidean') return 1 / (1 + distance);
+  // cosine distance = 1 - cosine similarity
+  return 1 - distance;
+}
+
 export const SystemDefaultVectorProviderContract: ProviderContract<
   VectorProviderRuntime,
   SystemDefaultVectorCredentials,
@@ -345,14 +357,19 @@ export const SystemDefaultVectorProviderContract: ProviderContract<
             queryVector: { float32: query.vector.map((v) => Number(v)) },
             topK: query.topK,
             filter: query.filter ? buildS3Filter(toAwsVectorFilter(query.filter)) : undefined,
+            // Both default to false in the SDK — without them `distance` and
+            // `metadata` come back undefined, so every score would be 0.
+            returnDistance: true,
+            returnMetadata: true,
           }),
         );
 
         const vectors = response.vectors ?? [];
+        const metric = handle.metric ?? distanceMetric;
         return {
           matches: vectors.map((v) => ({
             id: v.key ?? '',
-            score: v.distance ?? 0,
+            score: toSimilarityScore(v.distance, metric),
             metadata: v.metadata
               ? Object.fromEntries(
                   Object.entries(v.metadata as Record<string, { stringValue?: string; booleanValue?: boolean; doubleValue?: number }>).map(

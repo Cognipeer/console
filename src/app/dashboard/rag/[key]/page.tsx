@@ -218,6 +218,7 @@ export default function RagModuleDetailPage() {
   /* usage */
   const [queryLogs, setQueryLogs] = useState<RagQueryLogView[]>([]);
   const [usageLoading, setUsageLoading] = useState(false);
+  const [usageTotals, setUsageTotals] = useState<{ total: number; avgLatencyMs: number } | null>(null);
 
   const queryForm = useForm({
     initialValues: { query: '', topK: 5, minScore: 0, filter: '' },
@@ -304,6 +305,11 @@ export default function RagModuleDetailPage() {
       if (res.ok) {
         const data = await res.json();
         setQueryLogs(data.logs ?? []);
+        setUsageTotals(
+          typeof data.total === 'number' && typeof data.avgLatencyMs === 'number'
+            ? { total: data.total, avgLatencyMs: data.avgLatencyMs }
+            : null,
+        );
       }
     } catch (e) {
       console.error('[rag usage]', e);
@@ -728,7 +734,7 @@ export default function RagModuleDetailPage() {
                       Total Queries
                     </Text>
                     <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }}>
-                      {queryLogs.length}
+                      {usageTotals ? usageTotals.total : queryLogs.length}
                     </Text>
                   </Stack>
                   <ThemeIcon size={48} radius="xl" variant="light" color="violet">
@@ -743,9 +749,11 @@ export default function RagModuleDetailPage() {
                       Avg Latency
                     </Text>
                     <Text fw={700} size="xl" style={{ fontSize: '1.75rem' }}>
-                      {queryLogs.length > 0
-                        ? `${Math.round(queryLogs.reduce((s, l) => s + l.latencyMs, 0) / queryLogs.length)}ms`
-                        : '—'}
+                      {usageTotals
+                        ? (usageTotals.total > 0 ? `${usageTotals.avgLatencyMs}ms` : '—')
+                        : (queryLogs.length > 0
+                          ? `${Math.round(queryLogs.reduce((s, l) => s + l.latencyMs, 0) / queryLogs.length)}ms`
+                          : '—')}
                     </Text>
                   </Stack>
                   <ThemeIcon size={48} radius="xl" variant="light" color="teal">

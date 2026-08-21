@@ -242,6 +242,18 @@ function toAwsMetric(metric?: string | null): AwsDistanceMetric {
     throw new Error(`S3 Vectors does not support the distance metric "${metric}".`);
 }
 
+/**
+ * S3 Vectors returns a DISTANCE (lower = closer), but `VectorQueryMatch.score`
+ * is a similarity (higher = more similar) that callers threshold with minScore.
+ * Convert using the same convention as the sqlite/mongo-community providers.
+ */
+function toSimilarityScore(distance: number | undefined, metric: string | undefined): number {
+    if (typeof distance !== 'number' || Number.isNaN(distance)) return 0;
+    if (metric === 'euclidean') return 1 / (1 + distance);
+    // cosine distance = 1 - cosine similarity
+    return 1 - distance;
+}
+
 function buildHandle(
     from: {
         indexArn: string;
@@ -739,7 +751,7 @@ export const AwsS3VectorsProviderContract: ProviderContract<
 
                 const matches = (response.vectors ?? []).map((vector) => ({
                     id: ensurePresent(vector.key, 'Vector key missing from query response.'),
-                    score: vector.distance ?? 0,
+                    score: toSimilarityScore(vector.distance, handle.metric),
                     metadata: (vector.metadata as Record<string, unknown>) ?? {},
                 }));
 

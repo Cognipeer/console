@@ -287,5 +287,30 @@ export function RagMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: T
       const docs = await cursor.toArray();
       return docs.map((d) => ({ ...d, _id: d._id?.toString() }) as IRagQueryLog);
     }
+
+    async countRagQueryLogs(
+      ragModuleKey: string,
+      options?: { from?: Date; to?: Date },
+    ): Promise<{ total: number; avgLatencyMs: number }> {
+      const db = this.getTenantDb();
+      const query: Record<string, unknown> = { ragModuleKey };
+      if (options?.from || options?.to) {
+        const dateFilter: Record<string, Date> = {};
+        if (options.from) dateFilter.$gte = options.from;
+        if (options.to) dateFilter.$lte = options.to;
+        query.createdAt = dateFilter;
+      }
+      const [agg] = await db
+        .collection(COLLECTIONS.ragQueryLogs)
+        .aggregate([
+          { $match: query },
+          { $group: { _id: null, total: { $sum: 1 }, avgLatencyMs: { $avg: '$latencyMs' } } },
+        ])
+        .toArray();
+      return {
+        total: (agg?.total as number | undefined) ?? 0,
+        avgLatencyMs: agg?.avgLatencyMs ? Math.round(agg.avgLatencyMs as number) : 0,
+      };
+    }
   };
 }

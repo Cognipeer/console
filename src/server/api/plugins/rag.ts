@@ -3,6 +3,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import type { IRagChunkConfig, IRagDocument, IUser } from '@/lib/database';
 import {
+  countRagQueryLogs,
   createRagModule,
   deleteRagDocument,
   deleteRagModule,
@@ -16,6 +17,7 @@ import {
   queryRag,
   reingestDocument,
   updateRagModule,
+  shapeRagQueryResponse,
 } from '@/lib/services/rag/ragService';
 import { answerWithRag, type RagAnswerRequest } from '@/lib/services/rag/ragAnswerService';
 import {
@@ -128,6 +130,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         filterableFields: Array.isArray(body.filterableFields)
           ? (body.filterableFields as unknown[]).filter((f): f is string => typeof f === 'string')
           : undefined,
+        responseDetail: body.responseDetail === 'text' || body.responseDetail === 'full' ? body.responseDetail : undefined,
       });
 
       return reply.code(201).send({ module: ragModule });
@@ -400,7 +403,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         minScore: typeof body.minScore === 'number' ? body.minScore : undefined,
       });
 
-      return reply.code(200).send({ result });
+      return reply.code(200).send({ result: shapeRagQueryResponse(result) });
     } catch (error) {
       if (error instanceof VectorFilterError) {
         return reply.code(400).send({ error: error.message });
@@ -458,13 +461,22 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const query = (request.query ?? {}) as { from?: string; limit?: string; to?: string };
-      const logs = await listRagQueryLogs(session.tenantDbName, key, {
-        from: query.from ? new Date(query.from) : undefined,
-        limit: query.limit ? Number(query.limit) : 50,
-        to: query.to ? new Date(query.to) : undefined,
-      });
+      const from = query.from ? new Date(query.from) : undefined;
+      const to = query.to ? new Date(query.to) : undefined;
 
-      return reply.code(200).send({ logs });
+      // `logs` is a page (default 50, newest-first) for the History table;
+      // `total`/`avgLatencyMs` are true aggregates over the full matched set —
+      // the Overview KPIs must not silently cap at the page size.
+      const [logs, { total, avgLatencyMs }] = await Promise.all([
+        listRagQueryLogs(session.tenantDbName, key, {
+          from,
+          limit: query.limit ? Number(query.limit) : 50,
+          to,
+        }),
+        countRagQueryLogs(session.tenantDbName, key, { from, to }),
+      ]);
+
+      return reply.code(200).send({ avgLatencyMs, logs, total });
     } catch (error) {
       logger.error('List RAG query logs error', { error });
       return sendProjectContextError(reply, error)

@@ -33,7 +33,7 @@ export function McpServerMixin<TBase extends Constructor<MongoDBProviderBase>>(B
 
     async updateMcpServer(
       id: string,
-      data: Partial<Omit<IMcpServer, 'tenantId' | 'key' | 'createdBy'>>,
+      data: Partial<Omit<IMcpServer, 'tenantId' | 'createdBy'>>,
     ): Promise<IMcpServer | null> {
       const db = this.getTenantDb();
       const updateData: Record<string, unknown> = { ...data, updatedAt: new Date() };

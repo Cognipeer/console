@@ -24,15 +24,10 @@ import type {
 
 interface AzureAiSearchCredentials {
     apiKey: string;
-    subscriptionId?: string;
-    subscription?: string;
 }
 
 interface AzureAiSearchSettings {
     foundryProjectEndpoint: string;
-    resourceGroup?: string;
-    location?: string;
-    projectResourceId?: string;
     defaultDistanceMetric?: 'cosine' | 'euclidean' | 'dotProduct';
     serviceVersion?: string;
 }
@@ -155,22 +150,6 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                         required: true,
                         scope: 'credentials',
                     },
-                    {
-                        name: 'subscriptionId',
-                        label: 'Subscription ID',
-                        type: 'text',
-                        required: false,
-                        description: 'Azure subscription ID. Optional, used for resource identification.',
-                        scope: 'credentials',
-                    },
-                    {
-                        name: 'subscription',
-                        label: 'Subscription',
-                        type: 'text',
-                        required: false,
-                        description: 'Azure subscription display name.',
-                        scope: 'credentials',
-                    },
                 ],
             },
             {
@@ -185,32 +164,6 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                         placeholder: 'https://myservice.search.windows.net',
                         description:
                             'The endpoint URL of your Azure AI Search service or Microsoft Foundry project.',
-                        scope: 'settings',
-                    },
-                    {
-                        name: 'location',
-                        label: 'Location',
-                        type: 'text',
-                        required: false,
-                        placeholder: 'eastus',
-                        description: 'Azure region where the resource is deployed (e.g. eastus, westeurope).',
-                        scope: 'settings',
-                    },
-                    {
-                        name: 'resourceGroup',
-                        label: 'Resource Group',
-                        type: 'text',
-                        required: false,
-                        description: 'Azure resource group that contains the search service.',
-                        scope: 'settings',
-                    },
-                    {
-                        name: 'projectResourceId',
-                        label: 'Project Resource ID',
-                        type: 'text',
-                        required: false,
-                        placeholder: '/subscriptions/{subId}/resourceGroups/{rg}/providers/...',
-                        description: 'Full Azure resource ID of the AI project or search service. Optional.',
                         scope: 'settings',
                     },
                     {
@@ -458,7 +411,9 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                     );
                 }
 
-                const searchResults = await client.search('*', {
+                // searchText stays undefined: passing '*' puts Azure into hybrid/RRF
+                // scoring, which collapses every similarity to ~0.016.
+                const searchResults = await client.search(undefined, {
                     ...(odataFilter ? { filter: odataFilter } : {}),
                     vectorSearchOptions: {
                         queries: [

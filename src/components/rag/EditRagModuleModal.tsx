@@ -59,6 +59,7 @@ interface RagModuleData {
   defaultMinScore?: number | null;
   defaultFilter?: Record<string, unknown> | null;
   filterableFields?: string[] | null;
+  responseDetail?: 'full' | 'text' | null;
 }
 
 interface RerankerOption {
@@ -90,6 +91,7 @@ interface FormValues {
   defaultMinScore: number;
   defaultFilter: string;
   filterableFields: string[];
+  responseDetail: 'full' | 'text';
 }
 
 export default function EditRagModuleModal({ opened, onClose, module, onUpdated }: EditRagModuleModalProps) {
@@ -117,6 +119,7 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
       defaultMinScore: module.defaultMinScore ?? 0.5,
       defaultFilter: module.defaultFilter ? JSON.stringify(module.defaultFilter, null, 2) : '',
       filterableFields: module.filterableFields ?? [],
+      responseDetail: module.responseDetail ?? 'full',
     },
     validate: {
       name: (v) => (!v ? 'Name is required' : null),
@@ -228,6 +231,7 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
         defaultMinScore: module.defaultMinScore ?? 0.5,
         defaultFilter: module.defaultFilter ? JSON.stringify(module.defaultFilter, null, 2) : '',
         filterableFields: module.filterableFields ?? [],
+        responseDetail: module.responseDetail ?? 'full',
       });
       void loadEmbeddingModels();
       void loadVectorProviders();
@@ -279,6 +283,7 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
             ? (JSON.parse(values.defaultFilter) as Record<string, unknown>)
             : null,
           filterableFields: values.filterableFields.length > 0 ? values.filterableFields : null,
+          responseDetail: values.responseDetail,
         }),
       });
 
@@ -495,6 +500,21 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
             {...form.getInputProps('filterableFields')}
           />
         </FormField>
+        <FormRow cols={2}>
+          <FormField
+            label="Response detail"
+            hint="What a query response carries. 'Text only' returns just the chunk text."
+          >
+            <Select
+              data={[
+                { value: 'full', label: 'Full — scores, ids and metadata' },
+                { value: 'text', label: 'Text only — just the chunk text' },
+              ]}
+              allowDeselect={false}
+              {...form.getInputProps('responseDetail')}
+            />
+          </FormField>
+        </FormRow>
       </FormSection>
     </FormShell>
   );

@@ -2,7 +2,6 @@ import type { FastifyPluginAsync } from 'fastify';
 import type { ProviderDomain } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
-import { MongoDBProvider } from '@/lib/database/mongodb.provider';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { providerRegistry } from '@/lib/providers';
 import type { ProviderStatus } from '@/lib/services/providers/providerService';
@@ -594,6 +593,7 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
         from: since,
         to: until,
         days,
+        tenantId: session.tenantId,
       });
 
       return reply.code(200).send(stats);

@@ -46,6 +46,8 @@ interface McpToolRow {
   httpMethod?: string;
   httpPath?: string;
   annotations?: IMcpToolAnnotations;
+  /** sourceType 'composite' only: which member server this tool routes to. */
+  origin?: { serverId: string; serverKey: string; realName: string };
 }
 
 interface McpToolsPanelProps {
@@ -57,6 +59,8 @@ interface McpToolsPanelProps {
   toolAnnotations?: Record<string, IMcpToolAnnotations>;
   /** Operator-authored descriptions keyed by tool name. */
   toolDescriptions?: Record<string, string>;
+  /** Operator-set exposed names, keyed by the real (discovered) tool name. */
+  toolNames?: Record<string, string>;
   /** Receives the fresh server payload returned by the PATCH. */
   onServerUpdated: (server: unknown) => void;
 }
@@ -84,6 +88,9 @@ const ANNOTATION_FLAGS = [
   },
 ];
 
+/** Mirrors the server-side charset check in mcpService.ts. */
+const TOOL_NAME_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
+
 /** Flat list below this size — grouping only helps at scale. */
 const GROUP_THRESHOLD = 30;
 /** Per-group render cap so a single huge group can't freeze the tab. */
@@ -100,6 +107,9 @@ const METHOD_COLORS: Record<string, string> = {
 };
 
 function groupKeyFor(tool: McpToolRow): string {
+  // Composite servers: group by the member server that owns the tool,
+  // regardless of that member's own source shape.
+  if (tool.origin) return tool.origin.serverKey;
   if (tool.httpPath) {
     const seg = tool.httpPath.split('/').filter(Boolean)[0];
     return seg ? `/${seg}` : '/';
@@ -116,6 +126,7 @@ export default function McpToolsPanel({
   sourceType,
   toolAnnotations,
   toolDescriptions,
+  toolNames,
   onServerUpdated,
 }: McpToolsPanelProps) {
   const savedKey = useMemo(() => [...disabledTools].sort().join('\n'), [disabledTools]);
@@ -127,11 +138,15 @@ export default function McpToolsPanel({
   const [editingTool, setEditingTool] = useState<McpToolRow | null>(null);
   const [annDraft, setAnnDraft] = useState<IMcpToolAnnotations>({});
   const [descDraft, setDescDraft] = useState('');
+  const [nameDraft, setNameDraft] = useState('');
   const [savingAnn, setSavingAnn] = useState(false);
 
   const overrides = useMemo(() => toolAnnotations ?? {}, [toolAnnotations]);
   const descOverrides = useMemo(() => toolDescriptions ?? {}, [toolDescriptions]);
+  const nameOverrides = useMemo(() => toolNames ?? {}, [toolNames]);
   const sourceDefaults = useMemo(() => defaultAnnotationsForSource(sourceType), [sourceType]);
+  const nameDraftTrimmed = nameDraft.trim();
+  const nameDraftValid = !nameDraftTrimmed || TOOL_NAME_PATTERN.test(nameDraftTrimmed);
 
   const effectiveFor = (tool: McpToolRow, override: IMcpToolAnnotations | undefined) =>
     resolveToolAnnotations(
@@ -190,7 +205,8 @@ export default function McpToolsPanel({
         if (query
           && !t.name.toLowerCase().includes(query)
           && !(t.httpPath ?? '').toLowerCase().includes(query)
-          && !(t.description ?? '').toLowerCase().includes(query)) {
+          && !(t.description ?? '').toLowerCase().includes(query)
+          && !(nameOverrides[t.name] ?? '').toLowerCase().includes(query)) {
           return false;
         }
         if (statusFilter === 'enabled' && draft.has(t.name)) return false;
@@ -198,7 +214,7 @@ export default function McpToolsPanel({
         return true;
       }),
     }))
-    .filter((g) => g.visible.length > 0), [groups, query, statusFilter, draft]);
+    .filter((g) => g.visible.length > 0), [groups, query, statusFilter, draft, nameOverrides]);
 
   const visibleCount = useMemo(
     () => visibleGroups.reduce((sum, g) => sum + g.visible.length, 0),
@@ -233,20 +249,31 @@ export default function McpToolsPanel({
     setEditingTool(tool);
     setAnnDraft({ ...(overrides[tool.name] ?? {}) });
     setDescDraft(descOverrides[tool.name] ?? '');
+    setNameDraft(nameOverrides[tool.name] ?? '');
   };
 
   const handleSaveAnnotations = async () => {
     if (!editingTool) return;
+    if (!nameDraftValid) {
+      notifications.show({
+        title: 'Invalid tool name',
+        message: 'Use only letters, numbers, "_" and "-" (max 128 characters).',
+        color: 'red',
+      });
+      return;
+    }
     setSavingAnn(true);
     try {
       const payload = Object.keys(annDraft).length ? annDraft : null;
       const description = descDraft.trim();
+      const name = nameDraftTrimmed;
       const res = await fetch(`/api/mcp/${serverId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           toolAnnotations: { [editingTool.name]: payload },
           toolDescriptions: { [editingTool.name]: description || null },
+          toolNames: { [editingTool.name]: name || null },
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -255,7 +282,7 @@ export default function McpToolsPanel({
       setEditingTool(null);
       notifications.show({
         title: 'Tool settings saved',
-        message: payload || description
+        message: payload || description || name
           ? `Overrides applied to ${editingTool.name}`
           : `${editingTool.name} is back to its discovered definition`,
         color: 'teal',
@@ -346,6 +373,19 @@ export default function McpToolsPanel({
                     </Text>
                     {tool.httpPath ? (
                       <Text size="xs" c="dimmed" ff="monospace">{tool.name}</Text>
+                    ) : null}
+                    {nameOverrides[tool.name] ? (
+                      <Text size="xs" c="grape" ff="monospace">
+                        → exposed as {nameOverrides[tool.name]}
+                      </Text>
+                    ) : null}
+                    {tool.origin ? (
+                      <Text size="xs" c="dimmed">
+                        via <Text span ff="monospace">{tool.origin.serverKey}</Text>
+                        {tool.origin.realName !== tool.name ? (
+                          <> · <Text span ff="monospace">{tool.origin.realName}</Text> there</>
+                        ) : null}
+                      </Text>
                     ) : null}
                   </Table.Td>
                   <Table.Td>
@@ -562,8 +602,20 @@ export default function McpToolsPanel({
             />
 
             <TextInput
+              label="Tool name"
+              description={
+                `The identifier MCP clients and agents call this tool by (default: "${editingTool.name}"). `
+                + 'Must stay unique on this server; calls under the new name still run the same underlying tool.'
+              }
+              placeholder={editingTool.name}
+              value={nameDraft}
+              error={nameDraftValid ? undefined : 'Use only letters, numbers, "_" and "-" (max 128 characters).'}
+              onChange={(e) => setNameDraft(e.currentTarget.value)}
+            />
+
+            <TextInput
               label="Title"
-              description="Human-readable label shown by MCP clients."
+              description="Human-readable label shown by MCP clients (cosmetic — not the identifier used to call it)."
               placeholder={editingTool.name}
               value={annDraft.title ?? ''}
               onChange={(e) => {
@@ -606,7 +658,7 @@ export default function McpToolsPanel({
               <Code block>
                 {JSON.stringify(
                   {
-                    name: editingTool.name,
+                    name: nameDraftTrimmed || editingTool.name,
                     description: descDraft.trim() || editingTool.description || '',
                     annotations: effectiveFor(editingTool, annDraft),
                   },
@@ -620,8 +672,8 @@ export default function McpToolsPanel({
               <Button
                 variant="subtle"
                 color="red"
-                disabled={savingAnn || (!Object.keys(annDraft).length && !descDraft.trim())}
-                onClick={() => { setAnnDraft({}); setDescDraft(''); }}
+                disabled={savingAnn || (!Object.keys(annDraft).length && !descDraft.trim() && !nameDraft.trim())}
+                onClick={() => { setAnnDraft({}); setDescDraft(''); setNameDraft(''); }}
               >
                 Reset to discovered
               </Button>
@@ -629,7 +681,7 @@ export default function McpToolsPanel({
                 <Button variant="default" disabled={savingAnn} onClick={() => setEditingTool(null)}>
                   Cancel
                 </Button>
-                <Button loading={savingAnn} onClick={() => void handleSaveAnnotations()}>
+                <Button loading={savingAnn} disabled={!nameDraftValid} onClick={() => void handleSaveAnnotations()}>
                   Save
                 </Button>
               </Group>

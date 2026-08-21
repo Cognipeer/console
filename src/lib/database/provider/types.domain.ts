@@ -839,6 +839,11 @@ export interface IRagModule {
    * know what is filterable.
    */
   filterableFields?: string[];
+  /**
+   * How much of each match a query response carries. 'full' (default) keeps the
+   * scores/ids/metadata; 'text' returns only the chunk text.
+   */
+  responseDetail?: 'full' | 'text';
   totalDocuments?: number;
   totalChunks?: number;
   metadata?: Record<string, unknown>;

@@ -9,6 +9,7 @@ import type { Filter } from 'mongodb';
 import type {
   IVectorMigration,
   IVectorMigrationLog,
+  IVectorMigrationRunSummary,
   VectorMigrationStatus,
   VectorMigrationLogStatus,
 } from '../provider.interface';
@@ -131,13 +132,16 @@ export function VectorMigrationMixin<TBase extends Constructor<MongoDBProviderBa
 
     async listVectorMigrationLogs(
       migrationKey: string,
-      options?: { limit?: number; offset?: number },
+      options?: { limit?: number; offset?: number; attempt?: number },
     ): Promise<IVectorMigrationLog[]> {
       const db = this.getTenantDb();
       const logs = await db
         .collection<IVectorMigrationLog>(COLLECTIONS.vectorMigrationLogs)
-        .find({ migrationKey } as Filter<IVectorMigrationLog>)
-        .sort({ batchIndex: 1 })
+        .find({
+          migrationKey,
+          ...(options?.attempt !== undefined ? { attempt: options.attempt } : {}),
+        } as Filter<IVectorMigrationLog>)
+        .sort({ attempt: -1, batchIndex: 1 })
         .skip(options?.offset ?? 0)
         .limit(options?.limit ?? 100)
         .toArray();
@@ -148,6 +152,7 @@ export function VectorMigrationMixin<TBase extends Constructor<MongoDBProviderBa
     async countVectorMigrationLogs(
       migrationKey: string,
       status?: VectorMigrationLogStatus,
+      attempt?: number,
     ): Promise<number> {
       const db = this.getTenantDb();
       return db
@@ -155,7 +160,54 @@ export function VectorMigrationMixin<TBase extends Constructor<MongoDBProviderBa
         .countDocuments({
           migrationKey,
           ...(status ? { status } : {}),
+          ...(attempt !== undefined ? { attempt } : {}),
         } as Filter<IVectorMigrationLog>);
+    }
+
+    async listVectorMigrationRuns(migrationKey: string): Promise<IVectorMigrationRunSummary[]> {
+      const db = this.getTenantDb();
+      const rows = await db
+        .collection<IVectorMigrationLog>(COLLECTIONS.vectorMigrationLogs)
+        .aggregate<{
+          _id: number;
+          batchCount: number;
+          successBatches: number;
+          failedBatches: number;
+          skippedBatches: number;
+          migratedCount: number;
+          failedCount: number;
+          startedAt: Date;
+          endedAt: Date;
+        }>([
+          { $match: { migrationKey } },
+          {
+            $group: {
+              _id: '$attempt',
+              batchCount: { $sum: 1 },
+              successBatches: { $sum: { $cond: [{ $eq: ['$status', 'success'] }, 1, 0] } },
+              failedBatches: { $sum: { $cond: [{ $eq: ['$status', 'failed'] }, 1, 0] } },
+              skippedBatches: { $sum: { $cond: [{ $eq: ['$status', 'skipped'] }, 1, 0] } },
+              migratedCount: { $sum: '$migratedCount' },
+              failedCount: { $sum: '$failedCount' },
+              startedAt: { $min: '$createdAt' },
+              endedAt: { $max: '$createdAt' },
+            },
+          },
+          { $sort: { _id: -1 } },
+        ])
+        .toArray();
+
+      return rows.map((row) => ({
+        attempt: row._id,
+        batchCount: row.batchCount,
+        successBatches: row.successBatches,
+        failedBatches: row.failedBatches,
+        skippedBatches: row.skippedBatches,
+        migratedCount: row.migratedCount,
+        failedCount: row.failedCount,
+        startedAt: row.startedAt,
+        endedAt: row.endedAt,
+      }));
     }
   };
 }

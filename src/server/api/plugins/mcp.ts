@@ -32,7 +32,13 @@ import {
   isStdioRunnerEnabled,
   updateMcpServer,
 } from '@/lib/services/mcp';
-import type { McpAuditContext, InternalMcpConfigInput, UpdateMcpServerInput } from '@/lib/services/mcp';
+import type {
+  McpAuditContext,
+  InternalMcpConfigInput,
+  CompositeConfigInput,
+  UpdateMcpServerInput,
+} from '@/lib/services/mcp';
+import { sanitizeCompositePrefix } from '@/lib/services/mcp';
 import { INTERNAL_MCP_PROVIDERS } from '@/lib/services/mcp/internal/registry';
 import {
   buildRuntimeContextFromRequest,
@@ -52,7 +58,7 @@ import {
 
 const logger = createLogger('api:mcp');
 const VALID_AUTH_TYPES: McpAuthType[] = ['none', 'token', 'header', 'basic'];
-const VALID_SOURCE_TYPES = ['openapi', 'remote', 'stdio', 'internal'] as const;
+const VALID_SOURCE_TYPES = ['openapi', 'remote', 'stdio', 'internal', 'composite'] as const;
 
 /**
  * Resolve a server by id within the caller's project scope.
@@ -131,6 +137,26 @@ function parseInternalConfig(raw: unknown): InternalMcpConfigInput | undefined {
       ? value.config as Record<string, unknown>
       : undefined,
   };
+}
+
+/** Shape-only parse — deep validation (member exists, same tenant/project, no
+ *  nesting) happens against the DB inside createMcpServer/updateMcpServer. */
+function parseCompositeConfig(raw: unknown): CompositeConfigInput | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const value = raw as { members?: unknown };
+  if (!Array.isArray(value.members)) return undefined;
+  const members: CompositeConfigInput['members'] = [];
+  for (const m of value.members) {
+    if (!m || typeof m !== 'object') continue;
+    const entry = m as { serverId?: unknown; toolPrefix?: unknown; alwaysPrefix?: unknown };
+    if (typeof entry.serverId !== 'string' || !entry.serverId.trim()) continue;
+    members.push({
+      serverId: entry.serverId.trim(),
+      toolPrefix: sanitizeCompositePrefix(entry.toolPrefix),
+      alwaysPrefix: entry.alwaysPrefix === true,
+    });
+  }
+  return { members };
 }
 
 function parseStdioConfig(raw: unknown): IMcpStdioConfig | undefined {
@@ -309,7 +335,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
 
       const sourceType = typeof body.sourceType === 'string' ? body.sourceType : 'openapi';
       if (!VALID_SOURCE_TYPES.includes(sourceType as typeof VALID_SOURCE_TYPES[number])) {
-        return reply.code(400).send({ error: 'sourceType must be "openapi", "remote", "stdio", or "internal"' });
+        return reply.code(400).send({ error: 'sourceType must be "openapi", "remote", "stdio", "internal", or "composite"' });
       }
 
       if (sourceType === 'openapi' && typeof body.openApiSpec !== 'string') {
@@ -334,6 +360,11 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         if (!INTERNAL_MCP_PROVIDERS.some((p) => p.id === internalConfig.provider)) {
           return reply.code(400).send({ error: `Unknown internal provider "${internalConfig.provider}"` });
         }
+      }
+
+      const compositeConfig = parseCompositeConfig(body.compositeConfig);
+      if (sourceType === 'composite' && !compositeConfig?.members.length) {
+        return reply.code(400).send({ error: 'compositeConfig.members must include at least one member server' });
       }
 
       // Enterprise sub-feature: persistent sandbox execution needs the runtime
@@ -374,7 +405,8 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         {
           description: typeof body.description === 'string' ? body.description.trim() : undefined,
           name: body.name.trim(),
-          sourceType: sourceType as 'openapi' | 'remote' | 'stdio' | 'internal',
+          key: typeof body.key === 'string' && body.key.trim() ? body.key.trim() : undefined,
+          sourceType: sourceType as 'openapi' | 'remote' | 'stdio' | 'internal' | 'composite',
           openApiSpec: typeof body.openApiSpec === 'string' ? body.openApiSpec : undefined,
           specFormat: typeof body.specFormat === 'string' ? body.specFormat as SpecFormatHint : undefined,
           upstreamAuth: body.upstreamAuth as IMcpAuthConfig,
@@ -384,6 +416,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
           remoteConfig,
           stdioConfig,
           internalConfig,
+          compositeConfig,
           exposure: parseExposure(body.exposure),
           aegis: aegisConfig,
         },
@@ -487,6 +520,19 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'toolDescriptions must be an object keyed by tool name' });
       }
 
+      if (body.toolNames !== undefined
+        && (typeof body.toolNames !== 'object' || body.toolNames === null
+          || Array.isArray(body.toolNames))) {
+        return reply.code(400).send({ error: 'toolNames must be an object keyed by tool name' });
+      }
+
+      if (body.compositeConfig !== undefined) {
+        const parsed = parseCompositeConfig(body.compositeConfig);
+        if (!parsed?.members.length) {
+          return reply.code(400).send({ error: 'compositeConfig.members must include at least one member server' });
+        }
+      }
+
       // Enterprise sub-feature gate (mirrors POST): a non-enterprise tenant may
       // not turn on persistent sandbox execution via edit. Aegis is left as
       // save-but-inert (UI warns) to match create behaviour.
@@ -502,6 +548,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const updated = await updateMcpServer(session.tenantDbName, id, session.userId, {
+        key: typeof body.key === 'string' && body.key.trim() ? body.key.trim() : undefined,
         description: body.description as string | undefined,
         name: body.name as string | undefined,
         openApiSpec: body.openApiSpec as string | undefined,
@@ -512,12 +559,14 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         remoteConfig: body.remoteConfig !== undefined ? parseRemoteConfig(body.remoteConfig) : undefined,
         stdioConfig: nextStdioConfig,
         internalConfig: body.internalConfig !== undefined ? parseInternalConfig(body.internalConfig) : undefined,
+        compositeConfig: body.compositeConfig !== undefined ? parseCompositeConfig(body.compositeConfig) : undefined,
         exposure: body.exposure !== undefined ? parseExposure(body.exposure) : undefined,
         aegis: nextAegis,
         runtimeHeaders: body.runtimeHeaders as { allow?: boolean; allowedNames?: string[] } | null | undefined,
         disabledTools: body.disabledTools as string[] | undefined,
         toolAnnotations: body.toolAnnotations as UpdateMcpServerInput['toolAnnotations'],
         toolDescriptions: body.toolDescriptions as UpdateMcpServerInput['toolDescriptions'],
+        toolNames: body.toolNames as UpdateMcpServerInput['toolNames'],
       }, auditContextFor(request, session.userId));
 
       if (!updated) {

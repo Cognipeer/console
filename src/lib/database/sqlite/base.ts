@@ -389,6 +389,26 @@ export class SQLiteProviderBase {
       'rerankerOversample',
       'rerankerOversample INTEGER',
     );
+    // Query defaults + response shape. These were added to the Mongo tree and
+    // the UI without ever reaching SQLite, so on SQLite they silently vanished.
+    this.ensureTableColumn(
+      db,
+      TABLES.ragModules,
+      'defaultTopK',
+      'defaultTopK INTEGER',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.ragModules,
+      'defaultMinScore',
+      'defaultMinScore REAL',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.ragModules,
+      'responseDetail',
+      'responseDetail TEXT',
+    );
     // GPU fleet host extensions (added 2026-05-22). Safe to ensure on every boot.
     this.ensureTableColumn(
       db,
@@ -772,6 +792,10 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.mcpRequestLogs, 'transport', 'transport TEXT');
     this.ensureTableColumn(db, TABLES.mcpRequestLogs, 'sourceType', 'sourceType TEXT');
     this.ensureTableColumn(db, TABLES.mcpRequestLogs, 'sessionId', 'sessionId TEXT');
+    // Composite MCP servers (sourceType 'composite'): a member-scoped log row
+    // records the composite's key here so the member's own Logs tab can show
+    // "via <composite>" alongside calls that hit it directly.
+    this.ensureTableColumn(db, TABLES.mcpRequestLogs, 'viaServerKey', 'viaServerKey TEXT');
 
     // Evaluation: dataset items moved to their own table; the denormalised
     // itemCount rides on the dataset row. Suites were missing the
@@ -795,6 +819,11 @@ export class SQLiteProviderBase {
     // Structured-output contract captured with the item, so a replay reproduces
     // the request shape production ran under (see tracingResponseFormat.ts).
     this.ensureTableColumn(db, TABLES.evaluationDatasetItems, 'responseFormat', 'responseFormat TEXT');
+    // Vector migrations: `attempt` groups a restarted migration's batch logs
+    // into their own run instead of mixing with the previous run's batches
+    // (both reuse batchIndex starting from 0).
+    this.ensureTableColumn(db, TABLES.vectorMigrations, 'attempt', 'attempt INTEGER NOT NULL DEFAULT 0');
+    this.ensureTableColumn(db, TABLES.vectorMigrationLogs, 'attempt', 'attempt INTEGER NOT NULL DEFAULT 1');
   }
 
   private migrateOcrJobsSchema(db: Database.Database): void {

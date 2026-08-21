@@ -5,6 +5,7 @@
 import type {
   IVectorMigration,
   IVectorMigrationLog,
+  IVectorMigrationRunSummary,
   VectorMigrationStatus,
   VectorMigrationLogStatus,
 } from '../provider/types.base';
@@ -26,14 +27,14 @@ export function VectorMigrationMixin<TBase extends Constructor<SQLiteProviderBas
         (id, tenantId, projectId, key, name, description,
          sourceProviderKey, sourceIndexKey, sourceIndexName,
          destinationProviderKey, destinationIndexKey, destinationIndexName,
-         status, totalVectors, migratedVectors, failedVectors, batchSize,
+         status, attempt, totalVectors, migratedVectors, failedVectors, batchSize,
          errorMessage, startedAt, completedAt, metadata,
          createdBy, updatedBy, createdAt, updatedAt)
         VALUES
         (@id, @tenantId, @projectId, @key, @name, @description,
          @sourceProviderKey, @sourceIndexKey, @sourceIndexName,
          @destinationProviderKey, @destinationIndexKey, @destinationIndexName,
-         @status, @totalVectors, @migratedVectors, @failedVectors, @batchSize,
+         @status, @attempt, @totalVectors, @migratedVectors, @failedVectors, @batchSize,
          @errorMessage, @startedAt, @completedAt, @metadata,
          @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
@@ -50,6 +51,7 @@ export function VectorMigrationMixin<TBase extends Constructor<SQLiteProviderBas
         destinationIndexKey: migration.destinationIndexKey,
         destinationIndexName: migration.destinationIndexName,
         status: migration.status,
+        attempt: migration.attempt,
         totalVectors: migration.totalVectors,
         migratedVectors: migration.migratedVectors,
         failedVectors: migration.failedVectors,
@@ -83,6 +85,7 @@ export function VectorMigrationMixin<TBase extends Constructor<SQLiteProviderBas
       if (has('name')) { sets.push('name = @name'); params.name = data.name; }
       if (has('description')) { sets.push('description = @description'); params.description = data.description ?? null; }
       if (has('status')) { sets.push('status = @status'); params.status = data.status; }
+      if (has('attempt')) { sets.push('attempt = @attempt'); params.attempt = data.attempt; }
       if (has('totalVectors')) { sets.push('totalVectors = @totalVectors'); params.totalVectors = data.totalVectors; }
       if (has('migratedVectors')) { sets.push('migratedVectors = @migratedVectors'); params.migratedVectors = data.migratedVectors; }
       if (has('failedVectors')) { sets.push('failedVectors = @failedVectors'); params.failedVectors = data.failedVectors; }
@@ -142,16 +145,17 @@ export function VectorMigrationMixin<TBase extends Constructor<SQLiteProviderBas
 
       db.prepare(`
         INSERT INTO ${TABLES.vectorMigrationLogs}
-        (id, tenantId, projectId, migrationKey, batchIndex, vectorIds, status,
+        (id, tenantId, projectId, migrationKey, attempt, batchIndex, vectorIds, status,
          migratedCount, failedCount, errorMessage, durationMs, createdAt)
         VALUES
-        (@id, @tenantId, @projectId, @migrationKey, @batchIndex, @vectorIds, @status,
+        (@id, @tenantId, @projectId, @migrationKey, @attempt, @batchIndex, @vectorIds, @status,
          @migratedCount, @failedCount, @errorMessage, @durationMs, @createdAt)
       `).run({
         id,
         tenantId: log.tenantId,
         projectId: log.projectId ?? null,
         migrationKey: log.migrationKey,
+        attempt: log.attempt,
         batchIndex: log.batchIndex,
         vectorIds: this.toJson(log.vectorIds),
         status: log.status,
@@ -167,37 +171,67 @@ export function VectorMigrationMixin<TBase extends Constructor<SQLiteProviderBas
 
     async listVectorMigrationLogs(
       migrationKey: string,
-      options?: { limit?: number; offset?: number },
+      options?: { limit?: number; offset?: number; attempt?: number },
     ): Promise<IVectorMigrationLog[]> {
       const db = this.getTenantDb();
       const limit = options?.limit ?? 100;
       const offset = options?.offset ?? 0;
+      const attemptClause = options?.attempt !== undefined ? 'AND attempt = @attempt' : '';
       const rows = db.prepare(`
         SELECT * FROM ${TABLES.vectorMigrationLogs}
-        WHERE migrationKey = @migrationKey
-        ORDER BY batchIndex ASC
+        WHERE migrationKey = @migrationKey ${attemptClause}
+        ORDER BY attempt DESC, batchIndex ASC
         LIMIT @limit OFFSET @offset
-      `).all({ migrationKey, limit, offset }) as SqliteRow[];
+      `).all({ migrationKey, limit, offset, attempt: options?.attempt }) as SqliteRow[];
       return rows.map(this.rowToVectorMigrationLog.bind(this));
     }
 
     async countVectorMigrationLogs(
       migrationKey: string,
       status?: VectorMigrationLogStatus,
+      attempt?: number,
     ): Promise<number> {
       const db = this.getTenantDb();
-      if (status) {
-        const row = db.prepare(`
-          SELECT COUNT(*) as cnt FROM ${TABLES.vectorMigrationLogs}
-          WHERE migrationKey = @migrationKey AND status = @status
-        `).get({ migrationKey, status }) as { cnt: number } | undefined;
-        return row?.cnt ?? 0;
-      }
+      const clauses: string[] = ['migrationKey = @migrationKey'];
+      const params: Record<string, unknown> = { migrationKey };
+      if (status) { clauses.push('status = @status'); params.status = status; }
+      if (attempt !== undefined) { clauses.push('attempt = @attempt'); params.attempt = attempt; }
       const row = db.prepare(`
         SELECT COUNT(*) as cnt FROM ${TABLES.vectorMigrationLogs}
-        WHERE migrationKey = @migrationKey
-      `).get({ migrationKey }) as { cnt: number } | undefined;
+        WHERE ${clauses.join(' AND ')}
+      `).get(params) as { cnt: number } | undefined;
       return row?.cnt ?? 0;
+    }
+
+    async listVectorMigrationRuns(migrationKey: string): Promise<IVectorMigrationRunSummary[]> {
+      const db = this.getTenantDb();
+      const rows = db.prepare(`
+        SELECT
+          attempt,
+          COUNT(*) as batchCount,
+          SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as successBatches,
+          SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failedBatches,
+          SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) as skippedBatches,
+          SUM(migratedCount) as migratedCount,
+          SUM(failedCount) as failedCount,
+          MIN(createdAt) as startedAt,
+          MAX(createdAt) as endedAt
+        FROM ${TABLES.vectorMigrationLogs}
+        WHERE migrationKey = @migrationKey
+        GROUP BY attempt
+        ORDER BY attempt DESC
+      `).all({ migrationKey }) as SqliteRow[];
+      return rows.map((row) => ({
+        attempt: Number(row.attempt),
+        batchCount: Number(row.batchCount),
+        successBatches: Number(row.successBatches),
+        failedBatches: Number(row.failedBatches),
+        skippedBatches: Number(row.skippedBatches),
+        migratedCount: Number(row.migratedCount),
+        failedCount: Number(row.failedCount),
+        startedAt: row.startedAt ? new Date(String(row.startedAt)) : undefined,
+        endedAt: row.endedAt ? new Date(String(row.endedAt)) : undefined,
+      }));
     }
 
     // ── Private helpers ──────────────────────────────────────────────
@@ -217,6 +251,7 @@ export function VectorMigrationMixin<TBase extends Constructor<SQLiteProviderBas
         destinationIndexKey: String(row.destinationIndexKey),
         destinationIndexName: String(row.destinationIndexName),
         status: String(row.status) as IVectorMigration['status'],
+        attempt: Number(row.attempt ?? 0),
         totalVectors: Number(row.totalVectors),
         migratedVectors: Number(row.migratedVectors),
         failedVectors: Number(row.failedVectors),
@@ -238,6 +273,7 @@ export function VectorMigrationMixin<TBase extends Constructor<SQLiteProviderBas
         tenantId: String(row.tenantId),
         projectId: row.projectId ? String(row.projectId) : undefined,
         migrationKey: String(row.migrationKey),
+        attempt: Number(row.attempt ?? 1),
         batchIndex: Number(row.batchIndex),
         vectorIds: row.vectorIds ? this.parseJson<string[]>(String(row.vectorIds), []) : [],
         status: String(row.status) as IVectorMigrationLog['status'],

@@ -237,6 +237,7 @@ async function copyVectors(
       tenantId,
       projectId,
       migrationKey,
+      attempt: migration.attempt ?? 1,
       batchIndex,
       vectorIds: batchIds,
       status: batchFailed > 0 ? 'failed' : 'success',
