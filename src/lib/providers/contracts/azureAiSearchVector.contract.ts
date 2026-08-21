@@ -109,11 +109,18 @@ function guardCandidateCount(topK: number): number {
 }
 
 // Azure AI Search document keys may only contain letters, digits, underscore (_),
-// dash (-), or equal sign (=). Caller-supplied vector ids (e.g. Knowledge Engine's
-// "module:documentId:chunkIndex") routinely violate that, so unsafe ids are stored
-// under a marked, URL-safe Base64 form and transparently decoded on the way out.
-const SAFE_KEY_PATTERN = /^[A-Za-z0-9_\-=]+$/;
-const ENCODED_KEY_PREFIX = '_b64_';
+// dash (-), or equal sign (=), AND MAY NOT START WITH AN UNDERSCORE. Caller-supplied
+// vector ids (e.g. Knowledge Engine's "module:documentId:chunkIndex") routinely
+// violate that, so unsafe ids are stored under a marked, URL-safe Base64 form and
+// transparently decoded on the way out.
+//
+// The marker therefore starts with a letter. A leading underscore is the one thing
+// that looks like a natural marker here and is exactly what Azure rejects:
+// "Invalid document key: '_b64_…'. Keys cannot start with a leading underscore."
+const SAFE_KEY_PATTERN = /^[A-Za-z0-9\-=][A-Za-z0-9_\-=]*$/;
+const ENCODED_KEY_PREFIX = 'b64_';
+/** Only ever produced by a build that used the rejected marker; decoded for safety. */
+const LEGACY_ENCODED_KEY_PREFIX = '_b64_';
 
 function encodeVectorId(id: string): string {
     if (SAFE_KEY_PATTERN.test(id) && !id.startsWith(ENCODED_KEY_PREFIX)) {
@@ -123,11 +130,14 @@ function encodeVectorId(id: string): string {
 }
 
 function decodeVectorId(key: string): string {
-    if (!key.startsWith(ENCODED_KEY_PREFIX)) {
+    const prefix = key.startsWith(ENCODED_KEY_PREFIX)
+        ? ENCODED_KEY_PREFIX
+        : (key.startsWith(LEGACY_ENCODED_KEY_PREFIX) ? LEGACY_ENCODED_KEY_PREFIX : undefined);
+    if (!prefix) {
         return key;
     }
     try {
-        return Buffer.from(key.slice(ENCODED_KEY_PREFIX.length), 'base64url').toString('utf8');
+        return Buffer.from(key.slice(prefix.length), 'base64url').toString('utf8');
     } catch {
         return key;
     }
