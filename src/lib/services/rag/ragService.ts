@@ -1327,6 +1327,31 @@ export async function deleteRagDocument(
   return db.deleteRagDocument(request.documentId);
 }
 
+/**
+ * The document-row fields describing where its source now lives.
+ *
+ * The hash is what de-duplication and "has this changed?" compare against, so
+ * it is withheld for a reconstruction: the joined text is kept so a later run
+ * has something to rebuild from, but re-uploading the real original must never
+ * be mistaken for a duplicate of the join — and the stale hash of the true
+ * original must not survive next to the join either. Both are passed as an
+ * explicit undefined so each provider's partial update clears them.
+ */
+function sourceRowFields(
+  stored: Awaited<ReturnType<typeof storeDocumentSource>>,
+  doc: IRagDocument,
+  trustworthy: boolean,
+): Partial<IRagDocument> {
+  return {
+    sourceHash: trustworthy ? stored.sourceHash : undefined,
+    sourceText: stored.sourceText,
+    sourceTextKey: stored.sourceTextKey,
+    fileKey: stored.fileKey ?? doc.fileKey,
+    fileBucketKey: stored.fileBucketKey ?? doc.fileBucketKey,
+    fileProviderKey: stored.fileProviderKey ?? doc.fileProviderKey,
+  };
+}
+
 /* ── Re-ingest document ───────────────────────────────────────────────── */
 
 /**
@@ -1470,14 +1495,30 @@ export async function reingestDocument(
       createdBy: request.updatedBy,
     });
 
+    // COMMIT THE SOURCE BEFORE ANYTHING IS DESTROYED.
+    //
+    // For text under the inline cap storeDocumentSource only builds an
+    // in-memory object — it performs no write at all — and the steps below
+    // delete this document's vectors and chunk rows, which for a document with
+    // no previously stored source are the ONLY copy of its text. Writing the
+    // source fields here rather than in the success branch is what makes a
+    // failed re-ingest recoverable instead of destructive.
+    await db.updateRagDocument(request.documentId, sourceRowFields(storedSource, doc, sourceIsTrustworthy));
+
     // Upload keys are random, so a replacement never overwrites what it
     // supersedes — the old objects have to be dropped explicitly. Only drop the
-    // ones actually replaced: a failed upload must not take the last copy with it.
-    await discardDocumentSource(tenantDbName, tenantId, projectId, {
-      fileBucketKey: doc.fileBucketKey,
-      sourceTextKey: storedSource.sourceText || storedSource.sourceTextKey ? doc.sourceTextKey : undefined,
-      fileKey: storedSource.fileKey ? doc.fileKey : undefined,
-    }, request.updatedBy);
+    // ones actually replaced: a failed upload must not take the last copy with
+    // it, and a RECONSTRUCTION never supersedes anything. A chunk join is what
+    // we fall back to when the real source could not be read — very often
+    // because reading it failed transiently — so deleting the object it failed
+    // to read would destroy the document's only faithful copy.
+    if (sourceIsTrustworthy) {
+      await discardDocumentSource(tenantDbName, tenantId, projectId, {
+        fileBucketKey: doc.fileBucketKey,
+        sourceTextKey: storedSource.sourceText || storedSource.sourceTextKey ? doc.sourceTextKey : undefined,
+        fileKey: storedSource.fileKey ? doc.fileKey : undefined,
+      }, request.updatedBy);
+    }
   }
 
   // 1. Delete old vectors
@@ -1516,21 +1557,8 @@ export async function reingestDocument(
     // The whole source block is rewritten, not merged: an inline source that
     // outgrew the cap (or the reverse) has to leave the field it moved out of
     // empty, or the document would carry two disagreeing copies of itself.
-    const sourceFields = storedSource
-      ? {
-        // The hash is what de-duplication and "has this changed?" compare
-        // against, so it is withheld for a reconstruction: the text is kept so
-        // the next run has something to rebuild from, but re-uploading the real
-        // original must never be mistaken for a duplicate of the join, and the
-        // stale hash of the true original must not survive either.
-        sourceHash: sourceIsTrustworthy ? storedSource.sourceHash : undefined,
-        sourceText: storedSource.sourceText,
-        sourceTextKey: storedSource.sourceTextKey,
-        fileKey: storedSource.fileKey ?? doc.fileKey,
-        fileBucketKey: storedSource.fileBucketKey ?? doc.fileBucketKey,
-        fileProviderKey: storedSource.fileProviderKey ?? doc.fileProviderKey,
-      }
-      : {};
+    // Already committed above, before the destructive steps.
+    const sourceFields = {};
 
     await db.updateRagDocument(request.documentId, {
       status: 'indexed',

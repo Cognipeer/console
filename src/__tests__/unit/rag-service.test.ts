@@ -1308,6 +1308,14 @@ describe('RAG Service', () => {
       ).rejects.toThrow(/no existing chunks/i);
     });
 
+    /** Index of the first updateRagDocument call whose payload matches. */
+    const updateCallIndex = (match: (update: Record<string, unknown>) => boolean): number => {
+      const calls = (db.updateRagDocument as ReturnType<typeof vi.fn>).mock.calls;
+      const index = calls.findIndex((call) => match(call[1] as Record<string, unknown>));
+      expect(index).toBeGreaterThanOrEqual(0);
+      return index;
+    };
+
     it('stores the new source and drops the object it replaced', async () => {
       db.findRagDocumentById.mockResolvedValue({
         ...mockDocument,
@@ -1324,14 +1332,25 @@ describe('RAG Service', () => {
       expect(deleteFile).toHaveBeenCalledWith(
         DB_NAME, TENANT_ID, PROJECT_ID, 'kb-bucket', 'old-source.md', 'user-1',
       );
+      // The source must be committed BEFORE the vectors and chunk rows are
+      // deleted — those rows are the document's only copy when nothing was
+      // stored before, so writing it on the success path would leave a failed
+      // re-ingest destructive.
+      const sourceWriteIndex = updateCallIndex((u) => u.sourceText !== undefined);
+      const vectorDeleteFirst = (deleteVectors as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+      const sourceWriteOrder = (db.updateRagDocument as ReturnType<typeof vi.fn>)
+        .mock.invocationCallOrder[sourceWriteIndex];
+      expect(sourceWriteOrder).toBeLessThan(vectorDeleteFirst);
+
+      const [, sourceUpdate] = (db.updateRagDocument as ReturnType<typeof vi.fn>).mock.calls[sourceWriteIndex];
+      expect(sourceUpdate).toEqual(expect.objectContaining({
+        sourceText: 'Fresh content from the caller',
+        sourceHash: hashSourceText('Fresh content from the caller'),
+        sourceTextKey: undefined,
+      }));
       expect(db.updateRagDocument).toHaveBeenLastCalledWith(
         'ragdoc-1',
-        expect.objectContaining({
-          status: 'indexed',
-          sourceText: 'Fresh content from the caller',
-          sourceHash: hashSourceText('Fresh content from the caller'),
-          sourceTextKey: undefined,
-        }),
+        expect.objectContaining({ status: 'indexed' }),
       );
     });
 
@@ -1364,10 +1383,15 @@ describe('RAG Service', () => {
 
       await reingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, reingestReq);
 
-      const [, update] = (db.updateRagDocument as ReturnType<typeof vi.fn>).mock.lastCall!;
+      const [, update] = (db.updateRagDocument as ReturnType<typeof vi.fn>)
+        .mock.calls[updateCallIndex((u) => u.sourceText !== undefined)];
       expect(update.sourceText).toBe('first half overlap\noverlap second half');
       // No hash: dedupe compares against it, and "has this changed?" does too.
       expect(update.sourceHash).toBeUndefined();
+      // A reconstruction is what we fall back to when the real source could not
+      // be read — usually a transient failure — so it must never delete the
+      // object it failed to read.
+      expect(deleteFile).not.toHaveBeenCalled();
     });
 
     // ── Metadata ──

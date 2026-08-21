@@ -263,10 +263,23 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
       if (data.lastIndexedAt !== undefined) { sets.push('lastIndexedAt = @lastIndexedAt'); params.lastIndexedAt = data.lastIndexedAt instanceof Date ? data.lastIndexedAt.toISOString() : data.lastIndexedAt; }
       if (data.fileBucketKey !== undefined) { sets.push('fileBucketKey = @fileBucketKey'); params.fileBucketKey = data.fileBucketKey; }
       if (data.fileProviderKey !== undefined) { sets.push('fileProviderKey = @fileProviderKey'); params.fileProviderKey = data.fileProviderKey; }
-      if (data.chunkConfig !== undefined) { sets.push('chunkConfig = @chunkConfig'); params.chunkConfig = data.chunkConfig ? this.toJson(data.chunkConfig) : null; }
-      if (data.sourceText !== undefined) { sets.push('sourceText = @sourceText'); params.sourceText = data.sourceText ?? null; }
-      if (data.sourceTextKey !== undefined) { sets.push('sourceTextKey = @sourceTextKey'); params.sourceTextKey = data.sourceTextKey ?? null; }
-      if (data.sourceHash !== undefined) { sets.push('sourceHash = @sourceHash'); params.sourceHash = data.sourceHash ?? null; }
+      // Presence, not value. re-ingest passes an explicit `undefined` to CLEAR
+      // sourceHash when the text it stored is a reconstruction; a
+      // `!== undefined` guard would skip that and leave the stale hash of the
+      // true original sitting next to the join, so the user's corrective
+      // re-upload would be de-duplicated away against a hash of content that is
+      // no longer there.
+      const clearableDoc = [
+        ['chunkConfig', () => (data.chunkConfig ? this.toJson(data.chunkConfig) : null)],
+        ['sourceText', () => data.sourceText ?? null],
+        ['sourceTextKey', () => data.sourceTextKey ?? null],
+        ['sourceHash', () => data.sourceHash ?? null],
+      ] as const;
+      for (const [column, value] of clearableDoc) {
+        if (!Object.hasOwn(data, column)) continue;
+        sets.push(`${column} = @${column}`);
+        params[column] = value();
+      }
       if (data.metadata !== undefined) { sets.push('metadata = @metadata'); params.metadata = this.toJson(data.metadata); }
       if (data.updatedBy !== undefined) { sets.push('updatedBy = @updatedBy'); params.updatedBy = data.updatedBy; }
 
