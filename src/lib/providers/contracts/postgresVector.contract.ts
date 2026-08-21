@@ -9,6 +9,8 @@ import type {
   VectorListInput,
   VectorListResult,
 } from '../domains/vector';
+import { FULL_FILTER_OPERATORS } from '../domains/vectorFilter';
+import { toPostgresCondition } from './vectorFilterTranslators';
 
 interface PostgresVectorCredentials {
   connectionString?: string;
@@ -160,6 +162,7 @@ export const PostgresVectorProviderContract: ProviderContract<
     supportsUpsert: true,
     supportsQuery: true,
     supportsDelete: true,
+    'vector.filterOperators': FULL_FILTER_OPERATORS,
   },
   async createRuntime({ credentials, settings, providerKey, logger }) {
     if (!settings?.tableName?.trim()) {
@@ -268,13 +271,24 @@ export const PostgresVectorProviderContract: ProviderContract<
         const op = pgMetricOp(handle.metric);
         const vectorStr = `[${query.vector.join(',')}]`;
 
+        // Filter in SQL so the ORDER BY/LIMIT runs over matching rows only.
+        const params: unknown[] = [vectorStr];
+        let whereClause = '';
+        if (query.filter) {
+          const fragment = toPostgresCondition(query.filter, 'metadata', params.length + 1);
+          whereClause = ` WHERE ${fragment.sql}`;
+          params.push(...fragment.params);
+        }
+        params.push(query.topK);
+        const limitPlaceholder = `$${params.length}`;
+
         const rows = await withClient(async (client) => {
           const result = await client.query(
             `SELECT id, metadata, 1 - (vector ${op} $1::vector) AS score
-             FROM ${tbl}
+             FROM ${tbl}${whereClause}
              ORDER BY vector ${op} $1::vector
-             LIMIT $2`,
-            [vectorStr, query.topK],
+             LIMIT ${limitPlaceholder}`,
+            params,
           );
           return result.rows;
         });

@@ -89,6 +89,10 @@ export const OramaVectorProviderContract: ProviderContract<
     supportsUpsert: true,
     supportsQuery: true,
     supportsDelete: true,
+    // Orama indexes metadata as an opaque JSON string, so its `where` clause
+    // cannot address individual metadata keys. Declaring no operators makes
+    // filtered queries fail loudly instead of returning unfiltered results.
+    'vector.filterOperators': [],
   },
   async createRuntime({ settings, providerKey, logger }) {
     // @ts-expect-error -- @orama/orama is an optional peer dependency

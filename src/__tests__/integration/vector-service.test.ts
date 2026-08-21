@@ -20,7 +20,10 @@ vi.mock('@/lib/services/providers/providerService', () => ({
   getProviderConfigByKey: vi.fn(),
 }));
 
-vi.mock('@/lib/providers', () => ({
+// Only the registry is mocked: filter parsing and capability checks are pure
+// functions the service depends on, so they run for real here.
+vi.mock('@/lib/providers', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/providers')>()),
   providerRegistry: {
     listDescriptors: vi.fn(),
     getContract: vi.fn(),
@@ -288,6 +291,11 @@ describe('queryVectorIndex', () => {
 
   it('passes topK and filter through to runtime', async () => {
     MOCK_RUNTIME.queryVectors.mockResolvedValue({ matches: [] });
+    // The driver must declare it can push the filter down, or the service
+    // rejects the query rather than returning unfiltered results.
+    (providerRegistry.getContract as ReturnType<typeof vi.fn>).mockReturnValue({
+      capabilities: { 'vector.filterOperators': ['$eq', '$and'] },
+    });
 
     const request = {
       providerKey: PROVIDER_KEY,
@@ -303,7 +311,11 @@ describe('queryVectorIndex', () => {
 
     const runtimeQueryArg = MOCK_RUNTIME.queryVectors.mock.calls[0][1];
     expect(runtimeQueryArg.topK).toBe(10);
-    expect(runtimeQueryArg.filter).toEqual({ category: 'docs' });
+    // The service hands the provider a parsed filter tree, never the raw document.
+    expect(runtimeQueryArg.filter).toEqual({
+      kind: 'comparison',
+      comparison: { op: '$eq', field: 'category', value: 'docs' },
+    });
   });
 
   it('returns empty matches when no results', async () => {

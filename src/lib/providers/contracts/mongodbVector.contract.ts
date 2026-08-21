@@ -10,6 +10,7 @@ import type {
   VectorListInput,
   VectorListResult,
 } from '../domains/vector';
+import { toMongoQueryFilter } from './vectorFilterTranslators';
 
 interface MongoDbVectorCredentials {
   uri: string;
@@ -127,6 +128,12 @@ export const MongoDbVectorProviderContract: ProviderContract<
     supportsUpsert: true,
     supportsQuery: true,
     supportsDelete: true,
+    // Atlas `$vectorSearch.filter` covers comparison and logical operators but
+    // not `$exists`; filtered paths must be declared in the Atlas index.
+    'vector.filterOperators': [
+      '$eq', '$ne', '$gt', '$gte', '$lt', '$lte', '$in', '$nin', '$and', '$or', '$not',
+    ],
+    'vector.filterRaw': true,
   },
   async createRuntime({ credentials, settings, providerKey, logger }) {
     if (!credentials?.uri?.trim()) {
@@ -242,7 +249,7 @@ export const MongoDbVectorProviderContract: ProviderContract<
                 queryVector: query.vector,
                 numCandidates: query.topK * 10,
                 limit: query.topK,
-                filter: query.filter,
+                ...(query.filter ? { filter: toMongoQueryFilter(query.filter) } : {}),
               },
             },
             {

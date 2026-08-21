@@ -6667,11 +6667,7 @@ paths:
                   description: Maximum number of matches to return.
                   example: 5
                 filter:
-                  type: object
-                  additionalProperties: true
-                  description: Metadata filter applied to candidate chunks.
-                  example:
-                    source: docs
+                  $ref: "#/components/schemas/VectorMetadataFilter"
       responses:
         "200":
           description: Query results.
@@ -10672,6 +10668,8 @@ paths:
                 topK: 10
                 filter:
                   category: electronics
+                  depth:
+                    $lte: 2
       responses:
         "200":
           description: Query results
@@ -17563,6 +17561,20 @@ components:
         rerankerOversample:
           type: integer
           description: Candidate multiplier fetched before reranking.
+        defaultFilter:
+          allOf:
+            - $ref: "#/components/schemas/VectorMetadataFilter"
+          description: >-
+            Metadata filter ANDed into every query against this module. Lets several
+            sources share one vector index while each module retrieves only its own slice.
+        filterableFields:
+          type: array
+          items:
+            type: string
+          description: >-
+            Metadata keys callers may filter on. When set, a query filtering on any other
+            key is rejected with 400; the list is also advertised to agents and MCP clients
+            so they know what is filterable.
     RagDocument:
       type: object
       description: A document ingested into a Knowledge Engine module.
@@ -17652,6 +17664,20 @@ components:
           type: string
         rerankerOversample:
           type: integer
+        defaultFilter:
+          allOf:
+            - $ref: "#/components/schemas/VectorMetadataFilter"
+          description: >-
+            Metadata filter ANDed into every query against this module. Lets several
+            sources share one vector index while each module retrieves only its own slice.
+        filterableFields:
+          type: array
+          items:
+            type: string
+          description: >-
+            Metadata keys callers may filter on. When set, a query filtering on any other
+            key is rejected with 400; the list is also advertised to agents and MCP clients
+            so they know what is filterable.
         totalDocuments:
           type: integer
         totalChunks:
@@ -17739,6 +17765,20 @@ components:
           type: string
         rerankerOversample:
           type: integer
+        defaultFilter:
+          allOf:
+            - $ref: "#/components/schemas/VectorMetadataFilter"
+          description: >-
+            Metadata filter ANDed into every query against this module. Lets several
+            sources share one vector index while each module retrieves only its own slice.
+        filterableFields:
+          type: array
+          items:
+            type: string
+          description: >-
+            Metadata keys callers may filter on. When set, a query filtering on any other
+            key is rejected with 400; the list is also advertised to agents and MCP clients
+            so they know what is filterable.
     RealtimeModel:
       type: object
       description: A realtime model preset (snake_case client view) — a named session config bundling a response generator (chat model or agent) with STT, TTS, voice, and turn-detection settings.
@@ -20616,6 +20656,32 @@ components:
                 type: array
                 items:
                   $ref: "#/components/schemas/VectorProviderFormField"
+    VectorMetadataFilter:
+      type: object
+      additionalProperties: true
+      description: |
+        Metadata filter in the console's canonical, provider-neutral filter language.
+        The gateway translates it into each vector store's native syntax and pushes it
+        down to the store; it is never applied afterwards in memory, so `topK` always
+        counts matching documents.
+
+        Shorthand `{ "field": value }` means equality. Field operators: `$eq`, `$ne`,
+        `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$exists`. Compose clauses with
+        `$and`, `$or`, `$not`. Several fields in one object are ANDed together.
+
+        Not every store supports every operator. A filter a provider cannot push down
+        is rejected with `400` naming the unsupported operators, rather than silently
+        ignored. As an escape hatch, `{ "$raw": ... }` passes a provider-native filter
+        straight through (supported by Azure AI Search, Chroma, Elasticsearch, MongoDB,
+        Milvus, and S3 Vectors); `$raw` cannot be combined with other keys.
+      example:
+        source: crawler
+        depth:
+          $lte: 2
+        lang:
+          $in:
+            - tr
+            - en
     VectorQueryRequest:
       type: object
       description: Payload to query similar vectors.
@@ -20638,8 +20704,7 @@ components:
               default: 5
               description: Number of matches to return.
             filter:
-              type: object
-              description: Provider-specific filter criteria.
+              $ref: "#/components/schemas/VectorMetadataFilter"
     VectorQueryResponse:
       type: object
       description: Result of a vector similarity query.

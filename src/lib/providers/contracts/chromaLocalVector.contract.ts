@@ -9,6 +9,7 @@ import type {
   VectorListInput,
   VectorListResult,
 } from '../domains/vector';
+import { toChromaWhere } from './vectorFilterTranslators';
 
 // eslint-disable-next-line @typescript-eslint/no-empty-object-type
 interface ChromaLocalCredentials {}
@@ -131,6 +132,8 @@ export const ChromaLocalVectorProviderContract: ProviderContract<
     supportsUpsert: true,
     supportsQuery: true,
     supportsDelete: true,
+    'vector.filterOperators': ['$eq', '$ne', '$gt', '$gte', '$lt', '$lte', '$in', '$nin', '$and', '$or'],
+    'vector.filterRaw': true,
   },
   async createRuntime({ credentials: _credentials, settings, providerKey, logger }) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/ban-ts-comment
@@ -197,7 +200,7 @@ export const ChromaLocalVectorProviderContract: ProviderContract<
         const result = await collection.query({
           queryEmbeddings: [query.vector],
           nResults: query.topK,
-          where: query.filter as Record<string, unknown> | undefined,
+          where: query.filter ? toChromaWhere(query.filter) : undefined,
         });
         const ids = result.ids[0] ?? [];
         const distances = result.distances[0] ?? [];

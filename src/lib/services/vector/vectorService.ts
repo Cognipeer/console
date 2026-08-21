@@ -10,6 +10,10 @@ import { runtimePool, hashCredentials } from '@/lib/core/runtimePool';
 import { withResilience } from '@/lib/core/resilience';
 import {
   providerRegistry,
+  assertFilterSupported,
+  parseVectorFilter,
+  type VectorFilterNode,
+  type VectorFilterOperator,
   type VectorProviderRuntime,
   type VectorIndexHandle,
   type VectorQueryResult,
@@ -572,13 +576,42 @@ export async function deleteVectors(
   );
 }
 
+/**
+ * Parse a caller-supplied filter and confirm the driver can push it down.
+ *
+ * Filters are never applied after the fact: a driver that cannot express an
+ * operator must fail the request rather than return results that silently
+ * ignore the filter, so `topK` always counts matching documents.
+ */
+export function resolveVectorFilter(
+  driver: string,
+  filter: unknown,
+): VectorFilterNode | undefined {
+  const parsed = parseVectorFilter(filter);
+  if (!parsed) return undefined;
+
+  let capabilities;
+  try {
+    capabilities = providerRegistry.getContract(driver).capabilities;
+  } catch {
+    capabilities = undefined;
+  }
+
+  const operators = (capabilities?.['vector.filterOperators'] as VectorFilterOperator[] | undefined) ?? [];
+  const supportsRaw = capabilities?.['vector.filterRaw'] === true;
+
+  assertFilterSupported(parsed, { driverId: driver, operators, supportsRaw });
+
+  return parsed;
+}
+
 export async function queryVectorIndex(
   tenantDbName: string,
   tenantId: string,
   projectId: string,
   request: VectorQueryRequest,
 ): Promise<VectorQueryResponse> {
-  const { runtime } = await buildRuntimeContext(
+  const { runtime, record } = await buildRuntimeContext(
     tenantDbName,
     tenantId,
     request.providerKey,
@@ -593,10 +626,12 @@ export async function queryVectorIndex(
     projectId,
   );
 
+  const filter = resolveVectorFilter(record.driver, request.query.filter);
+
   const result: VectorQueryResult = await withResilience(
     () => runtime.queryVectors(
       toRuntimeHandle(index),
-      request.query,
+      { ...request.query, filter },
     ),
     { key: `vector-query:${request.providerKey}` },
   );

@@ -23,6 +23,7 @@ import type {
     VectorListInput,
     VectorListResult,
 } from '../domains/vector';
+import { toAwsVectorFilter } from './vectorFilterTranslators';
 
 interface AwsS3VectorsCredentials {
     accessKeyId: string;
@@ -486,6 +487,10 @@ export const AwsS3VectorsProviderContract: ProviderContract<
         'vector.metrics': ['cosine', 'euclidean'],
         'vector.dataType': 'float32',
         'vector.provider': 'aws-s3vectors',
+    'vector.filterOperators': [
+            '$eq', '$ne', '$gt', '$gte', '$lt', '$lte', '$in', '$nin', '$exists', '$and', '$or',
+        ],
+        'vector.filterRaw': true,
     },
     async createRuntime({ credentials, settings, providerKey, logger }) {
         const runtimeContext = createRuntimeContext(credentials, settings, providerKey);
@@ -726,7 +731,7 @@ export const AwsS3VectorsProviderContract: ProviderContract<
                         queryVector: {
                             float32: query.vector.map((value) => Number(value)),
                         },
-                        filter: toAwsDocument(query.filter),
+                        filter: query.filter ? toAwsDocument(toAwsVectorFilter(query.filter)) : undefined,
                         returnMetadata: true,
                         returnDistance: true,
                     }),

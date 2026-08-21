@@ -9,6 +9,7 @@ import type {
   VectorListInput,
   VectorListResult,
 } from '../domains/vector';
+import { toChromaWhere } from './vectorFilterTranslators';
 
 interface ChromaCloudCredentials {
   apiKey: string;
@@ -126,6 +127,8 @@ export const ChromaCloudVectorProviderContract: ProviderContract<
     supportsUpsert: true,
     supportsQuery: true,
     supportsDelete: true,
+    'vector.filterOperators': ['$eq', '$ne', '$gt', '$gte', '$lt', '$lte', '$in', '$nin', '$and', '$or'],
+    'vector.filterRaw': true,
   },
   async createRuntime({ credentials, settings, providerKey, logger }) {
     if (!credentials?.apiKey) {
@@ -199,7 +202,7 @@ export const ChromaCloudVectorProviderContract: ProviderContract<
         const result = await collection.query({
           queryEmbeddings: [query.vector],
           nResults: query.topK,
-          where: query.filter as Record<string, unknown> | undefined,
+          where: query.filter ? toChromaWhere(query.filter) : undefined,
         });
         const ids = result.ids[0] ?? [];
         const distances = result.distances[0] ?? [];

@@ -9,6 +9,8 @@ import type {
   VectorListInput,
   VectorListResult,
 } from '../domains/vector';
+import { FULL_FILTER_OPERATORS } from '../domains/vectorFilter';
+import { toElasticsearchFilter } from './vectorFilterTranslators';
 
 interface ElasticsearchSelfHostedCredentials {
   apiKey?: string;
@@ -110,6 +112,8 @@ export const ElasticsearchSelfHostedVectorProviderContract: ProviderContract<
     supportsUpsert: true,
     supportsQuery: true,
     supportsDelete: true,
+    'vector.filterOperators': FULL_FILTER_OPERATORS,
+    'vector.filterRaw': true,
   },
   async createRuntime({ credentials, settings, providerKey, logger }) {
     if (!settings?.node?.trim()) {
@@ -196,7 +200,7 @@ export const ElasticsearchSelfHostedVectorProviderContract: ProviderContract<
             query_vector: query.vector,
             k: query.topK,
             num_candidates: query.topK * 2,
-            filter: query.filter,
+            filter: query.filter ? toElasticsearchFilter(query.filter) : undefined,
           },
           size: query.topK,
         });

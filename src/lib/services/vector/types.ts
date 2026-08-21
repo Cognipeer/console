@@ -3,6 +3,7 @@ import type { ProviderCapabilityFlags } from '@/lib/providers';
 import type { ProviderConfigView } from '@/lib/services/providers/providerService';
 import type {
   CreateVectorIndexInput,
+  VectorFilter,
   VectorQueryInput,
   VectorQueryResult,
   VectorUpsertItem,
@@ -40,8 +41,17 @@ export interface VectorUpsertRequest extends VectorIndexLocator {
   updatedBy?: string;
 }
 
+/**
+ * Query as it arrives from an API caller: `filter` is still the raw canonical
+ * filter document. `queryVectorIndex` parses and capability-checks it before
+ * handing the provider the parsed `VectorQueryInput`.
+ */
+export interface VectorQueryRequestInput extends Omit<VectorQueryInput, 'filter'> {
+  filter?: VectorFilter;
+}
+
 export interface VectorQueryRequest extends VectorIndexLocator {
-  query: VectorQueryInput;
+  query: VectorQueryRequestInput;
 }
 
 export interface VectorDeleteRequest extends VectorIndexLocator {

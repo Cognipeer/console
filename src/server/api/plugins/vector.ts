@@ -44,6 +44,7 @@ import {
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
+import { VectorFilterError } from '@/lib/providers';
 
 const logger = createLogger('api:vector');
 
@@ -545,6 +546,9 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ result });
     } catch (error) {
+      if (error instanceof VectorFilterError) {
+        return reply.code(400).send({ error: error.message });
+      }
       if (isNotFoundError(error)) {
         return reply.code(404).send({ error: 'Not found' });
       }

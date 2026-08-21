@@ -25,7 +25,7 @@ import { getDatabase, type IAgent, type IAgentConfig, type IAgentConversation, t
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { resolveModelInvocationConfig } from '@/lib/services/models/inferenceService';
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
-import { queryRag } from '@/lib/services/rag/ragService';
+import { getRagModule, queryRag } from '@/lib/services/rag/ragService';
 import { evaluateGuardrail } from '@/lib/services/guardrail';
 import { getMcpServerByKey, executeMcpTool, isMcpToolEnabled } from '@/lib/services/mcp';
 import { getToolByKey, executeToolAction, logToolRequest, toolRequestSecretValues } from '@/lib/services/tools';
@@ -69,16 +69,41 @@ const CONSOLE_AGENT_TOOL_RESPONSES_CONFIG = {
 const CONSOLE_AGENT_KNOWLEDGE_SEARCH_DESCRIPTION =
     'PRIMARY retrieval tool. For factual, product, policy, API, docs, or troubleshooting questions, call this tool BEFORE drafting the final answer. Use the user question (or a focused rewrite) as query. If results are empty/insufficient, then answer briefly with uncertainty.';
 
+/**
+ * Description of the optional `filter` argument, listing the metadata keys the
+ * Knowledge Engine module exposes. Omitted entirely when the module declares
+ * none, so the model is never invited to guess at metadata names.
+ */
+function knowledgeSearchFilterDescription(filterableFields: string[]): string {
+    return (
+        'Optional metadata filter narrowing the search. Filterable fields: '
+        + `${filterableFields.join(', ')}. `
+        + 'Use { "field": value } for equality, or operators $eq, $ne, $gt, $gte, $lt, $lte, '
+        + '$in, $nin, $exists combined with $and / $or / $not.'
+    );
+}
+
 /** Trace menu entry mirroring the zod schema `knowledge_search` is bound with. */
-const KNOWLEDGE_SEARCH_TOOL_DEFINITION: TraceToolDefinition = {
-    name: 'knowledge_search',
-    description: CONSOLE_AGENT_KNOWLEDGE_SEARCH_DESCRIPTION,
-    parameters: {
-        type: 'object',
-        properties: { query: { type: 'string', description: 'The search query' } },
-        required: ['query'],
-    },
-};
+function knowledgeSearchToolDefinition(filterableFields: string[]): TraceToolDefinition {
+    const properties: Record<string, unknown> = {
+        query: { type: 'string', description: 'The search query' },
+    };
+    if (filterableFields.length > 0) {
+        properties.filter = {
+            type: 'object',
+            description: knowledgeSearchFilterDescription(filterableFields),
+        };
+    }
+    return {
+        name: 'knowledge_search',
+        description: CONSOLE_AGENT_KNOWLEDGE_SEARCH_DESCRIPTION,
+        parameters: {
+            type: 'object',
+            properties,
+            required: ['query'],
+        },
+    };
+}
 
 type InternalTraceEvent = TraceSessionFile['events'][number] & {
     toolName?: string;
@@ -1262,17 +1287,25 @@ export async function executeAgentChatLocal(
     const toolDefinitions: TraceToolDefinition[] = [];
     if (config.knowledgeEngineKey) {
         const ragModuleKey = config.knowledgeEngineKey;
+        // Tenant-wide lookup: the user explicitly bound this module to the agent.
+        const knowledgeModule = await getRagModule(tenantDbName, ragModuleKey);
+        const filterableFields = knowledgeModule?.filterableFields ?? [];
         const ragTool = createTool({
             name: 'knowledge_search',
             description: CONSOLE_AGENT_KNOWLEDGE_SEARCH_DESCRIPTION,
-            schema: z.object({ query: z.string().describe('The search query') }),
-            func: async (args: { query: string }) => {
-                // Use undefined projectId for tenant-wide lookup;
-                // the user explicitly configured this RAG module on the agent.
+            schema: filterableFields.length > 0
+                ? z.object({
+                    query: z.string().describe('The search query'),
+                    filter: z.record(z.unknown()).optional()
+                        .describe(knowledgeSearchFilterDescription(filterableFields)),
+                })
+                : z.object({ query: z.string().describe('The search query') }),
+            func: async (args: { query: string; filter?: Record<string, unknown> }) => {
                 const result = await queryRag(tenantDbName, tenantId, undefined, {
                     ragModuleKey,
                     query: args.query,
                     topK: 5,
+                    filter: args.filter,
                 });
                 return result.matches
                     .map((m) => m.content)
@@ -1281,7 +1314,7 @@ export async function executeAgentChatLocal(
             },
         });
         tools.push(ragTool);
-        toolDefinitions.push(KNOWLEDGE_SEARCH_TOOL_DEFINITION);
+        toolDefinitions.push(knowledgeSearchToolDefinition(filterableFields));
     }
 
     if (config.knowledgeEngineKey) {
@@ -1546,17 +1579,25 @@ export async function executePlaygroundChatLocal(
     const playgroundToolDefinitions: TraceToolDefinition[] = [];
     if (config.knowledgeEngineKey) {
         const ragModuleKey = config.knowledgeEngineKey;
+        // Tenant-wide lookup: the user explicitly bound this module to the agent.
+        const knowledgeModule = await getRagModule(tenantDbName, ragModuleKey);
+        const filterableFields = knowledgeModule?.filterableFields ?? [];
         const ragTool = createTool({
             name: 'knowledge_search',
             description: CONSOLE_AGENT_KNOWLEDGE_SEARCH_DESCRIPTION,
-            schema: z.object({ query: z.string().describe('The search query') }),
-            func: async (args: { query: string }) => {
-                // Use undefined projectId for tenant-wide lookup;
-                // the user explicitly configured this RAG module on the agent.
+            schema: filterableFields.length > 0
+                ? z.object({
+                    query: z.string().describe('The search query'),
+                    filter: z.record(z.unknown()).optional()
+                        .describe(knowledgeSearchFilterDescription(filterableFields)),
+                })
+                : z.object({ query: z.string().describe('The search query') }),
+            func: async (args: { query: string; filter?: Record<string, unknown> }) => {
                 const result = await queryRag(tenantDbName, tenantId, undefined, {
                     ragModuleKey,
                     query: args.query,
                     topK: 5,
+                    filter: args.filter,
                 });
                 return result.matches
                     .map((m) => m.content)
@@ -1565,7 +1606,7 @@ export async function executePlaygroundChatLocal(
             },
         });
         playgroundTools.push(ragTool);
-        playgroundToolDefinitions.push(KNOWLEDGE_SEARCH_TOOL_DEFINITION);
+        playgroundToolDefinitions.push(knowledgeSearchToolDefinition(filterableFields));
     }
 
     if (config.knowledgeEngineKey) {

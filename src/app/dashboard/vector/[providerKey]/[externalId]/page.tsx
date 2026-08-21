@@ -216,6 +216,12 @@ export default function VectorIndexDetailPage() {
     return String(value);
   }, [index?.metadata]);
 
+  /** Operators this driver can push down, declared by its provider contract. */
+  const filterOperators = useMemo(() => {
+    const declared = provider?.driverCapabilities?.['vector.filterOperators'];
+    return Array.isArray(declared) ? declared.map(String) : [];
+  }, [provider?.driverCapabilities]);
+
   const providerHandle = useMemo(() => resolveProviderHandle(index?.metadata), [index?.metadata]);
   const bucketName = useMemo(() => resolveBucketName(index?.metadata), [index?.metadata]);
 
@@ -1079,8 +1085,13 @@ export default function VectorIndexDetailPage() {
                       {...queryForm.getInputProps('topK')}
                     />
                     <Textarea
-                      label="Filter (JSON)"
-                      placeholder='{ "category": "support" }'
+                      label="Metadata filter (JSON)"
+                      description={
+                        filterOperators.length > 0
+                          ? `Supported operators: ${filterOperators.join(', ')}. A bare value means equality.`
+                          : 'This provider cannot push metadata filters down, so filtered queries are rejected.'
+                      }
+                      placeholder='{ "category": "support", "depth": { "$lte": 2 } }'
                       minRows={2}
                       autosize
                       {...queryForm.getInputProps('filter')}

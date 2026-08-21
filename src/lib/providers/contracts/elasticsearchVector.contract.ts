@@ -9,6 +9,8 @@ import type {
   VectorListInput,
   VectorListResult,
 } from '../domains/vector';
+import { FULL_FILTER_OPERATORS } from '../domains/vectorFilter';
+import { toElasticsearchFilter } from './vectorFilterTranslators';
 
 interface ElasticsearchCredentials {
   apiKey?: string;
@@ -194,6 +196,8 @@ export const ElasticsearchVectorProviderContract: ProviderContract<
     supportsUpsert: true,
     supportsQuery: true,
     supportsDelete: true,
+    'vector.filterOperators': FULL_FILTER_OPERATORS,
+    'vector.filterRaw': true,
   },
   async createRuntime({ credentials, settings, providerKey, logger }) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/ban-ts-comment
@@ -258,7 +262,7 @@ export const ElasticsearchVectorProviderContract: ProviderContract<
             query_vector: query.vector,
             k: query.topK,
             num_candidates: query.topK * 2,
-            filter: query.filter,
+            filter: query.filter ? toElasticsearchFilter(query.filter) : undefined,
           },
           size: query.topK,
         });

@@ -22,6 +22,7 @@ import type {
   VectorListInput,
   VectorListResult,
 } from '../domains/vector';
+import { toAwsVectorFilter } from './vectorFilterTranslators';
 
 /**
  * System Default Vector Provider — SaaS mode
@@ -62,6 +63,7 @@ function buildBucketInput(settings: SystemDefaultVectorSettings) {
   throw new Error('System Default provider requires either a vectorBucketName or vectorBucketArn setting.');
 }
 
+/** Wrap an already-translated filter document in the AWS DocumentType shape. */
 function buildS3Filter(filter: Record<string, unknown> | undefined): DocumentType | undefined {
   if (!filter || Object.keys(filter).length === 0) return undefined;
 
@@ -195,6 +197,10 @@ export const SystemDefaultVectorProviderContract: ProviderContract<
     supportsQuery: true,
     supportsDelete: true,
     multiTenant: true,
+    'vector.filterOperators': [
+      '$eq', '$ne', '$gt', '$gte', '$lt', '$lte', '$in', '$nin', '$exists', '$and', '$or',
+    ],
+    'vector.filterRaw': true,
   },
   async createRuntime({ credentials, settings, tenantId, tenantSlug, providerKey, logger }) {
     if (!credentials?.accessKeyId?.trim()) {
@@ -338,7 +344,7 @@ export const SystemDefaultVectorProviderContract: ProviderContract<
             indexName: handle.externalId,
             queryVector: { float32: query.vector.map((v) => Number(v)) },
             topK: query.topK,
-            filter: buildS3Filter(query.filter),
+            filter: query.filter ? buildS3Filter(toAwsVectorFilter(query.filter)) : undefined,
           }),
         );
 

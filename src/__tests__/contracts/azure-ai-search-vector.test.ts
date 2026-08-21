@@ -13,12 +13,15 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const mergeOrUploadDocuments = vi.fn().mockResolvedValue({ results: [] });
 const deleteDocuments = vi.fn().mockResolvedValue({ results: [] });
 const search = vi.fn();
+const createIndex = vi.fn().mockImplementation(async (index: unknown) => index);
 
 vi.mock('@azure/search-documents', () => ({
   AzureKeyCredential: class AzureKeyCredential {
     constructor(public key: string) {}
   },
-  SearchIndexClient: class SearchIndexClient {},
+  SearchIndexClient: class SearchIndexClient {
+    createIndex = createIndex;
+  },
   SearchClient: class SearchClient {
     mergeOrUploadDocuments = mergeOrUploadDocuments;
     deleteDocuments = deleteDocuments;
@@ -31,11 +34,18 @@ import type { VectorProviderRuntime, VectorIndexHandle } from '@/lib/providers/d
 
 const AZURE_KEY_PATTERN = /^[A-Za-z0-9_\-=]+$/;
 
+/** An index created before filterable metadata existed. */
 const HANDLE: VectorIndexHandle = {
   externalId: 'test-index',
   name: 'test-index',
   dimension: 3,
   metric: 'cosine',
+};
+
+/** An index created with the flattened, filterable metadata columns. */
+const FILTERABLE_HANDLE: VectorIndexHandle = {
+  ...HANDLE,
+  metadata: { filterSchema: 'kv-v1' },
 };
 
 function asyncResults(docs: Array<Record<string, unknown>>) {
@@ -157,5 +167,84 @@ describe('AzureAiSearchVectorProvider — document key encoding', () => {
     for (const key of keys) {
       expect(key).toMatch(AZURE_KEY_PATTERN);
     }
+  });
+});
+
+
+describe('AzureAiSearchVectorProvider — metadata filtering', () => {
+  let runtime: VectorProviderRuntime;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    runtime = await createRuntime();
+  });
+
+  it('creates indexes with filterable metadata columns and marks the schema', async () => {
+    const handle = await runtime.createIndex({ name: 'kb', dimension: 3, metric: 'cosine' });
+
+    const [definition] = createIndex.mock.calls[0];
+    const fieldNames = (definition.fields as Array<{ name: string; filterable?: boolean }>)
+      .filter((f) => f.filterable)
+      .map((f) => f.name);
+    expect(fieldNames).toEqual(expect.arrayContaining(['metadata_kv', 'metadata_keys']));
+    expect(handle.metadata?.filterSchema).toBe('kv-v1');
+  });
+
+  it('writes flattened metadata alongside the JSON blob on filterable indexes', async () => {
+    await runtime.upsertVectors(FILTERABLE_HANDLE, [
+      { id: 'a', values: [0.1, 0.2, 0.3], metadata: { source: 'crawler', depth: 2 } },
+    ]);
+
+    const [docs] = mergeOrUploadDocuments.mock.calls[0];
+    expect(docs[0].metadata_kv).toEqual(['source=crawler', 'depth=2']);
+    expect(docs[0].metadata_keys).toEqual(['source', 'depth']);
+    expect(JSON.parse(docs[0].metadata)).toEqual({ source: 'crawler', depth: 2 });
+  });
+
+  it('omits the flattened columns on pre-existing indexes that lack them', async () => {
+    await runtime.upsertVectors(HANDLE, [
+      { id: 'a', values: [0.1, 0.2, 0.3], metadata: { source: 'crawler' } },
+    ]);
+
+    const [docs] = mergeOrUploadDocuments.mock.calls[0];
+    expect(docs[0].metadata_kv).toBeUndefined();
+    expect(docs[0].metadata_keys).toBeUndefined();
+  });
+
+  it('pushes the filter down as an OData expression', async () => {
+    search.mockReturnValueOnce(asyncResults([]));
+
+    await runtime.queryVectors(FILTERABLE_HANDLE, {
+      vector: [0.1, 0.2, 0.3],
+      topK: 5,
+      filter: {
+        kind: 'comparison',
+        comparison: { op: '$eq', field: 'source', value: 'crawler' },
+      },
+    });
+
+    const [, options] = search.mock.calls[0];
+    expect(options.filter).toBe("metadata_kv/any(kv: kv eq 'source=crawler')");
+  });
+
+  it('rejects a filtered query against an index without the filterable schema', async () => {
+    await expect(
+      runtime.queryVectors(HANDLE, {
+        vector: [0.1, 0.2, 0.3],
+        topK: 5,
+        filter: {
+          kind: 'comparison',
+          comparison: { op: '$eq', field: 'source', value: 'crawler' },
+        },
+      }),
+    ).rejects.toThrow(/Recreate the index/);
+  });
+
+  it('leaves unfiltered queries alone', async () => {
+    search.mockReturnValueOnce(asyncResults([]));
+    await runtime.queryVectors(HANDLE, { vector: [0.1, 0.2, 0.3], topK: 5 });
+
+    const [, options] = search.mock.calls[0];
+    expect(options.filter).toBeUndefined();
   });
 });

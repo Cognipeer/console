@@ -57,6 +57,8 @@ interface RagModuleData {
   rerankerOversample?: number | null;
   defaultTopK?: number | null;
   defaultMinScore?: number | null;
+  defaultFilter?: Record<string, unknown> | null;
+  filterableFields?: string[] | null;
 }
 
 interface RerankerOption {
@@ -86,6 +88,8 @@ interface FormValues {
   rerankerOversample: number | '';
   defaultTopK: number | '';
   defaultMinScore: number;
+  defaultFilter: string;
+  filterableFields: string[];
 }
 
 export default function EditRagModuleModal({ opened, onClose, module, onUpdated }: EditRagModuleModalProps) {
@@ -111,6 +115,8 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
       rerankerOversample: module.rerankerOversample ?? '',
       defaultTopK: module.defaultTopK ?? 5,
       defaultMinScore: module.defaultMinScore ?? 0.5,
+      defaultFilter: module.defaultFilter ? JSON.stringify(module.defaultFilter, null, 2) : '',
+      filterableFields: module.filterableFields ?? [],
     },
     validate: {
       name: (v) => (!v ? 'Name is required' : null),
@@ -120,6 +126,18 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
       chunkSize: (v) => (!v || Number(v) <= 0 ? 'Chunk size must be positive' : null),
       chunkOverlap: (v) => (v === '' || Number(v) < 0 ? 'Overlap must be non-negative' : null),
       defaultTopK: (v) => (v === '' || Number(v) < 1 ? 'Must be at least 1' : null),
+      defaultFilter: (v) => {
+        if (!v.trim()) return null;
+        try {
+          const parsed = JSON.parse(v);
+          if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+            return 'Filter must be a JSON object';
+          }
+          return null;
+        } catch {
+          return 'Filter must be valid JSON';
+        }
+      },
     },
   });
 
@@ -208,6 +226,8 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
         rerankerOversample: module.rerankerOversample ?? '',
         defaultTopK: module.defaultTopK ?? 5,
         defaultMinScore: module.defaultMinScore ?? 0.5,
+        defaultFilter: module.defaultFilter ? JSON.stringify(module.defaultFilter, null, 2) : '',
+        filterableFields: module.filterableFields ?? [],
       });
       void loadEmbeddingModels();
       void loadVectorProviders();
@@ -255,6 +275,10 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
               : Number(values.rerankerOversample),
           defaultTopK: values.defaultTopK === '' ? null : Number(values.defaultTopK),
           defaultMinScore: values.defaultMinScore,
+          defaultFilter: values.defaultFilter.trim()
+            ? (JSON.parse(values.defaultFilter) as Record<string, unknown>)
+            : null,
+          filterableFields: values.filterableFields.length > 0 ? values.filterableFields : null,
         }),
       });
 
@@ -451,6 +475,26 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
             />
           </FormField>
         </FormRow>
+        <FormField
+          label="Default metadata filter (JSON)"
+          hint="ANDed into every query. Lets several sources share one vector index while this module retrieves only its own slice."
+        >
+          <Textarea
+            placeholder='{ "source": "crawler" }'
+            minRows={2}
+            autosize
+            {...form.getInputProps('defaultFilter')}
+          />
+        </FormField>
+        <FormField
+          label="Filterable fields"
+          hint="Metadata keys callers may filter on. Leave empty to allow any key. Also shown to agents and MCP clients so they know what is filterable."
+        >
+          <TagsInput
+            placeholder="source, depth, title…"
+            {...form.getInputProps('filterableFields')}
+          />
+        </FormField>
       </FormSection>
     </FormShell>
   );

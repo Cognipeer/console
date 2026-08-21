@@ -6,6 +6,11 @@ import {
     type SearchField,
 } from '@azure/search-documents';
 import type { ProviderContract } from '../types';
+import {
+    VectorFilterError,
+    type VectorFilterOperator,
+} from '../domains/vectorFilter';
+import { toAzureMetadataKeyValues, toAzureODataFilter } from './vectorFilterTranslators';
 import type {
     CreateVectorIndexInput,
     VectorIndexHandle,
@@ -38,11 +43,43 @@ interface AzureSearchDocument {
     id: string;
     vector: number[];
     metadata: string;
+    metadata_kv?: string[];
+    metadata_keys?: string[];
 }
 
 const ID_FIELD = 'id';
 const VECTOR_FIELD = 'vector';
 const METADATA_FIELD = 'metadata';
+// Azure cannot filter inside the metadata JSON blob, so filterable indexes also
+// carry flattened `key=value` pairs and a key list alongside it.
+const METADATA_KV_FIELD = 'metadata_kv';
+const METADATA_KEYS_FIELD = 'metadata_keys';
+const FILTER_SCHEMA_VERSION = 'kv-v1';
+
+/** Operators expressible over the flattened string collections. */
+const AZURE_FILTER_OPERATORS: VectorFilterOperator[] = [
+    '$eq',
+    '$ne',
+    '$in',
+    '$nin',
+    '$exists',
+    '$and',
+    '$or',
+    '$not',
+];
+
+function hasFilterableSchema(handle: VectorIndexHandle): boolean {
+    return handle.metadata?.filterSchema === FILTER_SCHEMA_VERSION;
+}
+
+function requireFilterableSchema(handle: VectorIndexHandle): void {
+    if (hasFilterableSchema(handle)) return;
+    throw new VectorFilterError(
+        `Azure AI Search index "${handle.externalId}" was created before filterable metadata `
+        + 'was supported, so metadata filters cannot be pushed down. Recreate the index and '
+        + 'reingest its documents to enable filtering.',
+    );
+}
 
 // Azure AI Search document keys may only contain letters, digits, underscore (_),
 // dash (-), or equal sign (=). Caller-supplied vector ids (e.g. Knowledge Engine's
@@ -214,6 +251,8 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
         'vector.metrics': ['cosine', 'euclidean', 'dot'],
         'vector.dataType': 'float32',
         'vector.provider': 'azure-ai-search',
+        'vector.filterOperators': AZURE_FILTER_OPERATORS,
+        'vector.filterRaw': true,
     },
     async createRuntime({ credentials, settings, providerKey, logger }) {
         const endpoint = normalizeEndpoint(settings.foundryProjectEndpoint);
@@ -267,6 +306,24 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                             facetable: false,
                             retrievable: true,
                         } as SearchField,
+                        {
+                            name: METADATA_KV_FIELD,
+                            type: 'Collection(Edm.String)',
+                            searchable: false,
+                            filterable: true,
+                            sortable: false,
+                            facetable: false,
+                            retrievable: false,
+                        } as SearchField,
+                        {
+                            name: METADATA_KEYS_FIELD,
+                            type: 'Collection(Edm.String)',
+                            searchable: false,
+                            filterable: true,
+                            sortable: false,
+                            facetable: false,
+                            retrievable: false,
+                        } as SearchField,
                     ],
                     vectorSearch: {
                         algorithms: [
@@ -302,6 +359,7 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                         endpoint,
                         algoName,
                         profileName,
+                        filterSchema: FILTER_SCHEMA_VERSION,
                     },
                 };
             },
@@ -332,12 +390,17 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
 
                     const metric = fromAzureMetric(algo?.parameters?.metric ?? 'cosine');
 
+                    const filterable = index.fields?.some((f) => f.name === METADATA_KV_FIELD);
+
                     handles.push({
                         externalId: index.name,
                         name: index.name,
                         dimension,
                         metric,
-                        metadata: { provider: 'azure-ai-search' },
+                        metadata: {
+                            provider: 'azure-ai-search',
+                            ...(filterable ? { filterSchema: FILTER_SCHEMA_VERSION } : {}),
+                        },
                     });
                 }
 
@@ -350,11 +413,25 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
             ): Promise<void> {
                 const client = getSearchClient(handle.externalId);
 
-                const documents: AzureSearchDocument[] = items.map((item) => ({
-                    [ID_FIELD]: encodeVectorId(item.id),
-                    [VECTOR_FIELD]: item.values,
-                    [METADATA_FIELD]: JSON.stringify(item.metadata ?? {}),
-                }));
+                const filterable = hasFilterableSchema(handle);
+
+                const documents: AzureSearchDocument[] = items.map((item) => {
+                    const document: AzureSearchDocument = {
+                        [ID_FIELD]: encodeVectorId(item.id),
+                        [VECTOR_FIELD]: item.values,
+                        [METADATA_FIELD]: JSON.stringify(item.metadata ?? {}),
+                    };
+
+                    // Older indexes have no filterable columns; writing them
+                    // would be rejected as unknown fields.
+                    if (filterable) {
+                        const { keys, pairs } = toAzureMetadataKeyValues(item.metadata);
+                        document[METADATA_KV_FIELD] = pairs;
+                        document[METADATA_KEYS_FIELD] = keys;
+                    }
+
+                    return document;
+                });
 
                 await client.mergeOrUploadDocuments(documents);
 
@@ -371,7 +448,18 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
             ): Promise<VectorQueryResult> {
                 const client = getSearchClient(handle.externalId);
 
+                let odataFilter: string | undefined;
+                if (query.filter) {
+                    requireFilterableSchema(handle);
+                    odataFilter = toAzureODataFilter(
+                        query.filter,
+                        METADATA_KV_FIELD,
+                        METADATA_KEYS_FIELD,
+                    );
+                }
+
                 const searchResults = await client.search('*', {
+                    ...(odataFilter ? { filter: odataFilter } : {}),
                     vectorSearchOptions: {
                         queries: [
                             {

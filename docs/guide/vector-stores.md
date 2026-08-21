@@ -160,3 +160,76 @@ interface VectorProviderRuntime {
 - Vector dimension is validated before upsert operations
 - Provider type and status are checked before any runtime operation
 - Credentials are validated during runtime construction
+
+## Metadata Filtering
+
+Queries can narrow candidates by chunk metadata using one provider-neutral filter
+language. The gateway parses and validates the filter once, then each driver
+translates it into its store's native syntax and pushes it down.
+
+**Filters are never applied after the query.** A driver that cannot express an
+operator rejects the request with a `400` naming what is unsupported, instead of
+returning results that quietly ignore the filter. That way `topK` always means
+"topK matching documents".
+
+### Filter language
+
+```jsonc
+{ "source": "crawler" }                       // shorthand for $eq
+{ "depth": { "$lte": 2 }, "lang": "tr" }      // several fields are ANDed
+{ "lang": { "$in": ["tr", "en"] } }
+{ "draft": { "$exists": false } }
+{ "$or": [{ "source": "crawler" }, { "$not": { "depth": { "$gt": 5 } } }] }
+{ "$raw": { "term": { "metadata.source": "crawler" } } }  // provider-native escape hatch
+```
+
+Field operators: `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`,
+`$exists`. Composition: `$and`, `$or`, `$not`. `$raw` replaces the entire filter
+and cannot be combined with other keys.
+
+### Provider support
+
+| Driver | Push-down | Notes |
+| --- | --- | --- |
+| `elasticsearch`, `elasticsearch-cloud`, `elasticsearch-self-hosted` | full | Exact matches target the `.keyword` sub-field. |
+| `postgres` | full | Parameterised `jsonb` predicates in the same `SELECT`. |
+| `sqlite-vector` | full | Evaluated during the scan, before top-K selection. |
+| `mongodb-community-vector` | full | Applied as part of the scan query. |
+| `milvus`, `milvus-cloud`, `milvus-local` | full | Requires a collection created with the JSON metadata column (see below). |
+| `mongodb` (Atlas) | no `$exists` | Filtered paths must be declared in the Atlas vector index. |
+| `aws-s3-vectors`, `system-default` | no `$not` | Metadata keys must be filterable in the index. |
+| `chroma`, `chroma-cloud`, `chroma-local` | no `$not`, no `$exists` | Chroma `where` has no equivalent. |
+| `azure-ai-search` | equality family only | `$eq`, `$ne`, `$in`, `$nin`, `$exists`; range operators are not expressible (see below). |
+| `orama` | none | Metadata is stored as an opaque JSON string; filtered queries are rejected. |
+
+Every driver except `orama` also accepts `$raw`.
+
+### Index schema requirements
+
+Two stores need an index created by a current version of the console before
+filters can be pushed down; older ones keep serving unfiltered queries and reject
+filtered ones with an actionable error:
+
+- **Azure AI Search** cannot filter inside the metadata JSON blob, so indexes now
+  carry `metadata_kv` (flattened `key=value` entries) and `metadata_keys`
+  alongside it. That covers equality and set membership; range comparisons over a
+  string collection are not expressible, so `$gt`/`$gte`/`$lt`/`$lte` are rejected.
+- **Milvus** can only filter a metadata column typed as JSON. Collections created
+  earlier store `metadata_json` as `VarChar`.
+
+To enable filtering on an existing index in either store, recreate the index and
+reingest its documents.
+
+### Knowledge Engine
+
+Knowledge Engine modules add two settings on top of the same language:
+
+- `defaultFilter` — ANDed into every query against the module, so several sources
+  can share one vector index while each module retrieves only its own slice.
+- `filterableFields` — the metadata keys callers may filter on. When set, a query
+  touching any other key is rejected, and the list is advertised to agents and MCP
+  clients so they know what is filterable.
+
+Documents ingested by the crawler carry `source`, `sourceUrl`, `crawlerKey`,
+`jobId`, `depth`, and `title`, which makes those the natural `filterableFields`
+for a crawled knowledge base.

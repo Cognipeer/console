@@ -1,3 +1,7 @@
+import type { VectorFilterNode, VectorFilterOperator } from './vectorFilter';
+
+export * from './vectorFilter';
+
 export interface VectorIndexHandle {
   externalId: string;
   name: string;
@@ -28,8 +32,22 @@ export interface VectorUpsertItem {
 export interface VectorQueryInput {
   topK: number;
   vector: number[];
-  filter?: Record<string, unknown>;
+  /**
+   * Parsed, validated metadata filter. Providers must push this down to the
+   * store; the service layer never applies it afterwards, so a provider that
+   * cannot honour an operator declares that in `vector.filterOperators` and
+   * the request is rejected before it reaches the runtime.
+   */
+  filter?: VectorFilterNode;
 }
+
+/**
+ * Filter operators a vector driver can push down, declared as the
+ * `vector.filterOperators` capability. An empty list means the driver cannot
+ * filter at all. `vector.filterRaw` marks drivers that also accept a
+ * provider-native `$raw` filter.
+ */
+export type VectorFilterCapability = VectorFilterOperator[];
 
 export interface VectorQueryMatch {
   id: string;

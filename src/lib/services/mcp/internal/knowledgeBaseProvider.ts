@@ -26,15 +26,31 @@ const SEARCH_ANNOTATIONS = {
   openWorldHint: false,
 } as const;
 
-function searchInputSchema(): Record<string, unknown> {
+function searchInputSchema(filterableFields?: string[]): Record<string, unknown> {
+  const properties: Record<string, unknown> = {
+    query: {
+      type: 'string',
+      description: 'The search query to run against this knowledge base.',
+    },
+  };
+
+  // Only advertise filtering when the module says which keys are filterable —
+  // without that list the model would be guessing at metadata names.
+  if (filterableFields && filterableFields.length > 0) {
+    properties.filter = {
+      type: 'object',
+      additionalProperties: true,
+      description:
+        'Optional metadata filter. Supported fields: '
+        + `${filterableFields.join(', ')}. `
+        + 'Use { "field": value } for equality or operators '
+        + '$eq, $ne, $gt, $gte, $lt, $lte, $in, $nin, $exists, combined with $and / $or / $not.',
+    };
+  }
+
   return {
     type: 'object',
-    properties: {
-      query: {
-        type: 'string',
-        description: 'The search query to run against this knowledge base.',
-      },
-    },
+    properties,
     required: ['query'],
     additionalProperties: false,
   };
@@ -76,7 +92,7 @@ export const knowledgeBaseProvider: InternalMcpProvider = {
         {
           name: TOOL_NAME,
           description,
-          inputSchema: searchInputSchema(),
+          inputSchema: searchInputSchema(ragModule?.filterableFields),
           annotations: { ...SEARCH_ANNOTATIONS, title: `Search ${label}` },
         },
       ],
@@ -93,10 +109,15 @@ export const knowledgeBaseProvider: InternalMcpProvider = {
     if (!query) {
       throw new Error('"query" is required');
     }
+    const filter =
+      args.filter && typeof args.filter === 'object' && !Array.isArray(args.filter)
+        ? (args.filter as Record<string, unknown>)
+        : undefined;
     // topK is intentionally omitted — queryRag falls back to the module's default.
     const result = await queryRag(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
       ragModuleKey: instanceKey,
       query,
+      filter,
     });
     return {
       query: result.query,

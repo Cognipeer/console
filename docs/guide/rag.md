@@ -145,3 +145,31 @@ The Knowledge Engine pipeline integrates several gateway services:
 - **Inference Service** — For generating embeddings
 - **Vector Service** — For storing and querying vectors
 - **File Service** — For file conversion (optional)
+
+## Metadata Filtering
+
+Queries accept a `filter` in the console's canonical filter language, which the
+gateway pushes down to the vector store — see
+[Vector Stores → Metadata Filtering](./vector-stores.md#metadata-filtering) for the
+operator list and per-provider support.
+
+A module can also carry its own filter configuration:
+
+| Setting | Effect |
+| --- | --- |
+| `defaultFilter` | ANDed into every query against the module. Lets several sources share one vector index while each module retrieves only its own slice. |
+| `filterableFields` | Metadata keys callers may filter on. A query touching any other key is rejected with `400`. The list is also surfaced to agents and MCP clients as the `filter` argument's documentation, so a model knows what it may narrow by. |
+
+```bash
+curl -X POST "$CONSOLE_URL/api/client/v1/rag/modules/support-kb/query" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "how do I reset my password?",
+    "topK": 5,
+    "filter": { "source": "crawler", "depth": { "$lte": 2 } }
+  }'
+```
+
+A filter the underlying vector store cannot push down is rejected rather than
+ignored, so a filtered query never silently returns unfiltered passages.

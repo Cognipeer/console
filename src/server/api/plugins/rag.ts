@@ -24,6 +24,7 @@ import {
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
+import { VectorFilterError } from '@/lib/providers';
 
 const logger = createLogger('api:rag');
 
@@ -95,10 +96,19 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         rerankerOversample: typeof body.rerankerOversample === 'number' ? body.rerankerOversample : undefined,
         defaultTopK: typeof body.defaultTopK === 'number' ? body.defaultTopK : undefined,
         defaultMinScore: typeof body.defaultMinScore === 'number' ? body.defaultMinScore : undefined,
+        defaultFilter: body.defaultFilter && typeof body.defaultFilter === 'object' && !Array.isArray(body.defaultFilter)
+          ? (body.defaultFilter as Record<string, unknown>)
+          : undefined,
+        filterableFields: Array.isArray(body.filterableFields)
+          ? (body.filterableFields as unknown[]).filter((f): f is string => typeof f === 'string')
+          : undefined,
       });
 
       return reply.code(201).send({ module: ragModule });
     } catch (error) {
+      if (error instanceof VectorFilterError) {
+        return reply.code(400).send({ error: error.message });
+      }
       logger.error('Create RAG module error', { error });
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({
@@ -145,6 +155,9 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ module: ragModule });
     } catch (error) {
+      if (error instanceof VectorFilterError) {
+        return reply.code(400).send({ error: error.message });
+      }
       logger.error('Update RAG module error', { error });
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({
@@ -333,6 +346,9 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ result });
     } catch (error) {
+      if (error instanceof VectorFilterError) {
+        return reply.code(400).send({ error: error.message });
+      }
       logger.error('Query RAG module error', { error });
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({

@@ -139,6 +139,18 @@ export interface IRagModule {
   fileProviderKey?: string;
   chunkConfig: IRagChunkConfig;
   status: 'active' | 'disabled';
+  /**
+   * Metadata filter ANDed into every query against this module. Lets several
+   * sources share one vector index while each module only ever retrieves its
+   * own slice.
+   */
+  defaultFilter?: Record<string, unknown>;
+  /**
+   * Metadata keys callers may filter on. When set, a query filtering on any
+   * other key is rejected; also advertised to agents and MCP clients so they
+   * know what is filterable.
+   */
+  filterableFields?: string[];
   totalDocuments?: number;
   totalChunks?: number;
   metadata?: Record<string, unknown>;

@@ -27,6 +27,8 @@ export interface CreateRagModuleRequest {
   rerankerOversample?: number;
   defaultTopK?: number;
   defaultMinScore?: number;
+  defaultFilter?: Record<string, unknown>;
+  filterableFields?: string[];
   metadata?: Record<string, unknown>;
   createdBy: string;
 }
@@ -43,6 +45,8 @@ export interface UpdateRagModuleRequest {
   rerankerOversample?: number | null;
   defaultTopK?: number | null;
   defaultMinScore?: number | null;
+  defaultFilter?: Record<string, unknown> | null;
+  filterableFields?: string[] | null;
   metadata?: Record<string, unknown>;
   updatedBy: string;
 }

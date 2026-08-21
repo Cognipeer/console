@@ -9,6 +9,8 @@ import type {
   VectorListInput,
   VectorListResult,
 } from '../domains/vector';
+import { FULL_FILTER_OPERATORS } from '../domains/vectorFilter';
+import { toElasticsearchFilter } from './vectorFilterTranslators';
 
 interface ElasticsearchCloudCredentials {
   cloudId: string;
@@ -161,6 +163,8 @@ export const ElasticsearchCloudVectorProviderContract: ProviderContract<
     supportsUpsert: true,
     supportsQuery: true,
     supportsDelete: true,
+    'vector.filterOperators': FULL_FILTER_OPERATORS,
+    'vector.filterRaw': true,
   },
   async createRuntime({ credentials, settings, providerKey, logger }) {
     if (!credentials?.cloudId?.trim()) {
@@ -287,7 +291,7 @@ export const ElasticsearchCloudVectorProviderContract: ProviderContract<
               query_vector: query.vector,
               k: query.topK,
               num_candidates: query.topK * 2,
-              filter: query.filter,
+              filter: query.filter ? toElasticsearchFilter(query.filter) : undefined,
             },
             size: query.topK,
           });

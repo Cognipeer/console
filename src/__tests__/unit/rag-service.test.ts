@@ -390,6 +390,73 @@ describe('RAG Service', () => {
         expect.objectContaining({ query: expect.objectContaining({ filter: { category: 'tech' } }) }),
       );
     });
+
+    it("ANDs the module's default filter into every query", async () => {
+      db.findRagModuleByKey.mockResolvedValue({
+        ...mockModule,
+        defaultFilter: { source: 'crawler' },
+      });
+
+      await queryRag(DB_NAME, TENANT_ID, PROJECT_ID, { ...queryReq, filter: { category: 'tech' } });
+
+      expect(queryVectorIndex).toHaveBeenCalledWith(
+        DB_NAME, TENANT_ID, PROJECT_ID,
+        expect.objectContaining({
+          query: expect.objectContaining({
+            filter: { $and: [{ source: 'crawler' }, { category: 'tech' }] },
+          }),
+        }),
+      );
+    });
+
+    it("applies the module's default filter when the caller sends none", async () => {
+      db.findRagModuleByKey.mockResolvedValue({
+        ...mockModule,
+        defaultFilter: { source: 'crawler' },
+      });
+
+      await queryRag(DB_NAME, TENANT_ID, PROJECT_ID, queryReq);
+
+      expect(queryVectorIndex).toHaveBeenCalledWith(
+        DB_NAME, TENANT_ID, PROJECT_ID,
+        expect.objectContaining({
+          query: expect.objectContaining({ filter: { source: 'crawler' } }),
+        }),
+      );
+    });
+
+    it('rejects a filter on a field the module does not expose', async () => {
+      db.findRagModuleByKey.mockResolvedValue({
+        ...mockModule,
+        filterableFields: ['source', 'depth'],
+      });
+
+      await expect(
+        queryRag(DB_NAME, TENANT_ID, PROJECT_ID, { ...queryReq, filter: { secret: 'x' } }),
+      ).rejects.toThrow(/not allowed/i);
+      expect(queryVectorIndex).not.toHaveBeenCalled();
+    });
+
+    it('allows a filter that stays within the exposed fields', async () => {
+      db.findRagModuleByKey.mockResolvedValue({
+        ...mockModule,
+        filterableFields: ['source', 'depth'],
+      });
+
+      await queryRag(DB_NAME, TENANT_ID, PROJECT_ID, {
+        ...queryReq,
+        filter: { source: 'crawler', depth: { $lte: 2 } },
+      });
+
+      expect(queryVectorIndex).toHaveBeenCalled();
+    });
+
+    it('rejects a malformed filter before touching the vector store', async () => {
+      await expect(
+        queryRag(DB_NAME, TENANT_ID, PROJECT_ID, { ...queryReq, filter: { depth: { $gt: 'high' } } }),
+      ).rejects.toThrow(/requires a number/);
+      expect(queryVectorIndex).not.toHaveBeenCalled();
+    });
   });
 
   // ─── deleteRagDocument ──────────────────────────────────────────────

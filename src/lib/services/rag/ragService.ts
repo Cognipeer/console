@@ -7,6 +7,11 @@
 
 import crypto from 'crypto';
 import { createLogger } from '@/lib/core/logger';
+import {
+  VectorFilterError,
+  collectFilterFields,
+  parseVectorFilter,
+} from '@/lib/providers';
 import { getDatabase } from '@/lib/database';
 
 const logger = createLogger('rag');
@@ -188,6 +193,57 @@ async function getEmbeddings(
   });
 }
 
+/* ── Metadata filters ────────────────────────────────────────────────── */
+
+/** Validate a filter document, surfacing DSL errors at configuration time. */
+function validateFilterDocument(filter: unknown, label: string): void {
+  if (filter === undefined || filter === null) return;
+  try {
+    parseVectorFilter(filter);
+  } catch (error) {
+    throw new VectorFilterError(
+      `${label}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+/**
+ * Reject a query filter that touches a metadata key the module does not
+ * expose. Modules that declare no `filterableFields` allow any key.
+ */
+function assertFilterFieldsAllowed(
+  filter: unknown,
+  filterableFields: string[] | undefined,
+): void {
+  if (!filterableFields || filterableFields.length === 0) return;
+  const parsed = parseVectorFilter(filter);
+  if (!parsed) return;
+
+  const allowed = new Set(filterableFields);
+  const rejected = [...collectFilterFields(parsed)].filter((field) => !allowed.has(field));
+
+  if (rejected.length > 0) {
+    throw new VectorFilterError(
+      `Filtering on ${rejected.join(', ')} is not allowed for this Knowledge Engine module. `
+      + `Filterable fields: ${filterableFields.join(', ')}.`,
+    );
+  }
+}
+
+/** Combine the module's standing filter with the per-request one. */
+function mergeFilters(
+  defaultFilter: Record<string, unknown> | undefined,
+  requestFilter: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  const hasDefault = defaultFilter && Object.keys(defaultFilter).length > 0;
+  const hasRequest = requestFilter && Object.keys(requestFilter).length > 0;
+
+  if (hasDefault && hasRequest) return { $and: [defaultFilter, requestFilter] };
+  if (hasDefault) return defaultFilter;
+  if (hasRequest) return requestFilter;
+  return undefined;
+}
+
 /* ── Module CRUD ─────────────────────────────────────────────────────── */
 
 export async function createRagModule(
@@ -200,6 +256,8 @@ export async function createRagModule(
   await db.switchToTenant(tenantDbName);
 
   const key = generateKey(request.name, request.key);
+
+  validateFilterDocument(request.defaultFilter, 'Invalid defaultFilter');
 
   // Check uniqueness
   const existing = await db.findRagModuleByKey(key, projectId);
@@ -224,6 +282,8 @@ export async function createRagModule(
     rerankerOversample: request.rerankerOversample,
     defaultTopK: request.defaultTopK,
     defaultMinScore: request.defaultMinScore,
+    defaultFilter: request.defaultFilter,
+    filterableFields: request.filterableFields,
     totalDocuments: 0,
     totalChunks: 0,
     metadata: request.metadata,
@@ -251,6 +311,13 @@ export async function updateRagModule(
   if (request.rerankerOversample !== undefined) updates.rerankerOversample = request.rerankerOversample ?? undefined;
   if (request.defaultTopK !== undefined) updates.defaultTopK = request.defaultTopK ?? undefined;
   if (request.defaultMinScore !== undefined) updates.defaultMinScore = request.defaultMinScore ?? undefined;
+  if (request.defaultFilter !== undefined) {
+    validateFilterDocument(request.defaultFilter, 'Invalid defaultFilter');
+    updates.defaultFilter = request.defaultFilter ?? undefined;
+  }
+  if (request.filterableFields !== undefined) {
+    updates.filterableFields = request.filterableFields ?? undefined;
+  }
   updates.updatedBy = request.updatedBy;
   return db.updateRagModule(moduleId, updates as Partial<IRagModule>);
 }
@@ -579,11 +646,12 @@ export async function queryRag(
     [request.query],
   );
 
-  // 2. Build filter — only include user-supplied filters; each module
-  //    already uses a dedicated vector index so no module-level filter needed.
-  const filter = request.filter && Object.keys(request.filter).length > 0
-    ? request.filter
-    : undefined;
+  // 2. Build the metadata filter: the module's standing filter ANDed with the
+  //    caller's, after validating the request filter and checking it only
+  //    touches fields the module exposes.
+  validateFilterDocument(request.filter, 'Invalid filter');
+  assertFilterFieldsAllowed(request.filter, ragModule.filterableFields);
+  const filter = mergeFilters(ragModule.defaultFilter, request.filter);
 
   // 3. Query vector store. If reranker is configured, oversample candidates
   //    so the reranker has more to work with.

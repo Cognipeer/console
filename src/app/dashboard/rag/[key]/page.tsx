@@ -75,6 +75,8 @@ interface RagModuleView {
   rerankerOversample?: number | null;
   defaultTopK?: number | null;
   defaultMinScore?: number | null;
+  defaultFilter?: Record<string, unknown> | null;
+  filterableFields?: string[] | null;
   totalDocuments?: number;
   totalChunks?: number;
   createdAt?: string;
@@ -218,10 +220,22 @@ export default function RagModuleDetailPage() {
   const [usageLoading, setUsageLoading] = useState(false);
 
   const queryForm = useForm({
-    initialValues: { query: '', topK: 5, minScore: 0 },
+    initialValues: { query: '', topK: 5, minScore: 0, filter: '' },
     validate: {
       query: (v) => (!v.trim() ? 'Query is required' : null),
       topK: (v) => (v < 1 ? 'Must be at least 1' : null),
+      filter: (v) => {
+        if (!v.trim()) return null;
+        try {
+          const parsed = JSON.parse(v);
+          if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+            return 'Filter must be a JSON object';
+          }
+          return null;
+        } catch {
+          return 'Filter must be valid JSON';
+        }
+      },
     },
   });
 
@@ -475,7 +489,12 @@ export default function RagModuleDetailPage() {
       const res = await fetch(`/api/rag/modules/${encodeURIComponent(moduleKey)}/query`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: values.query, topK: values.topK, minScore: values.minScore || undefined }),
+        body: JSON.stringify({
+          query: values.query,
+          topK: values.topK,
+          minScore: values.minScore || undefined,
+          filter: values.filter.trim() ? JSON.parse(values.filter) : undefined,
+        }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: 'Unknown error' }));
@@ -1056,6 +1075,18 @@ export default function RagModuleDetailPage() {
                       onChange={(v) => queryForm.setFieldValue('minScore', v)}
                     />
                   </Box>
+                  <Textarea
+                    label="Metadata filter (JSON)"
+                    description={
+                      mod?.filterableFields?.length
+                        ? `Filterable fields: ${mod.filterableFields.join(', ')}. A bare value means equality; operators $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin, $exists compose with $and / $or / $not.`
+                        : 'Optional. A bare value means equality; operators $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin, $exists compose with $and / $or / $not.'
+                    }
+                    placeholder='{ "source": "crawler", "depth": { "$lte": 2 } }'
+                    minRows={2}
+                    autosize
+                    {...queryForm.getInputProps('filter')}
+                  />
                   <Group align="flex-end">
                     <NumberInput
                       label="Top K"

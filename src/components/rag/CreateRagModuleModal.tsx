@@ -67,6 +67,8 @@ interface FormValues {
   rerankerOversample: number | '';
   defaultTopK: number | '';
   defaultMinScore: number;
+  defaultFilter: string;
+  filterableFields: string[];
 }
 
 export default function CreateRagModuleModal({ opened, onClose, onCreated }: CreateRagModuleModalProps) {
@@ -91,6 +93,8 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
       rerankerOversample: '',
       defaultTopK: 5,
       defaultMinScore: 0.5,
+      defaultFilter: '',
+      filterableFields: [],
     },
     validate: {
       name: (v) => (!v ? 'Name is required' : null),
@@ -100,6 +104,18 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
       chunkSize: (v) => (!v || Number(v) <= 0 ? 'Chunk size must be positive' : null),
       chunkOverlap: (v) => (v === '' || Number(v) < 0 ? 'Overlap must be non-negative' : null),
       defaultTopK: (v) => (v === '' || Number(v) < 1 ? 'Must be at least 1' : null),
+      defaultFilter: (v) => {
+        if (!v.trim()) return null;
+        try {
+          const parsed = JSON.parse(v);
+          if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+            return 'Filter must be a JSON object';
+          }
+          return null;
+        } catch {
+          return 'Filter must be valid JSON';
+        }
+      },
     },
   });
 
@@ -219,6 +235,10 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
               : undefined,
           defaultTopK: values.defaultTopK !== '' ? Number(values.defaultTopK) : undefined,
           defaultMinScore: values.defaultMinScore,
+          defaultFilter: values.defaultFilter.trim()
+            ? (JSON.parse(values.defaultFilter) as Record<string, unknown>)
+            : undefined,
+          filterableFields: values.filterableFields.length > 0 ? values.filterableFields : undefined,
         }),
       });
 
@@ -573,6 +593,26 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
             />
           </FormField>
         </FormRow>
+        <FormField
+          label="Default metadata filter (JSON)"
+          hint="ANDed into every query. Lets several sources share one vector index while this module retrieves only its own slice."
+        >
+          <Textarea
+            placeholder='{ "source": "crawler" }'
+            minRows={2}
+            autosize
+            {...form.getInputProps('defaultFilter')}
+          />
+        </FormField>
+        <FormField
+          label="Filterable fields"
+          hint="Metadata keys callers may filter on. Leave empty to allow any key. Also shown to agents and MCP clients so they know what is filterable."
+        >
+          <TagsInput
+            placeholder="source, depth, title…"
+            {...form.getInputProps('filterableFields')}
+          />
+        </FormField>
       </FormSection>
     </FormShell>
   );
