@@ -32,7 +32,16 @@ vi.mock('@azure/search-documents', () => ({
 import { AzureAiSearchVectorProviderContract } from '@/lib/providers/contracts/azureAiSearchVector.contract';
 import type { VectorProviderRuntime, VectorIndexHandle } from '@/lib/providers/domains/vector';
 
-const AZURE_KEY_PATTERN = /^[A-Za-z0-9_\-=]+$/;
+/**
+ * Azure's ACTUAL rule, which is the charset PLUS "may not start with an
+ * underscore". The pattern here used to omit that second half, so it happily
+ * accepted the `_b64_` marker this provider was producing — every upsert against
+ * a real index came back
+ * "Invalid document key: '_b64_…'. Keys cannot start with a leading underscore."
+ * while this suite stayed green. A mocked SDK can only ever check what the
+ * assertion knows, so the assertion has to carry the whole rule.
+ */
+const AZURE_KEY_PATTERN = /^[A-Za-z0-9\-=][A-Za-z0-9_\-=]*$/;
 
 /** An index created before filterable metadata existed. */
 const HANDLE: VectorIndexHandle = {
@@ -90,6 +99,27 @@ describe('AzureAiSearchVectorProvider — document key encoding', () => {
     expect(docs).toHaveLength(1);
     expect(docs[0].id).not.toBe(unsafeId);
     expect(docs[0].id).toMatch(AZURE_KEY_PATTERN);
+  });
+
+  it('never produces a key Azure would reject, for any shape of caller id', async () => {
+    // The ids a real deployment actually sends, including the ones that made the
+    // marker itself illegal.
+    const ids = [
+      'akbank-55d99256:6a87cf02fca13acf380663aa:0',
+      '_leading-underscore',
+      'with space',
+      'türkçe-karakter:1',
+      'a=b',
+      'safe_id-123=',
+    ];
+
+    for (const id of ids) {
+      vi.clearAllMocks();
+      await runtime.upsertVectors(HANDLE, [{ id, values: [0.1, 0.2, 0.3] }]);
+      const [docs] = mergeOrUploadDocuments.mock.calls[0];
+      expect(docs[0].id, `key for ${id}`).toMatch(AZURE_KEY_PATTERN);
+      expect(docs[0].id.startsWith('_'), `key for ${id} starts with _`).toBe(false);
+    }
   });
 
   it('leaves already-safe ids untouched on upsert', async () => {
