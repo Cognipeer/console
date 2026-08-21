@@ -59,6 +59,12 @@ export interface RagIngestRequest {
   content: string;
   contentType?: string;
   metadata?: Record<string, unknown>;
+  /**
+   * Chunk this document differently from the rest of the module. A 200-page
+   * contract and a FAQ export rarely want the same splitter. Persisted on the
+   * document so a re-index reproduces the same chunks.
+   */
+  chunkConfig?: IRagChunkConfig;
   createdBy: string;
 }
 

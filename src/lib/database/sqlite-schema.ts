@@ -546,6 +546,12 @@ CREATE TABLE IF NOT EXISTS rag_documents (
   projectId TEXT,
   ragModuleKey TEXT NOT NULL,
   fileKey TEXT,
+  fileBucketKey TEXT,
+  fileProviderKey TEXT,
+  chunkConfig TEXT,
+  sourceText TEXT,
+  sourceTextKey TEXT,
+  sourceHash TEXT,
   fileName TEXT NOT NULL,
   contentType TEXT,
   size INTEGER,
@@ -570,6 +576,10 @@ CREATE TABLE IF NOT EXISTS rag_chunks (
   chunkIndex INTEGER NOT NULL,
   vectorId TEXT NOT NULL,
   content TEXT NOT NULL,
+  charStart INTEGER,
+  charEnd INTEGER,
+  headingPath TEXT,
+  tokenCount INTEGER,
   metadata TEXT DEFAULT '{}',
   createdAt TEXT NOT NULL
 );

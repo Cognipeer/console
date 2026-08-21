@@ -165,11 +165,13 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
 
       db.prepare(`
         INSERT INTO ${TABLES.ragDocuments}
-        (id, tenantId, projectId, ragModuleKey, fileKey, fileName, contentType, size,
-         status, chunkCount, errorMessage, lastIndexedAt, metadata,
+        (id, tenantId, projectId, ragModuleKey, fileKey, fileBucketKey, fileProviderKey,
+         fileName, contentType, size, status, chunkCount, errorMessage, lastIndexedAt,
+         chunkConfig, sourceText, sourceTextKey, sourceHash, metadata,
          createdBy, updatedBy, createdAt, updatedAt)
-        VALUES (@id, @tenantId, @projectId, @ragModuleKey, @fileKey, @fileName, @contentType, @size,
-         @status, @chunkCount, @errorMessage, @lastIndexedAt, @metadata,
+        VALUES (@id, @tenantId, @projectId, @ragModuleKey, @fileKey, @fileBucketKey, @fileProviderKey,
+         @fileName, @contentType, @size, @status, @chunkCount, @errorMessage, @lastIndexedAt,
+         @chunkConfig, @sourceText, @sourceTextKey, @sourceHash, @metadata,
          @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
@@ -177,6 +179,8 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         projectId: doc.projectId ?? null,
         ragModuleKey: doc.ragModuleKey,
         fileKey: doc.fileKey ?? null,
+        fileBucketKey: doc.fileBucketKey ?? null,
+        fileProviderKey: doc.fileProviderKey ?? null,
         fileName: doc.fileName,
         contentType: doc.contentType ?? null,
         size: doc.size ?? null,
@@ -184,6 +188,10 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         chunkCount: doc.chunkCount ?? 0,
         errorMessage: doc.errorMessage ?? null,
         lastIndexedAt: doc.lastIndexedAt ? doc.lastIndexedAt.toISOString() : null,
+        chunkConfig: doc.chunkConfig ? this.toJson(doc.chunkConfig) : null,
+        sourceText: doc.sourceText ?? null,
+        sourceTextKey: doc.sourceTextKey ?? null,
+        sourceHash: doc.sourceHash ?? null,
         metadata: this.toJson(doc.metadata ?? {}),
         createdBy: doc.createdBy,
         updatedBy: doc.updatedBy ?? null,
@@ -211,6 +219,12 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
       if (data.chunkCount !== undefined) { sets.push('chunkCount = @chunkCount'); params.chunkCount = data.chunkCount; }
       if (data.errorMessage !== undefined) { sets.push('errorMessage = @errorMessage'); params.errorMessage = data.errorMessage; }
       if (data.lastIndexedAt !== undefined) { sets.push('lastIndexedAt = @lastIndexedAt'); params.lastIndexedAt = data.lastIndexedAt instanceof Date ? data.lastIndexedAt.toISOString() : data.lastIndexedAt; }
+      if (data.fileBucketKey !== undefined) { sets.push('fileBucketKey = @fileBucketKey'); params.fileBucketKey = data.fileBucketKey; }
+      if (data.fileProviderKey !== undefined) { sets.push('fileProviderKey = @fileProviderKey'); params.fileProviderKey = data.fileProviderKey; }
+      if (data.chunkConfig !== undefined) { sets.push('chunkConfig = @chunkConfig'); params.chunkConfig = data.chunkConfig ? this.toJson(data.chunkConfig) : null; }
+      if (data.sourceText !== undefined) { sets.push('sourceText = @sourceText'); params.sourceText = data.sourceText ?? null; }
+      if (data.sourceTextKey !== undefined) { sets.push('sourceTextKey = @sourceTextKey'); params.sourceTextKey = data.sourceTextKey ?? null; }
+      if (data.sourceHash !== undefined) { sets.push('sourceHash = @sourceHash'); params.sourceHash = data.sourceHash ?? null; }
       if (data.metadata !== undefined) { sets.push('metadata = @metadata'); params.metadata = this.toJson(data.metadata); }
       if (data.updatedBy !== undefined) { sets.push('updatedBy = @updatedBy'); params.updatedBy = data.updatedBy; }
 
@@ -297,8 +311,10 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
       const now = this.now();
       const insert = db.prepare(`
         INSERT INTO ${TABLES.ragChunks}
-        (id, tenantId, projectId, ragModuleKey, documentId, chunkIndex, vectorId, content, metadata, createdAt)
-        VALUES (@id, @tenantId, @projectId, @ragModuleKey, @documentId, @chunkIndex, @vectorId, @content, @metadata, @createdAt)
+        (id, tenantId, projectId, ragModuleKey, documentId, chunkIndex, vectorId, content,
+         charStart, charEnd, headingPath, tokenCount, metadata, createdAt)
+        VALUES (@id, @tenantId, @projectId, @ragModuleKey, @documentId, @chunkIndex, @vectorId, @content,
+         @charStart, @charEnd, @headingPath, @tokenCount, @metadata, @createdAt)
       `);
 
       const tx = db.transaction((items: typeof chunks) => {
@@ -312,6 +328,10 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
             chunkIndex: c.chunkIndex,
             vectorId: c.vectorId,
             content: c.content,
+            charStart: c.charStart ?? null,
+            charEnd: c.charEnd ?? null,
+            headingPath: c.headingPath ? this.toJson(c.headingPath) : null,
+            tokenCount: c.tokenCount ?? null,
             metadata: this.toJson(c.metadata ?? {}),
             createdAt: now,
           });
@@ -454,6 +474,8 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         projectId: r.projectId as string | undefined,
         ragModuleKey: r.ragModuleKey as string,
         fileKey: r.fileKey as string | undefined,
+        fileBucketKey: r.fileBucketKey as string | undefined,
+        fileProviderKey: r.fileProviderKey as string | undefined,
         fileName: r.fileName as string,
         contentType: r.contentType as string | undefined,
         size: r.size as number | undefined,
@@ -461,6 +483,10 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         chunkCount: r.chunkCount as number,
         errorMessage: r.errorMessage as string | undefined,
         lastIndexedAt: r.lastIndexedAt ? this.toDate(r.lastIndexedAt) : undefined,
+        chunkConfig: r.chunkConfig ? this.parseJson(r.chunkConfig, undefined) : undefined,
+        sourceText: r.sourceText as string | undefined,
+        sourceTextKey: r.sourceTextKey as string | undefined,
+        sourceHash: r.sourceHash as string | undefined,
         metadata: this.parseJson(r.metadata, {}),
         createdBy: r.createdBy as string,
         updatedBy: r.updatedBy as string | undefined,
@@ -479,6 +505,10 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         chunkIndex: r.chunkIndex as number,
         vectorId: r.vectorId as string,
         content: r.content as string,
+        charStart: r.charStart as number | undefined,
+        charEnd: r.charEnd as number | undefined,
+        headingPath: r.headingPath ? this.parseJson(r.headingPath, undefined) : undefined,
+        tokenCount: r.tokenCount as number | undefined,
         metadata: this.parseJson(r.metadata, {}),
         createdAt: this.toDate(r.createdAt),
       };

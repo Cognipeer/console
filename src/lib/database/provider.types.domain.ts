@@ -110,17 +110,62 @@ export interface IInferenceServerMetrics {
 
 // ── RAG Module types ────────────────────────────────────────────────────
 
-export type RagChunkStrategy = 'recursive_character' | 'token';
+/**
+ * How a document is split before embedding.
+ *
+ * `recursive_character` and `token` differ in the UNIT `chunkSize`/`chunkOverlap`
+ * are measured in — characters vs. real tokens. The rest change where the
+ * boundaries are allowed to fall.
+ */
+export type RagChunkStrategy =
+  /** Split on separators, largest first, falling back to a hard cut. Sizes in characters. */
+  | 'recursive_character'
+  /** Same boundaries, but sized in real tokens of `encoding`. */
+  | 'token'
+  /** Never cross a markdown heading; each chunk carries its heading path. */
+  | 'markdown'
+  /** Never cut mid-sentence. */
+  | 'sentence'
+  /** Cut where the topic shifts, measured by embedding distance between sentences. */
+  | 'semantic';
 
 export interface IRagChunkConfig {
   strategy: RagChunkStrategy;
-  /** Common */
+  /**
+   * Target chunk size. Characters for every strategy except `token`, which
+   * counts real tokens of `encoding`. This is a HARD cap: a run of text with no
+   * usable boundary is cut rather than emitted oversized.
+   */
   chunkSize: number;
+  /** Overlap carried into the next chunk, in the same unit as chunkSize. Must be < chunkSize. */
   chunkOverlap: number;
-  /** recursive_character specific */
+  /** recursive_character / markdown / sentence: boundary preferences, best first. */
   separators?: string[];
-  /** token specific */
+  /** token: tiktoken encoding name (cl100k_base, p50k_base, o200k_base). */
   encoding?: string;
+  /**
+   * semantic: cosine distance between neighbouring sentences above which a new
+   * chunk starts. 0..1, default 0.35. Higher = fewer, larger chunks.
+   */
+  semanticThreshold?: number;
+  /**
+   * Small-to-big retrieval. Embed the small chunk, but return a window of this
+   * many characters centred on it, resolved from the stored source at query
+   * time. 0 or unset disables it.
+   */
+  parentWindowSize?: number;
+  /**
+   * Prefix each chunk with one LLM-written sentence situating it in its
+   * document, which measurably improves retrieval on chunks that would
+   * otherwise be context-free. Costs one model call per chunk at ingest.
+   */
+  contextualHeader?: {
+    enabled: boolean;
+    /** Model used to write the header. Falls back to the module's answer model. */
+    modelKey?: string;
+    /** How much of the document to show the model as context. Default 8000. */
+    maxDocumentChars?: number;
+  };
 }
 
 export type RagDocumentStatus = 'pending' | 'processing' | 'indexed' | 'failed';
@@ -211,6 +256,9 @@ export interface IRagDocument {
   projectId?: string;
   ragModuleKey: string;
   fileKey?: string;
+  /** Bucket the original bytes were stored in, alongside fileKey. */
+  fileBucketKey?: string;
+  fileProviderKey?: string;
   fileName: string;
   contentType?: string;
   size?: number;
@@ -218,6 +266,21 @@ export interface IRagDocument {
   chunkCount?: number;
   errorMessage?: string;
   lastIndexedAt?: Date;
+  /**
+   * Per-document override of the module's chunkConfig. A 200-page PDF and a FAQ
+   * CSV rarely want the same splitter. Unset means "use the module's".
+   */
+  chunkConfig?: IRagChunkConfig;
+  /**
+   * The extracted text this document was last indexed from, so a re-index never
+   * has to reconstruct it from overlapping chunks. Stored inline only when it
+   * fits INLINE_SOURCE_MAX_CHARS; larger sources live in the file bucket under
+   * sourceTextKey.
+   */
+  sourceText?: string;
+  sourceTextKey?: string;
+  /** sha256 of the extracted text — lets a re-ingest skip unchanged content. */
+  sourceHash?: string;
   metadata?: Record<string, unknown>;
   createdBy: string;
   updatedBy?: string;
@@ -234,6 +297,16 @@ export interface IRagChunk {
   chunkIndex: number;
   vectorId: string;
   content: string;
+  /**
+   * Offsets of this chunk in the document's source text. These are what make a
+   * parent window resolvable without duplicating the text on every child row.
+   */
+  charStart?: number;
+  charEnd?: number;
+  /** Markdown heading breadcrumb the chunk sits under, outermost first. */
+  headingPath?: string[];
+  /** Real token count of `content`, when the strategy computed one. */
+  tokenCount?: number;
   metadata?: Record<string, unknown>;
   createdAt?: Date;
 }

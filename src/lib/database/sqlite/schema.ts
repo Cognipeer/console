@@ -1243,6 +1243,12 @@ export const TENANT_SCHEMA_SQL = `
     projectId TEXT,
     ragModuleKey TEXT NOT NULL,
     fileKey TEXT,
+    fileBucketKey TEXT,
+    fileProviderKey TEXT,
+    chunkConfig TEXT,
+    sourceText TEXT,
+    sourceTextKey TEXT,
+    sourceHash TEXT,
     fileName TEXT NOT NULL,
     contentType TEXT,
     size INTEGER,
@@ -1266,6 +1272,10 @@ export const TENANT_SCHEMA_SQL = `
     chunkIndex INTEGER NOT NULL,
     vectorId TEXT NOT NULL,
     content TEXT NOT NULL,
+    charStart INTEGER,
+    charEnd INTEGER,
+    headingPath TEXT,
+    tokenCount INTEGER,
     metadata TEXT DEFAULT '{}',
     createdAt TEXT NOT NULL
   );

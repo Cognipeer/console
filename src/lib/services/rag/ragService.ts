@@ -15,9 +15,9 @@ import {
 import { getDatabase } from '@/lib/database';
 
 const logger = createLogger('rag');
-import type { IRagModule, IRagQueryLog, IRagChunk } from '@/lib/database';
+import type { IRagModule, IRagQueryLog, IRagChunk, IRagChunkConfig, IRagDocument } from '@/lib/database';
 import { convertToMarkdown } from '@cognipeer/to-markdown';
-import { handleEmbeddingRequest } from '@/lib/services/models/inferenceService';
+import { handleChatCompletion, handleEmbeddingRequest } from '@/lib/services/models/inferenceService';
 import {
   queryVectorIndex,
   upsertVectors,
@@ -26,6 +26,7 @@ import {
 import { runReranker } from '@/lib/services/reranker';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { fireAndForget } from '@/lib/core/asyncTask';
+import { chunkText, type ChunkContext } from './chunking';
 import type {
   CreateRagModuleRequest,
   UpdateRagModuleRequest,
@@ -79,123 +80,62 @@ function generateKey(name: string, existingKey?: string): string {
 
 /* ── Chunking ────────────────────────────────────────────────────────── */
 
-interface ChunkResult {
-  content: string;
-  index: number;
-  metadata: Record<string, unknown>;
-}
+/**
+ * Splitting lives in ./chunking so every strategy shares one packer and one
+ * set of invariants (offsets quote the source; chunkSize is a hard cap), and
+ * so it can be tested without a database. See src/__tests__/unit/rag-chunking.
+ */
 
-function chunkRecursiveCharacter(
-  text: string,
-  chunkSize: number,
-  chunkOverlap: number,
-  separators: string[] = ['\n\n', '\n', '. ', ' ', ''],
-): ChunkResult[] {
-  const chunks: ChunkResult[] = [];
-  const parts = splitBySeparators(text, separators);
-  let currentChunk = '';
-  let chunkIndex = 0;
-
-  for (const part of parts) {
-    if (currentChunk.length + part.length > chunkSize && currentChunk.length > 0) {
-      chunks.push({
-        content: currentChunk.trim(),
-        index: chunkIndex,
-        metadata: { chunkIndex, chunkSize: currentChunk.trim().length },
-      });
-      chunkIndex++;
-      // Apply overlap
-      if (chunkOverlap > 0 && currentChunk.length > chunkOverlap) {
-        currentChunk = currentChunk.slice(-chunkOverlap) + part;
-      } else {
-        currentChunk = part;
+/**
+ * Model access for the strategies that need it. Both calls are lazy — a module
+ * on `recursive_character` with no contextual header never reaches either.
+ */
+function buildChunkContext(
+  tenantDbName: string,
+  projectId: string,
+  ragModule: IRagModule,
+): ChunkContext {
+  return {
+    embed: (texts) => getEmbeddings(tenantDbName, projectId, ragModule.embeddingModelKey, texts),
+    describe: async (documentExcerpt, chunk) => {
+      const modelKey = ragModule.chunkConfig.contextualHeader?.modelKey;
+      if (!modelKey) {
+        throw new Error(
+          'Contextual headers need chunkConfig.contextualHeader.modelKey to name a chat model.',
+        );
       }
-    } else {
-      currentChunk += part;
-    }
-  }
-
-  if (currentChunk.trim().length > 0) {
-    chunks.push({
-      content: currentChunk.trim(),
-      index: chunkIndex,
-      metadata: { chunkIndex, chunkSize: currentChunk.trim().length },
-    });
-  }
-
-  return chunks;
-}
-
-function splitBySeparators(text: string, separators: string[]): string[] {
-  if (separators.length === 0 || !separators[0]) return [text];
-  const sep = separators[0];
-  const remaining = separators.slice(1);
-  const segments = text.split(sep);
-
-  // `String.split` discards the separator itself. Re-emit it as its own
-  // part (rather than folding it into a segment) so the caller can
-  // reconstruct the original text by concatenating parts in order —
-  // otherwise paragraphs/sentences/words end up glued together with no
-  // whitespace once reassembled in chunkRecursiveCharacter.
-  const result: string[] = [];
-  segments.forEach((segment, i) => {
-    if (segment.length > 0) {
-      result.push(...splitBySeparators(segment, remaining));
-    }
-    if (i < segments.length - 1) {
-      result.push(sep);
-    }
-  });
-  return result;
-}
-
-function chunkToken(
-  text: string,
-  chunkSize: number,
-  chunkOverlap: number,
-): ChunkResult[] {
-  // Simple whitespace-based token splitter
-  const tokens = text.split(/\s+/);
-  const chunks: ChunkResult[] = [];
-  let chunkIndex = 0;
-  let start = 0;
-
-  while (start < tokens.length) {
-    const end = Math.min(start + chunkSize, tokens.length);
-    const chunkTokens = tokens.slice(start, end);
-    const content = chunkTokens.join(' ').trim();
-    if (content.length > 0) {
-      chunks.push({
-        content,
-        index: chunkIndex,
-        metadata: { chunkIndex, tokenCount: chunkTokens.length },
+      const outcome = await handleChatCompletion({
+        tenantDbName,
+        projectId,
+        modelKey,
+        body: {
+          messages: [
+            {
+              role: 'system',
+              content:
+                'You situate an excerpt inside its document so it can be retrieved on its own. '
+                + 'Reply with ONE short sentence naming what the excerpt is about and where it sits. '
+                + 'No preamble, no quotes, no markdown.',
+            },
+            {
+              role: 'user',
+              content: `<document>\n${documentExcerpt}\n</document>\n\n<excerpt>\n${chunk}\n</excerpt>`,
+            },
+          ],
+          temperature: 0,
+          max_tokens: 100,
+        },
       });
-      chunkIndex++;
-    }
-    start = end - chunkOverlap;
-    if (start >= end) start = end;
-  }
-
-  return chunks;
+      const choices = (outcome.response as { choices?: Array<{ message?: { content?: unknown } }> })?.choices;
+      const content = choices?.[0]?.message?.content;
+      return typeof content === 'string' ? content : '';
+    },
+  };
 }
 
-function chunkText(
-  text: string,
-  config: IRagModule['chunkConfig'],
-): ChunkResult[] {
-  switch (config.strategy) {
-    case 'recursive_character':
-      return chunkRecursiveCharacter(
-        text,
-        config.chunkSize,
-        config.chunkOverlap,
-        config.separators,
-      );
-    case 'token':
-      return chunkToken(text, config.chunkSize, config.chunkOverlap);
-    default:
-      return chunkRecursiveCharacter(text, config.chunkSize, config.chunkOverlap);
-  }
+/** The module's chunk config, unless this document overrides it. */
+function chunkConfigFor(ragModule: IRagModule, document?: Pick<IRagDocument, 'chunkConfig'>): IRagChunkConfig {
+  return document?.chunkConfig ?? ragModule.chunkConfig;
 }
 
 /* ── Embedding helper ────────────────────────────────────────────────── */
@@ -220,6 +160,139 @@ async function getEmbeddings(
     if (!d.embedding) throw new Error('Missing embedding in response');
     return d.embedding;
   });
+}
+
+/* ── Indexing (chunk → embed → upsert → persist) ─────────────────────── */
+
+const EMBED_BATCH_SIZE = 32;
+
+/**
+ * The one place a document's text becomes chunks, vectors and rows.
+ *
+ * ingest and re-ingest used to carry near-verbatim copies of this block, so
+ * every fix had to be made twice and they had already drifted.
+ *
+ * On failure it removes whatever it had already written to the vector store.
+ * Without that, a document whose ingest died mid-way left vectors that nothing
+ * could ever delete: deleteRagDocument reconstructs ids from `chunkCount`, and
+ * `chunkCount` is only recorded once the whole pipeline has succeeded.
+ */
+async function indexDocumentContent(params: {
+  db: Awaited<ReturnType<typeof getDatabase>>;
+  tenantDbName: string;
+  tenantId: string;
+  projectId: string | undefined;
+  ragModule: IRagModule;
+  chunkConfig: IRagChunkConfig;
+  documentId: string;
+  fileName: string;
+  text: string;
+  metadata?: Record<string, unknown>;
+}): Promise<number> {
+  const { db, tenantDbName, tenantId, projectId, ragModule, documentId, fileName } = params;
+
+  const chunks = await chunkText(
+    params.text,
+    params.chunkConfig,
+    buildChunkContext(tenantDbName, projectId ?? '', ragModule),
+  );
+  if (chunks.length === 0) return 0;
+
+  const vectorIdFor = (index: number) => `${ragModule.key}:${documentId}:${index}`;
+  const vectors: Array<{ id: string; values: number[]; metadata: Record<string, unknown> }> = [];
+
+  for (let i = 0; i < chunks.length; i += EMBED_BATCH_SIZE) {
+    const batch = chunks.slice(i, i + EMBED_BATCH_SIZE);
+    const embeddings = await getEmbeddings(
+      tenantDbName,
+      projectId ?? '',
+      ragModule.embeddingModelKey,
+      batch.map((c) => c.content),
+    );
+
+    batch.forEach((chunk, j) => {
+      vectors.push({
+        id: vectorIdFor(chunk.index),
+        values: embeddings[j],
+        metadata: {
+          ...chunk.metadata,
+          ...(params.metadata ?? {}),
+          // Reserved keys go LAST: caller-supplied metadata used to be spread
+          // over them, so a document carrying its own `_documentId` silently
+          // repointed its vectors at another document.
+          _ragModule: ragModule.key,
+          _documentId: documentId,
+          _fileName: fileName,
+          _chunkIndex: chunk.index,
+        },
+      });
+    });
+  }
+
+  try {
+    await upsertVectors(tenantDbName, tenantId, projectId ?? '', {
+      providerKey: ragModule.vectorProviderKey,
+      indexKey: ragModule.vectorIndexKey,
+      vectors,
+    });
+  } catch (error) {
+    await discardVectors(tenantDbName, tenantId, projectId, ragModule, vectors.map((v) => v.id));
+    throw error;
+  }
+
+  // Chunk text lives in the DB, not in vector metadata, which is size-capped on
+  // most providers.
+  const rows: Omit<IRagChunk, '_id' | 'createdAt'>[] = chunks.map((chunk) => ({
+    tenantId,
+    projectId,
+    ragModuleKey: ragModule.key,
+    documentId,
+    chunkIndex: chunk.index,
+    vectorId: vectorIdFor(chunk.index),
+    content: chunk.content,
+    charStart: chunk.charStart,
+    charEnd: chunk.charEnd,
+    headingPath: chunk.headingPath,
+    tokenCount: chunk.tokenCount,
+    metadata: { ...chunk.metadata, ...(params.metadata ?? {}) },
+  }));
+
+  try {
+    await db.bulkInsertRagChunks(rows as IRagChunk[]);
+  } catch (error) {
+    // Vectors without their text answer nothing, so this cannot stay a warning
+    // the way it used to: roll back and fail the document.
+    await discardVectors(tenantDbName, tenantId, projectId, ragModule, vectors.map((v) => v.id));
+    throw new Error(
+      `Failed to persist chunk text for "${fileName}": ${error instanceof Error ? error.message : 'unknown error'}`,
+    );
+  }
+
+  return chunks.length;
+}
+
+/** Best-effort cleanup of vectors written by a run that then failed. */
+async function discardVectors(
+  tenantDbName: string,
+  tenantId: string,
+  projectId: string | undefined,
+  ragModule: IRagModule,
+  ids: string[],
+): Promise<void> {
+  if (ids.length === 0) return;
+  try {
+    await deleteVectors(tenantDbName, tenantId, projectId ?? '', {
+      providerKey: ragModule.vectorProviderKey,
+      indexKey: ragModule.vectorIndexKey,
+      ids,
+    });
+  } catch (error) {
+    logger.warn('Failed to roll back vectors after a failed index run', {
+      ragModuleKey: ragModule.key,
+      count: ids.length,
+      error: error instanceof Error ? error.message : error,
+    });
+  }
 }
 
 /* ── Metadata filters ────────────────────────────────────────────────── */
@@ -435,6 +508,7 @@ export async function ingestDocument(
     contentType: request.contentType,
     size: Buffer.byteLength(request.content, 'utf-8'),
     status: 'processing',
+    chunkConfig: request.chunkConfig,
     metadata: request.metadata,
     createdBy: request.createdBy,
   });
@@ -442,91 +516,32 @@ export async function ingestDocument(
   const documentId = String(docRecord._id);
 
   try {
-    // 1. Chunk
-    const chunks = chunkText(request.content, ragModule.chunkConfig);
-    if (chunks.length === 0) {
-      await db.updateRagDocument(documentId, { status: 'indexed', chunkCount: 0 });
-      return { ...docRecord, status: 'indexed', chunkCount: 0 };
-    }
-
-    // 2. Embed (batch)
-    const batchSize = 32;
-    const allVectors: Array<{
-      id: string;
-      values: number[];
-      metadata: Record<string, unknown>;
-    }> = [];
-
-    for (let i = 0; i < chunks.length; i += batchSize) {
-      const batch = chunks.slice(i, i + batchSize);
-      const texts = batch.map((c) => c.content);
-      const embeddings = await getEmbeddings(
-        tenantDbName,
-        projectId ?? '',
-        ragModule.embeddingModelKey,
-        texts,
-      );
-
-      for (let j = 0; j < batch.length; j++) {
-        const chunk = batch[j];
-        const vectorId = `${request.ragModuleKey}:${documentId}:${chunk.index}`;
-        allVectors.push({
-          id: vectorId,
-          values: embeddings[j],
-          metadata: {
-            _ragModule: request.ragModuleKey,
-            _documentId: documentId,
-            _fileName: request.fileName,
-            _chunkIndex: chunk.index,
-            ...chunk.metadata,
-            ...(request.metadata ?? {}),
-          },
-        });
-      }
-    }
-
-    // 3. Upsert to vector store
-    await upsertVectors(tenantDbName, tenantId, projectId ?? '', {
-      providerKey: ragModule.vectorProviderKey,
-      indexKey: ragModule.vectorIndexKey,
-      vectors: allVectors,
-    });
-
-    // 3b. Store chunk content in MongoDB (avoids vector metadata size limits)
-    const chunkRecords: Omit<IRagChunk, '_id' | 'createdAt'>[] = chunks.map((chunk) => ({
+    const chunkCount = await indexDocumentContent({
+      db,
+      tenantDbName,
       tenantId,
       projectId,
-      ragModuleKey: request.ragModuleKey,
+      ragModule,
+      chunkConfig: chunkConfigFor(ragModule, { chunkConfig: request.chunkConfig }),
       documentId,
-      chunkIndex: chunk.index,
-      vectorId: `${request.ragModuleKey}:${documentId}:${chunk.index}`,
-      content: chunk.content,
-      metadata: { ...chunk.metadata, ...(request.metadata ?? {}) },
-    }));
-    try {
-      await db.bulkInsertRagChunks(chunkRecords as IRagChunk[]);
-    } catch (chunkErr) {
-      logger.warn('Failed to persist chunk content to MongoDB', { error: chunkErr });
-    }
+      fileName: request.fileName,
+      text: request.content,
+      metadata: request.metadata,
+    });
 
-    // 4. Update document and module stats
+    const lastIndexedAt = new Date();
     await db.updateRagDocument(documentId, {
       status: 'indexed',
-      chunkCount: chunks.length,
-      lastIndexedAt: new Date(),
+      chunkCount,
+      lastIndexedAt,
     });
 
     await db.updateRagModule(String(ragModule._id), {
       totalDocuments: (ragModule.totalDocuments ?? 0) + 1,
-      totalChunks: (ragModule.totalChunks ?? 0) + chunks.length,
+      totalChunks: (ragModule.totalChunks ?? 0) + chunkCount,
     } as Partial<IRagModule>);
 
-    return {
-      ...docRecord,
-      status: 'indexed' as const,
-      chunkCount: chunks.length,
-      lastIndexedAt: new Date(),
-    };
+    return { ...docRecord, status: 'indexed' as const, chunkCount, lastIndexedAt };
   } catch (error) {
     const msg = error instanceof Error ? error.message : 'Ingestion failed';
     await db.updateRagDocument(documentId, {
@@ -597,6 +612,7 @@ export async function ingestFile(
     fileData: Buffer;
     contentType?: string;
     metadata?: Record<string, unknown>;
+    chunkConfig?: IRagChunkConfig;
     createdBy: string;
   },
 ): Promise<RagDocument> {
@@ -646,6 +662,7 @@ export async function ingestFile(
     fileName: request.fileName,
     content: textContent,
     contentType: request.contentType,
+    chunkConfig: request.chunkConfig,
     metadata: {
       ...request.metadata,
       _sourceType: isPlainText ? 'text' : 'converted',
@@ -1026,97 +1043,37 @@ export async function reingestDocument(
   await db.updateRagDocument(request.documentId, { status: 'processing', errorMessage: undefined });
 
   try {
-    // 3. Chunk
-    const chunks = chunkText(textContent, ragModule.chunkConfig);
-    if (chunks.length === 0) {
-      await db.updateRagDocument(request.documentId, { status: 'indexed', chunkCount: 0 });
-      // Adjust module stats
-      await db.updateRagModule(String(ragModule._id), {
-        totalChunks: Math.max(0, (ragModule.totalChunks ?? 0) - oldChunkCount),
-      } as Partial<IRagModule>);
-      return { ...doc, status: 'indexed' as const, chunkCount: 0 };
-    }
-
-    // 4. Embed (batch)
-    const batchSize = 32;
-    const allVectors: Array<{
-      id: string;
-      values: number[];
-      metadata: Record<string, unknown>;
-    }> = [];
-
-    for (let i = 0; i < chunks.length; i += batchSize) {
-      const batch = chunks.slice(i, i + batchSize);
-      const texts = batch.map((c) => c.content);
-      const embeddings = await getEmbeddings(
-        tenantDbName,
-        projectId ?? '',
-        ragModule.embeddingModelKey,
-        texts,
-      );
-
-      for (let j = 0; j < batch.length; j++) {
-        const chunk = batch[j];
-        const vectorId = `${request.ragModuleKey}:${request.documentId}:${chunk.index}`;
-        allVectors.push({
-          id: vectorId,
-          values: embeddings[j],
-          metadata: {
-            _ragModule: request.ragModuleKey,
-            _documentId: request.documentId,
-            _fileName: request.fileName ?? doc.fileName,
-            _chunkIndex: chunk.index,
-            ...chunk.metadata,
-            ...(request.metadata ?? {}),
-          },
-        });
-      }
-    }
-
-    // 5. Upsert to vector store
-    await upsertVectors(tenantDbName, tenantId, projectId ?? '', {
-      providerKey: ragModule.vectorProviderKey,
-      indexKey: ragModule.vectorIndexKey,
-      vectors: allVectors,
-    });
-
-    // 5b. Store chunk content in MongoDB
-    const chunkRecords: Omit<IRagChunk, '_id' | 'createdAt'>[] = chunks.map((chunk) => ({
+    const chunkCount = await indexDocumentContent({
+      db,
+      tenantDbName,
       tenantId,
       projectId,
-      ragModuleKey: request.ragModuleKey,
+      ragModule,
+      chunkConfig: chunkConfigFor(ragModule, doc),
       documentId: request.documentId,
-      chunkIndex: chunk.index,
-      vectorId: `${request.ragModuleKey}:${request.documentId}:${chunk.index}`,
-      content: chunk.content,
-      metadata: { ...chunk.metadata, ...(request.metadata ?? {}) },
-    }));
-    try {
-      await db.bulkInsertRagChunks(chunkRecords as IRagChunk[]);
-    } catch (chunkErr) {
-      logger.warn('Reingest: Failed to persist chunks to MongoDB', { error: chunkErr });
-    }
+      fileName: request.fileName ?? doc.fileName,
+      text: textContent,
+      metadata: request.metadata,
+    });
 
-    // 6. Update document and module stats
     const now = new Date();
     await db.updateRagDocument(request.documentId, {
       status: 'indexed',
-      chunkCount: chunks.length,
+      chunkCount,
       lastIndexedAt: now,
       fileName: request.fileName ?? doc.fileName,
       size: Buffer.byteLength(textContent, 'utf-8'),
       updatedBy: request.updatedBy,
     });
 
-    // Adjust module chunk totals
     await db.updateRagModule(String(ragModule._id), {
-      totalChunks: Math.max(0, (ragModule.totalChunks ?? 0) - oldChunkCount + chunks.length),
+      totalChunks: Math.max(0, (ragModule.totalChunks ?? 0) - oldChunkCount + chunkCount),
     } as Partial<IRagModule>);
 
     return {
       ...doc,
       status: 'indexed' as const,
-      chunkCount: chunks.length,
+      chunkCount,
       lastIndexedAt: now,
       fileName: request.fileName ?? doc.fileName,
     };

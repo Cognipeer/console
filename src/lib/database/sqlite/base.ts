@@ -289,6 +289,28 @@ export class SQLiteProviderBase {
   }
 
   private applyTenantMigrations(db: Database.Database): void {
+    // Knowledge Engine: richer chunking (offsets, heading path, real token
+    // counts) plus the stored source a re-index rebuilds from. CREATE TABLE IF
+    // NOT EXISTS never alters an existing tenant DB, so without these the
+    // INSERTs would throw on every tenant provisioned before this change.
+    for (const [column, ddl] of [
+      ['fileBucketKey', 'fileBucketKey TEXT'],
+      ['fileProviderKey', 'fileProviderKey TEXT'],
+      ['chunkConfig', 'chunkConfig TEXT'],
+      ['sourceText', 'sourceText TEXT'],
+      ['sourceTextKey', 'sourceTextKey TEXT'],
+      ['sourceHash', 'sourceHash TEXT'],
+    ] as const) {
+      this.ensureTableColumn(db, TABLES.ragDocuments, column, ddl);
+    }
+    for (const [column, ddl] of [
+      ['charStart', 'charStart INTEGER'],
+      ['charEnd', 'charEnd INTEGER'],
+      ['headingPath', 'headingPath TEXT'],
+      ['tokenCount', 'tokenCount INTEGER'],
+    ] as const) {
+      this.ensureTableColumn(db, TABLES.ragChunks, column, ddl);
+    }
     this.ensureTableColumn(
       db,
       TABLES.users,
