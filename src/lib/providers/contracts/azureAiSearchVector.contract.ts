@@ -44,6 +44,31 @@ const ID_FIELD = 'id';
 const VECTOR_FIELD = 'vector';
 const METADATA_FIELD = 'metadata';
 
+// Azure AI Search document keys may only contain letters, digits, underscore (_),
+// dash (-), or equal sign (=). Caller-supplied vector ids (e.g. Knowledge Engine's
+// "module:documentId:chunkIndex") routinely violate that, so unsafe ids are stored
+// under a marked, URL-safe Base64 form and transparently decoded on the way out.
+const SAFE_KEY_PATTERN = /^[A-Za-z0-9_\-=]+$/;
+const ENCODED_KEY_PREFIX = '_b64_';
+
+function encodeVectorId(id: string): string {
+    if (SAFE_KEY_PATTERN.test(id) && !id.startsWith(ENCODED_KEY_PREFIX)) {
+        return id;
+    }
+    return ENCODED_KEY_PREFIX + Buffer.from(id, 'utf8').toString('base64url');
+}
+
+function decodeVectorId(key: string): string {
+    if (!key.startsWith(ENCODED_KEY_PREFIX)) {
+        return key;
+    }
+    try {
+        return Buffer.from(key.slice(ENCODED_KEY_PREFIX.length), 'base64url').toString('utf8');
+    } catch {
+        return key;
+    }
+}
+
 function toAzureMetric(metric: 'cosine' | 'dot' | 'euclidean'): AzureVectorMetric {
     switch (metric) {
         case 'cosine': return 'cosine';
@@ -326,7 +351,7 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                 const client = getSearchClient(handle.externalId);
 
                 const documents: AzureSearchDocument[] = items.map((item) => ({
-                    [ID_FIELD]: item.id,
+                    [ID_FIELD]: encodeVectorId(item.id),
                     [VECTOR_FIELD]: item.values,
                     [METADATA_FIELD]: JSON.stringify(item.metadata ?? {}),
                 }));
@@ -374,7 +399,7 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                     }
 
                     matches.push({
-                        id: doc[ID_FIELD],
+                        id: decodeVectorId(doc[ID_FIELD]),
                         score: result.score ?? 0,
                         metadata,
                     });
@@ -387,7 +412,7 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                 if (ids.length === 0) return;
 
                 const client = getSearchClient(handle.externalId);
-                await client.deleteDocuments(ID_FIELD, ids);
+                await client.deleteDocuments(ID_FIELD, ids.map(encodeVectorId));
 
                 logger?.debug('Azure AI Search vectors deleted', {
                     providerKey,
@@ -420,7 +445,7 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                         // ignore malformed metadata
                     }
                     items.push({
-                        id: doc[ID_FIELD],
+                        id: decodeVectorId(doc[ID_FIELD]),
                         values: Array.isArray(doc[VECTOR_FIELD]) ? doc[VECTOR_FIELD] : [],
                         metadata,
                     });
