@@ -313,6 +313,44 @@ export function collectFilterFields(node: VectorFilterNode): Set<string> {
   return fields;
 }
 
+/**
+ * Prefix of the metadata keys our own ingest stamps on every vector it writes
+ * (`_ragModule`, `_documentId`, `_fileName`, `_chunkIndex`). They are reserved:
+ * a caller's filter document never names one.
+ */
+const SYSTEM_METADATA_PREFIX = '_';
+
+/**
+ * Whether a parsed filter contains nothing but guards the service added on the
+ * caller's behalf — today, the `_ragModule` isolation clause.
+ *
+ * A store that cannot push a filter down has to tell the two origins apart. A
+ * filter the CALLER asked for must fail loudly, because answering without it
+ * returns rows they excluded. A guard the system added by itself must not fail
+ * the query: that would take a module offline over a filter nobody requested.
+ */
+export function isSystemGuardFilter(node: VectorFilterNode): boolean {
+  let sawComparison = false;
+
+  const walk = (current: VectorFilterNode): boolean => {
+    switch (current.kind) {
+      case 'and':
+      case 'or':
+        return current.nodes.every(walk);
+      case 'not':
+        return walk(current.node);
+      case 'raw':
+        // Provider-native and opaque — never something we generated.
+        return false;
+      case 'comparison':
+        sawComparison = true;
+        return current.comparison.field.startsWith(SYSTEM_METADATA_PREFIX);
+    }
+  };
+
+  return walk(node) && sawComparison;
+}
+
 export interface FilterSupport {
   /** Driver id, used to name the provider in error messages. */
   driverId: string;

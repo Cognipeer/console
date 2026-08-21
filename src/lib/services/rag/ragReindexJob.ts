@@ -14,13 +14,18 @@
  *     resumed run count the same document twice;
  *   - `resumeInterruptedRagReindexRuns` re-enqueues `queued`/`running` records
  *     at boot, which is what makes the memory queue driver survive a restart;
+ *   - the run record itself is CLAIMED before a single document is touched, so
+ *     of the N replicas that each sweep the same `running` record at boot,
+ *     exactly one executes it (see `RagReindexClaimOps` below);
  *   - cancellation is read from the DB at every document boundary, so it works
  *     across nodes (the in-memory set only makes it instant on this node).
  */
 
+import { randomUUID } from 'node:crypto';
 import { getDatabase, runWithTenantScope, type DatabaseProvider } from '@/lib/database';
 import type { IRagDocument, IRagModule } from '@/lib/database';
 import type { IRagReindexRun } from '@/lib/database/provider/types.domain';
+import { getThisNodeName } from '@/lib/core/cluster';
 import { createLogger } from '@/lib/core/logger';
 import { getQueue, type QueuePayload } from '@/lib/core/queue';
 import { reingestDocument } from './ragService';
@@ -60,8 +65,101 @@ const cancelRequests = new Set<string>();
 
 // Runs currently executing in this process, so a duplicate delivery (or a
 // resume sweep racing an in-flight job) cannot re-ingest the same document
-// twice concurrently.
+// twice concurrently. This is a FAST PATH ONLY — it says nothing about the
+// other replicas, which is what `RagReindexClaimOps` is for.
 const activeRuns = new Set<string>();
+
+/**
+ * Live state of ONE execution's claim. Per execution rather than a module-level
+ * set keyed by run: a heartbeat still in flight when its job ends must not be
+ * able to abort the next attempt at the same run.
+ */
+interface ClaimGuard {
+  lost: boolean;
+}
+
+/**
+ * Cross-process claim on a run record.
+ *
+ * Production runs three replicas with the in-process memory queue, so the
+ * queue's dedup map and `activeRuns` above are per-pod: after a rolling
+ * restart every pod's boot sweep re-drives the same `running` record and all
+ * three would re-embed the same corpus, triple-charging the embedding provider
+ * and racing each other's cursor. The run record is the only state all pods
+ * share, so the claim lives there and must be taken atomically.
+ *
+ * Contract (implemented by both `mongodb/rag-reindex.mixin.ts` and
+ * `sqlite/rag-reindex.mixin.ts`; behaviour must be identical on both):
+ *
+ * - `claimRagReindexRun(key, ownerId, staleBefore)` — ONE atomic statement
+ *   (`findOneAndUpdate` / `UPDATE … WHERE`) that matches the run only when its
+ *   status is `pending`/`queued`/`running` AND (`claimedBy` is unset, or it
+ *   already equals `ownerId`, or `heartbeatAt` is unset or older than
+ *   `staleBefore`). On a match it sets `status: 'running'`, `claimedBy`,
+ *   `claimedAt` and `heartbeatAt` to now and returns the updated record;
+ *   otherwise it returns `null` WITHOUT writing anything. Callers must treat
+ *   `null` as "another worker owns this run — do not touch it".
+ * - `touchRagReindexRunClaim(key, ownerId)` — refreshes `heartbeatAt` only
+ *   while `claimedBy === ownerId` and the run is still `running`; returns
+ *   whether the claim is still held, so a worker that lost it can stop.
+ * - `releaseRagReindexRunClaim(key, ownerId)` — clears `claimedBy`/`claimedAt`/
+ *   `heartbeatAt` only while still held by `ownerId`; a no-op otherwise.
+ */
+export interface RagReindexClaimOps {
+  claimRagReindexRun(
+    key: string,
+    ownerId: string,
+    staleBefore: Date,
+  ): Promise<IRagReindexRun | null>;
+  touchRagReindexRunClaim(key: string, ownerId: string): Promise<boolean>;
+  releaseRagReindexRunClaim(key: string, ownerId: string): Promise<void>;
+}
+
+// How often the owner proves it is alive, and how long a silent owner keeps
+// its claim. Three missed beats before another worker may take over: long
+// enough that a slow embedding batch never loses a run it is still working on,
+// short enough that a SIGKILLed pod's run resumes within a rolling update.
+const CLAIM_HEARTBEAT_MS = 30_000;
+const CLAIM_STALE_MS = CLAIM_HEARTBEAT_MS * 3;
+
+let workerId: string | null = null;
+
+/**
+ * Identity of THIS worker process, stable for its lifetime.
+ *
+ * The random suffix matters: `getThisNodeName()` falls back to a configured
+ * node name that a whole ReplicaSet can share, and a restarted container often
+ * reuses both hostname and pid — two live processes must never be able to
+ * present the same owner id, or the claim would hand the same run to both.
+ *
+ * Resolved on first use, not at module load: bootstrap.ts imports this module
+ * before `ensureServerEnvLoaded()`, and `getThisNodeName()` reads (and caches)
+ * config.
+ */
+function workerIdentity(): string {
+  workerId ??= `${getThisNodeName()}#${randomUUID().slice(0, 8)}`;
+  return workerId;
+}
+
+/**
+ * The claim primitives, or `null` when the provider predates them.
+ *
+ * Without them there is no way to keep three replicas off the same corpus, so
+ * the job refuses to run rather than silently re-embedding everything N times:
+ * a re-index that never starts is visible and free, one that runs three times
+ * is neither.
+ */
+function claimOps(db: DatabaseProvider): RagReindexClaimOps | null {
+  const provider = db as DatabaseProvider & Partial<RagReindexClaimOps>;
+  if (
+    typeof provider.claimRagReindexRun !== 'function'
+    || typeof provider.touchRagReindexRunClaim !== 'function'
+    || typeof provider.releaseRagReindexRunClaim !== 'function'
+  ) {
+    return null;
+  }
+  return provider as RagReindexClaimOps;
+}
 
 export function requestRagReindexCancel(key: string): void {
   cancelRequests.add(key);
@@ -91,6 +189,18 @@ function readProgress(run: IRagReindexRun): ReindexProgress {
 function readFailures(run: IRagReindexRun): ReindexFailure[] {
   const failures = (run.metadata ?? {}).failures;
   return Array.isArray(failures) ? (failures as ReindexFailure[]) : [];
+}
+
+/** Whether this worker has been dispossessed of the run it is walking. */
+function claimLost(
+  guard: ClaimGuard,
+  runKey: string,
+  processed: number,
+  failed: number,
+): boolean {
+  if (!guard.lost) return false;
+  logger.warn('Re-index claim lost to another worker, stopping', { runKey, processed, failed });
+  return true;
 }
 
 async function isCancelled(db: DatabaseProvider, runKey: string): Promise<boolean> {
@@ -159,6 +269,7 @@ async function reindexDocuments(
   db: DatabaseProvider,
   payload: RagReindexJobPayload,
   run: IRagReindexRun,
+  guard: ClaimGuard,
 ): Promise<void> {
   const { runKey, tenantDbName, tenantId, projectId } = payload;
 
@@ -188,6 +299,11 @@ async function reindexDocuments(
     const documentId = String(document._id);
     if (resumed.lastDocumentId && documentId <= resumed.lastDocumentId) continue;
 
+    // Another worker decided this run was orphaned and took it over. It is now
+    // walking the same cursor, so this one stops WITHOUT writing status or
+    // counters — those belong to the new owner.
+    if (claimLost(guard, runKey, processed, failed)) return;
+
     if (await isCancelled(db, runKey)) {
       cancelRequests.delete(runKey);
       await db.updateRagReindexRun(runKey, {
@@ -206,6 +322,10 @@ async function reindexDocuments(
       await reingestDocument(tenantDbName, tenantId, projectId, {
         ragModuleKey: run.ragModuleKey,
         documentId,
+        // Carried over explicitly: the rebuilt chunks are only searchable by
+        // the same filters as before if the document's metadata goes back in
+        // with them.
+        metadata: document.metadata,
         updatedBy: run.createdBy,
       });
       processed += 1;
@@ -232,6 +352,11 @@ async function reindexDocuments(
     });
   }
 
+  // Re-checked after the last document too: that is where a slow worker is
+  // most likely to have been declared dead, and stamping `completed` on a run
+  // someone else is still rebuilding would clear the module's flags early.
+  if (claimLost(guard, runKey, processed, failed)) return;
+
   await db.updateRagReindexRun(runKey, {
     status: 'completed',
     completedAt: new Date(),
@@ -244,6 +369,39 @@ async function reindexDocuments(
   await finalizeModule(db, run, projectId, true);
 
   logger.info('Re-index completed', { runKey, module: run.ragModuleKey, processed, failed });
+}
+
+/**
+ * Keep proving this worker is alive while it grinds through the corpus.
+ *
+ * Re-enters the tenant scope per beat instead of relying on the enclosing one:
+ * the timer fires long after the call that created it returned into an await,
+ * and a background timer that queried the process-global tenant handle would
+ * be exactly the cross-tenant race `runWithTenantScope` exists to prevent.
+ */
+function startClaimHeartbeat(
+  tenantDbName: string,
+  runKey: string,
+  guard: ClaimGuard,
+): NodeJS.Timeout {
+  const timer = setInterval(() => {
+    void runWithTenantScope(tenantDbName, async (db) => {
+      const ops = claimOps(db);
+      if (!ops) return;
+      const held = await ops.touchRagReindexRunClaim(runKey, workerIdentity());
+      if (!held) guard.lost = true;
+    }).catch((error) => {
+      // A missed beat is survivable (the claim only expires after three);
+      // losing the run to a false positive would not be.
+      logger.warn('Re-index heartbeat failed', {
+        runKey,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }, CLAIM_HEARTBEAT_MS);
+  // A re-index must never be the reason the process refuses to exit.
+  timer.unref();
+  return timer;
 }
 
 /** Queue handler. Binds the tenant DB for the whole (async) execution. */
@@ -259,33 +417,66 @@ export async function runRagReindexJob(payload: RagReindexJobPayload): Promise<v
 
   try {
     await runWithTenantScope(tenantDbName, async (db) => {
-      const run = await db.findRagReindexRunByKey(runKey);
-      if (!run) {
+      const ops = claimOps(db);
+      if (!ops) {
+        logger.error(
+          'Database provider has no re-index claim support; refusing to run the job',
+          { runKey },
+        );
+        return;
+      }
+
+      const existing = await db.findRagReindexRunByKey(runKey);
+      if (!existing) {
         logger.error('Re-index run not found, aborting job', { runKey });
         return;
       }
-      if (run.status === 'completed' || run.status === 'cancelled') {
+      if (existing.status === 'completed' || existing.status === 'cancelled') {
+        return;
+      }
+
+      // The claim, not the status read above, is what makes this exclusive:
+      // every replica's boot sweep reaches this line for the same record and
+      // only the one that wins the atomic update gets a run back.
+      const run = await ops.claimRagReindexRun(
+        runKey,
+        workerIdentity(),
+        new Date(Date.now() - CLAIM_STALE_MS),
+      );
+      if (!run) {
+        logger.info('Re-index is claimed by another worker, skipping', { runKey });
         return;
       }
 
       await db.updateRagReindexRun(runKey, {
-        status: 'running',
         startedAt: run.startedAt ?? new Date(),
         errorMessage: undefined,
       });
 
+      const guard: ClaimGuard = { lost: false };
+      const heartbeat = startClaimHeartbeat(tenantDbName, runKey, guard);
       try {
-        await reindexDocuments(db, payload, run);
+        await reindexDocuments(db, payload, run, guard);
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
         logger.error('Re-index failed', { runKey, error: errorMessage });
-        await db.updateRagReindexRun(runKey, {
-          status: 'failed',
-          completedAt: new Date(),
-          errorMessage,
-        });
-        // The module keeps `reindexRequired`: its vectors are still mixed.
-        await finalizeModule(db, run, payload.projectId, false);
+        // A worker that no longer owns the run must not write its verdict onto
+        // it: the failure it hit may be the new owner rebuilding underneath it.
+        if (!guard.lost) {
+          await db.updateRagReindexRun(runKey, {
+            status: 'failed',
+            completedAt: new Date(),
+            errorMessage,
+          });
+          // The module keeps `reindexRequired`: its vectors are still mixed.
+          await finalizeModule(db, run, payload.projectId, false);
+        }
+      } finally {
+        clearInterval(heartbeat);
+        // Released even on failure so the next attempt claims it immediately
+        // instead of waiting out the stale window. Held claims of a worker
+        // that died are what the stale window is for.
+        await ops.releaseRagReindexRunClaim(runKey, workerIdentity());
       }
     });
   } finally {

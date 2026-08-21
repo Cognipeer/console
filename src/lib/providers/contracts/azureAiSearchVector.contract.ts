@@ -8,6 +8,9 @@ import {
 import type { ProviderContract } from '../types';
 import {
     VectorFilterError,
+    isSystemGuardFilter,
+    matchesFilter,
+    type VectorFilterNode,
     type VectorFilterOperator,
 } from '../domains/vectorFilter';
 import { toAzureMetadataKeyValues, toAzureODataFilter } from './vectorFilterTranslators';
@@ -91,6 +94,18 @@ function requireFilterableSchema(handle: VectorIndexHandle): void {
         + 'was supported, so metadata filters cannot be pushed down. Recreate the index and '
         + 'reingest its documents to enable filtering.',
     );
+}
+
+/**
+ * How many hits to pull back when the isolation guard can only run after the
+ * search. Over-fetching keeps a `topK` slice reachable once foreign-module hits
+ * are dropped; the ceiling stops a large `topK` from turning into a scan.
+ */
+const GUARD_CANDIDATE_MULTIPLIER = 4;
+const GUARD_CANDIDATE_CEILING = 200;
+
+function guardCandidateCount(topK: number): number {
+    return Math.min(Math.max(topK * GUARD_CANDIDATE_MULTIPLIER, 20), GUARD_CANDIDATE_CEILING);
 }
 
 // Azure AI Search document keys may only contain letters, digits, underscore (_),
@@ -440,14 +455,32 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                 const client = getSearchClient(handle.externalId);
 
                 let odataFilter: string | undefined;
+                let guardFilter: VectorFilterNode | undefined;
+
                 if (query.filter) {
-                    requireFilterableSchema(handle);
-                    odataFilter = toAzureODataFilter(
-                        query.filter,
-                        METADATA_KV_FIELD,
-                        METADATA_KEYS_FIELD,
-                    );
+                    if (hasFilterableSchema(handle)) {
+                        odataFilter = toAzureODataFilter(
+                            query.filter,
+                            METADATA_KV_FIELD,
+                            METADATA_KEYS_FIELD,
+                        );
+                    } else if (isSystemGuardFilter(query.filter)) {
+                        // Module isolation is a guard we add, not something the
+                        // caller asked for: throwing here would take every index
+                        // created before the filterable schema offline. The guard
+                        // still has to hold, so it runs against the metadata blob
+                        // that comes back with each hit — correct, but capped by
+                        // how many candidates Azure returns, so it is reported in
+                        // `usage` rather than passed off as a pushed-down filter.
+                        guardFilter = query.filter;
+                    } else {
+                        // A filter the caller asked for cannot be degraded: a
+                        // short result set would look like "no more matches".
+                        requireFilterableSchema(handle);
+                    }
                 }
+
+                const candidateCount = guardFilter ? guardCandidateCount(query.topK) : query.topK;
 
                 const text = query.text?.trim();
                 // An index created before the searchable column existed has
@@ -469,17 +502,17 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                                 // The vector channel has to reach past the final
                                 // slice for the fusion to reorder anything.
                                 kNearestNeighborsCount: fused
-                                    ? hybridCandidateCount(query.topK)
-                                    : query.topK,
+                                    ? hybridCandidateCount(candidateCount)
+                                    : candidateCount,
                                 fields: [VECTOR_FIELD],
                             },
                         ],
                     },
                     select: [ID_FIELD, METADATA_FIELD] as (keyof AzureSearchDocument)[],
-                    top: query.topK,
+                    top: candidateCount,
                 });
 
-                const matches: VectorQueryResult['matches'] = [];
+                const candidates: VectorQueryResult['matches'] = [];
 
                 for await (const result of searchResults.results) {
                     const doc = result.document;
@@ -493,7 +526,7 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
 
                     const score = result.score ?? 0;
 
-                    matches.push({
+                    candidates.push({
                         id: decodeVectorId(doc[ID_FIELD]),
                         // Azure fuses server-side and hands back its own RRF
                         // score, ~0.016 — off the scale every caller thresholds
@@ -503,20 +536,42 @@ export const AzureAiSearchVectorProviderContract: ProviderContract<
                     });
                 }
 
-                if (!text) {
-                    return { matches };
+                let matches = candidates;
+                const usage: Record<string, unknown> = {};
+
+                if (guardFilter) {
+                    const guard = guardFilter;
+                    const kept = candidates.filter((match) => matchesFilter(match.metadata, guard));
+                    matches = kept.slice(0, query.topK);
+
+                    usage.filterPushdown = 'in-memory';
+                    usage.filterCandidates = candidates.length;
+                    usage.filterDropped = candidates.length - kept.length;
+
+                    logger?.warn('Azure AI Search applied module isolation after the search', {
+                        providerKey,
+                        indexName: handle.externalId,
+                        candidates: candidates.length,
+                        kept: kept.length,
+                        hint: candidates.length > 0 && kept.length === 0
+                            ? 'No candidate carried the module marker. Reingest this index, or '
+                                + 'turn module isolation off if it is not shared.'
+                            : 'This index predates filterable metadata; recreate and reingest it '
+                                + 'to push isolation down to Azure.',
+                    });
                 }
 
-                // Azure fuses with RRF whatever the caller asked for, so report
-                // the mode that actually ran rather than the one requested.
-                return {
-                    matches,
-                    usage: describeHybrid(
+                if (text) {
+                    // Azure fuses with RRF whatever the caller asked for, so
+                    // report the mode that actually ran, not the one requested.
+                    Object.assign(usage, describeHybrid(
                         fused
                             ? { ran: true, mode: 'rrf' }
                             : { ran: false, reason: 'index-schema' },
-                    ),
-                };
+                    ));
+                }
+
+                return Object.keys(usage).length > 0 ? { matches, usage } : { matches };
             },
 
             async deleteVectors(handle: VectorIndexHandle, ids: string[]): Promise<void> {

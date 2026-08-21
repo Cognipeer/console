@@ -93,8 +93,22 @@ export default function RetrievalFields({
 
       <ToggleRow
         label="Isolate by module"
-        description="AND this module's marker into every query, so an index shared with another module cannot leak between them. Turn it OFF for an index someone else's pipeline populated — those vectors carry no marker and every query would return nothing."
-        checked={values.isolateByModule}
+        description={
+          <>
+            AND this module&apos;s marker into every query, so an index shared with another
+            module cannot leak between them. Turn it OFF for an index someone else&apos;s
+            pipeline populated — those vectors carry no marker and every query would return
+            nothing.
+            {values.isolateByModule === null ? (
+              <> This module has no setting stored, so each query decides for itself and
+                isolates only when another module shares the index. Touching this switch
+                replaces that with a fixed answer.
+              </>
+            ) : null}
+          </>
+        }
+        // null is "unset", which the service resolves per query — not an "on".
+        checked={values.isolateByModule === true}
         onChange={(checked) => onChange({ isolateByModule: checked })}
       />
     </>

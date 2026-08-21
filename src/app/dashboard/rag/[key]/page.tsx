@@ -117,9 +117,14 @@ interface RagDocumentView {
   createdAt?: string;
 }
 
+/**
+ * A match as the query endpoint returns it — not as the service produced it.
+ * A module set to `responseDetail: 'text'` has every field but `content`
+ * stripped by shapeRagQueryResponse, so nothing here may be assumed present.
+ */
 interface RagQueryMatch {
-  id: string;
-  score: number;
+  id?: string;
+  score?: number;
   content?: string;
   fileName?: string;
   chunkIndex?: number;
@@ -129,7 +134,6 @@ interface RagQueryMatch {
 interface RagQueryResult {
   matches: RagQueryMatch[];
   query: string;
-  topK: number;
   latencyMs: number;
 }
 
@@ -142,7 +146,8 @@ interface RagQueryLogView {
   preFilterMatchCount?: number;
   topScore?: number;
   minScoreApplied?: number;
-  latencyMs: number;
+  /** Absent on logs written before latency was recorded. */
+  latencyMs?: number;
   createdAt?: string;
 }
 
@@ -173,6 +178,16 @@ function kpiValue(value: number | null | undefined) {
 
 function shareOf(part: number, whole: number) {
   return whole > 0 ? `${Math.round((part / whole) * 100)}%` : '—';
+}
+
+/** A latency that was never recorded gets no colour, rather than the "slow" red. */
+function latencyColor(ms?: number) {
+  if (typeof ms !== 'number') return 'gray';
+  return ms < 500 ? 'teal' : ms < 2000 ? 'yellow' : 'red';
+}
+
+function scoreColor(score: number) {
+  return score >= 0.8 ? 'teal' : score >= 0.5 ? 'yellow' : 'red';
 }
 
 function statusColor(status: string) {
@@ -703,7 +718,11 @@ export default function RagModuleDetailPage() {
     `});`,
     ``,
     `console.log(result.matches);`,
-    `// [{ score: 0.92, content: '...', fileName: 'doc.txt', chunkIndex: 3 }, ...]`,
+    // The snippet has to show what THIS module returns: a text-only module
+    // strips everything but the content before the response leaves the API.
+    mod.responseDetail === 'text'
+      ? `// [{ content: '...' }, ...] — this module's response detail is "text only"`
+      : `// [{ score: 0.92, content: '...', fileName: 'doc.txt', chunkIndex: 3 }, ...]`,
   ].join('\n');
 
   const sdkDelete = [
@@ -927,7 +946,12 @@ export default function RagModuleDetailPage() {
                       {zeroQueries.map((log) => {
                         // A query the store answered and the threshold emptied is a
                         // tuning problem; one the store never answered is a content gap.
-                        const filtered = (log.preFilterMatchCount ?? 0) > 0;
+                        // Logs written before the count existed can say neither: absent
+                        // is not zero, and calling it a content gap sends the user
+                        // looking for documents that may well be there.
+                        const preFilter = log.preFilterMatchCount;
+                        const recorded = typeof preFilter === 'number';
+                        const filtered = recorded && preFilter > 0;
                         return (
                           <Table.Tr key={log._id}>
                             <Table.Td style={{ maxWidth: 400 }}>
@@ -935,10 +959,16 @@ export default function RagModuleDetailPage() {
                             </Table.Td>
                             <Table.Td>
                               <Center>
-                                <Badge variant="light" color={filtered ? 'yellow' : 'red'} size="sm">
-                                  {filtered
-                                    ? `${log.preFilterMatchCount} below min score`
-                                    : 'nothing retrieved'}
+                                <Badge
+                                  variant="light"
+                                  color={!recorded ? 'gray' : filtered ? 'yellow' : 'red'}
+                                  size="sm"
+                                >
+                                  {!recorded
+                                    ? 'reason not recorded'
+                                    : filtered
+                                      ? `${preFilter} below min score`
+                                      : 'nothing retrieved'}
                                 </Badge>
                               </Center>
                             </Table.Td>
@@ -1043,10 +1073,14 @@ export default function RagModuleDetailPage() {
                 </Stack>
                 <Stack gap={4}>
                   <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Module Isolation</Text>
+                  {/* Three states. Absent is not "on": the service decides per
+                      query, isolating only when another module shares the index. */}
                   <Text size="sm">
-                    {mod.isolateByModule === false
-                      ? 'Off — the index is shared with an outside pipeline'
-                      : 'On — queries stay inside this module'}
+                    {typeof mod.isolateByModule !== 'boolean'
+                      ? 'Not set — on only while another module shares this index'
+                      : mod.isolateByModule
+                        ? 'On — queries stay inside this module'
+                        : 'Off — the index is shared with an outside pipeline'}
                   </Text>
                 </Stack>
                 <Stack gap={4}>
@@ -1269,8 +1303,15 @@ export default function RagModuleDetailPage() {
                           </Table.Td>
                           <Table.Td>
                             <Center>
-                              <Badge variant="filled" color="orange" size="md" radius="sm">
-                                {doc.chunkCount ?? 0}
+                              {/* A document still being ingested has no count yet;
+                                  0 would read as "this file produced nothing". */}
+                              <Badge
+                                variant={typeof doc.chunkCount === 'number' ? 'filled' : 'light'}
+                                color={typeof doc.chunkCount === 'number' ? 'orange' : 'gray'}
+                                size="md"
+                                radius="sm"
+                              >
+                                {doc.chunkCount ?? '—'}
                               </Badge>
                             </Center>
                           </Table.Td>
@@ -1402,6 +1443,12 @@ export default function RagModuleDetailPage() {
                     <Text size="sm" c="dimmed">
                       {queryResult.matches.length} match(es) — {queryResult.latencyMs}ms
                     </Text>
+                    {mod.responseDetail === 'text' ? (
+                      <Text size="xs" c="dimmed">
+                        This module answers with text only, so the response carries no scores,
+                        ids or metadata. Switch Response detail to &quot;Full&quot; to see them.
+                      </Text>
+                    ) : null}
                   </div>
                 </Group>
 
@@ -1412,32 +1459,32 @@ export default function RagModuleDetailPage() {
                 ) : (
                   <Accordion variant="separated" radius="md">
                     {queryResult.matches.map((match, idx) => (
-                      <Accordion.Item key={match.id || idx} value={String(idx)}>
+                      <Accordion.Item key={match.id ?? String(idx)} value={String(idx)}>
                         <Accordion.Control>
                           <Group justify="space-between" wrap="nowrap" pr="md">
                             <Group gap="sm">
                               <Badge variant="filled" color="violet" size="sm" radius="sm">
                                 #{idx + 1}
                               </Badge>
-                              <Text size="sm" fw={500}>
-                                {match.fileName ?? 'Unknown file'}
-                              </Text>
-                              {match.chunkIndex !== undefined && (
+                              {/* Stripped by a text-only response — the rank badge stands
+                                  in for it, rather than claiming an unknown file. */}
+                              {match.fileName ? (
+                                <Text size="sm" fw={500}>{match.fileName}</Text>
+                              ) : null}
+                              {typeof match.chunkIndex === 'number' && (
                                 <Badge variant="light" color="gray" size="xs">
                                   Chunk {match.chunkIndex}
                                 </Badge>
                               )}
                             </Group>
-                            <Group gap="xs">
-                              <Text size="xs" c="dimmed">Score:</Text>
-                              <Badge
-                                variant="light"
-                                color={match.score >= 0.8 ? 'teal' : match.score >= 0.5 ? 'yellow' : 'red'}
-                                size="sm"
-                              >
-                                {match.score.toFixed(4)}
-                              </Badge>
-                            </Group>
+                            {typeof match.score === 'number' ? (
+                              <Group gap="xs">
+                                <Text size="xs" c="dimmed">Score:</Text>
+                                <Badge variant="light" color={scoreColor(match.score)} size="sm">
+                                  {match.score.toFixed(4)}
+                                </Badge>
+                              </Group>
+                            ) : null}
                           </Group>
                         </Accordion.Control>
                         <Accordion.Panel>
@@ -1543,12 +1590,8 @@ export default function RagModuleDetailPage() {
                           </Table.Td>
                           <Table.Td>
                             <Center>
-                              <Badge
-                                variant="light"
-                                color={log.latencyMs < 500 ? 'teal' : log.latencyMs < 2000 ? 'yellow' : 'red'}
-                                size="sm"
-                              >
-                                {log.latencyMs}ms
+                              <Badge variant="light" color={latencyColor(log.latencyMs)} size="sm">
+                                {typeof log.latencyMs === 'number' ? `${log.latencyMs}ms` : '—'}
                               </Badge>
                             </Center>
                           </Table.Td>

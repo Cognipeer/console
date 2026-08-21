@@ -20,6 +20,9 @@ vi.mock('@/lib/services/vector/vectorService', () => ({
   queryVectorIndex: vi.fn().mockResolvedValue({ matches: [] }),
   deleteVectors: vi.fn().mockResolvedValue({ deleted: 1 }),
 }));
+vi.mock('@/lib/services/reranker', () => ({
+  runReranker: vi.fn(),
+}));
 vi.mock('@/lib/services/files/fileService', () => ({
   uploadFile: vi.fn().mockResolvedValue({ record: { key: 'stored-object-key' } }),
   downloadFile: vi.fn().mockResolvedValue({
@@ -50,7 +53,9 @@ import { hashSourceText, INLINE_SOURCE_MAX_CHARS } from '@/lib/services/rag/ragS
 import { getDatabase } from '@/lib/database';
 import { handleEmbeddingRequest } from '@/lib/services/models/inferenceService';
 import { upsertVectors, queryVectorIndex, deleteVectors } from '@/lib/services/vector/vectorService';
+import { runReranker } from '@/lib/services/reranker';
 import { deleteFile, downloadFile, uploadFile } from '@/lib/services/files/fileService';
+import type { IRagDocument } from '@/lib/database';
 
 const DB_NAME = 'tenant_acme';
 const TENANT_ID = 'tenant-1';
@@ -281,9 +286,25 @@ describe('RAG Service', () => {
       { ...mockDocument, _id: 'ragdoc-2', chunkCount: 1 },
     ];
 
+    /**
+     * Project scoping as the real providers implement it: a projectId filter
+     * matches that project alone, and no filter at all lists the module key
+     * tenant-wide.
+     */
+    const listAs = (documents: Array<Partial<IRagDocument>>) => {
+      db.listRagDocuments.mockImplementation(async (_key: string, filters?: { projectId?: string }) => (
+        filters?.projectId === undefined
+          ? documents
+          : documents.filter((doc) => doc.projectId === filters.projectId)
+      ) as unknown as Promise<IRagDocument[]>);
+    };
+
+    const deletedVectorIds = () => (deleteVectors as ReturnType<typeof vi.fn>).mock.calls
+      .flatMap((call) => (call[3] as { ids: string[] }).ids);
+
     beforeEach(() => {
       db.findRagModuleById.mockResolvedValue(mockModuleWithBucket);
-      db.listRagDocuments.mockResolvedValue(moduleDocuments);
+      listAs(moduleDocuments);
       db.deleteRagChunksByModuleKey.mockResolvedValue(3);
       db.deleteRagDocumentsByModuleKey.mockResolvedValue(2);
       db.deleteRagModule.mockResolvedValue(true);
@@ -336,6 +357,50 @@ describe('RAG Service', () => {
       const result = await deleteRagModule(DB_NAME, TENANT_ID, PROJECT_ID, 'ragmod-1');
       expect(result).toBe(true);
       expect(db.deleteRagDocumentsByModuleKey).toHaveBeenCalledWith('my-rag');
+    });
+
+    it("leaves another project's module of the same key completely untouched", async () => {
+      // Module keys are unique per project, and the teardown helpers key on
+      // ragModuleKey alone: the bulk path would have wiped project B's "my-rag"
+      // documents, chunks and vectors along with this one's.
+      db.listRagModules.mockResolvedValue([
+        mockModuleWithBucket,
+        { ...mockModule, _id: 'ragmod-2', projectId: 'proj-2' },
+      ]);
+      listAs([
+        { ...mockDocument, _id: 'ragdoc-1', chunkCount: 2 },
+        { ...mockDocument, _id: 'ragdoc-other', projectId: 'proj-2', chunkCount: 1 },
+      ]);
+
+      await deleteRagModule(DB_NAME, TENANT_ID, PROJECT_ID, 'ragmod-1');
+
+      expect(db.deleteRagChunksByModuleKey).not.toHaveBeenCalled();
+      expect(db.deleteRagDocumentsByModuleKey).not.toHaveBeenCalled();
+      expect(db.deleteRagDocument).toHaveBeenCalledWith('ragdoc-1');
+      expect(db.deleteRagChunksByDocumentId).toHaveBeenCalledWith('ragdoc-1');
+      expect(db.deleteRagDocument).not.toHaveBeenCalledWith('ragdoc-other');
+      expect(deletedVectorIds()).not.toContain('my-rag:ragdoc-other:0');
+    });
+
+    it('cleans up documents ingested through the client API, which carry no project', async () => {
+      // /client/v1 passes projectId undefined, so a document's project never
+      // matches its module's. Enumerating project-scoped deleted those rows in
+      // bulk and left their vectors and bucket objects behind forever.
+      listAs([{
+        ...mockDocument,
+        _id: 'ragdoc-client',
+        projectId: undefined,
+        chunkCount: 1,
+        fileBucketKey: 'kb-bucket',
+        sourceTextKey: 'client-source.md',
+      }]);
+
+      await deleteRagModule(DB_NAME, TENANT_ID, PROJECT_ID, 'ragmod-1');
+
+      expect(deletedVectorIds()).toContain('my-rag:ragdoc-client:0');
+      expect(deleteFile).toHaveBeenCalledWith(
+        DB_NAME, TENANT_ID, PROJECT_ID, 'kb-bucket', 'client-source.md', expect.any(String),
+      );
     });
   });
 
@@ -392,6 +457,21 @@ describe('RAG Service', () => {
       const [document] = await listRagDocuments(DB_NAME, 'my-rag');
       expect(document.sourceText).toBeUndefined();
       expect(document.fileName).toBe('doc.txt');
+    });
+
+    it('drops the inline source from every row, not only the first', async () => {
+      // Each row can carry INLINE_SOURCE_MAX_CHARS of sourceText, so nothing
+      // that leaves this function may still reference one.
+      db.listRagDocuments.mockResolvedValue([
+        { ...mockDocument, _id: 'a', sourceText: 'x'.repeat(1_000) },
+        { ...mockDocument, _id: 'b', sourceText: 'y'.repeat(1_000) },
+        { ...mockDocument, _id: 'c' },
+      ]);
+
+      const documents = await listRagDocuments(DB_NAME, 'my-rag');
+
+      expect(documents).toHaveLength(3);
+      expect(documents.every((doc) => doc.sourceText === undefined)).toBe(true);
     });
   });
 
@@ -747,10 +827,61 @@ describe('RAG Service', () => {
           matchCount: 0,
           preFilterMatchCount: 2,
           minScoreApplied: 0.8,
-          topScore: 0,
+          // The best score the STORE returned. Logging the surviving best would
+          // put a 0 in front of the zero-result panel and the histogram, which
+          // exist to explain and re-tune exactly this query.
+          topScore: 0.4,
           avgScore: 0,
         }),
       );
+    });
+
+    // ── Threshold scale ──
+
+    it('thresholds a reranked module on the reranker score, not the pre-rerank similarity', async () => {
+      // vectorScore is ALWAYS the pre-rerank similarity, so thresholding on it
+      // applies the operator's calibrated number to a distribution they never
+      // saw — quietly emptying a module that has both a reranker and a minScore.
+      db.findRagModuleByKey.mockResolvedValue({
+        ...mockModule,
+        rerankerKey: 'my-reranker',
+        defaultMinScore: 0.8,
+      });
+      (queryVectorIndex as ReturnType<typeof vi.fn>).mockResolvedValue({
+        matches: [{ id: 'my-rag:ragdoc-1:0', score: 0.42, metadata: {} }],
+      });
+      (runReranker as ReturnType<typeof vi.fn>).mockResolvedValue({
+        latencyMs: 7,
+        results: [{ index: 0, id: 'my-rag:ragdoc-1:0', score: 0.93, originalScore: 0.42, content: 'Chunk content here' }],
+      });
+
+      const result = await queryRag(DB_NAME, TENANT_ID, PROJECT_ID, queryReq);
+
+      expect(result.matches).toHaveLength(1);
+      expect(result.matches[0].score).toBe(0.93);
+    });
+
+    it('judges every hybrid match on one scale, dense-found or keyword-only', async () => {
+      // Under 'rrf' only the matches the dense channel found carry denseScore,
+      // so preferring it put one threshold against two different scales inside
+      // a single result list — the dense-found match was dropped and the
+      // keyword-only one kept, in that order.
+      db.findRagModuleByKey.mockResolvedValue({
+        ...mockModule,
+        hybrid: { enabled: true, mode: 'rrf' as const },
+        defaultMinScore: 0.5,
+      });
+      (queryVectorIndex as ReturnType<typeof vi.fn>).mockResolvedValue({
+        matches: [
+          { id: 'dense-found', score: 0.9, denseScore: 0.31, metadata: {} },
+          { id: 'keyword-only', score: 0.7, lexicalScore: 12.4, metadata: {} },
+        ],
+      });
+      db.findRagChunksByVectorIds.mockResolvedValue([]);
+
+      const result = await queryRag(DB_NAME, TENANT_ID, PROJECT_ID, queryReq);
+
+      expect(result.matches.map((m) => m.id)).toEqual(['dense-found', 'keyword-only']);
     });
 
     it('returns correct metadata fields', async () => {
@@ -1216,6 +1347,70 @@ describe('RAG Service', () => {
 
       expect(uploadFile).not.toHaveBeenCalled();
       expect(deleteFile).not.toHaveBeenCalled();
+    });
+
+    it('never promotes a chunk join to the stored source', async () => {
+      // The join repeats every overlap region. Storing it would make that
+      // corruption the document's canonical, authoritative source for every
+      // future re-index.
+      db.findRagDocumentById.mockResolvedValue({ ...mockDocument });
+      db.findRagChunksByDocumentId.mockResolvedValue([
+        { vectorId: 'v0', content: 'first half overlap', tenantId: TENANT_ID, ragModuleKey: 'my-rag', documentId: 'ragdoc-1', chunkIndex: 0 },
+        { vectorId: 'v1', content: 'overlap second half', tenantId: TENANT_ID, ragModuleKey: 'my-rag', documentId: 'ragdoc-1', chunkIndex: 1 },
+      ]);
+
+      await reingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, reingestReq);
+
+      expect(uploadFile).not.toHaveBeenCalled();
+      const [, update] = (db.updateRagDocument as ReturnType<typeof vi.fn>).mock.lastCall!;
+      expect(update.sourceText).toBeUndefined();
+      expect(update.sourceTextKey).toBeUndefined();
+      expect(update.sourceHash).toBeUndefined();
+    });
+
+    // ── Metadata ──
+
+    const indexedMetadata = () => {
+      const [rows] = (db.bulkInsertRagChunks as ReturnType<typeof vi.fn>).mock.calls[0];
+      return (rows as Array<{ metadata: Record<string, unknown> }>)[0].metadata;
+    };
+    const vectorMetadata = () => {
+      const call = (upsertVectors as ReturnType<typeof vi.fn>).mock.calls[0];
+      return (call[3] as { vectors: Array<{ metadata: Record<string, unknown> }> }).vectors[0].metadata;
+    };
+
+    it("keeps the document's own metadata when the re-index job supplies none", async () => {
+      // The re-index job calls this with no metadata at all, and those keys are
+      // exactly what defaultFilter/filterableFields filter on — stripping them
+      // made every filtered query return nothing after a re-index.
+      db.findRagDocumentById.mockResolvedValue({
+        ...mockDocument,
+        sourceText: 'The document exactly as it was indexed.',
+        metadata: { source: 'crawler', url: 'https://example.com/a' },
+      });
+
+      await reingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, reingestReq);
+
+      expect(indexedMetadata()).toMatchObject({ source: 'crawler', url: 'https://example.com/a' });
+      expect(vectorMetadata()).toMatchObject({ source: 'crawler', url: 'https://example.com/a' });
+    });
+
+    it('lets explicit re-index metadata override a key without erasing the rest', async () => {
+      db.findRagDocumentById.mockResolvedValue({
+        ...mockDocument,
+        sourceText: 'The document exactly as it was indexed.',
+        metadata: { source: 'crawler', url: 'https://example.com/a' },
+      });
+
+      await reingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, {
+        ...reingestReq,
+        metadata: { source: 'manual' },
+      });
+
+      expect(vectorMetadata()).toMatchObject({ source: 'manual', url: 'https://example.com/a' });
+      // The row has to agree with the vectors about what it is filterable by.
+      const [, update] = (db.updateRagDocument as ReturnType<typeof vi.fn>).mock.lastCall!;
+      expect(update.metadata).toEqual({ source: 'manual', url: 'https://example.com/a' });
     });
 
     it('deletes the old vectors before writing the new ones', async () => {

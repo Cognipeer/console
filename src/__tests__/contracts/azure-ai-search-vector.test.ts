@@ -59,12 +59,15 @@ function asyncResults(docs: Array<Record<string, unknown>>) {
   };
 }
 
+const logger = { info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
+
 async function createRuntime(): Promise<VectorProviderRuntime> {
   return (await AzureAiSearchVectorProviderContract.createRuntime({
     tenantId: 'tenant-test',
     providerKey: 'azure-ai-search-test',
     credentials: { apiKey: 'test-key' },
     settings: { foundryProjectEndpoint: 'https://test.search.windows.net' },
+    logger,
   } as never)) as VectorProviderRuntime;
 }
 
@@ -227,7 +230,7 @@ describe('AzureAiSearchVectorProvider — metadata filtering', () => {
     expect(options.filter).toBe("metadata_kv/any(kv: kv eq 'source=crawler')");
   });
 
-  it('rejects a filtered query against an index without the filterable schema', async () => {
+  it('rejects a caller filter against an index without the filterable schema', async () => {
     await expect(
       runtime.queryVectors(HANDLE, {
         vector: [0.1, 0.2, 0.3],
@@ -246,5 +249,123 @@ describe('AzureAiSearchVectorProvider — metadata filtering', () => {
 
     const [, options] = search.mock.calls[0];
     expect(options.filter).toBeUndefined();
+  });
+});
+
+/**
+ * Module isolation ANDs `_ragModule` into every query of an isolated module,
+ * including modules whose Azure index predates the filterable schema. Failing
+ * those queries would break a module over a filter the caller never asked for,
+ * so the guard — and only the guard — is applied to the returned metadata
+ * instead, and the degradation is reported.
+ */
+describe('AzureAiSearchVectorProvider — module isolation on a pre-filterable index', () => {
+  let runtime: VectorProviderRuntime;
+
+  const guardFilter = {
+    kind: 'comparison',
+    comparison: { op: '$eq', field: '_ragModule', value: 'my-rag' },
+  } as const;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    runtime = await createRuntime();
+  });
+
+  it('answers the query and drops another module\'s chunks', async () => {
+    search.mockReturnValueOnce(
+      asyncResults([
+        { id: 'a', metadata: JSON.stringify({ _ragModule: 'my-rag', text: 'mine' }) },
+        { id: 'b', metadata: JSON.stringify({ _ragModule: 'other-rag', text: 'theirs' }) },
+      ]),
+    );
+
+    const result = await runtime.queryVectors(HANDLE, {
+      vector: [0.1, 0.2, 0.3],
+      topK: 5,
+      filter: guardFilter,
+    });
+
+    expect(result.matches.map((m) => m.id)).toEqual(['a']);
+  });
+
+  it('reports the degradation in usage and in the log', async () => {
+    search.mockReturnValueOnce(
+      asyncResults([
+        { id: 'a', metadata: JSON.stringify({ _ragModule: 'my-rag' }) },
+        { id: 'b', metadata: JSON.stringify({ _ragModule: 'other-rag' }) },
+      ]),
+    );
+
+    const result = await runtime.queryVectors(HANDLE, {
+      vector: [0.1, 0.2, 0.3],
+      topK: 5,
+      filter: guardFilter,
+    });
+
+    expect(result.usage).toMatchObject({ filterPushdown: 'in-memory', filterDropped: 1 });
+    expect(logger.warn).toHaveBeenCalled();
+  });
+
+  it('over-fetches so a topK slice survives the dropped hits', async () => {
+    search.mockReturnValueOnce(asyncResults([]));
+
+    await runtime.queryVectors(HANDLE, {
+      vector: [0.1, 0.2, 0.3],
+      topK: 5,
+      filter: guardFilter,
+    });
+
+    const [, options] = search.mock.calls[0];
+    expect(options.top).toBeGreaterThan(5);
+    expect(options.filter).toBeUndefined();
+    expect(options.vectorSearchOptions.queries[0].kNearestNeighborsCount).toBe(options.top);
+  });
+
+  it('never returns more than topK after the guard runs', async () => {
+    search.mockReturnValueOnce(
+      asyncResults(
+        ['a', 'b', 'c'].map((id) => ({ id, metadata: JSON.stringify({ _ragModule: 'my-rag' }) })),
+      ),
+    );
+
+    const result = await runtime.queryVectors(HANDLE, {
+      vector: [0.1, 0.2, 0.3],
+      topK: 2,
+      filter: guardFilter,
+    });
+
+    expect(result.matches).toHaveLength(2);
+  });
+
+  it('still fails loudly when the caller asked for the filter as well', async () => {
+    await expect(
+      runtime.queryVectors(HANDLE, {
+        vector: [0.1, 0.2, 0.3],
+        topK: 5,
+        filter: {
+          kind: 'and',
+          nodes: [
+            guardFilter,
+            { kind: 'comparison', comparison: { op: '$eq', field: 'source', value: 'crawler' } },
+          ],
+        },
+      }),
+    ).rejects.toThrow(/Recreate the index/);
+  });
+
+  it('pushes the guard down as OData once the index carries the schema', async () => {
+    search.mockReturnValueOnce(asyncResults([]));
+
+    const result = await runtime.queryVectors(FILTERABLE_HANDLE, {
+      vector: [0.1, 0.2, 0.3],
+      topK: 5,
+      filter: guardFilter,
+    });
+
+    const [, options] = search.mock.calls[0];
+    expect(options.filter).toBe("metadata_kv/any(kv: kv eq '_ragModule=my-rag')");
+    expect(options.top).toBe(5);
+    expect(result.usage).toBeUndefined();
   });
 });

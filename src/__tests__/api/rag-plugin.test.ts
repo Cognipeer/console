@@ -28,17 +28,29 @@ vi.mock('@cognipeer/to-markdown', () => ({
 // Bypass project context lookup — the resolver needs a fully provisioned
 // user + UserProject row, which is more setup than this test needs.
 const FAKE_PROJECT_ID = 'test-project-1';
+const OTHER_PROJECT_ID = 'test-project-2';
+
+/** Flipped per-test: owner/admin reach across projects, a member does not. */
+let currentUserRole: 'owner' | 'admin' | 'member' = 'owner';
+
 vi.mock('@/lib/services/projects/projectContext', () => ({
   ProjectContextError: class extends Error {
     status = 400;
   },
-  resolveProjectContext: vi.fn(async (ctx: { tenantDbName: string; tenantId: string }) => ({
+  resolveProjectContext: vi.fn(async (ctx: { tenantDbName: string; tenantId: string; userId: string }) => ({
     projectId: FAKE_PROJECT_ID,
     project: {
       _id: FAKE_PROJECT_ID,
       tenantId: ctx.tenantId,
       name: 'Test',
       key: 'test',
+      status: 'active',
+    },
+    user: {
+      _id: ctx.userId,
+      tenantId: ctx.tenantId,
+      email: 'tester@example.com',
+      role: currentUserRole,
       status: 'active',
     },
     userProject: null,
@@ -116,6 +128,9 @@ const REQUEST_HEADERS = {
 };
 
 const JSON_HEADERS = { ...REQUEST_HEADERS, 'content-type': 'application/json' };
+
+/** Query text belonging to a same-key module in another project. */
+const FOREIGN_PROJECT_QUERY = 'salary bands for the Berlin office';
 
 const VALID_CHUNK_CONFIG = { strategy: 'recursive_character', chunkSize: 800, chunkOverlap: 100 };
 
@@ -309,6 +324,50 @@ describe('PATCH /api/rag/modules/{key} whitelists the body', () => {
     expect(parseJsonBody<{ error: string }>(res.body).error).toContain('chunkOverlap');
   });
 
+  /**
+   * The exact request the edit form sends for an emptied description: an
+   * explicit `null`. It used to fail the whole PATCH with 400, so nothing on
+   * the form saved — not the description, not the fields beside it.
+   */
+  it('clears the description when the edit form sends null', async () => {
+    const seed = await app.inject({
+      method: 'PATCH',
+      url: `/api/rag/modules/${MODULE_KEY}`,
+      headers: JSON_HEADERS,
+      payload: JSON.stringify({ description: 'Support FAQ corpus' }),
+    });
+    expect(seed.statusCode).toBe(200);
+    expect(parseJsonBody<{ module: { description?: string } }>(seed.body).module.description)
+      .toBe('Support FAQ corpus');
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/api/rag/modules/${MODULE_KEY}`,
+      headers: JSON_HEADERS,
+      payload: JSON.stringify({ name: 'Renamed Module', description: null }),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const { module: ragModule } = parseJsonBody<{
+      module: { description?: string; name: string };
+    }>(res.body);
+    expect(ragModule.description ?? '').toBe('');
+    // The rest of the form still had to save.
+    expect(ragModule.name).toBe('Renamed Module');
+  });
+
+  it('rejects a null name — an identifying field has no cleared state', async () => {
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/api/rag/modules/${MODULE_KEY}`,
+      headers: JSON_HEADERS,
+      payload: JSON.stringify({ name: null }),
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(parseJsonBody<{ error: string }>(res.body).error).toContain('name');
+  });
+
   it('rejects a responseDetail outside the enum', async () => {
     const res = await app.inject({
       method: 'PATCH',
@@ -478,6 +537,22 @@ describe('zero-result insight routes', () => {
       minScoreApplied: 0.5,
       latencyMs: 95,
     });
+
+    // Same module key, different project. Keys are unique per project only, so
+    // this row is what used to bleed into another project's counters, feed and
+    // histogram — verbatim query text included.
+    await db.createRagQueryLog({
+      tenantId: TENANT_ID,
+      projectId: OTHER_PROJECT_ID,
+      ragModuleKey: MODULE_KEY,
+      query: FOREIGN_PROJECT_QUERY,
+      topK: 5,
+      matchCount: 1,
+      preFilterMatchCount: 1,
+      topScore: 0.95,
+      avgScore: 0.95,
+      latencyMs: 40,
+    });
   });
 
   it('GET /usage reports full-set totals alongside the log page', async () => {
@@ -530,6 +605,18 @@ describe('zero-result insight routes', () => {
     expect(parseJsonBody<{ logs: unknown[] }>(res.body).logs).toHaveLength(3);
   });
 
+  it('keeps a same-key module in another project out of the feed', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/rag/modules/${MODULE_KEY}/queries`,
+      headers: REQUEST_HEADERS,
+    });
+
+    expect(res.statusCode).toBe(200);
+    const { logs } = parseJsonBody<{ logs: Array<{ query: string }> }>(res.body);
+    expect(logs.map((log) => log.query)).not.toContain(FOREIGN_PROJECT_QUERY);
+  });
+
   it('GET /score-distribution buckets the best score per query', async () => {
     const res = await app.inject({
       method: 'GET',
@@ -557,5 +644,96 @@ describe('zero-result insight routes', () => {
       headers: REQUEST_HEADERS,
     });
     expect(scoreRes.statusCode).toBe(404);
+  });
+});
+
+describe('document routes are project-scoped and never answer with the source text', () => {
+  const SECRET_SOURCE = 'CONFIDENTIAL: the extracted markdown of the whole contract';
+  let ownDocumentId = '';
+  let otherModuleDocumentId = '';
+  let otherProjectDocumentId = '';
+
+  beforeAll(async () => {
+    const db = await getDatabase();
+    await db.switchToTenant(TENANT_DB_NAME);
+
+    const own = await db.createRagDocument({
+      tenantId: TENANT_ID,
+      projectId: FAKE_PROJECT_ID,
+      ragModuleKey: MODULE_KEY,
+      fileName: 'contract.pdf',
+      status: 'indexed',
+      chunkCount: 4,
+      sourceText: SECRET_SOURCE,
+      createdBy: USER_ID,
+    });
+    ownDocumentId = String(own._id);
+
+    const otherModule = await db.createRagDocument({
+      tenantId: TENANT_ID,
+      projectId: FAKE_PROJECT_ID,
+      ragModuleKey: 'a-different-module',
+      fileName: 'elsewhere.pdf',
+      status: 'indexed',
+      createdBy: USER_ID,
+    });
+    otherModuleDocumentId = String(otherModule._id);
+
+    const otherProject = await db.createRagDocument({
+      tenantId: TENANT_ID,
+      projectId: OTHER_PROJECT_ID,
+      ragModuleKey: MODULE_KEY,
+      fileName: 'their-contract.pdf',
+      status: 'indexed',
+      createdBy: 'someone-else',
+    });
+    otherProjectDocumentId = String(otherProject._id);
+  });
+
+  afterAll(() => {
+    currentUserRole = 'owner';
+  });
+
+  it('returns the document without its stored source text', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/rag/modules/${MODULE_KEY}/documents/${ownDocumentId}`,
+      headers: REQUEST_HEADERS,
+    });
+
+    expect(res.statusCode).toBe(200);
+    const { document } = parseJsonBody<{ document: Record<string, unknown> }>(res.body);
+    expect(document.fileName).toBe('contract.pdf');
+    expect(document).not.toHaveProperty('sourceText');
+    expect(res.body).not.toContain(SECRET_SOURCE);
+  });
+
+  it('404s a document id that belongs to another module', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/rag/modules/${MODULE_KEY}/documents/${otherModuleDocumentId}`,
+      headers: REQUEST_HEADERS,
+    });
+
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('404s another project\'s document for a member, and still serves it to an owner', async () => {
+    currentUserRole = 'member';
+    const memberRes = await app.inject({
+      method: 'GET',
+      url: `/api/rag/modules/${MODULE_KEY}/documents/${otherProjectDocumentId}`,
+      headers: { ...REQUEST_HEADERS, 'x-user-role': 'member' },
+    });
+    expect(memberRes.statusCode).toBe(404);
+
+    // Owners/admins keep the tenant-wide reach resolveProjectContext grants.
+    currentUserRole = 'owner';
+    const ownerRes = await app.inject({
+      method: 'GET',
+      url: `/api/rag/modules/${MODULE_KEY}/documents/${otherProjectDocumentId}`,
+      headers: REQUEST_HEADERS,
+    });
+    expect(ownerRes.statusCode).toBe(200);
   });
 });

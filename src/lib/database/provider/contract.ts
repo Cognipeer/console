@@ -1012,11 +1012,13 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
       to?: Date;
       /** Only queries that returned nothing — the content-gap feed. */
       zeroOnly?: boolean;
+      /** Scope to one project; module keys are unique only within a project. */
+      projectId?: string;
     },
   ): Promise<IRagQueryLog[]>;
   countRagQueryLogs(
     ragModuleKey: string,
-    options?: { from?: Date; to?: Date },
+    options?: { from?: Date; to?: Date; projectId?: string },
   ): Promise<{
     total: number;
     avgLatencyMs: number;
@@ -1035,7 +1037,7 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
    */
   aggregateRagQueryScoreDistribution(
     ragModuleKey: string,
-    options?: { from?: Date; to?: Date },
+    options?: { from?: Date; to?: Date; projectId?: string },
   ): Promise<Array<{ bucket: string; count: number }>>;
   /** Retention: query text is stored in full, so this table cannot grow forever. */
   deleteRagQueryLogsOlderThan(before: Date, ragModuleKey?: string): Promise<number>;

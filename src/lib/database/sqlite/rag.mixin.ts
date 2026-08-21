@@ -439,7 +439,7 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
 
     async listRagQueryLogs(
       ragModuleKey: string,
-      options?: { limit?: number; skip?: number; from?: Date; to?: Date; zeroOnly?: boolean },
+      options?: { limit?: number; skip?: number; from?: Date; to?: Date; zeroOnly?: boolean; projectId?: string },
     ): Promise<IRagQueryLog[]> {
       const db = this.getTenantDb();
       const { clauses, params } = this.buildRagQueryLogFilter(ragModuleKey, options);
@@ -455,7 +455,7 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
 
     async countRagQueryLogs(
       ragModuleKey: string,
-      options?: { from?: Date; to?: Date },
+      options?: { from?: Date; to?: Date; projectId?: string },
     ): Promise<{
       total: number;
       avgLatencyMs: number;
@@ -489,7 +489,7 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
 
     async aggregateRagQueryScoreDistribution(
       ragModuleKey: string,
-      options?: { from?: Date; to?: Date },
+      options?: { from?: Date; to?: Date; projectId?: string },
     ): Promise<Array<{ bucket: string; count: number }>> {
       const db = this.getTenantDb();
       const { clauses, params } = this.buildRagQueryLogFilter(ragModuleKey, options);
@@ -557,12 +557,27 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
     }
 
     /** Shared module + date-window WHERE for every query-log read. */
+    /**
+     * Module keys are unique only WITHIN a project, so filtering by
+     * ragModuleKey alone picks up the rows of a same-key module in another
+     * project of the tenant — including the verbatim end-user query text.
+     *
+     * Rows with no projectId (logs predating project stamping, and every query
+     * through /client/v1, which passes projectId undefined) cannot be
+     * attributed to either module. They stay visible to the module's owner:
+     * hiding a project's own history is the worse of the two failure modes,
+     * and the caller has already been verified to own a module with this key.
+     */
     private buildRagQueryLogFilter(
       ragModuleKey: string,
-      options?: { from?: Date; to?: Date },
+      options?: { from?: Date; to?: Date; projectId?: string },
     ): { clauses: string[]; params: Record<string, unknown> } {
       const clauses: string[] = ['ragModuleKey = @ragModuleKey'];
       const params: Record<string, unknown> = { ragModuleKey };
+      if (options?.projectId) {
+        clauses.push('(projectId = @projectId OR projectId IS NULL)');
+        params.projectId = options.projectId;
+      }
       if (options?.from) { clauses.push('createdAt >= @from'); params.from = options.from.toISOString(); }
       if (options?.to) { clauses.push('createdAt <= @to'); params.to = options.to.toISOString(); }
       return { clauses, params };

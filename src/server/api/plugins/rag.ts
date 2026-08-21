@@ -187,13 +187,30 @@ export function readRagModuleCreateFields(
  * PATCH used to forward the raw body, so anything the service happened to
  * recognise later — including fields that identify the row — would have been
  * writable. Whitelisting mirrors what create accepts.
+ *
+ * Every field is `optional` or `clearable` on purpose, because the service
+ * reads `undefined` as "leave this alone" and `null` as "clear it", and a
+ * field whose reader disagrees with that is either unclearable or silently
+ * wipeable:
+ *  - name, embeddingModelKey, vectorProviderKey, vectorIndexKey, chunkConfig
+ *    and status identify or configure the module and have no cleared state, so
+ *    `null` is a bad request rather than an instruction.
+ *  - metadata's empty value is `{}`, so it needs no null either.
+ *  - everything else is a genuinely optional setting the edit form clears by
+ *    sending `null`.
  */
 export function readRagModuleUpdateFields(
   body: Record<string, unknown>,
 ): Omit<UpdateRagModuleRequest, 'updatedBy'> {
+  // Free text, cleared by the edit form with an explicit `null` — which used to
+  // fail the whole PATCH. It lands as '' rather than null because the stored
+  // type is `string`: '' is what create already writes for an empty
+  // description, and it round-trips identically on both DB backends.
+  const description = clearable(body, 'description', asString);
+
   return {
     name: optional(body, 'name', asString),
-    description: optional(body, 'description', asString),
+    description: description === null ? '' : description,
     embeddingModelKey: optional(body, 'embeddingModelKey', asString),
     vectorProviderKey: optional(body, 'vectorProviderKey', asString),
     vectorIndexKey: optional(body, 'vectorIndexKey', asString),
@@ -232,31 +249,44 @@ export function sendInvalidRequest(reply: FastifyReply, error: unknown) {
  * bound the document to the module it names, so without this an ordinary
  * member could read, re-ingest or delete another project's ingested document
  * by its id alone. Returns null for an out-of-scope id so it is
- * indistinguishable from a missing one. Owners/admins keep tenant-wide reach
- * (resolveProjectContext already grants it), and documents stored without a
- * projectId — legacy rows predating project stamping — stay reachable.
+ * indistinguishable from a missing one, and documents stored without a
+ * projectId — legacy rows predating project stamping, plus everything the
+ * client API ingests — stay reachable.
+ *
+ * `allowTenantWide` is the reach resolveProjectContext already grants an
+ * owner/admin on the dashboard. An API token never gets it: its project is
+ * fixed by the token, not by whoever is holding it.
  */
-async function documentInProjectScope(
+export async function documentInProjectScope(
   tenantDbName: string,
   documentId: string,
   ragModuleKey: string,
   projectId: string,
-  user: Pick<IUser, 'role'>,
+  options?: { allowTenantWide?: boolean },
 ): Promise<IRagDocument | null> {
   const document = await getRagDocument(tenantDbName, documentId);
   if (!document) return null;
   if (document.ragModuleKey !== ragModuleKey) return null;
-  if (user.role === 'owner' || user.role === 'admin') return document;
+  if (options?.allowTenantWide) return document;
   if (!document.projectId) return document;
   return String(document.projectId) === String(projectId) ? document : null;
+}
+
+/** The two roles resolveProjectContext lets act across every project. */
+function hasTenantWideReach(user: Pick<IUser, 'role'>): boolean {
+  return user.role === 'owner' || user.role === 'admin';
 }
 
 /**
  * A document record carries the extracted source text so a re-index never has
  * to rebuild it from overlapping chunks. That is up to INLINE_SOURCE_MAX_CHARS
- * of text — never something to put on the wire for a detail view.
+ * of text — never something to put on the wire.
+ *
+ * The service strips it from the documents it builds, but applying it at the
+ * HTTP boundary too is what makes "no route answers with sourceText" checkable
+ * by reading the routes alone.
  */
-function withoutSourceText(document: IRagDocument): Omit<IRagDocument, 'sourceText'> {
+export function withoutSourceText(document: IRagDocument): Omit<IRagDocument, 'sourceText'> {
   const { sourceText: _sourceText, ...rest } = document;
   return rest;
 }
@@ -442,7 +472,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
           ragModuleKey: key,
         });
 
-        return reply.code(201).send({ document });
+        return reply.code(201).send({ document: withoutSourceText(document) });
       }
 
       if (typeof body.content !== 'string' || body.content === '') {
@@ -462,7 +492,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         ragModuleKey: key,
       });
 
-      return reply.code(201).send({ document });
+      return reply.code(201).send({ document: withoutSourceText(document) });
     } catch (error) {
       logger.error('Ingest RAG document error', { error });
       return sendProjectContextError(reply, error)
@@ -481,7 +511,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         documentId,
         key,
         projectId,
-        user,
+        { allowTenantWide: hasTenantWideReach(user) },
       );
 
       if (!document) {
@@ -507,7 +537,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         documentId,
         key,
         projectId,
-        user,
+        { allowTenantWide: hasTenantWideReach(user) },
       );
 
       if (!document) {
@@ -538,7 +568,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         documentId,
         key,
         projectId,
-        user,
+        { allowTenantWide: hasTenantWideReach(user) },
       );
 
       if (!existing) {
@@ -571,7 +601,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         updatedBy: session.userId,
       });
 
-      return reply.code(200).send({ document });
+      return reply.code(200).send({ document: withoutSourceText(document) });
     } catch (error) {
       logger.error('Reingest RAG document error', { error });
       return sendProjectContextError(reply, error)
@@ -663,13 +693,18 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
       // `logs` is a page (default 50, newest-first) for the History table;
       // the counters are true aggregates over the full matched set — the
       // Overview KPIs must not silently cap at the page size.
+      //
+      // Both are narrowed by project as well as by key: module keys are unique
+      // per project only, so a same-key module elsewhere in the tenant would
+      // otherwise fold its rows — end-user query text included — into these.
       const [logs, totals] = await Promise.all([
         listRagQueryLogs(session.tenantDbName, key, {
           from,
           limit: query.limit ? Number(query.limit) : 50,
+          projectId,
           to,
         }),
-        countRagQueryLogs(session.tenantDbName, key, { from, to }),
+        countRagQueryLogs(session.tenantDbName, key, { from, projectId, to }),
       ]);
 
       return reply.code(200).send({
@@ -711,9 +746,12 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         zeroOnly?: string;
       };
 
+      // Project-scoped for the same reason as /usage: this feed shows the
+      // verbatim query text, and the key alone does not identify one module.
       const logs = await listRagQueryLogs(session.tenantDbName, key, {
         from: query.from ? new Date(query.from) : undefined,
         limit: query.limit ? Number(query.limit) : 50,
+        projectId,
         skip: query.skip ? Number(query.skip) : undefined,
         to: query.to ? new Date(query.to) : undefined,
         zeroOnly: query.zeroOnly === 'true',
@@ -742,6 +780,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
       const query = (request.query ?? {}) as { from?: string; to?: string };
       const buckets = await aggregateRagQueryScoreDistribution(session.tenantDbName, key, {
         from: query.from ? new Date(query.from) : undefined,
+        projectId,
         to: query.to ? new Date(query.to) : undefined,
       });
 

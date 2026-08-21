@@ -255,7 +255,9 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
           vectorIndexKey: values.vectorIndexKey,
           chunkConfig: buildChunkConfig(values.chunk),
           hybrid: hybridSupported ? buildHybrid(values.retrieval) : { enabled: false },
-          isolateByModule: values.retrieval.isolateByModule,
+          // The tri-state only ever holds null on the edit screen, where an
+          // existing module can predate the flag. A new module always states it.
+          isolateByModule: values.retrieval.isolateByModule ?? undefined,
           rerankerKey: values.rerankerKey || clearedValue(MODE),
           rerankerOversample:
             values.rerankerKey && values.rerankerOversample !== ''

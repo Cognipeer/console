@@ -252,7 +252,14 @@ export interface RetrievalFormValues {
   hybridMode: HybridMode;
   hybridAlpha: number;
   hybridK: number | '';
-  isolateByModule: boolean;
+  /**
+   * `null` is a third state — "no explicit setting on this module" — and not a
+   * false. The service reads an unset flag as "decide per query by checking
+   * whether the index is shared", which is the only safe answer for an index an
+   * outside pipeline filled: isolating one of those returns nothing at all.
+   * Writing a boolean over it destroys that, so the edit screen keeps it.
+   */
+  isolateByModule: boolean | null;
 }
 
 export interface RetrievalSource {
@@ -276,7 +283,9 @@ export function retrievalFormValues(source?: RetrievalSource | null): RetrievalF
     hybridMode: source.hybrid?.mode ?? 'rrf',
     hybridAlpha: source.hybrid?.alpha ?? DEFAULT_RETRIEVAL_FORM_VALUES.hybridAlpha,
     hybridK: source.hybrid?.k ?? DEFAULT_RETRIEVAL_FORM_VALUES.hybridK,
-    isolateByModule: source.isolateByModule ?? DEFAULT_RETRIEVAL_FORM_VALUES.isolateByModule,
+    // Not DEFAULT_RETRIEVAL_FORM_VALUES.isolateByModule: an existing module
+    // without the flag has not opted into isolation, it predates it.
+    isolateByModule: source.isolateByModule ?? null,
   };
 }
 
@@ -300,6 +309,60 @@ export const HYBRID_CAPABILITY_KEY = 'vector.supportsHybrid';
 
 export function providerSupportsHybrid(capabilities?: Record<string, unknown> | null): boolean {
   return Boolean(capabilities?.[HYBRID_CAPABILITY_KEY]);
+}
+
+/** The retrieval half of a module update. Absent means "leave this alone". */
+export interface RetrievalUpdate {
+  hybrid?: { enabled: boolean; mode?: HybridMode; alpha?: number; k?: number };
+  isolateByModule?: boolean;
+}
+
+/**
+ * What an edit is allowed to say about retrieval.
+ *
+ * Both fields are omitted rather than defaulted, because `undefined` is the only
+ * value updateRagModule reads as "leave this alone":
+ *
+ *  - `hybrid` waits until the provider's capabilities are known. The provider
+ *    list is fetched asynchronously and every provider looks hybrid-incapable
+ *    until it resolves, so a save that beat the fetch used to overwrite a stored
+ *    hybrid configuration with `{ enabled: false }`.
+ *  - `isolateByModule` stays out while it is unset, so a rename cannot flip a
+ *    legacy module onto isolation — which would empty every query against an
+ *    index an outside pipeline populated.
+ */
+export function buildRetrievalUpdate(
+  values: RetrievalFormValues,
+  capabilities: { known: boolean; hybridSupported: boolean },
+): RetrievalUpdate {
+  const update: RetrievalUpdate = {};
+
+  if (capabilities.known) {
+    // A provider that is known not to support hybrid is shown to the user as
+    // "unavailable for this module", so persisting off matches the screen.
+    update.hybrid = capabilities.hybridSupported ? buildHybrid(values) : { enabled: false };
+  }
+  if (values.isolateByModule !== null) {
+    update.isolateByModule = values.isolateByModule;
+  }
+
+  return update;
+}
+
+export type RagReindexReason = 'chunk-config' | 'embedding-model';
+
+/**
+ * Why a saved edit has to rebuild the module's vectors, or null when it doesn't.
+ * Chunking wins when both changed — the run re-embeds every chunk either way,
+ * and the chunk boundaries are the more surprising of the two to have moved.
+ */
+export function reindexReasonFor(
+  chunkingChanged: boolean,
+  embeddingChanged: boolean,
+): RagReindexReason | null {
+  if (chunkingChanged) return 'chunk-config';
+  if (embeddingChanged) return 'embedding-model';
+  return null;
 }
 
 /* ── Clearing optional fields ────────────────────────────────────────── */

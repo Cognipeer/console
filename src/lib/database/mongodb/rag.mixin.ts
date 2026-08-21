@@ -285,16 +285,10 @@ export function RagMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: T
 
     async listRagQueryLogs(
       ragModuleKey: string,
-      options?: { limit?: number; skip?: number; from?: Date; to?: Date; zeroOnly?: boolean },
+      options?: { limit?: number; skip?: number; from?: Date; to?: Date; zeroOnly?: boolean; projectId?: string },
     ): Promise<IRagQueryLog[]> {
       const db = this.getTenantDb();
-      const query: Record<string, unknown> = { ragModuleKey };
-      if (options?.from || options?.to) {
-        const dateFilter: Record<string, Date> = {};
-        if (options.from) dateFilter.$gte = options.from;
-        if (options.to) dateFilter.$lte = options.to;
-        query.createdAt = dateFilter;
-      }
+      const query = this.buildRagQueryLogFilter(ragModuleKey, options);
       if (options?.zeroOnly) query.matchCount = 0;
       const cursor = db
         .collection<IRagQueryLog>(COLLECTIONS.ragQueryLogs)
@@ -308,7 +302,7 @@ export function RagMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: T
 
     async countRagQueryLogs(
       ragModuleKey: string,
-      options?: { from?: Date; to?: Date },
+      options?: { from?: Date; to?: Date; projectId?: string },
     ): Promise<{
       total: number;
       avgLatencyMs: number;
@@ -357,7 +351,7 @@ export function RagMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: T
 
     async aggregateRagQueryScoreDistribution(
       ragModuleKey: string,
-      options?: { from?: Date; to?: Date },
+      options?: { from?: Date; to?: Date; projectId?: string },
     ): Promise<Array<{ bucket: string; count: number }>> {
       const db = this.getTenantDb();
       const query = this.buildRagQueryLogFilter(ragModuleKey, options);
@@ -434,12 +428,30 @@ export function RagMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: T
         .countDocuments(query as any);
     }
 
-    /** Shared module + date-window match for every query-log aggregate. */
+    /** Shared module + project + date-window match for every query-log read. */
+    /**
+     * Module keys are unique only WITHIN a project, so a query-log read filtered by
+     * ragModuleKey alone picks up the rows of a same-key module in another project
+     * of the tenant — including the verbatim end-user query text.
+     *
+     * Rows written with no projectId (logs predating project stamping, and every
+     * query through /client/v1, which passes projectId undefined) cannot be
+     * attributed to either module. They stay visible to the module's owner: hiding
+     * a project's own history is the worse of the two failure modes, and the caller
+     * has already been verified to own a module with this key.
+     */
     private buildRagQueryLogFilter(
       ragModuleKey: string,
-      options?: { from?: Date; to?: Date },
+      options?: { from?: Date; to?: Date; projectId?: string },
     ): Record<string, unknown> {
       const query: Record<string, unknown> = { ragModuleKey };
+      if (options?.projectId) {
+        query.$or = [
+          { projectId: options.projectId },
+          { projectId: { $exists: false } },
+          { projectId: null },
+        ];
+      }
       if (options?.from || options?.to) {
         const dateFilter: Record<string, Date> = {};
         if (options.from) dateFilter.$gte = options.from;

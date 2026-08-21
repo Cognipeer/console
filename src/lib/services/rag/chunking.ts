@@ -305,7 +305,12 @@ function packAtoms(
 
   /** Trailing atoms worth at most `chunkOverlap`, so overlap never cuts a word. */
   const overlapTail = (): Atom[] => {
-    if (chunkOverlap <= 0) return [];
+    // Asserted positive rather than testing for `<= 0`: every comparison
+    // against a missing chunkOverlap is false, so the old guard let the tail
+    // loop run with no budget and carried the ENTIRE previous chunk forward,
+    // each chunk accumulating all of its predecessors. chunkText normalises the
+    // config, and this keeps the invariant true wherever the packer is called.
+    if (!(chunkOverlap > 0)) return [];
     const tail: Atom[] = [];
     let size = 0;
     for (let i = current.length - 1; i >= 0; i -= 1) {
@@ -388,8 +393,18 @@ async function chunkSemantic(
     throw new Error('The "semantic" chunk strategy needs an embedding model; none was available.');
   }
 
-  const sentences = splitIntoSentences(text).filter((s) => s.text.trim().length > 0);
-  if (sentences.length <= 1) {
+  const sentences = splitIntoSentences(text);
+  // A whitespace-only atom carries no signal to embed, but it must stay in the
+  // stream: `emit` derives charEnd from the atoms it was handed as a contiguous
+  // slice of the source, so dropping one makes every chunk after it quote fewer
+  // characters than its recorded span, and a parent window resolved from those
+  // offsets cuts off the chunk that matched. So the blanks are skipped for the
+  // embedding pass only, and the break decision is written back in place.
+  const embeddable = sentences
+    .map((atom, index) => ({ atom, index }))
+    .filter(({ atom }) => atom.text.trim().length > 0);
+
+  if (embeddable.length <= 1) {
     return packAtoms(sentences, meter, config.chunkSize, config.chunkOverlap);
   }
 
@@ -397,12 +412,16 @@ async function chunkSemantic(
     ? config.semanticThreshold
     : DEFAULT_SEMANTIC_THRESHOLD;
 
-  const vectors = await ctx.embed(sentences.map((s) => s.text.trim()));
-  const atoms: Atom[] = sentences.map((sentence, i) => {
-    if (i === 0 || !vectors[i] || !vectors[i - 1]) return sentence;
+  const vectors = await ctx.embed(embeddable.map(({ atom }) => atom.text.trim()));
+  const atoms: Atom[] = [...sentences];
+  for (let i = 1; i < embeddable.length; i += 1) {
+    if (!vectors[i] || !vectors[i - 1]) continue;
     const distance = 1 - cosine(vectors[i - 1], vectors[i]);
-    return distance > threshold ? { ...sentence, breakBefore: true } : sentence;
-  });
+    if (distance > threshold) {
+      const { atom, index } = embeddable[i];
+      atoms[index] = { ...atom, breakBefore: true };
+    }
+  }
 
   // chunkSize still applies: a long stretch with no topic shift is packed
   // normally rather than becoming one enormous chunk.
@@ -551,17 +570,29 @@ export async function chunkText(
 ): Promise<ChunkResult[]> {
   if (text.trim().length === 0) return [];
 
-  // Defensive: modules created before validation existed can carry an overlap
-  // at or above their chunk size. Clamp rather than refuse to ingest.
-  const safe: IRagChunkConfig = config.chunkOverlap >= config.chunkSize
-    ? { ...config, chunkOverlap: Math.max(0, Math.floor(config.chunkSize / 10)) }
-    : config;
+  // Defensive, and the single place a stored config is made usable.
+  //
+  // Two shapes reach here that validateChunkConfig would have rejected: an
+  // overlap at or above the chunk size (modules created before validation
+  // existed), and no overlap at all (legacy records, or any API caller that
+  // omits the field). The second is the dangerous one — `undefined` loses every
+  // numeric comparison, so neither the clamp below nor the packer's overlap
+  // budget fires and each chunk carries all of its predecessors — so it is
+  // normalised to the same default validation applies, zero.
+  const requested = Number.isFinite(config.chunkOverlap) ? config.chunkOverlap : 0;
+  const chunkOverlap = requested >= config.chunkSize
+    ? Math.max(0, Math.floor(config.chunkSize / 10))
+    : requested;
+
+  const safe: IRagChunkConfig = chunkOverlap === config.chunkOverlap
+    ? config
+    : { ...config, chunkOverlap };
   if (safe !== config) {
-    logger.warn('chunkOverlap was at or above chunkSize; clamped for this run', {
+    logger.warn('chunkOverlap was unusable; normalised for this run', {
       strategy: config.strategy,
       chunkSize: config.chunkSize,
       chunkOverlap: config.chunkOverlap,
-      clampedTo: safe.chunkOverlap,
+      normalisedTo: chunkOverlap,
     });
   }
 

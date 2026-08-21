@@ -27,16 +27,18 @@ import RetrievalFields from './RetrievalFields';
 import {
   CHUNK_STRATEGIES,
   buildChunkConfig,
-  buildHybrid,
+  buildRetrievalUpdate,
   chunkConfigRequiresReindex,
   chunkFieldErrors,
   chunkFormValues,
   clearedValue,
   hasChunkFieldErrors,
   providerSupportsHybrid,
+  reindexReasonFor,
   retrievalFormValues,
   type ChunkFormValues,
   type HybridMode,
+  type RagReindexReason,
   type RetrievalFormValues,
 } from './ragModuleForm';
 import type { IRagChunkConfig } from '@/lib/database';
@@ -107,6 +109,31 @@ interface FormValues {
   defaultFilter: string;
   filterableFields: string[];
   responseDetail: 'full' | 'text';
+}
+
+/**
+ * Starts the rebuild the pre-save alert promised. Returns null when a run is
+ * underway and the message to show when none is: setting `reindexRequired`
+ * server-side only records that the vectors are stale, it does not rebuild them.
+ *
+ * 409 is a success. It means a run is already rebuilding this module, so
+ * reporting a failure would tell the user nothing started when something did.
+ */
+async function startReindexRun(key: string, reason: RagReindexReason): Promise<string | null> {
+  try {
+    const res = await fetch(`/api/rag/modules/${encodeURIComponent(key)}/reindex`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    });
+    if (res.ok || res.status === 409) return null;
+    const err = await res.json().catch(() => ({}));
+    return typeof (err as { error?: unknown }).error === 'string'
+      ? (err as { error: string }).error
+      : `The re-index endpoint answered ${res.status}.`;
+  } catch (error) {
+    return error instanceof Error ? error.message : 'Unexpected error';
+  }
 }
 
 function formValuesFromModule(module: RagModuleData): FormValues {
@@ -253,6 +280,9 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
     [vectorProviders, form.values.vectorProviderKey],
   );
   const hybridSupported = providerSupportsHybrid(selectedVectorProvider?.driverCapabilities);
+  // False while the provider list is still in flight, and for a provider that
+  // is no longer in it — in both cases nothing is known about hybrid support.
+  const capabilitiesKnown = Boolean(selectedVectorProvider);
 
   // Both of these invalidate every stored vector, so the module is marked
   // reindexRequired and a re-index run is enqueued the moment this form saves.
@@ -296,8 +326,7 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
           vectorProviderKey: values.vectorProviderKey,
           vectorIndexKey: values.vectorIndexKey,
           chunkConfig: buildChunkConfig(values.chunk),
-          hybrid: hybridSupported ? buildHybrid(values.retrieval) : { enabled: false },
-          isolateByModule: values.retrieval.isolateByModule,
+          ...buildRetrievalUpdate(values.retrieval, { known: capabilitiesKnown, hybridSupported }),
           rerankerKey: values.rerankerKey || clearedValue(MODE),
           rerankerOversample:
             values.rerankerOversample === ''
@@ -320,13 +349,30 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
       }
 
       const data = await res.json();
-      notifications.show({
-        color: 'green',
-        title: 'Knowledge Engine Module Updated',
-        message: chunkingChanged || embeddingChanged
-          ? `${values.name} updated — re-indexing its documents in the background.`
-          : `${values.name} has been updated successfully.`,
-      });
+
+      // The PATCH only marks the module stale; the rebuild is a separate run,
+      // and the alert above has already promised it.
+      const reason = reindexReasonFor(chunkingChanged, embeddingChanged);
+      const reindexError = reason ? await startReindexRun(module.key, reason) : null;
+
+      if (reindexError) {
+        notifications.show({
+          color: 'orange',
+          title: 'Saved, but the re-index did not start',
+          message: `${values.name} is saved and its documents still answer from the old vectors. `
+            + `Start the rebuild with "Re-index now" on the module page. (${reindexError})`,
+          autoClose: false,
+        });
+      } else {
+        notifications.show({
+          color: 'green',
+          title: 'Knowledge Engine Module Updated',
+          message: reason
+            ? `${values.name} updated — re-indexing its documents in the background.`
+            : `${values.name} has been updated successfully.`,
+        });
+      }
+
       onUpdated(data.module);
       onClose();
     } catch (error) {
@@ -368,9 +414,22 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
       />
       <SummaryKV
         label="Hybrid"
-        value={hybridSupported && v.retrieval.hybridEnabled ? v.retrieval.hybridMode : 'off'}
+        value={
+          !capabilitiesKnown
+            ? 'unchanged'
+            : hybridSupported && v.retrieval.hybridEnabled
+              ? v.retrieval.hybridMode
+              : 'off'
+        }
       />
-      <SummaryKV label="Isolation" value={v.retrieval.isolateByModule ? 'on' : 'off'} />
+      <SummaryKV
+        label="Isolation"
+        value={
+          v.retrieval.isolateByModule === null
+            ? 'unset — decided per query'
+            : v.retrieval.isolateByModule ? 'on' : 'off'
+        }
+      />
       <SummaryKV label="Reranker" value={v.rerankerKey || 'none'} />
       <SummaryKV label="Default Top K" value={v.defaultTopK || '—'} mono />
       <SummaryKV label="Default min score" value={v.defaultMinScore.toFixed(2)} mono />

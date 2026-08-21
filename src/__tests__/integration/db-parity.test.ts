@@ -1760,6 +1760,52 @@ describeForEachProvider('RAG query log analytics', (getDb) => {
     await log({ ragModuleKey: 'km-other', query: 'other module', matchCount: 5, topScore: 0.5 });
   };
 
+  it('keeps a same-key module in another project out of every analytics read', async () => {
+    const db = getDb();
+    await seedLogs();
+    // Module keys are unique only within a project, so without a project scope
+    // these rows — including their verbatim query text — would be counted,
+    // charted and listed as if they belonged to proj-1.
+    await db.createRagQueryLog({
+      tenantId,
+      projectId: 'proj-2',
+      ragModuleKey: 'km-scores',
+      query: 'other project secret',
+      topK: 5,
+      matchCount: 0,
+      preFilterMatchCount: 0,
+      topScore: 0.11,
+      latencyMs: 70,
+    });
+    // A log with no project at all: written through /client/v1, or before
+    // project stamping. Unattributable either way, so the owner still sees it.
+    await db.createRagQueryLog({
+      tenantId,
+      ragModuleKey: 'km-scores',
+      query: 'token-authed query',
+      topK: 5,
+      matchCount: 0,
+      preFilterMatchCount: 0,
+      topScore: 0.22,
+      latencyMs: 80,
+    });
+
+    const scoped = await db.listRagQueryLogs('km-scores', { projectId: 'proj-1', limit: 50 });
+    const texts = scoped.map((l) => l.query);
+    expect(texts).not.toContain('other project secret');
+    expect(texts).toContain('token-authed query');
+    expect(texts).toContain('strong hit');
+
+    const counts = await db.countRagQueryLogs('km-scores', { projectId: 'proj-1' });
+    const unscoped = await db.countRagQueryLogs('km-scores');
+    expect(counts.total).toBe(unscoped.total - 1);
+
+    const buckets = await db.aggregateRagQueryScoreDistribution('km-scores', { projectId: 'proj-1' });
+    // 0.11 is the other project's only score; nothing else lands in '0.1'.
+    expect(buckets.find((b) => b.bucket === '0.1')?.count).toBe(0);
+    expect(buckets.find((b) => b.bucket === '0.2')?.count).toBe(1);
+  });
+
   it('lists only the queries that matched nothing when zeroOnly is set, newest first', async () => {
     const db = getDb();
     await seedLogs();

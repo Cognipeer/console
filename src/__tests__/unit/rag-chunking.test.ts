@@ -6,6 +6,7 @@ import {
   chunkConfigRequiresReindex,
   resolveParentWindow,
   DEFAULT_SEPARATORS,
+  type ChunkContext,
 } from '@/lib/services/rag/chunking';
 import type { IRagChunkConfig } from '@/lib/database';
 
@@ -47,9 +48,50 @@ describe('chunkText — invariants that hold for every strategy', () => {
     expect(chunks.length).toBeGreaterThan(1);
   });
 
-  it('records offsets that quote the source exactly', async () => {
-    const chunks = await chunkText(prose, base({ chunkSize: 60, chunkOverlap: 10 }));
-    expectOffsetsQuoteSource(chunks, prose);
+  /**
+   * A heading, then a whitespace-only line between two blank lines. The
+   * sentence splitter emits that gap as its own whitespace-only atom, and the
+   * semantic strategy used to filter those out of the atom stream — which broke
+   * the contiguity `emit` relies on and left every chunk spanning the gap
+   * quoting fewer characters than its recorded span.
+   */
+  const withBlankGap = ['# Ledger', '', '   ', '', prose].join('\n');
+
+  /** Same vector for every sentence, so no topic break masks the gap. */
+  const flatEmbed = async (texts: string[]) => texts.map(() => [1, 0]);
+
+  const strategyCases: Array<[string, Partial<IRagChunkConfig>, ChunkContext?]> = [
+    ['recursive_character', { strategy: 'recursive_character' }],
+    ['token', { strategy: 'token', encoding: 'cl100k_base' }],
+    ['markdown', { strategy: 'markdown' }],
+    ['sentence', { strategy: 'sentence' }],
+    ['semantic', { strategy: 'semantic' }, { embed: flatEmbed }],
+  ];
+
+  for (const [label, overrides, ctx] of strategyCases) {
+    it(`records offsets that quote the source exactly — ${label}`, async () => {
+      const config = base({ chunkSize: 120, chunkOverlap: 20, ...overrides });
+      for (const source of [prose, withBlankGap]) {
+        const chunks = await chunkText(source, config, ctx);
+        expect(chunks.length).toBeGreaterThan(0);
+        expectOffsetsQuoteSource(chunks, source);
+      }
+    });
+  }
+
+  it('carries only the configured overlap forward when chunkOverlap is missing', async () => {
+    // Legacy stored configs and any API caller that omits the field both land
+    // here. `undefined` loses every numeric comparison, so the overlap budget
+    // never bound anything and each chunk carried its whole predecessor
+    // forward — chunks grew without limit and blew past chunkSize.
+    const text = 'alpha bravo charlie delta echo foxtrot golf hotel india juliet. '.repeat(12);
+    const config = { strategy: 'recursive_character', chunkSize: 100 } as unknown as IRagChunkConfig;
+
+    const chunks = await chunkText(text, config);
+
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) expect(chunk.content.length).toBeLessThanOrEqual(100);
+    expectOffsetsQuoteSource(chunks, text);
   });
 
   it('treats chunkSize as a hard cap even with no whitespace to split on', async () => {

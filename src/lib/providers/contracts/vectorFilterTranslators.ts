@@ -9,6 +9,7 @@
  * downgraded or dropped silently.
  */
 
+import type { DocumentType } from '@smithy/types';
 import {
   VectorFilterError,
   type VectorFilterComparison,
@@ -396,4 +397,44 @@ export function toAwsVectorFilter(node: VectorFilterNode): Record<string, unknow
       }
     }
   }
+}
+
+/** Recursively retype a JSON value as the AWS SDK's `DocumentType`. */
+function toAwsDocument(value: unknown): DocumentType | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return value;
+  }
+
+  if (value instanceof Date) return value.toISOString();
+
+  if (Array.isArray(value)) {
+    return value.map((entry) => toAwsDocument(entry) ?? null);
+  }
+
+  if (typeof value === 'object') {
+    const result: Record<string, DocumentType> = {};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      const converted = toAwsDocument(entry);
+      if (converted !== undefined) result[key] = converted;
+    }
+    return result;
+  }
+
+  return String(value);
+}
+
+/**
+ * The filter document a `QueryVectorsCommand` accepts.
+ *
+ * The conversion has to recurse: rewriting only the top-level entries turns the
+ * `$and` array of a compound filter into `{ "$and": { "$eq": [...] } }`, which
+ * S3 Vectors rejects with a ValidationException.
+ */
+export function toAwsFilterDocument(node: VectorFilterNode): DocumentType | undefined {
+  const filter = toAwsVectorFilter(node);
+  if (Object.keys(filter).length === 0) return undefined;
+  return toAwsDocument(filter);
 }

@@ -22,7 +22,7 @@ import type {
   VectorListInput,
   VectorListResult,
 } from '../domains/vector';
-import { toAwsVectorFilter } from './vectorFilterTranslators';
+import { toAwsFilterDocument } from './vectorFilterTranslators';
 
 /**
  * System Default Vector Provider — SaaS mode
@@ -61,27 +61,6 @@ function buildBucketInput(settings: SystemDefaultVectorSettings) {
   if (arn) return { vectorBucketArn: arn };
   if (name) return { vectorBucketName: name };
   throw new Error('System Default provider requires either a vectorBucketName or vectorBucketArn setting.');
-}
-
-/** Wrap an already-translated filter document in the AWS DocumentType shape. */
-function buildS3Filter(filter: Record<string, unknown> | undefined): DocumentType | undefined {
-  if (!filter || Object.keys(filter).length === 0) return undefined;
-
-  const conditions = Object.entries(filter)
-    .filter(([, v]) => v !== undefined && v !== null)
-    .map(([key, value]) => {
-      if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
-        const ops = Object.keys(value as object);
-        if (ops.some((k) => k.startsWith('$'))) {
-          return { [key]: value };
-        }
-      }
-      return { [key]: { $eq: value } };
-    });
-
-  if (conditions.length === 0) return undefined;
-  const result = conditions.length === 1 ? conditions[0] : { $and: conditions };
-  return result as DocumentType;
 }
 
 /**
@@ -359,7 +338,7 @@ export const SystemDefaultVectorProviderContract: ProviderContract<
             indexName: handle.externalId,
             queryVector: { float32: query.vector.map((v) => Number(v)) },
             topK: query.topK,
-            filter: query.filter ? buildS3Filter(toAwsVectorFilter(query.filter)) : undefined,
+            filter: query.filter ? toAwsFilterDocument(query.filter) : undefined,
             // Both default to false in the SDK — without them `distance` and
             // `metadata` come back undefined, so every score would be 0.
             returnDistance: true,
@@ -373,16 +352,10 @@ export const SystemDefaultVectorProviderContract: ProviderContract<
           matches: vectors.map((v) => ({
             id: v.key ?? '',
             score: toSimilarityScore(v.distance, metric),
-            metadata: v.metadata
-              ? Object.fromEntries(
-                  Object.entries(v.metadata as Record<string, { stringValue?: string; booleanValue?: boolean; doubleValue?: number }>).map(
-                    ([k, val]) => [
-                      k,
-                      val.stringValue ?? val.booleanValue ?? val.doubleValue ?? null,
-                    ],
-                  ),
-                )
-              : undefined,
+            // S3 Vectors stores and returns metadata as a plain JSON document,
+            // exactly as `upsertVectors` wrote it — unwrapping it as DynamoDB
+            // style `{ stringValue }` attributes read every key back as null.
+            metadata: (v.metadata as Record<string, unknown> | undefined) ?? undefined,
           })),
         };
       },

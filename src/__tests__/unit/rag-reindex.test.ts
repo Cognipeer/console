@@ -2,11 +2,13 @@
  * Unit tests — Knowledge Engine re-index job.
  * Covers the queue contract (attempts + dedupKey), resuming from a persisted
  * cursor, cross-node cancellation, a failing document not aborting the run,
- * and the module counters being recomputed rather than incremented.
+ * the module counters being recomputed rather than incremented, the
+ * cross-process claim that keeps several replicas off the same corpus, and
+ * bootstrap's refusal to serve on an invalid production config.
  * DB, queue and the re-ingest pipeline are mocked.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { IRagReindexRun } from '@/lib/database/provider/types.domain';
 
 const reingestDocument = vi.fn();
@@ -17,6 +19,40 @@ vi.mock('@/lib/services/rag/ragService', () => ({
 const publish = vi.fn().mockResolvedValue('job-1');
 vi.mock('@/lib/core/queue', () => ({
   getQueue: vi.fn(async () => ({ publish })),
+}));
+
+vi.mock('@/lib/core/cluster', () => ({
+  getThisNodeName: () => 'node-a',
+}));
+
+/**
+ * Bootstrap's two inputs, per test. Hoisted so the `vi.mock` factories below —
+ * which vitest lifts above the imports — can close over them.
+ */
+const boot = vi.hoisted(() => ({
+  config: {
+    nodeEnv: 'production',
+    cache: { provider: 'memory' },
+    cors: { enabled: false },
+    logging: { level: 'info' },
+    rateLimit: { provider: 'memory' },
+  },
+  configErrors: [] as Array<{ key: string; message: string }>,
+  logged: [] as string[],
+}));
+
+vi.mock('@/lib/core/config', () => ({
+  getConfig: () => boot.config,
+  validateConfig: () => boot.configErrors,
+}));
+
+vi.mock('@/lib/core/logger', () => ({
+  createLogger: () => ({
+    debug: () => {},
+    info: () => {},
+    warn: () => {},
+    error: (message: string) => { boot.logged.push(message); },
+  }),
 }));
 
 vi.mock('@/lib/database', () => ({
@@ -57,6 +93,37 @@ let ragModule: TestModule;
 let tenants: Array<{ slug: string; dbName: string }>;
 let pendingRuns: IRagReindexRun[];
 
+/**
+ * The shared claim the three replicas fight over, modelled the way both
+ * mixins must implement it: one atomic compare-and-set on the run record.
+ */
+interface ClaimState {
+  owner?: string;
+  heartbeatAt?: number;
+}
+let claim: ClaimState;
+const CLAIMABLE: IRagReindexRun['status'][] = ['pending', 'queued', 'running'];
+
+const claimRagReindexRun = vi.fn(async (_key: string, ownerId: string, staleBefore: Date) => {
+  if (!CLAIMABLE.includes(run.status)) return null;
+  const heldByAnother = claim.owner !== undefined
+    && claim.owner !== ownerId
+    && claim.heartbeatAt !== undefined
+    && claim.heartbeatAt >= staleBefore.getTime();
+  if (heldByAnother) return null;
+  claim = { owner: ownerId, heartbeatAt: Date.now() };
+  run.status = 'running';
+  return run;
+});
+const touchRagReindexRunClaim = vi.fn(async (_key: string, ownerId: string) => {
+  if (claim.owner !== ownerId) return false;
+  claim.heartbeatAt = Date.now();
+  return true;
+});
+const releaseRagReindexRunClaim = vi.fn(async (_key: string, ownerId: string) => {
+  if (claim.owner === ownerId) claim = {};
+});
+
 const updateRagReindexRun = vi.fn(async (_key: string, data: Partial<IRagReindexRun>) => {
   Object.assign(run, data);
   return run;
@@ -74,7 +141,20 @@ const db = {
   updateRagModule,
   listRagDocuments: vi.fn(async () => documents),
   listTenants: vi.fn(async () => tenants),
+  claimRagReindexRun,
+  touchRagReindexRunClaim,
+  releaseRagReindexRunClaim,
 };
+
+/**
+ * A second worker process: a fresh module instance has its own in-process
+ * guards and its own worker id, but talks to the same (mocked) database — the
+ * only state three replicas share.
+ */
+async function loadWorker(): Promise<typeof import('@/lib/services/rag/ragReindexJob')> {
+  vi.resetModules();
+  return import('@/lib/services/rag/ragReindexJob');
+}
 
 function makeRun(overrides: Partial<IRagReindexRun> = {}): IRagReindexRun {
   return {
@@ -126,6 +206,7 @@ beforeEach(() => {
   };
   tenants = [{ slug: 'acme', dbName: 't-db' }];
   pendingRuns = [];
+  claim = {};
 });
 
 describe('enqueueRagReindex', () => {
@@ -277,6 +358,105 @@ describe('runRagReindexJob', () => {
   });
 });
 
+describe('run claim', () => {
+  it('lets exactly one of two racing workers execute the run', async () => {
+    // Two processes, each with its own in-process guards and worker id, both
+    // reached by the boot resume sweep — production's three replicas.
+    const workerA = await loadWorker();
+    const workerB = await loadWorker();
+
+    let inFlight = 0;
+    let maxInFlight = 0;
+    reingestDocument.mockImplementation(async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await Promise.resolve();
+      inFlight -= 1;
+      return { status: 'indexed' };
+    });
+
+    await Promise.all([
+      workerA.runRagReindexJob(payload),
+      workerB.runRagReindexJob(payload),
+    ]);
+
+    expect(claimRagReindexRun).toHaveBeenCalledTimes(2);
+    expect(reingestDocument).toHaveBeenCalledTimes(3);
+    expect(maxInFlight).toBe(1);
+    expect(run).toMatchObject({ status: 'completed', processedDocuments: 3 });
+  });
+
+  it('refuses to touch a run another worker is actively holding', async () => {
+    run = makeRun({ status: 'running' });
+    claim = { owner: 'node-b#live', heartbeatAt: Date.now() };
+
+    await runRagReindexJob(payload);
+
+    expect(reingestDocument).not.toHaveBeenCalled();
+    expect(updateRagReindexRun).not.toHaveBeenCalled();
+    expect(claim.owner).toBe('node-b#live');
+  });
+
+  it('reclaims a run whose owner stopped heartbeating', async () => {
+    run = makeRun({ status: 'running', processedDocuments: 2, progress: { lastDocumentId: 'doc-2' } });
+    claim = { owner: 'node-b#gone', heartbeatAt: Date.now() - 10 * 60_000 };
+
+    await runRagReindexJob(payload);
+
+    // Resumes from the dead worker's cursor rather than starting over.
+    expect(reingestDocument).toHaveBeenCalledTimes(1);
+    expect(run).toMatchObject({ status: 'completed', processedDocuments: 3 });
+    expect(claim.owner).toBeUndefined();
+  });
+
+  it('stops without finalizing when the claim is taken away mid-run', async () => {
+    vi.useFakeTimers();
+    try {
+      reingestDocument.mockImplementationOnce(async () => {
+        // A worker that considered this one dead takes the run over; the
+        // heartbeat is how this one finds out.
+        claim = { owner: 'node-b#new', heartbeatAt: Date.now() };
+        await vi.advanceTimersByTimeAsync(31_000);
+        return { status: 'indexed' };
+      });
+
+      await runRagReindexJob(payload);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(reingestDocument).toHaveBeenCalledTimes(1);
+    // Status, counters and the module belong to the new owner now.
+    expect(run.status).toBe('running');
+    expect(updateRagModule).not.toHaveBeenCalled();
+    expect(claim.owner).toBe('node-b#new');
+  });
+
+  it('releases the claim when the run fails, so a retry need not wait it out', async () => {
+    ragModule.status = 'disabled';
+
+    await runRagReindexJob(payload);
+
+    expect(run.status).toBe('failed');
+    expect(claim.owner).toBeUndefined();
+  });
+
+  it('refuses to run at all when the provider has no claim primitive', async () => {
+    const provider = db as unknown as Record<string, unknown>;
+    const saved = provider.claimRagReindexRun;
+    delete provider.claimRagReindexRun;
+
+    try {
+      await runRagReindexJob(payload);
+    } finally {
+      provider.claimRagReindexRun = saved;
+    }
+
+    expect(reingestDocument).not.toHaveBeenCalled();
+    expect(updateRagReindexRun).not.toHaveBeenCalled();
+  });
+});
+
 describe('resumeInterruptedRagReindexRuns', () => {
   it('re-enqueues every unfinished run of every tenant', async () => {
     pendingRuns = [makeRun({ key: 'kb-reindex-1', status: 'running' })];
@@ -290,5 +470,41 @@ describe('resumeInterruptedRagReindexRuns', () => {
       expect.objectContaining({ tenantDbName: 't-db', runKey: 'kb-reindex-1' }),
       expect.objectContaining({ dedupKey: 't-db:kb-reindex-1' }),
     );
+  });
+});
+
+/**
+ * The boot resume sweep above only runs on a process that finished bootstrap,
+ * which is why a bootstrap that fails has to take the process with it.
+ */
+describe('bootstrapApplication', () => {
+  afterEach(() => {
+    boot.configErrors = [];
+    boot.logged = [];
+    vi.useRealTimers();
+  });
+
+  it('kills the process when the production config is invalid', async () => {
+    boot.config.nodeEnv = 'production';
+    boot.configErrors = [{ key: 'AUTH_SECRET', message: 'must be set' }];
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    vi.useFakeTimers();
+
+    try {
+      vi.resetModules();
+      const { bootstrapApplication, isApplicationReady } = await import('@/server/bootstrap');
+
+      // The only unawaited caller (app.ts) swallows this rejection, so the
+      // rejection alone would leave a live process that answers 503 forever
+      // while the liveness probe keeps passing.
+      await expect(bootstrapApplication()).rejects.toThrow(/AUTH_SECRET/);
+      expect(isApplicationReady()).toBe(false);
+      expect(boot.logged.some((line) => line.includes('FATAL'))).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(exit).toHaveBeenCalledWith(1);
+    } finally {
+      exit.mockRestore();
+    }
   });
 });

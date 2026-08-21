@@ -333,17 +333,32 @@ async function removeVectors(
 }
 
 /**
- * The similarity of a match on the 0..1 cosine scale, whatever ranking has
- * since been layered on top of it.
+ * The one number a match is judged on: `minScore`, the query log's
+ * topScore/avgScore and the histogram the minScore slider is set against all
+ * read this and nothing else.
  *
- * `score` is whatever ranked the match last: a cosine similarity for a plain
- * dense query, a reranker's relevance for a reranked one, rank-derived
- * confidence for hybrid RRF. Only the first is comparable to a module's
- * configured minScore, so the retrieval-time similarity is preferred whenever
- * the layer that replaced it preserved one.
+ * THE RULE: the threshold means what the operator sees. `score` is whatever the
+ * module's own pipeline finally produced — a cosine similarity for a plain
+ * dense query, the reranker's relevance once a reranker has run, the fused 0..1
+ * score under hybrid — and it is both what the caller is handed back and what
+ * the tuning histogram is built from, so it is the only scale a configured
+ * threshold can have been calibrated against.
+ *
+ * `denseScore` and `vectorScore` are diagnostics and must never become the
+ * threshold. After a successful rerank `vectorScore` is ALWAYS the pre-rerank
+ * similarity, so thresholding on it applies the operator's number to a
+ * distribution they never saw; and under hybrid only the matches the dense
+ * channel found carry a `denseScore` at all, so it would put one threshold
+ * against two scales inside a single result list.
+ *
+ * Hybrid stays coherent because the vector layer maps every fused score back
+ * onto 0..1 before it leaves the driver (see providers/domains/vectorHybrid),
+ * so every match in a hybrid set is on one scale. Under 'rrf' that scale
+ * expresses rank confidence rather than similarity — 'weighted' is the mode to
+ * pick when an absolute threshold has to keep meaning cosine.
  */
-function similarityOf(match: { score?: number; denseScore?: number; vectorScore?: number }): number {
-  return match.denseScore ?? match.vectorScore ?? match.score ?? 0;
+function rankedScoreOf(match: { score?: number }): number {
+  return match.score ?? 0;
 }
 
 /* ── Metadata filters ────────────────────────────────────────────────── */
@@ -556,12 +571,35 @@ export async function updateRagModule(
   return db.updateRagModule(moduleId, updates as Partial<IRagModule>);
 }
 
+/** Documents whose rows are torn down at once, so the rare path cannot flood the DB. */
+const CASCADE_DELETE_BATCH_SIZE = 25;
+
+/** Two documents belong to the same project only if both name it the same way. */
+function sameProject(a: string | undefined, b: string | undefined): boolean {
+  return (a ?? '') === (b ?? '');
+}
+
 /**
  * Delete a module and everything it owns.
  *
  * This used to delete one row, orphaning every document, chunk and vector: the
  * tenant kept paying for the storage, and the next module pointed at the same
  * index answered out of the dead one's vectors.
+ *
+ * ── Which rows are "its own" ──────────────────────────────────────────────
+ * `deleteRagChunksByModuleKey` / `deleteRagDocumentsByModuleKey` match on
+ * ragModuleKey alone, and a module key is unique only WITHIN a project. Firing
+ * them for a module named "docs" therefore also wipes project B's "docs" —
+ * silent, unrecoverable, cross-project data loss. So the bulk teardown is taken
+ * only when this module is the tenant's sole owner of its key; otherwise the
+ * rows are deleted one document at a time, and a document that cannot be
+ * attributed to either module is left alone. An orphaned row is recoverable,
+ * another project's deleted corpus is not.
+ *
+ * Documents are enumerated with NO project filter on purpose: everything
+ * ingested through /client/v1 carries no projectId at all, even when its module
+ * has one, and a project-scoped enumeration would delete those rows in bulk
+ * while leaving their vectors and their bucket objects behind forever.
  *
  * The external store and the bucket are cleaned up best effort — a provider
  * outage must not make a module undeletable — but the row deletions are
@@ -580,7 +618,23 @@ export async function deleteRagModule(
   const ragModule = await db.findRagModuleById(moduleId);
   if (!ragModule) return false;
 
-  const documents = await db.listRagDocuments(ragModule.key, { projectId: ragModule.projectId });
+  const siblings = (await db.listRagModules())
+    .filter((m) => m.key === ragModule.key && String(m._id) !== String(ragModule._id));
+  const keyIsUnambiguous = siblings.length === 0;
+
+  const candidates = await db.listRagDocuments(ragModule.key);
+  const documents = keyIsUnambiguous
+    ? candidates
+    : candidates.filter((doc) => sameProject(doc.projectId, ragModule.projectId));
+
+  if (!keyIsUnambiguous) {
+    logger.warn('Another project owns a module with this key; tearing down only this one', {
+      ragModuleKey: ragModule.key,
+      siblingCount: siblings.length,
+      documentCount: documents.length,
+      unattributableCount: candidates.length - documents.length,
+    });
+  }
 
   const vectorIds = documents.flatMap((doc) => documentVectorIds(
     ragModule.key,
@@ -595,8 +649,19 @@ export async function deleteRagModule(
     tenantDbName, tenantId, projectId, doc, CASCADE_ACTOR,
   )));
 
-  await db.deleteRagChunksByModuleKey(ragModule.key);
-  await db.deleteRagDocumentsByModuleKey(ragModule.key);
+  if (keyIsUnambiguous) {
+    // Also sweeps chunk rows whose document row is already gone, which the
+    // per-document path below cannot reach.
+    await db.deleteRagChunksByModuleKey(ragModule.key);
+    await db.deleteRagDocumentsByModuleKey(ragModule.key);
+  } else {
+    for (let i = 0; i < documents.length; i += CASCADE_DELETE_BATCH_SIZE) {
+      await Promise.all(documents.slice(i, i + CASCADE_DELETE_BATCH_SIZE).map(async (doc) => {
+        await db.deleteRagChunksByDocumentId(String(doc._id));
+        await db.deleteRagDocument(String(doc._id));
+      }));
+    }
+  }
 
   return db.deleteRagModule(moduleId);
 }
@@ -653,7 +718,15 @@ export async function listRagDocuments(
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
   const documents = await db.listRagDocuments(ragModuleKey, filters);
-  return documents.map(withoutInlineSource);
+  // Trimmed in place rather than mapped into a second array. Each row carries
+  // up to INLINE_SOURCE_MAX_CHARS of sourceText and the DB contract has no
+  // projection, so a module's whole corpus arrives in memory whichever way this
+  // is written; replacing each row as we go at least keeps ONE copy of it
+  // reachable instead of the trimmed set and the untrimmed set at once.
+  for (let i = 0; i < documents.length; i += 1) {
+    documents[i] = withoutInlineSource(documents[i]);
+  }
+  return documents;
 }
 
 export async function getRagDocument(
@@ -1088,17 +1161,20 @@ export async function queryRag(
   // and "the threshold discarded everything" look identical in matchCount alone
   // and want opposite fixes.
   const preFilterMatchCount = matches.length;
+  // The best score BEFORE the threshold ran. Taken here rather than from the
+  // survivors because a query the threshold emptied would otherwise be logged
+  // with topScore 0 — and the zero-result panel and the score histogram exist
+  // precisely to explain those queries and to re-tune the threshold that
+  // emptied them, so a zero is the one value that tells them nothing.
+  const bestRetrievedScore = matches.length > 0
+    ? Math.max(...matches.map(rankedScoreOf))
+    : 0;
 
-  // 5c. Apply the minimum score threshold, if configured.
-  //
-  // Thresholding is done on the SIMILARITY scale, not on whatever the ranker
-  // last wrote into `score`. Under hybrid 'rrf' the fused score is rank-derived
-  // confidence on a different scale entirely, so applying a module's calibrated
-  // 0.5 to it silently changes what the operator asked for. `denseScore` (and
-  // the reranker's `vectorScore`) carry the real cosine similarity, so prefer
-  // those and fall back to `score` for plain dense queries.
+  // 5c. Apply the minimum score threshold, if configured. See rankedScoreOf for
+  //     why the threshold is compared against the pipeline's final score and
+  //     never against a preserved retrieval-time similarity.
   if (typeof minScore === 'number' && minScore > 0) {
-    matches = matches.filter((m) => similarityOf(m) >= minScore);
+    matches = matches.filter((m) => rankedScoreOf(m) >= minScore);
   }
 
   // 5d. Apply final topK (in case reranker skipped or returned more).
@@ -1118,7 +1194,7 @@ export async function queryRag(
     chunkByVectorId,
   });
 
-  const scores = matches.map((m) => similarityOf(m));
+  const scores = matches.map((m) => rankedScoreOf(m));
   const latencyMs = Date.now() - startTime;
 
   // 6. Log the query.
@@ -1159,9 +1235,12 @@ export async function queryRag(
       topK,
       matchCount: matches.length,
       preFilterMatchCount,
-      // Same scale as the threshold above, so the histogram the min-score
-      // slider is set against cannot mix rank confidence with similarity.
-      topScore: scores.length > 0 ? Math.max(...scores) : 0,
+      // topScore describes RETRIEVAL — the best thing the store had, threshold
+      // or no threshold — because that is what the histogram tunes the
+      // threshold against. avgScore describes the ANSWER: how good the passages
+      // that actually reached the caller were. Both on the scale rankedScoreOf
+      // defines, so neither can mix rank confidence with similarity.
+      topScore: bestRetrievedScore,
       avgScore: scores.length > 0 ? scores.reduce((sum, s) => sum + s, 0) / scores.length : 0,
       ...(typeof minScore === 'number' ? { minScoreApplied: minScore } : {}),
       hybrid,
@@ -1306,7 +1385,8 @@ async function resolveReingestSource(
   if (existingChunks.length === 0) {
     throw new Error('No content provided and no existing chunks found for re-ingest');
   }
-  logger.warn('Rebuilding a document from its own chunks — the result repeats every overlap', {
+  logger.warn('Rebuilding a document from its own chunks — the result repeats every overlap '
+    + 'and is deliberately not stored as the document source', {
     documentId: request.documentId,
     fileName,
     chunkCount: existingChunks.length,
@@ -1348,13 +1428,30 @@ export async function reingestDocument(
   const source = await resolveReingestSource(db, tenantDbName, tenantId, projectId, doc, request);
   const textContent = source.text;
 
+  // The re-index job calls this with no metadata at all. Writing
+  // `request.metadata` straight through therefore stripped every user- and
+  // crawler-supplied key from the rebuilt vectors and chunk rows — and those
+  // keys are exactly what defaultFilter/filterableFields filter on, so every
+  // filtered query went empty after a re-index. The document's own metadata is
+  // the floor; an explicit request only adds to and overrides it.
+  const metadata = request.metadata
+    ? { ...doc.metadata, ...request.metadata }
+    : doc.metadata;
+
+  // A chunk join is a lossy reconstruction — it repeats every overlap region —
+  // so it may rebuild an index but must never be promoted to the document's
+  // stored source: that would make the corruption canonical and authoritative
+  // for every future re-index. The document keeps no source instead, and the
+  // next run rebuilds from chunks again rather than from a corrupted "original".
+  const sourceIsTrustworthy = source.origin !== 'chunk-join';
+
   // Refresh the stored source so the NEXT re-index reads this run's input
   // rather than the one before it. Unchanged text is left alone — a re-index
   // triggered by a chunkConfig change must not rewrite the bucket.
   const sourceHash = hashSourceText(textContent);
   const sourceIsStored = Boolean(doc.sourceText || doc.sourceTextKey);
   let storedSource: Awaited<ReturnType<typeof storeDocumentSource>> | undefined;
-  if (doc.sourceHash !== sourceHash || !sourceIsStored) {
+  if (sourceIsTrustworthy && (doc.sourceHash !== sourceHash || !sourceIsStored)) {
     storedSource = await storeDocumentSource({
       tenantDbName,
       tenantId,
@@ -1406,7 +1503,7 @@ export async function reingestDocument(
       documentId: request.documentId,
       fileName: request.fileName ?? doc.fileName,
       text: textContent,
-      metadata: request.metadata,
+      metadata,
     });
 
     const now = new Date();
@@ -1434,6 +1531,10 @@ export async function reingestDocument(
       // Persisted so the next re-index reproduces these chunks rather than
       // silently reverting to the module's config.
       ...(request.chunkConfig ? { chunkConfig: request.chunkConfig } : {}),
+      // Only when the caller supplied keys: the row and the vectors have to
+      // agree on what this document is filterable by, and an untouched row
+      // already does.
+      ...(request.metadata ? { metadata } : {}),
       ...sourceFields,
     });
 
@@ -1455,6 +1556,7 @@ export async function reingestDocument(
       chunkCount,
       lastIndexedAt: now,
       fileName: request.fileName ?? doc.fileName,
+      ...(request.metadata ? { metadata } : {}),
     });
   } catch (error) {
     const msg = error instanceof Error ? error.message : 'Re-ingest failed';
@@ -1481,7 +1583,7 @@ export async function listRagQueryLogs(
 export async function countRagQueryLogs(
   tenantDbName: string,
   ragModuleKey: string,
-  options?: { from?: Date; to?: Date },
+  options?: { from?: Date; to?: Date; projectId?: string },
 ): Promise<Awaited<ReturnType<DatabaseProvider['countRagQueryLogs']>>> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
@@ -1495,7 +1597,7 @@ export async function countRagQueryLogs(
 export async function aggregateRagQueryScoreDistribution(
   tenantDbName: string,
   ragModuleKey: string,
-  options?: { from?: Date; to?: Date },
+  options?: { from?: Date; to?: Date; projectId?: string },
 ): Promise<Array<{ bucket: string; count: number }>> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);

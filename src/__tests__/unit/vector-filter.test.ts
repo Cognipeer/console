@@ -15,6 +15,7 @@ import {
   assertFilterSupported,
   collectFilterFields,
   collectFilterOperators,
+  isSystemGuardFilter,
   matchesFilter,
   parseVectorFilter,
   type VectorFilterNode,
@@ -180,5 +181,25 @@ describe('matchesFilter', () => {
 
   it('refuses to evaluate $raw in memory', () => {
     expect(() => matchesFilter(doc, parse({ $raw: { a: 1 } }))).toThrow(VectorFilterError);
+  });
+});
+
+describe('isSystemGuardFilter', () => {
+  it('recognises the isolation guard the service adds by itself', () => {
+    expect(isSystemGuardFilter(parse({ _ragModule: 'my-rag' }))).toBe(true);
+    expect(isSystemGuardFilter(parse({ _ragModule: { $in: ['a', 'b'] } }))).toBe(true);
+  });
+
+  it('does not recognise a filter the caller asked for', () => {
+    expect(isSystemGuardFilter(parse({ source: 'crawler' }))).toBe(false);
+    // One caller field is enough: the whole filter has to be pushed down.
+    expect(isSystemGuardFilter(parse({ $and: [{ _ragModule: 'my-rag' }, { source: 'crawler' }] })))
+      .toBe(false);
+    expect(isSystemGuardFilter(parse({ $or: [{ _ragModule: 'my-rag' }, { source: 'crawler' }] })))
+      .toBe(false);
+  });
+
+  it('never treats an opaque $raw filter as a guard', () => {
+    expect(isSystemGuardFilter(parse({ $raw: { _ragModule: 'my-rag' } }))).toBe(false);
   });
 });

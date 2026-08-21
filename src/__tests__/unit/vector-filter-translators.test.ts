@@ -13,6 +13,7 @@ import {
   type VectorFilterNode,
 } from '@/lib/providers/domains/vectorFilter';
 import {
+  toAwsFilterDocument,
   toAwsVectorFilter,
   toAzureMetadataKeyValues,
   toAzureODataFilter,
@@ -186,5 +187,38 @@ describe('toAwsVectorFilter', () => {
 
   it('rejects $not, which S3 Vectors does not support', () => {
     expect(() => toAwsVectorFilter(parse({ $not: { a: 1 } }))).toThrow(VectorFilterError);
+  });
+});
+
+describe('toAwsFilterDocument', () => {
+  it('keeps the $and array intact instead of rewriting it per key', () => {
+    // The per-key rewrite this replaced produced { $and: { $eq: [...] } },
+    // which S3 Vectors rejects with a ValidationException.
+    expect(toAwsFilterDocument(parse({ source: 'crawler', depth: { $lte: 2 } }))).toEqual({
+      $and: [{ source: { $eq: 'crawler' } }, { depth: { $lte: 2 } }],
+    });
+  });
+
+  it('keeps the array operand of $in intact', () => {
+    expect(toAwsFilterDocument(parse({ lang: { $in: ['tr', 'en'] } }))).toEqual({
+      lang: { $in: ['tr', 'en'] },
+    });
+  });
+
+  it('passes a single condition through unwrapped', () => {
+    expect(toAwsFilterDocument(parse({ _ragModule: 'my-rag' }))).toEqual({
+      _ragModule: { $eq: 'my-rag' },
+    });
+  });
+
+  it('nests $or inside $and without flattening either', () => {
+    expect(
+      toAwsFilterDocument(parse({ _ragModule: 'my-rag', $or: [{ a: 1 }, { b: 2 }] })),
+    ).toEqual({
+      $and: [
+        { _ragModule: { $eq: 'my-rag' } },
+        { $or: [{ a: { $eq: 1 } }, { b: { $eq: 2 } }] },
+      ],
+    });
   });
 });
