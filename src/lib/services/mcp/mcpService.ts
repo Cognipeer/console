@@ -55,7 +55,6 @@ import { requireInternalMcpProvider } from './internal/registry';
 import {
   allocateExposedNames,
   assertMemberUsable,
-  assertPublicExposureAllowed,
   defaultMemberPrefix,
   getCompositeConfig,
   getCompositeMemberSummaries,
@@ -336,6 +335,48 @@ function generateEndpointSlug(): string {
   return randomUUID().replace(/-/g, '').substring(0, 16);
 }
 
+// The public-MCP route (public-mcp.ts) rejects any slug under 8 chars
+// outright (same floor `a2aExposure.ts` uses for agent slugs) — keep this in
+// sync with that so a custom path never gets saved just to 404 at call time.
+const MIN_ENDPOINT_SLUG_LENGTH = 8;
+const MAX_ENDPOINT_SLUG_LENGTH = 80;
+
+function normalizeCustomEndpointSlug(desired: string): string {
+  const slug = slugify(desired, SLUG_OPTIONS).substring(0, MAX_ENDPOINT_SLUG_LENGTH);
+  if (slug.length < MIN_ENDPOINT_SLUG_LENGTH) {
+    throw new Error(
+      `Custom path must be at least ${MIN_ENDPOINT_SLUG_LENGTH} characters (letters, numbers, hyphens).`,
+    );
+  }
+  return slug;
+}
+
+/**
+ * Resolve the path segment a server (or MCP Hub) is addressed by under
+ * `/api/public/mcp/:tenantId/:endpointSlug`. Omitting `desired` mints a
+ * random unguessable slug, same as before custom paths existed. A
+ * caller-supplied `desired` becomes this server's public URL path — unlike
+ * `key` it is never silently de-duplicated with a numeric suffix (that would
+ * surprise whoever the URL was shared with), so it must be unique or the
+ * caller picks a different one. `excludeId` lets a rename check uniqueness
+ * without colliding with the record being renamed.
+ */
+async function resolveEndpointSlug(
+  tenantDbName: string,
+  desired: string | undefined,
+  excludeId?: string,
+): Promise<string> {
+  if (!desired?.trim()) return generateEndpointSlug();
+  const slug = normalizeCustomEndpointSlug(desired);
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const existing = await db.findMcpServerByEndpointSlug(slug);
+  if (existing && String(existing._id) !== excludeId) {
+    throw new Error(`The path "${slug}" is already used by another MCP server. Choose a different one.`);
+  }
+  return slug;
+}
+
 // ── OpenAPI Parsing ───────────────────────────────────────────────────────
 
 export function parseOpenApiSpec(specString: string, format: SpecFormatHint = 'auto'): {
@@ -572,7 +613,6 @@ function validateCreateInput(input: CreateMcpServerInput): McpSourceType {
     if (!input.internalConfig?.instanceKey?.trim()) {
       throw new Error('internalConfig.instanceKey is required for source type "internal"');
     }
-    assertPublicExposureAllowed('internal', true, input.exposure?.accessMode);
   }
   if (sourceType === 'composite') {
     if (!input.compositeConfig?.members?.length) {
@@ -778,7 +818,7 @@ export async function createMcpServer(
   const sourceType = validateCreateInput(input);
 
   const key = await generateUniqueKey(tenantDbName, projectId, input.key?.trim() || input.name);
-  const endpointSlug = generateEndpointSlug();
+  const endpointSlug = await resolveEndpointSlug(tenantDbName, input.endpointSlug);
 
   let tools: IMcpTool[] = [];
   let normalizedSpec: string | undefined;
@@ -830,7 +870,6 @@ export async function createMcpServer(
       alwaysPrefix: m.alwaysPrefix,
     }));
     const built = await buildCompositeTools(db, { tenantId, projectId }, memberConfigs);
-    assertPublicExposureAllowed('composite', built.hasInternalMember, input.exposure?.accessMode);
     tools = built.tools;
     compositeMetadata = metadataWithComposite(
       undefined,
@@ -983,6 +1022,9 @@ export async function updateMcpServer(
     updateData.upstreamAuth = mergeAuthConfigUpdate(existing.upstreamAuth, input.upstreamAuth);
   }
   if (input.exposure !== undefined) updateData.exposure = normalizeExposure(input.exposure);
+  if (input.endpointSlug !== undefined) {
+    updateData.endpointSlug = await resolveEndpointSlug(tenantDbName, input.endpointSlug, serverId);
+  }
   if (input.aegis !== undefined) updateData.aegis = input.aegis;
   if (input.remoteConfig !== undefined) updateData.remoteConfig = input.remoteConfig;
   if (input.stdioConfig !== undefined) {
@@ -1062,9 +1104,6 @@ export async function updateMcpServer(
   // "previous" set keeps stable exposed names across the rebuild — see
   // allocateExposedNames). Omitting compositeConfig leaves the member list
   // untouched (e.g. a PATCH that only renames the server or flips status).
-  let compositeHasInternalMember = sourceType === 'composite'
-    ? getCompositeConfig(existing).hasInternalMember
-    : false;
   if (sourceType === 'composite' && input.compositeConfig !== undefined) {
     if (!input.compositeConfig.members.length) {
       throw new Error('compositeConfig.members must include at least one member server');
@@ -1082,25 +1121,12 @@ export async function updateMcpServer(
     );
     updateData.tools = built.tools;
     updateData.toolsDiscoveredAt = new Date();
-    compositeHasInternalMember = built.hasInternalMember;
     updateData.metadata = metadataWithComposite(
       (updateData.metadata as Record<string, unknown> | undefined) ?? existing.metadata,
       { members: built.members, hasInternalMember: built.hasInternalMember },
       built.memberSummaries,
     );
   }
-
-  // Public-exposure gate: an internal-sourced server (direct 'internal', or
-  // a composite with an internal member) must never be reachable without a
-  // Cognipeer token — runs on every update, not just ones that touch
-  // exposure or compositeConfig, since either one alone can flip the
-  // effective combination into a disallowed state.
-  const effectiveExposure = (updateData.exposure as IMcpExposureConfig | undefined) ?? resolveExposure(existing);
-  assertPublicExposureAllowed(
-    sourceType,
-    sourceType === 'internal' ? true : compositeHasInternalMember,
-    effectiveExposure.accessMode,
-  );
 
   // Tool enable/disable list (metadata-backed). Runs after tool rediscovery so
   // the incoming names are validated against the tool list being persisted.

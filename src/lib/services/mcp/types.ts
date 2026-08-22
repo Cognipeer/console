@@ -99,6 +99,9 @@ export interface CreateMcpServerInput {
   /** Member MCP servers to republish (sourceType 'composite'). */
   compositeConfig?: CompositeConfigInput;
   exposure?: IMcpExposureConfig;
+  /** Custom public-URL path segment (default: a random unguessable slug). Only
+   *  meaningful once exposure.accessMode is 'public'; must be unique tenant-wide. */
+  endpointSlug?: string;
   aegis?: IMcpAegisConfig;
 }
 
@@ -140,6 +143,8 @@ export interface UpdateMcpServerInput {
   /** Full replacement member list (sourceType 'composite'). */
   compositeConfig?: CompositeConfigInput;
   exposure?: IMcpExposureConfig;
+  /** Rename the server's public-URL path segment; must be unique tenant-wide. */
+  endpointSlug?: string;
   aegis?: IMcpAegisConfig;
   status?: string;
   /** Opt-in policy for caller-supplied runtime header passthrough (null clears). */

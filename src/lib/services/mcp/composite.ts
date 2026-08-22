@@ -7,15 +7,15 @@
  * and its own Aegis binding — the composite only decides *which* member
  * tools are included and what name they're exposed under.
  *
- * This module owns the config shape, the public-exposure gate (an
- * internal-service member must never be reachable without a token — see
- * `isInternalSourced`), and the naming/collision algorithm. The DB-touching
+ * This module owns the config shape (including `isInternalSourced`, which
+ * flags an internal-service member so operators can be warned before they
+ * expose it publicly) and the naming/collision algorithm. The DB-touching
  * orchestration (fetching members, persisting the rebuilt snapshot,
  * executing a routed call) lives in `mcpService.ts`, which imports from
  * here — never the other way, to keep this module import-cycle-free.
  */
 
-import type { IMcpServer, IMcpTool, McpAccessMode, McpSourceType } from '@/lib/database';
+import type { IMcpServer, IMcpTool, McpSourceType } from '@/lib/database';
 import slugify from 'slugify';
 
 /** One member entry as stored in a composite server's `metadata.composite.members`. */
@@ -89,33 +89,17 @@ export function metadataWithComposite(
 /**
  * A server is "internal-sourced" when calling it can read tenant-private
  * data with no external credential of its own — a direct 'internal' server,
- * or a composite that includes one as a member. Gates public exposure both
- * at write time (`assertPublicExposureAllowed`) and at the public-endpoint
- * read path (defense in depth — see `public-mcp.ts`).
+ * or a composite that includes one as a member. Public exposure of an
+ * internal-sourced server is allowed (publishing tenant data on a public URL
+ * is a deliberate, supported use case), but callers that offer the choice
+ * should warn the operator with this flag before they flip it on — see the
+ * "Endpoint exposure" warning in `CreateMcpModal.tsx`.
  */
 export function isInternalSourced(server: Pick<IMcpServer, 'sourceType' | 'metadata'>): boolean {
   const sourceType = server.sourceType ?? 'openapi';
   if (sourceType === 'internal') return true;
   if (sourceType === 'composite') return getCompositeConfig(server).hasInternalMember;
   return false;
-}
-
-export function assertPublicExposureAllowed(
-  sourceType: McpSourceType,
-  hasInternalMember: boolean,
-  accessMode: McpAccessMode | undefined,
-): void {
-  if (accessMode !== 'public') return;
-  if (sourceType === 'internal') {
-    throw new Error(
-      'Internal-service MCP servers read tenant-private data and cannot be exposed publicly. Use "API token required" access instead.',
-    );
-  }
-  if (sourceType === 'composite' && hasInternalMember) {
-    throw new Error(
-      'This composite includes an internal-service member and cannot be exposed publicly. Use "API token required" access instead.',
-    );
-  }
 }
 
 /** Reference to the composite record itself, for the self/tenant/project checks below. */

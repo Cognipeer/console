@@ -7,7 +7,7 @@ import type {
   IUser,
   McpAuthType,
 } from '@/lib/database';
-import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { SpecFormatHint } from '@/lib/services/specImport';
 import { createLogger } from '@/lib/core/logger';
 import {
@@ -82,6 +82,18 @@ async function serverInProjectScope(
   if (user.role === 'owner' || user.role === 'admin') return server;
   if (!server.projectId) return server;
   return String(server.projectId) === String(projectId) ? server : null;
+}
+
+/** Maps `resolveEndpointSlug`'s thrown errors to proper status codes; null if `error` isn't one of them. */
+function sendEndpointSlugError(reply: FastifyReply, error: unknown): ReturnType<FastifyReply['send']> | null {
+  if (!(error instanceof Error)) return null;
+  if (error.message.startsWith('Custom path must be')) {
+    return reply.code(400).send({ error: error.message });
+  }
+  if (error.message.includes('is already used by another MCP server')) {
+    return reply.code(409).send({ error: error.message });
+  }
+  return null;
 }
 
 function auditContextFor(request: FastifyRequest, userId: string): McpAuditContext {
@@ -418,6 +430,9 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
           internalConfig,
           compositeConfig,
           exposure: parseExposure(body.exposure),
+          endpointSlug: typeof body.endpointSlug === 'string' && body.endpointSlug.trim()
+            ? body.endpointSlug.trim()
+            : undefined,
           aegis: aegisConfig,
         },
         auditContextFor(request, session.userId),
@@ -429,6 +444,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       logger.error('Create MCP server error', { error });
       return sendProjectContextError(reply, error)
+        ?? sendEndpointSlugError(reply, error)
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Internal error',
         });
@@ -561,6 +577,9 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         internalConfig: body.internalConfig !== undefined ? parseInternalConfig(body.internalConfig) : undefined,
         compositeConfig: body.compositeConfig !== undefined ? parseCompositeConfig(body.compositeConfig) : undefined,
         exposure: body.exposure !== undefined ? parseExposure(body.exposure) : undefined,
+        endpointSlug: typeof body.endpointSlug === 'string' && body.endpointSlug.trim()
+          ? body.endpointSlug.trim()
+          : undefined,
         aegis: nextAegis,
         runtimeHeaders: body.runtimeHeaders as { allow?: boolean; allowedNames?: string[] } | null | undefined,
         disabledTools: body.disabledTools as string[] | undefined,
@@ -577,6 +596,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       logger.error('Update MCP server error', { error });
       return sendProjectContextError(reply, error)
+        ?? sendEndpointSlugError(reply, error)
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Internal error',
         });
