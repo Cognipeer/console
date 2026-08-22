@@ -153,7 +153,10 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
   websearch_run_logs: [{ key: { searchKey: 1, createdAt: -1 }, options: { name: 'idx_search_createdAt' } }],
   agent_conversations: [{ key: { agentKey: 1, updatedAt: -1 }, options: { name: 'idx_agent_updatedAt' } }],
   agent_versions: [{ key: { agentId: 1, version: -1 }, options: { name: 'idx_agent_version' } }],
-  mcp_request_logs: [{ key: { serverKey: 1, createdAt: -1 }, options: { name: 'idx_server_createdAt' } }],
+  mcp_request_logs: [
+    { key: { serverKey: 1, createdAt: -1 }, options: { name: 'idx_server_createdAt' } },
+    { key: { serverId: 1, createdAt: -1 }, options: { name: 'idx_serverId_createdAt' } },
+  ],
   tool_request_logs: [{ key: { toolKey: 1, createdAt: -1 }, options: { name: 'idx_tool_createdAt' } }],
   ocr_job_items: [{ key: { jobId: 1, index: 1 }, options: { name: 'idx_job_index' } }],
   batch_job_items: [{ key: { batchId: 1, index: 1 }, options: { name: 'idx_batch_index' } }],

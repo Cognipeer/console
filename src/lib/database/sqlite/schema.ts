@@ -1669,6 +1669,7 @@ export const TENANT_SCHEMA_SQL = `
     id TEXT PRIMARY KEY,
     tenantId TEXT NOT NULL,
     projectId TEXT,
+    serverId TEXT,
     serverKey TEXT NOT NULL,
     toolName TEXT NOT NULL,
     status TEXT NOT NULL,
@@ -1690,6 +1691,9 @@ export const TENANT_SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_mcp_request_logs_serverKey ON mcp_request_logs(serverKey);
   CREATE INDEX IF NOT EXISTS idx_mcp_request_logs_createdAt ON mcp_request_logs(createdAt);
+  -- idx_mcp_request_logs_serverId is created in applyTenantIndexes (base.ts),
+  -- after applyTenantMigrations ensures the serverId column on legacy DBs —
+  -- referencing it here would abort this whole script on pre-existing tenants.
 
   -- MCP Audit Logs
   CREATE TABLE IF NOT EXISTS mcp_audit_logs (

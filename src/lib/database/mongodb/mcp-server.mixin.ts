@@ -10,10 +10,49 @@ import type {
   IMcpAuditLog,
   IMcpRequestLog,
   IMcpRequestAggregate,
+  McpLogServerScope,
   McpServerStatus,
 } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
+
+/**
+ * Match a server's request logs by durable `serverId` primarily. The second
+ * `$or` branch only extends the match to rows written before `serverId`
+ * existed (`serverId` absent) — scoped to this server's own `serverKey` +
+ * `projectId`, and no older than this server's own `createdAt`, so a
+ * deleted-and-recreated server can never adopt its predecessor's logs just
+ * because they share the same name-derived key.
+ */
+function mcpLogScopeFilter(scope: McpLogServerScope): Record<string, unknown> {
+  const legacy: Record<string, unknown> = {
+    serverId: { $exists: false },
+    serverKey: scope.serverKey,
+  };
+  if (scope.projectId !== undefined) legacy.projectId = scope.projectId;
+  if (scope.createdAt) legacy.createdAt = { $gte: scope.createdAt };
+  return { $or: [{ serverId: scope.serverId }, legacy] };
+}
+
+/** Combine the scope filter with the caller's own query options via `$and` (the scope filter already uses `$or`, which can't be merged by object-spread without colliding keys). */
+function buildMcpLogFilter(
+  scope: McpLogServerScope,
+  options?: { status?: string; from?: Date; to?: Date; keyword?: string },
+): Record<string, unknown> {
+  const clauses: Record<string, unknown>[] = [mcpLogScopeFilter(scope)];
+  if (options?.status) clauses.push({ status: options.status });
+  if (options?.from || options?.to) {
+    const range: Record<string, unknown> = {};
+    if (options.from) range.$gte = options.from;
+    if (options.to) range.$lte = options.to;
+    clauses.push({ createdAt: range });
+  }
+  if (options?.keyword?.trim()) {
+    const keywordRegex = new RegExp(options.keyword.trim(), 'i');
+    clauses.push({ $or: [{ toolName: keywordRegex }, { errorMessage: keywordRegex }] });
+  }
+  return clauses.length === 1 ? clauses[0] : { $and: clauses };
+}
 
 export function McpServerMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class McpServerOps extends Base {
@@ -129,7 +168,7 @@ export function McpServerMixin<TBase extends Constructor<MongoDBProviderBase>>(B
     }
 
     async listMcpRequestLogs(
-      serverKey: string,
+      scope: McpLogServerScope,
       options?: {
         limit?: number;
         skip?: number;
@@ -140,20 +179,7 @@ export function McpServerMixin<TBase extends Constructor<MongoDBProviderBase>>(B
       },
     ): Promise<IMcpRequestLog[]> {
       const db = this.getTenantDb();
-      const filter: Record<string, unknown> = { serverKey };
-      if (options?.status) filter.status = options.status;
-      if (options?.from || options?.to) {
-        filter.createdAt = {};
-        if (options.from) (filter.createdAt as Record<string, unknown>).$gte = options.from;
-        if (options.to) (filter.createdAt as Record<string, unknown>).$lte = options.to;
-      }
-      if (options?.keyword?.trim()) {
-        const keywordRegex = new RegExp(options.keyword.trim(), 'i');
-        filter.$or = [
-          { toolName: keywordRegex },
-          { errorMessage: keywordRegex },
-        ];
-      }
+      const filter = buildMcpLogFilter(scope, options);
       const docs = await db
         .collection(COLLECTIONS.mcpRequestLogs)
         .find(filter)
@@ -183,40 +209,20 @@ export function McpServerMixin<TBase extends Constructor<MongoDBProviderBase>>(B
     }
 
     async countMcpRequestLogs(
-      serverKey: string,
+      scope: McpLogServerScope,
       options?: { from?: Date; to?: Date; status?: string; keyword?: string },
     ): Promise<number> {
       const db = this.getTenantDb();
-      const filter: Record<string, unknown> = { serverKey };
-
-      if (options?.status) filter.status = options.status;
-      if (options?.from || options?.to) {
-        filter.createdAt = {};
-        if (options.from) (filter.createdAt as Record<string, unknown>).$gte = options.from;
-        if (options.to) (filter.createdAt as Record<string, unknown>).$lte = options.to;
-      }
-      if (options?.keyword?.trim()) {
-        const keywordRegex = new RegExp(options.keyword.trim(), 'i');
-        filter.$or = [
-          { toolName: keywordRegex },
-          { errorMessage: keywordRegex },
-        ];
-      }
-
+      const filter = buildMcpLogFilter(scope, options);
       return db.collection(COLLECTIONS.mcpRequestLogs).countDocuments(filter);
     }
 
     async aggregateMcpRequestLogs(
-      serverKey: string,
+      scope: McpLogServerScope,
       options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month' },
     ): Promise<IMcpRequestAggregate> {
       const db = this.getTenantDb();
-      const match: Record<string, unknown> = { serverKey };
-      if (options?.from || options?.to) {
-        match.createdAt = {};
-        if (options.from) (match.createdAt as Record<string, unknown>).$gte = options.from;
-        if (options.to) (match.createdAt as Record<string, unknown>).$lte = options.to;
-      }
+      const match = buildMcpLogFilter(scope, { from: options?.from, to: options?.to });
 
       const pipeline = [
         { $match: match },
@@ -284,7 +290,7 @@ export function McpServerMixin<TBase extends Constructor<MongoDBProviderBase>>(B
       }
 
       return {
-        serverKey,
+        serverKey: scope.serverKey,
         totalRequests: (agg?.totalRequests as number) ?? 0,
         successCount: (agg?.successCount as number) ?? 0,
         errorCount: (agg?.errorCount as number) ?? 0,

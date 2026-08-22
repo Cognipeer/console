@@ -471,11 +471,11 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
       };
 
       if (query.includeLogs === 'true') {
-        payload.logs = await listMcpRequestLogs(session.tenantDbName, server.key, { limit: 50 });
+        payload.logs = await listMcpRequestLogs(session.tenantDbName, server, { limit: 50 });
       }
 
       if (query.includeAggregate === 'true') {
-        payload.aggregate = await aggregateMcpRequestLogs(session.tenantDbName, server.key, {
+        payload.aggregate = await aggregateMcpRequestLogs(session.tenantDbName, server, {
           groupBy: 'day',
         });
       }
@@ -697,8 +697,8 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
       };
 
       const [logs, total] = await Promise.all([
-        listMcpRequestLogs(session.tenantDbName, server.key, filter),
-        countMcpRequestLogs(session.tenantDbName, server.key, {
+        listMcpRequestLogs(session.tenantDbName, server, filter),
+        countMcpRequestLogs(session.tenantDbName, server, {
           from,
           keyword: filter.keyword,
           status: query.status,
@@ -783,6 +783,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         void logMcpRequest(session.tenantDbName, {
           tenantId: session.tenantId,
           projectId: server.projectId,
+          serverId: String(server._id),
           serverKey: server.key,
           toolName,
           status: 'success',
@@ -805,6 +806,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         void logMcpRequest(session.tenantDbName, {
           tenantId: session.tenantId,
           projectId: server.projectId,
+          serverId: String(server._id),
           serverKey: server.key,
           toolName,
           status: 'error',

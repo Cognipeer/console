@@ -40,7 +40,7 @@ export async function GET(
 
     const resolvedSkip = Number.isNaN(skip) ? (page - 1) * limit : Math.max(skip, 0);
 
-    const logs = await listMcpRequestLogs(tenantDbName, server.key, {
+    const logs = await listMcpRequestLogs(tenantDbName, server, {
       limit,
       skip: resolvedSkip,
       status,
@@ -49,7 +49,7 @@ export async function GET(
       keyword,
     });
 
-    const total = await countMcpRequestLogs(tenantDbName, server.key, {
+    const total = await countMcpRequestLogs(tenantDbName, server, {
       status,
       from,
       to,

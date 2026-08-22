@@ -863,6 +863,13 @@ export class SQLiteProviderBase {
     // records the composite's key here so the member's own Logs tab can show
     // "via <composite>" alongside calls that hit it directly.
     this.ensureTableColumn(db, TABLES.mcpRequestLogs, 'viaServerKey', 'viaServerKey TEXT');
+    // serverId: durable FK to mcp_servers.id, replacing serverKey (a slug of
+    // the server's name) as the log-query scope. serverKey is recycled when
+    // a server is deleted and recreated under the same name, which used to
+    // make a new server's Logs tab show its predecessor's history — see
+    // mcpLogScopeClause in mcp-server.mixin.ts. Rows written before this
+    // column existed are matched by the legacy fallback in that clause.
+    this.ensureTableColumn(db, TABLES.mcpRequestLogs, 'serverId', 'serverId TEXT');
 
     // Evaluation: dataset items moved to their own table; the denormalised
     // itemCount rides on the dataset row. Suites were missing the
@@ -936,6 +943,16 @@ export class SQLiteProviderBase {
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_model_usage_user
         ON ${TABLES.modelUsageLogs}(tenantId, userId, createdAt DESC);
+    `);
+
+    // mcp_request_logs.serverId index — must be created here (after
+    // applyTenantMigrations), same ordering constraint as above: serverId
+    // reaches legacy DBs via ensureTableColumn, and referencing it in
+    // TENANT_SCHEMA_SQL directly aborted the whole schema exec on tenants
+    // created before the column existed.
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_mcp_request_logs_serverId
+        ON ${TABLES.mcpRequestLogs}(serverId);
     `);
 
     // usage_daily unique dimension index v3 (adds metadataKey, on top of v2's

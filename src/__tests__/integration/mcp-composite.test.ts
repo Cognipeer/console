@@ -252,7 +252,7 @@ describe('composite execution — real routed call, member-scoped log, self-refe
   });
 
   it('writes a member-scoped log row tagged with the composite key, separate from the composite\'s own log', async () => {
-    const memberLogs = await listMcpRequestLogs(TENANT_DB_NAME, memberA.key, { limit: 10 });
+    const memberLogs = await listMcpRequestLogs(TENANT_DB_NAME, memberA, { limit: 10 });
     const viaComposite = memberLogs.filter((l) => l.viaServerKey === composite.key);
     expect(viaComposite.length).toBeGreaterThan(0);
     expect(viaComposite[0].transport).toBe('internal');
@@ -357,7 +357,12 @@ describe('sqlite viaServerKey column', () => {
   it('is persisted and queryable end to end', async () => {
     const db = await getDatabase();
     await db.switchToTenant(TENANT_DB_NAME);
-    const logs = await db.listMcpRequestLogs(memberA.key, { limit: 50 });
+    const logs = await db.listMcpRequestLogs({
+      serverId: String(memberA._id),
+      serverKey: memberA.key,
+      projectId: memberA.projectId,
+      createdAt: memberA.createdAt,
+    }, { limit: 50 });
     expect(logs.some((l) => l.viaServerKey)).toBe(true);
   });
 });

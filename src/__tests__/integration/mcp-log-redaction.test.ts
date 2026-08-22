@@ -23,11 +23,18 @@ import { reloadConfig } from '@/lib/core/config';
 import { disconnectDatabase } from '@/lib/database';
 import { logMcpRequest, listMcpRequestLogs } from '@/lib/services/mcp';
 import { LOG_SECRET_MASK } from '@/lib/services/logRedaction';
+import type { IMcpServer } from '@/lib/database';
 
 const TENANT_DB_NAME = 'mcp_logredact_tenant';
 const TENANT_ID = 'tenant-logredact';
 const SERVER_KEY = 'srv-logredact';
 const SECRET = 'Bearer sk-live-echoed-credential-1234567890';
+// These logs are written with no real MCP server record backing them (only
+// `logMcpRequest`'s legacy serverKey field) — listMcpRequestLogs now scopes
+// by serverId primarily, falling back to serverKey for pre-migration rows.
+// A synthetic server stub with no serverId/createdAt match exercises that
+// fallback path the same way a real legacy row would.
+const SERVER_STUB = { _id: 'nonexistent-server-id', key: SERVER_KEY } as IMcpServer;
 
 beforeAll(() => {
   reloadConfig();
@@ -62,7 +69,7 @@ describe('logMcpRequest — secret scrubbing at the persistence boundary', () =>
       [SECRET],
     );
 
-    const logs = await listMcpRequestLogs(TENANT_DB_NAME, SERVER_KEY, { limit: 10 });
+    const logs = await listMcpRequestLogs(TENANT_DB_NAME, SERVER_STUB, { limit: 10 });
     expect(logs.length).toBe(1);
 
     const stored = JSON.stringify(logs[0].responsePayload);
@@ -91,7 +98,7 @@ describe('logMcpRequest — secret scrubbing at the persistence boundary', () =>
       [SECRET],
     );
 
-    const errorLog = (await listMcpRequestLogs(TENANT_DB_NAME, SERVER_KEY, { limit: 10 }))
+    const errorLog = (await listMcpRequestLogs(TENANT_DB_NAME, SERVER_STUB, { limit: 10 }))
       .find((l) => l.toolName === 'failing');
     expect(errorLog?.errorMessage).toBeDefined();
     expect(errorLog?.errorMessage).not.toContain('sk-live-echoed-credential-1234567890');

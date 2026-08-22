@@ -11,6 +11,7 @@ import type {
   IMcpStdioConfig,
   IMcpTool,
   IMcpToolAnnotations,
+  McpLogServerScope,
   McpSourceType,
 } from '@/lib/database';
 import type {
@@ -30,7 +31,7 @@ import {
 import { recordUsageEvent, resolveUsageAttribution } from '@/lib/services/usage/usageEvents';
 import { safeFetch } from '@/lib/security/outboundFetch';
 import { normalizeApiSpec, type SpecFormatHint } from '@/lib/services/specImport';
-import { routeInstanceCall } from '@/lib/core/cluster';
+import { deleteInstanceAssignment, routeInstanceCall } from '@/lib/core/cluster';
 import type { QueuePayload } from '@/lib/core/queue';
 import { mcpEntityId } from './mcpEntityId';
 import {
@@ -1323,6 +1324,13 @@ export async function deleteMcpServer(
   const deleted = await db.deleteMcpServer(serverId);
 
   if (deleted && existing) {
+    // Drop the node-pinning cache entry, keyed by tenantId+key: without this,
+    // a server recreated under the same name would silently inherit the
+    // deleted server's cluster placement (including a stale "strictly
+    // assigned to an offline node" error).
+    void deleteInstanceAssignment('mcp', mcpEntityId(existing.tenantId, existing.key))
+      .catch((error) => logger.warn('Failed to clear MCP instance assignment', { serverId, error }));
+
     // Release a sandbox-backed runtime if one exists (best-effort).
     if (existing.stdioConfig?.executionMode === 'sandbox' && mcpSandboxRunner.current) {
       void mcpSandboxRunner.current
@@ -1385,6 +1393,22 @@ export async function listMcpServers(
 }
 
 // ── Request logging ───────────────────────────────────────────────────────
+
+/**
+ * Scope a request-log query to `server`. `serverId` is the durable match;
+ * the rest only extend it to rows written before `serverId` existed, capped
+ * at this server's own `createdAt` so a deleted-and-recreated server (which
+ * regenerates the same name-derived `key`) can't pull in its predecessor's
+ * history.
+ */
+function mcpLogScope(server: IMcpServer): McpLogServerScope {
+  return {
+    serverId: String(server._id),
+    serverKey: server.key,
+    projectId: server.projectId,
+    createdAt: server.createdAt,
+  };
+}
 
 /**
  * Outbound secret values that could be echoed back into a logged response for
@@ -1456,7 +1480,7 @@ export async function logMcpRequest(
 
 export async function listMcpRequestLogs(
   tenantDbName: string,
-  serverKey: string,
+  server: IMcpServer,
   options?: {
     limit?: number;
     skip?: number;
@@ -1468,27 +1492,27 @@ export async function listMcpRequestLogs(
 ) {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
-  return db.listMcpRequestLogs(serverKey, options);
+  return db.listMcpRequestLogs(mcpLogScope(server), options);
 }
 
 export async function countMcpRequestLogs(
   tenantDbName: string,
-  serverKey: string,
+  server: IMcpServer,
   options?: { from?: Date; to?: Date; status?: string; keyword?: string },
 ) {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
-  return db.countMcpRequestLogs(serverKey, options);
+  return db.countMcpRequestLogs(mcpLogScope(server), options);
 }
 
 export async function aggregateMcpRequestLogs(
   tenantDbName: string,
-  serverKey: string,
+  server: IMcpServer,
   options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month' },
 ) {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
-  return db.aggregateMcpRequestLogs(serverKey, options);
+  return db.aggregateMcpRequestLogs(mcpLogScope(server), options);
 }
 
 // ── Audit logging ─────────────────────────────────────────────────────────
@@ -1549,7 +1573,7 @@ export async function getMcpMonitorSnapshot(
 
   const entries: McpServerMonitorEntry[] = [];
   for (const server of servers) {
-    const aggregate = await db.aggregateMcpRequestLogs(server.key, { from, groupBy: 'hour' });
+    const aggregate = await db.aggregateMcpRequestLogs(mcpLogScope(server), { from, groupBy: 'hour' });
 
     const sourceType = resolveSourceType(server);
     let kind: McpServerMonitorEntry['runtime']['kind'] = 'openapi';
@@ -1814,6 +1838,7 @@ async function executeCompositeTool(
       void logMcpRequest(tenantDbName, {
         tenantId: m.tenantId,
         projectId: m.projectId,
+        serverId: String(m._id),
         serverKey: m.key,
         toolName: tool.origin.realName,
         status: 'success',
@@ -1834,6 +1859,7 @@ async function executeCompositeTool(
       void logMcpRequest(tenantDbName, {
         tenantId: m.tenantId,
         projectId: m.projectId,
+        serverId: String(m._id),
         serverKey: m.key,
         toolName: tool.origin.realName,
         status: 'error',

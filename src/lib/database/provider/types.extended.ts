@@ -332,6 +332,14 @@ export interface IMcpRequestLog extends IUsageAttributionFields {
   _id?: ObjectId | string;
   tenantId: string;
   projectId?: string;
+  /**
+   * Durable reference to the server that wrote this row. Always stamped on
+   * new rows (see `logMcpRequest`); absent only on rows written before this
+   * field existed. `serverKey` is a slug of the server's *name* and gets
+   * recycled if the server is deleted and a new one is created with the
+   * same name — `serverId` is what actually scopes a server's Logs tab.
+   */
+  serverId?: string;
   serverKey: string;
   toolName: string;
   status: 'success' | 'error';
@@ -380,6 +388,20 @@ export interface IMcpAuditLog {
   ipAddress?: string;
   userAgent?: string;
   metadata?: Record<string, unknown>;
+  createdAt?: Date;
+}
+
+/**
+ * Scopes an MCP request-log query to one server. `serverId` is the primary
+ * match; `serverKey`/`projectId`/`createdAt` only extend the match to rows
+ * written before `serverId` existed, and only up to this server's own
+ * `createdAt` — so a deleted-and-recreated server's recycled key can't pull
+ * in the predecessor's history. See `mcpLogScope` in mcpService.ts.
+ */
+export interface McpLogServerScope {
+  serverId: string;
+  serverKey: string;
+  projectId?: string;
   createdAt?: Date;
 }
 

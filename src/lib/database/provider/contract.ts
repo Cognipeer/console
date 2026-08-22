@@ -47,6 +47,7 @@ import type {
   IMcpAuditLog,
   IMcpRequestAggregate,
   IMcpRequestLog,
+  McpLogServerScope,
   IMcpServer,
   IModel,
   IModelUsageAggregate,
@@ -1343,7 +1344,7 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     log: Omit<IMcpRequestLog, '_id' | 'createdAt'>,
   ): Promise<IMcpRequestLog>;
   listMcpRequestLogs(
-    serverKey: string,
+    scope: McpLogServerScope,
     options?: {
       limit?: number;
       skip?: number;
@@ -1354,11 +1355,11 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     },
   ): Promise<IMcpRequestLog[]>;
   countMcpRequestLogs(
-    serverKey: string,
+    scope: McpLogServerScope,
     options?: { from?: Date; to?: Date; status?: string; keyword?: string },
   ): Promise<number>;
   aggregateMcpRequestLogs(
-    serverKey: string,
+    scope: McpLogServerScope,
     options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month' },
   ): Promise<IMcpRequestAggregate>;
   listRecentMcpRequestLogs(options?: {
