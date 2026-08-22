@@ -16,6 +16,7 @@
 
 import slugify from 'slugify';
 import { getDatabase } from '@/lib/database';
+import { mapLimit } from '@/lib/core/concurrency';
 import type {
   IAnalysisDefinition,
   IAnalysisFieldDef,
@@ -44,19 +45,6 @@ const MAX_KEY_ATTEMPTS = 50;
 const MAX_RUN_CONVERSATIONS = Math.max(1, Number(process.env.ANALYSIS_MAX_RUN_CONVERSATIONS ?? 5000) || 5000);
 /** Parallel write-back updates. Bounded so a 5k-item run can't storm the DB. */
 const WRITE_BACK_CONCURRENCY = 20;
-
-/** Run tasks with a bounded number in flight, preserving input order. */
-async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let cursor = 0;
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    for (let i = cursor++; i < items.length; i = cursor++) {
-      results[i] = await fn(items[i]);
-    }
-  });
-  await Promise.all(workers);
-  return results;
-}
 
 export type WithId<T> = Omit<T, '_id'> & { id: string };
 

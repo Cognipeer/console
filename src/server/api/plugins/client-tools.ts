@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import type { IToolAuthConfig } from '@/lib/database';
 import type { SpecFormatHint } from '@/lib/services/specImport';
 import { createLogger } from '@/lib/core/logger';
+import { overfetchLimit, paginationMeta, readPagination, takePage } from '@/lib/api/pagination';
 import {
   createTool,
   deleteTool,
@@ -27,13 +28,18 @@ export const clientToolsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const query = (request.query ?? {}) as { status?: 'active' | 'disabled'; type?: 'mcp' | 'openapi' };
-      const tools = await listTools(ctx.tenantDbName, {
+      const page = readPagination(request.query);
+      const fetched = await listTools(ctx.tenantDbName, {
         projectId: ctx.projectId,
         ...(query.status ? { status: query.status } : {}),
         ...(query.type ? { type: query.type } : {}),
+        limit: overfetchLimit(page),
+        offset: page.offset,
       });
+      const { items: tools, hasMore } = takePage(fetched, page);
 
       return reply.code(200).send({
+        pagination: paginationMeta(page, { hasMore }),
         tools: tools.map((tool) => ({
           actions: tool.actions.map((action) => ({
             description: action.description,

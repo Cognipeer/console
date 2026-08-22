@@ -135,6 +135,9 @@ export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       provider?: ModelProviderType;
       providerKey?: string;
       providerDriver?: string;
+      /** Page window. Omitted means every row, which is what unbounded lists cost. */
+      limit?: number;
+      offset?: number;
     }): Promise<IModel[]> {
       const db = this.getTenantDb();
       const query: Record<string, unknown> = {};
@@ -159,11 +162,13 @@ export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
         query.providerDriver = filters.providerDriver;
       }
 
-      const models = await db
+      const cursor = db
         .collection<IModel>(COLLECTIONS.models)
         .find(query)
-        .sort({ createdAt: -1 })
-        .toArray();
+        .sort({ createdAt: -1 });
+      if (filters?.offset && filters.offset > 0) cursor.skip(filters.offset);
+      if (filters?.limit && filters.limit > 0) cursor.limit(filters.limit);
+      const models = await cursor.toArray();
 
       return models.map((model) => ({
         ...model,

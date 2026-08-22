@@ -103,7 +103,7 @@ export async function startRagReindex(
     status: 'queued',
     reason: request.reason ?? 'manual',
     attempt: 1,
-    totalDocuments: await db.countRagDocuments(request.ragModuleKey, projectId),
+    totalDocuments: await db.countRagDocuments(request.ragModuleKey, { projectId }),
     processedDocuments: 0,
     failedDocuments: 0,
     batchSize: request.batchSize ?? 1,

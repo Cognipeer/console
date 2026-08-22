@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import Mustache from 'mustache';
 import { createLogger } from '@/lib/core/logger';
+import { overfetchLimit, paginationMeta, readPagination, takePage } from '@/lib/api/pagination';
 import {
   activatePromptDeployment,
   comparePromptVersions,
@@ -35,11 +36,18 @@ export const clientPromptsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const query = (request.query ?? {}) as { search?: string };
-      const prompts = await listPrompts(ctx.tenantDbName, ctx.projectId, {
+      const page = readPagination(request.query);
+      const fetched = await listPrompts(ctx.tenantDbName, ctx.projectId, {
         search: query.search,
+        limit: overfetchLimit(page),
+        offset: page.offset,
       });
+      const { items: prompts, hasMore } = takePage(fetched, page);
 
-      return reply.code(200).send({ prompts });
+      return reply.code(200).send({
+        prompts,
+        pagination: paginationMeta(page, { hasMore }),
+      });
     } catch (error) {
       logger.error('List client prompts error', { error });
       return reply.code(500).send({

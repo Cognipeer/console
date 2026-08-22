@@ -150,6 +150,45 @@ export class RedisCacheProvider implements CacheProvider {
     };
   }
 
+  async incrementCounters(
+    entries: Array<{ key: string; ttlSeconds: number; amount: number }>,
+  ): Promise<Array<{ count: number; resetAt: Date }>> {
+    if (entries.length === 0) return [];
+    if (entries.length === 1) {
+      const only = entries[0];
+      return [await this.incrementCounter(only.key, only.ttlSeconds, only.amount)];
+    }
+
+    // One pipeline: the same Lua script per counter, but a single write and a
+    // single read on the socket instead of one per counter.
+    const pipeline = this.ensureClient().pipeline();
+    for (const { key, ttlSeconds, amount } of entries) {
+      pipeline.eval(
+        INCREMENT_COUNTER_SCRIPT,
+        1,
+        key,
+        String(Math.max(0, Math.ceil(amount))),
+        String(Math.max(1, Math.ceil(ttlSeconds))),
+      );
+    }
+
+    const replies = await pipeline.exec();
+    if (!replies || replies.length !== entries.length) {
+      throw new Error('Unexpected Redis counter pipeline response');
+    }
+
+    const now = Date.now();
+    return replies.map(([error, result], index) => {
+      if (error) throw error;
+      if (!Array.isArray(result) || result.length < 2) {
+        throw new Error(`Unexpected Redis counter response for "${entries[index].key}"`);
+      }
+      const count = Number(result[0]);
+      const remainingTtl = Number(result[1]);
+      return { count, resetAt: new Date(now + Math.max(1, remainingTtl) * 1000) };
+    });
+  }
+
   async releaseLock(key: string, token: string): Promise<void> {
     await this.ensureClient().eval(RELEASE_LOCK_SCRIPT, 1, key, token);
   }

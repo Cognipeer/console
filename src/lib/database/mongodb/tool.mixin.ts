@@ -82,6 +82,9 @@ export function ToolMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: 
       type?: ToolSourceType;
       status?: ToolStatus;
       search?: string;
+      /** Page window. Omitted means every row, which is what unbounded lists cost. */
+      limit?: number;
+      offset?: number;
     }): Promise<ITool[]> {
       const db = this.getTenantDb();
       const filter: Record<string, unknown> = {};
@@ -95,11 +98,13 @@ export function ToolMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: 
           { key: { $regex: filters.search, $options: 'i' } },
         ];
       }
-      const docs = await db
+      const cursor = db
         .collection(COLLECTIONS.tools)
         .find(filter)
-        .sort({ createdAt: -1 })
-        .toArray();
+        .sort({ createdAt: -1 });
+      if (filters?.offset && filters.offset > 0) cursor.skip(filters.offset);
+      if (filters?.limit && filters.limit > 0) cursor.limit(filters.limit);
+      const docs = await cursor.toArray();
       return docs.map((d) => ({ ...d, _id: d._id?.toString() })) as unknown as ITool[];
     }
 

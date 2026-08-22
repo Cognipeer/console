@@ -1,5 +1,8 @@
 import { getDatabase } from '@/lib/database';
 import type { IGuardrail, GuardrailType } from '@/lib/database';
+import { getCache } from '@/lib/core/cache';
+import { getConfig } from '@/lib/core/config';
+import { createLogger } from '@/lib/core/logger';
 import { fireAndForget } from '@/lib/core/asyncTask';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { generateUniqueSlugKey } from './keyGeneration';
@@ -138,10 +141,17 @@ export async function updateGuardrail(
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
 
+  // Read before writing: an update that renames the key or moves the guardrail
+  // between projects leaves a stale entry under the previous cache key.
+  const prior = await db.findGuardrailById(id);
+
   const updated = await db.updateGuardrail(id, {
     ...input,
     updatedBy,
   });
+
+  await invalidateGuardrailCache(tenantDbName, prior);
+  await invalidateGuardrailCache(tenantDbName, updated);
 
   if (!updated) return null;
   return serializeGuardrail(updated);
@@ -153,7 +163,10 @@ export async function deleteGuardrail(
 ): Promise<boolean> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
-  return db.deleteGuardrail(id);
+  const existing = await db.findGuardrailById(id);
+  const deleted = await db.deleteGuardrail(id);
+  await invalidateGuardrailCache(tenantDbName, existing);
+  return deleted;
 }
 
 export async function getGuardrail(
@@ -165,6 +178,81 @@ export async function getGuardrail(
   const record = await db.findGuardrailById(id);
   if (!record) return null;
   return serializeGuardrail(record);
+}
+
+const cacheLog = createLogger('guardrail-cache');
+
+/*
+ * A guarded model resolves its guardrail on the request path — twice, when both
+ * an input and an output guardrail are configured — and the lookup was
+ * uncached, so the config was re-read from the database on every call.
+ */
+
+function guardrailCacheKey(tenantDbName: string, key: string, projectId?: string): string {
+  return `guardrail-cfg:${tenantDbName}:${key}:${projectId ?? ''}`;
+}
+
+/**
+ * Resolve a guardrail by key, through a short-lived cache.
+ *
+ * Returns the stored record, which callers treat as read-only: the memory cache
+ * provider hands back the object itself.
+ */
+async function loadGuardrailRecord(
+  tenantDbName: string,
+  key: string,
+  projectId?: string,
+): Promise<IGuardrail | null> {
+  const ttl = getConfig().guardrail.configCacheTtlSeconds;
+  const cacheKey = guardrailCacheKey(tenantDbName, key, projectId);
+
+  if (ttl > 0) {
+    try {
+      const cache = await getCache();
+      const cached = await cache.get<IGuardrail>(cacheKey);
+      if (cached) return cached;
+    } catch {
+      /* cache miss or unavailable — fall through to the database */
+    }
+  }
+
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const record = await db.findGuardrailByKey(key, projectId);
+
+  if (record && ttl > 0) {
+    try {
+      const cache = await getCache();
+      await cache.set(cacheKey, record, ttl);
+    } catch {
+      /* best-effort cache write */
+    }
+  }
+
+  return record;
+}
+
+/**
+ * Drop a guardrail's cached config so an edit applies to the next request.
+ *
+ * Best-effort, and only for a record whose project is known: a guardrail with
+ * no project is visible to every one of them and the cache is keyed per
+ * project, so those edits land on the TTL instead.
+ */
+async function invalidateGuardrailCache(
+  tenantDbName: string,
+  record: IGuardrail | null | undefined,
+): Promise<void> {
+  if (!record) return;
+  try {
+    const cache = await getCache();
+    await cache.del(guardrailCacheKey(tenantDbName, record.key, record.projectId));
+  } catch (error) {
+    cacheLog.warn('Failed to invalidate guardrail cache; entry expires on TTL', {
+      guardrailKey: record.key,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 export async function getGuardrailByKey(
@@ -281,7 +369,7 @@ export async function evaluateGuardrail(params: {
 
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
-  const record = await db.findGuardrailByKey(guardrailKey, projectId);
+  const record = await loadGuardrailRecord(tenantDbName, guardrailKey, projectId);
 
   if (!record) {
     throw new Error(`Guardrail with key "${guardrailKey}" not found`);

@@ -144,6 +144,11 @@ export interface AppConfig {
     policyCacheTtlSeconds: number;
   };
 
+  guardrail: {
+    /** TTL for a cached guardrail config. 0 disables the cache. */
+    configCacheTtlSeconds: number;
+  };
+
   logging: {
     level: 'error' | 'warn' | 'info' | 'debug';
     format: 'json' | 'pretty';
@@ -175,6 +180,11 @@ export interface AppConfig {
 
   providerRuntime: {
     cacheTtlSeconds: number;
+    /**
+     * TTL for the cached provider row behind a runtime. 0 disables the cache
+     * and every provider call re-reads the row from the database.
+     */
+    recordCacheTtlSeconds: number;
     /**
      * How long an evicted runtime is held before its connections are closed.
      * Covers requests still holding a reference. 0 closes immediately.
@@ -418,6 +428,10 @@ function buildConfig(source: ConfigSource): AppConfig {
       policyCacheTtlSeconds: int(source, 'QUOTA_POLICY_CACHE_TTL_SECONDS', 30),
     },
 
+    guardrail: {
+      configCacheTtlSeconds: int(source, 'GUARDRAIL_CONFIG_CACHE_TTL_SECONDS', 30),
+    },
+
     logging: {
       level: oneOf(source, 'LOG_LEVEL', ['error', 'warn', 'info', 'debug'], nodeEnv === 'production' ? 'info' : 'debug'),
       format: oneOf(source, 'LOG_FORMAT', ['json', 'pretty'], nodeEnv === 'production' ? 'json' : 'pretty'),
@@ -451,6 +465,7 @@ function buildConfig(source: ConfigSource): AppConfig {
 
     providerRuntime: {
       cacheTtlSeconds: int(source, 'PROVIDER_RUNTIME_CACHE_TTL_SECONDS', 300),
+      recordCacheTtlSeconds: int(source, 'PROVIDER_RECORD_CACHE_TTL_SECONDS', 60),
       disposeGraceSeconds: int(source, 'PROVIDER_RUNTIME_DISPOSE_GRACE_SECONDS', 300),
     },
 
