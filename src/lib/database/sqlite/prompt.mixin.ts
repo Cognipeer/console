@@ -84,7 +84,13 @@ export function PromptMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
       return row ? this.mapPromptRow(row) : null;
     }
 
-    async listPrompts(filters?: { projectId?: string; search?: string }): Promise<IPrompt[]> {
+    async listPrompts(filters?: {
+      projectId?: string;
+      search?: string;
+      /** Page window. Omitted means every row, which is what unbounded lists cost. */
+      limit?: number;
+      offset?: number;
+    }): Promise<IPrompt[]> {
       const db = this.getTenantDb();
       const clauses: string[] = [];
       const params: Record<string, unknown> = {};
@@ -97,8 +103,22 @@ export function PromptMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
       }
 
       const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
-      const rows = db.prepare(`SELECT * FROM ${TABLES.prompts} ${where} ORDER BY updatedAt DESC, createdAt DESC`)
-        .all(params) as SqliteRow[];
+      // SQLite needs a LIMIT before it will honour an OFFSET; -1 means "all".
+      let pageSql = '';
+      if (filters?.limit && filters.limit > 0) {
+        pageSql = ' LIMIT @limit';
+        params.limit = filters.limit;
+      } else if (filters?.offset && filters.offset > 0) {
+        pageSql = ' LIMIT -1';
+      }
+      if (filters?.offset && filters.offset > 0) {
+        pageSql += ' OFFSET @offset';
+        params.offset = filters.offset;
+      }
+
+      const rows = db.prepare(
+        `SELECT * FROM ${TABLES.prompts} ${where} ORDER BY updatedAt DESC, createdAt DESC${pageSql}`,
+      ).all(params) as SqliteRow[];
       return rows.map((r) => this.mapPromptRow(r));
     }
 

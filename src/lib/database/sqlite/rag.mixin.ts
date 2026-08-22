@@ -321,7 +321,13 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
 
     async listRagDocuments(
       ragModuleKey: string,
-      filters?: { projectId?: string; status?: RagDocumentStatus; search?: string },
+      filters?: {
+        projectId?: string;
+        status?: RagDocumentStatus;
+        search?: string;
+        limit?: number;
+        offset?: number;
+      },
     ): Promise<IRagDocument[]> {
       const db = this.getTenantDb();
       const clauses: string[] = ['ragModuleKey = @ragModuleKey'];
@@ -335,20 +341,44 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
       if (filters?.status) { clauses.push('status = @status'); params.status = filters.status; }
       if (filters?.search) { clauses.push('fileName LIKE @search'); params.search = this.likePattern(filters.search); }
 
+      // SQLite needs a LIMIT before it will honour an OFFSET; -1 means "all".
+      let pagination = '';
+      if (filters?.limit && filters.limit > 0) {
+        pagination = ' LIMIT @limit';
+        params.limit = filters.limit;
+      } else if (filters?.offset && filters.offset > 0) {
+        pagination = ' LIMIT -1';
+      }
+      if (filters?.offset && filters.offset > 0) {
+        pagination += ' OFFSET @offset';
+        params.offset = filters.offset;
+      }
+
       const rows = db.prepare(
-        `SELECT * FROM ${TABLES.ragDocuments} WHERE ${clauses.join(' AND ')} ORDER BY createdAt DESC`,
+        `SELECT * FROM ${TABLES.ragDocuments} WHERE ${clauses.join(' AND ')} `
+        + `ORDER BY createdAt DESC${pagination}`,
       ).all(params) as SqliteRow[];
       return rows.map((r) => this.mapDocRow(r));
     }
 
-    async countRagDocuments(ragModuleKey: string, projectId?: string): Promise<number> {
+    async countRagDocuments(
+      ragModuleKey: string,
+      filters?: { projectId?: string; status?: RagDocumentStatus; search?: string },
+    ): Promise<number> {
       const db = this.getTenantDb();
+      // Mirrors listRagDocuments exactly, so a paginated total describes the
+      // same rows as the page it accompanies.
       const clauses: string[] = ['ragModuleKey = @ragModuleKey'];
       const params: Record<string, unknown> = { ragModuleKey };
-      if (projectId) {
-        const scopeFilter = this.buildProjectScopeFilter(projectId);
+      if (filters?.projectId !== undefined) {
+        const scopeFilter = this.buildProjectScopeFilter(filters.projectId);
         clauses.push(scopeFilter.clause);
         Object.assign(params, scopeFilter.params);
+      }
+      if (filters?.status) { clauses.push('status = @status'); params.status = filters.status; }
+      if (filters?.search) {
+        clauses.push('fileName LIKE @search');
+        params.search = this.likePattern(filters.search);
       }
       const row = db.prepare(
         `SELECT COUNT(*) as cnt FROM ${TABLES.ragDocuments} WHERE ${clauses.join(' AND ')}`,

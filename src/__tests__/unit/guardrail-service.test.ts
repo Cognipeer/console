@@ -321,6 +321,26 @@ describe('evaluateGuardrail', () => {
     (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
   });
 
+  it('reads the guardrail config once across repeated evaluations', async () => {
+    db.findGuardrailByKey.mockResolvedValue(makeGuardrail({ enabled: false }));
+
+    const call = () => evaluateGuardrail({
+      tenantDbName: TENANT_DB,
+      tenantId: TENANT_ID,
+      projectId: PROJECT_ID,
+      guardrailKey: 'my-guardrail',
+      text: 'hello',
+    });
+
+    // A guarded model resolves its guardrail on the request path, and twice
+    // over when both an input and an output guardrail are configured.
+    await call();
+    await call();
+    await call();
+
+    expect(db.findGuardrailByKey).toHaveBeenCalledTimes(1);
+  });
+
   it('returns passed=true, disabled=true, and no findings when guardrail is disabled', async () => {
     db.findGuardrailByKey.mockResolvedValue(
       makeGuardrail({

@@ -27,6 +27,8 @@ import { runReranker } from '@/lib/services/reranker';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { fireAndForget } from '@/lib/core/asyncTask';
 import { chunkConfigRequiresReindex, chunkText, resolveParentWindow, type ChunkContext } from './chunking';
+import { getCache } from '@/lib/core/cache';
+import { mapLimit } from '@/lib/core/concurrency';
 import { publishRagIngestJob } from './ragIngestJob';
 import {
   discardDocumentSource,
@@ -711,10 +713,21 @@ function withoutInlineSource(document: RagDocument): RagDocument {
   return trimmed;
 }
 
-export async function listRagDocuments(
+/** Rows `listRagDocuments` would return for the same filters, ignoring paging. */
+export async function countRagDocuments(
   tenantDbName: string,
   ragModuleKey: string,
   filters?: { projectId?: string; search?: string },
+): Promise<number> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  return db.countRagDocuments(ragModuleKey, filters);
+}
+
+export async function listRagDocuments(
+  tenantDbName: string,
+  ragModuleKey: string,
+  filters?: { projectId?: string; search?: string; limit?: number; offset?: number },
 ): Promise<RagDocument[]> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
@@ -1038,6 +1051,86 @@ export async function ingestFile(
   });
 }
 
+/* ── Parent-window source loading ─────────────────────────────────── */
+
+/** Documents whose source may be loaded for one query's parent windows. */
+const PARENT_SOURCE_MAX_DOCUMENTS = Math.max(
+  1,
+  Number(process.env.RAG_PARENT_SOURCE_MAX_DOCUMENTS ?? 25) || 25,
+);
+
+/** Source loads in flight at once. Each is a DB read or an object download. */
+const PARENT_SOURCE_CONCURRENCY = Math.max(
+  1,
+  Number(process.env.RAG_PARENT_SOURCE_CONCURRENCY ?? 4) || 4,
+);
+
+/** Seconds a loaded source is reused. 0 disables the cache. */
+const PARENT_SOURCE_CACHE_TTL_SECONDS = Math.max(
+  0,
+  Number(process.env.RAG_PARENT_SOURCE_CACHE_TTL_SECONDS ?? 60) || 0,
+);
+
+/**
+ * Largest source kept in the cache.
+ *
+ * The memory cache provider has no size ceiling of its own, so caching every
+ * source would trade a read-amplification problem for a memory one. Anything
+ * larger is still expanded, it is just re-read each time.
+ */
+const PARENT_SOURCE_CACHE_MAX_CHARS = Math.max(
+  0,
+  Number(process.env.RAG_PARENT_SOURCE_CACHE_MAX_CHARS ?? 65_536) || 0,
+);
+
+interface ParentSource {
+  text: string;
+  windowSize: number;
+}
+
+function parentSourceCacheKey(tenantDbName: string, documentId: string): string {
+  return `rag-parent-src:${tenantDbName}:${documentId}`;
+}
+
+/**
+ * A re-ingest within the TTL can serve the previous text for up to that long.
+ * The window is an enrichment around a chunk the vector store already matched,
+ * so a briefly stale one costs context quality, never correctness.
+ */
+async function readCachedParentSource(
+  tenantDbName: string,
+  documentId: string,
+): Promise<ParentSource | null> {
+  if (PARENT_SOURCE_CACHE_TTL_SECONDS <= 0) return null;
+  try {
+    const cache = await getCache();
+    return (await cache.get<ParentSource>(
+      parentSourceCacheKey(tenantDbName, documentId),
+    )) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeCachedParentSource(
+  tenantDbName: string,
+  documentId: string,
+  source: ParentSource,
+): Promise<void> {
+  if (PARENT_SOURCE_CACHE_TTL_SECONDS <= 0) return;
+  if (source.text.length > PARENT_SOURCE_CACHE_MAX_CHARS) return;
+  try {
+    const cache = await getCache();
+    await cache.set(
+      parentSourceCacheKey(tenantDbName, documentId),
+      source,
+      PARENT_SOURCE_CACHE_TTL_SECONDS,
+    );
+  } catch {
+    /* best-effort cache write */
+  }
+}
+
 /* ── Query (embed → vector search) ───────────────────────────────────── */
 
 /**
@@ -1067,23 +1160,45 @@ async function applyParentWindows(params: {
   const moduleWindowSize = ragModule.chunkConfig.parentWindowSize;
   if (!moduleWindowSize || moduleWindowSize <= 0 || matches.length === 0) return matches;
 
-  const documentIds = [...new Set(
+  const allDocumentIds = [...new Set(
     matches.map((m) => m.documentId).filter((id): id is string => Boolean(id)),
   )];
 
+  // Expansion reads a whole document per match — up to INLINE_SOURCE_MAX_CHARS
+  // from the row itself, or a full object download for anything larger. Left
+  // unbounded that is one query pulling megabytes of text into heap, so cap the
+  // documents, and say so rather than silently returning narrower context.
+  const documentIds = allDocumentIds.slice(0, PARENT_SOURCE_MAX_DOCUMENTS);
+  if (documentIds.length < allDocumentIds.length) {
+    logger.warn('Parent window expansion capped; remaining matches keep their chunk text', {
+      ragModuleKey: ragModule.key,
+      expanded: documentIds.length,
+      requested: allDocumentIds.length,
+    });
+  }
+
   const sources = new Map<string, { text: string; windowSize: number }>();
-  await Promise.all(documentIds.map(async (documentId) => {
+  await mapLimit(documentIds, PARENT_SOURCE_CONCURRENCY, async (documentId) => {
+    const cached = await readCachedParentSource(params.tenantDbName, documentId);
+    if (cached) {
+      sources.set(documentId, cached);
+      return;
+    }
+
     const document = await db.findRagDocumentById(documentId);
     if (!document) return;
     const text = await loadSourceText(
       params.tenantDbName, params.tenantId, params.projectId, document,
     );
     if (!text) return;
-    sources.set(documentId, {
+
+    const source = {
       text,
       windowSize: chunkConfigFor(ragModule, document).parentWindowSize ?? moduleWindowSize,
-    });
-  }));
+    };
+    sources.set(documentId, source);
+    await writeCachedParentSource(params.tenantDbName, documentId, source);
+  });
 
   if (sources.size === 0) {
     logger.warn('Parent windows are configured but no document source could be read', {

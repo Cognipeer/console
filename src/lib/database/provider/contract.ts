@@ -370,6 +370,9 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     provider?: ModelProviderType; // deprecated
     providerKey?: string;
     providerDriver?: string;
+    /** Page window. Omitting it returns every row. */
+    limit?: number;
+    offset?: number;
   }): Promise<IModel[]>;
   findModelById(id: string, projectId?: string): Promise<IModel | null>;
   findModelByKey(key: string, projectId?: string): Promise<IModel | null>;
@@ -380,7 +383,13 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IPrompt>;
   updatePrompt(id: string, data: Partial<IPrompt>): Promise<IPrompt | null>;
   deletePrompt(id: string): Promise<boolean>;
-  listPrompts(filters?: { projectId?: string; search?: string }): Promise<IPrompt[]>;
+  listPrompts(filters?: {
+    projectId?: string;
+    search?: string;
+    /** Page window. Omitting it returns every row. */
+    limit?: number;
+    offset?: number;
+  }): Promise<IPrompt[]>;
   findPromptById(id: string, projectId?: string): Promise<IPrompt | null>;
   findPromptByKey(key: string, projectId?: string): Promise<IPrompt | null>;
 
@@ -634,6 +643,17 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     windowSeconds: number,
     amount: number,
   ): Promise<{ count: number; resetAt: Date }>;
+  /**
+   * Increment several rate-limit counters together, returning one result per
+   * entry in input order.
+   *
+   * One guarded request checks a counter per metric per window — up to 25 —
+   * and issuing those as 25 separate round trips let a single request occupy
+   * every connection in the pool.
+   */
+  incrementRateLimits(
+    entries: Array<{ key: string; windowSeconds: number; amount: number }>,
+  ): Promise<Array<{ count: number; resetAt: Date }>>;
 
   // Guardrail operations (tenant-specific)
   createGuardrail(
@@ -987,9 +1007,23 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IRagDocument | null>;
   listRagDocuments(
     ragModuleKey: string,
-    filters?: { projectId?: string; status?: RagDocumentStatus; search?: string },
+    filters?: {
+      projectId?: string;
+      status?: RagDocumentStatus;
+      search?: string;
+      /** Rows to return. Omit for all of them — every row carries its source text. */
+      limit?: number;
+      offset?: number;
+    },
   ): Promise<IRagDocument[]>;
-  countRagDocuments(ragModuleKey: string, projectId?: string): Promise<number>;
+  /**
+   * Count the rows `listRagDocuments` would return for the same filters, so a
+   * paginated response can report an accurate total.
+   */
+  countRagDocuments(
+    ragModuleKey: string,
+    filters?: { projectId?: string; status?: RagDocumentStatus; search?: string },
+  ): Promise<number>;
 
   // ── RAG Chunk operations (tenant-specific) ──
   bulkInsertRagChunks(
@@ -1242,6 +1276,9 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     type?: ToolSourceType;
     status?: ToolStatus;
     search?: string;
+    /** Page window. Omitting it returns every row. */
+    limit?: number;
+    offset?: number;
   }): Promise<ITool[]>;
   countTools(projectId?: string): Promise<number>;
 
@@ -1285,6 +1322,9 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     projectId?: string;
     status?: AgentStatus;
     search?: string;
+    /** Page window. Omitting it returns every row. */
+    limit?: number;
+    offset?: number;
   }): Promise<IAgent[]>;
   countAgents(projectId?: string): Promise<number>;
 

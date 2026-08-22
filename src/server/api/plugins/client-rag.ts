@@ -2,6 +2,7 @@ import { Buffer } from 'node:buffer';
 import type { FastifyPluginAsync } from 'fastify';
 import type { IRagChunkConfig } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
+import { paginationMeta, readPagination } from '@/lib/api/pagination';
 import {
   createRagModule,
   deleteRagDocument,
@@ -9,6 +10,7 @@ import {
   getRagModule,
   ingestDocument,
   ingestFile,
+  countRagDocuments,
   listRagDocuments,
   listRagModules,
   queryRag,
@@ -183,8 +185,17 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { key } = request.params as { key: string };
-      const documents = await listRagDocuments(ctx.tenantDbName, key, {});
-      return reply.code(200).send({ documents });
+      // A module's corpus grows with every ingest and each row carries its
+      // source text, so this returns a page rather than the whole collection.
+      const page = readPagination(request.query);
+      const [documents, total] = await Promise.all([
+        listRagDocuments(ctx.tenantDbName, key, page),
+        countRagDocuments(ctx.tenantDbName, key),
+      ]);
+      return reply.code(200).send({
+        documents,
+        pagination: paginationMeta(page, { total }),
+      });
     } catch (error) {
       logger.error('List client RAG documents error', { error });
       return reply.code(500).send({

@@ -93,6 +93,18 @@ export class MemoryCacheProvider implements CacheProvider {
     return { count: existing.count, resetAt: new Date(existing.expiresAt) };
   }
 
+  async incrementCounters(
+    entries: Array<{ key: string; ttlSeconds: number; amount: number }>,
+  ): Promise<Array<{ count: number; resetAt: Date }>> {
+    // In-process map writes — there is no round trip to batch, so the loop is
+    // the batch. It exists so callers can use one shape for every provider.
+    const results: Array<{ count: number; resetAt: Date }> = [];
+    for (const { key, ttlSeconds, amount } of entries) {
+      results.push(await this.incrementCounter(key, ttlSeconds, amount));
+    }
+    return results;
+  }
+
   async acquireLock(key: string, ttlSeconds: number): Promise<string | undefined> {
     const now = Date.now();
     const existing = this.locks.get(key);

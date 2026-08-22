@@ -184,6 +184,8 @@ export async function listPrompts(
 	const prompts = await db.listPrompts({
 		projectId,
 		search: options?.search,
+		limit: options?.limit,
+		offset: options?.offset,
 	});
 
 	return prompts.map((prompt) => serializePrompt(prompt));

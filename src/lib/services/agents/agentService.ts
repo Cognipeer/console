@@ -798,7 +798,7 @@ export async function getAgentByKey(
 
 export async function listAgents(
     tenantDbName: string,
-    filters?: { projectId?: string; status?: IAgent['status']; search?: string },
+    filters?: { projectId?: string; status?: IAgent['status']; search?: string; limit?: number; offset?: number },
 ): Promise<IAgent[]> {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);

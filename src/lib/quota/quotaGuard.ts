@@ -110,18 +110,16 @@ function mergeLimits(base: QuotaLimits, override: QuotaLimits): QuotaLimits {
   return merged;
 }
 
-async function incrementRateLimitCounter(
+async function incrementRateLimitCounters(
   context: QuotaContext,
-  key: string,
-  windowSeconds: number,
-  amount: number,
-): Promise<{ count: number; resetAt: Date }> {
+  entries: Array<{ key: string; windowSeconds: number; amount: number }>,
+): Promise<Array<{ count: number; resetAt: Date }>> {
   const provider = getConfig().rateLimit.provider;
 
   if (provider === 'mongodb') {
     const db = await getDatabase();
     await db.switchToTenant(context.tenantDbName);
-    return db.incrementRateLimit(key, windowSeconds, amount);
+    return db.incrementRateLimits(entries);
   }
 
   const cache = await getCache();
@@ -131,12 +129,15 @@ async function incrementRateLimitCounter(
     );
   }
 
-  return cache.incrementCounter(
-    `${context.tenantDbName}:${key}`,
-    windowSeconds,
-    amount,
+  return cache.incrementCounters(
+    entries.map((entry) => ({
+      key: `${context.tenantDbName}:${entry.key}`,
+      ttlSeconds: entry.windowSeconds,
+      amount: entry.amount,
+    })),
   );
 }
+
 
 /**
  * The tenant license + policy set behind an effective-limit resolution.
@@ -457,9 +458,27 @@ export async function checkRateLimit(
 
   const errors: string[] = [];
 
-  const checkWindow = async (
-    type: 'requests' | 'tokens' | 'vectors' | 'files' | 'storageBytes',
-    windowName: 'perSecond' | 'perMinute' | 'perHour' | 'perDay' | 'perMonth',
+  /**
+   * One counter to increment: a metric type in one window.
+   *
+   * Collected first and issued as a single batch. Sent one at a time these are
+   * up to 25 concurrent round trips per request, enough for one caller to hold
+   * every connection in the pool while its limits are checked.
+   */
+  interface PlannedWindow {
+    type: 'requests' | 'tokens' | 'vectors' | 'files' | 'storageBytes';
+    windowName: 'perSecond' | 'perMinute' | 'perHour' | 'perDay' | 'perMonth';
+    limit: number;
+    key: string;
+    windowSeconds: number;
+    amount: number;
+  }
+
+  const planned: PlannedWindow[] = [];
+
+  const checkWindow = (
+    type: PlannedWindow['type'],
+    windowName: PlannedWindow['windowName'],
     limit: number | undefined,
     incrementBy: number,
   ) => {
@@ -480,126 +499,84 @@ export async function checkRateLimit(
     else if (context.tokenId) keyParts.push(`token:${context.tokenId}`);
     else keyParts.push(`tenant:${context.tenantId}`);
 
-    const key = keyParts.join(':');
+    planned.push({
+      type,
+      windowName,
+      limit,
+      key: keyParts.join(':'),
+      windowSeconds,
+      amount: incrementBy,
+    });
+  };
 
+  if (rateLimit.requests) {
+    const r = rateLimit.requests;
+    checkWindow('requests', 'perSecond', r.perSecond, cost.requests || 0);
+    checkWindow('requests', 'perMinute', r.perMinute, cost.requests || 0);
+    checkWindow('requests', 'perHour', r.perHour, cost.requests || 0);
+    checkWindow('requests', 'perDay', r.perDay, cost.requests || 0);
+    checkWindow('requests', 'perMonth', r.perMonth, cost.requests || 0);
+  }
+
+  if (rateLimit.tokens) {
+    const t = rateLimit.tokens;
+    checkWindow('tokens', 'perSecond', t.perSecond, cost.tokens || 0);
+    checkWindow('tokens', 'perMinute', t.perMinute, cost.tokens || 0);
+    checkWindow('tokens', 'perHour', t.perHour, cost.tokens || 0);
+    checkWindow('tokens', 'perDay', t.perDay, cost.tokens || 0);
+    checkWindow('tokens', 'perMonth', t.perMonth, cost.tokens || 0);
+  }
+
+  if (rateLimit.vectors) {
+    const v = rateLimit.vectors;
+    checkWindow('vectors', 'perSecond', v.perSecond, cost.vectors || 0);
+    checkWindow('vectors', 'perMinute', v.perMinute, cost.vectors || 0);
+    checkWindow('vectors', 'perHour', v.perHour, cost.vectors || 0);
+    checkWindow('vectors', 'perDay', v.perDay, cost.vectors || 0);
+    checkWindow('vectors', 'perMonth', v.perMonth, cost.vectors || 0);
+  }
+
+  if (rateLimit.files) {
+    const f = rateLimit.files;
+    checkWindow('files', 'perSecond', f.perSecond, cost.files || 0);
+    checkWindow('files', 'perMinute', f.perMinute, cost.files || 0);
+    checkWindow('files', 'perHour', f.perHour, cost.files || 0);
+    checkWindow('files', 'perDay', f.perDay, cost.files || 0);
+    checkWindow('files', 'perMonth', f.perMonth, cost.files || 0);
+  }
+
+  if (rateLimit.storage) {
+    const s = rateLimit.storage;
+    checkWindow('storageBytes', 'perSecond', s.perSecond, cost.storageBytes || 0);
+    checkWindow('storageBytes', 'perMinute', s.perMinute, cost.storageBytes || 0);
+    checkWindow('storageBytes', 'perHour', s.perHour, cost.storageBytes || 0);
+    checkWindow('storageBytes', 'perDay', s.perDay, cost.storageBytes || 0);
+    checkWindow('storageBytes', 'perMonth', s.perMonth, cost.storageBytes || 0);
+  }
+
+  if (planned.length > 0) {
     try {
-      const { count } = await incrementRateLimitCounter(
-        context,
-        key,
-        windowSeconds,
-        incrementBy,
-      );
-      if (count > limit) {
-        errors.push(
-          `Rate limit exceeded for ${type} ${windowName} (${count}/${limit})`,
-        );
-      }
+      const counts = await incrementRateLimitCounters(context, planned);
+      counts.forEach(({ count }, index) => {
+        const window = planned[index];
+        if (count > window.limit) {
+          errors.push(
+            `Rate limit exceeded for ${window.type} ${window.windowName} `
+            + `(${count}/${window.limit})`,
+          );
+        }
+      });
     } catch (error) {
+      // The batch fails as a unit, where separate calls used to fail one
+      // counter at a time. Enforcement being unavailable is the same answer
+      // either way, and a partially-applied set of increments would leave the
+      // windows disagreeing about how much of this request was counted.
       logger.error('Rate limit check failed', {
         error: error instanceof Error ? error.message : String(error),
       });
       errors.push('Rate limit enforcement unavailable');
     }
-  };
-
-  const promises: Promise<void>[] = [];
-
-  if (rateLimit.requests) {
-    const r = rateLimit.requests;
-    promises.push(
-      checkWindow('requests', 'perSecond', r.perSecond, cost.requests || 0),
-    );
-    promises.push(
-      checkWindow('requests', 'perMinute', r.perMinute, cost.requests || 0),
-    );
-    promises.push(
-      checkWindow('requests', 'perHour', r.perHour, cost.requests || 0),
-    );
-    promises.push(
-      checkWindow('requests', 'perDay', r.perDay, cost.requests || 0),
-    );
-    promises.push(
-      checkWindow('requests', 'perMonth', r.perMonth, cost.requests || 0),
-    );
   }
-
-  if (rateLimit.tokens) {
-    const t = rateLimit.tokens;
-    promises.push(
-      checkWindow('tokens', 'perSecond', t.perSecond, cost.tokens || 0),
-    );
-    promises.push(
-      checkWindow('tokens', 'perMinute', t.perMinute, cost.tokens || 0),
-    );
-    promises.push(
-      checkWindow('tokens', 'perHour', t.perHour, cost.tokens || 0),
-    );
-    promises.push(
-      checkWindow('tokens', 'perDay', t.perDay, cost.tokens || 0),
-    );
-    promises.push(
-      checkWindow('tokens', 'perMonth', t.perMonth, cost.tokens || 0),
-    );
-  }
-
-  if (rateLimit.vectors) {
-    const v = rateLimit.vectors;
-    promises.push(
-      checkWindow('vectors', 'perSecond', v.perSecond, cost.vectors || 0),
-    );
-    promises.push(
-      checkWindow('vectors', 'perMinute', v.perMinute, cost.vectors || 0),
-    );
-    promises.push(
-      checkWindow('vectors', 'perHour', v.perHour, cost.vectors || 0),
-    );
-    promises.push(
-      checkWindow('vectors', 'perDay', v.perDay, cost.vectors || 0),
-    );
-    promises.push(
-      checkWindow('vectors', 'perMonth', v.perMonth, cost.vectors || 0),
-    );
-  }
-
-  if (rateLimit.files) {
-    const f = rateLimit.files;
-    promises.push(
-      checkWindow('files', 'perSecond', f.perSecond, cost.files || 0),
-    );
-    promises.push(
-      checkWindow('files', 'perMinute', f.perMinute, cost.files || 0),
-    );
-    promises.push(
-      checkWindow('files', 'perHour', f.perHour, cost.files || 0),
-    );
-    promises.push(
-      checkWindow('files', 'perDay', f.perDay, cost.files || 0),
-    );
-    promises.push(
-      checkWindow('files', 'perMonth', f.perMonth, cost.files || 0),
-    );
-  }
-
-  if (rateLimit.storage) {
-    const s = rateLimit.storage;
-    promises.push(
-      checkWindow('storageBytes', 'perSecond', s.perSecond, cost.storageBytes || 0),
-    );
-    promises.push(
-      checkWindow('storageBytes', 'perMinute', s.perMinute, cost.storageBytes || 0),
-    );
-    promises.push(
-      checkWindow('storageBytes', 'perHour', s.perHour, cost.storageBytes || 0),
-    );
-    promises.push(
-      checkWindow('storageBytes', 'perDay', s.perDay, cost.storageBytes || 0),
-    );
-    promises.push(
-      checkWindow('storageBytes', 'perMonth', s.perMonth, cost.storageBytes || 0),
-    );
-  }
-
-  await Promise.all(promises);
 
   if (errors.length > 0) {
     return { allowed: false, reason: errors[0], effectiveLimits };

@@ -107,7 +107,7 @@ export async function requireApiTokenFromHeader(
   fireAndForget('token-last-used', async () => {
     const bgDb = await getDatabase();
     await bgDb.updateTokenLastUsedByHash(tokenHash);
-  });
+  }, { droppable: true });
 
   await db.switchToTenant(tenant.dbName);
 

@@ -816,7 +816,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
             events: insertedEvents,
           });
         }
-      });
+      }, { droppable: true });
 
       return reply.code(200).send({
         eventsStored: mapped.events.length,
@@ -1077,7 +1077,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
           events: createdEvents,
           previousEvents,
         });
-      });
+      }, { droppable: true });
 
       return reply.code(200).send({
         eventsStored: events.length,
@@ -1221,7 +1221,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
             actorType: attribution.actorType,
           });
         }
-      });
+      }, { droppable: true });
 
       return reply.code(200).send({
         sessionId,
@@ -1357,7 +1357,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
           reasoningTokens: diagnostics.reasoningTokens,
           toolsUsed: collectEventToolNames(event),
         }, ctx.projectId);
-      });
+      }, { droppable: true });
 
       return reply.code(200).send({
         eventId: event.id,
@@ -1460,7 +1460,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
           totalInputTokens: getSummaryNumber(mergedSummary, 'totalInputTokens'),
           totalOutputTokens: getSummaryNumber(mergedSummary, 'totalOutputTokens'),
         }, ctx.projectId);
-      });
+      }, { droppable: true });
 
       return reply.code(200).send({
         durationMs,
