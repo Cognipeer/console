@@ -211,6 +211,7 @@ async function runToolCall(
     void logMcpRequest(log.tenantDbName, {
       tenantId: log.tenantId,
       projectId: log.projectId,
+      serverId: String(server._id),
       serverKey: server.key,
       toolName,
       status: 'success',
@@ -236,6 +237,7 @@ async function runToolCall(
     void logMcpRequest(log.tenantDbName, {
       tenantId: log.tenantId,
       projectId: log.projectId,
+      serverId: String(server._id),
       serverKey: server.key,
       toolName,
       status: 'error',

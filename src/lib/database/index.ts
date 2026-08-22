@@ -320,6 +320,7 @@ export type {
   IMcpToolAnnotations,
   IMcpRequestLog,
   IMcpRequestAggregate,
+  McpLogServerScope,
   IMcpAuditLog,
   McpAuditAction,
   McpServerStatus,

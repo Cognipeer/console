@@ -103,6 +103,7 @@ async function runPublicToolCall(
     void logMcpRequest(tenant.dbName, {
       tenantId: server.tenantId,
       projectId: server.projectId,
+      serverId: String(server._id),
       serverKey: server.key,
       toolName,
       status: 'success',
@@ -122,6 +123,7 @@ async function runPublicToolCall(
     void logMcpRequest(tenant.dbName, {
       tenantId: server.tenantId,
       projectId: server.projectId,
+      serverId: String(server._id),
       serverKey: server.key,
       toolName,
       status: 'error',

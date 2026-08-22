@@ -38,12 +38,12 @@ export async function GET(
     const payload: Record<string, unknown> = { server: serializeMcpServerFull(server) };
 
     if (includeLogs) {
-      const logs = await listMcpRequestLogs(tenantDbName, server.key, { limit: 50 });
+      const logs = await listMcpRequestLogs(tenantDbName, server, { limit: 50 });
       payload.logs = logs;
     }
 
     if (includeAggregate) {
-      const aggregate = await aggregateMcpRequestLogs(tenantDbName, server.key, { groupBy: 'day' });
+      const aggregate = await aggregateMcpRequestLogs(tenantDbName, server, { groupBy: 'day' });
       payload.aggregate = aggregate;
     }
 

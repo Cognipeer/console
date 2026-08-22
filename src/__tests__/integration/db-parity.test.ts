@@ -897,7 +897,11 @@ describeForEachProvider('MCP Hub servers + audit logs', (getDb) => {
       errorMessage: 'nope',
     });
 
-    const logs = await db.listMcpRequestLogs('srv-a');
+    const logs = await db.listMcpRequestLogs({
+      serverId: 'nonexistent-server-id',
+      serverKey: 'srv-a',
+      projectId: 'proj-1',
+    });
     expect(logs).toHaveLength(1);
     expect(logs[0].callerType).toBe('public');
     expect(logs[0].transport).toBe('jsonrpc');

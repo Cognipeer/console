@@ -13,10 +13,37 @@ import type {
   IMcpAuditLog,
   IMcpRequestLog,
   IMcpRequestAggregate,
+  McpLogServerScope,
   McpServerStatus,
 } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
+
+/**
+ * Build the WHERE clause matching a server's request logs by durable
+ * `serverId` primarily. The `OR` branch only extends the match to rows
+ * written before `serverId` existed (`serverId IS NULL`) — scoped to this
+ * server's own `serverKey` + `projectId`, and no older than this server's
+ * own `createdAt`, so a deleted-and-recreated server can never adopt its
+ * predecessor's logs just because they share the same name-derived key.
+ * Mutates `params` with the scope's bound parameters.
+ */
+function mcpLogScopeClause(scope: McpLogServerScope, params: Record<string, unknown>): string {
+  params.scopeServerId = scope.serverId;
+  params.scopeServerKey = scope.serverKey;
+  const legacyParts = ['serverId IS NULL', 'serverKey = @scopeServerKey'];
+  if (scope.projectId !== undefined) {
+    params.scopeProjectId = scope.projectId;
+    legacyParts.push('projectId = @scopeProjectId');
+  } else {
+    legacyParts.push('projectId IS NULL');
+  }
+  if (scope.createdAt) {
+    params.scopeCreatedAt = scope.createdAt.toISOString();
+    legacyParts.push('createdAt >= @scopeCreatedAt');
+  }
+  return `(serverId = @scopeServerId OR (${legacyParts.join(' AND ')}))`;
+}
 
 export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TBase) {
   return class McpServerOps extends Base {
@@ -178,11 +205,11 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
 
       db.prepare(`
         INSERT INTO ${TABLES.mcpRequestLogs}
-        (id, tenantId, projectId, serverKey, toolName, status,
+        (id, tenantId, projectId, serverId, serverKey, toolName, status,
          requestPayload, responsePayload, errorMessage, latencyMs, callerTokenId,
          callerType, callerUserId, transport, sourceType, sessionId, viaServerKey,
          userId, apiTokenId, actorType, createdAt)
-        VALUES (@id, @tenantId, @projectId, @serverKey, @toolName, @status,
+        VALUES (@id, @tenantId, @projectId, @serverId, @serverKey, @toolName, @status,
          @requestPayload, @responsePayload, @errorMessage, @latencyMs, @callerTokenId,
          @callerType, @callerUserId, @transport, @sourceType, @sessionId, @viaServerKey,
          @userId, @apiTokenId, @actorType, @createdAt)
@@ -190,6 +217,7 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         id,
         tenantId: log.tenantId,
         projectId: log.projectId ?? null,
+        serverId: log.serverId ?? null,
         serverKey: log.serverKey,
         toolName: log.toolName,
         status: log.status,
@@ -214,7 +242,7 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
     }
 
     async listMcpRequestLogs(
-      serverKey: string,
+      scope: McpLogServerScope,
       options?: {
         limit?: number;
         skip?: number;
@@ -225,8 +253,8 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       },
     ): Promise<IMcpRequestLog[]> {
       const db = this.getTenantDb();
-      const clauses: string[] = ['serverKey = @serverKey'];
-      const params: Record<string, unknown> = { serverKey };
+      const params: Record<string, unknown> = {};
+      const clauses: string[] = [mcpLogScopeClause(scope, params)];
       if (options?.status) { clauses.push('status = @status'); params.status = options.status; }
       if (options?.from) { clauses.push('createdAt >= @from'); params.from = options.from.toISOString(); }
       if (options?.to) { clauses.push('createdAt <= @to'); params.to = options.to.toISOString(); }
@@ -263,12 +291,12 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
     }
 
     async countMcpRequestLogs(
-      serverKey: string,
+      scope: McpLogServerScope,
       options?: { from?: Date; to?: Date; status?: string; keyword?: string },
     ): Promise<number> {
       const db = this.getTenantDb();
-      const clauses: string[] = ['serverKey = @serverKey'];
-      const params: Record<string, unknown> = { serverKey };
+      const params: Record<string, unknown> = {};
+      const clauses: string[] = [mcpLogScopeClause(scope, params)];
 
       if (options?.status) { clauses.push('status = @status'); params.status = options.status; }
       if (options?.from) { clauses.push('createdAt >= @from'); params.from = options.from.toISOString(); }
@@ -287,12 +315,12 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
     }
 
     async aggregateMcpRequestLogs(
-      serverKey: string,
+      scope: McpLogServerScope,
       options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month' },
     ): Promise<IMcpRequestAggregate> {
       const db = this.getTenantDb();
-      const clauses: string[] = ['serverKey = @serverKey'];
-      const params: Record<string, unknown> = { serverKey };
+      const params: Record<string, unknown> = {};
+      const clauses: string[] = [mcpLogScopeClause(scope, params)];
       if (options?.from) { clauses.push('createdAt >= @from'); params.from = options.from.toISOString(); }
       if (options?.to) { clauses.push('createdAt <= @to'); params.to = options.to.toISOString(); }
       const where = `WHERE ${clauses.join(' AND ')}`;
@@ -342,7 +370,7 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       }));
 
       return {
-        serverKey,
+        serverKey: scope.serverKey,
         totalRequests: (totalsRow?.totalRequests as number) ?? 0,
         successCount: (totalsRow?.successCount as number) ?? 0,
         errorCount: (totalsRow?.errorCount as number) ?? 0,
@@ -444,6 +472,7 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         _id: r.id as string,
         tenantId: r.tenantId as string,
         projectId: r.projectId as string | undefined,
+        serverId: (r.serverId as string | null) ?? undefined,
         serverKey: r.serverKey as string,
         toolName: r.toolName as string,
         status: r.status as IMcpRequestLog['status'],
