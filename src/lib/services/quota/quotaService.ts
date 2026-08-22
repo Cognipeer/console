@@ -1,6 +1,39 @@
 import { getDatabase, type IQuotaPolicy } from '@/lib/database';
+import { getCache } from '@/lib/core/cache';
+import { createLogger } from '@/lib/core/logger';
 import { LicenseManager } from '@/lib/license/license-manager';
+import { quotaPolicyCacheKey } from '@/lib/quota/quotaGuard';
 import type { QuotaDomain, QuotaPolicy, QuotaPolicyInput, QuotaScope } from '@/lib/quota/types';
+
+const logger = createLogger('quota-service');
+
+/**
+ * Drop the cached license + policy set so an edit applies to the next request
+ * instead of after QUOTA_POLICY_CACHE_TTL_SECONDS.
+ *
+ * Best-effort, and only for a mutation that names a project. A tenant-wide
+ * policy carries no project yet applies to every one of them, and the cache is
+ * keyed per project — there is no single key to drop, so those edits land on
+ * the TTL instead.
+ */
+async function invalidatePolicyCache(
+  tenantDbName: string,
+  tenantId: string,
+  projectId?: string,
+): Promise<void> {
+  if (!projectId) return;
+
+  try {
+    const cache = await getCache();
+    await cache.del(quotaPolicyCacheKey(tenantDbName, tenantId, projectId));
+  } catch (error) {
+    logger.warn('Failed to invalidate quota policy cache; entry expires on TTL', {
+      tenantId,
+      projectId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
 
 function normalizePolicy(policy: IQuotaPolicy): QuotaPolicy {
   return {
@@ -63,6 +96,8 @@ export async function createQuotaPolicy(
     updatedAt: now,
   });
 
+  await invalidatePolicyCache(tenantDbName, tenantId, payload.projectId);
+
   return normalizePolicy(policy);
 }
 
@@ -81,6 +116,8 @@ export async function updateQuotaPolicy(
     updatedAt: new Date(),
   }, projectId);
 
+  await invalidatePolicyCache(tenantDbName, tenantId, projectId);
+
   return updated ? normalizePolicy(updated) : null;
 }
 
@@ -92,5 +129,9 @@ export async function deleteQuotaPolicy(
 ): Promise<boolean> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
-  return db.deleteQuotaPolicy(id, tenantId, projectId);
+  const deleted = await db.deleteQuotaPolicy(id, tenantId, projectId);
+
+  await invalidatePolicyCache(tenantDbName, tenantId, projectId);
+
+  return deleted;
 }

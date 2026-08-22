@@ -138,12 +138,91 @@ async function incrementRateLimitCounter(
   );
 }
 
+/**
+ * The tenant license + policy set behind an effective-limit resolution.
+ *
+ * Cached as the *inputs*, never as the merged result: the merge depends on the
+ * caller's user, token, resource, provider and domain, so caching the outcome
+ * would need a key per requester and could hand one caller another's limits.
+ * Filtering stays on the request path; only the two DB reads are amortized.
+ *
+ * TREAT AS READ-ONLY. The memory cache provider hands back the stored object
+ * itself, so mutating either field would corrupt it for every later request on
+ * this node. `mergeLimits` builds new objects rather than writing into its base
+ * for exactly this reason.
+ */
+interface QuotaPolicySource {
+  licenseDefaults: QuotaLimits;
+  policies: IQuotaPolicy[];
+}
+
+export function quotaPolicyCacheKey(
+  tenantDbName: string,
+  tenantId: string,
+  projectId: string,
+): string {
+  return `quota:policy-src:${tenantDbName}:${tenantId}:${projectId}`;
+}
+
+/**
+ * Load the tenant license defaults and quota policies, through a short-lived
+ * cache.
+ *
+ * Every guarded request used to re-read the tenant document and the policy
+ * collection, and an inference request runs three resolutions before the model
+ * is even called — six reads against a 10-connection pool on the hottest path
+ * in the product. Policy edits invalidate this explicitly (see quotaService);
+ * the TTL is the backstop for edits made elsewhere.
+ */
+async function loadPolicySource(
+  context: QuotaContext,
+): Promise<QuotaPolicySource> {
+  const ttlSeconds = getConfig().quota.policyCacheTtlSeconds;
+  const cacheKey = quotaPolicyCacheKey(
+    context.tenantDbName,
+    context.tenantId,
+    context.projectId,
+  );
+
+  if (ttlSeconds > 0) {
+    try {
+      const cache = await getCache();
+      const cached = await cache.get<QuotaPolicySource>(cacheKey);
+      if (cached) return cached;
+    } catch {
+      /* cache miss or unavailable — fall through to the database */
+    }
+  }
+
+  const db = await getDatabase();
+  // Read the tenant before switching databases: fetchPolicies switches the
+  // connection to the tenant DB, and the tenant record lives in the main one.
+  const tenant = await db.findTenantById(context.tenantId);
+  const licenseDefaults = LicenseManager.getQuotaLimitsForTenant(tenant);
+  const policies = await fetchPolicies(
+    context.tenantDbName,
+    context.tenantId,
+    context.projectId,
+  );
+
+  const source: QuotaPolicySource = { licenseDefaults, policies };
+
+  if (ttlSeconds > 0) {
+    try {
+      const cache = await getCache();
+      await cache.set(cacheKey, source, ttlSeconds);
+    } catch {
+      /* best-effort cache write */
+    }
+  }
+
+  return source;
+}
+
 export async function resolveEffectiveLimits(
   context: QuotaContext,
 ): Promise<QuotaLimits> {
-  const db = await getDatabase();
-  const tenant = await db.findTenantById(context.tenantId);
-  const licenseDefaults = LicenseManager.getQuotaLimitsForTenant(tenant);
+  const { licenseDefaults, policies } = await loadPolicySource(context);
   let effectiveLimits: QuotaLimits = {
     ...licenseDefaults,
     quotas: { ...licenseDefaults.quotas },
@@ -151,12 +230,6 @@ export async function resolveEffectiveLimits(
       ? { ...licenseDefaults.rateLimit }
       : undefined,
   };
-
-  const policies = await fetchPolicies(
-    context.tenantDbName,
-    context.tenantId,
-    context.projectId,
-  );
 
   const applicable = policies
     .filter((p) => matchesScope(p, context) && matchesDomain(p, context))

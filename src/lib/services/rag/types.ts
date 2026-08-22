@@ -85,6 +85,14 @@ export interface RagIngestRequest {
    * embedded twice and answered from twice.
    */
   force?: boolean;
+  /**
+   * Persist the document and hand chunking + embedding to the ingest queue
+   * instead of running them inside the caller's request.
+   *
+   * The returned document is `pending`; it becomes `indexed` (or `failed`) once
+   * the job runs, and is not searchable until then.
+   */
+  deferIndexing?: boolean;
   createdBy: string;
 }
 

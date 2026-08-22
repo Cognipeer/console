@@ -19,6 +19,12 @@ interface InvokePayload {
   runtimeHeaders?: Record<string, string>;
 }
 
+/**
+ * Concurrent MCP tool invocations per node. Stdio servers stay bounded by
+ * MCP_STDIO_MAX_CONCURRENT underneath this.
+ */
+const CONCURRENCY = Math.max(1, Number(process.env.MCP_INVOKE_CONCURRENCY ?? 4) || 4);
+
 export async function startMcpQueueConsumer(): Promise<void> {
   if (started) return;
   const queue = await getQueue();
@@ -28,7 +34,7 @@ export async function startMcpQueueConsumer(): Promise<void> {
       return executeMcpToolLocal(payload.server, payload.toolName, payload.args, payload.runtimeHeaders);
     }
     throw new Error(`Unknown mcp job: ${ctx.name}`);
-  });
+  }, { concurrency: CONCURRENCY });
   started = true;
-  log.info('MCP queue consumer registered');
+  log.info('MCP queue consumer registered', { concurrency: CONCURRENCY });
 }

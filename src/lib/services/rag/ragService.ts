@@ -27,6 +27,7 @@ import { runReranker } from '@/lib/services/reranker';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { fireAndForget } from '@/lib/core/asyncTask';
 import { chunkConfigRequiresReindex, chunkText, resolveParentWindow, type ChunkContext } from './chunking';
+import { publishRagIngestJob } from './ragIngestJob';
 import {
   discardDocumentSource,
   hashSourceText,
@@ -793,7 +794,7 @@ export async function ingestDocument(
     fileName: request.fileName,
     contentType: request.contentType,
     size: Buffer.byteLength(request.content, 'utf-8'),
-    status: 'processing',
+    status: request.deferIndexing ? 'pending' : 'processing',
     chunkConfig: request.chunkConfig,
     metadata: request.metadata,
     createdBy: request.createdBy,
@@ -801,6 +802,19 @@ export async function ingestDocument(
   });
 
   const documentId = String(docRecord._id);
+
+  // The source is committed above, so publishing after it means a crash in
+  // between costs the indexing (recovered by the boot sweep), never the content.
+  if (request.deferIndexing) {
+    await publishRagIngestJob({
+      tenantDbName,
+      tenantId,
+      projectId,
+      ragModuleKey: request.ragModuleKey,
+      documentId,
+    });
+    return withoutInlineSource(docRecord);
+  }
 
   try {
     const chunkCount = await indexDocumentContent({
@@ -834,6 +848,90 @@ export async function ingestDocument(
     await db.updateRagDocument(documentId, {
       status: 'failed',
       errorMessage: msg,
+    });
+    throw error;
+  }
+}
+
+/**
+ * Index a document whose source is already stored — the deferred half of
+ * `ingestDocument`, run by the ingest queue consumer.
+ *
+ * Idempotent on the way in: a document another attempt already indexed returns
+ * untouched, so a duplicate delivery (or the boot sweep racing a job that
+ * survived the restart) cannot embed the same content twice.
+ */
+export async function indexPendingRagDocument(
+  tenantDbName: string,
+  tenantId: string,
+  projectId: string | undefined,
+  ragModuleKey: string,
+  documentId: string,
+): Promise<void> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+
+  const doc = await db.findRagDocumentById(documentId);
+  if (!doc) {
+    logger.warn('Skipping ingest job for a document that no longer exists', {
+      documentId,
+      ragModuleKey,
+    });
+    return;
+  }
+  if (doc.status === 'indexed') return;
+
+  const ragModule = await db.findRagModuleByKey(ragModuleKey, projectId);
+  if (!ragModule) {
+    await db.updateRagDocument(documentId, {
+      status: 'failed',
+      errorMessage: `Knowledge Engine module "${ragModuleKey}" not found`,
+    });
+    return;
+  }
+
+  const text = await loadSourceText(tenantDbName, tenantId, projectId, doc);
+  if (!text) {
+    await db.updateRagDocument(documentId, {
+      status: 'failed',
+      errorMessage: 'Stored source text is unavailable for this document',
+    });
+    return;
+  }
+
+  await db.updateRagDocument(documentId, { status: 'processing' });
+
+  try {
+    const chunkCount = await indexDocumentContent({
+      db,
+      tenantDbName,
+      tenantId,
+      projectId,
+      ragModule,
+      chunkConfig: chunkConfigFor(ragModule, { chunkConfig: doc.chunkConfig }),
+      documentId,
+      fileName: doc.fileName,
+      text,
+      metadata: doc.metadata,
+    });
+
+    await db.updateRagDocument(documentId, {
+      status: 'indexed',
+      chunkCount,
+      lastIndexedAt: new Date(),
+    });
+
+    await db.updateRagModule(String(ragModule._id), {
+      totalDocuments: (ragModule.totalDocuments ?? 0) + 1,
+      totalChunks: (ragModule.totalChunks ?? 0) + chunkCount,
+    } as Partial<IRagModule>);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : 'Ingestion failed';
+    await db.updateRagDocument(documentId, { status: 'failed', errorMessage: msg });
+    logger.error('Deferred Knowledge Engine ingest failed', {
+      documentId,
+      ragModuleKey,
+      error: msg,
     });
     throw error;
   }
@@ -900,6 +998,12 @@ export async function ingestFile(
     metadata?: Record<string, unknown>;
     chunkConfig?: IRagChunkConfig;
     force?: boolean;
+    /**
+     * Defer chunking + embedding to the ingest queue. File→text conversion
+     * still runs here: the bytes have to become text before the document can be
+     * persisted, and the stored text is what the job indexes.
+     */
+    deferIndexing?: boolean;
     createdBy: string;
   },
 ): Promise<RagDocument> {
@@ -925,6 +1029,7 @@ export async function ingestFile(
     contentType: request.contentType,
     chunkConfig: request.chunkConfig,
     force: request.force,
+    deferIndexing: request.deferIndexing,
     metadata: {
       ...request.metadata,
       _sourceType: isPlainText ? 'text' : 'converted',

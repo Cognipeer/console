@@ -33,6 +33,7 @@ interface ElasticsearchSettings {
 
 type EsClient = {
   ping: () => Promise<boolean>;
+  close: () => Promise<void>;
   indices: {
     exists: (p: { index: string }) => Promise<boolean>;
     create: (p: { index: string; mappings: unknown }) => Promise<unknown>;
@@ -202,6 +203,9 @@ export const ElasticsearchVectorProviderContract: ProviderContract<
     const client: EsClient = buildEsClient(credentials, settings, Client);
 
     const runtime: VectorProviderRuntime = {
+      async close(): Promise<void> {
+        await client.close();
+      },
       async createIndex(input: CreateVectorIndexInput): Promise<VectorIndexHandle> {
         const indexName = input.name || settings.indexName;
         if (!indexName) {

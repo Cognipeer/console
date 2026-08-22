@@ -1198,7 +1198,7 @@ export async function handleChatCompletion(params: {
     let asyncIterator: AsyncIterable<AIMessageChunk>;
     if (disableProviderStreaming) {
       const eagerMessage = await withResilience(
-        () => chatModel.invoke(messages, callOptions),
+        (signal) => chatModel.invoke(messages, { ...callOptions, signal }),
         { key: `chat:${model.providerKey}` },
       );
       asyncIterator = (async function* () {
@@ -1215,7 +1215,17 @@ export async function handleChatCompletion(params: {
       })();
     } else {
       asyncIterator = await withResilience(
-        () => chatModel.stream!(messages, streamCallOptions) as Promise<AsyncIterable<AIMessageChunk>>,
+        (signal) => {
+          // The stream already aborts on client disconnect; chain the gateway's
+          // timeout into the same controller so a provider that never opens the
+          // stream is cut loose too, instead of holding the socket.
+          signal.addEventListener(
+            'abort',
+            () => abortController.abort(signal.reason),
+            { once: true },
+          );
+          return chatModel.stream!(messages, streamCallOptions) as Promise<AsyncIterable<AIMessageChunk>>;
+        },
         { key: `chat-stream:${model.providerKey}` },
       );
     }
@@ -1512,7 +1522,7 @@ export async function handleChatCompletion(params: {
   }
 
   const aiMessage = await withResilience(
-    () => chatModel.invoke(messages, callOptions),
+    (signal) => chatModel.invoke(messages, { ...callOptions, signal }),
     { key: `chat:${model.providerKey}` },
   );
 

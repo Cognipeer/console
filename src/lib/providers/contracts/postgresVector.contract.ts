@@ -261,6 +261,9 @@ export const PostgresVectorProviderContract: ProviderContract<
     }
 
     const runtime: VectorProviderRuntime = {
+      async close(): Promise<void> {
+        await pool.end();
+      },
       async createIndex(input: CreateVectorIndexInput): Promise<VectorIndexHandle> {
         const dim = input.dimension || dimensions;
         const metric = input.metric ?? 'cosine';
