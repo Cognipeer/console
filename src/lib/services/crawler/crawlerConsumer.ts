@@ -27,6 +27,15 @@ interface RunPayload {
   jobId: string;
 }
 
+/**
+ * Concurrent crawl jobs per node.
+ *
+ * Kept lower than the other consumers on purpose: a single job already fans out
+ * to as many as 16 concurrent fetches and may drive a Chromium instance, so the
+ * real footprint is this number multiplied by that fan-out.
+ */
+const CONCURRENCY = Math.max(1, Number(process.env.CRAWLER_RUN_CONCURRENCY ?? 2) || 2);
+
 export async function startCrawlerQueueConsumer(): Promise<void> {
   if (started) return;
   const queue = await getQueue();
@@ -37,7 +46,7 @@ export async function startCrawlerQueueConsumer(): Promise<void> {
       return { ok: true };
     }
     throw new Error(`Unknown crawler job: ${ctx.name}`);
-  });
+  }, { concurrency: CONCURRENCY });
   started = true;
-  log.info('Crawler queue consumer registered');
+  log.info('Crawler queue consumer registered', { concurrency: CONCURRENCY });
 }

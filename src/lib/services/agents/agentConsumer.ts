@@ -20,6 +20,15 @@ import {
 const log = createLogger('agent.consumer');
 let started = false;
 
+/**
+ * Concurrent agent turns per node.
+ *
+ * These jobs are LLM round-trips — almost entirely I/O wait — so serialising
+ * them head-of-line blocked every cross-node turn behind the slowest one, and
+ * the queue's 60s invoke timeout then failed the ones still waiting.
+ */
+const CONCURRENCY = Math.max(1, Number(process.env.AGENT_CHAT_CONCURRENCY ?? 4) || 4);
+
 export async function startAgentQueueConsumer(): Promise<void> {
   if (started) return;
   const queue = await getQueue();
@@ -31,7 +40,7 @@ export async function startAgentQueueConsumer(): Promise<void> {
       return executePlaygroundChatLocal(ctx.data as unknown as AgentPlaygroundChatRequest);
     }
     throw new Error(`Unknown agent job: ${ctx.name}`);
-  });
+  }, { concurrency: CONCURRENCY });
   started = true;
-  log.info('Agent queue consumer registered');
+  log.info('Agent queue consumer registered', { concurrency: CONCURRENCY });
 }

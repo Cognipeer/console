@@ -135,4 +135,12 @@ export interface VectorProviderRuntime {
     handle: VectorIndexHandle,
     input?: VectorListInput,
   ): Promise<VectorListResult>;
+  /**
+   * Release any connections this runtime owns.
+   *
+   * Called by the runtime pool once an evicted runtime's grace period has
+   * elapsed. Implement it on any driver that holds a pool or a keep-alive
+   * client; stateless drivers can leave it out.
+   */
+  close?(): Promise<void> | void;
 }

@@ -29,6 +29,14 @@ export interface ResilienceOptions {
   retry?: Partial<RetryConfig>;
   /** Override circuit breaker config */
   circuitBreaker?: Partial<CircuitBreakerConfig>;
+  /**
+   * Per-attempt timeout in ms. Defaults to GATEWAY_REQUEST_TIMEOUT_MS.
+   * `0` disables the timeout for this call.
+   *
+   * The budget is per attempt, not per call: a retried operation gets the full
+   * timeout again, the same way an HTTP client's timeout applies to each try.
+   */
+  timeoutMs?: number;
 }
 
 export interface RetryConfig {
@@ -98,6 +106,23 @@ export class CircuitOpenError extends Error {
   constructor(key: string) {
     super(`Circuit breaker is open for "${key}" — request rejected`);
     this.name = 'CircuitOpenError';
+  }
+}
+
+/**
+ * Raised when an attempt exceeds its timeout budget.
+ *
+ * Treated as retryable: a single upstream stall is usually transient, and a
+ * provider that keeps stalling trips the circuit breaker after `threshold`
+ * failed calls, which is what stops the bleeding.
+ */
+export class RequestTimeoutError extends Error {
+  readonly timeoutMs: number;
+
+  constructor(key: string, timeoutMs: number) {
+    super(`Request to "${key}" timed out after ${timeoutMs}ms`);
+    this.name = 'RequestTimeoutError';
+    this.timeoutMs = timeoutMs;
   }
 }
 
@@ -171,6 +196,48 @@ function sleep(ms: number): Promise<void> {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Per-attempt timeout                                               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Run one attempt under a timeout.
+ *
+ * The signal is handed to the operation so a timeout *aborts* the upstream
+ * call instead of merely abandoning it — abandoning leaves the socket, the
+ * request context and (on a streaming call) the provider's generation alive,
+ * which is the leak this guards against. Operations that ignore the signal
+ * still stop blocking the caller, they just release their socket later.
+ */
+async function runAttempt<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  key: string,
+  timeoutMs: number,
+): Promise<T> {
+  if (timeoutMs <= 0) {
+    return operation(new AbortController().signal);
+  }
+
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const expiry = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new RequestTimeoutError(key, timeoutMs);
+      controller.abort(error);
+      reject(error);
+    }, timeoutMs);
+    // Never hold the event loop open for a timer that only guards a request.
+    timer.unref?.();
+  });
+
+  try {
+    return await Promise.race([operation(controller.signal), expiry]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /*  Main API                                                          */
 /* ------------------------------------------------------------------ */
 
@@ -181,7 +248,7 @@ function sleep(ms: number): Promise<void> {
  * @param options Resilience options (key is required for circuit breaker state)
  */
 export async function withResilience<T>(
-  operation: () => Promise<T>,
+  operation: (signal: AbortSignal) => Promise<T>,
   options: ResilienceOptions,
 ): Promise<T> {
   const cfg = getConfig();
@@ -202,6 +269,8 @@ export async function withResilience<T>(
     ...options.circuitBreaker,
   };
 
+  const timeoutMs = options.timeoutMs ?? cfg.gateway.requestTimeoutMs;
+
   // Circuit breaker check (before any attempt)
   checkCircuit(options.key, cbCfg);
 
@@ -211,7 +280,7 @@ export async function withResilience<T>(
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      const result = await operation();
+      const result = await runAttempt(operation, options.key, timeoutMs);
       recordSuccess(options.key, cbCfg);
       return result;
     } catch (error) {

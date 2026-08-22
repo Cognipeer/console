@@ -34,6 +34,8 @@ import { startVectorMigrationQueueConsumer } from '@/lib/services/vector/vectorM
 import { resumeInterruptedVectorMigrations } from '@/lib/services/vector/vectorMigrationJob';
 import { startRagReindexQueueConsumer } from '@/lib/services/rag/ragReindexConsumer';
 import { resumeInterruptedRagReindexRuns } from '@/lib/services/rag/ragReindexJob';
+import { startRagIngestQueueConsumer } from '@/lib/services/rag/ragIngestConsumer';
+import { resumePendingRagIngests } from '@/lib/services/rag/ragIngestJob';
 import { startPollScheduler } from '@/lib/services/inferenceMonitoring/pollScheduler';
 import { startAlertScheduler } from '@/lib/services/alerts/alertScheduler';
 import { startAnalysisScheduler } from '@/lib/services/analysis/analysisScheduler';
@@ -317,6 +319,7 @@ async function runBootstrap(): Promise<void> {
       startEvaluationRunQueueConsumer(),
       startVectorMigrationQueueConsumer(),
       startRagReindexQueueConsumer(),
+      startRagIngestQueueConsumer(),
       // Enterprise modules contribute their consumers through the seam;
       // the collection is empty in the community edition.
       ...enterpriseQueueConsumers.map((start) => start()),
@@ -344,6 +347,16 @@ async function runBootstrap(): Promise<void> {
     await resumeInterruptedRagReindexRuns();
   } catch (error) {
     logger.warn('Knowledge Engine re-index resume failed during startup', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  // Documents left `pending` by a restart: the memory queue driver drops
+  // in-flight jobs, so without this sweep a deferred ingest would never run.
+  try {
+    await resumePendingRagIngests();
+  } catch (error) {
+    logger.warn('Knowledge Engine ingest resume failed during startup', {
       error: error instanceof Error ? error.message : String(error),
     });
   }
