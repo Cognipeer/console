@@ -43,6 +43,7 @@ import {
   IconEdit,
   IconExternalLink,
   IconHistory,
+  IconInfoCircle,
   IconList,
   IconPlayerPlay,
   IconPlugConnected,
@@ -122,6 +123,9 @@ export default function McpDetailPage() {
   const [keyEditing, setKeyEditing] = useState(false);
   const [keyDraft, setKeyDraft] = useState('');
   const [savingKey, setSavingKey] = useState(false);
+  const [slugEditing, setSlugEditing] = useState(false);
+  const [slugDraft, setSlugDraft] = useState('');
+  const [savingSlug, setSavingSlug] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [activeTab, setActiveTab] = useState<string>(initialTab);
@@ -391,6 +395,38 @@ export default function McpDetailPage() {
     }
   };
 
+  const handleSaveSlug = async () => {
+    if (!server || !slugDraft.trim() || slugDraft.trim() === server.endpointSlug) {
+      setSlugEditing(false);
+      return;
+    }
+    setSavingSlug(true);
+    try {
+      const res = await fetch(`/api/mcp/${server.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ endpointSlug: slugDraft.trim() }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Failed to update endpoint path');
+      setServer(data.server);
+      setSlugEditing(false);
+      notifications.show({
+        title: 'Endpoint path updated',
+        message: `Now using "${data.server.endpointSlug}" — update any URL you've already shared.`,
+        color: 'teal',
+      });
+    } catch (err) {
+      notifications.show({
+        title: 'Error',
+        message: err instanceof Error ? err.message : 'Failed to update endpoint path',
+        color: 'red',
+      });
+    } finally {
+      setSavingSlug(false);
+    }
+  };
+
   const handleRefreshTools = async () => {
     if (!params.id) return;
     setRefreshingTools(true);
@@ -613,6 +649,11 @@ export default function McpDetailPage() {
   }
 
   const internalServiceLink = getInternalServiceLink(server);
+  // An internal-service server (or a composite with one as a member) reads
+  // tenant-private data with no credential of its own — worth a loud warning
+  // once it's exposed on a public, unauthenticated URL.
+  const readsInternalData = server.sourceType === 'internal'
+    || (server.sourceType === 'composite' && (server.members ?? []).some((m) => m.sourceType === 'internal'));
   const totalRequests = overviewAggregate?.totalRequests ?? 0;
   const successCount = overviewAggregate?.successCount ?? 0;
   const errorCount = overviewAggregate?.errorCount ?? 0;
@@ -1049,8 +1090,76 @@ export default function McpDetailPage() {
 
           <Paper withBorder p="md" radius="md">
             <Text size="xs" c="dimmed" tt="uppercase" fw={600} mb="xs">Endpoint Slug</Text>
-            <Code>{server.endpointSlug}</Code>
+            {slugEditing ? (
+              <Group gap="sm">
+                <TextInput
+                  value={slugDraft}
+                  onChange={(e) => setSlugDraft(e.currentTarget.value)}
+                  placeholder={server.endpointSlug}
+                  size="xs"
+                  w={260}
+                />
+                <Button size="compact-xs" color="teal" loading={savingSlug} onClick={handleSaveSlug}>
+                  Save
+                </Button>
+                <Button
+                  variant="subtle"
+                  size="compact-xs"
+                  color="gray"
+                  disabled={savingSlug}
+                  onClick={() => setSlugEditing(false)}
+                >
+                  Cancel
+                </Button>
+              </Group>
+            ) : (
+              <Group gap="sm">
+                <Code>{server.endpointSlug}</Code>
+                <CopyButton value={server.endpointSlug}>
+                  {({ copied, copy }) => (
+                    <Tooltip label={copied ? 'Copied' : 'Copy'}>
+                      <Button
+                        variant="subtle"
+                        size="compact-xs"
+                        color={copied ? 'teal' : 'gray'}
+                        onClick={copy}
+                        leftSection={copied ? <IconCheck size={12} /> : <IconCopy size={12} />}
+                      >
+                        {copied ? 'Copied' : 'Copy'}
+                      </Button>
+                    </Tooltip>
+                  )}
+                </CopyButton>
+                <Tooltip label="Set a custom path for the public URL">
+                  <ActionIcon
+                    variant="subtle"
+                    color="gray"
+                    size="sm"
+                    onClick={() => {
+                      setSlugDraft(server.endpointSlug);
+                      setSlugEditing(true);
+                    }}
+                  >
+                    <IconEdit size={13} />
+                  </ActionIcon>
+                </Tooltip>
+              </Group>
+            )}
+            <Text size="xs" c="dimmed" mt={6}>
+              The path segment in the public URL — changing it invalidates any public URL already shared.
+            </Text>
           </Paper>
+
+          {server.exposure?.accessMode === 'public' && readsInternalData ? (
+            <Alert color="orange" icon={<IconInfoCircle size={16} />} mt="md">
+              {server.sourceType === 'internal'
+                ? 'This is an internal-service server, which reads tenant-private data.'
+                : 'This composite includes an internal-service member, which reads tenant-private data.'}
+              {' '}It is exposed on a public URL with no authentication — anyone who has the link (or the
+              custom path above) can read that data. Switch back to &quot;API token required&quot; if that
+              is not intended.
+            </Alert>
+          ) : null}
         </Tabs.Panel>
 
         {/* ── Usage Tab ── */}

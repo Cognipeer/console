@@ -133,6 +133,7 @@ interface FormValues {
   protocolHttp: boolean;
   protocolSse: boolean;
   accessMode: AccessMode;
+  endpointSlug: string;
   // aegis
   aegisMode: AegisMode;
   aegisShieldId: string;
@@ -202,6 +203,7 @@ export default function CreateMcpModal({
       protocolHttp: true,
       protocolSse: true,
       accessMode: 'token',
+      endpointSlug: '',
       aegisMode: 'off',
       aegisShieldId: '',
     },
@@ -330,20 +332,6 @@ export default function CreateMcpModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened, hubs, capabilities, form.values.sourceType]);
 
-  // A composite that picks up an internal-service member can't stay public —
-  // the backend rejects that combination outright, so fix it up here instead
-  // of letting the user hit a submit-time error.
-  useEffect(() => {
-    if (form.values.sourceType !== 'composite') return;
-    const hasInternal = form.values.compositeMembers.some(
-      (id) => memberOptions.find((m) => m.id === id)?.sourceType === 'internal',
-    );
-    if (hasInternal && form.values.accessMode === 'public') {
-      form.setFieldValue('accessMode', 'token');
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.values.sourceType, form.values.compositeMembers, memberOptions]);
-
   // Providers without a per-instance picker (anything but Knowledge Base, for
   // now) always target the same single project-scoped instance.
   useEffect(() => {
@@ -395,6 +383,9 @@ export default function CreateMcpModal({
           protocols: protocols.length ? protocols : ['streamable-http', 'sse'],
           accessMode: v.accessMode,
         },
+        endpointSlug: v.accessMode === 'public' && v.endpointSlug.trim()
+          ? v.endpointSlug.trim()
+          : undefined,
         aegis: v.aegisMode !== 'off' || v.aegisShieldId
           ? { mode: v.aegisMode, shieldId: v.aegisShieldId || undefined }
           : undefined,
@@ -522,9 +513,11 @@ export default function CreateMcpModal({
   ]);
   const validExposure = v.protocolHttp || v.protocolSse;
   // An internal-service member reads tenant-private data with no credential
-  // of its own — the backend rejects saving this combination as public.
+  // of its own — exposing it publicly is allowed (that's the point of a
+  // public URL), but it's worth a loud warning before the operator commits.
   const compositeHasInternalMember = v.sourceType === 'composite'
     && v.compositeMembers.some((id) => memberOptions.find((m) => m.id === id)?.sourceType === 'internal');
+  const readsInternalData = v.sourceType === 'internal' || compositeHasInternalMember;
 
   const checklist = [
     { id: 1, label: 'Name provided', done: validIdentity },
@@ -652,6 +645,9 @@ export default function CreateMcpModal({
           label="Access"
           value={v.accessMode === 'public' ? 'Public URL (no auth)' : 'API token required'}
         />
+        {v.accessMode === 'public' ? (
+          <SummaryKV label="Custom path" value={v.endpointSlug.trim() || 'Auto-generated'} />
+        ) : null}
         {v.aegisMode !== 'off' ? (
           <SummaryKV label="Aegis" value={`${v.aegisMode}${v.aegisShieldId ? ' · shield' : ''}`} />
         ) : null}
@@ -1077,16 +1073,19 @@ export default function CreateMcpModal({
             }}
           />
         </FormField>
-        {compositeHasInternalMember ? (
+        {readsInternalData && v.accessMode === 'public' ? (
           <Alert color="orange" icon={<IconInfoCircle size={16} />}>
-            This composite includes an internal-service member, which reads tenant-private data.
-            It can only be exposed with an API token, never as a public URL.
+            {compositeHasInternalMember
+              ? 'This composite includes an internal-service member, which reads tenant-private data.'
+              : 'This is an internal-service server, which reads tenant-private data.'}
+            {' '}A public URL means anyone who has it can read that data with no authentication —
+            make sure that is really what you want before saving.
           </Alert>
         ) : null}
         <FormField
           label="Access mode"
           hint={v.accessMode === 'public'
-            ? 'Anyone with the unguessable URL can call this server — treat it like a webhook URL.'
+            ? 'Anyone with the URL can call this server — treat it like a webhook URL.'
             : 'Callers must send a Cognipeer API token (PAT) in the Authorization header.'}
         >
           <ChipPicker<AccessMode>
@@ -1095,12 +1094,22 @@ export default function CreateMcpModal({
               { value: 'public', label: 'Public URL (no auth)' },
             ]}
             value={v.accessMode}
-            onChange={(val) => {
-              if (val === 'public' && compositeHasInternalMember) return;
-              form.setFieldValue('accessMode', val as AccessMode);
-            }}
+            onChange={(val) => form.setFieldValue('accessMode', val as AccessMode)}
           />
         </FormField>
+        {v.accessMode === 'public' ? (
+          <FormField
+            label="Custom path"
+            optional
+            hint="Leave blank for a random unguessable path. Set your own to get a memorable, stable public URL — it must be unique and at least 8 characters (letters, numbers, hyphens)."
+          >
+            <TextInput
+              placeholder="e.g. acme-support-tools"
+              value={v.endpointSlug}
+              onChange={(e) => form.setFieldValue('endpointSlug', e.currentTarget.value)}
+            />
+          </FormField>
+        ) : null}
       </FormSection>
 
       <FormSection

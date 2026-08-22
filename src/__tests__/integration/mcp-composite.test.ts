@@ -143,24 +143,93 @@ describe('composite create — naming, tool count, hasInternalMember', () => {
     })).rejects.toThrow(/different project/i);
   });
 
-  it('rejects public exposure when a member is internal-sourced', async () => {
-    await expect(createMcpServer(TENANT_DB_NAME, TENANT_ID, USER_ID, PROJECT_ID, {
+  it('allows public exposure when a member is internal-sourced (exposing tenant data is intentional)', async () => {
+    const composite = await createMcpServer(TENANT_DB_NAME, TENANT_ID, USER_ID, PROJECT_ID, {
       name: 'Public Composite Attempt',
       sourceType: 'composite',
       upstreamAuth: { type: 'none' },
       compositeConfig: { members: [{ serverId: String(memberA._id) }] },
       exposure: { protocols: ['streamable-http'], accessMode: 'public' },
-    })).rejects.toThrow(/publicly/i);
+    });
+    expect(composite.exposure?.accessMode).toBe('public');
   });
 
-  it('rejects a direct internal server going public (the pre-existing gap this closes)', async () => {
-    await expect(createMcpServer(TENANT_DB_NAME, TENANT_ID, USER_ID, PROJECT_ID, {
+  it('allows a direct internal server going public', async () => {
+    const server = await createMcpServer(TENANT_DB_NAME, TENANT_ID, USER_ID, PROJECT_ID, {
       name: 'Public Internal Attempt',
       sourceType: 'internal',
       upstreamAuth: { type: 'none' },
       internalConfig: { provider: 'agent-observability', instanceKey: 'project' },
       exposure: { protocols: ['streamable-http'], accessMode: 'public' },
-    })).rejects.toThrow(/publicly/i);
+    });
+    expect(server.exposure?.accessMode).toBe('public');
+  });
+});
+
+describe('custom endpoint slug — public-path override', () => {
+  it('mints a random slug when none is requested', async () => {
+    const server = await createAgentObsMember('Default Slug Server');
+    expect(server.endpointSlug).toHaveLength(16);
+  });
+
+  it('accepts a caller-supplied path, normalized like a slug', async () => {
+    const server = await createMcpServer(TENANT_DB_NAME, TENANT_ID, USER_ID, PROJECT_ID, {
+      name: 'Custom Slug Server',
+      sourceType: 'internal',
+      upstreamAuth: { type: 'none' },
+      internalConfig: { provider: 'agent-observability', instanceKey: 'project' },
+      endpointSlug: 'My Cool Webhook',
+    });
+    expect(server.endpointSlug).toBe('my-cool-webhook');
+  });
+
+  it('rejects a path already used by another server', async () => {
+    await createMcpServer(TENANT_DB_NAME, TENANT_ID, USER_ID, PROJECT_ID, {
+      name: 'Slug Owner',
+      sourceType: 'internal',
+      upstreamAuth: { type: 'none' },
+      internalConfig: { provider: 'agent-observability', instanceKey: 'project' },
+      endpointSlug: 'taken-path',
+    });
+    await expect(createMcpServer(TENANT_DB_NAME, TENANT_ID, USER_ID, PROJECT_ID, {
+      name: 'Slug Squatter',
+      sourceType: 'internal',
+      upstreamAuth: { type: 'none' },
+      internalConfig: { provider: 'agent-observability', instanceKey: 'project' },
+      endpointSlug: 'taken-path',
+    })).rejects.toThrow(/already used/i);
+  });
+
+  it('rejects a path shorter than the minimum once normalized', async () => {
+    await expect(createMcpServer(TENANT_DB_NAME, TENANT_ID, USER_ID, PROJECT_ID, {
+      name: 'Short Slug Attempt',
+      sourceType: 'internal',
+      upstreamAuth: { type: 'none' },
+      internalConfig: { provider: 'agent-observability', instanceKey: 'project' },
+      endpointSlug: 'ab',
+    })).rejects.toThrow(/at least/i);
+  });
+
+  it('lets an update rename the path, and re-allows its own previous path', async () => {
+    const server = await createMcpServer(TENANT_DB_NAME, TENANT_ID, USER_ID, PROJECT_ID, {
+      name: 'Renamable Slug Server',
+      sourceType: 'internal',
+      upstreamAuth: { type: 'none' },
+      internalConfig: { provider: 'agent-observability', instanceKey: 'project' },
+      endpointSlug: 'first-path',
+    });
+
+    const renamed = await updateMcpServer(TENANT_DB_NAME, String(server._id), USER_ID, {
+      endpointSlug: 'second-path',
+    });
+    expect(renamed?.endpointSlug).toBe('second-path');
+
+    // Re-submitting the server's own current path must not trip the
+    // uniqueness check against itself (excludeId).
+    const resaved = await updateMcpServer(TENANT_DB_NAME, String(server._id), USER_ID, {
+      endpointSlug: 'second-path',
+    });
+    expect(resaved?.endpointSlug).toBe('second-path');
   });
 });
 

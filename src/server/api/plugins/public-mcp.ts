@@ -22,7 +22,6 @@ import { getDatabase } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
   executeMcpTool,
-  isInternalSourced,
   listMcpToolDescriptors,
   logMcpRequest,
   mcpRequestSecretValues,
@@ -83,12 +82,6 @@ async function resolvePublicServer(
 
   if (!server || server.status !== 'active') return null;
   if (resolveExposure(server).accessMode !== 'public') return null;
-  // Defense in depth: an internal-sourced server (direct 'internal', or a
-  // composite with an internal member) reads tenant-private data with no
-  // credential of its own — create/update already reject saving it as
-  // public (see assertPublicExposureAllowed), but a stale/malformed record
-  // must not be served here regardless.
-  if (isInternalSourced(server)) return null;
   return { tenant, server };
 }
 

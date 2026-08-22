@@ -1,15 +1,14 @@
 /**
  * Unit tests — composite MCP server domain logic (no DB, no execution).
- * Covers the naming/collision algorithm, the public-exposure gate, and the
- * config accessors. DB-backed create/execute/reconcile behavior is covered
- * in `src/__tests__/integration/mcp-composite.test.ts`.
+ * Covers the naming/collision algorithm and the config accessors. DB-backed
+ * create/execute/reconcile behavior is covered in
+ * `src/__tests__/integration/mcp-composite.test.ts`.
  */
 
 import { describe, expect, it } from 'vitest';
 import {
   allocateExposedNames,
   assertMemberUsable,
-  assertPublicExposureAllowed,
   defaultMemberPrefix,
   getCompositeConfig,
   getCompositeMemberSummaries,
@@ -98,26 +97,6 @@ describe('allocateExposedNames', () => {
       entry({ serverId: 's1', prefixBase: 'srv', realName: 'weird name!!', alwaysPrefix: true }),
     ]);
     expect(names[0]).toMatch(/^[a-zA-Z0-9_-]+$/);
-  });
-});
-
-describe('assertPublicExposureAllowed', () => {
-  it('allows token access regardless of source', () => {
-    expect(() => assertPublicExposureAllowed('internal', true, 'token')).not.toThrow();
-    expect(() => assertPublicExposureAllowed('composite', true, 'token')).not.toThrow();
-    expect(() => assertPublicExposureAllowed('openapi', false, 'public')).not.toThrow();
-  });
-
-  it('rejects a direct internal server going public', () => {
-    expect(() => assertPublicExposureAllowed('internal', true, 'public')).toThrow(/publicly/i);
-  });
-
-  it('rejects a composite with an internal member going public', () => {
-    expect(() => assertPublicExposureAllowed('composite', true, 'public')).toThrow(/publicly/i);
-  });
-
-  it('allows a composite with no internal member to go public', () => {
-    expect(() => assertPublicExposureAllowed('composite', false, 'public')).not.toThrow();
   });
 });
 
