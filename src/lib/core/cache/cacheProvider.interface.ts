@@ -36,6 +36,17 @@ export interface CacheProvider {
   ): Promise<{ count: number; resetAt: Date }>;
 
   /**
+   * Increment several counters together, returning one result per entry in
+   * input order.
+   *
+   * A guarded request touches a counter per metric per window — up to 25 — and
+   * issuing them separately turns one request into 25 concurrent round trips.
+   */
+  incrementCounters(
+    entries: Array<{ key: string; ttlSeconds: number; amount: number }>,
+  ): Promise<Array<{ count: number; resetAt: Date }>>;
+
+  /**
    * Acquire a best-effort lock with TTL. Returns an owner token when acquired,
    * or undefined when another owner already holds the lock.
    */

@@ -105,6 +105,9 @@ export interface PromptCompareView {
 
 export interface ListPromptsOptions {
 	search?: string;
+	/** Page window. Omitting it returns every prompt. */
+	limit?: number;
+	offset?: number;
 }
 
 export interface PromptCommentView {

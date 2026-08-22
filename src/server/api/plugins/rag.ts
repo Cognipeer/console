@@ -1,6 +1,7 @@
 import { Buffer } from 'node:buffer';
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
+import { paginationMeta, readPagination } from '@/lib/api/pagination';
 import type { IRagChunkConfig, IRagDocument, IRagModule, IUser } from '@/lib/database';
 import {
   aggregateRagQueryScoreDistribution,
@@ -12,6 +13,7 @@ import {
   getRagModule,
   ingestDocument,
   ingestFile,
+  countRagDocuments,
   listRagDocuments,
   listRagModules,
   listRagQueryLogs,
@@ -428,12 +430,25 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { key } = request.params as { key: string };
       const query = (request.query ?? {}) as { search?: string };
-      const documents = await listRagDocuments(session.tenantDbName, key, {
-        projectId,
-        search: query.search,
-      });
+      // Each row carries its source text, so an unpaged list of a large
+      // module's corpus is megabytes of response and heap.
+      const page = readPagination(request.query);
+      const [documents, total] = await Promise.all([
+        listRagDocuments(session.tenantDbName, key, {
+          projectId,
+          search: query.search,
+          ...page,
+        }),
+        countRagDocuments(session.tenantDbName, key, {
+          projectId,
+          search: query.search,
+        }),
+      ]);
 
-      return reply.code(200).send({ documents });
+      return reply.code(200).send({
+        documents,
+        pagination: paginationMeta(page, { total }),
+      });
     } catch (error) {
       logger.error('List RAG documents error', { error });
       return sendProjectContextError(reply, error)

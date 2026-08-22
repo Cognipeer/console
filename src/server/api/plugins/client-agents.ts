@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import type { AgentStatus, IAgent, IAgentConfig } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
+import { overfetchLimit, paginationMeta, readPagination, takePage } from '@/lib/api/pagination';
 import {
   createAgentRecord,
   createConversation,
@@ -199,12 +200,19 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const query = (request.query ?? {}) as { status?: AgentStatus };
-      const agents = await listAgents(ctx.tenantDbName, {
+      // Paged: a tenant's agent list grows with use, and returning it whole
+      // put the whole collection on the wire on every call.
+      const page = readPagination(request.query);
+      const fetched = await listAgents(ctx.tenantDbName, {
         ...(query.status ? { status: query.status } : {}),
         projectId: ctx.projectId,
+        limit: overfetchLimit(page),
+        offset: page.offset,
       });
+      const { items: agents, hasMore } = takePage(fetched, page);
 
       return reply.code(200).send({
+        pagination: paginationMeta(page, { hasMore }),
         agents: agents.map((agent) => ({
           config: {
             maxTokens: agent.config.maxTokens,

@@ -24,6 +24,13 @@ export class NullCacheProvider implements CacheProvider {
     const incrementBy = Math.max(0, Math.ceil(amount));
     return { count: incrementBy, resetAt: new Date(Date.now() + ttl * 1000) };
   }
+  async incrementCounters(
+    entries: Array<{ key: string; ttlSeconds: number; amount: number }>,
+  ): Promise<Array<{ count: number; resetAt: Date }>> {
+    return Promise.all(
+      entries.map((entry) => this.incrementCounter(entry.key, entry.ttlSeconds, entry.amount)),
+    );
+  }
   async acquireLock(): Promise<string | undefined> { return randomUUID(); }
   async releaseLock(): Promise<void> {}
   async destroy(): Promise<void> {}

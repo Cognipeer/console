@@ -271,5 +271,82 @@ export function ProviderRecordMixin<TBase extends Constructor<MongoDBProviderBas
         resetAt: result.resetAt,
       };
     }
+
+    async incrementRateLimits(
+      entries: Array<{ key: string; windowSeconds: number; amount: number }>,
+    ): Promise<Array<{ count: number; resetAt: Date }>> {
+      if (entries.length === 0) return [];
+      if (entries.length === 1) {
+        const only = entries[0];
+        return [await this.incrementRateLimit(only.key, only.windowSeconds, only.amount)];
+      }
+
+      type RateLimitRecord = {
+        _id: string;
+        count: number;
+        resetAt: Date;
+        isExpired?: boolean;
+      };
+
+      const db = this.getTenantDb();
+      const now = new Date();
+      const collection = db.collection<RateLimitRecord>(COLLECTIONS.rateLimits);
+
+      // Same check-and-set pipeline as the single-key path, issued as one
+      // bulkWrite so N counters cost one round trip instead of N.
+      await collection.bulkWrite(
+        entries.map(({ key, windowSeconds, amount }) => {
+          const resetAt = new Date(now.getTime() + windowSeconds * 1000);
+          return {
+            updateOne: {
+              filter: { _id: key } as Filter<RateLimitRecord>,
+              update: [
+                { $set: { isExpired: { $lt: ['$resetAt', now] } } },
+                {
+                  $set: {
+                    count: {
+                      $cond: {
+                        if: { $or: [{ $eq: ['$isExpired', true] }, { $not: ['$resetAt'] }] },
+                        then: amount,
+                        else: { $add: ['$count', amount] },
+                      },
+                    },
+                    resetAt: {
+                      $cond: {
+                        if: { $or: [{ $eq: ['$isExpired', true] }, { $not: ['$resetAt'] }] },
+                        then: resetAt,
+                        else: '$resetAt',
+                      },
+                    },
+                  },
+                },
+                { $unset: 'isExpired' },
+              ],
+              upsert: true,
+            },
+          };
+        }),
+        { ordered: false },
+      );
+
+      // Read the post-increment counts back in one query. A concurrent request
+      // may have incremented further in between, which can only report a count
+      // at or above our own — the safe direction for a limit check.
+      const keys = entries.map((e) => e.key);
+      const rows = await collection
+        .find({ _id: { $in: keys } } as Filter<RateLimitRecord>)
+        .toArray();
+      const byKey = new Map(rows.map((row) => [String(row._id), row]));
+
+      return entries.map(({ key, windowSeconds, amount }) => {
+        const row = byKey.get(key);
+        return row
+          ? { count: row.count, resetAt: row.resetAt }
+          // The row is written above, so a miss means it was swept between the
+          // write and the read. Report our own contribution rather than zero,
+          // which would read as "no usage" to the limit check.
+          : { count: amount, resetAt: new Date(now.getTime() + windowSeconds * 1000) };
+      });
+    }
   };
 }

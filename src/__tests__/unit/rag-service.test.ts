@@ -1273,7 +1273,39 @@ describe('RAG Service', () => {
         expect(db.findRagDocumentById).toHaveBeenCalledTimes(1);
       });
 
-      it('falls back to the chunk when the source is gone', async () => {
+      it('caps how many document sources one query expands', async () => {
+      const matches = Array.from({ length: 30 }, (_, i) => ({
+        id: `my-rag:ragdoc-${i}:0`,
+        score: 0.9,
+        metadata: { _documentId: `ragdoc-${i}` },
+      }));
+      (queryVectorIndex as ReturnType<typeof vi.fn>).mockResolvedValue({ matches });
+      db.findRagChunksByVectorIds.mockResolvedValue(
+        matches.map((m, i) => ({
+          vectorId: m.id,
+          content: 'Delta epsilon zeta.',
+          charStart: 18,
+          charEnd: 37,
+          tenantId: TENANT_ID,
+          ragModuleKey: 'my-rag',
+          documentId: `ragdoc-${i}`,
+          chunkIndex: 0,
+        })),
+      );
+      db.findRagDocumentById.mockImplementation(async (id: string) => ({
+        ...mockDocument,
+        _id: id,
+        sourceText: source,
+      }));
+
+      await queryRag(DB_NAME, TENANT_ID, PROJECT_ID, { ...queryReq, topK: 30 });
+
+      // 25 is the default ceiling; the remaining matches keep their chunk text
+      // rather than pulling five more whole documents into the request.
+      expect(db.findRagDocumentById).toHaveBeenCalledTimes(25);
+    });
+
+    it('falls back to the chunk when the source is gone', async () => {
         db.findRagDocumentById.mockResolvedValue({ ...mockDocument });
 
         const result = await queryRag(DB_NAME, TENANT_ID, PROJECT_ID, queryReq);

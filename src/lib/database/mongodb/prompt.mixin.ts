@@ -111,6 +111,9 @@ export function PromptMixin<TBase extends Constructor<MongoDBProviderBase>>(Base
     async listPrompts(filters?: {
       projectId?: string;
       search?: string;
+      /** Page window. Omitted means every row, which is what unbounded lists cost. */
+      limit?: number;
+      offset?: number;
     }): Promise<IPrompt[]> {
       const db = this.getTenantDb();
       const query: Filter<IPrompt> = {};
@@ -127,11 +130,13 @@ export function PromptMixin<TBase extends Constructor<MongoDBProviderBase>>(Base
         }
       }
 
-      const prompts = await db
+      const cursor = db
         .collection<IPrompt>(COLLECTIONS.prompts)
         .find(query)
-        .sort({ updatedAt: -1, createdAt: -1 })
-        .toArray();
+        .sort({ updatedAt: -1, createdAt: -1 });
+      if (filters?.offset && filters.offset > 0) cursor.skip(filters.offset);
+      if (filters?.limit && filters.limit > 0) cursor.limit(filters.limit);
+      const prompts = await cursor.toArray();
 
       return prompts.map((prompt) => ({
         ...prompt,

@@ -386,6 +386,8 @@ export async function listTools(
     type?: ITool['type'];
     status?: ITool['status'];
     search?: string;
+    limit?: number;
+    offset?: number;
   },
 ): Promise<ITool[]> {
   const db = await getDatabase();

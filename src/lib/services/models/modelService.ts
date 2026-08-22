@@ -141,7 +141,7 @@ function ensureCurrency(
 export async function listModels(
   tenantDbName: string,
   projectId: string,
-  filters?: { category?: ModelCategory; providerKey?: string; providerDriver?: string },
+  filters?: { category?: ModelCategory; providerKey?: string; providerDriver?: string; limit?: number; offset?: number },
 ): Promise<IModel[]> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);

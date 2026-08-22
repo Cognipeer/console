@@ -94,6 +94,9 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       provider?: ModelProviderType;
       providerKey?: string;
       providerDriver?: string;
+      /** Page window. Omitted means every row, which is what unbounded lists cost. */
+      limit?: number;
+      offset?: number;
     }): Promise<IModel[]> {
       const db = this.getTenantDb();
       const clauses: string[] = [];
@@ -106,8 +109,22 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       if (filters?.providerDriver) { clauses.push('providerDriver = @providerDriver'); params.providerDriver = filters.providerDriver; }
 
       const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
-      const rows = db.prepare(`SELECT * FROM ${TABLES.models} ${where} ORDER BY createdAt DESC`)
-        .all(params) as SqliteRow[];
+      // SQLite needs a LIMIT before it will honour an OFFSET; -1 means "all".
+      let pageSql = '';
+      if (filters?.limit && filters.limit > 0) {
+        pageSql = ' LIMIT @limit';
+        params.limit = filters.limit;
+      } else if (filters?.offset && filters.offset > 0) {
+        pageSql = ' LIMIT -1';
+      }
+      if (filters?.offset && filters.offset > 0) {
+        pageSql += ' OFFSET @offset';
+        params.offset = filters.offset;
+      }
+
+      const rows = db.prepare(
+        `SELECT * FROM ${TABLES.models} ${where} ORDER BY createdAt DESC${pageSql}`,
+      ).all(params) as SqliteRow[];
       return rows.map((r) => this.mapModelRow(r));
     }
 

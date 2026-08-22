@@ -194,7 +194,13 @@ export function RagMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: T
 
     async listRagDocuments(
       ragModuleKey: string,
-      filters?: { projectId?: string; status?: RagDocumentStatus; search?: string },
+      filters?: {
+        projectId?: string;
+        status?: RagDocumentStatus;
+        search?: string;
+        limit?: number;
+        offset?: number;
+      },
     ): Promise<IRagDocument[]> {
       const db = this.getTenantDb();
       // When projectId is provided, scope to that project.
@@ -207,20 +213,32 @@ export function RagMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: T
       if (filters?.search) {
         query.fileName = { $regex: this.escapeRegex(filters.search), $options: 'i' };
       }
-      const docs = await db
+      const cursor = db
         .collection<IRagDocument>(COLLECTIONS.ragDocuments)
         .find(query as Filter<IRagDocument>)
-        .sort({ createdAt: -1 })
-        .toArray();
+        .sort({ createdAt: -1 });
+      if (filters?.offset && filters.offset > 0) cursor.skip(filters.offset);
+      if (filters?.limit && filters.limit > 0) cursor.limit(filters.limit);
+      const docs = await cursor.toArray();
       return docs.map((d) => ({ ...d, _id: d._id?.toString() }) as IRagDocument);
     }
 
-    async countRagDocuments(ragModuleKey: string, projectId?: string): Promise<number> {
+    async countRagDocuments(
+      ragModuleKey: string,
+      filters?: { projectId?: string; status?: RagDocumentStatus; search?: string },
+    ): Promise<number> {
       const db = this.getTenantDb();
-      const query: Record<string, unknown> = {
-        ragModuleKey,
-        ...this.buildProjectScopeFilter(projectId),
-      };
+      // Mirrors listRagDocuments exactly: an absent projectId means "every
+      // project", not "documents without one", or the total would disagree
+      // with the page it describes.
+      const query: Record<string, unknown> = { ragModuleKey };
+      if (filters?.projectId !== undefined) {
+        Object.assign(query, this.buildProjectScopeFilter(filters.projectId));
+      }
+      if (filters?.status) query.status = filters.status;
+      if (filters?.search) {
+        query.fileName = { $regex: this.escapeRegex(filters.search), $options: 'i' };
+      }
       return db
         .collection(COLLECTIONS.ragDocuments)
         // eslint-disable-next-line @typescript-eslint/no-explicit-any

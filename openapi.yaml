@@ -297,6 +297,23 @@ paths:
       description: List the agents available to the authenticated API token's project. Each entry exposes the agent key, name, description, status, creation time, and the resolved model configuration (modelKey, temperature, topP, maxTokens).
       operationId: listAgents
       parameters:
+        - name: limit
+          in: query
+          required: false
+          description: "Rows to return. Defaults to 100; values above 500 are clamped."
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - name: offset
+          in: query
+          required: false
+          description: Rows to skip before the page starts.
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
         - name: status
           in: query
           required: false
@@ -5784,6 +5801,23 @@ paths:
       description: Returns all prompt templates in the token's project. Optionally filter by name or key using the `search` query parameter.
       operationId: listPrompts
       parameters:
+        - name: limit
+          in: query
+          required: false
+          description: "Rows to return. Defaults to 100; values above 500 are clamped."
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - name: offset
+          in: query
+          required: false
+          description: Rows to skip before the page starts.
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
         - name: search
           in: query
           required: false
@@ -6410,6 +6444,23 @@ paths:
       description: Returns the documents ingested into a Knowledge Engine module.
       operationId: listRagDocuments
       parameters:
+        - name: limit
+          in: query
+          required: false
+          description: "Rows to return. Defaults to 100; values above 500 are clamped."
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - name: offset
+          in: query
+          required: false
+          description: Rows to skip before the page starts.
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
         - name: key
           in: path
           required: true
@@ -9716,6 +9767,23 @@ paths:
       description: List tools available to the caller's project from the unified tool system. Tools are backed by an OpenAPI specification or an MCP server and expose discrete actions that can be invoked independently. Results are scoped to the API token's project.
       operationId: listTools
       parameters:
+        - name: limit
+          in: query
+          required: false
+          description: "Rows to return. Defaults to 100; values above 500 are clamped."
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - name: offset
+          in: query
+          required: false
+          description: Rows to skip before the page starts.
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
         - name: status
           in: query
           required: false

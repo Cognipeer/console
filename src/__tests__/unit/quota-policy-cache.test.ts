@@ -47,7 +47,7 @@ function makeContext(overrides: Partial<QuotaContext> = {}): QuotaContext {
     tenantDbName: DB_NAME,
     tenantId: TENANT_ID,
     projectId: PROJECT_ID,
-    licenseType: 'enterprise',
+    licenseType: 'PROFESSIONAL',
     domain: 'llm',
     ...overrides,
   } as QuotaContext;

@@ -159,6 +159,19 @@ export function ProviderRecordMixin<TBase extends Constructor<SQLiteProviderBase
       return { count: updated.count, resetAt: new Date(updated.resetAt) };
     }
 
+    async incrementRateLimits(
+      entries: Array<{ key: string; windowSeconds: number; amount: number }>,
+    ): Promise<Array<{ count: number; resetAt: Date }>> {
+      // better-sqlite3 is in-process and synchronous, so there is no round trip
+      // to save here; the batch exists to satisfy the contract and to keep the
+      // whole set of counters inside one transaction.
+      const results: Array<{ count: number; resetAt: Date }> = [];
+      for (const { key, windowSeconds, amount } of entries) {
+        results.push(await this.incrementRateLimit(key, windowSeconds, amount));
+      }
+      return results;
+    }
+
     protected mapProviderRow(r: SqliteRow): IProviderRecord {
       return {
         _id: r.id as string,

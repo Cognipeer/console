@@ -4,9 +4,87 @@ import {
   ProviderDomain,
 } from '@/lib/database';
 import { decryptObject, encryptObject } from '@/lib/utils/crypto';
+import { getCache } from '@/lib/core/cache';
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 
 const logger = createLogger('provider-service');
+
+/* ------------------------------------------------------------------ */
+/*  Provider record cache                                             */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Every provider call re-read the provider row. The SDK client itself is
+ * pooled (`runtimePool`), but the record behind it was not, so one Knowledge
+ * Engine query — embedding, then vector store, then reranker — spent three
+ * uncached reads before doing any work, against a ten-connection pool.
+ *
+ * The cached value is the row as stored, which means `credentialsEnc` — the
+ * SAME ciphertext that sits in the database, sealed with
+ * PROVIDER_ENCRYPTION_SECRET, which is never cached. Decryption still happens
+ * per call and plaintext credentials are never written to the cache. An
+ * operator who would rather keep that ciphertext out of Redis entirely can set
+ * PROVIDER_RECORD_CACHE_TTL_SECONDS=0.
+ */
+
+function providerRecordCacheKeys(record: IProviderRecord, tenantDbName: string): string[] {
+  const keys = [`provider-rec:${tenantDbName}:id:${String(record._id)}`];
+  const projectIds = record.projectIds?.length ? record.projectIds : [undefined];
+  for (const projectId of projectIds) {
+    keys.push(
+      `provider-rec:${tenantDbName}:key:${record.tenantId}:${record.key}:${projectId ?? ''}`,
+    );
+  }
+  return keys;
+}
+
+async function readCachedProviderRecord(cacheKey: string): Promise<IProviderRecord | null> {
+  if (getConfig().providerRuntime.recordCacheTtlSeconds <= 0) return null;
+  try {
+    const cache = await getCache();
+    return (await cache.get<IProviderRecord>(cacheKey)) ?? null;
+  } catch {
+    return null; // cache miss or unavailable — the caller falls back to the database
+  }
+}
+
+async function writeCachedProviderRecord(
+  cacheKey: string,
+  record: IProviderRecord,
+): Promise<void> {
+  const ttl = getConfig().providerRuntime.recordCacheTtlSeconds;
+  if (ttl <= 0) return;
+  try {
+    const cache = await getCache();
+    await cache.set(cacheKey, record, ttl);
+  } catch {
+    /* best-effort cache write */
+  }
+}
+
+/**
+ * Drop every cached entry for a provider so a credential rotation, a status
+ * change or a project re-assignment takes effect on the next call rather than
+ * after the TTL.
+ */
+export async function invalidateProviderRecordCache(
+  tenantDbName: string,
+  record: IProviderRecord | null | undefined,
+): Promise<void> {
+  if (!record) return;
+  try {
+    const cache = await getCache();
+    await Promise.all(
+      providerRecordCacheKeys(record, tenantDbName).map((key) => cache.del(key)),
+    );
+  } catch (error) {
+    logger.warn('Failed to invalidate provider record cache; entries expire on TTL', {
+      providerKey: record.key,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
 
 export type ProviderStatus = IProviderRecord['status'];
 
@@ -145,6 +223,10 @@ export async function updateProviderConfig(
   payload: UpdateProviderConfigInput,
 ): Promise<ProviderConfigView | null> {
   const db = await withTenantDb(tenantDbName);
+  // Read once, up front: the credential merge below needs it, and so does the
+  // cache invalidation at the end — which must cover the projects the provider
+  // was assigned to BEFORE this update, not just after.
+  const priorRecord = await db.findProviderById(providerId);
   const updates: Partial<IProviderRecord> = {};
 
   if (payload.projectIds !== undefined) {
@@ -182,7 +264,7 @@ export async function updateProviderConfig(
     // '' because the backend never returns the secret, so a wholesale replace
     // would silently wipe the API key whenever an unrelated field (baseUrl,
     // region, …) is edited.
-    const existing = await db.findProviderById(providerId);
+    const existing = priorRecord;
     let current: Record<string, unknown> = {};
     if (existing?.credentialsEnc) {
       try {
@@ -214,6 +296,10 @@ export async function updateProviderConfig(
   }
 
   const updated = await db.updateProvider(providerId, updates);
+  // Invalidate against BOTH rows: an update that moves the provider between
+  // projects leaves a stale entry under the old project's key.
+  await invalidateProviderRecordCache(tenantDbName, priorRecord);
+  await invalidateProviderRecordCache(tenantDbName, updated);
   return updated ? sanitize(updated) : null;
 }
 
@@ -257,7 +343,12 @@ export async function deleteProviderConfig(
   providerId: string,
 ): Promise<boolean> {
   const db = await withTenantDb(tenantDbName);
-  return db.deleteProvider(providerId);
+  // Read before deleting: the cache is keyed by tenant/key/project, none of
+  // which can be derived from the id once the row is gone.
+  const existing = await db.findProviderById(providerId);
+  const deleted = await db.deleteProvider(providerId);
+  await invalidateProviderRecordCache(tenantDbName, existing);
+  return deleted;
 }
 
 export interface ProviderRuntimeData<TCredentials = Record<string, unknown>> {
@@ -274,17 +365,29 @@ export async function loadProviderRuntimeData<TCredentials = Record<string, unkn
     projectId?: string;
   },
 ): Promise<ProviderRuntimeData<TCredentials>> {
-  const db = await withTenantDb(tenantDbName);
-  let record: IProviderRecord | null = null;
+  const cacheKey = providerIdOrKey.id
+    ? `provider-rec:${tenantDbName}:id:${providerIdOrKey.id}`
+    : `provider-rec:${tenantDbName}:key:${providerIdOrKey.tenantId}:`
+      + `${providerIdOrKey.key}:${providerIdOrKey.projectId ?? ''}`;
 
-  if (providerIdOrKey.id) {
-    record = await db.findProviderById(providerIdOrKey.id);
-  } else if (providerIdOrKey.key) {
-    record = await db.findProviderByKey(
-      providerIdOrKey.tenantId,
-      providerIdOrKey.key,
-      providerIdOrKey.projectId,
-    );
+  let record = await readCachedProviderRecord(cacheKey);
+  const fromCache = record !== null;
+
+  const db = await withTenantDb(tenantDbName);
+
+  if (!record) {
+    if (providerIdOrKey.id) {
+      record = await db.findProviderById(providerIdOrKey.id);
+    } else if (providerIdOrKey.key) {
+      record = await db.findProviderByKey(
+        providerIdOrKey.tenantId,
+        providerIdOrKey.key,
+        providerIdOrKey.projectId,
+      );
+    }
+    // Only successful lookups are cached. A miss falls through to the
+    // diagnostic branch below, which is an error path and not worth caching.
+    if (record) await writeCachedProviderRecord(cacheKey, record);
   }
 
   if (!record) {
@@ -313,6 +416,12 @@ export async function loadProviderRuntimeData<TCredentials = Record<string, unkn
   try {
     credentials = decryptObject<TCredentials>(record.credentialsEnc);
   } catch (error) {
+    // A cached row is the first suspect when decryption suddenly fails: the
+    // credentials may have been rotated a moment ago. Drop it so the retry —
+    // and the legacy-recovery path below — work against the stored row.
+    if (fromCache) {
+      await invalidateProviderRecordCache(tenantDbName, record);
+    }
     // Legacy auto-heal: an earlier version of the GPU-fleet auto-register
     // path persisted credentialsEnc as PLAINTEXT JSON instead of running it
     // through encryptObject. Those rows fail decrypt with the Node AES-GCM

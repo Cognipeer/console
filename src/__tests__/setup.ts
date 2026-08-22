@@ -4,6 +4,7 @@
  */
 
 import { beforeEach } from 'vitest';
+import { getCache } from '@/lib/core/cache';
 import { resetRateLimitStore } from '@/lib/services/auth/rateLimiter';
 
 // Database provider — default to mongodb for existing tests
@@ -21,6 +22,16 @@ if (!process.env.DEBUG) {
   globalThis.console.debug = () => {};
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   resetRateLimitStore();
+
+  // Request-path lookups (quota policies, guardrail configs, provider records,
+  // Knowledge Engine sources) are cached now, and the cache outlives a single
+  // test in the same process. Without this, one case's fixtures answer the
+  // next case's reads and the DB mock is never consulted.
+  try {
+    await (await getCache()).clear();
+  } catch {
+    /* provider not configured, or mocked without clear() — nothing to reset */
+  }
 });

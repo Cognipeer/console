@@ -112,6 +112,9 @@ export function ToolMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
       type?: ToolSourceType;
       status?: ToolStatus;
       search?: string;
+      /** Page window. Omitted means every row, which is what unbounded lists cost. */
+      limit?: number;
+      offset?: number;
     }): Promise<ITool[]> {
       const db = this.getTenantDb();
       const clauses: string[] = [];
@@ -129,6 +132,18 @@ export function ToolMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
       let sql = `SELECT * FROM ${TABLES.tools}`;
       if (clauses.length > 0) sql += ` WHERE ${clauses.join(' AND ')}`;
       sql += ' ORDER BY createdAt DESC';
+
+      // SQLite needs a LIMIT before it will honour an OFFSET; -1 means "all".
+      if (filters?.limit && filters.limit > 0) {
+        sql += ' LIMIT ?';
+        params.push(filters.limit);
+      } else if (filters?.offset && filters.offset > 0) {
+        sql += ' LIMIT -1';
+      }
+      if (filters?.offset && filters.offset > 0) {
+        sql += ' OFFSET ?';
+        params.push(filters.offset);
+      }
 
       const rows = db.prepare(sql).all(...params) as SqliteRow[];
       return rows.map((r) => this.mapToolRow(r));
