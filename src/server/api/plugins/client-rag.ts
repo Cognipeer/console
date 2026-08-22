@@ -210,19 +210,27 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
         return sendInvalidRequest(reply, error);
       }
 
+      // Opt-in: chunking and embedding move to the ingest queue and the call
+      // returns as soon as the document is persisted. Kept opt-in because the
+      // default response contract — 201 with an `indexed` document — is what
+      // existing clients read `chunkCount` from and query straight afterwards.
+      const deferIndexing = body.async === true;
+      const statusCode = deferIndexing ? 202 : 201;
+
       if (typeof body.data === 'string') {
         const document = await ingestFile(ctx.tenantDbName, ctx.tenantId, undefined, {
           chunkConfig,
           contentType: body.contentType as string | undefined,
           createdBy: ctx.tokenRecord.userId,
         force: body.force === true,
+          deferIndexing,
           fileData: decodeFileData(body.data),
           fileName: body.fileName,
           metadata: body.metadata as Record<string, unknown> | undefined,
           ragModuleKey: key,
         });
 
-        return reply.code(201).send({ document: withoutSourceText(document) });
+        return reply.code(statusCode).send({ document: withoutSourceText(document) });
       }
 
       if (typeof body.content !== 'string') {
@@ -236,13 +244,14 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
         content: body.content,
         contentType: body.contentType as string | undefined,
         createdBy: ctx.tokenRecord.userId,
+        deferIndexing,
         force: body.force === true,
         fileName: body.fileName,
         metadata: body.metadata as Record<string, unknown> | undefined,
         ragModuleKey: key,
       });
 
-      return reply.code(201).send({ document: withoutSourceText(document) });
+      return reply.code(statusCode).send({ document: withoutSourceText(document) });
     } catch (error) {
       logger.error('Ingest client RAG document error', { error });
       return reply.code(500).send({

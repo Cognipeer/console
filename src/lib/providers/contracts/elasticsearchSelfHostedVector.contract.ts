@@ -137,6 +137,9 @@ export const ElasticsearchSelfHostedVectorProviderContract: ProviderContract<
     const dimensions = getSelfHostedDimensions(settings);
 
     const runtime: VectorProviderRuntime = {
+      async close(): Promise<void> {
+        await client.close();
+      },
       async createIndex(input: CreateVectorIndexInput): Promise<VectorIndexHandle> {
         const indexName = input.name || settings.indexName;
         if (!indexName) {

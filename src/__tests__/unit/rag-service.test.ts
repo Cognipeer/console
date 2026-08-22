@@ -23,6 +23,9 @@ vi.mock('@/lib/services/vector/vectorService', () => ({
 vi.mock('@/lib/services/reranker', () => ({
   runReranker: vi.fn(),
 }));
+vi.mock('@/lib/services/rag/ragIngestJob', () => ({
+  publishRagIngestJob: vi.fn().mockResolvedValue(undefined),
+}));
 vi.mock('@/lib/services/files/fileService', () => ({
   uploadFile: vi.fn().mockResolvedValue({ record: { key: 'stored-object-key' } }),
   downloadFile: vi.fn().mockResolvedValue({
@@ -42,6 +45,7 @@ import {
   listRagModules,
   listRagDocuments,
   getRagDocument,
+  indexPendingRagDocument,
   ingestDocument,
   ingestFile,
   queryRag,
@@ -54,6 +58,7 @@ import { getDatabase } from '@/lib/database';
 import { handleEmbeddingRequest } from '@/lib/services/models/inferenceService';
 import { upsertVectors, queryVectorIndex, deleteVectors } from '@/lib/services/vector/vectorService';
 import { runReranker } from '@/lib/services/reranker';
+import { publishRagIngestJob } from '@/lib/services/rag/ragIngestJob';
 import { deleteFile, downloadFile, uploadFile } from '@/lib/services/files/fileService';
 import type { IRagDocument } from '@/lib/database';
 
@@ -491,6 +496,96 @@ describe('RAG Service', () => {
 
   // ─── ingestDocument ─────────────────────────────────────────────────
 
+  describe('indexPendingRagDocument', () => {
+    const PENDING = {
+      ...mockDocument,
+      _id: 'ragdoc-1',
+      status: 'pending' as const,
+      chunkCount: 0,
+      sourceText: 'This is a sample document with enough content to be chunked properly.',
+    };
+
+    beforeEach(() => {
+      db.findRagModuleByKey.mockResolvedValue(mockModule);
+      db.findRagDocumentById.mockResolvedValue(PENDING);
+      db.updateRagDocument.mockResolvedValue(null);
+      db.updateRagModule.mockResolvedValue(null);
+      db.bulkInsertRagChunks.mockResolvedValue(undefined);
+    });
+
+    it('indexes the stored source and marks the document indexed', async () => {
+      await indexPendingRagDocument(DB_NAME, TENANT_ID, PROJECT_ID, 'my-rag', 'ragdoc-1');
+
+      expect(handleEmbeddingRequest).toHaveBeenCalled();
+      expect(upsertVectors).toHaveBeenCalled();
+      expect(db.updateRagDocument).toHaveBeenCalledWith(
+        'ragdoc-1',
+        expect.objectContaining({ status: 'indexed' }),
+      );
+    });
+
+    it('is idempotent for a document another attempt already indexed', async () => {
+      db.findRagDocumentById.mockResolvedValue({ ...PENDING, status: 'indexed' });
+
+      await indexPendingRagDocument(DB_NAME, TENANT_ID, PROJECT_ID, 'my-rag', 'ragdoc-1');
+
+      expect(handleEmbeddingRequest).not.toHaveBeenCalled();
+      expect(db.updateRagDocument).not.toHaveBeenCalled();
+    });
+
+    it('does nothing when the document was deleted before the job ran', async () => {
+      db.findRagDocumentById.mockResolvedValue(null);
+
+      await indexPendingRagDocument(DB_NAME, TENANT_ID, PROJECT_ID, 'my-rag', 'ragdoc-1');
+
+      expect(handleEmbeddingRequest).not.toHaveBeenCalled();
+      expect(db.updateRagDocument).not.toHaveBeenCalled();
+    });
+
+    it('marks the document failed when its module is gone', async () => {
+      db.findRagModuleByKey.mockResolvedValue(null);
+
+      await indexPendingRagDocument(DB_NAME, TENANT_ID, PROJECT_ID, 'my-rag', 'ragdoc-1');
+
+      expect(db.updateRagDocument).toHaveBeenCalledWith(
+        'ragdoc-1',
+        expect.objectContaining({ status: 'failed' }),
+      );
+      expect(handleEmbeddingRequest).not.toHaveBeenCalled();
+    });
+
+    it('marks the document failed when the stored source is unavailable', async () => {
+      db.findRagDocumentById.mockResolvedValue({
+        ...PENDING, sourceText: undefined, sourceTextKey: undefined,
+      });
+
+      await indexPendingRagDocument(DB_NAME, TENANT_ID, PROJECT_ID, 'my-rag', 'ragdoc-1');
+
+      expect(db.updateRagDocument).toHaveBeenCalledWith(
+        'ragdoc-1',
+        expect.objectContaining({ status: 'failed' }),
+      );
+    });
+
+    it('records the error on the document when indexing throws', async () => {
+      (handleEmbeddingRequest as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new Error('embedding provider unavailable'),
+      );
+
+      await expect(
+        indexPendingRagDocument(DB_NAME, TENANT_ID, PROJECT_ID, 'my-rag', 'ragdoc-1'),
+      ).rejects.toThrow(/embedding provider unavailable/);
+
+      expect(db.updateRagDocument).toHaveBeenCalledWith(
+        'ragdoc-1',
+        expect.objectContaining({
+          status: 'failed',
+          errorMessage: 'embedding provider unavailable',
+        }),
+      );
+    });
+  });
+
   describe('ingestDocument', () => {
     const ingestReq = {
       ragModuleKey: 'my-rag',
@@ -510,6 +605,52 @@ describe('RAG Service', () => {
     it('throws if RAG module not found', async () => {
       db.findRagModuleByKey.mockResolvedValue(null);
       await expect(ingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, ingestReq)).rejects.toThrow(/not found/i);
+    });
+
+    describe('deferIndexing', () => {
+      it('persists the document as pending and publishes a job', async () => {
+        db.createRagDocument.mockResolvedValue({
+          ...mockDocument, _id: 'ragdoc-1', status: 'pending', chunkCount: 0,
+        });
+
+        const document = await ingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, {
+          ...ingestReq,
+          deferIndexing: true,
+        });
+
+        expect(db.createRagDocument).toHaveBeenCalledWith(
+          expect.objectContaining({ status: 'pending' }),
+        );
+        expect(document.status).toBe('pending');
+        expect(publishRagIngestJob).toHaveBeenCalledWith(
+          expect.objectContaining({
+            tenantDbName: DB_NAME,
+            ragModuleKey: 'my-rag',
+            documentId: 'ragdoc-1',
+          }),
+        );
+      });
+
+      it('keeps chunking and embedding off the request path', async () => {
+        db.createRagDocument.mockResolvedValue({
+          ...mockDocument, _id: 'ragdoc-1', status: 'pending', chunkCount: 0,
+        });
+
+        await ingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, {
+          ...ingestReq,
+          deferIndexing: true,
+        });
+
+        expect(handleEmbeddingRequest).not.toHaveBeenCalled();
+        expect(upsertVectors).not.toHaveBeenCalled();
+      });
+
+      it('still embeds inline when the flag is absent', async () => {
+        await ingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, ingestReq);
+
+        expect(publishRagIngestJob).not.toHaveBeenCalled();
+        expect(handleEmbeddingRequest).toHaveBeenCalled();
+      });
     });
 
     it('throws if RAG module is not active', async () => {

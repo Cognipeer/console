@@ -6582,7 +6582,18 @@ paths:
       tags:
         - Knowledge Engine
       summary: Ingest a document into a Knowledge Engine module
-      description: Ingests a document into a Knowledge Engine module. Provide `content` for raw text, or `data` for a base64-encoded (or data-URI) binary file which is converted to Markdown before chunking and embedding. `fileName` is always required. Pass `chunkConfig` to split this one document differently from the rest of the module.
+      description: >-
+        Ingests a document into a Knowledge Engine module. Provide `content` for raw text, or
+        `data` for a base64-encoded (or data-URI) binary file which is converted to Markdown
+        before chunking and embedding. `fileName` is always required. Pass `chunkConfig` to
+        split this one document differently from the rest of the module.
+
+
+        Ingestion is synchronous by default: the call returns `201` once the document is
+        `indexed` and searchable. Set `async: true` to return `202` as soon as the document is
+        stored — it comes back `pending`, is chunked and embedded by a background job, and is
+        not searchable until its `status` reaches `indexed`. Poll the document endpoint to
+        follow it; a failure lands on the record as `failed` with `errorMessage`.
       operationId: ingestRagDocument
       parameters:
         - name: key
@@ -6627,9 +6638,24 @@ paths:
                   example:
                     source: docs
                     version: "2.0"
+                async:
+                  type: boolean
+                  default: false
+                  description: >-
+                    Return as soon as the document is stored, leaving chunking and embedding to
+                    a background job. The response is `202` and the document is `pending`.
       responses:
         "201":
-          description: Ingested document.
+          description: Ingested document, already indexed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  document:
+                    $ref: "#/components/schemas/RagDocument"
+        "202":
+          description: "Document stored and queued for indexing (`async: true`). Its `status` is `pending`."
           content:
             application/json:
               schema:
