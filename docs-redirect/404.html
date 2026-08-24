@@ -1,0 +1,16 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Documentation has moved</title>
+<meta name="robots" content="noindex">
+<link rel="canonical" href="https://docs.cognipeer.com/console/">
+<script>
+(function () {
+  var base = "/console/";
+  var path = location.pathname;
+  var p = path.indexOf(base) === 0 ? path.slice(base.length) : "";
+  p = p.replace(/^\/+/, "").replace(/\.html$/, "");
+  var target = (function(){if(/^api\//.test(p)) return 'console/developer/api/' + p.slice(4);if(/^how-to\//.test(p)) return 'console/guide/how-to/' + p.slice(7);if(/^releases\//.test(p)) return 'release-notes/console/' + p.slice(9);if(/^contributing/.test(p)) return 'console/developer/contributing';if(/^guide\/(architecture|sdk-integration|core-)/.test(p)) return 'console/developer/' + p.slice(6);if(/^guide\//.test(p)) return 'console/guide/' + p.slice(6);return 'console/' + p;})();
+  location.replace("https://docs.cognipeer.com/" + target + location.hash);
+})();
+</script>
+<p>This documentation now lives at <a href="https://docs.cognipeer.com/console/">docs.cognipeer.com</a>.</p>

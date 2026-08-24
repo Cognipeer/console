@@ -156,7 +156,7 @@ See [openapi.yaml](openapi.yaml) for the full API specification.
 If you are building an application against Cognipeer Console, prefer the official TypeScript/JavaScript SDK:
 
 - SDK repo: [console-sdk](https://github.com/Cognipeer/console-sdk)
-- SDK docs: [cognipeer.github.io/console-sdk](https://cognipeer.github.io/console-sdk/)
+- SDK docs: [docs.cognipeer.com/console-sdk](https://docs.cognipeer.com/console-sdk/)
 
 Use this repository and its docs for platform setup, deployment, providers, tenancy, auth, and raw HTTP API semantics.
 
