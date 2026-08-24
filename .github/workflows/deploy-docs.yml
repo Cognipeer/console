@@ -1,14 +1,17 @@
-name: Deploy Documentation
+name: Deploy Documentation Redirect
+
+# The documentation for this package now lives at docs.cognipeer.com.
+# This workflow publishes a two-file redirect site in place of the old
+# VitePress build: GitHub Pages serves 404.html for any unmatched path,
+# so deep links are forwarded, not just the homepage.
 
 on:
   push:
     branches:
       - main
     paths:
-      - 'docs/**'
+      - 'docs-redirect/**'
       - '.github/workflows/deploy-docs.yml'
-      - 'package.json'
-      - 'package-lock.json'
   workflow_dispatch:
 
 permissions:
@@ -21,42 +24,23 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
-      - name: Setup Pages
-        uses: actions/configure-pages@v4
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build with VitePress
-        run: npm run docs:build
-
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: docs/.vitepress/dist
-
   deploy:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    needs: build
     runs-on: ubuntu-latest
-    name: Deploy
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload redirect site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs-redirect
+
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
