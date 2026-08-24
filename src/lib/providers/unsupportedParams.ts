@@ -31,8 +31,17 @@ export interface UnsupportedParamRule {
   drivers: readonly string[];
   /** Matched against the upstream model id (not the Model Hub key). */
   match: RegExp;
-  /** Wire names the model rejects. */
+  /** Wire names the model rejects outright, regardless of the rest of the request. */
   params: readonly string[];
+  /**
+   * Wire names the model only rejects when the request also carries function
+   * tools (`tools`/`tool_choice`) — e.g. OpenAI's newer reasoning models 400 on
+   * `reasoning`/`reasoning_effort` together with tools on `/v1/chat/completions`
+   * ("use /v1/responses, or set reasoning_effort to 'none'"). Kept separate from
+   * `params` because the parameter works fine — and callers rely on it — for a
+   * tool-free request.
+   */
+  paramsWithTools?: readonly string[];
   /** Shown in the UI next to the detected parameters. */
   reason: string;
 }
@@ -62,7 +71,12 @@ export const UNSUPPORTED_PARAM_RULES: readonly UnsupportedParamRule[] = [
     // `gpt-5-chat` is the non-reasoning variant and keeps the normal knobs.
     match: /^gpt-5(?!-chat)/,
     params: ['temperature', 'top_p', 'max_tokens'],
-    reason: 'GPT-5 family: only the default temperature and top_p are accepted, and max_tokens was replaced by max_completion_tokens',
+    // Confirmed on gpt-5.6-terra: /v1/chat/completions 400s with "Function tools
+    // with reasoning_effort are not supported ... To use function tools, use
+    // /v1/responses or set reasoning_effort to 'none'." The console does not proxy
+    // /v1/responses, so the only safe move on this endpoint is to drop it.
+    paramsWithTools: ['reasoning', 'reasoning_effort'],
+    reason: 'GPT-5 family: only the default temperature and top_p are accepted, max_tokens was replaced by max_completion_tokens, and reasoning_effort cannot be combined with function tools on /v1/chat/completions (upstream requires /v1/responses, or reasoning_effort:"none")',
   },
 ];
 
@@ -80,10 +94,14 @@ const EMPTY: DetectedUnsupportedParams = { params: [] };
 /**
  * Parameters the given model is known to reject. Returns an empty list — never
  * throws — for any driver or model the registry says nothing about.
+ *
+ * `hasTools` folds in a rule's `paramsWithTools` — pass `true` only when this
+ * particular call carries function tools, since those params are otherwise fine.
  */
 export function detectUnsupportedParams(
   driver: string | undefined,
   modelId: string | undefined,
+  hasTools = false,
 ): DetectedUnsupportedParams {
   if (!driver || !modelId) return EMPTY;
 
@@ -93,7 +111,11 @@ export function detectUnsupportedParams(
 
   if (!rule) return EMPTY;
 
-  return { params: [...rule.params], reason: rule.reason, ruleId: rule.id };
+  const params = hasTools && rule.paramsWithTools
+    ? [...rule.params, ...rule.paramsWithTools]
+    : [...rule.params];
+
+  return { params, reason: rule.reason, ruleId: rule.id };
 }
 
 /**
@@ -106,10 +128,11 @@ export function resolveUnsupportedParamNames(input: {
   modelId?: string;
   manual?: unknown;
   autoDetect?: unknown;
+  hasTools?: boolean;
 }): { params: string[]; detected: DetectedUnsupportedParams } {
   const detected = input.autoDetect === false
     ? EMPTY
-    : detectUnsupportedParams(input.driver, input.modelId);
+    : detectUnsupportedParams(input.driver, input.modelId, input.hasTools);
 
   const manual = Array.isArray(input.manual)
     ? input.manual.filter((entry): entry is string => typeof entry === 'string')

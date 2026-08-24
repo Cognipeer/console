@@ -630,6 +630,9 @@ export default function EditModelPage() {
                   {...form.getInputProps('modelId')}
                 />
               </Grid.Col>
+            </Grid>
+
+            <Grid>
               <Grid.Col span={{ base: 12, md: 6 }}>
                 <TextInput
                   label={tWizard('fields.currency.label')}
@@ -657,7 +660,7 @@ export default function EditModelPage() {
                     min={0}
                     value={form.values.pricing.inputTokenPer1M}
                     onChange={(value) => form.setFieldValue('pricing.inputTokenPer1M', Number(value) || 0)}
-                    thousandSeparator="," 
+                    thousandSeparator=","
                   />
                 </Grid.Col>
                 <Grid.Col span={{ base: 12, md: 4 }}>
@@ -666,7 +669,7 @@ export default function EditModelPage() {
                     min={0}
                     value={form.values.pricing.outputTokenPer1M}
                     onChange={(value) => form.setFieldValue('pricing.outputTokenPer1M', Number(value) || 0)}
-                    thousandSeparator="," 
+                    thousandSeparator=","
                   />
                 </Grid.Col>
                 <Grid.Col span={{ base: 12, md: 4 }}>
@@ -675,7 +678,7 @@ export default function EditModelPage() {
                     min={0}
                     value={form.values.pricing.cachedTokenPer1M}
                     onChange={(value) => form.setFieldValue('pricing.cachedTokenPer1M', Number(value) || 0)}
-                    thousandSeparator="," 
+                    thousandSeparator=","
                   />
                 </Grid.Col>
               </Grid>

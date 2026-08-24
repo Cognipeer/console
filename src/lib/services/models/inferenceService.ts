@@ -737,6 +737,7 @@ export function resolveModelInvocationConfig(
   unsupportedParams: string[];
 } {
   const settings = asRecord(model.settings);
+  const hasTools = Array.isArray(body.tools) && body.tools.length > 0;
 
   // Resolved here as well as in the contract layer, because the passthrough body
   // is assembled here and must not smuggle back a parameter the provider is
@@ -746,18 +747,24 @@ export function resolveModelInvocationConfig(
     modelId: model.modelId,
     manual: settings.unsupportedParams,
     autoDetect: settings.autoDropUnsupportedParams,
+    hasTools,
   });
+  const blockedLower = new Set(unsupportedParams.map((name) => name.toLowerCase()));
 
   const overrides = buildOverrides(body);
   const modelSettings = buildChatModelSettings(model.settings, overrides);
-  const extraBody = buildPassthroughBody(
-    model.settings,
-    body,
-    new Set(unsupportedParams.map((name) => name.toLowerCase())),
-  );
+  const extraBody = buildPassthroughBody(model.settings, body, blockedLower);
 
   if (extraBody) {
     modelSettings.extraBody = extraBody;
+  }
+
+  // `reasoning`/`reasoning_effort` is a call-level field the constructor
+  // wiring (openAiChatOverrides) always forwards, so — unlike the other
+  // unsupported params, which get filtered in the contract layer — it has to
+  // be dropped here, before it ever lands in modelSettings.
+  if (blockedLower.has('reasoning') || blockedLower.has('reasoning_effort')) {
+    delete modelSettings.reasoning;
   }
 
   // Stripping silently changes sampling behaviour, so leave a trace of which

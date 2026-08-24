@@ -322,6 +322,70 @@ describe('automatic detection — the drop_params equivalent', () => {
   });
 });
 
+describe('reasoning_effort + function tools — upstream 400s the combination', () => {
+  // gpt-5.6-terra confirmed: "Function tools with reasoning_effort are not
+  // supported ... To use function tools, use /v1/responses or set
+  // reasoning_effort to 'none'." The console does not proxy /v1/responses, so
+  // the gateway has to drop reasoning_effort itself whenever tools are present.
+  it('is unaffected without tools', () => {
+    expect(detectUnsupportedParams('openai', 'gpt-5.6-luna', false).params)
+      .not.toContain('reasoning_effort');
+  });
+
+  it('is dropped once the call carries tools', () => {
+    expect(detectUnsupportedParams('openai', 'gpt-5.6-luna', true).params)
+      .toEqual(expect.arrayContaining(['reasoning', 'reasoning_effort']));
+  });
+
+  it('keeps reasoning_effort out of the constructed model when tools are present', () => {
+    const config = resolveModelInvocationConfig(
+      { settings: {}, modelId: 'gpt-5.6-luna', providerDriver: 'openai' },
+      {
+        messages: [],
+        reasoning_effort: 'high',
+        tools: [{ type: 'function', function: { name: 'search' } }],
+      },
+    );
+
+    expect(config.modelSettings.reasoning).toBeUndefined();
+    expect(config.unsupportedParams).toEqual(expect.arrayContaining(['reasoning', 'reasoning_effort']));
+  });
+
+  it('still applies reasoning_effort on a tool-free call', () => {
+    const config = resolveModelInvocationConfig(
+      { settings: {}, modelId: 'gpt-5.6-luna', providerDriver: 'openai' },
+      { messages: [], reasoning_effort: 'high' },
+    );
+
+    expect(config.modelSettings.reasoning).toEqual({ effort: 'high' });
+  });
+
+  it('drops it end-to-end once bound to a real gpt-5 model id', () => {
+    constructed.length = 0;
+    const runtime = OpenAiCompatibleModelProviderContract.createRuntime({
+      tenantId: 't1',
+      providerKey: 'p1',
+      credentials: { apiKey: 'sk-test' },
+      settings: { baseUrl: 'https://api.openai.com/v1' },
+      metadata: {},
+      logger: console,
+    } as never) as ModelProviderRuntime;
+
+    const { modelSettings } = resolveModelInvocationConfig(
+      { settings: {}, modelId: 'gpt-5.6-luna', providerDriver: 'openai-compatible' },
+      {
+        messages: [],
+        reasoning_effort: 'high',
+        tools: [{ type: 'function', function: { name: 'search' } }],
+      },
+    );
+
+    runtime.createChatModel!({ modelId: 'gpt-5.6-luna', category: 'llm', modelSettings });
+
+    expect(constructed[0].reasoning).toBeUndefined();
+  });
+});
+
 describe('buildPassthroughBody — what a caller may add to the upstream body', () => {
   const settings = (extra: Record<string, unknown> = {}) => ({
     requestDefaults: { chat_template_kwargs: { enable_thinking: false, tool_prompt: 'x' } },
