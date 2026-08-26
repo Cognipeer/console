@@ -287,6 +287,14 @@ export class SQLiteProviderBase {
       'licenseError',
       'licenseError TEXT',
     );
+    // Per-token least-privilege scope (JSON UserServicePermissions). Legacy rows
+    // read as NULL = unscoped (inherit owner). API tokens live in the main DB.
+    this.ensureTableColumn(
+      db,
+      TABLES.apiTokens,
+      'servicePermissions',
+      'servicePermissions TEXT',
+    );
   }
 
   private applyTenantMigrations(db: Database.Database): void {
@@ -442,14 +450,6 @@ export class SQLiteProviderBase {
       'rerankerKey',
       'rerankerKey TEXT',
     );
-    // Per-token least-privilege scope (JSON UserServicePermissions). Legacy rows
-    // read as NULL = unscoped (inherit owner). API tokens live in the main DB.
-    this.ensureTableColumn(
-      db,
-      TABLES.apiTokens,
-      'servicePermissions',
-      'servicePermissions TEXT',
-    );
     this.ensureTableColumn(
       db,
       TABLES.ragModules,
@@ -567,6 +567,23 @@ export class SQLiteProviderBase {
       'warm INTEGER NOT NULL DEFAULT 0',
     );
     this.ensureTableColumn(db, 'sandbox_instances', 'warmKey', 'warmKey TEXT');
+    // Template Studio (plan §7): distinguishes an ordinary read-only jail
+    // from a writable builder instance used to promote a new template.
+    // Docker-mode instances are always 'runtime' — the column exists either
+    // way so the sandbox_instances row shape doesn't fork per executor.
+    this.ensureTableColumn(db, 'sandbox_instances', 'class', "class TEXT NOT NULL DEFAULT 'runtime'");
+    // The Template Studio (sandbox-host) source a builder/runtime jail instance
+    // was launched from — persisted so boot redrive/restart relaunches from the
+    // same rootfs instead of silently falling back to the seed template (the
+    // same failure mode imageRef exists to prevent for docker-mode snapshots).
+    this.ensureTableColumn(db, 'sandbox_instances', 'studioTemplateKey', 'studioTemplateKey TEXT');
+    this.ensureTableColumn(db, 'sandbox_instances', 'studioTemplateVersion', 'studioTemplateVersion INTEGER');
+    // Promoting a builder instance now upserts a real sandbox_templates row
+    // (see instanceService.promoteInstanceToTemplate) so Template Studio
+    // output shows up directly in the normal template list/picker — these
+    // mirror the instance-level columns above but on the template itself.
+    this.ensureTableColumn(db, 'sandbox_templates', 'studioTemplateKey', 'studioTemplateKey TEXT');
+    this.ensureTableColumn(db, 'sandbox_templates', 'studioTemplateVersion', 'studioTemplateVersion INTEGER');
     this.ensureTableColumn(
       db,
       'sandbox_snapshots',

@@ -856,6 +856,16 @@ export interface ISandboxTemplate {
   idleReapSeconds: number | null;
   /** Number of pre-started "warm" sandboxes kept ready for instant launch (0/null = off). */
   warmPoolSize: number | null;
+  /**
+   * Template Studio (jail mode only): the sandbox-host template-store
+   * key/version this template's instances actually boot their rootfs from,
+   * set automatically when a builder instance is promoted (see
+   * instanceService.promoteInstanceToTemplate). Every instance created from
+   * this template inherits it via resolveSpec — no per-instance selection
+   * needed. null/absent = boot from the seed rootfs as usual.
+   */
+  studioTemplateKey?: string | null;
+  studioTemplateVersion?: number | null;
   enabled: boolean;
   createdBy: string;
   createdAt: Date;
@@ -907,6 +917,22 @@ export interface ISandboxInstance extends IUsageAttributionFields {
   toolboxPort: number | null;
   previewPorts: Array<Record<string, unknown>>;
   isolation: string;
+  /**
+   * Ordinary read-only sandbox vs. Template Studio's writable builder
+   * instance (jail mode only — see docs/notes/sandbox-jail-mode-plan.md
+   * §7). Always 'runtime' for docker-mode instances. Defaults to
+   * 'runtime' when absent so existing rows don't need a migration to stay
+   * valid.
+   */
+  class?: 'runtime' | 'builder';
+  /**
+   * Template Studio (sandbox-host) key/version this instance was launched
+   * from, when it isn't the baked-in seed rootfs. Absent for docker-mode
+   * instances and for jail instances launched from the seed. Persisted so
+   * boot redrive/restart relaunches from the same rootfs.
+   */
+  studioTemplateKey?: string | null;
+  studioTemplateVersion?: number | null;
   /** Per-instance environment variables passed to the container. */
   env: Record<string, string>;
   /**
