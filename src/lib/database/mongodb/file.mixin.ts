@@ -148,7 +148,7 @@ export function FileMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: 
       }
 
       if (filters.search) {
-        const regex = new RegExp(filters.search, 'i');
+        const regex = new RegExp(this.escapeRegex(filters.search), 'i');
         query.$or = [{ key: regex }, { name: regex }];
       }
 
