@@ -170,13 +170,19 @@ describe('POST /api/auth/login', () => {
       expect(body.error).toMatch(/invalid email or password/i);
     });
 
-    it('switches to tenant database before user lookup', async () => {
+    it('binds the tenant database via runWithTenant before user lookup', async () => {
       await login({
         email: 'admin@acme.com',
         password: 'password123',
         slug: 'acme-corp',
       });
-      expect(db.switchToTenant).toHaveBeenCalledWith('tenant_acme-corp');
+      // Must be bound via a real AsyncLocalStorage scope (runWithTenant), not
+      // the process-global switchToTenant fallback, so a concurrent request
+      // for another tenant can't clobber this request's tenant binding.
+      expect(db.runWithTenant).toHaveBeenCalledWith(
+        'tenant_acme-corp',
+        expect.any(Function),
+      );
     });
 
     it('generates JWT token on successful login', async () => {

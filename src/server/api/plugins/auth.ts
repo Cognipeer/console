@@ -77,6 +77,28 @@ function sendRateLimitHeaders(
   }
 }
 
+/**
+ * Binds the tenant DB for the duration of `fn` via a real AsyncLocalStorage
+ * scope (`db.runWithTenant`), so a concurrent request for another tenant
+ * cannot clobber this request's tenant binding through the process-global
+ * `switchToTenant` fallback (CWE-362). These pre-auth routes previously
+ * called `db.switchToTenant()` directly and never established a scope for
+ * the rest of the handler, which is exactly the race this closes. Falls
+ * back to `switchToTenant` only for partial test doubles that don't
+ * implement `runWithTenant`.
+ */
+async function withTenantScope<T>(
+  db: Awaited<ReturnType<typeof getDatabase>>,
+  tenantDbName: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  if (typeof db.runWithTenant === 'function') {
+    return db.runWithTenant(tenantDbName, fn);
+  }
+  await db.switchToTenant(tenantDbName);
+  return fn();
+}
+
 export const authApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/auth/login', async (request, reply) => {
     try {
@@ -117,43 +139,47 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
             .send({ error: 'Invalid company identifier' });
         }
 
-        await db.switchToTenant(tenant.dbName);
-
         // External directory (LDAP/SSO, enterprise overlay) gets first refusal
         // when the tenant has it configured. 'skip' falls through to the local
         // email + bcrypt path; 'fail' is a rejected external login (no fallback).
-        const external = await tryExternalAuthenticate({
-          email: normalizedEmail,
-          password,
-          tenant,
+        const slugAuthResult = await withTenantScope(db, tenant.dbName, async () => {
+          const external = await tryExternalAuthenticate({
+            email: normalizedEmail,
+            password,
+            tenant: tenant!,
+          });
+
+          if (external.outcome === 'fail') {
+            return null;
+          }
+
+          if (external.outcome === 'pass') {
+            return external.user;
+          }
+
+          const candidateUser =
+            (await db.findUserByEmail(normalizedEmail))
+            || (await db.findUserByEmail(email));
+
+          if (!candidateUser) {
+            return null;
+          }
+
+          const isPasswordValid = await bcrypt.compare(password, candidateUser.password);
+          if (!isPasswordValid) {
+            return null;
+          }
+
+          return candidateUser;
         });
 
-        if (external.outcome === 'fail') {
+        if (!slugAuthResult) {
           return reply
             .code(401)
             .send({ error: 'Invalid email or password' });
         }
 
-        if (external.outcome === 'pass') {
-          user = external.user;
-        } else {
-          user =
-            (await db.findUserByEmail(normalizedEmail))
-            || (await db.findUserByEmail(email));
-
-          if (!user) {
-            return reply
-              .code(401)
-              .send({ error: 'Invalid email or password' });
-          }
-
-          const isPasswordValid = await bcrypt.compare(password, user.password);
-          if (!isPasswordValid) {
-            return reply
-              .code(401)
-              .send({ error: 'Invalid email or password' });
-          }
-        }
+        user = slugAuthResult;
       } else {
         const tenantEntries = await db.listTenantsForUser(normalizedEmail);
         const checkedTenantIds = new Set<string>();
@@ -167,21 +193,31 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
               continue;
             }
 
-            await db.switchToTenant(candidateTenant.dbName);
-            const candidateUser =
-              (await db.findUserByEmail(normalizedEmail))
-              || (await db.findUserByEmail(email));
+            // Each candidate gets its own isolated tenant scope: nothing
+            // about one candidate's DB binding should leak into the next
+            // iteration or into a concurrent request for another tenant.
+            const candidateUser = await withTenantScope(
+              db,
+              candidateTenant.dbName,
+              async () => {
+                const foundUser =
+                  (await db.findUserByEmail(normalizedEmail))
+                  || (await db.findUserByEmail(email));
 
-            if (!candidateUser) {
-              continue;
-            }
+                if (!foundUser) {
+                  return null;
+                }
 
-            const isPasswordValid = await bcrypt.compare(
-              password,
-              candidateUser.password,
+                const isPasswordValid = await bcrypt.compare(
+                  password,
+                  foundUser.password,
+                );
+
+                return isPasswordValid ? foundUser : null;
+              },
             );
 
-            if (!isPasswordValid) {
+            if (!candidateUser) {
               continue;
             }
 
@@ -210,21 +246,29 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
             }
 
             try {
-              await db.switchToTenant(candidateTenant.dbName);
-              const candidateUser =
-                (await db.findUserByEmail(normalizedEmail))
-                || (await db.findUserByEmail(email));
+              // Isolated scope per candidate, same reasoning as the loop above.
+              const candidateUser = await withTenantScope(
+                db,
+                candidateTenant.dbName,
+                async () => {
+                  const foundUser =
+                    (await db.findUserByEmail(normalizedEmail))
+                    || (await db.findUserByEmail(email));
 
-              if (!candidateUser) {
-                continue;
-              }
+                  if (!foundUser) {
+                    return null;
+                  }
 
-              const isPasswordValid = await bcrypt.compare(
-                password,
-                candidateUser.password,
+                  const isPasswordValid = await bcrypt.compare(
+                    password,
+                    foundUser.password,
+                  );
+
+                  return isPasswordValid ? foundUser : null;
+                },
               );
 
-              if (!isPasswordValid) {
+              if (!candidateUser) {
                 continue;
               }
 
@@ -252,93 +296,106 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         }
       }
 
-      const tenantIdStr =
-        typeof tenant._id === 'string' ? tenant._id : tenant._id!.toString();
-      const userIdStr =
-        typeof user._id === 'string' ? user._id : user._id!.toString();
+      // `tenant`/`user` are guaranteed non-null past this point (every branch
+      // above either returned early or set both). Alias to const so the
+      // post-authentication tail below runs inside a single tenant scope tied
+      // to the tenant that actually authenticated.
+      const authenticatedTenant = tenant;
+      const authenticatedUser = user;
 
-      const defaultProject = await ensureDefaultProject(
-        tenant.dbName,
-        tenantIdStr,
-        userIdStr,
-      );
-      const defaultProjectId =
-        typeof defaultProject._id === 'string'
-          ? defaultProject._id
-          : defaultProject._id?.toString();
+      return await withTenantScope(db, authenticatedTenant.dbName, async () => {
+        const tenantIdStr =
+          typeof authenticatedTenant._id === 'string'
+            ? authenticatedTenant._id
+            : authenticatedTenant._id!.toString();
+        const userIdStr =
+          typeof authenticatedUser._id === 'string'
+            ? authenticatedUser._id
+            : authenticatedUser._id!.toString();
 
-      let activeProjectId = request.cookies.active_project_id;
-
-      if (user.role === 'user' || user.role === 'project_admin') {
-        const allowed = await collectAccessibleProjectIds(
-          db,
+        const defaultProject = await ensureDefaultProject(
+          authenticatedTenant.dbName,
+          tenantIdStr,
           userIdStr,
-          user.projectIds,
         );
-        if (!activeProjectId || !allowed.includes(activeProjectId)) {
-          activeProjectId = allowed[0];
+        const defaultProjectId =
+          typeof defaultProject._id === 'string'
+            ? defaultProject._id
+            : defaultProject._id?.toString();
+
+        let activeProjectId = request.cookies.active_project_id;
+
+        if (authenticatedUser.role === 'user' || authenticatedUser.role === 'project_admin') {
+          const allowed = await collectAccessibleProjectIds(
+            db,
+            userIdStr,
+            authenticatedUser.projectIds,
+          );
+          if (!activeProjectId || !allowed.includes(activeProjectId)) {
+            activeProjectId = allowed[0];
+          }
+        } else if (!activeProjectId) {
+          const allProjects = await db.listProjects(tenantIdStr);
+          const preferred = allProjects.find(
+            (project) =>
+              project.key !== DEFAULT_PROJECT_KEY
+              && String(project._id) !== defaultProjectId,
+          );
+          activeProjectId = preferred
+            ? (
+              typeof preferred._id === 'string'
+                ? preferred._id
+                : preferred._id?.toString()
+            )
+            : defaultProjectId;
         }
-      } else if (!activeProjectId) {
-        const allProjects = await db.listProjects(tenantIdStr);
-        const preferred = allProjects.find(
-          (project) =>
-            project.key !== DEFAULT_PROJECT_KEY
-            && String(project._id) !== defaultProjectId,
-        );
-        activeProjectId = preferred
-          ? (
-            typeof preferred._id === 'string'
-              ? preferred._id
-              : preferred._id?.toString()
-          )
-          : defaultProjectId;
-      }
 
-      const effectiveLicense = LicenseManager.getEffectiveLicenseForTenant(tenant);
-      const token = await TokenManager.generateToken({
-        email: user.email,
-        features: effectiveLicense.features,
-        licenseExpiresAt: effectiveLicense.expiresAt?.toISOString(),
-        licenseId: effectiveLicense.licenseId,
-        licenseType: effectiveLicense.licenseType,
-        role: user.role!,
-        tenantDbName: tenant.dbName,
-        tenantId: tenantIdStr,
-        tenantSlug: tenant.slug,
-        userId: userIdStr,
-      });
-
-      if (user.invitedBy && !user.inviteAcceptedAt) {
-        try {
-          await db.updateUser(userIdStr, { inviteAcceptedAt: new Date() });
-          user.inviteAcceptedAt = new Date();
-        } catch (error) {
-          logger.error('Failed to mark invite accepted', { error });
-        }
-      }
-
-      setSessionCookies(reply, {
-        activeProjectId,
-        token,
-      });
-
-      return reply.code(200).send({
-        message: 'Login successful',
-        mustChangePassword: Boolean(user.mustChangePassword),
-        tenant: {
-          companyName: tenant.companyName,
-          id: tenant._id,
-          slug: tenant.slug,
-        },
-        user: {
-          email: user.email,
+        const effectiveLicense = LicenseManager.getEffectiveLicenseForTenant(authenticatedTenant);
+        const token = await TokenManager.generateToken({
+          email: authenticatedUser.email,
           features: effectiveLicense.features,
-          id: user._id,
+          licenseExpiresAt: effectiveLicense.expiresAt?.toISOString(),
+          licenseId: effectiveLicense.licenseId,
           licenseType: effectiveLicense.licenseType,
-          name: user.name,
-          role: user.role,
-          servicePermissions: normalizeServicePermissions(user.servicePermissions),
-        },
+          role: authenticatedUser.role!,
+          tenantDbName: authenticatedTenant.dbName,
+          tenantId: tenantIdStr,
+          tenantSlug: authenticatedTenant.slug,
+          userId: userIdStr,
+        });
+
+        if (authenticatedUser.invitedBy && !authenticatedUser.inviteAcceptedAt) {
+          try {
+            await db.updateUser(userIdStr, { inviteAcceptedAt: new Date() });
+            authenticatedUser.inviteAcceptedAt = new Date();
+          } catch (error) {
+            logger.error('Failed to mark invite accepted', { error });
+          }
+        }
+
+        setSessionCookies(reply, {
+          activeProjectId,
+          token,
+        });
+
+        return reply.code(200).send({
+          message: 'Login successful',
+          mustChangePassword: Boolean(authenticatedUser.mustChangePassword),
+          tenant: {
+            companyName: authenticatedTenant.companyName,
+            id: authenticatedTenant._id,
+            slug: authenticatedTenant.slug,
+          },
+          user: {
+            email: authenticatedUser.email,
+            features: effectiveLicense.features,
+            id: authenticatedUser._id,
+            licenseType: effectiveLicense.licenseType,
+            name: authenticatedUser.name,
+            role: authenticatedUser.role,
+            servicePermissions: normalizeServicePermissions(authenticatedUser.servicePermissions),
+          },
+        });
       });
     } catch (error) {
       logger.error('Login error', { error });
@@ -444,79 +501,80 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         slug,
       });
 
-      await db.switchToTenant(dbName);
-      const hashedPassword = await bcrypt.hash(password, BCRYPT_ROUNDS);
+      return await withTenantScope(db, dbName, async () => {
+        const hashedPassword = await bcrypt.hash(password, BCRYPT_ROUNDS);
 
-      const tenantIdStr =
-        typeof tenant._id === 'string' ? tenant._id : tenant._id!.toString();
+        const tenantIdStr =
+          typeof tenant._id === 'string' ? tenant._id : tenant._id!.toString();
 
-      const user = await db.createUser({
-        email,
-        features,
-        licenseId: finalLicenseType,
-        name,
-        password: hashedPassword,
-        role: 'owner',
-        tenantId: tenantIdStr,
-      });
+        const user = await db.createUser({
+          email,
+          features,
+          licenseId: finalLicenseType,
+          name,
+          password: hashedPassword,
+          role: 'owner',
+          tenantId: tenantIdStr,
+        });
 
-      const userIdStr =
-        typeof user._id === 'string' ? user._id : user._id!.toString();
+        const userIdStr =
+          typeof user._id === 'string' ? user._id : user._id!.toString();
 
-      const defaultProject = await ensureDefaultProject(
-        dbName,
-        tenantIdStr,
-        userIdStr,
-      );
-      const defaultProjectId =
-        typeof defaultProject._id === 'string'
-          ? defaultProject._id
-          : defaultProject._id?.toString();
+        const defaultProject = await ensureDefaultProject(
+          dbName,
+          tenantIdStr,
+          userIdStr,
+        );
+        const defaultProjectId =
+          typeof defaultProject._id === 'string'
+            ? defaultProject._id
+            : defaultProject._id?.toString();
 
-      await db.updateTenant(tenantIdStr, { ownerId: userIdStr });
+        await db.updateTenant(tenantIdStr, { ownerId: userIdStr });
 
-      const token = await TokenManager.generateToken({
-        email: user.email,
-        features: user.features || [],
-        licenseId: user.licenseId,
-        licenseType: finalLicenseType,
-        role: user.role!,
-        tenantDbName: tenant.dbName,
-        tenantId: tenantIdStr,
-        tenantSlug: tenant.slug,
-        userId: userIdStr,
-      });
-
-      sendEmail(email, 'welcome', {
-        companyName,
-        email,
-        licenseType: finalLicenseType,
-        name,
-        slug,
-      }).catch((error: Error) => {
-        logger.error('Failed to send welcome email', { error });
-      });
-
-      setSessionCookies(reply, {
-        activeProjectId: defaultProjectId,
-        token,
-      });
-
-      return reply.code(201).send({
-        message: 'Company and user registered successfully',
-        tenant: {
-          companyName: tenant.companyName,
-          id: tenant._id,
-          slug: tenant.slug,
-        },
-        user: {
+        const token = await TokenManager.generateToken({
           email: user.email,
-          features: user.features,
-          id: user._id,
+          features: user.features || [],
+          licenseId: user.licenseId,
           licenseType: finalLicenseType,
-          name: user.name,
-          role: user.role,
-        },
+          role: user.role!,
+          tenantDbName: tenant.dbName,
+          tenantId: tenantIdStr,
+          tenantSlug: tenant.slug,
+          userId: userIdStr,
+        });
+
+        sendEmail(email, 'welcome', {
+          companyName,
+          email,
+          licenseType: finalLicenseType,
+          name,
+          slug,
+        }).catch((error: Error) => {
+          logger.error('Failed to send welcome email', { error });
+        });
+
+        setSessionCookies(reply, {
+          activeProjectId: defaultProjectId,
+          token,
+        });
+
+        return reply.code(201).send({
+          message: 'Company and user registered successfully',
+          tenant: {
+            companyName: tenant.companyName,
+            id: tenant._id,
+            slug: tenant.slug,
+          },
+          user: {
+            email: user.email,
+            features: user.features,
+            id: user._id,
+            licenseType: finalLicenseType,
+            name: user.name,
+            role: user.role,
+          },
+        });
       });
     } catch (error) {
       if (claimedAccessCode) {
@@ -683,44 +741,45 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         return finishWithSuccess();
       }
 
-      await db.switchToTenant(tenant.dbName);
-      const user = await db.findUserByEmail(email);
-      if (!user) {
-        return finishWithSuccess();
-      }
+      return await withTenantScope(db, tenant.dbName, async () => {
+        const user = await db.findUserByEmail(email);
+        if (!user) {
+          return finishWithSuccess();
+        }
 
-      const secret = new TextEncoder().encode(getConfig().auth.jwtSecret);
-      const resetToken = await new SignJWT({
-        email: user.email,
-        purpose: 'password-reset',
-        slug,
-        sub: String(user._id),
-      })
-        .setProtectedHeader({ alg: 'HS256' })
-        .setIssuedAt()
-        .setExpirationTime(
-          Math.floor(Date.now() / 1000) + RESET_TOKEN_EXPIRY_SECONDS,
-        )
-        .sign(secret);
+        const secret = new TextEncoder().encode(getConfig().auth.jwtSecret);
+        const resetToken = await new SignJWT({
+          email: user.email,
+          purpose: 'password-reset',
+          slug,
+          sub: String(user._id),
+        })
+          .setProtectedHeader({ alg: 'HS256' })
+          .setIssuedAt()
+          .setExpirationTime(
+            Math.floor(Date.now() / 1000) + RESET_TOKEN_EXPIRY_SECONDS,
+          )
+          .sign(secret);
 
-      // Built from the configured app URL, never from Origin/Host: this endpoint is
-      // unauthenticated, so a caller-supplied header would let an attacker have a
-      // genuine reset token mailed to the victim pointing at a host they control.
-      const resetUrl = `${getConfig().app.url}/reset-password?token=${resetToken}`;
+        // Built from the configured app URL, never from Origin/Host: this endpoint is
+        // unauthenticated, so a caller-supplied header would let an attacker have a
+        // genuine reset token mailed to the victim pointing at a host they control.
+        const resetUrl = `${getConfig().app.url}/reset-password?token=${resetToken}`;
 
-      const emailSent = await sendEmail(email, 'password-reset', {
-        expiryTime: '1 hour',
-        name: user.name,
-        resetUrl,
-      });
-
-      if (!emailSent) {
-        logger.warn('Password reset email failed to send', {
-          userId: String(user._id),
+        const emailSent = await sendEmail(email, 'password-reset', {
+          expiryTime: '1 hour',
+          name: user.name,
+          resetUrl,
         });
-      }
 
-      return finishWithSuccess();
+        if (!emailSent) {
+          logger.warn('Password reset email failed to send', {
+            userId: String(user._id),
+          });
+        }
+
+        return finishWithSuccess();
+      });
     } catch (error) {
       logger.error('Forgot password error', { error });
       return reply.code(500).send({ error: 'Internal server error' });
@@ -792,40 +851,41 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'Invalid reset token' });
       }
 
-      await db.switchToTenant(tenant.dbName);
-      const user = await db.findUserById(payload.sub);
-      if (!user) {
-        return reply.code(400).send({ error: 'Invalid reset token' });
-      }
+      return await withTenantScope(db, tenant.dbName, async () => {
+        const user = await db.findUserById(payload.sub!);
+        if (!user) {
+          return reply.code(400).send({ error: 'Invalid reset token' });
+        }
 
-      // Single-use enforcement: token must have been issued AFTER the last
-      // password change. Any prior reset (or password change) invalidates
-      // every reset token that was outstanding before it.
-      const lastChangedAtMs = user.passwordChangedAt?.getTime() ?? 0;
-      const tokenIatMs = payload.iat * 1000;
-      if (lastChangedAtMs && tokenIatMs <= lastChangedAtMs) {
-        return reply.code(400).send({
-          error: 'Reset token has already been used or is no longer valid',
+        // Single-use enforcement: token must have been issued AFTER the last
+        // password change. Any prior reset (or password change) invalidates
+        // every reset token that was outstanding before it.
+        const lastChangedAtMs = user.passwordChangedAt?.getTime() ?? 0;
+        const tokenIatMs = payload.iat! * 1000;
+        if (lastChangedAtMs && tokenIatMs <= lastChangedAtMs) {
+          return reply.code(400).send({
+            error: 'Reset token has already been used or is no longer valid',
+          });
+        }
+
+        const hashedPassword = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+        const updated = await db.updateUser(payload.sub!, {
+          mustChangePassword: false,
+          password: hashedPassword,
+          passwordChangedAt: new Date(),
+          updatedAt: new Date(),
         });
-      }
 
-      const hashedPassword = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
-      const updated = await db.updateUser(payload.sub, {
-        mustChangePassword: false,
-        password: hashedPassword,
-        passwordChangedAt: new Date(),
-        updatedAt: new Date(),
-      });
+        if (!updated) {
+          return reply.code(500).send({
+            error: 'Failed to reset password',
+          });
+        }
 
-      if (!updated) {
-        return reply.code(500).send({
-          error: 'Failed to reset password',
+        logger.info('Password reset successful', { userId: payload.sub });
+        return reply.code(200).send({
+          message: 'Password has been reset successfully',
         });
-      }
-
-      logger.info('Password reset successful', { userId: payload.sub });
-      return reply.code(200).send({
-        message: 'Password has been reset successfully',
       });
     } catch (error) {
       logger.error('Reset password error', { error });
