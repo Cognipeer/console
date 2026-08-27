@@ -109,6 +109,8 @@ type InternalTraceEvent = TraceSessionFile['events'][number] & {
     toolName?: string;
     usage?: Record<string, unknown>;
     metadata?: Record<string, unknown> & { usage?: Record<string, unknown> };
+    finishReason?: string;
+    reasoningTokens?: number;
     sections?: unknown[];
     data?: { sections?: unknown[] };
     modelNames?: string[];
@@ -118,6 +120,7 @@ type InternalTraceEvent = TraceSessionFile['events'][number] & {
 
 type InternalTraceSession = Omit<TraceSessionFile, 'events'> & {
     events: InternalTraceEvent[];
+    metadata?: Record<string, string>;
 };
 
 type CreateConsoleSdkAgentInput = {
