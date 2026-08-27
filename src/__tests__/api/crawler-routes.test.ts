@@ -226,3 +226,74 @@ describe('GET /api/crawler/jobs and /jobs/:id/results return id + status on the 
     expect(typeof job.status).toBe('string');
   });
 });
+
+describe('Crawler HTTP credentials are never returned in cleartext (CWE-312)', () => {
+  const SECRET_BEARER_TOKEN = 'sekret-bearer-token-should-never-leak-12345';
+
+  it('masks the bearer token on create/get and on every job read after a real run', async () => {
+    // 1. Create a crawler carrying a bearer token.
+    const createRes = await app.inject({
+      method: 'POST',
+      url: '/api/crawler/crawlers',
+      headers: { ...REQUEST_HEADERS, 'content-type': 'application/json' },
+      payload: JSON.stringify({
+        name: 'Secret Bearer Crawler',
+        engine: 'axios',
+        maxDepth: 0,
+        maxPages: 1,
+        autoCrawl: false,
+        http: { allowPrivateNetwork: true, bearerToken: SECRET_BEARER_TOKEN },
+      }),
+    });
+    expect(createRes.statusCode).toBe(201);
+    expect(createRes.body).not.toContain(SECRET_BEARER_TOKEN);
+    const { crawler } = parseJsonBody<{
+      crawler: { id: string; key: string; http?: { bearerToken?: string } };
+    }>(createRes.body);
+    expect(crawler.http?.bearerToken).not.toBe(SECRET_BEARER_TOKEN);
+
+    // 2. Re-fetch the crawler — still masked.
+    const getRes = await app.inject({
+      method: 'GET',
+      url: `/api/crawler/crawlers/${crawler.key}`,
+      headers: REQUEST_HEADERS,
+    });
+    expect(getRes.body).not.toContain(SECRET_BEARER_TOKEN);
+
+    // 3. Actually run a crawl (sync) so the token is used for real and the
+    //    plan snapshot is persisted on the job record.
+    const crawlRes = await app.inject({
+      method: 'POST',
+      url: `/api/crawler/crawlers/${crawler.key}/crawl`,
+      headers: { ...REQUEST_HEADERS, 'content-type': 'application/json' },
+      payload: JSON.stringify({ urls: [originUrl], mode: 'sync' }),
+    });
+    expect(crawlRes.statusCode).toBe(202);
+    const { jobId } = parseJsonBody<{ jobId: string }>(crawlRes.body);
+    expect(jobId).toBeTruthy();
+
+    // 4. GET /crawler/jobs/:jobId — the exact route the finding's residual
+    //    leak (`planSnapshot.http`) was reachable through. Must never
+    //    contain the plaintext token, even though the crawl actually ran.
+    const jobRes = await app.inject({
+      method: 'GET',
+      url: `/api/crawler/jobs/${jobId}`,
+      headers: REQUEST_HEADERS,
+    });
+    expect(jobRes.statusCode).toBe(200);
+    expect(jobRes.body).not.toContain(SECRET_BEARER_TOKEN);
+    const { job } = parseJsonBody<{
+      job: { status: string; planSnapshot?: { http?: { bearerToken?: string } } };
+    }>(jobRes.body);
+    expect(job.status).toBe('succeeded');
+    expect(job.planSnapshot?.http?.bearerToken).not.toBe(SECRET_BEARER_TOKEN);
+
+    // 5. GET /crawler/jobs (list) — same masking must apply there too.
+    const listRes = await app.inject({
+      method: 'GET',
+      url: '/api/crawler/jobs?limit=50',
+      headers: REQUEST_HEADERS,
+    });
+    expect(listRes.body).not.toContain(SECRET_BEARER_TOKEN);
+  }, 30_000);
+});

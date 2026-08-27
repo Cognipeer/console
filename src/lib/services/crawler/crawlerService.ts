@@ -21,6 +21,7 @@ import type {
 } from '@/lib/database';
 import { resolveUsageAttribution } from '@/lib/services/usage/usageEvents';
 import { crawlerEntityId } from './crawlerEntityId';
+import { maskHttpConfig, mergeHttpConfigUpdate, sealHttpConfig } from './httpConfigSecrets';
 import { matchesProjectScope } from './internals';
 import { computeNextRun, validateSchedule } from './schedulePlanner';
 import type {
@@ -56,12 +57,25 @@ async function withTenantDb(tenantDbName: string): Promise<DatabaseProvider> {
 
 function serializeCrawler(record: ICrawler): CrawlerView {
   const { _id, ...rest } = record;
-  return { ...rest, id: typeof _id === 'string' ? _id : _id?.toString() ?? '' };
+  return {
+    ...rest,
+    http: maskHttpConfig(rest.http),
+    id: typeof _id === 'string' ? _id : _id?.toString() ?? '',
+  };
 }
 
 function serializeJob(record: ICrawlJob): CrawlJobView {
   const { _id, ...rest } = record;
-  return { ...rest, id: typeof _id === 'string' ? _id : _id?.toString() ?? '' };
+  return {
+    ...rest,
+    // `planSnapshot.http` carries the same class of secrets as a saved
+    // crawler's `http` (it's snapshotted from it, or supplied directly by
+    // an ad-hoc run) — mask it here too so job reads never leak them.
+    planSnapshot: rest.planSnapshot
+      ? { ...rest.planSnapshot, http: maskHttpConfig(rest.planSnapshot.http) }
+      : rest.planSnapshot,
+    id: typeof _id === 'string' ? _id : _id?.toString() ?? '',
+  };
 }
 
 function serializeResult(record: ICrawlResult): CrawlResultView {
@@ -123,7 +137,7 @@ export async function createCrawler(
     autoCrawl: input.autoCrawl ?? false,
     scope: { ...DEFAULT_SCOPE, ...(input.scope ?? {}) },
     downloadableMimes: input.downloadableMimes,
-    http: { ...DEFAULT_HTTP, ...(input.http ?? {}) },
+    http: sealHttpConfig({ ...DEFAULT_HTTP, ...(input.http ?? {}) }),
     markdownOptions: input.markdownOptions,
     rag: input.rag,
     webhook: input.webhook,
@@ -156,7 +170,7 @@ export async function updateCrawler(
   if (input.maxPages !== undefined) patch.maxPages = Math.max(0, input.maxPages);
   if (input.autoCrawl !== undefined) patch.autoCrawl = input.autoCrawl;
   if (input.scope !== undefined) patch.scope = { ...existing.scope, ...input.scope };
-  if (input.http !== undefined) patch.http = { ...existing.http, ...input.http };
+  if (input.http !== undefined) patch.http = mergeHttpConfigUpdate(existing.http, input.http);
   if (input.downloadableMimes !== undefined) patch.downloadableMimes = input.downloadableMimes;
   if (input.markdownOptions !== undefined) patch.markdownOptions = input.markdownOptions;
   if (input.rag !== undefined) patch.rag = input.rag ?? undefined;
@@ -392,7 +406,7 @@ export async function runAdhocCrawl(
     maxPages: Math.max(0, input.maxPages ?? 20),
     autoCrawl: input.autoCrawl ?? false,
     scope: { ...DEFAULT_SCOPE, ...(input.scope ?? {}) },
-    http: { ...DEFAULT_HTTP, ...(input.http ?? {}) },
+    http: sealHttpConfig({ ...DEFAULT_HTTP, ...(input.http ?? {}) }),
     downloadableMimes: input.downloadableMimes,
     markdownOptions: input.markdownOptions,
     rag: input.rag,

@@ -12,6 +12,7 @@ import { getDatabase, type DatabaseProvider } from '@/lib/database';
 import type { ICrawlJob, ICrawlPlanSnapshot } from '@/lib/database';
 import { crawl } from './engine';
 import type { CrawlPlan, PageResult } from './engine';
+import { openHttpConfig } from './httpConfigSecrets';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { sendCrawlerWebhook } from './crawlerWebhook';
 import { ingestCrawlPage } from './crawlerRagBridge';
@@ -48,6 +49,11 @@ async function runWithTenantDb<T>(
 }
 
 function snapshotToPlan(snapshot: ICrawlPlanSnapshot): CrawlPlan {
+  // The plan snapshot's `http` is sealed at rest (see `httpConfigSecrets.ts`)
+  // — this is the one place execution is allowed to recover the plaintext
+  // bearer token / basic-auth password / cookie values to actually reach
+  // the target site. Every read path (serializeJob) must keep masking it.
+  const http = openHttpConfig(snapshot.http);
   return {
     seeds: snapshot.seeds ?? [],
     engine: snapshot.engine ?? 'auto',
@@ -61,17 +67,19 @@ function snapshotToPlan(snapshot: ICrawlPlanSnapshot): CrawlPlan {
       blockList: snapshot.scope?.blockList,
     },
     http: {
-      userAgent: snapshot.http?.userAgent,
-      acceptLanguage: snapshot.http?.acceptLanguage,
-      timeoutMs: snapshot.http?.timeoutMs,
-      maxConcurrency: snapshot.http?.maxConcurrency,
-      retries: snapshot.http?.retries,
-      headers: snapshot.http?.headers,
-      cookies: snapshot.http?.cookies,
-      basicAuth: snapshot.http?.basicAuth,
-      bearerToken: snapshot.http?.bearerToken,
-      allowPrivateNetwork: snapshot.http?.allowPrivateNetwork,
-      allowInsecureTls: snapshot.http?.allowInsecureTls,
+      userAgent: http.userAgent,
+      acceptLanguage: http.acceptLanguage,
+      timeoutMs: http.timeoutMs,
+      maxConcurrency: http.maxConcurrency,
+      retries: http.retries,
+      headers: http.headers,
+      cookies: http.cookies?.map((c) => ({ ...c, value: c.value ?? '' })),
+      basicAuth: http.basicAuth
+        ? { username: http.basicAuth.username, password: http.basicAuth.password ?? '' }
+        : undefined,
+      bearerToken: http.bearerToken,
+      allowPrivateNetwork: http.allowPrivateNetwork,
+      allowInsecureTls: http.allowInsecureTls,
     },
     downloadableMimes: snapshot.downloadableMimes,
     markdownOptions: snapshot.markdownOptions,

@@ -1727,7 +1727,12 @@ export interface ICrawlerScope {
 
 export interface ICrawlerCookie {
   name: string;
-  value: string;
+  /**
+   * Absent on a sealed/masked record — the plaintext value is either moved
+   * into `ICrawlerHttpConfig.sealed` (at rest) or redacted (on read). See
+   * `@/lib/services/crawler/httpConfigSecrets`.
+   */
+  value?: string;
   domain?: string;
   path?: string;
   secure?: boolean;
@@ -1748,7 +1753,8 @@ export interface ICrawlerHttpConfig {
   retries?: number;
   headers?: Record<string, string>;
   cookies?: ICrawlerCookie[];
-  basicAuth?: { username: string; password: string };
+  /** `password` is absent on a sealed/masked record — see `sealed` below. */
+  basicAuth?: { username: string; password?: string };
   bearerToken?: string;
   /** Allow private / link-local destinations. Default false (SSRF guard). */
   allowPrivateNetwork?: boolean;
@@ -1757,6 +1763,14 @@ export interface ICrawlerHttpConfig {
    * Use only for sites with a known-broken TLS chain. Default false.
    */
   allowInsecureTls?: boolean;
+  /**
+   * Encrypted-at-rest secret payload (AES-256-GCM) holding bearerToken /
+   * basicAuth.password / cookies[].value. When set, those plaintext fields
+   * are absent from the stored record and must be recovered through
+   * `@/lib/services/crawler/httpConfigSecrets` before use. See the MCP
+   * secret vault (`@/lib/services/mcp/secretVault`) for the same convention.
+   */
+  sealed?: string;
 }
 
 /** Markdown extraction options forwarded to the crawler engine. */
