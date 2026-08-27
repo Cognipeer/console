@@ -168,6 +168,10 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/client/v1/traces', service: 'tracing' },
   { prefix: '/api/client/v1/vector', service: 'vector' },
   { prefix: '/api/client/v1/agents', service: 'agents' },
+  // Inbound A2A (Agent2Agent) JSON-RPC surface drives the same agent-execution
+  // path as /api/client/v1/agents — gate it identically so a token's 'agents'
+  // scope (or lack of it) applies here too.
+  { prefix: '/api/client/v1/a2a', service: 'agents' },
   { prefix: '/api/client/v1/batches', service: 'models' },
   { prefix: '/api/client/v1/spend', service: 'models' },
   { prefix: '/api/client/v1/budgets', service: 'models' },
