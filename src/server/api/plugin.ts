@@ -5,8 +5,13 @@ import type {
   FastifyRequest,
 } from 'fastify';
 import { isApplicationReady } from '@/server/bootstrap';
+import { getDatabase } from '@/lib/database';
 import { LicenseManager } from '@/lib/license/license-manager';
-import { checkEnterpriseApiAccess } from '@/lib/license/enterprise-access';
+import { checkEnterpriseApiAccess, getEnterpriseModuleForPath } from '@/lib/license/enterprise-access';
+import {
+  getCachedEnterpriseLicense,
+  setCachedEnterpriseLicense,
+} from '@/lib/license/enterprise-license-cache';
 import { TokenManager, type JWTPayload } from '@/lib/license/token-manager';
 import { fireAndForget } from '@/lib/core/asyncTask';
 import { getPermissionServiceForPath, getRequiredPermissionLevel } from '@/lib/security/rbac';
@@ -195,6 +200,38 @@ function unauthorized(
   return reply.code(status).send(body);
 }
 
+/**
+ * Resolve a tenant's CURRENT effective license for the enterprise API guard,
+ * instead of trusting the licenseType/licenseExpiresAt embedded in the
+ * caller's session JWT. A JWT can be up to JWT_EXPIRES_IN old (default 7
+ * days), so trusting it here would let every other already-logged-in user
+ * of a tenant keep enterprise access for the life of their cookie after an
+ * owner/admin downgrades or removes the tenant's license.
+ *
+ * Backed by a short TTL cache (`enterprise-license-cache.ts`) so this
+ * doesn't add a DB round-trip to every gated request; the license admin
+ * endpoints invalidate that cache entry immediately on change, so both
+ * upgrades and downgrades are visible on the very next request.
+ */
+async function resolveLiveLicenseForTenant(
+  tenantId: string,
+): Promise<{ licenseType: string; licenseExpiresAt?: string }> {
+  const cached = await getCachedEnterpriseLicense(tenantId);
+  if (cached) {
+    return cached;
+  }
+
+  const db = await getDatabase();
+  const tenant = await db.findTenantById(tenantId);
+  const effective = LicenseManager.getEffectiveLicenseForTenant(tenant);
+  const resolved = {
+    licenseExpiresAt: effective.expiresAt?.toISOString(),
+    licenseType: effective.licenseType,
+  };
+  await setCachedEnterpriseLicense(tenantId, resolved);
+  return resolved;
+}
+
 function getAuditOutcome(
   statusCode: number,
   upstreamForwarded = false,
@@ -368,13 +405,22 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
     // No-op in the community edition (enterprise routes don't exist). In the
     // enterprise edition this turns a FREE tenant hitting an enterprise route
     // into a clean 402.
-    const enterpriseDenial = checkEnterpriseApiAccess(
-      pathname,
-      payload.licenseType,
-      payload.licenseExpiresAt,
-    );
-    if (enterpriseDenial) {
-      return reply.code(enterpriseDenial.status).send(enterpriseDenial.body);
+    //
+    // The license type/expiry used here is re-resolved from the tenant's
+    // CURRENT record (via a short-lived cache), never taken from the
+    // session JWT: the JWT can be days old, and a license downgrade must
+    // apply to every already-logged-in user of the tenant, not just the
+    // acting admin whose cookie gets re-issued.
+    if (getEnterpriseModuleForPath(pathname)) {
+      const liveLicense = await resolveLiveLicenseForTenant(payload.tenantId);
+      const enterpriseDenial = checkEnterpriseApiAccess(
+        pathname,
+        liveLicense.licenseType,
+        liveLicense.licenseExpiresAt,
+      );
+      if (enterpriseDenial) {
+        return reply.code(enterpriseDenial.status).send(enterpriseDenial.body);
+      }
     }
   });
 

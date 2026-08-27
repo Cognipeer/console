@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
 import { LicenseManager } from '@/lib/license/license-manager';
+import { invalidateEnterpriseLicenseCache } from '@/lib/license/enterprise-license-cache';
 import { TokenManager } from '@/lib/license/token-manager';
 import {
   readJsonBody,
@@ -76,6 +77,11 @@ export const licenseApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(500).send({ error: 'Failed to store license' });
       }
 
+      // Bust the enterprise-access guard's cached license for this tenant so
+      // every already-logged-in session (not just this request's re-issued
+      // cookie) sees the new license on its very next request.
+      await invalidateEnterpriseLicenseCache(session.tenantId);
+
       await db.switchToTenant(updatedTenant.dbName);
       const user = await db.findUserById(session.userId);
       if (user) {
@@ -135,6 +141,11 @@ export const licenseApiPlugin: FastifyPluginAsync = async (app) => {
       if (!updatedTenant) {
         return reply.code(500).send({ error: 'Failed to reset license' });
       }
+
+      // Bust the enterprise-access guard's cached license for this tenant so
+      // every already-logged-in session (not just this request's re-issued
+      // cookie) loses enterprise access on its very next request.
+      await invalidateEnterpriseLicenseCache(session.tenantId);
 
       await db.switchToTenant(updatedTenant.dbName);
       const user = await db.findUserById(session.userId);
