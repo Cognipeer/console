@@ -15,10 +15,7 @@ function handleError(error: unknown, scope: string) {
   }
 
   logger.error(`${scope} error`, { error });
-  return NextResponse.json(
-    { error: error instanceof Error ? error.message : 'Internal server error' },
-    { status: 500 },
-  );
+  return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
 }
 
 export async function GET(request: NextRequest) {

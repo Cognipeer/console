@@ -103,7 +103,7 @@ describe('GET /api/client/v1/vector/providers', () => {
     expect(res.status).toBe(403);
   });
 
-  it('returns 500 on unexpected error', async () => {
+  it('returns 500 on unexpected error without leaking the internal error message', async () => {
     (listVectorProviders as ReturnType<typeof vi.fn>).mockRejectedValue(
       new Error('DB connection failed'),
     );
@@ -112,7 +112,7 @@ describe('GET /api/client/v1/vector/providers', () => {
     const json = await res.json();
 
     expect(res.status).toBe(500);
-    expect(json.error).toBe('DB connection failed');
+    expect(json.error).toBe('Internal server error');
   });
 });
 
@@ -188,7 +188,7 @@ describe('POST /api/client/v1/vector/providers', () => {
     expect(res.status).toBe(401);
   });
 
-  it('returns 500 on unexpected service error', async () => {
+  it('returns 500 on unexpected service error without leaking the internal error message', async () => {
     (createVectorProvider as ReturnType<typeof vi.fn>).mockRejectedValue(
       new Error('Provider creation failed'),
     );
@@ -197,6 +197,6 @@ describe('POST /api/client/v1/vector/providers', () => {
     const json = await res.json();
 
     expect(res.status).toBe(500);
-    expect(json.error).toBe('Provider creation failed');
+    expect(json.error).toBe('Internal server error');
   });
 });

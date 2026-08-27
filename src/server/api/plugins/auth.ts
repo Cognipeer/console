@@ -1,8 +1,10 @@
+import { randomUUID } from 'crypto';
 import { SignJWT, jwtVerify } from 'jose';
 import bcrypt from 'bcryptjs';
 import type { FastifyPluginAsync } from 'fastify';
 import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
+import { getCache } from '@/lib/core/cache';
 import { getDatabase, type ITenant } from '@/lib/database';
 import { LicenseManager, type LicenseType } from '@/lib/license/license-manager';
 import { TokenManager } from '@/lib/license/token-manager';
@@ -23,6 +25,7 @@ import {
 } from '@/lib/services/projects/projectService';
 import { normalizeServicePermissions } from '@/lib/security/rbac';
 import { tryExternalAuthenticate } from '@/enterprise/external-auth';
+import { recordAuditLog } from '@/lib/services/audit/auditService';
 import {
   clearSessionCookies,
   getClientIp,
@@ -34,6 +37,7 @@ import {
 
 const logger = createLogger('api:auth');
 const RESET_TOKEN_EXPIRY_SECONDS = 3600;
+const RESET_TOKEN_USED_KEY_PREFIX = 'password-reset-used:';
 
 type LoginBody = {
   email?: string;
@@ -103,7 +107,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/auth/login', async (request, reply) => {
     try {
       const clientIp = getClientIp(request);
-      const rl = checkRateLimit(`login:${clientIp}`, LOGIN_RATE_LIMIT);
+      const rl = await checkRateLimit(`login:${clientIp}`, LOGIN_RATE_LIMIT);
       if (!rl.allowed) {
         sendRateLimitHeaders(
           {
@@ -134,6 +138,11 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
       if (slug) {
         tenant = await db.findTenantBySlug(slug);
         if (!tenant) {
+          logger.warn('auth.login.failed', {
+            ipAddress: clientIp,
+            reason: 'tenant_not_found',
+            slug,
+          });
           return reply
             .code(401)
             .send({ error: 'Invalid company identifier' });
@@ -174,6 +183,22 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         });
 
         if (!slugAuthResult) {
+          const failedTenantId =
+            typeof tenant._id === 'string' ? tenant._id : tenant._id!.toString();
+          await recordAuditLog(
+            { tenantDbName: tenant.dbName, tenantId: failedTenantId },
+            {
+              action: 'auth',
+              actorEmail: normalizedEmail,
+              actorType: 'user',
+              event: 'auth.login.failed',
+              ipAddress: clientIp,
+              method: 'POST',
+              outcome: 'failure',
+              path: '/api/auth/login',
+              service: 'auth',
+            },
+          );
           return reply
             .code(401)
             .send({ error: 'Invalid email or password' });
@@ -290,6 +315,11 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         }
 
         if (!tenant || !user) {
+          logger.warn('auth.login.failed', {
+            email: normalizedEmail,
+            ipAddress: clientIp,
+            reason: 'no_matching_tenant',
+          });
           return reply
             .code(401)
             .send({ error: 'Invalid email or password' });
@@ -423,7 +453,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const clientIp = getClientIp(request);
-      const rl = checkRateLimit(`register:${clientIp}`, REGISTER_RATE_LIMIT);
+      const rl = await checkRateLimit(`register:${clientIp}`, REGISTER_RATE_LIMIT);
       if (!rl.allowed) {
         sendRateLimitHeaders(
           {
@@ -722,7 +752,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const clientIp = getClientIp(request);
-      const rl = checkRateLimit(
+      const rl = await checkRateLimit(
         `forgot-password:${clientIp}`,
         PASSWORD_RESET_RATE_LIMIT,
       );
@@ -756,6 +786,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         })
           .setProtectedHeader({ alg: 'HS256' })
           .setIssuedAt()
+          .setJti(randomUUID())
           .setExpirationTime(
             Math.floor(Date.now() / 1000) + RESET_TOKEN_EXPIRY_SECONDS,
           )
@@ -789,7 +820,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/auth/reset-password', async (request, reply) => {
     try {
       const clientIp = getClientIp(request);
-      const rl = checkRateLimit(
+      const rl = await checkRateLimit(
         `reset-password:${clientIp}`,
         PASSWORD_RESET_RATE_LIMIT,
       );
@@ -825,6 +856,8 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         slug?: string;
         sub?: string;
         iat?: number;
+        jti?: string;
+        exp?: number;
       };
 
       try {
@@ -840,9 +873,30 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         payload.purpose !== 'password-reset'
         || !payload.sub
         || !payload.slug
+        || !payload.jti
         || typeof payload.iat !== 'number'
       ) {
         return reply.code(400).send({ error: 'Invalid reset token' });
+      }
+
+      // Single-use enforcement (primary): atomically claim this token's jti via
+      // the shared cache lock. Only the first caller to claim a given jti gets
+      // `true`; every subsequent attempt — including two concurrent requests
+      // racing on the same token — is rejected. TTL matches the token's
+      // remaining lifetime so the claim never outlives the token itself.
+      const ttlSeconds = Math.max(
+        1,
+        Math.ceil((payload.exp ?? Math.floor(Date.now() / 1000) + RESET_TOKEN_EXPIRY_SECONDS) - Date.now() / 1000),
+      );
+      const cache = await getCache();
+      const claimToken = await cache.acquireLock(
+        `${RESET_TOKEN_USED_KEY_PREFIX}${payload.jti}`,
+        ttlSeconds,
+      );
+      if (!claimToken) {
+        return reply.code(400).send({
+          error: 'Reset token has already been used or is no longer valid',
+        });
       }
 
       const db = await getDatabase();

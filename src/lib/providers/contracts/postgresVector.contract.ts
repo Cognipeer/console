@@ -38,6 +38,25 @@ const DEFAULT_DIMENSIONS = 1536;
 const DEFAULT_PORT = 5432;
 
 /**
+ * `tableName` is interpolated directly into SQL as an identifier in every
+ * query below (node-postgres cannot parameterize identifiers, only values).
+ * Restricting it to this pattern at the single point it enters the system
+ * (createRuntime) closes the SQL-injection surface for every call site that
+ * uses it or a value derived from it (`externalId`, `handle.metadata.tableName`).
+ */
+const SAFE_IDENTIFIER_PATTERN = /^[a-zA-Z_][a-zA-Z0-9_]{0,62}$/;
+
+function assertSafeIdentifier(tableName: string): void {
+  if (!SAFE_IDENTIFIER_PATTERN.test(tableName)) {
+    throw new Error(
+      'Invalid PostgreSQL table name: must start with a letter or underscore and '
+      + 'contain only letters, digits and underscores (max 63 characters).',
+    );
+  }
+}
+
+
+/**
  * Keyword channel expression, shared by the GIN index and the query so the
  * planner can actually use one for the other. 'simple' rather than a language
  * configuration because the column holds chunks in whatever language the
@@ -218,6 +237,7 @@ export const PostgresVectorProviderContract: ProviderContract<
     const { Pool } = await import(/* webpackIgnore: true */ 'pg') as unknown as PgModule;
     const pool: PgPool = new Pool(buildPoolConfig(credentials));
     const tableName = settings.tableName.trim();
+    assertSafeIdentifier(tableName);
     const dimensions = Number(settings.dimensions) > 0 ? Number(settings.dimensions) : DEFAULT_DIMENSIONS;
 
     async function withClient<T>(fn: (client: PgClient) => Promise<T>): Promise<T> {
@@ -296,6 +316,7 @@ export const PostgresVectorProviderContract: ProviderContract<
       },
 
       async deleteIndex({ externalId }: { externalId: string }): Promise<void> {
+        assertSafeIdentifier(externalId);
         await withClient(async (client) => {
           await client.query(`DROP TABLE IF EXISTS ${externalId} CASCADE`);
         });
@@ -326,6 +347,7 @@ export const PostgresVectorProviderContract: ProviderContract<
 
       async upsertVectors(handle: VectorIndexHandle, items: VectorUpsertItem[]): Promise<void> {
         const tbl = (handle.metadata?.tableName as string) || tableName;
+        assertSafeIdentifier(tbl);
         const hasContent = await ensureContentColumn(tbl);
 
         const sql = hasContent
@@ -351,6 +373,7 @@ export const PostgresVectorProviderContract: ProviderContract<
 
       async queryVectors(handle: VectorIndexHandle, query: VectorQueryInput): Promise<VectorQueryResult> {
         const tbl = (handle.metadata?.tableName as string) || tableName;
+        assertSafeIdentifier(tbl);
         const op = pgMetricOp(handle.metric);
         const vectorStr = `[${query.vector.join(',')}]`;
 
@@ -428,6 +451,7 @@ export const PostgresVectorProviderContract: ProviderContract<
       async deleteVectors(handle: VectorIndexHandle, ids: string[]): Promise<void> {
         if (ids.length === 0) return;
         const tbl = (handle.metadata?.tableName as string) || tableName;
+        assertSafeIdentifier(tbl);
         const placeholders = ids.map((_, i) => `$${i + 1}`).join(', ');
 
         await withClient(async (client) => {
@@ -439,6 +463,7 @@ export const PostgresVectorProviderContract: ProviderContract<
 
       async listVectors(handle: VectorIndexHandle, input?: VectorListInput): Promise<VectorListResult> {
         const tbl = (handle.metadata?.tableName as string) || tableName;
+        assertSafeIdentifier(tbl);
         const limit = input?.limit ?? 100;
         const offset = input?.cursor ? parseInt(input.cursor, 10) : 0;
 
