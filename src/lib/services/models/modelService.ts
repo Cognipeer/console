@@ -190,6 +190,7 @@ export async function createModel(
   );
 
   ensureProviderSupportsCategory(provider, payload.category);
+  validateSettingsDynamicConfig(payload.settings);
 
   const keyCandidate = payload.key || payload.name;
   const key = await generateUniqueKey(tenantDbName, projectId, keyCandidate);
@@ -235,6 +236,24 @@ export interface CreateDynamicModelInput {
   metadata?: Record<string, unknown>;
 }
 
+/**
+ * Hard caps on a rule-based routing config's shape, enforced at config-save
+ * time (CWE-1333 mitigation). `evaluateRules` already carries its own
+ * per-request wall-clock budget (see `RULES_EVALUATION_BUDGET_MS` in
+ * `dynamicRouting.ts`) that bounds a single request regardless of config
+ * size, but these caps are a second, independent bound: even ignoring that
+ * budget entirely, `maxRules * maxConditionsPerRule` "matches" conditions
+ * each paying the worst case per-condition regex timeout
+ * (`REGEX_MATCH_TIMEOUT_MS` = 50ms in `dynamicRouting.ts`) works out to
+ * 10 * 5 * 50ms = 2.5s absolute worst case — a small, defensible bound for a
+ * config-save-time validator to guarantee on its own, and low enough that
+ * the two defenses together keep the actual hot-path cost far below that.
+ */
+export const DYNAMIC_ROUTING_LIMITS = {
+  maxRules: 10,
+  maxConditionsPerRule: 5,
+} as const;
+
 /** Validates a routing config; throws with a descriptive message if invalid. */
 export function validateDynamicConfig(config: IDynamicRoutingConfig | undefined): void {
   if (!config || typeof config !== 'object') {
@@ -250,10 +269,21 @@ export function validateDynamicConfig(config: IDynamicRoutingConfig | undefined)
     if (!Array.isArray(config.rules) || config.rules.length === 0) {
       throw new Error('rule-based routing requires at least one rule');
     }
+    if (config.rules.length > DYNAMIC_ROUTING_LIMITS.maxRules) {
+      throw new Error(
+        `rule-based routing supports at most ${DYNAMIC_ROUTING_LIMITS.maxRules} rules`,
+      );
+    }
     for (const rule of config.rules) {
       if (!rule.targetModelKey) throw new Error('every rule needs a targetModelKey');
       if (!Array.isArray(rule.conditions) || rule.conditions.length === 0) {
         throw new Error(`rule "${rule.label || '(unnamed)'}" needs at least one condition`);
+      }
+      if (rule.conditions.length > DYNAMIC_ROUTING_LIMITS.maxConditionsPerRule) {
+        throw new Error(
+          `rule "${rule.label || '(unnamed)'}" supports at most ` +
+            `${DYNAMIC_ROUTING_LIMITS.maxConditionsPerRule} conditions`,
+        );
       }
     }
   }
@@ -269,6 +299,23 @@ export function validateDynamicConfig(config: IDynamicRoutingConfig | undefined)
       if (!label.targetModelKey) throw new Error(`decider label "${label.label}" needs a targetModelKey`);
     }
   }
+}
+
+/**
+ * Every code path that persists a model's `settings` object — plain
+ * `createModel`, `createDynamicModel`, and the generic `updateModel` (which
+ * a caller can use to attach or wholesale-replace `settings.dynamic` on any
+ * model, not just ones created via the dynamic-model endpoint) — must run
+ * new/changed dynamic-routing configs through the same validation so none of
+ * them can persist a config that skips the CWE-1333 safeguards in
+ * `validateDynamicConfig`. Call this wherever `settings` is about to be
+ * written, regardless of which public API reached it.
+ */
+function validateSettingsDynamicConfig(settings: Record<string, unknown> | undefined): void {
+  if (!settings || typeof settings !== 'object') return;
+  const dyn = (settings as { dynamic?: unknown }).dynamic;
+  if (dyn === undefined) return;
+  validateDynamicConfig(dyn as IDynamicRoutingConfig);
 }
 
 export async function createDynamicModel(
@@ -358,6 +405,14 @@ export async function updateModel(
 
   if (userId) {
     updatePayload.updatedBy = userId;
+  }
+
+  // `updates.settings` may attach a brand-new `dynamic` config or (via a
+  // caller's shallow merge, e.g. the `PUT /models/:id` route) wholesale
+  // replace an existing one — validate whatever is about to be persisted
+  // here, the single place every `updateModel` caller funnels through.
+  if (updatePayload.settings !== undefined) {
+    validateSettingsDynamicConfig(updatePayload.settings);
   }
 
   return db.updateModel(modelId, updatePayload as Partial<IModel>);

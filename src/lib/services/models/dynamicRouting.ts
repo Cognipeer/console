@@ -11,6 +11,7 @@
  * logging live in `inferenceService`.
  */
 
+import vm from 'node:vm';
 import type {
   IDynamicDeciderConfig,
   IDynamicDeciderLabel,
@@ -20,6 +21,9 @@ import type {
   IModel,
   IModelPricing,
 } from '@/lib/database';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('dynamic-routing');
 
 /** Hard cap on router→model→router chaining to prevent runaway recursion. */
 export const MAX_ROUTING_DEPTH = 3;
@@ -176,6 +180,31 @@ export function estimateRequestCostUsd(
   return inputCost + outputCost;
 }
 
+/** Per-condition hard timeout for a tenant-supplied "matches" regex. */
+const REGEX_MATCH_TIMEOUT_MS = 50;
+
+/**
+ * Runs `pattern.test(text)` inside a fresh V8 context with a wall-clock
+ * timeout so a malicious/pathological tenant-supplied regex (catastrophic
+ * backtracking) cannot block the shared event loop indefinitely. A plain
+ * try/catch cannot help here — a hung regex engine never throws, it just
+ * never returns — but `vm.runInContext`'s `timeout` option can forcibly
+ * interrupt long-running synchronous JS execution.
+ */
+function safeRegexTest(pattern: RegExp, text: string): boolean {
+  try {
+    const context = vm.createContext({ pattern, text });
+    return Boolean(
+      vm.runInContext('pattern.test(text)', context, { timeout: REGEX_MATCH_TIMEOUT_MS }),
+    );
+  } catch (error) {
+    logger.warn('Dynamic routing keyword regex timed out or failed; treating as no match', {
+      error: error instanceof Error ? error.message : error,
+    });
+    return false;
+  }
+}
+
 export function evaluateCondition(
   condition: IDynamicRoutingCondition,
   signals: RoutingSignals,
@@ -191,7 +220,7 @@ export function evaluateCondition(
     }
     if (operator === 'matches') {
       try {
-        return new RegExp(needle, 'i').test(text);
+        return safeRegexTest(new RegExp(needle, 'i'), text);
       } catch {
         return false;
       }
@@ -237,16 +266,49 @@ export function evaluateCondition(
   return false;
 }
 
+/**
+ * Single wall-clock budget for one `evaluateRules()` call, shared across
+ * every rule and condition it evaluates — not a per-condition allowance.
+ * `REGEX_MATCH_TIMEOUT_MS` bounds a single "matches" regex, but a config
+ * with many rules/conditions that never matches would otherwise pay that
+ * timeout once per condition, so per-condition bounds alone don't bound the
+ * cost of one request. This is checked on the hot, shared chat-completion
+ * path, so once the budget is spent we stop evaluating and fall back to
+ * `defaultModelKey` (as if no rule had matched) rather than let a single
+ * request hold up the event loop.
+ */
+const RULES_EVALUATION_BUDGET_MS = 150;
+
 /** Evaluates rules in order; returns the first matching rule, or null. */
 export function evaluateRules(
   rules: IDynamicRoutingRule[],
   signals: RoutingSignals,
 ): IDynamicRoutingRule | null {
+  const deadline = Date.now() + RULES_EVALUATION_BUDGET_MS;
+
   for (const rule of rules) {
     const conditions = rule.conditions ?? [];
     if (conditions.length === 0) continue;
     const matchType = rule.matchType ?? 'all';
-    const results = conditions.map((condition) => evaluateCondition(condition, signals));
+
+    const results: boolean[] = [];
+    let timedOut = false;
+    for (const condition of conditions) {
+      if (Date.now() >= deadline) {
+        timedOut = true;
+        break;
+      }
+      results.push(evaluateCondition(condition, signals));
+    }
+
+    if (timedOut) {
+      logger.warn(
+        'Dynamic routing rule evaluation exceeded its time budget; falling back to the default model',
+        { budgetMs: RULES_EVALUATION_BUDGET_MS, ruleLabel: rule.label },
+      );
+      return null;
+    }
+
     const matched = matchType === 'any' ? results.some(Boolean) : results.every(Boolean);
     if (matched) return rule;
   }
