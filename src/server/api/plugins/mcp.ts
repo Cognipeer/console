@@ -49,12 +49,15 @@ import {
 import { mcpSandboxRunner, mcpGuardrailHook, IS_ENTERPRISE_BUILD } from '@/enterprise/registry';
 import { isEnterpriseLicenseType } from '@/lib/license/license-manager';
 import {
+  type ApiSessionContext,
   getClientIp,
   readJsonBody,
   requireProjectContextForRequest,
+  resolveSessionRbacContext,
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
+import { resolveCurrentServicePermission } from '@/lib/security/rbac';
 
 const logger = createLogger('api:mcp');
 const VALID_AUTH_TYPES: McpAuthType[] = ['none', 'token', 'header', 'basic'];
@@ -95,6 +98,26 @@ function sendEndpointSlugError(reply: FastifyReply, error: unknown): ReturnType<
   }
   return null;
 }
+
+/**
+ * A stdio 'subprocess' execution mode makes the shared backend process spawn
+ * npx/uvx with a caller-supplied package name/args on this host — unlike
+ * every other MCP source type (and unlike 'sandbox', which is already gated
+ * behind an Enterprise license). The 'mcp' service otherwise only requires
+ * 'write' by default, which the 'user'/'project_admin' roles hold — so this
+ * one capability is additionally gated behind 'admin'-level 'mcp' permission
+ * (owner/admin role, or an explicit admin-level grant).
+ */
+async function requireStdioSubprocessPermission(
+  session: ApiSessionContext,
+): Promise<boolean> {
+  const { user, groupGrants } = await resolveSessionRbacContext(session);
+  return resolveCurrentServicePermission(user, 'mcp', groupGrants) === 'admin';
+}
+
+const STDIO_SUBPROCESS_FORBIDDEN_ERROR =
+  'Creating or editing a stdio MCP server with subprocess execution requires elevated "mcp" '
+  + 'admin permission. Ask a tenant owner/admin, or have one grant your account admin-level MCP permission.';
 
 function auditContextFor(request: FastifyRequest, userId: string): McpAuditContext {
   const ua = request.headers['user-agent'];
@@ -394,6 +417,10 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
+      if (stdioConfig?.executionMode === 'subprocess' && !(await requireStdioSubprocessPermission(session))) {
+        return reply.code(403).send({ error: STDIO_SUBPROCESS_FORBIDDEN_ERROR });
+      }
+
       if (
         !body.upstreamAuth
         || typeof body.upstreamAuth !== 'object'
@@ -561,6 +588,10 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
           module: 'sandbox',
           requiresEnterprise: true,
         });
+      }
+
+      if (nextStdioConfig?.executionMode === 'subprocess' && !(await requireStdioSubprocessPermission(session))) {
+        return reply.code(403).send({ error: STDIO_SUBPROCESS_FORBIDDEN_ERROR });
       }
 
       const updated = await updateMcpServer(session.tenantDbName, id, session.userId, {

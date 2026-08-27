@@ -433,6 +433,29 @@ export function hasServicePermission(
   return LEVEL_RANK[getEffectiveServicePermission(user, service)] >= LEVEL_RANK[required];
 }
 
+/**
+ * Effective service permission for a caller, folding in group grants and an
+ * optional API-token scope — the same inputs `authorizeServiceRequest` uses to
+ * gate a whole route, exposed for call sites that must additionally gate one
+ * specific, more dangerous sub-action of an otherwise write-level service at a
+ * stricter level (e.g. requiring 'admin' for a capability the route itself
+ * only requires 'write' for). A token scope can only narrow the result, never
+ * widen it, mirroring `authorizeServiceRequest`'s least-privilege contract.
+ */
+export function resolveCurrentServicePermission(
+  user: RbacUserLike,
+  service: PermissionService,
+  groupGrants: GroupTenantGrant[] = [],
+  tokenScope?: UserServicePermissions | null,
+): ServicePermissionLevel {
+  let current = getEffectiveServicePermissionWithGroups(user, groupGrants, service);
+  if (tokenScope != null) {
+    const scopedLevel = normalizeServicePermissions(tokenScope)[service] ?? 'none';
+    current = minPermission(current, scopedLevel);
+  }
+  return current;
+}
+
 export function authorizeServiceRequest(
   user: RbacUserLike,
   method: string,
