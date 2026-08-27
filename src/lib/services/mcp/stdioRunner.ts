@@ -11,6 +11,9 @@
  * Safety rails:
  * - runtime allowlist (npx / uvx only), no shell interpolation (execFile-style
  *   spawn with an args array)
+ * - packageName is validated against a strict npm/PyPI identifier grammar and
+ *   the package spec is always passed after a literal `--`, so it can never
+ *   be reinterpreted as an npx/uvx flag (e.g. npx's own `-c`/`--call`)
  * - per-call timeout and stdout buffer cap
  * - global concurrency cap so a burst cannot fork-bomb the gateway
  * - can be disabled entirely with MCP_STDIO_ENABLED=false
@@ -42,14 +45,41 @@ interface JsonRpcResponse {
   error?: { code?: number; message?: string };
 }
 
+// A package spec is the npm/PyPI package identifier `buildCommand` hands to
+// npx/uvx, optionally followed by a version/extras suffix (e.g.
+// "@scope/name@1.2.3", "black==23.1.0"). It must never be able to look like a
+// CLI flag: npx and uvx both scan their argv for recognized flags (npx's own
+// `-c`/`--call` runs an arbitrary shell string; a bare-looking token can be
+// misread as an option), so a leading '-' is rejected outright, and only a
+// tight, known-safe character set is allowed — no whitespace, quotes, `$`,
+// backticks, `;`, `|`, `&`, parens, etc.
+const SAFE_PACKAGE_SPEC_RE = /^[A-Za-z0-9@][A-Za-z0-9@/_.~+!=<>,[\]-]{0,213}$/;
+
+function assertSafePackageSpec(packageName: string, runtime: 'npx' | 'uvx'): string {
+  const spec = packageName.trim();
+  if (!SAFE_PACKAGE_SPEC_RE.test(spec)) {
+    throw new Error(
+      `Refusing to launch ${runtime}: stdio packageName "${packageName}" is not a valid `
+      + 'npm/PyPI package identifier (leading "-" or unsafe characters are not allowed)',
+    );
+  }
+  return spec;
+}
+
 function buildCommand(config: IMcpStdioConfig): { command: string; args: string[] } {
   const extraArgs = (config.args ?? []).map((a) => String(a));
   if (config.runtime === 'npx') {
+    const packageSpec = assertSafePackageSpec(config.packageName, 'npx');
     // -y: run without an install prompt; the npm cache keeps this fast.
-    return { command: 'npx', args: ['-y', config.packageName, ...extraArgs] };
+    // `--` marks the end of npx's own flags: everything after it is always
+    // treated as the package spec + its args, never re-parsed as an npx
+    // option (e.g. a malicious packageName can no longer masquerade as
+    // npx's `-c`/`--call` and hijack the invocation).
+    return { command: 'npx', args: ['-y', '--', packageSpec, ...extraArgs] };
   }
   if (config.runtime === 'uvx') {
-    return { command: 'uvx', args: [config.packageName, ...extraArgs] };
+    const packageSpec = assertSafePackageSpec(config.packageName, 'uvx');
+    return { command: 'uvx', args: ['--', packageSpec, ...extraArgs] };
   }
   throw new Error(`Unsupported stdio runtime: ${String(config.runtime)}`);
 }

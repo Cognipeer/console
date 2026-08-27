@@ -92,6 +92,18 @@ describe('stdioRunner with a real npx MCP server', () => {
     expect(available).toBe(true);
   });
 
+  it('refuses a flag-like packageName instead of spawning it (argument-injection guard)', async () => {
+    const config = {
+      runtime: 'npx' as const,
+      // Mimics npx's own `-c`/`--call` flag: without validation this would
+      // let `args` run as an arbitrary shell command instead of MCP tool args.
+      packageName: '-c',
+      args: ['echo pwned'],
+      executionMode: 'subprocess' as const,
+    };
+    await expect(stdioListTools(config)).rejects.toThrow(/not a valid npm\/PyPI package identifier/);
+  });
+
   it('lists and calls tools on @modelcontextprotocol/server-everything', async () => {
     const config = {
       runtime: 'npx' as const,
