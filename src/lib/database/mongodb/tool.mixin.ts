@@ -89,10 +89,11 @@ export function ToolMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: 
       if (filters?.type) filter.type = filters.type;
       if (filters?.status) filter.status = filters.status;
       if (filters?.search) {
+        const escapedSearch = this.escapeRegex(filters.search);
         filter.$or = [
-          { name: { $regex: filters.search, $options: 'i' } },
-          { description: { $regex: filters.search, $options: 'i' } },
-          { key: { $regex: filters.search, $options: 'i' } },
+          { name: { $regex: escapedSearch, $options: 'i' } },
+          { description: { $regex: escapedSearch, $options: 'i' } },
+          { key: { $regex: escapedSearch, $options: 'i' } },
         ];
       }
       const docs = await db
