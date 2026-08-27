@@ -120,6 +120,17 @@ export const COLLECTIONS = {
 
 // ── Base class ───────────────────────────────────────────────────────────
 
+/**
+ * Escape regex metacharacters so a caller-supplied string can be embedded in
+ * a `new RegExp(...)` filter without being interpreted as a pattern (used to
+ * avoid ReDoS from unescaped user input reaching MongoDB `$regex` queries).
+ * Exported standalone so mixins that build filters outside the class body
+ * (e.g. free functions) can reuse the same logic as `MongoDBProviderBase.escapeRegex`.
+ */
+export function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 export class MongoDBProviderBase {
   protected client: MongoClient | null = null;
   protected mainDb: Db | null = null;
@@ -268,7 +279,7 @@ export class MongoDBProviderBase {
   }
 
   protected escapeRegex(value: string): string {
-    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return escapeRegex(value);
   }
 
   protected buildProjectScopeFilter(

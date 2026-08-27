@@ -14,7 +14,7 @@ import type {
   McpServerStatus,
 } from '../provider.interface';
 import type { Constructor } from './types';
-import { MongoDBProviderBase, COLLECTIONS } from './base';
+import { MongoDBProviderBase, COLLECTIONS, escapeRegex } from './base';
 
 /**
  * Match a server's request logs by durable `serverId` primarily. The second
@@ -48,7 +48,7 @@ function buildMcpLogFilter(
     clauses.push({ createdAt: range });
   }
   if (options?.keyword?.trim()) {
-    const keywordRegex = new RegExp(options.keyword.trim(), 'i');
+    const keywordRegex = new RegExp(escapeRegex(options.keyword.trim()), 'i');
     clauses.push({ $or: [{ toolName: keywordRegex }, { errorMessage: keywordRegex }] });
   }
   return clauses.length === 1 ? clauses[0] : { $and: clauses };
