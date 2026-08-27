@@ -21,7 +21,7 @@
  */
 
 import { decryptObject, encryptObject } from '@/lib/utils/crypto';
-import type { ICrawlerHttpConfig } from '@/lib/database';
+import type { ICrawlerHttpConfig, ICrawlerWebhookConfig } from '@/lib/database';
 
 const MASK = '••••••';
 
@@ -147,3 +147,32 @@ export function isMaskedHttpSecret(value: unknown): boolean {
 }
 
 export const CRAWLER_HTTP_SECRET_MASK = MASK;
+
+/**
+ * Redact a webhook's HMAC signing secret for API/UI serialization (crawler
+ * records AND queued/finished job `planSnapshot.webhook`) — mirrors
+ * `maskHttpConfig`'s treatment of the crawler's own upstream credentials.
+ * The secret is not sealed at rest by this module; only the read path is
+ * masked, matching this finding's scope (API disclosure, not DB compromise).
+ */
+export function maskWebhookConfig(
+  webhook: ICrawlerWebhookConfig | undefined,
+): ICrawlerWebhookConfig | undefined {
+  if (!webhook?.secret) return webhook;
+  return { ...webhook, secret: MASK };
+}
+
+/**
+ * Merge a webhook-config update coming from the UI/API onto the stored
+ * config. The literal mask placeholder submitted back in `secret` means
+ * "keep the current secret" — same convention as `mergeHttpConfigUpdate`.
+ */
+export function mergeWebhookConfigUpdate(
+  current: ICrawlerWebhookConfig | undefined,
+  incoming: ICrawlerWebhookConfig,
+): ICrawlerWebhookConfig {
+  if (incoming.secret === MASK) {
+    return { ...incoming, secret: current?.secret };
+  }
+  return incoming;
+}

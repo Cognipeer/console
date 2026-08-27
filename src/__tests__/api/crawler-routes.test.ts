@@ -297,3 +297,99 @@ describe('Crawler HTTP credentials are never returned in cleartext (CWE-312)', (
     expect(listRes.body).not.toContain(SECRET_BEARER_TOKEN);
   }, 30_000);
 });
+
+describe('Crawler webhook HMAC secret is never returned in cleartext (CWE-201)', () => {
+  const WEBHOOK_SECRET = 'sekret-webhook-hmac-should-never-leak-67890';
+  const NEW_WEBHOOK_SECRET = 'brand-new-webhook-secret-abcde';
+
+  it('masks the secret on create/get/job-read, and a no-op re-save does not corrupt it', async () => {
+    // 1. Create a crawler carrying a webhook secret.
+    const createRes = await app.inject({
+      method: 'POST',
+      url: '/api/crawler/crawlers',
+      headers: { ...REQUEST_HEADERS, 'content-type': 'application/json' },
+      payload: JSON.stringify({
+        name: 'Secret Webhook Crawler',
+        engine: 'axios',
+        maxDepth: 0,
+        maxPages: 1,
+        autoCrawl: false,
+        webhook: { url: 'https://example.test/hook', secret: WEBHOOK_SECRET, events: ['completed'] },
+      }),
+    });
+    expect(createRes.statusCode).toBe(201);
+    expect(createRes.body).not.toContain(WEBHOOK_SECRET);
+    const { crawler } = parseJsonBody<{
+      crawler: { id: string; key: string; webhook?: { secret?: string } };
+    }>(createRes.body);
+    const maskedSecret = crawler.webhook?.secret;
+    expect(maskedSecret).not.toBe(WEBHOOK_SECRET);
+    expect(maskedSecret).toBeTruthy();
+
+    // 2. Re-fetch — still masked, same placeholder.
+    const getRes = await app.inject({
+      method: 'GET',
+      url: `/api/crawler/crawlers/${crawler.key}`,
+      headers: REQUEST_HEADERS,
+    });
+    expect(getRes.body).not.toContain(WEBHOOK_SECRET);
+    const { crawler: fetched } = parseJsonBody<{ crawler: { webhook?: { secret?: string } } }>(getRes.body);
+    expect(fetched.webhook?.secret).toBe(maskedSecret);
+
+    // 3. Simulate the dashboard's round-trip: PATCH the crawler back with the
+    //    masked placeholder unchanged (exactly what page.tsx's pre-filled
+    //    form submits on a no-op save). The REAL secret must survive.
+    const noopPatchRes = await app.inject({
+      method: 'PATCH',
+      url: `/api/crawler/crawlers/${crawler.key}`,
+      headers: { ...REQUEST_HEADERS, 'content-type': 'application/json' },
+      payload: JSON.stringify({
+        webhook: { url: 'https://example.test/hook', secret: maskedSecret, events: ['completed', 'failed'] },
+      }),
+    });
+    expect(noopPatchRes.statusCode).toBe(200);
+    const { crawler: afterNoop } = parseJsonBody<{
+      crawler: { webhook?: { secret?: string; events?: string[] } };
+    }>(noopPatchRes.body);
+    // The unrelated field change (events) took effect...
+    expect(afterNoop.webhook?.events).toEqual(['completed', 'failed']);
+    // ...but the secret is still masked the same way, not corrupted to the
+    // literal placeholder string, and not blank.
+    expect(afterNoop.webhook?.secret).toBe(maskedSecret);
+
+    // 4. Run a real crawl and confirm the job's planSnapshot never leaks it.
+    const crawlRes = await app.inject({
+      method: 'POST',
+      url: `/api/crawler/crawlers/${crawler.key}/crawl`,
+      headers: { ...REQUEST_HEADERS, 'content-type': 'application/json' },
+      payload: JSON.stringify({ urls: [originUrl], mode: 'sync' }),
+    });
+    expect(crawlRes.statusCode).toBe(202);
+    const { jobId } = parseJsonBody<{ jobId: string }>(crawlRes.body);
+    const jobRes = await app.inject({
+      method: 'GET',
+      url: `/api/crawler/jobs/${jobId}`,
+      headers: REQUEST_HEADERS,
+    });
+    expect(jobRes.body).not.toContain(WEBHOOK_SECRET);
+    const { job } = parseJsonBody<{
+      job: { planSnapshot?: { webhook?: { secret?: string } } };
+    }>(jobRes.body);
+    expect(job.planSnapshot?.webhook?.secret).toBe(maskedSecret);
+
+    // 5. A genuine secret rotation (a real, different value) must actually
+    //    take effect, not be treated as "keep current" too.
+    const rotateRes = await app.inject({
+      method: 'PATCH',
+      url: `/api/crawler/crawlers/${crawler.key}`,
+      headers: { ...REQUEST_HEADERS, 'content-type': 'application/json' },
+      payload: JSON.stringify({
+        webhook: { url: 'https://example.test/hook', secret: NEW_WEBHOOK_SECRET, events: ['completed'] },
+      }),
+    });
+    expect(rotateRes.statusCode).toBe(200);
+    const { crawler: afterRotate } = parseJsonBody<{ crawler: { webhook?: { secret?: string } } }>(rotateRes.body);
+    expect(afterRotate.webhook?.secret).not.toBe(NEW_WEBHOOK_SECRET);
+    expect(afterRotate.webhook?.secret).not.toBe(WEBHOOK_SECRET);
+  }, 30_000);
+});

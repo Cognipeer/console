@@ -21,7 +21,13 @@ import type {
 } from '@/lib/database';
 import { resolveUsageAttribution } from '@/lib/services/usage/usageEvents';
 import { crawlerEntityId } from './crawlerEntityId';
-import { maskHttpConfig, mergeHttpConfigUpdate, sealHttpConfig } from './httpConfigSecrets';
+import {
+  maskHttpConfig,
+  maskWebhookConfig,
+  mergeHttpConfigUpdate,
+  mergeWebhookConfigUpdate,
+  sealHttpConfig,
+} from './httpConfigSecrets';
 import { matchesProjectScope } from './internals';
 import { computeNextRun, validateSchedule } from './schedulePlanner';
 import type {
@@ -60,6 +66,7 @@ function serializeCrawler(record: ICrawler): CrawlerView {
   return {
     ...rest,
     http: maskHttpConfig(rest.http),
+    webhook: maskWebhookConfig(rest.webhook),
     id: typeof _id === 'string' ? _id : _id?.toString() ?? '',
   };
 }
@@ -68,11 +75,16 @@ function serializeJob(record: ICrawlJob): CrawlJobView {
   const { _id, ...rest } = record;
   return {
     ...rest,
-    // `planSnapshot.http` carries the same class of secrets as a saved
-    // crawler's `http` (it's snapshotted from it, or supplied directly by
-    // an ad-hoc run) — mask it here too so job reads never leak them.
+    // `planSnapshot.http`/`.webhook` carry the same class of secrets as a
+    // saved crawler's `http`/`webhook` (snapshotted from it, or supplied
+    // directly by an ad-hoc run) — mask them here too so job reads never
+    // leak them.
     planSnapshot: rest.planSnapshot
-      ? { ...rest.planSnapshot, http: maskHttpConfig(rest.planSnapshot.http) }
+      ? {
+          ...rest.planSnapshot,
+          http: maskHttpConfig(rest.planSnapshot.http),
+          webhook: maskWebhookConfig(rest.planSnapshot.webhook),
+        }
       : rest.planSnapshot,
     id: typeof _id === 'string' ? _id : _id?.toString() ?? '',
   };
@@ -174,7 +186,11 @@ export async function updateCrawler(
   if (input.downloadableMimes !== undefined) patch.downloadableMimes = input.downloadableMimes;
   if (input.markdownOptions !== undefined) patch.markdownOptions = input.markdownOptions;
   if (input.rag !== undefined) patch.rag = input.rag ?? undefined;
-  if (input.webhook !== undefined) patch.webhook = input.webhook ?? undefined;
+  if (input.webhook !== undefined) {
+    patch.webhook = input.webhook
+      ? mergeWebhookConfigUpdate(existing.webhook, input.webhook)
+      : undefined;
+  }
   if (input.schedule !== undefined) {
     if (input.schedule === null) {
       patch.schedule = undefined;
