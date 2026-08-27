@@ -25,9 +25,20 @@ function cellValue(value: unknown): string {
   return String(value);
 }
 
+/**
+ * Neutralize CSV formula injection: if a cell's first character would be
+ * interpreted by spreadsheet software as the start of a formula/command
+ * (=, +, -, @, tab, or CR), prefix it with a single quote so it's rendered
+ * as inert text instead of being evaluated when the file is opened.
+ */
+function neutralizeFormula(value: string): string {
+  return /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+}
+
 /** RFC-4180-ish CSV escaping. */
 function csvEscape(value: string): string {
-  return /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+  const safe = neutralizeFormula(value);
+  return /[",\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 }
 
 /** Build a CSV string: status/judge/accuracy columns + one column per field. */
