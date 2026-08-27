@@ -147,7 +147,7 @@ export function ToolMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: 
         if (options.to) (filter.createdAt as Record<string, unknown>).$lte = options.to;
       }
       if (options?.keyword?.trim()) {
-        const keywordRegex = new RegExp(options.keyword.trim(), 'i');
+        const keywordRegex = new RegExp(this.escapeRegex(options.keyword.trim()), 'i');
         filter.$or = [
           { actionName: keywordRegex },
           { actionKey: keywordRegex },
@@ -178,7 +178,7 @@ export function ToolMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: 
         if (options.to) (filter.createdAt as Record<string, unknown>).$lte = options.to;
       }
       if (options?.keyword?.trim()) {
-        const keywordRegex = new RegExp(options.keyword.trim(), 'i');
+        const keywordRegex = new RegExp(this.escapeRegex(options.keyword.trim()), 'i');
         filter.$or = [
           { actionName: keywordRegex },
           { actionKey: keywordRegex },
