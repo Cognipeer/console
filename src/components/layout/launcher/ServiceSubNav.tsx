@@ -46,6 +46,7 @@ import {
   IconStackPush,
   IconTimeline,
   IconTool,
+  IconTrendingUp,
   IconVector,
   IconVolume,
   IconWorld,
@@ -279,6 +280,7 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
           !p.startsWith('/dashboard/cost/agents') &&
           !p.startsWith('/dashboard/cost/pricing') &&
           !p.startsWith('/dashboard/cost/reports') &&
+          !p.startsWith('/dashboard/cost/forecast') &&
           !p.startsWith('/dashboard/cost/recommendations') &&
           !p.startsWith('/dashboard/cost/analysis') &&
           !p.startsWith('/dashboard/cost/prescriptions') &&
@@ -337,6 +339,13 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       href: '/dashboard/cost/reports',
       icon: IconReportAnalytics,
       matcher: (p) => p.startsWith('/dashboard/cost/reports'),
+    },
+    {
+      id: 'forecast',
+      label: 'Forecast',
+      href: '/dashboard/cost/forecast',
+      icon: IconTrendingUp,
+      matcher: (p) => p.startsWith('/dashboard/cost/forecast'),
     },
   ],
   vector: [

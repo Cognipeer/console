@@ -6,8 +6,8 @@
  */
 
 import crypto from 'node:crypto';
-import axios from 'axios';
 import { createLogger } from '@/lib/core/logger';
+import { safeFetch } from '@/lib/security/outboundFetch';
 import type { IOcrJob, OcrJobWebhookEvent } from '@/lib/database';
 
 const log = createLogger('ocr-job:webhook');
@@ -67,17 +67,24 @@ export async function sendOcrJobWebhook<T>(input: {
   let lastErr: unknown;
   for (let attempt = 0; attempt < DEFAULT_ATTEMPTS; attempt++) {
     try {
-      await axios.post(url, body, {
+      // callbackUrl is tenant-supplied, so route it through the shared SSRF
+      // guard: safeFetch DNS-resolves the host (and every redirect hop) and
+      // rejects loopback/private/link-local/metadata targets before the
+      // request is made, matching the crawler webhook's protection.
+      const response = await safeFetch(url, {
+        method: 'POST',
         headers,
-        timeout: DEFAULT_TIMEOUT_MS,
-        validateStatus: (s) => s >= 200 && s < 300,
-      });
-      return true;
+        body: JSON.stringify(body),
+      }, { timeoutMs: DEFAULT_TIMEOUT_MS });
+      if (response.status >= 200 && response.status < 300) {
+        return true;
+      }
+      lastErr = new Error(`OCR webhook responded with status ${response.status}`);
     } catch (err) {
       lastErr = err;
-      if (attempt < DEFAULT_ATTEMPTS - 1) {
-        await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, attempt)));
-      }
+    }
+    if (attempt < DEFAULT_ATTEMPTS - 1) {
+      await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, attempt)));
     }
   }
   log.warn('OCR webhook delivery failed after retries', {

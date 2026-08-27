@@ -2,18 +2,24 @@
  * Unit tests — OCR job outbound webhook (`sendOcrJobWebhook`).
  * Covers delivery gating (no URL / event not subscribed), the `job.completed`
  * default subscription, HMAC signing, and the payload envelope shape.
+ *
+ * `safeFetch` is mocked with a synchronous factory (async factories silently
+ * fail to intercept — see reference-vitest-mock-importactual-trap). The
+ * webhook is expected to go through `safeFetch` (SSRF guard) rather than
+ * calling `axios`/`fetch` directly, since `callbackUrl` is tenant-supplied.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-vi.mock('axios', () => ({
-  default: { post: vi.fn() },
+vi.mock('@/lib/security/outboundFetch', () => ({
+  safeFetch: vi.fn(),
+  OutboundNetworkError: class OutboundNetworkError extends Error {},
 }));
 
-import axios from 'axios';
+import { safeFetch } from '@/lib/security/outboundFetch';
 import { sendOcrJobWebhook } from '@/lib/services/ocrJobs/ocrJobWebhook';
 
-const post = axios.post as unknown as ReturnType<typeof vi.fn>;
+const post = safeFetch as unknown as ReturnType<typeof vi.fn>;
 
 function job(overrides: Record<string, unknown> = {}) {
   return {
@@ -27,7 +33,7 @@ function job(overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  post.mockResolvedValue({ status: 200, data: {} });
+  post.mockResolvedValue({ status: 200 });
 });
 
 describe('sendOcrJobWebhook', () => {
@@ -59,8 +65,9 @@ describe('sendOcrJobWebhook', () => {
     });
     expect(ok).toBe(true);
     expect(post).toHaveBeenCalledTimes(1);
-    const [url, body] = post.mock.calls[0];
+    const [url, init] = post.mock.calls[0];
     expect(url).toBe('https://hook.example.com/ocr');
+    const body = JSON.parse((init as RequestInit).body as string);
     expect(body.event).toBe('ocr.item.succeeded');
     expect(body.jobId).toBe('job-1');
     expect(body.tenantId).toBe('tenant-1');
@@ -77,7 +84,8 @@ describe('sendOcrJobWebhook', () => {
     });
     expect(ok).toBe(true);
     expect(post).toHaveBeenCalledTimes(1);
-    expect(post.mock.calls[0][1].event).toBe('ocr.job.completed');
+    const body = JSON.parse((post.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.event).toBe('ocr.job.completed');
   });
 
   it('attaches an HMAC signature header when a callbackSecret is set', async () => {
@@ -86,13 +94,22 @@ describe('sendOcrJobWebhook', () => {
       event: 'job.completed',
       data: {},
     });
-    const headers = post.mock.calls[0][2].headers as Record<string, string>;
+    const headers = (post.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
     expect(headers['x-cognipeer-signature']).toMatch(/^t=\d+,v1=[a-f0-9]{64}$/);
   });
 
   it('omits the signature header when no secret is configured', async () => {
     await sendOcrJobWebhook({ job: job(), event: 'item.succeeded', data: {} });
-    const headers = post.mock.calls[0][2].headers as Record<string, string>;
+    const headers = (post.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
     expect(headers['x-cognipeer-signature']).toBeUndefined();
+  });
+
+  it('goes through safeFetch (tenant-provided URL → SSRF guard) rather than calling fetch/axios directly', async () => {
+    await sendOcrJobWebhook({ job: job(), event: 'item.succeeded', data: {} });
+    expect(post).toHaveBeenCalledWith(
+      'https://hook.example.com/ocr',
+      expect.objectContaining({ method: 'POST' }),
+      expect.any(Object),
+    );
   });
 });
