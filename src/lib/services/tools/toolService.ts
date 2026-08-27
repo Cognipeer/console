@@ -18,6 +18,7 @@ import { getDatabase } from '@/lib/database';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import type { RuntimeAuthLogInfo } from '@/lib/services/runtimeContext';
 import type { ITool, IToolAction, IToolAuthConfig } from '@/lib/database';
+import { mergeAuthConfigUpdate, openAuthConfig, sealAuthConfig } from './secretVault';
 import type {
   CreateToolInput,
   UpdateToolInput,
@@ -289,7 +290,9 @@ export async function createTool(
     actions,
     openApiSpec: normalizedSpec,
     upstreamBaseUrl,
-    upstreamAuth: input.upstreamAuth as IToolAuthConfig,
+    upstreamAuth: input.upstreamAuth
+      ? sealAuthConfig(input.upstreamAuth as IToolAuthConfig)
+      : undefined,
     mcpEndpoint: input.mcpEndpoint,
     mcpTransport: input.mcpTransport,
     createdBy: userId,
@@ -310,18 +313,30 @@ export async function updateTool(
 
   const updateData: Record<string, unknown> = { updatedBy: userId };
 
+  // Fetched lazily, at most once, by whichever branch below needs the
+  // currently-stored tool (existing metadata for the runtime-header merge,
+  // or the existing sealed auth config to preserve/re-seal on update).
+  let existingTool: ITool | null | undefined;
+  const loadExisting = async () => {
+    if (existingTool === undefined) existingTool = await db.findToolById(toolId);
+    return existingTool;
+  };
+
   if (input.name !== undefined) updateData.name = input.name.trim();
   if (input.description !== undefined) updateData.description = input.description.trim();
   if (input.status !== undefined) updateData.status = input.status;
   if (input.upstreamBaseUrl !== undefined) updateData.upstreamBaseUrl = input.upstreamBaseUrl;
-  if (input.upstreamAuth !== undefined) updateData.upstreamAuth = input.upstreamAuth;
+  if (input.upstreamAuth !== undefined) {
+    const existing = await loadExisting();
+    updateData.upstreamAuth = mergeAuthConfigUpdate(existing?.upstreamAuth, input.upstreamAuth);
+  }
   if (input.mcpEndpoint !== undefined) updateData.mcpEndpoint = input.mcpEndpoint;
   if (input.mcpTransport !== undefined) updateData.mcpTransport = input.mcpTransport;
 
   // Runtime-header passthrough policy lives in the metadata blob (no schema
   // migration needed in either DB tree).
   if (input.runtimeHeaders !== undefined) {
-    const existing = await db.findToolById(toolId);
+    const existing = await loadExisting();
     updateData.metadata = {
       ...(existing?.metadata ?? {}),
       runtimeHeaders: input.runtimeHeaders === null
@@ -425,7 +440,7 @@ export async function syncToolActions(
     actions = await discoverMcpTools(
       tool.mcpEndpoint,
       tool.mcpTransport || 'streamable-http',
-      tool.upstreamAuth,
+      openAuthConfig(tool.upstreamAuth),
     );
   }
 
@@ -493,7 +508,7 @@ async function executeOpenApiAction(
     Accept: 'application/json',
   };
 
-  const auth = tool.upstreamAuth;
+  const auth = openAuthConfig(tool.upstreamAuth);
   if (auth?.type === 'token' && auth.token) {
     headers['Authorization'] = `Bearer ${auth.token}`;
   } else if (auth?.type === 'header' && auth.headerName && auth.headerValue) {
@@ -550,7 +565,7 @@ async function executeMcpAction(
     Accept: 'application/json',
   };
 
-  const auth = tool.upstreamAuth;
+  const auth = openAuthConfig(tool.upstreamAuth);
   if (auth?.type === 'token' && auth.token) {
     headers['Authorization'] = `Bearer ${auth.token}`;
   } else if (auth?.type === 'header' && auth.headerName && auth.headerValue) {
@@ -636,8 +651,9 @@ export function serializeTool(tool: ITool): ToolView {
 /**
  * Outbound secret values that could be echoed back into a logged response for
  * this tool: the caller's applied runtime-header values plus the tool's own
- * static upstream credential. Tool auth is stored plaintext (no vault seal),
- * so it is read directly. Passed to `logToolRequest`.
+ * static upstream credential. Tool auth is sealed at rest (see
+ * `@/lib/services/tools/secretVault`), so it is opened here to get the
+ * plaintext values to scrub. Passed to `logToolRequest`.
  */
 export function toolRequestSecretValues(
   tool: ITool,
@@ -645,7 +661,7 @@ export function toolRequestSecretValues(
 ): string[] {
   return [
     ...Object.values(runtimeHeaders ?? {}),
-    ...authConfigSecretValues(tool.upstreamAuth),
+    ...authConfigSecretValues(openAuthConfig(tool.upstreamAuth)),
   ];
 }
 

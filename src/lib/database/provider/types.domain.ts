@@ -1306,6 +1306,13 @@ export interface IToolAuthConfig {
   /** For 'basic': username + password */
   username?: string;
   password?: string;
+  /**
+   * AES-256-GCM ciphertext (base64) holding `token`/`headerValue`/`password`
+   * once sealed for storage — see `@/lib/services/tools/secretVault`. Only
+   * ever set by that module's own `sealAuthConfig`/`mergeAuthConfigUpdate`;
+   * never trust a `sealed` value handed in from outside the service layer.
+   */
+  sealed?: string;
 }
 
 export interface IToolAction {
