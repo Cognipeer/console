@@ -35,6 +35,94 @@ const MAX_CONCURRENT = Number(process.env.MCP_STDIO_MAX_CONCURRENT ?? 8);
 
 let activeProcesses = 0;
 
+/**
+ * The gateway process environment carries platform-wide secrets (JWT signing
+ * key, provider credential encryption key, database connection strings,
+ * SMTP/CRM/system-model credentials, etc. — see `src/lib/core/config.ts`).
+ * Tenant-configured stdio MCP servers run tenant-selected npx/uvx packages,
+ * so they must NOT inherit that environment wholesale (CWE-526).
+ *
+ * Instead the child only gets:
+ *  - a small, explicit allowlist of platform/runtime plumbing vars needed for
+ *    npx/uvx (and the interpreters they shell out to) to locate binaries,
+ *    caches, and — for on-prem deployments behind a corporate proxy or a
+ *    private package mirror — the standard proxy/mirror vars those tools
+ *    read directly from the environment;
+ *  - the tenant-supplied stdio env map for this MCP server (`config.env` /
+ *    `config.envSealed`), layered on top so it can still override any of the
+ *    above.
+ * Nothing else from `process.env` reaches the child.
+ */
+const SAFE_ENV_VAR_NAMES = new Set([
+  // Binary resolution / OS plumbing needed for npx and uvx to run at all.
+  'PATH',
+  'HOME',
+  'USERPROFILE',
+  'TMPDIR',
+  'TEMP',
+  'TMP',
+  'SystemRoot',
+  'windir',
+  'ProgramFiles',
+  'ProgramFiles(x86)',
+  'ProgramData',
+  'APPDATA',
+  'LOCALAPPDATA',
+  'COMSPEC',
+  'PATHEXT',
+  'LANG',
+  'LC_ALL',
+  'LC_CTYPE',
+  'SHELL',
+  // Corporate-proxy egress. npm/npx, uvx and the interpreters they invoke
+  // read these directly from the environment (independent of the
+  // NPM_CONFIG_*/UV_* prefixes below) — required for on-prem deployments
+  // that egress through a proxy. None of these carry secrets.
+  'HTTP_PROXY',
+  'http_proxy',
+  'HTTPS_PROXY',
+  'https_proxy',
+  'NO_PROXY',
+  'no_proxy',
+  // Private PyPI mirror configuration read directly by pip/uv on on-prem
+  // deployments. None of these carry secrets (index URLs, not credentials).
+  'PIP_INDEX_URL',
+  'PIP_EXTRA_INDEX_URL',
+  'PIP_TRUSTED_HOST',
+]);
+
+const SAFE_ENV_VAR_PREFIXES = ['NPM_CONFIG_', 'UV_'];
+
+function isSafeEnvVarName(name: string): boolean {
+  if (SAFE_ENV_VAR_NAMES.has(name)) return true;
+  return SAFE_ENV_VAR_PREFIXES.some((prefix) => name.startsWith(prefix));
+}
+
+/**
+ * Build the child process environment: an explicit allowlist copied from the
+ * gateway's own environment, plus the tenant-supplied stdio env for this MCP
+ * server. The full `process.env` is never spread into the child.
+ */
+function buildChildEnv(config: IMcpStdioConfig): NodeJS.ProcessEnv {
+  const safe: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined && isSafeEnvVarName(key)) {
+      safe[key] = value;
+    }
+  }
+  return {
+    // NODE_ENV is not a secret and is unconditionally required by the
+    // NodeJS.ProcessEnv type (see next/types/global.d.ts); it does not
+    // widen exposure beyond the allowlist above.
+    NODE_ENV: process.env.NODE_ENV,
+    ...safe,
+    ...openStdioEnv(config),
+    // MCP servers must not inherit interactive npm prompts.
+    npm_config_yes: 'true',
+    NO_COLOR: '1',
+  };
+}
+
 export function isStdioRunnerEnabled(): boolean {
   return (process.env.MCP_STDIO_ENABLED ?? 'true').toLowerCase() !== 'false';
 }
@@ -101,13 +189,7 @@ async function runStdioSession(
   }
 
   const { command, args } = buildCommand(config);
-  const env = {
-    ...process.env,
-    ...openStdioEnv(config),
-    // MCP servers must not inherit interactive npm prompts.
-    npm_config_yes: 'true',
-    NO_COLOR: '1',
-  };
+  const env = buildChildEnv(config);
 
   activeProcesses += 1;
   const child = spawn(command, args, {
