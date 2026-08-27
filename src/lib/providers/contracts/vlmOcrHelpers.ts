@@ -7,6 +7,7 @@ import type {
 } from '../domains/ocr';
 import type { ModelProviderRuntime, ModelRuntimeConfig } from '../domains/model';
 import { looksLikePdf, renderPdfToPngDataUrls } from './pdfRender';
+import { safeFetch } from '@/lib/security/outboundFetch';
 
 const DEFAULT_OCR_PROMPT = `You are an OCR engine. Extract every visible textual element from the provided document image(s) and return the result as STRICT JSON matching this TypeScript type:
 
@@ -138,7 +139,7 @@ function isPdfDocument(input: OcrExtractInput): boolean {
 /** Load the raw bytes of a PDF document, fetching the URL when needed. */
 async function loadPdfBytes(input: OcrExtractInput): Promise<Buffer> {
   if (input.document.kind === 'bytes') return input.document.data;
-  const res = await fetch(input.document.url);
+  const res = await safeFetch(input.document.url);
   if (!res.ok) throw new Error(`Failed to fetch PDF document: HTTP ${res.status}`);
   return Buffer.from(await res.arrayBuffer());
 }
