@@ -2,6 +2,7 @@ import { getTenantDatabase } from '@/lib/database';
 import type { IInferenceServer, IInferenceServerMetrics } from '@/lib/database';
 import { pollVllmServer, snapshotToMetrics } from './vllmPoller';
 import { pollLlamaCppServer } from './llamacppPoller';
+import { sealApiKey, openApiKey } from './apiKeyVault';
 import slugify from 'slugify';
 
 function generateServerKey(name: string): string {
@@ -52,7 +53,9 @@ export class InferenceMonitoringService {
       name: data.name,
       type: data.type,
       baseUrl: data.baseUrl.replace(/\/+$/, ''),
-      apiKey: data.apiKey,
+      // Never persist the plaintext apiKey — only its AES-256-GCM ciphertext.
+      apiKey: undefined,
+      apiKeySealed: data.apiKey ? sealApiKey(data.apiKey) : undefined,
       pollIntervalSeconds: data.pollIntervalSeconds ?? 60,
       status: 'active',
       createdBy: userId,
@@ -75,7 +78,12 @@ export class InferenceMonitoringService {
     const update: Record<string, unknown> = { updatedBy: userId };
     if (data.name !== undefined) update.name = data.name;
     if (data.baseUrl !== undefined) update.baseUrl = data.baseUrl.replace(/\/+$/, '');
-    if (data.apiKey !== undefined) update.apiKey = data.apiKey;
+    if (data.apiKey !== undefined) {
+      // Re-seal on every change; never persist the plaintext apiKey column
+      // (also clears any leftover plaintext from a pre-encryption row).
+      update.apiKey = null;
+      update.apiKeySealed = data.apiKey ? sealApiKey(data.apiKey) : null;
+    }
     if (data.pollIntervalSeconds !== undefined) update.pollIntervalSeconds = data.pollIntervalSeconds;
     if (data.status !== undefined) update.status = data.status;
     return db.updateInferenceServer(String(server._id), update);
@@ -108,11 +116,15 @@ export class InferenceMonitoringService {
     const server = await db.findInferenceServerByKey(tenantId, serverKey);
     if (!server) throw new Error('Server not found');
 
+    // Decrypt the apiKey only for this outbound poll call — never persisted
+    // or logged in plaintext.
+    const pollableServer = { ...server, apiKey: openApiKey(server) };
+
     try {
       const snapshot =
         server.type === 'llamacpp'
-          ? await pollLlamaCppServer(server)
-          : await pollVllmServer(server);
+          ? await pollLlamaCppServer(pollableServer)
+          : await pollVllmServer(pollableServer);
       const metricsData = snapshotToMetrics(tenantId, serverKey, snapshot);
       const metrics = await db.createInferenceServerMetrics(metricsData);
 

@@ -1,13 +1,14 @@
 import type { IInferenceServer } from '@/lib/database';
 
 /**
- * Remove sensitive fields (apiKey) from server objects before sending to client.
+ * Remove sensitive fields (apiKey / its sealed ciphertext) from server
+ * objects before sending to client.
  */
 export function sanitizeServer(
   server: IInferenceServer,
-): Omit<IInferenceServer, 'apiKey'> {
+): Omit<IInferenceServer, 'apiKey' | 'apiKeySealed'> {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { apiKey, ...safe } = server;
+  const { apiKey, apiKeySealed, ...safe } = server;
   return safe;
 }
 

@@ -915,6 +915,10 @@ export class SQLiteProviderBase {
     // (both reuse batchIndex starting from 0).
     this.ensureTableColumn(db, TABLES.vectorMigrations, 'attempt', 'attempt INTEGER NOT NULL DEFAULT 0');
     this.ensureTableColumn(db, TABLES.vectorMigrationLogs, 'attempt', 'attempt INTEGER NOT NULL DEFAULT 1');
+    // Encrypted-at-rest inference server monitoring apiKey (AES-256-GCM); see
+    // apiKeyVault.ts. The legacy plaintext `apiKey` column stays for rows
+    // written before this vault existed.
+    this.ensureTableColumn(db, TABLES.inferenceServers, 'apiKeySealed', 'apiKeySealed TEXT');
   }
 
   private migrateOcrJobsSchema(db: Database.Database): void {

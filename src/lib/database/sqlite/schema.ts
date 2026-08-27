@@ -764,6 +764,7 @@ export const TENANT_SCHEMA_SQL = `
     type TEXT NOT NULL,
     baseUrl TEXT NOT NULL,
     apiKey TEXT,
+    apiKeySealed TEXT,
     pollIntervalSeconds INTEGER NOT NULL DEFAULT 60,
     status TEXT NOT NULL DEFAULT 'active',
     lastPolledAt TEXT,

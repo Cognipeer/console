@@ -956,7 +956,19 @@ export interface IInferenceServer {
   name: string;
   type: InferenceServerType;
   baseUrl: string;
+  /**
+   * Legacy plaintext monitoring apiKey. New writes never populate this —
+   * see `apiKeySealed` — but it is read as a fallback for rows written
+   * before the encrypted-at-rest vault existed
+   * (`@/lib/services/inferenceMonitoring/apiKeyVault`).
+   */
   apiKey?: string;
+  /**
+   * Encrypted-at-rest monitoring apiKey (AES-256-GCM), see
+   * `@/lib/services/inferenceMonitoring/apiKeyVault`. Decrypt only when the
+   * key is actually needed to poll the upstream server.
+   */
+  apiKeySealed?: string;
   pollIntervalSeconds: number;
   status: 'active' | 'disabled' | 'errored';
   lastPolledAt?: Date;

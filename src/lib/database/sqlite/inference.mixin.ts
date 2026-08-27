@@ -21,10 +21,10 @@ export function InferenceMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
 
       db.prepare(`
         INSERT INTO ${TABLES.inferenceServers}
-        (id, tenantId, key, name, type, baseUrl, apiKey,
+        (id, tenantId, key, name, type, baseUrl, apiKey, apiKeySealed,
          pollIntervalSeconds, status, lastPolledAt, lastError, metadata,
          createdBy, updatedBy, createdAt, updatedAt)
-        VALUES (@id, @tenantId, @key, @name, @type, @baseUrl, @apiKey,
+        VALUES (@id, @tenantId, @key, @name, @type, @baseUrl, @apiKey, @apiKeySealed,
          @pollIntervalSeconds, @status, @lastPolledAt, @lastError, @metadata,
          @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
@@ -35,6 +35,7 @@ export function InferenceMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         type: server.type,
         baseUrl: server.baseUrl,
         apiKey: server.apiKey ?? null,
+        apiKeySealed: server.apiKeySealed ?? null,
         pollIntervalSeconds: server.pollIntervalSeconds,
         status: server.status,
         lastPolledAt: server.lastPolledAt ? server.lastPolledAt.toISOString() : null,
@@ -62,6 +63,7 @@ export function InferenceMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       if (data.type !== undefined) { sets.push('type = @type'); params.type = data.type; }
       if (data.baseUrl !== undefined) { sets.push('baseUrl = @baseUrl'); params.baseUrl = data.baseUrl; }
       if (data.apiKey !== undefined) { sets.push('apiKey = @apiKey'); params.apiKey = data.apiKey; }
+      if (data.apiKeySealed !== undefined) { sets.push('apiKeySealed = @apiKeySealed'); params.apiKeySealed = data.apiKeySealed; }
       if (data.pollIntervalSeconds !== undefined) { sets.push('pollIntervalSeconds = @pollIntervalSeconds'); params.pollIntervalSeconds = data.pollIntervalSeconds; }
       if (data.status !== undefined) { sets.push('status = @status'); params.status = data.status; }
       if (data.lastPolledAt !== undefined) { sets.push('lastPolledAt = @lastPolledAt'); params.lastPolledAt = data.lastPolledAt instanceof Date ? data.lastPolledAt.toISOString() : data.lastPolledAt; }
@@ -178,6 +180,7 @@ export function InferenceMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         type: r.type as IInferenceServer['type'],
         baseUrl: r.baseUrl as string,
         apiKey: (r.apiKey as string) || undefined,
+        apiKeySealed: (r.apiKeySealed as string) || undefined,
         pollIntervalSeconds: r.pollIntervalSeconds as number,
         status: r.status as IInferenceServer['status'],
         lastPolledAt: r.lastPolledAt ? this.toDate(r.lastPolledAt) : undefined,
