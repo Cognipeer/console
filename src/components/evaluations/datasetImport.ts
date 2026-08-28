@@ -1,7 +1,8 @@
 /**
  * Dataset import helpers — turn Excel / CSV / JSON into evaluation dataset
- * items. Excel and CSV are both parsed with `xlsx` (CSV via `type: 'string'`),
- * so a single typed dependency covers both; JSON is parsed directly.
+ * items. Spreadsheet and delimited files are parsed by the shared helpers in
+ * `@/components/common/spreadsheet` (exceljs for .xlsx and .csv/.tsv,
+ * xls-reader for legacy .xls); JSON is parsed directly.
  *
  * Tabular rows are mapped by (case-insensitive) header to a single-turn item:
  *   input/question/prompt  → the user message
@@ -13,7 +14,13 @@
  *   id                     → item id (auto if absent)
  */
 
-import * as XLSX from 'xlsx';
+import {
+  downloadSheet,
+  isDelimitedFile,
+  isSpreadsheetFile,
+  readDelimitedRows,
+  readSpreadsheetRows,
+} from '@/components/common/spreadsheet';
 import type { EvalDatasetItemView } from './types';
 
 type Row = Record<string, unknown>;
@@ -130,18 +137,21 @@ const TEMPLATE_ROWS: Array<Record<string, string>> = [
 
 /**
  * Build and download a starter template in the importer's column format.
- * Uses `xlsx` for both spreadsheet (.xlsx) and .csv output, so the headers
+ * Uses `exceljs` for both spreadsheet (.xlsx) and .csv output, so the headers
  * always match what {@link parseDatasetFile} understands.
  */
 export function downloadDatasetTemplate(format: 'xlsx' | 'csv'): void {
-  const sheet = XLSX.utils.json_to_sheet(TEMPLATE_ROWS, { header: [...TEMPLATE_HEADERS] });
-  const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, sheet, 'dataset');
-  if (format === 'csv') {
-    XLSX.writeFile(workbook, 'evaluation-dataset-template.csv', { bookType: 'csv' });
-  } else {
-    XLSX.writeFile(workbook, 'evaluation-dataset-template.xlsx');
-  }
+  // Fire-and-forget: exceljs builds the file asynchronously, but the callers are
+  // plain onClick handlers, so the signature stays synchronous as before.
+  void downloadSheet({
+    headers: TEMPLATE_HEADERS,
+    rows: TEMPLATE_ROWS,
+    sheetName: 'dataset',
+    filename: `evaluation-dataset-template.${format}`,
+    format,
+  }).catch((err) => {
+    console.error('Failed to build dataset template', err);
+  });
 }
 
 /** A copy-pasteable JSON starter, matching the importer's expectations. */
@@ -202,15 +212,11 @@ export async function parseDatasetFile(file: File): Promise<{ items: EvalDataset
     if (name.endsWith('.json')) {
       return parseJsonItems(await file.text());
     }
-    if (name.endsWith('.csv') || name.endsWith('.tsv')) {
-      const wb = XLSX.read(await file.text(), { type: 'string' });
-      const sheet = wb.Sheets[wb.SheetNames[0]];
-      return { items: rowsToItems(XLSX.utils.sheet_to_json<Row>(sheet, { defval: '' })) };
+    if (isDelimitedFile(name)) {
+      return { items: rowsToItems(await readDelimitedRows(file)) };
     }
-    if (name.endsWith('.xlsx') || name.endsWith('.xls')) {
-      const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
-      const sheet = wb.Sheets[wb.SheetNames[0]];
-      return { items: rowsToItems(XLSX.utils.sheet_to_json<Row>(sheet, { defval: '' })) };
+    if (isSpreadsheetFile(name)) {
+      return { items: rowsToItems(await readSpreadsheetRows(file)) };
     }
     return { error: 'Unsupported file type — use .xlsx, .xls, .csv or .json' };
   } catch (err) {

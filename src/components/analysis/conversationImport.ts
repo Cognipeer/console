@@ -1,7 +1,8 @@
 /**
  * Conversation import helpers for the Analysis module — turn Excel / CSV / JSON
- * into ingestable conversations. Excel and CSV are both parsed with `xlsx`
- * (CSV via `type: 'string'`); JSON is parsed directly.
+ * into ingestable conversations. Spreadsheet and delimited files are parsed by
+ * the shared helpers in `@/components/common/spreadsheet` (exceljs for .xlsx and
+ * .csv/.tsv, xls-reader for legacy .xls); JSON is parsed directly.
  *
  * Tabular rows map to multi-turn transcripts by grouping on a conversation id
  * column. (case-insensitive headers):
@@ -13,7 +14,13 @@
  * each row becomes its own single-turn conversation.
  */
 
-import * as XLSX from 'xlsx';
+import {
+  downloadSheet,
+  isDelimitedFile,
+  isSpreadsheetFile,
+  readDelimitedRows,
+  readSpreadsheetRows,
+} from '@/components/common/spreadsheet';
 
 export interface ConversationInput {
   name?: string;
@@ -135,15 +142,11 @@ export async function parseConversationFile(file: File): Promise<{ conversations
     if (name.endsWith('.json')) {
       return parseJsonConversations(await file.text());
     }
-    if (name.endsWith('.csv') || name.endsWith('.tsv')) {
-      const wb = XLSX.read(await file.text(), { type: 'string' });
-      const sheet = wb.Sheets[wb.SheetNames[0]];
-      return { conversations: rowsToConversations(XLSX.utils.sheet_to_json<Row>(sheet, { defval: '' })) };
+    if (isDelimitedFile(name)) {
+      return { conversations: rowsToConversations(await readDelimitedRows(file)) };
     }
-    if (name.endsWith('.xlsx') || name.endsWith('.xls')) {
-      const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
-      const sheet = wb.Sheets[wb.SheetNames[0]];
-      return { conversations: rowsToConversations(XLSX.utils.sheet_to_json<Row>(sheet, { defval: '' })) };
+    if (isSpreadsheetFile(name)) {
+      return { conversations: rowsToConversations(await readSpreadsheetRows(file)) };
     }
     return { error: 'Unsupported file type — use .xlsx, .xls, .csv or .json' };
   } catch (err) {
@@ -161,11 +164,17 @@ const TEMPLATE_ROWS: Array<Record<string, string>> = [
 
 /** Download a starter template (grouped multi-turn format) as .xlsx or .csv. */
 export function downloadConversationTemplate(format: 'xlsx' | 'csv'): void {
-  const sheet = XLSX.utils.json_to_sheet(TEMPLATE_ROWS, { header: [...TEMPLATE_HEADERS] });
-  const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, sheet, 'conversations');
-  if (format === 'csv') XLSX.writeFile(workbook, 'analysis-conversations-template.csv', { bookType: 'csv' });
-  else XLSX.writeFile(workbook, 'analysis-conversations-template.xlsx');
+  // Fire-and-forget: exceljs builds the file asynchronously, but the callers are
+  // plain onClick handlers, so the signature stays synchronous as before.
+  void downloadSheet({
+    headers: TEMPLATE_HEADERS,
+    rows: TEMPLATE_ROWS,
+    sheetName: 'conversations',
+    filename: `analysis-conversations-template.${format}`,
+    format,
+  }).catch((err) => {
+    console.error('Failed to build conversation template', err);
+  });
 }
 
 export const JSON_CONVERSATION_TEMPLATE = JSON.stringify(
