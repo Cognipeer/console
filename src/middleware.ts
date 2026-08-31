@@ -20,6 +20,25 @@ function applySecurityHeaders(response: NextResponse): void {
     'Permissions-Policy',
     'camera=(), microphone=(self), geolocation=()',
   );
+  // Baseline CSP: blocks framing/plugin embedding and restricts fetch/form
+  // targets to same-origin. `unsafe-inline`/`unsafe-eval` are kept for
+  // script-src because the app hasn't been audited for a nonce-based policy
+  // yet — tightening this further needs browser-level verification.
+  response.headers.set(
+    'Content-Security-Policy',
+    [
+      "default-src 'self'",
+      "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data: blob: https:",
+      "font-src 'self' data:",
+      "connect-src 'self'",
+      "object-src 'none'",
+      "frame-ancestors 'none'",
+      "base-uri 'self'",
+      "form-action 'self'",
+    ].join('; '),
+  );
   // HSTS – only effective over HTTPS; max-age = 1 year
   response.headers.set(
     'Strict-Transport-Security',

@@ -21,6 +21,6 @@ if (!process.env.DEBUG) {
   globalThis.console.debug = () => {};
 }
 
-beforeEach(() => {
-  resetRateLimitStore();
+beforeEach(async () => {
+  await resetRateLimitStore();
 });

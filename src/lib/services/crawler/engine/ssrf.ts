@@ -2,10 +2,13 @@
  * SSRF guard – reject URLs that resolve to private / link-local / metadata
  * IP space unless the caller explicitly opts in.
  *
- * Limitation: in F1 we only inspect the host literal. A motivated attacker
- * can still use a DNS name that resolves to a private IP. F2 will add an
- * async resolve step before fetch.
+ * Limitation: `assertSafeUrl` only inspects the host literal. A motivated
+ * attacker can still use a DNS name that resolves to a private IP (DNS
+ * rebinding). `assertSafeUrlResolved` below closes most of that gap with an
+ * async resolve-and-check step; full TOCTOU-proof protection would require
+ * pinning the resolved address for the actual outbound connection too.
  */
+import { lookup } from 'node:dns/promises';
 
 const PRIVATE_HOSTS = new Set([
   'localhost',
@@ -56,5 +59,43 @@ export function assertSafeUrl(rawUrl: string, allowPrivate?: boolean): void {
   } catch (err) {
     if (err instanceof Error && err.message.startsWith('Refusing')) throw err;
     // URL parse error – let the fetcher surface it as a fetch failure
+  }
+}
+
+/**
+ * DNS-aware variant of `assertSafeUrl`. Resolves the hostname and checks
+ * every returned address against the private/loopback/link-local ranges,
+ * closing the common DNS-rebinding case where a public-looking hostname
+ * resolves to a private IP.
+ *
+ * Best-effort: if DNS resolution itself fails (offline sandbox, NXDOMAIN,
+ * etc.) we don't block here — the caller's own fetch will fail on its DNS
+ * lookup right after, so we avoid turning a transient resolver error into a
+ * false SSRF rejection.
+ */
+export async function assertSafeUrlResolved(rawUrl: string, allowPrivate?: boolean): Promise<void> {
+  assertSafeUrl(rawUrl, allowPrivate);
+  if (allowPrivate) return;
+
+  let hostname: string;
+  try {
+    hostname = new URL(rawUrl).hostname;
+  } catch {
+    return; // malformed URL — let the fetcher report it
+  }
+  if (isPrivateHost(hostname)) return; // literal IP, already checked above
+
+  try {
+    const records = await lookup(hostname, { all: true, verbatim: true });
+    for (const record of records) {
+      if (isPrivateHost(record.address)) {
+        throw new Error(
+          `Refusing to crawl — hostname resolves to a private address: ${hostname} -> ${record.address}`,
+        );
+      }
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith('Refusing')) throw err;
+    // DNS lookup error — let the real fetch surface it as a connection failure.
   }
 }

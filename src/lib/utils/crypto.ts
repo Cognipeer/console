@@ -1,5 +1,8 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
 import { getConfig } from '@/lib/core/config';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('crypto');
 
 const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 12; // 96 bits for GCM
@@ -73,11 +76,20 @@ export function decryptObject<T = unknown>(payload: string): T {
   const ciphertext = buffer.subarray(IV_LENGTH + AUTH_TAG_LENGTH);
 
   let lastError: unknown;
-  for (const secret of candidateSecrets()) {
+  const candidates = candidateSecrets();
+  for (const [index, secret] of candidates.entries()) {
     try {
       const decipher = createDecipheriv(ALGORITHM, deriveKey(secret), iv);
       decipher.setAuthTag(authTag);
       const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+      if (index > 0) {
+        // Decrypted only with a non-primary (rotated-out / fallback) secret.
+        // Surfacing this lets operators track how much data still depends on
+        // a deprecated key so they know when it's safe to retire it.
+        logger.warn('Payload decrypted using a non-primary/rotated secret', {
+          candidateIndex: index,
+        });
+      }
       return JSON.parse(decrypted.toString('utf8')) as T;
     } catch (error) {
       // GCM auth failure with this key — try the next candidate secret.

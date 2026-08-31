@@ -10,7 +10,7 @@ import crypto from 'node:crypto';
 import axios from 'axios';
 import { createLogger } from '@/lib/core/logger';
 import type { ICrawlerWebhookConfig, CrawlerWebhookEvent } from '@/lib/database';
-import { assertSafeUrl } from './engine/ssrf';
+import { assertSafeUrlResolved } from './engine/ssrf';
 
 const log = createLogger('crawler:webhook');
 
@@ -56,7 +56,7 @@ export async function sendCrawlerWebhook<T>(input: SendWebhookInput<T>): Promise
   // unless the tenant has explicitly opted in via `allowPrivateNetwork`
   // (same flag that gates crawling private hosts).
   try {
-    assertSafeUrl(url, input.allowPrivateNetwork);
+    await assertSafeUrlResolved(url, input.allowPrivateNetwork);
   } catch (err) {
     log.warn('Refusing to deliver webhook to private/loopback host', {
       url,

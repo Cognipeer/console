@@ -68,6 +68,13 @@ export async function POST(request: NextRequest) {
     // Switch to tenant database
     await db.switchToTenant(tenantDbName);
 
+    // Defense in depth: fail closed if the database layer can't confirm the
+    // tenant scope actually took effect (mirrors the RBAC path's check in
+    // fastify-utils.ts loadRbacUser()).
+    if (typeof db.assertTenantContext === 'function') {
+      db.assertTenantContext(tenantDbName);
+    }
+
     // Check if user already exists
     const existingUser = await db.findUserByEmail(email);
     if (existingUser) {

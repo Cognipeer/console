@@ -1,39 +1,24 @@
 /**
- * In-memory rate limiter for auth endpoints.
- * Uses a sliding-window counter per key (IP or email).
+ * Rate limiter for auth endpoints (login, register, password reset).
+ * Uses a sliding-window counter per key (IP or email), backed by the shared
+ * cache provider (`CACHE_PROVIDER`).
  *
- * This is intentionally kept simple — no external dependencies.
- * For distributed deployments, swap for Redis-backed implementation.
+ * Unlike a process-local `Map`, this is safe for horizontally scaled
+ * deployments: when `CACHE_PROVIDER=redis` every node shares the same
+ * counters, so an attacker distributing login attempts across replicas
+ * behind a load balancer can no longer multiply their effective attempt
+ * budget by the number of instances. `CACHE_PROVIDER=memory` keeps the old
+ * single-node behavior for local/dev use; `CACHE_PROVIDER=none` disables
+ * rate limiting entirely (matches the cache module's documented "none = all
+ * operations are no-ops" contract) and should not be used in production.
  */
 
+import { getCache } from '@/lib/core/cache';
 import { createLogger } from '@/lib/core/logger';
 
 const logger = createLogger('rate-limit-auth');
 
-interface RateLimitEntry {
-  count: number;
-  resetAt: number;
-}
-
-const store = new Map<string, RateLimitEntry>();
-
-// Cleanup stale entries every 5 minutes
-const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
-let cleanupTimer: ReturnType<typeof setInterval> | null = null;
-
-function ensureCleanup() {
-  if (cleanupTimer) return;
-  cleanupTimer = setInterval(() => {
-    const now = Date.now();
-    for (const [key, entry] of store) {
-      if (entry.resetAt <= now) store.delete(key);
-    }
-  }, CLEANUP_INTERVAL_MS);
-  // Allow Node to exit even if the timer is active
-  if (cleanupTimer && typeof cleanupTimer === 'object' && 'unref' in cleanupTimer) {
-    cleanupTimer.unref();
-  }
-}
+const KEY_PREFIX = 'auth-rate-limit:';
 
 export interface RateLimitConfig {
   /** Maximum number of attempts in the window */
@@ -52,44 +37,31 @@ export interface RateLimitResult {
 /**
  * Check and increment the rate limit counter for a given key.
  */
-export function checkRateLimit(
+export async function checkRateLimit(
   key: string,
   config: RateLimitConfig,
-): RateLimitResult {
-  ensureCleanup();
+): Promise<RateLimitResult> {
+  const cache = await getCache();
+  const { count, resetAt } = await cache.incrementCounter(
+    `${KEY_PREFIX}${key}`,
+    config.windowSeconds,
+    1,
+  );
 
-  const now = Date.now();
-  const windowMs = config.windowSeconds * 1000;
-
-  let entry = store.get(key);
-
-  // If no entry or window expired, create a new one
-  if (!entry || entry.resetAt <= now) {
-    entry = { count: 1, resetAt: now + windowMs };
-    store.set(key, entry);
-    return {
-      allowed: true,
-      remaining: config.maxAttempts - 1,
-      resetAt: new Date(entry.resetAt),
-      retryAfterSeconds: 0,
-    };
-  }
-
-  // Increment count
-  entry.count++;
-
-  const allowed = entry.count <= config.maxAttempts;
-  const remaining = Math.max(0, config.maxAttempts - entry.count);
-  const retryAfterSeconds = allowed ? 0 : Math.ceil((entry.resetAt - now) / 1000);
+  const allowed = count <= config.maxAttempts;
+  const remaining = Math.max(0, config.maxAttempts - count);
+  const retryAfterSeconds = allowed
+    ? 0
+    : Math.max(0, Math.ceil((resetAt.getTime() - Date.now()) / 1000));
 
   if (!allowed) {
-    logger.warn('Rate limit exceeded', { key, count: entry.count, maxAttempts: config.maxAttempts });
+    logger.warn('Rate limit exceeded', { key, count, maxAttempts: config.maxAttempts });
   }
 
   return {
     allowed,
     remaining,
-    resetAt: new Date(entry.resetAt),
+    resetAt,
     retryAfterSeconds,
   };
 }
@@ -112,6 +84,11 @@ export const PASSWORD_RESET_RATE_LIMIT: RateLimitConfig = {
   windowSeconds: 15 * 60,
 };
 
-export function resetRateLimitStore(): void {
-  store.clear();
+/**
+ * Test/dev helper: clears all cached counters (and everything else in the
+ * shared cache). Not for production use.
+ */
+export async function resetRateLimitStore(): Promise<void> {
+  const cache = await getCache();
+  await cache.clear();
 }

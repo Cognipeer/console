@@ -1,5 +1,6 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { getConfig } from '@/lib/core/config';
+import { createLogger } from '@/lib/core/logger';
 import { getDatabase, type IUser } from '@/lib/database';
 import { isShuttingDown } from '@/lib/core/lifecycle';
 import type { LicenseType } from '@/lib/license/license-manager';
@@ -19,6 +20,8 @@ import {
   resolveProjectContext,
   type ProjectContext,
 } from '@/lib/services/projects/projectContext';
+
+const utilsLogger = createLogger('api:fastify-utils');
 
 export interface ApiSessionContext {
   requestId: string;
@@ -168,9 +171,18 @@ async function loadRbacUser(session: ApiSessionContext): Promise<IUser> {
   const db = await getDatabase();
   await db.switchToTenant(session.tenantDbName);
   // Defense-in-depth: verify the active tenant context matches the session.
-  // Real providers always implement assertTenantContext; test mocks may not.
+  // Real providers always implement assertTenantContext; some unit-test
+  // doubles use a partial mock without it. In production a missing
+  // implementation means a broken/incomplete DB adapter reached prod — fail
+  // loudly there instead of silently downgrading to the user.tenantId check
+  // below. Outside production, tolerate the partial mock.
   if (typeof db.assertTenantContext === 'function') {
     db.assertTenantContext(session.tenantDbName);
+  } else if (getConfig().nodeEnv === 'production') {
+    throw new Error(
+      'Database provider does not implement assertTenantContext(); refusing to '
+      + 'serve requests without tenant-isolation verification in production.',
+    );
   }
   const user = await db.findUserById(session.userId);
   if (!user) {
@@ -391,10 +403,10 @@ export function withApiRequestContext<
         },
       );
     } catch (error) {
-      return sendRbacError(reply, error)
-        ?? reply.code(500).send({
-          error: error instanceof Error ? error.message : 'Internal server error',
-        });
+      const handled = sendRbacError(reply, error);
+      if (handled) return handled;
+      utilsLogger.error('Unhandled dashboard route error', { error });
+      return reply.code(500).send({ error: 'Internal server error' });
     }
   };
 }
@@ -477,12 +489,11 @@ function sendClientApiError(
     return reply.code(error.status).send({ error: error.message });
   }
 
+  utilsLogger.error('Unhandled client-API route error', { error });
   if (style === 'openai') {
     return reply.code(500).send(openAiErrorBody('Internal server error', 'server_error'));
   }
-  return reply
-    .code(500)
-    .send({ error: error instanceof Error ? error.message : 'Internal server error' });
+  return reply.code(500).send({ error: 'Internal server error' });
 }
 
 /**
