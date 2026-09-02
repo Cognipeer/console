@@ -141,23 +141,13 @@ describe('GET /api/models/:id/logs and /usage', () => {
     expect(rangeMs).toBe(30 * 24 * 60 * 60 * 1000);
   });
 
-  it('passes groupBy=token to the breakdown and rejects invalid values', async () => {
-    (getModelUsageBreakdown as ReturnType<typeof vi.fn>).mockResolvedValue({
-      groupBy: 'token', totals: {}, entries: [],
-    });
-    const ok = await app.inject({
+  it('rejects invalid groupBy values, including the removed token option', async () => {
+    const token = await app.inject({
       method: 'GET',
       url: '/api/models/model-1/usage/breakdown?groupBy=token',
       headers: HEADERS,
     });
-    expect(ok.statusCode).toBe(200);
-    expect(getModelUsageBreakdown).toHaveBeenCalledWith(
-      'tenant_acme',
-      'tenant-1',
-      'gpt-4o',
-      'project-1',
-      expect.objectContaining({ groupBy: 'token' }),
-    );
+    expect(token.statusCode).toBe(400);
 
     const bad = await app.inject({
       method: 'GET',

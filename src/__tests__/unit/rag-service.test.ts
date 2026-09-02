@@ -52,6 +52,8 @@ import {
   deleteRagDocument,
   reingestDocument,
   reindexReasonForUpdate,
+  getRagDocumentFullText,
+  getRagDocumentTextLines,
 } from '@/lib/services/rag/ragService';
 import { hashSourceText, INLINE_SOURCE_MAX_CHARS } from '@/lib/services/rag/ragSource';
 import { getDatabase } from '@/lib/database';
@@ -1288,6 +1290,104 @@ describe('RAG Service', () => {
 
         expect(db.findRagDocumentById).not.toHaveBeenCalled();
       });
+    });
+  });
+
+  // ─── Full-text read (whole document / line range) ──────────────────
+
+  describe('getRagDocumentFullText', () => {
+    it('returns the inline source as-is when it fits', async () => {
+      const result = await getRagDocumentFullText(DB_NAME, TENANT_ID, PROJECT_ID, {
+        ...mockDocument,
+        sourceText: 'line one\nline two',
+      } as IRagDocument);
+
+      expect(result).toEqual({
+        documentId: 'ragdoc-1',
+        fileName: 'doc.txt',
+        contentType: 'text/plain',
+        text: 'line one\nline two',
+        totalChars: 17,
+        totalLines: 2,
+        truncated: false,
+      });
+    });
+
+    it('reads from the bucket via sourceTextKey when there is no inline text', async () => {
+      const result = await getRagDocumentFullText(DB_NAME, TENANT_ID, PROJECT_ID, {
+        ...mockDocument,
+        sourceTextKey: 'source-key',
+        fileBucketKey: 'kb-bucket',
+      } as IRagDocument);
+
+      expect(downloadFile).toHaveBeenCalledWith(DB_NAME, TENANT_ID, PROJECT_ID, 'kb-bucket', 'source-key');
+      expect(result?.text).toBe('Bytes from the bucket');
+    });
+
+    it('truncates past the size ceiling and says so', async () => {
+      const huge = 'x'.repeat(70_000);
+      const result = await getRagDocumentFullText(DB_NAME, TENANT_ID, PROJECT_ID, {
+        ...mockDocument,
+        sourceText: huge,
+      } as IRagDocument);
+
+      expect(result?.truncated).toBe(true);
+      expect(result?.text.length).toBeLessThan(huge.length);
+      expect(result?.totalChars).toBe(huge.length);
+    });
+
+    it('returns undefined when no source was ever stored', async () => {
+      const result = await getRagDocumentFullText(DB_NAME, TENANT_ID, PROJECT_ID, {
+        ...mockDocument,
+      } as IRagDocument);
+
+      expect(result).toBeUndefined();
+    });
+  });
+
+  describe('getRagDocumentTextLines', () => {
+    const document = { ...mockDocument, sourceText: 'one\ntwo\nthree\nfour\nfive' } as IRagDocument;
+
+    it('defaults to line 1 and the default limit', async () => {
+      const result = await getRagDocumentTextLines(DB_NAME, TENANT_ID, PROJECT_ID, document);
+
+      expect(result?.startLine).toBe(1);
+      expect(result?.endLine).toBe(5);
+      expect(result?.totalLines).toBe(5);
+      expect(result?.hasMore).toBe(false);
+      expect(result?.lines).toBe('1\tone\n2\ttwo\n3\tthree\n4\tfour\n5\tfive');
+    });
+
+    it('pages with offset/limit and reports hasMore', async () => {
+      const result = await getRagDocumentTextLines(DB_NAME, TENANT_ID, PROJECT_ID, document, {
+        offset: 2,
+        limit: 2,
+      });
+
+      expect(result?.startLine).toBe(2);
+      expect(result?.endLine).toBe(3);
+      expect(result?.hasMore).toBe(true);
+      expect(result?.lines).toBe('2\ttwo\n3\tthree');
+    });
+
+    it('clamps a limit above the ceiling and an offset below 1', async () => {
+      const result = await getRagDocumentTextLines(DB_NAME, TENANT_ID, PROJECT_ID, document, {
+        offset: -5,
+        limit: 100_000,
+      });
+
+      expect(result?.startLine).toBe(1);
+      expect(result?.endLine).toBe(5);
+    });
+
+    it('returns an empty page past the end of the document', async () => {
+      const result = await getRagDocumentTextLines(DB_NAME, TENANT_ID, PROJECT_ID, document, {
+        offset: 50,
+      });
+
+      expect(result?.startLine).toBe(0);
+      expect(result?.hasMore).toBe(false);
+      expect(result?.lines).toBe('');
     });
   });
 

@@ -51,6 +51,12 @@ import {
 import { createLogger } from '@/lib/core/logger';
 import { normalizeModelSettings } from '@/lib/services/models/modelSettings';
 import { readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
+import {
+  legacyGuardrailSlots,
+  legacyGuardrailWriteConflict,
+  readGuardrailBindingsField,
+  validateGuardrailBindings,
+} from './guardrail-bindings';
 
 const logger = createLogger('api:client-models');
 
@@ -318,15 +324,45 @@ export const clientModelsApiPlugin: FastifyPluginAsync = async (app) => {
       if (body.isMultimodal !== undefined) updates.isMultimodal = body.isMultimodal;
       if (body.supportsToolCalls !== undefined) updates.supportsToolCalls = body.supportsToolCalls;
       if (body.semanticCache !== undefined) updates.semanticCache = body.semanticCache;
-      // Pass the value through as-is (incl. empty string) so clearing a
-      // guardrail persists — `|| undefined` would skip the DB write and the
-      // previous binding would stick. Empty string reads as "no guardrail".
-      if (body.inputGuardrailKey !== undefined) {
-        updates.inputGuardrailKey = body.inputGuardrailKey as string;
+
+      // Same binding contract as the dashboard route (`plugins/models.ts`),
+      // through the same helpers: a token write and a session write that
+      // accept different payloads is a guardrail that runs on one surface and
+      // not the other. No `user` is passed — a token is scoped to its project,
+      // so only a guardrail with no projectId at all falls back tenant-wide.
+      const bindingsField = readGuardrailBindingsField(body.guardrails);
+      if (bindingsField.error) {
+        return reply.code(400).send({ error: bindingsField.error });
       }
-      if (body.outputGuardrailKey !== undefined) {
-        updates.outputGuardrailKey = body.outputGuardrailKey as string;
+      if (bindingsField.bindings) {
+        const invalid = await validateGuardrailBindings(
+          auth.tenantDbName,
+          projectId,
+          bindingsField.bindings,
+        );
+        if (invalid) {
+          return reply.code(400).send({ error: invalid });
+        }
+        const slots = legacyGuardrailSlots(bindingsField.bindings);
+        updates.guardrails = bindingsField.bindings;
+        updates.inputGuardrailKey = slots.inputGuardrailKey;
+        updates.outputGuardrailKey = slots.outputGuardrailKey;
+      } else {
+        const conflict = legacyGuardrailWriteConflict(existing, body);
+        if (conflict) {
+          return reply.code(400).send({ error: conflict });
+        }
+        // Pass the value through as-is (incl. empty string) so clearing a
+        // guardrail persists — `|| undefined` would skip the DB write and the
+        // previous binding would stick. Empty string reads as "no guardrail".
+        if (body.inputGuardrailKey !== undefined) {
+          updates.inputGuardrailKey = body.inputGuardrailKey as string;
+        }
+        if (body.outputGuardrailKey !== undefined) {
+          updates.outputGuardrailKey = body.outputGuardrailKey as string;
+        }
       }
+
       if (body.metadata !== undefined) updates.metadata = body.metadata;
       if (body.providerKey !== undefined) updates.providerKey = body.providerKey as string;
 

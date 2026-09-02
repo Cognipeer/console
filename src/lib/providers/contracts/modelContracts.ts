@@ -7,6 +7,7 @@ import {
   type ChatBedrockConverseInput,
 } from '@langchain/aws';
 import { ChatVertexAI, VertexAIEmbeddings } from '@langchain/google-vertexai';
+import { ChatAnthropic } from '@langchain/anthropic';
 import type { ProviderContract } from '../types';
 import type { ModelProviderRuntime } from '../domains/model';
 import { resolveUnsupportedParamNames } from '../unsupportedParams';
@@ -35,6 +36,16 @@ interface OpenAiCompatibleSettings {
 
 interface TogetherCredentials {
   apiKey: string;
+}
+
+interface AnthropicCredentials {
+  apiKey: string;
+}
+
+interface AnthropicSettings {
+  /** Override for Bedrock/Vertex-fronted or self-hosted Anthropic-compatible
+   *  endpoints. Empty = api.anthropic.com. */
+  baseUrl?: string;
 }
 
 interface BedrockCredentials {
@@ -199,6 +210,11 @@ function resolveUnsupportedParams(
  * a transient 429/5xx for callers outside the gateway's `withResilience`.
  */
 const DEFAULT_PROVIDER_RETRIES = 2;
+
+/** Anthropic's Messages API requires max_tokens; this is the floor applied when
+ *  an operator has cleared the field. Generous enough not to truncate a coding
+ *  answer, bounded enough not to be a blank cheque. */
+const ANTHROPIC_DEFAULT_MAX_TOKENS = 8192;
 
 function resolveMaxRetries(config: { options?: { maxRetries?: number } }): number {
   return config.options?.maxRetries ?? DEFAULT_PROVIDER_RETRIES;
@@ -610,6 +626,118 @@ export const TogetherModelProviderContract: ProviderContract<ModelProviderRuntim
           model: config.modelId,
           apiKey,
         }),
+    };
+
+    return runtime;
+  },
+};
+
+/**
+ * Anthropic's first-party API.
+ *
+ * Claude was previously reachable only through Bedrock or Vertex, which meant a
+ * tenant on the direct API had no Model Hub record for `claude-opus-5` at all.
+ * Two things depended on one existing:
+ *
+ *  - **AI App Gateway pricing.** A native gateway forwards bytes straight to
+ *    api.anthropic.com, so nothing in the inference path prices the turn; the
+ *    cost comes from the Model Hub record for the served model. No record, no
+ *    cost — every report reads $0.00.
+ *  - **Bridge mode.** A gateway that maps an inbound model to a Model Hub key
+ *    needs that key to exist before it can route anything.
+ *
+ * `maxTokens` is REQUIRED by the Messages API, unlike the OpenAI schema where
+ * it is optional. LangChain defaults it, but an operator who explicitly cleared
+ * it would otherwise get a hard 400 rather than an unbounded response — so a
+ * floor is applied here instead of letting the request fail at the provider.
+ */
+export const AnthropicModelProviderContract: ProviderContract<ModelProviderRuntime, AnthropicCredentials, AnthropicSettings> = {
+  id: 'anthropic',
+  version: '1.0.0',
+  domains: ['model', 'ocr'],
+  display: {
+    label: 'Anthropic',
+    description: 'Claude models on Anthropic\'s own API (api.anthropic.com) — Messages API with tool use, extended thinking, prompt caching and vision-based OCR.',
+  },
+  capabilities: {
+    // No embedding: Anthropic does not serve one. Voyage is their recommendation
+    // and already has its own contract.
+    'model.categories': ['llm', 'ocr'],
+    'model.supports.tool_calls': true,
+    'model.supports.streaming': true,
+    'model.supports.reasoning': true,
+    'ocr.modes': ['vlm'],
+  },
+  form: {
+    sections: [
+      {
+        title: 'Credentials',
+        fields: [
+          {
+            name: 'apiKey',
+            label: 'API Key',
+            type: 'password',
+            required: true,
+            placeholder: 'sk-ant-api03-...',
+          },
+        ],
+      },
+      {
+        title: 'Settings',
+        fields: [
+          {
+            name: 'baseUrl',
+            label: 'Base URL',
+            type: 'text',
+            required: false,
+            placeholder: 'https://api.anthropic.com',
+            description: 'Leave empty for Anthropic. Set it to point at a proxy or a gateway that speaks the Messages API.',
+            scope: 'settings',
+          },
+        ],
+      },
+    ],
+  },
+  createRuntime: ({ credentials, settings }) => {
+    const apiKey = ensureValue(credentials.apiKey, 'Anthropic API key is required.');
+    const baseUrl = typeof settings.baseUrl === 'string' && settings.baseUrl.trim()
+      ? settings.baseUrl.trim()
+      : undefined;
+
+    const runtime: ModelProviderRuntime = {
+      createChatModel: (config) => {
+        const overrides = resolveOverrides(config.modelSettings, config.modelId, 'anthropic');
+        return new ChatAnthropic({
+          model: config.modelId,
+          apiKey,
+          maxRetries: resolveMaxRetries(config),
+          ...(baseUrl ? { anthropicApiUrl: baseUrl } : {}),
+          temperature: overrides.temperature,
+          topP: overrides.topP,
+          // Messages API rejects a request without max_tokens, and treats
+          // maxCompletionTokens as unknown. Fold the two names into the one the
+          // provider accepts and keep a floor so a cleared field cannot 400.
+          maxTokens: overrides.maxCompletionTokens ?? overrides.maxTokens ?? ANTHROPIC_DEFAULT_MAX_TOKENS,
+          // Anthropic's passthrough channel is `invocationKwargs`, not the
+          // `modelKwargs` every OpenAI-schema contract in this file uses. The
+          // operator's configured beta fields — `thinking`, `cache_control`
+          // breakpoints, anything Anthropic ships next — ride here.
+          invocationKwargs: overrides.extraBody,
+          streaming: config.options?.streaming ?? false,
+        });
+      },
+      createOcrRuntime: (config) => {
+        const prompt =
+          typeof (config.modelSettings as Record<string, unknown> | undefined)?.ocr === 'object'
+            ? ((config.modelSettings as Record<string, unknown>).ocr as Record<string, unknown>)
+                .prompt
+            : undefined;
+        return createVlmOcrRuntime(
+          runtime,
+          config,
+          typeof prompt === 'string' ? prompt : undefined,
+        );
+      },
     };
 
     return runtime;
@@ -1030,6 +1158,7 @@ export const VoyageAiModelProviderContract: ProviderContract<ModelProviderRuntim
 };
 
 export const MODEL_PROVIDER_CONTRACTS = [
+  AnthropicModelProviderContract,
   OpenAiModelProviderContract,
   OpenAiCompatibleModelProviderContract,
   TogetherModelProviderContract,

@@ -53,10 +53,13 @@ export function PiiPolicyMixin<TBase extends Constructor<MongoDBProviderBase>>(B
       return doc as unknown as IPiiPolicy | null;
     }
 
-    async findPiiPolicyByKey(key: string, projectId?: string): Promise<IPiiPolicy | null> {
+    async findPiiPolicyByKey(key: string, projectId?: string | null): Promise<IPiiPolicy | null> {
       const db = this.getTenantDb();
       const filter: Record<string, unknown> = { key };
-      if (projectId !== undefined) filter.projectId = projectId;
+      // Same three-way contract as findGuardrailByKey: null = tenant-wide only
+      // (matches a null field and a missing one).
+      if (projectId === null) filter.projectId = null;
+      else if (projectId !== undefined) filter.projectId = projectId;
       const doc = await db.collection(COLLECTIONS.piiPolicies).findOne(filter);
       return doc as unknown as IPiiPolicy | null;
     }

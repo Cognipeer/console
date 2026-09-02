@@ -131,9 +131,16 @@ async function generateUniqueListKey(
 ): Promise<string> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
-  return generateUniqueSlugKey(desiredKey, 'word-list', async (candidate) =>
-    Boolean(await db.findGuardrailWordListByKey(candidate, projectId)),
-  );
+  return generateUniqueSlugKey(desiredKey, 'word-list', async (candidate) => {
+    if (await db.findGuardrailWordListByKey(candidate, projectId)) return true;
+    // Same rule as guardrail keys: a project-scoped list must not shadow a
+    // tenant-wide one, because `resolveCustomWordLists` reaches both from one
+    // `customListKeys` entry (project first, then tenant-wide).
+    if (projectId !== undefined && (await db.findGuardrailWordListByKey(candidate, null))) {
+      return true;
+    }
+    return false;
+  });
 }
 
 // ── CRUD ──────────────────────────────────────────────────────────────────
@@ -259,9 +266,11 @@ export async function resolveCustomWordLists(
       }
       const record =
         (await db.findGuardrailWordListByKey(listKey, projectId)) ??
-        // Fall back to tenant-wide lookup so lists created without a project
-        // still resolve from project-scoped guardrails.
-        (projectId !== undefined ? await db.findGuardrailWordListByKey(listKey) : null);
+        // Fall back to the TENANT-WIDE list (`null`) so lists created without a
+        // project still resolve from project-scoped guardrails. Not
+        // `undefined`: that would answer with the first list of ANY project
+        // carrying this key, i.e. another project's words.
+        (projectId !== undefined ? await db.findGuardrailWordListByKey(listKey, null) : null);
       const words = record?.words ?? [];
       listCache.set(cacheKey(tenantDbName, listKey), { words, expiresAt: now + CACHE_TTL_MS });
       return { key: listKey, words };

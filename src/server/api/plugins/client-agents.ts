@@ -14,14 +14,42 @@ import {
   publishAgent,
   updateAgentRecord,
 } from '@/lib/services/agents';
+// By path: the agents barrel does not export the error class.
+import { AgentGuardrailBlockedError } from '@/lib/services/agents/agentService';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import {
   getApiTokenContextForRequest,
   readJsonBody,
   withClientApiRequestContext,
 } from '../fastify-utils';
+import { carriedGuardrailFields, resolveConfigGuardrailBindings } from './guardrail-bindings';
 
 const logger = createLogger('api:client-agents');
+
+/**
+ * A guardrail refusal answered as the inference routes answer
+ * `GuardrailBlockError`: same status, same `{ error: { type: 'guardrail_block' } }`
+ * envelope, so an SDK client branches on `error.type` and reads `guardrail_key`
+ * and `reason` whether it called `/chat/completions` or `/responses`. Before
+ * this the client API returned `500 Internal server error` for a policy
+ * decision — no reason, no key, indistinguishable from an outage.
+ */
+function sendAgentGuardrailBlock(
+  reply: { code: (status: number) => { send: (body: unknown) => unknown } },
+  error: unknown,
+) {
+  if (!(error instanceof AgentGuardrailBlockedError)) return null;
+  return reply.code(error.status).send({
+    error: {
+      type: 'guardrail_block',
+      action: 'block',
+      message: error.message,
+      reason: error.reason,
+      guardrail_key: error.guardrailKey ?? null,
+      hook: error.hook ?? null,
+    },
+  });
+}
 
 /**
  * Strip secret material (encrypted inline API keys) from an agent before it
@@ -53,9 +81,14 @@ function normalizeAgentConfig(rawConfig: unknown): IAgentConfig {
   const cfg = rawConfig as Record<string, unknown>;
 
   if (cfg.kind === 'external') {
+    // Guardrail bindings are carried through and validated by the caller with
+    // `resolveConfigGuardrailBindings`; dropping them here is what left a
+    // connected agent's saved bindings unenforced (the enforcement branch reads
+    // them off the stored config). Mirrors the dashboard `agents.ts` helper.
     return {
       kind: 'external',
       connection: prepareConnectionForStorage(cfg.connection),
+      ...carriedGuardrailFields(cfg),
     };
   }
 
@@ -188,6 +221,14 @@ function createResponsesHandler(usePublished: boolean) {
       void _conversation_messages;
       return reply.code(200).send(responseBody);
     } catch (error) {
+      if (error instanceof AgentGuardrailBlockedError) {
+        // Info, not error: a refused prompt is policy working as configured.
+        logger.info('Client agent response blocked by guardrail', {
+          guardrailKey: error.guardrailKey,
+          hook: error.hook,
+        });
+        return sendAgentGuardrailBlock(reply, error);
+      }
       logger.error('Client agent responses error', { error });
       return reply.code(500).send({ error: 'Internal server error' });
     }
@@ -278,6 +319,20 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
+      // Guardrail bindings, validated exactly as the dashboard route validates
+      // them. No `user`: a token is scoped to its project, so a guardrail owned
+      // by another project is out of reach and only a tenant-wide one (no
+      // projectId) falls back.
+      const bindings = await resolveConfigGuardrailBindings(
+        ctx.tenantDbName,
+        ctx.projectId,
+        config.guardrails,
+      );
+      if (bindings.error) {
+        return reply.code(400).send({ error: bindings.error });
+      }
+      if (bindings.patch) Object.assign(config, bindings.patch);
+
       const agent = await createAgentRecord(
         ctx.tenantDbName,
         ctx.tenantId,
@@ -322,17 +377,45 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
             const existingEnc = existing.config?.connection?.apiKeyEnc;
             if (existingEnc) conn.apiKeyEnc = existingEnc;
           }
+          let externalConfig: IAgentConfig;
           try {
-            body.config = { kind: 'external', connection: prepareConnectionForStorage(conn) };
+            externalConfig = {
+              kind: 'external',
+              connection: prepareConnectionForStorage(conn),
+              // Carried, then validated below — see `normalizeAgentConfig`.
+              ...carriedGuardrailFields(cfg),
+            };
           } catch (validationError) {
             return reply.code(400).send({
               error: validationError instanceof Error ? validationError.message : 'Invalid agent config',
             });
           }
+          const bindings = await resolveConfigGuardrailBindings(
+            ctx.tenantDbName,
+            ctx.projectId,
+            cfg.guardrails,
+          );
+          if (bindings.error) {
+            return reply.code(400).send({ error: bindings.error });
+          }
+          if (bindings.patch) Object.assign(externalConfig, bindings.patch);
+          body.config = externalConfig;
         } else if (existing.config?.kind === 'external') {
           // Guard: never let a native-shaped config silently clobber a stored
           // connected agent's connection.
           delete body.config;
+        } else {
+          const bindings = await resolveConfigGuardrailBindings(
+            ctx.tenantDbName,
+            ctx.projectId,
+            cfg.guardrails,
+          );
+          if (bindings.error) {
+            return reply.code(400).send({ error: bindings.error });
+          }
+          // The config replaces the stored one wholesale, so the projected
+          // legacy slots must ride along on the SAME object.
+          if (bindings.patch) Object.assign(cfg, bindings.patch);
         }
       }
 

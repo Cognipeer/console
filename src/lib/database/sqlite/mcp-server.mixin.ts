@@ -60,11 +60,11 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         INSERT INTO ${TABLES.mcpServers}
         (id, tenantId, projectId, key, name, description, sourceType, openApiSpec, remoteConfig,
          stdioConfig, tools, toolsDiscoveredAt, upstreamBaseUrl, upstreamAuth, exposure, aegis,
-         status, endpointSlug, totalRequests, lastError, metadata, createdBy, updatedBy,
+         guardrail, status, endpointSlug, totalRequests, lastError, metadata, createdBy, updatedBy,
          createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @key, @name, @description, @sourceType, @openApiSpec,
          @remoteConfig, @stdioConfig, @tools, @toolsDiscoveredAt, @upstreamBaseUrl, @upstreamAuth,
-         @exposure, @aegis, @status, @endpointSlug, @totalRequests, @lastError, @metadata,
+         @exposure, @aegis, @guardrail, @status, @endpointSlug, @totalRequests, @lastError, @metadata,
          @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
@@ -82,7 +82,10 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         upstreamBaseUrl: server.upstreamBaseUrl ?? '',
         upstreamAuth: this.toJson(server.upstreamAuth ?? {}),
         exposure: server.exposure ? this.toJson(server.exposure) : null,
+        // `aegis` is still written alongside its successor for one release:
+        // an older console binary on the same tenant DB reads only that column.
         aegis: server.aegis ? this.toJson(server.aegis) : null,
+        guardrail: server.guardrail ? this.toJson(server.guardrail) : null,
         status: server.status,
         endpointSlug: server.endpointSlug,
         totalRequests: server.totalRequests ?? 0,
@@ -119,6 +122,7 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       if (data.upstreamAuth !== undefined) { sets.push('upstreamAuth = @upstreamAuth'); params.upstreamAuth = this.toJson(data.upstreamAuth); }
       if (data.exposure !== undefined) { sets.push('exposure = @exposure'); params.exposure = data.exposure ? this.toJson(data.exposure) : null; }
       if (data.aegis !== undefined) { sets.push('aegis = @aegis'); params.aegis = data.aegis ? this.toJson(data.aegis) : null; }
+      if (data.guardrail !== undefined) { sets.push('guardrail = @guardrail'); params.guardrail = data.guardrail ? this.toJson(data.guardrail) : null; }
       if (data.status !== undefined) { sets.push('status = @status'); params.status = data.status; }
       if (data.endpointSlug !== undefined) { sets.push('endpointSlug = @endpointSlug'); params.endpointSlug = data.endpointSlug; }
       if (data.totalRequests !== undefined) { sets.push('totalRequests = @totalRequests'); params.totalRequests = data.totalRequests; }
@@ -142,11 +146,14 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       return row ? this.mapMcpServerRow(row) : null;
     }
 
-    async findMcpServerByKey(key: string, projectId?: string): Promise<IMcpServer | null> {
+    async findMcpServerByKey(key: string, projectId?: string | null): Promise<IMcpServer | null> {
       const db = this.getTenantDb();
       const clauses: string[] = ['key = @key'];
       const params: Record<string, unknown> = { key };
-      if (projectId !== undefined) { clauses.push('projectId = @projectId'); params.projectId = projectId; }
+      // `null` = the tenant-wide row only (rows are written `projectId ?? null`);
+      // a string = that project's row; `undefined` = no project clause.
+      if (projectId === null) clauses.push('projectId IS NULL');
+      else if (projectId !== undefined) { clauses.push('projectId = @projectId'); params.projectId = projectId; }
       const row = db.prepare(
         `SELECT * FROM ${TABLES.mcpServers} WHERE ${clauses.join(' AND ')}`,
       ).get(params) as SqliteRow | undefined;
@@ -454,7 +461,11 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         upstreamBaseUrl: (r.upstreamBaseUrl as string) || undefined,
         upstreamAuth: this.parseJson(r.upstreamAuth, { type: 'none' }),
         exposure: r.exposure ? this.parseJson(r.exposure, undefined) : undefined,
+        // Deprecated but still mapped: the read-time normaliser folds an
+        // `aegis`-only row onto `guardrail`, so dropping it here would silently
+        // disarm every MCP server bound before the rename.
         aegis: r.aegis ? this.parseJson(r.aegis, undefined) : undefined,
+        guardrail: r.guardrail ? this.parseJson(r.guardrail, undefined) : undefined,
         status: r.status as IMcpServer['status'],
         endpointSlug: r.endpointSlug as string,
         totalRequests: (r.totalRequests as number) ?? 0,

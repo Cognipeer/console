@@ -21,8 +21,18 @@ import {
   checkRateLimit,
 } from '@/lib/quota/quotaGuard';
 import {
+  anthropicErrorBody,
+  anthropicErrorTypeForStatus,
+  anthropicRequestToOpenAi,
+  AnthropicRequestError,
+  openAiResponseToAnthropic,
+  openAiStreamToAnthropic,
+  type AnthropicMessagesRequest,
+} from '@/lib/services/models/anthropicWire';
+import {
   applyStreamHeaders,
   readJsonBody,
+  withAnthropicApiRequestContext,
   withOpenAiApiRequestContext,
 } from '../fastify-utils';
 
@@ -325,6 +335,207 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       return reply.code(normalizedError.status).send({ error: normalizedError.error });
+    }
+  }));
+
+  /**
+   * Anthropic Messages, served from the same Model Hub as chat/completions.
+   *
+   * The platform's internal dialect is and stays the OpenAI schema — this route
+   * translates at the edge and hands the result to the exact same
+   * `handleChatCompletion` the OpenAI route uses, so guardrails, quota, budget,
+   * usage logging and dynamic routing all apply unchanged. Anything else would
+   * mean a second, quietly divergent metering path.
+   *
+   * The translation is lossy in one direction worth stating out loud:
+   * `cache_control` breakpoints and extended-thinking blocks have no
+   * chat-completions equivalent and do not survive. A client that depends on
+   * prompt caching wants an AI App Gateway instance in native mode, where the
+   * bytes are forwarded unchanged, not this endpoint.
+   */
+  app.post('/client/v1/messages', withAnthropicApiRequestContext(async (request, reply, auth) => {
+    const startedAt = Date.now();
+    let anthropicBody: AnthropicMessagesRequest = {};
+    let modelKey = '';
+    // Set once the inference layer has assigned one; the error log below
+    // correlates with the same id the client saw rather than a fresh UUID.
+    let requestId: string | undefined;
+
+    try {
+      try {
+        const parsed = readJsonBody<unknown>(request);
+        anthropicBody = parsed && typeof parsed === 'object'
+          ? parsed as AnthropicMessagesRequest
+          : {};
+      } catch (error) {
+        if (error instanceof SyntaxError) {
+          return reply.code(400).send(anthropicErrorBody('Invalid JSON body'));
+        }
+        throw error;
+      }
+
+      let body: ChatCompletionRequest;
+      try {
+        body = anthropicRequestToOpenAi(anthropicBody) as ChatCompletionRequest;
+      } catch (error) {
+        if (error instanceof AnthropicRequestError) {
+          return reply.code(400).send(anthropicErrorBody(error.message));
+        }
+        throw error;
+      }
+
+      modelKey = anthropicBody.model as string;
+      const requestedOutputTokens = anthropicBody.max_tokens;
+      const estimatedInputTokens = estimateTokens(extractMessageText(body.messages));
+      const tokenId = auth.tokenRecord._id?.toString() ?? auth.token;
+      const quotaContext = {
+        domain: 'llm' as const,
+        licenseType: auth.tenant.licenseType as LicenseType,
+        projectId: auth.projectId,
+        resourceKey: modelKey,
+        tenantDbName: auth.tenantDbName,
+        tenantId: auth.tenantId,
+        tokenId,
+        userId: auth.tokenRecord.userId,
+      };
+
+      try {
+        const quotaResult = await checkPerRequestLimits(quotaContext, {
+          inputTokens: estimatedInputTokens,
+          outputTokens: requestedOutputTokens,
+          totalTokens: estimatedInputTokens + (requestedOutputTokens ?? 0),
+        });
+        if (!quotaResult.allowed) {
+          return reply.code(429).send(
+            anthropicErrorBody(quotaResult.reason || 'Quota exceeded', 'rate_limit_error'),
+          );
+        }
+        const rateLimitResult = await checkRateLimit(quotaContext, {
+          requests: 1,
+          tokens: estimatedInputTokens,
+        });
+        if (!rateLimitResult.allowed) {
+          return reply.code(429).send(
+            anthropicErrorBody(rateLimitResult.reason || 'Rate limit exceeded', 'rate_limit_error'),
+          );
+        }
+        const budgetResult = await checkBudget(quotaContext);
+        if (!budgetResult.allowed) {
+          return reply.code(429).send(
+            anthropicErrorBody(budgetResult.reason || 'Budget exceeded', 'rate_limit_error'),
+          );
+        }
+      } catch (error) {
+        logger.error('Client messages quota check error', { error });
+        return reply.code(500).send(anthropicErrorBody('Quota check failed', 'api_error'));
+      }
+
+      const result = await handleChatCompletion({
+        body,
+        modelKey,
+        projectId: auth.projectId,
+        stream: Boolean(body.stream),
+        tenantDbName: auth.tenantDbName,
+        tenantId: auth.tenantId,
+      });
+      requestId = result.requestId;
+
+      const actualOutputTokens = result.usage?.outputTokens || 0;
+      if (actualOutputTokens > 0) {
+        void checkRateLimit(quotaContext, { tokens: actualOutputTokens }).catch((error) =>
+          logger.error('Failed to update messages rate limit usage', { error }),
+        );
+      }
+
+      if (result.usage) {
+        const usage = result.usage;
+        void getModelByKey(auth.tenantDbName, modelKey, auth.projectId)
+          .then((model) => {
+            if (!model) return undefined;
+            const cost = calculateCost(model.pricing, usage);
+            if (
+              cost.currency !== 'USD'
+              || !Number.isFinite(cost.totalCost)
+              || cost.totalCost <= 0
+            ) {
+              return undefined;
+            }
+            return checkBudget(quotaContext, { usd: cost.totalCost });
+          })
+          .catch((error) => logger.error('Failed to update messages budget usage', { error }));
+      }
+
+      if (result.stream) {
+        applyStreamHeaders(reply, result.requestId);
+        const translated = openAiStreamToAnthropic(
+          result.stream as ReadableStream<Uint8Array>,
+          modelKey,
+        );
+        return reply.send(
+          Readable.fromWeb(translated as unknown as NodeReadableStream<Uint8Array>),
+        );
+      }
+
+      // Same correlation the chat route offers: the id in the body for clients
+      // that log responses, and the `request-id` header the Anthropic SDKs
+      // surface on their error/response objects.
+      reply.header('request-id', result.requestId);
+      return reply.code(200).send({
+        ...openAiResponseToAnthropic(result.response ?? {}, modelKey),
+        request_id: result.requestId,
+      });
+    } catch (error) {
+      logger.error('Client messages error', { error, requestId });
+
+      if (error instanceof GuardrailBlockError) {
+        return reply.code(400).send({
+          type: 'error',
+          error: {
+            type: 'invalid_request_error',
+            message: error.message,
+            guardrail_key: error.guardrailKey,
+            action: error.action,
+            findings: error.findings,
+          },
+        });
+      }
+
+      const normalizedError = normalizeInferenceError(error);
+
+      try {
+        const model = modelKey
+          ? await getModelByKey(auth.tenantDbName, modelKey, auth.projectId)
+          : null;
+        if (model) {
+          const errorMessage = normalizedError.error.message;
+          await logModelUsage(auth.tenantDbName, model, {
+            errorMessage,
+            latencyMs: Date.now() - startedAt,
+            providerRequest: sanitize({ body: anthropicBody, model: modelKey }),
+            providerResponse: sanitize({ error: errorMessage }),
+            requestId: requestId ?? request.apiRequestId ?? crypto.randomUUID(),
+            // Its own route label: a Messages turn and a chat-completions turn
+            // are different client contracts and a usage report that merges them
+            // cannot answer "which dialect is this team on".
+            route: 'messages',
+            status: 'error',
+            usage: {},
+          });
+        }
+      } catch (logError) {
+        logger.error('Failed to log client messages error', { error: logError });
+      }
+
+      if (normalizedError.status >= 400 && normalizedError.status < 500) {
+        request.upstreamStatusForwarded = true;
+      }
+
+      return reply.code(normalizedError.status).send(
+        anthropicErrorBody(
+          normalizedError.error.message,
+          anthropicErrorTypeForStatus(normalizedError.status),
+        ),
+      );
     }
   }));
 

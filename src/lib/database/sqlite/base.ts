@@ -295,6 +295,9 @@ export class SQLiteProviderBase {
       'servicePermissions',
       'servicePermissions TEXT',
     );
+    // Session user that minted the token — differs from `userId` when an
+    // admin mints on behalf of another (e.g. login-disabled) user.
+    this.ensureTableColumn(db, TABLES.apiTokens, 'createdBy', 'createdBy TEXT');
   }
 
   private applyTenantMigrations(db: Database.Database): void {
@@ -767,6 +770,57 @@ export class SQLiteProviderBase {
       'failMode',
       "failMode TEXT NOT NULL DEFAULT 'open'",
     );
+    // Guardrail hook plane (v2). The whole configuration is ONE JSON blob so
+    // adding a check family later costs no further migration. '{}' is the
+    // "not authored" sentinel — mapGuardrailRow turns it into undefined so
+    // ensureHooks() re-derives from the legacy columns, which stay populated.
+    // hooksVersion 0 means exactly that; >= 1 means an operator authored it.
+    this.ensureTableColumn(
+      db,
+      TABLES.guardrails,
+      'hooks',
+      "hooks TEXT DEFAULT '{}'",
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.guardrails,
+      'hooksVersion',
+      'hooksVersion INTEGER NOT NULL DEFAULT 0',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.guardrails,
+      'mode',
+      "mode TEXT NOT NULL DEFAULT 'enforce'",
+    );
+    // Multi-guardrail binding on models (IGuardrailBinding[] as one JSON
+    // blob). No DEFAULT: a NULL column is the "never authored" sentinel that
+    // mapModelRow maps to undefined, which is what makes resolveBindings fall
+    // back to inputGuardrailKey/outputGuardrailKey. A DEFAULT '[]' would tell
+    // every pre-existing model "bound to nothing" and disarm it on upgrade.
+    //
+    // Nothing indexes this column, so unlike guardrail_evaluation_logs.hook it
+    // needs no companion entry in applyTenantIndexes().
+    //
+    // The AGENT side needs no migration: its bindings live in IAgentConfig and
+    // ride the existing `config` JSON column on both backends.
+    this.ensureTableColumn(db, TABLES.models, 'guardrails', 'guardrails TEXT');
+    // Evaluation log: without these, all five hooks collapse into the two
+    // legacy `target` values and a tool.pre block is indistinguishable from an
+    // output.pre redaction in the audit trail. riskScore has no other home.
+    this.ensureTableColumn(db, TABLES.guardrailEvalLogs, 'hook', 'hook TEXT');
+    this.ensureTableColumn(
+      db,
+      TABLES.guardrailEvalLogs,
+      'decision',
+      'decision TEXT',
+    );
+    this.ensureTableColumn(
+      db,
+      TABLES.guardrailEvalLogs,
+      'riskScore',
+      'riskScore INTEGER',
+    );
     this.ensureTableColumn(
       db,
       TABLES.crawlJobs,
@@ -870,6 +924,10 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.mcpServers, 'toolsDiscoveredAt', 'toolsDiscoveredAt TEXT');
     this.ensureTableColumn(db, TABLES.mcpServers, 'exposure', 'exposure TEXT');
     this.ensureTableColumn(db, TABLES.mcpServers, 'aegis', 'aegis TEXT');
+    // Guardrail binding, successor to `aegis`. Both columns are written for
+    // one release: every stored row still carries `aegis` and the read-time
+    // normaliser needs it to keep an existing binding armed.
+    this.ensureTableColumn(db, TABLES.mcpServers, 'guardrail', 'guardrail TEXT');
     this.ensureTableColumn(db, TABLES.mcpServers, 'lastError', 'lastError TEXT');
     this.ensureTableColumn(db, TABLES.mcpRequestLogs, 'callerType', 'callerType TEXT');
     this.ensureTableColumn(db, TABLES.mcpRequestLogs, 'callerUserId', 'callerUserId TEXT');
@@ -919,6 +977,10 @@ export class SQLiteProviderBase {
     // apiKeyVault.ts. The legacy plaintext `apiKey` column stays for rows
     // written before this vault existed.
     this.ensureTableColumn(db, TABLES.inferenceServers, 'apiKeySealed', 'apiKeySealed TEXT');
+    // "Programmatic User" support (Add User canLogin toggle): users created with
+    // canLogin=false have no password login capability. Missing/undefined is
+    // treated as true everywhere it's read, so existing rows default to 1.
+    this.ensureTableColumn(db, TABLES.users, 'canLogin', 'canLogin INTEGER NOT NULL DEFAULT 1');
   }
 
   private migrateOcrJobsSchema(db: Database.Database): void {
@@ -974,6 +1036,24 @@ export class SQLiteProviderBase {
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_mcp_request_logs_serverId
         ON ${TABLES.mcpRequestLogs}(serverId);
+    `);
+
+    // guardrail_evaluation_logs.hook index — same ordering constraint again:
+    // `hook` reaches legacy DBs via ensureTableColumn above, so this cannot
+    // live in TENANT_SCHEMA_SQL. It backs the hook-filtered eval-log views.
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_guardrail_eval_hook
+        ON ${TABLES.guardrailEvalLogs}(hook);
+    `);
+
+    // vector_migration_logs.attempt index — same ordering constraint again.
+    // `attempt` reaches legacy DBs via ensureTableColumn above, so while this
+    // index sat in TENANT_SCHEMA_SQL it aborted the whole schema exec with
+    // "no such column: attempt" on every pre-existing tenant, leaving later
+    // tables in that script uncreated.
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_vml_migrationKey_attempt
+        ON ${TABLES.vectorMigrationLogs}(migrationKey, attempt);
     `);
 
     // usage_daily unique dimension index v3 (adds metadataKey, on top of v2's
@@ -1127,6 +1207,9 @@ export class SQLiteProviderBase {
   }
 
   protected normalizeEmail(email: string): string {
+    // Programmatic users (canLogin=false) may have no email at all — guard
+    // against undefined/empty input rather than throwing on `.trim()`.
+    if (!email) return '';
     return email.trim().toLowerCase();
   }
 

@@ -289,14 +289,25 @@
         "safety",
         "pii",
         "moderation",
-        "prompt injection"
+        "prompt injection",
+        "policy",
+        "enforcement",
+        "dlp"
       ],
       "searchKeywords": [
         "guardrails",
         "safety",
         "moderation",
-        "pii"
-      ]
+        "pii",
+        "hook",
+        "policy",
+        "enforcement",
+        "dlp",
+        "redaction",
+        "tool call",
+        "aegis"
+      ],
+      "badge": "new"
     },
     {
       "id": "evaluations",
@@ -677,30 +688,34 @@
       "enterpriseModule": "sandbox"
     },
     {
-      "id": "aegis",
-      "href": "/dashboard/aegis",
-      "icon": "IconShield",
+      "id": "ai-app-gateway",
+      "href": "/dashboard/ai-app-gateway",
+      "icon": "IconPlug",
       "category": "operate",
-      "navLabelKey": "aegis",
-      "navDescriptionKey": "aegisDescription",
+      "navLabelKey": "aiAppGateway",
+      "navDescriptionKey": "aiAppGatewayDescription",
       "tags": [
+        "gateway",
+        "coding agents",
         "policy",
-        "enforcement",
-        "dlp",
-        "approvals"
+        "observability"
       ],
       "searchKeywords": [
-        "aegis",
-        "policy",
-        "enforcement",
+        "ai app gateway",
+        "claude code",
+        "codex",
+        "copilot",
+        "cursor",
+        "cline",
+        "coding agent",
+        "base url",
+        "proxy",
         "dlp",
-        "redaction",
-        "approval",
-        "tool call"
+        "developer gateway"
       ],
       "badge": "new",
       "requiresEnterprise": true,
-      "enterpriseModule": "aegis"
+      "enterpriseModule": "ai-app-gateway"
     },
     {
       "id": "prompt-optimizer",

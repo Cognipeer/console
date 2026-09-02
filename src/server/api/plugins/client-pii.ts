@@ -36,6 +36,7 @@ import {
   updatePiiPolicy,
 } from '@/lib/services/pii';
 import type { PiiScanResult, PiiVault } from '@/lib/services/pii';
+import { parseCustomPatternsInput } from '@/lib/services/pii';
 import {
   getApiTokenContextForRequest,
   readJsonBody,
@@ -177,13 +178,15 @@ export const clientPiiApiPlugin: FastifyPluginAsync = async (app) => {
       }
       const categories = (body.categories as Record<string, boolean> | undefined)
         ?? buildDefaultPolicyCategories();
+      const customPatterns = parseCustomPatternsInput(body.customPatterns);
+      if (customPatterns.error) return reply.code(400).send({ error: customPatterns.error });
 
       const policy = await createPiiPolicy(ctx.tenantDbName, ctx.tenantId, ctx.tokenRecord.userId, {
         name: body.name.trim(),
         description: typeof body.description === 'string' ? body.description.trim() : undefined,
         defaultAction,
         categories,
-        customPatterns: Array.isArray(body.customPatterns) ? (body.customPatterns as never[]) : [],
+        customPatterns: customPatterns.patterns ?? [],
         languages: parseLanguages(body.languages),
         enabled: typeof body.enabled === 'boolean' ? body.enabled : true,
         metadata: typeof body.metadata === 'object' && body.metadata !== null
@@ -216,12 +219,14 @@ export const clientPiiApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'PII policy not found' });
       }
 
+      const customPatterns = parseCustomPatternsInput(body.customPatterns);
+      if (customPatterns.error) return reply.code(400).send({ error: customPatterns.error });
       const policy = await updatePiiPolicy(ctx.tenantDbName, existing.id, ctx.tokenRecord.userId, {
         name: body.name as string | undefined,
         description: body.description as string | undefined,
         defaultAction: body.defaultAction as PiiAction | undefined,
         categories: body.categories as Record<string, boolean> | undefined,
-        customPatterns: Array.isArray(body.customPatterns) ? (body.customPatterns as never[]) : undefined,
+        customPatterns: customPatterns.patterns,
         languages: parseLanguages(body.languages),
         enabled: body.enabled as boolean | undefined,
         metadata: body.metadata as Record<string, unknown> | undefined,

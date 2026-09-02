@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AIMessageChunk } from '@langchain/core/messages';
 import {
   handleChatCompletion,
@@ -28,6 +28,13 @@ vi.mock('@/lib/services/models/usageLogger', () => ({
 
 vi.mock('@/lib/services/guardrail', () => ({
   evaluateGuardrail: vi.fn().mockResolvedValue({ action: 'allow', findings: [] }),
+  // The gate's own behaviour (hold-back windows, overlap scanning, mutation
+  // rebasing) is covered by guardrail-stream-gate.test.ts against the real
+  // implementation. What is under test HERE is the wiring: which frames the
+  // inference service writes, in what order, and what it logs — so the gate is
+  // a stub whose emissions the test dictates. The real one resolves guardrail
+  // records from the database, which this unit test has no business reaching.
+  createStreamGate: vi.fn(),
 }));
 
 vi.mock('@/lib/services/models/openaiAdapter', async (importOriginal) => {
@@ -44,7 +51,7 @@ import { getModelByKey } from '@/lib/services/models/modelService';
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
 import { isSemanticCacheEnabled, lookupCache, storeInCache } from '@/lib/services/models/semanticCacheService';
 import { logModelUsage } from '@/lib/services/models/usageLogger';
-import { evaluateGuardrail } from '@/lib/services/guardrail';
+import { createStreamGate, evaluateGuardrail } from '@/lib/services/guardrail';
 import {
   toOpenAIChatResponse,
   toOpenAIStreamChunk,
@@ -94,6 +101,37 @@ const makeEmbeddingRuntime = (embedResult?: number[][]) => ({
   }),
 });
 
+/**
+ * A scripted stand-in for the real stream gate.
+ *
+ * `push` consumes one entry of `pushes` per call; 'passthrough' re-emits the
+ * chunk untouched, which is what a gate with no streaming enforcement
+ * configured does and therefore the right default for every other test in this
+ * file.
+ */
+type StubEmission = { emit: unknown[]; blocked: boolean; verdict?: unknown };
+
+const makeGateStub = (script: {
+  pushes?: Array<StubEmission | 'passthrough'>;
+  end?: StubEmission;
+} = {}) => {
+  const pushes = [...(script.pushes ?? [])];
+  return {
+    push: vi.fn(async (chunk: unknown) => {
+      const next = pushes.shift() ?? 'passthrough';
+      return next === 'passthrough' ? { emit: [chunk], blocked: false } : next;
+    }),
+    flush: vi.fn(async () => ({ emit: [], blocked: false })),
+    end: vi.fn(async () => script.end ?? { emit: [], blocked: false }),
+    abandon: vi.fn(),
+    pendingChars: 0,
+    bufferedText: '',
+    heldText: '',
+    isBlocked: false,
+    isDegraded: false,
+  };
+};
+
 const BASE_PARAMS = {
   tenantDbName: 'tenant_acme',
   tenantId: 'tenant-1',
@@ -109,6 +147,7 @@ describe('handleChatCompletion', () => {
     (lookupCache as ReturnType<typeof vi.fn>).mockResolvedValue({ hit: false, response: null });
     (storeInCache as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
     (logModelUsage as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    (createStreamGate as ReturnType<typeof vi.fn>).mockImplementation(() => makeGateStub());
   });
 
   it('throws when messages is missing', async () => {
@@ -686,6 +725,227 @@ describe('handleChatCompletion', () => {
     });
   });
 
+  describe('real-time streaming guardrail enforcement', () => {
+    const BLOCK_VERDICT = {
+      guardrailKey: 'no-pii',
+      codes: ['pii.email'],
+      riskScore: 90,
+      message: {
+        reasonClass: 'pii',
+        body: 'Response withheld: it contained personal data.',
+        mode: 'error',
+        status: 400,
+        traceId: 'trace-1',
+      },
+    };
+
+    /** Streams `chunks` and reports whether the upstream call was aborted. */
+    const startGatedStream = async (chunks: string[], modelOverrides = {}) => {
+      (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(
+        makeLlmModel({ outputGuardrailKey: 'no-pii', ...modelOverrides }),
+      );
+      const upstream = { aborted: false };
+      (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
+        runtime: {
+          createChatModel: vi.fn().mockResolvedValue({
+            invoke: vi.fn(),
+            stream: vi.fn().mockImplementation((_messages, options) => {
+              options?.signal?.addEventListener('abort', () => {
+                upstream.aborted = true;
+              });
+              return Promise.resolve((async function* () {
+                for (const content of chunks) {
+                  yield new AIMessageChunk({ content });
+                }
+              })());
+            }),
+          }),
+        },
+      });
+      (toOpenAIStreamChunk as ReturnType<typeof vi.fn>).mockImplementation((chunk: {
+        content: string;
+      }) => ({
+        id: 'chatcmpl-1',
+        object: 'chat.completion.chunk',
+        choices: [{ index: 0, delta: { content: chunk.content }, finish_reason: null }],
+      }));
+
+      const result = await handleChatCompletion({
+        ...BASE_PARAMS,
+        body: { messages: [] },
+        stream: true,
+      });
+      const body = await new Response(result.stream!).text();
+      // Let the fire-and-forget usage log and guardrail audit settle.
+      await new Promise((resolve) => { setTimeout(resolve, 20); });
+      return { body, result, upstream };
+    };
+
+    const frames = (body: string) =>
+      body
+        .split('\n\n')
+        .filter((line) => line.startsWith('data: '))
+        .map((line) => line.slice(6));
+
+    it('is not constructed for a model with no output guardrail', () => {
+      // Building a gate for an empty key list buys a pass-through wrapper and
+      // an allocation per chunk, and nothing else.
+      return startGatedStream(['hello'], { outputGuardrailKey: undefined }).then(() => {
+        expect(createStreamGate).not.toHaveBeenCalled();
+      });
+    });
+
+    it('scopes the gate to this model, this project and the gateway surface', async () => {
+      await startGatedStream(['hello']);
+
+      expect(createStreamGate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          guardrailKeys: ['no-pii'],
+          // The terminal output.pre pass stays with auditStreamedOutput, so the
+          // gate must not schedule a second one for the same answer.
+          audit: false,
+          scope: expect.objectContaining({
+            tenantId: 'tenant-1',
+            tenantDbName: 'tenant_acme',
+            projectId: 'proj-1',
+            surface: 'gateway',
+            source: 'chat.completions:stream',
+          }),
+        }),
+      );
+    });
+
+    it('closes the stream on a block before it aborts the upstream, so the block is not filed as a hang-up', async () => {
+      // THE regression this whole path exists to avoid: aborting first makes
+      // the provider iterator throw into the catch, which sees an aborted
+      // signal, logs `status: 'cancelled'` and returns — leaving the client
+      // with a truncated stream and the usage row blaming the user.
+      (createStreamGate as ReturnType<typeof vi.fn>).mockImplementation(() =>
+        makeGateStub({
+          pushes: ['passthrough', { emit: [], blocked: true, verdict: BLOCK_VERDICT }],
+        }),
+      );
+
+      const { body, result, upstream } = await startGatedStream(['safe part', 'leaked@example.com']);
+      const payloads = frames(body);
+
+      // The full terminal sequence reached the socket...
+      expect(payloads.at(-1)).toBe('[DONE]');
+      expect(JSON.parse(payloads[0]).choices[0].delta).toMatchObject({ role: 'assistant' });
+      expect(JSON.parse(payloads[1]).choices[0].delta.content).toBe('safe part');
+      expect(JSON.parse(payloads[2]).choices[0].finish_reason).toBe('content_filter');
+      expect(JSON.parse(payloads[3])).toEqual({
+        guardrail: { blocked: true, discardPrior: true },
+      });
+      expect(JSON.parse(payloads[4])).toMatchObject({
+        error: {
+          type: 'guardrail_block',
+          code: 'pii',
+          message: BLOCK_VERDICT.message.body,
+          guardrail_key: 'no-pii',
+        },
+      });
+      // ...and only then was the provider cut loose.
+      expect(upstream.aborted).toBe(true);
+      // Half an answer is already on screen; the caller has to be told.
+      expect(result.streamHeaders).toEqual({ 'x-guardrail-partial': 'true' });
+
+      const log = (logModelUsage as ReturnType<typeof vi.fn>).mock.calls.at(-1);
+      expect(log?.[2]).toMatchObject({
+        status: 'error',
+        finishReason: 'content_filter',
+        errorMessage: BLOCK_VERDICT.message.body,
+      });
+      expect(log?.[2].status).not.toBe('cancelled');
+      // The provider generated these tokens whether or not we delivered them.
+      expect(log?.[2].usage.outputTokens).toBeGreaterThan(0);
+    });
+
+    it('omits the partial markers when nothing had been released yet', async () => {
+      // A block that lands before the first character is a clean refusal, not a
+      // half-rendered answer — telling the client to discard a prefix it never
+      // received would be noise.
+      (createStreamGate as ReturnType<typeof vi.fn>).mockImplementation(() =>
+        makeGateStub({ pushes: [{ emit: [], blocked: true, verdict: BLOCK_VERDICT }] }),
+      );
+
+      const { body, result } = await startGatedStream(['leaked@example.com']);
+
+      expect(body).not.toContain('discardPrior');
+      expect(result.streamHeaders).toEqual({});
+      expect(body).toContain('"finish_reason":"content_filter"');
+      expect(body.trimEnd().endsWith('data: [DONE]')).toBe(true);
+    });
+
+    it('still records exactly one post-hoc audit for a blocked answer', async () => {
+      // The gate is built with `audit: false`, so this call is the answer's
+      // only evaluation row — and it covers the withheld text too, because it
+      // audits what the PROVIDER produced.
+      (createStreamGate as ReturnType<typeof vi.fn>).mockImplementation(() =>
+        makeGateStub({
+          pushes: ['passthrough', { emit: [], blocked: true, verdict: BLOCK_VERDICT }],
+        }),
+      );
+
+      await startGatedStream(['safe part', 'leaked@example.com']);
+
+      expect(evaluateGuardrail).toHaveBeenCalledTimes(1);
+      expect(evaluateGuardrail).toHaveBeenCalledWith(
+        expect.objectContaining({
+          guardrailKey: 'no-pii',
+          phase: 'output',
+          source: 'chat.completions:stream',
+          text: expect.stringContaining('leaked@example.com'),
+        }),
+      );
+    });
+
+    it('releases the tail the gate is still holding when the provider sends no finish_reason', async () => {
+      // Without the terminal `end()` the hold-back window would simply never be
+      // released: the last sentence of every answer would go missing.
+      const heldFrame = {
+        id: 'chatcmpl-1',
+        object: 'chat.completion.chunk',
+        choices: [{ index: 0, delta: { content: ' the held tail' }, finish_reason: null }],
+      };
+      (createStreamGate as ReturnType<typeof vi.fn>).mockImplementation(() =>
+        makeGateStub({
+          pushes: [{ emit: [], blocked: false }],
+          end: { emit: [heldFrame], blocked: false },
+        }),
+      );
+
+      const { body } = await startGatedStream(['the held tail']);
+      const payloads = frames(body);
+
+      expect(JSON.parse(payloads[1]).choices[0].delta.content).toBe(' the held tail');
+      // The synthesised stop frame still comes after it, and last of all [DONE].
+      expect(JSON.parse(payloads[2]).choices[0].finish_reason).toBe('stop');
+      expect(payloads.at(-1)).toBe('[DONE]');
+    });
+
+    it('blocks on the final window too', async () => {
+      // `end()` adjudicates the tail with no hold-back left, so it is the last
+      // chance for a violation to be caught — and it has to take the same exit.
+      (createStreamGate as ReturnType<typeof vi.fn>).mockImplementation(() =>
+        makeGateStub({
+          pushes: [{ emit: [], blocked: false }],
+          end: { emit: [], blocked: true, verdict: BLOCK_VERDICT },
+        }),
+      );
+
+      const { body, upstream } = await startGatedStream(['leaked@example.com']);
+
+      expect(body).toContain('"finish_reason":"content_filter"');
+      expect(body).toContain('"type":"guardrail_block"');
+      expect(body.trimEnd().endsWith('data: [DONE]')).toBe(true);
+      expect(upstream.aborted).toBe(true);
+      expect(
+        (logModelUsage as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[2],
+      ).toMatchObject({ status: 'error', finishReason: 'content_filter' });
+    });
+  });
+
   it('forwards each frame as the provider produces it, without collecting the answer first', async () => {
     // The distinction that matters to a caller: do we relay the provider's
     // chunks as they land, or wait for the completion and replay it? Assert the
@@ -1089,6 +1349,357 @@ describe('handleChatCompletion', () => {
     expect(streamBody).toContain('512 tokens');
     expect(streamBody).not.toContain('"finish_reason":"length"');
     expect(stream).not.toHaveBeenCalled();
+  });
+
+  // ── Multi-guardrail bindings ────────────────────────────────────────────
+  //
+  // A model may carry the ordered `guardrails` list or only the two legacy
+  // slots. `resolveBindings` (the real module — it is pure, so it is NOT part
+  // of the `@/lib/services/guardrail` mock above) decides which keys each hook
+  // gets; what is under test here is what this service does with more than one.
+  describe('multi-guardrail bindings', () => {
+    /**
+     * Answers per guardrail key, so a test can say "gr-a warns, gr-b blocks"
+     * without knowing anything about the engine. The defaults reproduce a clean
+     * pass, which is what the module-level mock gives every other test.
+     */
+    const scriptGuardrails = (
+      byKey: Record<string, Record<string, unknown>> = {},
+    ) => {
+      (evaluateGuardrail as ReturnType<typeof vi.fn>).mockImplementation(
+        async ({ guardrailKey }: { guardrailKey: string }) => ({
+          passed: true,
+          // `blocked` is what `inferenceService` actually throws on — the
+          // Mode-neutralised decision, not the `passed` counterfactual. Every
+          // override below that sets `passed: false` sets this too, because
+          // these fixtures model ENFORCING guardrails.
+          blocked: false,
+          action: 'allow',
+          findings: [],
+          guardrailKey,
+          guardrailName: guardrailKey,
+          ...(byKey[guardrailKey] ?? {}),
+        }),
+      );
+    };
+
+    const finding = (overrides: Record<string, unknown> = {}) => ({
+      type: 'pii',
+      category: 'email',
+      message: 'email address',
+      block: false,
+      ...overrides,
+    });
+
+    const runCompletion = (
+      modelOverrides: object,
+      userText = 'my email is a@b.com',
+    ) => {
+      (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(
+        makeLlmModel(modelOverrides),
+      );
+      (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
+        runtime: makeChatRuntime(),
+      });
+      (toOpenAIChatResponse as ReturnType<typeof vi.fn>).mockReturnValue({
+        id: 'chatcmpl-1',
+        choices: [
+          { index: 0, message: { role: 'assistant', content: 'the answer' }, finish_reason: 'stop' },
+        ],
+      });
+      return handleChatCompletion({
+        ...BASE_PARAMS,
+        body: { messages: [{ role: 'user', content: userText }] },
+      });
+    };
+
+    const runStream = async (modelOverrides: object) => {
+      (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(
+        makeLlmModel(modelOverrides),
+      );
+      (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
+        runtime: {
+          createChatModel: vi.fn().mockResolvedValue({
+            invoke: vi.fn(),
+            stream: vi.fn().mockResolvedValue((async function* () {
+              yield new AIMessageChunk({ content: 'the answer' });
+            })()),
+          }),
+        },
+      });
+      (toOpenAIStreamChunk as ReturnType<typeof vi.fn>).mockImplementation((chunk: {
+        content: string;
+      }) => ({
+        id: 'chatcmpl-1',
+        object: 'chat.completion.chunk',
+        choices: [{ index: 0, delta: { content: chunk.content }, finish_reason: null }],
+      }));
+
+      const result = await handleChatCompletion({
+        ...BASE_PARAMS,
+        body: { messages: [] },
+        stream: true,
+      });
+      await new Response(result.stream!).text();
+      // Let the fire-and-forget audit settle.
+      await new Promise((resolve) => { setTimeout(resolve, 20); });
+    };
+
+    // These mocks are shared with every other test in the file and
+    // `vi.clearAllMocks()` clears CALLS, not implementations — so a scripted
+    // guardrail or a per-chunk adapter left behind here would silently rewrite
+    // the tests that run after this block.
+    afterEach(() => {
+      (evaluateGuardrail as ReturnType<typeof vi.fn>).mockResolvedValue({
+        action: 'allow',
+        findings: [],
+      });
+      (toOpenAIChatResponse as ReturnType<typeof vi.fn>).mockReturnValue({
+        id: 'chatcmpl-1',
+        choices: [],
+      });
+      (toOpenAIStreamChunk as ReturnType<typeof vi.fn>).mockReturnValue({
+        id: 'chatcmpl-1',
+        choices: [],
+      });
+    });
+
+    it('leaves a legacy single-slot model exactly as it was', async () => {
+      // The production majority. One key per direction, one evaluation, and an
+      // annotation with NO `results` array — a consumer reading
+      // `guardrails.input.findings` must see what it saw before the hook plane.
+      scriptGuardrails({ 'gr-legacy': { findings: [finding()] } });
+
+      const result = await runCompletion({ inputGuardrailKey: 'gr-legacy' });
+
+      expect(evaluateGuardrail).toHaveBeenCalledTimes(1);
+      expect(evaluateGuardrail).toHaveBeenCalledWith(
+        expect.objectContaining({ guardrailKey: 'gr-legacy', phase: 'input' }),
+      );
+      expect((result.response as { guardrails?: unknown }).guardrails).toEqual({
+        input: { guardrail_key: 'gr-legacy', findings: [finding()] },
+      });
+    });
+
+    it('projects a legacy output slot onto the non-streaming output check', async () => {
+      scriptGuardrails({ 'gr-legacy': { findings: [finding()] } });
+
+      const result = await runCompletion({ outputGuardrailKey: 'gr-legacy' });
+
+      expect(evaluateGuardrail).toHaveBeenCalledTimes(1);
+      expect(evaluateGuardrail).toHaveBeenCalledWith(
+        expect.objectContaining({ guardrailKey: 'gr-legacy', phase: 'output' }),
+      );
+      expect((result.response as { guardrails?: unknown }).guardrails).toEqual({
+        output: { guardrail_key: 'gr-legacy', findings: [finding()] },
+      });
+    });
+
+    it('runs every guardrail bound to input.pre, in binding order', async () => {
+      scriptGuardrails({
+        'gr-a': { findings: [finding({ category: 'email' })] },
+        'gr-b': { findings: [finding({ category: 'phone' })] },
+      });
+
+      const result = await runCompletion({
+        guardrails: [
+          { key: 'gr-a', hooks: ['input.pre'] },
+          { key: 'gr-b', hooks: ['input.pre'] },
+        ],
+      });
+
+      const keys = (evaluateGuardrail as ReturnType<typeof vi.fn>).mock.calls
+        .map((call) => call[0].guardrailKey);
+      expect(keys).toEqual(['gr-a', 'gr-b']);
+
+      // Neither guardrail is collapsed: `findings` is the union (so the old
+      // reader still sees everything) and `results` says who found what.
+      expect((result.response as { guardrails?: unknown }).guardrails).toEqual({
+        input: {
+          guardrail_key: 'gr-a',
+          findings: [finding({ category: 'email' }), finding({ category: 'phone' })],
+          results: [
+            { guardrail_key: 'gr-a', findings: [finding({ category: 'email' })] },
+            { guardrail_key: 'gr-b', findings: [finding({ category: 'phone' })] },
+          ],
+        },
+      });
+    });
+
+    it('blocks on the first blocking guardrail and never runs the ones behind it', async () => {
+      scriptGuardrails({
+        'gr-strict': {
+          passed: false,
+          blocked: true,
+          action: 'block',
+          guardrailName: 'Strict',
+          findings: [finding({ block: true, message: 'email address' })],
+        },
+        'gr-lenient': { findings: [finding()] },
+      });
+
+      await expect(
+        runCompletion({
+          guardrails: [
+            { key: 'gr-strict', hooks: ['input.pre'] },
+            { key: 'gr-lenient', hooks: ['input.pre'] },
+          ],
+        }),
+      ).rejects.toThrow('Input blocked by guardrail "Strict": email address');
+
+      expect(evaluateGuardrail).toHaveBeenCalledTimes(1);
+    });
+
+    it('reports the EARLIER blocker when two guardrails both block', async () => {
+      // The message the end user reads is the first blocker's, deterministically
+      // — an operator who put the friendlier refusal first meant it, and
+      // evaluating the chain concurrently would make it a race.
+      scriptGuardrails({
+        'gr-first': {
+          passed: false,
+          blocked: true,
+          action: 'block',
+          guardrailName: 'First',
+          findings: [finding({ block: true, message: 'first reason' })],
+        },
+        'gr-second': {
+          passed: false,
+          blocked: true,
+          action: 'block',
+          guardrailName: 'Second',
+          findings: [finding({ block: true, message: 'second reason' })],
+        },
+      });
+
+      await expect(
+        runCompletion({
+          guardrails: [
+            { key: 'gr-first', hooks: ['input.pre'] },
+            { key: 'gr-second', hooks: ['input.pre'] },
+          ],
+        }),
+      ).rejects.toThrow('Input blocked by guardrail "First": first reason');
+    });
+
+    it('chains redactions so a later guardrail sees what the earlier one rewrote', async () => {
+      // Feeding every guardrail the ORIGINAL text and keeping the last
+      // `redactedText` would discard every earlier redaction, so composing two
+      // guardrails would mask LESS than either does alone.
+      (evaluateGuardrail as ReturnType<typeof vi.fn>).mockImplementation(
+        async ({ guardrailKey, text }: { guardrailKey: string; text: string }) => ({
+          passed: true,
+          action: 'redact',
+          guardrailKey,
+          guardrailName: guardrailKey,
+          findings: [finding()],
+          redactedText:
+            guardrailKey === 'gr-email'
+              ? text.replace('a@b.com', '[EMAIL]')
+              : text.replace('555-1234', '[PHONE]'),
+        }),
+      );
+
+      await runCompletion(
+        {
+          guardrails: [
+            { key: 'gr-email', hooks: ['input.pre'] },
+            { key: 'gr-phone', hooks: ['input.pre'] },
+          ],
+        },
+        'mail a@b.com or call 555-1234',
+      );
+
+      const calls = (evaluateGuardrail as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls[0][0]).toMatchObject({
+        guardrailKey: 'gr-email',
+        text: 'mail a@b.com or call 555-1234',
+      });
+      expect(calls[1][0]).toMatchObject({
+        guardrailKey: 'gr-phone',
+        text: 'mail [EMAIL] or call 555-1234',
+      });
+
+      // Both masks reach the provider, which is the point of chaining.
+      const logged = (logModelUsage as ReturnType<typeof vi.fn>).mock.calls.at(-1);
+      expect(logged?.[2].providerRequest.messages[0].content)
+        .toBe('mail [EMAIL] or call [PHONE]');
+    });
+
+    it('ignores the legacy slots once the model carries a binding list', async () => {
+      // The compatibility promise runs one way only: a row that has migrated is
+      // not ALSO enforced through the deprecated column it still writes, which
+      // would double-log and double-bill the same guardrail.
+      scriptGuardrails();
+
+      await runCompletion({
+        inputGuardrailKey: 'gr-old',
+        guardrails: [{ key: 'gr-new', hooks: ['input.pre'] }],
+      });
+
+      expect(evaluateGuardrail).toHaveBeenCalledTimes(1);
+      expect(evaluateGuardrail).toHaveBeenCalledWith(
+        expect.objectContaining({ guardrailKey: 'gr-new' }),
+      );
+    });
+
+    it('does not run a stream-only binding on the non-streaming output check', async () => {
+      // The legacy slot could not express this; the binding list can, and
+      // honouring it is what makes narrowing a guardrail to the stream real.
+      scriptGuardrails();
+
+      await runCompletion({
+        guardrails: [{ key: 'gr-stream', hooks: ['output.stream.delta'] }],
+      });
+
+      expect(evaluateGuardrail).not.toHaveBeenCalled();
+    });
+
+    it('hands the stream gate every guardrail bound to output.stream.delta', async () => {
+      scriptGuardrails();
+
+      await runStream({
+        guardrails: [
+          { key: 'gr-a', hooks: ['output.stream.delta'] },
+          { key: 'gr-b', hooks: ['output.stream.delta'] },
+        ],
+      });
+
+      expect(createStreamGate).toHaveBeenCalledWith(
+        expect.objectContaining({ guardrailKeys: ['gr-a', 'gr-b'] }),
+      );
+    });
+
+    it('writes one post-hoc audit row per output.pre guardrail', async () => {
+      // The evaluation log is per-guardrail, so two bound guardrails are two
+      // rows. Collapsing them would leave one of the two with no audit trail.
+      scriptGuardrails();
+
+      await runStream({
+        guardrails: [
+          { key: 'gr-a', hooks: ['output.pre'] },
+          { key: 'gr-b', hooks: ['output.pre'] },
+        ],
+      });
+
+      const audited = (evaluateGuardrail as ReturnType<typeof vi.fn>).mock.calls
+        .map((call) => call[0].guardrailKey);
+      expect(audited.sort()).toEqual(['gr-a', 'gr-b']);
+      expect(evaluateGuardrail).toHaveBeenCalledWith(
+        expect.objectContaining({
+          phase: 'output',
+          source: 'chat.completions:stream',
+          text: expect.stringContaining('the answer'),
+        }),
+      );
+    });
+
+    it('builds no gate when nothing is bound to the stream hook', async () => {
+      scriptGuardrails();
+
+      await runStream({ guardrails: [{ key: 'gr-a', hooks: ['output.pre'] }] });
+
+      expect(createStreamGate).not.toHaveBeenCalled();
+    });
   });
 });
 

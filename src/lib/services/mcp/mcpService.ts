@@ -3,9 +3,11 @@ import { randomUUID } from 'crypto';
 import { getDatabase } from '@/lib/database';
 import type {
   DatabaseProvider,
+  IMcpAegisConfig,
   IMcpAuditLog,
   IMcpAuthConfig,
   IMcpExposureConfig,
+  IMcpGuardrailConfig,
   IMcpRequestLog,
   IMcpServer,
   IMcpStdioConfig,
@@ -51,7 +53,12 @@ import {
 } from './secretVault';
 import { remoteCallTool, remoteListTools } from './remoteMcpClient';
 import { isStdioRunnerEnabled, stdioCallTool, stdioListTools } from './stdioRunner';
-import { mcpGuardrailHook, mcpSandboxRunner } from '@/enterprise/registry';
+import { mcpSandboxRunner } from '@/enterprise/registry';
+import { toGuardrailMode } from '@/lib/services/guardrail/hooks/contract';
+import {
+  ensureMcpGuardrailHook,
+  invalidateMcpGuardrailBinding,
+} from '@/lib/services/guardrail/hooks/mcpHook';
 import { requireInternalMcpProvider } from './internal/registry';
 import {
   allocateExposedNames,
@@ -69,6 +76,15 @@ import {
 const logger = createLogger('mcp-service');
 const SLUG_OPTIONS = { lower: true, strict: true, trim: true };
 const MAX_KEY_ATTEMPTS = 50;
+
+// ── Guardrail seam registration ───────────────────────────────────────────
+// The seam is filled by `ensureMcpGuardrailHook()`, called from
+// `executeMcpToolLocal` below — NOT here at module scope. This file is pulled
+// into `registry.ts`'s own import phase in the enterprise overlay
+// (registry -> plugins/realtime -> ... -> agentService -> mcp/index -> here),
+// where `mcpGuardrailHook` does not exist yet, so a module-scope read of the
+// ref takes the process down at boot. See `ensureMcpGuardrailHook`'s doc for
+// the full chain and for why optional-chaining it is the wrong fix.
 
 export const DEFAULT_MCP_EXPOSURE: IMcpExposureConfig = {
   protocols: ['streamable-http', 'sse'],
@@ -88,6 +104,125 @@ export function resolveExposure(server: IMcpServer): IMcpExposureConfig {
     protocols: exposure.protocols,
     accessMode: exposure.accessMode === 'public' ? 'public' : 'token',
   };
+}
+
+// ── Guardrail binding ─────────────────────────────────────────────────────
+// A server carries at most one live binding, but two columns can hold it: the
+// canonical `guardrail` and the legacy `aegis`, which every row written before
+// the hook plane still has. This is the ONE read-time normaliser; nothing else
+// may look at `server.aegis`.
+
+/** One WARN per (tenant, server) per process — this runs on every tool call. */
+const warnedStaleShields = new Set<string>();
+
+export interface McpGuardrailBinding {
+  /** Kept in the MCP vocabulary so it feeds `McpGuardrailContext.mode` directly. */
+  mode: 'off' | 'monitor' | 'enforce';
+  /** Absent = fall back to the tenant's default tool guardrail. */
+  guardrailKey?: string;
+}
+
+/**
+ * Which guardrail (if any) evaluates this server's tool calls.
+ *
+ * `guardrail` wins outright when present — an operator who has saved the new
+ * field has expressed the current intent, and the legacy column is only still
+ * written so a mid-deploy rollback keeps enforcing.
+ *
+ * ── STALE `aegis.shieldId` IS DROPPED, NOT TRANSLATED ──────────────────────
+ * Its values are ids from the removed `aegis_shields` table. There is nothing
+ * to translate them into: the shield rows are gone, so the mapping from "this
+ * server used shield X" to "this server uses guardrail Y" cannot be recovered
+ * at read time. Keeping the id would be worse than dropping it — the hook plane
+ * would resolve nothing and the server would silently stop being guarded — so
+ * the binding degrades to the tenant's DEFAULT tool guardrail instead.
+ *
+ * That is a real enforcement change for any server whose shield was not the
+ * default: a narrow shield widens to the default policy, a broad one narrows.
+ * It is loud on purpose. The fix is to save an explicit `guardrail.guardrailKey`
+ * on the server; the warning stops as soon as the new field is present.
+ */
+export function resolveMcpGuardrailBinding(server: IMcpServer): McpGuardrailBinding {
+  // `?? undefined` and `!= null` on purpose. On Mongo/Cosmos an absent binding
+  // is persisted as BSON `null` (the driver runs without `ignoreUndefined`),
+  // while SQLite maps its NULL to `undefined`; both must read as "no binding".
+  // A `!== undefined` test here armed every unbound Cosmos-backed server in
+  // 'enforce' — `toGuardrailMode(undefined, true)` is 'enforce'.
+  const binding = server.guardrail ?? server.aegis ?? undefined;
+  // `toGuardrailMode` folds BOTH vocabularies ('off' and 'disabled') onto the
+  // canonical three. `enabled` is "a binding exists at all", which is what
+  // preserves the pre-hook-plane default: a server with neither column stays
+  // unguarded rather than being armed by an upgrade.
+  const mode = toGuardrailMode(binding?.mode, binding != null);
+
+  const guardrailKey = server.guardrail?.guardrailKey;
+  if (!guardrailKey && server.aegis?.shieldId && mode !== 'disabled') {
+    const warnKey = `${server.tenantId}/${server.key}`;
+    if (!warnedStaleShields.has(warnKey)) {
+      warnedStaleShields.add(warnKey);
+      logger.warn(
+        'MCP server is bound to a removed Aegis shield; falling back to the default tool guardrail',
+        {
+          tenantId: server.tenantId,
+          projectId: server.projectId,
+          serverKey: server.key,
+          serverName: server.name,
+          staleShieldId: server.aegis.shieldId,
+          mode,
+          action: 'Set guardrail.guardrailKey on this server to restore the intended policy.',
+        },
+      );
+    }
+  }
+
+  return { mode: mode === 'disabled' ? 'off' : mode, guardrailKey };
+}
+
+/** The two binding columns as they are WRITTEN — an absent key is omitted. */
+export interface McpGuardrailBindingColumns {
+  aegis?: IMcpAegisConfig;
+  guardrail?: IMcpGuardrailConfig;
+}
+
+/**
+ * Two-way projection between the canonical `guardrail` column and the legacy
+ * `aegis` column, for the one release in which both are written.
+ *
+ *   · `guardrail` only → `aegis: { mode }` is written too, so a rollback to a
+ *     binary that still reads `server.aegis?.mode` keeps enforcing. Models and
+ *     guardrails keep their legacy columns current the same way
+ *     (`projectBindingsToLegacy`, `projectHooksToLegacy`); MCP was the one
+ *     record that broke the "older binary on the same tenant DB keeps
+ *     enforcing" promise.
+ *   · `aegis` only (a pre-2.0 SDK client) → `guardrail: { mode }`, so the
+ *     legacy write is not silently outranked by a stored `guardrail`. On an
+ *     update the stored `guardrailKey` is KEPT: the legacy vocabulary cannot
+ *     name one, and a mode change is not a request to fall back to the
+ *     default policy.
+ *   · Both → written as sent; `guardrail` wins at read time.
+ *
+ * Keys the caller did not send are OMITTED rather than set to `undefined`: the
+ * Mongo driver persists an explicit `undefined` as BSON `null`, which is the
+ * shape `resolveMcpGuardrailBinding` then has to defend against. `shieldId` is
+ * never projected — its values are dead references and the parsers drop it.
+ */
+export function projectMcpGuardrailBinding(
+  input: McpGuardrailBindingColumns,
+  existing?: Pick<IMcpServer, 'guardrail'>,
+): McpGuardrailBindingColumns {
+  const out: McpGuardrailBindingColumns = {};
+  if (input.guardrail !== undefined) {
+    out.guardrail = input.guardrail;
+  } else if (input.aegis !== undefined) {
+    const guardrailKey = existing?.guardrail?.guardrailKey;
+    out.guardrail = { mode: input.aegis.mode, ...(guardrailKey ? { guardrailKey } : {}) };
+  }
+  if (input.aegis !== undefined) {
+    out.aegis = input.aegis;
+  } else if (input.guardrail !== undefined) {
+    out.aegis = { mode: input.guardrail.mode };
+  }
+  return out;
 }
 
 // ── Tool enable/disable ───────────────────────────────────────────────────
@@ -894,7 +1029,9 @@ export async function createMcpServer(
     upstreamBaseUrl,
     upstreamAuth: sealAuthConfig(openedAuth),
     exposure: normalizeExposure(input.exposure),
-    aegis: input.aegis,
+    // Absent bindings are OMITTED, never `undefined` (BSON null on Mongo), and
+    // either column sent is projected onto the other for one release.
+    ...projectMcpGuardrailBinding(input),
     status: 'active',
     endpointSlug,
     totalRequests: 0,
@@ -962,6 +1099,7 @@ function diffForAudit(before: IMcpServer, after: Partial<IMcpServer>): Record<st
   compare('upstreamBaseUrl', before.upstreamBaseUrl, after.upstreamBaseUrl);
   compare('exposure', resolveExposure(before), after.exposure);
   compare('aegis', before.aegis, after.aegis);
+  compare('guardrail', before.guardrail, after.guardrail);
   compare('remoteConfig', before.remoteConfig, after.remoteConfig);
   if (after.stdioConfig !== undefined) {
     const strip = (c?: IMcpStdioConfig) => c && {
@@ -1026,7 +1164,9 @@ export async function updateMcpServer(
   if (input.endpointSlug !== undefined) {
     updateData.endpointSlug = await resolveEndpointSlug(tenantDbName, input.endpointSlug, serverId);
   }
-  if (input.aegis !== undefined) updateData.aegis = input.aegis;
+  // Either binding column sent → both written (two-way projection, one
+  // release); a body that names neither leaves both untouched.
+  Object.assign(updateData, projectMcpGuardrailBinding(input, existing));
   if (input.remoteConfig !== undefined) updateData.remoteConfig = input.remoteConfig;
   if (input.stdioConfig !== undefined) {
     updateData.stdioConfig = mergeStdioConfigUpdate(existing.stdioConfig, input.stdioConfig);
@@ -1227,6 +1367,16 @@ export async function updateMcpServer(
 
   const updated = await db.updateMcpServer(serverId, updateData as Partial<IMcpServer>);
 
+  // The guardrail bridge caches "which guardrail is this server bound to" for a
+  // minute, keyed by server KEY — so a rebinding (or a rename that moves the
+  // binding to a new key) would otherwise keep evaluating against the previous
+  // guardrail for up to that long. Both old and new keys are dropped because a
+  // rename leaves an entry nothing will ever look up again.
+  if (updated && (input.guardrail !== undefined || updateData.key !== undefined)) {
+    invalidateMcpGuardrailBinding(tenantDbName, existing.key);
+    if (updated.key !== existing.key) invalidateMcpGuardrailBinding(tenantDbName, updated.key);
+  }
+
   if (updated) {
     const changes = diffForAudit(existing, updateData as Partial<IMcpServer>);
     const isSecretsChange = 'upstreamAuth' in changes || 'stdioConfig' in changes;
@@ -1330,6 +1480,11 @@ export async function deleteMcpServer(
     // assigned to an offline node" error).
     void deleteInstanceAssignment('mcp', mcpEntityId(existing.tenantId, existing.key))
       .catch((error) => logger.warn('Failed to clear MCP instance assignment', { serverId, error }));
+
+    // Same reasoning one level down: the guardrail binding cache is keyed by
+    // server key, so a recreated server would inherit the deleted one's
+    // guardrail until the entry expired.
+    invalidateMcpGuardrailBinding(tenantDbName, existing.key);
 
     // Release a sandbox-backed runtime if one exists (best-effort).
     if (existing.stdioConfig?.executionMode === 'sandbox' && mcpSandboxRunner.current) {
@@ -1706,21 +1861,32 @@ export async function executeMcpToolLocal(
     throw new Error(`Tool "${toolName}" is disabled on MCP server "${server.name}"`);
   }
 
-  // Aegis pre-hook (enterprise overlay; no-op in community).
-  const guardrail = mcpGuardrailHook.current;
-  const aegisMode = server.aegis?.mode ?? 'off';
+  // Guardrail `tool.pre` hook. `ensureMcpGuardrailHook()` fills the seam with
+  // the community bridge on first call (an overlay that claimed it first
+  // wins), so this is live in every build — and resolving it HERE rather than
+  // at module load is what keeps this file importable from inside
+  // `registry.ts`'s import phase.
+  const guardrail = ensureMcpGuardrailHook();
+  const { mode: guardrailMode, guardrailKey } = resolveMcpGuardrailBinding(server);
+  // ONE context object for both hooks: the bridge keys its per-call trace id on
+  // this object's identity, so splitting it would split the two evaluation-log
+  // rows of a single tool call.
   const guardCtx = {
     tenantId: server.tenantId,
     projectId: server.projectId,
     serverKey: server.key,
     toolName: realToolName,
-    shieldId: server.aegis?.shieldId,
-    mode: aegisMode,
+    guardrailKey,
+    mode: guardrailMode,
   };
   let effectiveArgs = args;
-  if (guardrail && aegisMode !== 'off') {
+  if (guardrailMode !== 'off') {
     const verdict = await guardrail.beforeToolCall(guardCtx, args);
-    if (!verdict.allowed && aegisMode === 'enforce') {
+    if (!verdict.allowed && guardrailMode === 'enforce') {
+      // TODO(v1.3.0): rename to `Blocked by guardrail` once the operator
+      // runbooks and log greps that match this exact sentence have been
+      // updated. Both strings below are load-bearing OUTSIDE this repo — do
+      // not "clean them up" with the rest of the Aegis removal.
       throw new Error(`Blocked by Aegis shield${verdict.reason ? `: ${verdict.reason}` : ''}`);
     }
     if (verdict.args) effectiveArgs = verdict.args;
@@ -1776,10 +1942,11 @@ export async function executeMcpToolLocal(
     throw error;
   }
 
-  // Aegis post-hook.
-  if (guardrail && aegisMode !== 'off') {
+  // Guardrail `tool.post` hook.
+  if (guardrailMode !== 'off') {
     const verdict = await guardrail.afterToolCall(guardCtx, result);
-    if (!verdict.allowed && aegisMode === 'enforce') {
+    if (!verdict.allowed && guardrailMode === 'enforce') {
+      // TODO(v1.3.0): see the `tool.pre` throw above — same runbook contract.
       throw new Error(`Response blocked by Aegis shield${verdict.reason ? `: ${verdict.reason}` : ''}`);
     }
     if (verdict.result !== undefined) result = verdict.result;

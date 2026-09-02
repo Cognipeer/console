@@ -1,10 +1,16 @@
 import type { GuardrailAction, IGuardrailWordFilterPolicy } from '@/lib/database';
 import type { GuardrailFinding } from './types';
 import { BUILTIN_WORD_LISTS } from './builtinWordLists';
+import {
+  DEFAULT_MAX_REGEX_INPUT_CHARS,
+  DEFAULT_REGEX_BUDGET_MS,
+  MAX_REGEX_SOURCE_CHARS,
+  execRuleBounded,
+} from './families/regex';
 
 // ── Word filter (deterministic, no LLM) ───────────────────────────────────
 // Catches profanity and tenant-defined banned words that trivially bypass an
-// LLM check budget: leetspeak (f#ck, s1k), diacritic stripping (amcık→amcik),
+// LLM policy budget: leetspeak (f#ck, s1k), diacritic stripping (amcık→amcik),
 // stretched letters (fuuuck), spaced-out letters (f u c k) and mixed casing.
 // Matching is whole-token against folded forms, so ordinary words that merely
 // contain a banned substring ("classic", "assessment") do not fire.
@@ -197,14 +203,159 @@ function matchCandidate(candidate: Candidate, lists: CompiledLists): boolean {
   return false;
 }
 
+// ── Tenant regexes ────────────────────────────────────────────────────────
+
+/**
+ * A `policy.regexes` entry that did not run, or did not run to completion.
+ * Never silently dropped: the family adapter turns each one into a `degraded`
+ * entry so `failMode` decides, instead of a rule quietly not guarding.
+ */
+export interface WordFilterSkip {
+  /** Position in `policy.regexes`. */
+  index: number;
+  /** The pattern source, truncated — for the operator, not for re-execution. */
+  pattern: string;
+  reason: string;
+}
+
+export interface WordFilterScan {
+  findings: GuardrailFinding[];
+  skipped: WordFilterSkip[];
+}
+
+export interface WordFilterScanOptions {
+  /**
+   * Wall-clock budget for ALL of this policy's regexes together. Defaults to
+   * `DEFAULT_REGEX_BUDGET_MS` — the same 50 ms the `regex` family spends per
+   * policy, and for the same reason: a tenant-authored pattern such as
+   * `(a+)+$` on thirty characters otherwise pins the event loop for seconds,
+   * and `POLICY_VALID_HOOKS.word_filter` includes `tool.post`, so tool results
+   * shaped by an attacker reach these patterns.
+   */
+  budgetMs?: number;
+}
+
+/**
+ * Compiled once per source and reused: a streamed answer and a busy tenant
+ * re-run the same handful of patterns on every request, and `new RegExp` is
+ * the expensive half of a pattern that matches nothing. Failures are cached
+ * too so a broken pattern is not re-thrown per request.
+ */
+const REGEX_COMPILE_CACHE_LIMIT = 512;
+const regexCompileCache = new Map<string, RegExp | { error: string }>();
+
+function compileWordFilterRegex(source: string): RegExp | { error: string } {
+  const cached = regexCompileCache.get(source);
+  if (cached) return cached;
+  let compiled: RegExp | { error: string };
+  try {
+    // 'giu' as before: `g` is what lets the bounded sweep iterate, `i`/`u` are
+    // the legacy semantics a fleet of tenant patterns already rely on.
+    compiled = new RegExp(source, 'giu');
+  } catch (error) {
+    compiled = { error: error instanceof Error ? error.message : String(error) };
+  }
+  if (regexCompileCache.size >= REGEX_COMPILE_CACHE_LIMIT) {
+    const oldest = regexCompileCache.keys().next();
+    if (!oldest.done) regexCompileCache.delete(oldest.value);
+  }
+  regexCompileCache.set(source, compiled);
+  return compiled;
+}
+
+const PATTERN_HINT_CHARS = 64;
+
+/**
+ * Tenant-defined regexes, case-insensitive, ONE finding per pattern (the first
+ * non-empty match — exactly what the old `pattern.exec(text)` reported).
+ *
+ * Every pattern runs through the `regex` family's bounded executor: a V8
+ * context with a timeout, the only thing that can interrupt a backtracking
+ * regex. One budget covers the whole list, spent down pattern by pattern, so
+ * forty patterns cannot buy forty stalls. The same source and input caps as
+ * the `regex` family apply, and every refusal is reported in `skipped`.
+ */
+function scanTenantRegexes(
+  text: string,
+  regexes: readonly string[],
+  action: GuardrailAction,
+  options: WordFilterScanOptions | undefined,
+  findings: GuardrailFinding[],
+  skipped: WordFilterSkip[],
+): void {
+  const budgetMs = options?.budgetMs ?? DEFAULT_REGEX_BUDGET_MS;
+  const startedAt = Date.now();
+
+  regexes.forEach((source, index) => {
+    if (typeof source !== 'string' || !source.trim()) return;
+    const hint = source.length > PATTERN_HINT_CHARS ? `${source.slice(0, PATTERN_HINT_CHARS)}…` : source;
+    const skip = (reason: string): void => {
+      skipped.push({ index, pattern: hint, reason });
+    };
+
+    if (source.length > MAX_REGEX_SOURCE_CHARS) {
+      skip(`pattern source is ${source.length} characters, over the ${MAX_REGEX_SOURCE_CHARS} character limit`);
+      return;
+    }
+    if (text.length > DEFAULT_MAX_REGEX_INPUT_CHARS) {
+      skip(`input of ${text.length} characters is over the ${DEFAULT_MAX_REGEX_INPUT_CHARS} scan limit`);
+      return;
+    }
+
+    const compiled = compileWordFilterRegex(source);
+    if (!(compiled instanceof RegExp)) {
+      // Reported, not swallowed: the old `catch { continue }` is exactly how a
+      // rule ends up dead for a year behind a green UI.
+      skip(`pattern does not compile: ${compiled.error}`);
+      return;
+    }
+
+    const remaining = budgetMs - (Date.now() - startedAt);
+    if (remaining <= 0) {
+      skip(`not run: the ${budgetMs}ms scan budget was spent by earlier patterns`);
+      return;
+    }
+
+    // `maxMatches: 1` — this matcher has only ever reported the first match,
+    // so the sweep stops there and `hitCap` is the expected outcome, not a
+    // refusal.
+    const swept = execRuleBounded(compiled, text, undefined, 1, remaining);
+    if (swept.timedOut) {
+      skip(
+        `pattern did not finish within the ${budgetMs}ms scan budget on ${text.length} characters — ` +
+          'it backtracks catastrophically and must be rewritten (nested quantifiers such as (a+)+ are the usual cause)',
+      );
+      return;
+    }
+
+    const match = swept.matches[0];
+    if (!match || !match.whole) return;
+    findings.push({
+      type: 'word_filter',
+      category: 'custom_pattern',
+      severity: 'high',
+      message: `Content matches banned pattern`,
+      action,
+      block: action === 'block',
+      value: match.whole,
+    });
+  });
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────
 
-export function runWordFilter(
+/**
+ * The matcher with its full report. `runWordFilter` below is the
+ * findings-only view kept for callers that predate the report.
+ */
+export function scanWordFilter(
   text: string,
   policy: IGuardrailWordFilterPolicy,
   extraLists?: ResolvedWordList[],
-): GuardrailFinding[] {
-  if (!policy.enabled || !text.trim()) return [];
+  options?: WordFilterScanOptions,
+): WordFilterScan {
+  const skipped: WordFilterSkip[] = [];
+  if (!policy.enabled || !text.trim()) return { findings: [], skipped };
 
   const action = (policy.action ?? 'block') as GuardrailAction;
   const findings: GuardrailFinding[] = [];
@@ -246,28 +397,15 @@ export function runWordFilter(
     }
   }
 
-  // Tenant-defined regexes, case-insensitive; invalid patterns are skipped.
-  for (const source of policy.regexes ?? []) {
-    if (!source?.trim()) continue;
-    let pattern: RegExp;
-    try {
-      pattern = new RegExp(source, 'giu');
-    } catch {
-      continue;
-    }
-    const match = pattern.exec(text);
-    if (match && match[0]) {
-      findings.push({
-        type: 'word_filter',
-        category: 'custom_pattern',
-        severity: 'high',
-        message: `Content matches banned pattern`,
-        action,
-        block: action === 'block',
-        value: match[0],
-      });
-    }
-  }
+  scanTenantRegexes(text, policy.regexes ?? [], action, options, findings, skipped);
 
-  return findings;
+  return { findings, skipped };
+}
+
+export function runWordFilter(
+  text: string,
+  policy: IGuardrailWordFilterPolicy,
+  extraLists?: ResolvedWordList[],
+): GuardrailFinding[] {
+  return scanWordFilter(text, policy, extraLists).findings;
 }

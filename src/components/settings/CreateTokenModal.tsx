@@ -33,6 +33,8 @@ interface CreateTokenModalProps {
   onClose: () => void;
   onSuccess: () => void;
   createUrl?: string;
+  /** Extra fields merged into the POST body alongside the form values — e.g. `{ userId }` to mint on behalf of another user from their member detail page. */
+  extraBody?: Record<string, unknown>;
 }
 
 export default function CreateTokenModal({
@@ -40,6 +42,7 @@ export default function CreateTokenModal({
   onClose,
   onSuccess,
   createUrl = '/api/tokens',
+  extraBody,
 }: CreateTokenModalProps) {
   const [createdToken, setCreatedToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -74,7 +77,7 @@ export default function CreateTokenModal({
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(form.values),
+        body: JSON.stringify({ ...form.values, ...extraBody }),
       });
 
       const data = await response.json();

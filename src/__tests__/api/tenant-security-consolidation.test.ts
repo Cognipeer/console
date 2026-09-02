@@ -39,10 +39,35 @@ describe('tenant-security consolidation guards', () => {
     expect(offenders, `These plugins resolve the API token themselves instead of using a canonical wrapper: ${offenders.join(', ')}`).toEqual([]);
   });
 
+/**
+ * The ONE sanctioned local wrapper, and why it is not a clone.
+ *
+ * This guard exists because three copies of the auth + tenant-bind + RBAC
+ * wrapper once drifted apart and one of them stopped enforcing RBAC. It matches
+ * on the NAME, which cannot tell a drifting copy from a different mechanism
+ * that happens to be named the same way — so an entry here has to argue its
+ * case, not just silence the test.
+ *
+ * `appgw-data-plane.ts` (EE overlay) does not resolve a console session or an
+ * API token at all. `/api/appgw/*` is deliberately registered as a PUBLIC
+ * enterprise prefix (`console-ee/overlay/src/enterprise/registry.ts:165`), and
+ * `withGatewayRequestContext` binds the gateway's OWN app identity — the
+ * documented INV-1 choke point in `aiAppGateway/identity.ts:4`, which is
+ * fail-closed at `identity.ts:307-332`. Routing it through the console's
+ * session wrapper would be the actual bug.
+ *
+ * Note this file exists only in the overlay, so the community suite never sees
+ * it and only an overlay-applied run goes red. Keep the entry in the COMMUNITY
+ * tree regardless: the test is community-owned, and an allowlist that lives in
+ * a different tree from its guard is how the pair silently separates.
+ */
+const SANCTIONED_LOCAL_WRAPPERS = new Set(['appgw-data-plane.ts']);
+
   it('no plugin defines its own request-context wrapper (no clones)', () => {
     const offenders: string[] = [];
     const localWrapperDef = /(?:function|const)\s+with[A-Za-z]*(?:Client|OpenAi|Context)[A-Za-z]*\s*(?:<|=|\()/;
     for (const file of pluginFiles()) {
+      if (SANCTIONED_LOCAL_WRAPPERS.has(path.basename(file))) continue;
       const src = read(file);
       if (localWrapperDef.test(src)) {
         offenders.push(path.basename(file));

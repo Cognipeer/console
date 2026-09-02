@@ -246,6 +246,21 @@ describe('POST /api/auth/login', () => {
         { inviteAcceptedAt: expect.any(Date) },
       );
     });
+
+    it('returns 401 without checking the password when the account has canLogin=false', async () => {
+      db.findUserByEmail.mockResolvedValue({ ...mockUser, canLogin: false });
+      const res = await login({
+        email: 'admin@acme.com',
+        password: 'password123',
+        slug: 'acme-corp',
+      });
+      expect(res.statusCode).toBe(401);
+      const body = parseJsonBody<{ error: string }>(res.body);
+      // Same generic message as "not found" / "wrong password" — never leak
+      // that a login-disabled ("Programmatic User") account exists.
+      expect(body.error).toMatch(/invalid email or password/i);
+      expect(bcrypt.compare).not.toHaveBeenCalled();
+    });
   });
 
   describe('login without slug (directory search)', () => {
@@ -281,6 +296,31 @@ describe('POST /api/auth/login', () => {
       db.listTenants.mockResolvedValue([]);
       const res = await login({ email: 'admin@acme.com', password: 'wrongpass' });
       expect(res.statusCode).toBe(401);
+    });
+
+    it('returns 401 without checking the password when the known-tenant candidate has canLogin=false', async () => {
+      db.findUserByEmail.mockResolvedValue({ ...mockUser, canLogin: false });
+      db.listTenants.mockResolvedValue([]);
+      const res = await login({ email: 'admin@acme.com', password: 'password123' });
+      expect(res.statusCode).toBe(401);
+      const body = parseJsonBody<{ error: string }>(res.body);
+      expect(body.error).toMatch(/invalid email or password/i);
+      expect(bcrypt.compare).not.toHaveBeenCalled();
+    });
+
+    it('returns 401 without checking the password when a fallback (all-tenants) candidate has canLogin=false', async () => {
+      // No directory entry for this email at all, so the first (known-tenant)
+      // loop finds nothing and control falls through to the all-tenants
+      // fallback loop, which is the branch under test here.
+      db.listTenantsForUser.mockResolvedValue([]);
+      db.listTenants.mockResolvedValue([mockTenant]);
+      db.findUserByEmail.mockResolvedValue({ ...mockUser, canLogin: false });
+      const res = await login({ email: 'admin@acme.com', password: 'password123' });
+      expect(res.statusCode).toBe(401);
+      const body = parseJsonBody<{ error: string }>(res.body);
+      expect(body.error).toMatch(/invalid email or password/i);
+      expect(bcrypt.compare).not.toHaveBeenCalled();
+      expect(db.registerUserInDirectory).not.toHaveBeenCalled();
     });
   });
 

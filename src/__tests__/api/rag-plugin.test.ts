@@ -736,4 +736,56 @@ describe('document routes are project-scoped and never answer with the source te
     });
     expect(ownerRes.statusCode).toBe(200);
   });
+
+  it('/content returns the whole stored source text', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/rag/modules/${MODULE_KEY}/documents/${ownDocumentId}/content`,
+      headers: REQUEST_HEADERS,
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = parseJsonBody<{ fileName: string; text: string; truncated: boolean }>(res.body);
+    expect(body.fileName).toBe('contract.pdf');
+    expect(body.text).toBe(SECRET_SOURCE);
+    expect(body.truncated).toBe(false);
+  });
+
+  it('/content 404s a document id that belongs to another module', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/rag/modules/${MODULE_KEY}/documents/${otherModuleDocumentId}/content`,
+      headers: REQUEST_HEADERS,
+    });
+
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('/lines returns a line-numbered range and pages past it', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/rag/modules/${MODULE_KEY}/documents/${ownDocumentId}/lines?limit=1`,
+      headers: REQUEST_HEADERS,
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = parseJsonBody<{
+      totalLines: number; startLine: number; endLine: number; hasMore: boolean; lines: string;
+    }>(res.body);
+    expect(body.totalLines).toBe(1);
+    expect(body.startLine).toBe(1);
+    expect(body.endLine).toBe(1);
+    expect(body.hasMore).toBe(false);
+    expect(body.lines).toBe(`1\t${SECRET_SOURCE}`);
+  });
+
+  it('/lines 404s a document id that belongs to another module', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/rag/modules/${MODULE_KEY}/documents/${otherModuleDocumentId}/lines`,
+      headers: REQUEST_HEADERS,
+    });
+
+    expect(res.statusCode).toBe(404);
+  });
 });

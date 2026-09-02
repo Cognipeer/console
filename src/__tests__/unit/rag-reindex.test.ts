@@ -488,11 +488,16 @@ describe('bootstrapApplication', () => {
     boot.config.nodeEnv = 'production';
     boot.configErrors = [{ key: 'AUTH_SECRET', message: 'must be set' }];
     const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
-    vi.useFakeTimers();
 
     try {
       vi.resetModules();
       const { bootstrapApplication, isApplicationReady } = await import('@/server/bootstrap');
+
+      // The fake clock goes in AFTER the import, not before it. It exists for
+      // bootstrap's own `setTimeout(() => process.exit(1))`, and holding a
+      // frozen clock across the import above would hang this test forever the
+      // day any module in that graph awaits a real timer while loading.
+      vi.useFakeTimers();
 
       // The only unawaited caller (app.ts) swallows this rejection, so the
       // rejection alone would leave a live process that answers 503 forever
@@ -506,5 +511,12 @@ describe('bootstrapApplication', () => {
     } finally {
       exit.mockRestore();
     }
-  });
+    // `@/server/bootstrap` is the widest import graph in the app — a cold
+    // resetModules + import of it measures ~4s on an idle machine, which is
+    // almost the whole of vitest's 5s default before an assertion has run. It
+    // fitted only while the suite was small enough to leave the transform pool
+    // idle; under a full parallel run it intermittently timed out. The budget
+    // below covers the import, not the behaviour: the hang this test guards
+    // against (a bootstrap that neither resolves nor exits) still blows it.
+  }, 60_000);
 });

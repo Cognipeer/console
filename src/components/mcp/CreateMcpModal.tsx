@@ -36,7 +36,11 @@ type SourceType = 'openapi' | 'remote' | 'stdio' | 'internal' | 'composite';
 type StdioRuntime = 'npx' | 'uvx';
 type ExecutionMode = 'subprocess' | 'sandbox';
 type AccessMode = 'token' | 'public';
-type AegisMode = 'off' | 'monitor' | 'enforce';
+/**
+ * Keeps the MCP vocabulary ('off' rather than 'disabled') — this is the wire
+ * shape of `IMcpGuardrailConfig.mode`, not `GuardrailMode`.
+ */
+type GuardrailBindingMode = 'off' | 'monitor' | 'enforce';
 
 interface InternalProviderConfigField {
   key: string;
@@ -56,13 +60,38 @@ interface InternalProviderInfo {
 
 interface McpCapabilities {
   stdioSubprocess: { enabled: boolean; npx: boolean; uvx: boolean };
-  // `available`/`hookAvailable` fold both the enterprise build seam AND the
-  // tenant's ENTERPRISE license. `seamAvailable`/`licenseEnterprise` explain WHY
+  // `available` folds both the enterprise build seam AND the tenant's
+  // ENTERPRISE license. `seamAvailable`/`licenseEnterprise` explain WHY
   // it is off: no license (upgradeable) vs. community build (edition).
   stdioSandbox: { available: boolean; enterpriseBuild: boolean; seamAvailable?: boolean; licenseEnterprise?: boolean };
-  aegis: { hookAvailable: boolean; enterpriseBuild: boolean; seamAvailable?: boolean; licenseEnterprise?: boolean };
+  /**
+   * Guardrail enforcement on tool calls. Community — there is no license fold
+   * here, only "is the hook wired at all". OPTIONAL because this UI can be
+   * served by an API binary that predates the rename.
+   */
+  guardrail?: { available: boolean };
+  /**
+   * @deprecated Pre-rename spelling of `guardrail`, read only as a fallback.
+   * On that older binary the hook really was enterprise-gated, so a `false`
+   * here is an accurate "not enforcing" for that deployment.
+   */
+  aegis?: { hookAvailable: boolean };
   mcpHub?: { available: boolean; enterpriseBuild: boolean; licenseEnterprise?: boolean };
   internalProviders?: InternalProviderInfo[];
+}
+
+/**
+ * A guardrail the operator can bind to this server's tool calls.
+ * `toolBound` is what the hint column reports: a guardrail only touches an MCP
+ * call through its `tool.pre` / `tool.post` bindings, and a legacy record lifts
+ * onto `input.pre`/`output.pre` only — so most existing guardrails will bind
+ * nothing here until someone adds a tool hook to them.
+ */
+interface GuardrailOption {
+  key: string;
+  name: string;
+  enabled: boolean;
+  toolBound: boolean;
 }
 
 interface InternalInstanceOption {
@@ -90,6 +119,11 @@ interface McpMemberOption {
 
 const NEW_HUB_VALUE = '__new__';
 const NO_HUB_VALUE = '__none__';
+// An ABSENT guardrailKey means "use the tenant's default tool guardrail"
+// (IMcpGuardrailConfig), which is a real choice an operator makes — so it needs
+// its own option value rather than the empty string, which Mantine's Select
+// treats as "nothing selected".
+const DEFAULT_GUARDRAIL_VALUE = '__default__';
 // Providers other than Knowledge Base aren't scoped to a per-instance
 // resource yet (one MCP server covers the whole project) — this must match
 // the instance key each such provider's `listInstances()` returns.
@@ -134,9 +168,10 @@ interface FormValues {
   protocolSse: boolean;
   accessMode: AccessMode;
   endpointSlug: string;
-  // aegis
-  aegisMode: AegisMode;
-  aegisShieldId: string;
+  // guardrail
+  guardrailMode: GuardrailBindingMode;
+  /** Guardrail key, or DEFAULT_GUARDRAIL_VALUE for the default tool guardrail. */
+  guardrailKey: string;
 }
 
 /** Parse "KEY=value" lines into an env map (ignores blanks and comments). */
@@ -166,7 +201,7 @@ export default function CreateMcpModal({
 }: CreateMcpModalProps) {
   const [loading, setLoading] = useState(false);
   const [capabilities, setCapabilities] = useState<McpCapabilities | null>(null);
-  const [shields, setShields] = useState<Array<{ value: string; label: string }>>([]);
+  const [guardrails, setGuardrails] = useState<GuardrailOption[]>([]);
   const [ragModules, setRagModules] = useState<InternalInstanceOption[]>([]);
   const [hubs, setHubs] = useState<McpHubOption[]>([]);
   const [memberOptions, setMemberOptions] = useState<McpMemberOption[]>([]);
@@ -204,8 +239,8 @@ export default function CreateMcpModal({
       protocolSse: true,
       accessMode: 'token',
       endpointSlug: '',
-      aegisMode: 'off',
-      aegisShieldId: '',
+      guardrailMode: 'off',
+      guardrailKey: DEFAULT_GUARDRAIL_VALUE,
     },
     validate: (values) => {
       const errors: Partial<Record<keyof FormValues, string>> = {};
@@ -259,17 +294,30 @@ export default function CreateMcpModal({
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => setCapabilities(data))
       .catch(() => setCapabilities(null));
-    // Aegis shields are enterprise; degrade silently when absent.
-    fetch('/api/aegis/shields')
+    // Guardrails available to bind to this server's tool calls. Every guardrail
+    // is listed, not just the tool-bound ones — binding one that has no tool
+    // hook yet is a legitimate half-finished setup, so it is flagged in the
+    // option label rather than hidden.
+    fetch('/api/guardrails')
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
-        const list = Array.isArray(data?.shields) ? data.shields : [];
-        setShields(list.map((s: { id?: string; _id?: string; name?: string; key?: string }) => ({
-          value: String(s.id ?? s._id ?? s.key ?? ''),
-          label: String(s.name ?? s.key ?? s.id ?? ''),
-        })).filter((s: { value: string }) => s.value));
+        const list = Array.isArray(data?.guardrails) ? data.guardrails : [];
+        setGuardrails(list.map((g: {
+          key?: string;
+          name?: string;
+          enabled?: boolean;
+          hooks?: { bindings?: Record<string, { enabled?: boolean } | undefined> };
+        }) => ({
+          key: String(g.key ?? ''),
+          name: String(g.name ?? g.key ?? ''),
+          enabled: g.enabled !== false,
+          toolBound: Boolean(
+            g.hooks?.bindings?.['tool.pre']?.enabled
+            || g.hooks?.bindings?.['tool.post']?.enabled,
+          ),
+        })).filter((g: GuardrailOption) => g.key));
       })
-      .catch(() => setShields([]));
+      .catch(() => setGuardrails([]));
     // Knowledge Base modules — instances for the "internal" (Knowledge Base) source.
     fetch('/api/rag/modules?status=active')
       .then((r) => (r.ok ? r.json() : null))
@@ -386,8 +434,16 @@ export default function CreateMcpModal({
         endpointSlug: v.accessMode === 'public' && v.endpointSlug.trim()
           ? v.endpointSlug.trim()
           : undefined,
-        aegis: v.aegisMode !== 'off' || v.aegisShieldId
-          ? { mode: v.aegisMode, shieldId: v.aegisShieldId || undefined }
+        // Omitted entirely when off — an absent block and `{ mode: 'off' }`
+        // mean the same thing to the gateway, and a guardrail key without a
+        // mode to run it in would just be dead configuration.
+        guardrail: v.guardrailMode !== 'off'
+          ? {
+              mode: v.guardrailMode,
+              guardrailKey: v.guardrailKey === DEFAULT_GUARDRAIL_VALUE
+                ? undefined
+                : v.guardrailKey,
+            }
           : undefined,
       };
 
@@ -542,23 +598,26 @@ export default function CreateMcpModal({
   };
 
   const selectedRagModule = ragModules.find((m) => m.key === v.internalInstanceKey);
+  // undefined while the default option is selected — that binding names no
+  // guardrail at all, so there is nothing to warn about.
+  const selectedGuardrail = guardrails.find((g) => g.key === v.guardrailKey);
 
   const sandboxAvailable = capabilities?.stdioSandbox.available ?? false;
   const subprocessEnabled = capabilities?.stdioSubprocess.enabled ?? true;
   const uvxAvailable = capabilities?.stdioSubprocess.uvx ?? true;
-  const aegisAvailable = capabilities?.aegis.hookAvailable ?? false;
+  // `guardrail.available` on a current API; `aegis.hookAvailable` is the
+  // pre-rename key, read so this UI still tells the truth against an API binary
+  // that has not been redeployed yet.
+  const guardrailAvailable = capabilities?.guardrail?.available
+    ?? capabilities?.aegis?.hookAvailable
+    ?? false;
   // Distinguish "off because no ENTERPRISE license" (upgradeable on this SaaS
   // deployment) from "off because community build" (edition has no seam).
   const sandboxNeedsPlan = (capabilities?.stdioSandbox.seamAvailable ?? capabilities?.stdioSandbox.enterpriseBuild ?? false)
     && !(capabilities?.stdioSandbox.licenseEnterprise ?? false);
-  const aegisNeedsPlan = (capabilities?.aegis.seamAvailable ?? capabilities?.aegis.enterpriseBuild ?? false)
-    && !(capabilities?.aegis.licenseEnterprise ?? false);
   const sandboxUnavailableReason = sandboxNeedsPlan
     ? 'Persistent sandbox execution requires an active Enterprise plan. Upgrade under Dashboard → License to enable it.'
     : 'Persistent sandbox execution is part of the Enterprise edition and is not available on this deployment.';
-  const aegisUnavailableReason = aegisNeedsPlan
-    ? 'Aegis shield enforcement requires an active Enterprise plan. The binding is saved but stays inactive until you upgrade under Dashboard → License.'
-    : 'Aegis enforcement is part of the Enterprise edition. The binding is saved and becomes active once Aegis is available.';
 
   const summary = (
     <>
@@ -648,8 +707,13 @@ export default function CreateMcpModal({
         {v.accessMode === 'public' ? (
           <SummaryKV label="Custom path" value={v.endpointSlug.trim() || 'Auto-generated'} />
         ) : null}
-        {v.aegisMode !== 'off' ? (
-          <SummaryKV label="Aegis" value={`${v.aegisMode}${v.aegisShieldId ? ' · shield' : ''}`} />
+        {v.guardrailMode !== 'off' ? (
+          <SummaryKV
+            label="Guardrail"
+            value={`${v.guardrailMode} · ${v.guardrailKey === DEFAULT_GUARDRAIL_VALUE
+              ? 'default tool guardrail'
+              : v.guardrailKey}`}
+          />
         ) : null}
       </SummaryGroup>
 
@@ -1114,45 +1178,61 @@ export default function CreateMcpModal({
 
       <FormSection
         number={v.sourceType === 'stdio' || v.sourceType === 'internal' || v.sourceType === 'composite' ? 4 : 5}
-        title="Aegis shield"
-        description="Guardrail enforcement on tool calls (evaluated by the Aegis enforcement plane)."
+        title="Guardrail"
+        description="Guardrail enforcement on this server's tool calls, on the tool.pre and tool.post hooks."
         done
       >
-        {capabilities && !aegisAvailable ? (
-          <Alert color={aegisNeedsPlan ? 'yellow' : 'gray'} icon={<IconInfoCircle size={16} />}>
-            {aegisUnavailableReason}
+        {capabilities && !guardrailAvailable ? (
+          <Alert color="gray" icon={<IconInfoCircle size={16} />}>
+            Tool-call enforcement is not wired on this deployment. The binding is saved and starts
+            enforcing as soon as it is.
           </Alert>
         ) : null}
         <FormRow cols={2}>
-          <FormField label="Mode">
-            <ChipPicker<AegisMode>
+          <FormField
+            label="Mode"
+            hint={v.guardrailMode === 'enforce'
+              ? 'A blocking finding fails the tool call before it reaches the upstream.'
+              : v.guardrailMode === 'monitor'
+                ? 'Findings are recorded, but the call still runs — use this to see what would be blocked.'
+                : 'No guardrail runs for this server’s tool calls.'}
+          >
+            <ChipPicker<GuardrailBindingMode>
               options={[
                 { value: 'off', label: 'Off' },
                 { value: 'monitor', label: 'Monitor' },
                 { value: 'enforce', label: 'Enforce' },
               ]}
-              value={v.aegisMode}
-              onChange={(val) => form.setFieldValue('aegisMode', val as AegisMode)}
+              value={v.guardrailMode}
+              onChange={(val) => form.setFieldValue('guardrailMode', val as GuardrailBindingMode)}
             />
           </FormField>
-          <FormField label="Shield" optional>
-            {shields.length > 0 ? (
-              <Select
-                data={shields}
-                placeholder="Select a shield"
-                clearable
-                value={v.aegisShieldId || null}
-                onChange={(val) => form.setFieldValue('aegisShieldId', val ?? '')}
-              />
-            ) : (
-              <TextInput
-                placeholder="Shield ID"
-                disabled={v.aegisMode === 'off'}
-                {...form.getInputProps('aegisShieldId')}
-              />
-            )}
+          <FormField
+            label="Guardrail"
+            hint="The default tool guardrail is the tenant-wide one every unbound tool call already runs through."
+          >
+            <Select
+              disabled={v.guardrailMode === 'off'}
+              allowDeselect={false}
+              data={[
+                { value: DEFAULT_GUARDRAIL_VALUE, label: 'Default tool guardrail' },
+                ...guardrails.map((g) => ({
+                  value: g.key,
+                  label: `${g.name}${g.enabled ? '' : ' · disabled'}${g.toolBound ? ' · tool hooks' : ''}`,
+                })),
+              ]}
+              value={v.guardrailKey}
+              onChange={(val) => form.setFieldValue('guardrailKey', val ?? DEFAULT_GUARDRAIL_VALUE)}
+            />
           </FormField>
         </FormRow>
+        {v.guardrailMode !== 'off' && selectedGuardrail && !selectedGuardrail.toolBound ? (
+          <Alert color="yellow" icon={<IconInfoCircle size={16} />}>
+            “{selectedGuardrail.name}” has no tool.pre or tool.post hook enabled, so binding it here
+            changes nothing yet. Add a tool hook to it under Dashboard → Guardrails, or bind the
+            default tool guardrail instead.
+          </Alert>
+        ) : null}
       </FormSection>
     </FormShell>
   );

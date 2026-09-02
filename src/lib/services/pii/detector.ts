@@ -10,7 +10,20 @@
  *   - replacement string generation via the category's mask strategy
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 import type { PiiLanguage, IPiiCustomPattern } from '@/lib/database';
+// The regex family's interruptible sweep — a V8 context with a timeout, the
+// only thing that can stop a backtracking regex. Custom patterns are
+// tenant-authored and run on caller-controlled text, so they get exactly the
+// bounds the `regex` family's rules get, from the same implementation.
+import {
+  DEFAULT_MAX_MATCHES_PER_RULE,
+  DEFAULT_MAX_REGEX_INPUT_CHARS,
+  DEFAULT_REGEX_BUDGET_MS,
+  MAX_REGEX_SOURCE_CHARS,
+  execRuleBounded,
+} from '@/lib/services/guardrail/families/regex';
 import type { PiiFinding, PiiVault } from './types';
 import {
   PII_CATEGORIES,
@@ -23,6 +36,81 @@ import {
 } from './categories';
 
 const SEVERITY_WEIGHT: Record<PiiSeverity, number> = { low: 1, medium: 2, high: 3 };
+
+// ── Custom-pattern bounds ─────────────────────────────────────────────────
+
+/** Longest custom pattern SOURCE accepted. Same cap as a `regex` family rule:
+ *  512 characters bounds how much nesting one pattern can express. */
+export const MAX_CUSTOM_PATTERN_SOURCE_CHARS = MAX_REGEX_SOURCE_CHARS;
+
+/**
+ * A custom pattern that did not run, or did not run to completion, during one
+ * `detect()` call. Surfaced through `withCustomPatternBudget` so the guardrail
+ * family can report the policy as degraded instead of silently passing.
+ */
+export interface CustomPatternSkip {
+  patternId: string;
+  categoryId: string;
+  reason: string;
+}
+
+interface CustomPatternReport {
+  skipped: CustomPatternSkip[];
+  budgetMs: number;
+  /** Epoch ms. ONE deadline for every `detect()` call made under the report. */
+  deadline: number;
+}
+
+/**
+ * `detect()` is synchronous and is reached through `scanWithPolicy`, which
+ * builds the detector config itself — there is no parameter to thread a report
+ * through. The report therefore travels on the async context: a caller wraps
+ * its scan in `withCustomPatternBudget` and every `detect()` under it, however
+ * deep, records into the same report and spends the same budget. Concurrent
+ * requests each get their own store, so nothing leaks between them.
+ */
+const reportStore = new AsyncLocalStorage<CustomPatternReport>();
+
+/**
+ * Run `fn` with ONE custom-pattern budget shared by every `detect()` call it
+ * makes, and collect what those calls could not finish.
+ *
+ * Shared, not per call, on purpose: the PII family scans the whole subject
+ * once and then every segment whose normalised form differs, so a per-call
+ * budget would let a forty-segment tool result buy forty stalls.
+ */
+export async function withCustomPatternBudget<T>(
+  fn: () => Promise<T>,
+  budgetMs = DEFAULT_REGEX_BUDGET_MS,
+): Promise<{ result: T; skipped: CustomPatternSkip[] }> {
+  const report: CustomPatternReport = { skipped: [], budgetMs, deadline: Date.now() + budgetMs };
+  const result = await reportStore.run(report, fn);
+  return { result, skipped: report.skipped };
+}
+
+function customFlags(p: Pick<IPiiCustomPattern, 'flags'>): string {
+  return (p.flags ?? '').includes('g') ? (p.flags ?? 'g') : `${p.flags ?? ''}g`;
+}
+
+/**
+ * Why a custom pattern will be refused at runtime, or null when it will run.
+ * Exported for the save path: a pattern rejected here is a pattern `detect()`
+ * skips, so a validator built on it rejects exactly what the scan would drop.
+ */
+export function explainCustomPatternError(
+  p: Pick<IPiiCustomPattern, 'pattern' | 'flags'>,
+): string | null {
+  if (!p.pattern || typeof p.pattern !== 'string') return 'pattern is empty, so it can never fire';
+  if (p.pattern.length > MAX_CUSTOM_PATTERN_SOURCE_CHARS) {
+    return `pattern source is ${p.pattern.length} characters, over the ${MAX_CUSTOM_PATTERN_SOURCE_CHARS} character limit`;
+  }
+  try {
+    new RegExp(p.pattern, customFlags(p));
+    return null;
+  } catch (error) {
+    return `pattern does not compile: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
 
 /** Configuration consumed by `detect()`. */
 export interface DetectorConfig {
@@ -45,6 +133,9 @@ interface CompiledPattern {
   validate?: (value: string) => boolean;
   label: string;
   mask: PiiMaskStrategy;
+  /** The tenant pattern this came from — present on `source: 'custom'` only,
+   *  so a skip can name it. */
+  custom?: IPiiCustomPattern;
 }
 
 function compileBuiltin(
@@ -69,10 +160,13 @@ function compileCustom(
 ): CompiledPattern | null {
   if (!p.enabled) return null;
   if (!p.pattern || typeof p.pattern !== 'string') return null;
+  // The source cap is enforced HERE, at compile, so that the save path can
+  // reject the same pattern by calling `explainCustomPatternError` and the
+  // scan refuses it even when a row was written past the validator.
+  if (p.pattern.length > MAX_CUSTOM_PATTERN_SOURCE_CHARS) return null;
   let regex: RegExp;
   try {
-    const flags = (p.flags ?? '').includes('g') ? (p.flags ?? 'g') : `${p.flags ?? ''}g`;
-    regex = new RegExp(p.pattern, flags);
+    regex = new RegExp(p.pattern, customFlags(p));
   } catch {
     return null;
   }
@@ -83,6 +177,7 @@ function compileCustom(
     regex,
     label: p.labels?.[locale] ?? p.label,
     mask: { kind: 'fixed', replacement: `[REDACTED_${p.categoryId.toUpperCase()}]` },
+    custom: p,
   };
 }
 
@@ -188,22 +283,55 @@ export function detect(
   if (!text) return [];
 
   const locale: PiiLanguage = config.locale ?? 'en';
-  const compiled: CompiledPattern[] = [];
+  const builtins: CompiledPattern[] = [];
+  const customs: CompiledPattern[] = [];
+  const report = reportStore.getStore();
+  const skip = (p: IPiiCustomPattern, reason: string): void => {
+    report?.skipped.push({ patternId: p.id, categoryId: p.categoryId, reason });
+  };
 
   // Built-ins
   for (const cat of pickActiveBuiltins(config)) {
-    compiled.push(compileBuiltin(cat, locale));
+    builtins.push(compileBuiltin(cat, locale));
   }
 
   // Custom patterns
   for (const p of config.customPatterns ?? []) {
+    if (!p.enabled) continue;
     if (!customAppliesToLanguages(p, config.languages)) continue;
     const c = compileCustom(p, locale);
-    if (c) compiled.push(c);
+    if (c) {
+      customs.push(c);
+    } else {
+      skip(p, explainCustomPatternError(p) ?? 'pattern does not compile');
+    }
   }
 
   const raw: PiiFinding[] = [];
-  for (const c of compiled) {
+  const push = (c: CompiledPattern, value: string, start: number): void => {
+    if (c.validate && !c.validate(value)) return;
+    const end = start + value.length;
+    const replacement = actionMode === 'redact'
+      ? redactReplacement(c.categoryId)
+      : buildReplacement(value, c.mask, c.categoryId);
+    raw.push({
+      category: c.categoryId,
+      source: c.source,
+      severity: c.severity,
+      value,
+      start,
+      end,
+      label: c.label,
+      message: formatMessage(c.label, locale),
+      action: actionMode,
+      block: actionMode === 'block',
+      replacement,
+    });
+  };
+
+  // Built-in patterns are vetted, fixed and anchored; they sweep on the main
+  // thread as they always have.
+  for (const c of builtins) {
     c.regex.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = c.regex.exec(text)) !== null) {
@@ -212,26 +340,46 @@ export function detect(
         c.regex.lastIndex += 1;
         continue;
       }
-      const value = m[0];
-      if (c.validate && !c.validate(value)) continue;
-      const start = m.index;
-      const end = start + value.length;
-      const replacement = actionMode === 'redact'
-        ? redactReplacement(c.categoryId)
-        : buildReplacement(value, c.mask, c.categoryId);
-      raw.push({
-        category: c.categoryId,
-        source: c.source,
-        severity: c.severity,
-        value,
-        start,
-        end,
-        label: c.label,
-        message: formatMessage(c.label, locale),
-        action: actionMode,
-        block: actionMode === 'block',
-        replacement,
-      });
+      push(c, m[0], m.index);
+    }
+  }
+
+  // Custom patterns are tenant-authored, so they sweep under the regex family's
+  // bound: one wall-clock budget for the whole list (shared across every
+  // `detect()` call under a `withCustomPatternBudget`), an input cap, a match
+  // cap, and a V8 timeout that can actually interrupt `(a+)+$`. A pattern that
+  // cannot finish is dropped and reported — a partial sweep would make the
+  // verdict depend on machine speed.
+  if (customs.length > 0) {
+    if (text.length > DEFAULT_MAX_REGEX_INPUT_CHARS) {
+      for (const c of customs) {
+        if (c.custom) skip(c.custom, `input of ${text.length} characters is over the ${DEFAULT_MAX_REGEX_INPUT_CHARS} scan limit`);
+      }
+    } else {
+      const budgetMs = report?.budgetMs ?? DEFAULT_REGEX_BUDGET_MS;
+      const deadline = report?.deadline ?? Date.now() + budgetMs;
+      for (const c of customs) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) {
+          if (c.custom) skip(c.custom, `not run: the ${budgetMs}ms scan budget was spent by earlier patterns`);
+          continue;
+        }
+        const swept = execRuleBounded(c.regex, text, undefined, DEFAULT_MAX_MATCHES_PER_RULE, remaining);
+        if (swept.timedOut) {
+          if (c.custom) {
+            skip(
+              c.custom,
+              `pattern did not finish within the ${budgetMs}ms scan budget on ${text.length} characters — ` +
+                'it backtracks catastrophically and must be rewritten (nested quantifiers such as (a+)+ are the usual cause)',
+            );
+          }
+          continue;
+        }
+        for (const m of swept.matches) push(c, m.whole, m.index);
+        if (swept.hitCap && c.custom) {
+          skip(c.custom, `stopped after ${DEFAULT_MAX_MATCHES_PER_RULE} matches`);
+        }
+      }
     }
   }
 

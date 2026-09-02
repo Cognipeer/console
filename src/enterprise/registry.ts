@@ -16,6 +16,33 @@
 
 import type { FastifyInstance } from 'fastify';
 
+/**
+ * THE SEAM CONTRACT VERSION, declared in code so CI can check it.
+ *
+ * It used to live only in `console-ee/COMPAT.json`, which meant nothing could
+ * verify that the community tree an overlay is applied to actually speaks the
+ * shape that overlay expects. The build workflows resolve the community source
+ * from `compatibleCommunity` alone and take the HIGHEST matching tag
+ * (`console-saas-build.yml:33-58`), so a range whose floor still admits an
+ * older line silently selects it, and the mismatch surfaces as an overlay
+ * typecheck error naming none of this. That is a discipline-enforced
+ * invariant; this constant makes it machine-enforced.
+ *
+ * Bump it whenever the SHAPE of this file changes — a collection added or
+ * removed, a signature changed — and bump `COMPAT.json.seamContractVersion`
+ * with it. The overlay file that REPLACES this one must declare the same
+ * number.
+ *
+ * 3 — the guardrail hook plane replaced the Aegis enforcement plane:
+ *     `EnterpriseDbMethods` lost the nine `*Aegis*` methods,
+ *     `McpGuardrailContext` gained `guardrailKey`, and `mcpGuardrailHook`
+ *     is now claimed by the community bridge rather than assigned by the
+ *     overlay.
+ */
+export const SEAM_CONTRACT_VERSION = 3;
+
+
+
 // ── Deterministic agent insights ──────────────────────────────────────────
 /**
  * Derives the deterministic per-agent / per-model analysis (tool-menu size,
@@ -180,16 +207,33 @@ export interface McpSandboxRunner {
 
 export const mcpSandboxRunner: { current: McpSandboxRunner | null } = { current: null };
 
-// ── MCP Aegis guardrail seam ──────────────────────────────────────────────
-// Pre/post hooks around every MCP tool call. The enterprise overlay wires
-// these to the Aegis enforcement plane (shield evaluation); community is a
-// no-op. A pre-hook may block the call by returning `{ allowed: false }`.
+// ── MCP guardrail seam ────────────────────────────────────────────────────
+// Pre/post hooks around every MCP tool call. This USED to be an enterprise-only
+// seam wired to the Aegis enforcement plane; it is now filled by the community
+// guardrail hook plane (`tool.pre` / `tool.post`) and needs no overlay and no
+// license. A pre-hook may block the call by returning `{ allowed: false }`.
+//
+// The seam SHAPE is deliberately unchanged so the overlay's own copy of this
+// file keeps satisfying it for the release in which both exist.
 export interface McpGuardrailContext {
   tenantId: string;
   projectId?: string;
   serverKey: string;
   toolName: string;
+  /**
+   * @deprecated Dead reference. Every stored value is an id from the removed
+   * `aegis_shields` table, so resolving one finds nothing. Retained ONLY so an
+   * overlay implementation still compiles; `mcpService` no longer sets it and
+   * no implementation may read it. Use `guardrailKey`.
+   */
   shieldId?: string;
+  /**
+   * Which guardrail evaluates this call. Absent means "the tenant's default
+   * tool guardrail", which is what keeps a server armed with no per-server
+   * setup.
+   */
+  guardrailKey?: string;
+  /** Server-level binding. Kept in the MCP vocabulary ('off', not 'disabled'). */
   mode: 'off' | 'monitor' | 'enforce';
 }
 
@@ -204,6 +248,36 @@ export interface McpGuardrailHook {
   ): Promise<{ allowed: boolean; reason?: string; result?: unknown }>;
 }
 
+/**
+ * Filled by `consoleMcpGuardrailHook` — the COMMUNITY hook-plane bridge — not
+ * by an overlay, so a plain community build has a live guardrail on every MCP
+ * tool call. `ensureMcpGuardrailHook()` (guardrail/hooks/mcpHook.ts) is the ONE
+ * way to reach this ref: it fills it on first read and hands back whatever
+ * already claimed it.
+ *
+ * ── WHY THE ASSIGNMENT IS NOT ON THE NEXT LINE ─────────────────────────────
+ * It cannot be. This file is imported by `sqlite.provider.ts` and
+ * `mongodb.provider.ts`, both of which call `applyEnterprise*DbMixins` at
+ * MODULE SCOPE (`const FinalBase = ...`, sqlite.provider.ts:97 /
+ * mongodb.provider.ts:96). The bridge reaches `@/lib/database` through the hook
+ * engine, so importing it here closes the cycle
+ *   registry -> mcpHook -> engine -> @/lib/database -> *.provider -> registry
+ * and, whenever registry is the module that ENTERS that cycle (bootstrap.ts,
+ * api/plugin.ts), the provider re-enters this file mid-evaluation and reads
+ * `enterpriseMongoDbMixins` while it is still in its TDZ:
+ *   ReferenceError: Cannot access 'enterpriseMongoDbMixins' before initialization
+ * Verified, not theorised. That is also why the file header demands this module
+ * stay dependency-free — the rule has teeth, and this ref is where you find out.
+ *
+ * ── AND WHY NOBODY MAY *READ* IT AT MODULE SCOPE EITHER ────────────────────
+ * The mirror image of the above, and it bit us once already. In the enterprise
+ * overlay this file additionally imports ~20 Fastify plugins, and one of those
+ * graphs comes back through `agentService -> mcp/index -> mcpService`. Imports
+ * are hoisted, so that runs before the `= { current: null }` initialiser below:
+ * a module-scope read there sees the binding before it exists and kills boot
+ * with `TypeError: Cannot read properties of undefined (reading 'current')`.
+ * Resolve the seam at CALL time — `ensureMcpGuardrailHook()` does exactly that.
+ */
 export const mcpGuardrailHook: { current: McpGuardrailHook | null } = { current: null };
 
 // ── Edition flag ──────────────────────────────────────────────────────────

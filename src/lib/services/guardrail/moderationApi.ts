@@ -115,7 +115,7 @@ function toResult(findings: GuardrailFinding[]): ModerationResult {
     // Any real finding flags the input — including PII / prompt-shield
     // findings when the guardrail has those policies enabled (they stay
     // visible in `findings` rather than the fixed category map). Fail-open
-    // `evaluation_error` findings are informational (the check did not run)
+    // `evaluation_error` findings are informational (the policy did not run)
     // and must not flag the input; fail-closed ones block and do flag.
     flagged: findings.some((f) => f.block || f.category !== 'evaluation_error'),
     categories,

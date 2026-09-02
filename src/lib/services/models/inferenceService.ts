@@ -53,14 +53,56 @@ import {
   lookupCache,
   storeInCache,
 } from './semanticCacheService';
-import { evaluateGuardrail } from '@/lib/services/guardrail';
+import { createStreamGate, evaluateGuardrail } from '@/lib/services/guardrail';
+import type { HookActor, HookScope } from '@/lib/services/guardrail';
+// Not on the barrel (deliberately — see `guardrail/index.ts`). Read here only to
+// version the semantic-cache key by the bound output guardrails' `updatedAt`.
+import { getCachedGuardrail } from '@/lib/services/guardrail/hooks/recordCache';
+// The gate's wire types are not re-exported from the guardrail barrel yet. A
+// type-only import is erased at build time, so naming the module directly adds
+// no runtime import edge — only the value import above goes through the barrel.
+import type {
+  OpenAiStreamChunkLike,
+  StreamGateEmission,
+} from '@/lib/services/guardrail/hooks/streamGate';
+// Also not on the barrel yet, and this one IS a value import. Deep-importing it
+// is still the right call: `binding.ts` is pure (one type-only import, no DB, no
+// engine) so the extra module edge costs nothing, and the alternative —
+// re-deriving "which guardrails does this model bind to this hook?" locally —
+// is exactly the drift the module exists to prevent.
+import { resolveBindings } from '@/lib/services/guardrail/hooks/binding';
+import { resolveUsageAttribution } from '@/lib/services/usage/usageEvents';
 
 const encoder = new TextEncoder();
 
 // ── Guardrail block error ────────────────────────────────────────────────
+
+/**
+ * A finding as it may leave the process in an error body.
+ *
+ * `value` is the MATCHED STRING — the credential the secrets family found, the
+ * card number the PII family found — and `span` is where it sits. The
+ * evaluation logger masks `value` before storage for exactly that reason; the
+ * HTTP error path did not, so a blocked completion handed the client the secret
+ * it was blocked for. Both routes (`/chat/completions`, `/messages`) serialise
+ * `error.findings` as-is, so the stripping happens HERE, where the error is
+ * built, and covers every route at once. Everything that identifies the policy
+ * decision (type, category, severity, message, code, action, block) is kept.
+ */
+export function clientSafeFindings(findings: readonly unknown[]): unknown[] {
+  return findings.map((finding) => {
+    if (!finding || typeof finding !== 'object') return finding;
+    const { value: _value, span: _span, ...safe } = finding as Record<string, unknown>;
+    void _value;
+    void _span;
+    return safe;
+  });
+}
+
 export class GuardrailBlockError extends Error {
   readonly guardrailKey: string;
   readonly action: string;
+  /** Client-safe: `value` and `span` are stripped at construction. */
   readonly findings: unknown[];
 
   constructor(
@@ -73,15 +115,57 @@ export class GuardrailBlockError extends Error {
     this.name = 'GuardrailBlockError';
     this.guardrailKey = guardrailKey;
     this.action = action;
-    this.findings = findings;
+    this.findings = clientSafeFindings(findings);
   }
 }
 
+/**
+ * The bound output guardrails as `key@updatedAt` — the same `policyVersion`
+ * spelling `HookVerdict` uses — for the semantic-cache variant key.
+ *
+ * Reads the RECORD CACHE (TTL'd, tenant-scoped), not the database: a request
+ * that pays for an embedding and a vector search can afford a memoised record
+ * read, but not a DB round trip per bound key. A record that cannot be read —
+ * cache miss into a failing database, a key that no longer exists — falls back
+ * to the bare key, so the lookup degrades to "keyed by binding" rather than
+ * failing the request. An empty list is returned as `[]` on purpose: "no output
+ * guardrail" is itself a policy that must not share entries with a guarded one.
+ */
+async function outputGuardrailPolicyVersions(
+  tenantDbName: string,
+  projectId: string | undefined,
+  guardrailKeys: readonly string[],
+): Promise<string[]> {
+  return Promise.all(
+    guardrailKeys.map(async (key) => {
+      try {
+        const record = await getCachedGuardrail(tenantDbName, key, projectId ?? null);
+        const updatedAt = record?.updatedAt;
+        const stamp = updatedAt instanceof Date && !Number.isNaN(updatedAt.getTime())
+          ? updatedAt.toISOString()
+          : typeof updatedAt === 'string'
+            ? updatedAt
+            : undefined;
+        return stamp ? `${key}@${stamp}` : key;
+      } catch {
+        return key;
+      }
+    }),
+  );
+}
+
 // ── Model guardrail enforcement ───────────────────────────────────────────
-// A guardrail attached to a model runs on every chat completion. The direction
-// is decided by the slot it is bound to: `inputGuardrailKey` checks the user
-// message before the model is called, `outputGuardrailKey` checks the assistant
-// response (non-streaming only). Blocking guardrails throw GuardrailBlockError.
+// Every guardrail a model binds runs on every chat completion. WHICH ones a
+// given hook gets is `resolveBindings`' answer, not this file's: a model may
+// carry the ordered `guardrails` list, or only the two legacy slots
+// (`inputGuardrailKey` / `outputGuardrailKey`), and the resolver projects the
+// second shape onto the first. For a legacy row that projection yields exactly
+// one key per hook, so everything below reduces to what it did before.
+//
+// `input.pre` checks the latest user message before the model is called,
+// `output.pre` the assistant response (non-streaming; the streamed answer is
+// gated by `createStreamGate` and audited post-hoc). Blocking guardrails throw
+// GuardrailBlockError.
 
 function guardrailContentToText(content: unknown): string {
   if (typeof content === 'string') return content;
@@ -143,7 +227,11 @@ async function enforceModelGuardrail(params: {
     requestId: params.requestId,
     source: params.source ?? 'chat.completions',
   });
-  if (!result.passed && result.findings.some((f) => f.block)) {
+  // `blocked`, NOT `passed`: `passed` is the counterfactual ("would a blocking
+  // finding have fired"), which stays true-to-form in monitor mode, while
+  // `blocked` is the guardrail's Mode-neutralised decision. Reading `passed`
+  // here is what made a Monitor guardrail keep refusing chat.completions.
+  if (result.blocked) {
     // Prefer the finding's own message: a fail-closed guardrail whose judge model
     // could not run already explains that, and reducing it to the bare category
     // `evaluation_error` threw that explanation away — leaving a provider
@@ -167,6 +255,122 @@ async function enforceModelGuardrail(params: {
   };
 }
 
+/** One guardrail's non-blocking findings, in the shape the response carries. */
+interface GuardrailAnnotationResult {
+  guardrail_key: string;
+  findings: unknown[];
+}
+
+/**
+ * A hook's entry in the response's `guardrails` extension field.
+ *
+ * `guardrail_key` + `findings` are the shape documented since the single-slot
+ * days (docs/guide/guardrails.md) and are LEFT ALONE for the one-guardrail case,
+ * which is every legacy row. When several guardrails contributed, the entry
+ * grows a `results` breakdown rather than picking a winner: `findings` becomes
+ * the concatenation over all of them — still a superset of what a consumer read
+ * before, so an existing reader keeps working — and `results` is what says which
+ * guardrail each finding came from. `guardrail_key` stays the FIRST contributor
+ * in binding order, matching the singular/plural convention the verdict shape
+ * already uses (`guardrailKey` + `guardrailKeys` in plugins/guardrails.ts).
+ */
+interface GuardrailAnnotation extends GuardrailAnnotationResult {
+  /** Per-guardrail attribution. Present only when more than one contributed. */
+  results?: GuardrailAnnotationResult[];
+}
+
+interface GuardrailChainOutcome {
+  /**
+   * Text after every redact-action rewrite in the chain; undefined when nothing
+   * rewrote it. Distinguishing "unchanged" from "rewritten to the same string"
+   * is what keeps the caller from cloning the request body for no reason.
+   */
+  redactedText?: string;
+  /** Guardrails that produced findings, in binding order. */
+  results: GuardrailAnnotationResult[];
+}
+
+/**
+ * Runs every guardrail bound to one hook, in binding order, and folds them.
+ *
+ * Two properties are load-bearing:
+ *
+ *  1. THE FIRST BLOCKER WINS. `enforceModelGuardrail` throws, and the loop is
+ *     sequential, so the GuardrailBlockError the caller sees — and therefore the
+ *     message the end user reads — always comes from the earliest blocking
+ *     guardrail in binding order. An operator who put the guardrail with the
+ *     friendlier refusal first meant it, and a Promise.all here would make that
+ *     message depend on which provider answered quickest.
+ *
+ *  2. REDACTIONS CHAIN. Guardrail N+1 evaluates the text as guardrail N left it,
+ *     not the original. Feeding each the original and keeping the last
+ *     `redactedText` would silently discard every earlier redaction — the
+ *     composed result would mask strictly less than the guardrails did
+ *     individually, which is the opposite of what composing them is for.
+ *
+ * A key that resolves to no record still throws (`evaluateGuardrail` does), as
+ * it always has: a model pointing at a deleted guardrail is a misconfiguration,
+ * and quietly running the rest of the chain would let it look enforced.
+ */
+async function enforceModelGuardrailChain(params: {
+  tenantDbName: string;
+  tenantId: string;
+  projectId: string;
+  guardrailKeys: string[];
+  text: string;
+  phase: 'input' | 'output';
+  requestId?: string;
+  source?: string;
+}): Promise<GuardrailChainOutcome> {
+  const results: GuardrailAnnotationResult[] = [];
+  let text = params.text;
+  let rewritten = false;
+
+  for (const guardrailKey of params.guardrailKeys) {
+    const outcome = await enforceModelGuardrail({
+      tenantDbName: params.tenantDbName,
+      tenantId: params.tenantId,
+      projectId: params.projectId,
+      guardrailKey,
+      text,
+      phase: params.phase,
+      requestId: params.requestId,
+      source: params.source,
+    });
+    // null = there was nothing to check (empty text). That can happen mid-chain
+    // when an earlier redaction emptied the message, and skipping is right:
+    // there is no subject left to adjudicate.
+    if (!outcome) continue;
+    if (outcome.redactedText !== undefined) {
+      text = outcome.redactedText;
+      rewritten = true;
+    }
+    if (outcome.findings.length > 0) {
+      results.push({
+        guardrail_key: outcome.guardrailKey,
+        findings: outcome.findings,
+      });
+    }
+  }
+
+  return { redactedText: rewritten ? text : undefined, results };
+}
+
+/** Collapses a chain's per-guardrail findings into one annotation entry. */
+function foldGuardrailAnnotation(
+  results: GuardrailAnnotationResult[],
+): GuardrailAnnotation | undefined {
+  if (results.length === 0) return undefined;
+  // Byte-identical to the pre-multi-binding shape, deliberately: no `results`
+  // key appears on a response that only ever had one guardrail on the hook.
+  if (results.length === 1) return results[0];
+  return {
+    ...results[0],
+    findings: results.flatMap((result) => result.findings),
+    results,
+  };
+}
+
 /** Rewrites the latest user message's textual content (used by the redact action). */
 function replaceLatestUserText(messages: unknown, newText: string): unknown {
   if (!Array.isArray(messages)) return messages;
@@ -184,12 +388,77 @@ function replaceLatestUserText(messages: unknown, newText: string): unknown {
 /** Attaches non-blocking guardrail findings to an OpenAI-shaped response. */
 function annotateResponseWithGuardrails(
   response: unknown,
-  annotations: Record<string, { guardrail_key: string; findings: unknown[] }>,
+  annotations: Record<string, GuardrailAnnotation>,
 ): unknown {
   if (!response || typeof response !== 'object' || Object.keys(annotations).length === 0) {
     return response;
   }
   return { ...(response as Record<string, unknown>), guardrails: annotations };
+}
+
+// ── Streaming guardrail enforcement helpers ───────────────────────────────
+
+/**
+ * The actor a gateway-side hook call is made on behalf of.
+ *
+ * `HookActor.id` is required to come from the AUTHENTICATED context and never
+ * from a caller-supplied field, so it is read from the same request-scoped
+ * attribution `logModelUsage` already writes onto every usage row. When there is
+ * no ambient request (a queued job, a unit test) it degrades to an anonymous
+ * system actor, which is safe on THIS door specifically: the only check that
+ * reads the actor is `tool_access`'s `allowedRoles`, and POLICY_VALID_HOOKS keeps
+ * that family off `output.stream.delta`.
+ */
+function gatewayActor(): HookActor {
+  const attribution = resolveUsageAttribution();
+  const kind: HookActor['kind'] =
+    attribution.actorType === 'user'
+      ? 'user'
+      : attribution.actorType === 'api_token'
+        ? 'api_token'
+        : 'system';
+  return {
+    id: attribution.userId ?? attribution.apiTokenId ?? '',
+    kind,
+    roles: [],
+  };
+}
+
+/**
+ * True when a frame the gate released actually put characters on the wire.
+ *
+ * This is what decides whether a later block has to tell the client to discard
+ * what it already rendered: a block that lands before the first character is a
+ * clean refusal, one that lands after it leaves half an answer on screen.
+ */
+function streamFrameHasContent(frame: OpenAiStreamChunkLike): boolean {
+  return (frame.choices ?? []).some((choice) => {
+    const content = choice.delta?.content;
+    return typeof content === 'string' && content.length > 0;
+  });
+}
+
+/**
+ * Hand a stream payload to the gate in the shape the gate declares.
+ *
+ * The only difference is `finish_reason`: `toOpenAIStreamChunk` infers it as
+ * `{} | null`, because LangChain types `response_metadata` as an open record.
+ * The wire value is a string or null, and the loop below already relies on
+ * exactly that (`typeof choice.finish_reason === 'string'`) — so the mismatch is
+ * narrowed here, where the assumption is stated, rather than cast away at the
+ * call site where it would be invisible.
+ */
+function toGateChunk(
+  payload: ReturnType<typeof toOpenAIStreamChunk>,
+): OpenAiStreamChunkLike {
+  return {
+    ...payload,
+    choices: payload.choices.map((choice) => ({
+      ...choice,
+      finish_reason:
+        typeof choice.finish_reason === 'string' ? choice.finish_reason : null,
+    })),
+  };
 }
 
 interface ChatRunnable {
@@ -843,6 +1112,18 @@ export interface ChatCompletionOutcome {
   cacheHit?: boolean;
   stream?: ReadableStream<Uint8Array>;
   routing?: IModelUsageRouting;
+  /**
+   * Verdict headers for a STREAMED answer, filled in as the stream unfolds —
+   * so it is only complete once the stream is.
+   *
+   * A guardrail block on a stream is discovered mid-response, long after the
+   * response headers were flushed, which is why the same facts are also written
+   * in-band (the `{ guardrail: { blocked, discardPrior } }` frame). A transport
+   * that can send trailers should announce these here and send them as
+   * trailers; one that cannot should ignore it and let the in-band frame do the
+   * talking. Present only on the streaming path.
+   */
+  streamHeaders?: Record<string, string>;
 }
 
 // ── Dynamic LLM resolution ────────────────────────────────────────────────
@@ -1086,42 +1367,53 @@ export async function handleChatCompletion(params: {
 
   ensureLlmModel(model);
 
-  // Input guardrail: check the latest user message before calling the model.
+  // Input guardrails: check the latest user message before calling the model.
   // Non-blocking findings (warn/flag) are surfaced on the response; redact
-  // findings rewrite the user message before it reaches the provider.
-  const guardrailAnnotations: Record<string, { guardrail_key: string; findings: unknown[] }> = {};
-  if (model.inputGuardrailKey) {
-    const inputOutcome = await enforceModelGuardrail({
+  // findings rewrite the user message before it reaches the provider, and chain
+  // through the rest of the bound guardrails.
+  const guardrailAnnotations: Record<string, GuardrailAnnotation> = {};
+  const inputGuardrailKeys = resolveBindings(model, 'input.pre');
+  if (inputGuardrailKeys.length > 0) {
+    const inputOutcome = await enforceModelGuardrailChain({
       tenantDbName,
       tenantId: model.tenantId,
       projectId,
-      guardrailKey: model.inputGuardrailKey,
+      guardrailKeys: inputGuardrailKeys,
       text: extractLatestUserText(body.messages),
       phase: 'input',
       requestId,
     });
-    if (inputOutcome?.redactedText !== undefined) {
+    if (inputOutcome.redactedText !== undefined) {
       body = { ...body, messages: replaceLatestUserText(body.messages, inputOutcome.redactedText) as typeof body.messages };
     }
-    if (inputOutcome && inputOutcome.findings.length > 0) {
-      guardrailAnnotations.input = {
-        guardrail_key: inputOutcome.guardrailKey,
-        findings: inputOutcome.findings,
-      };
-    }
+    const annotation = foldGuardrailAnnotation(inputOutcome.results);
+    if (annotation) guardrailAnnotations.input = annotation;
   }
 
   // Resolved before the cache lookup on purpose: the sampling parameters and
   // any passthrough body fields change what the model produces from the same
   // prompt, so they have to take part in the cache key.
   const invocation = resolveModelInvocationConfig(model, body);
+
+  // THE OUTPUT POLICY IS PART OF THE CACHE KEY. What gets cached is the
+  // response AFTER the `output.pre` chain (see `storeInCache` below), so an
+  // entry is only valid for a caller under the SAME output policy: a model
+  // whose binding changed, or a model with no output guardrail at all, must not
+  // be served a hit that was redacted — or NOT redacted — under a different
+  // one. Keyed on the guardrail's `policyVersion` (`key@updatedAt`) when the
+  // record is cheaply available from the record cache, so an edit to a policy
+  // also retires the entries produced under the old one.
+  const outputGuardrailKeys = resolveBindings(model, 'output.pre');
+  const cacheEnabled = !stream && tenantId && isSemanticCacheEnabled(model);
   const cacheVariantKey = buildCacheVariantKey({
     ...invocation.overrides,
     ...(invocation.extraBody ?? {}),
+    ...(cacheEnabled
+      ? { __outputGuardrails: await outputGuardrailPolicyVersions(tenantDbName, projectId, outputGuardrailKeys) }
+      : {}),
   });
 
   // Semantic cache: check for cached response before calling the model
-  const cacheEnabled = !stream && tenantId && isSemanticCacheEnabled(model);
   if (cacheEnabled && model.semanticCache) {
     try {
       const cacheResult = await lookupCache({
@@ -1274,6 +1566,71 @@ export async function handleChatCompletion(params: {
       created: completionCreated,
     };
 
+    // ── Real-time streaming enforcement ──────────────────────────────────
+    // Until now a streamed answer could only be audited AFTER the fact (see
+    // `auditStreamedOutput` below, whose own comment says why): the text was
+    // already in the caller's browser by the time the guardrail saw it. The
+    // gate withholds it behind a release frontier instead, adjudicates a window
+    // that overlaps what was already released — so a secret split across two
+    // provider chunks is still caught — and only then lets the characters out.
+    //
+    // Only the DETERMINISTIC families run per window; the gate enforces that
+    // itself. The LLM judge and the webhook family stay post-hoc, because a 4K
+    // answer is ~17 windows and nobody wants 17 judge calls or 17 third-party
+    // round trips on the token path.
+    //
+    // `audit: false` because `auditStreamedOutput` still owns the terminal
+    // `output.pre` pass on every exit — success, block and client hang-up
+    // alike. Letting the gate schedule its own would put two evaluation rows in
+    // the audit trail for one answer.
+    //
+    // Nothing is gated when the model binds no guardrail to the stream hook:
+    // constructing a gate for an empty key list buys a pass-through wrapper and
+    // an extra allocation per chunk.
+    //
+    // The two hooks are resolved SEPARATELY because a multi-binding model can
+    // scope a guardrail to the real-time gate and not to the terminal audit, or
+    // the other way round. On a legacy row both resolve to `outputGuardrailKey`
+    // — the resolver projects that slot onto `output.pre` AND
+    // `output.stream.delta` — so this is a no-op for the production majority.
+    const streamGuardrailKeys = resolveBindings(model, 'output.stream.delta');
+    const auditGuardrailKeys = resolveBindings(model, 'output.pre');
+
+    const streamHeaders: Record<string, string> = {};
+    const gate = streamGuardrailKeys.length > 0
+      ? createStreamGate({
+        scope: {
+          tenantId: model.tenantId,
+          tenantDbName,
+          projectId,
+          actor: gatewayActor(),
+          // Unlike `evaluateGuardrail`'s facade — which is reached from four
+          // different surfaces and has to answer 'api' — this call site knows
+          // exactly where it is.
+          surface: 'gateway',
+          source: 'chat.completions:stream',
+          requestId,
+          // The evaluation log has no traceId column; this ties one stream's
+          // window verdicts together and fills the block message's
+          // {{traceId}}. Reusing requestId keeps the two identifiers aligned,
+          // exactly as the legacy facade does.
+          traceId: requestId,
+        } satisfies HookScope,
+        guardrailKeys: streamGuardrailKeys,
+        // The gate cannot forward the provider's own chunk once it has delayed
+        // or rewritten that chunk's content, so it asks for the envelope those
+        // characters should arrive in. Identical to `toOpenAIStreamChunk`'s.
+        makeChunk: (text: string) => ({
+          id: completionId,
+          object: 'chat.completion.chunk',
+          created: completionCreated,
+          model: model.modelId,
+          choices: [{ index: 0, delta: { content: text }, finish_reason: null }],
+        }),
+        audit: false,
+      })
+      : null;
+
     const readable = new ReadableStream<Uint8Array>({
       async start(controller) {
         let aggregatedChunk: AIMessageChunk | null = null;
@@ -1309,14 +1666,22 @@ export async function handleChatCompletion(params: {
           };
         };
 
-        // Output guardrail (streaming): the text has already reached the
+        // Output guardrails (streaming): the text has already reached the
         // client, so this is a post-hoc audit — violations land in the
         // evaluation log and alert metrics rather than blocking the stream.
         // It runs on a cancelled stream too: those tokens were delivered, and
         // auditing only completed answers would let a caller skip the audit by
         // hanging up.
+        //
+        // One evaluation row PER BOUND GUARDRAIL, which is what the log's
+        // per-guardrail shape means; a legacy row still produces exactly one.
+        // They are started together rather than in sequence because these are
+        // independent audits: `evaluateGuardrail` throws for a key whose record
+        // is gone, and a sequential loop would let that one misconfiguration
+        // erase the audit trail of every guardrail behind it. `Promise.all`
+        // still surfaces the rejection to `fireAndForget`'s handler.
         const auditStreamedOutput = (source: string) => {
-          if (!model.outputGuardrailKey) return;
+          if (auditGuardrailKeys.length === 0) return;
 
           const streamedText = guardrailContentToText(
             (aggregatedChunk as { content?: unknown } | null)?.content,
@@ -1324,17 +1689,149 @@ export async function handleChatCompletion(params: {
           if (!streamedText.trim()) return;
 
           fireAndForget('guardrail-stream-output-audit', async () => {
-            await evaluateGuardrail({
-              tenantDbName,
-              tenantId: model.tenantId,
-              projectId,
-              guardrailKey: model.outputGuardrailKey!,
-              text: streamedText,
-              phase: 'output',
-              requestId,
-              source,
-            });
+            await Promise.all(
+              auditGuardrailKeys.map((guardrailKey) =>
+                evaluateGuardrail({
+                  tenantDbName,
+                  tenantId: model.tenantId,
+                  projectId,
+                  guardrailKey,
+                  text: streamedText,
+                  phase: 'output',
+                  requestId,
+                  source,
+                }),
+              ),
+            );
           });
+        };
+
+        // Set the moment a window blocks, and checked in the catch below BEFORE
+        // `abortController.signal.aborted` — the block path aborts the upstream
+        // on purpose, so without this a policy block would be filed as a client
+        // hang-up.
+        let blockedByGuardrail = false;
+        /** True once gated characters actually reached the socket. */
+        let releasedGatedText = false;
+
+        const emitGatedFrames = (frames: readonly OpenAiStreamChunkLike[]) => {
+          for (const frame of frames) {
+            if (streamFrameHasContent(frame)) releasedGatedText = true;
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify(frame)}\n\n`),
+            );
+          }
+        };
+
+        /**
+         * The terminal sequence for a guardrail block. THE ORDER IS
+         * LOAD-BEARING, and the last step is the one that makes it so.
+         */
+        const closeWithGuardrailBlock = (
+          verdict: StreamGateEmission['verdict'],
+        ) => {
+          blockedByGuardrail = true;
+          // A verdict is normally present, but `StreamGateEmission` types it as
+          // optional (a latched gate replays a block whose verdict it never
+          // had), and "blocked with no reason at all" is the one thing worse
+          // than blocking.
+          const blockMessage =
+            verdict?.message?.body ?? 'Response blocked by an output guardrail.';
+          // The verdict names the guardrail that actually blocked. Falling back
+          // to the FIRST stream-bound key keeps the old single-guardrail answer
+          // for a latched replay that carries no verdict, and stays deterministic
+          // now that there can be several.
+          const blockedKey = verdict?.guardrailKey ?? streamGuardrailKeys[0];
+
+          // 1. The OpenAI-native signal every SDK already understands. A client
+          //    that reads nothing else still learns the answer was filtered.
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify(
+              openAIStreamStopChunk(chunkOptions, 'content_filter'),
+            )}\n\n`),
+          );
+
+          // 2. Characters already rendered cannot be recalled, so say so on
+          //    both channels: a header for the transport (see
+          //    `ChatCompletionOutcome.streamHeaders` — a stream's headers are
+          //    long flushed by now, which is exactly why the same fact also
+          //    goes in-band) and a frame for the client holding the prefix.
+          if (releasedGatedText) {
+            streamHeaders['x-guardrail-partial'] = 'true';
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify({
+                guardrail: { blocked: true, discardPrior: true },
+              })}\n\n`),
+            );
+          }
+
+          // 3. The same error-frame shape the output-limit path emits, so a
+          //    caller has one place to look for "the gateway ended this".
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify({
+              error: {
+                type: 'guardrail_block',
+                code: verdict?.message?.reasonClass,
+                message: blockMessage,
+                guardrail_key: blockedKey,
+              },
+              request_id: requestId,
+            })}\n\n`),
+          );
+
+          // 4. ALWAYS. Withholding `[DONE]` leaves a client that reads to the
+          //    sentinel blocked on the socket instead of returning the error it
+          //    was just handed.
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+          controller.close();
+
+          // 5. ONLY NOW. Aborting first makes the provider iterator throw into
+          //    the catch below, which tests `abortController.signal.aborted`,
+          //    logs `status: 'cancelled'` and RETURNS — so none of the frames
+          //    above would ever be written, a policy block would be reported as
+          //    a user pressing stop, and the usage row would be wrong with it.
+          abortController.abort();
+
+          fireAndForget('log-stream-guardrail-block', () =>
+            logModelUsage(tenantDbName, model, {
+              requestId,
+              route: 'chat.completions',
+              // 'error' rather than a new status: the non-streaming path throws
+              // GuardrailBlockError and lands here as an error too, and the two
+              // halves of one feature must not report differently.
+              status: 'error',
+              providerRequest: sanitizeForLogging({
+                model: modelKey,
+                messages: body.messages,
+                overrides,
+                stream: true,
+                ...describeRequestContract(body),
+              }),
+              providerResponse: sanitizeForLogging({
+                guardrail_blocked: true,
+                guardrail_key: blockedKey,
+                codes: verdict?.codes,
+                risk_score: verdict?.riskScore,
+                partial_delivery: releasedGatedText,
+                // The provider produced this whether or not we delivered it.
+                partial: aggregatedChunk ?? { tool_calls: toolCalls },
+                ...(lastUsage ? {} : { output_tokens_estimated: true }),
+              }),
+              errorMessage: blockMessage,
+              latencyMs: Date.now() - startedAt,
+              // The same estimator the cancel path uses, for the same reason:
+              // a stream cut short never carries the provider's terminal usage
+              // frame, and reporting zero writes off tokens we are billed for.
+              usage: partialUsageOnCancel(),
+              finishReason: 'content_filter',
+            }),
+          );
+
+          // The gate was built with `audit: false`, so this is still the single
+          // post-hoc `output.pre` row for the answer — and it audits the
+          // aggregated provider text, which INCLUDES the withheld characters
+          // that caused the block.
+          auditStreamedOutput('chat.completions:stream');
         };
 
         try {
@@ -1396,9 +1893,40 @@ export async function handleChatCompletion(params: {
             }
 
             if (!outputLimitError) {
-              controller.enqueue(
-                encoder.encode(`data: ${JSON.stringify(payload)}\n\n`),
-              );
+              if (gate) {
+                // The gate hands back the frames that are safe NOW: whatever it
+                // has cleared, plus this chunk's non-content residual (tool-call
+                // deltas, finish_reason) in order. It never throws.
+                const gated = await gate.push(toGateChunk(payload));
+                emitGatedFrames(gated.emit);
+                if (gated.blocked) {
+                  closeWithGuardrailBlock(gated.verdict);
+                  break;
+                }
+              } else {
+                controller.enqueue(
+                  encoder.encode(`data: ${JSON.stringify(payload)}\n\n`),
+                );
+              }
+            }
+          }
+
+          // `break`ing out of the loop above already wrote the terminal frames,
+          // closed the controller and aborted the upstream. Nothing here may
+          // touch the controller again.
+          if (blockedByGuardrail) return;
+
+          if (gate) {
+            // An upstream that never sends a finish_reason leaves the gate
+            // holding its hold-back tail, with no terminal chunk to trigger the
+            // final window — this is what releases it. It is also the LAST
+            // chance for a window to block, so it can come back blocked exactly
+            // like a push.
+            const tail = await gate.end();
+            emitGatedFrames(tail.emit);
+            if (tail.blocked) {
+              closeWithGuardrailBlock(tail.verdict);
+              return;
             }
           }
 
@@ -1481,6 +2009,13 @@ export async function handleChatCompletion(params: {
         } catch (error: unknown) {
           const latencyMs = Date.now() - startedAt;
 
+          // CHECKED FIRST, and before the aborted branch below: a guardrail
+          // block aborts the upstream itself, so the provider iterator can
+          // still throw its way out of `for await`'s `return()` afterwards.
+          // Everything that had to be written was written by
+          // `closeWithGuardrailBlock`, and the controller is closed.
+          if (blockedByGuardrail) return;
+
           // Only `cancel()` aborts this signal, and only a closed response
           // socket reaches `cancel()`. So an aborted signal means the client
           // walked away — the upstream call we abort in response then throws
@@ -1552,7 +2087,7 @@ export async function handleChatCompletion(params: {
       },
     });
 
-    return { stream: readable, requestId };
+    return { stream: readable, requestId, streamHeaders };
   }
 
   const aiMessage = await withResilience(
@@ -1600,20 +2135,22 @@ export async function handleChatCompletion(params: {
     }),
   );
 
-  // Output guardrail: check the assistant response before returning it
-  // (streamed responses are audited post-hoc after the stream completes).
+  // Output guardrails: check the assistant response before returning it
+  // (streamed responses are gated in real time and audited post-hoc after the
+  // stream completes). `outputGuardrailKeys` was resolved above, before the
+  // cache lookup, because it is part of the cache key.
   let finalResponse: unknown = response;
-  if (model.outputGuardrailKey) {
-    const outputOutcome = await enforceModelGuardrail({
+  if (outputGuardrailKeys.length > 0) {
+    const outputOutcome = await enforceModelGuardrailChain({
       tenantDbName,
       tenantId: model.tenantId,
       projectId,
-      guardrailKey: model.outputGuardrailKey,
+      guardrailKeys: outputGuardrailKeys,
       text: extractAssistantText(response),
       phase: 'output',
       requestId,
     });
-    if (outputOutcome?.redactedText !== undefined) {
+    if (outputOutcome.redactedText !== undefined) {
       const withChoices = finalResponse as { choices?: Array<{ message?: { content?: unknown } }> };
       if (withChoices?.choices?.[0]?.message) {
         finalResponse = {
@@ -1626,17 +2163,19 @@ export async function handleChatCompletion(params: {
         };
       }
     }
-    if (outputOutcome && outputOutcome.findings.length > 0) {
-      guardrailAnnotations.output = {
-        guardrail_key: outputOutcome.guardrailKey,
-        findings: outputOutcome.findings,
-      };
-    }
+    const annotation = foldGuardrailAnnotation(outputOutcome.results);
+    if (annotation) guardrailAnnotations.output = annotation;
   }
 
   finalResponse = annotateResponseWithGuardrails(finalResponse, guardrailAnnotations);
 
-  // Semantic cache: store the response for future lookups
+  // Semantic cache: store the response for future lookups — the FINAL one,
+  // redacted and annotated, never the raw provider message. A cache hit returns
+  // before any output guardrail runs, so a raw entry would hand the next
+  // semantically-similar caller the exact text the guardrail removed — with
+  // `cacheHit: true` and no evaluation row. The variant key carries the output
+  // policy (above), so the entry is only ever served under the policy that
+  // produced it.
   if (cacheEnabled && tenantId && model.semanticCache) {
     storeInCache({
       tenantDbName,
@@ -1644,7 +2183,7 @@ export async function handleChatCompletion(params: {
       projectId,
       config: model.semanticCache,
       messages: body.messages as unknown[],
-      response: response as Record<string, unknown>,
+      response: finalResponse as Record<string, unknown>,
       variantKey: cacheVariantKey,
     }).catch((err) =>
       logger.warn('Failed to store response in cache', { error: err }),

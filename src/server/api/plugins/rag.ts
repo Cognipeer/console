@@ -9,6 +9,8 @@ import {
   deleteRagDocument,
   deleteRagModule,
   getRagDocument,
+  getRagDocumentFullText,
+  getRagDocumentTextLines,
   getRagModule,
   ingestDocument,
   ingestFile,
@@ -521,6 +523,72 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ document: withoutSourceText(document) });
     } catch (error) {
       logger.error('Get RAG document error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({
+          error: error instanceof Error ? error.message : 'Internal error',
+        });
+    }
+  }));
+
+  app.get('/rag/modules/:key/documents/:documentId/content', withApiRequestContext(async (request, reply) => {
+    try {
+      const { documentId, key } = request.params as { documentId: string; key: string };
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const document = await documentInProjectScope(
+        session.tenantDbName,
+        documentId,
+        key,
+        projectId,
+        { allowTenantWide: hasTenantWideReach(user) },
+      );
+
+      if (!document) {
+        return reply.code(404).send({ error: 'Document not found' });
+      }
+
+      const result = await getRagDocumentFullText(session.tenantDbName, session.tenantId, projectId, document);
+      if (!result) {
+        return reply.code(404).send({ error: 'Source text is not available for this document; re-ingest it first' });
+      }
+
+      return reply.code(200).send(result);
+    } catch (error) {
+      logger.error('Get RAG document full text error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({
+          error: error instanceof Error ? error.message : 'Internal error',
+        });
+    }
+  }));
+
+  app.get('/rag/modules/:key/documents/:documentId/lines', withApiRequestContext(async (request, reply) => {
+    try {
+      const { documentId, key } = request.params as { documentId: string; key: string };
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const document = await documentInProjectScope(
+        session.tenantDbName,
+        documentId,
+        key,
+        projectId,
+        { allowTenantWide: hasTenantWideReach(user) },
+      );
+
+      if (!document) {
+        return reply.code(404).send({ error: 'Document not found' });
+      }
+
+      const query = (request.query ?? {}) as { offset?: string; limit?: string };
+      const result = await getRagDocumentTextLines(session.tenantDbName, session.tenantId, projectId, document, {
+        offset: query.offset !== undefined ? Number(query.offset) : undefined,
+        limit: query.limit !== undefined ? Number(query.limit) : undefined,
+      });
+      if (!result) {
+        return reply.code(404).send({ error: 'Source text is not available for this document; re-ingest it first' });
+      }
+
+      return reply.code(200).send(result);
+    } catch (error) {
+      logger.error('Get RAG document lines error', { error });
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Internal error',

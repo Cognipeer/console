@@ -27,6 +27,24 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     modelIdHint: 'e.g., gpt-4.1, gpt-4o-mini, text-embedding-3-large',
   },
   {
+    id: 'anthropic',
+    label: 'Anthropic',
+    description:
+      'Claude models on Anthropic\'s own API. Required for AI App Gateway cost attribution: a native gateway forwards bytes straight to api.anthropic.com, so the Model Hub record is the only place its pricing can come from.',
+    categories: ['llm', 'ocr'],
+    credentialFields: [
+      {
+        name: 'apiKey',
+        label: 'API Key',
+        type: 'password',
+        required: true,
+        placeholder: 'sk-ant-api03-...',
+      },
+    ],
+    defaultPricingCurrency: 'USD',
+    modelIdHint: 'e.g., claude-opus-5, claude-sonnet-5, claude-haiku-4-5-20251001',
+  },
+  {
     id: 'openai-compatible',
     label: 'OpenAI-Compatible',
     description:

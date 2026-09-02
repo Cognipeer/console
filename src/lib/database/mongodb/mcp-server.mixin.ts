@@ -104,9 +104,12 @@ export function McpServerMixin<TBase extends Constructor<MongoDBProviderBase>>(B
       return doc as unknown as IMcpServer | null;
     }
 
-    async findMcpServerByKey(key: string, projectId?: string): Promise<IMcpServer | null> {
+    async findMcpServerByKey(key: string, projectId?: string | null): Promise<IMcpServer | null> {
       const db = this.getTenantDb();
       const filter: Record<string, unknown> = { key };
+      // `null` matches both a stored null and a missing field — the two
+      // spellings tenant-wide rows have on disk; a string is exact; `undefined`
+      // adds no clause.
       if (projectId !== undefined) filter.projectId = projectId;
       const doc = await db
         .collection(COLLECTIONS.mcpServers)

@@ -13,6 +13,7 @@
 import slugify from 'slugify';
 import { getDatabase } from '@/lib/database';
 import type {
+  IPiiCustomPattern,
   IPiiPolicy,
   PiiAction,
   PiiLanguage,
@@ -25,7 +26,7 @@ import {
   filterCategoriesByLanguages,
   type PiiCategoryDefinition,
 } from './categories';
-import { detect, applyReplacements, tokenize, detokenize } from './detector';
+import { detect, applyReplacements, tokenize, detokenize, explainCustomPatternError } from './detector';
 import type {
   PiiFinding,
   PiiScanResult,
@@ -91,6 +92,43 @@ export function buildDefaultPolicyCategories(): Record<string, boolean> {
 
 // ── CRUD operations ───────────────────────────────────────────────────────
 
+/** Upper bound on custom patterns per policy; each one is a regex sweep per scan. */
+export const MAX_CUSTOM_PATTERNS_PER_POLICY = 64;
+
+/**
+ * Validate a `customPatterns` request field BEFORE it is stored. A pattern the
+ * detector would refuse at runtime (`explainCustomPatternError`: empty, over
+ * the source cap, or not compiling) is rejected here with the same reason, so
+ * an admin learns at save time rather than seeing a silently `degraded` scan.
+ * `undefined` means "field absent" and is passed through untouched.
+ */
+export function parseCustomPatternsInput(
+  input: unknown,
+): { patterns?: IPiiCustomPattern[]; error?: string } {
+  if (input === undefined) return {};
+  if (!Array.isArray(input)) return { error: 'customPatterns must be an array' };
+  if (input.length > MAX_CUSTOM_PATTERNS_PER_POLICY) {
+    return { error: `customPatterns: at most ${MAX_CUSTOM_PATTERNS_PER_POLICY} entries are allowed` };
+  }
+  const out: IPiiCustomPattern[] = [];
+  for (const [index, raw] of input.entries()) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      return { error: `customPatterns[${index}] must be an object` };
+    }
+    const candidate = raw as Partial<IPiiCustomPattern>;
+    if (typeof candidate.pattern !== 'string') {
+      return { error: `customPatterns[${index}].pattern must be a string` };
+    }
+    if (candidate.flags !== undefined && typeof candidate.flags !== 'string') {
+      return { error: `customPatterns[${index}].flags must be a string` };
+    }
+    const why = explainCustomPatternError({ pattern: candidate.pattern, flags: candidate.flags });
+    if (why) return { error: `customPatterns[${index}]: ${why}` };
+    out.push(raw as IPiiCustomPattern);
+  }
+  return { patterns: out };
+}
+
 export async function createPiiPolicy(
   tenantDbName: string,
   tenantId: string,
@@ -153,7 +191,8 @@ export async function getPiiPolicy(
 export async function getPiiPolicyByKey(
   tenantDbName: string,
   key: string,
-  projectId?: string,
+  /** string = that project's row; `null` = the tenant-wide row only; `undefined` = any project. */
+  projectId?: string | null,
 ): Promise<PiiServicePolicyView | null> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);

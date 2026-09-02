@@ -5,6 +5,7 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type {
   IMcpAuthConfig,
   IMcpExposureConfig,
+  IMcpGuardrailConfig,
   IMcpRemoteConfig,
   IMcpServer,
   IMcpStdioConfig,
@@ -106,12 +107,29 @@ function parseExposure(raw: unknown): IMcpExposureConfig | undefined {
   };
 }
 
-function parseAegis(raw: unknown): { shieldId?: string; mode: 'off' | 'monitor' | 'enforce' } | undefined {
+/** @deprecated Legacy shield binding, still accepted so an older client keeps
+ *  working. `guardrail` wins wherever both are sent.
+ *  A legacy-only body is projected onto `guardrail` (mode only) by the service.
+ *  `shieldId` is DROPPED here: its values are ids from the removed
+ *  `aegis_shields` table, so persisting a fresh one would only re-arm the
+ *  "bound to a removed Aegis shield" warning on the server's first tool call. */
+function parseAegis(raw: unknown): { mode: 'off' | 'monitor' | 'enforce' } | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
-  const value = raw as { shieldId?: unknown; mode?: unknown };
+  const value = raw as { mode?: unknown };
+  const mode = value.mode === 'monitor' || value.mode === 'enforce' ? value.mode : 'off';
+  return { mode };
+}
+
+/** Mirror of the dashboard route's parser — `guardrailKey` is a guardrail KEY,
+ *  and omitting it selects the tenant's default tool guardrail. */
+function parseGuardrail(raw: unknown): IMcpGuardrailConfig | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const value = raw as { guardrailKey?: unknown; mode?: unknown };
   const mode = value.mode === 'monitor' || value.mode === 'enforce' ? value.mode : 'off';
   return {
-    shieldId: typeof value.shieldId === 'string' && value.shieldId.trim() ? value.shieldId.trim() : undefined,
+    guardrailKey: typeof value.guardrailKey === 'string' && value.guardrailKey.trim()
+      ? value.guardrailKey.trim()
+      : undefined,
     mode,
   };
 }
@@ -656,6 +674,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
       // with the same 402 the dashboard uses — it literally cannot run otherwise.
       const licenseEnterprise = isEnterpriseLicenseType(ctx.tenant.licenseType);
       const aegisConfig = parseAegis(body.aegis);
+      const guardrailConfig = parseGuardrail(body.guardrail);
       if (stdioConfig?.executionMode === 'sandbox' && !(licenseEnterprise && mcpSandboxRunner.current)) {
         return reply.code(402).send({
           error: 'Persistent sandbox execution requires an active Enterprise license.',
@@ -701,6 +720,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
           stdioConfig,
           exposure: parseExposure(body.exposure),
           aegis: aegisConfig,
+          guardrail: guardrailConfig,
         },
         auditContextFor(request, ctx.tokenRecord.userId),
       );
@@ -760,6 +780,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
       const licenseEnterprise = isEnterpriseLicenseType(ctx.tenant.licenseType);
       const nextStdioConfig = body.stdioConfig !== undefined ? parseStdioConfig(body.stdioConfig) : undefined;
       const nextAegis = body.aegis !== undefined ? parseAegis(body.aegis) : undefined;
+      const nextGuardrail = body.guardrail !== undefined ? parseGuardrail(body.guardrail) : undefined;
       if (nextStdioConfig?.executionMode === 'sandbox' && !(licenseEnterprise && mcpSandboxRunner.current)) {
         return reply.code(402).send({
           error: 'Persistent sandbox execution requires an active Enterprise license.',
@@ -785,6 +806,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         stdioConfig: nextStdioConfig,
         exposure: body.exposure !== undefined ? parseExposure(body.exposure) : undefined,
         aegis: nextAegis,
+        guardrail: nextGuardrail,
         runtimeHeaders: body.runtimeHeaders as { allow?: boolean; allowedNames?: string[] } | null | undefined,
         disabledTools: body.disabledTools as string[] | undefined,
         toolAnnotations: body.toolAnnotations as UpdateMcpServerInput['toolAnnotations'],

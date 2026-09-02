@@ -646,7 +646,18 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IGuardrail | null>;
   deleteGuardrail(id: string): Promise<boolean>;
   findGuardrailById(id: string): Promise<IGuardrail | null>;
-  findGuardrailByKey(key: string, projectId?: string): Promise<IGuardrail | null>;
+  /**
+   * Three DIFFERENT questions, told apart by `projectId`:
+   *   - a string  → that project's row only (`projectId = ?`, which excludes NULL);
+   *   - `null`    → the TENANT-WIDE row only (`projectId IS NULL` / `{ projectId: null }`);
+   *   - undefined → no project clause: the first row with that key in ANY project.
+   * Keys are unique per project, not per tenant, so `undefined` is ambiguous the
+   * moment two projects share a key. Every runtime fallback ("project first,
+   * then workspace-wide") must pass `null`; `undefined` is for callers that
+   * genuinely mean "any" (an owner/admin lookup, a legacy migration).
+   * The same rule applies to `findGuardrailWordListByKey` and `findPiiPolicyByKey`.
+   */
+  findGuardrailByKey(key: string, projectId?: string | null): Promise<IGuardrail | null>;
   listGuardrails(filters?: {
     projectId?: string;
     type?: GuardrailType;
@@ -665,7 +676,8 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IGuardrailWordList | null>;
   deleteGuardrailWordList(id: string): Promise<boolean>;
   findGuardrailWordListById(id: string): Promise<IGuardrailWordList | null>;
-  findGuardrailWordListByKey(key: string, projectId?: string): Promise<IGuardrailWordList | null>;
+  /** `projectId` semantics as documented on `findGuardrailByKey`. */
+  findGuardrailWordListByKey(key: string, projectId?: string | null): Promise<IGuardrailWordList | null>;
   listGuardrailWordLists(filters?: {
     projectId?: string;
     search?: string;
@@ -886,7 +898,8 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IPiiPolicy | null>;
   deletePiiPolicy(id: string): Promise<boolean>;
   findPiiPolicyById(id: string): Promise<IPiiPolicy | null>;
-  findPiiPolicyByKey(key: string, projectId?: string): Promise<IPiiPolicy | null>;
+  /** `projectId` semantics as documented on `findGuardrailByKey`. */
+  findPiiPolicyByKey(key: string, projectId?: string | null): Promise<IPiiPolicy | null>;
   listPiiPolicies(filters?: {
     projectId?: string;
     enabled?: boolean;
@@ -1330,7 +1343,12 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IMcpServer | null>;
   deleteMcpServer(id: string): Promise<boolean>;
   findMcpServerById(id: string): Promise<IMcpServer | null>;
-  findMcpServerByKey(key: string, projectId?: string): Promise<IMcpServer | null>;
+  /**
+   * `projectId`: a string selects that project's row; `null` selects ONLY the
+   * tenant-wide row (`projectId IS NULL`); `undefined` adds no project clause
+   * (any project — keys are unique per project, so use with care).
+   */
+  findMcpServerByKey(key: string, projectId?: string | null): Promise<IMcpServer | null>;
   findMcpServerByEndpointSlug(endpointSlug: string): Promise<IMcpServer | null>;
   listMcpServers(filters?: {
     projectId?: string;

@@ -1,6 +1,6 @@
 import type { ObjectId } from 'mongodb';
 import type { IModelPricing, IUsageAttributionFields } from './types.base';
-import type { GuardrailAction, GuardrailType } from './types.domain';
+import type { GuardrailAction, GuardrailHookId, GuardrailType } from './types.domain';
 // ── Memory types ─────────────────────────────────────────────────────────
 
 export type MemoryScope = 'user' | 'agent' | 'session' | 'global';
@@ -70,8 +70,14 @@ export interface IGuardrailEvaluationLog extends IUsageAttributionFields {
   guardrailKey: string;
   guardrailName: string;
   guardrailType: GuardrailType;
-  /** Phase the evaluation ran in — decided by the binding slot, not the guardrail. */
-  target: 'input' | 'output';
+  /**
+   * Phase the evaluation ran in — decided by the binding slot, not the
+   * guardrail. Rows written before the hook plane carry only the two legacy
+   * phases; rows written by a hook carry the hook id, which is strictly more
+   * informative (a blocked tool call and a redacted response are both
+   * 'output' under the old vocabulary).
+   */
+  target: 'input' | 'output' | GuardrailHookId;
   action: GuardrailAction;
   passed: boolean;
   findings: Array<{
@@ -88,6 +94,23 @@ export interface IGuardrailEvaluationLog extends IUsageAttributionFields {
   source?: string;
   requestId?: string;
   message?: string | null;
+  /**
+   * The hook that produced this row, when one did — a GuardrailHookId. Typed
+   * as a plain string because the column is TEXT and rows survive a contract
+   * change: a value this build does not know must still read back rather than
+   * fail the row mapper. Absent on every pre-hook-plane row.
+   */
+  hook?: string;
+  /**
+   * The EFFECTIVE decision, i.e. already neutralised to 'allow' when the
+   * guardrail ran in monitor mode. This is what actually happened, not what
+   * the checks wanted — one of 'allow' | 'flag' | 'warn' | 'redact' | 'block'.
+   * `action` above stays the legacy projection so existing aggregations keep
+   * bucketing the same way.
+   */
+  decision?: string;
+  /** 0–100. Has no legacy column to live in, hence its own field. */
+  riskScore?: number;
   createdAt?: Date;
 }
 
@@ -242,9 +265,31 @@ export interface IMcpStdioConfig {
   };
 }
 
-/** Aegis integration seam — enforcement is wired by the enterprise overlay. */
+/**
+ * Aegis integration seam — enforcement was wired by the enterprise overlay.
+ *
+ * @deprecated Superseded by `IMcpGuardrailConfig`. NOT removed: every stored
+ * MCP server row carries this object and the `aegis` column is still written,
+ * so dropping the type would make existing rows unreadable. `shieldId` values
+ * are already dead references — the read-time normaliser keeps `mode` and
+ * falls back to the default tool guardrail.
+ */
 export interface IMcpAegisConfig {
   shieldId?: string;
+  mode: 'off' | 'monitor' | 'enforce';
+}
+
+/**
+ * Guardrail binding for an MCP server's tool calls. Replaces IMcpAegisConfig.
+ *
+ * `mode` keeps the MCP vocabulary ('off' rather than 'disabled') so the two
+ * fields are drop-in interchangeable during the release where both are
+ * written; the read-time normaliser folds 'off' onto GuardrailMode.
+ * An absent `guardrailKey` means "use the tenant's default tool guardrail",
+ * which is what keeps the sandbox toolbox armed without per-server setup.
+ */
+export interface IMcpGuardrailConfig {
+  guardrailKey?: string;
   mode: 'off' | 'monitor' | 'enforce';
 }
 
@@ -273,8 +318,10 @@ export interface IMcpServer {
   upstreamAuth: IMcpAuthConfig;
   /** Endpoint exposure: enabled protocols + access mode. Default: both + token. */
   exposure?: IMcpExposureConfig;
-  /** Aegis shield binding (prep — enforcement lands with the EE integration). */
+  /** @deprecated Aegis shield binding. Read for one release, then dropped. */
   aegis?: IMcpAegisConfig;
+  /** Guardrail binding for tool.pre / tool.post enforcement. */
+  guardrail?: IMcpGuardrailConfig;
   status: McpServerStatus;
   /** Unique slug used in the public MCP endpoint URL */
   endpointSlug: string;

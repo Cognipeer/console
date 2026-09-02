@@ -5,6 +5,15 @@
  * protocols (a2a / openai-chat / openai-responses) instead of being run through
  * the local agent-sdk. This module resolves credentials and performs the call,
  * normalizing every protocol down to a single assistant-text reply.
+ *
+ * NO GUARDRAIL RUNS IN HERE. The caller owns enforcement: `agentService` fires
+ * `input.pre` on the message before it is handed to `invokeExternalAgent` and
+ * `output.pre` on the returned content before it is persisted or returned. The
+ * split is deliberate — the hooks need the agent's bindings and tenant scope,
+ * which this transport has no business resolving, and putting a second
+ * evaluation here would double-log and double-bill the model-backed families.
+ * `tool.pre` / `tool.post` are not enforceable on this path at all: the remote
+ * agent runs its own tools and only the final text comes back.
  */
 
 import { createLogger } from '@/lib/core/logger';

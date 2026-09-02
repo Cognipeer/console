@@ -429,7 +429,7 @@ export function sendApiTokenError(
 }
 
 /** Error envelope styles for the client (token) API. */
-export type ClientApiErrorStyle = 'json' | 'openai';
+export type ClientApiErrorStyle = 'json' | 'openai' | 'anthropic';
 
 export interface ClientApiContextOptions {
   /**
@@ -453,6 +453,16 @@ function openAiErrorBody(message: string, type: string) {
 }
 
 /**
+ * Anthropic's envelope. Different enough from OpenAI's that an SDK cannot read
+ * the other one: it is `{type:'error', error:{type, message}}`, and the error
+ * `type` vocabulary is its own (`authentication_error`, `permission_error`,
+ * `invalid_request_error`, `api_error`).
+ */
+function anthropicErrorEnvelope(message: string, type: string) {
+  return { type: 'error', error: { type, message } };
+}
+
+/**
  * Single error responder for the client (token) API. Maps the well-known error
  * types to the right status + envelope so every token route reports failures
  * identically. Returns the reply (never null) so callers can `return` it.
@@ -463,6 +473,9 @@ function sendClientApiError(
   style: ClientApiErrorStyle,
 ) {
   if (error instanceof ApiTokenAuthError) {
+    if (style === 'anthropic') {
+      return reply.code(401).send(anthropicErrorEnvelope(error.message, 'authentication_error'));
+    }
     if (style === 'openai') {
       // OpenAI SDKs treat auth failures as 401 regardless of the finer status.
       return reply.code(401).send(openAiErrorBody(error.message, 'invalid_request_error'));
@@ -471,12 +484,18 @@ function sendClientApiError(
   }
 
   if (error instanceof RbacAuthorizationError) {
+    if (style === 'anthropic') {
+      return reply.code(error.status).send(anthropicErrorEnvelope(error.message, 'permission_error'));
+    }
     if (style === 'openai') {
       return reply.code(error.status).send(openAiErrorBody(error.message, 'permission_error'));
     }
     return reply.code(error.status).send({ error: error.message });
   }
 
+  if (style === 'anthropic') {
+    return reply.code(500).send(anthropicErrorEnvelope('Internal server error', 'api_error'));
+  }
   if (style === 'openai') {
     return reply.code(500).send(openAiErrorBody('Internal server error', 'server_error'));
   }
@@ -519,6 +538,14 @@ export function withClientApiRequestContext<
           .code(503)
           .header('Retry-After', '5')
           .send(openAiErrorBody('Service is shutting down', 'server_error'));
+      }
+      if (errorStyle === 'anthropic') {
+        // `overloaded_error` is the Messages type the SDKs treat as retryable,
+        // which is exactly what a draining instance wants them to do.
+        return reply
+          .code(503)
+          .header('Retry-After', '5')
+          .send(anthropicErrorEnvelope('Service is shutting down', 'overloaded_error'));
       }
       return reply
         .code(503)
@@ -594,6 +621,27 @@ export function withOpenAiApiRequestContext<
   options: Omit<ClientApiContextOptions, 'errorStyle'> = {},
 ) {
   return withClientApiRequestContext(handler, { ...options, errorStyle: 'openai' });
+}
+
+/**
+ * Same lifecycle as the OpenAI wrapper — auth, RBAC, tenant binding — with the
+ * Messages-dialect error envelope. A route that authenticates identically but
+ * answers failures in the other dialect is the whole difference, and it has to
+ * be the whole difference: an Anthropic SDK cannot parse an OpenAI error body,
+ * so a shared wrapper with the wrong envelope turns every 401 into an opaque
+ * client-side crash.
+ */
+export function withAnthropicApiRequestContext<
+  TRequest extends FastifyRequest = FastifyRequest,
+>(
+  handler: (
+    request: TRequest,
+    reply: FastifyReply,
+    auth: ApiTokenContext,
+  ) => Promise<unknown> | unknown,
+  options: Omit<ClientApiContextOptions, 'errorStyle'> = {},
+) {
+  return withClientApiRequestContext(handler, { ...options, errorStyle: 'anthropic' });
 }
 
 export function clearSessionCookies(reply: FastifyReply): void {

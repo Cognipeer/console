@@ -1,10 +1,12 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { Badge, Button, Group, Modal, Select, Stack, Text, Tooltip } from '@mantine/core';
-import { IconMail, IconShieldCheck, IconTrash, IconUserPlus } from '@tabler/icons-react';
+import { IconExternalLink, IconMail, IconShieldCheck, IconTrash, IconUpload, IconUserPlus } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
-import InviteUserModal from './InviteUserModal';
+import AddUserModal from './AddUserModal';
+import ImportUsersModal from './ImportUsersModal';
 import { useTranslations } from '@/lib/i18n';
 import type { PermissionService, ServicePermissionLevel, UserServicePermissions } from '@/lib/security/rbac';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
@@ -19,6 +21,8 @@ interface User {
   invitedAt?: string;
   inviteAcceptedAt?: string;
   servicePermissions?: UserServicePermissions;
+  /** Missing/undefined is treated as true (back-compat). `false` marks a "Programmatic User" with no login capability. */
+  canLogin?: boolean;
 }
 
 interface PermissionServiceOption {
@@ -30,10 +34,12 @@ interface PermissionServiceOption {
 }
 
 export default function UserManagement() {
+  const router = useRouter();
   const [users, setUsers] = useState<User[]>([]);
   const [permissionServices, setPermissionServices] = useState<PermissionServiceOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [inviteModalOpened, setInviteModalOpened] = useState(false);
+  const [importModalOpened, setImportModalOpened] = useState(false);
   const [deleteModalOpened, setDeleteModalOpened] = useState(false);
   const [permissionsModalOpened, setPermissionsModalOpened] = useState(false);
   const [userToDelete, setUserToDelete] = useState<User | null>(null);
@@ -196,9 +202,18 @@ export default function UserManagement() {
       label: t('table.role'),
       width: 140,
       render: (user) => (
-        <Badge color={getRoleBadgeColor(user.role)} variant="light">
-          {t(`roles.${user.role}`)}
-        </Badge>
+        <Group gap={6} wrap="nowrap">
+          <Badge color={getRoleBadgeColor(user.role)} variant="light">
+            {t(`roles.${user.role}`)}
+          </Badge>
+          {user.canLogin === false ? (
+            <Tooltip label={t('table.programmaticHint')}>
+              <Badge color="dark" variant="outline">
+                {t('table.programmatic')}
+              </Badge>
+            </Tooltip>
+          ) : null}
+        </Group>
       ),
     },
     {
@@ -216,7 +231,11 @@ export default function UserManagement() {
       label: t('table.status'),
       width: 140,
       render: (user) =>
-        user.invitedBy && !user.inviteAcceptedAt ? (
+        user.canLogin === false ? (
+          <Badge color="gray" variant="light">
+            {t('status.noLogin')}
+          </Badge>
+        ) : user.invitedBy && !user.inviteAcceptedAt ? (
           <Tooltip
             label={t('status.invitedAt', { date: new Date(user.invitedAt!).toLocaleDateString() })}
           >
@@ -239,6 +258,7 @@ export default function UserManagement() {
         loading={loading}
         rowKey={(u) => String(u._id)}
         columns={columns}
+        onRowClick={(user) => router.push(`/dashboard/members/${user._id}`)}
         search={{
           value: query,
           onChange: setQuery,
@@ -247,19 +267,29 @@ export default function UserManagement() {
         onRefresh={() => void fetchUsers()}
         refreshing={loading}
         toolbarRight={
-          <Button
-            color="teal"
-            size="xs"
-            leftSection={<IconUserPlus size={13} stroke={1.7} />}
-            onClick={() => setInviteModalOpened(true)}
-          >
-            {t('actions.invite')}
-          </Button>
+          <Group gap={8} wrap="nowrap">
+            <Button
+              variant="default"
+              size="xs"
+              leftSection={<IconUpload size={13} stroke={1.7} />}
+              onClick={() => setImportModalOpened(true)}
+            >
+              Import CSV
+            </Button>
+            <Button
+              color="teal"
+              size="xs"
+              leftSection={<IconUserPlus size={13} stroke={1.7} />}
+              onClick={() => setInviteModalOpened(true)}
+            >
+              {t('actions.addUser')}
+            </Button>
+          </Group>
         }
         empty={{
           title: t('table.empty'),
           primaryAction: {
-            label: t('actions.invite'),
+            label: t('actions.addUser'),
             icon: <IconUserPlus size={14} stroke={1.7} />,
             onClick: () => setInviteModalOpened(true),
           },
@@ -267,8 +297,21 @@ export default function UserManagement() {
         footerLeft={`Showing ${filtered.length} of ${users.length} users`}
         rowActions={(user) =>
           user.role === 'owner'
-            ? []
+            ? [
+                {
+                  id: 'profile',
+                  label: 'View profile',
+                  icon: <IconExternalLink size={14} />,
+                  onClick: () => router.push(`/dashboard/members/${user._id}`),
+                },
+              ]
             : [
+                {
+                  id: 'profile',
+                  label: 'View profile',
+                  icon: <IconExternalLink size={14} />,
+                  onClick: () => router.push(`/dashboard/members/${user._id}`),
+                },
                 {
                   id: 'permissions',
                   label: 'Service permissions',
@@ -286,9 +329,15 @@ export default function UserManagement() {
         }
       />
 
-      <InviteUserModal
+      <AddUserModal
         opened={inviteModalOpened}
         onClose={() => setInviteModalOpened(false)}
+        onSuccess={fetchUsers}
+      />
+
+      <ImportUsersModal
+        opened={importModalOpened}
+        onClose={() => setImportModalOpened(false)}
         onSuccess={fetchUsers}
       />
 

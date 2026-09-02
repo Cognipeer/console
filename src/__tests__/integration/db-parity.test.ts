@@ -12,6 +12,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
+import type { GuardrailHooksConfig, IGuardrailBinding } from '@/lib/database/provider.interface';
 import { describeForEachProvider } from './db-parity.helper';
 
 describeForEachProvider('Tenant CRUD', (getDb) => {
@@ -406,6 +407,494 @@ describeForEachProvider('Guardrail CRUD + evaluation logs', (getDb) => {
     expect(aggregate.passedCount).toBe(1);
     expect(aggregate.failedCount).toBe(1);
     expect(aggregate.passRate).toBe(50);
+  });
+});
+
+/**
+ * Hook plane persistence.
+ *
+ * This is the suite that catches a forgotten SQLite whitelist site. SQLite has
+ * FOUR of them per table (INSERT column list, INSERT params, the per-field
+ * UPDATE chain, the row mapper) and missing one fails SILENTLY: the INSERT is a
+ * template string, `.run({...})` accepts a loose object, and updateGuardrail
+ * re-reads the row it just failed to write — so the UI reports "saved" and the
+ * config reverts on the next page load. MongoDB has none of those sites, so a
+ * SQLite-only omission is invisible on SaaS and fatal on self-host, which is
+ * the default deployment.
+ *
+ * The config below is deliberately maximal — every optional sub-object, nested
+ * policy configs, and at least one entry in each nested map — because a partial
+ * fixture round-trips fine through a mapper that drops half the blob.
+ */
+describeForEachProvider('Guardrail hook plane persistence', (getDb) => {
+  const tenantId = 'tenant-guardrail-hooks-parity';
+  const dbName = `tenant_guardrail_hooks_${Date.now()}`;
+
+  /** Every field of GuardrailHooksConfig, populated. */
+  const fullHooks: GuardrailHooksConfig = {
+    contractVersion: 2,
+    policies: [
+      {
+        id: 'chk-pii',
+        family: 'pii',
+        enabled: true,
+        hooks: ['input.pre', 'output.pre', 'output.stream.delta'],
+        schedule: { timing: 'sync', onFail: 'block' },
+        action: 'redact',
+        failMode: 'closed',
+        timeoutMs: 1500,
+        label: 'Customer PII',
+        piiPolicyKey: 'pii-default',
+        actionOverride: 'redact',
+        locale: 'tr',
+        detectObfuscated: true,
+        legacyCategories: { email: true, tc_kimlik: true, phone: false },
+      },
+      {
+        id: 'chk-secrets',
+        family: 'secrets',
+        enabled: true,
+        hooks: ['output.pre', 'tool.post'],
+        schedule: { timing: 'sync', onFail: 'block' },
+        known: true,
+        genericHighEntropy: true,
+        minEntropy: 3.5,
+        allowValues: ['sk-test-fixture'],
+      },
+      {
+        id: 'chk-regex',
+        family: 'regex',
+        enabled: true,
+        hooks: ['output.stream.delta'],
+        schedule: { timing: 'sync', onFail: 'log' },
+        rules: [
+          {
+            id: 'rule-iban',
+            label: 'IBAN',
+            pattern: 'TR\\d{24}',
+            flags: 'gi',
+            category: 'financial',
+            severity: 'high',
+            action: 'redact',
+            captureGroup: 0,
+            maxMatchChars: 26,
+          },
+        ],
+      },
+      {
+        id: 'chk-tools',
+        family: 'tool_access',
+        enabled: true,
+        hooks: ['tool.pre', 'tool.post'],
+        schedule: { timing: 'sync', onFail: 'block' },
+        allow: ['search'],
+        deny: ['shell'],
+        sideEffects: { search: 'read', deploy: 'destructive' },
+        allowedRoles: { deploy: ['admin'] },
+        allowedDomains: ['api.example.com'],
+        deniedDomains: ['evil.example.com'],
+        allowedPathPrefixes: ['/workspace'],
+        deniedPathPrefixes: ['/etc'],
+        argumentSchemas: {
+          search: { type: 'object', required: ['q'], properties: { q: { type: 'string' } } },
+        },
+        maxArgBytes: 65536,
+        maxResultBytes: 262144,
+        maxArgDepth: 32,
+        urlArgPaths: { fetch: ['url'] },
+        pathArgPaths: { readFile: ['path'] },
+        scanUndeclaredStrings: false,
+        fsRoot: '/workspace',
+        denyPrivateNetworks: true,
+        defaultSideEffect: 'read',
+        sideEffectActions: { destructive: 'warn', external: 'flag' },
+      },
+      {
+        id: 'chk-webhook',
+        family: 'webhook',
+        enabled: false,
+        hooks: ['input.pre'],
+        schedule: { timing: 'async', onFail: 'log' },
+        url: 'https://hooks.example.com/guardrail',
+        headers: { 'x-tenant': 'parity' },
+        credentialProviderKey: 'webhook-bearer',
+        signingSecretRef: 'guardrail.webhook.hmac',
+        send: 'text',
+        retries: 2,
+      },
+    ],
+    bindings: {
+      'input.pre': { enabled: true, schedule: { timing: 'sync', onFail: 'block' }, failMode: 'closed', timeoutMs: 3000 },
+      'output.pre': { enabled: true, schedule: { timing: 'sync', onFail: 'log' }, timeoutMs: 0 },
+      'output.stream.delta': { enabled: true, schedule: { timing: 'sync', onFail: 'block' } },
+      'tool.pre': { enabled: true, schedule: { timing: 'sync', onFail: 'block' } },
+      'tool.post': { enabled: false, schedule: { timing: 'async', onFail: 'log' } },
+    },
+    stream: {
+      enabled: true,
+      holdBackChars: 256,
+      holdBackMs: 200,
+      overlapChars: 64,
+      maxHeldChars: 4000,
+      onBudgetExceeded: 'release',
+      onBlock: 'truncate',
+    },
+    blockedMessage: {
+      mode: 'replace',
+      templates: { pii: 'Kişisel veri tespit edildi.', tool_denied: 'Bu araç kullanılamaz.' },
+      includeTraceId: true,
+    },
+    visibility: {
+      headers: true,
+      useVerdictStatusCodes: false,
+      detailedHeaders: true,
+      aegisCompatHeaders: true,
+    },
+    shortCircuit: true,
+  };
+
+  beforeEach(async () => {
+    const db = getDb();
+    await db.switchToTenant(dbName);
+  });
+
+  it('round-trips a full hooks config, nested policy configs included', async () => {
+    const db = getDb();
+    const created = await db.createGuardrail({
+      tenantId,
+      key: `gr-hooks-${Date.now()}`,
+      name: 'Hooked',
+      type: 'preset',
+      target: 'input',
+      action: 'block',
+      enabled: true,
+      hooks: fullHooks,
+      hooksVersion: 1,
+      mode: 'enforce',
+      createdBy: 'user-1',
+    });
+
+    const found = await db.findGuardrailById(String(created._id));
+    // Deep equality, not toMatchObject: the point is that NOTHING was dropped
+    // on the way through, and toMatchObject would pass on a truncated blob.
+    expect(found?.hooks).toEqual(fullHooks);
+    expect(found?.hooksVersion).toBe(1);
+    expect(found?.mode).toBe('enforce');
+
+    // Spot-check the deepest nesting explicitly, so a failure names the level
+    // that broke rather than dumping the whole config diff.
+    const pii = found?.hooks?.policies.find((c) => c.id === 'chk-pii');
+    expect(pii?.family === 'pii' ? pii.legacyCategories : undefined).toEqual({
+      email: true,
+      tc_kimlik: true,
+      phone: false,
+    });
+    const tools = found?.hooks?.policies.find((c) => c.id === 'chk-tools');
+    expect(tools?.family === 'tool_access' ? tools.argumentSchemas?.search : undefined).toEqual({
+      type: 'object',
+      required: ['q'],
+      properties: { q: { type: 'string' } },
+    });
+    expect(found?.hooks?.bindings['output.stream.delta']?.schedule).toEqual({
+      timing: 'sync',
+      onFail: 'block',
+    });
+  });
+
+  it('updates hooks/hooksVersion/mode in place and reads the new blob back', async () => {
+    const db = getDb();
+    const created = await db.createGuardrail({
+      tenantId,
+      key: `gr-hooks-upd-${Date.now()}`,
+      name: 'Hook Update',
+      type: 'preset',
+      target: 'input',
+      action: 'block',
+      enabled: true,
+      createdBy: 'user-1',
+    });
+
+    // A guardrail authored through the UI is created legacy-shaped and gains
+    // its hooks on a later save — the exact path that silently reverted when
+    // the per-field UPDATE chain was missing a whitelist entry.
+    const narrowed: GuardrailHooksConfig = {
+      contractVersion: 2,
+      policies: [fullHooks.policies[0]],
+      bindings: { 'input.pre': { enabled: true, schedule: { timing: 'sync', onFail: 'block' } } },
+      stream: { enabled: false },
+      shortCircuit: false,
+    };
+
+    const updated = await db.updateGuardrail(String(created._id), {
+      hooks: narrowed,
+      hooksVersion: 2,
+      mode: 'monitor',
+    });
+    expect(updated?.hooks).toEqual(narrowed);
+    expect(updated?.hooksVersion).toBe(2);
+    expect(updated?.mode).toBe('monitor');
+
+    // …and it survives a fresh read, not just the write-through return value.
+    const reread = await db.findGuardrailById(String(created._id));
+    expect(reread?.hooks).toEqual(narrowed);
+    expect(reread?.hooks?.stream?.enabled).toBe(false);
+    expect(reread?.hooks?.shortCircuit).toBe(false);
+  });
+
+  it('reads a row stored in the PRE-RENAME spelling back as a real config', async () => {
+    const db = getDb();
+    // `hooks.checks`, not `hooks.policies`: what every build before the
+    // `check` -> `policy` rename wrote, and what is on disk in every tenant
+    // that authored a guardrail before it. The SQLite mapper decides whether a
+    // stored blob is a config AT ALL by looking for that array, so if it only
+    // knows the new name the row comes back `undefined`, `ensureHooks` calls it
+    // unauthored, and the operator's whole configuration is silently replaced
+    // by the legacy preset lift. Mongo stores the document verbatim, so this
+    // case is the one place the two providers could disagree.
+    const created = await db.createGuardrail({
+      tenantId,
+      key: `gr-hooks-legacy-spelling-${Date.now()}`,
+      name: 'Old Spelling',
+      type: 'preset',
+      target: 'input',
+      action: 'block',
+      enabled: true,
+      hooks: {
+        contractVersion: 2,
+        checks: [
+          {
+            id: 'chk-tools',
+            family: 'tool_policy',
+            enabled: true,
+            hooks: ['tool.pre'],
+            schedule: { timing: 'sync', onFail: 'block' },
+            deny: ['shell.exec'],
+          },
+        ],
+        bindings: { 'tool.pre': { enabled: true, schedule: { timing: 'sync', onFail: 'block' } } },
+      } as unknown as GuardrailHooksConfig,
+      hooksVersion: 1,
+      createdBy: 'user-1',
+    });
+
+    const found = await db.findGuardrailById(String(created._id));
+    expect(found?.hooks).toBeDefined();
+    expect(found?.hooksVersion).toBe(1);
+    // Stored VERBATIM — nothing rewrites a row on read. Re-spelling is the read
+    // path's job (`normalizeHooksConfig`), so what the provider owes here is
+    // simply not to throw the config away.
+    const stored = found?.hooks as unknown as { checks?: unknown[] };
+    expect(stored.checks).toHaveLength(1);
+  });
+
+  it('reads an unauthored guardrail back with hooks UNDEFINED, never {}', async () => {
+    const db = getDb();
+    const created = await db.createGuardrail({
+      tenantId,
+      key: `gr-hooks-none-${Date.now()}`,
+      name: 'No Hooks',
+      type: 'preset',
+      target: 'input',
+      action: 'block',
+      enabled: true,
+      createdBy: 'user-1',
+    });
+
+    const found = await db.findGuardrailById(String(created._id));
+    // ensureHooks() distinguishes "absent" from "authored": an empty object
+    // reads as an authored config with zero policies, i.e. a guardrail that
+    // enforces NOTHING. SQLite defaults the column to '{}', so the mapper has
+    // to collapse it back to undefined for the two providers to agree here.
+    expect(found?.hooks).toBeUndefined();
+    expect(found?.hooksVersion ?? 0).toBe(0);
+  });
+
+  it('persists hook / decision / riskScore on evaluation logs', async () => {
+    const db = getDb();
+    const created = await db.createGuardrail({
+      tenantId,
+      key: `gr-hooks-log-${Date.now()}`,
+      name: 'Hook Logged',
+      type: 'preset',
+      target: 'input',
+      action: 'block',
+      enabled: true,
+      createdBy: 'user-1',
+    });
+    const guardrailId = String(created._id);
+
+    // A tool.pre block: indistinguishable from an output.pre redaction in the
+    // audit trail unless `hook` survives the round trip.
+    await db.createGuardrailEvaluationLog({
+      tenantId,
+      guardrailId,
+      guardrailKey: created.key,
+      guardrailName: created.name,
+      guardrailType: created.type,
+      target: 'tool.pre',
+      action: 'block',
+      passed: false,
+      findings: [
+        { type: 'tool_access', category: 'denied_tool', severity: 'high', message: 'shell denied', action: 'block', block: true },
+      ],
+      hook: 'tool.pre',
+      decision: 'block',
+      riskScore: 87,
+      source: 'parity-test',
+    });
+
+    const logs = await db.listGuardrailEvaluationLogs(guardrailId, { limit: 10 });
+    expect(logs).toHaveLength(1);
+    expect(logs[0].hook).toBe('tool.pre');
+    expect(logs[0].target).toBe('tool.pre');
+    expect(logs[0].decision).toBe('block');
+    expect(logs[0].riskScore).toBe(87);
+  });
+});
+
+describeForEachProvider('Multi-guardrail binding persistence (model + agent)', (getDb) => {
+  const tenantId = 'tenant-guardrail-binding-parity';
+  const dbName = `tenant_guardrail_binding_${Date.now()}`;
+  let seq = 0;
+
+  const bindings: IGuardrailBinding[] = [
+    { key: 'gr-pii', hooks: ['input.pre', 'output.pre', 'output.stream.delta'] },
+    { key: 'gr-tool-policy', hooks: ['tool.pre', 'tool.post'] },
+    // No `hooks`: activates wherever the guardrail itself declares it runs.
+    { key: 'gr-everything' },
+  ];
+
+  const modelBase = (key: string) => ({
+    key,
+    name: key,
+    providerKey: 'openai',
+    providerDriver: 'openai',
+    category: 'llm' as const,
+    modelId: 'gpt-4o',
+    tenantId,
+    settings: {},
+    pricing: { inputTokenPer1M: 0, outputTokenPer1M: 0 },
+  });
+
+  const agentBase = (key: string) => ({
+    tenantId,
+    projectId: 'project-binding',
+    key,
+    name: key,
+    status: 'active' as const,
+    createdBy: 'tester',
+  });
+
+  beforeEach(async () => {
+    const db = getDb();
+    await db.switchToTenant(dbName);
+    seq += 1;
+  });
+
+  it('round-trips model.guardrails, per-binding hook lists included', async () => {
+    const db = getDb();
+    const created = await db.createModel({
+      ...modelBase(`m-bind-${Date.now()}-${seq}`),
+      guardrails: bindings,
+      // The deprecated slots stay written for one release; they must survive
+      // alongside the array rather than being clobbered by it.
+      inputGuardrailKey: 'gr-pii',
+      outputGuardrailKey: 'gr-pii',
+    });
+
+    const found = await db.findModelById(String(created._id));
+    expect(found?.guardrails).toEqual(bindings);
+    expect(found?.guardrails?.[1].hooks).toEqual(['tool.pre', 'tool.post']);
+    expect(found?.guardrails?.[2].hooks).toBeUndefined();
+    expect(found?.inputGuardrailKey).toBe('gr-pii');
+  });
+
+  it('updates model.guardrails in place and reads the new array back', async () => {
+    const db = getDb();
+    const created = await db.createModel({
+      ...modelBase(`m-bind-upd-${Date.now()}-${seq}`),
+      guardrails: bindings,
+    });
+    const id = String(created._id);
+
+    const narrowed: IGuardrailBinding[] = [{ key: 'gr-tool-policy', hooks: ['tool.pre'] }];
+    const updated = await db.updateModel(id, { guardrails: narrowed });
+    expect(updated?.guardrails).toEqual(narrowed);
+
+    // Re-read, not just the update's return value: a mixin that forgets the
+    // per-field UPDATE whitelist still returns the row it failed to change.
+    expect((await db.findModelById(id))?.guardrails).toEqual(narrowed);
+  });
+
+  it('reads a model written without guardrails back as UNDEFINED, never []', async () => {
+    // [] means "authored, bound to nothing". If an absent column mapped to []
+    // instead of undefined, resolveBindings would stop falling back to the
+    // legacy keys and every pre-upgrade model would be silently disarmed.
+    const db = getDb();
+    const created = await db.createModel({
+      ...modelBase(`m-bind-none-${Date.now()}-${seq}`),
+      inputGuardrailKey: 'gr-legacy',
+    });
+
+    const found = await db.findModelById(String(created._id));
+    expect(found?.guardrails).toBeUndefined();
+    expect(found?.inputGuardrailKey).toBe('gr-legacy');
+  });
+
+  it('keeps an explicitly EMPTY model binding list distinct from an absent one', async () => {
+    const db = getDb();
+    const created = await db.createModel({
+      ...modelBase(`m-bind-empty-${Date.now()}-${seq}`),
+      guardrails: [],
+    });
+
+    expect((await db.findModelById(String(created._id)))?.guardrails).toEqual([]);
+  });
+
+  it('round-trips agent config.guardrails alongside the deprecated slots', async () => {
+    // The agent's bindings ride the existing `config` JSON column — no agents
+    // table migration — so this asserts the blob is not lossy for the new key.
+    const db = getDb();
+    const created = await db.createAgent({
+      ...agentBase(`a-bind-${Date.now()}-${seq}`),
+      config: {
+        modelKey: 'gpt-4o',
+        guardrails: bindings,
+        inputGuardrailKey: 'gr-pii',
+        outputGuardrailKey: 'gr-pii',
+      },
+    });
+
+    const found = await db.findAgentById(String(created._id));
+    expect(found?.config.guardrails).toEqual(bindings);
+    expect(found?.config.guardrails?.[1].hooks).toEqual(['tool.pre', 'tool.post']);
+    expect(found?.config.inputGuardrailKey).toBe('gr-pii');
+  });
+
+  it('updates agent config.guardrails and reads the new array back', async () => {
+    const db = getDb();
+    const created = await db.createAgent({
+      ...agentBase(`a-bind-upd-${Date.now()}-${seq}`),
+      config: { modelKey: 'gpt-4o', guardrails: bindings },
+    });
+    const id = String(created._id);
+
+    const narrowed: IGuardrailBinding[] = [{ key: 'gr-tool-policy', hooks: ['tool.post'] }];
+    await db.updateAgent(id, { config: { modelKey: 'gpt-4o', guardrails: narrowed } });
+
+    expect((await db.findAgentById(id))?.config.guardrails).toEqual(narrowed);
+  });
+
+  it('reads an agent written without guardrails back as UNDEFINED, never []', async () => {
+    const db = getDb();
+    const created = await db.createAgent({
+      ...agentBase(`a-bind-none-${Date.now()}-${seq}`),
+      config: { modelKey: 'gpt-4o', inputGuardrailKey: 'gr-legacy' },
+    });
+
+    const found = await db.findAgentById(String(created._id));
+    expect(found?.config.guardrails).toBeUndefined();
+    expect(found?.config.inputGuardrailKey).toBe('gr-legacy');
   });
 });
 

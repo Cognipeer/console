@@ -16,6 +16,7 @@ import { TokenManager, type JWTPayload } from '@/lib/license/token-manager';
 import { fireAndForget } from '@/lib/core/asyncTask';
 import { getPermissionServiceForPath, getRequiredPermissionLevel } from '@/lib/security/rbac';
 import { recordAuditLog } from '@/lib/services/audit';
+import { anthropicErrorBody } from '@/lib/services/models/anthropicWire';
 import { applyCorsHeaders } from './cors';
 import { authApiPlugin } from './plugins/auth';
 import { clientA2aApiPlugin } from './plugins/client-a2a';
@@ -28,6 +29,7 @@ import { clientModelsApiPlugin } from './plugins/client-models';
 import { clientLicenseApiPlugin } from './plugins/client-license';
 import { clientProjectsApiPlugin } from './plugins/client-projects';
 import { clientMembersApiPlugin } from './plugins/client-members';
+import { clientUsersApiPlugin } from './plugins/client-users';
 import { clientBatchesApiPlugin } from './plugins/client-batches';
 import { clientModerationsApiPlugin } from './plugins/client-moderations';
 import { clientSpendApiPlugin } from './plugins/client-spend';
@@ -365,10 +367,13 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
     if (clientApiRequest) {
       const authHeader = request.headers.authorization;
       if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        return unauthorized(reply, {
-          error: 'Unauthorized',
-          message: 'Missing or invalid Authorization header. Use: Bearer <token>',
-        });
+        const message = 'Missing or invalid Authorization header. Use: Bearer <token>';
+        // The Messages route speaks Anthropic's envelope; an SDK handed the
+        // generic body reports "401 (no body)" instead of this message.
+        if (pathname === '/api/client/v1/messages') {
+          return unauthorized(reply, anthropicErrorBody(message, 'authentication_error'));
+        }
+        return unauthorized(reply, { error: 'Unauthorized', message });
       }
       return;
     }
@@ -442,6 +447,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(clientLicenseApiPlugin);
   await app.register(clientProjectsApiPlugin);
   await app.register(clientMembersApiPlugin);
+  await app.register(clientUsersApiPlugin);
   await app.register(clientBatchesApiPlugin);
   await app.register(clientModerationsApiPlugin);
   await app.register(clientSpendApiPlugin);

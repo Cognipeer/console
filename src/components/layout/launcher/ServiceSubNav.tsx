@@ -32,6 +32,7 @@ import {
   IconPin,
   IconPinFilled,
   IconPlayerPlay,
+  IconPlug,
   IconReportAnalytics,
   IconChartHistogram,
   IconStethoscope,
@@ -346,6 +347,25 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       href: '/dashboard/cost/forecast',
       icon: IconTrendingUp,
       matcher: (p) => p.startsWith('/dashboard/cost/forecast'),
+    },
+  ],
+
+  'ai-app-gateway': [
+    {
+      id: 'gateways',
+      label: 'Gateways',
+      href: '/dashboard/ai-app-gateway',
+      icon: IconPlug,
+      matcher: (p) =>
+        p === '/dashboard/ai-app-gateway' ||
+        (p.startsWith('/dashboard/ai-app-gateway/') && !p.startsWith('/dashboard/ai-app-gateway/reports')),
+    },
+    {
+      id: 'reports',
+      label: 'Reports',
+      href: '/dashboard/ai-app-gateway/reports',
+      icon: IconReportAnalytics,
+      matcher: (p) => p.startsWith('/dashboard/ai-app-gateway/reports'),
     },
   ],
   vector: [

@@ -4,7 +4,14 @@
  * Includes guardrail CRUD, evaluation logs listing, and aggregation.
  */
 
-import type { IGuardrail, IGuardrailEvaluationLog, IGuardrailWordList, GuardrailType } from '../provider.interface';
+import type {
+  IGuardrail,
+  IGuardrailEvaluationLog,
+  IGuardrailWordList,
+  GuardrailType,
+  GuardrailHooksConfig,
+  GuardrailMode,
+} from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
 
@@ -22,9 +29,11 @@ export function GuardrailMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       db.prepare(`
         INSERT INTO ${TABLES.guardrails}
         (id, tenantId, projectId, key, name, description, type, action, enabled, failMode,
-          target, modelKey, policy, customPrompt, metadata, createdBy, updatedBy, createdAt, updatedAt)
+          target, modelKey, policy, customPrompt, metadata, hooks, hooksVersion, mode,
+          createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @key, @name, @description, @type, @action, @enabled, @failMode,
-          @target, @modelKey, @policy, @customPrompt, @metadata, @createdBy, @updatedBy, @createdAt, @updatedAt)
+          @target, @modelKey, @policy, @customPrompt, @metadata, @hooks, @hooksVersion, @mode,
+          @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
         tenantId: guardrail.tenantId,
@@ -41,6 +50,13 @@ export function GuardrailMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         policy: this.toJson(guardrail.policy ?? {}),
         customPrompt: guardrail.customPrompt ?? null,
         metadata: this.toJson(guardrail.metadata ?? {}),
+        // '{}' rather than NULL keeps the column shape identical to the CREATE
+        // TABLE default; both read back as "not authored" (see mapGuardrailRow).
+        hooks: this.toJson(guardrail.hooks ?? {}),
+        hooksVersion: guardrail.hooksVersion ?? 0,
+        // Absent `mode` derives from `enabled`, exactly as the row mapper does,
+        // so a create and a subsequent read agree without a second write.
+        mode: guardrail.mode ?? (guardrail.enabled ? 'enforce' : 'disabled'),
         createdBy: guardrail.createdBy,
         updatedBy: guardrail.updatedBy ?? null,
         createdAt: now,
@@ -70,6 +86,9 @@ export function GuardrailMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       if (data.policy !== undefined) { sets.push('policy = @policy'); params.policy = this.toJson(data.policy); }
       if (data.customPrompt !== undefined) { sets.push('customPrompt = @customPrompt'); params.customPrompt = data.customPrompt; }
       if (data.metadata !== undefined) { sets.push('metadata = @metadata'); params.metadata = this.toJson(data.metadata); }
+      if (data.hooks !== undefined) { sets.push('hooks = @hooks'); params.hooks = this.toJson(data.hooks); }
+      if (data.hooksVersion !== undefined) { sets.push('hooksVersion = @hooksVersion'); params.hooksVersion = data.hooksVersion; }
+      if (data.mode !== undefined) { sets.push('mode = @mode'); params.mode = data.mode; }
       if (data.updatedBy !== undefined) { sets.push('updatedBy = @updatedBy'); params.updatedBy = data.updatedBy; }
       if (data.projectId !== undefined) { sets.push('projectId = @projectId'); params.projectId = data.projectId; }
 
@@ -88,11 +107,15 @@ export function GuardrailMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       return row ? this.mapGuardrailRow(row) : null;
     }
 
-    async findGuardrailByKey(key: string, projectId?: string): Promise<IGuardrail | null> {
+    async findGuardrailByKey(key: string, projectId?: string | null): Promise<IGuardrail | null> {
       const db = this.getTenantDb();
       const clauses: string[] = ['key = @key'];
       const params: Record<string, unknown> = { key };
-      if (projectId !== undefined) { clauses.push('projectId = @projectId'); params.projectId = projectId; }
+      // `null` = the tenant-wide row ONLY. `createGuardrail` writes
+      // `projectId ?? null`, so `IS NULL` is exactly the set of rows no project
+      // owns; a bound `= @projectId` with a null parameter would match nothing.
+      if (projectId === null) clauses.push('projectId IS NULL');
+      else if (projectId !== undefined) { clauses.push('projectId = @projectId'); params.projectId = projectId; }
       const row = db.prepare(
         `SELECT * FROM ${TABLES.guardrails} WHERE ${clauses.join(' AND ')}`,
       ).get(params) as SqliteRow | undefined;
@@ -181,11 +204,13 @@ export function GuardrailMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       return row ? this.mapWordListRow(row) : null;
     }
 
-    async findGuardrailWordListByKey(key: string, projectId?: string): Promise<IGuardrailWordList | null> {
+    async findGuardrailWordListByKey(key: string, projectId?: string | null): Promise<IGuardrailWordList | null> {
       const db = this.getTenantDb();
       const clauses: string[] = ['key = @key'];
       const params: Record<string, unknown> = { key };
-      if (projectId !== undefined) { clauses.push('projectId = @projectId'); params.projectId = projectId; }
+      // Same three-way contract as findGuardrailByKey: null = tenant-wide only.
+      if (projectId === null) clauses.push('projectId IS NULL');
+      else if (projectId !== undefined) { clauses.push('projectId = @projectId'); params.projectId = projectId; }
       const row = db.prepare(
         `SELECT * FROM ${TABLES.guardrailWordLists} WHERE ${clauses.join(' AND ')}`,
       ).get(params) as SqliteRow | undefined;
@@ -238,10 +263,10 @@ export function GuardrailMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         INSERT INTO ${TABLES.guardrailEvalLogs}
         (id, tenantId, projectId, guardrailId, guardrailKey, guardrailName, guardrailType,
           target, action, passed, findings, inputText, latencyMs, source, requestId, message,
-          userId, apiTokenId, actorType, createdAt)
+          userId, apiTokenId, actorType, hook, decision, riskScore, createdAt)
         VALUES (@id, @tenantId, @projectId, @guardrailId, @guardrailKey, @guardrailName, @guardrailType,
           @target, @action, @passed, @findings, @inputText, @latencyMs, @source, @requestId, @message,
-          @userId, @apiTokenId, @actorType, @createdAt)
+          @userId, @apiTokenId, @actorType, @hook, @decision, @riskScore, @createdAt)
       `).run({
         id: this.newId(),
         tenantId: log.tenantId,
@@ -262,6 +287,9 @@ export function GuardrailMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         userId: log.userId ?? null,
         apiTokenId: log.apiTokenId ?? null,
         actorType: log.actorType ?? null,
+        hook: log.hook ?? null,
+        decision: log.decision ?? null,
+        riskScore: log.riskScore ?? null,
         createdAt: this.now(),
       });
     }
@@ -382,6 +410,31 @@ export function GuardrailMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         policy: this.parseJson(r.policy, undefined),
         customPrompt: r.customPrompt as string | undefined,
         metadata: this.parseJson(r.metadata, {}),
+        // An absent column (pre-migration row) or the '{}' default MUST come
+        // back as undefined, not {}: ensureHooks() distinguishes the two, and
+        // an authored-but-empty config is a guardrail that runs NOTHING.
+        // The policy array being an array is the only structural marker of a
+        // real one — under EITHER spelling, because a row written before the
+        // `check` -> `policy` rename stores it as `checks`, and calling that
+        // "no config" would make every guardrail authored before the rename
+        // read back with zero policies. Re-spelling happens downstream, in
+        // `normalizeHooksConfig`; this file may not import from services, and
+        // only needs to decide that a config is THERE.
+        hooks: ((): GuardrailHooksConfig | undefined => {
+          // `parsed` can be a literal null: toJson(undefined) stores the string
+          // "null", so the truthiness check is not redundant here.
+          const parsed = this.parseJson<Partial<GuardrailHooksConfig> | null>(r.hooks, {});
+          if (!parsed) return undefined;
+          const stored = parsed as { policies?: unknown; checks?: unknown };
+          return Array.isArray(stored.policies) || Array.isArray(stored.checks)
+            ? (parsed as GuardrailHooksConfig)
+            : undefined;
+        })(),
+        hooksVersion: (r.hooksVersion as number | null) ?? 0,
+        // Same derivation as createGuardrail, for rows written before the
+        // column existed (SQLite backfills the DEFAULT, but a NULL can still
+        // arrive from a hand-edited DB).
+        mode: (r.mode as GuardrailMode | null) ?? (this.fromBoolInt(r.enabled) ? 'enforce' : 'disabled'),
         createdBy: r.createdBy as string,
         updatedBy: r.updatedBy as string | undefined,
         createdAt: this.toDate(r.createdAt),
@@ -410,6 +463,11 @@ export function GuardrailMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         userId: (r.userId as string | null) ?? undefined,
         apiTokenId: (r.apiTokenId as string | null) ?? undefined,
         actorType: (r.actorType as IGuardrailEvaluationLog['actorType'] | null) ?? undefined,
+        // Without these three the columns are write-only — the hook plane's
+        // whole audit trail would exist in the table and nowhere in the API.
+        hook: (r.hook as string | null) ?? undefined,
+        decision: (r.decision as string | null) ?? undefined,
+        riskScore: (r.riskScore as number | null) ?? undefined,
         createdAt: this.toDate(r.createdAt),
       } as IGuardrailEvaluationLog;
     }
