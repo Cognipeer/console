@@ -1,11 +1,35 @@
 'use client';
 
 import { useMemo } from 'react';
-import { Paper, useMantineColorScheme } from '@mantine/core';
-import { JsonView, collapseAllNested, defaultStyles, darkStyles } from 'react-json-view-lite';
+import { Paper } from '@mantine/core';
+import { JsonView, collapseAllNested, defaultStyles } from 'react-json-view-lite';
 import 'react-json-view-lite/dist/index.css';
+import moduleStyles from './JsonTreeViewer.module.css';
 
-/* ─── Expand strategy ───────────────────────────────────────── */
+/**
+ * `react-json-view-lite`'s style props are CSS class names, not inline
+ * styles — `basicChildStyle`/`childFieldsContainer` carry no color (just
+ * indentation), so the library's own classes are kept for those; every
+ * color-bearing class is replaced with one driven by Mantine tokens, so it
+ * reads as part of this app rather than the library's default black-on-grey
+ * look, and stays correct in both themes without a light/dark branch.
+ */
+const jsonViewStyle = {
+    ...defaultStyles,
+    container: moduleStyles.container,
+    label: moduleStyles.label,
+    clickableLabel: moduleStyles.clickableLabel,
+    stringValue: moduleStyles.stringValue,
+    numberValue: moduleStyles.numberValue,
+    booleanValue: moduleStyles.booleanValue,
+    nullValue: moduleStyles.nullValue,
+    undefinedValue: moduleStyles.undefinedValue,
+    otherValue: moduleStyles.otherValue,
+    punctuation: moduleStyles.punctuation,
+    expandIcon: moduleStyles.expandIcon,
+    collapseIcon: moduleStyles.collapseIcon,
+    collapsedContent: moduleStyles.collapsedContent,
+};
 
 export interface JsonTreeViewerProps {
     /** The data to display — object, array, or primitive */
@@ -21,9 +45,6 @@ export default function JsonTreeViewer({
     initialExpandLevel = 2,
     bordered = true,
 }: JsonTreeViewerProps) {
-    const { colorScheme } = useMantineColorScheme();
-    const isDark = colorScheme === 'dark';
-
     const expandFn = useMemo(() => {
         if (initialExpandLevel <= 0) return collapseAllNested;
         if (initialExpandLevel >= 100) return () => true;
@@ -42,7 +63,7 @@ export default function JsonTreeViewer({
             data={normalizedData}
             shouldExpandNode={expandFn}
             clickToExpandNode
-            style={isDark ? darkStyles : defaultStyles}
+            style={jsonViewStyle}
         />
     );
 
@@ -53,12 +74,7 @@ export default function JsonTreeViewer({
             withBorder
             radius="md"
             p="xs"
-            style={{
-                overflow: 'auto',
-                fontSize: 13,
-                lineHeight: 1.6,
-                fontFamily: 'var(--mantine-font-family-monospace, ui-monospace, monospace)',
-            }}
+            style={{ overflow: 'auto' }}
         >
             {content}
         </Paper>

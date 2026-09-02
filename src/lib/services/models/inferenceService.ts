@@ -294,9 +294,12 @@ interface EmbeddingRequestBody extends Record<string, unknown> {
  * Logging those was the missing half — without them a structured-output
  * failure is indistinguishable from a model that simply chose to write prose.
  *
- * Tool SCHEMAS are deliberately reduced to names + count: the full definitions
- * routinely dwarf the rest of the payload and would be truncated away by the
- * size cap, taking the response with them.
+ * Tool SCHEMAS get their own byte budget (like `responseFormat.schema` below)
+ * rather than being logged unconditionally: the full definitions routinely
+ * dwarf the rest of the payload and would be truncated away by
+ * `sanitizeForLogging`'s whole-payload cap, taking the response with them.
+ * `names`/`count` are always logged regardless, so a caller that only needs
+ * "which tools were offered" never depends on the budget.
  */
 export interface LoggedRequestContract {
   responseFormat?: {
@@ -308,7 +311,14 @@ export interface LoggedRequestContract {
     /** Set when the schema was dropped by that budget. */
     schemaTruncated?: true;
   };
-  tools?: { count: number; names: string[] };
+  tools?: {
+    count: number;
+    names: string[];
+    /** The full tool/function definitions as sent, when they fit TOOLS_SCHEMA_LOG_MAX_BYTES. */
+    schemas?: unknown[];
+    /** Set when the schemas were dropped by that budget — names/count still logged. */
+    schemasTruncated?: true;
+  };
   toolChoice?: unknown;
   maxTokens?: number;
   temperature?: number;
@@ -323,6 +333,10 @@ export interface LoggedRequestContract {
  * (type / name / strict) survives and only the schema body is dropped.
  */
 const RESPONSE_SCHEMA_LOG_MAX_BYTES = 8 * 1024;
+
+/** Same rationale as RESPONSE_SCHEMA_LOG_MAX_BYTES, sized for a typical tool
+ *  menu (several tool definitions) rather than a single schema. */
+const TOOLS_SCHEMA_LOG_MAX_BYTES = 16 * 1024;
 
 export function describeRequestContract(body: Record<string, unknown> | undefined): LoggedRequestContract {
   const out: LoggedRequestContract = {};
@@ -371,6 +385,19 @@ export function describeRequestContract(body: Record<string, unknown> | undefine
         })
         .filter((n): n is string => Boolean(n)),
     };
+    // Full definitions are what a REPLAY needs (evaluation suite, prompt
+    // optimizer, traffic snapshot) — same reasoning as the response schema
+    // above, on its own budget so an oversized tool menu can't take the
+    // messages down with it.
+    try {
+      if (Buffer.byteLength(JSON.stringify(tools), 'utf8') <= TOOLS_SCHEMA_LOG_MAX_BYTES) {
+        out.tools.schemas = tools;
+      } else {
+        out.tools.schemasTruncated = true;
+      }
+    } catch {
+      out.tools.schemasTruncated = true;
+    }
   }
   if (body.tool_choice !== undefined) out.toolChoice = body.tool_choice;
 

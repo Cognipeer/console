@@ -1,7 +1,8 @@
 'use client';
 
-import { use, useCallback, useEffect, useState } from 'react';
+import { use, useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { useDisclosure } from '@mantine/hooks';
 import {
   Card,
   Stack,
@@ -34,6 +35,7 @@ import {
   IconCheck,
   IconInfoCircle,
   IconTimeline,
+  IconMaximize,
 } from '@tabler/icons-react';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
@@ -50,6 +52,15 @@ import {
   formatToolName,
   calcCacheHitRate,
 } from '@/lib/utils/tracingUtils';
+import { messageContentToText } from '@/components/common/ui/MessageBlock';
+import { type PropertyRow } from '@/components/common/ui/PropertiesPanel';
+import FunctionsList from '@/components/common/ui/FunctionsList';
+import TokenStats from '@/components/common/ui/TokenStats';
+import LlmRequestDetailModal, {
+  LlmRequestItemsView,
+  type LlmRequestDetailData,
+  type LlmRequestItem,
+} from '@/components/common/llm/LlmRequestDetail';
 
 dayjs.extend(relativeTime);
 dayjs.extend(duration);
@@ -270,6 +281,93 @@ function MetaItem({
   );
 }
 
+/**
+ * Maps thread event sections onto the shared item stream. `message`/
+ * `tool_call`/`tool_result` become typed items (a call and the result
+ * sharing its tool name group into one card); a `tool_definitions` section
+ * feeds the Functions row directly rather than joining the stream. Every
+ * other kind either passes through as a `SectionCard` (`includeOther`, used
+ * by the inline Sections tab) or is dropped (the "View full request" modal).
+ */
+function sectionsToItems(
+  sections: SectionEntry[],
+  includeOther: boolean,
+): { items: LlmRequestItem[]; functionNames: string[] } {
+  const items: LlmRequestItem[] = [];
+  let functionNames: string[] = [];
+
+  sections.forEach((section, index) => {
+    const kind = typeof section.kind === 'string' ? section.kind : undefined;
+    const role = typeof section.role === 'string' ? section.role : undefined;
+    const tool = typeof section.tool === 'string' ? section.tool : undefined;
+
+    if (kind === 'message' && role) {
+      items.push({ itemType: 'message', role, content: messageContentToText(section.content) });
+    } else if (kind === 'tool_call') {
+      const raw = section.content;
+      let args: unknown = raw;
+      if (typeof raw === 'string') {
+        try { args = JSON.parse(raw); } catch { /* leave as string */ }
+      }
+      items.push({ itemType: 'call', turnId: tool ?? `call-${index}`, name: tool, args });
+    } else if (kind === 'tool_result') {
+      items.push({ itemType: 'result', turnId: tool ?? `result-${index}`, name: tool, content: messageContentToText(section.content) });
+    } else if (kind === 'tool_definitions' && Array.isArray(section.tools)) {
+      functionNames = (section.tools as Array<Record<string, unknown>>)
+        .filter((entry) => entry && typeof entry === 'object' && typeof entry.name === 'string')
+        .map((entry) => entry.name as string);
+    } else if (includeOther) {
+      const key =
+        (typeof section.id === 'string' && section.id.length > 0 && `id-${section.id}`) ||
+        (typeof section.label === 'string' && section.label.length > 0 && `label-${section.label}-${index}`) ||
+        (typeof section.title === 'string' && section.title.length > 0 && `title-${section.title}-${index}`) ||
+        `section-${index}`;
+      items.push({ itemType: 'custom', node: <SectionCard key={key} section={section} index={index} /> });
+    }
+  });
+
+  return { items, functionNames };
+}
+
+function buildThreadEventDetailData(event: TracingEvent): LlmRequestDetailData {
+  const { items, functionNames } = sectionsToItems(event.sections ?? [], false);
+
+  const properties: PropertyRow[] = [
+    { key: 'timestamp', label: 'Timestamp', value: <Text size="sm">{event.timestamp ? dayjs(event.timestamp).format('MMM D, YYYY HH:mm:ss') : '—'}</Text> },
+    { key: 'id', label: 'Event ID', value: <Code style={{ fontSize: 11, wordBreak: 'break-all' }}>{event.id}</Code> },
+    ...(event.model ? [{ key: 'model', label: 'Model', value: <Text size="sm">{event.model}</Text> }] : []),
+    ...(event.inputTokens != null || event.outputTokens != null ? [{
+      key: 'tokens',
+      label: 'Tokens',
+      value: (
+        <TokenStats
+          total={(event.inputTokens ?? 0) + (event.outputTokens ?? 0)}
+          input={event.inputTokens}
+          output={event.outputTokens}
+          cached={event.cachedInputTokens}
+        />
+      ),
+    }] : []),
+    { key: 'functions', label: 'Functions', value: <FunctionsList names={functionNames} emptyLabel="No functions available" /> },
+  ];
+
+  return {
+    badges: (
+      <Group gap="xs" wrap="wrap">
+        {event.status && (
+          <Badge size="sm" variant="light" radius="xl" color={resolveStatusColor(event.status)}>
+            {event.status.toUpperCase()}
+          </Badge>
+        )}
+      </Group>
+    ),
+    banner: event.error?.message ? <Text size="sm" c="red">{event.error.message}</Text> : undefined,
+    items,
+    properties,
+    raw: { response: event },
+  };
+}
+
 const SectionCard = ({ section, index }: { section: SectionEntry; index: number }) => {
   const kind = typeof section.kind === 'string' ? section.kind : undefined;
   const role = typeof section.role === 'string' ? section.role : undefined;
@@ -456,6 +554,11 @@ export default function ThreadDetailPage({
   }, [selectedSessionId, hasInProgressSelectedSession, fetchSessionEvents]);
 
   const selectedEvent = selectedSessionEvents.find((event) => event.id === selectedEventId) || null;
+  const [fullViewOpened, fullViewHandlers] = useDisclosure(false);
+  const selectedEventDetailData = useMemo(
+    () => (selectedEvent ? buildThreadEventDetailData(selectedEvent) : null),
+    [selectedEvent],
+  );
 
   const selectedEventTokenStats = (() => {
     if (!selectedEvent) {
@@ -888,7 +991,25 @@ export default function ThreadDetailPage({
         <Grid.Col span={{ base: 12, xl: 4 }}>
           <Card withBorder p="md" h="100%">
             <Stack gap="md" h="100%">
-              <Text fw={600}>Event detail</Text>
+              <Group justify="space-between" wrap="nowrap">
+                <Text fw={600}>Event detail</Text>
+                {selectedEvent && selectedEventDetailData && selectedEventDetailData.items.length > 0 ? (
+                  <Button
+                    size="xs"
+                    variant="light"
+                    leftSection={<IconMaximize size={14} />}
+                    onClick={fullViewHandlers.open}
+                  >
+                    View full request
+                  </Button>
+                ) : null}
+              </Group>
+              <LlmRequestDetailModal
+                opened={fullViewOpened}
+                onClose={fullViewHandlers.close}
+                title={selectedEvent ? (selectedEvent.label ? humanize(selectedEvent.label) : humanize(selectedEvent.type) || 'Event') : 'Event'}
+                data={selectedEventDetailData}
+              />
               {selectedEvent ? (
                 <ScrollArea style={{ flex: 1 }} type="auto" offsetScrollbars>
                   <Stack gap="md">
@@ -1010,17 +1131,7 @@ export default function ThreadDetailPage({
                         Sections
                       </Text>
                       {selectedEvent.sections && selectedEvent.sections.length > 0 ? (
-                        <Stack gap="sm">
-                          {selectedEvent.sections.map((section, index) => {
-                            const key =
-                              (typeof section.id === 'string' && section.id.length > 0 && `id-${section.id}`) ||
-                              (typeof section.label === 'string' && section.label.length > 0 && `label-${section.label}-${index}`) ||
-                              (typeof section.title === 'string' && section.title.length > 0 && `title-${section.title}-${index}`) ||
-                              `section-${index}`;
-
-                            return <SectionCard key={key} section={section} index={index} />;
-                          })}
-                        </Stack>
+                        <LlmRequestItemsView items={sectionsToItems(selectedEvent.sections, true).items} />
                       ) : (
                         <Text size="sm" c="dimmed">
                           No structured sections for this event.

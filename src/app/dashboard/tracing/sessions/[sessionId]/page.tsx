@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState, use as usePromise } from 'react';
 import { useRouter } from 'next/navigation';
+import { useDisclosure } from '@mantine/hooks';
 import {
     Stack,
     Group,
@@ -39,6 +40,7 @@ import {
     IconBinaryTree,
     IconTimeline,
     IconTool,
+    IconMaximize,
 } from '@tabler/icons-react';
 import DetailShell from '@/components/common/ui/DetailShell';
 import StatusBadge from '@/components/common/ui/StatusBadge';
@@ -56,6 +58,15 @@ import {
 } from '@/lib/utils/tracingUtils';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 import JsonTreeViewer from '@/components/common/JsonTreeViewer';
+import { messageContentToText } from '@/components/common/ui/MessageBlock';
+import { type PropertyRow } from '@/components/common/ui/PropertiesPanel';
+import FunctionsList from '@/components/common/ui/FunctionsList';
+import TokenStats from '@/components/common/ui/TokenStats';
+import LlmRequestDetailModal, {
+    LlmRequestItemsView,
+    type LlmRequestDetailData,
+    type LlmRequestItem,
+} from '@/components/common/llm/LlmRequestDetail';
 import { isAbnormalFinishReason, isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
 
 dayjs.extend(relativeTime);
@@ -621,6 +632,13 @@ function EventInfoRows({ event }: { event: TracingEvent }) {
             value: <Badge size="sm" variant="light" color="violet">{formatToolName(event.toolName)}</Badge>,
         });
     }
+    if (event.toolDefinitionNames && event.toolDefinitionNames.length > 0) {
+        rows.push({
+            key: 'functions',
+            label: 'Functions',
+            value: <ToolMenuBadge names={event.toolDefinitionNames} count={event.toolDefinitionCount} />,
+        });
+    }
     if (event.toolExecutionId) {
         rows.push({
             key: 'toolExecId',
@@ -894,7 +912,95 @@ function RawJsonView({ event }: { event: TracingEvent }) {
 
 // ─── Event detail panel ────────────────────────────────────────
 
+/**
+ * Maps one tracing event onto the shared `LlmRequestDetailData` shape — the
+ * same normalization job Model Hub and AI App Gateway do for their own raw
+ * payloads — so "View full request" opens the exact same viewer used
+ * everywhere else a single LLM request/response is inspected.
+ */
+/**
+ * Maps tracing sections onto the shared item stream. `message`/`tool_call`/
+ * `tool_result` become typed items (a `tool_call` and the `tool_result` that
+ * shares its tool name group into one card); every other kind (tool
+ * definitions, response format, …) either passes through as a `SectionCard`
+ * (`includeOther`, used by the inline Sections tab, which already renders
+ * those well) or is dropped (the "View full request" modal, which has no
+ * room for a config-shaped section and already surfaces tool definitions via
+ * the Properties rail's Functions row).
+ */
+function sectionsToItems(sections: SectionEntry[], includeOther: boolean): LlmRequestItem[] {
+    const items: LlmRequestItem[] = [];
+    sections.forEach((section, index) => {
+        const kind = typeof section.kind === 'string' ? section.kind : undefined;
+        const role = typeof section.role === 'string' ? section.role : undefined;
+        const tool = typeof section.tool === 'string' ? section.tool : (typeof section.toolName === 'string' ? section.toolName : undefined);
+
+        if (kind === 'message' && role) {
+            items.push({ itemType: 'message', role, content: messageContentToText(section.content) });
+        } else if (kind === 'tool_call') {
+            const raw = section.content;
+            let args: unknown = raw;
+            if (typeof raw === 'string') {
+                try { args = JSON.parse(raw); } catch { /* leave as string */ }
+            }
+            items.push({ itemType: 'call', turnId: tool ?? `call-${index}`, name: tool, args });
+        } else if (kind === 'tool_result') {
+            items.push({ itemType: 'result', turnId: tool ?? `result-${index}`, name: tool, content: messageContentToText(section.content) });
+        } else if (includeOther) {
+            const key =
+                (typeof section.id === 'string' && section.id.length > 0 && `id-${section.id}`) ||
+                (typeof section.label === 'string' && section.label.length > 0 && `label-${section.label}-${index}`) ||
+                `section-${index}`;
+            items.push({ itemType: 'custom', node: <SectionCard key={key} section={section} index={index} /> });
+        }
+    });
+    return items;
+}
+
+function buildEventDetailData(event: TracingEvent): LlmRequestDetailData {
+    const items = sectionsToItems(event.sections ?? [], false);
+
+    const properties: PropertyRow[] = [
+        { key: 'timestamp', label: 'Timestamp', value: <Text size="sm">{event.timestamp ? dayjs(event.timestamp).format('MMM D, YYYY HH:mm:ss') : '—'}</Text> },
+        { key: 'id', label: 'Event ID', value: <Code style={{ fontSize: 11, wordBreak: 'break-all' }}>{event.id}</Code> },
+        ...(event.model ? [{ key: 'model', label: 'Model', value: <Text size="sm">{event.model}</Text> }] : []),
+        ...(event.totalTokens != null ? [{
+            key: 'tokens',
+            label: 'Tokens',
+            value: (
+                <TokenStats
+                    total={event.totalTokens}
+                    input={event.inputTokens}
+                    output={event.outputTokens}
+                    cached={event.cachedInputTokens}
+                    reasoning={event.reasoningTokens}
+                />
+            ),
+        }] : []),
+        { key: 'functions', label: 'Functions', value: <FunctionsList names={event.toolDefinitionNames ?? []} emptyLabel="No functions available" /> },
+    ];
+
+    return {
+        badges: (
+            <Group gap="xs" wrap="wrap">
+                {event.status && (
+                    <Badge size="sm" variant="light" radius="xl" color={resolveStatusColor(event.status)}>
+                        {event.status.toUpperCase()}
+                    </Badge>
+                )}
+                {event.finishReason ? <Badge size="sm" variant="light">{event.finishReason}</Badge> : null}
+            </Group>
+        ),
+        banner: event.error?.message ? <Text size="sm" c="red">{event.error.message}</Text> : undefined,
+        items,
+        properties,
+        raw: { response: event },
+    };
+}
+
 function EventDetailPanel({ event }: { event: TracingEvent }) {
+    const [fullViewOpened, fullViewHandlers] = useDisclosure(false);
+    const detailData = useMemo(() => buildEventDetailData(event), [event]);
     const hasSections = event.sections && event.sections.length > 0;
     const hasMetadata = event.metadata && Object.keys(event.metadata).length > 0;
     // An abnormal stop (`length`, `content_filter`) explains a truncated or
@@ -929,11 +1035,29 @@ function EventDetailPanel({ event }: { event: TracingEvent }) {
                             </Badge>
                         </Tooltip>
                     )}
+                    {detailData.items.length > 0 ? (
+                        <Button
+                            size="xs"
+                            variant="light"
+                            leftSection={<IconMaximize size={14} />}
+                            onClick={fullViewHandlers.open}
+                            style={{ marginLeft: 'auto' }}
+                        >
+                            View full request
+                        </Button>
+                    ) : null}
                 </Group>
                 <Text size="sm" c="dimmed">
                     #{event.sequence ?? '—'} · {event.timestamp ? dayjs(event.timestamp).format('MMM D, YYYY HH:mm:ss') : '—'} · {formatRelativeTime(event.timestamp)}
                 </Text>
             </Stack>
+
+            <LlmRequestDetailModal
+                opened={fullViewOpened}
+                onClose={fullViewHandlers.close}
+                title={event.label ? humanize(event.label) : humanize(event.type) || 'Event'}
+                data={detailData}
+            />
 
             {/* Info rows */}
             <EventInfoRows event={event} />
@@ -970,15 +1094,7 @@ function EventDetailPanel({ event }: { event: TracingEvent }) {
 
                 <Tabs.Panel value="sections" pt="md">
                     {hasSections ? (
-                        <Stack gap="sm">
-                            {event.sections!.map((section, index) => {
-                                const key =
-                                    (typeof section.id === 'string' && section.id.length > 0 && `id-${section.id}`) ||
-                                    (typeof section.label === 'string' && section.label.length > 0 && `label-${section.label}-${index}`) ||
-                                    `section-${index}`;
-                                return <SectionCard key={key} section={section} index={index} />;
-                            })}
-                        </Stack>
+                        <LlmRequestItemsView items={sectionsToItems(event.sections!, true)} />
                     ) : (
                         <Text size="sm" c="dimmed">No structured sections for this event.</Text>
                     )}

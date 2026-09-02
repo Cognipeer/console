@@ -9,12 +9,10 @@ import {
   Center,
   Code,
   CopyButton,
+  Group,
   Loader,
   Menu,
-  Modal,
-  ScrollArea,
   Stack,
-  Tabs,
   Text,
   Tooltip,
 } from '@mantine/core';
@@ -44,7 +42,6 @@ import {
   IconRefresh,
   IconSettings,
   IconTimeline,
-  IconTool,
   IconTrash,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
@@ -56,6 +53,13 @@ import OcrPlayground from '@/components/playground/OcrPlayground';
 import PageContainer from '@/components/common/ui/PageContainer';
 import TabsBar from '@/components/common/ui/TabsBar';
 import StatusBadge from '@/components/common/ui/StatusBadge';
+import { type PropertyRow } from '@/components/common/ui/PropertiesPanel';
+import FunctionsList from '@/components/common/ui/FunctionsList';
+import TokenStats from '@/components/common/ui/TokenStats';
+import LlmRequestDetailModal, {
+  type LlmRequestDetailData,
+  type LlmRequestItem,
+} from '@/components/common/llm/LlmRequestDetail';
 import { useDashboardDateFilterState } from '@/components/layout/DashboardDateFilter';
 import Spark from '@/components/common/ui/Spark';
 import Toolbar from '@/components/common/ui/Toolbar';
@@ -270,6 +274,129 @@ function relativeDate(iso?: string) {
 }
 
 type DetailTab = 'overview' | 'playground' | 'routing' | 'configure' | 'logs' | 'usage';
+
+interface ParsedToolCall {
+  id?: string;
+  name: string;
+  args: unknown;
+}
+
+function parseToolCalls(source: Record<string, unknown> | undefined): ParsedToolCall[] {
+  const raw = source?.tool_calls;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((tc) => {
+      const entry = tc as Record<string, unknown>;
+      const fn = entry.function as Record<string, unknown> | undefined;
+      let args: unknown = fn?.arguments ?? entry.args;
+      if (typeof args === 'string') {
+        try {
+          args = JSON.parse(args);
+        } catch {
+          // leave as the raw string — still renders fine in the JSON viewer
+        }
+      }
+      const name = (fn?.name ?? entry.name) as string | undefined;
+      return { id: typeof entry.id === 'string' ? entry.id : undefined, name: name ?? 'unknown', args };
+    })
+    .filter((tc) => tc.name !== 'unknown' || tc.args !== undefined);
+}
+
+/**
+ * `providerResponse` takes one of a few shapes depending on how the request
+ * completed: an OpenAI-style `{choices:[{message}]}` object (non-streaming
+ * success), a flat LangChain `AIMessageChunk`-like object (`{content,
+ * tool_calls,...}`, aggregated from stream deltas), or a wrapper around one
+ * of those (`{partial: ...}` on cancel/guardrail-block, `{error}` on failure).
+ * This normalizes all of them to one shape for display.
+ */
+function parseResponseOutput(providerResponse?: Record<string, unknown>): {
+  content?: unknown;
+  toolCalls: ParsedToolCall[];
+  reasoning?: string;
+} {
+  if (!providerResponse) return { toolCalls: [] };
+
+  const choices = providerResponse.choices;
+  const message = Array.isArray(choices) && choices[0] && typeof choices[0] === 'object'
+    ? ((choices[0] as Record<string, unknown>).message as Record<string, unknown> | undefined)
+    : undefined;
+
+  const partial = providerResponse.partial;
+  const flatSource = message
+    ?? (partial && typeof partial === 'object' ? (partial as Record<string, unknown>) : providerResponse);
+
+  const reasoning =
+    (typeof flatSource.reasoning === 'string' && flatSource.reasoning) ||
+    (typeof flatSource.reasoning_content === 'string' && flatSource.reasoning_content) ||
+    undefined;
+
+  return {
+    content: flatSource.content,
+    toolCalls: parseToolCalls(flatSource),
+    reasoning: reasoning || undefined,
+  };
+}
+
+/**
+ * Walks `providerRequest.messages` in conversation order and appends the
+ * response's output, producing one ordered `LlmRequestItem` stream. A
+ * historical `role:"assistant"` message's `tool_calls` become `call` items;
+ * the `role:"tool"` message answering one becomes a `result` item carrying
+ * the SAME `tool_call_id` as `turnId` — that shared id is what lets
+ * `LlmRequestDetailModal` render the call and its answer as one card instead
+ * of two unrelated "Tool" blocks.
+ */
+function buildRequestItems(
+  providerRequest: Record<string, unknown> | undefined,
+  providerResponse: Record<string, unknown> | undefined,
+): LlmRequestItem[] {
+  const items: LlmRequestItem[] = [];
+  const toolNameByCallId = new Map<string, string>();
+
+  const messages = providerRequest?.messages;
+  if (Array.isArray(messages)) {
+    messages.forEach((m, mi) => {
+      if (!m || typeof m !== 'object') return;
+      const msg = m as Record<string, unknown>;
+      const role = typeof msg.role === 'string' ? msg.role : 'user';
+
+      if (role === 'tool') {
+        const turnId = typeof msg.tool_call_id === 'string' ? msg.tool_call_id : `tool-${mi}`;
+        const name = toolNameByCallId.get(turnId) ?? (typeof msg.name === 'string' ? msg.name : undefined);
+        items.push({ itemType: 'result', turnId, name, content: msg.content });
+        return;
+      }
+
+      for (const tc of parseToolCalls(msg)) {
+        const turnId = tc.id ?? `call-${mi}-${tc.name}`;
+        const name = tc.name === 'unknown' ? undefined : tc.name;
+        if (name) toolNameByCallId.set(turnId, name);
+        items.push({ itemType: 'call', turnId, name, args: tc.args });
+      }
+
+      // MessageBlock renders nothing for empty content (e.g. an assistant
+      // message that is only tool_calls) — no need to pre-filter here.
+      items.push({ itemType: 'message', role, content: msg.content });
+    });
+  }
+
+  items.push({ itemType: 'divider', label: 'Output' });
+
+  const output = parseResponseOutput(providerResponse);
+  if (output.reasoning) {
+    items.push({ itemType: 'message', role: 'assistant', roleLabel: 'Reasoning', content: output.reasoning });
+  }
+  if (output.content) {
+    items.push({ itemType: 'message', role: 'assistant', content: output.content });
+  }
+  for (const tc of output.toolCalls) {
+    const name = tc.name === 'unknown' ? undefined : tc.name;
+    items.push({ itemType: 'call', turnId: tc.id ?? `out-${tc.name}`, name, args: tc.args });
+  }
+
+  return items;
+}
 
 /** Reads the routing config off a model when it is a Dynamic LLM. */
 function dynamicConfigOf(model: { settings?: Record<string, unknown> } | null): IDynamicRoutingConfig | null {
@@ -827,145 +954,128 @@ export default function ModelDetailPage() {
       {tab === 'usage' ? <UsageTab model={model} /> : null}
 
       {/* Request Details Modal */}
-      <Modal
+      <LlmRequestDetailModal
         opened={logModalOpened}
         onClose={closeLogModal}
         title={t('logs.modal.title')}
-        size="xl"
-      >
-        {selectedLog ? (
-          <Stack gap="md">
-            <div className="ds-card ds-card-pad-sm">
-              <Stack gap="xs">
-                <div className="ds-row ds-gap-xs">
-                  <StatusBadge status={selectedLog.status} />
-                  {selectedLog.latencyMs ? (
-                    <span className="ds-badge ds-badge-info">
-                      {Math.round(selectedLog.latencyMs)} ms
-                    </span>
-                  ) : null}
-                  {selectedLog.toolCalls !== undefined &&
-                  selectedLog.toolCalls > 0 ? (
-                    <span className="ds-badge ds-badge-warn">
-                      <IconTool size={10} stroke={2} />
-                      {t('logs.modal.toolCalls', { count: selectedLog.toolCalls })}
-                    </span>
-                  ) : null}
-                  {selectedLog.cacheHit === true ? (
-                    <span className="ds-badge ds-badge-teal">
-                      {t('logs.cacheHit')}
-                    </span>
-                  ) : null}
-                  {selectedLog.cacheHit === false && selectedLog.status === 'success' ? (
-                    <span className="ds-badge">{t('logs.cacheMiss')}</span>
-                  ) : null}
-                </div>
-                <Text size="sm">
-                  <strong>{t('logs.modal.requestId')}:</strong>{' '}
-                  <code>{selectedLog.requestId || '—'}</code>
-                </Text>
-                <Text size="sm">
-                  <strong>{t('logs.route')}:</strong> {selectedLog.route}
-                </Text>
-                <Text size="sm">
-                  <strong>{t('logs.timestamp')}:</strong>{' '}
-                  {selectedLog.createdAt
-                    ? new Date(selectedLog.createdAt).toLocaleString()
-                    : '—'}
-                </Text>
-                <Text size="sm">
-                  <strong>{t('logs.modal.tokens')}:</strong>{' '}
-                  {t('logs.modal.tokenBreakdown', {
-                    input: selectedLog.inputTokens.toLocaleString(),
-                    output: selectedLog.outputTokens.toLocaleString(),
-                    cached: (selectedLog.cachedInputTokens || 0).toLocaleString(),
-                    total: selectedLog.totalTokens.toLocaleString(),
-                  })}
-                </Text>
-                {selectedLog.reasoningTokens ? (
-                  // Separate line rather than a tokenBreakdown placeholder: reasoning
-                  // tokens are already counted inside outputTokens above, so adding a
-                  // slot to that message would make readers double them.
-                  <Text size="xs" c="dimmed">
-                    {t('logs.modal.reasoningTokens', {
-                      count: selectedLog.reasoningTokens.toLocaleString(),
-                    })}
-                  </Text>
-                ) : null}
-                <Text size="sm">
-                  <strong>{t('logs.modal.finishReason')}:</strong>{' '}
-                  {selectedLog.finishReason ? (
-                    <span
-                      className={`ds-badge ${
-                        isAbnormalFinishReason(selectedLog.finishReason) ? 'ds-badge-warn' : ''
-                      }`}
-                    >
-                      {selectedLog.finishReason}
-                    </span>
-                  ) : (
-                    <span className="ds-faint">{t('logs.finishReasonNone')}</span>
-                  )}
-                </Text>
-                {selectedLog.errorMessage ? (
-                  <Text size="sm" c="red">
-                    <strong>{t('logs.modal.error')}:</strong>{' '}
-                    {selectedLog.errorMessage}
-                  </Text>
-                ) : null}
-                {selectedLog.routing ? (
-                  <>
-                    <Text size="sm">
-                      <strong>Routed to:</strong>{' '}
-                      <code>{selectedLog.routing.chosenModelKey}</code>{' '}
-                      <span className="ds-badge ds-badge-info">{selectedLog.routing.decision}</span>
-                    </Text>
-                    <Text size="sm" c="dimmed">
-                      {selectedLog.routing.reason}
-                    </Text>
-                  </>
-                ) : null}
-              </Stack>
-            </div>
+        labels={{
+          formatted: t('logs.modal.formatted'),
+          raw: t('logs.modal.raw'),
+          properties: t('logs.modal.properties'),
+          request: t('logs.modal.request'),
+          response: t('logs.modal.response'),
+          noRequest: t('logs.modal.noRequest'),
+          noResponse: t('logs.modal.noResponse'),
+          noItems: t('logs.modal.noItems'),
+          exchanges: t('logs.modal.exchanges'),
+          exchange: t('logs.modal.exchange'),
+          untitledCall: t('logs.modal.untitledCall'),
+          noArguments: t('logs.modal.noArguments'),
+        }}
+        data={selectedLog ? (() => {
+          const items: LlmRequestItem[] = buildRequestItems(selectedLog.providerRequest, selectedLog.providerResponse);
+          const functionNames =
+            (selectedLog.providerRequest?.tools as { names?: string[] } | undefined)?.names ?? [];
 
-            <Tabs defaultValue="request">
-              <Tabs.List>
-                <Tabs.Tab value="request">{t('logs.modal.request')}</Tabs.Tab>
-                <Tabs.Tab value="response">{t('logs.modal.response')}</Tabs.Tab>
-              </Tabs.List>
-              <Tabs.Panel value="request" pt="sm">
-                <ScrollArea h={400} type="auto">
-                  {selectedLog.providerRequest ? (
-                    <Code block style={{ whiteSpace: 'pre-wrap' }}>
-                      {JSON.stringify(selectedLog.providerRequest, null, 2)}
-                    </Code>
-                  ) : (
-                    <Center py="md">
-                      <Text size="sm" c="dimmed">
-                        {t('logs.modal.noRequest')}
-                      </Text>
-                    </Center>
-                  )}
-                </ScrollArea>
-              </Tabs.Panel>
-              <Tabs.Panel value="response" pt="sm">
-                <ScrollArea h={400} type="auto">
-                  {selectedLog.providerResponse ? (
-                    <Code block style={{ whiteSpace: 'pre-wrap' }}>
-                      {JSON.stringify(selectedLog.providerResponse, null, 2)}
-                    </Code>
-                  ) : (
-                    <Center py="md">
-                      <Text size="sm" c="dimmed">
-                        {t('logs.modal.noResponse')}
-                      </Text>
-                    </Center>
-                  )}
-                </ScrollArea>
-              </Tabs.Panel>
-            </Tabs>
-          </Stack>
-        ) : null}
-      </Modal>
+          const properties: PropertyRow[] = [
+            {
+              key: 'created',
+              label: t('logs.modal.created'),
+              value: (
+                <Text size="sm">
+                  {selectedLog.createdAt ? new Date(selectedLog.createdAt).toLocaleString() : '—'}
+                </Text>
+              ),
+            },
+            {
+              key: 'id',
+              label: t('logs.modal.requestId'),
+              value: (
+                <Code style={{ fontSize: 11, wordBreak: 'break-all' }}>
+                  {selectedLog.requestId || '—'}
+                </Code>
+              ),
+            },
+            {
+              key: 'model',
+              label: t('logs.modal.model'),
+              value: <Text size="sm">{model?.key ?? '—'}</Text>,
+            },
+            {
+              key: 'tokens',
+              label: t('logs.modal.tokens'),
+              value: (
+                <TokenStats
+                  total={selectedLog.totalTokens}
+                  input={selectedLog.inputTokens}
+                  output={selectedLog.outputTokens}
+                  cached={selectedLog.cachedInputTokens}
+                  reasoning={selectedLog.reasoningTokens}
+                />
+              ),
+            },
+            {
+              key: 'functions',
+              label: t('logs.modal.functions'),
+              value: <FunctionsList names={functionNames} emptyLabel={t('logs.modal.noFunctions')} />,
+            },
+          ];
+
+          const badges = (
+            <Group gap="xs" wrap="wrap">
+              <StatusBadge status={selectedLog.status} />
+              {selectedLog.latencyMs ? (
+                <span className="ds-badge ds-badge-info">{Math.round(selectedLog.latencyMs)} ms</span>
+              ) : null}
+              {selectedLog.finishReason ? (
+                <span
+                  className={`ds-badge ${
+                    isAbnormalFinishReason(selectedLog.finishReason) ? 'ds-badge-warn' : ''
+                  }`}
+                >
+                  {selectedLog.finishReason}
+                </span>
+              ) : null}
+              {selectedLog.cacheHit === true ? (
+                <span className="ds-badge ds-badge-teal">{t('logs.cacheHit')}</span>
+              ) : null}
+              {selectedLog.cacheHit === false && selectedLog.status === 'success' ? (
+                <span className="ds-badge">{t('logs.cacheMiss')}</span>
+              ) : null}
+            </Group>
+          );
+
+          const banner = (
+            <Stack gap={4}>
+              <Text size="sm" c="dimmed">
+                <strong>{t('logs.route')}:</strong> {selectedLog.route}
+              </Text>
+              {selectedLog.errorMessage ? (
+                <Text size="sm" c="red">
+                  <strong>{t('logs.modal.error')}:</strong> {selectedLog.errorMessage}
+                </Text>
+              ) : null}
+              {selectedLog.routing ? (
+                <Text size="sm" c="dimmed">
+                  <strong>Routed to:</strong> <code>{selectedLog.routing.chosenModelKey}</code>{' '}
+                  <span className="ds-badge ds-badge-info">{selectedLog.routing.decision}</span>
+                  {' — '}
+                  {selectedLog.routing.reason}
+                </Text>
+              ) : null}
+            </Stack>
+          );
+
+          const data: LlmRequestDetailData = {
+            badges,
+            banner,
+            items,
+            properties,
+            raw: { request: selectedLog.providerRequest, response: selectedLog.providerResponse },
+          };
+          return data;
+        })() : null}
+      />
     </PageContainer>
   );
 }

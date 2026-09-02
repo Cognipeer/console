@@ -44,21 +44,41 @@ describe('describeRequestContract', () => {
       .toBe('json_object');
   });
 
-  it('records the tool menu as names + count, not full schemas', () => {
-    const c = describeRequestContract({
-      tools: [
-        { type: 'function', function: { name: 'create_todo', parameters: { type: 'object', properties: { a: {} } } } },
-        { type: 'function', function: { name: 'search_topics', parameters: {} } },
-      ],
-    });
-    expect(c.tools).toEqual({ count: 2, names: ['create_todo', 'search_topics'] });
-    // The point of names-only: the payload must not grow with schema size.
-    expect(JSON.stringify(c.tools).length).toBeLessThan(120);
+  it('records the tool menu as names + count, plus the full schemas when they fit budget', () => {
+    const tools = [
+      { type: 'function', function: { name: 'create_todo', parameters: { type: 'object', properties: { a: {} } } } },
+      { type: 'function', function: { name: 'search_topics', parameters: {} } },
+    ];
+    const c = describeRequestContract({ tools });
+    expect(c.tools?.count).toBe(2);
+    expect(c.tools?.names).toEqual(['create_todo', 'search_topics']);
+    // A replay (evaluation suite, prompt optimizer, traffic snapshot) needs
+    // the schemas themselves, not just which names were offered.
+    expect(c.tools?.schemas).toEqual(tools);
+    expect(c.tools?.schemasTruncated).toBeUndefined();
+  });
+
+  it('drops oversized tool schemas rather than blowing the whole log payload, keeping names + count', () => {
+    // Same reasoning as the response-schema truncation test: the 20k
+    // whole-payload cap replaces providerRequest with a preview, so an
+    // unbounded tool menu would take the messages down with it.
+    const tools = Array.from({ length: 20 }, (_, i) => ({
+      type: 'function',
+      function: { name: `tool_${i}`, parameters: { type: 'object', description: 'x'.repeat(1024) } },
+    }));
+    const c = describeRequestContract({ tools });
+    expect(c.tools?.count).toBe(20);
+    expect(c.tools?.names).toHaveLength(20);
+    expect(c.tools?.schemas).toBeUndefined();
+    expect(c.tools?.schemasTruncated).toBe(true);
   });
 
   it('survives a malformed tool entry without dropping the rest', () => {
-    const c = describeRequestContract({ tools: [{ function: { name: 'ok' } }, null, { nonsense: true }] });
-    expect(c.tools).toEqual({ count: 3, names: ['ok'] });
+    const tools = [{ function: { name: 'ok' } }, null, { nonsense: true }];
+    const c = describeRequestContract({ tools });
+    expect(c.tools?.count).toBe(3);
+    expect(c.tools?.names).toEqual(['ok']);
+    expect(c.tools?.schemas).toEqual(tools);
   });
 
   it('records tool_choice, max_tokens and sampling settings', () => {
