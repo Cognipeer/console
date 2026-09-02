@@ -47,7 +47,7 @@ const VALID_DOMAINS: QuotaDomain[] = [
 ];
 const VALID_SCOPES: QuotaScope[] = ['tenant', 'user', 'token', 'resource', 'provider'];
 const VALID_GROUP_BY = ['hour', 'day', 'month'] as const;
-const VALID_GROUP_BY_ENTITY: SpendGroupByEntity[] = ['user', 'api_key', 'agent'];
+const VALID_GROUP_BY_ENTITY: SpendGroupByEntity[] = ['user', 'agent'];
 
 function parseDate(value: string | undefined, field: string): Date | undefined {
   if (!value) return undefined;
@@ -117,10 +117,10 @@ export const clientSpendApiPlugin: FastifyPluginAsync = async (app) => {
   // Default (no `group_by_entity`): totals + per-model + timeseries rolled up
   // from the raw model usage logs — unchanged legacy behavior.
   //
-  // With `group_by_entity=user|api_key`: a per-user / per-API-token breakdown
-  // read from the cross-service `usage_daily` rollup instead. Attribution
-  // (userId/apiTokenId) is only recorded from the rollup's deploy onward, so
-  // earlier traffic appears under the empty-id (unattributed) entry.
+  // With `group_by_entity=user`: a per-user breakdown read from the
+  // cross-service `usage_daily` rollup instead. Attribution (userId) is only
+  // recorded from the rollup's deploy onward, so earlier traffic appears
+  // under the empty-id (unattributed) entry.
   app.get('/client/v1/spend/report', withClientApiRequestContext(async (request, reply) => {
     try {
       const auth = await getApiTokenContextForRequest(request);
@@ -142,7 +142,7 @@ export const clientSpendApiPlugin: FastifyPluginAsync = async (app) => {
           });
         }
         if (!metadataKey && !(VALID_GROUP_BY_ENTITY as readonly string[]).includes(query.group_by_entity)) {
-          return reply.code(400).send({ error: '`group_by_entity` must be user, api_key, agent, or metadata.<key>' });
+          return reply.code(400).send({ error: '`group_by_entity` must be user, agent, or metadata.<key>' });
         }
         const entity = query.group_by_entity as SpendGroupByEntity;
 
@@ -162,11 +162,9 @@ export const clientSpendApiPlugin: FastifyPluginAsync = async (app) => {
 
         const idField = metadataKey
           ? metadataKey
-          : entity === 'user'
-            ? 'user_id'
-            : entity === 'agent'
-              ? 'agent_key'
-              : 'api_token_id';
+          : entity === 'agent'
+            ? 'agent_key'
+            : 'user_id';
         return reply.code(200).send({
           object: 'spend.breakdown',
           group_by_entity: entity,

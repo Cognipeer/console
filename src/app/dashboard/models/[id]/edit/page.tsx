@@ -28,7 +28,13 @@ import {
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
-import { IconArrowLeft, IconBook, IconDeviceFloppy, IconRefresh } from '@tabler/icons-react';
+import {
+  IconArrowLeft,
+  IconBook,
+  IconDeviceFloppy,
+  IconRefresh,
+  IconShield,
+} from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 import { PROVIDER_DEFINITIONS } from '@/lib/services/models/providerCatalog';
@@ -46,6 +52,8 @@ import {
   getDefaultModelOutputModalities,
 } from '@/lib/services/models/modelCapabilities';
 import CatalogPriceFill from '@/components/models/CatalogPriceFill';
+import ModelGuardrailModal from '@/components/models/ModelGuardrailModal';
+import type { GuardrailBindingRow } from '@/components/guardrails/GuardrailBindingList';
 
 interface ModelProviderOption {
   key: string;
@@ -92,16 +100,27 @@ interface ModelDetailDto {
   pricing: ModelPricing;
   settings: Record<string, unknown>;
   semanticCache?: SemanticCacheConfig;
+  /**
+   * Multi-guardrail binding. Its PRESENCE (not its length) is what says the
+   * model is on the list rather than the two deprecated slots — an explicitly
+   * empty array is an operator saying "bound to nothing", which the resolver
+   * honours literally instead of falling back to the keys below.
+   */
+  guardrails?: GuardrailBindingRow[];
+  /** @deprecated Read only to tell a legacy-bound model from an unbound one. */
   inputGuardrailKey?: string;
+  /** @deprecated See `inputGuardrailKey`. */
   outputGuardrailKey?: string;
   metadata?: Record<string, unknown>;
 }
 
+/** `GET /api/guardrails`, narrowed to what naming an attached binding needs. */
 interface GuardrailOption {
   key: string;
   name: string;
   type: 'preset' | 'custom';
   action: string;
+  enabled?: boolean;
 }
 
 function slugify(value: string) {
@@ -138,8 +157,6 @@ interface FormValues {
   semanticCacheEmbeddingModelKey: string;
   semanticCacheSimilarityThreshold: number;
   semanticCacheTtlSeconds: number;
-  inputGuardrailKey: string;
-  outputGuardrailKey: string;
 }
 
 interface VectorProviderOption {
@@ -172,6 +189,7 @@ export default function EditModelPage() {
   const [vectorIndexes, setVectorIndexes] = useState<VectorIndexOption[]>([]);
   const [embeddingModels, setEmbeddingModels] = useState<EmbeddingModelOption[]>([]);
   const [guardrails, setGuardrails] = useState<GuardrailOption[]>([]);
+  const [guardrailModalOpen, setGuardrailModalOpen] = useState(false);
   // Held as text so a half-typed JSON object doesn't get thrown away on rerender.
   const [requestDefaultsText, setRequestDefaultsText] = useState('');
 
@@ -201,8 +219,6 @@ export default function EditModelPage() {
       semanticCacheEmbeddingModelKey: '',
       semanticCacheSimilarityThreshold: 0.92,
       semanticCacheTtlSeconds: 3600,
-      inputGuardrailKey: '',
-      outputGuardrailKey: '',
     },
     validate: {
       name: (value) => (!value ? tWizard('validation.name') : null),
@@ -215,6 +231,27 @@ export default function EditModelPage() {
       modelProviders.find((candidate) => candidate.key === form.values.providerKey) ?? null,
     [form.values.providerKey, modelProviders],
   );
+
+  /**
+   * Guardrail keys attached today, whichever generation the row is on.
+   *
+   * Only the KEYS: which hooks each one covers is a question with a right
+   * answer (the guardrail's own declaration, the surface, whether streaming is
+   * enabled) and it is answered in one place — `GuardrailBindingList`, inside
+   * the editor below. A second, hand-rolled answer on this card is how a screen
+   * ends up telling an operator a guardrail runs somewhere it does not.
+   */
+  const attachedGuardrailKeys = useMemo(() => {
+    if (!model) return [];
+    if (Array.isArray(model.guardrails)) {
+      return model.guardrails.map((binding) => binding.key);
+    }
+    return [model.inputGuardrailKey, model.outputGuardrailKey].filter(
+      (key, index, all): key is string =>
+        Boolean(key) && all.indexOf(key) === index,
+    );
+  }, [model]);
+
 
   const providerDefinition = useMemo(
     () =>
@@ -269,7 +306,10 @@ export default function EditModelPage() {
         fetch('/api/models/providers'),
         fetch('/api/vector/providers'),
         fetch('/api/models?category=embedding'),
-        fetch('/api/guardrails?enabled=true'),
+        // Unfiltered on purpose: a guardrail disabled AFTER it was bound still
+        // has to resolve to its name here, or an attached binding renders as
+        // "unknown" and reads as deleted when it is merely switched off.
+        fetch('/api/guardrails'),
       ]);
 
       if (!modelResponse.ok) {
@@ -312,8 +352,6 @@ export default function EditModelPage() {
         semanticCacheEmbeddingModelKey: cache?.embeddingModelKey || '',
         semanticCacheSimilarityThreshold: cache?.similarityThreshold ?? 0.92,
         semanticCacheTtlSeconds: cache?.ttlSeconds ?? 3600,
-        inputGuardrailKey: nextModel.inputGuardrailKey || '',
-        outputGuardrailKey: nextModel.outputGuardrailKey || '',
       });
 
       if (providerResponse.ok) {
@@ -353,11 +391,18 @@ export default function EditModelPage() {
         const gData = await guardrailsResponse.json();
         setGuardrails(
           (gData.guardrails ?? []).map(
-            (g: { key: string; name: string; type: 'preset' | 'custom'; action: string }) => ({
+            (g: {
+              key: string;
+              name: string;
+              type: 'preset' | 'custom';
+              action: string;
+              enabled?: boolean;
+            }) => ({
               key: g.key,
               name: g.name,
               type: g.type,
               action: g.action,
+              enabled: g.enabled,
             }),
           ),
         );
@@ -480,8 +525,13 @@ export default function EditModelPage() {
             similarityThreshold: values.semanticCacheSimilarityThreshold,
             ttlSeconds: values.semanticCacheTtlSeconds,
           },
-          inputGuardrailKey: values.inputGuardrailKey || '',
-          outputGuardrailKey: values.outputGuardrailKey || '',
+          // No guardrail field of any kind. The bindings are written by the
+          // editor overlay (which sends `guardrails`, and lets the API derive
+          // the two deprecated columns from it); resending the legacy keys from
+          // here would either be a stale echo of columns the API now owns, or —
+          // on a model whose bindings moved into the list — the exact write the
+          // API rejects with "send the full `guardrails` array instead". An
+          // update that omits them leaves both columns untouched.
         }),
       });
 
@@ -916,57 +966,82 @@ export default function EditModelPage() {
               </Card>
             )}
 
-            {/* Guardrails section - only for LLM models */}
+            {/*
+              * Guardrails — the binding LIST, not the two `Select`s this card
+              * used to be. One slot per direction cannot compose two reusable
+              * guardrails and has nowhere to put a tool binding at all.
+              *
+              * The editing itself is `ModelGuardrailModal`: a full-screen
+              * `FormShell` hosting the shared `GuardrailBindingList`, and the
+              * same overlay the models list page opens. One editor for the
+              * model surface means one set of rules for the column and one
+              * place where the per-hook warnings are worded — this card only
+              * has to say what is attached and open it.
+              */}
             {model.category === 'llm' && (
               <Card withBorder radius="md" padding="md">
                 <Stack gap="sm">
-                  <Title order={4}>Guardrails</Title>
-                  <Text size="sm" c="dimmed">
-                    Safety checks that run automatically on every request to this model. The input
-                    guardrail checks the user message before the model is called; the output
-                    guardrail checks the response before it is returned (non-streaming only).
-                  </Text>
-                  {guardrails.length === 0 ? (
-                    <Text size="sm" c="dimmed">
-                      No guardrails defined yet.{' '}
-                      <Link href="/dashboard/guardrails" style={{ color: 'var(--mantine-color-teal-6)' }}>
-                        Create one first.
-                      </Link>
-                    </Text>
+                  <Group justify="space-between" align="flex-start" wrap="nowrap">
+                    <div>
+                      <Title order={4}>Guardrails</Title>
+                      <Text size="sm" c="dimmed">
+                        Safety checks that run on every request to this model — the prompt
+                        before the model sees it, the answer before it reaches the caller, and
+                        the answer while it streams. Each guardrail covers the hooks you tick.
+                      </Text>
+                    </div>
+                    <Button
+                      variant="light"
+                      size="xs"
+                      leftSection={<IconShield size={14} />}
+                      onClick={() => setGuardrailModalOpen(true)}
+                      style={{ flexShrink: 0 }}
+                    >
+                      {attachedGuardrailKeys.length > 0 ? 'Edit bindings' : 'Attach a guardrail'}
+                    </Button>
+                  </Group>
+
+                  {attachedGuardrailKeys.length === 0 ? (
+                    guardrails.length === 0 ? (
+                      <Text size="sm" c="dimmed">
+                        No guardrails defined yet.{' '}
+                        <Link href="/dashboard/guardrails" style={{ color: 'var(--mantine-color-teal-6)' }}>
+                          Create one first.
+                        </Link>
+                      </Text>
+                    ) : (
+                      <Text size="sm" c="dimmed">
+                        No guardrails attached — every request to this model passes unchecked.
+                      </Text>
+                    )
                   ) : (
-                    <Grid>
-                      <Grid.Col span={{ base: 12, md: 6 }}>
-                        <Select
-                          label="Input guardrail"
-                          description="Checks the user message"
-                          placeholder="None — no input check"
-                          data={guardrails.map((g) => ({
-                            value: g.key,
-                            label: `${g.name} [${g.type} · ${g.action}]`,
-                          }))}
-                          value={form.values.inputGuardrailKey || null}
-                          onChange={(val) => form.setFieldValue('inputGuardrailKey', val || '')}
-                          clearable
-                          searchable
-                        />
-                      </Grid.Col>
-                      <Grid.Col span={{ base: 12, md: 6 }}>
-                        <Select
-                          label="Output guardrail"
-                          description="Checks the model response"
-                          placeholder="None — no output check"
-                          data={guardrails.map((g) => ({
-                            value: g.key,
-                            label: `${g.name} [${g.type} · ${g.action}]`,
-                          }))}
-                          value={form.values.outputGuardrailKey || null}
-                          onChange={(val) => form.setFieldValue('outputGuardrailKey', val || '')}
-                          clearable
-                          searchable
-                        />
-                      </Grid.Col>
-                    </Grid>
+                    <Group gap="xs">
+                      {attachedGuardrailKeys.map((key) => {
+                        const guardrail = guardrails.find((candidate) => candidate.key === key);
+                        return (
+                          <Badge
+                            key={key}
+                            variant="light"
+                            // A bound key with no guardrail behind it is kept
+                            // visible and flagged: it was deleted or belongs to
+                            // another project, and hiding it is how a binding
+                            // nobody chose to remove disappears.
+                            color={
+                              !guardrail ? 'red' : guardrail.enabled === false ? 'gray' : 'teal'
+                            }
+                          >
+                            {guardrail
+                              ? `${guardrail.name}${guardrail.enabled === false ? ' · disabled' : ''}`
+                              : `${key} · unknown key`}
+                          </Badge>
+                        );
+                      })}
+                    </Group>
                   )}
+
+                  <Text size="xs" c="dimmed">
+                    Bindings are saved by the overlay, separately from the rest of this form.
+                  </Text>
                 </Stack>
               </Card>
             )}
@@ -982,6 +1057,28 @@ export default function EditModelPage() {
           </Stack>
         </form>
       </Card>
+
+      {/*
+        * Mounted unconditionally rather than behind `guardrailModalOpen` so the
+        * overlay owns its own load: it re-reads `GET /api/models/:id` on open,
+        * which is what decides list-vs-legacy, and the seeds below are only a
+        * fallback for the moment before that lands.
+        */}
+      <ModelGuardrailModal
+        opened={guardrailModalOpen}
+        modelId={model._id}
+        modelName={model.name}
+        initialInputGuardrailKey={model.inputGuardrailKey}
+        initialOutputGuardrailKey={model.outputGuardrailKey}
+        onClose={() => setGuardrailModalOpen(false)}
+        onSaved={(bindings) => {
+          // Reflect the save locally instead of reloading the whole form: a
+          // reload would throw away every unsaved field on this page. Setting
+          // `guardrails` is also what flips the card out of the legacy state,
+          // which is exactly what the save just did to the record.
+          setModel((current) => (current ? { ...current, guardrails: bindings } : current));
+        }}
+      />
     </PageContainer>
   );
 }

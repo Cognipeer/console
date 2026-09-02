@@ -1,6 +1,7 @@
 import type {
   IMcpAuthConfig,
   IMcpExposureConfig,
+  IMcpGuardrailConfig,
   IMcpRemoteConfig,
   IMcpServer,
   IMcpStdioConfig,
@@ -46,7 +47,8 @@ import {
   resolveRuntimeHeaders,
   runtimeHeaderPolicyFromMetadata,
 } from '@/lib/services/runtimeContext';
-import { mcpSandboxRunner, mcpGuardrailHook, IS_ENTERPRISE_BUILD } from '@/enterprise/registry';
+import { mcpSandboxRunner, IS_ENTERPRISE_BUILD } from '@/enterprise/registry';
+import { ensureMcpGuardrailHook } from '@/lib/services/guardrail/hooks/mcpHook';
 import { isEnterpriseLicenseType } from '@/lib/license/license-manager';
 import {
   type ApiSessionContext,
@@ -140,12 +142,33 @@ function parseExposure(raw: unknown): IMcpExposureConfig | undefined {
   };
 }
 
-function parseAegis(raw: unknown): { shieldId?: string; mode: 'off' | 'monitor' | 'enforce' } | undefined {
+/** @deprecated Legacy shield binding. Still parsed so an un-deployed UI keeps
+ *  saving; `guardrail` wins wherever both are sent.
+ *  A legacy-only body is projected onto `guardrail` (mode only) by the service.
+ *  `shieldId` is DROPPED here: its values are ids from the removed
+ *  `aegis_shields` table, so persisting a fresh one would only re-arm the
+ *  "bound to a removed Aegis shield" warning on the server's first tool call. */
+function parseAegis(raw: unknown): { mode: 'off' | 'monitor' | 'enforce' } | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
-  const value = raw as { shieldId?: unknown; mode?: unknown };
+  const value = raw as { mode?: unknown };
+  const mode = value.mode === 'monitor' || value.mode === 'enforce' ? value.mode : 'off';
+  return { mode };
+}
+
+/**
+ * The guardrail binding that replaces `aegis`. Same shape of parse, one real
+ * difference: `guardrailKey` is a guardrail KEY (the tenant-scoped slug), not
+ * an id, and omitting it is meaningful — it selects the tenant's default tool
+ * guardrail rather than leaving the server unguarded.
+ */
+function parseGuardrail(raw: unknown): IMcpGuardrailConfig | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const value = raw as { guardrailKey?: unknown; mode?: unknown };
   const mode = value.mode === 'monitor' || value.mode === 'enforce' ? value.mode : 'off';
   return {
-    shieldId: typeof value.shieldId === 'string' && value.shieldId.trim() ? value.shieldId.trim() : undefined,
+    guardrailKey: typeof value.guardrailKey === 'string' && value.guardrailKey.trim()
+      ? value.guardrailKey.trim()
+      : undefined,
     mode,
   };
 }
@@ -276,11 +299,22 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         stdioRuntimeAvailable('npx'),
         stdioRuntimeAvailable('uvx'),
       ]);
-      // Sandbox execution + Aegis enforcement are enterprise sub-features: a
-      // tenant may use them only when the runtime seam is wired (enterprise
-      // build) AND the tenant holds an active ENTERPRISE license. `available`
-      // therefore folds both; `seamAvailable`/`licenseEnterprise` let the UI
-      // explain WHY it is unavailable (build vs. plan).
+      // Resolve rather than peek: the seam is filled lazily on first use (a
+      // module-scope read of the ref crashes the enterprise build — see
+      // `ensureMcpGuardrailHook`), so reading `mcpGuardrailHook.current`
+      // directly would report the guardrail as unavailable on any process
+      // that had not yet run an MCP tool call.
+      const guardrailHookAvailable = Boolean(ensureMcpGuardrailHook());
+      // Sandbox execution is an enterprise sub-feature: a tenant may use it
+      // only when the runtime seam is wired (enterprise build) AND the tenant
+      // holds an active ENTERPRISE license. `available` therefore folds both;
+      // `seamAvailable`/`licenseEnterprise` let the UI explain WHY it is
+      // unavailable (build vs. plan).
+      //
+      // Guardrail enforcement is NOT one of those any more — it is community,
+      // in every build and on every plan. `licenseEnterprise` is still reported
+      // beside it so a not-yet-deployed UI reading that key renders something
+      // sane, but nothing gates on it.
       return reply.code(200).send({
         stdioSubprocess: {
           enabled: isStdioRunnerEnabled(),
@@ -293,15 +327,29 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
           enterpriseBuild: IS_ENTERPRISE_BUILD,
           licenseEnterprise,
         },
+        // The canonical block. `available` is the single key the UI should read.
+        guardrail: {
+          available: guardrailHookAvailable,
+          seamAvailable: guardrailHookAvailable,
+          enterpriseBuild: IS_ENTERPRISE_BUILD,
+          licenseEnterprise,
+          requiresEnterprise: false,
+        },
+        // @deprecated Mirror of `guardrail`, kept for the release in which the
+        // dashboard bundle may be older than this API. The four keys are the
+        // ones the shipped UI reads — dropping any of them mid-deploy makes the
+        // MCP create screen render an "unavailable" state for a feature that is
+        // now always available, which is why `hookAvailable` no longer folds in
+        // `licenseEnterprise`.
         aegis: {
-          hookAvailable: Boolean(mcpGuardrailHook.current) && licenseEnterprise,
-          seamAvailable: Boolean(mcpGuardrailHook.current),
+          hookAvailable: guardrailHookAvailable,
+          seamAvailable: guardrailHookAvailable,
           enterpriseBuild: IS_ENTERPRISE_BUILD,
           licenseEnterprise,
         },
         // MCP Hubs ship as a whole separate plugin in the enterprise overlay
-        // (no seam ref to check, unlike sandbox/Aegis) — the build flag alone
-        // says whether the /api/mcp/hubs routes even exist.
+        // (no seam ref to check, unlike sandbox/guardrail) — the build flag
+        // alone says whether the /api/mcp/hubs routes even exist.
         mcpHub: {
           available: IS_ENTERPRISE_BUILD && licenseEnterprise,
           enterpriseBuild: IS_ENTERPRISE_BUILD,
@@ -405,10 +453,11 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
       // Enterprise sub-feature: persistent sandbox execution needs the runtime
       // seam (enterprise build) AND an active ENTERPRISE license. Reject up-front
       // with a clear 402 — it literally cannot run otherwise, so a silent save
-      // would strand the tenant. (Aegis is softer: it is saved but stays inert
-      // without the license; the UI warns about that — no hard reject here.)
+      // would strand the tenant. (The guardrail binding needs no gate at all:
+      // it is community and enforces on every plan.)
       const licenseEnterprise = isEnterpriseLicenseType(session.licenseType);
       const aegisConfig = parseAegis(body.aegis);
+      const guardrailConfig = parseGuardrail(body.guardrail);
       if (stdioConfig?.executionMode === 'sandbox' && !(licenseEnterprise && mcpSandboxRunner.current)) {
         return reply.code(402).send({
           error: 'Persistent sandbox execution requires an active Enterprise license.',
@@ -461,6 +510,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
             ? body.endpointSlug.trim()
             : undefined,
           aegis: aegisConfig,
+          guardrail: guardrailConfig,
         },
         auditContextFor(request, session.userId),
       );
@@ -577,11 +627,12 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       // Enterprise sub-feature gate (mirrors POST): a non-enterprise tenant may
-      // not turn on persistent sandbox execution via edit. Aegis is left as
-      // save-but-inert (UI warns) to match create behaviour.
+      // not turn on persistent sandbox execution via edit. The guardrail
+      // binding is ungated, on every plan, to match create behaviour.
       const licenseEnterprise = isEnterpriseLicenseType(session.licenseType);
       const nextStdioConfig = body.stdioConfig !== undefined ? parseStdioConfig(body.stdioConfig) : undefined;
       const nextAegis = body.aegis !== undefined ? parseAegis(body.aegis) : undefined;
+      const nextGuardrail = body.guardrail !== undefined ? parseGuardrail(body.guardrail) : undefined;
       if (nextStdioConfig?.executionMode === 'sandbox' && !(licenseEnterprise && mcpSandboxRunner.current)) {
         return reply.code(402).send({
           error: 'Persistent sandbox execution requires an active Enterprise license.',
@@ -612,6 +663,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
           ? body.endpointSlug.trim()
           : undefined,
         aegis: nextAegis,
+        guardrail: nextGuardrail,
         runtimeHeaders: body.runtimeHeaders as { allow?: boolean; allowedNames?: string[] } | null | undefined,
         disabledTools: body.disabledTools as string[] | undefined,
         toolAnnotations: body.toolAnnotations as UpdateMcpServerInput['toolAnnotations'],

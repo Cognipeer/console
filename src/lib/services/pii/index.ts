@@ -14,6 +14,8 @@ export {
   tokenizePii,
   detokenizePii,
   scanWithPolicy,
+  parseCustomPatternsInput,
+  MAX_CUSTOM_PATTERNS_PER_POLICY,
   PII_CATEGORIES,
   PII_CATEGORIES_BY_ID,
 } from './piiService';

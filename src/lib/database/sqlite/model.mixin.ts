@@ -3,6 +3,7 @@
  */
 
 import type {
+  IGuardrailBinding,
   IModel, IModelUsageLog, IModelUsageAggregate,
   ModelCategory, ModelProviderType,
 } from '../provider.interface';
@@ -23,10 +24,10 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         INSERT INTO ${TABLES.models}
         (id, tenantId, projectId, name, description, key, providerKey, providerDriver, provider,
          category, modelId, isMultimodal, supportsToolCalls, settings, pricing, semanticCache,
-         inputGuardrailKey, outputGuardrailKey, metadata, createdBy, updatedBy, createdAt, updatedAt)
+         inputGuardrailKey, outputGuardrailKey, guardrails, metadata, createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @name, @description, @key, @providerKey, @providerDriver, @provider,
          @category, @modelId, @isMultimodal, @supportsToolCalls, @settings, @pricing, @semanticCache,
-         @inputGuardrailKey, @outputGuardrailKey, @metadata, @createdBy, @updatedBy, @createdAt, @updatedAt)
+         @inputGuardrailKey, @outputGuardrailKey, @guardrails, @metadata, @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
         tenantId: model.tenantId,
@@ -46,6 +47,10 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         semanticCache: model.semanticCache ? this.toJson(model.semanticCache) : null,
         inputGuardrailKey: model.inputGuardrailKey ?? null,
         outputGuardrailKey: model.outputGuardrailKey ?? null,
+        // NULL, not '[]', when unbound — see mapModelRow: an empty array is an
+        // operator saying "bound to nothing", NULL is "never authored" and is
+        // what makes resolveBindings fall back to the two legacy keys above.
+        guardrails: model.guardrails ? this.toJson(model.guardrails) : null,
         metadata: this.toJson(model.metadata ?? {}),
         createdBy: model.createdBy ?? null,
         updatedBy: model.updatedBy ?? null,
@@ -75,6 +80,10 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       if (data.semanticCache !== undefined) { sets.push('semanticCache = @semanticCache'); params.semanticCache = data.semanticCache ? this.toJson(data.semanticCache) : null; }
       if (data.inputGuardrailKey !== undefined) { sets.push('inputGuardrailKey = @inputGuardrailKey'); params.inputGuardrailKey = data.inputGuardrailKey; }
       if (data.outputGuardrailKey !== undefined) { sets.push('outputGuardrailKey = @outputGuardrailKey'); params.outputGuardrailKey = data.outputGuardrailKey; }
+      // `[]` is truthy and so survives as '[]' — clearing every binding is a
+      // real operator action and must not be rewritten to the "never authored"
+      // NULL, which would resurrect the deprecated legacy keys.
+      if (data.guardrails !== undefined) { sets.push('guardrails = @guardrails'); params.guardrails = data.guardrails ? this.toJson(data.guardrails) : null; }
       if (data.metadata !== undefined) { sets.push('metadata = @metadata'); params.metadata = this.toJson(data.metadata); }
       if (data.updatedBy !== undefined) { sets.push('updatedBy = @updatedBy'); params.updatedBy = data.updatedBy; }
       if (data.projectId !== undefined) { sets.push('projectId = @projectId'); params.projectId = data.projectId; }
@@ -343,6 +352,17 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         semanticCache: r.semanticCache ? this.parseJson(r.semanticCache, undefined) : undefined,
         inputGuardrailKey: r.inputGuardrailKey as string | undefined,
         outputGuardrailKey: r.outputGuardrailKey as string | undefined,
+        // An absent column (pre-migration row) or a NULL MUST come back as
+        // undefined, never []: resolveBindings reads undefined as "fall back to
+        // the legacy keys above" and [] as "authored, bound to nothing", so []
+        // here would disarm every guardrail on every model on upgrade.
+        // Array-ness is the only structural marker of a real binding list —
+        // toJson(undefined) stores the string "null", which parses to a literal
+        // null rather than to the fallback.
+        guardrails: ((): IGuardrailBinding[] | undefined => {
+          const parsed = this.parseJson<IGuardrailBinding[] | null>(r.guardrails, null);
+          return Array.isArray(parsed) ? parsed : undefined;
+        })(),
         metadata: this.parseJson(r.metadata, {}),
         createdBy: r.createdBy as string | undefined,
         updatedBy: r.updatedBy as string | undefined,

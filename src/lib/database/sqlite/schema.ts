@@ -312,6 +312,7 @@ export const TENANT_SCHEMA_SQL = `
     passwordChangedAt TEXT,
     authProvider TEXT NOT NULL DEFAULT 'local',
     externalId TEXT,
+    canLogin INTEGER NOT NULL DEFAULT 1,
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   );
@@ -551,6 +552,12 @@ export const TENANT_SCHEMA_SQL = `
     semanticCache TEXT,
     inputGuardrailKey TEXT,
     outputGuardrailKey TEXT,
+    -- Multi-guardrail binding (IGuardrailBinding[]) as ONE JSON blob, so
+    -- adding a hook or a per-binding option later costs no migration. NULL
+    -- (not '[]') is the "never authored" sentinel: mapModelRow turns it into
+    -- undefined, and resolveBindings reads undefined as "fall back to the two
+    -- legacy columns" but [] as "authored, bound to nothing".
+    guardrails TEXT,
     metadata TEXT DEFAULT '{}',
     createdBy TEXT,
     updatedBy TEXT,
@@ -813,6 +820,14 @@ export const TENANT_SCHEMA_SQL = `
     policy TEXT DEFAULT '{}',
     customPrompt TEXT,
     metadata TEXT DEFAULT '{}',
+    -- v2 hook plane, ONE JSON blob (checks + bindings + stream + message +
+    -- visibility). '{}' is the "no authored config" sentinel: the row mapper
+    -- turns it into undefined so ensureHooks() re-derives from the legacy
+    -- columns above, which stay populated for older readers.
+    hooks TEXT DEFAULT '{}',
+    -- 0 = derived (re-derive on every read); >= 1 = operator-authored.
+    hooksVersion INTEGER NOT NULL DEFAULT 0,
+    mode TEXT NOT NULL DEFAULT 'enforce',
     createdBy TEXT NOT NULL,
     updatedBy TEXT,
     createdAt TEXT NOT NULL,
@@ -839,10 +854,22 @@ export const TENANT_SCHEMA_SQL = `
     userId TEXT,
     apiTokenId TEXT,
     actorType TEXT,
+    -- Which of the five hooks produced the row. Without it all five collapse
+    -- into the two legacy target values and a tool.pre block is
+    -- indistinguishable from an output.pre redaction in the audit trail.
+    hook TEXT,
+    -- The EFFECTIVE decision, already neutralised to 'allow' in monitor mode.
+    decision TEXT,
+    riskScore INTEGER,
     createdAt TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_guardrail_eval_guardrailId ON guardrail_evaluation_logs(guardrailId);
   CREATE INDEX IF NOT EXISTS idx_guardrail_eval_createdAt ON guardrail_evaluation_logs(createdAt);
+  -- NOTE: the idx_guardrail_eval_hook index is NOT here. This script runs
+  -- BEFORE applyTenantMigrations, so on a pre-hook-plane tenant DB the table
+  -- exists without the hook column and the index would abort the whole schema exec
+  -- ("no such column: hook"), leaving every later table uncreated. It lives in
+  -- applyTenantIndexes() in base.ts instead, same as idx_mcp_request_logs_serverId.
 
   CREATE TABLE IF NOT EXISTS guardrail_word_lists (
     id TEXT PRIMARY KEY,
@@ -1651,7 +1678,10 @@ export const TENANT_SCHEMA_SQL = `
     upstreamBaseUrl TEXT,
     upstreamAuth TEXT DEFAULT '{}',
     exposure TEXT,
+    -- @deprecated, still written and still read: every stored row carries it
+    -- and the read-time normaliser folds it into the guardrail column.
     aegis TEXT,
+    guardrail TEXT,
     status TEXT NOT NULL DEFAULT 'active',
     endpointSlug TEXT NOT NULL,
     totalRequests INTEGER DEFAULT 0,
@@ -1785,7 +1815,10 @@ export const TENANT_SCHEMA_SQL = `
     createdAt TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_vml_migrationKey ON vector_migration_logs(migrationKey);
-  CREATE INDEX IF NOT EXISTS idx_vml_migrationKey_attempt ON vector_migration_logs(migrationKey, attempt);
+  -- NOTE: the (migrationKey, attempt) index is NOT created here. The attempt
+  -- column reaches legacy DBs through an ensureTableColumn migration that runs
+  -- AFTER this script, so referencing it here aborts the ENTIRE schema exec on
+  -- any tenant created before the column existed. See applyTenantIndexes.
   CREATE INDEX IF NOT EXISTS idx_vml_status ON vector_migration_logs(status);
 
   -- Browsers (parent profiles)

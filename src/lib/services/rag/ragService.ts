@@ -739,6 +739,95 @@ export async function getRagDocument(
   return db.findRagDocumentById(documentId);
 }
 
+/* ── Full-text read (two modes: whole document, or a line range) ──────── */
+
+/**
+ * Hard ceiling on what "give me the whole document" hands back in one call.
+ * A few hundred KB of markdown is still tens of thousands of tokens; beyond
+ * this the caller is pointed at the line-range mode instead of silently
+ * blowing a model's context window.
+ */
+const FULL_TEXT_MAX_CHARS = 60_000;
+
+export interface RagDocumentFullTextResult {
+  documentId: string;
+  fileName: string;
+  contentType?: string;
+  text: string;
+  totalChars: number;
+  totalLines: number;
+  truncated: boolean;
+}
+
+/** The whole document, capped at FULL_TEXT_MAX_CHARS. Use getRagDocumentTextLines for the rest. */
+export async function getRagDocumentFullText(
+  tenantDbName: string,
+  tenantId: string,
+  projectId: string | undefined,
+  document: IRagDocument,
+): Promise<RagDocumentFullTextResult | undefined> {
+  const text = await loadSourceText(tenantDbName, tenantId, projectId, document);
+  if (text === undefined) return undefined;
+  const truncated = text.length > FULL_TEXT_MAX_CHARS;
+  return {
+    documentId: String(document._id),
+    fileName: document.fileName,
+    contentType: document.contentType,
+    text: truncated ? text.slice(0, FULL_TEXT_MAX_CHARS) : text,
+    totalChars: text.length,
+    totalLines: text.split('\n').length,
+    truncated,
+  };
+}
+
+const DEFAULT_LINE_LIMIT = 200;
+const MAX_LINE_LIMIT = 1000;
+
+export interface RagDocumentLinesResult {
+  documentId: string;
+  fileName: string;
+  contentType?: string;
+  totalLines: number;
+  /** 1-indexed, inclusive. 0 when the document (or the requested offset) has no lines. */
+  startLine: number;
+  endLine: number;
+  hasMore: boolean;
+  /** `${lineNumber}\t${text}` per line, joined by \n — same convention as the Read tool. */
+  lines: string;
+}
+
+/** A 1-indexed line range, so a caller can page through a document it can't read whole. */
+export async function getRagDocumentTextLines(
+  tenantDbName: string,
+  tenantId: string,
+  projectId: string | undefined,
+  document: IRagDocument,
+  options?: { offset?: number; limit?: number },
+): Promise<RagDocumentLinesResult | undefined> {
+  const text = await loadSourceText(tenantDbName, tenantId, projectId, document);
+  if (text === undefined) return undefined;
+
+  const allLines = text.split('\n');
+  const totalLines = allLines.length;
+  const offset = Math.max(1, Math.floor(options?.offset ?? 1));
+  const limit = Math.min(MAX_LINE_LIMIT, Math.max(1, Math.floor(options?.limit ?? DEFAULT_LINE_LIMIT)));
+
+  const startIndex = offset - 1;
+  const slice = startIndex < totalLines ? allLines.slice(startIndex, startIndex + limit) : [];
+  const endLine = startIndex + slice.length;
+
+  return {
+    documentId: String(document._id),
+    fileName: document.fileName,
+    contentType: document.contentType,
+    totalLines,
+    startLine: slice.length > 0 ? offset : 0,
+    endLine,
+    hasMore: endLine < totalLines,
+    lines: slice.map((line, i) => `${offset + i}\t${line}`).join('\n'),
+  };
+}
+
 /* ── Ingest (chunk → embed → upsert) ────────────────────────────────── */
 
 export async function ingestDocument(

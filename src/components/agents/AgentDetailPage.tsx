@@ -66,6 +66,12 @@ import {
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import EmptyState from '@/components/common/EmptyState';
+import GuardrailBindingList, {
+  bindingRowsFromStored,
+  type GuardrailBindingOption,
+  type GuardrailBindingRow,
+} from '@/components/guardrails/GuardrailBindingList';
+import type { HookId } from '@/lib/services/guardrail/hooks/contract';
 import LoadingState from '@/components/common/LoadingState';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import RuntimeContextEditor, { parseRuntimeContextJson } from '@/components/common/RuntimeContextEditor';
@@ -98,7 +104,12 @@ interface Agent {
     topP?: number;
     maxTokens?: number;
     knowledgeEngineKey?: string;
+    /** Multi-guardrail binding. Authoritative when present — the two slots
+     *  below are then derived from it, not read. */
+    guardrails?: Array<{ key: string; hooks?: HookId[] }>;
+    /** @deprecated Read only as the fallback when `guardrails` is absent. */
     inputGuardrailKey?: string;
+    /** @deprecated See `inputGuardrailKey`. */
     outputGuardrailKey?: string;
     toolBindings?: ToolBinding[];
     kind?: 'native' | 'external';
@@ -163,12 +174,14 @@ interface RagModule {
   status: string;
 }
 
-interface Guardrail {
+/**
+ * `GuardrailBindingOption` is the shape the binding list needs — including the
+ * `hooks` config, which is what decides whether a hook checkbox is available.
+ * Extended rather than redeclared so the two cannot drift.
+ */
+interface Guardrail extends GuardrailBindingOption {
   _id: string;
-  key: string;
-  name: string;
-  target: string;
-  enabled: boolean;
+  target?: string;
 }
 
 interface TracingSessionRecord {
@@ -184,6 +197,38 @@ interface TracingSessionRecord {
 }
 
 const DEFAULT_PAGE_SIZE = 25;
+
+/**
+ * The legacy single slots, rendered as the equivalent binding list.
+ *
+ * The output slot seeds `output.pre` ONLY. `resolveBindings` also projects the
+ * legacy key onto `output.stream.delta`, but a guardrail written before the
+ * hook plane declares no streaming binding, so the stream gate evaluates
+ * nothing for it today — seeding that hook would show a ticked box that does
+ * nothing and the API would reject it. The checkbox unlocks itself the moment
+ * the guardrail enables streaming.
+ */
+function seedGuardrailsFromLegacySlots(
+  inputKey: string | undefined,
+  outputKey: string | undefined,
+): GuardrailBindingRow[] {
+  // Materialised rows: a legacy slot names ONE direction, so "wherever the
+  // guardrail declares" (an absent `hooks`) is not what it meant — the
+  // conversion has to be the exact equivalent of the two slots.
+  const rows: Array<Required<GuardrailBindingRow>> = [];
+  const bind = (key: string | undefined, hook: HookId) => {
+    if (!key) return;
+    const existing = rows.find((row) => row.key === key);
+    if (existing) {
+      if (!existing.hooks.includes(hook)) existing.hooks.push(hook);
+      return;
+    }
+    rows.push({ key, hooks: [hook] });
+  };
+  bind(inputKey || undefined, 'input.pre');
+  bind(outputKey || undefined, 'output.pre');
+  return rows;
+}
 
 export default function AgentDetailPage() {
   const params = useParams();
@@ -208,6 +253,25 @@ export default function AgentDetailPage() {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [toolSelectorOpen, setToolSelectorOpen] = useState(false);
   const [toolBindings, setToolBindings] = useState<ToolBinding[]>([]);
+
+  // Guardrail bindings live outside `configForm`: they are a list of objects,
+  // not a scalar field, and the form's `getInputProps` contract has nothing to
+  // offer them.
+  //
+  // THE MIGRATION CEREMONY IS GONE. An agent still on `inputGuardrailKey` /
+  // `outputGuardrailKey` used to get a read-only list plus a "Migrate to list"
+  // step, so that converting was an explicit act rather than a side effect of
+  // an unrelated save. That guarded against a conversion LOSING something —
+  // and it does not: `resolveBindings` projects the legacy output slot onto
+  // `output.pre` AND `output.stream.delta` (binding.ts:48-55) while the seed
+  // writes only `output.pre`, but a pre-hook-plane guardrail is lifted with
+  // `stream: { enabled: false }` and no policy on the stream hook
+  // (legacy.ts:537), so the stream projection resolves to a key with nothing
+  // to run. The conversion is lossless, and the ceremony was friction with no
+  // protective value — it is also exactly the "why am I picking two?" the
+  // owner hit. The API still derives the deprecated columns from the list, so
+  // an older console binary on the same tenant DB keeps enforcing.
+  const [guardrailBindings, setGuardrailBindings] = useState<GuardrailBindingRow[]>([]);
 
   // Publish & version state
   const [a2aSaving, setA2aSaving] = useState(false);
@@ -283,6 +347,25 @@ export default function AgentDetailPage() {
           outputGuardrailKey: cfg.outputGuardrailKey || '',
         });
         setToolBindings(cfg.toolBindings ?? []);
+
+        // An array — even an empty one — means the operator has already moved
+        // to the list, and "bound to nothing" is a real decision, so it must not
+        // fall back to the legacy slots.
+        if (Array.isArray(cfg.guardrails)) {
+          // Shared mapping: an absent `hooks` means "wherever the guardrail
+          // declares it runs" and must stay absent, or the binding is silently
+          // parked the next time this config is saved for any reason, while the
+          // row still renders as attached.
+          setGuardrailBindings(
+            bindingRowsFromStored(cfg.guardrails as Array<{ key: string; hooks?: HookId[] }>),
+          );
+        } else {
+          const seeded = seedGuardrailsFromLegacySlots(
+            cfg.inputGuardrailKey,
+            cfg.outputGuardrailKey,
+          );
+          setGuardrailBindings(seeded);
+        }
       }
     } catch (err) {
       console.error('Failed to load agent', err);
@@ -328,7 +411,10 @@ export default function AgentDetailPage() {
 
   const loadGuardrails = async () => {
     try {
-      const res = await fetch('/api/guardrails?enabled=true', { cache: 'no-store' });
+      // Unfiltered on purpose: a guardrail disabled AFTER it was bound must
+      // still render as a (badged) row in the binding list, which keeps
+      // disabled ones out of its picker instead.
+      const res = await fetch('/api/guardrails', { cache: 'no-store' });
       if (res.ok) {
         const data = await res.json();
         setGuardrails(data.guardrails ?? []);
@@ -474,10 +560,13 @@ export default function AgentDetailPage() {
       topP: values.topP,
       maxTokens: values.maxTokens,
       knowledgeEngineKey: values.knowledgeEngineKey || undefined,
-      inputGuardrailKey: values.inputGuardrailKey || undefined,
-      outputGuardrailKey: values.outputGuardrailKey || undefined,
       toolBindings: bindings.length > 0 ? bindings : undefined,
     };
+
+    // The list is authoritative, always. Only it is sent: the API derives the
+    // deprecated slots from it, so an older console binary on the same tenant
+    // database keeps enforcing and the two can never disagree.
+    nextConfig.guardrails = guardrailBindings;
 
     if (values.promptMode === 'custom') {
       nextConfig.systemPrompt = values.systemPrompt;
@@ -894,32 +983,17 @@ export default function AgentDetailPage() {
 
                 <Collapse in={guardrailsOpen}>
                   <Stack gap="md" mt="xs">
-                    <Select
-                      label={t('config.inputGuardrail')}
-                      description={t('config.inputGuardrailDescription')}
-                      placeholder={t('config.inputGuardrailPlaceholder')}
-                      data={guardrails.map((g) => ({
-                        value: g.key,
-                        label: g.name,
-                      }))}
-                      searchable
-                      clearable
-                      leftSection={<IconShield size={14} />}
-                      {...configForm.getInputProps('inputGuardrailKey')}
-                    />
-
-                    <Select
-                      label={t('config.outputGuardrail')}
-                      description={t('config.outputGuardrailDescription')}
-                      placeholder={t('config.outputGuardrailPlaceholder')}
-                      data={guardrails.map((g) => ({
-                        value: g.key,
-                        label: g.name,
-                      }))}
-                      searchable
-                      clearable
-                      leftSection={<IconShield size={14} />}
-                      {...configForm.getInputProps('outputGuardrailKey')}
+                    {/*
+                      One guardrail per row, each naming the hooks it covers on
+                      THIS agent. The tool hooks are the new capability here:
+                      an agent's own action tools are the surface a tool policy
+                      could never reach through the old direction slots.
+                    */}
+                    <GuardrailBindingList
+                      options={guardrails}
+                      value={guardrailBindings}
+                      onChange={setGuardrailBindings}
+                      surface="agent"
                     />
                   </Stack>
                 </Collapse>

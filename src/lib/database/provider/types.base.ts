@@ -16,6 +16,11 @@ import type {
   UserRole,
   UserServicePermissions,
 } from '@/lib/security/rbac';
+// Type-only, and therefore erased: types.domain already imports
+// IUsageAttributionFields from here, so a value import would close a runtime
+// cycle. IGuardrailBinding is declared there because it names GuardrailHookId,
+// and the hook vocabulary must have exactly one home.
+import type { IGuardrailBinding } from './types.domain';
 
 export interface ITenant {
   _id?: ObjectId | string;
@@ -127,6 +132,7 @@ export interface IPromptComment {
 
 export interface IUser {
   _id?: ObjectId | string;
+  /** May be an empty string for a "Programmatic User" (canLogin=false) — a deliberate design choice to avoid a SQLite NOT NULL migration, not a bug. */
   email: string;
   emailLower?: string;
   password: string;
@@ -156,6 +162,8 @@ export interface IUser {
   invitedAt?: Date;
   inviteAcceptedAt?: Date;
   mustChangePassword?: boolean;
+  /** Whether this user may authenticate at all. Missing/undefined is treated as `true` everywhere (back-compat for existing rows). `false` marks a "Programmatic User" with no login capability. */
+  canLogin?: boolean;
   /**
    * Timestamp of the last password change.
    * Used to invalidate password reset tokens issued before this moment,
@@ -197,6 +205,8 @@ export interface IApiToken {
   tenantId: string;
   projectId?: string;
   label: string;
+  /** Session user that minted this token. Equals `userId` for self-service tokens; differs when an admin mints on behalf of another user. */
+  createdBy?: string;
   /** Plaintext token is only used for legacy records and immediate create responses. */
   token?: string;
   tokenHash?: string;
@@ -740,7 +750,19 @@ export interface IModel {
   settings: Record<string, unknown>;
   pricing: IModelPricing;
   semanticCache?: ISemanticCacheConfig;
+  /**
+   * Multi-guardrail binding. AUTHORITATIVE when present: the two deprecated
+   * single-slot keys below are then ignored, not merged — see
+   * `resolveBindings()` in `@/lib/services/guardrail/hooks/binding`.
+   */
+  guardrails?: IGuardrailBinding[];
+  /**
+   * @deprecated Use `guardrails`. Still READ (as the fallback when `guardrails`
+   * is absent) and still WRITTEN for one release, so an older console binary
+   * on the same tenant database keeps enforcing.
+   */
   inputGuardrailKey?: string;
+  /** @deprecated Use `guardrails`. See `inputGuardrailKey`. */
   outputGuardrailKey?: string;
   metadata?: Record<string, unknown>;
   createdBy?: string;

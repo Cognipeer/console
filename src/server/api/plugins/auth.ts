@@ -154,6 +154,14 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
           }
 
           if (external.outcome === 'pass') {
+            // Same rule as every other path to a session below: a
+            // login-disabled ("Programmatic User") account never
+            // authenticates, even when an external authenticator (LDAP/SSO)
+            // vouches for it.
+            if (external.user.canLogin === false) {
+              return null;
+            }
+
             return external.user;
           }
 
@@ -162,6 +170,14 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
             || (await db.findUserByEmail(email));
 
           if (!candidateUser) {
+            return null;
+          }
+
+          // Login-disabled ("Programmatic User") accounts never authenticate
+          // via password, regardless of whether the password would match.
+          // Same generic failure as any other auth rejection — never leak
+          // that the account exists but can't log in.
+          if (candidateUser.canLogin === false) {
             return null;
           }
 
@@ -204,7 +220,10 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
                   (await db.findUserByEmail(normalizedEmail))
                   || (await db.findUserByEmail(email));
 
-                if (!foundUser) {
+                // Login-disabled ("Programmatic User") accounts never
+                // authenticate via password — same generic failure as
+                // "not found" or "wrong password".
+                if (!foundUser || foundUser.canLogin === false) {
                   return null;
                 }
 
@@ -255,7 +274,10 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
                     (await db.findUserByEmail(normalizedEmail))
                     || (await db.findUserByEmail(email));
 
-                  if (!foundUser) {
+                  // Login-disabled ("Programmatic User") accounts never
+                  // authenticate via password — same generic failure as
+                  // "not found" or "wrong password".
+                  if (!foundUser || foundUser.canLogin === false) {
                     return null;
                   }
 
@@ -743,7 +765,11 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
 
       return await withTenantScope(db, tenant.dbName, async () => {
         const user = await db.findUserByEmail(email);
-        if (!user) {
+        // A login-disabled ("Programmatic User") account has no password to
+        // reset: treat it exactly like an unknown email — same generic 200, no
+        // token minted, no mail sent — so the flow neither burns a reset token
+        // nor lets a user-chosen password be planted on a no-login record.
+        if (!user || user.canLogin === false) {
           return finishWithSuccess();
         }
 
@@ -853,7 +879,10 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
 
       return await withTenantScope(db, tenant.dbName, async () => {
         const user = await db.findUserById(payload.sub!);
-        if (!user) {
+        // Same generic answer as an invalid token for a login-disabled account:
+        // a token minted before `canLogin` was turned off must not be able to
+        // set a password on a record that is never supposed to log in.
+        if (!user || user.canLogin === false) {
           return reply.code(400).send({ error: 'Invalid reset token' });
         }
 

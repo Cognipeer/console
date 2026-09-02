@@ -6,6 +6,8 @@ import {
   createRagModule,
   deleteRagDocument,
   deleteRagModule,
+  getRagDocumentFullText,
+  getRagDocumentTextLines,
   getRagModule,
   ingestDocument,
   ingestFile,
@@ -278,6 +280,58 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ document: withoutSourceText(document) });
     } catch (error) {
       logger.error('Get client RAG document error', { error });
+      return reply.code(500).send({
+        error: error instanceof Error ? error.message : 'Internal error',
+      });
+    }
+  }));
+
+  app.get('/client/v1/rag/modules/:key/documents/:documentId/content', withClientApiRequestContext(async (request, reply) => {
+    try {
+      const { documentId, key } = request.params as { documentId: string; key: string };
+      const ctx = await getApiTokenContextForRequest(request);
+      const document = await documentInProjectScope(ctx.tenantDbName, documentId, key, ctx.projectId);
+
+      if (!document) {
+        return reply.code(404).send({ error: 'Document not found' });
+      }
+
+      const result = await getRagDocumentFullText(ctx.tenantDbName, ctx.tenantId, ctx.projectId, document);
+      if (!result) {
+        return reply.code(404).send({ error: 'Source text is not available for this document; re-ingest it first' });
+      }
+
+      return reply.code(200).send(result);
+    } catch (error) {
+      logger.error('Get client RAG document full text error', { error });
+      return reply.code(500).send({
+        error: error instanceof Error ? error.message : 'Internal error',
+      });
+    }
+  }));
+
+  app.get('/client/v1/rag/modules/:key/documents/:documentId/lines', withClientApiRequestContext(async (request, reply) => {
+    try {
+      const { documentId, key } = request.params as { documentId: string; key: string };
+      const ctx = await getApiTokenContextForRequest(request);
+      const document = await documentInProjectScope(ctx.tenantDbName, documentId, key, ctx.projectId);
+
+      if (!document) {
+        return reply.code(404).send({ error: 'Document not found' });
+      }
+
+      const query = (request.query ?? {}) as { offset?: string; limit?: string };
+      const result = await getRagDocumentTextLines(ctx.tenantDbName, ctx.tenantId, ctx.projectId, document, {
+        offset: query.offset !== undefined ? Number(query.offset) : undefined,
+        limit: query.limit !== undefined ? Number(query.limit) : undefined,
+      });
+      if (!result) {
+        return reply.code(404).send({ error: 'Source text is not available for this document; re-ingest it first' });
+      }
+
+      return reply.code(200).send(result);
+    } catch (error) {
+      logger.error('Get client RAG document lines error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal error',
       });

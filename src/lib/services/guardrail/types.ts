@@ -1,4 +1,11 @@
 import type { IGuardrail, GuardrailAction, GuardrailFailMode, GuardrailType } from '@/lib/database';
+// TYPE-ONLY, and it has to stay that way. `hooks/contract.ts` imports
+// `GuardrailFinding` back from this file, so a value import in either
+// direction would be a genuine module cycle over two files that both hold
+// module-level const tables. Both sides are erased at compile time, so the
+// emitted JS has no edge at all and TypeScript resolves the circular reference
+// without complaint.
+import type { HookVerdict } from './hooks/contract';
 
 // ── PII Category definitions ─────────────────────────────────────────────
 
@@ -209,7 +216,7 @@ export function normalizeSeverity(value: unknown): GuardrailFinding['severity'] 
 }
 
 /**
- * Single source of truth for the "a check could not run" finding. Fail-closed
+ * Single source of truth for the "a policy could not run" finding. Fail-closed
  * turns the failure into a real (potentially blocking) violation; fail-open
  * surfaces it as a non-blocking flag so the outage is visible without changing
  * the verdict. Used by both the LLM evaluators and the missing-model guard.
@@ -238,21 +245,55 @@ export interface GuardrailEvaluationResult {
   action: GuardrailAction;
   findings: GuardrailFinding[];
   /**
-   * True when the guardrail is disabled: no checks ran and `passed` is a
+   * True when the guardrail is disabled: no policies ran and `passed` is a
    * vacuous true. Runtime enforcement correctly skips disabled guardrails,
    * but the test panel must surface this so a disabled guardrail doesn't read
    * as "content is safe".
    */
   disabled?: boolean;
   /**
+   * THE ENFORCEMENT ANSWER: "should this caller stop the request", already
+   * neutralised by the guardrail's Mode. A guardrail in Monitor reports
+   * `blocked: false` while its findings still carry `block: true` — that is the
+   * whole point of Monitor, and it is why `passed` cannot be used here.
+   *
+   * `passed` answers a DIFFERENT question ("was there a blocking finding") and
+   * keeps its legacy meaning for every reader that wants the counterfactual.
+   * Anything that throws, denies, or refuses reads THIS field.
+   */
+  blocked: boolean;
+  /**
    * Present when any finding carries the `redact` action: the evaluated text
    * with those findings' values masked. Callers should substitute this for the
    * original content and continue.
    */
   redactedText?: string;
+  /**
+   * The full hook verdict behind this result — spans, mutations, risk score,
+   * response-header codes, the rendered block message and `wouldBeDecision`.
+   *
+   * ADDITIVE and always optional: every field above keeps its exact meaning, so
+   * a caller that has never heard of hooks reads the same six fields it reads
+   * today. This exists so a caller that DOES want the richer answer (the test
+   * panel, the red-team runner, the gateway's response headers) does not have
+   * to bypass the facade and call `runHook` itself — which is how the two
+   * paths would start disagreeing about what a guardrail decided.
+   */
+  verdict?: HookVerdict;
 }
 
 // ── Service input/output types ────────────────────────────────────────────
+//
+// The three hook-plane fields below are declared with indexed access into
+// `IGuardrail` rather than by naming `GuardrailHooksConfig` / `GuardrailMode`
+// directly. That is the idiom this file already uses for `target`, `failMode`
+// and `policy`, and it matters more here than there: `hooks` is a large
+// structural blob that is written through these inputs and read back through
+// the view, so a second description of it would be free to drift and would
+// break assignment in exactly one direction — the direction nobody tests.
+//
+// All three are OPTIONAL everywhere. A legacy record carries none of them, and
+// a create/update that omits them must keep behaving exactly as it does today.
 
 export interface CreateGuardrailInput {
   name: string;
@@ -266,6 +307,12 @@ export interface CreateGuardrailInput {
   policy?: IGuardrail['policy'];
   customPrompt?: string;
   projectId?: string;
+  /** The hook-plane config. Absent = the record is created legacy-shaped and
+   *  is lifted on first read. */
+  hooks?: IGuardrail['hooks'];
+  hooksVersion?: IGuardrail['hooksVersion'];
+  /** enforce | monitor | disabled. Absent behaves as 'enforce'. */
+  mode?: IGuardrail['mode'];
 }
 
 export interface UpdateGuardrailInput {
@@ -277,6 +324,9 @@ export interface UpdateGuardrailInput {
   modelKey?: string;
   policy?: IGuardrail['policy'];
   customPrompt?: string;
+  hooks?: IGuardrail['hooks'];
+  hooksVersion?: IGuardrail['hooksVersion'];
+  mode?: IGuardrail['mode'];
 }
 
 export interface GuardrailView {
@@ -294,6 +344,9 @@ export interface GuardrailView {
   modelKey?: string;
   policy?: IGuardrail['policy'];
   customPrompt?: string;
+  hooks?: IGuardrail['hooks'];
+  hooksVersion?: IGuardrail['hooksVersion'];
+  mode?: IGuardrail['mode'];
   createdBy: string;
   updatedBy?: string;
   createdAt?: Date | string;

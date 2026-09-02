@@ -98,6 +98,33 @@ const STATUS_COLORS: Record<string, string> = {
   error: 'red',
 };
 
+/** Wire shape of `IMcpGuardrailConfig.mode` — 'off', not GuardrailMode's 'disabled'. */
+type GuardrailBindingMode = 'off' | 'monitor' | 'enforce';
+
+const GUARDRAIL_MODE_COLORS: Record<GuardrailBindingMode, string> = {
+  off: 'gray',
+  monitor: 'yellow',
+  enforce: 'red',
+};
+
+// An ABSENT guardrailKey means "use the tenant's default tool guardrail", which
+// is a real choice — so it needs an option value of its own rather than the
+// empty string, which Mantine's Select reads as "nothing selected".
+const DEFAULT_GUARDRAIL_VALUE = '__default__';
+
+/**
+ * A guardrail bindable to this server's tool calls. `toolBound` is reported
+ * because a guardrail only touches an MCP call through its `tool.pre` /
+ * `tool.post` bindings, and a legacy record lifts onto `input.pre`/`output.pre`
+ * only — binding one of those here enforces nothing.
+ */
+interface GuardrailOption {
+  key: string;
+  name: string;
+  enabled: boolean;
+  toolBound: boolean;
+}
+
 interface McpAggregateView {
   totalRequests: number;
   successCount: number;
@@ -142,13 +169,20 @@ export default function McpDetailPage() {
   const [overviewLoading, setOverviewLoading] = useState(false);
   const [overviewAggregate, setOverviewAggregate] = useState<McpAggregateView | null>(null);
   const [todaySummary, setTodaySummary] = useState({ total: 0, success: 0, error: 0 });
-  // Enterprise sub-feature availability for THIS tenant (sandbox exec + Aegis).
-  // `available`/`hookAvailable` fold the enterprise build seam AND the tenant's
-  // ENTERPRISE license, so a downgraded tenant sees the warning below.
+  // Sub-feature availability for THIS tenant. `stdioSandbox.available` folds
+  // the enterprise build seam AND the tenant's ENTERPRISE license, so a
+  // downgraded tenant sees the warning below. `guardrail.available` folds
+  // neither — tool-call enforcement is a community capability, and the flag
+  // only reports whether the hook is wired at all. `aegis.hookAvailable` is the
+  // pre-rename key, read as a fallback so this page stays honest against an API
+  // binary that has not been redeployed yet.
   const [caps, setCaps] = useState<{
     stdioSandbox: { available: boolean };
-    aegis: { hookAvailable: boolean };
+    guardrail?: { available: boolean };
+    aegis?: { hookAvailable: boolean };
   } | null>(null);
+  const [guardrails, setGuardrails] = useState<GuardrailOption[]>([]);
+  const [savingGuardrail, setSavingGuardrail] = useState(false);
 
   // ── Playground state ──
   const [pgTool, setPgTool] = useState<string | null>(null);
@@ -339,6 +373,33 @@ export default function McpDetailPage() {
       .catch(() => setCaps(null));
   }, []);
 
+  // Guardrails bindable to this server's tool calls (Overview → Guardrail card).
+  // Every guardrail is listed, not just the tool-bound ones: binding one that
+  // has no tool hook yet is a legitimate half-finished setup, so it is flagged
+  // in the option label rather than hidden.
+  useEffect(() => {
+    fetch('/api/guardrails', { cache: 'no-store' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        const list = Array.isArray(data?.guardrails) ? data.guardrails : [];
+        setGuardrails(list.map((g: {
+          key?: string;
+          name?: string;
+          enabled?: boolean;
+          hooks?: { bindings?: Record<string, { enabled?: boolean } | undefined> };
+        }) => ({
+          key: String(g.key ?? ''),
+          name: String(g.name ?? g.key ?? ''),
+          enabled: g.enabled !== false,
+          toolBound: Boolean(
+            g.hooks?.bindings?.['tool.pre']?.enabled
+            || g.hooks?.bindings?.['tool.post']?.enabled,
+          ),
+        })).filter((g: GuardrailOption) => g.key));
+      })
+      .catch(() => setGuardrails([]));
+  }, []);
+
   useEffect(() => {
     loadOverviewMetrics();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -424,6 +485,32 @@ export default function McpDetailPage() {
       });
     } finally {
       setSavingSlug(false);
+    }
+  };
+
+  /**
+   * Writes the whole binding every time: `guardrail` is one persisted object,
+   * so PATCHing only the mode would drop the bound key.
+   */
+  const handleSaveGuardrail = async (next: { mode: GuardrailBindingMode; guardrailKey?: string }) => {
+    setSavingGuardrail(true);
+    try {
+      const res = await fetch(`/api/mcp/${params.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ guardrail: next }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Failed to update the guardrail binding');
+      setServer(data.server);
+    } catch (err) {
+      notifications.show({
+        title: 'Error',
+        message: err instanceof Error ? err.message : 'Failed to update the guardrail binding',
+        color: 'red',
+      });
+    } finally {
+      setSavingGuardrail(false);
     }
   };
 
@@ -654,6 +741,22 @@ export default function McpDetailPage() {
   // once it's exposed on a public, unauthenticated URL.
   const readsInternalData = server.sourceType === 'internal'
     || (server.sourceType === 'composite' && (server.members ?? []).some((m) => m.sourceType === 'internal'));
+  // What actually runs, resolved the way mcpService does it: the new binding
+  // when there is one, otherwise the legacy `aegis` mode. The legacy shieldId
+  // is deliberately dropped — those are dead references, and an unbound mode
+  // falls back to the tenant's default tool guardrail.
+  const guardrailMode: GuardrailBindingMode = server.guardrail?.mode
+    ?? server.aegis?.mode
+    ?? 'off';
+  const guardrailKeyValue = server.guardrail?.guardrailKey ?? DEFAULT_GUARDRAIL_VALUE;
+  const boundGuardrail = guardrails.find((g) => g.key === server.guardrail?.guardrailKey);
+  // Rendered read-only for one release so an operator can still see what a
+  // server was bound to before the rename. Only worth showing when it says
+  // something — an `{ mode: 'off' }` leftover does not.
+  const legacyAegis = server.aegis && (server.aegis.mode !== 'off' || server.aegis.shieldId)
+    ? server.aegis
+    : undefined;
+  const guardrailHookAvailable = caps?.guardrail?.available ?? caps?.aegis?.hookAvailable ?? false;
   const totalRequests = overviewAggregate?.totalRequests ?? 0;
   const successCount = overviewAggregate?.successCount ?? 0;
   const errorCount = overviewAggregate?.errorCount ?? 0;
@@ -793,29 +896,34 @@ export default function McpDetailPage() {
 
         {/* ── Overview Tab ── */}
         <Tabs.Panel value="overview">
-          {caps && (
-            (server.stdioConfig?.executionMode === 'sandbox' && !caps.stdioSandbox.available)
-            || ((server.aegis?.mode ?? 'off') !== 'off' && !caps.aegis.hookAvailable)
-          ) ? (
+          {/* Two separate alerts, not one: sandbox execution is licensed, tool-call
+              enforcement is community and can only be missing its runtime hook. */}
+          {caps && server.stdioConfig?.executionMode === 'sandbox' && !caps.stdioSandbox.available ? (
             <Alert
               color="yellow"
               icon={<IconAlertTriangle size={16} />}
               title="Enterprise features inactive"
               mb="md"
             >
-              {server.stdioConfig?.executionMode === 'sandbox' && !caps.stdioSandbox.available ? (
-                <Text size="sm">
-                  This server is configured for <b>persistent sandbox execution</b>, an Enterprise
-                  feature that is not active on your current plan — it will not run until you upgrade
-                  under Dashboard → License.
-                </Text>
-              ) : null}
-              {(server.aegis?.mode ?? 'off') !== 'off' && !caps.aegis.hookAvailable ? (
-                <Text size="sm" mt={server.stdioConfig?.executionMode === 'sandbox' && !caps.stdioSandbox.available ? 6 : 0}>
-                  An <b>Aegis shield</b> is bound in <b>{server.aegis?.mode}</b> mode but will not
-                  enforce without an active Enterprise plan.
-                </Text>
-              ) : null}
+              <Text size="sm">
+                This server is configured for <b>persistent sandbox execution</b>, an Enterprise
+                feature that is not active on your current plan — it will not run until you upgrade
+                under Dashboard → License.
+              </Text>
+            </Alert>
+          ) : null}
+
+          {caps && guardrailMode !== 'off' && !guardrailHookAvailable ? (
+            <Alert
+              color="yellow"
+              icon={<IconAlertTriangle size={16} />}
+              title="Guardrail enforcement inactive"
+              mb="md"
+            >
+              <Text size="sm">
+                A guardrail is bound in <b>{guardrailMode}</b> mode, but tool-call enforcement is not
+                wired on this deployment. The binding is stored and starts enforcing as soon as it is.
+              </Text>
             </Alert>
           ) : null}
 
@@ -904,19 +1012,98 @@ export default function McpDetailPage() {
               </Group>
             </Paper>
             <Paper withBorder p="md" radius="md">
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Aegis Shield</Text>
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Guardrail</Text>
               <Group gap="xs" mt="xs">
-                <Badge
-                  size="sm"
-                  variant="light"
-                  color={server.aegis?.mode === 'enforce' ? 'red' : server.aegis?.mode === 'monitor' ? 'yellow' : 'gray'}
-                >
-                  {server.aegis?.mode ?? 'off'}
+                <Badge size="sm" variant="light" color={GUARDRAIL_MODE_COLORS[guardrailMode]}>
+                  {guardrailMode}
                 </Badge>
-                {server.aegis?.shieldId ? (
-                  <Code style={{ fontSize: 11 }}>{server.aegis.shieldId}</Code>
+                {guardrailMode !== 'off' ? (
+                  <Text size="xs" c="dimmed">
+                    {server.guardrail?.guardrailKey
+                      ? boundGuardrail?.name ?? server.guardrail.guardrailKey
+                      : 'Default tool guardrail'}
+                  </Text>
                 ) : null}
               </Group>
+              <Stack gap={6} mt="sm">
+                <Select
+                  size="xs"
+                  aria-label="Guardrail mode"
+                  data={[
+                    { value: 'off', label: 'Off' },
+                    { value: 'monitor', label: 'Monitor — log only' },
+                    { value: 'enforce', label: 'Enforce — block tool calls' },
+                  ]}
+                  value={guardrailMode}
+                  disabled={savingGuardrail}
+                  allowDeselect={false}
+                  onChange={(val) => {
+                    if (!val || val === guardrailMode) return;
+                    void handleSaveGuardrail({
+                      mode: val as GuardrailBindingMode,
+                      guardrailKey: server.guardrail?.guardrailKey,
+                    });
+                  }}
+                />
+                <Select
+                  size="xs"
+                  aria-label="Bound guardrail"
+                  data={[
+                    { value: DEFAULT_GUARDRAIL_VALUE, label: 'Default tool guardrail' },
+                    ...guardrails.map((g) => ({
+                      value: g.key,
+                      label: `${g.name}${g.enabled ? '' : ' · disabled'}${g.toolBound ? ' · tool hooks' : ''}`,
+                    })),
+                  ]}
+                  value={guardrailKeyValue}
+                  disabled={guardrailMode === 'off' || savingGuardrail}
+                  allowDeselect={false}
+                  onChange={(val) => {
+                    if (!val || val === guardrailKeyValue) return;
+                    void handleSaveGuardrail({
+                      mode: guardrailMode,
+                      guardrailKey: val === DEFAULT_GUARDRAIL_VALUE ? undefined : val,
+                    });
+                  }}
+                />
+              </Stack>
+              {guardrailMode !== 'off' && boundGuardrail && !boundGuardrail.toolBound ? (
+                <Text size="xs" c="orange" mt={6}>
+                  “{boundGuardrail.name}” has no tool.pre or tool.post hook enabled, so this binding
+                  enforces nothing yet.
+                </Text>
+              ) : null}
+              {legacyAegis ? (
+                <Box
+                  mt="sm"
+                  pt="sm"
+                  style={{ borderTop: '1px solid var(--mantine-color-default-border)' }}
+                >
+                  <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Legacy binding</Text>
+                  <Group gap="xs" mt={4}>
+                    <Badge size="xs" variant="light" color="gray">aegis: {legacyAegis.mode}</Badge>
+                    {legacyAegis.shieldId ? (
+                      <Code style={{ fontSize: 11 }}>{legacyAegis.shieldId}</Code>
+                    ) : null}
+                  </Group>
+                  <Text size="xs" c="dimmed" mt={4}>
+                    {server.guardrail
+                      ? 'Kept read-only for one release — the guardrail above is what enforces.'
+                      : 'This is what still enforces this server, through the default tool guardrail: shield IDs are dead references. Migrating keeps the mode and makes the binding explicit.'}
+                  </Text>
+                  {!server.guardrail ? (
+                    <Button
+                      mt={6}
+                      size="compact-xs"
+                      variant="default"
+                      loading={savingGuardrail}
+                      onClick={() => void handleSaveGuardrail({ mode: legacyAegis.mode })}
+                    >
+                      Migrate
+                    </Button>
+                  ) : null}
+                </Box>
+              ) : null}
             </Paper>
             <Paper withBorder p="md" radius="md">
               <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Runtime Headers</Text>

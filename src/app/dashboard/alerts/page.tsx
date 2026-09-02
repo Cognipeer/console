@@ -78,10 +78,22 @@ const METRIC_LABELS: Record<string, string> = {
   analysis_avg_accuracy: 'Avg Accuracy',
   redteam_attack_success_rate: 'Attack Success Rate',
   redteam_resilience_score: 'Resilience Score',
+  // Guardrail hook-plane decision metrics — the four the rule form authors.
+  guardrail_block_rate: 'Block Rate',
+  guardrail_approval_rate: 'Approval Rate',
+  guardrail_avg_risk_score: 'Avg Risk Score',
+  guardrail_total_decisions: 'Total Decisions',
+  // Guardrail enforcement metrics. The `aegis_` ids are the PERSISTED metric
+  // names on every stored rule and on the collector that feeds them, so they
+  // stay exactly as they are — only the module they are filed under moved.
   aegis_block_rate: 'Block Rate',
   aegis_approval_rate: 'Approval Rate',
   aegis_avg_risk_score: 'Avg Risk Score',
   aegis_total_decisions: 'Total Decisions',
+  appgw_requests: 'Requests',
+  appgw_block_rate: 'Block Rate',
+  appgw_error_rate: 'Error Rate',
+  appgw_requests_per_user: 'Busiest User (requests)',
 };
 
 const METRIC_UNITS: Record<string, string> = {
@@ -108,10 +120,18 @@ const METRIC_UNITS: Record<string, string> = {
   analysis_avg_accuracy: '%',
   redteam_attack_success_rate: '%',
   redteam_resilience_score: '%',
+  guardrail_block_rate: '%',
+  guardrail_approval_rate: '%',
+  guardrail_avg_risk_score: '',
+  guardrail_total_decisions: '',
   aegis_block_rate: '%',
   aegis_approval_rate: '%',
   aegis_avg_risk_score: '',
   aegis_total_decisions: '',
+  appgw_requests: '',
+  appgw_block_rate: '%',
+  appgw_error_rate: '%',
+  appgw_requests_per_user: '',
 };
 
 const METRIC_COLORS: Record<string, string> = {
@@ -138,10 +158,18 @@ const METRIC_COLORS: Record<string, string> = {
   analysis_avg_accuracy: 'teal',
   redteam_attack_success_rate: 'red',
   redteam_resilience_score: 'green',
+  guardrail_block_rate: 'red',
+  guardrail_approval_rate: 'orange',
+  guardrail_avg_risk_score: 'grape',
+  guardrail_total_decisions: 'blue',
   aegis_block_rate: 'red',
   aegis_approval_rate: 'orange',
   aegis_avg_risk_score: 'grape',
   aegis_total_decisions: 'blue',
+  appgw_requests: 'blue',
+  appgw_block_rate: 'red',
+  appgw_error_rate: 'orange',
+  appgw_requests_per_user: 'grape',
 };
 
 const MODULE_LABELS: Record<string, string> = {
@@ -153,7 +181,18 @@ const MODULE_LABELS: Record<string, string> = {
   evaluation: 'Evaluation',
   analysis: 'Analysis',
   redteam: 'Red Team',
-  aegis: 'Aegis',
+  'ai-app-gateway': 'AI App Gateway',
+};
+
+/**
+ * Modules that no longer exist on their own. A rule persisted with
+ * `module: 'aegis'` keeps firing — enforcement moved into the guardrail hook
+ * plane, not away — so it is FILED under Guardrails rather than rewritten:
+ * relabelling stored rows would break the collector that still emits
+ * `aegis_*` metric ids.
+ */
+const LEGACY_MODULE_ALIASES: Record<string, string> = {
+  aegis: 'guardrails',
 };
 
 const MODULE_COLORS: Record<string, string> = {
@@ -165,7 +204,7 @@ const MODULE_COLORS: Record<string, string> = {
   evaluation: 'green',
   analysis: 'lime',
   redteam: 'red',
-  aegis: 'grape',
+  'ai-app-gateway': 'indigo',
 };
 
 const OPERATOR_SYMBOLS: Record<string, string> = {
@@ -284,7 +323,7 @@ export default function AlertsPage() {
 
   /** Determine module for a rule (backward compat: infer from metric) */
   const getModule = (rule: AlertRule): string => {
-    if (rule.module) return rule.module;
+    if (rule.module) return LEGACY_MODULE_ALIASES[rule.module] ?? rule.module;
     const modelMetrics = ['error_rate', 'avg_latency_ms', 'p95_latency_ms', 'total_cost', 'total_requests'];
     const inferenceMetrics = ['gpu_cache_usage', 'request_queue_depth'];
     if (modelMetrics.includes(rule.metric)) return 'models';
@@ -295,7 +334,9 @@ export default function AlertsPage() {
     if (rule.metric.startsWith('evaluation_')) return 'evaluation';
     if (rule.metric.startsWith('analysis_')) return 'analysis';
     if (rule.metric.startsWith('redteam_')) return 'redteam';
-    if (rule.metric.startsWith('aegis_')) return 'aegis';
+    // Enforcement metrics, filed with the guardrails that now produce them.
+    if (rule.metric.startsWith('aegis_')) return 'guardrails';
+    if (rule.metric.startsWith('appgw_')) return 'ai-app-gateway';
     return 'models';
   };
 
@@ -382,7 +423,7 @@ export default function AlertsPage() {
           { label: 'Evaluation', value: 'evaluation' },
           { label: 'Analysis', value: 'analysis' },
           { label: 'Red Team', value: 'redteam' },
-          { label: 'Aegis', value: 'aegis' },
+          { label: 'AI App Gateway', value: 'ai-app-gateway' },
         ]}
         size="xs"
       />

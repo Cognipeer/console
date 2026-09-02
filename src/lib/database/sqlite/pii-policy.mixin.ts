@@ -83,11 +83,14 @@ export function PiiPolicyMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       return row ? this.mapPiiPolicyRow(row) : null;
     }
 
-    async findPiiPolicyByKey(key: string, projectId?: string): Promise<IPiiPolicy | null> {
+    async findPiiPolicyByKey(key: string, projectId?: string | null): Promise<IPiiPolicy | null> {
       const db = this.getTenantDb();
       const clauses: string[] = ['key = @key'];
       const params: Record<string, unknown> = { key };
-      if (projectId !== undefined) { clauses.push('projectId = @projectId'); params.projectId = projectId; }
+      // Same three-way contract as findGuardrailByKey: null = tenant-wide only
+      // (`createPiiPolicy` writes `projectId ?? null`).
+      if (projectId === null) clauses.push('projectId IS NULL');
+      else if (projectId !== undefined) { clauses.push('projectId = @projectId'); params.projectId = projectId; }
       const row = db.prepare(
         `SELECT * FROM ${TABLES.piiPolicies} WHERE ${clauses.join(' AND ')}`,
       ).get(params) as SqliteRow | undefined;

@@ -9,16 +9,29 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn(),
-}));
+// `runWithTenantScope` is mocked alongside `getDatabase` because the hook
+// engine resolves every record through it rather than calling `switchToTenant`
+// itself — a tenant-scoped read that skips the wrapper is the cross-tenant race
+// this repo has already been bitten by. The stub reproduces the real helper's
+// contract (resolve the provider, hand it to the callback) against whatever
+// `getDatabase` is made to return in a given test.
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    runWithTenantScope: async (
+      _tenantDbName: string,
+      fn: (db: unknown) => unknown,
+    ) => fn(await getDatabase()),
+  };
+});
 
 // Mock LLM evaluators so evaluateGuardrail tests don't need real LLM calls
 // Note: piiDetector is a pure regex-based function — no mock needed
 vi.mock('@/lib/services/guardrail/llmEvaluator', () => ({
-  runModerationCheck: vi.fn().mockResolvedValue([]),
-  runPromptShieldCheck: vi.fn().mockResolvedValue([]),
-  runCustomPromptCheck: vi.fn().mockResolvedValue([]),
+  runModerationPolicy: vi.fn().mockResolvedValue([]),
+  runPromptShieldPolicy: vi.fn().mockResolvedValue([]),
+  runCustomPromptPolicy: vi.fn().mockResolvedValue([]),
 }));
 
 import { getDatabase } from '@/lib/database';
@@ -35,6 +48,7 @@ import {
   evaluateGuardrail,
 } from '@/lib/services/guardrail/guardrailService';
 import type { IGuardrail } from '@/lib/database/provider.interface';
+import { resetRecordCaches } from '@/lib/services/guardrail/hooks/recordCache';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -319,6 +333,12 @@ describe('evaluateGuardrail', () => {
     vi.clearAllMocks();
     db = createMockDb();
     (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
+    // The hook engine resolves guardrail, PII-policy and tenant records through
+    // a 60s TTL cache. Every case here reuses the key 'my-guardrail' with a
+    // DIFFERENT record, so without this every test after the first would assert
+    // against the first one's cached row — the disabled guardrail, which runs
+    // nothing. Production is invalidated on save; a test suite has no save.
+    resetRecordCaches();
   });
 
   it('returns passed=true, disabled=true, and no findings when guardrail is disabled', async () => {
@@ -363,7 +383,7 @@ describe('evaluateGuardrail', () => {
         tenantDbName: TENANT_DB,
         tenantId: TENANT_ID,
         guardrailKey: 'nonexistent',
-        text: 'check me',
+        text: 'policy me',
       }),
     ).rejects.toThrow('Guardrail with key "nonexistent" not found');
   });
@@ -491,10 +511,15 @@ describe('evaluateGuardrail', () => {
     expect(result.findings.length).toBeGreaterThan(0);
     expect(result.redactedText).toBeDefined();
     expect(result.redactedText).not.toContain('leak@corp.com');
-    expect(result.redactedText).toContain('[REDACTED:email]');
+    // `[REDACTED_EMAIL]`, not the guardrail detector's old `[REDACTED:email]`.
+    // Redaction now runs through the PII service, so the marker is the one the
+    // standalone /v1/pii API, snapshot anonymisation and dataset import have
+    // always emitted — the point of collapsing onto one engine is that there is
+    // one marker, and this is the one three of the four callers already used.
+    expect(result.redactedText).toContain('[REDACTED_EMAIL]');
   });
 
-  it('fails closed when an LLM check is enabled without any model', async () => {
+  it('fails closed when an LLM policy is enabled without any model', async () => {
     db.findGuardrailByKey.mockResolvedValue(
       makeGuardrail({
         modelKey: undefined,
@@ -516,7 +541,7 @@ describe('evaluateGuardrail', () => {
     expect(result.findings[0].category).toBe('evaluation_error');
   });
 
-  it('fails open (default) when an LLM check is enabled without any model — passes but surfaces the gap', async () => {
+  it('fails open (default) when an LLM policy is enabled without any model — passes but surfaces the gap', async () => {
     db.findGuardrailByKey.mockResolvedValue(
       makeGuardrail({
         modelKey: undefined,

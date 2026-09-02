@@ -66,21 +66,6 @@ describe('groupUsageDailyRows', () => {
     });
   });
 
-  it('groups by apiTokenId when groupBy is token', () => {
-    const { entries } = groupUsageDailyRows(
-      [
-        row({ userId: 'u1', apiTokenId: 't1', requests: 1, costUsd: 1 }),
-        row({ userId: 'u2', apiTokenId: 't1', requests: 2, costUsd: 2 }),
-        row({ userId: 'u1', apiTokenId: 't2', requests: 4, costUsd: 0.1 }),
-      ],
-      'token',
-    );
-
-    expect(entries.map((entry) => entry.id)).toEqual(['t1', 't2']);
-    expect(entries[0]).toMatchObject({ requests: 3, costUsd: 3 });
-    expect(entries[1]).toMatchObject({ requests: 4, costUsd: 0.1 });
-  });
-
   it('sorts entries by cost descending', () => {
     const { entries } = groupUsageDailyRows(
       [

@@ -38,6 +38,17 @@ describe('getEnterpriseModuleForPath', () => {
     expect(getEnterpriseModuleForPath('/api/rag/documents')).toBeNull();
   });
 
+  it('maps every ai-app-gateway surface, including per-instance data-plane paths', () => {
+    expect(getEnterpriseModuleForPath('/api/ai-app-gateway/gateways')).toBe('ai-app-gateway');
+    expect(getEnterpriseModuleForPath('/api/client/v1/ai-app-gateway/gateways')).toBe('ai-app-gateway');
+    // One prefix must cover an unbounded number of instances: the instance key
+    // is a path segment beneath /api/appgw/.
+    expect(getEnterpriseModuleForPath('/api/appgw/platform-team-a7f3k2/v1/messages')).toBe('ai-app-gateway');
+    expect(getEnterpriseModuleForPath('/api/appgw/data-eng-91bc2f/v1/chat/completions')).toBe('ai-app-gateway');
+    // Nothing outside the module's own prefixes may be captured by it.
+    expect(getEnterpriseModuleForPath('/api/appgateway')).toBeNull();
+  });
+
   it('exempts machine/self-serve sub-paths', () => {
     expect(getEnterpriseModuleForPath('/api/gpu-fleet/installer.sh')).toBeNull();
     expect(getEnterpriseModuleForPath('/api/gpu-fleet/agent-bundle/x.tar.gz')).toBeNull();

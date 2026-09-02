@@ -6,7 +6,7 @@ import type { IUsageAttributionFields } from './types.base';
 export type GuardrailType = 'preset' | 'custom';
 export type GuardrailTarget = 'input' | 'output';
 export type GuardrailAction = 'block' | 'warn' | 'flag' | 'redact';
-/** What happens when an LLM-backed check errors out: pass content (open) or block it (closed). */
+/** What happens when an LLM-backed policy errors out: pass content (open) or block it (closed). */
 export type GuardrailFailMode = 'open' | 'closed';
 
 export interface IGuardrailPiiPolicy {
@@ -64,6 +64,548 @@ export interface IGuardrailPresetPolicy {
   promptShield?: IGuardrailPromptShieldPolicy;
 }
 
+// ── Guardrail hook plane (contract v2) ─────────────────────────────────────
+/**
+ * The PERSISTED shape of a guardrail's hook configuration.
+ *
+ * It lives in the persistence layer rather than next to the evaluator because
+ * `IGuardrail.hooks` has to name it, and nothing under `provider/` may import
+ * from `@/lib/services/**` — that direction is what keeps these types safe to
+ * pull into a pure module (importing the `@/lib/database` barrel instead
+ * constructs providers and registers shutdown handlers on load).
+ *
+ * The split is deliberate: what is *stored* is described here, and the
+ * *runtime* contract — HookCall / HookVerdict / SafetyFinding / Mutation plus
+ * every constant and helper — is owned by
+ * `@/lib/services/guardrail/hooks/contract`, which re-exports these rather
+ * than redeclaring them. Two independent descriptions of a policy would drift,
+ * and a drifted policy shape is a policy that silently stops running.
+ *
+ * Everything below is types only; this file has no runtime values.
+ */
+
+/** Bumped only on a breaking change to the hook call/verdict shape. */
+export type GuardrailContractVersion = 2;
+
+/**
+ * The six hook points. A string union rather than an enum, which is exactly how
+ * `prompt.pre` arrived: additive, invalidating no stored record. A seventh
+ * (`retrieval.post`) would land the same way.
+ *
+ * `prompt.pre` and `input.pre` ARE NOT TWO NAMES FOR ONE THING, and the
+ * difference is both semantics and money. `prompt.pre` is the incoming user
+ * turn, once per run. `input.pre` fires before every model call — the agent
+ * loop re-enters it after each tool round trip — so on a run with four tool
+ * calls an `input.pre` moderation policy spends five model calls where a
+ * `prompt.pre` one spends one, and the newest message it sees is a TOOL result
+ * rather than anything a human typed. `input.pre` keeps its existing meaning
+ * because persisted bindings depend on it; `prompt.pre` is the rule that had
+ * nowhere to live.
+ *
+ * Direction is carried by the hook id itself. `IGuardrail.target` is NOT
+ * consulted when a guardrail runs — the binding slot decides — which is why a
+ * legacy record lifts onto BOTH `input.pre` and `output.pre` regardless of
+ * what its `target` column says. It lifts onto NEITHER `prompt.pre` nor the
+ * tool hooks: a row written before they existed never opted into them, and
+ * gaining an evaluation (and a bill) on upgrade is not a migration, it is a
+ * surprise.
+ */
+export type GuardrailHookId =
+  | 'prompt.pre'
+  | 'input.pre'
+  | 'output.pre'
+  | 'output.stream.delta'
+  | 'tool.pre'
+  | 'tool.post';
+
+/**
+ * Timing x failure handling as ONE discriminated field, so
+ * `{ timing: 'async', onFail: 'block' }` is unrepresentable rather than merely
+ * rejected by a validator: an async policy has by definition already let the
+ * flow continue, so it cannot block. Two independent optionals would leak the
+ * illegal pair into every level (policy, binding, webhook).
+ */
+export type GuardrailHookSchedule =
+  | { timing: 'sync'; onFail: 'block' | 'log' }
+  | { timing: 'async'; onFail: 'log' };
+
+/**
+ * Enforcement posture. `monitor` evaluates and logs but neutralises the
+ * decision to 'allow' before anyone acts on it.
+ *
+ * Stored rows may carry older vocabularies for the same three states — the
+ * enterprise enforcement plane wrote 'simulate', the MCP binding writes 'off'
+ * — so this union stays at three canonical words and the read-time normaliser
+ * folds the aliases in. Widening it here would push the aliases into every
+ * comparison instead.
+ */
+export type GuardrailMode = 'enforce' | 'monitor' | 'disabled';
+
+/**
+ * `'allow'` plus the existing four actions, and deliberately nothing else.
+ * No 'mask'/'tokenize' (they live per-category on IPiiPolicy, where promoting
+ * them to this ladder would make `mask < redact` and silently escalate a
+ * masking guardrail merged with a redacting one) and no 'sandbox'/
+ * 'require_approval' (neither has a store). Keeping this a strict superset of
+ * GuardrailAction by construction is what lets a hook verdict project back
+ * onto the legacy `action` column without a lossy table.
+ */
+export type GuardrailSafetyAction = 'allow' | GuardrailAction;
+
+/** The nine policy families a hook can run. */
+export type GuardrailPolicyFamily =
+  | 'pii'
+  | 'secrets'
+  | 'word_filter'
+  | 'regex'
+  | 'moderation'
+  | 'prompt_shield'
+  | 'custom'
+  | 'tool_access'
+  | 'webhook';
+
+export interface GuardrailPolicyBase<F extends GuardrailPolicyFamily> {
+  /** Stable within the guardrail and never reused — it appears on every finding. */
+  id: string;
+  family: F;
+  enabled: boolean;
+  /** Must be a subset of the family's valid hooks; enforced at save time. */
+  hooks: GuardrailHookId[];
+  schedule: GuardrailHookSchedule;
+  /** Overrides the record-level `action` for this policy's findings. */
+  action?: GuardrailSafetyAction;
+  /**
+   * Per-POLICY, unlike the record-level `failMode`: today one flaky moderation
+   * model fails the whole guardrail closed and takes its deterministic PII
+   * pass down with it.
+   */
+  failMode?: GuardrailFailMode;
+  /** 0 / absent = no timeout, which is exactly today's behaviour. */
+  timeoutMs?: number;
+  /**
+   * WHEN this policy is allowed to spend a model call — the single biggest cost
+   * lever in the design. `'onFinding'` runs it only once a cheap deterministic
+   * policy has already flagged something; `'onSideEffect'` only for a
+   * destructive or external tool call (and for an UNCLASSIFIED one, because an
+   * unknown tool is itself the risk signal). Absent — and any unrecognised
+   * stored value — means `'always'`, which is what every lifted legacy policy
+   * needs, since `evaluateGuardrail` has always run its LLM policies
+   * unconditionally.
+   *
+   * Only the three LLM families read it (`resolveRunIf`,
+   * services/guardrail/families/llm.ts): the deterministic families cost a pass
+   * over a string, so gating them would add nothing but a way to switch them
+   * off by accident.
+   *
+   * DECLARED HERE, and not merely read structurally, because the engine and
+   * three editor screens all depend on the name. An undeclared field is one
+   * rename away from reverting every conditional policy to `'always'` with no
+   * compile error, no runtime error and a green UI — i.e. from silently
+   * multiplying a tenant's guardrail model spend.
+   */
+  runIf?: 'always' | 'onFinding' | 'onSideEffect';
+  label?: string;
+  /**
+   * What an end user is told when THIS policy blocks something, overriding the
+   * per-reason template on `GuardrailBlockedMessageSettings.templates`.
+   *
+   * WHY IT EXISTS. Messages are keyed by `GuardrailBlockReasonClass`, and
+   * `BLOCK_REASON_FOR_FAMILY` collapses `regex`, `custom` and `webhook` all
+   * onto `'custom'` — deliberately, because an authored regex rule could be
+   * about anything and guessing a specific reason for it produces a message
+   * that is confidently wrong. But the consequence is that an operator editing
+   * "the regex policy's message" is also rewriting the webhook policy's, with
+   * nothing on screen saying so. This field is the narrow override that makes
+   * the two separable.
+   *
+   * RESOLUTION ORDER, normative: this field, then
+   * `blockedMessage.templates[reasonClass]`, then the built-in default for the
+   * locale. The reason-class layer STAYS — it is how an operator sets one
+   * message for every personal-data block at once — and this only outranks it
+   * because it is the narrower statement of the same intent, authored on the
+   * policy itself rather than on a preset.
+   *
+   * BLANK MEANS INHERIT, not "an empty message": `selectBlockMessageTemplate`
+   * skips a layer whose string is whitespace, so clearing the box restores the
+   * inherited wording instead of showing an end user nothing.
+   *
+   * Same closed variable set as every other template (`BLOCK_MESSAGE_VARS`),
+   * and for the same reason: the output is shown to end users, so an
+   * interpolatable matched value would turn the guardrail into an exfiltration
+   * channel for the data it exists to protect. `validateGuardrailHooks` rejects
+   * an unrecognised one at save time.
+   */
+  message?: string;
+}
+
+/**
+ * `piiPolicyKey` is required once the policy is enabled, and there is deliberately
+ * no inline category list: the PII service owns categories, languages, custom
+ * patterns, checksum validators, per-category mask strategies and the tokenize
+ * vault. Duplicating any of that here is how the two engines drift. Legacy
+ * rows are lifted onto a generated policy instead of keeping their inline map.
+ */
+export interface GuardrailPiiPolicyConfig extends GuardrailPolicyBase<'pii'> {
+  /**
+   * The `IPiiPolicy.key` this policy scans through. NOT a guardrail policy id:
+   * a PII policy is a separate, reusable tenant asset (`pii_policies`) that
+   * this guardrail policy REFERENCES, which is why the field is prefixed —
+   * `policy.piiPolicyKey` names the thing it points at, where the unprefixed
+   * `policy.policyKey` read as if a policy carried its own key.
+   */
+  piiPolicyKey: string;
+  actionOverride?: PiiAction;
+  locale?: PiiLanguage;
+  /**
+   * Runs the legacy NFKC + zero-width-strip + de-obfuscated-email second pass
+   * on top of the policy scan. The PII service performs no normalisation of
+   * its own, so without this the migration silently loses obfuscation
+   * resistance. Findings from that pass are span-less. Default true.
+   */
+  detectObfuscated?: boolean;
+  /**
+   * Set ONLY by the legacy lift, never by an authored config: the guardrail's
+   * inline `policy.pii.categories`, already mapped onto the PII service's
+   * catalog ids (`tckn` -> `tc_kimlik` and friends).
+   *
+   * It exists because provisioning the lifted policy is a DATABASE WRITE on a
+   * row that has enforced PII for months without one. If that write fails —
+   * a throttled tenant, a read-only replica, a permissions gap — the policy
+   * would degrade to `evaluation_error`, i.e. fail OPEN on the single most
+   * sensitive detector, on rows the operator never touched. With this list the
+   * scan falls back to the stateless `detectPii` API, which needs no policy row
+   * and no tenant scope, and reproduces exactly the categories the legacy
+   * detector ran.
+   *
+   * An AUTHORED config has no legacy columns to lift and therefore no fallback:
+   * enabling `pii` there requires a real `piiPolicyKey`, which is the point.
+   */
+  legacyCategories?: Record<string, boolean>;
+}
+
+/**
+ * Deterministic credential scan, split out of the PII detector so it can run
+ * without a database. It keeps the legacy `pii` finding type on the wire, so
+ * consumers that filter findings down to the PII dimension still see secrets.
+ */
+export interface GuardrailSecretsPolicyConfig extends GuardrailPolicyBase<'secrets'> {
+  /** The named vendor patterns (Stripe / OpenAI / AWS / GitHub / Slack / JWT / PEM). */
+  known?: boolean;
+  /**
+   * The `\b[A-Za-z0-9-_]{32,}\b` heuristic. It fires on ordinary base64 and on
+   * UUIDs, so it is gated behind an entropy floor rather than shipped bare.
+   */
+  genericHighEntropy?: boolean;
+  minEntropy?: number;
+  /** Known-safe literals: test fixtures, documentation samples. */
+  allowValues?: string[];
+}
+
+export interface GuardrailWordFilterPolicyConfig extends GuardrailPolicyBase<'word_filter'> {
+  builtinLists?: Record<string, boolean>;
+  customListKeys?: string[];
+  words?: string[];
+  /**
+   * Carried verbatim from `IGuardrailWordFilterPolicy.regexes` so the legacy
+   * lift is behaviour-identical. Newly authored patterns belong in the `regex`
+   * family, which is span-capable and stream-eligible; these are not.
+   */
+  regexes?: string[];
+}
+
+export interface GuardrailRegexRule {
+  id: string;
+  label: string;
+  pattern: string;
+  flags?: string;
+  category: string;
+  /** Same three levels as GuardrailFinding.severity — never widened. */
+  severity: 'low' | 'medium' | 'high';
+  action?: GuardrailSafetyAction;
+  /** Redact only this capture group instead of the whole match. */
+  captureGroup?: number;
+  /**
+   * Longest string this rule can match. Required, and rejected above 4096:
+   * it is what sizes the streaming hold-back window, and an unbounded rule
+   * would make the stream silently unenforceable at window boundaries.
+   */
+  maxMatchChars: number;
+}
+
+export interface GuardrailRegexPolicyConfig extends GuardrailPolicyBase<'regex'> {
+  rules: GuardrailRegexRule[];
+}
+
+export interface GuardrailModerationPolicyConfig extends GuardrailPolicyBase<'moderation'> {
+  modelKey?: string;
+  categories: Record<string, boolean>;
+}
+
+export interface GuardrailPromptShieldPolicyConfig extends GuardrailPolicyBase<'prompt_shield'> {
+  modelKey?: string;
+  sensitivity: 'low' | 'balanced' | 'high';
+}
+
+export interface GuardrailCustomPolicyConfig extends GuardrailPolicyBase<'custom'> {
+  modelKey?: string;
+  prompt: string;
+  /**
+   * Preserves an existing quirk rather than silently changing it: today a
+   * custom guardrail with no model evaluates nothing and passes. Lifted policies
+   * get 'skip' so no tenant's behaviour moves; newly authored ones default to
+   * 'error_finding', so the quirk dies for new configs only.
+   */
+  onMissingModel: 'skip' | 'error_finding';
+}
+
+export type GuardrailSideEffect = 'none' | 'read' | 'write' | 'destructive' | 'external';
+
+/**
+ * A deliberate subset of JSON Schema — no $ref, no remote schemas, no Ajv.
+ * Exactly what the enforcement plane's 12-line validator already supported, so
+ * the migration of stored argument schemas is 1:1.
+ */
+export interface GuardrailJsonSchemaLite {
+  type?: 'object' | 'string' | 'number' | 'boolean' | 'array';
+  required?: string[];
+  properties?: Record<string, GuardrailJsonSchemaLite>;
+  enum?: unknown[];
+  additionalProperties?: boolean;
+}
+
+export interface GuardrailToolAccessPolicyConfig extends GuardrailPolicyBase<'tool_access'> {
+  allow?: string[];
+  deny?: string[];
+  sideEffects?: Record<string, GuardrailSideEffect>;
+  allowedRoles?: Record<string, string[]>;
+  allowedDomains?: string[];
+  deniedDomains?: string[];
+  allowedPathPrefixes?: string[];
+  deniedPathPrefixes?: string[];
+  argumentSchemas?: Record<string, GuardrailJsonSchemaLite>;
+  maxArgBytes?: number;
+  maxResultBytes?: number;
+  /** JSON-bomb defence. Default 32. */
+  maxArgDepth?: number;
+  /**
+   * Which tool arguments actually carry a URL / a filesystem path, per tool
+   * name. Declared paths are authoritative; scraping every string for
+   * `https?://` or a leading `/` both missed real targets (`//evil.com`,
+   * `file:`, `data:`, scheme-less hosts) and false-positived on any prose
+   * containing a slash.
+   */
+  urlArgPaths?: Record<string, string[]>;
+  pathArgPaths?: Record<string, string[]>;
+  /**
+   * The old scrape, kept as a clamped fallback. Default false; when on, its
+   * findings are clamped to 'medium'/'flag' and never trigger DNS resolution.
+   */
+  scanUndeclaredStrings?: boolean;
+  /**
+   * Root that path prefixes resolve against. Matching is on a POSIX-normalised
+   * path, because raw `startsWith` lets `/workspace/../etc/shadow` walk
+   * straight through an allowed prefix.
+   */
+  fsRoot?: string;
+  /**
+   * SSRF guard on declared URL arguments only. It resolves DNS, so it never
+   * runs on scraped strings and never on a streaming hook.
+   */
+  denyPrivateNetworks?: boolean;
+  /** Default 'read'. Defaulting undeclared tools to 'external' made every unknown tool suspicious. */
+  defaultSideEffect?: GuardrailSideEffect;
+  /**
+   * Side effect -> action. Defaults to warn (not block) for destructive and
+   * external, which reproduces today's ACTUAL behaviour: the sandbox adapter
+   * those rungs resolved to is a pass-through, so the tool ran anyway.
+   */
+  sideEffectActions?: Partial<Record<GuardrailSideEffect, GuardrailSafetyAction>>;
+}
+
+/**
+ * The extension point. Its request body IS a hook call and its response body
+ * IS a hook verdict — one documented contract for in-process, remote and
+ * customer transports, instead of a bespoke envelope to keep in sync.
+ */
+export interface GuardrailWebhookPolicyConfig extends GuardrailPolicyBase<'webhook'> {
+  /** https only, enforced at save. Outbound calls go through the SSRF-guarded fetch. */
+  url: string;
+  headers?: Record<string, string>;
+  /** Provider key holding the encrypted bearer, same pattern as IEvaluationExternalTarget. */
+  credentialProviderKey?: string;
+  /** Config key of the HMAC secret used to sign `${timestamp}.${body}`. */
+  signingSecretRef?: string;
+  /** 'text' keeps structured PII off the wire unless the operator opts in. */
+  send: 'text' | 'subject';
+  /**
+   * Apply the redactions THIS hook run has already computed before serialising
+   * the body. Default TRUE, and the default is the security-relevant half: by
+   * the time a webhook runs, the deterministic families have already located
+   * the credentials and the PII, and shipping the raw text to a third party
+   * after deciding it must be redacted is a data leak the guardrail itself
+   * caused. Set it false only for a receiver that has to see the original.
+   *
+   * It can only remove what another enabled policy FOUND, so it is not a promise
+   * that the payload is clean — which is why the request carries an
+   * `x-cognipeer-guardrail-redactions` count of the rewrites actually applied
+   * rather than a bare "redacted: true".
+   */
+  redactBeforeSend?: boolean;
+  retries?: 0 | 1 | 2;
+}
+
+export type GuardrailPolicy =
+  | GuardrailPiiPolicyConfig
+  | GuardrailSecretsPolicyConfig
+  | GuardrailWordFilterPolicyConfig
+  | GuardrailRegexPolicyConfig
+  | GuardrailModerationPolicyConfig
+  | GuardrailPromptShieldPolicyConfig
+  | GuardrailCustomPolicyConfig
+  | GuardrailToolAccessPolicyConfig
+  | GuardrailWebhookPolicyConfig;
+
+export interface GuardrailHookBinding {
+  enabled: boolean;
+  schedule: GuardrailHookSchedule;
+  failMode?: GuardrailFailMode;
+  /** Whole-hook budget. 0 / absent = no timeout, matching today. */
+  timeoutMs?: number;
+}
+
+export interface GuardrailStreamSettings {
+  /**
+   * Opt-in. Lifted legacy rows get false so the existing post-hoc audit is
+   * reproduced exactly and no tenant's streaming behaviour changes on upgrade;
+   * newly created guardrails default to true.
+   */
+  enabled: boolean;
+  /**
+   * Characters withheld behind the write frontier. The engine RAISES this to
+   * the longest match any enabled stream-eligible policy can produce, because
+   * that is what makes the guarantee true: no such match can begin before the
+   * frontier and end after it if the withheld tail is at least as long.
+   * Default 256.
+   */
+  holdBackChars?: number;
+  /** ...or this long, whichever comes first. Default 200. */
+  holdBackMs?: number;
+  /**
+   * Characters before the release point re-scanned each window, so a match
+   * starting in already-scanned text is re-found with a correct absolute span.
+   * Default 64.
+   */
+  overlapChars?: number;
+  /** Cap on the held region; on overflow `onBudgetExceeded` decides. Default 4000. */
+  maxHeldChars?: number;
+  onBudgetExceeded?: 'release' | 'terminate';
+  /**
+   * 'truncate' ends the stream after the block message. 'replace' is only
+   * honest when nothing has been flushed to the client yet. Default 'truncate'.
+   */
+  onBlock?: 'truncate' | 'replace';
+}
+
+/** Coarse reason shown to an end user — never the matched value. */
+export type GuardrailBlockReasonClass =
+  | 'pii'
+  | 'secrets'
+  | 'profanity'
+  | 'moderation'
+  | 'injection'
+  | 'tool_denied'
+  | 'custom'
+  | 'unavailable';
+
+export interface GuardrailBlockedMessageSettings {
+  /**
+   * 'error' returns the OpenAI-shaped error body that clients parse today.
+   * 'replace' returns a normal 200 whose assistant content IS the message,
+   * with finish_reason 'content_filter' — what a chat UI can actually render.
+   */
+  mode?: 'error' | 'replace';
+  /**
+   * Per-reason overrides. The variable set is closed and excludes the matched
+   * text: a template is tenant-editable and its output is shown to end users,
+   * so an interpolatable matched value turns the guardrail into an
+   * exfiltration channel for the data it exists to protect.
+   */
+  templates?: Partial<Record<GuardrailBlockReasonClass, string>>;
+  /** Default true — support cannot debug a block without the trace id. */
+  includeTraceId?: boolean;
+}
+
+export interface GuardrailVerdictVisibility {
+  /** Response headers describing the verdict. Default true. */
+  headers?: boolean;
+  /**
+   * Opt-in, and off by default: a block is HTTP 400 with
+   * `{ error: { type: 'guardrail_block' } }` today and every deployed
+   * OpenAI-compatible client parses that.
+   */
+  useVerdictStatusCodes?: boolean;
+  detailedHeaders?: boolean;
+  /** Keep the pre-rename `x-aegis-*` header aliases for one release. */
+  aegisCompatHeaders?: boolean;
+}
+
+/**
+ * The whole v2 configuration in ONE persisted blob, and therefore ONE SQLite
+ * column. Splitting policies / bindings / stream / message / visibility into
+ * separate fields would cost four call sites per field in each of the two
+ * provider mixins, and missing one of them fails silently: Mongo accepts the
+ * write, SQLite drops it, and the UI shows it saved because it re-reads the
+ * row it just failed to update.
+ */
+export interface GuardrailHooksConfig {
+  contractVersion: GuardrailContractVersion;
+  policies: GuardrailPolicy[];
+  bindings: Partial<Record<GuardrailHookId, GuardrailHookBinding>>;
+  stream?: GuardrailStreamSettings;
+  blockedMessage?: GuardrailBlockedMessageSettings;
+  visibility?: GuardrailVerdictVisibility;
+  /**
+   * Stop after the first synchronous `block`. Default true.
+   *
+   * WHOLE-CONFIG, and the only ordering knob there is: a policy declares WHERE
+   * it runs with `hooks`, and the engine's phase order (deterministic families
+   * first, then the model-backed ones and `webhook`) is fixed. This says only
+   * whether the work after a blocking finding is still worth doing.
+   *
+   * Every legacy-lifted row and the default tool guardrail carry `false`, to
+   * keep their whole findings array for the audit trail and for the
+   * /v1/moderations category map.
+   */
+  shortCircuit?: boolean;
+}
+
+/**
+ * ONE guardrail attached to a consumer (a model, an agent), plus which hooks
+ * it may fire on there. A consumer holds an ARRAY of these, which is the whole
+ * point: the single `inputGuardrailKey`/`outputGuardrailKey` slots it replaces
+ * make composing two reusable guardrails impossible and can bind nothing at
+ * all to `tool.pre`/`tool.post`.
+ *
+ * The reference is by `key`, never by id — that is what the legacy columns
+ * already store, what the API payloads carry and what survives a tenant
+ * export/import, so the two generations stay comparable and
+ * `projectBindingsToLegacy()` is a pure rename rather than a lookup.
+ *
+ * Resolution lives in `@/lib/services/guardrail/hooks/binding`, not here: this
+ * file is types-only and both call sites must share one implementation or they
+ * will disagree about what a legacy row binds to.
+ */
+export interface IGuardrailBinding {
+  key: string;
+  /**
+   * Hooks this binding activates. Omitted = every hook the guardrail itself
+   * declares (its own `hooks.bindings`), which is what "just attach it"
+   * should mean. An explicitly EMPTY array is honoured literally: bound to
+   * nothing, i.e. parked without being deleted.
+   */
+  hooks?: GuardrailHookId[];
+}
+
 export interface IGuardrail {
   _id?: ObjectId | string;
   tenantId: string;
@@ -75,13 +617,44 @@ export interface IGuardrail {
   target: GuardrailTarget;
   action: GuardrailAction;
   enabled: boolean;
-  /** LLM-check failure behavior. Defaults to 'open' (content passes if the evaluator errors). */
+  /** LLM-backed policy failure behavior. Defaults to 'open' (content passes if the evaluator errors). */
   failMode?: GuardrailFailMode;
   modelKey?: string;
-  // For preset guardrails
+  /**
+   * The legacy preset blob, and a real COLUMN on both backends.
+   *
+   * NOT a policy in the `hooks.policies` sense, despite the name — this is the
+   * pre-hook-plane pii/wordFilter/moderation/promptShield bundle that
+   * `liftLegacyHooks` derives a policy list FROM and `projectHooksToLegacy`
+   * writes back TO. The two are told apart by number: singular `policy` is the
+   * legacy blob, plural `policies` is the hook plane's list. It is kept and
+   * kept current because an older console binary on the same tenant database
+   * still reads it.
+   *
+   * @deprecated Author `hooks.policies` instead. Still WRITTEN on every save
+   * (see `projectHooksToLegacy`) and still READ by `moderationApi` and by
+   * older binaries, so it cannot be dropped.
+   */
   policy?: IGuardrailPresetPolicy;
   // For custom prompt guardrails
   customPrompt?: string;
+  /**
+   * v2 hook plane. Absent on every row written before it shipped, so it is
+   * OPTIONAL and the legacy columns above stay permanently populated: they are
+   * what an older console binary on the same tenant database, and the
+   * finding-shape consumers that scan `policy`, still read.
+   */
+  hooks?: GuardrailHooksConfig;
+  /**
+   * 0 / absent means `hooks` was DERIVED from the legacy columns and must be
+   * re-derived on every read, so a later fix to the projection reaches every
+   * un-edited record. >= 1 means an operator authored it and it is used
+   * verbatim. Deriving-and-persisting on the evaluate path instead would be a
+   * write per evaluation and would freeze the derivation.
+   */
+  hooksVersion?: number;
+  /** Absent = derived from `enabled` ('enforce' when on, 'disabled' when off). */
+  mode?: GuardrailMode;
   metadata?: Record<string, unknown>;
   createdBy: string;
   updatedBy?: string;
@@ -1189,7 +1762,7 @@ export interface IWebSearchRunLog extends IUsageAttributionFields {
 
 // ── Alert types ─────────────────────────────────────────────────────────
 
-export type AlertModule = 'models' | 'inference' | 'guardrails' | 'rag' | 'mcp' | 'analysis' | 'evaluation' | 'redteam' | 'aegis';
+export type AlertModule = 'models' | 'inference' | 'guardrails' | 'rag' | 'mcp' | 'analysis' | 'evaluation' | 'redteam' | 'aegis' | 'ai-app-gateway';
 
 export type AlertMetric =
   // models
@@ -1205,6 +1778,18 @@ export type AlertMetric =
   | 'guardrail_fail_rate'
   | 'guardrail_avg_latency_ms'
   | 'guardrail_total_evaluations'
+  // guardrail enforcement (over hook decisions in the window). These are the
+  // renamed 'aegis_*' four below; the old strings CANNOT be dropped because
+  // stored alert rules carry them in a `metric` column, so both spellings
+  // resolve to the same collector for now.
+  | 'guardrail_block_rate'
+  /**
+   * Vestigial: kept only so the rename of 'aegis_approval_rate' is total.
+   * The approval rung has no store and nothing emits it, so it reports 0.
+   */
+  | 'guardrail_approval_rate'
+  | 'guardrail_avg_risk_score'
+  | 'guardrail_total_decisions'
   // rag
   | 'rag_avg_latency_ms'
   | 'rag_total_queries'
@@ -1223,11 +1808,19 @@ export type AlertMetric =
   // red-team (percentages, 0–100, averaged over completed scans in the window)
   | 'redteam_attack_success_rate'
   | 'redteam_resilience_score'
-  // aegis enforcement plane (over decisions in the window)
+  // aegis enforcement plane (over decisions in the window).
+  // @deprecated Superseded by the 'guardrail_*' four above. Retained because
+  // stored IAlertRule rows reference these strings; removing them would make
+  // every existing rule fail validation.
   | 'aegis_block_rate'
   | 'aegis_approval_rate'
   | 'aegis_avg_risk_score'
-  | 'aegis_total_decisions';
+  | 'aegis_total_decisions'
+  // AI App Gateway (over requests logged in the window)
+  | 'appgw_requests'
+  | 'appgw_block_rate'
+  | 'appgw_error_rate'
+  | 'appgw_requests_per_user';
 
 export type AlertConditionOperator = 'gt' | 'lt' | 'gte' | 'lte' | 'eq';
 
@@ -1439,9 +2032,29 @@ export interface IAgentConfig {
   maxTokens?: number;
   /** RAG module key – attached as a retrieval tool */
   knowledgeEngineKey?: string;
-  /** Guardrail key applied to user input */
+  /**
+   * Multi-guardrail binding. AUTHORITATIVE when present: the two deprecated
+   * single-slot keys below are then ignored, not merged — see
+   * `resolveBindings()` in `@/lib/services/guardrail/hooks/binding` for why
+   * merging would double-run (and so double-log and double-bill) a guardrail
+   * an operator moved into the array.
+   *
+   * Lives inside `config`, alongside the slots it replaces, so it rides the
+   * agent's existing `config` JSON column on both backends and appears in the
+   * version snapshot without a schema change.
+   */
+  guardrails?: IGuardrailBinding[];
+  /**
+   * Guardrail key applied to user input.
+   * @deprecated Use `guardrails`. Still READ (as the fallback when `guardrails`
+   * is absent) and still WRITTEN for one release, so an older console binary
+   * on the same tenant database keeps enforcing.
+   */
   inputGuardrailKey?: string;
-  /** Guardrail key applied to assistant output */
+  /**
+   * Guardrail key applied to assistant output.
+   * @deprecated Use `guardrails`. See `inputGuardrailKey`.
+   */
   outputGuardrailKey?: string;
   /** Bound tools from various sources (tools, MCP servers legacy) */
   toolBindings?: IAgentToolBinding[];
@@ -1998,6 +2611,13 @@ export interface IPiiCustomPattern {
 /**
  * A reusable PII policy: which built-in categories are enabled,
  * which custom patterns to run, default action and target languages.
+ *
+ * A DIFFERENT THING from a `GuardrailPolicy`, and deliberately not renamed with
+ * it: this is a standalone tenant asset with its own collection
+ * (`pii_policies`), its own screens and its own API, which a guardrail's `pii`
+ * policy merely REFERENCES by key (`GuardrailPiiPolicyConfig.piiPolicyKey`).
+ * One PII policy is shared by many guardrail policies, which is the whole
+ * reason the categories do not live inline on the guardrail.
  */
 export interface IPiiPolicy {
   _id?: import('mongodb').ObjectId | string;

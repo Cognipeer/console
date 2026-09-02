@@ -16,6 +16,8 @@ import {
   publishAgent,
   updateAgentRecord,
 } from '@/lib/services/agents';
+// By path: the agents barrel does not export the error class.
+import { AgentGuardrailBlockedError } from '@/lib/services/agents/agentService';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import {
   readJsonBody,
@@ -23,8 +25,33 @@ import {
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
+import { carriedGuardrailFields, resolveConfigGuardrailBindings } from './guardrail-bindings';
 
 const logger = createLogger('api:agents');
+
+/**
+ * A guardrail refusal is a POLICY decision, not a server fault: answered with
+ * the same `guardrail_block` envelope and status the inference routes use for
+ * `GuardrailBlockError`, so a client can branch on `error.type` whether it
+ * called a model or an agent. Returns null for any other error so the caller's
+ * own fallback still applies.
+ */
+function sendAgentGuardrailBlock(
+  reply: Parameters<typeof sendProjectContextError>[0],
+  error: unknown,
+) {
+  if (!(error instanceof AgentGuardrailBlockedError)) return null;
+  return reply.code(error.status).send({
+    error: {
+      type: 'guardrail_block',
+      action: 'block',
+      message: error.message,
+      reason: error.reason,
+      guardrail_key: error.guardrailKey ?? null,
+      hook: error.hook ?? null,
+    },
+  });
+}
 
 /**
  * Strip secret material (encrypted inline API keys) from an agent before it
@@ -47,6 +74,13 @@ function redactAgent<T extends IAgent>(agent: T): T {
  * Normalize an incoming agent config. For connected (external) agents the
  * connection is validated and its inline API key encrypted; native agents must
  * carry a modelKey. Throws (Error) on invalid input — callers map to 400.
+ *
+ * A connected agent's config is rebuilt from scratch so nothing but the
+ * validated connection is stored — EXCEPT its guardrail bindings, which are
+ * carried through (`carriedGuardrailFields`) and validated by
+ * `applyConfigGuardrailBindings` right after. Dropping them here is what made
+ * the connected-agent enforcement branch unreachable: the binding list saved
+ * with a 200 and `resolveBindings` read `{ kind, connection }` as "nothing bound".
  */
 function normalizeAgentConfig(rawConfig: unknown): IAgentConfig {
   if (!rawConfig || typeof rawConfig !== 'object') {
@@ -58,6 +92,7 @@ function normalizeAgentConfig(rawConfig: unknown): IAgentConfig {
     return {
       kind: 'external',
       connection: prepareConnectionForStorage(cfg.connection),
+      ...carriedGuardrailFields(cfg),
     };
   }
 
@@ -78,6 +113,35 @@ function normalizeAgentConfig(rawConfig: unknown): IAgentConfig {
  * resolveProjectContext already grants them, and agents stored without a
  * projectId stay tenant-wide.
  */
+/**
+ * Validate `config.guardrails` and stamp the deprecated single slots back onto
+ * the config from it, in place.
+ *
+ * Done here rather than in `normalizeAgentConfig` because it needs the tenant
+ * database and the caller's project scope, and `normalizeAgentConfig` is
+ * deliberately synchronous and DB-free. Returns the 400 message, or null.
+ *
+ * Runs for connected (external) agents too: their `input.pre` / `output.pre`
+ * bindings are enforced by `executeAgentChatLocal`'s external branch, so they
+ * are validated exactly like a native agent's.
+ */
+async function applyConfigGuardrailBindings(
+  config: IAgentConfig,
+  tenantDbName: string,
+  projectId: string,
+  user?: Pick<IUser, 'role'>,
+): Promise<string | null> {
+  const resolved = await resolveConfigGuardrailBindings(
+    tenantDbName,
+    projectId,
+    config.guardrails,
+    user,
+  );
+  if (resolved.error) return resolved.error;
+  if (resolved.patch) Object.assign(config, resolved.patch);
+  return null;
+}
+
 async function agentInProjectScope(
   tenantDbName: string,
   agentId: string,
@@ -112,7 +176,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.post('/agents', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, session } = await requireProjectContextForRequest(request);
+      const { projectId, session, user } = await requireProjectContextForRequest(request);
       const body = readJsonBody<Record<string, unknown>>(request);
 
       if (typeof body.name !== 'string') {
@@ -126,6 +190,16 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({
           error: validationError instanceof Error ? validationError.message : 'Invalid agent config',
         });
+      }
+
+      const bindingError = await applyConfigGuardrailBindings(
+        config,
+        session.tenantDbName,
+        projectId,
+        user,
+      );
+      if (bindingError) {
+        return reply.code(400).send({ error: bindingError });
       }
 
       const agent = await createAgentRecord(
@@ -187,19 +261,49 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
             const existingEnc = existing?.config?.connection?.apiKeyEnc;
             if (existingEnc) conn.apiKeyEnc = existingEnc;
           }
+          let externalConfig: IAgentConfig;
           try {
-            body.config = { kind: 'external', connection: prepareConnectionForStorage(conn) };
+            externalConfig = {
+              kind: 'external',
+              connection: prepareConnectionForStorage(conn),
+              // Carried, then validated below — see `normalizeAgentConfig`.
+              ...carriedGuardrailFields(cfg),
+            };
           } catch (validationError) {
             return reply.code(400).send({
               error: validationError instanceof Error ? validationError.message : 'Invalid agent config',
             });
           }
+          const bindingError = await applyConfigGuardrailBindings(
+            externalConfig,
+            session.tenantDbName,
+            projectId,
+            user,
+          );
+          if (bindingError) {
+            return reply.code(400).send({ error: bindingError });
+          }
+          body.config = externalConfig;
         } else {
           // Guard: never let a native-shaped config silently clobber a stored
           // connected agent's connection (e.g. a stray playground auto-save).
           const existing = await getAgentById(session.tenantDbName, agentId);
           if (existing?.config?.kind === 'external') {
             delete body.config;
+          } else {
+            const resolved = await resolveConfigGuardrailBindings(
+              session.tenantDbName,
+              projectId,
+              cfg.guardrails,
+              user,
+            );
+            if (resolved.error) {
+              return reply.code(400).send({ error: resolved.error });
+            }
+            // The config replaces the stored one wholesale, so the projected
+            // legacy slots must be written on the SAME object — leaving them
+            // out would clear the columns an older binary still reads.
+            if (resolved.patch) Object.assign(cfg, resolved.patch);
           }
         }
       }
@@ -415,8 +519,19 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send(result);
     } catch (error) {
-      logger.error('Agent playground chat error', { error });
-      return sendProjectContextError(reply, error)
+      // A guardrail block is logged at info, not error: it is the configured
+      // outcome, and an error-level line per refused prompt would page for
+      // policy working as written.
+      if (error instanceof AgentGuardrailBlockedError) {
+        logger.info('Agent playground chat blocked by guardrail', {
+          guardrailKey: error.guardrailKey,
+          hook: error.hook,
+        });
+      } else {
+        logger.error('Agent playground chat error', { error });
+      }
+      return sendAgentGuardrailBlock(reply, error)
+        ?? sendProjectContextError(reply, error)
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Agent chat failed',
         });

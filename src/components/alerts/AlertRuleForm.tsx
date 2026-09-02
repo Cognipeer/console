@@ -38,6 +38,7 @@ const MODULE_OPTIONS = [
   { value: 'evaluation', label: 'Evaluation' },
   { value: 'analysis', label: 'Analysis' },
   { value: 'redteam', label: 'Red Team' },
+  { value: 'ai-app-gateway', label: 'AI App Gateway' },
 ];
 
 const MODULE_METRICS: Record<string, Array<{ value: string; label: string }>> = {
@@ -56,6 +57,13 @@ const MODULE_METRICS: Record<string, Array<{ value: string; label: string }>> = 
     { value: 'guardrail_fail_rate', label: 'Fail Rate (%)' },
     { value: 'guardrail_avg_latency_ms', label: 'Average Latency (ms)' },
     { value: 'guardrail_total_evaluations', label: 'Total Evaluations' },
+    // Hook-plane decision metrics (GuardrailDecisionCollector). Rules persisted
+    // under the `aegis_*` ids still resolve — they alias these four — but
+    // nothing new is authored against the retired names.
+    { value: 'guardrail_block_rate', label: 'Block Rate (%)' },
+    { value: 'guardrail_approval_rate', label: 'Approval Rate (%)' },
+    { value: 'guardrail_avg_risk_score', label: 'Average Risk Score (0–100)' },
+    { value: 'guardrail_total_decisions', label: 'Total Decisions' },
   ],
   rag: [
     { value: 'rag_avg_latency_ms', label: 'Avg Query Latency (ms)' },
@@ -79,6 +87,12 @@ const MODULE_METRICS: Record<string, Array<{ value: string; label: string }>> = 
   redteam: [
     { value: 'redteam_attack_success_rate', label: 'Attack Success Rate (%)' },
     { value: 'redteam_resilience_score', label: 'Resilience Score (%)' },
+  ],
+  'ai-app-gateway': [
+    { value: 'appgw_requests', label: 'Requests' },
+    { value: 'appgw_block_rate', label: 'Block Rate (%)' },
+    { value: 'appgw_error_rate', label: 'Error Rate (%)' },
+    { value: 'appgw_requests_per_user', label: 'Busiest User (requests)' },
   ],
 };
 

@@ -17,6 +17,7 @@ info:
     - Successful responses are typically wrapped as `{ "data": ... }`; OpenAI-compatible endpoints (chat, embeddings, moderations, responses) return the provider-shaped object directly.
     - Errors return `{ "error": "..." }` (string or object).
     - Requests may include an optional `request_id` for correlation.
+    - `POST /messages` speaks the Anthropic Messages dialect: its errors use `{ "type": "error", "error": { "type", "message" } }` instead of `{ "error": ... }`.
 
     ## Official SDK
     For TypeScript/JavaScript integrations, use the official [Cognipeer Console SDK](https://cognipeer.github.io/console-sdk/).
@@ -97,7 +98,7 @@ tags:
   - name: MCP Hubs
     description: Curated MCP hub discovery (read-only). Enterprise.
   - name: Aegis
-    description: "Aegis enforcement plane: policy evaluation and shield audit. Enterprise."
+    description: "REMOVED. The Aegis enforcement plane was replaced by guardrail hooks (`POST /guardrails/hooks/evaluate`, `GET /guardrails`). Every operation under this tag answers `410 Gone`."
   - name: Analytics
     description: Usage analytics and dashboard overview (project-scoped).
   - name: Audit
@@ -179,114 +180,41 @@ paths:
     post:
       tags:
         - Aegis
-      summary: Evaluate a call against a shield
-      description: Enterprise / license-gated. Evaluates a tool call, retrieval, or model I/O against an Aegis shield's policy (tool allow/deny, egress/path rules, side-effect classes, DLP). Returns a decision of `allow`, `redact`, `require_approval`, `sandbox`, or `block`; every decision is recorded on the shield's audit trail. When `shieldId` is omitted the built-in `default` shield is used. A `require_approval` decision returns an `approval.approvalId` — after a human approves it in the Console, re-run the SAME call with `context.approvalToken`.
+      deprecated: true
+      summary: "[Removed] Evaluate a call against a shield"
+      description: "REMOVED — always answers `410 Gone`. The Aegis enforcement plane was replaced by guardrail hooks: evaluate a tool call, model input/output or stream window with `POST /guardrails/hooks/evaluate` (`hook: tool.pre | tool.post | input.pre | output.pre | prompt.pre | output.stream.delta`). Kept in this document only so clients built against the old surface recognise the response."
       operationId: aegisEvaluate
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/AegisEvaluateRequest"
       responses:
-        "200":
-          description: The evaluation result.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/AegisEvaluation"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
+        "410":
+          $ref: "#/components/responses/AegisRemoved"
   /aegis/shields:
     get:
       tags:
         - Aegis
-      summary: List shields
-      description: Enterprise / license-gated. Lists the tenant's Aegis shields (including the built-in `default` shield). Read-only — shields are created and configured in the Console dashboard.
+      deprecated: true
+      summary: "[Removed] List shields"
+      description: "REMOVED — always answers `410 Gone`. Shields were replaced by guardrail definitions: list them with `GET /guardrails`."
       operationId: listAegisShields
       responses:
-        "200":
-          description: The tenant's shields.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  shields:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/AegisShield"
-                required:
-                  - shields
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "500":
-          $ref: "#/components/responses/InternalError"
+        "410":
+          $ref: "#/components/responses/AegisRemoved"
   /aegis/shields/{id}/audit:
     get:
       tags:
         - Aegis
-      summary: Read a shield's audit trail
-      description: Enterprise / license-gated. Reads a shield's decision audit trail, newest first. Optional `decision` filter narrows to a single decision class.
+      deprecated: true
+      summary: "[Removed] Read a shield's audit trail"
+      description: "REMOVED — always answers `410 Gone`. Guardrail decisions are recorded on the guardrail's evaluation log and in the tenant audit log; the verdict of each call is also returned in the `x-cognipeer-guardrail-*` response headers."
       operationId: getAegisShieldAudit
       parameters:
         - name: id
           in: path
           required: true
-          description: Shield id (`default` for the built-in shield).
           schema:
             type: string
-        - name: limit
-          in: query
-          required: false
-          description: Maximum number of audit events to return (defaults to 100).
-          schema:
-            type: integer
-            default: 100
-        - name: decision
-          in: query
-          required: false
-          description: Filter to a single decision class.
-          schema:
-            type: string
-            enum:
-              - allow
-              - redact
-              - require_approval
-              - sandbox
-              - block
       responses:
-        "200":
-          description: The shield's audit events.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  events:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/AegisAuditEvent"
-                required:
-                  - events
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
+        "410":
+          $ref: "#/components/responses/AegisRemoved"
   /agents:
     get:
       tags:
@@ -3693,6 +3621,51 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
   /guardrails:
+    get:
+      tags:
+        - Guardrails
+      summary: List guardrails
+      description: "Lists the guardrail definitions this token can address: the token's own project plus workspace-level guardrails (the same set `POST /guardrails/hooks/evaluate` accepts). Each item is the stored record minus the authored `hooks` blob (which may carry webhook credentials), plus `effectiveMode` and a `hooksSummary` saying which hooks will actually be evaluated. Replaces the removed `GET /aegis/shields`. Requires `read` on the guardrails service."
+      operationId: listGuardrails
+      parameters:
+        - name: enabled
+          in: query
+          required: false
+          schema:
+            type: boolean
+        - name: type
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [preset, custom]
+        - name: search
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The guardrails this token can address.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - guardrails
+                properties:
+                  guardrails:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/GuardrailListItem"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
     post:
       tags:
         - Guardrails
@@ -3749,6 +3722,68 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /guardrails/hooks/evaluate:
+    post:
+      tags:
+        - Guardrails
+      summary: Evaluate a hook against one or more guardrails
+      description: "The remote enforcement point's entry to the guardrail hook plane — the replacement for the removed `POST /aegis/evaluate`. Names a `hook`, the guardrail key(s) that govern it and the hook's subject: `text` for `prompt.pre` / `input.pre` / `output.pre`; `tool_name` + `tool_args` for `tool.pre`, plus `tool_result` for `tool.post`; `buffer` for `output.stream.delta`. The tenant, project and actor come from the API token and cannot be supplied in the body. The verdicts of several guardrails merge. The response repeats the verdict in the `x-cognipeer-guardrail-*` headers (the `x-aegis-*` aliases are deprecated). When any named guardrail opts into verdict status codes the reply is `246` (passed with findings) or `446` (blocked) instead of `200`. Requires `write` on the guardrails service."
+      operationId: evaluateGuardrailHook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GuardrailHookEvaluateRequest"
+            example:
+              hook: tool.pre
+              guardrail_keys: [no-destructive-shell]
+              tool_name: bash
+              tool_args:
+                command: rm -rf /srv/data
+              request_id: 7f3c1a9e-run-42
+      responses:
+        "200":
+          description: The merged verdict (also `246` / `446` when verdict status codes are enabled).
+          headers:
+            x-cognipeer-guardrail:
+              $ref: "#/components/headers/GuardrailDecision"
+            x-cognipeer-guardrail-key:
+              $ref: "#/components/headers/GuardrailKey"
+            x-cognipeer-guardrail-hook:
+              $ref: "#/components/headers/GuardrailHook"
+            x-cognipeer-guardrail-mode:
+              $ref: "#/components/headers/GuardrailMode"
+            x-cognipeer-guardrail-enforced:
+              $ref: "#/components/headers/GuardrailEnforced"
+            x-cognipeer-guardrail-risk:
+              $ref: "#/components/headers/GuardrailRisk"
+            x-cognipeer-guardrail-codes:
+              $ref: "#/components/headers/GuardrailCodes"
+            x-cognipeer-guardrail-trace-id:
+              $ref: "#/components/headers/GuardrailTraceId"
+            x-aegis-trace-id:
+              $ref: "#/components/headers/AegisTraceIdDeprecated"
+            x-aegis-decision:
+              $ref: "#/components/headers/AegisDecisionDeprecated"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GuardrailHookVerdict"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: A named guardrail key does not exist in the token's scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/InternalError"
   /guardrails/{key}:
@@ -4908,6 +4943,107 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
+  /messages:
+    post:
+      tags:
+        - Chat
+      summary: Create a message (Anthropic Messages dialect)
+      description: "Anthropic Messages API served from the same Model Hub as `/chat/completions`. The request is translated at the edge to the platform's chat-completions shape and handed to the exact same metered, guardrailed, quota-checked pipeline, so any model key configured in the dashboard works and usage is attributed identically (route label `messages`). Point an Anthropic SDK at `<gateway>/api/client/v1` with the Console API token as its API key. Errors use the Anthropic envelope `{ \"type\": \"error\", \"error\": { \"type\", \"message\" } }`. When `stream` is `true` the response is a `text/event-stream` of Messages events. Not carried across the translation: `cache_control` breakpoints and extended-thinking blocks (dropped), server-side tools and non-text `document` blocks (400). `stop_sequence` is always `null`."
+      operationId: createMessage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AnthropicMessagesRequest"
+            examples:
+              basic:
+                summary: Basic message
+                value:
+                  model: my-model-key
+                  max_tokens: 1024
+                  system: You are terse.
+                  messages:
+                    - role: user
+                      content: What is the capital of France?
+              tools:
+                summary: Tool use
+                value:
+                  model: my-model-key
+                  max_tokens: 1024
+                  tools:
+                    - name: get_weather
+                      description: Current weather for a city
+                      input_schema:
+                        type: object
+                        properties:
+                          city:
+                            type: string
+                        required: [city]
+                  messages:
+                    - role: user
+                      content: Weather in Paris?
+              streaming:
+                summary: Streaming
+                value:
+                  model: my-model-key
+                  max_tokens: 1024
+                  stream: true
+                  messages:
+                    - role: user
+                      content: Tell me a story
+      responses:
+        "200":
+          description: A `message` object when not streaming, or a Server-Sent Events stream when `stream` is `true`.
+          headers:
+            request-id:
+              description: Correlation id for the request (also echoed as `request_id` in a buffered body).
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnthropicMessagesResponse"
+            text/event-stream:
+              schema:
+                type: string
+                description: "Anthropic Messages SSE — `event: <type>` + `data: <json>` frames: `message_start`, `content_block_start`, `content_block_delta` (`text_delta` / `input_json_delta`), `content_block_stop`, `message_delta` (with `stop_reason` and full `usage`), `message_stop`. A terminal `error` event replaces `message_stop` when the upstream fails mid-stream."
+        "400":
+          description: Invalid request (`invalid_request_error`) — including unsupported content or tool types, and guardrail blocks (which add `guardrail_key`, `action` and `findings` to `error`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnthropicError"
+        "401":
+          description: Missing or invalid API token (`authentication_error`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnthropicError"
+        "403":
+          description: The token lacks `models` permission (`permission_error`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnthropicError"
+        "404":
+          description: Unknown model key (`not_found_error`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnthropicError"
+        "429":
+          description: Quota, rate limit or budget exceeded (`rate_limit_error`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnthropicError"
+        "500":
+          description: Provider or platform failure (`api_error`). A saturated upstream or a draining instance answers 529/503 with `overloaded_error`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnthropicError"
   /moderations:
     post:
       tags:
@@ -7601,18 +7737,28 @@ paths:
         "200":
           description: Path deleted.
           headers:
+            x-cognipeer-guardrail:
+              $ref: "#/components/headers/GuardrailDecision"
+            x-cognipeer-guardrail-key:
+              $ref: "#/components/headers/GuardrailKey"
+            x-cognipeer-guardrail-hook:
+              $ref: "#/components/headers/GuardrailHook"
+            x-cognipeer-guardrail-mode:
+              $ref: "#/components/headers/GuardrailMode"
+            x-cognipeer-guardrail-enforced:
+              $ref: "#/components/headers/GuardrailEnforced"
+            x-cognipeer-guardrail-risk:
+              $ref: "#/components/headers/GuardrailRisk"
+            x-cognipeer-guardrail-codes:
+              $ref: "#/components/headers/GuardrailCodes"
+            x-cognipeer-guardrail-trace-id:
+              $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              description: Aegis evaluation trace id.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisTraceIdDeprecated"
             x-aegis-decision:
-              description: Aegis pre-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisDecisionDeprecated"
             x-aegis-post-decision:
-              description: Aegis post-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisPostDecisionDeprecated"
           content:
             application/json:
               schema:
@@ -7667,18 +7813,28 @@ paths:
         "200":
           description: Matching lines.
           headers:
+            x-cognipeer-guardrail:
+              $ref: "#/components/headers/GuardrailDecision"
+            x-cognipeer-guardrail-key:
+              $ref: "#/components/headers/GuardrailKey"
+            x-cognipeer-guardrail-hook:
+              $ref: "#/components/headers/GuardrailHook"
+            x-cognipeer-guardrail-mode:
+              $ref: "#/components/headers/GuardrailMode"
+            x-cognipeer-guardrail-enforced:
+              $ref: "#/components/headers/GuardrailEnforced"
+            x-cognipeer-guardrail-risk:
+              $ref: "#/components/headers/GuardrailRisk"
+            x-cognipeer-guardrail-codes:
+              $ref: "#/components/headers/GuardrailCodes"
+            x-cognipeer-guardrail-trace-id:
+              $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              description: Aegis evaluation trace id.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisTraceIdDeprecated"
             x-aegis-decision:
-              description: Aegis pre-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisDecisionDeprecated"
             x-aegis-post-decision:
-              description: Aegis post-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisPostDecisionDeprecated"
           content:
             application/json:
               schema:
@@ -7729,18 +7885,28 @@ paths:
         "200":
           description: File/directory metadata.
           headers:
+            x-cognipeer-guardrail:
+              $ref: "#/components/headers/GuardrailDecision"
+            x-cognipeer-guardrail-key:
+              $ref: "#/components/headers/GuardrailKey"
+            x-cognipeer-guardrail-hook:
+              $ref: "#/components/headers/GuardrailHook"
+            x-cognipeer-guardrail-mode:
+              $ref: "#/components/headers/GuardrailMode"
+            x-cognipeer-guardrail-enforced:
+              $ref: "#/components/headers/GuardrailEnforced"
+            x-cognipeer-guardrail-risk:
+              $ref: "#/components/headers/GuardrailRisk"
+            x-cognipeer-guardrail-codes:
+              $ref: "#/components/headers/GuardrailCodes"
+            x-cognipeer-guardrail-trace-id:
+              $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              description: Aegis evaluation trace id.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisTraceIdDeprecated"
             x-aegis-decision:
-              description: Aegis pre-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisDecisionDeprecated"
             x-aegis-post-decision:
-              description: Aegis post-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisPostDecisionDeprecated"
           content:
             application/json:
               schema:
@@ -7791,18 +7957,28 @@ paths:
         "200":
           description: Directory entries.
           headers:
+            x-cognipeer-guardrail:
+              $ref: "#/components/headers/GuardrailDecision"
+            x-cognipeer-guardrail-key:
+              $ref: "#/components/headers/GuardrailKey"
+            x-cognipeer-guardrail-hook:
+              $ref: "#/components/headers/GuardrailHook"
+            x-cognipeer-guardrail-mode:
+              $ref: "#/components/headers/GuardrailMode"
+            x-cognipeer-guardrail-enforced:
+              $ref: "#/components/headers/GuardrailEnforced"
+            x-cognipeer-guardrail-risk:
+              $ref: "#/components/headers/GuardrailRisk"
+            x-cognipeer-guardrail-codes:
+              $ref: "#/components/headers/GuardrailCodes"
+            x-cognipeer-guardrail-trace-id:
+              $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              description: Aegis evaluation trace id.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisTraceIdDeprecated"
             x-aegis-decision:
-              description: Aegis pre-stage decision (e.g. allow).
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisDecisionDeprecated"
             x-aegis-post-decision:
-              description: Aegis post-stage decision (empty when no post evaluation ran).
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisPostDecisionDeprecated"
           content:
             application/json:
               schema:
@@ -7856,18 +8032,28 @@ paths:
         "200":
           description: Directory created.
           headers:
+            x-cognipeer-guardrail:
+              $ref: "#/components/headers/GuardrailDecision"
+            x-cognipeer-guardrail-key:
+              $ref: "#/components/headers/GuardrailKey"
+            x-cognipeer-guardrail-hook:
+              $ref: "#/components/headers/GuardrailHook"
+            x-cognipeer-guardrail-mode:
+              $ref: "#/components/headers/GuardrailMode"
+            x-cognipeer-guardrail-enforced:
+              $ref: "#/components/headers/GuardrailEnforced"
+            x-cognipeer-guardrail-risk:
+              $ref: "#/components/headers/GuardrailRisk"
+            x-cognipeer-guardrail-codes:
+              $ref: "#/components/headers/GuardrailCodes"
+            x-cognipeer-guardrail-trace-id:
+              $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              description: Aegis evaluation trace id.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisTraceIdDeprecated"
             x-aegis-decision:
-              description: Aegis pre-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisDecisionDeprecated"
             x-aegis-post-decision:
-              description: Aegis post-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisPostDecisionDeprecated"
           content:
             application/json:
               schema:
@@ -7922,18 +8108,28 @@ paths:
         "200":
           description: Path moved.
           headers:
+            x-cognipeer-guardrail:
+              $ref: "#/components/headers/GuardrailDecision"
+            x-cognipeer-guardrail-key:
+              $ref: "#/components/headers/GuardrailKey"
+            x-cognipeer-guardrail-hook:
+              $ref: "#/components/headers/GuardrailHook"
+            x-cognipeer-guardrail-mode:
+              $ref: "#/components/headers/GuardrailMode"
+            x-cognipeer-guardrail-enforced:
+              $ref: "#/components/headers/GuardrailEnforced"
+            x-cognipeer-guardrail-risk:
+              $ref: "#/components/headers/GuardrailRisk"
+            x-cognipeer-guardrail-codes:
+              $ref: "#/components/headers/GuardrailCodes"
+            x-cognipeer-guardrail-trace-id:
+              $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              description: Aegis evaluation trace id.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisTraceIdDeprecated"
             x-aegis-decision:
-              description: Aegis pre-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisDecisionDeprecated"
             x-aegis-post-decision:
-              description: Aegis post-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisPostDecisionDeprecated"
           content:
             application/json:
               schema:
@@ -7993,18 +8189,28 @@ paths:
         "200":
           description: Permissions applied.
           headers:
+            x-cognipeer-guardrail:
+              $ref: "#/components/headers/GuardrailDecision"
+            x-cognipeer-guardrail-key:
+              $ref: "#/components/headers/GuardrailKey"
+            x-cognipeer-guardrail-hook:
+              $ref: "#/components/headers/GuardrailHook"
+            x-cognipeer-guardrail-mode:
+              $ref: "#/components/headers/GuardrailMode"
+            x-cognipeer-guardrail-enforced:
+              $ref: "#/components/headers/GuardrailEnforced"
+            x-cognipeer-guardrail-risk:
+              $ref: "#/components/headers/GuardrailRisk"
+            x-cognipeer-guardrail-codes:
+              $ref: "#/components/headers/GuardrailCodes"
+            x-cognipeer-guardrail-trace-id:
+              $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              description: Aegis evaluation trace id.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisTraceIdDeprecated"
             x-aegis-decision:
-              description: Aegis pre-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisDecisionDeprecated"
             x-aegis-post-decision:
-              description: Aegis post-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisPostDecisionDeprecated"
           content:
             application/json:
               schema:
@@ -8062,18 +8268,28 @@ paths:
         "200":
           description: File content.
           headers:
+            x-cognipeer-guardrail:
+              $ref: "#/components/headers/GuardrailDecision"
+            x-cognipeer-guardrail-key:
+              $ref: "#/components/headers/GuardrailKey"
+            x-cognipeer-guardrail-hook:
+              $ref: "#/components/headers/GuardrailHook"
+            x-cognipeer-guardrail-mode:
+              $ref: "#/components/headers/GuardrailMode"
+            x-cognipeer-guardrail-enforced:
+              $ref: "#/components/headers/GuardrailEnforced"
+            x-cognipeer-guardrail-risk:
+              $ref: "#/components/headers/GuardrailRisk"
+            x-cognipeer-guardrail-codes:
+              $ref: "#/components/headers/GuardrailCodes"
+            x-cognipeer-guardrail-trace-id:
+              $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              description: Aegis evaluation trace id.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisTraceIdDeprecated"
             x-aegis-decision:
-              description: Aegis pre-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisDecisionDeprecated"
             x-aegis-post-decision:
-              description: Aegis post-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisPostDecisionDeprecated"
           content:
             application/json:
               schema:
@@ -8134,18 +8350,28 @@ paths:
         "200":
           description: Per-file replace results.
           headers:
+            x-cognipeer-guardrail:
+              $ref: "#/components/headers/GuardrailDecision"
+            x-cognipeer-guardrail-key:
+              $ref: "#/components/headers/GuardrailKey"
+            x-cognipeer-guardrail-hook:
+              $ref: "#/components/headers/GuardrailHook"
+            x-cognipeer-guardrail-mode:
+              $ref: "#/components/headers/GuardrailMode"
+            x-cognipeer-guardrail-enforced:
+              $ref: "#/components/headers/GuardrailEnforced"
+            x-cognipeer-guardrail-risk:
+              $ref: "#/components/headers/GuardrailRisk"
+            x-cognipeer-guardrail-codes:
+              $ref: "#/components/headers/GuardrailCodes"
+            x-cognipeer-guardrail-trace-id:
+              $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              description: Aegis evaluation trace id.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisTraceIdDeprecated"
             x-aegis-decision:
-              description: Aegis pre-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisDecisionDeprecated"
             x-aegis-post-decision:
-              description: Aegis post-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisPostDecisionDeprecated"
           content:
             application/json:
               schema:
@@ -8207,18 +8433,28 @@ paths:
         "200":
           description: Bytes written.
           headers:
+            x-cognipeer-guardrail:
+              $ref: "#/components/headers/GuardrailDecision"
+            x-cognipeer-guardrail-key:
+              $ref: "#/components/headers/GuardrailKey"
+            x-cognipeer-guardrail-hook:
+              $ref: "#/components/headers/GuardrailHook"
+            x-cognipeer-guardrail-mode:
+              $ref: "#/components/headers/GuardrailMode"
+            x-cognipeer-guardrail-enforced:
+              $ref: "#/components/headers/GuardrailEnforced"
+            x-cognipeer-guardrail-risk:
+              $ref: "#/components/headers/GuardrailRisk"
+            x-cognipeer-guardrail-codes:
+              $ref: "#/components/headers/GuardrailCodes"
+            x-cognipeer-guardrail-trace-id:
+              $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              description: Aegis evaluation trace id.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisTraceIdDeprecated"
             x-aegis-decision:
-              description: Aegis pre-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisDecisionDeprecated"
             x-aegis-post-decision:
-              description: Aegis post-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisPostDecisionDeprecated"
           content:
             application/json:
               schema:
@@ -8274,18 +8510,28 @@ paths:
         "200":
           description: Files staged.
           headers:
+            x-cognipeer-guardrail:
+              $ref: "#/components/headers/GuardrailDecision"
+            x-cognipeer-guardrail-key:
+              $ref: "#/components/headers/GuardrailKey"
+            x-cognipeer-guardrail-hook:
+              $ref: "#/components/headers/GuardrailHook"
+            x-cognipeer-guardrail-mode:
+              $ref: "#/components/headers/GuardrailMode"
+            x-cognipeer-guardrail-enforced:
+              $ref: "#/components/headers/GuardrailEnforced"
+            x-cognipeer-guardrail-risk:
+              $ref: "#/components/headers/GuardrailRisk"
+            x-cognipeer-guardrail-codes:
+              $ref: "#/components/headers/GuardrailCodes"
+            x-cognipeer-guardrail-trace-id:
+              $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              description: Aegis evaluation trace id.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisTraceIdDeprecated"
             x-aegis-decision:
-              description: Aegis pre-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisDecisionDeprecated"
             x-aegis-post-decision:
-              description: Aegis post-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisPostDecisionDeprecated"
           content:
             application/json:
               schema:
@@ -8340,18 +8586,28 @@ paths:
         "200":
           description: Branch created.
           headers:
+            x-cognipeer-guardrail:
+              $ref: "#/components/headers/GuardrailDecision"
+            x-cognipeer-guardrail-key:
+              $ref: "#/components/headers/GuardrailKey"
+            x-cognipeer-guardrail-hook:
+              $ref: "#/components/headers/GuardrailHook"
+            x-cognipeer-guardrail-mode:
+              $ref: "#/components/headers/GuardrailMode"
+            x-cognipeer-guardrail-enforced:
+              $ref: "#/components/headers/GuardrailEnforced"
+            x-cognipeer-guardrail-risk:
+              $ref: "#/components/headers/GuardrailRisk"
+            x-cognipeer-guardrail-codes:
+              $ref: "#/components/headers/GuardrailCodes"
+            x-cognipeer-guardrail-trace-id:
+              $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              description: Aegis evaluation trace id.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisTraceIdDeprecated"
             x-aegis-decision:
-              description: Aegis pre-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisDecisionDeprecated"
             x-aegis-post-decision:
-              description: Aegis post-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisPostDecisionDeprecated"
           content:
             application/json:
               schema:
@@ -8406,18 +8662,28 @@ paths:
         "200":
           description: Branch deleted.
           headers:
+            x-cognipeer-guardrail:
+              $ref: "#/components/headers/GuardrailDecision"
+            x-cognipeer-guardrail-key:
+              $ref: "#/components/headers/GuardrailKey"
+            x-cognipeer-guardrail-hook:
+              $ref: "#/components/headers/GuardrailHook"
+            x-cognipeer-guardrail-mode:
+              $ref: "#/components/headers/GuardrailMode"
+            x-cognipeer-guardrail-enforced:
+              $ref: "#/components/headers/GuardrailEnforced"
+            x-cognipeer-guardrail-risk:
+              $ref: "#/components/headers/GuardrailRisk"
+            x-cognipeer-guardrail-codes:
+              $ref: "#/components/headers/GuardrailCodes"
+            x-cognipeer-guardrail-trace-id:
+              $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              description: Aegis evaluation trace id.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisTraceIdDeprecated"
             x-aegis-decision:
-              description: Aegis pre-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisDecisionDeprecated"
             x-aegis-post-decision:
-              description: Aegis post-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisPostDecisionDeprecated"
           content:
             application/json:
               schema:
@@ -8468,18 +8734,28 @@ paths:
         "200":
           description: Branch names.
           headers:
+            x-cognipeer-guardrail:
+              $ref: "#/components/headers/GuardrailDecision"
+            x-cognipeer-guardrail-key:
+              $ref: "#/components/headers/GuardrailKey"
+            x-cognipeer-guardrail-hook:
+              $ref: "#/components/headers/GuardrailHook"
+            x-cognipeer-guardrail-mode:
+              $ref: "#/components/headers/GuardrailMode"
+            x-cognipeer-guardrail-enforced:
+              $ref: "#/components/headers/GuardrailEnforced"
+            x-cognipeer-guardrail-risk:
+              $ref: "#/components/headers/GuardrailRisk"
+            x-cognipeer-guardrail-codes:
+              $ref: "#/components/headers/GuardrailCodes"
+            x-cognipeer-guardrail-trace-id:
+              $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              description: Aegis evaluation trace id.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisTraceIdDeprecated"
             x-aegis-decision:
-              description: Aegis pre-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisDecisionDeprecated"
             x-aegis-post-decision:
-              description: Aegis post-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisPostDecisionDeprecated"
           content:
             application/json:
               schema:
@@ -8534,18 +8810,28 @@ paths:
         "200":
           description: Branch checked out.
           headers:
+            x-cognipeer-guardrail:
+              $ref: "#/components/headers/GuardrailDecision"
+            x-cognipeer-guardrail-key:
+              $ref: "#/components/headers/GuardrailKey"
+            x-cognipeer-guardrail-hook:
+              $ref: "#/components/headers/GuardrailHook"
+            x-cognipeer-guardrail-mode:
+              $ref: "#/components/headers/GuardrailMode"
+            x-cognipeer-guardrail-enforced:
+              $ref: "#/components/headers/GuardrailEnforced"
+            x-cognipeer-guardrail-risk:
+              $ref: "#/components/headers/GuardrailRisk"
+            x-cognipeer-guardrail-codes:
+              $ref: "#/components/headers/GuardrailCodes"
+            x-cognipeer-guardrail-trace-id:
+              $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              description: Aegis evaluation trace id.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisTraceIdDeprecated"
             x-aegis-decision:
-              description: Aegis pre-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisDecisionDeprecated"
             x-aegis-post-decision:
-              description: Aegis post-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisPostDecisionDeprecated"
           content:
             application/json:
               schema:
@@ -8609,18 +8895,28 @@ paths:
         "200":
           description: Repository cloned.
           headers:
+            x-cognipeer-guardrail:
+              $ref: "#/components/headers/GuardrailDecision"
+            x-cognipeer-guardrail-key:
+              $ref: "#/components/headers/GuardrailKey"
+            x-cognipeer-guardrail-hook:
+              $ref: "#/components/headers/GuardrailHook"
+            x-cognipeer-guardrail-mode:
+              $ref: "#/components/headers/GuardrailMode"
+            x-cognipeer-guardrail-enforced:
+              $ref: "#/components/headers/GuardrailEnforced"
+            x-cognipeer-guardrail-risk:
+              $ref: "#/components/headers/GuardrailRisk"
+            x-cognipeer-guardrail-codes:
+              $ref: "#/components/headers/GuardrailCodes"
+            x-cognipeer-guardrail-trace-id:
+              $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              description: Aegis evaluation trace id.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisTraceIdDeprecated"
             x-aegis-decision:
-              description: Aegis pre-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisDecisionDeprecated"
             x-aegis-post-decision:
-              description: Aegis post-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisPostDecisionDeprecated"
           content:
             application/json:
               schema:
@@ -8687,18 +8983,28 @@ paths:
         "200":
           description: Commit created.
           headers:
+            x-cognipeer-guardrail:
+              $ref: "#/components/headers/GuardrailDecision"
+            x-cognipeer-guardrail-key:
+              $ref: "#/components/headers/GuardrailKey"
+            x-cognipeer-guardrail-hook:
+              $ref: "#/components/headers/GuardrailHook"
+            x-cognipeer-guardrail-mode:
+              $ref: "#/components/headers/GuardrailMode"
+            x-cognipeer-guardrail-enforced:
+              $ref: "#/components/headers/GuardrailEnforced"
+            x-cognipeer-guardrail-risk:
+              $ref: "#/components/headers/GuardrailRisk"
+            x-cognipeer-guardrail-codes:
+              $ref: "#/components/headers/GuardrailCodes"
+            x-cognipeer-guardrail-trace-id:
+              $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              description: Aegis evaluation trace id.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisTraceIdDeprecated"
             x-aegis-decision:
-              description: Aegis pre-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisDecisionDeprecated"
             x-aegis-post-decision:
-              description: Aegis post-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisPostDecisionDeprecated"
           content:
             application/json:
               schema:
@@ -8755,18 +9061,28 @@ paths:
         "200":
           description: Commit log.
           headers:
+            x-cognipeer-guardrail:
+              $ref: "#/components/headers/GuardrailDecision"
+            x-cognipeer-guardrail-key:
+              $ref: "#/components/headers/GuardrailKey"
+            x-cognipeer-guardrail-hook:
+              $ref: "#/components/headers/GuardrailHook"
+            x-cognipeer-guardrail-mode:
+              $ref: "#/components/headers/GuardrailMode"
+            x-cognipeer-guardrail-enforced:
+              $ref: "#/components/headers/GuardrailEnforced"
+            x-cognipeer-guardrail-risk:
+              $ref: "#/components/headers/GuardrailRisk"
+            x-cognipeer-guardrail-codes:
+              $ref: "#/components/headers/GuardrailCodes"
+            x-cognipeer-guardrail-trace-id:
+              $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              description: Aegis evaluation trace id.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisTraceIdDeprecated"
             x-aegis-decision:
-              description: Aegis pre-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisDecisionDeprecated"
             x-aegis-post-decision:
-              description: Aegis post-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisPostDecisionDeprecated"
           content:
             application/json:
               schema:
@@ -8823,18 +9139,28 @@ paths:
         "200":
           description: Pull completed.
           headers:
+            x-cognipeer-guardrail:
+              $ref: "#/components/headers/GuardrailDecision"
+            x-cognipeer-guardrail-key:
+              $ref: "#/components/headers/GuardrailKey"
+            x-cognipeer-guardrail-hook:
+              $ref: "#/components/headers/GuardrailHook"
+            x-cognipeer-guardrail-mode:
+              $ref: "#/components/headers/GuardrailMode"
+            x-cognipeer-guardrail-enforced:
+              $ref: "#/components/headers/GuardrailEnforced"
+            x-cognipeer-guardrail-risk:
+              $ref: "#/components/headers/GuardrailRisk"
+            x-cognipeer-guardrail-codes:
+              $ref: "#/components/headers/GuardrailCodes"
+            x-cognipeer-guardrail-trace-id:
+              $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              description: Aegis evaluation trace id.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisTraceIdDeprecated"
             x-aegis-decision:
-              description: Aegis pre-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisDecisionDeprecated"
             x-aegis-post-decision:
-              description: Aegis post-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisPostDecisionDeprecated"
           content:
             application/json:
               schema:
@@ -8891,18 +9217,28 @@ paths:
         "200":
           description: Push completed.
           headers:
+            x-cognipeer-guardrail:
+              $ref: "#/components/headers/GuardrailDecision"
+            x-cognipeer-guardrail-key:
+              $ref: "#/components/headers/GuardrailKey"
+            x-cognipeer-guardrail-hook:
+              $ref: "#/components/headers/GuardrailHook"
+            x-cognipeer-guardrail-mode:
+              $ref: "#/components/headers/GuardrailMode"
+            x-cognipeer-guardrail-enforced:
+              $ref: "#/components/headers/GuardrailEnforced"
+            x-cognipeer-guardrail-risk:
+              $ref: "#/components/headers/GuardrailRisk"
+            x-cognipeer-guardrail-codes:
+              $ref: "#/components/headers/GuardrailCodes"
+            x-cognipeer-guardrail-trace-id:
+              $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              description: Aegis evaluation trace id.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisTraceIdDeprecated"
             x-aegis-decision:
-              description: Aegis pre-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisDecisionDeprecated"
             x-aegis-post-decision:
-              description: Aegis post-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisPostDecisionDeprecated"
           content:
             application/json:
               schema:
@@ -8953,18 +9289,28 @@ paths:
         "200":
           description: Working-tree status.
           headers:
+            x-cognipeer-guardrail:
+              $ref: "#/components/headers/GuardrailDecision"
+            x-cognipeer-guardrail-key:
+              $ref: "#/components/headers/GuardrailKey"
+            x-cognipeer-guardrail-hook:
+              $ref: "#/components/headers/GuardrailHook"
+            x-cognipeer-guardrail-mode:
+              $ref: "#/components/headers/GuardrailMode"
+            x-cognipeer-guardrail-enforced:
+              $ref: "#/components/headers/GuardrailEnforced"
+            x-cognipeer-guardrail-risk:
+              $ref: "#/components/headers/GuardrailRisk"
+            x-cognipeer-guardrail-codes:
+              $ref: "#/components/headers/GuardrailCodes"
+            x-cognipeer-guardrail-trace-id:
+              $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              description: Aegis evaluation trace id.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisTraceIdDeprecated"
             x-aegis-decision:
-              description: Aegis pre-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisDecisionDeprecated"
             x-aegis-post-decision:
-              description: Aegis post-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisPostDecisionDeprecated"
           content:
             application/json:
               schema:
@@ -9149,18 +9495,28 @@ paths:
         "200":
           description: Session created.
           headers:
+            x-cognipeer-guardrail:
+              $ref: "#/components/headers/GuardrailDecision"
+            x-cognipeer-guardrail-key:
+              $ref: "#/components/headers/GuardrailKey"
+            x-cognipeer-guardrail-hook:
+              $ref: "#/components/headers/GuardrailHook"
+            x-cognipeer-guardrail-mode:
+              $ref: "#/components/headers/GuardrailMode"
+            x-cognipeer-guardrail-enforced:
+              $ref: "#/components/headers/GuardrailEnforced"
+            x-cognipeer-guardrail-risk:
+              $ref: "#/components/headers/GuardrailRisk"
+            x-cognipeer-guardrail-codes:
+              $ref: "#/components/headers/GuardrailCodes"
+            x-cognipeer-guardrail-trace-id:
+              $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              description: Aegis evaluation trace id.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisTraceIdDeprecated"
             x-aegis-decision:
-              description: Aegis pre-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisDecisionDeprecated"
             x-aegis-post-decision:
-              description: Aegis post-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisPostDecisionDeprecated"
           content:
             application/json:
               schema:
@@ -9198,18 +9554,28 @@ paths:
         "200":
           description: Session ids.
           headers:
+            x-cognipeer-guardrail:
+              $ref: "#/components/headers/GuardrailDecision"
+            x-cognipeer-guardrail-key:
+              $ref: "#/components/headers/GuardrailKey"
+            x-cognipeer-guardrail-hook:
+              $ref: "#/components/headers/GuardrailHook"
+            x-cognipeer-guardrail-mode:
+              $ref: "#/components/headers/GuardrailMode"
+            x-cognipeer-guardrail-enforced:
+              $ref: "#/components/headers/GuardrailEnforced"
+            x-cognipeer-guardrail-risk:
+              $ref: "#/components/headers/GuardrailRisk"
+            x-cognipeer-guardrail-codes:
+              $ref: "#/components/headers/GuardrailCodes"
+            x-cognipeer-guardrail-trace-id:
+              $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              description: Aegis evaluation trace id.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisTraceIdDeprecated"
             x-aegis-decision:
-              description: Aegis pre-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisDecisionDeprecated"
             x-aegis-post-decision:
-              description: Aegis post-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisPostDecisionDeprecated"
           content:
             application/json:
               schema:
@@ -9254,18 +9620,28 @@ paths:
         "200":
           description: Session deleted.
           headers:
+            x-cognipeer-guardrail:
+              $ref: "#/components/headers/GuardrailDecision"
+            x-cognipeer-guardrail-key:
+              $ref: "#/components/headers/GuardrailKey"
+            x-cognipeer-guardrail-hook:
+              $ref: "#/components/headers/GuardrailHook"
+            x-cognipeer-guardrail-mode:
+              $ref: "#/components/headers/GuardrailMode"
+            x-cognipeer-guardrail-enforced:
+              $ref: "#/components/headers/GuardrailEnforced"
+            x-cognipeer-guardrail-risk:
+              $ref: "#/components/headers/GuardrailRisk"
+            x-cognipeer-guardrail-codes:
+              $ref: "#/components/headers/GuardrailCodes"
+            x-cognipeer-guardrail-trace-id:
+              $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              description: Aegis evaluation trace id.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisTraceIdDeprecated"
             x-aegis-decision:
-              description: Aegis pre-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisDecisionDeprecated"
             x-aegis-post-decision:
-              description: Aegis post-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisPostDecisionDeprecated"
           content:
             application/json:
               schema:
@@ -9381,18 +9757,28 @@ paths:
         "200":
           description: Command launched.
           headers:
+            x-cognipeer-guardrail:
+              $ref: "#/components/headers/GuardrailDecision"
+            x-cognipeer-guardrail-key:
+              $ref: "#/components/headers/GuardrailKey"
+            x-cognipeer-guardrail-hook:
+              $ref: "#/components/headers/GuardrailHook"
+            x-cognipeer-guardrail-mode:
+              $ref: "#/components/headers/GuardrailMode"
+            x-cognipeer-guardrail-enforced:
+              $ref: "#/components/headers/GuardrailEnforced"
+            x-cognipeer-guardrail-risk:
+              $ref: "#/components/headers/GuardrailRisk"
+            x-cognipeer-guardrail-codes:
+              $ref: "#/components/headers/GuardrailCodes"
+            x-cognipeer-guardrail-trace-id:
+              $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              description: Aegis evaluation trace id.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisTraceIdDeprecated"
             x-aegis-decision:
-              description: Aegis pre-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisDecisionDeprecated"
             x-aegis-post-decision:
-              description: Aegis post-stage decision.
-              schema:
-                type: string
+              $ref: "#/components/headers/AegisPostDecisionDeprecated"
           content:
             application/json:
               schema:
@@ -9570,7 +9956,7 @@ paths:
       tags:
         - Spend
       summary: Get spend report
-      description: Read-side cost report for the calling token's project. By default returns totals, a per-model breakdown, and a merged timeseries rolled up from the per-model usage logs (`spend.report`). When `group_by_entity` is set to `user` or `api_key`, returns a per-user / per-API-token breakdown read from the cross-service `usage_daily` rollup instead (`spend.breakdown`). This endpoint never enforces anything.
+      description: Read-side cost report for the calling token's project. By default returns totals, a per-model breakdown, and a merged timeseries rolled up from the per-model usage logs (`spend.report`). When `group_by_entity` is set to `user` or `agent`, returns a per-user / per-agent breakdown read from the cross-service `usage_daily` rollup instead (`spend.breakdown`). This endpoint never enforces anything.
       operationId: getSpendReport
       parameters:
         - name: from
@@ -9601,12 +9987,12 @@ paths:
         - name: group_by_entity
           in: query
           required: false
-          description: When set, switches the response to a per-entity breakdown from the usage_daily rollup. `user` groups by user id; `api_key` groups by API token id.
+          description: When set, switches the response to a per-entity breakdown from the usage_daily rollup. `user` groups by user id; `agent` groups by agent key.
           schema:
             type: string
             enum:
               - user
-              - api_key
+              - agent
         - name: model
           in: query
           required: false
@@ -10879,9 +11265,61 @@ components:
       scheme: bearer
       bearerFormat: opaque
       description: "Console API token. Create one in the dashboard under Settings → API Tokens. Format: `cpeer_...`"
+  headers:
+    GuardrailDecision:
+      description: "Guardrail verdict for the call: `allow`, `flag`, `warn`, `redact` or `block`. Canonical replacement for `x-aegis-decision`."
+      schema:
+        type: string
+        enum: [allow, flag, warn, redact, block]
+    GuardrailKey:
+      description: Key of the guardrail that produced the verdict. Sent only when the guardrail's `visibility.detailedHeaders` is on.
+      schema:
+        type: string
+    GuardrailHook:
+      description: "Hook the verdict was produced on: `prompt.pre`, `input.pre`, `output.pre`, `output.stream.delta`, `tool.pre` or `tool.post`."
+      schema:
+        type: string
+    GuardrailMode:
+      description: "`enforce`, `monitor` or `disabled`."
+      schema:
+        type: string
+        enum: [enforce, monitor, disabled]
+    GuardrailEnforced:
+      description: "`true` when the decision was applied to the call; `false` is the monitor-mode (dry-run) signal."
+      schema:
+        type: string
+        enum: ["true", "false"]
+    GuardrailRisk:
+      description: Aggregate risk score, 0–100. Sent only when `visibility.detailedHeaders` is on.
+      schema:
+        type: string
+    GuardrailCodes:
+      description: Comma-separated finding codes. Sent only when `visibility.detailedHeaders` is on.
+      schema:
+        type: string
+    GuardrailTraceId:
+      description: Guardrail evaluation trace id; correlates with the guardrail evaluation log. Canonical replacement for `x-aegis-trace-id`.
+      schema:
+        type: string
+    AegisTraceIdDeprecated:
+      deprecated: true
+      description: "Deprecated alias of `x-cognipeer-guardrail-trace-id`. Sent while the guardrail's `visibility.aegisCompatHeaders` is on; removed in v3."
+      schema:
+        type: string
+    AegisDecisionDeprecated:
+      deprecated: true
+      description: "Deprecated alias of `x-cognipeer-guardrail` (the pre-stage decision); removed in v3."
+      schema:
+        type: string
+    AegisPostDecisionDeprecated:
+      deprecated: true
+      description: "Deprecated post-stage (`tool.post`) decision alias; read `x-cognipeer-guardrail` on the post hook's own response instead. Removed in v3."
+      schema:
+        type: string
   schemas:
     AegisAuditEvent:
       type: object
+      deprecated: true
       description: One recorded shield decision.
       properties:
         traceId:
@@ -10932,6 +11370,7 @@ components:
         - at
     AegisEvaluateRequest:
       type: object
+      deprecated: true
       description: A call to evaluate against a shield's policy.
       properties:
         stage:
@@ -10998,6 +11437,7 @@ components:
         - resource
     AegisEvaluation:
       type: object
+      deprecated: true
       description: The result of evaluating a call against a shield.
       properties:
         traceId:
@@ -11083,6 +11523,7 @@ components:
         - mutations
     AegisFinding:
       type: object
+      deprecated: true
       properties:
         code:
           type: string
@@ -11103,6 +11544,7 @@ components:
         - reason
     AegisShield:
       type: object
+      deprecated: true
       description: An Aegis enforcement instance — one protected surface with its own policy and DLP settings.
       properties:
         id:
@@ -11175,6 +11617,7 @@ components:
         - updatedAt
     AegisToolRule:
       type: object
+      deprecated: true
       description: A shield's tool/egress/path policy.
       properties:
         allow:
@@ -11367,6 +11810,31 @@ components:
         timestamp:
           type: string
           format: date-time
+    AegisRemovedError:
+      type: object
+      description: Returned with `410 Gone` by every removed Aegis operation.
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - type
+            - code
+            - message
+          properties:
+            type:
+              type: string
+              enum: [gone]
+            code:
+              type: string
+              enum: [aegis_removed]
+            message:
+              type: string
+            replacement:
+              type: string
+              nullable: true
+              description: Path of the operation that replaces the removed one; `null` when there is none (the shield audit log has no API-token equivalent).
     AgentCard:
       type: object
       description: A2A Agent Card (discovery document) as defined by the Agent-to-Agent protocol.
@@ -12168,6 +12636,226 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/AnalyticsServiceEntry"
+    AnthropicContentBlock:
+      type: object
+      description: "A Messages content block: `text`; `image` (base64 or URL source); `tool_use` (assistant turns); `tool_result` (user turns, answers a `tool_use`); `document` (text/plain only — other media types are rejected with 400)."
+      required:
+        - type
+      properties:
+        type:
+          type: string
+          enum: [text, image, document, tool_use, tool_result]
+        text:
+          type: string
+        source:
+          type: object
+          description: For `image` and `document` blocks.
+          properties:
+            type:
+              type: string
+              enum: [base64, url, text]
+            media_type:
+              type: string
+              example: image/png
+            data:
+              type: string
+              description: Base64 payload (raw text when `type` is `text`).
+            url:
+              type: string
+              format: uri
+        id:
+          type: string
+          description: "`tool_use` id."
+        name:
+          type: string
+          description: "`tool_use` tool name."
+        input:
+          type: object
+          additionalProperties: true
+          description: "`tool_use` arguments."
+        tool_use_id:
+          type: string
+          description: "`tool_result`: the `tool_use.id` this block answers."
+        content:
+          description: "`tool_result` payload — a string or an array of blocks; flattened to text for the model."
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: object
+                additionalProperties: true
+        is_error:
+          type: boolean
+          description: "`tool_result`: marks a failed call so the model is told the call failed."
+    AnthropicMessage:
+      type: object
+      required:
+        - role
+        - content
+      properties:
+        role:
+          type: string
+          enum: [user, assistant]
+          description: Only these two roles; instructions go in the top-level `system` field.
+        content:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                $ref: "#/components/schemas/AnthropicContentBlock"
+    AnthropicTool:
+      type: object
+      description: A client tool (function). Server-side tool types (`web_search_*`, `bash_*`, `text_editor_*`, …) are rejected with 400.
+      required:
+        - name
+        - input_schema
+      properties:
+        type:
+          type: string
+          enum: [custom]
+          description: Optional; `custom` is the only accepted value.
+        name:
+          type: string
+        description:
+          type: string
+        input_schema:
+          type: object
+          additionalProperties: true
+          description: JSON Schema for the tool's input.
+    AnthropicMessagesRequest:
+      type: object
+      required:
+        - model
+        - max_tokens
+        - messages
+      properties:
+        model:
+          type: string
+          description: Model key configured in the dashboard — any Model Hub model, not only Anthropic ones.
+          example: my-model-key
+        max_tokens:
+          type: integer
+          minimum: 1
+          description: Required, as in the Messages API.
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/AnthropicMessage"
+        system:
+          description: System prompt — a string or an array of `text` blocks.
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                $ref: "#/components/schemas/AnthropicContentBlock"
+        tools:
+          type: array
+          items:
+            $ref: "#/components/schemas/AnthropicTool"
+        tool_choice:
+          type: object
+          properties:
+            type:
+              type: string
+              enum: [auto, any, tool, none]
+            name:
+              type: string
+              description: Required when `type` is `tool`.
+        temperature:
+          type: number
+        top_p:
+          type: number
+        top_k:
+          type: integer
+          description: Forwarded only to models configured to pass unknown parameters through.
+        stop_sequences:
+          type: array
+          items:
+            type: string
+        stream:
+          type: boolean
+          default: false
+        metadata:
+          type: object
+          properties:
+            user_id:
+              type: string
+              description: Forwarded as the chat-completions `user` field.
+    AnthropicUsage:
+      type: object
+      properties:
+        input_tokens:
+          type: integer
+          description: Input tokens EXCLUSIVE of cache reads.
+        output_tokens:
+          type: integer
+        cache_read_input_tokens:
+          type: integer
+        cache_creation_input_tokens:
+          type: integer
+          description: Always 0 on this endpoint.
+    AnthropicMessagesResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          example: msg_chatcmpl0000000000000000
+        type:
+          type: string
+          enum: [message]
+        role:
+          type: string
+          enum: [assistant]
+        model:
+          type: string
+        content:
+          type: array
+          description: "`text` and `tool_use` blocks."
+          items:
+            $ref: "#/components/schemas/AnthropicContentBlock"
+        stop_reason:
+          type: string
+          enum: [end_turn, max_tokens, tool_use]
+        stop_sequence:
+          type: string
+          nullable: true
+          description: Always `null` — the upstream dialect does not report which stop sequence matched.
+        usage:
+          $ref: "#/components/schemas/AnthropicUsage"
+        request_id:
+          type: string
+          description: Correlation id (also sent as the `request-id` header).
+    AnthropicError:
+      type: object
+      description: Anthropic-dialect error envelope.
+      required:
+        - type
+        - error
+      properties:
+        type:
+          type: string
+          enum: [error]
+        error:
+          type: object
+          required:
+            - type
+            - message
+          properties:
+            type:
+              type: string
+              enum: [invalid_request_error, authentication_error, permission_error, not_found_error, request_too_large, rate_limit_error, api_error, overloaded_error]
+            message:
+              type: string
+            guardrail_key:
+              type: string
+              description: Present when a guardrail blocked the request.
+            action:
+              type: string
+            findings:
+              type: array
+              items:
+                type: object
+                additionalProperties: true
     AudioBase64Input:
       type: object
       description: Audio supplied inline as base64-encoded bytes.
@@ -15173,6 +15861,198 @@ components:
         policy:
           type: object
           additionalProperties: true
+    GuardrailHookEvaluateRequest:
+      type: object
+      required:
+        - hook
+      properties:
+        hook:
+          type: string
+          enum: [prompt.pre, input.pre, output.pre, output.stream.delta, tool.pre, tool.post]
+        guardrail_keys:
+          type: array
+          items:
+            type: string
+          description: Guardrail keys whose verdicts merge. `guardrail_key` (a single string) is accepted as well; one of the two is required.
+        guardrail_key:
+          type: string
+        text:
+          type: string
+          description: Subject for `prompt.pre`, `input.pre` and `output.pre`.
+        tool_name:
+          type: string
+          description: "`tool.pre` / `tool.post`: the tool being called."
+        tool_args:
+          type: object
+          additionalProperties: true
+        tool_result:
+          description: "`tool.post`: the tool's result (any JSON)."
+        requested_name:
+          type: string
+          description: "`tool.pre`: the name as the model requested it, when it was aliased."
+        provider_ref:
+          type: string
+          description: Informational tool-provider reference (default `api`).
+        sandbox_available:
+          type: boolean
+        buffer:
+          type: string
+          description: "`output.stream.delta`: the full accumulated channel text; spans are absolute into it."
+        delta:
+          type: string
+        released_to:
+          type: integer
+        seq:
+          type: integer
+        final:
+          type: boolean
+        only:
+          type: array
+          items:
+            type: string
+          description: Restrict evaluation to these policy families.
+        budget_ms:
+          type: number
+          minimum: 1
+        request_id:
+          type: string
+          description: Reused as the verdict's `trace_id`, so the block message's trace matches the caller's correlation id.
+    GuardrailHookVerdict:
+      type: object
+      additionalProperties: true
+      description: The merged verdict of every guardrail named in the request. Keys shared with `POST /guardrails/evaluate` (`guardrail_key`, `redacted_text`, `message`, `passed`) keep their meaning there.
+      properties:
+        hook:
+          type: string
+        contract_version:
+          type: integer
+        decision:
+          type: string
+          enum: [allow, flag, warn, redact, block]
+        would_be_decision:
+          type: string
+          description: The decision enforcement WOULD have taken; differs from `decision` in monitor mode.
+        enforced:
+          type: boolean
+        mode:
+          type: string
+          enum: [enforce, monitor, disabled]
+        disabled:
+          type: boolean
+        passed:
+          type: boolean
+          description: "`true` when there was no blocking finding (legacy meaning — not \"was the request blocked\", which differs in monitor mode)."
+        findings:
+          type: array
+          items:
+            $ref: "#/components/schemas/GuardFinding"
+        mutations:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        subject:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: The rewritten subject; present only when a mutation was applied, in which case the caller must substitute it for what it sent.
+        redacted_text:
+          type: string
+          nullable: true
+        risk_score:
+          type: number
+        codes:
+          type: array
+          items:
+            type: string
+        blocked_message:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: Rendered end-user message plus its reason class, mode and status — what a remote enforcement point needs to refuse the call in its own client's dialect.
+        message:
+          type: string
+          nullable: true
+        guardrail_key:
+          type: string
+        guardrail_keys:
+          type: array
+          items:
+            type: string
+        guardrail_name:
+          type: string
+        policy_version:
+          description: Version of the compiled policy the verdict was produced under.
+        trace_id:
+          type: string
+        latency_ms:
+          type: number
+        degraded:
+          type: array
+          description: Policies that could not run.
+          items:
+            type: object
+            additionalProperties: true
+        cancelled:
+          type: array
+          description: Policies the evaluation stopped waiting for (budget).
+          items:
+            type: object
+            additionalProperties: true
+    GuardrailListItem:
+      description: A guardrail as `GET /guardrails` lists it — the stored record minus the authored `hooks` blob, plus what a caller needs to know what it can ask of it.
+      allOf:
+        - $ref: "#/components/schemas/GuardRecord"
+        - type: object
+          properties:
+            effectiveMode:
+              type: string
+              enum: [enforce, monitor, disabled]
+              description: "`mode` with `enabled` folded in — a disabled guardrail is `disabled` whatever its mode column says."
+            hooksSummary:
+              type: object
+              properties:
+                contractVersion:
+                  type: integer
+                authored:
+                  type: boolean
+                  description: "`false` when the hook config was derived from legacy columns on read."
+                servable:
+                  type: array
+                  description: The hooks `POST /guardrails/hooks/evaluate` will actually evaluate against this guardrail.
+                  items:
+                    type: string
+                bindings:
+                  type: object
+                  additionalProperties: true
+                policies:
+                  type: array
+                  description: What runs, never how it is configured (no credentials).
+                  items:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      family:
+                        type: string
+                      enabled:
+                        type: boolean
+                      label:
+                        type: string
+                      hooks:
+                        type: array
+                        items:
+                          type: string
+                      action:
+                        type: string
+                stream:
+                  type: object
+                  nullable: true
+                  properties:
+                    enabled:
+                      type: boolean
+                    holdBackChars:
+                      type: integer
     McpAegisInput:
       type: object
       description: Aegis enforcement configuration.
@@ -18916,7 +19796,7 @@ components:
         - status
     SandboxToolAegisRejection:
       type: object
-      description: Aegis enforcement outcome returned when a toolbox operation is held for approval (202) or blocked (403).
+      description: "Guardrail enforcement outcome returned when a toolbox operation is held for approval (202) or blocked (403). The verdict is produced by the guardrail hook plane; the `Aegis` name is kept for wire compatibility only. The same verdict is repeated in the `x-cognipeer-guardrail-*` response headers."
       required:
         - error
       properties:
@@ -19269,7 +20149,7 @@ components:
         - size
     SpendBreakdown:
       type: object
-      description: Per-user / per-API-token spend breakdown from the usage_daily rollup (returned when `group_by_entity` is set).
+      description: Per-user / per-agent spend breakdown from the usage_daily rollup (returned when `group_by_entity` is set).
       properties:
         object:
           type: string
@@ -19279,7 +20159,7 @@ components:
           type: string
           enum:
             - user
-            - api_key
+            - agent
         from:
           type: string
           nullable: true
@@ -19313,14 +20193,14 @@ components:
             $ref: "#/components/schemas/SpendBreakdownEntry"
     SpendBreakdownEntry:
       type: object
-      description: Per-entity spend breakdown entry. Carries `user_id` when grouped by user, or `api_token_id` when grouped by api_key.
+      description: Per-entity spend breakdown entry. Carries `user_id` when grouped by user, or `agent_key` when grouped by agent.
       properties:
         user_id:
           type: string
           description: Present when `group_by_entity=user`. Empty id groups unattributed traffic.
-        api_token_id:
+        agent_key:
           type: string
-          description: Present when `group_by_entity=api_key`. Empty id groups unattributed traffic.
+          description: Present when `group_by_entity=agent`. Empty id groups unattributed traffic.
         name:
           type: string
           nullable: true
@@ -20828,6 +21708,27 @@ components:
           nullable: true
           description: Relevance score when provided by the engine.
   responses:
+    AegisRemoved:
+      description: "Gone — the Aegis enforcement plane has been removed. The body names the replacement path when there is one; a `Link` header with `rel=\"successor-version\"` repeats it."
+      headers:
+        Deprecation:
+          description: Always `true`.
+          schema:
+            type: string
+        Link:
+          description: "`<replacement path>; rel=\"successor-version\"` — absent when the operation has no replacement."
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AegisRemovedError"
+          example:
+            error:
+              type: gone
+              code: aegis_removed
+              message: The Aegis enforcement plane was removed. Evaluate a tool call with POST /api/client/v1/guardrails/hooks/evaluate.
+              replacement: /api/client/v1/guardrails/hooks/evaluate
     BadRequest:
       description: Bad request — missing or invalid parameters.
       content:

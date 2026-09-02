@@ -17,6 +17,13 @@ import { McpCollector } from './mcpCollector';
 import { AnalysisCollector } from './analysisCollector';
 import { EvaluationCollector } from './evaluationCollector';
 import { RedTeamCollector } from './redTeamCollector';
+// Hook-plane decisions (block rate, approval rate, risk score, total). Serves
+// the four `guardrail_*` decision metrics and their persisted `aegis_*` aliases
+// from `guardrail_evaluation_logs`, which every edition writes. The enterprise
+// overlay's copy of this file lists it too — that file REPLACES this one, so
+// both must register it or one edition silently loses the four metrics
+// (`collectMetric` answers 0 for an unregistered metric and the rule never fires).
+import { GuardrailDecisionCollector } from './guardrailDecisionCollector';
 
 const collectors: IMetricCollector[] = [];
 
@@ -46,5 +53,6 @@ register(new McpCollector());
 register(new AnalysisCollector());
 register(new EvaluationCollector());
 register(new RedTeamCollector());
+register(new GuardrailDecisionCollector());
 
 export type { IMetricCollector, MetricQuery, MetricResult } from './types';

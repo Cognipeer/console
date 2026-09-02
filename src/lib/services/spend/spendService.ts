@@ -136,10 +136,10 @@ export async function getSpendReport(
   };
 }
 
-/** Client-facing entity names for the per-user / per-token / per-agent spend breakdown. */
+/** Client-facing entity names for the per-user / per-agent spend breakdown. */
 /** `metadata.<key>` groups by a free-form attribution tag; see
  *  `parseMetadataGroupByKey` for the key-format contract. */
-export type SpendGroupByEntity = 'user' | 'api_key' | 'agent' | `metadata.${string}`;
+export type SpendGroupByEntity = 'user' | 'agent' | `metadata.${string}`;
 
 export interface SpendEntityBreakdownOptions {
   from?: Date;
@@ -154,10 +154,10 @@ export interface SpendEntityBreakdown extends UsageBreakdown {
 }
 
 /**
- * Per-user / per-API-token spend breakdown, read from the `usage_daily`
- * rollup (service 'models') — the only aggregate that keeps attribution.
- * Attribution starts at the deploy that introduced the rollup; earlier
- * (backfilled) traffic shows up under the '' (unattributed) entry.
+ * Per-user spend breakdown, read from the `usage_daily` rollup (service
+ * 'models') — the only aggregate that keeps attribution. Attribution starts
+ * at the deploy that introduced the rollup; earlier (backfilled) traffic
+ * shows up under the '' (unattributed) entry.
  */
 export async function getSpendEntityBreakdown(
   ctx: SpendContext,
@@ -170,13 +170,11 @@ export async function getSpendEntityBreakdown(
     service: 'models',
     refKey: options.modelKey,
     groupBy:
-      options.entity === 'api_key'
-        ? 'token'
-        : options.entity === 'agent'
-          ? 'agent'
-          : options.entity.startsWith('metadata.')
-            ? (options.entity as UsageBreakdownGroupBy)
-            : 'user',
+      options.entity === 'agent'
+        ? 'agent'
+        : options.entity.startsWith('metadata.')
+          ? (options.entity as UsageBreakdownGroupBy)
+          : 'user',
     from: options.from,
     to: options.to,
   });

@@ -35,6 +35,7 @@ import {
   updatePiiPolicy,
 } from '@/lib/services/pii';
 import type { PiiServicePolicyView, PiiVault } from '@/lib/services/pii';
+import { parseCustomPatternsInput } from '@/lib/services/pii';
 import {
   parseBooleanQuery,
   readJsonBody,
@@ -146,6 +147,8 @@ export const piiApiPlugin: FastifyPluginAsync = async (app) => {
       }
       const categories = (body.categories as Record<string, boolean> | undefined)
         ?? buildDefaultPolicyCategories();
+      const customPatterns = parseCustomPatternsInput(body.customPatterns);
+      if (customPatterns.error) return reply.code(400).send({ error: customPatterns.error });
       const policy = await createPiiPolicy(
         session.tenantDbName,
         session.tenantId,
@@ -155,7 +158,7 @@ export const piiApiPlugin: FastifyPluginAsync = async (app) => {
           description: typeof body.description === 'string' ? body.description.trim() : undefined,
           defaultAction,
           categories,
-          customPatterns: Array.isArray(body.customPatterns) ? (body.customPatterns as never[]) : [],
+          customPatterns: customPatterns.patterns ?? [],
           languages: parseLanguages(body.languages),
           enabled: typeof body.enabled === 'boolean' ? body.enabled : true,
           metadata: typeof body.metadata === 'object' && body.metadata !== null
@@ -198,12 +201,14 @@ export const piiApiPlugin: FastifyPluginAsync = async (app) => {
       if (body.defaultAction !== undefined && !VALID_ACTIONS.includes(body.defaultAction as PiiAction)) {
         return reply.code(400).send({ error: `defaultAction must be ${ACTIONS_HINT}` });
       }
+      const customPatterns = parseCustomPatternsInput(body.customPatterns);
+      if (customPatterns.error) return reply.code(400).send({ error: customPatterns.error });
       const policy = await updatePiiPolicy(session.tenantDbName, id, session.userId, {
         name: body.name as string | undefined,
         description: body.description as string | undefined,
         defaultAction: body.defaultAction as PiiAction | undefined,
         categories: body.categories as Record<string, boolean> | undefined,
-        customPatterns: Array.isArray(body.customPatterns) ? (body.customPatterns as never[]) : undefined,
+        customPatterns: customPatterns.patterns,
         languages: parseLanguages(body.languages),
         enabled: body.enabled as boolean | undefined,
         metadata: body.metadata as Record<string, unknown> | undefined,
@@ -244,12 +249,14 @@ export const piiApiPlugin: FastifyPluginAsync = async (app) => {
         if (typeof body.text !== 'string') {
           return reply.code(400).send({ error: 'text is required' });
         }
+        const customPatterns = parseCustomPatternsInput(body.customPatterns);
+        if (customPatterns.error) return reply.code(400).send({ error: customPatterns.error });
         const payload = {
           text: body.text,
           categories: typeof body.categories === 'object' && body.categories !== null
             ? (body.categories as Record<string, boolean>)
             : undefined,
-          customPatterns: Array.isArray(body.customPatterns) ? (body.customPatterns as never[]) : undefined,
+          customPatterns: customPatterns.patterns,
           languages: parseLanguages(body.languages),
           locale: parseLocale(body.locale),
         };

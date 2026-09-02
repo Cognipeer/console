@@ -76,12 +76,13 @@ export const ENTERPRISE_API_RULES: EnterpriseApiRule[] = [
     module: 'reports',
     prefixes: ['/api/reports/'],
   },
-  {
-    // Aegis enforcement plane: policy evaluation, approvals and decision audit.
-    // Gates both the admin surface and the SDK's API-token surface.
-    module: 'aegis',
-    prefixes: ['/api/aegis/', '/api/client/v1/aegis/'],
-  },
+  // NOTE: there is deliberately NO rule for the guardrail hook plane (the old
+  // 'aegis' enforcement module, whose `/api/aegis/*` prefixes lived here). The
+  // whole enforcement surface — hooks, tool policy, webhook checks, streaming
+  // gates — is COMMUNITY, so a FREE tenant must reach it. Re-adding an entry
+  // for `/api/guardrails/` or `/api/aegis/` would 402 every free tenant on
+  // functionality they are entitled to; RBAC (the `guardrails` service) is the
+  // only gate that applies.
   {
     // Cost & Optimization: spend attribution, the deterministic analysis
     // workbench, automated prescriptions, the pricing catalog and reports.
@@ -102,6 +103,19 @@ export const ENTERPRISE_API_RULES: EnterpriseApiRule[] = [
     // the owning tenant's license in-handler.
     module: 'mcp-hub',
     prefixes: ['/api/mcp/hubs', '/api/client/v1/mcp/hubs'],
+  },
+  {
+    // AI App Gateway: the control plane for coding agents (Claude Code, Codex,
+    // Copilot, Cursor). Only the FIRST prefix is actually enforced here — the
+    // admin CRUD surface is a cookie-session path, so it reaches the guard in
+    // plugin.ts. The other two are listed for discoverability and
+    // defence-in-depth but are NEVER evaluated: the onRequest hook returns for
+    // `/api/client/*` (bearer branch) and for `/api/appgw/*` (contributed to
+    // enterprisePublicApiPrefixes by the overlay) before the guard runs. Those
+    // two surfaces check the license in-handler instead — see the overlay's
+    // aiAppGateway/licenseGuard.ts, modelled on public-mcp-hubs.ts.
+    module: 'ai-app-gateway',
+    prefixes: ['/api/ai-app-gateway/', '/api/client/v1/ai-app-gateway/', '/api/appgw/'],
   },
 ];
 

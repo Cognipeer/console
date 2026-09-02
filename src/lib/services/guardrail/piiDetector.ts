@@ -1,5 +1,10 @@
 import type { GuardrailAction, IGuardrailPiiPolicy } from '@/lib/database';
 import type { GuardrailFinding } from './types';
+import {
+  KNOWN_SECRET_PATTERNS,
+  hasSecretEntropy,
+  isKnownSecret,
+} from './families/secrets';
 
 // ── Text normalization ────────────────────────────────────────────────────
 // PII is frequently obfuscated (zero-width characters, fullwidth digits,
@@ -10,7 +15,15 @@ import type { GuardrailFinding } from './types';
 
 const ZERO_WIDTH_RE = /[\u200B-\u200D\u2060\uFEFF\u00AD]/g;
 
-function normalizeText(text: string): string {
+/**
+ * EXPORTED for `families/pii.ts`, whose obfuscation pass runs this same
+ * rewrite per subject segment. It stays HERE rather than moving there so there
+ * is exactly one definition of "what counts as evasion": the legacy detector
+ * and the hook-plane family must never disagree about which strings collapse
+ * to the same value, or a guardrail would catch an obfuscated address on one
+ * path and miss it on the other.
+ */
+export function normalizeText(text: string): string {
   // NFKC folds fullwidth/compatibility forms (ｅｘａｍｐｌｅ → example, ① → 1)
   return text.normalize('NFKC').replace(ZERO_WIDTH_RE, '');
 }
@@ -19,8 +32,10 @@ function normalizeText(text: string): string {
  * Rewrites spelled-out email obfuscation: "user (at) mail (dot) com" →
  * "user@mail.com". A bare " at " is only rewritten when the domain side uses a
  * spelled-out/bracketed dot, so ordinary sentences ("meet at 5.30") survive.
+ *
+ * Exported for the same reason as `normalizeText` above.
  */
-function deobfuscateEmails(text: string): string {
+export function deobfuscateEmails(text: string): string {
   return text
     .replace(/\s*[([{]\s*(?:at|@)\s*[)\]}]\s*/gi, '@')
     .replace(/\s+at\s+(?=[a-z0-9-]+\s*(?:[([{]\s*(?:dot|\.)\s*[)\]}]|\s+dot\s+))/gi, '@')
@@ -49,19 +64,13 @@ const PATTERNS: Record<string, RegExp> = {
   cryptoWallet: /\b(?:0x[a-fA-F0-9]{40}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})\b/g,
 };
 
-// Well-known credential shapes checked in addition to the generic apiKey
-// pattern. These fire regardless of length, so short-but-unmistakable tokens
-// (Slack, Stripe, AWS, GitHub, JWTs, private key blocks) are caught even when
-// the generic 32-char heuristic misses them.
-const KNOWN_SECRET_PATTERNS: RegExp[] = [
-  /\b(?:sk|pk|rk)[-_](?:live|test|proj|ant|or)?[-_]?[A-Za-z0-9_-]{16,}\b/g, // Stripe/OpenAI/Anthropic-style
-  /\bAKIA[0-9A-Z]{16}\b/g,                                                 // AWS access key id
-  /\bgh[oprsu]?p?_[A-Za-z0-9]{30,}\b/g,                                    // GitHub tokens
-  /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g,                                     // Slack tokens
-  /\bcpeer_[A-Za-z0-9_-]{16,}\b/g,                                         // Console API tokens
-  /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\b/g,     // JWT
-  /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g,                    // PEM private key
-];
+// KNOWN_SECRET_PATTERNS, `hasSecretEntropy` and the anchored known-prefix test
+// used to live HERE, riding inside the PII detector and firing only when the
+// `apiKey` category happened to be enabled. They now live in
+// `families/secrets.ts`, which is the pure, span-producing home the AI App
+// Gateway can call without a tenant scope. This file imports them rather than
+// keeping a second copy: two credential scanners drift the first time a vendor
+// pattern is added, and the one that drifts is always the one nobody edits.
 
 const CATEGORY_MESSAGES: Record<string, string> = {
   email: 'Email address detected',
@@ -98,8 +107,10 @@ function findMatches(text: string, category: string): string[] {
   if (!pattern) return [];
   const matches = execAll(pattern, text);
   if (category === 'apiKey') {
-    for (const secretPattern of KNOWN_SECRET_PATTERNS) {
-      matches.push(...execAll(secretPattern, text));
+    // Declaration order is preserved, so the emitted match order — and hence
+    // the finding order every existing assertion depends on — is unchanged.
+    for (const definition of KNOWN_SECRET_PATTERNS) {
+      matches.push(...execAll(definition.pattern, text));
     }
   }
   return matches;
@@ -159,30 +170,16 @@ function validateTckn(value: string): boolean {
 }
 
 /**
- * Shannon entropy filter for the generic long-token pattern: real secrets are
- * high-entropy; repeated words, slugs, and hex-like low-variety strings are
- * mostly false positives. Known-prefix secrets bypass this via
- * KNOWN_SECRET_PATTERNS.
+ * Known-prefix matches are always secrets; generic 32+ character tokens must
+ * additionally look random (Shannon entropy ≥ 3.5 over ≥ 20 characters), which
+ * is what keeps slugs, repeated words and low-variety hex out of the findings.
+ *
+ * Both predicates are `families/secrets.ts`'s, with the same defaults this file
+ * used to hardcode — so the legacy detector and the `secrets` family agree on
+ * every value by construction rather than by two matching literals.
  */
-function hasSecretEntropy(value: string): boolean {
-  if (value.length < 20) return false;
-  const freq: Record<string, number> = {};
-  for (const ch of value) freq[ch] = (freq[ch] ?? 0) + 1;
-  let entropy = 0;
-  for (const count of Object.values(freq)) {
-    const p = count / value.length;
-    entropy -= p * Math.log2(p);
-  }
-  return entropy >= 3.5;
-}
-
 function validateApiKey(value: string): boolean {
-  // Known-prefix matches are always secrets; generic 32+ tokens must look random.
-  for (const pattern of KNOWN_SECRET_PATTERNS) {
-    const single = new RegExp(`^(?:${pattern.source})$`);
-    if (single.test(value)) return true;
-  }
-  return hasSecretEntropy(value);
+  return isKnownSecret(value) || hasSecretEntropy(value);
 }
 
 const VALIDATORS: Record<string, (value: string) => boolean> = {
@@ -208,6 +205,21 @@ function getMatches(text: string, category: string): string[] {
  * for any finding type that carries a `value` — PII, word filter, etc. Longer
  * values are replaced first so overlapping matches (e.g. a URL containing an
  * email) don't leave fragments behind.
+ *
+ * NOT deprecated, and deliberately NOT reimplemented on top of `applyMutations`
+ * — the two answer different questions and only one of them is right here.
+ * `applyMutations` is span-addressed and scopes a value rewrite to the ONE
+ * segment the finding came from, which is exactly what enforcement wants: it
+ * must not touch occurrences the finding was never about. This function is the
+ * LOG-MASKING path (hooks/engine.ts's `maskTextForLogging`), where the opposite
+ * rule holds — every occurrence of a detected value must disappear before the
+ * text is persisted, including the ones no finding pointed at, because a single
+ * surviving copy defeats the whole point of masking. It also has to work on
+ * bare `GuardrailFinding`s that carry no `path` and no `span` at all, which is
+ * what a legacy finding and an LLM-family finding both are.
+ *
+ * Enforcement rewrites go through `applyMutations`; this stays the redactor of
+ * record for anything that is about to be written to a log row.
  */
 export function redactFindings(text: string, findings: GuardrailFinding[]): string {
   const values = [...new Set(findings.map((f) => f.value).filter((v): v is string => Boolean(v)))]

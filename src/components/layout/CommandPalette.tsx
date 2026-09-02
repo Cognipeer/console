@@ -16,6 +16,7 @@ import {
   IconCommand,
   IconCornerDownLeft,
   IconFolder,
+  IconLock,
   IconPlug,
   IconRobot,
   IconSearch,
@@ -66,7 +67,19 @@ interface ResultItem {
 
 const GROUP_META: Record<
   GroupId,
-  { label: string; icon: TablerIcon; order: number }
+  {
+    label: string;
+    icon: TablerIcon;
+    order: number;
+    /**
+     * Renders this group as a sub-asset of another one: indented in the
+     * sidebar and prefixed with the parent's label in the section header.
+     * A PII policy is not a peer of a guardrail — a guardrail's `pii` check
+     * REQUIRES a policy key to point at, so a policy is only ever reached
+     * through the guardrail that uses it.
+     */
+    parent?: GroupId;
+  }
 > = {
   services: { label: 'Services', icon: IconCommand, order: 0 },
   models: { label: 'Models', icon: IconBrain, order: 1 },
@@ -81,8 +94,17 @@ const GROUP_META: Record<
   files: { label: 'File buckets', icon: IconFolder, order: 10 },
   browser: { label: 'Browsers', icon: IconWorld, order: 11 },
   guardrails: { label: 'Guardrails', icon: IconShield, order: 12 },
-  pii: { label: 'PII policies', icon: IconShield, order: 13 },
+  // IconLock, not IconShield: the shield is the guardrail's mark across the
+  // console (platform-services.json gives /dashboard/pii IconLock), and two
+  // adjacent groups wearing the same icon read as a duplicate row.
+  pii: { label: 'PII policies', icon: IconLock, order: 13, parent: 'guardrails' },
 };
+
+/** "Guardrails › PII policies" for a nested group, plain label otherwise. */
+function groupPath(group: GroupId): string {
+  const meta = GROUP_META[group];
+  return meta.parent ? `${GROUP_META[meta.parent].label} › ${meta.label}` : meta.label;
+}
 
 /* ──────────────────────────────────────────────────────────────────────
    Global open/close — event-based so any component can trigger.
@@ -277,8 +299,11 @@ const FETCH_SOURCES: FetchSource<any>[] = [
       label: p.name || p.key,
       sublabel: p.defaultAction ? `action: ${p.defaultAction}` : undefined,
       href: `/dashboard/pii/${p.id ?? p._id}`,
-      icon: <IconShield size={15} stroke={1.7} />,
-      haystack: `${p.name} ${p.key} ${p.defaultAction ?? ''}`.toLowerCase(),
+      icon: <IconLock size={15} stroke={1.7} />,
+      // 'guardrail' is in the haystack on purpose: a policy is the thing a
+      // guardrail's pii check binds to, so someone searching "guardrail"
+      // should see the policies as well as the guardrails themselves.
+      haystack: `${p.name} ${p.key} ${p.defaultAction ?? ''} guardrail pii policy`.toLowerCase(),
     }),
   },
 ];
@@ -660,6 +685,13 @@ export default function CommandPalette({ isTenantAdmin = false }: CommandPalette
                   key={g}
                   type="button"
                   className={`cmd-cat ${activeGroup === g ? 'active' : ''}`}
+                  // Nested groups are indented under their parent rather than
+                  // listed as another top-level category (.cmd-cat's own
+                  // padding is 6px 10px). Only when the parent is actually on
+                  // screen — an indent under nothing reads as a layout bug.
+                  style={meta.parent && visibleGroups.includes(meta.parent)
+                    ? { paddingLeft: 24 }
+                    : undefined}
                   onClick={() => setActiveGroup(g)}
                 >
                   <GroupIcon size={13} stroke={1.7} />
@@ -796,7 +828,7 @@ function GroupHeader({ group, count }: { group: GroupId; count: number }) {
   return (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
       <GroupIcon size={11} stroke={1.7} />
-      {meta.label}
+      {groupPath(group)}
       <span className="cmd-section-count">{count}</span>
     </span>
   );

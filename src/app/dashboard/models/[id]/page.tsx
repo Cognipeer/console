@@ -12,6 +12,7 @@ import {
   Group,
   Loader,
   Menu,
+  SegmentedControl,
   Stack,
   Text,
   Tooltip,
@@ -69,6 +70,20 @@ import {
 } from '@/lib/utils/dashboardDateFilter';
 import { calcCacheHitRate, formatPercent } from '@/lib/utils/tracingUtils';
 import { isAbnormalFinishReason } from '@/lib/shared/finishReason';
+import ModelGuardrailModal from '@/components/models/ModelGuardrailModal';
+import {
+  bindingRowsFromStored,
+  effectiveHooks,
+  type GuardrailBindingOption,
+  type GuardrailBindingRow,
+} from '@/components/guardrails/GuardrailBindingList';
+// Safe from a client component: `hooks/binding` is pure and its only import is
+// a `import type` of the narrow domain-types path, so nothing of the database
+// barrel survives into the bundle. That is what separates it from
+// `hooks/legacy` and `hooks/engine`, which `GuardrailBindingList` may not touch.
+import { resolveBindings } from '@/lib/services/guardrail/hooks/binding';
+import { HOOK_IDS } from '@/lib/services/guardrail/hooks/contract';
+import type { HookId } from '@/lib/services/guardrail/hooks/contract';
 import type { IDynamicRoutingConfig } from '@/lib/database';
 
 interface ModelPricing {
@@ -102,19 +117,30 @@ interface ModelDetailDto {
   pricing: ModelPricing;
   settings: Record<string, unknown>;
   semanticCache?: SemanticCacheConfigDto;
+  /**
+   * Multi-guardrail binding, authoritative when present — the two keys below
+   * are then ignored rather than merged. An empty array is a real state
+   * ("attached to nothing") and must not be confused with an absent one.
+   */
+  guardrails?: GuardrailBindingRow[];
+  /** @deprecated Read only as the fallback when `guardrails` is absent. */
   inputGuardrailKey?: string;
+  /** @deprecated See `inputGuardrailKey`. */
   outputGuardrailKey?: string;
   metadata?: Record<string, unknown>;
   createdAt?: string;
   updatedAt?: string;
 }
 
-interface GuardrailLite {
-  key: string;
-  name: string;
-  type: 'preset' | 'custom';
-  action: string;
-}
+/**
+ * A guardrail row from `GET /api/guardrails`.
+ *
+ * The binding control's own type, not a local narrowing of it: it carries the
+ * `hooks` config, which is what decides where an attached guardrail actually
+ * runs, and a second declaration is how this page and the editor end up with
+ * two opinions about the same row.
+ */
+type GuardrailLite = GuardrailBindingOption;
 
 interface CostSummary {
   currency: string;
@@ -207,7 +233,7 @@ interface UsageBreakdownEntryDto {
 }
 
 interface UsageBreakdownDto {
-  groupBy: 'user' | 'token';
+  groupBy: 'user';
   fromDay?: string;
   toDay?: string;
   totals: {
@@ -466,7 +492,10 @@ export default function ModelDetailPage() {
         fetch(`/api/models/${modelId}`),
         fetch(`/api/models/${modelId}/usage?${usageParams.toString()}`),
         fetch('/api/models/providers'),
-        fetch('/api/guardrails?enabled=true'),
+        // Unfiltered: a guardrail disabled AFTER it was bound must still
+        // resolve here. Filtered to enabled ones, such a binding rendered as
+        // "missing", which reads as deleted when it is merely switched off.
+        fetch('/api/guardrails'),
       ]);
       if (!modelResponse.ok) throw new Error('modelFailed');
       const modelData = await modelResponse.json();
@@ -926,7 +955,13 @@ export default function ModelDetailPage() {
       ) : null}
 
       {tab === 'configure' ? (
-        <ConfigureTab model={model} guardrails={guardrails} onDelete={handleDelete} deleting={deleting} />
+        <ConfigureTab
+          model={model}
+          guardrails={guardrails}
+          onDelete={handleDelete}
+          deleting={deleting}
+          onGuardrailsSaved={() => void fetchDetail()}
+        />
       ) : null}
 
       {tab === 'logs' ? (
@@ -1349,7 +1384,7 @@ function OverviewTab({
           )}
         </div>
 
-        {/* Usage by user / API key (usage_daily rollup, last 30 days) */}
+        {/* Usage by user (usage_daily rollup, last 30 days) */}
         <UsageBreakdownCard modelId={model._id} costCurrency={costCurrency} />
       </div>
 
@@ -1531,9 +1566,7 @@ function UsageBreakdownCard({
           Usage by {
             groupBy === 'user'
               ? 'user'
-              : groupBy === 'token'
-                ? 'API key'
-                : `metadata: ${groupBy.slice('metadata.'.length)}`
+              : `metadata: ${groupBy.slice('metadata.'.length)}`
           }
         </div>
         <div className="ds-row ds-gap-xs">
@@ -1543,7 +1576,6 @@ function UsageBreakdownCard({
           {(
             [
               { id: 'user' as const, label: 'Users' },
-              { id: 'token' as const, label: 'API keys' },
             ]
           ).map((option) => (
             <button
@@ -1682,38 +1714,70 @@ function UsageBreakdownCard({
 
 /* ───────────────────────── Configure Tab ───────────────────────── */
 
+/**
+ * The bindings this model runs, for either generation, as one list.
+ *
+ * A stored list is read through the binding control's own helpers, so a row
+ * with an ABSENT `hooks` resolves the way the engine resolves it — wherever
+ * that guardrail declares an enabled policy — instead of being rendered as
+ * "everywhere" or, worse, as nothing.
+ *
+ * A model still on the two deprecated slots is lifted through
+ * `resolveBindings`, the same function the gateway calls, rather than through a
+ * local copy of the projection rule. That is what makes a legacy-bound model
+ * render as a one-row list instead of an empty one, and it is why the output
+ * slot shows `output.stream.delta` as well: an older row IS enforced on the
+ * stream gate today, whatever a later migration chooses to seed.
+ */
+function guardrailBindingRows(
+  model: ModelDetailDto,
+  byKey: Map<string, GuardrailLite>,
+): Array<{ key: string; hooks: HookId[] }> {
+  if (Array.isArray(model.guardrails)) {
+    return bindingRowsFromStored(model.guardrails).map((row) => ({
+      key: row.key,
+      hooks: effectiveHooks(row, byKey.get(row.key)),
+    }));
+  }
+
+  const lifted = new Map<string, HookId[]>();
+  for (const hook of HOOK_IDS) {
+    for (const key of resolveBindings(model, hook)) {
+      const hooks = lifted.get(key);
+      if (hooks) hooks.push(hook);
+      else lifted.set(key, [hook]);
+    }
+  }
+  return [...lifted.entries()].map(([key, hooks]) => ({ key, hooks }));
+}
+
 function ConfigureTab({
   model,
   guardrails,
   onDelete,
   deleting,
+  onGuardrailsSaved,
 }: {
   model: ModelDetailDto;
   guardrails: GuardrailLite[];
   onDelete: () => void;
   deleting: boolean;
+  onGuardrailsSaved: () => void;
 }) {
-  const inputGuardrail = guardrails.find((g) => g.key === model.inputGuardrailKey);
-  const outputGuardrail = guardrails.find((g) => g.key === model.outputGuardrailKey);
+  const [guardrailModalOpen, setGuardrailModalOpen] = useState(false);
 
-  const renderGuardrail = (
-    key: string | undefined,
-    resolved: GuardrailLite | undefined,
-  ) => {
-    if (!key) return <span className="ds-faint">None</span>;
-    return (
-      <span className="ds-row ds-gap-xs" style={{ justifyContent: 'flex-end' }}>
-        <span>{resolved?.name ?? key}</span>
-        {resolved ? (
-          <span className={`ds-badge ${resolved.action === 'block' ? 'ds-badge-err' : resolved.action === 'warn' ? 'ds-badge-warn' : 'ds-badge-info'}`}>
-            {resolved.action}
-          </span>
-        ) : (
-          <span className="ds-badge ds-badge-warn">missing</span>
-        )}
-      </span>
-    );
-  };
+  const guardrailsByKey = useMemo(() => {
+    const map = new Map<string, GuardrailLite>();
+    for (const guardrail of guardrails) map.set(guardrail.key, guardrail);
+    return map;
+  }, [guardrails]);
+
+  const bindingRows = useMemo(
+    () => guardrailBindingRows(model, guardrailsByKey),
+    [model, guardrailsByKey],
+  );
+
+  /** On the deprecated slots AND actually bound — an unbound model is neither. */
 
   return (
     <div
@@ -1833,8 +1897,7 @@ function ConfigureTab({
             <div className="ds-row-between" style={{ marginBottom: 4 }}>
               <div className="ds-h3">Guardrails</div>
               <Button
-                component={Link}
-                href={`/dashboard/models/${model._id}/edit`}
+                onClick={() => setGuardrailModalOpen(true)}
                 variant="subtle"
                 size="xs"
                 leftSection={<IconSettings size={12} stroke={1.7} />}
@@ -1844,18 +1907,106 @@ function ConfigureTab({
               </Button>
             </div>
             <div className="ds-muted" style={{ fontSize: 12.5, marginBottom: 16 }}>
-              Safety checks applied automatically on every request to this model.
+              Safety policies applied automatically on every request to this model, each one
+              covering the hooks named beside it.
             </div>
             <Stack gap="xs">
-              <div className="ds-row-between" style={{ fontSize: 12.5 }}>
-                <span className="ds-muted">Input guardrail</span>
-                {renderGuardrail(model.inputGuardrailKey, inputGuardrail)}
-              </div>
-              <div className="ds-row-between" style={{ fontSize: 12.5 }}>
-                <span className="ds-muted">Output guardrail</span>
-                {renderGuardrail(model.outputGuardrailKey, outputGuardrail)}
-              </div>
+              {bindingRows.length === 0 ? (
+                <span className="ds-faint" style={{ fontSize: 12.5 }}>
+                  No guardrails attached — every request to this model passes unchecked.
+                </span>
+              ) : null}
+              {bindingRows.map((row) => {
+                const guardrail = guardrailsByKey.get(row.key);
+                return (
+                  <div
+                    key={row.key}
+                    className="ds-row-between"
+                    style={{ fontSize: 12.5, alignItems: 'flex-start', gap: 12 }}
+                  >
+                    <span className="ds-row ds-gap-xs" style={{ flexWrap: 'wrap' }}>
+                      <span>{guardrail?.name ?? row.key}</span>
+                      {guardrail ? (
+                        <>
+                          {guardrail.action ? (
+                            <span
+                              className={`ds-badge ${guardrail.action === 'block' ? 'ds-badge-err' : guardrail.action === 'warn' ? 'ds-badge-warn' : 'ds-badge-info'}`}
+                            >
+                              {guardrail.action}
+                            </span>
+                          ) : null}
+                          {guardrail.enabled === false ? (
+                            <span className="ds-badge ds-badge-warn">disabled</span>
+                          ) : null}
+                        </>
+                      ) : (
+                        // Kept visible rather than dropped: a key with no
+                        // guardrail behind it was deleted or belongs to another
+                        // project, and hiding it loses a binding nobody removed.
+                        <span className="ds-badge ds-badge-warn">missing</span>
+                      )}
+                    </span>
+                    {/*
+                      * The hook ids verbatim, not a second set of friendly
+                      * labels: these are the exact values in the `guardrails`
+                      * payload and in the editor, and a display-only synonym
+                      * for them is one more vocabulary to keep in step.
+                      *
+                      * A tool hook is flagged but NOT explained here — a model
+                      * never calls a tool, so the binding is inert, and that
+                      * sentence is written once, in `GuardrailBindingList`
+                      * (`surface="model"`), which the Edit button opens. Two
+                      * wordings of the same rule is how they drift.
+                      */}
+                    <span
+                      className="ds-row ds-gap-xs"
+                      style={{ flexWrap: 'wrap', justifyContent: 'flex-end' }}
+                    >
+                      {row.hooks.length === 0 ? (
+                        <span className="ds-faint">runs nowhere</span>
+                      ) : (
+                        row.hooks.map((hook) => (
+                          <span
+                            key={hook}
+                            className={`ds-badge ds-mono${hook.startsWith('tool.') ? ' ds-badge-warn' : ''}`}
+                            title={
+                              hook.startsWith('tool.')
+                                ? 'Open the editor for what this hook does on a model.'
+                                : undefined
+                            }
+                          >
+                            {hook}
+                          </span>
+                        ))
+                      )}
+                    </span>
+                  </div>
+                );
+              })}
             </Stack>
+
+            {/*
+              * The one editor for the model surface: a full-screen `FormShell`
+              * hosting the shared `GuardrailBindingList`, the same overlay the
+              * models list page opens. Reused rather than reimplemented here
+              * because two screens writing the `guardrails` column with
+              * different rules produce rows only one of them can round-trip —
+              * and because the per-hook warnings (a tool hook bound on a model
+              * runs nowhere; a stream binding on a guardrail with streaming off
+              * only audits after the fact) are worded once, inside it.
+              *
+              * It renders through a portal, so it sits in this card without
+              * being laid out by it.
+              */}
+            <ModelGuardrailModal
+              opened={guardrailModalOpen}
+              modelId={model._id}
+              modelName={model.name}
+              initialInputGuardrailKey={model.inputGuardrailKey}
+              initialOutputGuardrailKey={model.outputGuardrailKey}
+              onClose={() => setGuardrailModalOpen(false)}
+              onSaved={onGuardrailsSaved}
+            />
           </div>
         ) : null}
 
@@ -1914,7 +2065,8 @@ function ConfigureTab({
             className="ds-muted"
             style={{ fontSize: 12.5, marginBottom: 12 }}
           >
-            Configuration is read-only here. Use the edit page to change settings.
+            Configuration is read-only here — apart from the guardrail bindings above,
+            which their own overlay saves. Use the edit page for everything else.
           </p>
           <Button
             component={Link}
@@ -2346,6 +2498,9 @@ function UsageTab({ model }: { model: ModelDetailDto }) {
   const base =
     typeof window !== 'undefined' ? window.location.origin : 'https://your-host';
   const isLlm = model.category === 'llm';
+  // Only LLMs have two dialects: `/v1/messages` serves chat, nothing else.
+  const [dialect, setDialect] = useState<'openai' | 'anthropic'>('openai');
+  const showAnthropic = isLlm && dialect === 'anthropic';
 
   const curl = isLlm
     ? `curl -X POST ${base}/api/client/v1/chat/completions \\
@@ -2431,8 +2586,101 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)`
     : null;
 
+  /**
+   * Anthropic Messages, against the same Model Hub model.
+   *
+   * Two things here trip everyone up once and are worth being explicit about in
+   * the copyable snippet rather than in prose nobody reads:
+   *
+   *  - the SDK appends `/v1/messages` to its base URL itself, so the base stops
+   *    at `/api/client` — not at `/api/client/v1`, and not at the full path;
+   *  - the SDK's `apiKey` option sends `x-api-key`, which this API does not
+   *    accept. `authToken` is the one that sends `Authorization: Bearer`, which
+   *    is what a Console token needs.
+   */
+  const anthropicBase = `${base}/api/client`;
+
+  const anthropicCurl = `curl -X POST ${base}/api/client/v1/messages \\
+  -H "Authorization: Bearer YOUR_API_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "${model.key}",
+    "max_tokens": 1024,
+    "system": "You are a helpful assistant.",
+    "messages": [
+      { "role": "user", "content": "Hello!" }
+    ]
+  }'`;
+
+  const anthropicPython = `from anthropic import Anthropic
+
+client = Anthropic(
+    # The SDK appends /v1/messages itself — stop the base URL at /api/client.
+    base_url="${anthropicBase}",
+    # auth_token sends "Authorization: Bearer". api_key would send x-api-key,
+    # which this API does not accept.
+    auth_token="YOUR_API_TOKEN",
+)
+
+message = client.messages.create(
+    model="${model.key}",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+print(message.content[0].text)`;
+
+  const anthropicTs = `import Anthropic from '@anthropic-ai/sdk';
+
+const client = new Anthropic({
+  // The SDK appends /v1/messages itself — stop the base URL at /api/client.
+  baseURL: '${anthropicBase}',
+  // authToken sends "Authorization: Bearer". apiKey would send x-api-key,
+  // which this API does not accept.
+  authToken: 'YOUR_API_TOKEN',
+});
+
+const message = await client.messages.create({
+  model: '${model.key}',
+  max_tokens: 1024,
+  messages: [{ role: 'user', content: 'Hello!' }],
+});
+
+console.log(message.content[0].type === 'text' ? message.content[0].text : '');`;
+
+  const anthropicEnv = `# Point any Messages-API client at this model
+export ANTHROPIC_BASE_URL="${anthropicBase}"
+export ANTHROPIC_AUTH_TOKEN="YOUR_API_TOKEN"
+export ANTHROPIC_MODEL="${model.key}"`;
+
   return (
     <div className="ds-col ds-gap-md">
+      {isLlm ? (
+        <div className="ds-card ds-card-pad-lg">
+          <div className="ds-row-between" style={{ marginBottom: 10, gap: 16, flexWrap: 'wrap' }}>
+            <div>
+              <div className="ds-h4">API dialect</div>
+              <p className="ds-muted" style={{ fontSize: 12.5, margin: '4px 0 0' }}>
+                {showAnthropic
+                  ? 'Anthropic Messages, translated at the edge onto the same model — guardrails, quota and usage logging are identical. Prompt-cache breakpoints and extended thinking have no equivalent in the internal schema and are not carried across.'
+                  : 'The native schema of this API. Everything the platform does internally speaks it, so nothing is translated.'}
+              </p>
+            </div>
+            <SegmentedControl
+              size="xs"
+              value={dialect}
+              onChange={(v) => setDialect(v as 'openai' | 'anthropic')}
+              data={[
+                { value: 'openai', label: 'OpenAI' },
+                { value: 'anthropic', label: 'Anthropic Messages' },
+              ]}
+            />
+          </div>
+          <Code style={{ fontSize: 12 }}>
+            {showAnthropic ? `POST ${base}/api/client/v1/messages` : `POST ${base}/api/client/v1/chat/completions`}
+          </Code>
+        </div>
+      ) : null}
+
       <div className="ds-card ds-card-pad-lg">
         <div className="ds-h4" style={{ marginBottom: 8 }}>
           Model key
@@ -2461,16 +2709,27 @@ print(response.choices[0].message.content)`
         </div>
       </div>
 
-      <CodeBlock title={`cURL — ${isLlm ? 'Chat completion' : 'Embeddings'}`} code={curl} />
-      <CodeBlock
-        title={`TypeScript SDK — ${isLlm ? 'Chat completion' : 'Embeddings'}`}
-        code={ts}
-      />
-      <CodeBlock
-        title={`Python (httpx) — ${isLlm ? 'Chat completion' : 'Embeddings'}`}
-        code={python}
-      />
-      {openai ? <CodeBlock title="Python — OpenAI compatible" code={openai} /> : null}
+      {showAnthropic ? (
+        <>
+          <CodeBlock title="Environment — any Messages-API client" code={anthropicEnv} />
+          <CodeBlock title="cURL — Messages" code={anthropicCurl} />
+          <CodeBlock title="Python — anthropic SDK" code={anthropicPython} />
+          <CodeBlock title="TypeScript — @anthropic-ai/sdk" code={anthropicTs} />
+        </>
+      ) : (
+        <>
+          <CodeBlock title={`cURL — ${isLlm ? 'Chat completion' : 'Embeddings'}`} code={curl} />
+          <CodeBlock
+            title={`TypeScript SDK — ${isLlm ? 'Chat completion' : 'Embeddings'}`}
+            code={ts}
+          />
+          <CodeBlock
+            title={`Python (httpx) — ${isLlm ? 'Chat completion' : 'Embeddings'}`}
+            code={python}
+          />
+          {openai ? <CodeBlock title="Python — OpenAI compatible" code={openai} /> : null}
+        </>
+      )}
     </div>
   );
 }

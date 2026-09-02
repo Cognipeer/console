@@ -78,6 +78,28 @@ export const UNSUPPORTED_PARAM_RULES: readonly UnsupportedParamRule[] = [
     paramsWithTools: ['reasoning', 'reasoning_effort'],
     reason: 'GPT-5 family: only the default temperature and top_p are accepted, max_tokens was replaced by max_completion_tokens, and reasoning_effort cannot be combined with function tools on /v1/chat/completions (upstream requires /v1/responses, or reasoning_effort:"none")',
   },
+  {
+    id: 'anthropic-messages',
+    drivers: ['anthropic'],
+    // Every Claude model on the Messages API, not a family quirk.
+    match: /^claude/i,
+    // The Messages API has no penalty knobs and no OpenAI-style logprobs
+    // surface. Passing them reaches the SDK as unknown constructor fields and
+    // either 400s or is silently ignored depending on the version — neither is
+    // a behaviour an operator should have to discover in production.
+    params: [
+      'presence_penalty',
+      'frequency_penalty',
+      'logprobs',
+      'top_logprobs',
+      'logit_bias',
+      // NOTE: `max_completion_tokens` is deliberately NOT listed. Messages has
+      // no such field, but the contract already folds it into `max_tokens`
+      // (`maxCompletionTokens ?? maxTokens`), so blocking it here would throw
+      // the caller's requested cap away and silently fall back to the default.
+    ],
+    reason: 'Anthropic Messages API: no presence/frequency penalties, no logprobs or logit_bias, and the output cap is max_tokens (there is no max_completion_tokens)',
+  },
 ];
 
 export interface DetectedUnsupportedParams {

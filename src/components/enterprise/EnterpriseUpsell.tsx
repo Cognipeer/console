@@ -21,6 +21,7 @@ const MODULE_LABELS: Record<string, string> = {
   'prompt-optimizer': 'Prompt Optimizer',
   realtime: 'Realtime',
   reports: 'Service Reports',
+  'ai-app-gateway': 'AI App Gateway',
 };
 
 export function EnterpriseUpsell({ module }: EnterpriseUpsellProps) {

@@ -23,6 +23,10 @@ vi.mock('@/lib/database', async () => {
 });
 
 vi.mock('@/lib/services/pii', () => ({
+  // Pass-through stub of the save-time validator: undefined → absent, array → accepted.
+  parseCustomPatternsInput: vi.fn((input: unknown) =>
+    input === undefined ? {} : Array.isArray(input) ? { patterns: input } : { error: 'customPatterns must be an array' },
+  ),
   buildDefaultPolicyCategories: vi.fn().mockReturnValue({ email: true, phone: true }),
   createPiiPolicy: vi.fn(),
   deletePiiPolicy: vi.fn(),

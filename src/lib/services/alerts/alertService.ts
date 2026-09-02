@@ -15,24 +15,66 @@ import type {
   AlertEventStatus,
 } from '@/lib/database';
 
+/**
+ * Everything the `guardrails` module can alert on: the three evaluation
+ * metrics it has always had, plus the four enforcement metrics folded in from
+ * the retired `aegis` module.
+ *
+ * The four `aegis_*` strings are listed BESIDE their `guardrail_*` renames
+ * rather than replaced by them. `IAlertRule.metric` is a persisted column, so
+ * every rule an operator created against the enforcement plane still carries
+ * the old spelling; dropping it here would make `validateRuleInput` reject the
+ * rule the moment anything edits it, and — because `VALID_METRICS` is derived
+ * from this table — would take the API's create/update validation with it.
+ * Both spellings resolve to the same collector, so a rule keeps firing under
+ * whichever name it was stored with.
+ */
+const GUARDRAIL_METRICS: AlertMetric[] = [
+  'guardrail_fail_rate',
+  'guardrail_avg_latency_ms',
+  'guardrail_total_evaluations',
+  'guardrail_block_rate',
+  'guardrail_approval_rate',
+  'guardrail_avg_risk_score',
+  'guardrail_total_decisions',
+  // @deprecated Pre-rename spellings of the four above. Do not remove while
+  // any stored rule can still name them.
+  'aegis_block_rate',
+  'aegis_approval_rate',
+  'aegis_avg_risk_score',
+  'aegis_total_decisions',
+];
+
 /** Module-to-metrics mapping */
 const MODULE_METRICS: Record<AlertModule, AlertMetric[]> = {
   models: ['error_rate', 'avg_latency_ms', 'p95_latency_ms', 'total_cost', 'total_requests'],
   inference: ['gpu_cache_usage', 'request_queue_depth'],
-  guardrails: ['guardrail_fail_rate', 'guardrail_avg_latency_ms', 'guardrail_total_evaluations'],
+  guardrails: GUARDRAIL_METRICS,
   rag: ['rag_avg_latency_ms', 'rag_total_queries', 'rag_failed_documents'],
   mcp: ['mcp_error_rate', 'mcp_avg_latency_ms', 'mcp_total_requests'],
   analysis: ['analysis_pass_rate', 'analysis_avg_judge_score', 'analysis_avg_accuracy'],
   evaluation: ['evaluation_pass_rate', 'evaluation_avg_score'],
   redteam: ['redteam_attack_success_rate', 'redteam_resilience_score'],
-  aegis: ['aegis_block_rate', 'aegis_approval_rate', 'aegis_avg_risk_score', 'aegis_total_decisions'],
+  // @deprecated Folded into `guardrails`, and deliberately absent from
+  // VALID_MODULES so nothing NEW can be authored against it. The key itself is
+  // mandatory — `AlertModule` still names 'aegis' because stored rules carry it
+  // — and this whole table is served to clients as the API's `moduleMetrics`,
+  // so pointing it at the SAME list as `guardrails` is what lets a legacy rule's
+  // metric still resolve to a label instead of an empty option list.
+  aegis: GUARDRAIL_METRICS,
+  'ai-app-gateway': ['appgw_requests', 'appgw_block_rate', 'appgw_error_rate', 'appgw_requests_per_user'],
 };
 
-/** Supported metric names for validation */
-const VALID_METRICS: AlertMetric[] = Object.values(MODULE_METRICS).flat();
+/**
+ * Supported metric names for validation. De-duplicated because `guardrails`
+ * and the retired `aegis` alias share one array — without the Set every
+ * guardrail metric would appear twice in the "must be one of" error messages
+ * the API returns verbatim.
+ */
+const VALID_METRICS: AlertMetric[] = [...new Set(Object.values(MODULE_METRICS).flat())];
 
 /** Supported module names */
-const VALID_MODULES: AlertModule[] = ['models', 'inference', 'guardrails', 'rag', 'mcp', 'analysis', 'evaluation', 'redteam'];
+const VALID_MODULES: AlertModule[] = ['models', 'inference', 'guardrails', 'rag', 'mcp', 'analysis', 'evaluation', 'redteam', 'ai-app-gateway'];
 
 /** Supported window durations (minutes) */
 const VALID_WINDOWS = [5, 15, 30, 60];

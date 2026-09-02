@@ -1,11 +1,11 @@
 /**
- * Usage breakdown — read-side grouping of `usage_daily` rollup rows by user,
- * API token or agent.
+ * Usage breakdown — read-side grouping of `usage_daily` rollup rows by user
+ * or agent.
  *
  * The rollup table is the only place per-request attribution (userId /
- * apiTokenId / agentKey) survives aggregation, so any "who spent what" view
- * reads from here rather than the raw service logs. Rows are daily aggregates
- * (small), so grouping happens in JS.
+ * agentKey) survives aggregation, so any "who spent what" view reads from
+ * here rather than the raw service logs. Rows are daily aggregates (small),
+ * so grouping happens in JS.
  *
  * Attribution only exists from the deploy that introduced the rollup onward;
  * rows written by the backfill script carry '' dimensions and surface as the
@@ -22,7 +22,7 @@ import type { IUsageDaily } from '@/lib/database';
  * string is parsed from a request (`parseMetadataGroupByKey`); this type only
  * documents the shape.
  */
-export type UsageBreakdownGroupBy = 'user' | 'token' | 'agent' | `metadata.${string}`;
+export type UsageBreakdownGroupBy = 'user' | 'agent' | `metadata.${string}`;
 
 const METADATA_GROUP_BY_PREFIX = 'metadata.';
 /** Same charset/length the ingest side enforces on metadata keys
@@ -50,11 +50,11 @@ export function parseMetadataGroupByKey(value: string): string | undefined {
 }
 
 export interface UsageBreakdownEntry {
-  /** userId, apiTokenId or agentKey depending on groupBy; '' = unattributed. */
+  /** userId or agentKey depending on groupBy; '' = unattributed. */
   id: string;
   /** Display name (user.name); undefined when the entity no longer exists. */
   name?: string;
-  /** Secondary label: user email or API token label. */
+  /** Secondary label: user email. */
   label?: string;
   requests: number;
   errors: number;
@@ -87,16 +87,15 @@ export function toUtcDay(date: Date): string {
 }
 
 /**
- * Pure grouping over daily rollup rows: one entry per userId / apiTokenId /
- * agentKey, sorted by cost descending, plus overall totals. Rows with an
- * empty dimension value collapse into a single '' entry (unattributed).
+ * Pure grouping over daily rollup rows: one entry per userId / agentKey,
+ * sorted by cost descending, plus overall totals. Rows with an empty
+ * dimension value collapse into a single '' entry (unattributed).
  */
 export function groupUsageDailyRows(
   rows: Array<
     Pick<
       IUsageDaily,
       | 'userId'
-      | 'apiTokenId'
       | 'requests'
       | 'errors'
       | 'inputTokens'
@@ -124,11 +123,9 @@ export function groupUsageDailyRows(
     const id =
       (groupBy === 'user'
         ? row.userId
-        : groupBy === 'token'
-          ? row.apiTokenId
-          : metadataKey !== undefined
-            ? row.metadata?.[metadataKey]
-            : row.agentKey) ?? '';
+        : metadataKey !== undefined
+          ? row.metadata?.[metadataKey]
+          : row.agentKey) ?? '';
     const entry = byId.get(id) ?? {
       id,
       requests: 0,
@@ -159,17 +156,20 @@ export function groupUsageDailyRows(
 }
 
 /**
- * Decorate breakdown entries with display names, read-side only.
- * Users resolve one-by-one via findUserById (unique ids, batched with
- * Promise.all); tokens resolve from one listTenantApiTokens call. Missing or
- * deleted entities keep the raw id with name/label undefined.
+ * Decorate breakdown entries with display names, read-side only. Users
+ * resolve one-by-one via findUserById (unique ids, batched with
+ * Promise.all). Missing or deleted users keep the raw id with name/label
+ * undefined.
  *
- * Assumes the caller already bound the tenant DB.
+ * Assumes the caller already bound the tenant DB. `_tenantId` is accepted
+ * (but unused) for signature stability with callers built around the
+ * broader entity-breakdown contract; this function no longer needs it now
+ * that token-scoped resolution is gone.
  */
 export async function resolveUsageEntityNames(
   entries: UsageBreakdownEntry[],
   groupBy: UsageBreakdownGroupBy,
-  tenantId: string,
+  _tenantId: string,
 ): Promise<void> {
   const ids = [...new Set(entries.map((entry) => entry.id).filter((id) => id !== ''))];
   if (ids.length === 0) return;
@@ -185,37 +185,25 @@ export async function resolveUsageEntityNames(
 
   const db = await getDatabase();
 
-  if (groupBy === 'user') {
-    const users = await Promise.all(
-      ids.map(async (id) => {
-        try {
-          return await db.findUserById(id);
-        } catch {
-          return null; // malformed/legacy id — keep raw id, name undefined
-        }
-      }),
-    );
-    const byId = new Map(
-      users
-        .filter((user): user is NonNullable<typeof user> => Boolean(user))
-        .map((user) => [String(user._id), user]),
-    );
-    for (const entry of entries) {
-      const user = byId.get(entry.id);
-      if (user) {
-        entry.name = user.name;
-        entry.label = user.email;
+  const users = await Promise.all(
+    ids.map(async (id) => {
+      try {
+        return await db.findUserById(id);
+      } catch {
+        return null; // malformed/legacy id — keep raw id, name undefined
       }
-    }
-    return;
-  }
-
-  const tokens = await db.listTenantApiTokens(tenantId);
-  const byId = new Map(tokens.map((token) => [String(token._id), token]));
+    }),
+  );
+  const byId = new Map(
+    users
+      .filter((user): user is NonNullable<typeof user> => Boolean(user))
+      .map((user) => [String(user._id), user]),
+  );
   for (const entry of entries) {
-    const token = byId.get(entry.id);
-    if (token) {
-      entry.label = token.label;
+    const user = byId.get(entry.id);
+    if (user) {
+      entry.name = user.name;
+      entry.label = user.email;
     }
   }
 }
@@ -239,7 +227,7 @@ export interface GetUsageBreakdownOptions {
 const MAX_ROLLUP_ROWS = 20_000;
 
 /**
- * Read `usage_daily` for one service/resource, group by user or API token and
+ * Read `usage_daily` for one service/resource, group by user or agent and
  * resolve display names.
  */
 export async function getUsageBreakdown(

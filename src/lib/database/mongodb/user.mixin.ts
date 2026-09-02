@@ -19,9 +19,12 @@ interface WithTenantOps {
 export function UserMixin<TBase extends Constructor<MongoDBProviderBase & WithTenantOps>>(Base: TBase) {
   return class UserOps extends Base {
     async findUserByEmail(email: string): Promise<IUser | null> {
+      const trimmedInput = (email ?? '').trim();
+      if (!trimmedInput) return null;
+
       const db = this.getTenantDb();
-      const trimmedEmail = email.trim();
-      const normalizedEmail = this.normalizeEmail(email);
+      const trimmedEmail = trimmedInput;
+      const normalizedEmail = this.normalizeEmail(trimmedInput);
       const user = await db.collection<IUser>(COLLECTIONS.users).findOne({
         $or: [
           { emailLower: normalizedEmail },
@@ -55,7 +58,7 @@ export function UserMixin<TBase extends Constructor<MongoDBProviderBase & WithTe
     ): Promise<IUser> {
       const db = this.getTenantDb();
       const now = new Date();
-      const trimmedEmail = userData.email.trim();
+      const trimmedEmail = (userData.email ?? '').trim();
       const normalizedEmail = this.normalizeEmail(trimmedEmail);
 
       const userDocument = {
@@ -63,6 +66,7 @@ export function UserMixin<TBase extends Constructor<MongoDBProviderBase & WithTe
         email: trimmedEmail,
         emailLower: normalizedEmail,
         servicePermissions: normalizeServicePermissions(userData.servicePermissions),
+        canLogin: userData.canLogin !== false,
         createdAt: now,
         updatedAt: now,
       };
@@ -76,23 +80,27 @@ export function UserMixin<TBase extends Constructor<MongoDBProviderBase & WithTe
         updatedAt: now,
       };
 
-      try {
-        const tenant = await this.findTenantById(userData.tenantId);
-        if (tenant) {
-          const tenantId =
-            typeof tenant._id === 'string'
-              ? tenant._id
-              : (tenant._id?.toString() ?? userData.tenantId);
-          await this.registerUserInDirectory({
-            email: trimmedEmail,
-            tenantId,
-            tenantSlug: tenant.slug,
-            tenantDbName: tenant.dbName,
-            tenantCompanyName: tenant.companyName,
-          });
+      // Programmatic users (canLogin=false, typically no email) have nothing
+      // to register in the cross-tenant email directory.
+      if (trimmedEmail) {
+        try {
+          const tenant = await this.findTenantById(userData.tenantId);
+          if (tenant) {
+            const tenantId =
+              typeof tenant._id === 'string'
+                ? tenant._id
+                : (tenant._id?.toString() ?? userData.tenantId);
+            await this.registerUserInDirectory({
+              email: trimmedEmail,
+              tenantId,
+              tenantSlug: tenant.slug,
+              tenantDbName: tenant.dbName,
+              tenantCompanyName: tenant.companyName,
+            });
+          }
+        } catch (error) {
+          logger.error('Failed to register user in directory', { error });
         }
-      } catch (error) {
-        logger.error('Failed to register user in directory', { error });
       }
 
       return createdUser;
@@ -150,13 +158,16 @@ export function UserMixin<TBase extends Constructor<MongoDBProviderBase & WithTe
           if (existingUser.email && existingUser.email !== updatedUser.email) {
             await this.unregisterUserFromDirectory(existingUser.email, tenantId);
           }
-          await this.registerUserInDirectory({
-            email: updatedUser.email,
-            tenantId,
-            tenantSlug: tenant.slug,
-            tenantDbName: tenant.dbName,
-            tenantCompanyName: tenant.companyName,
-          });
+          // Programmatic users (canLogin=false) may have no email — nothing to register.
+          if (updatedUser.email) {
+            await this.registerUserInDirectory({
+              email: updatedUser.email,
+              tenantId,
+              tenantSlug: tenant.slug,
+              tenantDbName: tenant.dbName,
+              tenantCompanyName: tenant.companyName,
+            });
+          }
         }
       } catch (error) {
         logger.error('Failed to sync user directory during update', { error });

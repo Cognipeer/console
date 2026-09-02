@@ -18,10 +18,31 @@ export function GuardrailMixin<TBase extends Constructor<MongoDBProviderBase>>(B
     ): Promise<IGuardrail> {
       const db = this.getTenantDb();
       const now = new Date();
-      const doc = { ...guardrail, createdAt: now, updatedAt: now };
+      const doc: Omit<IGuardrail, '_id'> = {
+        ...guardrail,
+        // Absent `mode` derives from `enabled`, exactly as the SQLite INSERT and
+        // row mapper do, so a create and every later read agree across providers
+        // instead of SQLite answering 'enforce' where Mongo answered nothing.
+        mode: guardrail.mode ?? (guardrail.enabled ? 'enforce' : 'disabled'),
+        createdAt: now,
+        updatedAt: now,
+      };
+      // Same reason as `updateGuardrail` below: the BSON serializer turns an
+      // EXPLICIT `undefined` into null, so `{ hooks: undefined, hooksVersion:
+      // undefined, projectId: undefined }` — what the service layer passes for
+      // a legacy-shaped or tenant-wide create — would persist `hooks: null`,
+      // `hooksVersion: null`, `projectId: null`. SQLite yields `undefined` for
+      // the same input, so the API returned `mode: null` / `hooks: null` on
+      // Mongo only. Dropping the keys makes "absent" mean absent on both. A
+      // tenant-wide row therefore has NO `projectId` field, which the
+      // `{ projectId: null }` filter in `findGuardrailByKey` matches too.
+      const insert: Record<string, unknown> = { ...doc };
+      for (const key of Object.keys(insert)) {
+        if (insert[key] === undefined) delete insert[key];
+      }
       const result = await db
         .collection(COLLECTIONS.guardrails)
-        .insertOne(doc);
+        .insertOne(insert);
       return { ...doc, _id: result.insertedId.toString() };
     }
 
@@ -32,6 +53,17 @@ export function GuardrailMixin<TBase extends Constructor<MongoDBProviderBase>>(B
       const db = this.getTenantDb();
       const updateData: Record<string, unknown> = { ...data, updatedAt: new Date() };
       delete updateData._id;
+      // A spread copies EXPLICIT undefined keys, and $set turns those into BSON
+      // null. Harmless while every field was required; with optional `hooks` /
+      // `mode` a caller passing `{ hooks: undefined }` would persist null,
+      // which is not "absent" — ensureHooks() would re-derive on SQLite and
+      // read a null on Mongo, i.e. provider drift on the one field the hook
+      // plane is built on. SQLite already skips undefined keys by construction
+      // (its UPDATE is a per-field `!== undefined` chain), so this is what
+      // makes the two backends agree.
+      for (const key of Object.keys(updateData)) {
+        if (updateData[key] === undefined) delete updateData[key];
+      }
       const result = await db
         .collection<IGuardrail>(COLLECTIONS.guardrails)
         .findOneAndUpdate(
@@ -59,10 +91,15 @@ export function GuardrailMixin<TBase extends Constructor<MongoDBProviderBase>>(B
       return doc as unknown as IGuardrail | null;
     }
 
-    async findGuardrailByKey(key: string, projectId?: string): Promise<IGuardrail | null> {
+    async findGuardrailByKey(key: string, projectId?: string | null): Promise<IGuardrail | null> {
       const db = this.getTenantDb();
       const filter: Record<string, unknown> = { key };
-      if (projectId !== undefined) filter.projectId = projectId;
+      // `null` = the tenant-wide row ONLY. In Mongo `{ projectId: null }`
+      // matches a document whose field is null AND one that has no such field —
+      // both spellings exist on disk (older builds serialised an explicit
+      // undefined as null; `createGuardrail` above now drops the key).
+      if (projectId === null) filter.projectId = null;
+      else if (projectId !== undefined) filter.projectId = projectId;
       const doc = await db
         .collection(COLLECTIONS.guardrails)
         .findOne(filter);
@@ -81,10 +118,17 @@ export function GuardrailMixin<TBase extends Constructor<MongoDBProviderBase>>(B
       if (filters?.type !== undefined) filter.type = filters.type;
       if (filters?.enabled !== undefined) filter.enabled = filters.enabled;
       if (filters?.search) {
+        // ESCAPED. The raw string used to reach `$regex` directly, which handed
+        // the caller the database's regex engine: a pattern like `(a+)+$` runs
+        // catastrophic backtracking against every guardrail document in the
+        // tenant. It was reachable only from the dashboard until the client API
+        // gained a list route, which is what makes it worth fixing now — an API
+        // token can send it. `rag.mixin.ts:117` already does exactly this.
+        const search = this.escapeRegex(filters.search);
         filter.$or = [
-          { name: { $regex: filters.search, $options: 'i' } },
-          { description: { $regex: filters.search, $options: 'i' } },
-          { key: { $regex: filters.search, $options: 'i' } },
+          { name: { $regex: search, $options: 'i' } },
+          { description: { $regex: search, $options: 'i' } },
+          { key: { $regex: search, $options: 'i' } },
         ];
       }
       const docs = await db
@@ -143,10 +187,12 @@ export function GuardrailMixin<TBase extends Constructor<MongoDBProviderBase>>(B
       return doc as unknown as IGuardrailWordList | null;
     }
 
-    async findGuardrailWordListByKey(key: string, projectId?: string): Promise<IGuardrailWordList | null> {
+    async findGuardrailWordListByKey(key: string, projectId?: string | null): Promise<IGuardrailWordList | null> {
       const db = this.getTenantDb();
       const filter: Record<string, unknown> = { key };
-      if (projectId !== undefined) filter.projectId = projectId;
+      // Same three-way contract as findGuardrailByKey: null = tenant-wide only.
+      if (projectId === null) filter.projectId = null;
+      else if (projectId !== undefined) filter.projectId = projectId;
       const doc = await db
         .collection(COLLECTIONS.guardrailWordLists)
         .findOne(filter);
@@ -161,10 +207,17 @@ export function GuardrailMixin<TBase extends Constructor<MongoDBProviderBase>>(B
       const filter: Record<string, unknown> = {};
       if (filters?.projectId !== undefined) filter.projectId = filters.projectId;
       if (filters?.search) {
+        // ESCAPED. The raw string used to reach `$regex` directly, which handed
+        // the caller the database's regex engine: a pattern like `(a+)+$` runs
+        // catastrophic backtracking against every guardrail document in the
+        // tenant. It was reachable only from the dashboard until the client API
+        // gained a list route, which is what makes it worth fixing now — an API
+        // token can send it. `rag.mixin.ts:117` already does exactly this.
+        const search = this.escapeRegex(filters.search);
         filter.$or = [
-          { name: { $regex: filters.search, $options: 'i' } },
-          { description: { $regex: filters.search, $options: 'i' } },
-          { key: { $regex: filters.search, $options: 'i' } },
+          { name: { $regex: search, $options: 'i' } },
+          { description: { $regex: search, $options: 'i' } },
+          { key: { $regex: search, $options: 'i' } },
         ];
       }
       const docs = await db

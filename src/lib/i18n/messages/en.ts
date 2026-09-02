@@ -48,7 +48,7 @@ export const en = {
     inferenceMonitoring: 'Model Monitoring',
     inferenceMonitoringDescription: 'Monitor vLLM and inference servers',
     guardrails: 'Guardrail',
-    guardrailsDescription: 'Safety policies for AI services',
+    guardrailsDescription: 'Safety and enforcement policies: PII, secrets, moderation, prompt injection and tool-call rules',
     evaluations: 'Evaluations',
     evaluationsDescription: 'Offline agent & model testing with datasets and scorers',
     redteam: 'Red Team',
@@ -69,8 +69,8 @@ export const en = {
     gpuFleetDescription: 'Onboard GPU hosts, deploy models from the curated library, manage pools',
     sandbox: 'Agent Sandbox',
     sandboxDescription: 'Remote, API-driven runtime sandboxes for code, files, terminals and previews',
-    aegis: 'Aegis',
-    aegisDescription: 'Enforcement-plane policy engine: tool-call evaluation, DLP redaction, approvals and audit',
+    aiAppGateway: 'AI App Gateway',
+    aiAppGatewayDescription: 'Control plane for AI coding agents: who uses Claude Code, Codex and Copilot, what they send, and what they may do',
     promptOptimizer: 'Prompt Optimizer',
     promptOptimizerDescription: 'Iteratively improve a prompt toward a goal: generate variants, test and score them, promote the best',
     memory: 'Agent Memory',
@@ -432,6 +432,7 @@ export const en = {
       },
       actions: {
         invite: 'Invite User',
+        addUser: 'Add User',
       },
       table: {
         name: 'Name',
@@ -440,6 +441,8 @@ export const en = {
         status: 'Status',
         actions: 'Actions',
         empty: 'No users found',
+        programmatic: 'Programmatic',
+        programmaticHint: 'This account has no login capability (canLogin=false).',
       },
       roles: {
         owner: 'Owner',
@@ -451,6 +454,7 @@ export const en = {
         invited: 'Invited',
         active: 'Active',
         invitedAt: 'Invited at {date}',
+        noLogin: 'No login',
       },
       errors: {
         fetch: 'Failed to fetch users',
@@ -804,8 +808,17 @@ export const en = {
         loadError: 'Failed to load policies',
       },
     },
-    inviteModal: {
-      title: 'Invite User',
+    addUserModal: {
+      title: 'Add User',
+      subtitle: 'Invite a teammate, or create a login-disabled programmatic account.',
+      sections: {
+        identity: 'Identify the person you are adding.',
+        role: 'Choose what this user will be able to do in your workspace.',
+        accessTitle: 'Login access',
+        access: 'Control whether this account can sign in, and whether to email them an invitation.',
+        permissionsTitle: 'Service permissions',
+        permissions: 'Optional per-service overrides for this user, on top of their role.',
+      },
       form: {
         name: {
           label: 'Full Name',
@@ -824,10 +837,32 @@ export const en = {
             admin: 'Admin — Full access except billing',
           },
         },
-        submit: 'Send Invitation',
+        canLogin: {
+          label: 'Can log in',
+          description: 'Off creates a "Programmatic User" with no password login — for service accounts.',
+          on: 'Enabled',
+          off: 'Disabled',
+        },
+        sendInvite: {
+          label: 'Send invite email',
+          description: 'Email a one-time login link and temporary password.',
+          on: 'Will send',
+          off: 'Will not send',
+        },
+        submit: 'Add User',
+      },
+      passwordPanel: {
+        title: 'User Created',
+        warningTitle: 'Copy this password now',
+        warning: 'This password is shown once and cannot be retrieved again. Copy it now and share it securely.',
+        passwordLabel: 'Generated password',
+        copy: 'Copy to clipboard',
+        copied: 'Copied!',
+        created: 'Created',
+        done: 'Done, I copied it',
       },
       errors: {
-        invite: 'Failed to invite user',
+        create: 'Failed to add user',
       },
       messages: {
         inviteSuccess: 'Invitation sent to {email}',
@@ -929,7 +964,7 @@ export const en = {
       },
       guardrails: {
         title: 'Guardrail',
-        description: 'Define safety policies against PII, harmful content, and prompt injection.',
+        description: 'Define safety policies against PII, harmful content, prompt injection, and unsafe tool calls.',
       },
       memory: {
         title: 'Agent Memory',
@@ -2160,6 +2195,254 @@ export const en = {
       changed: 'Changed',
       unchanged: 'Unchanged',
       noDifferences: 'No differences found',
+    },
+  },
+  /**
+   * Guardrail hook plane.
+   *
+   * ⚠ NOT YET RENDERED. Nothing under `components/guardrails/**` or
+   * `app/dashboard/guardrails/**` calls `useTranslations('guardrails')` — the
+   * whole folder still hardcodes its strings, and `tr.ts` has no `guardrails`
+   * block to translate against. This namespace is the REFERENCE vocabulary
+   * written alongside the surface simplification, not live copy.
+   *
+   * WHERE THE RENDERED WORDS ACTUALLY LIVE, so nobody edits this block
+   * expecting a screen to change: `components/guardrails/guardrailVocabulary.ts`
+   * holds the three enforcement words and the three mode words in the three
+   * registers the screens ask for (short / long / description), and every
+   * screen derives its option list from that file. `schedule.enforcement*`,
+   * `mode.*` and `action.*` below are the same three ideas in prose, kept here
+   * so an i18n adoption pass is a substitution rather than a rewrite — but the
+   * two ARE two copies, and they have already drifted apart in wording. If you
+   * change either, change both, and when the folder is finally wired to
+   * `useTranslations`, delete `guardrailVocabulary.ts`'s literals and derive it
+   * from these keys so only one copy survives.
+   *
+   * KEY NAMING: `useTranslations` resolves a key by splitting it on '.', so a
+   * key can never contain one. The hook ids and policy families are persisted
+   * with dots and underscores (`output.stream.delta`, `prompt_shield`); the
+   * label maps below key them in camelCase and the UI is expected to convert
+   * once, at the lookup, rather than storing a second spelling.
+   */
+  guardrails: {
+    /** The five points in a request where a guardrail can run. */
+    hooks: {
+      label: 'Hooks',
+      description: 'Where this guardrail runs. Each hook is configured independently — a guardrail may check input only, output only, or both.',
+      inputPre: 'Before input',
+      inputPreDescription: 'Runs on the user message before the model sees it. The only hook that can stop a violation from reaching the provider at all.',
+      outputPre: 'Before output',
+      outputPreDescription: 'Runs on the complete assistant response before it is returned. For a streamed answer with streaming enforcement off, this is the post-hoc audit.',
+      outputStreamDelta: 'During streaming',
+      outputStreamDeltaDescription: 'Runs on the response as it streams, holding back a short tail so a match cannot be flushed before it is found.',
+      toolPre: 'Before tool call',
+      toolPreDescription: 'Runs on the tool name and arguments before the tool executes. This is where tool-execution policy is enforced.',
+      toolPost: 'After tool call',
+      toolPostDescription: 'Runs on the tool result before it re-enters the conversation — the path an untrusted tool would use to inject content.',
+      notEnabled: 'Not enabled',
+      noPolicies: 'No policies bound to this hook',
+      unsupportedForPolicy: 'This policy cannot run on this hook',
+    },
+    /** The nine detector families a policy can belong to. */
+    families: {
+      label: 'Policy',
+      pii: 'PII',
+      piiDescription: 'Personal data, detected by a PII policy. Enabling this policy requires selecting one — categories, languages and mask strategies live in the PII service, not here.',
+      secrets: 'Secrets',
+      secretsDescription: 'API keys, tokens, private keys and other credentials.',
+      wordFilter: 'Word filter',
+      wordFilterDescription: 'Blocked terms from a word list, matched after case and accent folding.',
+      regex: 'Regex',
+      regexDescription: 'Custom regular expressions, each with its own action.',
+      moderation: 'Moderation',
+      moderationDescription: 'Harmful-content categories judged by a model.',
+      promptShield: 'Prompt shield',
+      promptShieldDescription: 'Prompt injection and jailbreak attempts.',
+      custom: 'Custom prompt',
+      customDescription: 'A free-form instruction judged by a model.',
+      toolAccess: 'Tool access',
+      toolAccessDescription: 'Which tools may run, with what arguments, against which hosts and paths.',
+      webhook: 'Webhook',
+      webhookDescription: 'Defers the decision to an external endpoint that speaks the hook contract.',
+    },
+    /**
+     * THE ONE ENFORCEMENT CONTROL, and the copy that replaced two selects.
+     *
+     * `timing` x `onFail` reads as four combinations and the stored type has
+     * three: an async check has already let the response go, so it cannot stop
+     * anything. The screen therefore asks ONE question with three answers, and
+     * `toEnforcement` / `fromEnforcement` (guardrail/hooks/contract) map them
+     * onto the unchanged stored `schedule`.
+     *
+     * VOCABULARY. "Observe" is the same idea as the guardrail-wide `mode.monitor`
+     * below, one scope smaller: whatever the checks decide, nothing is acted on.
+     * It is NOT the same as `action.flag`, and the difference is worth keeping
+     * straight — observing neutralises every decision at this point in the
+     * request, flagging is one policy DECIDING to record and do nothing else.
+     */
+    schedule: {
+      enforcement: 'Enforcement',
+      enforcementDescription: 'Whether this stops the request or only records what it finds — and whether the request waits for it at all.',
+      enforcementBlock: 'Block',
+      enforcementBlockDescription: 'The request waits for the check, and stops if it finds something.',
+      enforcementObserve: 'Observe',
+      enforcementObserveDescription: 'The request waits for the check and records what it finds, then continues either way.',
+      enforcementObserveNoWait: 'Observe, without waiting',
+      enforcementObserveNoWaitDescription: 'The request does not wait at all. The check runs beside it and records what it finds — by the time it answers there is nothing left to stop, so it can only ever record.',
+      enforcementOnlyThree: 'There is no fourth combination: a check the request does not wait for cannot block it.',
+      /**
+       * The PERSISTED spelling of the same three states, for the few places that
+       * show a stored value rather than ask for one — an audit diff, the API
+       * reference, a binding rendered read-only. No control offers these two
+       * fields separately any more.
+       */
+      timing: 'Timing',
+      timingSync: 'Blocking',
+      timingSyncDescription: 'The request waits for the verdict.',
+      timingAsync: 'Non-blocking',
+      timingAsyncDescription: 'Evaluated alongside the request and recorded. It cannot block, so its only useful outcome is a log entry.',
+      onFail: 'On violation',
+      onFailBlock: 'Block',
+      onFailBlockDescription: 'Stop the request and return the blocked message.',
+      onFailLog: 'Log only',
+      onFailLogDescription: 'Record the finding and let the request through.',
+      asyncForcesLog: 'A non-blocking hook can only log — there is no request left to stop by the time it finishes.',
+      failMode: 'If it cannot run',
+      failModeOpen: 'Let the content through',
+      failModeClosed: 'Block it',
+      failModeDescription: 'Applies when the check itself is unavailable or times out — a model outage, a webhook that never answers — and never when it finds something. Set per policy, so one flaky model judge does not take a deterministic PII pass down with it. Only offered for the families that can actually fail: a regex and a word list scan a string in memory.',
+      timeout: 'Time limit',
+      timeoutPlaceholder: 'No limit',
+      timeoutDescription: 'Milliseconds. Empty or 0 means no limit, and the hook’s own budget still caps it.',
+    },
+    /**
+     * WHAT A FINDING DOES — the policy-level decision, all five stored rungs.
+     *
+     * Block, Redact and Flag are the question an operator is asked. 'warn' and
+     * 'allow' stay legal stored values and stay selectable behind the advanced
+     * disclosure, because a policy saved with one must open on a control that
+     * can still show it.
+     */
+    action: {
+      label: 'When it finds something',
+      block: 'Block',
+      blockDescription: 'Stop the request and return the block message.',
+      redact: 'Redact',
+      redactDescription: 'Rewrite the match in place and let the rest through.',
+      flag: 'Flag',
+      flagDescription: 'Record what it found and let it through. The verdict reports it; nothing is stopped and nothing is rewritten.',
+      warn: 'Warn',
+      warnDescription: 'Flag, and also say so on the verdict the caller reads.',
+      allow: 'Allow',
+      allowDescription: 'Run the policy, but let whatever it finds not count — the verdict still reads as clean.',
+      inherit: 'Whatever the rest of this guardrail does',
+      /**
+       * WHY THERE IS NO GUARDRAIL-WIDE "default action" CONTROL ANY MORE. The
+       * `action` column is still written and still read — an older console
+       * binary and the AI App Gateway enforce from it — but it is PROJECTED from
+       * the policies on save rather than typed in. A default that policies
+       * silently inherited was the hidden indirection that made "what does this
+       * guardrail actually do" unanswerable from the screen.
+       */
+      projectedNotice: 'Every policy states what it does. The guardrail’s overall action is worked out from them, so there is nothing to set here.',
+    },
+    /**
+     * Enforcement posture for the WHOLE guardrail — one control written to both
+     * `mode` and `enabled`, which are two columns describing one decision.
+     */
+    mode: {
+      label: 'Mode',
+      enforce: 'Enforce',
+      enforceDescription: 'Verdicts are acted on: a policy that says block, blocks.',
+      monitor: 'Monitor',
+      monitorDescription: 'Everything still runs and everything is still recorded, but every decision is neutralised to allow before anyone acts on it. This is Observe applied to the whole guardrail — use it to size the impact of a policy before turning it on.',
+      disabled: 'Off',
+      disabledDescription: 'Nothing runs, and nothing is recorded. An allow verdict from an off guardrail means “nothing was checked”, not “this is safe”.',
+    },
+    /** The one disclosure every policy form has. */
+    advanced: {
+      label: 'Advanced',
+      description: 'Overrides, timing, limits and settings carried over from an older configuration. Everything here has a working default.',
+    },
+    /** Real-time streaming gate. */
+    stream: {
+      label: 'Check while streaming',
+      description: 'Scan the response as it streams instead of only after it completes. A short tail is withheld so a match can never be flushed to the client before it is found.',
+      enabled: 'Check while streaming',
+      legacyDisabledNotice: 'This guardrail was migrated from an older version, where streamed responses were only audited after the fact. Streaming enforcement is off so its behaviour did not change on upgrade — turn them on to block violations mid-stream.',
+      eligibleFamiliesNote: 'Only PII, secrets and regex policies run on the stream. The rest still run on the complete response.',
+      holdBackChars: 'Hold-back',
+      holdBackCharsDescription: 'Characters withheld behind the release point. Raised automatically when a policy can produce a longer match — that is what makes the guarantee true.',
+      holdBackMs: 'Hold-back time',
+      holdBackMsDescription: 'Milliseconds to wait before releasing, whichever limit is reached first.',
+      overlapChars: 'Re-scan overlap',
+      overlapCharsDescription: 'Characters before the release point re-scanned each window, so a match that starts in already-released text is still found with a correct position.',
+      maxHeldChars: 'Maximum held',
+      maxHeldCharsDescription: 'Upper bound on the withheld region.',
+      onBudgetExceeded: 'When the maximum is reached',
+      onBudgetExceededRelease: 'Release the held text',
+      onBudgetExceededTerminate: 'Terminate the stream',
+      onBlock: 'When blocked mid-stream',
+      onBlockTruncate: 'Truncate — end the stream after the message',
+      onBlockReplace: 'Replace — substitute the whole response',
+      onBlockReplaceUnavailable: 'Replace is only honest before anything has been flushed to the client.',
+    },
+    /** The end-user-facing block message. */
+    blockedMessage: {
+      label: 'Blocked message',
+      description: 'What the caller sees when this guardrail blocks.',
+      mode: 'Delivery',
+      modeError: 'Error response',
+      modeErrorDescription: 'The OpenAI-shaped error body existing clients already parse.',
+      modeReplace: 'Replacement answer',
+      modeReplaceDescription: 'A normal successful response whose content is the message, finishing with content_filter — what a chat UI can actually render.',
+      templates: 'Per-reason messages',
+      templatesDescription: 'Override the default wording for a specific kind of violation. Anything not overridden uses the default.',
+      reasonPii: 'Personal data',
+      reasonSecrets: 'Credentials',
+      reasonProfanity: 'Blocked terms',
+      reasonModeration: 'Harmful content',
+      reasonInjection: 'Prompt injection',
+      reasonToolDenied: 'Tool not allowed',
+      reasonCustom: 'Custom policy',
+      reasonUnavailable: 'Policy unavailable',
+      variablesHint: 'Available variables: {reason}, {traceId}, {guardrailName}.',
+      noMatchedValueWarning: 'The matched text is deliberately not available as a variable. This message is shown to end users, so interpolating it would turn the guardrail into a leak for the very data it protects.',
+      includeTraceId: 'Include the trace id',
+      includeTraceIdDescription: 'Support cannot investigate a block without it.',
+      preview: 'Preview',
+    },
+    /** How much of the verdict is exposed on the wire. */
+    visibility: {
+      label: 'Verdict visibility',
+      headers: 'Response headers',
+      headersDescription: 'Always sent: the decision, the guardrail and the trace id.',
+      detailedHeaders: 'Include which policies fired',
+      detailedHeadersDescription: 'Adds the families and codes behind the decision. Never the matched value.',
+      useVerdictStatusCodes: 'Use guardrail status codes',
+      useVerdictStatusCodesDescription: 'Opt-in. Returns 246 for a modified response and 446 for a blocked one instead of the standard codes. Every deployed OpenAI-compatible client understands the standard codes, and none understands these — turn it on only for clients you control.',
+      legacyHeaders: 'Also send the legacy header names',
+      legacyHeadersDescription: 'Publishes the pre-rename x-aegis-* aliases alongside the current ones, for one release, so an integration reading them keeps working.',
+    },
+    shortCircuit: {
+      label: 'Stop at the first block',
+      description: 'Skip the remaining policies once one blocks. Turn this off to record every violation in a single evaluation — useful while tuning a policy, more expensive in production.',
+    },
+    presets: {
+      label: 'Start from a preset',
+      description: 'A working configuration you can edit, instead of an empty grid.',
+      starterInput: 'Input safety',
+      starterInputDescription: 'PII and prompt injection on the user message.',
+      outputSafety: 'Output safety',
+      outputSafetyDescription: 'Secrets and PII on the response, checked while streaming.',
+      toolSafety: 'Tool safety',
+      toolSafetyDescription: 'An allowlist on tool calls, plus secret detection on tool results.',
+    },
+    validation: {
+      piiPolicyRequired: 'Select a PII policy — an enabled PII policy cannot run without one.',
+      hookNotValidForFamily: 'This policy cannot be bound to that hook.',
+      noEnabledPolicies: 'Enable at least one policy.',
+      noBoundHooks: 'Bind at least one hook.',
     },
   },
   pii: {

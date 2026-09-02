@@ -24,6 +24,8 @@ import {
   SERVICE_PERMISSION_LEVELS,
   type UserRole,
 } from '@/lib/security/rbac';
+import { generateSecurePassword } from '@/lib/services/auth/passwordGenerator';
+import { BCRYPT_ROUNDS } from '@/lib/services/auth/passwordPolicy';
 import { ensureDefaultProject } from '@/lib/services/projects/projectService';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
@@ -177,8 +179,8 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
       );
       if (!quota.allowed) return reply.code(429).send({ error: quota.reason || 'User quota exceeded' });
 
-      const tempPassword = Math.random().toString(36).slice(-12);
-      const hashedPassword = await bcrypt.hash(tempPassword, 10);
+      const tempPassword = generateSecurePassword();
+      const hashedPassword = await bcrypt.hash(tempPassword, BCRYPT_ROUNDS);
       const initialProjectIds = (body.role === 'user' || body.role === 'project_admin') && body.projectId
         ? [body.projectId] : undefined;
 

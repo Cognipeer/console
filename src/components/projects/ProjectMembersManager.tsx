@@ -22,6 +22,14 @@ import {
 } from '@/lib/security/rbac';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 
+/**
+ * What the permission matrix OFFERS. A retired service keeps its definition
+ * (`deprecated: true`) so a persisted grant naming it still resolves and
+ * labels, but it is not something new to hand out — filtered on the flag, not
+ * the id, so the next retirement needs no change here.
+ */
+const GRANTABLE_SERVICES = RBAC_SERVICE_DEFINITIONS.filter((service) => !service.deprecated);
+
 type TenantRole = 'owner' | 'admin' | 'project_admin' | 'user';
 type ProjectRole = 'member' | 'project_admin';
 
@@ -685,7 +693,7 @@ export default function ProjectMembersManager(
                 </tr>
               </thead>
               <tbody>
-                {RBAC_SERVICE_DEFINITIONS.length === 0 ? (
+                {GRANTABLE_SERVICES.length === 0 ? (
                   <tr>
                     <td colSpan={3}>
                       <Text size="sm" c="dimmed" ta="center" py="md">
@@ -694,7 +702,7 @@ export default function ProjectMembersManager(
                     </td>
                   </tr>
                 ) : (
-                  RBAC_SERVICE_DEFINITIONS.map((service) => (
+                  GRANTABLE_SERVICES.map((service) => (
                     <tr key={service.id}>
                       <td>
                         <div>

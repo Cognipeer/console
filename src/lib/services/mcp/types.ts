@@ -2,6 +2,7 @@ import type {
   IMcpAegisConfig,
   IMcpAuthConfig,
   IMcpExposureConfig,
+  IMcpGuardrailConfig,
   IMcpRemoteConfig,
   IMcpStdioConfig,
   IMcpTool,
@@ -41,7 +42,10 @@ export interface McpServerView {
   /** Env values are masked in views. */
   stdioConfig?: IMcpStdioConfig;
   exposure: IMcpExposureConfig;
+  /** @deprecated Legacy shield binding; still returned so an un-deployed UI keeps rendering. */
   aegis?: IMcpAegisConfig;
+  /** Guardrail binding evaluated at `tool.pre` / `tool.post`. */
+  guardrail?: IMcpGuardrailConfig;
   status: string;
   endpointSlug: string;
   totalRequests?: number;
@@ -102,7 +106,10 @@ export interface CreateMcpServerInput {
   /** Custom public-URL path segment (default: a random unguessable slug). Only
    *  meaningful once exposure.accessMode is 'public'; must be unique tenant-wide. */
   endpointSlug?: string;
+  /** @deprecated Legacy shield binding. Accepted for one release; `guardrail` wins. */
   aegis?: IMcpAegisConfig;
+  /** Guardrail binding for this server's tool calls (omit = unguarded). */
+  guardrail?: IMcpGuardrailConfig;
 }
 
 /** Which internal capability backs the server, and its instance + settings. */
@@ -145,7 +152,10 @@ export interface UpdateMcpServerInput {
   exposure?: IMcpExposureConfig;
   /** Rename the server's public-URL path segment; must be unique tenant-wide. */
   endpointSlug?: string;
+  /** @deprecated Legacy shield binding. Accepted for one release; `guardrail` wins. */
   aegis?: IMcpAegisConfig;
+  /** Guardrail binding for this server's tool calls. */
+  guardrail?: IMcpGuardrailConfig;
   status?: string;
   /** Opt-in policy for caller-supplied runtime header passthrough (null clears). */
   runtimeHeaders?: { allow?: boolean; allowedNames?: string[] } | null;

@@ -17,9 +17,12 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
   return class UserOps extends Base {
 
     async findUserByEmail(email: string): Promise<IUser | null> {
+      const trimmedInput = (email ?? '').trim();
+      if (!trimmedInput) return null;
+
       const db = this.getTenantDb();
-      const normalizedEmail = this.normalizeEmail(email);
-      const trimmedEmail = email.trim();
+      const normalizedEmail = this.normalizeEmail(trimmedInput);
+      const trimmedEmail = trimmedInput;
 
       const row = db.prepare(
         `SELECT * FROM ${TABLES.users} WHERE emailLower = @emailLower OR email = @email1 OR email = @email2 LIMIT 1`,
@@ -43,15 +46,16 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
       const db = this.getTenantDb();
       const id = this.newId();
       const now = this.now();
-      const trimmedEmail = userData.email.trim();
+      const trimmedEmail = (userData.email ?? '').trim();
       const normalizedEmail = this.normalizeEmail(trimmedEmail);
+      const canLogin = userData.canLogin !== false;
 
       db.prepare(`
         INSERT INTO ${TABLES.users}
         (id, email, emailLower, password, name, tenantId, role, projectIds, servicePermissions, licenseId, features,
-         invitedBy, invitedAt, inviteAcceptedAt, mustChangePassword, passwordChangedAt, authProvider, externalId, createdAt, updatedAt)
+         invitedBy, invitedAt, inviteAcceptedAt, mustChangePassword, passwordChangedAt, authProvider, externalId, canLogin, createdAt, updatedAt)
         VALUES (@id, @email, @emailLower, @password, @name, @tenantId, @role, @projectIds, @servicePermissions, @licenseId, @features,
-         @invitedBy, @invitedAt, @inviteAcceptedAt, @mustChangePassword, @passwordChangedAt, @authProvider, @externalId, @createdAt, @updatedAt)
+         @invitedBy, @invitedAt, @inviteAcceptedAt, @mustChangePassword, @passwordChangedAt, @authProvider, @externalId, @canLogin, @createdAt, @updatedAt)
       `).run({
         id,
         email: trimmedEmail,
@@ -71,6 +75,7 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
         passwordChangedAt: userData.passwordChangedAt?.toISOString() ?? now,
         authProvider: userData.authProvider ?? 'local',
         externalId: userData.externalId ?? null,
+        canLogin: this.toBoolInt(canLogin),
         createdAt: now,
         updatedAt: now,
       });
@@ -80,25 +85,29 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
         _id: id,
         email: trimmedEmail,
         emailLower: normalizedEmail,
+        canLogin,
         createdAt: new Date(now),
         updatedAt: new Date(now),
       };
 
-      // Sync user directory
-      try {
-        const tenant = await this.findTenantById(userData.tenantId);
-        if (tenant) {
-          const tenantId = typeof tenant._id === 'string' ? tenant._id : (tenant._id?.toString() ?? userData.tenantId);
-          await this.registerUserInDirectory({
-            email: trimmedEmail,
-            tenantId,
-            tenantSlug: tenant.slug,
-            tenantDbName: tenant.dbName,
-            tenantCompanyName: tenant.companyName,
-          });
+      // Sync user directory. Programmatic users (canLogin=false, typically no
+      // email) have nothing to register.
+      if (trimmedEmail) {
+        try {
+          const tenant = await this.findTenantById(userData.tenantId);
+          if (tenant) {
+            const tenantId = typeof tenant._id === 'string' ? tenant._id : (tenant._id?.toString() ?? userData.tenantId);
+            await this.registerUserInDirectory({
+              email: trimmedEmail,
+              tenantId,
+              tenantSlug: tenant.slug,
+              tenantDbName: tenant.dbName,
+              tenantCompanyName: tenant.companyName,
+            });
+          }
+        } catch (error) {
+          logger.error('Failed to register user in directory', { error });
         }
-      } catch (error) {
-        logger.error('Failed to register user in directory', { error });
       }
 
       return createdUser;
@@ -139,6 +148,7 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
       }
       if (data.authProvider !== undefined) { sets.push('authProvider = @authProvider'); params.authProvider = data.authProvider; }
       if (data.externalId !== undefined) { sets.push('externalId = @externalId'); params.externalId = data.externalId ?? null; }
+      if (data.canLogin !== undefined) { sets.push('canLogin = @canLogin'); params.canLogin = this.toBoolInt(data.canLogin); }
 
       db.prepare(`UPDATE ${TABLES.users} SET ${sets.join(', ')} WHERE id = @id`).run(params);
 
@@ -155,13 +165,16 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
           if (oldEmail && oldEmail !== updated.email) {
             await this.unregisterUserFromDirectory(oldEmail, tenantId);
           }
-          await this.registerUserInDirectory({
-            email: updated.email,
-            tenantId,
-            tenantSlug: tenant.slug,
-            tenantDbName: tenant.dbName,
-            tenantCompanyName: tenant.companyName,
-          });
+          // Programmatic users (canLogin=false) may have no email — nothing to register.
+          if (updated.email) {
+            await this.registerUserInDirectory({
+              email: updated.email,
+              tenantId,
+              tenantSlug: tenant.slug,
+              tenantDbName: tenant.dbName,
+              tenantCompanyName: tenant.companyName,
+            });
+          }
         }
       } catch (error) {
         logger.error('Failed to sync user directory during update', { error });
@@ -220,6 +233,9 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
         passwordChangedAt: this.toDate(r.passwordChangedAt),
         authProvider: ((r.authProvider as string) || 'local') as IUser['authProvider'],
         externalId: (r.externalId as string | null) ?? undefined,
+        // Missing/undefined column (pre-migration rows before the column
+        // default kicked in) is treated as true — back-compat default.
+        canLogin: r.canLogin === undefined ? true : this.fromBoolInt(r.canLogin),
         createdAt: this.toDate(r.createdAt),
         updatedAt: this.toDate(r.updatedAt),
       };

@@ -43,6 +43,12 @@ import {
   requireProjectContextForRequest,
   withApiRequestContext,
 } from '../fastify-utils';
+import {
+  legacyGuardrailSlots,
+  legacyGuardrailWriteConflict,
+  readGuardrailBindingsField,
+  validateGuardrailBindings,
+} from './guardrail-bindings';
 
 const logger = createLogger('api:models');
 const MAX_LIMIT = 200;
@@ -76,7 +82,7 @@ type ModelUsageQuery = {
 
 type ModelUsageBreakdownQuery = {
   from?: string;
-  groupBy?: 'user' | 'token' | string;
+  groupBy?: 'user' | string;
   to?: string;
 };
 
@@ -631,7 +637,7 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  // Per-user / per-API-token breakdown from the `usage_daily` rollup.
+  // Per-user breakdown from the `usage_daily` rollup.
   // Attribution starts at the rollup's deploy; earlier traffic shows as the
   // ''-id (unattributed/legacy) entry. Defaults: groupBy=user, last 30 days.
   app.get('/models/:id/usage/breakdown', withApiRequestContext(async (request, reply) => {
@@ -653,12 +659,12 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
           error: '`groupBy` metadata key must match /^[a-zA-Z0-9_]{1,40}$/',
         });
       }
-      if (!metadataKey && query.groupBy !== undefined && query.groupBy !== 'user' && query.groupBy !== 'token') {
-        return reply.code(400).send({ error: '`groupBy` must be user, token, or metadata.<key>' });
+      if (!metadataKey && query.groupBy !== undefined && query.groupBy !== 'user') {
+        return reply.code(400).send({ error: '`groupBy` must be user or metadata.<key>' });
       }
       const groupBy: UsageBreakdownGroupBy = metadataKey
         ? (query.groupBy as UsageBreakdownGroupBy)
-        : ((query.groupBy as 'user' | 'token' | undefined) ?? 'user');
+        : ((query.groupBy as 'user' | undefined) ?? 'user');
       const to = buildDate(query.to) ?? new Date();
       const from = buildDate(query.from)
         ?? new Date(to.getTime() - 30 * 24 * 60 * 60 * 1000);
@@ -704,7 +710,9 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
   app.put('/models/:id', withApiRequestContext(async (request, reply) => {
     try {
       const { id } = request.params as { id: string };
-      const { projectId, session } = await requireProjectContextForRequest(request);
+      // `user` is read for the guardrail-binding scope check: an owner/admin
+      // may bind a tenant-wide guardrail a project member cannot see.
+      const { projectId, session, user } = await requireProjectContextForRequest(request);
       const existing = await getModelById(session.tenantDbName, id, projectId);
 
       if (!existing) {
@@ -725,15 +733,47 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
       if (body.isMultimodal !== undefined) updates.isMultimodal = body.isMultimodal;
       if (body.supportsToolCalls !== undefined) updates.supportsToolCalls = body.supportsToolCalls;
       if (body.semanticCache !== undefined) updates.semanticCache = body.semanticCache;
-      // Pass the value through as-is (incl. empty string) so clearing a
-      // guardrail persists — `|| undefined` would skip the DB write and the
-      // previous binding would stick. Empty string reads as "no guardrail".
-      if (body.inputGuardrailKey !== undefined) {
-        updates.inputGuardrailKey = body.inputGuardrailKey as string;
+
+      // Multi-guardrail binding. When present it is authoritative and the two
+      // deprecated keys are DERIVED from it, so a client cannot set both and
+      // get an incoherent row; when absent, the legacy keys still work, but
+      // only while they do not contradict a stored list (see the conflict
+      // guard) — silently ignoring them is how a screen appears to save and
+      // does not.
+      const bindingsField = readGuardrailBindingsField(body.guardrails);
+      if (bindingsField.error) {
+        return reply.code(400).send({ error: bindingsField.error });
       }
-      if (body.outputGuardrailKey !== undefined) {
-        updates.outputGuardrailKey = body.outputGuardrailKey as string;
+      if (bindingsField.bindings) {
+        const invalid = await validateGuardrailBindings(
+          session.tenantDbName,
+          projectId,
+          bindingsField.bindings,
+          user,
+        );
+        if (invalid) {
+          return reply.code(400).send({ error: invalid });
+        }
+        const slots = legacyGuardrailSlots(bindingsField.bindings);
+        updates.guardrails = bindingsField.bindings;
+        updates.inputGuardrailKey = slots.inputGuardrailKey;
+        updates.outputGuardrailKey = slots.outputGuardrailKey;
+      } else {
+        const conflict = legacyGuardrailWriteConflict(existing, body);
+        if (conflict) {
+          return reply.code(400).send({ error: conflict });
+        }
+        // Pass the value through as-is (incl. empty string) so clearing a
+        // guardrail persists — `|| undefined` would skip the DB write and the
+        // previous binding would stick. Empty string reads as "no guardrail".
+        if (body.inputGuardrailKey !== undefined) {
+          updates.inputGuardrailKey = body.inputGuardrailKey as string;
+        }
+        if (body.outputGuardrailKey !== undefined) {
+          updates.outputGuardrailKey = body.outputGuardrailKey as string;
+        }
       }
+
       if (body.metadata !== undefined) updates.metadata = body.metadata;
       if (body.providerKey !== undefined) updates.providerKey = body.providerKey as string;
 

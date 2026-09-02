@@ -6,7 +6,7 @@
  * services that back the dashboard UI — no new data access. All reads are
  * strictly tenant + project scoped via the API token context.
  *
- *   GET /client/v1/analytics/usage     – time-series / breakdown (model|user|token|service)
+ *   GET /client/v1/analytics/usage     – time-series / breakdown (model|user|service)
  *   GET /client/v1/analytics/overview  – dashboard rollup (stats + recent sessions + daily)
  */
 
@@ -19,7 +19,7 @@ import { sendApiTokenError, withClientApiRequestContext } from '../fastify-utils
 
 const logger = createLogger('api:client-analytics');
 
-const VALID_GROUP_BY = ['model', 'user', 'token', 'service', 'agent'] as const;
+const VALID_GROUP_BY = ['model', 'user', 'service', 'agent'] as const;
 const VALID_INTERVAL = ['hour', 'day', 'month'] as const;
 
 class AnalyticsRequestError extends Error {
@@ -59,7 +59,7 @@ export const clientAnalyticsApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
       if (!groupByMetadataKey && !(VALID_GROUP_BY as readonly string[]).includes(groupBy)) {
-        return reply.code(400).send({ error: '`group_by` must be model, user, token, service, agent, or metadata.<key>' });
+        return reply.code(400).send({ error: '`group_by` must be model, user, service, agent, or metadata.<key>' });
       }
       const interval = query.interval ?? 'day';
       if (!(VALID_INTERVAL as readonly string[]).includes(interval)) {
@@ -154,11 +154,11 @@ export const clientAnalyticsApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
-      // group_by=user | token | agent | metadata.<key> → per-entity attribution
+      // group_by=user | agent | metadata.<key> → per-entity attribution
       // from usage_daily.
       const entity: SpendGroupByEntity = groupByMetadataKey
         ? (groupBy as SpendGroupByEntity)
-        : groupBy === 'token' ? 'api_key' : groupBy === 'agent' ? 'agent' : 'user';
+        : groupBy === 'agent' ? 'agent' : 'user';
       const breakdown = await getSpendEntityBreakdown(
         {
           tenantDbName: auth.tenantDbName,
@@ -175,11 +175,9 @@ export const clientAnalyticsApiPlugin: FastifyPluginAsync = async (app) => {
 
       const idField = groupByMetadataKey
         ? groupByMetadataKey
-        : entity === 'user'
-          ? 'user_id'
-          : entity === 'agent'
-            ? 'agent_key'
-            : 'api_token_id';
+        : entity === 'agent'
+          ? 'agent_key'
+          : 'user_id';
       return reply.code(200).send({
         object: 'analytics.usage',
         group_by: groupBy,
