@@ -1,0 +1,51 @@
+.container {
+    font-family: var(--mantine-font-family-monospace, ui-monospace, monospace);
+    font-size: 12.5px;
+    line-height: 1.7;
+    color: var(--mantine-color-text);
+}
+
+.label,
+.clickableLabel {
+    color: var(--mantine-color-dimmed);
+    font-weight: 500;
+    margin-right: 5px;
+}
+
+.clickableLabel {
+    cursor: pointer;
+}
+
+.stringValue {
+    color: var(--mantine-color-teal-7);
+}
+
+.numberValue {
+    color: var(--mantine-color-blue-6);
+}
+
+.booleanValue {
+    color: var(--mantine-color-violet-6);
+    font-weight: 600;
+}
+
+.nullValue,
+.undefinedValue,
+.otherValue {
+    color: var(--mantine-color-gray-5);
+    font-style: italic;
+}
+
+.punctuation {
+    color: var(--mantine-color-dimmed);
+}
+
+.expandIcon,
+.collapseIcon {
+    color: var(--mantine-color-dimmed);
+    cursor: pointer;
+}
+
+.collapsedContent {
+    color: var(--mantine-color-dimmed);
+}
