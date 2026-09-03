@@ -12,6 +12,9 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      image_digest: ${{ steps.image.outputs.digest }}
+      commit_sha: ${{ steps.vars.outputs.commit_sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,6 +30,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build & Push to GHCR
+        id: image
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -35,3 +39,80 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           tags: ghcr.io/cognipeer/console:${{ github.ref_name }}
+
+      - name: Capture release identity
+        id: vars
+        if: always()
+        run: echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  notify-crm:
+    if: always() && needs.build.result != 'skipped'
+    environment: production
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Report community artifact to CRM
+        env:
+          WEBHOOK_URL: ${{ secrets.RELEASE_WEBHOOK_URL }}
+          WEBHOOK_SECRET: ${{ secrets.RELEASE_WEBHOOK_SECRET }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          CRM_ENVIRONMENT: artifacts
+          COMMIT_SHA: ${{ needs.build.outputs.commit_sha || github.sha }}
+          IMAGE_DIGEST: ${{ needs.build.outputs.image_digest }}
+          VERSION: ${{ github.ref_name }}
+          IMAGE_REF: ghcr.io/cognipeer/console:${{ github.ref_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${WEBHOOK_URL}" || -z "${WEBHOOK_SECRET}" ]]; then
+            echo "::warning::RELEASE_WEBHOOK_URL / RELEASE_WEBHOOK_SECRET are not configured; CRM notification skipped."
+            exit 0
+          fi
+
+          STATUS="succeeded"
+          if [[ "${BUILD_RESULT}" != "success" ]]; then
+            STATUS="failed"
+          fi
+
+          IMMUTABLE_REF=""
+          if [[ -n "${IMAGE_DIGEST}" ]]; then
+            IMMUTABLE_REF="ghcr.io/cognipeer/console@${IMAGE_DIGEST}"
+          fi
+
+          PAYLOAD_FILE="$(mktemp)"
+          trap 'rm -f "${PAYLOAD_FILE}"' EXIT
+
+          jq -n \
+            --arg product "console" \
+            --arg repo "${GITHUB_REPOSITORY}" \
+            --arg targetKey "community" \
+            --arg environment "${CRM_ENVIRONMENT}" \
+            --arg version "${VERSION}" \
+            --arg commitSha "${COMMIT_SHA}" \
+            --arg imageRef "${IMAGE_REF}" \
+            --arg immutableRef "${IMMUTABLE_REF}" \
+            --arg status "${STATUS}" \
+            --arg actor "${GITHUB_ACTOR}" \
+            --arg runUrl "${RUN_URL}" \
+            '{
+              product: $product,
+              repo: $repo,
+              targetKey: $targetKey,
+              environment: $environment,
+              version: $version,
+              commitSha: $commitSha,
+              imageRef: $imageRef,
+              immutableRef: (if $immutableRef == "" then null else $immutableRef end),
+              status: $status,
+              actor: $actor,
+              runUrl: $runUrl
+            }' > "${PAYLOAD_FILE}"
+
+          SIGNATURE="$(openssl dgst -sha256 -hmac "${WEBHOOK_SECRET}" -hex "${PAYLOAD_FILE}" | sed 's/^.* //')"
+          curl --retry 3 --retry-delay 2 --retry-max-time 30 \
+            --fail-with-body --silent --show-error \
+            --request POST "${WEBHOOK_URL}" \
+            --header "Content-Type: application/json" \
+            --header "X-Cognipeer-Signature: sha256=${SIGNATURE}" \
+            --data-binary "@${PAYLOAD_FILE}"
