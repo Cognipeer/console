@@ -19,6 +19,14 @@ services:
       - SUPPORT_BASE_URL=${SUPPORT_BASE_URL:-}
       - SUPPORT_CRM_API_URL=${SUPPORT_CRM_API_URL:-}
       - SUPPORT_HANDOFF_SECRET=${SUPPORT_HANDOFF_SECRET:-}
+      # On-prem, single-organization bootstrap: set REGISTRATION_MODE=disabled
+      # in your environment/.env and fill these to create the one organization
+      # + owner user on first boot instead of leaving public signup open.
+      - REGISTRATION_MODE=${REGISTRATION_MODE:-open}
+      - BOOTSTRAP_ORG_NAME=${BOOTSTRAP_ORG_NAME:-}
+      - BOOTSTRAP_ADMIN_EMAIL=${BOOTSTRAP_ADMIN_EMAIL:-}
+      - BOOTSTRAP_ADMIN_PASSWORD=${BOOTSTRAP_ADMIN_PASSWORD:-}
+      - BOOTSTRAP_ADMIN_NAME=${BOOTSTRAP_ADMIN_NAME:-Administrator}
     volumes:
       - app-data:/app/data
     restart: unless-stopped
@@ -31,6 +39,9 @@ services:
 
   # ── Optional: MongoDB (uncomment to use MongoDB instead of SQLite) ──
   # Requires: DB_PROVIDER=mongodb and MONGODB_URI=mongodb://mongo:27017
+  # On-prem (DEPLOYMENT_MODE=onprem, the default above) tenant data is kept in
+  # the same physical database as MAIN_DB_NAME — no separate tenant_{slug}
+  # database is created. Override with MONGODB_SINGLE_DATABASE=false to opt out.
   #
   # mongo:
   #   image: mongo:7

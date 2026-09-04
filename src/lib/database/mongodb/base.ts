@@ -140,15 +140,25 @@ export class MongoDBProviderBase {
   protected readonly uri: string;
   protected readonly mainDbName: string;
   protected readonly clientOptions?: MongoClientOptions;
+  /**
+   * On-prem single-database mode: tenant operations bind to the main DB
+   * instead of a separate `tenant_{slug}` database. See `switchToTenant` /
+   * `runWithTenant`. Collection names never collide between `MAIN_DB_INDEXES`
+   * and `TENANT_DB_INDEXES` (indexManifest.ts), so this is safe as long as
+   * there is exactly one tenant — enforced in `TenantMixin.createTenant`.
+   */
+  protected readonly singleDatabase: boolean;
 
   constructor(
     uri: string,
     mainDbName: string = 'console_main',
     clientOptions?: MongoClientOptions,
+    singleDatabase: boolean = false,
   ) {
     this.uri = uri;
     this.mainDbName = mainDbName;
     this.clientOptions = clientOptions;
+    this.singleDatabase = singleDatabase;
   }
 
   // ── Connection lifecycle ─────────────────────────────────────────────
@@ -191,7 +201,10 @@ export class MongoDBProviderBase {
     if (!this.client) {
       throw new Error('Database client not connected. Call connect() first.');
     }
-    const tenantDb = this.client.db(tenantDbName);
+    // Single-database mode: the tenant handle IS the main DB. `tenantDbName`
+    // is kept only as the logical label (assertTenantContext, audit/logging) —
+    // it no longer names a distinct physical database.
+    const tenantDb = this.singleDatabase ? this.getMainDb() : this.client.db(tenantDbName);
     // First touch of this tenant DB in this process ensures its indexes once,
     // in the background. Memoized per process, so this is a cheap Set check on
     // every subsequent request — no per-request index work.
@@ -217,7 +230,8 @@ export class MongoDBProviderBase {
     if (!this.client) {
       throw new Error('Database client not connected. Call connect() first.');
     }
-    const tenantDb = this.client.db(tenantDbName);
+    // See switchToTenant: single-database mode binds the main DB handle.
+    const tenantDb = this.singleDatabase ? this.getMainDb() : this.client.db(tenantDbName);
     void ensureTenantDbIndexes(tenantDb, tenantDbName);
     return this.tenantContext.run(tenantDb, () =>
       this.tenantNameContext.run(tenantDbName, () => fn()),

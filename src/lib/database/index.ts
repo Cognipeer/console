@@ -70,16 +70,21 @@ export async function getDatabase(): Promise<DatabaseProvider> {
       throw new Error('MONGODB_URI environment variable is not set');
     }
 
-    const provider = new MongoDBProvider(cfg.database.uri, cfg.database.mainDbName, {
-      minPoolSize: cfg.database.minPoolSize,
-      maxPoolSize: cfg.database.maxPoolSize,
-      connectTimeoutMS: cfg.database.connectTimeoutMs,
-      socketTimeoutMS: cfg.database.socketTimeoutMs,
-      serverSelectionTimeoutMS: cfg.database.serverSelectionTimeoutMs,
-    });
+    const provider = new MongoDBProvider(
+      cfg.database.uri,
+      cfg.database.mainDbName,
+      {
+        minPoolSize: cfg.database.minPoolSize,
+        maxPoolSize: cfg.database.maxPoolSize,
+        connectTimeoutMS: cfg.database.connectTimeoutMs,
+        socketTimeoutMS: cfg.database.socketTimeoutMs,
+        serverSelectionTimeoutMS: cfg.database.serverSelectionTimeoutMs,
+      },
+      cfg.database.singleDatabase,
+    );
     await provider.connect();
     dbProvider = provider;
-    log.info('MongoDB connected successfully');
+    log.info('MongoDB connected successfully', { singleDatabase: cfg.database.singleDatabase });
 
     // Register health check
     registerHealthCheck('mongodb', async () => {
