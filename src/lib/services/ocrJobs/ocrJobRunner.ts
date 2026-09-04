@@ -22,6 +22,7 @@ import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import type { OcrDocumentSource, OcrFeature } from '@/lib/providers';
 import { sendOcrJobWebhook } from './ocrJobWebhook';
 import type { OcrJobContext } from './types';
+import { stripInlineReasoning } from '@/lib/shared/inlineReasoning';
 
 const logger = createLogger('ocr-job:runner');
 
@@ -37,7 +38,7 @@ const DEFAULT_STRUCTURED_PROMPT =
   'Extract structured data from the following document text. Respond ONLY with a valid JSON object that conforms to the provided schema, with no extra commentary or markdown fences.';
 
 function stripJsonFences(text: string): string {
-  const trimmed = text.trim();
+  const trimmed = stripInlineReasoning(text).trim();
   const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
   return (fenced ? fenced[1] : trimmed).trim();
 }

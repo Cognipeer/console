@@ -13,6 +13,7 @@ import { withResilience } from '@/lib/core/resilience';
 const logger = createLogger('guardrail-evaluator');
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
 import type { GuardrailFinding } from './types';
+import { stripInlineReasoning } from '@/lib/shared/inlineReasoning';
 import {
   MODERATION_CATEGORIES,
   PROMPT_SHIELD_ISSUES,
@@ -87,7 +88,7 @@ async function callLlm(ctx: LlmCallContext, systemPrompt: string, userPrompt: st
  * here's the JSON: {...}") still parse.
  */
 export function safeParseJson<T>(text: string): T | null {
-  const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
+  const cleaned = stripInlineReasoning(text).replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
   try {
     return JSON.parse(cleaned) as T;
   } catch {
@@ -192,6 +193,60 @@ Respond ONLY with valid JSON matching this schema exactly:
   ]
 }`;
 
+/**
+ * The classifier half of the moderation policy.
+ *
+ * Only categories the policy has ENABLED can produce a finding: a classifier
+ * reports its whole taxonomy, and an operator who turned a category off has
+ * said they do not want it enforced. Scores are the model's own probabilities,
+ * so the severity mapping here is a presentation choice over a real number
+ * rather than the judge's guess.
+ */
+async function runModerationClassifier(
+  text: string,
+  modelKey: string,
+  enabledCategories: Set<string>,
+  ctx: LlmCallContext,
+  globalAction: GuardrailAction,
+): Promise<GuardrailFinding[]> {
+  try {
+    const { handleModerationRequest } = await import('@/lib/services/models/inferenceService');
+    const { result } = await handleModerationRequest({
+      tenantDbName: ctx.tenantDbName,
+      modelKey,
+      projectId: ctx.projectId ?? '',
+      texts: [text],
+    });
+
+    const classification = result.results[0];
+    if (!classification) return [];
+
+    const findings: GuardrailFinding[] = [];
+    for (const [category, verdict] of Object.entries(classification.categories)) {
+      if (!verdict.flagged || !enabledCategories.has(category)) continue;
+      const score = verdict.score ?? 1;
+      findings.push({
+        type: 'moderation' as const,
+        category,
+        severity: score >= 0.85 ? 'high' : score >= 0.5 ? 'medium' : 'low',
+        message: `Content flagged as ${category} (score ${score.toFixed(3)})`,
+        action: globalAction,
+        block: globalAction === 'block',
+      });
+    }
+    return findings;
+  } catch (error) {
+    return failModeFindings(
+      'moderation',
+      ctx,
+      globalAction,
+      error instanceof Error ? error : new Error('Moderation classifier failed'),
+      'Moderation policy',
+      modelKey,
+    );
+  }
+}
+
 export async function runModerationPolicy(
   text: string,
   policy: IGuardrailModerationPolicy,
@@ -209,6 +264,10 @@ export async function runModerationPolicy(
     .map(([id]) => id);
 
   if (enabledCats.length === 0) return [];
+
+  if (policy.detector === 'model') {
+    return runModerationClassifier(text, effectiveModelKey, new Set(enabledCats), ctx, globalAction);
+  }
 
   const catLabels = MODERATION_CATEGORIES.filter((c) => enabledCats.includes(c.id))
     .map((c) => `- ${c.id}: ${c.label}`)

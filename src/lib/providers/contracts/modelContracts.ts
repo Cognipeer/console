@@ -11,11 +11,17 @@ import { ChatAnthropic } from '@langchain/anthropic';
 import type { ProviderContract } from '../types';
 import type { ModelProviderRuntime } from '../domains/model';
 import { resolveUnsupportedParamNames } from '../unsupportedParams';
+import { withInlineReasoningNormalization } from './wireNormalization';
+import { createOpenAiImageRuntime } from './openaiImageHelpers';
+import { createOpenAiModerationRuntime } from './openaiModerationHelpers';
 import {
   createOpenAiSttRuntime,
   createOpenAiTtsRuntime,
 } from './openaiAudioHelpers';
 import { createVlmOcrRuntime } from './vlmOcrHelpers';
+
+/** One wrapper for every OpenAI-schema chat model built by this module. */
+const reasoningNormalizingFetch = withInlineReasoningNormalization();
 
 interface OpenAiCredentials {
   apiKey: string;
@@ -336,13 +342,13 @@ function parseServiceAccountKey(raw?: string) {
 export const OpenAiModelProviderContract: ProviderContract<ModelProviderRuntime, OpenAiCredentials, OpenAiSettings> = {
   id: 'openai',
   version: '1.0.0',
-  domains: ['model', 'embedding', 'stt', 'tts', 'ocr'],
+  domains: ['model', 'embedding', 'stt', 'tts', 'ocr', 'image', 'moderation'],
   display: {
     label: 'OpenAI',
     description: 'Official OpenAI platform supporting GPT, embedding, audio (Whisper/TTS) and vision (VLM-OCR) models.',
   },
   capabilities: {
-    'model.categories': ['llm', 'embedding', 'stt', 'tts', 'ocr'],
+    'model.categories': ['llm', 'embedding', 'stt', 'tts', 'ocr', 'image', 'moderation'],
     'model.supports.tool_calls': true,
     'model.supports.streaming': true,
     'model.supports.reasoning': true,
@@ -419,6 +425,20 @@ export const OpenAiModelProviderContract: ProviderContract<ModelProviderRuntime,
           organization: settings.organization,
           modelId: config.modelId,
         }),
+      createImageRuntime: (config) =>
+        createOpenAiImageRuntime({
+          apiKey,
+          baseUrl: audioBase,
+          organization: settings.organization,
+          modelId: config.modelId,
+        }),
+      createModerationRuntime: (config) =>
+        createOpenAiModerationRuntime({
+          apiKey,
+          baseUrl: audioBase,
+          organization: settings.organization,
+          modelId: config.modelId,
+        }),
       createOcrRuntime: (config) => {
         const prompt =
           typeof (config.modelSettings as Record<string, unknown> | undefined)?.ocr === 'object'
@@ -471,13 +491,13 @@ function azureAudioOverrides(
 export const OpenAiCompatibleModelProviderContract: ProviderContract<ModelProviderRuntime, OpenAiCompatibleCredentials, OpenAiCompatibleSettings> = {
   id: 'openai-compatible',
   version: '1.0.0',
-  domains: ['model', 'embedding', 'stt', 'tts', 'ocr'],
+  domains: ['model', 'embedding', 'stt', 'tts', 'ocr', 'image', 'moderation'],
   display: {
     label: 'OpenAI-Compatible',
     description: 'Any API following the OpenAI REST schema (Mistral, Groq, Deepgram-OpenAI, ElevenLabs-OpenAI, …) including /v1/audio/* and VLM-based OCR.',
   },
   capabilities: {
-    'model.categories': ['llm', 'embedding', 'rerank', 'stt', 'tts', 'ocr'],
+    'model.categories': ['llm', 'embedding', 'rerank', 'stt', 'tts', 'ocr', 'image', 'moderation'],
     'model.supports.tool_calls': true,
     'model.supports.streaming': true,
     'model.supports.reasoning': true,
@@ -534,6 +554,10 @@ export const OpenAiCompatibleModelProviderContract: ProviderContract<ModelProvid
           configuration: {
             baseURL: baseUrl,
             organization: settings.organization,
+            // See `withInlineReasoningNormalization`: the OpenAI SDK parses the
+            // body itself under `response_format: json_schema`, so a leaked
+            // reasoning block has to be gone before it ever gets there.
+            fetch: reasoningNormalizingFetch,
           },
           ...openAiChatOverrides(overrides, config.options, resolveMaxRetries(config)),
         });
@@ -554,6 +578,20 @@ export const OpenAiCompatibleModelProviderContract: ProviderContract<ModelProvid
           organization: settings.organization,
           modelId: config.modelId,
           ...azureAudioOverrides(baseUrl, config.modelId, apiKey),
+        }),
+      createImageRuntime: (config) =>
+        createOpenAiImageRuntime({
+          apiKey,
+          baseUrl,
+          organization: settings.organization,
+          modelId: config.modelId,
+        }),
+      createModerationRuntime: (config) =>
+        createOpenAiModerationRuntime({
+          apiKey,
+          baseUrl,
+          organization: settings.organization,
+          modelId: config.modelId,
         }),
       createTtsRuntime: (config) =>
         createOpenAiTtsRuntime({
@@ -965,13 +1003,13 @@ export const VertexModelProviderContract: ProviderContract<ModelProviderRuntime,
 export const AzureModelProviderContract: ProviderContract<ModelProviderRuntime, AzureCredentials, AzureSettings> = {
   id: 'azure',
   version: '1.0.0',
-  domains: ['model', 'embedding', 'stt', 'tts', 'ocr'],
+  domains: ['model', 'embedding', 'stt', 'tts', 'ocr', 'image', 'moderation'],
   display: {
     label: 'Azure OpenAI',
     description: 'Microsoft Azure-hosted OpenAI models with deployment-based access, including Whisper/TTS deployments.',
   },
   capabilities: {
-    'model.categories': ['llm', 'embedding', 'stt', 'tts', 'ocr'],
+    'model.categories': ['llm', 'embedding', 'stt', 'tts', 'ocr', 'image', 'moderation'],
     'model.supports.tool_calls': true,
     'model.supports.streaming': true,
     'ocr.modes': ['vlm'],
@@ -1026,8 +1064,41 @@ export const AzureModelProviderContract: ProviderContract<ModelProviderRuntime, 
   createRuntime: ({ credentials, settings }) => {
     const apiKey = ensureValue(credentials.apiKey, 'Azure OpenAI API key is required.');
     const instanceName = ensureValue(settings.instanceName, 'Azure OpenAI instance name is required.');
-    const deploymentName = ensureValue(settings.deploymentName, 'Azure OpenAI deployment name is required.');
+    const defaultDeployment = ensureValue(settings.deploymentName, 'Azure OpenAI deployment name is required.');
     const apiVersion = ensureValue(settings.apiVersion, 'Azure OpenAI API version is required.');
+
+    /**
+     * On Azure the DEPLOYMENT is what a request addresses, not the model — the
+     * model id only names what was deployed. So a Model Hub entry's `modelId`
+     * is its deployment, and the provider-level `deploymentName` is only the
+     * fallback for an entry that does not name one.
+     *
+     * Every runtime below used to hard-code the provider-level value, which
+     * meant ONE Azure provider could serve exactly one deployment: an
+     * embedding, TTS or STT model registered under it was silently routed to
+     * the chat deployment. Embeddings then answered `400 The embeddings
+     * operation does not work with this model`, audio 500'd — and, worst of
+     * the three, a second CHAT model answered normally from the wrong
+     * deployment, with nothing in the response to say so.
+     */
+    const deploymentFor = (modelId?: string) =>
+      typeof modelId === 'string' && modelId.trim().length > 0 ? modelId.trim() : defaultDeployment;
+
+    /**
+     * The api-version is per DEPLOYMENT too, not per resource. Azure's GA
+     * versions do not carry every route: `2024-10-21` serves chat and
+     * embeddings but answers `404 Resource not found` for `/audio/speech`,
+     * which needs a preview version. One provider-level value therefore cannot
+     * cover a resource that hosts both, so a model may override it with
+     * `settings.azureApiVersion` — the same escape hatch LiteLLM's per-model
+     * `api_version` gives.
+     */
+    const apiVersionFor = (modelSettings: unknown) => {
+      const override = (modelSettings as Record<string, unknown> | undefined)?.azureApiVersion;
+      return typeof override === 'string' && override.trim().length > 0
+        ? override.trim()
+        : apiVersion;
+    };
 
     const runtime: ModelProviderRuntime = {
       createChatModel: (config) => {
@@ -1036,8 +1107,8 @@ export const AzureModelProviderContract: ProviderContract<ModelProviderRuntime, 
           model: config.modelId,
           azureOpenAIApiKey: apiKey,
           azureOpenAIApiInstanceName: instanceName,
-          azureOpenAIApiDeploymentName: deploymentName,
-          azureOpenAIApiVersion: apiVersion,
+          azureOpenAIApiDeploymentName: deploymentFor(config.modelId),
+          azureOpenAIApiVersion: apiVersionFor(config.modelSettings),
           ...openAiChatOverrides(overrides, config.options, resolveMaxRetries(config)),
         });
       },
@@ -1046,26 +1117,44 @@ export const AzureModelProviderContract: ProviderContract<ModelProviderRuntime, 
           model: config.modelId,
           azureOpenAIApiKey: apiKey,
           azureOpenAIApiInstanceName: instanceName,
-          azureOpenAIApiDeploymentName: deploymentName,
-          azureOpenAIApiVersion: apiVersion,
+          azureOpenAIApiDeploymentName: deploymentFor(config.modelId),
+          azureOpenAIApiVersion: apiVersionFor(config.modelSettings),
         }),
       createSttRuntime: (config) =>
         createOpenAiSttRuntime({
           apiKey,
-          baseUrl: `https://${instanceName}.openai.azure.com/openai/deployments/${deploymentName}`,
+          baseUrl: `https://${instanceName}.openai.azure.com/openai/deployments/${deploymentFor(config.modelId)}`,
           modelId: config.modelId,
           extraHeaders: { 'api-key': apiKey },
           buildUrl: (path) =>
-            `https://${instanceName}.openai.azure.com/openai/deployments/${deploymentName}${path}?api-version=${encodeURIComponent(apiVersion)}`,
+            `https://${instanceName}.openai.azure.com/openai/deployments/${deploymentFor(config.modelId)}${path}?api-version=${encodeURIComponent(apiVersionFor(config.modelSettings))}`,
         }),
       createTtsRuntime: (config) =>
         createOpenAiTtsRuntime({
           apiKey,
-          baseUrl: `https://${instanceName}.openai.azure.com/openai/deployments/${deploymentName}`,
+          baseUrl: `https://${instanceName}.openai.azure.com/openai/deployments/${deploymentFor(config.modelId)}`,
           modelId: config.modelId,
           extraHeaders: { 'api-key': apiKey },
           buildUrl: (path) =>
-            `https://${instanceName}.openai.azure.com/openai/deployments/${deploymentName}${path}?api-version=${encodeURIComponent(apiVersion)}`,
+            `https://${instanceName}.openai.azure.com/openai/deployments/${deploymentFor(config.modelId)}${path}?api-version=${encodeURIComponent(apiVersionFor(config.modelSettings))}`,
+        }),
+      createImageRuntime: (config) =>
+        createOpenAiImageRuntime({
+          apiKey,
+          baseUrl: `https://${instanceName}.openai.azure.com/openai/deployments/${deploymentFor(config.modelId)}`,
+          modelId: config.modelId,
+          extraHeaders: { 'api-key': apiKey },
+          buildUrl: (path) =>
+            `https://${instanceName}.openai.azure.com/openai/deployments/${deploymentFor(config.modelId)}${path}?api-version=${encodeURIComponent(apiVersionFor(config.modelSettings))}`,
+        }),
+      createModerationRuntime: (config) =>
+        createOpenAiModerationRuntime({
+          apiKey,
+          baseUrl: `https://${instanceName}.openai.azure.com/openai/deployments/${deploymentFor(config.modelId)}`,
+          modelId: config.modelId,
+          extraHeaders: { 'api-key': apiKey },
+          buildUrl: (path) =>
+            `https://${instanceName}.openai.azure.com/openai/deployments/${deploymentFor(config.modelId)}${path}?api-version=${encodeURIComponent(apiVersionFor(config.modelSettings))}`,
         }),
       createOcrRuntime: (config) => {
         const prompt =

@@ -37,7 +37,9 @@ import {
   IconChartHistogram,
   IconStethoscope,
   IconRobot,
+  IconPhoto,
   IconScan,
+  IconShieldCheck,
   IconServer,
   IconSettings,
   IconShield,
@@ -66,7 +68,7 @@ export interface SubNavItem {
 }
 
 /** Model categories surfaced as their own sub-nav entries under the Models service. */
-const MODEL_TYPE_KEYS = ['llm', 'embedding', 'rerank', 'stt', 'tts', 'ocr'];
+const MODEL_TYPE_KEYS = ['llm', 'embedding', 'rerank', 'stt', 'tts', 'ocr', 'image', 'moderation'];
 
 export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
   sandbox: [
@@ -450,6 +452,20 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       href: '/dashboard/models?type=ocr',
       icon: IconScan,
       matcher: (p, s) => p === '/dashboard/models' && s.get('type') === 'ocr',
+    },
+    {
+      id: 'image',
+      label: 'Image Generation',
+      href: '/dashboard/models?type=image',
+      icon: IconPhoto,
+      matcher: (p, s) => p === '/dashboard/models' && s.get('type') === 'image',
+    },
+    {
+      id: 'moderation',
+      label: 'Moderation',
+      href: '/dashboard/models?type=moderation',
+      icon: IconShieldCheck,
+      matcher: (p, s) => p === '/dashboard/models' && s.get('type') === 'moderation',
     },
   ],
   files: [

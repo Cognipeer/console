@@ -47,6 +47,19 @@ export interface IGuardrailWordList {
 
 export interface IGuardrailModerationPolicy {
   enabled: boolean;
+  /**
+   * Which detector runs this policy.
+   *  - `llm` (default): the chat model named by `modelKey` judges the text.
+   *  - `model`: the moderation-category model named by `modelKey` classifies it.
+   *
+   * The judge is the universal fallback — it works against any chat model — but
+   * it costs a full completion on the hot path of every guarded request, and it
+   * can only report a coarse severity. Where the provider has a real
+   * classifier, `model` is both far cheaper and the only path that yields true
+   * per-category probabilities.
+   */
+  detector?: 'llm' | 'model';
+  /** Chat model (detector `llm`) or moderation model (detector `model`). */
   modelKey?: string;
   categories: Record<string, boolean>;
 }
@@ -337,6 +350,8 @@ export interface GuardrailRegexPolicyConfig extends GuardrailPolicyBase<'regex'>
 }
 
 export interface GuardrailModerationPolicyConfig extends GuardrailPolicyBase<'moderation'> {
+  /** See `IGuardrailModerationPolicy.detector`. */
+  detector?: 'llm' | 'model';
   modelKey?: string;
   categories: Record<string, boolean>;
 }
@@ -2191,6 +2206,14 @@ export type BrowserActionType =
   | 'press'
   | 'wait'
   | 'scroll'
+  | 'select'
+  | 'check'
+  | 'upload'
+  | 'drag'
+  | 'back'
+  | 'forward'
+  | 'reload'
+  | 'tab'
   | 'extract'
   | 'snapshot'
   | 'screenshot'
@@ -2221,6 +2244,34 @@ export interface IBrowser {
   artifactBucketKey?: string;
   /** Default browser session configuration applied to spawned sessions. */
   defaultSessionConfig?: IBrowserSessionConfig;
+  /**
+   * A signed-in profile (Playwright `storageState`) every session starts from,
+   * encrypted at rest with `encryptObject`.
+   *
+   * This is what makes an unattended flow practical: sign in ONCE — by hand
+   * in the live preview, or by exporting from a browser — and the nightly run
+   * begins authenticated instead of pushing credentials through a login form,
+   * where they would pass through the action log on every single run.
+   *
+   * Encrypted because it holds session cookies: whoever holds this file is
+   * logged in as that user until the cookies expire.
+   */
+  storageStateEnc?: string | null;
+  /**
+   * Non-secret description of the stored profile, safe to show in the UI.
+   *
+   * `null` clears the profile. `undefined` means "leave it alone" — the
+   * providers skip undefined fields, so it cannot express a deletion.
+   */
+  storageStateMeta?: null | {
+    uploadedAt: Date;
+    uploadedBy?: string;
+    cookieCount: number;
+    origins: string[];
+    /** Earliest cookie expiry, so the UI can warn before a profile goes stale. */
+    earliestExpiry?: Date;
+    sourceFileName?: string;
+  };
   /** Default tenant model key applied when running agents under this browser. */
   defaultModelKey?: string;
   /** Default agent runtime knobs (maxSteps, runtimeProfile, …). */
@@ -2248,6 +2299,8 @@ export interface IBrowserSessionConfig {
   viewport?: { width: number; height: number };
   userAgent?: string;
   locale?: string;
+  /** IANA zone, e.g. `Europe/Istanbul`. Pages that render dates read this. */
+  timezoneId?: string;
   /** Auto-close after this many ms of inactivity. Defaults via config. */
   idleTimeoutMs?: number;
   /** Hard upper bound on session lifetime (ms). */
@@ -2257,6 +2310,41 @@ export interface IBrowserSessionConfig {
   /** Default navigation timeout (goto). Defaults via config. */
   navigationTimeoutMs?: number;
   access?: IBrowserAccessRules;
+  /**
+   * Route the session's traffic through an egress proxy.
+   *
+   * Enterprise networks want automated browsers on the same secure web
+   * gateway as everything else; without this the traffic leaves from the
+   * pod's default route and appears in no egress log.
+   */
+  proxy?: {
+    server: string;
+    username?: string;
+    password?: string;
+    bypass?: string;
+  };
+  /** Sent on every request — API keys for internal apps, tracing headers. */
+  extraHTTPHeaders?: Record<string, string>;
+  /** HTTP basic auth, for internal tools still fronted by it. */
+  httpCredentials?: { username: string; password: string };
+  /** Off by default: an automated browser that accepts files is an ingest path. */
+  acceptDownloads?: boolean;
+  /** DANGER: disables TLS verification. Only for a known-broken internal chain. */
+  ignoreHTTPSErrors?: boolean;
+  /**
+   * What to do when the page raises `alert` / `confirm` / `prompt`.
+   *
+   * There is no "leave it open" option on purpose: an unanswered dialog
+   * blocks the page indefinitely, and every subsequent action fails as a
+   * timeout with no hint of the cause.
+   */
+  dialogPolicy?: 'accept' | 'dismiss';
+  /**
+   * Cookies + origin storage to start from, as exported by
+   * `browserManager.exportStorageState`. This is how a scheduled flow resumes
+   * a signed-in session instead of replaying credentials into a login form.
+   */
+  storageState?: Record<string, unknown>;
 }
 
 export interface IBrowserSession extends IUsageAttributionFields {
@@ -2321,6 +2409,158 @@ export interface IBrowserSessionEvent {
   data?: Record<string, unknown>;
   errorMessage?: string;
   createdAt?: Date;
+}
+
+// ── Browser Flow types ─────────────────────────────────────────────────────
+//
+// A Flow is the replayable half of browser automation, and it exists because
+// discovery and execution are different problems with different costs.
+//
+// DISCOVERY is a model reading a page, guessing, backtracking and paying for
+// tokens on every step. EXECUTION is running the steps that discovery already
+// proved. Today an agent pays the discovery price on every single run, which
+// is why the same nightly task costs the same as the first time it was solved
+// and fails in new ways each night.
+//
+// A Flow freezes the outcome of one discovery into an ordered step list with
+// DURABLE targets (`role` + `name`, test-ids — never the volatile aria `ref`),
+// declared inputs, and per-step retry policy. Replaying it needs no model at
+// all: `runBrowserFlow` walks the list. An agent can still be in the loop —
+// it can CALL a flow as one tool, and a step can hand control back to a model
+// when the page is genuinely new — but the common path is deterministic.
+
+export type BrowserFlowStatus = 'draft' | 'active' | 'disabled';
+export type BrowserFlowRunStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+export type BrowserFlowTrigger = 'manual' | 'agent' | 'api' | 'schedule';
+
+/** Declared parameter of a flow, bound at run time into `{{input.name}}`. */
+export interface IBrowserFlowInput {
+  name: string;
+  label?: string;
+  type: 'string' | 'number' | 'boolean' | 'secret';
+  required?: boolean;
+  /** Applied when the run supplies nothing. Never set for `secret`. */
+  default?: string | number | boolean;
+  description?: string;
+}
+
+/**
+ * What a step does when it fails.
+ *
+ * `abort` is the default because a half-finished form is usually worse than
+ * no form. `continue` suits assertion-ish steps ("dismiss the cookie banner
+ * if it is there"), which is why `optional` exists as its own flag rather
+ * than being inferred from a zero retry count.
+ */
+export interface IBrowserFlowStepPolicy {
+  /** Attempts beyond the first. Default 0. */
+  retries?: number;
+  /** Delay between attempts (ms). Default 500, doubling. */
+  retryDelayMs?: number;
+  /** Per-step timeout (ms). Falls back to the session's action timeout. */
+  timeoutMs?: number;
+  /** A failing optional step is recorded and skipped instead of aborting. */
+  optional?: boolean;
+}
+
+export interface IBrowserFlowStep {
+  /** Stable id, so a run's step results survive a step being reordered. */
+  id: string;
+  /** Operator-facing label. Generated at record time from the action. */
+  label?: string;
+  /**
+   * The action payload, in the same shape the live API accepts, minus any
+   * volatile `ref`. Recording strips refs; `browserFlowService` rejects a
+   * step that still carries one.
+   */
+  action: Record<string, unknown>;
+  /** Store the step's output under this name for later `{{step.name}}` use. */
+  captureAs?: string;
+  policy?: IBrowserFlowStepPolicy;
+  /** Skip the step unless this expression is truthy. */
+  when?: string;
+}
+
+export interface IBrowserFlow {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  /** URL-friendly unique identifier scoped to the tenant/project. */
+  key: string;
+  name: string;
+  description?: string;
+  status: BrowserFlowStatus;
+  /** Browser profile the flow runs under — supplies session config and egress rules. */
+  browserId: string;
+  inputs?: IBrowserFlowInput[];
+  steps: IBrowserFlowStep[];
+  /** Session config overrides applied for the flow's own sessions. */
+  sessionConfig?: IBrowserSessionConfig;
+  /** Session this flow was recorded from, for provenance. */
+  recordedFromSessionId?: string;
+  /** Bumped on every step change; a run pins the version it executed. */
+  version: number;
+  /** Rollup of the most recent run, for list views. */
+  lastRun?: {
+    runId: string;
+    status: BrowserFlowRunStatus;
+    startedAt: Date;
+    durationMs?: number;
+  };
+  metadata?: Record<string, unknown>;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IBrowserFlowStepResult {
+  stepId: string;
+  index: number;
+  status: 'succeeded' | 'failed' | 'skipped';
+  attempts: number;
+  durationMs?: number;
+  url?: string;
+  /** Sanitized action echo — secrets are already substituted out. */
+  action?: Record<string, unknown>;
+  /** Whatever `captureAs` collected. */
+  captured?: unknown;
+  artifact?: {
+    bucketKey: string;
+    fileId: string;
+    objectKey: string;
+    contentType?: string;
+  };
+  errorMessage?: string;
+}
+
+export interface IBrowserFlowRun {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  flowId: string;
+  flowKey: string;
+  /** Flow version this run executed — steps may have changed since. */
+  flowVersion: number;
+  status: BrowserFlowRunStatus;
+  trigger: BrowserFlowTrigger;
+  /** Session the run drove. Its event log is the fine-grained record. */
+  sessionId?: string;
+  sessionKey?: string;
+  /** Non-secret inputs only; `secret` parameters are never persisted. */
+  inputs?: Record<string, unknown>;
+  stepResults?: IBrowserFlowStepResult[];
+  /** Values collected by `captureAs`, keyed by name. */
+  outputs?: Record<string, unknown>;
+  startedAt?: Date;
+  endedAt?: Date;
+  durationMs?: number;
+  errorMessage?: string;
+  /** Index of the step that aborted the run. */
+  failedStepIndex?: number;
+  createdBy: string;
+  createdAt?: Date;
+  updatedAt?: Date;
 }
 
 // ── Crawler types ──────────────────────────────────────────────────────────

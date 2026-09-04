@@ -46,6 +46,19 @@ export interface IGuardrailWordList {
 
 export interface IGuardrailModerationPolicy {
   enabled: boolean;
+  /**
+   * Which detector runs this policy.
+   *  - `llm` (default): the chat model named by `modelKey` judges the text.
+   *  - `model`: the moderation-category model named by `modelKey` classifies it.
+   *
+   * The judge is the universal fallback — it works against any chat model — but
+   * it costs a full completion on the hot path of every guarded request, and it
+   * can only report a coarse severity. Where the provider has a real
+   * classifier, `model` is both far cheaper and the only path that yields true
+   * per-category probabilities.
+   */
+  detector?: 'llm' | 'model';
+  /** Chat model (detector `llm`) or moderation model (detector `model`). */
   modelKey?: string;
   categories: Record<string, boolean>;
 }

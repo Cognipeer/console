@@ -10,6 +10,8 @@
 import { ObjectId } from 'mongodb';
 import type {
   IBrowser,
+  IBrowserFlow,
+  IBrowserFlowRun,
   IBrowserSession,
   IBrowserSessionEvent,
 } from '../provider.interface';
@@ -256,6 +258,169 @@ export function BrowserMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
       return db
         .collection<IBrowserSessionEvent>(COLLECTIONS.browserSessionEvents)
         .countDocuments({ sessionId });
+    }
+
+    // ── Browser Flows ─────────────────────────────────────────────
+
+    async createBrowserFlow(
+      record: Omit<IBrowserFlow, '_id' | 'createdAt' | 'updatedAt'>,
+    ): Promise<IBrowserFlow> {
+      const db = this.getTenantDb();
+      const now = new Date();
+      const doc: Omit<IBrowserFlow, '_id'> = { ...record, createdAt: now, updatedAt: now };
+      const result = await db
+        .collection<IBrowserFlow>(COLLECTIONS.browserFlows)
+        .insertOne(doc as unknown as IBrowserFlow);
+      return { ...doc, _id: result.insertedId.toString() };
+    }
+
+    async updateBrowserFlow(
+      id: string,
+      data: Partial<Omit<IBrowserFlow, '_id' | 'tenantId' | 'createdAt'>>,
+    ): Promise<IBrowserFlow | null> {
+      const db = this.getTenantDb();
+      const payload: Partial<IBrowserFlow> = { ...data, updatedAt: new Date() };
+      delete payload._id;
+      delete payload.tenantId;
+      delete payload.createdAt;
+      const result = await db
+        .collection<IBrowserFlow>(COLLECTIONS.browserFlows)
+        .findOneAndUpdate({ _id: objectId(id) }, { $set: payload }, { returnDocument: 'after' });
+      if (!result) return null;
+      return { ...result, _id: toId(result._id) } as IBrowserFlow;
+    }
+
+    async deleteBrowserFlow(id: string): Promise<boolean> {
+      const db = this.getTenantDb();
+      // Runs are meaningless without their flow, and nothing else references
+      // them — drop the history in the same call rather than orphaning it.
+      await db
+        .collection<IBrowserFlowRun>(COLLECTIONS.browserFlowRuns)
+        .deleteMany({ flowId: id });
+      const result = await db
+        .collection<IBrowserFlow>(COLLECTIONS.browserFlows)
+        .deleteOne({ _id: objectId(id) });
+      return result.deletedCount > 0;
+    }
+
+    async findBrowserFlowById(id: string): Promise<IBrowserFlow | null> {
+      const db = this.getTenantDb();
+      try {
+        const record = await db
+          .collection<IBrowserFlow>(COLLECTIONS.browserFlows)
+          .findOne({ _id: objectId(id) });
+        if (!record) return null;
+        return { ...record, _id: toId(record._id) } as IBrowserFlow;
+      } catch {
+        // A key was passed where an id was expected — the caller falls back.
+        return null;
+      }
+    }
+
+    async findBrowserFlowByKey(
+      tenantId: string,
+      key: string,
+      projectId?: string,
+    ): Promise<IBrowserFlow | null> {
+      const db = this.getTenantDb();
+      const query: Record<string, unknown> = { tenantId, key };
+      if (projectId) query.projectId = projectId;
+      const record = await db
+        .collection<IBrowserFlow>(COLLECTIONS.browserFlows)
+        .findOne(query);
+      if (!record) return null;
+      return { ...record, _id: toId(record._id) } as IBrowserFlow;
+    }
+
+    async listBrowserFlows(
+      tenantId: string,
+      filters?: {
+        projectId?: string;
+        status?: string;
+        browserId?: string;
+        search?: string;
+      },
+    ): Promise<IBrowserFlow[]> {
+      const db = this.getTenantDb();
+      const query: Record<string, unknown> = { tenantId };
+      if (filters?.projectId) query.projectId = filters.projectId;
+      if (filters?.status) query.status = filters.status;
+      if (filters?.browserId) query.browserId = filters.browserId;
+      if (filters?.search) query.name = { $regex: filters.search, $options: 'i' };
+      const docs = await db
+        .collection<IBrowserFlow>(COLLECTIONS.browserFlows)
+        .find(query)
+        .sort({ updatedAt: -1 })
+        .toArray();
+      return docs.map((d) => ({ ...d, _id: toId(d._id) }) as IBrowserFlow);
+    }
+
+    // ── Browser Flow Runs ─────────────────────────────────────────
+
+    async createBrowserFlowRun(
+      record: Omit<IBrowserFlowRun, '_id' | 'createdAt' | 'updatedAt'>,
+    ): Promise<IBrowserFlowRun> {
+      const db = this.getTenantDb();
+      const now = new Date();
+      const doc: Omit<IBrowserFlowRun, '_id'> = { ...record, createdAt: now, updatedAt: now };
+      const result = await db
+        .collection<IBrowserFlowRun>(COLLECTIONS.browserFlowRuns)
+        .insertOne(doc as unknown as IBrowserFlowRun);
+      return { ...doc, _id: result.insertedId.toString() };
+    }
+
+    async updateBrowserFlowRun(
+      id: string,
+      data: Partial<Omit<IBrowserFlowRun, '_id' | 'tenantId' | 'createdAt'>>,
+    ): Promise<IBrowserFlowRun | null> {
+      const db = this.getTenantDb();
+      const payload: Partial<IBrowserFlowRun> = { ...data, updatedAt: new Date() };
+      delete payload._id;
+      delete payload.tenantId;
+      delete payload.createdAt;
+      const result = await db
+        .collection<IBrowserFlowRun>(COLLECTIONS.browserFlowRuns)
+        .findOneAndUpdate({ _id: objectId(id) }, { $set: payload }, { returnDocument: 'after' });
+      if (!result) return null;
+      return { ...result, _id: toId(result._id) } as IBrowserFlowRun;
+    }
+
+    async findBrowserFlowRunById(id: string): Promise<IBrowserFlowRun | null> {
+      const db = this.getTenantDb();
+      try {
+        const record = await db
+          .collection<IBrowserFlowRun>(COLLECTIONS.browserFlowRuns)
+          .findOne({ _id: objectId(id) });
+        if (!record) return null;
+        return { ...record, _id: toId(record._id) } as IBrowserFlowRun;
+      } catch {
+        return null;
+      }
+    }
+
+    async listBrowserFlowRuns(
+      tenantId: string,
+      filters?: {
+        projectId?: string;
+        flowId?: string;
+        status?: string;
+        limit?: number;
+        skip?: number;
+      },
+    ): Promise<IBrowserFlowRun[]> {
+      const db = this.getTenantDb();
+      const query: Record<string, unknown> = { tenantId };
+      if (filters?.projectId) query.projectId = filters.projectId;
+      if (filters?.flowId) query.flowId = filters.flowId;
+      if (filters?.status) query.status = filters.status;
+      const cursor = db
+        .collection<IBrowserFlowRun>(COLLECTIONS.browserFlowRuns)
+        .find(query)
+        .sort({ createdAt: -1 });
+      if (filters?.skip) cursor.skip(filters.skip);
+      cursor.limit(filters?.limit && filters.limit > 0 ? filters.limit : 100);
+      const docs = await cursor.toArray();
+      return docs.map((d) => ({ ...d, _id: toId(d._id) }) as IBrowserFlowRun);
     }
   };
 }

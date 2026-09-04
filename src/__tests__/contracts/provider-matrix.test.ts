@@ -59,6 +59,8 @@ describe('Domain classification', () => {
     'tts',
     'ocr',
     'websearch',
+    'image',
+    'moderation',
   ] as const;
 
   it.each(CORE_PROVIDER_CONTRACTS.map((c) => [c.id, c]))(
@@ -133,7 +135,7 @@ describe('Model provider capabilities', () => {
         expect(Array.isArray(caps['model.categories'])).toBe(true);
         const categories = caps['model.categories'] as string[];
         categories.forEach((cat) => {
-          expect(['llm', 'embedding', 'rerank', 'stt', 'tts', 'ocr']).toContain(cat);
+          expect(['llm', 'embedding', 'rerank', 'stt', 'tts', 'ocr', 'image', 'moderation']).toContain(cat);
         });
       }
     },

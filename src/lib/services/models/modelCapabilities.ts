@@ -70,6 +70,8 @@ export function getDefaultModelOutputModalities(
       return ['embeddings'];
     case 'tts':
       return ['audio'];
+    case 'image':
+      return ['image'];
     default:
       return ['text'];
   }

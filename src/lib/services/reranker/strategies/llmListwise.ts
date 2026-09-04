@@ -9,6 +9,7 @@
 import { createLogger } from '@/lib/core/logger';
 import { handleChatCompletion } from '@/lib/services/models/inferenceService';
 import type { RerankerStrategyImpl } from './index';
+import { stripInlineReasoning } from '@/lib/shared/inlineReasoning';
 
 const logger = createLogger('reranker:llm-listwise');
 
@@ -29,8 +30,10 @@ function renderPrompt(template: string, query: string, formatted: string): strin
 }
 
 function parseRanking(text: string): Array<{ index: number; score: number }> {
-  // Extract JSON array, even if the model wraps with prose.
-  const match = text.match(/\[[\s\S]*\]/);
+  // Extract JSON array, even if the model wraps with prose. Leaked
+  // `<reasoning>` markup goes first: a chain-of-thought often contains
+  // bracketed text that would win the match.
+  const match = stripInlineReasoning(text).match(/\[[\s\S]*\]/);
   if (!match) return [];
   try {
     const parsed = JSON.parse(match[0]) as Array<{ index?: unknown; score?: unknown }>;

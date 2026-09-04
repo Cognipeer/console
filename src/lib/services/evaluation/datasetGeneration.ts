@@ -14,6 +14,7 @@ import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
 import type { IEvaluationDatasetItem } from '@/lib/database';
 import { handleChatCompletion } from '@/lib/services/models/inferenceService';
+import { stripInlineReasoning } from '@/lib/shared/inlineReasoning';
 
 const logger = createLogger('eval-dataset-gen');
 
@@ -116,7 +117,7 @@ function extractAssistantText(response: unknown): string {
 
 /** Tolerantly parse a JSON array out of a model reply (handles code fences). */
 function parseQaPairs(text: string): Array<{ question: string; answer: string }> {
-  let raw = text.trim();
+  let raw = stripInlineReasoning(text).trim();
   const fence = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fence) raw = fence[1].trim();
   const start = raw.indexOf('[');

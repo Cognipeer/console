@@ -337,7 +337,7 @@ describe('reasoning_effort + function tools — upstream 400s the combination', 
       .toEqual(expect.arrayContaining(['reasoning', 'reasoning_effort']));
   });
 
-  it('keeps reasoning_effort out of the constructed model when tools are present', () => {
+  it('replaces the caller\'s reasoning_effort with "none" when tools are present', () => {
     const config = resolveModelInvocationConfig(
       { settings: {}, modelId: 'gpt-5.6-luna', providerDriver: 'openai' },
       {
@@ -347,7 +347,11 @@ describe('reasoning_effort + function tools — upstream 400s the combination', 
       },
     );
 
+    // Omitting it entirely is NOT enough on a hosted upstream: Bedrock supplies
+    // its own default and 400s the tool call anyway, so the caller's value is
+    // stripped and the one value the upstream accepts is sent in its place.
     expect(config.modelSettings.reasoning).toBeUndefined();
+    expect(config.modelSettings.extraBody).toMatchObject({ reasoning_effort: 'none' });
     expect(config.unsupportedParams).toEqual(expect.arrayContaining(['reasoning', 'reasoning_effort']));
   });
 
@@ -360,7 +364,7 @@ describe('reasoning_effort + function tools — upstream 400s the combination', 
     expect(config.modelSettings.reasoning).toEqual({ effort: 'high' });
   });
 
-  it('drops it end-to-end once bound to a real gpt-5 model id', () => {
+  it('reaches the provider as reasoning_effort "none" once bound to a real gpt-5 model id', () => {
     constructed.length = 0;
     const runtime = OpenAiCompatibleModelProviderContract.createRuntime({
       tenantId: 't1',
@@ -383,6 +387,7 @@ describe('reasoning_effort + function tools — upstream 400s the combination', 
     runtime.createChatModel!({ modelId: 'gpt-5.6-luna', category: 'llm', modelSettings });
 
     expect(constructed[0].reasoning).toBeUndefined();
+    expect(constructed[0].modelKwargs).toMatchObject({ reasoning_effort: 'none' });
   });
 });
 
@@ -518,5 +523,38 @@ describe('buildCacheVariantKey — parameters take part in the cache key', () =>
   it('collapses to a shared key when nothing was specified', () => {
     expect(buildCacheVariantKey({})).toBe('default');
     expect(buildCacheVariantKey(undefined)).toBe('default');
+  });
+});
+
+describe('gateway-namespaced model ids', () => {
+  // Bedrock, Vertex and friends serve the same model under a namespaced id.
+  // Every rule in the registry is anchored at the start of the model id, so
+  // without suffix matching none of them fired for a hosted deployment and the
+  // request went out with parameters the upstream rejects.
+  it('detects a rule through a vendor/region prefix', () => {
+    const bare = detectUnsupportedParams('openai-compatible', 'gpt-5.6-terra', true);
+    const namespaced = detectUnsupportedParams('openai-compatible', 'global.openai.gpt-5.6-terra', true);
+    expect(namespaced.ruleId).toBe('openai-gpt-5');
+    expect(namespaced.params).toEqual(bare.params);
+  });
+
+  it('forces reasoning_effort:"none" for a gpt-5 call that carries tools', () => {
+    // Bedrock 400s on a gpt-5 tool call even when the request omits
+    // reasoning_effort entirely, so dropping it is not enough.
+    const withTools = detectUnsupportedParams('openai-compatible', 'global.openai.gpt-5.6-terra', true);
+    expect(withTools.forced).toEqual({ reasoning_effort: 'none' });
+
+    const withoutTools = detectUnsupportedParams('openai-compatible', 'global.openai.gpt-5.6-terra', false);
+    expect(withoutTools.forced).toBeUndefined();
+  });
+
+  it('never splits a dotted version inside the model name itself', () => {
+    // `gpt-5.6-terra` must not be peeled down to `6-terra`.
+    expect(detectUnsupportedParams('openai-compatible', 'gpt-5.6-terra', false).ruleId).toBe('openai-gpt-5');
+  });
+
+  it('leaves a namespaced model with no rule alone', () => {
+    expect(detectUnsupportedParams('openai-compatible', 'qwen.qwen3-32b-v1:0', true).params).toEqual([]);
+    expect(detectUnsupportedParams('openai-compatible', 'zai.glm-4.7-flash', true).params).toEqual([]);
   });
 });

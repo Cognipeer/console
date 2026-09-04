@@ -41,6 +41,11 @@ import {
   readJsonBody,
   withClientApiRequestContext,
 } from '../fastify-utils';
+import {
+  browserFlowHandlers,
+  browserProfileHandlers,
+  type BrowserRouteContext,
+} from './browser-shared';
 
 const logger = createLogger('api:client-browser');
 
@@ -342,4 +347,37 @@ export const clientBrowserApiPlugin: FastifyPluginAsync = async (app) => {
       return sendBrowserError(reply, error, 'Failed to delete browser session');
     }
   }));
+
+  // ── Flows, profiles and session diagnostics ───────────────────────
+  //
+  // Same handler bodies as the dashboard API — see `browser-shared`. Only
+  // the auth resolver below differs.
+  const resolve = async (request: Parameters<typeof getApiTokenContextForRequest>[0]): Promise<BrowserRouteContext> => {
+    const ctx = await getApiTokenContextForRequest(request);
+    return {
+      tenantDbName: ctx.tenantDbName,
+      tenantId: ctx.tenantId,
+      projectId: ctx.projectId,
+      actor: ctx.user?.email ?? 'api-token',
+    };
+  };
+  const deps = { resolve, sendError: sendBrowserError };
+  const flows = browserFlowHandlers(deps);
+  const profiles = browserProfileHandlers(deps);
+
+  app.post('/client/v1/browser/flows', withClientApiRequestContext(flows.create));
+  app.get('/client/v1/browser/flows', withClientApiRequestContext(flows.list));
+  app.post('/client/v1/browser/flows/record', withClientApiRequestContext(flows.record));
+  app.get('/client/v1/browser/flow-runs', withClientApiRequestContext(flows.listRuns));
+  app.get('/client/v1/browser/flow-runs/:runId', withClientApiRequestContext(flows.getRun));
+  app.get('/client/v1/browser/flows/:idOrKey', withClientApiRequestContext(flows.get));
+  app.patch('/client/v1/browser/flows/:idOrKey', withClientApiRequestContext(flows.update));
+  app.delete('/client/v1/browser/flows/:idOrKey', withClientApiRequestContext(flows.remove));
+  app.post('/client/v1/browser/flows/:idOrKey/run', withClientApiRequestContext(flows.run));
+
+  app.put('/client/v1/browser/browsers/:idOrKey/profile', withClientApiRequestContext(profiles.uploadProfile));
+  app.delete('/client/v1/browser/browsers/:idOrKey/profile', withClientApiRequestContext(profiles.deleteProfile));
+  app.get('/client/v1/browser/sessions/:sessionKey/profile', withClientApiRequestContext(profiles.exportSessionProfile));
+  app.get('/client/v1/browser/sessions/:sessionKey/diagnostics', withClientApiRequestContext(profiles.observations));
+  app.get('/client/v1/browser/sessions/:sessionKey/find', withClientApiRequestContext(profiles.find));
 };

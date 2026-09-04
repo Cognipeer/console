@@ -94,6 +94,8 @@ export const TABLES = {
   browsers: 'browsers',
   browserSessions: 'browser_sessions',
   browserSessionEvents: 'browser_session_events',
+  browserFlows: 'browser_flows',
+  browserFlowRuns: 'browser_flow_runs',
   crawlers: 'crawlers',
   crawlJobs: 'crawl_jobs',
   crawlResults: 'crawl_results',
@@ -301,6 +303,13 @@ export class SQLiteProviderBase {
   }
 
   private applyTenantMigrations(db: Database.Database): void {
+    // Browser profiles: an encrypted `storageState` (signed-in cookies) plus
+    // its non-secret description. CREATE TABLE IF NOT EXISTS never alters an
+    // existing tenant DB, so a browser created before this change would fail
+    // its next UPDATE without these.
+    this.ensureTableColumn(db, TABLES.browsers, 'storageStateEnc', 'storageStateEnc TEXT');
+    this.ensureTableColumn(db, TABLES.browsers, 'storageStateMeta', 'storageStateMeta TEXT');
+
     // Knowledge Engine: richer chunking (offsets, heading path, real token
     // counts) plus the stored source a re-index rebuilds from. CREATE TABLE IF
     // NOT EXISTS never alters an existing tenant DB, so without these the

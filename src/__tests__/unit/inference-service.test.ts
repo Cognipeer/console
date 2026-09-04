@@ -644,6 +644,66 @@ describe('handleChatCompletion', () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 
+  describe('JSON mode — repairing a malformed provider response', () => {
+    const setup = (content: string) => {
+      (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeLlmModel());
+      (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
+        runtime: makeChatRuntime({ content, tool_calls: [] }),
+      });
+      (toOpenAIChatResponse as ReturnType<typeof vi.fn>).mockReturnValue({
+        id: 'chatcmpl-abc',
+        choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content } }],
+      });
+      (summarizeUsage as ReturnType<typeof vi.fn>).mockReturnValue({
+        inputTokens: 5, outputTokens: 10, totalTokens: 15,
+      });
+    };
+
+    const run = (responseFormat?: unknown) =>
+      handleChatCompletion({
+        ...BASE_PARAMS,
+        body: {
+          messages: [{ role: 'user', content: 'json please' }],
+          ...(responseFormat ? { response_format: responseFormat } : {}),
+        },
+      });
+
+    const contentOf = (out: Awaited<ReturnType<typeof handleChatCompletion>>) =>
+      (out as unknown as { response: { choices: Array<{ message: { content: unknown } }> } })
+        .response.choices[0].message.content;
+
+    // Verbatim from bedrock-runtime eu-central-1, `openai.gpt-oss-120b-1:0`
+    // with response_format json_object: the decoder stranded a bare `{`.
+    const BROKEN = '{\n{"city":"Istanbul","ok":true}';
+
+    it('recovers the payload when the caller asked for json_object', async () => {
+      setup(BROKEN);
+      expect(contentOf(await run({ type: 'json_object' }))).toBe('{"city":"Istanbul","ok":true}');
+    });
+
+    it('recovers the payload when the caller asked for json_schema', async () => {
+      setup('Sounds{   "city":"Istanbul",   "tempC":22 }');
+      expect(contentOf(await run({ type: 'json_schema', json_schema: { name: 'w', schema: {} } })))
+        .toBe('{   "city":"Istanbul",   "tempC":22 }');
+    });
+
+    it('leaves the answer alone when no JSON was requested', async () => {
+      setup(BROKEN);
+      expect(contentOf(await run())).toBe(BROKEN);
+    });
+
+    it('does not reformat a response that already parses', async () => {
+      const clean = '{\n  "city": "Istanbul"\n}';
+      setup(clean);
+      expect(contentOf(await run({ type: 'json_object' }))).toBe(clean);
+    });
+
+    it('passes through text with nothing recoverable in it', async () => {
+      setup('the provider gave up');
+      expect(contentOf(await run({ type: 'json_object' }))).toBe('the provider gave up');
+    });
+  });
+
   describe('client disconnects mid-stream', () => {
     const startCancellableStream = async (modelOverrides = {}) => {
       (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeLlmModel(modelOverrides));

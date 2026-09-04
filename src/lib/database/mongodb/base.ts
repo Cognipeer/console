@@ -88,6 +88,8 @@ export const COLLECTIONS = {
   browsers: 'browsers',
   browserSessions: 'browser_sessions',
   browserSessionEvents: 'browser_session_events',
+  browserFlows: 'browser_flows',
+  browserFlowRuns: 'browser_flow_runs',
   crawlers: 'crawlers',
   crawlJobs: 'crawl_jobs',
   crawlResults: 'crawl_results',

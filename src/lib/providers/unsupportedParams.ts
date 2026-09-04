@@ -42,6 +42,17 @@ export interface UnsupportedParamRule {
    * tool-free request.
    */
   paramsWithTools?: readonly string[];
+  /**
+   * Wire values the request must CARRY when it also has tools, rather than
+   * merely omit. Dropping is not always enough: a hosted upstream can supply its
+   * own default for a parameter and reject the combination anyway. AWS Bedrock's
+   * `/openai/v1` does exactly this for the gpt-5 family — a tool call with no
+   * `reasoning_effort` at all still 400s, and only an explicit
+   * `reasoning_effort: "none"` (the value the upstream's own error message names)
+   * gets through. Applied AFTER `paramsWithTools` strips whatever the caller
+   * asked for, so the forced value always wins.
+   */
+  forcedParamsWithTools?: Readonly<Record<string, unknown>>;
   /** Shown in the UI next to the detected parameters. */
   reason: string;
 }
@@ -76,6 +87,7 @@ export const UNSUPPORTED_PARAM_RULES: readonly UnsupportedParamRule[] = [
     // /v1/responses or set reasoning_effort to 'none'." The console does not proxy
     // /v1/responses, so the only safe move on this endpoint is to drop it.
     paramsWithTools: ['reasoning', 'reasoning_effort'],
+    forcedParamsWithTools: { reasoning_effort: 'none' },
     reason: 'GPT-5 family: only the default temperature and top_p are accepted, max_tokens was replaced by max_completion_tokens, and reasoning_effort cannot be combined with function tools on /v1/chat/completions (upstream requires /v1/responses, or reasoning_effort:"none")',
   },
   {
@@ -109,6 +121,8 @@ export interface DetectedUnsupportedParams {
   reason?: string;
   /** Id of the rule that matched. */
   ruleId?: string;
+  /** Values the request must carry — see `forcedParamsWithTools`. */
+  forced?: Readonly<Record<string, unknown>>;
 }
 
 const EMPTY: DetectedUnsupportedParams = { params: [] };
@@ -120,6 +134,34 @@ const EMPTY: DetectedUnsupportedParams = { params: [] };
  * `hasTools` folds in a rule's `paramsWithTools` — pass `true` only when this
  * particular call carries function tools, since those params are otherwise fine.
  */
+/**
+ * The ids a rule is matched against: the model id as configured, plus each
+ * suffix after a leading dotted segment.
+ *
+ * Every rule here is anchored at the start of the model id, which is right for a
+ * first-party endpoint (`gpt-5.6-terra`) and wrong for every gateway that
+ * namespaces the same model. AWS Bedrock serves it as
+ * `global.openai.gpt-5.6-terra` and Anthropic's models as
+ * `eu.anthropic.claude-...`, so anchored matching silently detected nothing and
+ * the request went out with the parameters the upstream rejects.
+ */
+function candidateModelIds(modelId: string): string[] {
+  const candidates = [modelId];
+  let rest = modelId;
+  // Only leading `vendor.`/`region.` style segments are peeled: a dot inside the
+  // model name itself (`gpt-5.6-terra`) must never split it, so a segment only
+  // counts when it has no dash or colon in it.
+  for (;;) {
+    const dot = rest.indexOf('.');
+    if (dot === -1) break;
+    const head = rest.slice(0, dot);
+    if (head === '' || /[-:]/.test(head)) break;
+    rest = rest.slice(dot + 1);
+    candidates.push(rest);
+  }
+  return candidates;
+}
+
 export function detectUnsupportedParams(
   driver: string | undefined,
   modelId: string | undefined,
@@ -127,8 +169,11 @@ export function detectUnsupportedParams(
 ): DetectedUnsupportedParams {
   if (!driver || !modelId) return EMPTY;
 
+  const candidates = candidateModelIds(modelId);
   const rule = UNSUPPORTED_PARAM_RULES.find(
-    (candidate) => candidate.drivers.includes(driver) && candidate.match.test(modelId),
+    (candidate) =>
+      candidate.drivers.includes(driver)
+      && candidates.some((id) => candidate.match.test(id)),
   );
 
   if (!rule) return EMPTY;
@@ -137,7 +182,12 @@ export function detectUnsupportedParams(
     ? [...rule.params, ...rule.paramsWithTools]
     : [...rule.params];
 
-  return { params, reason: rule.reason, ruleId: rule.id };
+  return {
+    params,
+    reason: rule.reason,
+    ruleId: rule.id,
+    ...(hasTools && rule.forcedParamsWithTools ? { forced: rule.forcedParamsWithTools } : {}),
+  };
 }
 
 /**

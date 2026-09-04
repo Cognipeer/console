@@ -29,6 +29,7 @@ import {
   sendSseResponse,
 } from '@/lib/services/mcp/sseSessionManager';
 import { describeMcpTools } from '@/lib/services/mcp/toolAnnotations';
+import { toolInputJsonSchema } from '@/lib/services/browser/toolSchema';
 import {
   getApiTokenContextForRequest,
   readJsonBody,
@@ -48,152 +49,54 @@ const SERVER_INFO = {
 // One MCP session owns exactly one browser session for its lifetime.
 const mcpToBrowserSession = new Map<string, string>();
 
+/**
+ * The MCP tool list, DERIVED from the agent tool set rather than restated.
+ *
+ * These descriptors used to be hand-written JSON Schema next to the zod
+ * schemas in `agentTools`, which meant every tool added to one surface was
+ * missing from the other until someone noticed. Building the list from the
+ * real tools makes that impossible: a tool exists on both surfaces or on
+ * neither, with one description and one schema.
+ *
+ * The context passed here is a throwaway — only `name`, `description` and
+ * `schema` are read, and no session is opened.
+ */
 interface BrowserToolDescriptor {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
 }
 
-const BROWSER_TOOL_DESCRIPTORS: BrowserToolDescriptor[] = [
-  {
-    name: 'browser_navigate',
-    description:
-      'Navigate the live browser to a fully-qualified URL. Returns the new URL, page title and an aria-snapshot of the page.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        url: { type: 'string', format: 'uri' },
-        waitUntil: { type: 'string', enum: ['load', 'domcontentloaded', 'networkidle'] },
-      },
-      required: ['url'],
-    },
-  },
-  {
-    name: 'browser_click',
-    description:
-      'Click a clickable element identified by either an aria reference (preferred, from a previous snapshot) or a CSS selector. When both are given, a stale ref falls back to the selector. Optional `timeout` (ms) bounds the wait.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        ref: { type: 'string' },
-        selector: { type: 'string' },
-        timeout: { type: 'number' },
-      },
-    },
-  },
-  {
-    name: 'browser_hover',
-    description: 'Hover the mouse over an element by ref or CSS selector.',
-    inputSchema: {
-      type: 'object',
-      properties: { ref: { type: 'string' }, selector: { type: 'string' } },
-    },
-  },
-  {
-    name: 'browser_type',
-    description:
-      'Type text into a text input (textarea / input). Set `clear: true` to wipe the field first.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        ref: { type: 'string' },
-        selector: { type: 'string' },
-        text: { type: 'string' },
-        clear: { type: 'boolean' },
-      },
-      required: ['text'],
-    },
-  },
-  {
-    name: 'browser_press',
-    description:
-      'Press a keyboard key (e.g., "Enter", "Escape", "ArrowDown") on a focused element.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        ref: { type: 'string' },
-        selector: { type: 'string' },
-        key: { type: 'string' },
-      },
-      required: ['key'],
-    },
-  },
-  {
-    name: 'browser_wait',
-    description:
-      'Wait for a fixed duration (ms) or until a CSS selector reaches a given visibility state.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        ms: { type: 'integer', minimum: 1, maximum: 60000 },
-        selector: { type: 'string' },
-        state: { type: 'string', enum: ['attached', 'detached', 'visible', 'hidden'] },
-      },
-    },
-  },
-  {
-    name: 'browser_snapshot',
-    description:
-      'Capture an aria-snapshot of the current page (YAML). Refs in this snapshot can be used for subsequent click/hover/type operations.',
-    inputSchema: { type: 'object', properties: {} },
-  },
-  {
-    name: 'browser_extract',
-    description:
-      'Extract text/html/attribute from the page. Either a CSS selector or aria ref must be supplied.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        ref: { type: 'string' },
-        selector: { type: 'string' },
-        mode: { type: 'string', enum: ['text', 'html', 'attr'] },
-        attribute: { type: 'string' },
-        multiple: { type: 'boolean' },
-      },
-    },
-  },
-  {
-    name: 'browser_screenshot',
-    description:
-      'Capture a full-page or element screenshot, persist it to the session bucket, and return a download URL.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        fullPage: { type: 'boolean' },
-        selector: { type: 'string' },
-        ref: { type: 'string' },
-      },
-    },
-  },
-  {
-    name: 'browser_pdf',
-    description:
-      'Render the current page to a PDF, persist it to the session bucket, and return a download URL. Only works in headless mode.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        format: { type: 'string', enum: ['A4', 'Letter', 'Legal', 'A3', 'A5'] },
-        landscape: { type: 'boolean' },
-        printBackground: { type: 'boolean' },
-      },
-    },
-  },
-  {
-    name: 'browser_close',
-    description:
-      'Close the browser session. Use this only when the task is fully complete.',
-    inputSchema: { type: 'object', properties: {} },
-  },
-];
-
 /** Tools that only observe the page; everything else mutates page or session state. */
 const READ_ONLY_BROWSER_TOOLS = new Set([
   'browser_wait',
   'browser_snapshot',
+  'browser_find',
   'browser_extract',
+  'browser_diagnostics',
   'browser_screenshot',
   'browser_pdf',
+  'browser_list_flows',
 ]);
+
+function buildBrowserToolDescriptors(): BrowserToolDescriptor[] {
+  const tools = buildBrowserAgentTools({
+    tenantDbName: '',
+    tenantId: '',
+    sessionKey: '',
+    createdBy: 'schema-probe',
+  }) as Array<{ name: string; description?: string; schema?: unknown }>;
+
+  return tools.map((tool) => {
+    return {
+      name: tool.name,
+      description: tool.description ?? tool.name,
+      inputSchema: toolInputJsonSchema(tool.schema),
+    };
+  });
+}
+
+const BROWSER_TOOL_DESCRIPTORS: BrowserToolDescriptor[] = buildBrowserToolDescriptors();
 
 const BROWSER_TOOL_LIST = describeMcpTools(
   BROWSER_TOOL_DESCRIPTORS.map((tool) => {

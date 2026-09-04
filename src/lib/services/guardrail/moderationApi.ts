@@ -11,6 +11,8 @@
 import { randomUUID } from 'node:crypto';
 import { getDatabase } from '@/lib/database';
 import { evaluateGuardrail } from './guardrailService';
+import { handleModerationRequest } from '@/lib/services/models/inferenceService';
+import type { ModerationClassification } from '@/lib/providers';
 import { MODERATION_CATEGORIES } from './types';
 import type { GuardrailFinding } from './types';
 
@@ -34,10 +36,21 @@ export interface ModerationResult {
   findings: GuardrailFinding[];
 }
 
+/**
+ * Where `category_scores` came from. A classifier reports a real probability; a
+ * judge reports a severity bucket that is widened into one of three fixed
+ * values. A caller that thresholds on the score has to be able to tell the
+ * difference, so it is stated rather than left to be inferred.
+ */
+export type ModerationScoreSource = 'model' | 'severity';
+
 export interface ModerationResponse {
   id: string;
-  /** Guardrail key the inputs were evaluated against. */
+  /** The guardrail key or moderation model key the inputs were evaluated against. */
   model: string;
+  /** Which detector ran. */
+  detector: 'guardrail' | 'model';
+  scoreSource: ModerationScoreSource;
   results: ModerationResult[];
 }
 
@@ -62,6 +75,60 @@ export function normalizeModerationInput(input: unknown): string[] {
     });
   }
   throw new ModerationRequestError('`input` must be a string or an array of strings');
+}
+
+export type ModerationTarget =
+  | { kind: 'guardrail'; key: string }
+  | { kind: 'model'; key: string };
+
+/**
+ * Decide what `model` names.
+ *
+ * Order matters and is deliberate: a guardrail key wins, so every caller that
+ * worked before keeps working; a moderation-category MODEL is the second
+ * lookup, which is what lets a client migrating off OpenAI point at a
+ * classifier without authoring a guardrail first.
+ *
+ * With nothing named, the project's own configuration decides — an enabled
+ * moderation guardrail, else a registered moderation model. There is NO hidden
+ * fallback to some provider default: routing a caller's text to an upstream the
+ * operator never chose is a cost, data-residency and DPA decision, not a
+ * convenience.
+ */
+export async function resolveModerationTarget(
+  ctx: ModerationContext,
+  explicitKey?: string,
+): Promise<ModerationTarget> {
+  const db = await getDatabase();
+  await db.switchToTenant(ctx.tenantDbName);
+
+  if (explicitKey) {
+    const guardrail = await db.findGuardrailByKey(explicitKey, ctx.projectId);
+    if (guardrail) return { kind: 'guardrail', key: guardrail.key };
+
+    const model = await db.findModelByKey(explicitKey, ctx.projectId);
+    if (model && model.category === 'moderation') {
+      return { kind: 'model', key: model.key };
+    }
+    throw new ModerationRequestError(
+      `"${explicitKey}" matches no guardrail and no moderation model. Pass a guardrail key, or the key of a model whose category is "moderation".`,
+    );
+  }
+
+  const guardrails = await db.listGuardrails({ projectId: ctx.projectId, enabled: true });
+  const guardrail = guardrails.find(
+    (record) => record.type === 'preset' && record.policy?.moderation?.enabled,
+  );
+  if (guardrail) return { kind: 'guardrail', key: guardrail.key };
+
+  const models = await db.listModels(ctx.projectId ? { projectId: ctx.projectId } : {});
+  const model = models.find((record) => record.category === 'moderation');
+  if (model) return { kind: 'model', key: model.key };
+
+  throw new ModerationRequestError(
+    'No moderation detector configured. Either add a model with category "moderation", '
+    + 'or create an enabled guardrail with the moderation policy — then pass its key as `model`.',
+  );
 }
 
 /**
@@ -133,7 +200,23 @@ export async function runModeration(
   if (texts.length === 0) {
     throw new ModerationRequestError('`input` must not be empty');
   }
-  const guardrailKey = await resolveModerationGuardrailKey(ctx, params.model);
+  const target = await resolveModerationTarget(ctx, params.model);
+
+  if (target.kind === 'model') {
+    const { result } = await handleModerationRequest({
+      tenantDbName: ctx.tenantDbName,
+      modelKey: target.key,
+      projectId: ctx.projectId ?? '',
+      texts,
+    });
+    return {
+      id: `modr_${randomUUID()}`,
+      model: target.key,
+      detector: 'model',
+      scoreSource: 'model',
+      results: result.results.map(toNativeResult),
+    };
+  }
 
   const results: ModerationResult[] = [];
   for (const text of texts) {
@@ -141,7 +224,7 @@ export async function runModeration(
       tenantDbName: ctx.tenantDbName,
       tenantId: ctx.tenantId,
       projectId: ctx.projectId,
-      guardrailKey,
+      guardrailKey: target.key,
       text,
       source: 'moderations-api',
     });
@@ -150,7 +233,35 @@ export async function runModeration(
 
   return {
     id: `modr_${randomUUID()}`,
-    model: guardrailKey,
+    model: target.key,
+    detector: 'guardrail',
+    scoreSource: 'severity',
     results,
+  };
+}
+
+/**
+ * Folds a classifier verdict into the same response shape the guardrail path
+ * produces. Categories the console knows but the upstream did not report stay
+ * `false`/`0` rather than being dropped, so the map is the same size whichever
+ * detector ran; categories the upstream reports that the console does not model
+ * are carried through as-is rather than silently discarded.
+ */
+function toNativeResult(classification: ModerationClassification): ModerationResult {
+  const categories: Record<string, boolean> = {};
+  const categoryScores: Record<string, number> = {};
+  for (const category of MODERATION_CATEGORIES) {
+    categories[category.id] = false;
+    categoryScores[category.id] = 0;
+  }
+  for (const [id, verdict] of Object.entries(classification.categories)) {
+    categories[id] = verdict.flagged;
+    categoryScores[id] = verdict.score ?? (verdict.flagged ? 1 : 0);
+  }
+  return {
+    flagged: classification.flagged,
+    categories,
+    categoryScores,
+    findings: [],
   };
 }

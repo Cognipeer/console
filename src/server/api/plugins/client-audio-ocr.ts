@@ -9,6 +9,7 @@ import {
   handleTranscriptionRequest,
 } from '@/lib/services/models/inferenceService';
 import { getModelByKey } from '@/lib/services/models/modelService';
+import { normalizeInferenceError } from '@/lib/services/models/openaiErrors';
 import { logModelUsage } from '@/lib/services/models/usageLogger';
 import {
   checkBudget,
@@ -27,6 +28,15 @@ import type {
   TtsSynthesizeInput,
 } from '@/lib/providers';
 
+/**
+ * Error mapping note: every handler below reports failures through
+ * `normalizeInferenceError`, the same mapper `/chat/completions` uses. These
+ * routes used to decide the status with `/required|must/i.test(message) ? 400 :
+ * 500`, which collapsed EVERY upstream fault into `500 server_error` — an
+ * invalid file, a bad key, a 404 deployment and, worst for a gateway, a 429
+ * rate limit all reached the caller as "server error", so a client could not
+ * tell what to retry or back off from.
+ */
 const logger = createLogger('api:client-audio-ocr');
 
 const VALID_OCR_FEATURES: OcrFeature[] = [
@@ -361,13 +371,8 @@ export const clientAudioOcrApiPlugin: FastifyPluginAsync = async (app) => {
         } catch (logError) {
           logger.error('Failed to log STT error', { error: logError });
         }
-        const code = error instanceof Error && /required|must/i.test(error.message) ? 400 : 500;
-        return reply.code(code).send({
-          error: {
-            message: error instanceof Error ? error.message : 'Inference error',
-            type: code === 400 ? 'invalid_request_error' : 'server_error',
-          },
-        });
+        const normalized = normalizeInferenceError(error);
+        return reply.code(normalized.status).send(normalized);
       }
     }),
   );
@@ -423,13 +428,8 @@ export const clientAudioOcrApiPlugin: FastifyPluginAsync = async (app) => {
         } catch (logError) {
           logger.error('Failed to log STT translate error', { error: logError });
         }
-        const code = error instanceof Error && /required|must/i.test(error.message) ? 400 : 500;
-        return reply.code(code).send({
-          error: {
-            message: error instanceof Error ? error.message : 'Inference error',
-            type: code === 400 ? 'invalid_request_error' : 'server_error',
-          },
-        });
+        const normalized = normalizeInferenceError(error);
+        return reply.code(normalized.status).send(normalized);
       }
     }),
   );
@@ -516,12 +516,8 @@ export const clientAudioOcrApiPlugin: FastifyPluginAsync = async (app) => {
         } catch (logError) {
           logger.error('Failed to log TTS error', { error: logError });
         }
-        return reply.code(500).send({
-          error: {
-            message: error instanceof Error ? error.message : 'Inference error',
-            type: 'server_error',
-          },
-        });
+        const normalized = normalizeInferenceError(error);
+        return reply.code(normalized.status).send(normalized);
       }
     }),
   );
@@ -569,13 +565,8 @@ export const clientAudioOcrApiPlugin: FastifyPluginAsync = async (app) => {
         } catch (logError) {
           logger.error('Failed to log OCR error', { error: logError });
         }
-        const code = error instanceof Error && /required|must/i.test(error.message) ? 400 : 500;
-        return reply.code(code).send({
-          error: {
-            message: error instanceof Error ? error.message : 'Inference error',
-            type: code === 400 ? 'invalid_request_error' : 'server_error',
-          },
-        });
+        const normalized = normalizeInferenceError(error);
+        return reply.code(normalized.status).send(normalized);
       }
     }),
   );

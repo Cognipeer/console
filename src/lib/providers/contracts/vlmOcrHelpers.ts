@@ -8,6 +8,7 @@ import type {
 import type { ModelProviderRuntime, ModelRuntimeConfig } from '../domains/model';
 import { looksLikePdf, renderPdfToPngDataUrls } from './pdfRender';
 import { safeFetch } from '@/lib/security/outboundFetch';
+import { stripInlineReasoning } from '@/lib/shared/inlineReasoning';
 
 const DEFAULT_OCR_PROMPT = `You are an OCR engine. Extract every visible textual element from the provided document image(s) and return the result as STRICT JSON matching this TypeScript type:
 
@@ -59,7 +60,7 @@ function extractText(message: unknown): string {
 }
 
 function stripJsonFence(text: string): string {
-  let trimmed = text.trim();
+  let trimmed = stripInlineReasoning(text).trim();
   if (trimmed.startsWith('```')) {
     trimmed = trimmed.replace(/^```(?:json)?\s*/i, '');
     const fenceEnd = trimmed.lastIndexOf('```');

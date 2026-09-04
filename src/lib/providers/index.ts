@@ -5,3 +5,5 @@ export * from './domains/model';
 export * from './domains/file';
 export * from './domains/audio';
 export * from './domains/ocr';
+export * from './domains/image';
+export * from './domains/moderation';

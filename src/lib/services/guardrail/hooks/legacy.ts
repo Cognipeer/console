@@ -505,6 +505,9 @@ export function liftLegacyPolicies(
         // `guardrailService.ts:339` hands `runModerationPolicy`.
         action: record.action,
         failMode: record.failMode,
+        // Same trap as the family dispatcher: this converter names every field
+        // it carries, so anything omitted is dropped on the way in.
+        detector: moderation.detector,
         modelKey: moderation.modelKey ?? record.modelKey,
         categories: moderation.categories ?? {},
       } satisfies ModerationPolicyConfig);

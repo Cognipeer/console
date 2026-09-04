@@ -54,7 +54,7 @@ const CAPABILITY_KEYS = {
   multimodal: 'model.supports.multimodal',
 } as const;
 
-type ModelCategory = 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr';
+type ModelCategory = 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr' | 'image' | 'moderation';
 
 const ALL_CATEGORIES: ReadonlyArray<{ value: ModelCategory; label: string }> = [
   { value: 'llm', label: 'LLM' },
@@ -63,7 +63,18 @@ const ALL_CATEGORIES: ReadonlyArray<{ value: ModelCategory; label: string }> = [
   { value: 'stt', label: 'Speech-to-Text' },
   { value: 'tts', label: 'Text-to-Speech' },
   { value: 'ocr', label: 'OCR' },
+  { value: 'image', label: 'Image Generation' },
+  { value: 'moderation', label: 'Moderation' },
 ];
+
+/**
+ * Categories whose models are addressed by tokens in and tokens out, and are
+ * therefore the only ones the capability block below describes. A TTS voice has
+ * no context window; an embedding model calls no tools. Showing those controls
+ * for every category was asking an operator to answer questions that have no
+ * answer, and storing whatever they picked.
+ */
+const CAPABILITY_CATEGORIES: ReadonlyArray<ModelCategory> = ['llm'];
 
 type OcrMode = 'native' | 'vlm';
 
@@ -101,6 +112,7 @@ interface FormValues {
     inputSecondPer1K: number | '';
     inputCharacterPer1M: number | '';
     pagePer1K: number | '';
+    imagePer1K: number | '';
   };
   settings: {
     temperature: number | '';
@@ -170,12 +182,16 @@ export default function CreateModelModal({
       category: 'llm',
       modelId: '',
       isMultimodal: false,
+      // Capabilities default ON: nearly every current chat model does all of
+      // this, and an operator who knows their model does not is one toggle away
+      // from saying so. Defaulting them off had the opposite failure mode —
+      // a model quietly advertised as unable to call tools.
       supportsToolCalls: true,
       capabilities: {
         contextWindow: '',
         maxOutputTokens: '',
-        supportsReasoning: false,
-        supportsStructuredOutputs: false,
+        supportsReasoning: true,
+        supportsStructuredOutputs: true,
       },
       pricing: {
         currency: DEFAULT_PRICING.currency,
@@ -185,6 +201,7 @@ export default function CreateModelModal({
         inputSecondPer1K: '',
         inputCharacterPer1M: '',
         pagePer1K: '',
+        imagePer1K: '',
       },
       settings: {
         temperature: '',
@@ -291,22 +308,20 @@ export default function CreateModelModal({
       setFieldValue('category', categories[0]);
     }
 
-    const supportsTools = providerSupportsToolCalls(selectedProvider);
-    if (formValues.supportsToolCalls !== supportsTools) {
-      setFieldValue('supportsToolCalls', supportsTools);
+    // Clamp DOWN only. This effect used to depend on the toggle values
+    // themselves and re-assert the provider's capability whenever they
+    // differed, so unchecking "Supports tool calls" snapped straight back and
+    // the control was unusable. A provider that cannot do something still wins
+    // — that is not the operator's call — but within what it can do, the
+    // operator's choice stands.
+    if (!providerSupportsToolCalls(selectedProvider)) {
+      setFieldValue('supportsToolCalls', false);
     }
-
-    const multimodal = providerSupportsMultimodal(selectedProvider);
-    if (formValues.isMultimodal !== multimodal) {
-      setFieldValue('isMultimodal', multimodal);
+    if (!providerSupportsMultimodal(selectedProvider)) {
+      setFieldValue('isMultimodal', false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    selectedProvider,
-    formValues.category,
-    formValues.supportsToolCalls,
-    formValues.isMultimodal,
-  ]);
+  }, [selectedProvider, formValues.category]);
 
   const providerOptions = useMemo(
     () =>
@@ -405,6 +420,9 @@ export default function CreateModelModal({
               : {}),
             ...(toNumber(values.pricing.pagePer1K) !== undefined
               ? { pagePer1K: toNumber(values.pricing.pagePer1K) }
+              : {}),
+            ...(toNumber(values.pricing.imagePer1K) !== undefined
+              ? { imagePer1K: toNumber(values.pricing.imagePer1K) }
               : {}),
           },
           settings: {
@@ -684,6 +702,7 @@ export default function CreateModelModal({
         </FormRow>
       </FormSection>
 
+      {CAPABILITY_CATEGORIES.includes(formValues.category) && (
       <FormSection
         number={3}
         title="Capabilities"
@@ -746,6 +765,7 @@ export default function CreateModelModal({
           </FormField>
         </FormRow>
       </FormSection>
+      )}
 
       {formValues.category === 'ocr' && (
         <FormSection
@@ -797,7 +817,9 @@ export default function CreateModelModal({
               ? 'Per-1,000,000-character pricing for synthesized speech input.'
               : formValues.category === 'ocr'
                 ? 'Per-1000-page pricing for OCR. Token fields apply when the VLM mode is used.'
-                : 'Per-million-token pricing for accounting and routing decisions.'
+                : formValues.category === 'image'
+                  ? 'Per-1000-image pricing. Token fields apply to the models that also bill the prompt.'
+                  : 'Per-million-token pricing for accounting and routing decisions.'
         }
         done={validPricing}
       >
@@ -867,6 +889,21 @@ export default function CreateModelModal({
                 decimalScale={4}
                 placeholder="e.g., 15.00"
                 {...form.getInputProps('pricing.inputCharacterPer1M')}
+              />
+            </FormField>
+            <FormField label=" " optional>
+              <span />
+            </FormField>
+          </FormRow>
+        )}
+        {formValues.category === 'image' && (
+          <FormRow cols={2}>
+            <FormField label="Images · per 1K" optional>
+              <NumberInput
+                min={0}
+                decimalScale={4}
+                placeholder="e.g., 40.00"
+                {...form.getInputProps('pricing.imagePer1K')}
               />
             </FormField>
             <FormField label=" " optional>

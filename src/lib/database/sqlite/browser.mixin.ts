@@ -4,6 +4,8 @@
 
 import type {
   IBrowser,
+  IBrowserFlow,
+  IBrowserFlowRun,
   IBrowserSession,
   IBrowserSessionEvent,
 } from '../provider.interface';
@@ -23,9 +25,11 @@ export function BrowserMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         INSERT INTO ${TABLES.browsers}
         (id, tenantId, projectId, key, name, description, status,
          artifactBucketKey, defaultSessionConfig, defaultModelKey, defaultRunOptions,
+         storageStateEnc, storageStateMeta,
          metadata, createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @key, @name, @description, @status,
          @artifactBucketKey, @defaultSessionConfig, @defaultModelKey, @defaultRunOptions,
+         @storageStateEnc, @storageStateMeta,
          @metadata, @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
@@ -39,6 +43,8 @@ export function BrowserMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         defaultSessionConfig: this.toJson(record.defaultSessionConfig ?? {}),
         defaultModelKey: record.defaultModelKey ?? null,
         defaultRunOptions: this.toJson(record.defaultRunOptions ?? {}),
+        storageStateEnc: record.storageStateEnc ?? null,
+        storageStateMeta: record.storageStateMeta ? this.toJson(record.storageStateMeta) : null,
         metadata: this.toJson(record.metadata ?? {}),
         createdBy: record.createdBy,
         updatedBy: record.updatedBy ?? null,
@@ -65,8 +71,10 @@ export function BrowserMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         updatedBy: (v) => v,
         projectId: (v) => v,
         key: (v) => v,
+        storageStateEnc: (v) => v ?? null,
         defaultSessionConfig: (v) => this.toJson(v ?? {}),
         defaultRunOptions: (v) => this.toJson(v ?? {}),
+        storageStateMeta: (v) => (v ? this.toJson(v) : null),
         metadata: (v) => this.toJson(v ?? {}),
       };
       for (const [k, transform] of Object.entries(map)) {
@@ -135,6 +143,10 @@ export function BrowserMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         defaultSessionConfig: this.parseJson(row.defaultSessionConfig, {}),
         defaultModelKey: (row.defaultModelKey as string) ?? undefined,
         defaultRunOptions: this.parseJson(row.defaultRunOptions, {}),
+        storageStateEnc: (row.storageStateEnc as string) ?? undefined,
+        storageStateMeta: row.storageStateMeta
+          ? this.parseJson(row.storageStateMeta, undefined as unknown as IBrowser['storageStateMeta'])
+          : undefined,
         metadata: this.parseJson(row.metadata, {}),
         createdBy: row.createdBy as string,
         updatedBy: (row.updatedBy as string) ?? undefined,
@@ -385,6 +397,312 @@ export function BrowserMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         `SELECT COUNT(*) as cnt FROM ${TABLES.browserSessionEvents} WHERE sessionId = @sessionId`,
       ).get({ sessionId }) as SqliteRow;
       return Number(row.cnt) || 0;
+    }
+
+    // ── Browser Flows ────────────────────────────────────────────────
+
+    private mapBrowserFlow(row: SqliteRow): IBrowserFlow {
+      return {
+        _id: row.id as string,
+        tenantId: row.tenantId as string,
+        projectId: (row.projectId as string) ?? undefined,
+        key: row.key as string,
+        name: row.name as string,
+        description: (row.description as string) ?? undefined,
+        status: row.status as IBrowserFlow['status'],
+        browserId: row.browserId as string,
+        inputs: this.parseJson(row.inputs, [] as IBrowserFlow['inputs']),
+        steps: this.parseJson(row.steps, [] as IBrowserFlow['steps']) ?? [],
+        sessionConfig: this.parseJson(
+          row.sessionConfig,
+          undefined as unknown as IBrowserFlow['sessionConfig'],
+        ),
+        recordedFromSessionId: (row.recordedFromSessionId as string) ?? undefined,
+        version: Number(row.version) || 1,
+        lastRun: this.parseJson(row.lastRun, undefined as unknown as IBrowserFlow['lastRun']),
+        metadata: this.parseJson(row.metadata, {} as Record<string, unknown>),
+        createdBy: row.createdBy as string,
+        updatedBy: (row.updatedBy as string) ?? undefined,
+        createdAt: this.toDate(row.createdAt),
+        updatedAt: this.toDate(row.updatedAt),
+      };
+    }
+
+    async createBrowserFlow(
+      record: Omit<IBrowserFlow, '_id' | 'createdAt' | 'updatedAt'>,
+    ): Promise<IBrowserFlow> {
+      const db = this.getTenantDb();
+      const id = this.newId();
+      const now = this.now();
+      db.prepare(`
+        INSERT INTO ${TABLES.browserFlows}
+        (id, tenantId, projectId, key, name, description, status, browserId, inputs, steps,
+         sessionConfig, recordedFromSessionId, version, lastRun, metadata,
+         createdBy, updatedBy, createdAt, updatedAt)
+        VALUES (@id, @tenantId, @projectId, @key, @name, @description, @status, @browserId,
+         @inputs, @steps, @sessionConfig, @recordedFromSessionId, @version, @lastRun, @metadata,
+         @createdBy, @updatedBy, @createdAt, @updatedAt)
+      `).run({
+        id,
+        tenantId: record.tenantId,
+        projectId: record.projectId ?? null,
+        key: record.key,
+        name: record.name,
+        description: record.description ?? null,
+        status: record.status,
+        browserId: record.browserId,
+        inputs: this.toJson(record.inputs ?? []),
+        steps: this.toJson(record.steps ?? []),
+        sessionConfig: record.sessionConfig ? this.toJson(record.sessionConfig) : null,
+        recordedFromSessionId: record.recordedFromSessionId ?? null,
+        version: record.version ?? 1,
+        lastRun: record.lastRun ? this.toJson(record.lastRun) : null,
+        metadata: this.toJson(record.metadata ?? {}),
+        createdBy: record.createdBy,
+        updatedBy: record.updatedBy ?? null,
+        createdAt: now,
+        updatedAt: now,
+      });
+      return { ...record, _id: id, createdAt: new Date(now), updatedAt: new Date(now) };
+    }
+
+    async updateBrowserFlow(
+      id: string,
+      data: Partial<Omit<IBrowserFlow, '_id' | 'tenantId' | 'createdAt'>>,
+    ): Promise<IBrowserFlow | null> {
+      const db = this.getTenantDb();
+      const now = this.now();
+      const sets: string[] = ['updatedAt = @updatedAt'];
+      const params: Record<string, unknown> = { id, updatedAt: now };
+      const map: Record<string, (v: unknown) => unknown> = {
+        key: (v) => v,
+        name: (v) => v,
+        description: (v) => v,
+        status: (v) => v,
+        browserId: (v) => v,
+        recordedFromSessionId: (v) => v,
+        version: (v) => v,
+        updatedBy: (v) => v,
+        projectId: (v) => v,
+        inputs: (v) => this.toJson(v ?? []),
+        steps: (v) => this.toJson(v ?? []),
+        sessionConfig: (v) => (v ? this.toJson(v) : null),
+        lastRun: (v) => (v ? this.toJson(v) : null),
+        metadata: (v) => this.toJson(v ?? {}),
+      };
+      for (const [k, transform] of Object.entries(map)) {
+        if ((data as Record<string, unknown>)[k] !== undefined) {
+          sets.push(`${k} = @${k}`);
+          params[k] = transform((data as Record<string, unknown>)[k]);
+        }
+      }
+      db.prepare(`UPDATE ${TABLES.browserFlows} SET ${sets.join(', ')} WHERE id = @id`).run(params);
+      return this.findBrowserFlowById(id);
+    }
+
+    async deleteBrowserFlow(id: string): Promise<boolean> {
+      const db = this.getTenantDb();
+      // Runs are meaningless without their flow, and nothing else references
+      // them — drop the history in the same call rather than orphaning it.
+      db.prepare(`DELETE FROM ${TABLES.browserFlowRuns} WHERE flowId = @id`).run({ id });
+      const result = db.prepare(`DELETE FROM ${TABLES.browserFlows} WHERE id = @id`).run({ id });
+      return result.changes > 0;
+    }
+
+    async findBrowserFlowById(id: string): Promise<IBrowserFlow | null> {
+      const db = this.getTenantDb();
+      const row = db
+        .prepare(`SELECT * FROM ${TABLES.browserFlows} WHERE id = @id`)
+        .get({ id }) as SqliteRow | undefined;
+      return row ? this.mapBrowserFlow(row) : null;
+    }
+
+    async findBrowserFlowByKey(
+      tenantId: string,
+      key: string,
+      projectId?: string,
+    ): Promise<IBrowserFlow | null> {
+      const db = this.getTenantDb();
+      let sql = `SELECT * FROM ${TABLES.browserFlows} WHERE tenantId = @tenantId AND key = @key`;
+      const params: Record<string, unknown> = { tenantId, key };
+      if (projectId) {
+        sql += ' AND projectId = @projectId';
+        params.projectId = projectId;
+      }
+      const row = db.prepare(sql).get(params) as SqliteRow | undefined;
+      return row ? this.mapBrowserFlow(row) : null;
+    }
+
+    async listBrowserFlows(
+      tenantId: string,
+      filters?: {
+        projectId?: string;
+        status?: string;
+        browserId?: string;
+        search?: string;
+      },
+    ): Promise<IBrowserFlow[]> {
+      const db = this.getTenantDb();
+      let sql = `SELECT * FROM ${TABLES.browserFlows} WHERE tenantId = @tenantId`;
+      const params: Record<string, unknown> = { tenantId };
+      if (filters?.projectId) {
+        sql += ' AND projectId = @projectId';
+        params.projectId = filters.projectId;
+      }
+      if (filters?.status) {
+        sql += ' AND status = @status';
+        params.status = filters.status;
+      }
+      if (filters?.browserId) {
+        sql += ' AND browserId = @browserId';
+        params.browserId = filters.browserId;
+      }
+      if (filters?.search) {
+        sql += ' AND (name LIKE @search OR key LIKE @search OR description LIKE @search)';
+        params.search = `%${filters.search}%`;
+      }
+      sql += ' ORDER BY updatedAt DESC';
+      const rows = db.prepare(sql).all(params) as SqliteRow[];
+      return rows.map((row) => this.mapBrowserFlow(row));
+    }
+
+    // ── Browser Flow Runs ────────────────────────────────────────────
+
+    private mapBrowserFlowRun(row: SqliteRow): IBrowserFlowRun {
+      return {
+        _id: row.id as string,
+        tenantId: row.tenantId as string,
+        projectId: (row.projectId as string) ?? undefined,
+        flowId: row.flowId as string,
+        flowKey: row.flowKey as string,
+        flowVersion: Number(row.flowVersion) || 1,
+        status: row.status as IBrowserFlowRun['status'],
+        trigger: row.trigger as IBrowserFlowRun['trigger'],
+        sessionId: (row.sessionId as string) ?? undefined,
+        sessionKey: (row.sessionKey as string) ?? undefined,
+        inputs: this.parseJson(row.inputs, {} as Record<string, unknown>),
+        stepResults: this.parseJson(row.stepResults, [] as IBrowserFlowRun['stepResults']),
+        outputs: this.parseJson(row.outputs, {} as Record<string, unknown>),
+        startedAt: row.startedAt ? this.toDate(row.startedAt) : undefined,
+        endedAt: row.endedAt ? this.toDate(row.endedAt) : undefined,
+        durationMs: row.durationMs == null ? undefined : Number(row.durationMs),
+        errorMessage: (row.errorMessage as string) ?? undefined,
+        failedStepIndex: row.failedStepIndex == null ? undefined : Number(row.failedStepIndex),
+        createdBy: row.createdBy as string,
+        createdAt: this.toDate(row.createdAt),
+        updatedAt: this.toDate(row.updatedAt),
+      };
+    }
+
+    async createBrowserFlowRun(
+      record: Omit<IBrowserFlowRun, '_id' | 'createdAt' | 'updatedAt'>,
+    ): Promise<IBrowserFlowRun> {
+      const db = this.getTenantDb();
+      const id = this.newId();
+      const now = this.now();
+      db.prepare(`
+        INSERT INTO ${TABLES.browserFlowRuns}
+        (id, tenantId, projectId, flowId, flowKey, flowVersion, status, trigger,
+         sessionId, sessionKey, inputs, stepResults, outputs, startedAt, endedAt,
+         durationMs, errorMessage, failedStepIndex, createdBy, createdAt, updatedAt)
+        VALUES (@id, @tenantId, @projectId, @flowId, @flowKey, @flowVersion, @status, @trigger,
+         @sessionId, @sessionKey, @inputs, @stepResults, @outputs, @startedAt, @endedAt,
+         @durationMs, @errorMessage, @failedStepIndex, @createdBy, @createdAt, @updatedAt)
+      `).run({
+        id,
+        tenantId: record.tenantId,
+        projectId: record.projectId ?? null,
+        flowId: record.flowId,
+        flowKey: record.flowKey,
+        flowVersion: record.flowVersion,
+        status: record.status,
+        trigger: record.trigger,
+        sessionId: record.sessionId ?? null,
+        sessionKey: record.sessionKey ?? null,
+        inputs: this.toJson(record.inputs ?? {}),
+        stepResults: this.toJson(record.stepResults ?? []),
+        outputs: this.toJson(record.outputs ?? {}),
+        startedAt: record.startedAt ? record.startedAt.toISOString() : null,
+        endedAt: record.endedAt ? record.endedAt.toISOString() : null,
+        durationMs: record.durationMs ?? null,
+        errorMessage: record.errorMessage ?? null,
+        failedStepIndex: record.failedStepIndex ?? null,
+        createdBy: record.createdBy,
+        createdAt: now,
+        updatedAt: now,
+      });
+      return { ...record, _id: id, createdAt: new Date(now), updatedAt: new Date(now) };
+    }
+
+    async updateBrowserFlowRun(
+      id: string,
+      data: Partial<Omit<IBrowserFlowRun, '_id' | 'tenantId' | 'createdAt'>>,
+    ): Promise<IBrowserFlowRun | null> {
+      const db = this.getTenantDb();
+      const now = this.now();
+      const sets: string[] = ['updatedAt = @updatedAt'];
+      const params: Record<string, unknown> = { id, updatedAt: now };
+      const map: Record<string, (v: unknown) => unknown> = {
+        status: (v) => v,
+        sessionId: (v) => v,
+        sessionKey: (v) => v,
+        durationMs: (v) => v,
+        errorMessage: (v) => v,
+        failedStepIndex: (v) => v,
+        inputs: (v) => this.toJson(v ?? {}),
+        stepResults: (v) => this.toJson(v ?? []),
+        outputs: (v) => this.toJson(v ?? {}),
+        startedAt: (v) => (v instanceof Date ? v.toISOString() : v),
+        endedAt: (v) => (v instanceof Date ? v.toISOString() : v),
+      };
+      for (const [k, transform] of Object.entries(map)) {
+        if ((data as Record<string, unknown>)[k] !== undefined) {
+          sets.push(`${k} = @${k}`);
+          params[k] = transform((data as Record<string, unknown>)[k]);
+        }
+      }
+      db.prepare(`UPDATE ${TABLES.browserFlowRuns} SET ${sets.join(', ')} WHERE id = @id`).run(params);
+      return this.findBrowserFlowRunById(id);
+    }
+
+    async findBrowserFlowRunById(id: string): Promise<IBrowserFlowRun | null> {
+      const db = this.getTenantDb();
+      const row = db
+        .prepare(`SELECT * FROM ${TABLES.browserFlowRuns} WHERE id = @id`)
+        .get({ id }) as SqliteRow | undefined;
+      return row ? this.mapBrowserFlowRun(row) : null;
+    }
+
+    async listBrowserFlowRuns(
+      tenantId: string,
+      filters?: {
+        projectId?: string;
+        flowId?: string;
+        status?: string;
+        limit?: number;
+        skip?: number;
+      },
+    ): Promise<IBrowserFlowRun[]> {
+      const db = this.getTenantDb();
+      let sql = `SELECT * FROM ${TABLES.browserFlowRuns} WHERE tenantId = @tenantId`;
+      const params: Record<string, unknown> = { tenantId };
+      if (filters?.projectId) {
+        sql += ' AND projectId = @projectId';
+        params.projectId = filters.projectId;
+      }
+      if (filters?.flowId) {
+        sql += ' AND flowId = @flowId';
+        params.flowId = filters.flowId;
+      }
+      if (filters?.status) {
+        sql += ' AND status = @status';
+        params.status = filters.status;
+      }
+      sql += ' ORDER BY createdAt DESC';
+      sql += ` LIMIT ${Math.min(filters?.limit && filters.limit > 0 ? filters.limit : 100, 1000)}`;
+      if (filters?.skip) sql += ` OFFSET ${filters.skip}`;
+      const rows = db.prepare(sql).all(params) as SqliteRow[];
+      return rows.map((row) => this.mapBrowserFlowRun(row));
     }
   };
 }

@@ -3,11 +3,11 @@
  *
  *   POST /client/v1/moderations – classify text against a moderation guardrail
  *
- * The OpenAI `model` field selects the console guardrail to evaluate with
- * (any enabled guardrail key). When omitted, the tenant's first enabled
- * guardrail with an active moderation policy is used, so an OpenAI client
- * pointed at the console works without code changes once such a guardrail
- * exists.
+ * The OpenAI `model` field selects the detector: a console guardrail key (the
+ * LLM-judge path), or the key of a model whose category is `moderation` (a
+ * native classifier). When omitted the project decides — its enabled moderation
+ * guardrail, else its registered moderation model — so an OpenAI client pointed
+ * at the console works without code changes once either exists.
  */
 
 import type { FastifyPluginAsync } from 'fastify';
@@ -54,6 +54,11 @@ export const clientModerationsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({
         id: result.id,
         model: result.model,
+        // Console extensions: which detector ran, and whether the scores are
+        // model probabilities or severity buckets — a caller thresholding on
+        // `category_scores` has to be able to tell.
+        detector: result.detector,
+        score_source: result.scoreSource,
         results: result.results.map((entry) => ({
           flagged: entry.flagged,
           categories: entry.categories,
