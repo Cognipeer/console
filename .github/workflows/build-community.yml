@@ -52,16 +52,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Create release automation token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RELEASE_AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.RELEASE_AUTOMATION_PRIVATE_KEY }}
+          owner: Cognipeer
+          repositories: console-ee
+
       - name: Update Console Enterprise compatibility pin
         env:
-          DISPATCH_TOKEN: ${{ secrets.CONSOLE_EE_DISPATCH_PAT }}
+          DISPATCH_TOKEN: ${{ steps.app-token.outputs.token }}
           COMMUNITY_TAG: ${{ github.ref_name }}
           COMMUNITY_SHA: ${{ needs.build.outputs.commit_sha }}
         run: |
           set -euo pipefail
 
           if [[ -z "${DISPATCH_TOKEN}" ]]; then
-            echo "::error::CONSOLE_EE_DISPATCH_PAT is not configured."
+            echo "::error::GitHub release automation App token is not available."
             exit 1
           fi
 

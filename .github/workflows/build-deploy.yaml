@@ -78,15 +78,5 @@
 #             ${{ steps.ecr.outputs.registry }}/${{ secrets.LOCAL_FIRST_REPOSITORY }}:${{ steps.vars.outputs.tag }}
 #             ${{ secrets.LOGIN_SERVER }}/${{ secrets.LOCAL_SECOND_REPOSITORY }}:${{ steps.vars.outputs.tag }}
 
-#   notify:
-#     runs-on: ubuntu-latest
-#     needs: build
-#     steps:
-#       - name: Fire repository_dispatch
-#         run: |
-#           curl --fail-with-body -X POST \
-#             -H "Authorization: Bearer ${{ secrets.REPO_PAT_TO_DEPLOY }}" \
-#             -H "Accept: application/vnd.github+json" \
-#             -H "Content-Type: application/json" \
-#             https://api.github.com/repos/${{secrets.TENANT_REPO_ADDRESS}}/dispatches \
-#             -d "{\"event_type\":\"app-released\",\"client_payload\":{\"image_tag\":\"${{ needs.build.outputs.image_tag }}\",\"source_ref\":\"${GITHUB_REF_NAME}\"}}"
+# The legacy workflow is disabled. Active release workflows use GitHub App
+# installation tokens for cross-repository operations.
