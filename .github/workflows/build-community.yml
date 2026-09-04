@@ -47,6 +47,7 @@ jobs:
 
   sync-console-ee:
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     needs: build
     steps:
       - name: Checkout
@@ -61,6 +62,7 @@ jobs:
           owner: Cognipeer
           repositories: console-ee
           permission-contents: write
+          permission-pull-requests: read
           permission-metadata: read
 
       - name: Update Console Enterprise compatibility pin
@@ -105,6 +107,55 @@ jobs:
             --header "X-GitHub-Api-Version: 2022-11-28" \
             --data "${PAYLOAD}" \
             https://api.github.com/repos/Cognipeer/console-ee/dispatches
+
+      - name: Wait for Console Enterprise compatibility merge
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          COMMUNITY_TAG: ${{ github.ref_name }}
+          CONSOLE_EE_REPOSITORY: Cognipeer/console-ee
+        run: |
+          set -euo pipefail
+          TITLE="chore(compat): pin ${COMMUNITY_TAG}"
+          MAX_ATTEMPTS=180
+
+          for ((attempt=1; attempt<=MAX_ATTEMPTS; attempt++)); do
+            PR_JSON=$(gh api \
+              --method GET "repos/${CONSOLE_EE_REPOSITORY}/pulls" \
+              -f state=all \
+              -f head="Cognipeer:automation/community-compat" \
+              -f base=main \
+              -f per_page=100 \
+              | jq --arg title "${TITLE}" \
+                '[.[] | select(.title == $title)] | sort_by(.number) | last')
+
+            if [[ "${PR_JSON}" != "null" ]]; then
+              PR_STATE=$(jq -r .state <<<"${PR_JSON}")
+              MERGED_AT=$(jq -r '.merged_at // ""' <<<"${PR_JSON}")
+              if [[ "${PR_STATE}" == "closed" && -z "${MERGED_AT}" ]]; then
+                echo "::error::Compatibility PR for ${COMMUNITY_TAG} was closed without merging."
+                exit 1
+              fi
+
+              if [[ -n "${MERGED_AT}" ]]; then
+                COMMUNITY_REF=$(gh api \
+                  "repos/${CONSOLE_EE_REPOSITORY}/contents/COMPAT.json?ref=main" \
+                  --jq .content \
+                  | tr -d '\n' \
+                  | base64 --decode \
+                  | jq -r .communityRef)
+                if [[ "${COMMUNITY_REF}" == "${COMMUNITY_TAG}" ]]; then
+                  exit 0
+                fi
+              fi
+            fi
+
+            if [[ "${attempt}" -lt "${MAX_ATTEMPTS}" ]]; then
+              sleep 10
+            fi
+          done
+
+          echo "::error::Console Enterprise compatibility merge was not observed for ${COMMUNITY_TAG}."
+          exit 1
 
   notify-crm:
     if: always() && needs.build.result != 'skipped'
