@@ -14,23 +14,31 @@
  * coverage is real where it counts.
  */
 
+import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
+
 let cached: boolean | undefined;
 
 export function chromiumAvailable(): boolean {
   if (cached !== undefined) return cached;
+
   try {
-    // `executablePath()` resolves the browser Playwright would launch and
-    // throws when the download is missing — cheaper and more accurate than
-    // probing the cache directory ourselves.
+    // Resolved lazily and synchronously: this is called in a `describe.skipIf`
+    // predicate, which runs during collection and cannot await. `playwright`
+    // is a CommonJS package, so a created require is the honest way in.
+    const require = createRequire(import.meta.url);
     const { chromium } = require('playwright') as {
       chromium: { executablePath(): string };
     };
-    const path = chromium.executablePath();
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    cached = Boolean(path) && (require('node:fs') as typeof import('node:fs')).existsSync(path);
+    // `executablePath()` names the browser Playwright would launch and throws
+    // when the download is missing — more accurate than probing the cache
+    // directory ourselves.
+    const executable = chromium.executablePath();
+    cached = Boolean(executable) && existsSync(executable);
   } catch {
     cached = false;
   }
+
   if (!cached) {
     console.warn(
       '[browser tests] Skipped: no Chromium available. Run `npx playwright install chromium` to run them.',
