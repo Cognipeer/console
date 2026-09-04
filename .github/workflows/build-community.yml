@@ -60,6 +60,8 @@ jobs:
           private-key: ${{ secrets.RELEASE_AUTOMATION_PRIVATE_KEY }}
           owner: Cognipeer
           repositories: console-ee
+          permission-contents: read
+          permission-metadata: read
 
       - name: Update Console Enterprise compatibility pin
         env:
