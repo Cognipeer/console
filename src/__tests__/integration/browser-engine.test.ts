@@ -22,6 +22,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 process.env.BROWSER_BLOCK_PRIVATE_NETWORK = 'false';
 
 import { browserManager } from '@/lib/services/browser/browserManager';
+import { chromiumAvailable } from '../helpers/browserAvailability';
 
 const PAGE = `<!doctype html>
 <html><body>
@@ -105,7 +106,7 @@ afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
-describe('aria snapshot', () => {
+describe.skipIf(!chromiumAvailable())('aria snapshot', () => {
   it('emits element references the model can address', async () => {
     const key = await open();
     const snapshot = await browserManager.captureAriaSnapshot(key);
@@ -135,7 +136,7 @@ describe('aria snapshot', () => {
   }, 60_000);
 });
 
-describe('target strategies', () => {
+describe.skipIf(!chromiumAvailable())('target strategies', () => {
   it('addresses an element by role and name', async () => {
     const key = await open();
     const result = await browserManager.runAction(key, {
@@ -191,7 +192,7 @@ describe('target strategies', () => {
   }, 60_000);
 });
 
-describe('replay across sessions', () => {
+describe.skipIf(!chromiumAvailable())('replay across sessions', () => {
   it('re-uses a descriptor captured in an earlier session', async () => {
     const discovery = await open();
     const snapshot = await browserManager.captureAriaSnapshot(discovery);
@@ -214,7 +215,7 @@ describe('replay across sessions', () => {
   }, 60_000);
 });
 
-describe('form controls', () => {
+describe.skipIf(!chromiumAvailable())('form controls', () => {
   it('types, selects, checks and reads back the result', async () => {
     const key = await open();
 
@@ -243,7 +244,7 @@ describe('form controls', () => {
   }, 60_000);
 });
 
-describe('scrolling', () => {
+describe.skipIf(!chromiumAvailable())('scrolling', () => {
   it('scrolls the window by an offset', async () => {
     const key = await open();
     const result = await browserManager.runAction(key, { type: 'scroll', y: 800 });
@@ -264,7 +265,7 @@ describe('scrolling', () => {
   }, 60_000);
 });
 
-describe('navigation history', () => {
+describe.skipIf(!chromiumAvailable())('navigation history', () => {
   it('goes back and forward', async () => {
     const key = await open();
     await browserManager.runAction(key, { type: 'goto', url: `${baseUrl}second` });
@@ -274,7 +275,7 @@ describe('navigation history', () => {
   }, 60_000);
 });
 
-describe('tabs', () => {
+describe.skipIf(!chromiumAvailable())('tabs', () => {
   it('adopts a popup opened by the page and can switch back', async () => {
     const key = await open();
     await browserManager.runAction(key, { type: 'click', role: 'link', name: 'Open second' });
@@ -301,7 +302,7 @@ describe('tabs', () => {
   }, 60_000);
 });
 
-describe('observation', () => {
+describe.skipIf(!chromiumAvailable())('observation', () => {
   it('finds visible text and hands back a reusable target', async () => {
     const key = await open();
     const found = await browserManager.findText(key, 'Sign in');
@@ -340,7 +341,7 @@ describe('observation', () => {
   }, 60_000);
 });
 
-describe('extraction', () => {
+describe.skipIf(!chromiumAvailable())('extraction', () => {
   it('reads text, attributes, input values and multiple matches', async () => {
     const key = await open();
     expect((await browserManager.extract(key, { role: 'heading', name: 'Console Test App' })).values[0])
@@ -356,7 +357,7 @@ describe('extraction', () => {
   }, 60_000);
 });
 
-describe('egress policy', () => {
+describe.skipIf(!chromiumAvailable())('egress policy', () => {
   it('blocks a host outside the allow list', async () => {
     const { sessionKey } = await browserManager.openSession({
       tenantId: 'test-tenant',
@@ -378,7 +379,7 @@ describe('egress policy', () => {
   }, 60_000);
 });
 
-describe('storage state', () => {
+describe.skipIf(!chromiumAvailable())('storage state', () => {
   it('exports cookies and origin storage for a later session', async () => {
     const key = await open();
     const state = await browserManager.exportStorageState(key);

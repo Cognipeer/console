@@ -32,6 +32,7 @@ process.env.BROWSER_BLOCK_PRIVATE_NETWORK = 'false';
 import { reloadConfig } from '@/lib/core/config';
 import { disconnectDatabase, getDatabase } from '@/lib/database';
 import { browserManager } from '@/lib/services/browser/browserManager';
+import { chromiumAvailable } from '../helpers/browserAvailability';
 import { createApiTokenSecret, hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
 import { fastifyApiPlugin } from '@/server/api/plugin';
 import { bootstrapApplication } from '@/server/bootstrap';
@@ -149,7 +150,7 @@ afterAll(async () => {
   rmSync(tmpRoot, { force: true, recursive: true });
 });
 
-describe('client API', () => {
+describe.skipIf(!chromiumAvailable())('client API', () => {
   let browserId = '';
   let sessionKey = '';
   let sessionId = '';
