@@ -18,6 +18,8 @@ import {
   IconMicrophone,
   IconSpeakerphone,
   IconScan,
+  IconPhoto,
+  IconShieldCheck,
 } from '@tabler/icons-react';
 import type { IQuotaPolicy } from '@/lib/database/provider.interface';
 import type { QuotaDomain, QuotaScope } from '@/lib/quota/types';
@@ -49,6 +51,8 @@ const DOMAIN_ICONS: Record<QuotaDomain, React.FC<{ size?: number }>> = {
   stt: IconMicrophone,
   tts: IconSpeakerphone,
   ocr: IconScan,
+  image: IconPhoto,
+  moderation: IconShieldCheck,
 };
 
 export function QuotaPolicyCard({ policy, onEdit, onDelete, showDomain = true, compact = false }: QuotaPolicyCardProps) {

@@ -158,6 +158,8 @@ export const DOMAIN_LABELS: Record<ProviderDomain, string> = {
   datasource: 'Datasource',
   stt: 'Speech-to-Text',
   tts: 'Text-to-Speech',
+  image: 'Image Generation',
+  moderation: 'Moderation',
   ocr: 'OCR',
   websearch: 'Web Search',
 };

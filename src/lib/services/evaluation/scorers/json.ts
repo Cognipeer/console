@@ -4,6 +4,8 @@
  * path resolution, deep equality, and a minimal JSON-schema subset validator.
  */
 
+import { stripInlineReasoning } from '@/lib/shared/inlineReasoning';
+import { balancedJsonBlocks } from '@/lib/shared/jsonExtraction';
 import type { JsonSchema } from '../types';
 
 export type ParseResult =
@@ -16,14 +18,16 @@ export type ParseResult =
  * (covering fenced code blocks and chatty preambles).
  */
 export function extractJson(text: string): ParseResult {
-  const trimmed = (text ?? '').trim();
+  // Upstreams that leak `<reasoning>…</reasoning>` into `content` would
+  // otherwise defeat the direct parse and let the fallback pick a JSON-looking
+  // fragment out of the chain-of-thought.
+  const trimmed = stripInlineReasoning(text ?? '').trim();
   if (!trimmed) return { ok: false, error: 'empty output' };
 
   const direct = tryParse(trimmed);
   if (direct.ok) return direct;
 
-  const block = findFirstBalancedBlock(trimmed);
-  if (block) {
+  for (const block of balancedJsonBlocks(trimmed)) {
     const parsed = tryParse(block);
     if (parsed.ok) return parsed;
   }
@@ -38,32 +42,6 @@ function tryParse(s: string): ParseResult {
   }
 }
 
-/** Find the first balanced object or array literal, respecting strings. */
-function findFirstBalancedBlock(text: string): string | null {
-  const start = text.search(/[{[]/);
-  if (start === -1) return null;
-  const open = text[start];
-  const close = open === '{' ? '}' : ']';
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let i = start; i < text.length; i += 1) {
-    const ch = text[i];
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (ch === '\\') escaped = true;
-      else if (ch === '"') inString = false;
-      continue;
-    }
-    if (ch === '"') inString = true;
-    else if (ch === open) depth += 1;
-    else if (ch === close) {
-      depth -= 1;
-      if (depth === 0) return text.slice(start, i + 1);
-    }
-  }
-  return null;
-}
 
 export interface PathLookup {
   exists: boolean;

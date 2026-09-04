@@ -15,13 +15,18 @@ import type {
   OcrRuntime,
   OcrExtractInput,
   OcrResult,
+  ImageGenerateInput,
 } from '@/lib/providers';
 import { resolveUnsupportedParamNames } from '@/lib/providers/unsupportedParams';
+import { createInlineReasoningSplitter } from '@/lib/shared/inlineReasoning';
+import { repairJsonContent } from '@/lib/shared/jsonExtraction';
+import { InvalidRequestError } from '@/lib/providers/contracts/upstreamError';
 import { getModelByKey } from './modelService';
 import {
   toLangChainMessages,
   toOpenAIChatResponse,
   newCompletionId,
+  openAIStreamDeltaChunk,
   openAIStreamRoleChunk,
   openAIStreamStopChunk,
   toOpenAIStreamChunk,
@@ -1063,6 +1068,18 @@ export function resolveModelInvocationConfig(
     delete modelSettings.reasoning;
   }
 
+  // A rule can also REQUIRE a value, not just forbid one — see
+  // `forcedParamsWithTools`. It goes on the passthrough body under its WIRE
+  // name rather than through a typed setting: LangChain only forwards
+  // `reasoning` for a model its own `isReasoningModel()` recognises, and that
+  // check is prefix-anchored, so a gateway-namespaced id
+  // (`global.openai.gpt-5.6-terra`) silently loses the parameter on the way out.
+  // Merged last, after `buildPassthroughBody` has filtered the caller's fields,
+  // so the forced value always wins.
+  if (detected.forced) {
+    modelSettings.extraBody = { ...asRecord(modelSettings.extraBody), ...detected.forced };
+  }
+
   // Stripping silently changes sampling behaviour, so leave a trace of which
   // rule did it and what the caller had asked for.
   if (detected.params.length > 0) {
@@ -1086,15 +1103,41 @@ export function resolveModelInvocationConfig(
   };
 }
 
+/**
+ * Circuit-breaker key for a chat call.
+ *
+ * Scoped to the MODEL, not just the provider. One Model Hub entry can be broken
+ * on its own — a model id the upstream rejects, a response shape that fails to
+ * parse — and a provider-wide key let that one model trip the breaker for every
+ * other model behind the same credentials, which then answered `503 Circuit
+ * breaker is open` for requests that would have succeeded. A genuine provider
+ * outage still trips, once per model in use, which is what the breaker is for.
+ */
+function chatResilienceKey(prefix: 'chat' | 'chat-stream', model: IModel): string {
+  return `${prefix}:${model.providerKey}:${model.modelId}`;
+}
+
+function ensureModerationModel(model: IModel) {
+  if (model.category !== 'moderation') {
+    throw new InvalidRequestError('Model is not configured for moderation');
+  }
+}
+
+function ensureImageModel(model: IModel) {
+  if (model.category !== 'image') {
+    throw new InvalidRequestError('Model is not configured for image generation');
+  }
+}
+
 function ensureLlmModel(model: IModel) {
   if (model.category !== 'llm') {
-    throw new Error('Model is not configured for chat completions');
+    throw new InvalidRequestError('Model is not configured for chat completions');
   }
 }
 
 function ensureEmbeddingModel(model: IModel) {
   if (model.category !== 'embedding') {
-    throw new Error('Model is not configured for embeddings');
+    throw new InvalidRequestError('Model is not configured for embeddings');
   }
 }
 
@@ -1315,6 +1358,12 @@ async function resolveDynamicCompletion(args: {
   return { ...childResult, routing };
 }
 
+/** True when the caller (or the model's defaults) asked for a JSON document. */
+function wantsJsonOutput(responseFormat: unknown): boolean {
+  const type = (responseFormat as { type?: unknown } | undefined)?.type;
+  return type === 'json_object' || type === 'json_schema';
+}
+
 export async function handleChatCompletion(params: {
   tenantDbName: string;
   tenantId?: string;
@@ -1525,7 +1574,7 @@ export async function handleChatCompletion(params: {
     if (disableProviderStreaming) {
       const eagerMessage = await withResilience(
         (signal) => chatModel.invoke(messages, { ...callOptions, signal }),
-        { key: `chat:${model.providerKey}` },
+        { key: chatResilienceKey('chat', model) },
       );
       asyncIterator = (async function* () {
         yield new AIMessageChunk({
@@ -1552,18 +1601,24 @@ export async function handleChatCompletion(params: {
           );
           return chatModel.stream!(messages, streamCallOptions) as Promise<AsyncIterable<AIMessageChunk>>;
         },
-        { key: `chat-stream:${model.providerKey}` },
+        { key: chatResilienceKey('chat-stream', model) },
       );
     }
     const startedAt = Date.now();
     const completionId = newCompletionId();
     const completionCreated = Math.floor(Date.now() / 1000);
 
+    // Upstreams that leak a reasoning model's chain-of-thought into `content`
+    // (Bedrock's `/openai/v1` gpt-oss shim among them) do it across delta
+    // boundaries, so one splitter carries the state for this whole completion.
+    const reasoningSplitter = createInlineReasoningSplitter();
+
     const chunkOptions = {
       model: model.modelId,
       stream: true as const,
       completionId,
       created: completionCreated,
+      reasoningSplitter,
     };
 
     // ── Real-time streaming enforcement ──────────────────────────────────
@@ -1852,12 +1907,7 @@ export async function handleChatCompletion(params: {
               });
             }
 
-            const payload = toOpenAIStreamChunk(chunk, {
-              model: model.modelId,
-              stream: true,
-              completionId,
-              created: completionCreated,
-            });
+            const payload = toOpenAIStreamChunk(chunk, chunkOptions);
             const choice = payload.choices[0];
             if (typeof choice?.finish_reason === 'string') {
               terminalFinishReason = choice.finish_reason;
@@ -1872,6 +1922,16 @@ export async function handleChatCompletion(params: {
             if (terminalFinishReason === 'length' && !hasFinalOutput) {
               outputLimitError = new OutputTokenLimitError(outputTokenLimit);
             }
+
+            // The reasoning splitter can consume a whole delta while it waits
+            // for the rest of a tag. What is left is not a valid OpenAI frame
+            // — it carries no delta, no finish_reason and no usage — so it is
+            // dropped rather than pushed at the client.
+            const carriesNothing =
+              (!delta || Object.keys(delta).length === 0)
+              && choice?.finish_reason == null
+              && !payload.usage;
+            if (carriesNothing) continue;
 
             if (payload.usage) {
               lastUsage = {
@@ -1915,6 +1975,29 @@ export async function handleChatCompletion(params: {
           // closed the controller and aborted the upstream. Nothing here may
           // touch the controller again.
           if (blockedByGuardrail) return;
+
+          // A stream that ended mid-tag — or mid-thought, when the model was
+          // cut off inside its reasoning — leaves text in the splitter.
+          // Release it instead of truncating the answer.
+          const reasoningTail = reasoningSplitter.flush();
+          if (!outputLimitError && (reasoningTail.content || reasoningTail.reasoning)) {
+            const tailDelta: Record<string, unknown> = {};
+            if (reasoningTail.content) tailDelta.content = reasoningTail.content;
+            if (reasoningTail.reasoning) tailDelta.reasoning_content = reasoningTail.reasoning;
+            const tailPayload = openAIStreamDeltaChunk(chunkOptions, tailDelta);
+            if (gate) {
+              const gatedTail = await gate.push(toGateChunk(tailPayload));
+              emitGatedFrames(gatedTail.emit);
+              if (gatedTail.blocked) {
+                closeWithGuardrailBlock(gatedTail.verdict);
+                return;
+              }
+            } else {
+              controller.enqueue(
+                encoder.encode(`data: ${JSON.stringify(tailPayload)}\n\n`),
+              );
+            }
+          }
 
           if (gate) {
             // An upstream that never sends a finish_reason leaves the gate
@@ -2092,7 +2175,7 @@ export async function handleChatCompletion(params: {
 
   const aiMessage = await withResilience(
     (signal) => chatModel.invoke(messages, { ...callOptions, signal }),
-    { key: `chat:${model.providerKey}` },
+    { key: chatResilienceKey('chat', model) },
   );
 
   const latencyMs = Date.now() - start;
@@ -2100,6 +2183,30 @@ export async function handleChatCompletion(params: {
     model: model.modelId,
     stream: false,
   });
+
+  // JSON mode is a contract: the caller asked for a parseable document and is
+  // going to `JSON.parse` whatever comes back. Some providers break it anyway —
+  // Bedrock's `/openai/v1` gpt-oss path splices a stray brace or a truncated
+  // prose answer in front of the payload under `response_format`. Recover the
+  // model's own JSON bytes rather than handing the caller something it asked
+  // not to receive. A response that already parses is never touched, and a
+  // response with nothing recoverable in it is passed through unchanged.
+  if (wantsJsonOutput(overrides.response_format ?? body.response_format)) {
+    const choice = response.choices[0];
+    const content = choice?.message?.content;
+    if (typeof content === 'string' && content.length > 0) {
+      const { content: repairedContent, repaired } = repairJsonContent(content);
+      if (repaired) {
+        choice.message.content = repairedContent;
+        logger.warn('Repaired malformed JSON-mode response from provider', {
+          requestId,
+          modelKey,
+          providerDriver: model.providerDriver,
+          discardedPrefix: content.slice(0, content.indexOf(repairedContent)).slice(0, 120),
+        });
+      }
+    }
+  }
 
   if (
     aiMessage.response_metadata?.finish_reason === 'length'
@@ -2305,13 +2412,13 @@ export async function handleEmbeddingRequest(params: {
 
 function ensureSttModel(model: IModel) {
   if (model.category !== 'stt') {
-    throw new Error('Model is not configured for speech-to-text');
+    throw new InvalidRequestError('Model is not configured for speech-to-text');
   }
 }
 
 function ensureTtsModel(model: IModel) {
   if (model.category !== 'tts') {
-    throw new Error('Model is not configured for text-to-speech');
+    throw new InvalidRequestError('Model is not configured for text-to-speech');
   }
 }
 
@@ -2543,6 +2650,177 @@ export async function handleSpeechRequest(params: {
     requestId,
     model,
   };
+}
+
+/**
+ * `POST /v1/images/generations`.
+ *
+ * Same shape as the other non-chat handlers: resolve the model, build the
+ * provider runtime, run it under the shared resilience wrapper, and log usage.
+ * Image models bill per IMAGE rather than per token, so `usage.images` is what
+ * the usage row carries; token counts are recorded only when the upstream
+ * reports them (gpt-image does, dall-e does not).
+ */
+export async function handleImageRequest(params: {
+  tenantDbName: string;
+  modelKey: string;
+  projectId: string;
+  input: ImageGenerateInput;
+  requestId?: string;
+}) {
+  const { tenantDbName, modelKey, projectId, input } = params;
+  const requestId = params.requestId || crypto.randomUUID();
+  const start = Date.now();
+
+  const model = await getModelByKey(tenantDbName, modelKey, projectId);
+  if (!model) {
+    throw new Error(`Model with key ${modelKey} not found`);
+  }
+  ensureImageModel(model);
+
+  const { runtime } = await buildModelRuntime(
+    tenantDbName,
+    model.tenantId,
+    model.providerKey,
+    projectId,
+  );
+
+  if (!runtime.createImageRuntime) {
+    throw new Error('Model provider does not support image generation');
+  }
+
+  const imageRuntime = await runtime.createImageRuntime({
+    modelId: model.modelId,
+    category: model.category,
+    modelSettings: model.settings,
+  });
+
+  const result = await withResilience(
+    () => imageRuntime.generate(input),
+    { key: `image:${model.providerKey}:${model.modelId}` },
+  );
+
+  const latencyMs = Date.now() - start;
+
+  fireAndForget('log-image-usage', () =>
+    logModelUsage(tenantDbName, model, {
+      requestId,
+      route: 'images.generations',
+      status: 'success',
+      providerRequest: sanitizeForLogging({
+        model: modelKey,
+        n: input.n,
+        size: input.size,
+        quality: input.quality,
+        promptCharacters: input.prompt.length,
+      }),
+      // The base64 payload is megabytes; only its shape is worth a trace row.
+      providerResponse: sanitizeForLogging({
+        images: result.images.length,
+        withUrl: result.images.filter((image) => Boolean(image.url)).length,
+        revisedPrompt: result.images[0]?.revisedPrompt,
+      }),
+      latencyMs,
+      usage: {
+        inputTokens: result.usage?.inputTokens ?? 0,
+        outputTokens: result.usage?.outputTokens ?? 0,
+        totalTokens: result.usage?.totalTokens ?? 0,
+        images: result.usage?.images ?? result.images.length,
+      },
+    }),
+  );
+
+  return {
+    response: {
+      created: Math.floor(Date.now() / 1000),
+      data: result.images.map((image) => ({
+        ...(image.b64Json !== undefined ? { b64_json: image.b64Json } : {}),
+        ...(image.url !== undefined ? { url: image.url } : {}),
+        ...(image.revisedPrompt !== undefined ? { revised_prompt: image.revisedPrompt } : {}),
+      })),
+      usage: result.usage,
+    },
+    latencyMs,
+    requestId,
+    model,
+  };
+}
+
+/**
+ * Native moderation: one call to a purpose-built classifier.
+ *
+ * The guardrail engine's LLM-judge path stays where it is — this is the other
+ * half of the story (see `providers/domains/moderation.ts`), used both by
+ * `/v1/moderations` when the caller names a moderation MODEL and by a guardrail
+ * whose moderation policy selects the model detector.
+ */
+export async function handleModerationRequest(params: {
+  tenantDbName: string;
+  modelKey: string;
+  projectId: string;
+  texts: string[];
+  requestId?: string;
+}) {
+  const { tenantDbName, modelKey, projectId, texts } = params;
+  const requestId = params.requestId || crypto.randomUUID();
+  const start = Date.now();
+
+  const model = await getModelByKey(tenantDbName, modelKey, projectId);
+  if (!model) {
+    throw new Error(`Model with key ${modelKey} not found`);
+  }
+  ensureModerationModel(model);
+
+  const { runtime } = await buildModelRuntime(
+    tenantDbName,
+    model.tenantId,
+    model.providerKey,
+    projectId,
+  );
+
+  if (!runtime.createModerationRuntime) {
+    throw new Error('Model provider does not support moderation');
+  }
+
+  const moderationRuntime = await runtime.createModerationRuntime({
+    modelId: model.modelId,
+    category: model.category,
+    modelSettings: model.settings,
+  });
+
+  const result = await withResilience(
+    () => moderationRuntime.classify(texts),
+    { key: `moderation:${model.providerKey}:${model.modelId}` },
+  );
+
+  const latencyMs = Date.now() - start;
+
+  fireAndForget('log-moderation-usage', () =>
+    logModelUsage(tenantDbName, model, {
+      requestId,
+      route: 'moderations',
+      status: 'success',
+      providerRequest: sanitizeForLogging({
+        model: modelKey,
+        inputs: texts.length,
+        characters: texts.reduce((total, text) => total + text.length, 0),
+      }),
+      // The texts themselves are the thing being moderated; only the verdict
+      // shape belongs in a trace row.
+      providerResponse: sanitizeForLogging({
+        results: result.results.length,
+        flagged: result.results.filter((entry) => entry.flagged).length,
+      }),
+      latencyMs,
+      usage: {
+        inputTokens: result.usage?.inputTokens ?? 0,
+        outputTokens: 0,
+        totalTokens: result.usage?.totalTokens ?? result.usage?.inputTokens ?? 0,
+      },
+    }),
+  );
+
+  return { result, latencyMs, requestId, model };
 }
 
 export async function handleOcrRequest(params: {

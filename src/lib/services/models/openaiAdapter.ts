@@ -9,6 +9,10 @@ import {
 } from '@langchain/core/messages';
 import crypto from 'crypto';
 import { normalizeFinishReason } from '@/lib/shared/finishReason';
+import {
+  splitInlineReasoning,
+  type InlineReasoningSplitter,
+} from '@/lib/shared/inlineReasoning';
 
 type MessageContentPart = Record<string, unknown>;
 
@@ -79,6 +83,12 @@ export interface ChatTransformOptions {
   stream?: boolean;
   completionId?: string;
   created?: number;
+  /**
+   * Per-response state for pulling a leaked `<reasoning>` block out of the
+   * streamed answer. One instance per completion — see
+   * `@/lib/shared/inlineReasoning`.
+   */
+  reasoningSplitter?: InlineReasoningSplitter;
 }
 
 function normalizeContent(
@@ -383,14 +393,23 @@ export function toOpenAIChatResponse(
   const refusalValue = additional['refusal'];
   const refusal = refusalValue === undefined ? null : refusalValue;
 
+  // Upstreams that leave a reasoning model's chain-of-thought inside `content`
+  // (Bedrock's `/openai/v1` gpt-oss shim, some vLLM builds) would otherwise
+  // hand the caller `<reasoning>…</reasoning>{"answer":1}` as the answer.
+  let inlineReasoning: string | undefined;
+  let contentText: string | null = null;
+  if (typeof message.content === 'string') {
+    const split = splitInlineReasoning(message.content);
+    inlineReasoning = split.reasoning;
+    contentText = split.content.length > 0 ? split.content : null;
+  }
+
   const normalizedContent = Array.isArray(message.content)
     ? message.content.length > 0
       ? message.content
       : null
     : typeof message.content === 'string'
-      ? message.content.length > 0
-        ? message.content
-        : null
+      ? contentText
       : (message.content ?? null);
 
   const usagePayload: Record<string, unknown> = {
@@ -420,8 +439,26 @@ export function toOpenAIChatResponse(
     fingerprintFromMetadata ||
     `fp_${crypto.createHash('sha256').update(`${options.model}`).digest('hex').slice(0, 24)}`;
 
-  const messageWithTools = message as AIMessage & { tool_calls?: unknown };
-  const normalizedToolCalls = normalizeToolCalls(messageWithTools.tool_calls);
+  const messageWithTools = message as AIMessage & {
+    tool_calls?: unknown;
+    invalid_tool_calls?: unknown;
+  };
+
+  // The RAW wire array comes FIRST on purpose. LangChain moves any call whose
+  // `arguments` string is not valid JSON into `invalid_tool_calls` and leaves
+  // `tool_calls` empty, so a gateway reading only `tool_calls` silently drops a
+  // call the upstream really did make: the client is handed
+  // `finish_reason: "tool_calls"` with no calls on the message and its agent
+  // loop stalls with nothing to dispatch. Observed with qwen3-coder over
+  // Bedrock's `/openai/v1`, which emits `arguments: "{"` for a no-parameter
+  // tool. The streaming path already preferred the raw array; this is the same
+  // rule for a non-streamed response.
+  const normalizedToolCalls =
+    normalizeToolCalls((additional as Record<string, unknown>).tool_calls)
+    ?? mergeToolCalls(
+      normalizeToolCalls(messageWithTools.tool_calls),
+      normalizeToolCalls(messageWithTools.invalid_tool_calls),
+    );
 
   const assistantMessage: Record<string, unknown> = {
     role: 'assistant',
@@ -431,8 +468,11 @@ export function toOpenAIChatResponse(
   };
 
   const { reasoningContent, reasoning } = extractReasoning(message);
-  if (reasoningContent !== undefined) {
-    assistantMessage.reasoning_content = reasoningContent;
+  const mergedReasoningContent = [reasoningContent, inlineReasoning]
+    .filter((part): part is string => typeof part === 'string' && part.length > 0)
+    .join('');
+  if (mergedReasoningContent) {
+    assistantMessage.reasoning_content = mergedReasoningContent;
   }
   if (reasoning !== undefined) {
     assistantMessage.reasoning = reasoning;
@@ -565,13 +605,28 @@ export function toOpenAIStreamChunk(
   const delta: Record<string, unknown> = {};
 
   const { text, reasoning: reasoningFromContent } = flattenDeltaContent(chunk.content);
-  if (text !== undefined) {
-    delta.content = text;
+
+  // A leaked `<reasoning>` block arrives split across deltas, so the caller
+  // threads one splitter through every chunk of the same completion.
+  let contentText = text;
+  let inlineReasoning: string | undefined;
+  if (options.reasoningSplitter && text !== undefined) {
+    const split = options.reasoningSplitter.push(text);
+    contentText = split.content.length > 0 ? split.content : undefined;
+    inlineReasoning = split.reasoning.length > 0 ? split.reasoning : undefined;
+  }
+
+  if (contentText !== undefined) {
+    delta.content = contentText;
   }
 
   const { reasoningContent, reasoning } = extractReasoning(chunk);
-  if (reasoningContent !== undefined || reasoningFromContent !== undefined) {
-    delta.reasoning_content = `${reasoningContent ?? ''}${reasoningFromContent ?? ''}`;
+  if (
+    reasoningContent !== undefined
+    || reasoningFromContent !== undefined
+    || inlineReasoning !== undefined
+  ) {
+    delta.reasoning_content = `${reasoningContent ?? ''}${reasoningFromContent ?? ''}${inlineReasoning ?? ''}`;
   }
   if (reasoning !== undefined) {
     delta.reasoning = reasoning;
@@ -622,6 +677,21 @@ export function toOpenAIStreamChunk(
   };
 }
 
+/**
+ * A content/reasoning-only frame. Used to release text a stream transform was
+ * still buffering when the upstream ended — see the inline-reasoning splitter.
+ */
+export function openAIStreamDeltaChunk(
+  options: ChatTransformOptions,
+  delta: Record<string, unknown>,
+): ReturnType<typeof toOpenAIStreamChunk> {
+  return {
+    ...streamChunkEnvelope(options),
+    choices: [{ index: 0, delta, finish_reason: null }],
+    usage: undefined,
+  };
+}
+
 export function buildErrorResponse(message: string, status = 400) {
   return {
     error: {
@@ -643,6 +713,33 @@ function metadataFingerprint(metadata: unknown): string | undefined {
 
   const fingerprint = (metadata as Record<string, unknown>).system_fingerprint;
   return typeof fingerprint === 'string' ? fingerprint : undefined;
+}
+
+/** Concatenates the parsed and unparseable halves LangChain splits a turn into. */
+function mergeToolCalls(
+  ...groups: Array<OpenAIToolCall[] | undefined>
+): OpenAIToolCall[] | undefined {
+  const merged = groups.flatMap((group) => group ?? []);
+  return merged.length > 0 ? merged : undefined;
+}
+
+/**
+ * `arguments` is a JSON string on the wire. Some upstreams truncate it to a bare
+ * `"{"` for a call that takes no parameters (Bedrock's Qwen tool parser does),
+ * which every strict client then fails to parse. That one shape is unambiguously
+ * an empty object, so it is repaired; anything else is passed through exactly as
+ * the model produced it — inventing arguments would be worse than reporting the
+ * ones it actually emitted.
+ */
+function normalizeArgumentsString(raw: string): string {
+  const trimmed = raw.trim();
+  if (trimmed === '') return '{}';
+  try {
+    JSON.parse(trimmed);
+    return raw;
+  } catch {
+    return /^\{\s*$/.test(trimmed) ? '{}' : raw;
+  }
 }
 
 function normalizeToolCalls(
@@ -677,7 +774,7 @@ function normalizeToolCalls(
       call.input ??
       call.parameters;
 
-    const argsString = serializeArguments(argumentSource);
+    const argsString = normalizeArgumentsString(serializeArguments(argumentSource));
 
     const idCandidate = [call.id, call.tool_call_id].find(
       (candidate): candidate is string =>

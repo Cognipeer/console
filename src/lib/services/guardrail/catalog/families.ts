@@ -727,7 +727,7 @@ const DEFINITIONS: PolicyFamilyDefinitions = {
   moderation: {
     label: 'Moderation',
     description:
-      'An LLM classifier for harmful and policy-violating content across the standard category set. Costs a model call on every run.',
+      'Classifies harmful and policy-violating content across the standard category set. A dedicated moderation model answers in one cheap call with real per-category scores; an LLM judge works against any chat model but costs a full completion on every run.',
     icon: 'alert-octagon',
     color: 'red',
     catalog: {
@@ -737,6 +737,16 @@ const DEFINITIONS: PolicyFamilyDefinitions = {
     },
     needsFailMode: true,
     fields: fieldsFor<ModerationPolicyConfig>([
+      {
+        kind: 'select',
+        key: 'detector',
+        label: 'Detector',
+        options: [
+          { value: 'llm', label: 'LLM judge', description: 'Any chat model. Works everywhere; costs a completion per run and reports a coarse severity.' },
+          { value: 'model', label: 'Moderation model', description: 'A model whose category is "moderation". One cheap call with real per-category scores.' },
+        ],
+        help: 'Which detector runs this policy. The model picked below has to match: a chat model for the judge, a moderation model for the classifier.',
+      },
       {
         kind: 'reference',
         key: 'modelKey',
@@ -757,6 +767,10 @@ const DEFINITIONS: PolicyFamilyDefinitions = {
     ]),
     defaults: () => ({
       ...base('moderation'),
+      // `llm` stays the default: it is the only detector every provider can
+      // serve, so a policy created before anyone registers a moderation model
+      // still runs.
+      detector: 'llm' as const,
       categories: Object.fromEntries(
         MODERATION_CATEGORIES.map((category) => [category.id, category.defaultEnabled]),
       ),
@@ -766,6 +780,7 @@ const DEFINITIONS: PolicyFamilyDefinitions = {
       return summary(
         [
           on > 0 ? `${on} of ${MODERATION_CATEGORIES.length} categories` : 'No categories switched on',
+          policy.detector === 'model' ? 'classifier' : 'LLM judge',
           policy.modelKey ? `via ${policy.modelKey}` : 'no model chosen',
         ],
         'Not configured yet.',

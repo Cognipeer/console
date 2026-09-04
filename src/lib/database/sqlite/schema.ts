@@ -1834,6 +1834,8 @@ export const TENANT_SCHEMA_SQL = `
     defaultSessionConfig TEXT DEFAULT '{}',
     defaultModelKey TEXT,
     defaultRunOptions TEXT DEFAULT '{}',
+    storageStateEnc TEXT,
+    storageStateMeta TEXT,
     metadata TEXT DEFAULT '{}',
     createdBy TEXT NOT NULL,
     updatedBy TEXT,
@@ -1898,6 +1900,59 @@ export const TENANT_SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_browser_session_events_sessionId ON browser_session_events(sessionId);
   CREATE INDEX IF NOT EXISTS idx_browser_session_events_seq ON browser_session_events(sessionId, sequence);
+
+  -- Browser flows (recorded, replayable step lists)
+  CREATE TABLE IF NOT EXISTS browser_flows (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    status TEXT NOT NULL,
+    browserId TEXT NOT NULL,
+    inputs TEXT,
+    steps TEXT NOT NULL,
+    sessionConfig TEXT,
+    recordedFromSessionId TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
+    lastRun TEXT,
+    metadata TEXT,
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_browser_flows_tenantId ON browser_flows(tenantId);
+  CREATE INDEX IF NOT EXISTS idx_browser_flows_browserId ON browser_flows(browserId);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_browser_flows_tenant_key ON browser_flows(tenantId, key);
+
+  -- Browser flow runs (one execution of a flow)
+  CREATE TABLE IF NOT EXISTS browser_flow_runs (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    flowId TEXT NOT NULL,
+    flowKey TEXT NOT NULL,
+    flowVersion INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    trigger TEXT NOT NULL,
+    sessionId TEXT,
+    sessionKey TEXT,
+    inputs TEXT,
+    stepResults TEXT,
+    outputs TEXT,
+    startedAt TEXT,
+    endedAt TEXT,
+    durationMs INTEGER,
+    errorMessage TEXT,
+    failedStepIndex INTEGER,
+    createdBy TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_browser_flow_runs_flowId ON browser_flow_runs(flowId, createdAt DESC);
+  CREATE INDEX IF NOT EXISTS idx_browser_flow_runs_tenantId ON browser_flow_runs(tenantId, createdAt DESC);
 
   -- Crawlers (parent profiles)
   CREATE TABLE IF NOT EXISTS crawlers (

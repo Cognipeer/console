@@ -6,9 +6,11 @@ import { notifications } from '@mantine/notifications';
 import {
   IconCheck,
   IconCopy,
+  IconPhoto,
   IconPlayerPlay,
   IconPlayerStop,
   IconRefresh,
+  IconX,
 } from '@tabler/icons-react';
 
 interface ModelPlaygroundProps {
@@ -36,10 +38,28 @@ export default function ModelPlayground({
   const [responseFormat, setResponseFormat] = useState<'text' | 'json_object'>(
     'text',
   );
+  // Attached images travel as OpenAI `image_url` parts with a data: URL, which
+  // is the only shape every vision-capable upstream accepts without the gateway
+  // having to host the file somewhere first.
+  const [images, setImages] = useState<Array<{ name: string; dataUrl: string }>>([]);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [stats, setStats] = useState<{ ms: number; tokens: number } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => () => abortRef.current?.abort(), []);
+
+  const attachImages = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const read = (file: File) =>
+      new Promise<{ name: string; dataUrl: string }>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve({ name: file.name, dataUrl: String(reader.result) });
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(file);
+      });
+    const attached = await Promise.all(Array.from(files).map(read));
+    setImages((current) => [...current, ...attached]);
+  };
 
   const run = async () => {
     if (!user.trim() || running) return;
@@ -55,9 +75,23 @@ export default function ModelPlayground({
     let fullReasoning = '';
 
     try {
-      const messages: Array<{ role: string; content: string }> = [];
+      type ContentPart =
+        | { type: 'text'; text: string }
+        | { type: 'image_url'; image_url: { url: string } };
+      const messages: Array<{ role: string; content: string | ContentPart[] }> = [];
       if (system.trim()) messages.push({ role: 'system', content: system.trim() });
-      messages.push({ role: 'user', content: user.trim() });
+      messages.push({
+        role: 'user',
+        content: images.length > 0
+          ? ([
+            { type: 'text', text: user.trim() },
+            ...images.map((image) => ({
+              type: 'image_url' as const,
+              image_url: { url: image.dataUrl },
+            })),
+          ] as ContentPart[])
+          : user.trim(),
+      });
 
       const res = await fetch('/api/dashboard/playground/chat', {
         method: 'POST',
@@ -215,6 +249,50 @@ export default function ModelPlayground({
           />
         </div>
 
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          multiple
+          hidden
+          onChange={(e) => {
+            void attachImages(e.target.files);
+            e.target.value = '';
+          }}
+        />
+
+        {images.length > 0 ? (
+          <div className="ds-row ds-gap-xs" style={{ flexWrap: 'wrap' }}>
+            {images.map((image, index) => (
+              <div
+                key={`${image.name}-${index}`}
+                className="ds-row ds-gap-xs"
+                style={{
+                  alignItems: 'center',
+                  border: '1px solid var(--mantine-color-default-border)',
+                  borderRadius: 6,
+                  padding: '2px 6px',
+                  fontSize: 11,
+                }}
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={image.dataUrl} alt={image.name} width={22} height={22} style={{ objectFit: 'cover', borderRadius: 3 }} />
+                <span style={{ maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {image.name}
+                </span>
+                <ActionIcon
+                  variant="subtle"
+                  size="xs"
+                  aria-label={`Remove ${image.name}`}
+                  onClick={() => setImages((current) => current.filter((_, i) => i !== index))}
+                >
+                  <IconX size={12} stroke={1.7} />
+                </ActionIcon>
+              </div>
+            ))}
+          </div>
+        ) : null}
+
         <div className="ds-row ds-gap-sm">
           {running ? (
             <Button
@@ -237,6 +315,17 @@ export default function ModelPlayground({
               Run · ⌘↵
             </Button>
           )}
+          <Tooltip label="Attach image (vision)" withArrow>
+            <ActionIcon
+              variant="default"
+              size="lg"
+              radius="md"
+              aria-label="Attach image"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <IconPhoto size={15} stroke={1.7} />
+            </ActionIcon>
+          </Tooltip>
           <Tooltip label="Clear output" withArrow>
             <ActionIcon
               variant="default"

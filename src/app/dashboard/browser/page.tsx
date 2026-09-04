@@ -16,6 +16,7 @@ import { notifications } from '@mantine/notifications';
 import {
   IconEye,
   IconPlus,
+  IconRoute,
   IconTrash,
   IconWorld,
 } from '@tabler/icons-react';
@@ -265,14 +266,24 @@ export default function BrowsersListPage() {
         title="Browsers"
         subtitle="Headless browser profiles. Create a browser, then add sessions or run agents on top of it."
         actions={
-          <Button
-            color="teal"
-            size="sm"
-            leftSection={<IconPlus size={14} stroke={1.7} />}
-            onClick={createHandlers.open}
-          >
-            Create browser
-          </Button>
+          <Group gap="xs">
+            <Button
+              variant="default"
+              size="sm"
+              leftSection={<IconRoute size={14} stroke={1.7} />}
+              onClick={() => router.push('/dashboard/browser/flows')}
+            >
+              Flows
+            </Button>
+            <Button
+              color="teal"
+              size="sm"
+              leftSection={<IconPlus size={14} stroke={1.7} />}
+              onClick={createHandlers.open}
+            >
+              Create browser
+            </Button>
+          </Group>
         }
       />
 

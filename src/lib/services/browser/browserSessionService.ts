@@ -13,12 +13,13 @@ import { getConfig } from '@/lib/core/config';
 import { routeInstanceCall } from '@/lib/core/cluster';
 import type { QueuePayload } from '@/lib/core/queue';
 import { getDatabase, runWithTenantScope, type DatabaseProvider } from '@/lib/database';
-import { uploadFile } from '@/lib/services/files';
+import { downloadFile, uploadFile } from '@/lib/services/files';
 import {
   recordUsageEvent,
   resolveUsageAttribution,
 } from '@/lib/services/usage/usageEvents';
 import { browserManager } from './browserManager';
+import { readBrowserStorageState } from './browserProfileService';
 import { browserEntityId } from './entityId';
 import { matchesProjectScope, redactTypedText, sanitizePersistedUrl } from './internals';
 import type {
@@ -36,6 +37,7 @@ import type {
 import type {
   BrowserActionType,
   IBrowserSession,
+  IBrowserSessionConfig,
   IBrowserSessionEvent,
 } from '@/lib/database';
 
@@ -46,6 +48,45 @@ async function withTenantDb(tenantDbName: string): Promise<DatabaseProvider> {
   await db.switchToTenant(tenantDbName);
   return db;
 }
+
+/**
+ * Teach the manager how to turn Files ids into upload payloads.
+ *
+ * The manager knows Playwright and nothing else, so it cannot reach tenant
+ * storage on its own. Uploads deliberately take a Files id rather than a
+ * path: a path would let any caller hand the browser a file the server can
+ * read, and the document a flow uploads is tenant data that belongs in the
+ * tenant's bucket anyway.
+ */
+browserManager.setUploadResolver(async (ctx, fileIds) => {
+  const db = await withTenantDb(ctx.tenantDbName);
+  const resolved: Array<{ name: string; mimeType: string; buffer: Buffer }> = [];
+
+  for (const fileId of fileIds) {
+    const record = await db.findFileRecordById(fileId);
+    if (
+      !record
+      || record.tenantId !== ctx.tenantId
+      || !matchesProjectScope(record.projectId, ctx.projectId)
+    ) {
+      throw new Error(`File not found: ${fileId}`);
+    }
+    const download = await downloadFile(
+      ctx.tenantDbName,
+      ctx.tenantId,
+      record.projectId ?? ctx.projectId ?? '',
+      record.bucketKey,
+      record.key,
+    );
+    resolved.push({
+      name: record.name || record.key,
+      mimeType: download.contentType ?? record.contentType ?? 'application/octet-stream',
+      buffer: download.data,
+    });
+  }
+
+  return resolved;
+});
 
 function serializeSession(record: IBrowserSession): BrowserSessionView {
   const { _id, ...rest } = record;
@@ -94,8 +135,30 @@ export async function createBrowserSession(
   if (browser.status !== 'active') {
     throw new Error(`Browser ${browser.key} is not active`);
   }
-  const config = { ...(browser.defaultSessionConfig ?? {}), ...(input.config ?? {}) };
+  // The browser's signed-in profile is the LOWEST-priority source: an
+  // explicit `config.storageState` on the request wins, and passing `null`
+  // clears it for one session (a flow that must start logged out).
+  const storedProfile = readBrowserStorageState(browser);
+  const config: IBrowserSessionConfig = {
+    ...(storedProfile ? { storageState: storedProfile } : {}),
+    ...(browser.defaultSessionConfig ?? {}),
+    ...(input.config ?? {}),
+  };
+  if (input.config && 'storageState' in input.config && !input.config.storageState) {
+    delete config.storageState;
+  }
   const artifactBucketKey = input.artifactBucketKey ?? browser.artifactBucketKey ?? cfg.defaultArtifactBucketKey;
+
+  // What the session ROW stores is not what the context gets. `storageState`
+  // is a live login and `proxy`/`httpCredentials` carry passwords; the row is
+  // read by the sessions list, the API and the UI, so the secrets stay in the
+  // in-memory `config` and never reach the database.
+  const persistedConfig: IBrowserSessionConfig = { ...config };
+  delete persistedConfig.storageState;
+  delete persistedConfig.httpCredentials;
+  if (persistedConfig.proxy) {
+    persistedConfig.proxy = { ...persistedConfig.proxy, password: undefined };
+  }
 
   // Attribution is stamped at creation (request ALS in scope); the rollup
   // event is emitted once per session when it ends.
@@ -112,7 +175,7 @@ export async function createBrowserSession(
     agentId: input.agentId,
     agentKey: input.agentKey,
     status: 'pending',
-    config,
+    config: persistedConfig,
     artifactBucketKey,
     eventCount: 0,
     metadata: input.metadata,
@@ -124,6 +187,8 @@ export async function createBrowserSession(
   try {
     await browserManager.openSession({
       tenantId: ctx.tenantId,
+      tenantDbName: ctx.tenantDbName,
+      projectId: ctx.projectId,
       sessionKey,
       config,
       onClose: async (reason) => {
@@ -332,7 +397,16 @@ export async function runBrowserActionLocal(
     selector: 'selector' in action ? action.selector : undefined,
     ref: 'ref' in action ? action.ref : undefined,
     durationMs,
-    data: redactAction(action),
+    // `resolvedTarget` is the durable half of what the action actually hit,
+    // and stamping it here is what makes the event log a RECORDING rather
+    // than just an audit trail: `recordBrowserFlow` reads these back into
+    // replayable steps. The raw action is redacted as before; the target is
+    // a role/name description, never a value.
+    data: {
+      ...redactAction(action),
+      ...(result.resolvedTarget ? { resolvedTarget: result.resolvedTarget } : {}),
+      ...(result.targetStrategy ? { targetStrategy: result.targetStrategy } : {}),
+    },
     errorMessage: result.errorMessage,
   });
 
@@ -357,6 +431,47 @@ export async function extractFromBrowser(
     errorMessage: result.errorMessage,
   });
   return result;
+}
+
+/**
+ * Find visible text and return a DURABLE target for each hit.
+ *
+ * The cheap alternative to another full snapshot once the caller knows what
+ * it is looking for, and the way a discovery turn produces a target that can
+ * be written into a flow step.
+ */
+export async function searchPageText(
+  ctx: SessionContext,
+  sessionKey: string,
+  text: string,
+  options: { limit?: number } = {},
+): Promise<{ ok: boolean; matches: Array<{ text: string; target: unknown }>; errorMessage?: string }> {
+  await loadSessionForKey(ctx, sessionKey);
+  return browserManager.findText(sessionKey, text, options);
+}
+
+/** Console messages, failed requests and the last dialog the session saw. */
+export async function readSessionObservations(
+  ctx: SessionContext,
+  sessionKey: string,
+): Promise<ReturnType<typeof browserManager.getObservations>> {
+  await loadSessionForKey(ctx, sessionKey);
+  return browserManager.getObservations(sessionKey);
+}
+
+/**
+ * Export the session's cookies + origin storage.
+ *
+ * This is the "sign in once" half of unattended automation: drive a login by
+ * hand, export here, attach the result to the browser profile, and every run
+ * afterwards starts authenticated.
+ */
+export async function exportSessionStorageState(
+  ctx: SessionContext,
+  sessionKey: string,
+): Promise<Record<string, unknown>> {
+  await loadSessionForKey(ctx, sessionKey);
+  return browserManager.exportStorageState(sessionKey);
 }
 
 export async function captureSnapshot(

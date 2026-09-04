@@ -1,3 +1,4 @@
+import { upstreamError } from './upstreamError';
 import type {
   SttRuntime,
   SttResult,
@@ -196,9 +197,7 @@ export function createOpenAiSttRuntime(opts: OpenAiAudioClientOptions): SttRunti
     });
 
     if (!response.ok) {
-      throw new Error(
-        `OpenAI transcription failed (${response.status}): ${await readErrorText(response)}`,
-      );
+      throw await upstreamError('OpenAI transcription failed', response);
     }
 
     const contentType = response.headers.get('content-type') ?? '';
@@ -231,9 +230,7 @@ export function createOpenAiSttRuntime(opts: OpenAiAudioClientOptions): SttRunti
     });
 
     if (!response.ok) {
-      throw new Error(
-        `OpenAI translation failed (${response.status}): ${await readErrorText(response)}`,
-      );
+      throw await upstreamError('OpenAI translation failed', response);
     }
 
     const contentType = response.headers.get('content-type') ?? '';
@@ -268,9 +265,7 @@ export function createOpenAiTtsRuntime(opts: OpenAiAudioClientOptions): TtsRunti
     });
 
     if (!response.ok) {
-      throw new Error(
-        `OpenAI TTS failed (${response.status}): ${await readErrorText(response)}`,
-      );
+      throw await upstreamError('OpenAI TTS failed', response);
     }
 
     const buffer = Buffer.from(await response.arrayBuffer());

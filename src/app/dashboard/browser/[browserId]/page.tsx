@@ -38,8 +38,8 @@ import {
   IconAlertCircle,
   IconCamera,
   IconCode,
+  IconCookie,
   IconCopy,
-  IconDeviceDesktop,
   IconDots,
   IconEdit,
   IconHistory,
@@ -48,6 +48,7 @@ import {
   IconPlug,
   IconPlus,
   IconRefresh,
+  IconRoute,
   IconTerminal,
   IconTrash,
   IconWorld,
@@ -55,6 +56,7 @@ import {
 } from '@tabler/icons-react';
 import DetailShell from '@/components/common/ui/DetailShell';
 import StatusBadge from '@/components/common/ui/StatusBadge';
+import BrowserProfilePanel from '@/components/browser/BrowserProfilePanel';
 import type { BrowserSessionView, BrowserView } from '@/lib/services/browser';
 
 interface CreateSessionForm {
@@ -118,6 +120,10 @@ export default function BrowserDetailPage() {
   const [searchTerm, setSearchTerm] = useState<string>('');
 
   const [editOpened, editHandlers] = useDisclosure(false);
+  /** Session queued for recording into a flow, and the name being given to it. */
+  const [recordTarget, setRecordTarget] = useState<BrowserSessionView | null>(null);
+  const [recordName, setRecordName] = useState('');
+  const [recording, setRecording] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const [createOpened, createHandlers] = useDisclosure(false);
@@ -191,6 +197,88 @@ export default function BrowserDetailPage() {
     const closed = sessions.filter((s) => s.status === 'closed' || s.status === 'expired').length;
     return { total: sessions.length, active, errored, closed };
   }, [sessions]);
+
+  /**
+   * Turn a driven session into a flow.
+   *
+   * This is the shortest path from "I did it once by hand" to "it runs every
+   * night": the session's action log already holds durable targets, so no
+   * separate recorder is needed.
+   */
+  async function handleRecordFlow() {
+    if (!recordTarget) return;
+    setRecording(true);
+    try {
+      const res = await fetch('/api/browser/flows/record', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          sessionId: recordTarget.id,
+          name: recordName.trim() || `Flow from ${recordTarget.name || recordTarget.sessionKey}`,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Recording failed');
+      notifications.show({
+        color: 'teal',
+        title: 'Flow recorded',
+        message: `${data.flow.steps.length} step(s) captured. Review it before making it active.`,
+      });
+      setRecordTarget(null);
+      setRecordName('');
+      window.location.href = `/dashboard/browser/flows/${data.flow.id}`;
+    } catch (err) {
+      notifications.show({
+        color: 'red',
+        title: 'Could not record',
+        message: err instanceof Error ? err.message : 'Failed',
+      });
+    } finally {
+      setRecording(false);
+    }
+  }
+
+  /**
+   * Export a live session's cookies and attach them to the browser profile.
+   *
+   * The "sign in once" path: drive a login in the live preview, click this,
+   * and every later session — including scheduled flow runs — starts
+   * authenticated instead of replaying credentials through a form.
+   */
+  async function handleSaveProfile(session: BrowserSessionView) {
+    try {
+      const exported = await fetch(
+        `/api/browser/sessions/${encodeURIComponent(session.sessionKey)}/profile`,
+        { cache: 'no-store' },
+      );
+      const exportedData = await exported.json().catch(() => ({}));
+      if (!exported.ok) throw new Error(exportedData.error || 'Could not export the session');
+
+      const saved = await fetch(`/api/browser/browsers/${browserId}/profile`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          storageState: exportedData.storageState,
+          fileName: `session-${session.sessionKey}.json`,
+        }),
+      });
+      const savedData = await saved.json().catch(() => ({}));
+      if (!saved.ok) throw new Error(savedData.error || 'Could not attach the profile');
+
+      notifications.show({
+        color: 'teal',
+        title: 'Profile saved',
+        message: `${savedData.profile.cookieCount} cookie(s) stored. New sessions start signed in.`,
+      });
+      await loadAll();
+    } catch (err) {
+      notifications.show({
+        color: 'red',
+        title: 'Error',
+        message: err instanceof Error ? err.message : 'Failed',
+      });
+    }
+  }
 
   const filteredSessions = useMemo(() => {
     const search = searchTerm.trim().toLowerCase();
@@ -451,19 +539,11 @@ export default function BrowserDetailPage() {
               </Paper>
             </Grid.Col>
             <Grid.Col span={{ base: 12, md: 6 }}>
-              <Paper withBorder p="lg" radius="lg">
-                <Stack gap="sm">
-                  <Group gap="xs">
-                    <ThemeIcon variant="light" color="teal" radius="md"><IconDeviceDesktop size={16} /></ThemeIcon>
-                    <Text fw={600}>Default session config</Text>
-                  </Group>
-                  <ScrollArea type="auto" h={260}>
-                    <Code block style={{ whiteSpace: 'pre-wrap' }}>
-                      {JSON.stringify(browser.defaultSessionConfig ?? {}, null, 2)}
-                    </Code>
-                  </ScrollArea>
-                </Stack>
-              </Paper>
+              {/* The session config used to be a read-only JSON dump here.
+                  These are the settings that decide whether a corporate site
+                  works at all, so they are editable — alongside the signed-in
+                  profile that lets an unattended run skip the login form. */}
+              <BrowserProfilePanel browser={browser} onUpdated={setBrowser} />
             </Grid.Col>
           </Grid>
         </Tabs.Panel>
@@ -534,6 +614,20 @@ export default function BrowserDetailPage() {
                                 <IconCamera size={14} />
                               </ActionIcon>
                             </Tooltip>
+                            {(s.eventCount ?? 0) > 1 && (
+                              <Tooltip label="Record this session as a replayable flow">
+                                <ActionIcon variant="light" color="grape" onClick={() => setRecordTarget(s)}>
+                                  <IconRoute size={14} />
+                                </ActionIcon>
+                              </Tooltip>
+                            )}
+                            {(s.status === 'running' || s.status === 'idle') && (
+                              <Tooltip label="Save this signed-in session as the browser profile">
+                                <ActionIcon variant="light" color="teal" onClick={() => handleSaveProfile(s)}>
+                                  <IconCookie size={14} />
+                                </ActionIcon>
+                              </Tooltip>
+                            )}
                             {s.status !== 'closed' && s.status !== 'expired' && (
                               <Tooltip label="Close session">
                                 <ActionIcon variant="light" color="orange" onClick={() => handleCloseSession(s)}>
@@ -561,6 +655,31 @@ export default function BrowserDetailPage() {
           <BrowserUsagePanel browser={browser} />
         </Tabs.Panel>
       </Tabs>
+
+      <Modal
+        opened={Boolean(recordTarget)}
+        onClose={() => setRecordTarget(null)}
+        title="Record session as a flow"
+        size="md"
+      >
+        <Stack>
+          <Text size="sm" c="dimmed">
+            The session&apos;s {recordTarget?.eventCount ?? 0} action(s) become ordered steps.
+            Element references are replaced with durable ones, and anything that was typed
+            becomes a flow input rather than a stored value.
+          </Text>
+          <TextInput
+            label="Flow name"
+            placeholder={`Flow from ${recordTarget?.name || recordTarget?.sessionKey || 'session'}`}
+            value={recordName}
+            onChange={(event) => setRecordName(event.currentTarget.value)}
+          />
+          <Group justify="flex-end">
+            <Button variant="default" onClick={() => setRecordTarget(null)}>Cancel</Button>
+            <Button color="teal" loading={recording} onClick={handleRecordFlow}>Record flow</Button>
+          </Group>
+        </Stack>
+      </Modal>
 
       <Modal opened={editOpened} onClose={editHandlers.close} title="Edit Browser" size="md">
         <form onSubmit={editForm.onSubmit(handleEditSubmit)}>

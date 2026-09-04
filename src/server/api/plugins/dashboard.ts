@@ -8,6 +8,8 @@ import {
   GuardrailBlockError,
   handleChatCompletion,
   handleOcrRequest,
+  handleEmbeddingRequest,
+  handleImageRequest,
   handleSpeechRequest,
   handleTranscriptionRequest,
 } from '@/lib/services/models/inferenceService';
@@ -312,6 +314,125 @@ export const dashboardApiPlugin: FastifyPluginAsync = async (app) => {
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Speech synthesis failed',
+        });
+    }
+  }));
+
+  // ─── Image generation playground ────────────────────────────────────
+  app.post('/dashboard/playground/images', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const body = readJsonBody<Record<string, unknown>>(request);
+
+      const modelKey = typeof body.model === 'string' ? body.model : '';
+      const prompt = typeof body.prompt === 'string' ? body.prompt : '';
+      if (!modelKey) return reply.code(400).send({ error: '`model` is required' });
+      if (!prompt.trim()) return reply.code(400).send({ error: '`prompt` is required' });
+
+      const result = await handleImageRequest({
+        tenantDbName: session.tenantDbName,
+        modelKey,
+        projectId,
+        input: {
+          prompt,
+          n: typeof body.n === 'number' ? body.n : undefined,
+          size: typeof body.size === 'string' && body.size ? body.size : undefined,
+          quality: typeof body.quality === 'string' && body.quality ? body.quality : undefined,
+          style: typeof body.style === 'string' && body.style ? body.style : undefined,
+          background: typeof body.background === 'string' && body.background
+            ? body.background
+            : undefined,
+          outputFormat: typeof body.output_format === 'string' && body.output_format
+            ? body.output_format
+            : undefined,
+        },
+      });
+
+      return reply.code(200).send({ ...result.response, latencyMs: result.latencyMs });
+    } catch (error) {
+      logger.error('Playground image error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({
+          error: error instanceof Error ? error.message : 'Image generation failed',
+        });
+    }
+  }));
+
+  // ─── Embeddings playground ──────────────────────────────────────────
+  // Returns the vector's shape and a short preview rather than thousands of
+  // floats, plus pairwise cosine similarity — which is the thing an operator is
+  // actually trying to eyeball when they open this.
+  app.post('/dashboard/playground/embeddings', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const body = readJsonBody<Record<string, unknown>>(request);
+
+      const modelKey = typeof body.model === 'string' ? body.model : '';
+      const rawInputs = Array.isArray(body.input)
+        ? body.input.filter((entry): entry is string => typeof entry === 'string')
+        : typeof body.input === 'string'
+          ? [body.input]
+          : [];
+      const inputs = rawInputs.map((entry) => entry.trim()).filter(Boolean);
+
+      if (!modelKey) return reply.code(400).send({ error: '`model` is required' });
+      if (inputs.length === 0) return reply.code(400).send({ error: '`input` text is required' });
+
+      const startedAt = Date.now();
+      const result = await handleEmbeddingRequest({
+        tenantDbName: session.tenantDbName,
+        modelKey,
+        projectId,
+        body: { model: modelKey, input: inputs },
+      });
+
+      const response = result.response as {
+        data?: Array<{ embedding?: number[] }>;
+        usage?: Record<string, unknown>;
+      };
+      const vectors = (response.data ?? []).map((entry) =>
+        Array.isArray(entry.embedding) ? entry.embedding : [],
+      );
+
+      const cosine = (a: number[], b: number[]) => {
+        const length = Math.min(a.length, b.length);
+        let dot = 0;
+        let normA = 0;
+        let normB = 0;
+        for (let i = 0; i < length; i += 1) {
+          dot += a[i] * b[i];
+          normA += a[i] * a[i];
+          normB += b[i] * b[i];
+        }
+        const denominator = Math.sqrt(normA) * Math.sqrt(normB);
+        return denominator === 0 ? 0 : dot / denominator;
+      };
+
+      const similarities: Array<{ a: number; b: number; score: number }> = [];
+      for (let i = 0; i < vectors.length; i += 1) {
+        for (let j = i + 1; j < vectors.length; j += 1) {
+          similarities.push({ a: i, b: j, score: cosine(vectors[i], vectors[j]) });
+        }
+      }
+
+      return reply.code(200).send({
+        model: modelKey,
+        latencyMs: Date.now() - startedAt,
+        usage: response.usage,
+        vectors: vectors.map((vector, index) => ({
+          index,
+          input: inputs[index] ?? '',
+          dimensions: vector.length,
+          preview: vector.slice(0, 8),
+          magnitude: Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0)),
+        })),
+        similarities,
+      });
+    } catch (error) {
+      logger.error('Playground embeddings error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({
+          error: error instanceof Error ? error.message : 'Embedding request failed',
         });
     }
   }));

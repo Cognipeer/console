@@ -29,6 +29,7 @@ import type {
   CreateModelProviderInput,
 } from './types';
 import { applyModelCapabilityOverrides } from './modelCapabilities';
+import { InvalidRequestError } from '@/lib/providers/contracts/upstreamError';
 
 const logger = createLogger('model-service');
 
@@ -98,6 +99,8 @@ const ALLOWED_MODEL_CATEGORIES: ReadonlySet<ModelCategory> = new Set([
   'stt',
   'tts',
   'ocr',
+  'image',
+  'moderation',
 ]);
 
 function ensureProviderSupportsCategory(
@@ -118,7 +121,7 @@ function ensureProviderSupportsCategory(
   }
 
   if (!categories.includes(category)) {
-    throw new Error('Selected provider does not support requested category');
+    throw new InvalidRequestError('Selected provider does not support requested category');
   }
 }
 

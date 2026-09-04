@@ -255,7 +255,7 @@ const REGEX_RULE_KEYS = [
   'captureGroup',
   'maxMatchChars',
 ] as const;
-const MODERATION_KEYS = ['modelKey', 'categories'] as const;
+const MODERATION_KEYS = ['detector', 'modelKey', 'categories'] as const;
 const PROMPT_SHIELD_KEYS = ['modelKey', 'sensitivity'] as const;
 const CUSTOM_KEYS = ['modelKey', 'prompt', 'onMissingModel'] as const;
 const TOOL_ACCESS_KEYS = [

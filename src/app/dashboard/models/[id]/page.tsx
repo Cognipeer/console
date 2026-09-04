@@ -51,6 +51,8 @@ import ModelPlayground from '@/components/playground/ModelPlayground';
 import SttPlayground from '@/components/playground/SttPlayground';
 import TtsPlayground from '@/components/playground/TtsPlayground';
 import OcrPlayground from '@/components/playground/OcrPlayground';
+import ImagePlayground from '@/components/playground/ImagePlayground';
+import EmbeddingPlayground from '@/components/playground/EmbeddingPlayground';
 import PageContainer from '@/components/common/ui/PageContainer';
 import TabsBar from '@/components/common/ui/TabsBar';
 import StatusBadge from '@/components/common/ui/StatusBadge';
@@ -110,7 +112,7 @@ interface ModelDetailDto {
   provider?: string;
   providerKey?: string;
   providerDriver?: string;
-  category: 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr';
+  category: 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr' | 'image' | 'moderation';
   modelId: string;
   isMultimodal?: boolean;
   supportsToolCalls?: boolean;
@@ -690,7 +692,7 @@ export default function ModelDetailPage() {
   const isDynamic = Boolean(dynamic);
 
   // A Dynamic LLM has no real provider runtime, so its playground would error.
-  const playgroundCategories = ['llm', 'stt', 'tts', 'ocr'] as const;
+  const playgroundCategories = ['llm', 'stt', 'tts', 'ocr', 'image', 'embedding'] as const;
   const hasPlayground =
     !isDynamic && (playgroundCategories as readonly string[]).includes(model.category);
 
@@ -932,6 +934,14 @@ export default function ModelDetailPage() {
 
       {tab === 'playground' && model.category === 'tts' ? (
         <TtsPlayground modelKey={model.key} />
+      ) : null}
+
+      {tab === 'playground' && model.category === 'image' ? (
+        <ImagePlayground modelKey={model.key} />
+      ) : null}
+
+      {tab === 'playground' && model.category === 'embedding' ? (
+        <EmbeddingPlayground modelKey={model.key} />
       ) : null}
 
       {tab === 'playground' && model.category === 'ocr' ? (

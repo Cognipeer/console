@@ -1,6 +1,8 @@
 import type { ModelCategory } from '@/lib/database';
 import type { SttRuntime, TtsRuntime } from './audio';
 import type { OcrRuntime } from './ocr';
+import type { ImageRuntime } from './image';
+import type { ModerationRuntime } from './moderation';
 
 export type ModelRuntimeCategory = ModelCategory;
 
@@ -37,6 +39,8 @@ export interface ModelProviderRuntime {
   createSttRuntime?(config: ModelRuntimeConfig): Promise<SttRuntime> | SttRuntime;
   createTtsRuntime?(config: ModelRuntimeConfig): Promise<TtsRuntime> | TtsRuntime;
   createOcrRuntime?(config: ModelRuntimeConfig): Promise<OcrRuntime> | OcrRuntime;
+  createImageRuntime?(config: ModelRuntimeConfig): Promise<ImageRuntime> | ImageRuntime;
+  createModerationRuntime?(config: ModelRuntimeConfig): Promise<ModerationRuntime> | ModerationRuntime;
   getCapabilities?(): Record<string, unknown>;
 }
 
@@ -57,5 +61,8 @@ export interface ModelProviderCapabilityFlags {
   'ocr.supports.tables'?: boolean;
   'ocr.supports.kv_pairs'?: boolean;
   'ocr.formats.input'?: string[];
+  'image.sizes'?: string[];
+  'image.formats.output'?: string[];
+  'image.supports.edit'?: boolean;
   [key: string]: unknown;
 }

@@ -15,6 +15,7 @@ import {
   buildErrorResponse,
   extractFinishReason,
 } from '@/lib/services/models/openaiAdapter';
+import { createInlineReasoningSplitter } from '@/lib/shared/inlineReasoning';
 
 // ── toLangChainMessages ───────────────────────────────────────────────────────
 
@@ -377,7 +378,7 @@ describe('toOpenAIStreamChunk', () => {
     expect(first.choices[0].delta.tool_calls).toEqual([{
       index: 0,
       id: 'call_weather',
-      type: 'function',
+      type: 'function' as const,
       function: {
         name: 'get_weather',
         arguments: '{"city":',
@@ -396,7 +397,7 @@ describe('toOpenAIStreamChunk', () => {
         tool_calls: [{
           index: 0,
           id: 'call_weather',
-          type: 'function',
+          type: 'function' as const,
           function: {
             name: 'get_weather',
             arguments: '{"city":"Ankara"}',
@@ -416,7 +417,7 @@ describe('toOpenAIStreamChunk', () => {
     expect(result.choices[0].delta.tool_calls).toEqual([{
       index: 0,
       id: 'call_weather',
-      type: 'function',
+      type: 'function' as const,
       function: {
         name: 'get_weather',
         arguments: '{"city":"Ankara"}',
@@ -470,6 +471,143 @@ describe('toOpenAIStreamChunk', () => {
 });
 
 // ── summarizeUsage ────────────────────────────────────────────────────────────
+
+// -- tool calls the parser could not read --------------------------------------
+
+describe('tool calls with unparseable arguments', () => {
+  // Verbatim from bedrock-runtime eu-central-1, `qwen.qwen3-coder-30b-a3b-v1:0`:
+  // a call to a NO-PARAMETER tool comes back with `arguments: "{"`. LangChain
+  // cannot parse that, so it files the call under `invalid_tool_calls` and
+  // leaves `tool_calls` empty -- while `additional_kwargs.tool_calls` still
+  // holds the raw wire array.
+  const brokenCall = {
+    id: 'call_c222a246b91a4cff92495c73',
+    type: 'function' as const,
+    function: { name: 'list_available_symbols', arguments: '{' },
+  };
+
+  it('keeps a call LangChain could not parse, instead of dropping it', () => {
+    const msg = new AIMessage({
+      content: '',
+      additional_kwargs: { tool_calls: [brokenCall] },
+      response_metadata: { finish_reason: 'tool_calls' },
+    });
+    (msg as unknown as Record<string, unknown>).invalid_tool_calls = [
+      { name: 'list_available_symbols', args: '{', id: brokenCall.id, type: 'invalid_tool_call' },
+    ];
+
+    const res = toOpenAIChatResponse(msg, { model: 'm' });
+    const message = res.choices[0].message as Record<string, unknown>;
+    const calls = message.tool_calls as Array<{ id: string; function: { name: string; arguments: string } }>;
+
+    expect(res.choices[0].finish_reason).toBe('tool_calls');
+    expect(calls).toHaveLength(1);
+    expect(calls[0].function.name).toBe('list_available_symbols');
+    expect(calls[0].id).toBe(brokenCall.id);
+    // A bare `{` for a no-parameter call is unambiguously an empty object.
+    expect(calls[0].function.arguments).toBe('{}');
+    expect(JSON.parse(calls[0].function.arguments)).toEqual({});
+  });
+
+  it('falls back to invalid_tool_calls when the raw wire array is absent', () => {
+    const msg = new AIMessage({ content: '', response_metadata: { finish_reason: 'tool_calls' } });
+    (msg as unknown as Record<string, unknown>).invalid_tool_calls = [
+      { name: 'get_time', args: '{', id: 'call_1', type: 'invalid_tool_call' },
+    ];
+
+    const message = toOpenAIChatResponse(msg, { model: 'm' }).choices[0].message as Record<string, unknown>;
+    expect((message.tool_calls as unknown[]).length).toBe(1);
+  });
+
+  it('merges the parsed and unparseable halves of the same turn', () => {
+    const msg = new AIMessage({
+      content: '',
+      tool_calls: [{ id: 'ok-1', name: 'get_weather', args: { city: 'Istanbul' }, type: 'tool_call' }],
+    });
+    (msg as unknown as Record<string, unknown>).invalid_tool_calls = [
+      { name: 'get_time', args: '{', id: 'bad-1', type: 'invalid_tool_call' },
+    ];
+
+    const message = toOpenAIChatResponse(msg, { model: 'm' }).choices[0].message as Record<string, unknown>;
+    const calls = message.tool_calls as Array<{ id: string }>;
+    expect(calls.map((c) => c.id)).toEqual(['ok-1', 'bad-1']);
+  });
+
+  it('never invents arguments for a genuinely truncated call', () => {
+    const msg = new AIMessage({
+      content: '',
+      additional_kwargs: {
+        tool_calls: [
+          { id: 'c1', type: 'function' as const, function: { name: 'get_weather', arguments: '{"city":"Ist' } },
+        ],
+      },
+    });
+
+    const message = toOpenAIChatResponse(msg, { model: 'm' }).choices[0].message as Record<string, unknown>;
+    const calls = message.tool_calls as Array<{ function: { arguments: string } }>;
+    expect(calls[0].function.arguments).toBe('{"city":"Ist');
+  });
+
+  it('leaves well-formed arguments byte-for-byte alone', () => {
+    const raw = '{\n  "city": "Istanbul"\n}';
+    const msg = new AIMessage({
+      content: '',
+      additional_kwargs: {
+        tool_calls: [{ id: 'c1', type: 'function' as const, function: { name: 'get_weather', arguments: raw } }],
+      },
+    });
+
+    const message = toOpenAIChatResponse(msg, { model: 'm' }).choices[0].message as Record<string, unknown>;
+    const calls = message.tool_calls as Array<{ function: { arguments: string } }>;
+    expect(calls[0].function.arguments).toBe(raw);
+  });
+});
+
+// ── leaked inline reasoning ───────────────────────────────────────────────────
+
+describe('inline reasoning leaked into content', () => {
+  it('moves a <reasoning> block to reasoning_content on a full response', () => {
+    // The shape AWS Bedrock's `/openai/v1` shim returns for gpt-oss.
+    const msg = new AIMessage({
+      content: '<reasoning>User wants JSON.</reasoning>{"ok": true}',
+    });
+    const res = toOpenAIChatResponse(msg, { model: 'openai.gpt-oss-120b-1:0' });
+    const message = res.choices[0].message as Record<string, unknown>;
+
+    expect(message.content).toBe('{"ok": true}');
+    expect(message.reasoning_content).toBe('User wants JSON.');
+    expect(JSON.parse(message.content as string)).toEqual({ ok: true });
+  });
+
+  it('leaves a message without leaked markup untouched', () => {
+    const msg = new AIMessage({ content: 'plain answer' });
+    const res = toOpenAIChatResponse(msg, { model: 'm' });
+    const message = res.choices[0].message as Record<string, unknown>;
+
+    expect(message.content).toBe('plain answer');
+    expect(message.reasoning_content).toBeUndefined();
+  });
+
+  it('splits a block that spans several stream deltas', () => {
+    const reasoningSplitter = createInlineReasoningSplitter();
+    const options = { model: 'm', stream: true, reasoningSplitter };
+    const deltas = ['<reason', 'ing>why</reason', 'ing>Hel', 'lo'];
+
+    const seen = deltas.map((content) =>
+      toOpenAIStreamChunk(new AIMessageChunk({ content }), options).choices[0].delta,
+    );
+
+    expect(seen.map((d) => d.content ?? '').join('')).toBe('Hello');
+    expect(seen.map((d) => d.reasoning_content ?? '').join('')).toBe('why');
+  });
+
+  it('does not touch stream deltas when no splitter is threaded through', () => {
+    const chunk = new AIMessageChunk({ content: '<reasoning>x</reasoning>hi' });
+    const delta = toOpenAIStreamChunk(chunk, { model: 'm', stream: true }).choices[0].delta;
+
+    expect(delta.content).toBe('<reasoning>x</reasoning>hi');
+  });
+});
 
 describe('summarizeUsage', () => {
   it('extracts token usage from promptTokens / completionTokens keys', () => {

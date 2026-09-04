@@ -434,7 +434,9 @@ export type ModelCategory =
   | 'rerank'
   | 'stt'
   | 'tts'
-  | 'ocr';
+  | 'ocr'
+  | 'image'
+  | 'moderation';
 
 export type ModelProviderType =
   | 'openai'
@@ -554,6 +556,8 @@ export type ProviderDomain =
   | 'stt'
   | 'tts'
   | 'ocr'
+  | 'image'
+  | 'moderation'
   | 'websearch';
 
 export interface IProviderRecordStatus {

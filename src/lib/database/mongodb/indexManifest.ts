@@ -81,6 +81,15 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
   browser_session_events: [
     { key: { sessionId: 1, createdAt: 1 }, options: { name: 'idx_session_createdAt' } },
   ],
+  browser_flows: [
+    { key: { tenantId: 1, key: 1 }, options: { name: 'idx_tenant_key', unique: true } },
+    { key: { tenantId: 1, browserId: 1 }, options: { name: 'idx_tenant_browser' } },
+  ],
+  // Run history is read newest-first per flow, and swept per flow on delete.
+  browser_flow_runs: [
+    { key: { flowId: 1, createdAt: -1 }, options: { name: 'idx_flow_createdAt' } },
+    { key: { tenantId: 1, createdAt: -1 }, options: { name: 'idx_tenant_createdAt' } },
+  ],
   crawl_results: [{ key: { jobId: 1, createdAt: 1 }, options: { name: 'idx_job_createdAt' } }],
   rag_chunks: [
     { key: { documentId: 1, chunkIndex: 1 }, options: { name: 'idx_doc_chunk' } },

@@ -16,6 +16,10 @@ import type {
   IAlertRule,
   IApiToken,
   IBrowser,
+  IBrowserFlow,
+  IBrowserFlowRun,
+  BrowserFlowStatus,
+  BrowserFlowRunStatus,
   IBrowserSession,
   IBrowserSessionEvent,
   ICrawler,
@@ -1454,6 +1458,51 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     options?: { limit?: number; skip?: number },
   ): Promise<IBrowserSessionEvent[]>;
   countBrowserSessionEvents(sessionId: string): Promise<number>;
+
+  // ── Browser Flows (tenant-specific) ──
+  createBrowserFlow(
+    record: Omit<IBrowserFlow, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IBrowserFlow>;
+  updateBrowserFlow(
+    id: string,
+    data: Partial<Omit<IBrowserFlow, '_id' | 'tenantId' | 'createdAt'>>,
+  ): Promise<IBrowserFlow | null>;
+  deleteBrowserFlow(id: string): Promise<boolean>;
+  findBrowserFlowById(id: string): Promise<IBrowserFlow | null>;
+  findBrowserFlowByKey(
+    tenantId: string,
+    key: string,
+    projectId?: string,
+  ): Promise<IBrowserFlow | null>;
+  listBrowserFlows(
+    tenantId: string,
+    filters?: {
+      projectId?: string;
+      status?: BrowserFlowStatus | string;
+      browserId?: string;
+      search?: string;
+    },
+  ): Promise<IBrowserFlow[]>;
+
+  // ── Browser Flow Runs (tenant-specific) ──
+  createBrowserFlowRun(
+    record: Omit<IBrowserFlowRun, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IBrowserFlowRun>;
+  updateBrowserFlowRun(
+    id: string,
+    data: Partial<Omit<IBrowserFlowRun, '_id' | 'tenantId' | 'createdAt'>>,
+  ): Promise<IBrowserFlowRun | null>;
+  findBrowserFlowRunById(id: string): Promise<IBrowserFlowRun | null>;
+  listBrowserFlowRuns(
+    tenantId: string,
+    filters?: {
+      projectId?: string;
+      flowId?: string;
+      status?: BrowserFlowRunStatus | string;
+      limit?: number;
+      skip?: number;
+    },
+  ): Promise<IBrowserFlowRun[]>;
 
   // ── Crawlers (tenant-specific) ──
   createCrawler(

@@ -22,6 +22,7 @@ import type {
   IModelPricing,
 } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
+import { stripInlineReasoning } from '@/lib/shared/inlineReasoning';
 
 const logger = createLogger('dynamic-routing');
 
@@ -346,7 +347,10 @@ export function parseDeciderLabel(
   text: string,
   labels: IDynamicDeciderLabel[],
 ): IDynamicDeciderLabel | null {
-  const normalized = text.trim().toLowerCase();
+  // A reasoning model whose upstream leaks `<reasoning>…</reasoning>` into
+  // `content` would never match a label, and every request would silently fall
+  // back to the default model.
+  const normalized = stripInlineReasoning(text).trim().toLowerCase();
   if (!normalized) return null;
 
   // Exact match first, then a contains-match so minor decorations

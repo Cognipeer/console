@@ -619,7 +619,16 @@ function dispatch(
     case 'moderation':
       return runModerationPolicy(
         text,
-        { enabled: true, modelKey, categories: policy.categories ?? {} },
+        {
+          enabled: true,
+          // Carried across explicitly: this legacy shape is rebuilt field by
+          // field, so anything not named here is silently dropped — which is
+          // how `detector` was lost, sending a classifier policy down the
+          // judge path and failing with "not an LLM model".
+          detector: policy.detector,
+          modelKey,
+          categories: policy.categories ?? {},
+        },
         ctx,
         action,
       );

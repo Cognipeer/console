@@ -8,6 +8,7 @@ import {
   GuardrailBlockError,
   handleChatCompletion,
   handleEmbeddingRequest,
+  handleImageRequest,
 } from '@/lib/services/models/inferenceService';
 import { normalizeInferenceError } from '@/lib/services/models/openaiErrors';
 import { getModelByKey } from '@/lib/services/models/modelService';
@@ -536,6 +537,138 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
           anthropicErrorTypeForStatus(normalizedError.status),
         ),
       );
+    }
+  }));
+
+  // ─── POST /client/v1/images/generations ──────────────────────────────
+  // The OpenAI images schema, so an OpenAI client pointed at Console works
+  // unchanged. Image models bill per image rather than per token, so the quota
+  // guard runs on request count and the budget is settled from the model's own
+  // per-image price after the call.
+  app.post('/client/v1/images/generations', withOpenAiApiRequestContext(async (request, reply, auth) => {
+    const startedAt = Date.now();
+    let modelKey = '';
+
+    try {
+      let body: Record<string, unknown>;
+      try {
+        const parsed = readJsonBody<unknown>(request);
+        body = parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {};
+      } catch (error) {
+        if (error instanceof SyntaxError) return invalidJson(reply);
+        throw error;
+      }
+
+      if (typeof body.model !== 'string' || !body.model) {
+        return reply.code(400).send({
+          error: { message: '`model` is required', type: 'invalid_request_error' },
+        });
+      }
+      if (typeof body.prompt !== 'string' || !body.prompt.trim()) {
+        return reply.code(400).send({
+          error: { message: '`prompt` is required', type: 'invalid_request_error' },
+        });
+      }
+      if (body.n !== undefined && (typeof body.n !== 'number' || body.n < 1)) {
+        return reply.code(400).send({
+          error: { message: '`n` must be a positive number', type: 'invalid_request_error' },
+        });
+      }
+
+      modelKey = body.model;
+      const tokenId = auth.tokenRecord._id?.toString() ?? auth.token;
+      const quotaContext = {
+        domain: 'image' as const,
+        licenseType: auth.tenant.licenseType as LicenseType,
+        projectId: auth.projectId,
+        resourceKey: modelKey,
+        tenantDbName: auth.tenantDbName,
+        tenantId: auth.tenantId,
+        tokenId,
+        userId: auth.tokenRecord.userId,
+      };
+
+      try {
+        const rateLimitResult = await checkRateLimit(quotaContext, { requests: 1, tokens: 0 });
+        if (!rateLimitResult.allowed) {
+          return reply.code(429).send(
+            quotaExceededPayload(rateLimitResult.reason || 'Rate limit exceeded'),
+          );
+        }
+        const budgetResult = await checkBudget(quotaContext);
+        if (!budgetResult.allowed) {
+          return reply.code(429).send(
+            quotaExceededPayload(budgetResult.reason || 'Budget exceeded'),
+          );
+        }
+      } catch (error) {
+        logger.error('Client image quota check error', { error });
+        return reply.code(500).send({
+          error: { message: 'Quota check failed', type: 'server_error' },
+        });
+      }
+
+      const result = await handleImageRequest({
+        tenantDbName: auth.tenantDbName,
+        modelKey,
+        projectId: auth.projectId,
+        input: {
+          prompt: body.prompt,
+          n: typeof body.n === 'number' ? body.n : undefined,
+          size: typeof body.size === 'string' ? body.size : undefined,
+          quality: typeof body.quality === 'string' ? body.quality : undefined,
+          style: typeof body.style === 'string' ? body.style : undefined,
+          background: typeof body.background === 'string' ? body.background : undefined,
+          outputFormat: typeof body.output_format === 'string' ? body.output_format : undefined,
+          responseFormat:
+            body.response_format === 'url' || body.response_format === 'b64_json'
+              ? body.response_format
+              : undefined,
+          user: typeof body.user === 'string' ? body.user : undefined,
+        },
+      });
+
+      try {
+        const cost = calculateCost(result.model.pricing, {
+          images: result.response.usage?.images ?? result.response.data.length,
+          inputTokens: result.response.usage?.inputTokens ?? 0,
+          outputTokens: result.response.usage?.outputTokens ?? 0,
+        });
+        if (cost.currency === 'USD' && Number.isFinite(cost.totalCost) && cost.totalCost > 0) {
+          void checkBudget(quotaContext, { usd: cost.totalCost }).catch((error) =>
+            logger.error('Failed to update image budget usage', { error }),
+          );
+        }
+      } catch (error) {
+        logger.error('Image budget update error', { error });
+      }
+
+      return reply.code(200).send({ ...result.response, request_id: result.requestId });
+    } catch (error) {
+      logger.error('Client image generation error', { error });
+      const normalizedError = normalizeInferenceError(error);
+
+      try {
+        const model = modelKey
+          ? await getModelByKey(auth.tenantDbName, modelKey, auth.projectId)
+          : null;
+        if (model) {
+          await logModelUsage(auth.tenantDbName, model, {
+            errorMessage: normalizedError.error.message,
+            latencyMs: Date.now() - startedAt,
+            providerRequest: { model: modelKey },
+            providerResponse: { error: normalizedError.error.message },
+            requestId: crypto.randomUUID(),
+            route: 'images.generations',
+            status: 'error',
+            usage: {},
+          });
+        }
+      } catch (logError) {
+        logger.error('Failed to log image generation error', { error: logError });
+      }
+
+      return reply.code(normalizedError.status).send(normalizedError);
     }
   }));
 
