@@ -45,17 +45,68 @@ jobs:
         if: always()
         run: echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+  sync-console-ee:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Update Console Enterprise compatibility pin
+        env:
+          DISPATCH_TOKEN: ${{ secrets.CONSOLE_EE_DISPATCH_PAT }}
+          COMMUNITY_TAG: ${{ github.ref_name }}
+          COMMUNITY_SHA: ${{ needs.build.outputs.commit_sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${DISPATCH_TOKEN}" ]]; then
+            echo "::error::CONSOLE_EE_DISPATCH_PAT is not configured."
+            exit 1
+          fi
+
+          SEAM_CONTRACT_VERSION=$(grep -oE 'SEAM_CONTRACT_VERSION = [0-9]+' \
+            src/enterprise/registry.ts | grep -oE '[0-9]+$')
+          if [[ -z "${SEAM_CONTRACT_VERSION}" ]]; then
+            echo "::error::Community registry does not declare SEAM_CONTRACT_VERSION."
+            exit 1
+          fi
+
+          PAYLOAD=$(jq -n \
+            --arg tag "${COMMUNITY_TAG}" \
+            --arg sha "${COMMUNITY_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --argjson seamContractVersion "${SEAM_CONTRACT_VERSION}" \
+            '{
+              event_type: "community-released",
+              client_payload: {
+                tag: $tag,
+                sha: $sha,
+                repository: $repository,
+                seamContractVersion: $seamContractVersion
+              }
+            }')
+
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Authorization: Bearer ${DISPATCH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data "${PAYLOAD}" \
+            https://api.github.com/repos/Cognipeer/console-ee/dispatches
+
   notify-crm:
     if: always() && needs.build.result != 'skipped'
     environment: production
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build, sync-console-ee]
     steps:
       - name: Report community artifact to CRM
         env:
           WEBHOOK_URL: ${{ secrets.RELEASE_WEBHOOK_URL }}
           WEBHOOK_SECRET: ${{ secrets.RELEASE_WEBHOOK_SECRET }}
           BUILD_RESULT: ${{ needs.build.result }}
+          COMPAT_SYNC_RESULT: ${{ needs.sync-console-ee.result }}
           CRM_ENVIRONMENT: artifacts
           COMMIT_SHA: ${{ needs.build.outputs.commit_sha || github.sha }}
           IMAGE_DIGEST: ${{ needs.build.outputs.image_digest }}
@@ -66,12 +117,12 @@ jobs:
           set -euo pipefail
 
           if [[ -z "${WEBHOOK_URL}" || -z "${WEBHOOK_SECRET}" ]]; then
-            echo "::warning::RELEASE_WEBHOOK_URL / RELEASE_WEBHOOK_SECRET are not configured; CRM notification skipped."
-            exit 0
+            echo "::error::RELEASE_WEBHOOK_URL / RELEASE_WEBHOOK_SECRET are required."
+            exit 1
           fi
 
           STATUS="succeeded"
-          if [[ "${BUILD_RESULT}" != "success" ]]; then
+          if [[ "${BUILD_RESULT}" != "success" || "${COMPAT_SYNC_RESULT}" != "success" ]]; then
             STATUS="failed"
           fi
 
