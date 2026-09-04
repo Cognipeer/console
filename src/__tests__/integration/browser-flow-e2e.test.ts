@@ -28,6 +28,7 @@ process.env.BROWSER_BLOCK_PRIVATE_NETWORK = 'false';
 import { reloadConfig } from '@/lib/core/config';
 import { disconnectDatabase, getDatabase } from '@/lib/database';
 import { browserManager } from '@/lib/services/browser/browserManager';
+import { chromiumAvailable } from '../helpers/browserAvailability';
 import {
   createBrowser,
   setBrowserStorageState,
@@ -154,7 +155,7 @@ async function driveDiscoverySession(): Promise<{ sessionId: string; sessionKey:
   return { sessionId: session.id, sessionKey: key };
 }
 
-describe('record', () => {
+describe.skipIf(!chromiumAvailable())('record', () => {
   it('turns a ref-driven session into a flow with no refs left in it', async () => {
     const { sessionId, sessionKey } = await driveDiscoverySession();
     await closeBrowserSession(ctx, sessionKey);
@@ -207,7 +208,7 @@ describe('record', () => {
   }, 60_000);
 });
 
-describe('replay', () => {
+describe.skipIf(!chromiumAvailable())('replay', () => {
   it('runs a recorded flow in a fresh session and binds its inputs', async () => {
     const { sessionId, sessionKey } = await driveDiscoverySession();
     await closeBrowserSession(ctx, sessionKey);
@@ -384,7 +385,7 @@ describe('replay', () => {
   }, 120_000);
 });
 
-describe('browser profile', () => {
+describe.skipIf(!chromiumAvailable())('browser profile', () => {
   it('stores a storageState encrypted and reports only a summary', async () => {
     const summary = await setBrowserStorageState(ctx, browserId, {
       storageState: {

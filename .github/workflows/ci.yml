@@ -24,6 +24,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # The browser integration suites drive a real Chromium — they exist to
+      # catch the class of defect that passes a mocked test and fails in
+      # production (a Playwright option silently ignored, a locator that
+      # resolves to nothing). Without the binary they skip themselves, which
+      # would quietly remove that coverage from CI.
+      - name: Install Chromium for browser tests
+        run: npx playwright install --with-deps chromium
+
       - name: Lint
         run: npm run lint
 
