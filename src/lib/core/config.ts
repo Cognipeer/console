@@ -71,6 +71,16 @@ export interface AppConfig {
     connectTimeoutMs: number;
     socketTimeoutMs: number;
     serverSelectionTimeoutMs: number;
+    /**
+     * When true, tenant-scoped MongoDB operations are bound to the main
+     * database instead of a separate `tenant_{slug}` database. On-prem
+     * deployments are single-organization by construction (REGISTRATION_MODE
+     * disabled + BOOTSTRAP_* envs), so collapsing main+tenant collections into
+     * one physical database removes an extra database to provision/back up
+     * without any cross-tenant risk. Defaults on for onprem+mongodb; override
+     * with MONGODB_SINGLE_DATABASE for edge cases.
+     */
+    singleDatabase: boolean;
   };
 
   auth: {
@@ -359,6 +369,11 @@ function buildConfig(source: ConfigSource): AppConfig {
       connectTimeoutMs: int(source, 'MONGODB_CONNECT_TIMEOUT_MS', 10000),
       socketTimeoutMs: int(source, 'MONGODB_SOCKET_TIMEOUT_MS', 45000),
       serverSelectionTimeoutMs: int(source, 'MONGODB_SERVER_SELECTION_TIMEOUT_MS', 30000),
+      singleDatabase: bool(
+        source,
+        'MONGODB_SINGLE_DATABASE',
+        deploymentMode === 'onprem' && databaseProvider === 'mongodb',
+      ),
     },
 
     auth: {

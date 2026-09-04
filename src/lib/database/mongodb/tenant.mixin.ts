@@ -87,6 +87,20 @@ export function TenantMixin<TBase extends Constructor<MongoDBProviderBase>>(Base
       tenantData: Omit<ITenant, '_id' | 'createdAt' | 'updatedAt'>,
     ): Promise<ITenant> {
       const db = this.getMainDb();
+
+      if (this.singleDatabase) {
+        // In single-database mode there is no per-tenant physical database to
+        // isolate a second tenant's data — tenant-scoped collections carry no
+        // per-row tenant discriminator, so a second tenant would silently
+        // share (and corrupt) the first tenant's rows. Refuse instead.
+        const existingCount = await db.collection(COLLECTIONS.tenants).countDocuments();
+        if (existingCount > 0) {
+          throw new Error(
+            'Cannot create a second tenant: MONGODB_SINGLE_DATABASE mode supports exactly one tenant per deployment.',
+          );
+        }
+      }
+
       const now = new Date();
 
       const result = await db.collection(COLLECTIONS.tenants).insertOne({
