@@ -1,0 +1,221 @@
+/*
+ * Full-height two-pane playground.
+ *
+ * The shell owns the space rather than sitting inside PageContainer's
+ * scrolling column: driving a browser means watching the page while you act
+ * on it, so the preview must not scroll out of view when the step log grows.
+ * Each pane scrolls on its own instead.
+ *
+ * It does NOT use `position: absolute` to grab the viewport — the dashboard
+ * shell's `<main>` is the nearest POSITIONED ancestor for that (the grid
+ * wrapper one level up has `position: relative`), so an absolutely
+ * positioned box here escapes past `<main>` and paints over the sidebar and
+ * topbar instead of just filling the content area. Height and the
+ * padding-cancelling margins are measured at runtime (see the page
+ * component) and applied as inline style instead, so this stays a normal
+ * flow element that only ever fills its own `<main>`.
+ */
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--ds-bg);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--ds-border);
+  background: var(--ds-surface);
+  flex: none;
+}
+
+.body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+/* ── Left pane ─────────────────────────────────────────────── */
+
+.left {
+  width: 340px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--ds-border);
+  background: var(--ds-surface);
+}
+
+.panelHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--ds-border);
+  border-top: 1px solid var(--ds-border);
+  background: var(--ds-surface-sunken, var(--ds-bg));
+}
+
+.panelHead:first-child {
+  border-top: none;
+}
+
+.targetSlot {
+  padding: 8px 10px;
+  border: 1px dashed var(--ds-border);
+  border-radius: 6px;
+  background: var(--ds-bg);
+}
+
+.logScroll {
+  flex: 1;
+  min-height: 0;
+}
+
+.logRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--ds-border-soft, var(--ds-border));
+}
+
+.okIcon {
+  color: var(--ds-ok, #16a34a);
+  flex: none;
+  margin-top: 2px;
+}
+
+.errIcon {
+  color: var(--ds-err, #dc2626);
+  flex: none;
+  margin-top: 2px;
+}
+
+/* ── Right pane ────────────────────────────────────────────── */
+
+.right {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.rightHead {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--ds-border);
+  background: var(--ds-surface);
+  flex: none;
+}
+
+.preview {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 16px;
+  /* A checkerboard reads as "this is a viewport", and makes a page with a
+     transparent or short body obviously distinct from an empty pane. */
+  background:
+    repeating-conic-gradient(var(--ds-border-soft, #f1f1f4) 0% 25%, transparent 0% 50%)
+    50% / 18px 18px;
+}
+
+.shot {
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--ds-border);
+  border-radius: 6px;
+  box-shadow: 0 8px 30px -18px rgba(0, 0, 0, 0.5);
+  background: #fff;
+}
+
+.placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  height: 100%;
+  color: var(--ds-text-muted);
+}
+
+/* ── Elements list ─────────────────────────────────────────── */
+
+.elements {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.elementRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 12px;
+  border: none;
+  border-bottom: 1px solid var(--ds-border-soft, var(--ds-border));
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: var(--ds-text);
+}
+
+.elementRow:hover {
+  background: var(--ds-surface-sunken, var(--ds-surface));
+}
+
+.elementRow:focus-visible {
+  outline: 2px solid var(--ds-accent);
+  outline-offset: -2px;
+}
+
+.elementName {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.elementRef {
+  font-family: var(--ds-font-mono, ui-monospace, monospace);
+  font-size: 10.5px;
+  color: var(--ds-text-faint, var(--ds-text-muted));
+  flex: none;
+}
+
+.console {
+  flex: 1;
+  min-height: 0;
+}
+
+@media (max-width: 900px) {
+  .body {
+    flex-direction: column;
+  }
+
+  .left {
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--ds-border);
+    max-height: 45%;
+  }
+}

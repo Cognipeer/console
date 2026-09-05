@@ -199,6 +199,8 @@ export function BrowserMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
         agentId?: string;
         status?: string;
         search?: string;
+        createdFrom?: Date;
+        createdTo?: Date;
         limit?: number;
       },
     ): Promise<IBrowserSession[]> {
@@ -209,6 +211,12 @@ export function BrowserMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
       if (filters?.agentId) query.agentId = filters.agentId;
       if (filters?.status) query.status = filters.status;
       if (filters?.search) query.name = { $regex: filters.search, $options: 'i' };
+      if (filters?.createdFrom || filters?.createdTo) {
+        query.createdAt = {
+          ...(filters.createdFrom ? { $gte: filters.createdFrom } : {}),
+          ...(filters.createdTo ? { $lte: filters.createdTo } : {}),
+        };
+      }
 
       const cursor = db
         .collection<IBrowserSession>(COLLECTIONS.browserSessions)
