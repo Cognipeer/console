@@ -13,7 +13,7 @@ import {
   updateModel,
 } from '@/lib/services/models/modelService';
 import { parseMetadataGroupByKey, type UsageBreakdownGroupBy } from '@/lib/services/usage/usageBreakdown';
-import type { IDynamicRoutingConfig } from '@/lib/database';
+import type { IDynamicRoutingConfig, IModelReplica } from '@/lib/database';
 import type { UpdateModelInput } from '@/lib/services/models/types';
 import {
   ModelCapabilityValidationError,
@@ -147,6 +147,54 @@ function mergeSettings(
 
 function buildDate(value?: string): Date | undefined {
   return value ? new Date(value) : undefined;
+}
+
+/**
+ * Validates a replica pool from the wire.
+ *
+ * Every replica must name a provider; `modelId` may be omitted to mean "the
+ * same upstream id as the model", which is the normal case for a pool of
+ * identical deployments across regions. A pool of zero enabled replicas is
+ * refused rather than saved: it reads as "pooled" while nothing can serve it,
+ * and the model's own provider would silently take over.
+ */
+function readReplicasField(
+  raw: unknown,
+): { replicas?: IModelReplica[]; error?: string } {
+  if (raw === undefined) return {};
+  if (raw === null) return { replicas: [] };
+  if (!Array.isArray(raw)) return { error: '`replicas` must be an array' };
+
+  const replicas: IModelReplica[] = [];
+  for (const [index, entry] of raw.entries()) {
+    if (!entry || typeof entry !== 'object') {
+      return { error: `replicas[${index}] must be an object` };
+    }
+    const record = entry as Record<string, unknown>;
+    const providerKey = record.providerKey;
+    if (typeof providerKey !== 'string' || !providerKey.trim()) {
+      return { error: `replicas[${index}].providerKey is required` };
+    }
+    const weight = record.weight;
+    if (weight !== undefined && (typeof weight !== 'number' || !(weight > 0))) {
+      return { error: `replicas[${index}].weight must be a positive number` };
+    }
+    replicas.push({
+      providerKey: providerKey.trim(),
+      modelId: typeof record.modelId === 'string' ? record.modelId.trim() : '',
+      ...(typeof weight === 'number' ? { weight } : {}),
+      ...(record.enabled === false ? { enabled: false } : {}),
+      ...(record.label && typeof record.label === 'string' ? { label: record.label } : {}),
+      ...(record.settings && typeof record.settings === 'object'
+        ? { settings: record.settings as Record<string, unknown> }
+        : {}),
+    });
+  }
+
+  if (replicas.length > 0 && replicas.every((replica) => replica.enabled === false)) {
+    return { error: 'a replica pool needs at least one enabled replica' };
+  }
+  return { replicas };
 }
 
 export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
@@ -740,6 +788,14 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
       // only while they do not contradict a stored list (see the conflict
       // guard) — silently ignoring them is how a screen appears to save and
       // does not.
+      const replicasField = readReplicasField(body.replicas);
+      if (replicasField.error) {
+        return reply.code(400).send({ error: replicasField.error });
+      }
+      if (replicasField.replicas) {
+        updates.replicas = replicasField.replicas;
+      }
+
       const bindingsField = readGuardrailBindingsField(body.guardrails);
       if (bindingsField.error) {
         return reply.code(400).send({ error: bindingsField.error });

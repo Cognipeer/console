@@ -814,6 +814,7 @@ export class SQLiteProviderBase {
     // The AGENT side needs no migration: its bindings live in IAgentConfig and
     // ride the existing `config` JSON column on both backends.
     this.ensureTableColumn(db, TABLES.models, 'guardrails', 'guardrails TEXT');
+    this.ensureTableColumn(db, TABLES.models, 'replicas', 'replicas TEXT');
     // Evaluation log: without these, all five hooks collapse into the two
     // legacy `target` values and a tool.pre block is indistinguishable from an
     // output.pre redaction in the audit trail. riskScore has no other home.

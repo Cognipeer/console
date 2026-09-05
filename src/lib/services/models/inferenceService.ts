@@ -19,6 +19,12 @@ import type {
 } from '@/lib/providers';
 import { resolveUnsupportedParamNames } from '@/lib/providers/unsupportedParams';
 import { createInlineReasoningSplitter } from '@/lib/shared/inlineReasoning';
+import {
+  modelForReplica,
+  replicaOrder,
+  shouldTryNextReplica,
+  type ResolvedReplica,
+} from './replicaPool';
 import { repairJsonContent } from '@/lib/shared/jsonExtraction';
 import { InvalidRequestError } from '@/lib/providers/contracts/upstreamError';
 import { getModelByKey } from './modelService';
@@ -1104,6 +1110,80 @@ export function resolveModelInvocationConfig(
 }
 
 /**
+ * Runs one call across a model's replica pool.
+ *
+ * Each replica is a full attempt: its own parameter resolution (drivers differ,
+ * so the set of parameters an upstream rejects differs with them), its own
+ * runtime, and its own circuit breaker. A capacity or availability fault moves
+ * to the next replica; the caller's own mistakes do not travel, because a 400
+ * fails identically everywhere and retrying it only multiplies the bill.
+ *
+ * `attempt` is handed the model AS THAT REPLICA — `providerKey`, `modelId` and
+ * merged `settings` already swapped — so nothing downstream has to know a pool
+ * exists.
+ */
+/**
+ * The replica detail carried on a usage row. Absent for an unpooled model, so
+ * existing rows and dashboards are untouched until someone adds a replica.
+ */
+function replicaTrace(
+  model: IModel,
+  replica: ResolvedReplica,
+  failed: readonly ResolvedReplica[] = [],
+): Record<string, unknown> | undefined {
+  const pooled = Array.isArray(model.replicas) && model.replicas.length > 0;
+  if (!pooled) return undefined;
+  return {
+    replica: {
+      index: replica.index,
+      providerKey: replica.providerKey,
+      modelId: replica.modelId,
+      ...(replica.label ? { label: replica.label } : {}),
+      ...(failed.length > 0
+        ? { failedOver: failed.map((entry) => `${entry.providerKey}:${entry.modelId}`) }
+        : {}),
+    },
+  };
+}
+
+async function runAcrossReplicas<T>(
+  model: IModel,
+  prefix: 'chat' | 'chat-stream',
+  attempt: (activeModel: IModel, replica: ResolvedReplica) => Promise<T>,
+): Promise<{ value: T; replica: ResolvedReplica; failed: ResolvedReplica[] }> {
+  const order = replicaOrder(model, prefix);
+  const failed: ResolvedReplica[] = [];
+  let lastError: unknown;
+
+  for (let i = 0; i < order.length; i += 1) {
+    const replica = order[i];
+    try {
+      const value = await attempt(modelForReplica(model, replica), replica);
+      if (failed.length > 0) {
+        logger.info('Replica failover succeeded', {
+          modelKey: model.key,
+          served: `${replica.providerKey}:${replica.modelId}`,
+          skipped: failed.map((entry) => `${entry.providerKey}:${entry.modelId}`),
+        });
+      }
+      return { value, replica, failed };
+    } catch (error) {
+      lastError = error;
+      const isLast = i === order.length - 1;
+      if (isLast || !shouldTryNextReplica(error)) throw error;
+      failed.push(replica);
+      logger.warn('Replica failed, trying the next one', {
+        modelKey: model.key,
+        replica: `${replica.providerKey}:${replica.modelId}`,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  throw lastError;
+}
+
+/**
  * Circuit-breaker key for a chat call.
  *
  * Scoped to the MODEL, not just the provider. One Model Hub entry can be broken
@@ -1508,21 +1588,38 @@ export async function handleChatCompletion(params: {
     }
   }
 
-  const { runtime } = await buildModelRuntime(
-    tenantDbName,
-    model.tenantId,
-    model.providerKey,
-    projectId,
-  );
-
-  if (!runtime.createChatModel) {
-    throw new Error('Model provider does not support chat completions');
-  }
-
   const messagesInput = body.messages as Parameters<typeof toLangChainMessages>[0];
   const messages = toLangChainMessages(messagesInput);
-  const { modelSettings, callOptions, overrides } = invocation;
-  const outputTokenLimit = resolveOutputTokenLimit(overrides, modelSettings);
+
+  /**
+   * Everything needed to place ONE call, resolved for the replica that will
+   * serve it.
+   *
+   * This runs per replica rather than once per request because the parts that
+   * depend on the upstream genuinely differ between them: the parameter
+   * registry is keyed on driver AND model id, so a pool spanning Azure and
+   * Bedrock strips (and forces) different fields on each leg, and the runtime
+   * is built from the replica's own provider credentials.
+   *
+   * What is deliberately NOT in here: the cache variant key and the quota
+   * context, both resolved once from the model above. A pool must not fork the
+   * cache or split a budget — every replica is the same model.
+   */
+  const prepareCall = async (activeModel: IModel) => {
+    const { runtime } = await buildModelRuntime(
+      tenantDbName,
+      activeModel.tenantId,
+      activeModel.providerKey,
+      projectId,
+    );
+
+    if (!runtime.createChatModel) {
+      throw new InvalidRequestError('Model provider does not support chat completions');
+    }
+
+    const call = resolveModelInvocationConfig(activeModel, body);
+    const { modelSettings, callOptions, overrides } = call;
+    const outputTokenLimit = resolveOutputTokenLimit(overrides, modelSettings);
   // A streamed request that carries tools used to be answered by a single
   // `invoke()` replayed as one SSE frame. The reason was real at the time —
   // the collapsed `tool_calls` on a streamed chunk arrive with empty arguments
@@ -1533,63 +1630,83 @@ export async function handleChatCompletion(params: {
   // tools) and from Onyx, i.e. exactly the clients that reported streaming not
   // working. Tools are the normal case, not the exception; the escape hatch
   // stays per-model for an upstream that really cannot stream them.
-  const disableProviderStreaming = Boolean(
-    stream
-    && modelSettings.disableStreamingWithTools === true
-    && Array.isArray(overrides.tools)
-    && overrides.tools.length > 0,
-  );
-  const includeStreamUsage =
-    asRecord(overrides.stream_options).include_usage === true;
+    const disableProviderStreaming = Boolean(
+      stream
+      && modelSettings.disableStreamingWithTools === true
+      && Array.isArray(overrides.tools)
+      && overrides.tools.length > 0,
+    );
+    const includeStreamUsage =
+      asRecord(overrides.stream_options).include_usage === true;
 
-  if (disableProviderStreaming) {
-    delete callOptions.stream_options;
-  }
-
-  const chatModel = ensureChatRunnable(await runtime.createChatModel({
-    modelId: model.modelId,
-    category: model.category,
-    modelSettings,
-    options: {
-      streaming: Boolean(stream),
-      disableStreaming: disableProviderStreaming,
-      // `withResilience` owns retry and circuit-breaking on this path, so the
-      // provider SDK must not retry underneath it.
-      maxRetries: 0,
-    },
-  }));
-
-  if (stream) {
-    if (!disableProviderStreaming && typeof chatModel.stream !== 'function') {
-      throw new Error('Model provider does not support streaming responses');
+    if (disableProviderStreaming) {
+      delete callOptions.stream_options;
     }
 
+    const chatModel = ensureChatRunnable(await runtime.createChatModel({
+      modelId: activeModel.modelId,
+      category: activeModel.category,
+      modelSettings,
+      options: {
+        streaming: Boolean(stream),
+        disableStreaming: disableProviderStreaming,
+        // `withResilience` owns retry and circuit-breaking on this path, so the
+        // provider SDK must not retry underneath it.
+        maxRetries: 0,
+      },
+    }));
+
+    return {
+      chatModel,
+      modelSettings,
+      callOptions,
+      overrides,
+      outputTokenLimit,
+      disableProviderStreaming,
+      includeStreamUsage,
+    };
+  };
+
+  if (stream) {
     // A disconnected client used to leave the provider generating (and billing)
     // until it finished on its own. Cancelling the readable — which Fastify does
     // when the response socket closes — now aborts the upstream call.
     const abortController = new AbortController();
-    const streamCallOptions = { ...callOptions, signal: abortController.signal };
 
-    let asyncIterator: AsyncIterable<AIMessageChunk>;
-    if (disableProviderStreaming) {
-      const eagerMessage = await withResilience(
-        (signal) => chatModel.invoke(messages, { ...callOptions, signal }),
-        { key: chatResilienceKey('chat', model) },
-      );
-      asyncIterator = (async function* () {
-        yield new AIMessageChunk({
-          content: eagerMessage.content,
-          additional_kwargs: eagerMessage.additional_kwargs,
-          response_metadata: eagerMessage.response_metadata,
-          id: eagerMessage.id,
-          name: eagerMessage.name,
-          usage_metadata: eagerMessage.usage_metadata,
-          tool_calls: eagerMessage.tool_calls,
-          invalid_tool_calls: eagerMessage.invalid_tool_calls,
-        });
-      })();
-    } else {
-      asyncIterator = await withResilience(
+    // FAILOVER ENDS HERE. Opening the stream is the last moment a different
+    // replica can serve this request: once a byte has reached the client, the
+    // answer is half-written and retrying elsewhere would splice two different
+    // completions together. So the pool covers connection and handshake
+    // failures, and a mid-stream fault stays a mid-stream fault.
+    const opened = await runAcrossReplicas(model, 'chat-stream', async (activeModel) => {
+      const prepared = await prepareCall(activeModel);
+      if (!prepared.disableProviderStreaming && typeof prepared.chatModel.stream !== 'function') {
+        throw new InvalidRequestError('Model provider does not support streaming responses');
+      }
+
+      const streamCallOptions = { ...prepared.callOptions, signal: abortController.signal };
+
+      if (prepared.disableProviderStreaming) {
+        const eagerMessage = await withResilience(
+          (signal) => prepared.chatModel.invoke(messages, { ...prepared.callOptions, signal }),
+          { key: chatResilienceKey('chat', activeModel) },
+        );
+        const iterator: AsyncIterable<AIMessageChunk> = (async function* () {
+          yield new AIMessageChunk({
+            content: eagerMessage.content,
+            additional_kwargs: eagerMessage.additional_kwargs,
+            response_metadata: eagerMessage.response_metadata,
+            id: eagerMessage.id,
+            name: eagerMessage.name,
+            usage_metadata: eagerMessage.usage_metadata,
+            tool_calls: eagerMessage.tool_calls,
+            invalid_tool_calls: eagerMessage.invalid_tool_calls,
+          });
+        })();
+        return { activeModel, prepared, asyncIterator: iterator };
+      }
+
+      const iterator = await withResilience(
         (signal) => {
           // The stream already aborts on client disconnect; chain the gateway's
           // timeout into the same controller so a provider that never opens the
@@ -1599,11 +1716,17 @@ export async function handleChatCompletion(params: {
             () => abortController.abort(signal.reason),
             { once: true },
           );
-          return chatModel.stream!(messages, streamCallOptions) as Promise<AsyncIterable<AIMessageChunk>>;
+          return prepared.chatModel.stream!(messages, streamCallOptions) as Promise<AsyncIterable<AIMessageChunk>>;
         },
-        { key: chatResilienceKey('chat-stream', model) },
+        { key: chatResilienceKey('chat-stream', activeModel) },
       );
-    }
+      return { activeModel, prepared, asyncIterator: iterator };
+    });
+
+    const servingReplica = opened.replica;
+    const asyncIterator = opened.value.asyncIterator;
+    const { overrides, outputTokenLimit, includeStreamUsage } = opened.value.prepared;
+
     const startedAt = Date.now();
     const completionId = newCompletionId();
     const completionCreated = Math.floor(Date.now() / 1000);
@@ -1861,6 +1984,7 @@ export async function handleChatCompletion(params: {
                 overrides,
                 stream: true,
                 ...describeRequestContract(body),
+                ...replicaTrace(model, servingReplica, opened.failed),
               }),
               providerResponse: sanitizeForLogging({
                 guardrail_blocked: true,
@@ -2079,6 +2203,7 @@ export async function handleChatCompletion(params: {
                 overrides,
                 stream: true,
                 ...describeRequestContract(body),
+                ...replicaTrace(model, servingReplica, opened.failed),
               }),
               providerResponse: sanitizeForLogging(providerResponse),
               errorMessage: outputLimitError?.message,
@@ -2146,6 +2271,7 @@ export async function handleChatCompletion(params: {
                 overrides,
                 stream: true,
                 ...describeRequestContract(body),
+                ...replicaTrace(model, servingReplica, opened.failed),
               }),
               providerResponse: sanitizeForLogging({ error: errorMessage }),
               errorMessage,
@@ -2173,13 +2299,24 @@ export async function handleChatCompletion(params: {
     return { stream: readable, requestId, streamHeaders };
   }
 
-  const aiMessage = await withResilience(
-    (signal) => chatModel.invoke(messages, { ...callOptions, signal }),
-    { key: chatResilienceKey('chat', model) },
-  );
+  const completed = await runAcrossReplicas(model, 'chat', async (candidate) => {
+    const prepared = await prepareCall(candidate);
+    const message = await withResilience(
+      (signal) => prepared.chatModel.invoke(messages, { ...prepared.callOptions, signal }),
+      { key: chatResilienceKey('chat', candidate) },
+    );
+    return { candidate, prepared, message };
+  });
+
+  const servingReplica = completed.replica;
+  const failedReplicas = completed.failed;
+  const { overrides, outputTokenLimit } = completed.value.prepared;
+  const aiMessage = completed.value.message;
 
   const latencyMs = Date.now() - start;
   const response = toOpenAIChatResponse(aiMessage, {
+    // The MODEL's id, never the replica's: the caller asked for this model and
+    // must not be able to tell which deployment answered.
     model: model.modelId,
     stream: false,
   });
@@ -2233,6 +2370,7 @@ export async function handleChatCompletion(params: {
         overrides,
         stream: false,
         ...describeRequestContract(body),
+        ...replicaTrace(model, servingReplica, failedReplicas),
       }),
       providerResponse: sanitizeForLogging(response),
       latencyMs,

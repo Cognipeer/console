@@ -42,6 +42,7 @@ import {
   IconPlayerPlay,
   IconRefresh,
   IconSettings,
+  IconStack2,
   IconTimeline,
   IconTrash,
 } from '@tabler/icons-react';
@@ -53,6 +54,7 @@ import TtsPlayground from '@/components/playground/TtsPlayground';
 import OcrPlayground from '@/components/playground/OcrPlayground';
 import ImagePlayground from '@/components/playground/ImagePlayground';
 import EmbeddingPlayground from '@/components/playground/EmbeddingPlayground';
+import ReplicaPoolPanel from '@/components/models/ReplicaPoolPanel';
 import PageContainer from '@/components/common/ui/PageContainer';
 import TabsBar from '@/components/common/ui/TabsBar';
 import StatusBadge from '@/components/common/ui/StatusBadge';
@@ -124,6 +126,13 @@ interface ModelDetailDto {
    * are then ignored rather than merged. An empty array is a real state
    * ("attached to nothing") and must not be confused with an absent one.
    */
+  replicas?: Array<{
+    providerKey: string;
+    modelId: string;
+    weight?: number;
+    enabled?: boolean;
+    label?: string;
+  }>;
   guardrails?: GuardrailBindingRow[];
   /** @deprecated Read only as the fallback when `guardrails` is absent. */
   inputGuardrailKey?: string;
@@ -301,7 +310,7 @@ function relativeDate(iso?: string) {
   return d.toLocaleDateString();
 }
 
-type DetailTab = 'overview' | 'playground' | 'routing' | 'configure' | 'logs' | 'usage';
+type DetailTab = 'overview' | 'playground' | 'routing' | 'replicas' | 'configure' | 'logs' | 'usage';
 
 interface ParsedToolCall {
   id?: string;
@@ -704,6 +713,11 @@ export default function ModelDetailPage() {
     ...(isDynamic
       ? [{ id: 'routing' as const, label: 'Routing', icon: <IconArrowsSplit size={14} stroke={1.7} /> }]
       : []),
+    // Pooling is wired on the chat path, so the tab appears where it does
+    // something. A Dynamic LLM owns no provider of its own to pool.
+    ...(!isDynamic && model.category === 'llm'
+      ? [{ id: 'replicas' as const, label: 'Replicas', icon: <IconStack2 size={14} stroke={1.7} /> }]
+      : []),
     { id: 'configure', label: 'Configure', icon: <IconSettings size={14} stroke={1.7} /> },
     { id: 'logs', label: 'Logs', icon: <IconTimeline size={14} stroke={1.7} /> },
     { id: 'usage', label: 'Usage', icon: <IconBook size={14} stroke={1.7} /> },
@@ -934,6 +948,17 @@ export default function ModelDetailPage() {
 
       {tab === 'playground' && model.category === 'tts' ? (
         <TtsPlayground modelKey={model.key} />
+      ) : null}
+
+      {tab === 'replicas' ? (
+        <ReplicaPoolPanel
+          modelId={String(model._id)}
+          modelKey={model.key}
+          ownProviderKey={model.providerKey ?? ''}
+          ownModelId={model.modelId}
+          providers={providers.map((provider) => ({ key: provider.key, label: provider.label }))}
+          initialReplicas={model.replicas}
+        />
       ) : null}
 
       {tab === 'playground' && model.category === 'image' ? (
