@@ -14,9 +14,119 @@ The landing page lists browser profiles with their active/disabled and live-sess
 
 - **Browser profile** — long-lived container with defaults for session config, the artifact bucket where screenshots/PDFs land, and a default model (used by extract/LLM-driven actions). Persisted in `browsers`.
 - **Session** — a live Playwright context. Created from a profile, carries its own status (`starting | ready | closed | error`), receives actions, and records every event (navigation, click, extract, screenshot) to `browser_session_events`. Auto-closes after `idleTimeoutMs`.
-- **Action** — a single operation against a session: `goto`, `click`, `hover`, `type`, `press`, `wait`, `snapshot`, `extract`, `screenshot`, `close`. The full schema lives in `browserActionSchema`.
-- **Extract** — selector + mode (`text | html | attribute`) optionally piped through the profile's default model for structured extraction.
+- **Action** — a single operation against a session: `goto`, `click`, `hover`, `type`, `press`, `select`, `check`, `upload`, `drag`, `scroll`, `wait`, `tab`, `back`/`forward`/`reload`. The full schema lives in `browserActionSchema`.
+- **Target** — how an action names the element it acts on. See [Addressing elements](#addressing-elements); this is the difference between an automation that works once and one that keeps working.
+- **Flow** — a recorded, replayable step list. See [Flows](#flows).
+- **Extract** — a target + mode (`text | html | attr | value`), optionally over every match.
 - **Artifacts** — screenshots and PDFs are stored in the configured file bucket; the response carries the bucket key.
+
+## Addressing elements
+
+An action can name its element two ways, and only one of them survives being
+saved.
+
+`browser_snapshot` returns the page's accessibility tree with `[ref=e4]`
+markers. A **ref** is the cheapest, least ambiguous handle for the turn you
+are in — and it is valid only until the next snapshot, because the browser
+renumbers them every time. Stored in a flow, a ref looks like a working
+target and then spends the step's entire timeout resolving to nothing.
+
+Everything else is **durable**: it describes the element the way a person
+would, so it still resolves after a re-render and usually after a deploy.
+
+| Field | Use when |
+|---|---|
+| `testId` | the app sets `data-testid` — the most stable target there is |
+| `role` + `name` | almost always: `{ "role": "button", "name": "Sign in" }` |
+| `label` | a form field with a `<label>` |
+| `placeholder` | an input with placeholder text and no label |
+| `text` | a link or element identified by its visible text |
+| `selector` | last resort — CSS encodes markup nobody promised to keep |
+| `nth` | disambiguates when the chosen strategy matches several elements |
+| `frame` | CSS selector of an iframe to look inside |
+
+Every action result carries **`resolvedTarget`**: the durable description of
+whatever the action actually hit. That is what you save.
+
+```jsonc
+// Request — a live agent uses the ref it just saw
+{ "type": "click", "ref": "e12" }
+
+// Response — the durable form, safe to keep
+{ "ok": true, "targetStrategy": "ref",
+  "resolvedTarget": { "role": "button", "name": "Sign in" } }
+```
+
+A stale ref does not stall: when a durable target is supplied alongside it,
+the ref is probed briefly and then abandoned in favour of the durable one.
+
+## Flows
+
+Driving a browser with a model is **discovery** — it reads the page,
+guesses, backtracks, and bills tokens for every step. Replaying a flow is
+**execution**: no model, no guessing, the same steps every time.
+
+A flow is an ordered list of steps with durable targets, declared inputs, and
+per-step retry policy. Record one from a session you already drove — by hand
+in the live preview, or with an agent:
+
+```bash
+curl -X POST /api/client/v1/browser/flows/record \
+  -d '{ "sessionId": "…", "name": "Submit expense", "status": "active" }'
+```
+
+Recording substitutes durable targets for refs, and turns **every typed value
+into a declared input** rather than a literal — the recorder cannot tell a
+search term from a password, and only one of those mistakes is recoverable.
+Steps reference them as <span v-pre>`{{input.name}}`</span>.
+
+Replay it with different values, as often as you like:
+
+```bash
+curl -X POST /api/client/v1/browser/flows/<key>/run \
+  -d '{ "inputs": { "reference": "EXP-2002", "amount": "999" } }'
+```
+
+The response is the run record: per-step status and attempt count, whatever
+`captureAs` collected, and — on a failure — the index of the step that broke
+plus a screenshot of the page it gave up on.
+
+Step policy:
+
+| Field | Effect |
+|---|---|
+| `policy.retries` | attempts beyond the first; the delay doubles |
+| `policy.timeoutMs` | per-step bound, overriding the session default |
+| `policy.optional` | a failing step is recorded and skipped instead of aborting |
+| `when` | skip the step unless the expression is truthy |
+| `captureAs` | store the step's output for later steps and the run's outputs |
+
+A run **aborts at the first non-optional failure**: a half-finished form is
+usually worse than an untouched one.
+
+Agents reach flows through `browser_list_flows` and `browser_run_flow` —
+check for an existing flow before working a task out step by step.
+
+Flows live at **Operate → Browser → Flows**.
+
+## Signed-in profiles
+
+An unattended run should not push credentials through a login form every
+time. A browser profile can carry a Playwright `storageState` — cookies plus
+origin storage — so every session it opens starts already authenticated:
+
+```bash
+curl -X PUT /api/client/v1/browser/browsers/<idOrKey>/profile \
+  -d '{ "storageState": <contents of profile.json> }'
+```
+
+Get that file either from Playwright (`context.storageState()`) or from a
+session you signed into by hand — the session list has a **save as profile**
+action, and `GET …/sessions/<key>/profile` returns the same JSON.
+
+The payload is encrypted at rest and is **never readable back**; the API
+returns only a summary (cookie count, origins, earliest expiry) so the
+dashboard can warn you before a profile goes stale.
 
 ## Quick start
 
@@ -53,10 +163,16 @@ The live screenshot endpoint (`GET …/screenshot/live`) returns an inline PNG/J
 Every profile exposes its own MCP server at `/api/client/v1/browser/:browserKey/mcp/*`. The toolset mirrors the action API but follows the Model Context Protocol:
 
 ```
-browser_navigate · browser_click · browser_hover · browser_type ·
-browser_press · browser_wait · browser_snapshot · browser_extract ·
-browser_screenshot · browser_close
+browser_navigate · browser_history · browser_click · browser_hover ·
+browser_type · browser_press · browser_select · browser_check ·
+browser_upload · browser_scroll · browser_wait · browser_tabs ·
+browser_snapshot · browser_find · browser_extract · browser_diagnostics ·
+browser_screenshot · browser_pdf · browser_list_flows · browser_run_flow ·
+browser_close
 ```
+
+The list is derived from the same tool definitions the `Browser Use` system
+tool binds, so the two surfaces cannot drift apart.
 
 Open the SSE stream first:
 

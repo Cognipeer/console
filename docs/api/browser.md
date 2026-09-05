@@ -107,10 +107,37 @@ GET /api/client/v1/browser/sessions/:sessionKey/snapshot
 - `POST /api/client/v1/browser/sessions/:sessionKey/screenshot`
 - `POST /api/client/v1/browser/sessions/:sessionKey/pdf`
 
+### Find Text / Diagnostics / Export Profile
+
+- `GET /api/client/v1/browser/sessions/:sessionKey/find?text=…&limit=…` — locate visible text and get a **durable target** for each hit, cheaper than a full snapshot.
+- `GET /api/client/v1/browser/sessions/:sessionKey/diagnostics` — console messages, failed requests and the last dialog the session saw.
+- `GET /api/client/v1/browser/sessions/:sessionKey/profile` — export this session's cookies + origin storage, ready to attach as a browser profile.
+
 ### Close / Delete Session
 
 - `DELETE /api/client/v1/browser/sessions/:sessionKey`
 - `DELETE /api/client/v1/browser/sessions/by-id/:sessionId`
+
+## Signed-In Profiles
+
+- `PUT /api/client/v1/browser/browsers/:idOrKey/profile` — attach a Playwright `storageState` so new sessions start authenticated. Body is either the raw export or `{ "storageState": …, "fileName": "profile.json" }`. Encrypted at rest; the response is a summary only and the payload is never readable back.
+- `DELETE /api/client/v1/browser/browsers/:idOrKey/profile`
+
+## Browser Flows
+
+A flow is a recorded, replayable step list — discovery once, deterministic execution afterwards.
+
+- `POST /api/client/v1/browser/flows` — create (steps may be supplied directly)
+- `GET /api/client/v1/browser/flows` — list, filterable by `status`, `browserId`, `search`
+- `GET|PATCH|DELETE /api/client/v1/browser/flows/:idOrKey`
+- `POST /api/client/v1/browser/flows/record` — turn a driven session into a flow
+- `POST /api/client/v1/browser/flows/:idOrKey/run` — replay it and wait for the result
+- `GET /api/client/v1/browser/flow-runs` — run history, filterable by `flowId` and `status`
+- `GET /api/client/v1/browser/flow-runs/:runId`
+
+A step's action uses the same schema as a live action, with one added rule: **a stored `ref` is rejected**. A ref is valid only for the snapshot that produced it, so a persisted one resolves to nothing on the next run and burns the step's whole timeout finding that out. Use `role` + `name`, `testId`, `label`, `placeholder`, `text` or `selector`.
+
+A failed run still returns `200` with `run.status: "failed"` — the request succeeded and the caller gets a complete, inspectable answer including `failedStepIndex` and per-step results.
 
 ## Per-Browser MCP
 
@@ -145,17 +172,17 @@ Supported methods:
 
 The browser MCP server exposes the Browser Use-compatible tools:
 
-- `browser_navigate`
-- `browser_click`
-- `browser_hover`
-- `browser_type`
-- `browser_press`
-- `browser_wait`
-- `browser_snapshot`
-- `browser_extract`
-- `browser_screenshot`
-- `browser_pdf` (renders the current page to PDF)
+- `browser_navigate`, `browser_history` (back / forward / reload)
+- `browser_click`, `browser_hover`, `browser_type`, `browser_press`
+- `browser_select`, `browser_check`, `browser_upload`, `browser_scroll`
+- `browser_wait`, `browser_tabs`
+- `browser_snapshot` (accessibility tree with `[ref=…]` markers), `browser_find`, `browser_extract`
+- `browser_diagnostics` (console, failed requests, last dialog)
+- `browser_screenshot`, `browser_pdf`
+- `browser_list_flows`, `browser_run_flow`
 - `browser_close`
+
+The list is derived from the same definitions the `Browser Use` system tool binds, so the MCP and agent surfaces cannot drift apart.
 
 ## Relationship To Console Agents
 
@@ -164,5 +191,7 @@ Standalone browser agent management has been removed. If you want a Console-mana
 1. create or reuse a browser profile,
 2. attach the `Browser Use` system tool to the agent in Console,
 3. invoke that agent through the normal agents / responses surface.
+
+The agent addresses elements by the `ref` values in `browser_snapshot`'s output. Those are valid only until the next snapshot — every action result also returns `resolvedTarget`, the durable `role`/`name` form, which is what a flow step stores. Where a flow already exists for the task, `browser_run_flow` replays it without a model in the loop.
 
 For external runtimes or custom orchestrators, use the browser session API directly or connect through the per-browser MCP endpoint.
