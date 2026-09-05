@@ -470,6 +470,29 @@ export interface IModelPricing {
 // child model — by rules (signal thresholds) or by a decider model — and
 // recurses through `handleChatCompletion` against the chosen key.
 
+/**
+ * One deployment behind a pooled model.
+ *
+ * `settings` is merged OVER the model's own settings for calls that land here,
+ * which is what makes a pool able to span providers whose knobs differ — an
+ * Azure replica needing its own `azureApiVersion`, say. Everything that must
+ * stay identical across replicas (pricing, capability profile, cache key,
+ * guardrail bindings, quota attribution) deliberately lives on the model and
+ * has no per-replica form.
+ */
+export interface IModelReplica {
+  providerKey: string;
+  /** Upstream model id at THIS provider — a deployment name on Azure. */
+  modelId: string;
+  /** Relative share of traffic among healthy replicas. Defaults to 1. */
+  weight?: number;
+  /** Defaults to true. A disabled replica is drained without being deleted. */
+  enabled?: boolean;
+  /** Per-replica overrides merged over `IModel.settings`. */
+  settings?: Record<string, unknown>;
+  label?: string;
+}
+
 export type DynamicRoutingStrategy = 'rule-based' | 'model-based';
 
 /** Signals computed from the chat request, available to rule conditions. */
@@ -754,6 +777,20 @@ export interface IModel {
   settings: Record<string, unknown>;
   pricing: IModelPricing;
   semanticCache?: ISemanticCacheConfig;
+  /**
+   * Interchangeable deployments of THIS SAME model, for capacity and
+   * resilience. Every replica must be the same model — same pricing, same
+   * capabilities, same answers — because the caller asked for this model and
+   * cannot tell which replica served it. Routing to a DIFFERENT model is what
+   * Dynamic LLM does (`dynamic` below), and the two compose: a Dynamic route
+   * picks a model key, and that model may itself be pooled.
+   *
+   * ABSENT means "one replica", built from the `providerKey`/`modelId` on this
+   * record — so every existing model keeps working with no migration, and the
+   * top-level pair stays the identity of the model rather than becoming
+   * vestigial.
+   */
+  replicas?: IModelReplica[];
   /**
    * Multi-guardrail binding. AUTHORITATIVE when present: the two deprecated
    * single-slot keys below are then ignored, not merged — see

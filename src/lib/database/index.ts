@@ -176,6 +176,7 @@ export type {
   IAgentTracingSession,
   IAgentTracingEvent,
   IModel,
+  IModelReplica,
   IModelUsageLog,
   ModelUsageStatus,
   IModelUsageAggregate,

@@ -558,6 +558,11 @@ export const TENANT_SCHEMA_SQL = `
     -- undefined, and resolveBindings reads undefined as "fall back to the two
     -- legacy columns" but [] as "authored, bound to nothing".
     guardrails TEXT,
+    -- Replica pool (IModelReplica[]) as ONE JSON blob, same reasoning as the
+    -- guardrails column above. NULL means no pool: the model's own
+    -- providerKey/modelId are then its single replica, which is what every row
+    -- written before pools existed says.
+    replicas TEXT,
     metadata TEXT DEFAULT '{}',
     createdBy TEXT,
     updatedBy TEXT,

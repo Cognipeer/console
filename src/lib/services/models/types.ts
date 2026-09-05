@@ -1,4 +1,4 @@
-import type { IModel, IModelPricing, ISemanticCacheConfig, ModelCategory } from '@/lib/database';
+import type { IModel, IModelPricing, IModelReplica, ISemanticCacheConfig, ModelCategory } from '@/lib/database';
 import type { IGuardrailBinding } from '@/lib/database/provider/types.domain';
 import type { ProviderCapabilityFlags } from '@/lib/providers';
 import type {
@@ -56,6 +56,12 @@ export interface UpdateModelInput {
    * console binary on the same tenant DB stops enforcing.
    */
   guardrails?: IGuardrailBinding[];
+  /**
+   * Replica pool — interchangeable deployments of this same model. An empty
+   * array clears the pool and returns the model to its own
+   * `providerKey`/`modelId`.
+   */
+  replicas?: IModelReplica[];
   /** @deprecated Use `guardrails`. Kept as the read fallback for legacy rows. */
   inputGuardrailKey?: string;
   /** @deprecated Use `guardrails`. Kept as the read fallback for legacy rows. */

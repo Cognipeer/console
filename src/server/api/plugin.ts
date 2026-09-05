@@ -21,6 +21,7 @@ import { applyCorsHeaders } from './cors';
 import { authApiPlugin } from './plugins/auth';
 import { clientA2aApiPlugin } from './plugins/client-a2a';
 import { clientAgentsApiPlugin } from './plugins/client-agents';
+import { clientAssistantsApiPlugin } from './plugins/client-assistants';
 import { clientAnalyticsApiPlugin } from './plugins/client-analytics';
 import { clientAuditApiPlugin } from './plugins/client-audit';
 import { clientMonitoringApiPlugin } from './plugins/client-monitoring';
@@ -439,6 +440,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(authApiPlugin);
   await app.register(clientA2aApiPlugin);
   await app.register(clientAgentsApiPlugin);
+  await app.register(clientAssistantsApiPlugin);
   await app.register(clientAnalyticsApiPlugin);
   await app.register(clientAuditApiPlugin);
   await app.register(clientMonitoringApiPlugin);
