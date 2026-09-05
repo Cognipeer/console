@@ -6,7 +6,10 @@ import {
   Button,
   Group,
   Modal,
+  NumberInput,
+  Select,
   Stack,
+  Switch,
   TextInput,
   Textarea,
 } from '@mantine/core';
@@ -24,6 +27,7 @@ import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer'
 import StatTile from '@/components/common/ui/StatTile';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
+import FormShell, { FormField, FormRow, FormSection } from '@/components/common/ui/FormShell';
 import type {
   BrowserSessionView,
   BrowserView,
@@ -34,6 +38,25 @@ interface CreateForm {
   description: string;
   artifactBucketKey: string;
   defaultModelKey: string;
+  headless: boolean;
+  viewportWidth: number;
+  viewportHeight: number;
+  locale: string;
+  timezoneId: string;
+  actionTimeoutMs: number;
+  navigationTimeoutMs: number;
+  idleTimeoutMs: number;
+  allowList: string;
+  blockList: string;
+  proxyServer: string;
+  dialogPolicy: 'accept' | 'dismiss';
+  acceptDownloads: boolean;
+}
+
+/** "a.com, b.com" -> ["a.com","b.com"]; empty stays undefined, not []. */
+function splitHosts(value: string): string[] | undefined {
+  const hosts = value.split(',').map((item) => item.trim()).filter(Boolean);
+  return hosts.length > 0 ? hosts : undefined;
 }
 
 interface RowMetrics {
@@ -54,7 +77,27 @@ export default function BrowsersListPage() {
   const [deleteTarget, setDeleteTarget] = useState<BrowserView | null>(null);
 
   const form = useForm<CreateForm>({
-    initialValues: { name: '', description: '', artifactBucketKey: '', defaultModelKey: '' },
+    initialValues: {
+      name: '',
+      description: '',
+      artifactBucketKey: '',
+      defaultModelKey: '',
+      // Defaults mirror the server's own (`config.browser.*`), so a browser
+      // created without touching this section behaves exactly as before.
+      headless: true,
+      viewportWidth: 1280,
+      viewportHeight: 800,
+      locale: '',
+      timezoneId: '',
+      actionTimeoutMs: 15_000,
+      navigationTimeoutMs: 30_000,
+      idleTimeoutMs: 300_000,
+      allowList: '',
+      blockList: '',
+      proxyServer: '',
+      dialogPolicy: 'dismiss',
+      acceptDownloads: false,
+    },
     validate: { name: (v) => (v.trim().length < 2 ? 'Name is required' : null) },
   });
 
@@ -143,6 +186,22 @@ export default function BrowsersListPage() {
           description: values.description.trim() || undefined,
           artifactBucketKey: values.artifactBucketKey.trim() || undefined,
           defaultModelKey: values.defaultModelKey.trim() || undefined,
+          defaultSessionConfig: {
+            headless: values.headless,
+            viewport: { width: values.viewportWidth, height: values.viewportHeight },
+            locale: values.locale.trim() || undefined,
+            timezoneId: values.timezoneId.trim() || undefined,
+            actionTimeoutMs: values.actionTimeoutMs,
+            navigationTimeoutMs: values.navigationTimeoutMs,
+            idleTimeoutMs: values.idleTimeoutMs,
+            dialogPolicy: values.dialogPolicy,
+            acceptDownloads: values.acceptDownloads,
+            ...(values.proxyServer.trim() ? { proxy: { server: values.proxyServer.trim() } } : {}),
+            access: {
+              allowList: splitHosts(values.allowList),
+              blockList: splitHosts(values.blockList),
+            },
+          },
         }),
       });
       if (!res.ok) {
@@ -358,46 +417,139 @@ export default function BrowsersListPage() {
         ]}
       />
 
-      <Modal
-        opened={createOpened}
+      <FormShell
+        open={createOpened}
         onClose={createHandlers.close}
         title="Create browser"
-        size="md"
+        subtitle="A browser profile is the container sessions, flows and agent tools run under — these defaults apply to every session it opens."
+        icon={<IconWorld size={18} stroke={1.7} />}
+        primaryAction={{
+          label: 'Create browser',
+          color: 'teal',
+          loading: creating,
+          onClick: () => form.onSubmit(handleCreate)(),
+        }}
+        secondaryAction={{ label: 'Cancel', onClick: createHandlers.close }}
       >
-        <form onSubmit={form.onSubmit(handleCreate)}>
-          <Stack>
-            <TextInput label="Name" required {...form.getInputProps('name')} />
-            <Textarea
-              label="Description"
-              autosize
-              minRows={2}
-              {...form.getInputProps('description')}
-            />
-            <TextInput
-              label="Default Model Key"
-              description="Used as a default for browser agents under this browser"
-              {...form.getInputProps('defaultModelKey')}
-            />
-            <TextInput
-              label="Artifact Bucket Key"
-              description="File bucket for screenshots and PDFs"
-              {...form.getInputProps('artifactBucketKey')}
-            />
-            <Group justify="flex-end">
-              <Button
-                variant="subtle"
-                onClick={createHandlers.close}
-                disabled={creating}
-              >
-                Cancel
-              </Button>
-              <Button type="submit" loading={creating}>
-                Create
-              </Button>
-            </Group>
-          </Stack>
-        </form>
-      </Modal>
+        <FormSection number={1} title="Identity">
+          <FormRow cols={1}>
+            <FormField label="Name" required>
+              <TextInput placeholder="Vendor portal" {...form.getInputProps('name')} />
+            </FormField>
+          </FormRow>
+          <FormRow cols={1}>
+            <FormField label="Description" optional>
+              <Textarea
+                autosize
+                minRows={2}
+                placeholder="What this browser is for, and who owns it."
+                {...form.getInputProps('description')}
+              />
+            </FormField>
+          </FormRow>
+          <FormRow cols={2}>
+            <FormField label="Artifact bucket" optional hint="Where screenshots and PDFs land. Empty uses the platform default.">
+              <TextInput placeholder="browser-artifacts" {...form.getInputProps('artifactBucketKey')} />
+            </FormField>
+            <FormField label="Default model key" optional hint="Used by agents bound to this browser.">
+              <TextInput placeholder="gpt-5.6" {...form.getInputProps('defaultModelKey')} />
+            </FormField>
+          </FormRow>
+        </FormSection>
+
+        <FormSection
+          number={2}
+          title="Browser window"
+          description="How pages are rendered. Viewport size changes what a responsive site shows, so it changes which elements exist."
+        >
+          <FormRow cols={2}>
+            <FormField label="Viewport width">
+              <NumberInput min={320} max={8192} {...form.getInputProps('viewportWidth')} />
+            </FormField>
+            <FormField label="Viewport height">
+              <NumberInput min={240} max={8192} {...form.getInputProps('viewportHeight')} />
+            </FormField>
+          </FormRow>
+          <FormRow cols={2}>
+            <FormField label="Locale" optional hint="Sent as Accept-Language.">
+              <TextInput placeholder="tr-TR" {...form.getInputProps('locale')} />
+            </FormField>
+            <FormField label="Timezone" optional hint="Pages that render dates read this.">
+              <TextInput placeholder="Europe/Istanbul" {...form.getInputProps('timezoneId')} />
+            </FormField>
+          </FormRow>
+          <FormRow cols={1}>
+            <FormField label="Headless" hint="Off runs a visible browser — only useful on a machine with a display.">
+              <Switch
+                label={form.values.headless ? 'Headless' : 'Headful'}
+                checked={form.values.headless}
+                onChange={(event) => form.setFieldValue('headless', event.currentTarget.checked)}
+              />
+            </FormField>
+          </FormRow>
+        </FormSection>
+
+        <FormSection
+          number={3}
+          title="Timeouts"
+          description="Bounds on how long one step may wait. Too generous and a broken selector costs a minute; too tight and a slow page fails for no reason."
+          collapsible
+          defaultOpen={false}
+        >
+          <FormRow cols={3}>
+            <FormField label="Action (ms)">
+              <NumberInput min={1} max={120_000} {...form.getInputProps('actionTimeoutMs')} />
+            </FormField>
+            <FormField label="Navigation (ms)">
+              <NumberInput min={1} max={300_000} {...form.getInputProps('navigationTimeoutMs')} />
+            </FormField>
+            <FormField label="Idle close (ms)" hint="Auto-close after this long with no activity.">
+              <NumberInput min={1_000} {...form.getInputProps('idleTimeoutMs')} />
+            </FormField>
+          </FormRow>
+        </FormSection>
+
+        <FormSection
+          number={4}
+          title="Network and safety"
+          description="What this browser is allowed to reach, and what it does when a page interrupts."
+          collapsible
+          defaultOpen={false}
+        >
+          <FormRow cols={2}>
+            <FormField label="Allowed hosts" optional hint="Comma separated. Empty means any host. Supports *.example.com.">
+              <TextInput placeholder="portal.example.com, *.example.com" {...form.getInputProps('allowList')} />
+            </FormField>
+            <FormField label="Blocked hosts" optional hint="Evaluated after the allow list.">
+              <TextInput placeholder="ads.example.com" {...form.getInputProps('blockList')} />
+            </FormField>
+          </FormRow>
+          <FormRow cols={2}>
+            <FormField label="Egress proxy" optional hint="Route this browser through a corporate gateway.">
+              <TextInput placeholder="http://proxy.corp.local:8080" {...form.getInputProps('proxyServer')} />
+            </FormField>
+            <FormField label="Dialogs" hint="An unanswered alert blocks the page forever, so there is no 'leave it open'.">
+              <Select
+                data={[
+                  { value: 'dismiss', label: 'Dismiss (cancel)' },
+                  { value: 'accept', label: 'Accept (OK)' },
+                ]}
+                value={form.values.dialogPolicy}
+                onChange={(value) => form.setFieldValue('dialogPolicy', (value as 'accept' | 'dismiss') ?? 'dismiss')}
+              />
+            </FormField>
+          </FormRow>
+          <FormRow cols={1}>
+            <FormField label="File downloads" hint="Off by default — an automated browser that accepts files is an ingest path nobody scanned.">
+              <Switch
+                label={form.values.acceptDownloads ? 'Allowed' : 'Blocked'}
+                checked={form.values.acceptDownloads}
+                onChange={(event) => form.setFieldValue('acceptDownloads', event.currentTarget.checked)}
+              />
+            </FormField>
+          </FormRow>
+        </FormSection>
+      </FormShell>
 
       <Modal
         opened={deleteTarget !== null}

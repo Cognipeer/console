@@ -56,7 +56,8 @@ import {
 } from '@tabler/icons-react';
 import DetailShell from '@/components/common/ui/DetailShell';
 import StatusBadge from '@/components/common/ui/StatusBadge';
-import BrowserProfilePanel from '@/components/browser/BrowserProfilePanel';
+import BrowserOverview from '@/components/browser/BrowserOverview';
+import FormShell, { FormField, FormRow, FormSection } from '@/components/common/ui/FormShell';
 import type { BrowserSessionView, BrowserView } from '@/lib/services/browser';
 
 interface CreateSessionForm {
@@ -509,43 +510,15 @@ export default function BrowserDetailPage() {
         </Tabs.List>
 
         <Tabs.Panel value="overview" pt="md">
-          <Grid>
-            <Grid.Col span={{ base: 12, md: 6 }}>
-              <Paper withBorder p="lg" radius="lg">
-                <Stack gap="sm">
-                  <Group gap="xs">
-                    <ThemeIcon variant="light" color="indigo" radius="md"><IconWorld size={16} /></ThemeIcon>
-                    <Text fw={600}>Profile</Text>
-                  </Group>
-                  <DetailRow label="Browser ID" value={<Code>{browser.id}</Code>} />
-                  <DetailRow label="Browser key" value={<Code>{browser.key}</Code>} />
-                  <DetailRow label="Status" value={<Badge color={statusColor(browser.status)} variant="light">{browser.status}</Badge>} />
-                  <DetailRow label="Default model" value={browser.defaultModelKey ? <Code>{browser.defaultModelKey}</Code> : <Text c="dimmed">—</Text>} />
-                  <DetailRow label="Artifact bucket" value={browser.artifactBucketKey ? <Code>{browser.artifactBucketKey}</Code> : <Text c="dimmed">—</Text>} />
-                  <DetailRow label="Created" value={<Text size="sm">{formatDate(browser.createdAt)}</Text>} />
-                  <DetailRow label="Updated" value={<Text size="sm">{formatDate(browser.updatedAt)}</Text>} />
-                  <Group gap="xs" mt="xs">
-                    <Button
-                      size="xs"
-                      variant="light"
-                      color="grape"
-                      leftSection={<IconPlug size={14} />}
-                      onClick={mcpHandlers.open}
-                    >
-                      Get MCP URL
-                    </Button>
-                  </Group>
-                </Stack>
-              </Paper>
-            </Grid.Col>
-            <Grid.Col span={{ base: 12, md: 6 }}>
-              {/* The session config used to be a read-only JSON dump here.
-                  These are the settings that decide whether a corporate site
-                  works at all, so they are editable — alongside the signed-in
-                  profile that lets an unattended run skip the login form. */}
-              <BrowserProfilePanel browser={browser} onUpdated={setBrowser} />
-            </Grid.Col>
-          </Grid>
+          {/* Was two cards of label/value rows — true, but not a reason to
+              open the page. This leads with what the browser is doing. */}
+          <BrowserOverview
+            browser={browser}
+            sessions={sessions}
+            onUpdated={setBrowser}
+            onOpenMcp={mcpHandlers.open}
+            onNewSession={createHandlers.open}
+          />
         </Tabs.Panel>
 
         <Tabs.Panel value="playground" pt="md">
@@ -656,64 +629,139 @@ export default function BrowserDetailPage() {
         </Tabs.Panel>
       </Tabs>
 
-      <Modal
-        opened={Boolean(recordTarget)}
+      <FormShell
+        open={Boolean(recordTarget)}
         onClose={() => setRecordTarget(null)}
         title="Record session as a flow"
-        size="md"
+        subtitle="The steps this session ran become an ordered list you can replay without a model."
+        icon={<IconRoute size={18} stroke={1.7} />}
+        primaryAction={{
+          label: 'Record flow',
+          color: 'teal',
+          loading: recording,
+          onClick: handleRecordFlow,
+        }}
+        secondaryAction={{ label: 'Cancel', onClick: () => setRecordTarget(null) }}
       >
-        <Stack>
-          <Text size="sm" c="dimmed">
-            The session&apos;s {recordTarget?.eventCount ?? 0} action(s) become ordered steps.
-            Element references are replaced with durable ones, and anything that was typed
-            becomes a flow input rather than a stored value.
+        <FormSection title="Flow">
+          <FormRow cols={1}>
+            <FormField
+              label="Name"
+              hint={`${recordTarget?.eventCount ?? 0} action(s) will be considered.`}
+            >
+              <TextInput
+                placeholder={`Flow from ${recordTarget?.name || recordTarget?.sessionKey || 'session'}`}
+                value={recordName}
+                onChange={(event) => setRecordName(event.currentTarget.value)}
+              />
+            </FormField>
+          </FormRow>
+          <Text size="xs" c="dimmed">
+            Element references are replaced with durable ones, and anything that was typed becomes
+            a flow input rather than a stored value — so a password entered during the session is
+            not saved into the flow.
           </Text>
-          <TextInput
-            label="Flow name"
-            placeholder={`Flow from ${recordTarget?.name || recordTarget?.sessionKey || 'session'}`}
-            value={recordName}
-            onChange={(event) => setRecordName(event.currentTarget.value)}
-          />
-          <Group justify="flex-end">
-            <Button variant="default" onClick={() => setRecordTarget(null)}>Cancel</Button>
-            <Button color="teal" loading={recording} onClick={handleRecordFlow}>Record flow</Button>
-          </Group>
-        </Stack>
-      </Modal>
+        </FormSection>
+      </FormShell>
 
-      <Modal opened={editOpened} onClose={editHandlers.close} title="Edit Browser" size="md">
-        <form onSubmit={editForm.onSubmit(handleEditSubmit)}>
-          <Stack>
-            <TextInput label="Name" required {...editForm.getInputProps('name')} />
-            <Textarea label="Description" autosize minRows={2} {...editForm.getInputProps('description')} />
-            <TextInput label="Default model key" {...editForm.getInputProps('defaultModelKey')} />
-            <TextInput label="Artifact bucket key" {...editForm.getInputProps('artifactBucketKey')} />
-            <Switch
-              label="Active"
-              checked={editForm.values.status === 'active'}
-              onChange={(e) => editForm.setFieldValue('status', e.currentTarget.checked ? 'active' : 'disabled')}
-            />
-            <Group justify="flex-end">
-              <Button variant="subtle" onClick={editHandlers.close} disabled={saving}>Cancel</Button>
-              <Button type="submit" loading={saving}>Save</Button>
-            </Group>
-          </Stack>
-        </form>
-      </Modal>
+      <FormShell
+        open={editOpened}
+        onClose={editHandlers.close}
+        title={`Edit ${browser?.name ?? 'browser'}`}
+        subtitle="Session defaults and the signed-in profile live on the Overview tab."
+        icon={<IconWorld size={18} stroke={1.7} />}
+        primaryAction={{
+          label: 'Save changes',
+          color: 'teal',
+          loading: saving,
+          onClick: () => editForm.onSubmit(handleEditSubmit)(),
+        }}
+        secondaryAction={{ label: 'Cancel', onClick: editHandlers.close }}
+      >
+        <FormSection number={1} title="Identity">
+          <FormRow cols={1}>
+            <FormField label="Name" required>
+              <TextInput {...editForm.getInputProps('name')} />
+            </FormField>
+          </FormRow>
+          <FormRow cols={1}>
+            <FormField label="Description" optional>
+              <Textarea autosize minRows={2} {...editForm.getInputProps('description')} />
+            </FormField>
+          </FormRow>
+          <FormRow cols={2}>
+            <FormField label="Artifact bucket" optional>
+              <TextInput {...editForm.getInputProps('artifactBucketKey')} />
+            </FormField>
+            <FormField label="Default model key" optional>
+              <TextInput {...editForm.getInputProps('defaultModelKey')} />
+            </FormField>
+          </FormRow>
+        </FormSection>
 
-      <Modal opened={createOpened} onClose={createHandlers.close} title="New session" size="md">
-        <Stack>
-          <TextInput label="Name (optional)" {...sessionForm.getInputProps('name')} />
-          <TextInput label="Initial URL (optional)" placeholder="https://example.com" {...sessionForm.getInputProps('url')} />
-          <TextInput label="Artifact bucket override (optional)" {...sessionForm.getInputProps('artifactBucketKey')} />
-          <TextInput label="Allowed hosts (comma separated)" {...sessionForm.getInputProps('allowList')} />
-          <TextInput label="Blocked hosts (comma separated)" {...sessionForm.getInputProps('blockList')} />
-          <Group justify="flex-end">
-            <Button variant="subtle" onClick={createHandlers.close} disabled={creating}>Cancel</Button>
-            <Button onClick={handleCreateSession} loading={creating}>Create</Button>
-          </Group>
-        </Stack>
-      </Modal>
+        <FormSection number={2} title="Availability">
+          <FormRow cols={1}>
+            <FormField
+              label="Status"
+              hint="A disabled browser refuses new sessions; existing ones keep running until they close."
+            >
+              <Switch
+                label={editForm.values.status === 'active' ? 'Active' : 'Disabled'}
+                checked={editForm.values.status === 'active'}
+                onChange={(e) => editForm.setFieldValue('status', e.currentTarget.checked ? 'active' : 'disabled')}
+              />
+            </FormField>
+          </FormRow>
+        </FormSection>
+      </FormShell>
+
+      <FormShell
+        open={createOpened}
+        onClose={createHandlers.close}
+        title="New browser session"
+        subtitle="Opens a real Chromium context under this browser. It inherits the browser's defaults unless overridden here."
+        icon={<IconPlayerPlay size={18} stroke={1.7} />}
+        primaryAction={{
+          label: 'Start session',
+          color: 'teal',
+          loading: creating,
+          onClick: handleCreateSession,
+        }}
+        secondaryAction={{ label: 'Cancel', onClick: createHandlers.close }}
+      >
+        <FormSection number={1} title="Session">
+          <FormRow cols={2}>
+            <FormField label="Name" optional hint="Shows in the session list; helps you find it later.">
+              <TextInput placeholder="nightly-expense-check" {...sessionForm.getInputProps('name')} />
+            </FormField>
+            <FormField label="Initial URL" optional hint="Navigated to as soon as the session opens.">
+              <TextInput placeholder="https://example.com" {...sessionForm.getInputProps('url')} />
+            </FormField>
+          </FormRow>
+        </FormSection>
+
+        <FormSection
+          number={2}
+          title="Overrides"
+          description="Leave empty to use the browser's own defaults."
+          collapsible
+          defaultOpen={false}
+        >
+          <FormRow cols={1}>
+            <FormField label="Artifact bucket" optional>
+              <TextInput {...sessionForm.getInputProps('artifactBucketKey')} />
+            </FormField>
+          </FormRow>
+          <FormRow cols={2}>
+            <FormField label="Allowed hosts" optional hint="Comma separated. Empty means any host.">
+              <TextInput placeholder="portal.example.com" {...sessionForm.getInputProps('allowList')} />
+            </FormField>
+            <FormField label="Blocked hosts" optional hint="Evaluated after the allow list.">
+              <TextInput placeholder="ads.example.com" {...sessionForm.getInputProps('blockList')} />
+            </FormField>
+          </FormRow>
+        </FormSection>
+      </FormShell>
 
       <SessionPreviewDrawer
         session={drawerSession}

@@ -49,6 +49,18 @@ import {
 
 const logger = createLogger('api:client-browser');
 
+/**
+ * Parse a date-range query parameter.
+ *
+ * Returns `undefined` for anything unparseable rather than `Invalid Date`,
+ * which would otherwise reach the query builder and silently match nothing.
+ */
+function parseDateParam(value: string | undefined): Date | undefined {
+  if (!value) return undefined;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? undefined : parsed;
+}
+
 function sendBrowserError(reply: { code: (statusCode: number) => { send: (body: Record<string, unknown>) => unknown } }, error: unknown, fallback: string) {
   const status = getBrowserErrorStatus(error);
   return reply.code(status).send({ error: getBrowserErrorMessage(error, fallback) });
@@ -155,7 +167,7 @@ export const clientBrowserApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/client/v1/browser/sessions', withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
-      const query = (request.query ?? {}) as { status?: string; agentId?: string; browserId?: string; search?: string; limit?: string };
+      const query = (request.query ?? {}) as { status?: string; agentId?: string; browserId?: string; search?: string; createdFrom?: string; createdTo?: string; limit?: string };
       const sessions = await listBrowserSessions(
         { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
         {
@@ -163,6 +175,8 @@ export const clientBrowserApiPlugin: FastifyPluginAsync = async (app) => {
           agentId: query.agentId,
           browserId: query.browserId,
           search: query.search,
+          createdFrom: parseDateParam(query.createdFrom),
+          createdTo: parseDateParam(query.createdTo),
           limit: query.limit ? Number(query.limit) : undefined,
         },
       );

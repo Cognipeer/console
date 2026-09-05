@@ -1445,6 +1445,10 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
       agentId?: string;
       status?: BrowserSessionStatus | string;
       search?: string;
+      /** Inclusive lower bound on `createdAt`. */
+      createdFrom?: Date;
+      /** Inclusive upper bound on `createdAt`. */
+      createdTo?: Date;
       limit?: number;
     },
   ): Promise<IBrowserSession[]>;

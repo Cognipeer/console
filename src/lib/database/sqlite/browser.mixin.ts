@@ -278,6 +278,8 @@ export function BrowserMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         agentId?: string;
         status?: string;
         search?: string;
+        createdFrom?: Date;
+        createdTo?: Date;
         limit?: number;
       },
     ): Promise<IBrowserSession[]> {
@@ -291,6 +293,17 @@ export function BrowserMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       if (filters?.search) {
         conds.push('(name LIKE @search OR sessionKey LIKE @search)');
         params.search = this.likePattern(filters.search);
+      }
+      // `createdAt` is stored as an ISO-8601 string, which sorts and compares
+      // lexicographically in the same order as the instants it represents —
+      // so a plain string range is correct here, not a coincidence.
+      if (filters?.createdFrom) {
+        conds.push('createdAt >= @createdFrom');
+        params.createdFrom = filters.createdFrom.toISOString();
+      }
+      if (filters?.createdTo) {
+        conds.push('createdAt <= @createdTo');
+        params.createdTo = filters.createdTo.toISOString();
       }
       let sql = `SELECT * FROM ${TABLES.browserSessions} WHERE ${conds.join(' AND ')} ORDER BY createdAt DESC`;
       if (filters?.limit && filters.limit > 0) sql += ` LIMIT ${Math.min(filters.limit, 1000)}`;

@@ -6,9 +6,9 @@ It replaces the previous standalone "Browser Agent" feature. Console-managed age
 
 Operators manage browsers under **Operate → Browser**.
 
-![Browser profiles](/screenshots/browser/01-browser-sessions.png)
+![Browsers list](/screenshots/browser/01-browsers-list.jpg)
 
-The landing page lists browser profiles with their active/disabled and live-session counts. From a new tenant it shows the empty state above — **Create browser** registers the first profile, after which sessions and per-browser MCP endpoints become available.
+The landing page lists browser profiles with their active/disabled state and live-session counts. **Browsers**, **Sessions**, **Flows** and **Playground** are peers in the left nav — each is its own screen, not a tab buried inside another.
 
 ## Concepts
 
@@ -109,6 +109,12 @@ check for an existing flow before working a task out step by step.
 
 Flows live at **Operate → Browser → Flows**.
 
+![A flow's steps and run history](/screenshots/browser/13-flow-detail-run-history.jpg)
+
+Every step shows the durable target it was recorded with — never a `ref` — and
+the run history underneath is a per-step ledger: status, attempt count and
+duration, so a failure names the step that broke rather than just the flow.
+
 ## Signed-in profiles
 
 An unattended run should not push credentials through a login form every
@@ -127,6 +133,13 @@ action, and `GET …/sessions/<key>/profile` returns the same JSON.
 The payload is encrypted at rest and is **never readable back**; the API
 returns only a summary (cookie count, origins, earliest expiry) so the
 dashboard can warn you before a profile goes stale.
+
+![Browser overview: activity, flows, profile and session defaults](/screenshots/browser/05-browser-overview.jpg)
+
+The overview leads with what the browser is DOING — live sessions, a 7-day
+sparkline, recent runs, the flows recorded against it — rather than a static
+list of its own fields. The signed-in profile and default session settings
+sit below it, still one scroll away.
 
 ## Quick start
 
@@ -190,7 +203,23 @@ POST /api/client/v1/browser/:browserKey/mcp/message?sessionId=<id>
 
 ## Sessions in the dashboard
 
-`/dashboard/browser/[browserId]` shows the profile config, recent sessions, and aggregate counters. `/dashboard/browser/[browserId]/sessions` lists every session for the profile with filterable status and a quick deep-link to event history and stored artifacts.
+`/dashboard/browser/[browserId]` shows the profile's activity, its flows, and its signed-in profile and session defaults. `/dashboard/browser/[browserId]/sessions` lists every session for *that* profile.
+
+**Sessions** in the left nav (`/dashboard/browser/sessions`) is the project-wide view: every session across every browser, with filters for browser, status and a **time range** (last hour / 24h / 7 days / 30 days / a custom range) — the question this page answers is "what ran last night and what is still open", which needs a time axis a single-browser list doesn't.
+
+![Every session in the project, with time-range and status filters](/screenshots/browser/09-sessions-global.jpg)
+
+The **Started by** column names where a session came from — an agent, a recorded flow, MCP, or a person driving it by hand — which is the first thing worth knowing when a session misbehaves.
+
+### Playground
+
+**Playground** (`/dashboard/browser/playground`) drives a session interactively: controls on the left, the live page on the right, so acting on an element never means losing sight of it.
+
+![The playground: action composer on the left, live preview on the right](/screenshots/browser/16-playground-live-preview.jpg)
+
+The right pane's **Elements** tab lists the page's interactive elements — clicking one fills the action composer with its durable target (the same `role` + `name` a recorded flow step stores), so discovering a step and recording it use the same gesture. **Console** surfaces the page's own console messages and failed requests, for when an action succeeded but the page didn't do what you expected.
+
+Once a session has run a few steps, **Record as flow** freezes them into a flow — this is the fastest path from "I drove it once by hand" to "it runs every night".
 
 ## Distributed execution
 

@@ -278,7 +278,15 @@ export async function createBrowserSession(
 
 export async function listBrowserSessions(
   ctx: SessionContext,
-  filters?: { status?: string; agentId?: string; browserId?: string; search?: string; limit?: number },
+  filters?: {
+    status?: string;
+    agentId?: string;
+    browserId?: string;
+    search?: string;
+    createdFrom?: Date;
+    createdTo?: Date;
+    limit?: number;
+  },
 ): Promise<BrowserSessionView[]> {
   const db = await withTenantDb(ctx.tenantDbName);
   const records = await db.listBrowserSessions(ctx.tenantId, {

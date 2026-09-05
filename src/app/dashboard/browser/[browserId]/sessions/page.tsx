@@ -37,6 +37,7 @@ import {
   IconX,
 } from '@tabler/icons-react';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
+import FormShell, { FormField, FormRow, FormSection } from '@/components/common/ui/FormShell';
 import type { BrowserSessionEventView, BrowserSessionView } from '@/lib/services/browser';
 
 interface CreateForm {
@@ -248,35 +249,57 @@ export default function BrowserSessionsPage() {
       </Paper>
 
       {/* Create modal */}
-      <Modal opened={createOpened} onClose={createHandlers.close} title="New browser session" size="lg">
-        <Stack gap="sm">
-          <TextInput label="Name" placeholder="My session" {...form.getInputProps('name')} />
-          <TextInput
-            label="Initial URL (optional)"
-            placeholder="https://example.com"
-            {...form.getInputProps('url')}
-          />
-          <TextInput
-            label="Artifact bucket key (optional)"
-            description="Existing files bucket where screenshots and PDFs are persisted. Defaults to the configured fallback bucket."
-            {...form.getInputProps('artifactBucketKey')}
-          />
-          <TextInput
-            label="Allow-list (comma-separated)"
-            placeholder="*.example.com, github.com"
-            {...form.getInputProps('allowList')}
-          />
-          <TextInput
-            label="Block-list (comma-separated)"
-            placeholder="*.tracker.com"
-            {...form.getInputProps('blockList')}
-          />
-          <Group justify="flex-end">
-            <Button variant="default" onClick={createHandlers.close}>Cancel</Button>
-            <Button onClick={handleCreate} loading={creating}>Create</Button>
-          </Group>
-        </Stack>
-      </Modal>
+      <FormShell
+        open={createOpened}
+        onClose={createHandlers.close}
+        title="New browser session"
+        subtitle="Opens a real Chromium context under this browser."
+        icon={<IconPlayerPlay size={18} stroke={1.7} />}
+        primaryAction={{
+          label: 'Start session',
+          color: 'teal',
+          loading: creating,
+          onClick: handleCreate,
+        }}
+        secondaryAction={{ label: 'Cancel', onClick: createHandlers.close }}
+      >
+        <FormSection number={1} title="Session">
+          <FormRow cols={2}>
+            <FormField label="Name" optional hint="Shows in the session list; helps you find it later.">
+              <TextInput placeholder="nightly-expense-check" {...form.getInputProps('name')} />
+            </FormField>
+            <FormField label="Initial URL" optional hint="Navigated to as soon as the session opens.">
+              <TextInput placeholder="https://example.com" {...form.getInputProps('url')} />
+            </FormField>
+          </FormRow>
+        </FormSection>
+
+        <FormSection
+          number={2}
+          title="Overrides"
+          description="Leave empty to use the browser's own defaults."
+          collapsible
+          defaultOpen={false}
+        >
+          <FormRow cols={1}>
+            <FormField
+              label="Artifact bucket"
+              optional
+              hint="Existing files bucket for screenshots and PDFs. Defaults to the configured fallback."
+            >
+              <TextInput {...form.getInputProps('artifactBucketKey')} />
+            </FormField>
+          </FormRow>
+          <FormRow cols={2}>
+            <FormField label="Allowed hosts" optional hint="Comma separated. Empty means any host.">
+              <TextInput placeholder="*.example.com, github.com" {...form.getInputProps('allowList')} />
+            </FormField>
+            <FormField label="Blocked hosts" optional hint="Evaluated after the allow list.">
+              <TextInput placeholder="*.tracker.com" {...form.getInputProps('blockList')} />
+            </FormField>
+          </FormRow>
+        </FormSection>
+      </FormShell>
 
       {/* Live viewer drawer */}
       <SessionDrawer

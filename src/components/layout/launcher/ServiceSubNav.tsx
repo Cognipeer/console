@@ -71,6 +71,44 @@ export interface SubNavItem {
 const MODEL_TYPE_KEYS = ['llm', 'embedding', 'rerank', 'stt', 'tts', 'ocr', 'image', 'moderation'];
 
 export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
+  browser: [
+    {
+      id: 'browsers',
+      label: 'Browsers',
+      href: '/dashboard/browser',
+      icon: IconWorld,
+      // A browser's own detail page belongs to this entry, but the sibling
+      // sections below live under the same path prefix — so match the list
+      // route exactly, then anything that is not one of them.
+      matcher: (p) =>
+        p === '/dashboard/browser' ||
+        (p.startsWith('/dashboard/browser/') &&
+          !p.startsWith('/dashboard/browser/sessions') &&
+          !p.startsWith('/dashboard/browser/flows') &&
+          !p.startsWith('/dashboard/browser/playground')),
+    },
+    {
+      id: 'sessions',
+      label: 'Sessions',
+      href: '/dashboard/browser/sessions',
+      icon: IconHistory,
+      matcher: (p) => p.startsWith('/dashboard/browser/sessions'),
+    },
+    {
+      id: 'flows',
+      label: 'Flows',
+      href: '/dashboard/browser/flows',
+      icon: IconArrowsSplit,
+      matcher: (p) => p.startsWith('/dashboard/browser/flows'),
+    },
+    {
+      id: 'playground',
+      label: 'Playground',
+      href: '/dashboard/browser/playground',
+      icon: IconPlayerPlay,
+      matcher: (p) => p.startsWith('/dashboard/browser/playground'),
+    },
+  ],
   sandbox: [
     {
       id: 'overview',
