@@ -341,6 +341,89 @@ export async function createVectorProvider(
   return attachDriverCapabilities(provider);
 }
 
+/**
+ * Thrown by `attachExistingIndex` when the provider can't be listed (missing
+ * permission, or the driver doesn't support discovery) and the caller didn't
+ * supply enough to attach blind. The API layer maps this to a distinguishable
+ * response so the UI can prompt for the missing fields instead of failing flat.
+ */
+export class VectorAttachRequiresDetailsError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'VectorAttachRequiresDetailsError';
+  }
+}
+
+/** Thrown when the provider was listed successfully but no index with this name/externalId exists there. */
+export class VectorAttachNotFoundError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'VectorAttachNotFoundError';
+  }
+}
+
+async function attachExistingIndex(
+  runtime: VectorProviderRuntime,
+  providerKey: string,
+  request: CreateVectorIndexRequest,
+): Promise<VectorIndexHandle> {
+  const wantedExternalId = request.externalId ?? request.name;
+  let remoteIndexes: VectorIndexHandle[] | null = null;
+
+  try {
+    remoteIndexes = await runtime.listIndexes();
+  } catch (error) {
+    logger.warn('Vector attach: listIndexes failed, falling back to manual details', {
+      providerKey,
+      name: request.name,
+      error: error instanceof Error ? error.message : error,
+    });
+  }
+
+  if (remoteIndexes) {
+    const match = remoteIndexes.find(
+      (item) => item.name === request.name || item.externalId === wantedExternalId,
+    );
+
+    if (!match) {
+      throw new VectorAttachNotFoundError(
+        `No index named "${request.name}" was found on this provider. Create it there first, or enable "Create index in provider".`,
+      );
+    }
+
+    if (request.dimension !== undefined && request.dimension !== match.dimension) {
+      throw new Error(
+        `Attach failed: the provider reports dimension ${match.dimension}, but ${request.dimension} was supplied.`,
+      );
+    }
+    if (request.metric !== undefined && request.metric !== match.metric) {
+      throw new Error(
+        `Attach failed: the provider reports metric "${match.metric}", but "${request.metric}" was supplied.`,
+      );
+    }
+
+    return match;
+  }
+
+  // Couldn't list the provider at all (permission or support gap) — we cannot
+  // safely guess externalId ourselves, since adapters derive it differently
+  // (e.g. Postgres/Mongo compose it from provider settings, others echo the
+  // name back). The caller must supply the full shape.
+  if (request.dimension === undefined || !request.metric || !request.externalId) {
+    throw new VectorAttachRequiresDetailsError(
+      'Could not read this index from the provider (insufficient permission, or listing is unsupported). Provide the external ID, dimension and metric manually to attach it.',
+    );
+  }
+
+  return {
+    externalId: request.externalId,
+    name: request.name,
+    dimension: request.dimension,
+    metric: request.metric,
+    metadata: request.metadata,
+  };
+}
+
 export async function createVectorIndex(
   tenantDbName: string,
   tenantId: string,
@@ -362,15 +445,25 @@ export async function createVectorIndex(
     request.key ?? request.name,
   );
 
-  const handle = await withResilience(
-    () => runtime.createIndex({
-      name: request.name,
-      dimension: request.dimension,
-      metric: request.metric,
-      metadata: request.metadata,
-    }),
-    { key: `vector-create:${request.providerKey}` },
-  );
+  const createInProvider = request.createInProvider !== false;
+
+  let handle: VectorIndexHandle;
+  if (createInProvider) {
+    if (request.dimension === undefined) {
+      throw new Error('dimension is required to create a new index in the provider.');
+    }
+    handle = await withResilience(
+      () => runtime.createIndex({
+        name: request.name,
+        dimension: request.dimension as number,
+        metric: request.metric,
+        metadata: request.metadata,
+      }),
+      { key: `vector-create:${request.providerKey}` },
+    );
+  } else {
+    handle = await attachExistingIndex(runtime, request.providerKey, request);
+  }
 
   const metadata = composeMetadataForCreate(handle.metadata, request.metadata);
 

@@ -26,6 +26,8 @@ import {
   listVectorMigrationLogs,
   countVectorMigrationLogs,
   getVectorIndexQueryStats,
+  VectorAttachRequiresDetailsError,
+  VectorAttachNotFoundError,
 } from '@/lib/services/vector';
 import type { VectorMetric } from '@/lib/services/vector/types';
 import type { VectorMigrationStatus } from '@/lib/database/provider/types.base';
@@ -331,12 +333,19 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'providerKey and name are required' });
       }
 
-      const dimensionValue =
-        typeof body.dimension === 'number'
+      const createInProvider = body.createInProvider !== false;
+
+      let dimensionValue: number | undefined;
+      if (body.dimension !== undefined && body.dimension !== null && body.dimension !== '') {
+        dimensionValue = typeof body.dimension === 'number'
           ? body.dimension
           : Number.parseInt(String(body.dimension), 10);
+        if (!dimensionValue || Number.isNaN(dimensionValue) || dimensionValue <= 0) {
+          return reply.code(400).send({ error: 'dimension must be a positive number' });
+        }
+      }
 
-      if (!dimensionValue || Number.isNaN(dimensionValue) || dimensionValue <= 0) {
+      if (createInProvider && dimensionValue === undefined) {
         return reply.code(400).send({ error: 'dimension must be a positive number' });
       }
 
@@ -389,7 +398,9 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
         projectId,
         {
           createdBy: session.userId,
+          createInProvider,
           dimension: dimensionValue,
+          externalId: typeof body.externalId === 'string' && body.externalId ? body.externalId : undefined,
           metadata: body.metadata as Record<string, unknown> | undefined,
           metric: body.metric as VectorMetric | undefined,
           name: body.name as string,
@@ -399,6 +410,12 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ index });
     } catch (error) {
+      if (error instanceof VectorAttachRequiresDetailsError) {
+        return reply.code(422).send({ error: error.message, code: 'VECTOR_ATTACH_REQUIRES_DETAILS' });
+      }
+      if (error instanceof VectorAttachNotFoundError) {
+        return reply.code(404).send({ error: error.message, code: 'VECTOR_ATTACH_NOT_FOUND' });
+      }
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Internal server error',

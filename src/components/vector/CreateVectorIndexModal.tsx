@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { NumberInput, Select, TextInput, Textarea } from '@mantine/core';
+import { NumberInput, Select, Switch, TextInput, Textarea } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { IconDatabase, IconPlus } from '@tabler/icons-react';
@@ -45,6 +45,8 @@ interface FormValues {
 	metric: string;
 	description: string;
 	providerKey: string;
+	createInProvider: boolean;
+	externalId: string;
 }
 
 export default function CreateVectorIndexModal({
@@ -55,6 +57,7 @@ export default function CreateVectorIndexModal({
 }: CreateVectorIndexModalProps) {
 	const [availableProviders, setAvailableProviders] = useState<VectorProviderView[]>(providers);
 	const [submitting, setSubmitting] = useState(false);
+	const [needsManualDetails, setNeedsManualDetails] = useState(false);
 	const wasOpenedRef = useRef(false);
 
 	const form = useForm<FormValues>({
@@ -64,11 +67,15 @@ export default function CreateVectorIndexModal({
 			metric: 'cosine',
 			description: '',
 			providerKey: providers[0]?.key ?? '',
+			createInProvider: true,
+			externalId: '',
 		},
 		validate: {
 			name: (value) => (!value ? 'Name is required' : null),
-			dimension: (value) =>
-				!value || Number(value) <= 0 ? 'Dimension must be a positive number' : null,
+			dimension: (value, values) => {
+				if (!values.createInProvider) return null;
+				return !value || Number(value) <= 0 ? 'Dimension must be a positive number' : null;
+			},
 			providerKey: (value) => (!value ? 'Select a provider' : null),
 		},
 	});
@@ -95,6 +102,7 @@ export default function CreateVectorIndexModal({
 				reset();
 				setAvailableProviders(providers);
 				setFieldValue('providerKey', providers[0]?.key ?? '');
+				setNeedsManualDetails(false);
 				wasOpenedRef.current = false;
 			}
 		} else {
@@ -139,12 +147,20 @@ export default function CreateVectorIndexModal({
 
 	const validProvider = Boolean(formValues.providerKey);
 	const validIdentity = Boolean(formValues.name);
-	const validConfig = Boolean(formValues.dimension && Number(formValues.dimension) > 0 && formValues.metric);
+	const validConfig = formValues.createInProvider
+		? Boolean(formValues.dimension && Number(formValues.dimension) > 0 && formValues.metric)
+		: !needsManualDetails || Boolean(
+			formValues.dimension && Number(formValues.dimension) > 0 && formValues.metric && formValues.externalId,
+		);
 
 	const checklist = [
 		{ id: 1, label: 'Provider selected', done: validProvider },
 		{ id: 2, label: 'Name set', done: validIdentity },
-		{ id: 3, label: 'Dimension & metric configured', done: validConfig },
+		{
+			id: 3,
+			label: formValues.createInProvider ? 'Dimension & metric configured' : 'Attach details resolved',
+			done: validConfig,
+		},
 	];
 
 	const submit = async () => {
@@ -167,6 +183,15 @@ export default function CreateVectorIndexModal({
 			return;
 		}
 
+		// On the first attach attempt, send only the name and let the server try
+		// to read dimension/metric/externalId from the provider — the form's
+		// dimension/metric fields default to values the user never chose, so
+		// forwarding them here would produce false "mismatch" rejections against
+		// whatever the provider actually reports. Only once the server says it
+		// couldn't read the index (needsManualDetails) do we forward what the
+		// user filled in.
+		const sendManualDetails = values.createInProvider || needsManualDetails;
+
 		setSubmitting(true);
 		try {
 			const response = await fetch('/api/vector/indexes', {
@@ -175,26 +200,39 @@ export default function CreateVectorIndexModal({
 				body: JSON.stringify({
 					providerKey: values.providerKey,
 					name: values.name,
-					dimension: Number(values.dimension),
-					metric: values.metric,
+					createInProvider: values.createInProvider,
+					dimension: sendManualDetails && values.dimension !== '' ? Number(values.dimension) : undefined,
+					metric: sendManualDetails ? (values.metric || undefined) : undefined,
+					externalId: needsManualDetails ? (values.externalId || undefined) : undefined,
 					metadata: values.description ? { description: values.description } : undefined,
 				}),
 			});
 
 			if (!response.ok) {
-				const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-				throw new Error(error.error ?? 'Failed to create index');
+				const errorBody = await response.json().catch(() => ({ error: 'Unknown error' }));
+				if (errorBody.code === 'VECTOR_ATTACH_REQUIRES_DETAILS') {
+					setNeedsManualDetails(true);
+					notifications.show({
+						color: 'yellow',
+						title: 'Provider details needed',
+						message: errorBody.error ?? 'Console could not read this index from the provider. Fill in the external ID, dimension and metric below, then try again.',
+						autoClose: 8000,
+					});
+					return;
+				}
+				throw new Error(errorBody.error ?? 'Failed to create index');
 			}
 
 			const data = await response.json();
 			notifications.show({
 				color: 'green',
-				title: 'Vector index created',
+				title: values.createInProvider ? 'Vector index created' : 'Vector index attached',
 				message: `${values.name} is ready to use.`,
 			});
 			onCreated({ index: data.index, provider });
 			onClose();
 			reset();
+			setNeedsManualDetails(false);
 		} catch (error: unknown) {
 			console.error(error);
 			notifications.show({
@@ -355,18 +393,50 @@ export default function CreateVectorIndexModal({
 			<FormSection
 				number={3}
 				title="Configuration"
-				description="Vector dimensionality and similarity metric used by this index."
+				description={
+					formValues.createInProvider
+						? 'Vector dimensionality and similarity metric used by this index.'
+						: 'Console will try to read these from the provider. Fill them in only if it can\'t.'
+				}
 				done={validConfig}
 			>
+				<FormRow cols={1}>
+					<FormField
+						label="Create index in provider"
+						hint={
+							formValues.createInProvider
+								? 'Console calls the provider to create a brand-new index. Turn this off to attach one that already exists there.'
+								: 'Console will attach an existing index instead of creating one — nothing is created on the provider.'
+						}
+					>
+						<Switch
+							checked={formValues.createInProvider}
+							onChange={(event) => {
+								setFieldValue('createInProvider', event.currentTarget.checked);
+								setNeedsManualDetails(false);
+							}}
+							label={formValues.createInProvider ? 'Create new index' : 'Attach existing index'}
+						/>
+					</FormField>
+				</FormRow>
 				<FormRow cols={2}>
-					<FormField label="Dimension" required hint="Must match the embedding model output size.">
+					<FormField
+						label="Dimension"
+						required={formValues.createInProvider || needsManualDetails}
+						optional={!formValues.createInProvider && !needsManualDetails}
+						hint="Must match the embedding model output size. Leave blank to auto-detect from the provider."
+					>
 						<NumberInput
 							placeholder="1536"
 							min={1}
 							{...form.getInputProps('dimension')}
 						/>
 					</FormField>
-					<FormField label="Metric" required>
+					<FormField
+						label="Metric"
+						required={formValues.createInProvider || needsManualDetails}
+						optional={!formValues.createInProvider && !needsManualDetails}
+					>
 						<ChipPicker<MetricValue>
 							options={metricOptions.map((opt) => ({ value: opt.value, label: opt.label }))}
 							value={formValues.metric}
@@ -374,6 +444,21 @@ export default function CreateVectorIndexModal({
 						/>
 					</FormField>
 				</FormRow>
+				{!formValues.createInProvider ? (
+					<FormRow cols={1}>
+						<FormField
+							label="External ID on provider"
+							optional={!needsManualDetails}
+							required={needsManualDetails}
+							hint="Only needed if Console can't list this provider's indexes automatically. Leave blank to try the index name."
+						>
+							<TextInput
+								placeholder={formValues.name || 'index-name-on-provider'}
+								{...form.getInputProps('externalId')}
+							/>
+						</FormField>
+					</FormRow>
+				) : null}
 			</FormSection>
 		</FormShell>
 	);
