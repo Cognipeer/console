@@ -94,11 +94,20 @@ export function safeReadJsonBody<T = Record<string, any>>(request: FastifyReques
 }
 
 export function getClientIp(request: FastifyRequest): string {
+  // `request.ip` is Fastify's own resolution, computed with the server's
+  // configured `trustProxy` boundary (config.network.trustedProxies) applied
+  // -- when that is set to the deployment's real proxy/CIDR (or left at the
+  // legacy default of trusting every hop), this is already the right
+  // answer. Reading X-Forwarded-For directly here, as this function used
+  // to, bypassed that trust boundary entirely: any caller who can reach
+  // this process at all could set the header to whatever they wanted,
+  // regardless of how trustProxy was configured.
+  if (request.ip) return request.ip;
+
   const forwarded = request.headers['x-forwarded-for'];
   if (typeof forwarded === 'string' && forwarded.trim().length > 0) {
     return forwarded.split(',')[0].trim();
   }
-
   if (Array.isArray(forwarded) && forwarded[0]) {
     return forwarded[0].split(',')[0].trim();
   }
@@ -108,7 +117,7 @@ export function getClientIp(request: FastifyRequest): string {
     return realIp.trim();
   }
 
-  return request.ip || 'unknown';
+  return 'unknown';
 }
 
 export function getSessionContext(

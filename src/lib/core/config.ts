@@ -171,6 +171,22 @@ export interface AppConfig {
     endpointEnabled: boolean;
   };
 
+  network: {
+    /**
+     * Which immediate peers Fastify's `trustProxy` (and everything that
+     * reads `request.ip`/X-Forwarded-For through it, e.g. the auth rate
+     * limiter and audit IP logging) trusts to have set X-Forwarded-For
+     * honestly. Empty (default) preserves the existing `trustProxy: true`
+     * behaviour -- every hop is trusted, including one the caller
+     * themselves controls if a request can reach this process directly.
+     * Set to your real reverse proxy/load balancer's IP(s) or CIDR(s) (or a
+     * small integer hop count, e.g. "1") to close that gap; anything not
+     * matching this list falls back to the raw socket address instead of a
+     * spoofable header.
+     */
+    trustedProxies: string[];
+  };
+
   limits: {
     bodySize: string;
     tracingMaxBodySizeMb: number;
@@ -448,6 +464,10 @@ function buildConfig(source: ConfigSource): AppConfig {
 
     health: {
       endpointEnabled: bool(source, 'HEALTH_ENDPOINT_ENABLED', true),
+    },
+
+    network: {
+      trustedProxies: list(source, 'TRUSTED_PROXIES', []),
     },
 
     limits: {
