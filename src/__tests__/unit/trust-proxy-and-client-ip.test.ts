@@ -50,22 +50,27 @@ describe('getClientIp', () => {
     expect(getClientIp(request)).toBe('203.0.113.9');
   });
 
-  it('falls back to X-Forwarded-For only when request.ip is unavailable', () => {
+  it('never reads X-Forwarded-For itself, even with no request.ip to fall back on', () => {
+    // The old implementation read the header directly here, which bypassed
+    // trustProxy entirely -- any caller able to reach the process could name
+    // their own IP for the auth rate limiter and the audit log. Fastify
+    // already folds a TRUSTED proxy's XFF into request.ip; anything else is
+    // the caller talking about themselves.
     const request = makeRequest({
       ip: '',
       headers: { 'x-forwarded-for': '203.0.113.9, 10.0.0.1' },
     });
 
-    expect(getClientIp(request)).toBe('203.0.113.9');
+    expect(getClientIp(request)).toBe('unknown');
   });
 
-  it('falls back to X-Real-IP after X-Forwarded-For when request.ip is unavailable', () => {
+  it('never reads X-Real-IP itself either', () => {
     const request = makeRequest({
       ip: '',
       headers: { 'x-real-ip': '203.0.113.9' },
     });
 
-    expect(getClientIp(request)).toBe('203.0.113.9');
+    expect(getClientIp(request)).toBe('unknown');
   });
 
   it('returns "unknown" rather than throwing when nothing is available', () => {
