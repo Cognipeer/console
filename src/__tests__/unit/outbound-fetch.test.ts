@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { lookup } from 'node:dns/promises';
 import {
   getConfigSource,
   setConfigSource,
@@ -19,6 +20,19 @@ import {
   OutboundNetworkError,
   safeFetch,
 } from '@/lib/security/outboundFetch';
+
+/** Node's global RequestInit type doesn't declare `dispatcher` (undici's addition). */
+type FetchInit = RequestInit & { dispatcher?: unknown };
+
+/** `dns/promises`' overloaded `lookup` type infers the single-address
+ * overload against `vi.mocked(lookup)`; the guard always calls it with
+ * `{ all: true }`, so tests stub the array-returning shape directly. */
+function mockLookupOnce(...results: Array<{ address: string; family: 4 | 6 }[]>): void {
+  const mocked = lookup as unknown as { mockImplementationOnce: (fn: () => Promise<unknown>) => unknown };
+  for (const result of results) {
+    mocked.mockImplementationOnce(async () => result);
+  }
+}
 
 const original = getConfigSource();
 
@@ -136,6 +150,31 @@ describe('safeFetch', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('pins the connection to the resolved address instead of leaving fetch to re-resolve DNS itself', async () => {
+    const fetchMock = vi.fn(() => new Response('ok', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    await safeFetch('https://public.example.com/api');
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect((fetchMock.mock.calls[0] as unknown as [URL, FetchInit?])[1]?.dispatcher).toBeDefined();
+  });
+
+  it('does not attempt to pin a literal-IP URL (nothing to pin)', async () => {
+    const fetchMock = vi.fn(() => new Response('ok', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    await safeFetch('https://93.184.216.34/api');
+
+    expect((fetchMock.mock.calls[0] as unknown as [URL, FetchInit?])[1]?.dispatcher).toBeUndefined();
+  });
+
+  it('does not pin when the private-network guard itself was bypassed', async () => {
+    const fetchMock = vi.fn(() => new Response('ok', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    await safeFetch('https://internal.corp.example/api', undefined, { allowPrivate: true });
+
+    expect((fetchMock.mock.calls[0] as unknown as [URL, FetchInit?])[1]?.dispatcher).toBeUndefined();
+  });
+
   it('re-validates redirect hops and blocks redirects into private space', async () => {
     const fetchMock = vi.fn(async () => new Response(null, {
       status: 302,
@@ -178,5 +217,44 @@ describe('safeFetch', () => {
     vi.stubGlobal('fetch', fetchMock);
     await expect(safeFetch('https://public.example.com/slow', undefined, { timeoutMs: 20 }))
       .rejects.toThrow();
+  });
+});
+
+// F-11 (finance-institution assessment, 2026-09-05): assertPublicUrl resolved
+// DNS once to decide a hostname was public, then handed the HOSTNAME (not the
+// resolved address) to fetch, which resolves it AGAIN at connect time. An
+// attacker controlling DNS for the target can answer publicly for the check
+// and privately for the connection -- classic TOCTOU / DNS rebinding. Every
+// case below uses its own hostname so the 30s privacy cache from earlier
+// tests in this file can't hide a lookup call these tests need to count.
+describe('DNS rebinding: the address fetch connects to must be the one just checked', () => {
+  it('rejects a target whose SECOND (connection-time) resolution differs and is private, even though the first (policy) resolution was public', async () => {
+    mockLookupOnce(
+      [{ address: '93.184.216.34', family: 4 }], // policy check
+      [{ address: '127.0.0.1', family: 4 }], // rebind at connect time
+    );
+
+    const fetchMock = vi.fn(() => new Response('ok', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(safeFetch('https://rebind-attack.example.com/api'))
+      .rejects.toThrow(OutboundNetworkError);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('still succeeds when the second resolution legitimately differs but is also public', async () => {
+    mockLookupOnce(
+      [{ address: '93.184.216.34', family: 4 }],
+      [{ address: '203.0.113.9', family: 4 }], // still public, just different
+    );
+
+    const fetchMock = vi.fn(() => new Response('ok', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const res = await safeFetch('https://rebind-legit.example.com/api');
+
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect((fetchMock.mock.calls[0] as unknown as [URL, FetchInit?])[1]?.dispatcher).toBeDefined();
   });
 });

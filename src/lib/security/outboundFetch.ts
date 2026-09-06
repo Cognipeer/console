@@ -23,13 +23,19 @@
 
 import { isIP } from 'node:net';
 import { lookup } from 'node:dns/promises';
+import { Agent, buildConnector, type Dispatcher } from 'undici';
 
 import { getConfig } from '@/lib/core/config';
 
 const HOST_CACHE_TTL_MS = 30_000;
 const MAX_REDIRECTS = 5;
 
-const hostPrivacyCache = new Map<string, { privateNetwork: boolean; expiresAt: number }>();
+interface ResolvedAddress {
+  address: string;
+  family: 4 | 6;
+}
+
+const hostPrivacyCache = new Map<string, { privateNetwork: boolean; addresses: ResolvedAddress[]; expiresAt: number }>();
 
 export class OutboundNetworkError extends Error {
   constructor(message: string) {
@@ -156,25 +162,84 @@ export function isAllowlistedHost(host: string, allowedHosts: string[]): boolean
   });
 }
 
-async function resolvesToPrivateNetwork(host: string): Promise<boolean> {
+/**
+ * Resolves a hostname and reports both the private/public verdict and the
+ * addresses that verdict was based on. Cached per the guard's existing TTL —
+ * the addresses are cached alongside the verdict, not re-resolved
+ * separately, but `assertPublicUrl` always does its own connection-time
+ * `dns.lookup()` for the pin (see `resolvePinnedAddress`) rather than trust
+ * this cache for that: a stale-but-still-public cache entry is fine for the
+ * policy question "is this host allowed at all", but pinning specifically
+ * exists to close the gap between "resolved" and "connected", which a cache
+ * up to 30s old would reopen.
+ */
+async function resolvesToPrivateNetwork(host: string): Promise<{ privateNetwork: boolean; addresses: ResolvedAddress[] }> {
   const bare = host.replace(/^\[|\]$/g, '');
-  if (isLocalHostname(bare)) return true;
-  if (isIP(bare)) return isPrivateIpAddress(bare);
+  if (isLocalHostname(bare)) return { privateNetwork: true, addresses: [] };
+  if (isIP(bare)) {
+    const family = isIP(bare) as 4 | 6;
+    return { privateNetwork: isPrivateIpAddress(bare), addresses: [{ address: bare, family }] };
+  }
 
   const cached = hostPrivacyCache.get(bare);
-  if (cached && cached.expiresAt > Date.now()) return cached.privateNetwork;
+  if (cached && cached.expiresAt > Date.now()) {
+    return { privateNetwork: cached.privateNetwork, addresses: cached.addresses };
+  }
 
   let privateNetwork = true;
+  let addresses: ResolvedAddress[] = [];
   try {
     const records = await lookup(bare, { all: true, verbatim: true });
+    addresses = records.map((r) => ({ address: r.address, family: r.family as 4 | 6 }));
     privateNetwork = records.length === 0
       || records.some((record) => isPrivateIpAddress(record.address));
   } catch {
     privateNetwork = true;
   }
 
-  hostPrivacyCache.set(bare, { privateNetwork, expiresAt: Date.now() + HOST_CACHE_TTL_MS });
-  return privateNetwork;
+  hostPrivacyCache.set(bare, { privateNetwork, addresses, expiresAt: Date.now() + HOST_CACHE_TTL_MS });
+  return { privateNetwork, addresses };
+}
+
+/**
+ * Connection-time resolution used to pin the socket `fetch` opens to the
+ * exact address the SSRF guard just validated. Deliberately NOT the cached
+ * lookup above: this runs immediately before the connection it protects, so
+ * an attacker controlling DNS cannot answer differently between "checked"
+ * and "connected" — there is no gap left to rebind into. Returns null for a
+ * hostname that fails to resolve here (the caller falls back to plain
+ * `fetch`, which will fail with its own DNS error) or resolves to a private
+ * address on this fresh lookup (caller re-runs the guard, which will reject
+ * it the normal way).
+ */
+async function resolvePinnedAddress(host: string): Promise<ResolvedAddress | null> {
+  const bare = host.replace(/^\[|\]$/g, '');
+  if (isIP(bare)) return null; // nothing to pin -- the destination already is the address
+  try {
+    const records = await lookup(bare, { all: true, verbatim: true });
+    const first = records[0];
+    if (!first) return null;
+    return { address: first.address, family: first.family as 4 | 6 };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * An undici dispatcher whose connector resolves ONLY to `pinned`, regardless
+ * of what DNS says for the hostname in the request URL. Built fresh per
+ * fetch call (never shared/cached) so it can never be reused for an
+ * unrelated request.
+ */
+function pinnedDispatcher(pinned: ResolvedAddress): Dispatcher {
+  return new Agent({
+    connect: buildConnector({
+      family: pinned.family,
+      lookup: (_hostname, _options, callback) => {
+        callback(null, [{ address: pinned.address, family: pinned.family }]);
+      },
+    }),
+  });
 }
 
 export interface OutboundGuardOptions {
@@ -199,6 +264,19 @@ export interface OutboundGuardOptions {
  * DNS-resolves hostnames, so names pointing at private IPs are also rejected.
  */
 export async function assertPublicUrl(rawUrl: string, options?: OutboundGuardOptions): Promise<URL> {
+  return (await checkPublicUrl(rawUrl, options)).url;
+}
+
+/**
+ * Same validation as `assertPublicUrl`, plus the address that validation
+ * decided was public — used by `safeFetch` to pin the actual connection to
+ * it. Kept separate from `assertPublicUrl` so callers that only need the
+ * policy check (e.g. the tool-access guardrail) are unaffected.
+ */
+async function checkPublicUrl(
+  rawUrl: string,
+  options?: OutboundGuardOptions,
+): Promise<{ url: URL; pinned: ResolvedAddress | null }> {
   let url: URL;
   try {
     url = new URL(rawUrl);
@@ -212,16 +290,27 @@ export async function assertPublicUrl(rawUrl: string, options?: OutboundGuardOpt
 
   if (!options?.forceBlock) {
     const { blockPrivateNetwork, allowedHosts } = getConfig().outboundHttp;
-    if (!blockPrivateNetwork || options?.allowPrivate) return url;
-    if (isAllowlistedHost(url.hostname, allowedHosts)) return url;
+    if (!blockPrivateNetwork || options?.allowPrivate) return { url, pinned: null };
+    if (isAllowlistedHost(url.hostname, allowedHosts)) return { url, pinned: null };
   }
 
-  if (await resolvesToPrivateNetwork(url.hostname)) {
+  const { privateNetwork } = await resolvesToPrivateNetwork(url.hostname);
+  if (privateNetwork) {
     throw new OutboundNetworkError(
       `Refusing outbound request to private/loopback host: ${url.hostname}`,
     );
   }
-  return url;
+
+  // Fresh, connection-time resolution for the pin (see resolvePinnedAddress)
+  // -- re-checked for privacy in case DNS answers differently on this second
+  // lookup than it did a moment ago on the cached/policy one above.
+  const pinned = await resolvePinnedAddress(url.hostname);
+  if (pinned && isPrivateIpAddress(pinned.address)) {
+    throw new OutboundNetworkError(
+      `Refusing outbound request to private/loopback host: ${url.hostname}`,
+    );
+  }
+  return { url, pinned };
 }
 
 export interface SafeFetchOptions extends OutboundGuardOptions {
@@ -277,12 +366,20 @@ export async function safeFetch(
   try {
     let currentUrl = rawUrl;
     for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
-      const url = await assertPublicUrl(currentUrl, options);
+      const { url, pinned } = await checkPublicUrl(currentUrl, options);
       const response = await fetch(url, {
         ...init,
         signal: controller.signal,
         redirect: 'manual',
-      });
+        // Pins the socket to the exact address just validated instead of
+        // letting undici re-resolve DNS itself at connect time -- otherwise
+        // an attacker controlling DNS for this host can answer differently
+        // between the check above and the connection below (TOCTOU / DNS
+        // rebinding). Absent (plain fetch) when there was nothing to pin:
+        // a literal-IP URL, or the private-network guard was bypassed
+        // (allowlisted host / allowPrivate / blocking disabled).
+        ...(pinned ? { dispatcher: pinnedDispatcher(pinned) } : {}),
+      } as RequestInit);
 
       if (response.status >= 300 && response.status < 400) {
         const location = response.headers.get('location');
