@@ -185,7 +185,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { key } = request.params as { key: string };
-      const documents = await listRagDocuments(ctx.tenantDbName, key, {});
+      const documents = await listRagDocuments(ctx.tenantDbName, key, { projectId: ctx.projectId });
       return reply.code(200).send({ documents });
     } catch (error) {
       logger.error('List client RAG documents error', { error });
@@ -220,7 +220,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       const statusCode = deferIndexing ? 202 : 201;
 
       if (typeof body.data === 'string') {
-        const document = await ingestFile(ctx.tenantDbName, ctx.tenantId, undefined, {
+        const document = await ingestFile(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
           chunkConfig,
           contentType: body.contentType as string | undefined,
           createdBy: ctx.tokenRecord.userId,
@@ -241,7 +241,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const document = await ingestDocument(ctx.tenantDbName, ctx.tenantId, undefined, {
+      const document = await ingestDocument(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
         chunkConfig,
         content: body.content,
         contentType: body.contentType as string | undefined,
@@ -356,7 +356,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Document not found' });
       }
 
-      await deleteRagDocument(ctx.tenantDbName, ctx.tenantId, undefined, {
+      await deleteRagDocument(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
         documentId,
         ragModuleKey: key,
       });
@@ -396,7 +396,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
         return sendInvalidRequest(reply, error);
       }
 
-      const document = await reingestDocument(ctx.tenantDbName, ctx.tenantId, undefined, {
+      const document = await reingestDocument(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
         chunkConfig,
         content: typeof body.content === 'string' ? body.content : undefined,
         contentType: typeof body.contentType === 'string' ? body.contentType : undefined,
@@ -429,7 +429,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'query is required' });
       }
 
-      const result = await queryRag(ctx.tenantDbName, ctx.tenantId, undefined, {
+      const result = await queryRag(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
         filter: body.filter as Record<string, unknown> | undefined,
         query: body.query,
         ragModuleKey: key,

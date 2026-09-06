@@ -2393,7 +2393,17 @@ export async function executeAgentChatLocal(
 
     // 2. Load conversation
     const conversation = await db.findAgentConversationById(conversationId);
-    if (!conversation) throw new Error(`Conversation "${conversationId}" not found`);
+    // findAgentConversationById resolves purely by _id — it has no projectId
+    // parameter — so without this check, any caller who can produce another
+    // project's conversationId (a previous_response_id / A2A contextId / any
+    // future caller of this function) gets that project's message history
+    // read back as context AND appended to, regardless of which project the
+    // agent above was resolved from. This is the actual execution chokepoint
+    // shared by every caller, so the check belongs here, not only at each
+    // call site's own pre-check.
+    if (!conversation || conversation.projectId !== projectId) {
+        throw new Error(`Conversation "${conversationId}" not found`);
+    }
 
     // 2b. Connected (external) agent — invoke over HTTP, skip local runtime.
     //
