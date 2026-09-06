@@ -23,6 +23,7 @@ import {
   updatePrompt,
   deletePrompt,
   listPromptVersions,
+  resolvePromptForEnvironment,
 } from '@/lib/services/prompts/promptService';
 import type { IPrompt, IPromptVersion } from '@/lib/database';
 
@@ -350,5 +351,86 @@ describe('listPromptVersions', () => {
     expect(latest?.isLatest).toBe(true);
     const older = result.find((v) => v.version === 1);
     expect(older?.isLatest).toBe(false);
+  });
+});
+
+// ── resolvePromptForEnvironment ──────────────────────────────────────────────
+// Regression coverage for F-13 (finance-institution assessment, 2026-09-05):
+// `promotePromptVersion` writes a fresh deployment as `rolloutStatus:
+// 'planned'`, and only `activatePromptDeployment` flips it to 'active'. The
+// resolver used to pick `deployments[environment].versionId` without ever
+// checking that status, so a promoted-but-not-yet-approved version was
+// served identically to an approved one.
+
+describe('resolvePromptForEnvironment', () => {
+  let db: ReturnType<typeof createMockDb>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    db = createMockDb();
+    (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
+  });
+
+  it('does not serve a "planned" (not yet activated) deployment', async () => {
+    db.findPromptByKey.mockResolvedValue(makePrompt({
+      currentVersion: 1,
+      deployments: {
+        prod: {
+          environment: 'prod',
+          versionId: 'version-2',
+          version: 2,
+          rolloutStatus: 'planned',
+          rolloutStrategy: 'manual',
+          updatedBy: USER_ID,
+          updatedAt: new Date('2025-01-02'),
+        },
+      },
+    }));
+    db.findPromptById.mockResolvedValue(makePrompt({ currentVersion: 1 }));
+    db.listPromptVersions.mockResolvedValue([
+      makeVersion({ _id: 'version-1', version: 1 }),
+      makeVersion({ _id: 'version-2', version: 2 }),
+    ]);
+
+    const result = await resolvePromptForEnvironment(TENANT_DB, PROJECT_ID, 'my-prompt', 'prod');
+
+    // Must fall back to currentVersion (1), never serve the planned v2.
+    expect(result?.resolvedVersion?.version).toBe(1);
+  });
+
+  it('serves the deployment once it is active', async () => {
+    db.findPromptByKey.mockResolvedValue(makePrompt({
+      currentVersion: 1,
+      deployments: {
+        prod: {
+          environment: 'prod',
+          versionId: 'version-2',
+          version: 2,
+          rolloutStatus: 'active',
+          rolloutStrategy: 'manual',
+          updatedBy: USER_ID,
+          updatedAt: new Date('2025-01-02'),
+        },
+      },
+    }));
+    db.findPromptById.mockResolvedValue(makePrompt({ currentVersion: 1 }));
+    db.listPromptVersions.mockResolvedValue([
+      makeVersion({ _id: 'version-1', version: 1 }),
+      makeVersion({ _id: 'version-2', version: 2 }),
+    ]);
+
+    const result = await resolvePromptForEnvironment(TENANT_DB, PROJECT_ID, 'my-prompt', 'prod');
+
+    expect(result?.resolvedVersion?.version).toBe(2);
+  });
+
+  it('falls back to currentVersion when the environment has no deployment at all', async () => {
+    db.findPromptByKey.mockResolvedValue(makePrompt({ currentVersion: 1, deployments: {} }));
+    db.findPromptById.mockResolvedValue(makePrompt({ currentVersion: 1 }));
+    db.listPromptVersions.mockResolvedValue([makeVersion({ _id: 'version-1', version: 1 })]);
+
+    const result = await resolvePromptForEnvironment(TENANT_DB, PROJECT_ID, 'my-prompt', 'prod');
+
+    expect(result?.resolvedVersion?.version).toBe(1);
   });
 });
