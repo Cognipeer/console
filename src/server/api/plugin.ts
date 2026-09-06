@@ -13,7 +13,7 @@ import {
   setCachedEnterpriseLicense,
 } from '@/lib/license/enterprise-license-cache';
 import { TokenManager, type JWTPayload } from '@/lib/license/token-manager';
-import { fireAndForget } from '@/lib/core/asyncTask';
+import { criticalFireAndForget } from '@/lib/core/asyncTask';
 import { getPermissionServiceForPath, getRequiredPermissionLevel } from '@/lib/security/rbac';
 import { recordAuditLog } from '@/lib/services/audit';
 import { anthropicErrorBody } from '@/lib/services/models/anthropicWire';
@@ -295,7 +295,7 @@ function enqueueAuditLog(request: FastifyRequest, reply: FastifyReply): void {
     ? String(apiToken.tokenRecord._id)
     : undefined;
 
-  fireAndForget('api-audit-log', () => recordAuditLog(
+  criticalFireAndForget('api-audit-log', () => recordAuditLog(
     { tenantDbName, tenantId },
     {
       action,
