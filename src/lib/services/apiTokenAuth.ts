@@ -36,6 +36,16 @@ export interface ApiTokenRequestLike {
   };
 }
 
+/**
+ * The auth-cache key for a given token hash. Exported so the token-delete
+ * path can invalidate the exact same entry `requireApiTokenFromHeader`
+ * writes — without this, a deleted token stayed valid on every replica for
+ * up to the cache's own TTL after the delete succeeded.
+ */
+export function apiAuthCacheKey(tokenHash: string): string {
+  return `api-auth:${tokenHash.substring(0, 16)}`;
+}
+
 export async function requireApiTokenFromHeader(
   authHeader: string | null | undefined,
 ): Promise<ApiTokenContext> {
@@ -55,7 +65,7 @@ export async function requireApiTokenFromHeader(
 
   // Cache tokenRecord + tenant to avoid 2 DB lookups per request
   const tokenHash = hashApiToken(token);
-  const cacheKey = `api-auth:${tokenHash.substring(0, 16)}`;
+  const cacheKey = apiAuthCacheKey(tokenHash);
 
   interface CachedAuth { tokenRecord: IApiToken; tenant: ITenant }
   let cached: CachedAuth | undefined;

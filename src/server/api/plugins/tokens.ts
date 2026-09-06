@@ -2,7 +2,10 @@ import type { FastifyPluginAsync } from 'fastify';
 import { getDatabase } from '@/lib/database';
 import type { IUser } from '@/lib/database';
 import type { LicenseType } from '@/lib/license/license-manager';
+import { getCache } from '@/lib/core/cache';
+import { createLogger } from '@/lib/core/logger';
 import { checkResourceQuota } from '@/lib/quota/quotaGuard';
+import { apiAuthCacheKey } from '@/lib/services/apiTokenAuth';
 import { createApiTokenSecret, getApiTokenPrefix, hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
 import {
   getEffectiveServicePermission,
@@ -23,6 +26,26 @@ import {
 } from '../fastify-utils';
 
 const ALLOWED_ROLES = new Set(['owner', 'admin', 'project_admin', 'user']);
+const logger = createLogger('api:tokens');
+
+/**
+ * Best-effort invalidation of the auth cache entry a deleted token may still
+ * hold. Without this, `requireApiTokenFromHeader` kept accepting the token
+ * on every replica for up to its own cache TTL after the delete already
+ * succeeded -- deletion looked immediate in the UI but was not immediate in
+ * effect. Never blocks the delete response on a cache failure: the token row
+ * is already gone either way, and the cache entry expires on its own TTL as
+ * a fallback.
+ */
+async function invalidateApiTokenAuthCache(tokenHash: string | undefined): Promise<void> {
+  if (!tokenHash) return;
+  try {
+    const cache = await getCache();
+    await cache.del(apiAuthCacheKey(tokenHash));
+  } catch (error) {
+    logger.warn('Failed to invalidate api-auth cache on token delete', { error });
+  }
+}
 
 /**
  * Whether `actorRole` may act on (mint for, or list the tokens of) `target`.
@@ -280,26 +303,32 @@ export const tokensApiPlugin: FastifyPluginAsync = async (app) => {
       const { projectId } = await requireProjectContextForRequest(request);
       const db = await getDatabase();
 
-      const deleted = session.userRole === 'user'
-        ? await (async () => {
-          const ownTokens = await db.listApiTokens(session.userId);
-          const token = ownTokens.find((item) => String(item._id) === String(id));
-          if (!token) {
-            return false;
-          }
-          if (
-            String(token.tenantId) !== String(session.tenantId)
-            || String(token.projectId) !== String(projectId)
-          ) {
-            return false;
-          }
-          return db.deleteApiToken(id, session.userId);
-        })()
-        : await db.deleteProjectApiToken(id, session.tenantId, projectId);
+      let deleted: boolean;
+      let tokenHash: string | undefined;
+      if (session.userRole === 'user') {
+        const ownTokens = await db.listApiTokens(session.userId);
+        const token = ownTokens.find((item) => String(item._id) === String(id));
+        if (
+          !token
+          || String(token.tenantId) !== String(session.tenantId)
+          || String(token.projectId) !== String(projectId)
+        ) {
+          deleted = false;
+        } else {
+          tokenHash = token.tokenHash;
+          deleted = await db.deleteApiToken(id, session.userId);
+        }
+      } else {
+        const projectTokens = await db.listProjectApiTokens(session.tenantId, projectId);
+        tokenHash = projectTokens.find((item) => String(item._id) === String(id))?.tokenHash;
+        deleted = await db.deleteProjectApiToken(id, session.tenantId, projectId);
+      }
 
       if (!deleted) {
         return reply.code(404).send({ error: 'Token not found' });
       }
+
+      await invalidateApiTokenAuthCache(tokenHash);
 
       return reply.code(200).send({ message: 'API token deleted successfully' });
     } catch (error) {
