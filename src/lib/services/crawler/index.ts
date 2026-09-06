@@ -11,6 +11,7 @@ export {
   getCrawlJob,
   listCrawlJobResults,
   getCrawlResult,
+  syncCrawlJobToRag,
   cancelCrawlJob,
   snapshotCrawlerPlan,
   addCrawlerUrls,
@@ -35,6 +36,7 @@ export {
   adhocCrawlInputSchema,
   crawlerUrlsBodySchema,
   crawlOnContainerSchema,
+  syncCrawlJobToRagSchema,
 } from './validation';
 export type {
   CreateCrawlerBody,
@@ -43,4 +45,5 @@ export type {
   AdhocCrawlBody,
   CrawlerUrlsBody,
   CrawlOnContainerBody,
+  SyncCrawlJobToRagBody,
 } from './validation';

@@ -160,9 +160,16 @@ export const adhocCrawlInputSchema = z.object({
   metadata: z.record(z.unknown()).optional(),
 });
 
+/** Body for `POST /crawler/jobs/:jobId/sync-to-rag`. */
+export const syncCrawlJobToRagSchema = z.object({
+  /** Overrides the crawler's saved module binding for this sync only. */
+  ragModuleKey: z.string().min(1).optional(),
+});
+
 export type CreateCrawlerBody = z.infer<typeof createCrawlerInputSchema>;
 export type UpdateCrawlerBody = z.infer<typeof updateCrawlerInputSchema>;
 export type RunCrawlerOptionsBody = z.infer<typeof runCrawlerOptionsSchema>;
 export type AdhocCrawlBody = z.infer<typeof adhocCrawlInputSchema>;
 export type CrawlerUrlsBody = z.infer<typeof crawlerUrlsBodySchema>;
 export type CrawlOnContainerBody = z.infer<typeof crawlOnContainerSchema>;
+export type SyncCrawlJobToRagBody = z.infer<typeof syncCrawlJobToRagSchema>;

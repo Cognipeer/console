@@ -116,6 +116,7 @@ export default function CrawlerDetailPage() {
   const [cancelingJob, setCancelingJob] = useState(false);
   const [jobResults, setJobResults] = useState<CrawlResultView[]>([]);
   const [resultsLoading, setResultsLoading] = useState(false);
+  const [syncingToRag, setSyncingToRag] = useState(false);
   const [jobQuery, setJobQuery] = useState('');
   const [jobStatusFilter, setJobStatusFilter] = useState('all');
   const [jobTriggerFilter, setJobTriggerFilter] = useState('all');
@@ -658,6 +659,38 @@ export default function CrawlerDetailPage() {
       });
     } finally {
       setCancelingJob(false);
+    }
+  }
+
+  async function syncJobToRag(jobId: string, ragModuleKey: string) {
+    setSyncingToRag(true);
+    try {
+      const res = await fetch(`/api/crawler/jobs/${jobId}/sync-to-rag`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ragModuleKey }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || 'Failed to sync to Knowledge Engine');
+      }
+      const summary = await res.json();
+      notifications.show({
+        color: summary.failed > 0 ? 'orange' : 'teal',
+        title: 'Sent to Knowledge Engine',
+        message: `${summary.indexed} indexed, ${summary.skipped} skipped, ${summary.failed} failed (of ${summary.total} pages)`,
+      });
+      if (openJob?.id === jobId) {
+        await openJobModal(openJob);
+      }
+    } catch (err) {
+      notifications.show({
+        color: 'red',
+        title: 'Error',
+        message: err instanceof Error ? err.message : 'Failed',
+      });
+    } finally {
+      setSyncingToRag(false);
     }
   }
 
@@ -1406,6 +1439,10 @@ Content-Type: application/json
         loading={resultsLoading}
         canceling={cancelingJob}
         onCancel={(jobId) => void cancelJob(jobId)}
+        ragModules={ragModules}
+        defaultRagModuleKey={crawler?.rag?.ragModuleKey}
+        onSyncToRag={syncJobToRag}
+        syncingToRag={syncingToRag}
         onClose={() => {
           setOpenJob(null);
           setJobResults([]);

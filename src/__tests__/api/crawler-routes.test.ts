@@ -17,6 +17,21 @@ process.env.DB_PROVIDER = 'sqlite';
 process.env.SQLITE_DATA_DIR = tmpRoot;
 process.env.MAIN_DB_NAME = 'crawler_routes_main';
 
+// Same RAG-ingest mock as the e2e suite — sync-to-rag calls into the real
+// ingest pipeline otherwise, which is out of scope for an HTTP-wire test.
+const ragIngestCalls = vi.hoisted(() => [] as Array<{ ragModuleKey: string }>);
+vi.mock('@/lib/services/rag', () => ({
+  ingestDocument: async (
+    _tenantDbName: string,
+    _tenantId: string,
+    _projectId: string | undefined,
+    request: { ragModuleKey: string },
+  ) => {
+    ragIngestCalls.push({ ragModuleKey: request.ragModuleKey });
+    return { _id: `ragdoc-${ragIngestCalls.length}`, status: 'indexed' };
+  },
+}));
+
 // Same to-markdown mock as the e2e suite — the underlying file-type CJS
 // import trips vitest's ESM resolver.
 vi.mock('@cognipeer/to-markdown', () => ({
@@ -392,4 +407,64 @@ describe('Crawler webhook HMAC secret is never returned in cleartext (CWE-201)',
     expect(afterRotate.webhook?.secret).not.toBe(NEW_WEBHOOK_SECRET);
     expect(afterRotate.webhook?.secret).not.toBe(WEBHOOK_SECRET);
   }, 30_000);
+});
+
+describe('POST /api/crawler/jobs/:jobId/sync-to-rag', () => {
+  it('backfills a completed job into a Knowledge Engine module chosen after the fact', async () => {
+    ragIngestCalls.length = 0;
+
+    const createRes = await app.inject({
+      method: 'POST',
+      url: '/api/crawler/crawlers',
+      headers: { ...REQUEST_HEADERS, 'content-type': 'application/json' },
+      payload: JSON.stringify({
+        name: 'Sync To RAG Crawler',
+        engine: 'axios',
+        maxDepth: 0,
+        maxPages: 1,
+        autoCrawl: false,
+        http: { allowPrivateNetwork: true },
+      }),
+    });
+    expect(createRes.statusCode).toBe(201);
+    const { crawler } = parseJsonBody<{ crawler: { key: string } }>(createRes.body);
+
+    // No `rag` binding at crawl time — nothing gets ingested yet.
+    const crawlRes = await app.inject({
+      method: 'POST',
+      url: `/api/crawler/crawlers/${crawler.key}/crawl`,
+      headers: { ...REQUEST_HEADERS, 'content-type': 'application/json' },
+      payload: JSON.stringify({ urls: [originUrl], mode: 'sync' }),
+    });
+    expect(crawlRes.statusCode).toBe(202);
+    const { jobId } = parseJsonBody<{ jobId: string }>(crawlRes.body);
+    expect(ragIngestCalls.length).toBe(0);
+
+    const syncRes = await app.inject({
+      method: 'POST',
+      url: `/api/crawler/jobs/${jobId}/sync-to-rag`,
+      headers: { ...REQUEST_HEADERS, 'content-type': 'application/json' },
+      payload: JSON.stringify({ ragModuleKey: 'kb-module-routes-test' }),
+    });
+    expect(syncRes.statusCode).toBe(200);
+    const summary = parseJsonBody<{
+      jobId: string; ragModuleKey: string; total: number; indexed: number; skipped: number; failed: number;
+    }>(syncRes.body);
+    expect(summary.jobId).toBe(jobId);
+    expect(summary.ragModuleKey).toBe('kb-module-routes-test');
+    expect(summary.total).toBe(1);
+    expect(summary.indexed).toBe(1);
+    expect(summary.failed).toBe(0);
+    expect(ragIngestCalls).toEqual([{ ragModuleKey: 'kb-module-routes-test' }]);
+  }, 30_000);
+
+  it('returns 404 for an unknown job id', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/crawler/jobs/does-not-exist/sync-to-rag',
+      headers: { ...REQUEST_HEADERS, 'content-type': 'application/json' },
+      payload: JSON.stringify({ ragModuleKey: 'kb-module-routes-test' }),
+    });
+    expect(res.statusCode).toBe(404);
+  });
 });

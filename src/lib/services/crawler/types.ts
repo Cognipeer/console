@@ -123,4 +123,18 @@ export interface CrawlRunSummary {
   status: ICrawlJob['status'];
 }
 
+export interface SyncCrawlJobToRagOptions {
+  /** Overrides the crawler's saved binding — e.g. after switching modules. */
+  ragModuleKey?: string;
+}
+
+export interface SyncCrawlJobToRagSummary {
+  jobId: string;
+  ragModuleKey: string;
+  total: number;
+  indexed: number;
+  skipped: number;
+  failed: number;
+}
+
 export type { ICrawlPlanSnapshot };

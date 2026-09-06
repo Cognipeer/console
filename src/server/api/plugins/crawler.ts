@@ -19,6 +19,7 @@ import {
   removeCrawlerUrls,
   runAdhocCrawl,
   runCrawler,
+  syncCrawlJobToRag,
   updateCrawler,
   createCrawlerInputSchema,
   updateCrawlerInputSchema,
@@ -26,6 +27,7 @@ import {
   adhocCrawlInputSchema,
   crawlerUrlsBodySchema,
   crawlOnContainerSchema,
+  syncCrawlJobToRagSchema,
 } from '@/lib/services/crawler';
 import {
   readJsonBody,
@@ -344,6 +346,28 @@ export const crawlerApiPlugin: FastifyPluginAsync = async (app) => {
       if (sendProjectContextError(reply, error)) return;
       logger.error('Get crawl result failed', { error });
       return reply.code(500).send({ error: 'Internal server error' });
+    }
+  }));
+
+  /** Push a job's already-fetched pages into a Knowledge Engine module
+   *  without re-crawling — e.g. after turning ingestion on, or repointing it
+   *  at a different module, once the pages are already sitting in the DB. */
+  app.post('/crawler/jobs/:jobId/sync-to-rag', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const { jobId } = request.params as { jobId: string };
+      const body = syncCrawlJobToRagSchema.parse(readJsonBody<unknown>(request) ?? {});
+      const summary = await syncCrawlJobToRag(
+        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
+        jobId,
+        { ragModuleKey: body.ragModuleKey },
+        session.userEmail ?? session.userId,
+      );
+      return reply.code(200).send(summary);
+    } catch (error) {
+      if (sendProjectContextError(reply, error)) return;
+      logger.error('Sync crawl job to Knowledge Engine failed', { error });
+      return sendError(reply, error, 'Failed to sync results to Knowledge Engine');
     }
   }));
 
