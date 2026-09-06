@@ -302,6 +302,12 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
+  // Deliberately different defaults, not a typo: /agents/responses always
+  // runs the published version (usePublished=true); the general /responses
+  // dialect runs the current draft config unless the caller asks for a
+  // specific version (usePublished=false). A caller who has only ever seen
+  // a published version in the dashboard can otherwise assume the general
+  // Responses route uses it too — it does not, unless told to.
   app.post('/client/v1/agents/responses', createResponsesHandler(true));
   app.post('/client/v1/responses', createResponsesHandler(false));
 
