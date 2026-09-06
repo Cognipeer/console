@@ -213,7 +213,9 @@ export async function handleA2aRpc(
       let conversationId: string | undefined;
       if (typeof message.contextId === 'string' && message.contextId) {
         const conversation = await getConversationById(ctx.tenantDbName, message.contextId);
-        if (!conversation || conversation.agentKey !== agent.key) {
+        // agentKey alone is not unique across projects — see the identical
+        // check in client-agents.ts's previous_response_id handling.
+        if (!conversation || conversation.agentKey !== agent.key || conversation.projectId !== ctx.projectId) {
           return reply.code(200).send(
             jsonRpcError(rpcId, -32602, 'Invalid params: unknown contextId'),
           );
@@ -271,7 +273,7 @@ export async function handleA2aRpc(
         return reply.code(200).send(jsonRpcError(rpcId, ERR_TASK_NOT_FOUND, 'Task not found'));
       }
       const conversation = await getConversationById(ctx.tenantDbName, parsed.conversationId);
-      const message = conversation?.agentKey === agent.key
+      const message = conversation?.agentKey === agent.key && conversation?.projectId === ctx.projectId
         ? conversation.messages?.[parsed.messageIndex]
         : undefined;
       if (!message || message.role !== 'assistant') {

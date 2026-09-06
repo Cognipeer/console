@@ -9,8 +9,9 @@
  *   - PATCH  /api/client/v1/rerank/:key      → update a reranker definition
  *   - DELETE /api/client/v1/rerank/:key      → delete a reranker definition
  *
- * Authoring lives under `/rerank` (not `/rerankers`) so it is covered by the
- * `/api/client/v1/rerank` RBAC prefix and enforced at `write`.
+ * `/rerankers` and `/rerank` each have their own RBAC route-prefix entry
+ * (they don't share a path separator, so one prefix cannot cover both) —
+ * both map to the `reranker` service in `src/lib/security/rbac.ts`.
  *
  * The run request shape mirrors Cohere's /v2/rerank to make it easy to drop in:
  *   { query, documents: string[] | { text }[], top_n? }
@@ -92,8 +93,6 @@ export const clientRerankerApiPlugin: FastifyPluginAsync = async (app) => {
   );
 
   // ── Create a reranker definition ──
-  // Registered on the `/rerank` collection (not `/rerankers`) so it is covered
-  // by the `/api/client/v1/rerank` RBAC prefix.
   app.post(
     '/client/v1/rerank',
     withClientApiRequestContext(async (request, reply) => {

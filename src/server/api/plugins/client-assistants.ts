@@ -329,11 +329,19 @@ export function extractMessageText(input: unknown): string | null {
 async function loadThreadOr404(
   tenantDbName: string,
   rawThreadId: string,
+  projectId: string | undefined,
 ): Promise<{ conversation: IAgentConversation; agent: IAgent } | { error: { code: number; message: string } }> {
   const conversationId = conversationIdFromThreadId(rawThreadId);
   const conversation = await getConversationById(tenantDbName, conversationId);
-  if (!conversation) return { error: { code: 404, message: 'Thread not found' } };
-  const agent = await getAgentByKey(tenantDbName, conversation.agentKey);
+  // getConversationById resolves purely by _id (findAgentConversationById has
+  // no projectId parameter at all) — without this check, a caller who can
+  // guess or enumerate another project's thread id gets that project's whole
+  // conversation history back. A scoped token's projectId must always be
+  // undefined-or-equal to the record's own project, never silently ignored.
+  if (!conversation || (projectId !== undefined && conversation.projectId !== projectId)) {
+    return { error: { code: 404, message: 'Thread not found' } };
+  }
+  const agent = await getAgentByKey(tenantDbName, conversation.agentKey, conversation.projectId);
   if (!agent) return { error: { code: 404, message: 'Thread references an assistant that no longer exists' } };
   return { conversation, agent };
 }
@@ -562,7 +570,7 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId } = request.params as { threadId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId);
+      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
       if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
       return reply.code(200).send(threadObject(loaded.conversation));
     } catch (error) {
@@ -575,7 +583,7 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId } = request.params as { threadId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId);
+      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
       if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
 
       const body = readJsonBody<Record<string, unknown>>(request);
@@ -602,7 +610,7 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId } = request.params as { threadId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId);
+      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
       if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
       const { deleteConversation } = await import('@/lib/services/agents');
       const deleted = await deleteConversation(ctx.tenantDbName, conversationIdFromThreadId(rawId));
@@ -619,7 +627,7 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId } = request.params as { threadId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId);
+      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
       if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
 
       const body = readJsonBody<Record<string, unknown>>(request);
@@ -659,7 +667,7 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId } = request.params as { threadId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId);
+      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
       if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
 
       const conversationId = conversationIdFromThreadId(rawId);
@@ -679,7 +687,7 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId, messageId: rawMessageId } = request.params as { threadId: string; messageId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId);
+      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
       if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
 
       const conversationId = conversationIdFromThreadId(rawId);
@@ -791,7 +799,7 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId } = request.params as { threadId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId);
+      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
       if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
 
       const body = readJsonBody<Record<string, unknown>>(request);
@@ -832,7 +840,7 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId } = request.params as { threadId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId);
+      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
       if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
 
       const runs = readAssistantsMetadata(loaded.conversation).runs ?? [];
@@ -851,7 +859,7 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId, runId: rawRunId } = request.params as { threadId: string; runId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId);
+      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
       if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
 
       const runs = readAssistantsMetadata(loaded.conversation).runs ?? [];
@@ -870,7 +878,7 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId, runId: rawRunId } = request.params as { threadId: string; runId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId);
+      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
       if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
 
       const runs = readAssistantsMetadata(loaded.conversation).runs ?? [];
