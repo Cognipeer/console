@@ -13,6 +13,10 @@ import {
   redactLogPayload,
   redactLogString,
 } from '@/lib/services/logRedaction';
+import {
+  redactPiiFromLogPayload,
+  redactPiiFromLogString,
+} from '@/lib/services/logPiiRedaction';
 import { normalizeFinishReason } from '@/lib/shared/finishReason';
 
 const TOKENS_PER_MILLION = 1_000_000;
@@ -190,9 +194,14 @@ export async function logModelUsage(
     requestId: payload.requestId,
     route: payload.route,
     status: payload.status,
-    providerRequest: toRecord(redactLogPayload(payload.providerRequest)),
-    providerResponse: toRecord(redactLogPayload(payload.providerResponse)),
-    errorMessage: redactLogString(payload.errorMessage),
+    // Secret scrub first (known key names / outbound secret values), then a
+    // free-text PII pass -- a customer's email or name inside
+    // messages[].content has no distinctive key or known value to match
+    // against the way a secret does, so it can only be found by scanning
+    // the text itself. See logPiiRedaction.ts.
+    providerRequest: toRecord(redactPiiFromLogPayload(redactLogPayload(payload.providerRequest))),
+    providerResponse: toRecord(redactPiiFromLogPayload(redactLogPayload(payload.providerResponse))),
+    errorMessage: redactPiiFromLogString(redactLogString(payload.errorMessage)),
     latencyMs: payload.latencyMs,
     inputTokens: usage.inputTokens ?? 0,
     outputTokens: usage.outputTokens ?? 0,
