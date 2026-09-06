@@ -621,6 +621,33 @@ function usdToMicros(usd: number): number {
   return Math.max(0, Math.round(usd * MICROS_PER_USD));
 }
 
+/**
+ * Debit a budget window with a call's REALIZED cost, once it is known.
+ *
+ * `checkBudget()` alone is a pre-flight gate — called before a call runs, or
+ * with no `usd` at all it only reads the window without incrementing it.
+ * Every caller that later learns the real cost (a stream's terminal usage
+ * chunk, an audio/OCR provider response) must feed it back through here, or
+ * the budget counter never reflects what actually happened and a hard cap
+ * only ever throttles requests, never spend. Swallows its own errors — same
+ * failure mode as `checkBudget`'s window-read errors — because a settlement
+ * failure must never surface as a user-facing error on a call that already
+ * completed and was already billed by the provider.
+ */
+export async function settleUsageBudget(
+  context: QuotaContext,
+  cost: { currency: string; totalCost: number },
+): Promise<void> {
+  if (cost.currency !== 'USD' || !Number.isFinite(cost.totalCost) || cost.totalCost <= 0) {
+    return;
+  }
+  try {
+    await checkBudget(context, { usd: cost.totalCost });
+  } catch (error) {
+    logger.error('Failed to settle realized budget usage', { error });
+  }
+}
+
 export async function checkBudget(
   context: QuotaContext,
   cost: { usd?: number } = {},

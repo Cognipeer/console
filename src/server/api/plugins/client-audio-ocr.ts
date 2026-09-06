@@ -10,11 +10,13 @@ import {
 } from '@/lib/services/models/inferenceService';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { normalizeInferenceError } from '@/lib/services/models/openaiErrors';
-import { logModelUsage } from '@/lib/services/models/usageLogger';
+import { calculateCost, logModelUsage } from '@/lib/services/models/usageLogger';
 import {
   checkBudget,
   checkPerRequestLimits,
   checkRateLimit,
+  settleUsageBudget,
+  type QuotaContext,
 } from '@/lib/quota/quotaGuard';
 import { readJsonBody, withOpenAiApiRequestContext } from '../fastify-utils';
 import type {
@@ -302,9 +304,9 @@ async function runQuotaGuard(
   auth: ApiTokenContext,
   domain: 'stt' | 'tts' | 'ocr',
   modelKey: string,
-): Promise<string | null> {
+): Promise<{ ctx: QuotaContext; error: string | null }> {
   const tokenId = auth.tokenRecord._id?.toString() ?? auth.token;
-  const ctx = {
+  const ctx: QuotaContext = {
     tenantDbName: auth.tenantDbName,
     tenantId: auth.tenantId,
     projectId: auth.projectId,
@@ -316,15 +318,31 @@ async function runQuotaGuard(
   };
 
   const perRequest = await checkPerRequestLimits(ctx, {});
-  if (!perRequest.allowed) return perRequest.reason || 'Quota exceeded';
+  if (!perRequest.allowed) return { ctx, error: perRequest.reason || 'Quota exceeded' };
 
   const rate = await checkRateLimit(ctx, { requests: 1 });
-  if (!rate.allowed) return rate.reason || 'Rate limit exceeded';
+  if (!rate.allowed) return { ctx, error: rate.reason || 'Rate limit exceeded' };
 
   const budget = await checkBudget(ctx);
-  if (!budget.allowed) return budget.reason || 'Budget exceeded';
+  if (!budget.allowed) return { ctx, error: budget.reason || 'Budget exceeded' };
 
-  return null;
+  return { ctx, error: null };
+}
+
+/**
+ * Debit the budget window with what this call actually cost, once usage is
+ * known. `runQuotaGuard`'s `checkBudget(ctx)` above is a pre-flight-only
+ * read (no `usd` given, so it never increments) — nothing after it settled
+ * the realized cost, so the budget window tracked zero spend for every
+ * transcription/translation/speech/OCR call regardless of usage. See the
+ * 2026-09-05 assessment, F-05.
+ */
+function settleAudioOcrUsage(
+  ctx: QuotaContext,
+  pricing: Parameters<typeof calculateCost>[0],
+  usage: Parameters<typeof calculateCost>[1],
+): void {
+  void settleUsageBudget(ctx, calculateCost(pricing, usage));
 }
 
 export const clientAudioOcrApiPlugin: FastifyPluginAsync = async (app) => {
@@ -338,7 +356,7 @@ export const clientAudioOcrApiPlugin: FastifyPluginAsync = async (app) => {
         const parsed = await buildSttInput(request);
         modelKey = parsed.modelKey;
 
-        const quotaError = await runQuotaGuard(auth, 'stt', modelKey);
+        const { ctx: quotaContext, error: quotaError } = await runQuotaGuard(auth, 'stt', modelKey);
         if (quotaError) return reply.code(429).send(quotaExceededPayload(quotaError));
 
         const result = await handleTranscriptionRequest({
@@ -347,6 +365,8 @@ export const clientAudioOcrApiPlugin: FastifyPluginAsync = async (app) => {
           projectId: auth.projectId,
           input: parsed.input,
         });
+
+        settleAudioOcrUsage(quotaContext, result.model.pricing, result.usage);
 
         return reply.code(200).send({ ...result.response, request_id: result.requestId });
       } catch (error) {
@@ -387,7 +407,7 @@ export const clientAudioOcrApiPlugin: FastifyPluginAsync = async (app) => {
         const parsed = await buildSttInput(request);
         modelKey = parsed.modelKey;
 
-        const quotaError = await runQuotaGuard(auth, 'stt', modelKey);
+        const { ctx: quotaContext, error: quotaError } = await runQuotaGuard(auth, 'stt', modelKey);
         if (quotaError) return reply.code(429).send(quotaExceededPayload(quotaError));
 
         const translateInput: SttTranslateInput = {
@@ -404,6 +424,8 @@ export const clientAudioOcrApiPlugin: FastifyPluginAsync = async (app) => {
           input: translateInput as SttTranscribeInput,
           translate: true,
         });
+
+        settleAudioOcrUsage(quotaContext, result.model.pricing, result.usage);
 
         return reply.code(200).send({ ...result.response, request_id: result.requestId });
       } catch (error) {
@@ -480,7 +502,7 @@ export const clientAudioOcrApiPlugin: FastifyPluginAsync = async (app) => {
             typeof body.instructions === 'string' ? body.instructions : undefined,
         };
 
-        const quotaError = await runQuotaGuard(auth, 'tts', modelKey);
+        const { ctx: quotaContext, error: quotaError } = await runQuotaGuard(auth, 'tts', modelKey);
         if (quotaError) return reply.code(429).send(quotaExceededPayload(quotaError));
 
         const result = await handleSpeechRequest({
@@ -489,6 +511,8 @@ export const clientAudioOcrApiPlugin: FastifyPluginAsync = async (app) => {
           projectId: auth.projectId,
           input,
         });
+
+        settleAudioOcrUsage(quotaContext, result.model.pricing, result.usage);
 
         reply.raw.setHeader('Content-Type', result.contentType);
         reply.raw.setHeader('Content-Length', String(result.audio.byteLength));
@@ -532,7 +556,7 @@ export const clientAudioOcrApiPlugin: FastifyPluginAsync = async (app) => {
         const parsed = await buildOcrInput(request);
         modelKey = parsed.modelKey;
 
-        const quotaError = await runQuotaGuard(auth, 'ocr', modelKey);
+        const { ctx: quotaContext, error: quotaError } = await runQuotaGuard(auth, 'ocr', modelKey);
         if (quotaError) return reply.code(429).send(quotaExceededPayload(quotaError));
 
         const result = await handleOcrRequest({
@@ -541,6 +565,8 @@ export const clientAudioOcrApiPlugin: FastifyPluginAsync = async (app) => {
           projectId: auth.projectId,
           input: parsed.input,
         });
+
+        settleAudioOcrUsage(quotaContext, result.model.pricing, result.usage);
 
         return reply.code(200).send({ ...result.response, request_id: result.requestId });
       } catch (error) {

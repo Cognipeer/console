@@ -46,7 +46,7 @@ import {
 
 export { OutputTokenLimitError } from './openaiErrors';
 
-import { logModelUsage, TokenUsage } from './usageLogger';
+import { calculateCost, logModelUsage, TokenUsage, UsageCostResult } from './usageLogger';
 import {
   MAX_ROUTING_DEPTH,
   buildDeciderMessages,
@@ -1264,8 +1264,9 @@ async function resolveDynamicCompletion(args: {
   router: IModel;
   config: IDynamicRoutingConfig;
   depth: number;
+  onUsageSettled?: (cost: UsageCostResult) => void;
 }): Promise<ChatCompletionOutcome> {
-  const { tenantDbName, tenantId, projectId, body, stream, router, config, depth } = args;
+  const { tenantDbName, tenantId, projectId, body, stream, router, config, depth, onUsageSettled } = args;
   const start = Date.now();
   const routerRequestId =
     typeof body.request_id === 'string' && body.request_id.length > 0
@@ -1337,6 +1338,7 @@ async function resolveDynamicCompletion(args: {
       body,
       stream,
       _routingDepth: depth + 1,
+      onUsageSettled,
     });
 
   const buildRouting = (
@@ -1453,8 +1455,21 @@ export async function handleChatCompletion(params: {
   stream?: boolean;
   /** Internal: recursion depth when a Dynamic LLM resolves to another model. */
   _routingDepth?: number;
+  /**
+   * Called with the REALIZED cost of this call, once usage is known — for a
+   * streaming response that is long after this function has already returned
+   * the (still-open) stream to the caller. That's the only reason this
+   * exists: the caller's `quotaContext` (license type, token id, per-user vs
+   * per-tenant budget key) isn't reconstructible from inside this module, but
+   * a plain closure over it costs the caller nothing to provide. Computed
+   * here (not by the caller) so a Dynamic LLM child model's own pricing is
+   * always what gets charged, never the router's. Fires for success and for
+   * a cancelled stream with partial usage (the provider still billed for
+   * those tokens); never for a request that produced no usage at all.
+   */
+  onUsageSettled?: (cost: UsageCostResult) => void;
 }): Promise<ChatCompletionOutcome> {
-  const { tenantDbName, tenantId, modelKey, projectId, stream } = params;
+  const { tenantDbName, tenantId, modelKey, projectId, stream, onUsageSettled } = params;
   let { body } = params;
 
   if (!Array.isArray(body?.messages)) {
@@ -1491,6 +1506,7 @@ export async function handleChatCompletion(params: {
       router: model,
       config: dynamicConfig,
       depth,
+      onUsageSettled,
     });
   }
 
@@ -2192,6 +2208,8 @@ export async function handleChatCompletion(params: {
             ? aggregatedChunk
             : { tool_calls: toolCalls };
 
+          onUsageSettled?.(calculateCost(model.pricing, usage));
+
           fireAndForget('log-stream-usage', () =>
             logModelUsage(tenantDbName, model, {
               requestId,
@@ -2232,6 +2250,8 @@ export async function handleChatCompletion(params: {
           // the error rate rose, alerting fired, and the tokens the provider
           // had already generated (and bills us for) were written as zero.
           if (abortController.signal.aborted) {
+            const cancelledUsage = partialUsageOnCancel();
+            onUsageSettled?.(calculateCost(model.pricing, cancelledUsage));
             fireAndForget('log-stream-cancelled', () =>
               logModelUsage(tenantDbName, model, {
                 requestId,
@@ -2249,7 +2269,7 @@ export async function handleChatCompletion(params: {
                   ...(lastUsage ? {} : { output_tokens_estimated: true }),
                 }),
                 latencyMs,
-                usage: partialUsageOnCancel(),
+                usage: cancelledUsage,
               }),
             );
             auditStreamedOutput('chat.completions:stream:cancelled');
@@ -2358,6 +2378,8 @@ export async function handleChatCompletion(params: {
   if (toolCallCount) {
     usage.toolCalls = toolCallCount;
   }
+
+  onUsageSettled?.(calculateCost(model.pricing, usage));
 
   fireAndForget('log-chat-usage', () =>
     logModelUsage(tenantDbName, model, {
@@ -2702,6 +2724,11 @@ export async function handleTranscriptionRequest(params: {
       usage: result.usage,
     },
     rawUsage: result.usage,
+    // The normalized usage this function itself billed against above — the
+    // one a caller needs to settle a budget with the same numbers that went
+    // into the usage-log row, not the provider's raw (differently-shaped)
+    // usage object.
+    usage,
     latencyMs,
     requestId,
     model,
@@ -2751,6 +2778,14 @@ export async function handleSpeechRequest(params: {
 
   const latencyMs = Date.now() - start;
 
+  const usage: TokenUsage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+    inputCharacters: result.usage?.inputCharacters ?? input.text.length,
+    outputSeconds: result.usage?.outputSeconds,
+  };
+
   fireAndForget('log-tts-usage', () =>
     logModelUsage(tenantDbName, model, {
       requestId,
@@ -2769,13 +2804,7 @@ export async function handleSpeechRequest(params: {
         audioBytes: result.audio.byteLength,
       }),
       latencyMs,
-      usage: {
-        inputTokens: 0,
-        outputTokens: 0,
-        totalTokens: 0,
-        inputCharacters: result.usage?.inputCharacters ?? input.text.length,
-        outputSeconds: result.usage?.outputSeconds,
-      },
+      usage,
     }),
   );
 
@@ -2783,7 +2812,10 @@ export async function handleSpeechRequest(params: {
     audio: result.audio,
     contentType: result.contentType,
     format: result.format,
-    usage: result.usage,
+    rawUsage: result.usage,
+    // The normalized usage this function itself billed against above — see
+    // the matching comment on handleTranscriptionRequest's return.
+    usage,
     latencyMs,
     requestId,
     model,
@@ -3064,6 +3096,9 @@ export async function handleOcrRequest(params: {
       invokedVia: result.invokedVia ?? mode,
       usage: result.usage,
     },
+    // The normalized usage this function itself billed against above — see
+    // the matching comment on handleTranscriptionRequest's return.
+    usage,
     latencyMs,
     requestId,
     model,
