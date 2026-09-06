@@ -97,34 +97,42 @@ function pathFragments(pathPattern: string): string[] {
     .filter((seg) => !seg.startsWith(':'));
 }
 
-async function loadTestHaystack(): Promise<string> {
+async function loadTestFiles(): Promise<string[]> {
   const files = await walk(TESTS_DIR, ['.ts']);
-  const buffers = await Promise.all(files.map((f) => fs.readFile(f, 'utf8')));
-  return buffers.join('\n');
+  return Promise.all(files.map((f) => fs.readFile(f, 'utf8')));
 }
 
 /**
- * Cheap substring check: every non-parameter fragment must appear in the test
- * haystack. Avoids regex compilation issues with route patterns that contain
- * wildcards like `*`. Order isn't enforced — if all fragments appear somewhere
- * in any test file, we count the route as covered.
+ * Path-and-method must both appear in the SAME test file. Concatenating every
+ * test file into one haystack (the previous approach) let an unrelated test
+ * "cover" a route just because some other file happened to share a path
+ * fragment, and never checked the HTTP method at all — a GET-only test for
+ * `/agents/:id` counted as coverage for `DELETE /agents/:id` too. Still cheap
+ * regex/substring work, no route-schema parsing, per the file's own design
+ * goal — just checked per-file and method-aware instead of globally and
+ * method-blind.
+ *
+ * The method check is a whole-word search for the literal method name
+ * (`POST`, `GET`, ...), which matches both styles this repo's tests use:
+ * `app.inject({ method: 'POST', ... })` for a live Fastify plugin, and
+ * `import { POST } from '.../route'` for the legacy Next.js route handlers —
+ * both spell the method as that literal uppercase word somewhere in the file.
  */
-function isReferenced(route: Route, haystack: string): boolean {
-  // Static literal first — catches `app.inject({ url: '/x/y' })`.
-  if (haystack.includes(route.pathPattern)) return true;
-
+function isReferenced(route: Route, testFiles: string[]): boolean {
   const frags = pathFragments(route.pathPattern);
-  if (frags.length === 0) return false;
+  const methodRe = new RegExp(`\\b${route.method}\\b`);
 
-  // Require *every* non-param fragment to appear, prefixed with `/` to avoid
-  // matching unrelated words. E.g. `/agents/:id/publish` → ["/agents", "/publish"]
-  return frags.every((f) => haystack.includes('/' + f));
+  return testFiles.some((text) => {
+    const pathMatches = text.includes(route.pathPattern)
+      || (frags.length > 0 && frags.every((f) => text.includes('/' + f)));
+    return pathMatches && methodRe.test(text);
+  });
 }
 
 async function main(): Promise<void> {
-  const [routes, haystack, baseline] = await Promise.all([
+  const [routes, testFiles, baseline] = await Promise.all([
     extractRoutes(),
-    loadTestHaystack(),
+    loadTestFiles(),
     loadBaseline(),
   ]);
 
@@ -132,7 +140,7 @@ async function main(): Promise<void> {
 
   const missing: Route[] = [];
   for (const r of routes) {
-    if (!isReferenced(r, haystack)) missing.push(r);
+    if (!isReferenced(r, testFiles)) missing.push(r);
   }
   const missingKeys = new Set(missing.map(routeKey));
 
