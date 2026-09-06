@@ -37,18 +37,18 @@ export class TokenManager {
   ): Promise<string> {
     const expiresIn = getConfig().auth.jwtExpiresIn;
 
-    // Convert expiry string to seconds (7d -> 604800)
-    const expiryMap: Record<string, number> = {
-      '1d': 86400,
-      '7d': 604800,
-      '30d': 2592000,
-    };
-    const expirySeconds = expiryMap[expiresIn] || 604800;
-
+    // jose's own duration parser (used here as an untyped string, exactly
+    // the format it documents: "10 minutes", "12h", "7d", "2 weeks", ...)
+    // already understands anything JWT_EXPIRES_IN could reasonably be set
+    // to. The previous hardcoded {'1d','7d','30d'} map silently fell back to
+    // 7 days for any other value -- an operator setting e.g. "12h" got a
+    // week-long token instead, with no error to notice it by. An operator
+    // who sets something jose truly cannot parse now gets a loud failure
+    // here (every login fails, visibly) instead of a silent, wrong duration.
     const token = await new SignJWT(payload as Record<string, unknown>)
       .setProtectedHeader({ alg: 'HS256' })
       .setIssuedAt()
-      .setExpirationTime(Math.floor(Date.now() / 1000) + expirySeconds)
+      .setExpirationTime(expiresIn)
       .sign(this.getSecretKey());
 
     return token;
