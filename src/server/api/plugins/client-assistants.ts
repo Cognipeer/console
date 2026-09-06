@@ -329,16 +329,18 @@ export function extractMessageText(input: unknown): string | null {
 async function loadThreadOr404(
   tenantDbName: string,
   rawThreadId: string,
-  projectId: string | undefined,
+  projectId: string,
 ): Promise<{ conversation: IAgentConversation; agent: IAgent } | { error: { code: number; message: string } }> {
   const conversationId = conversationIdFromThreadId(rawThreadId);
   const conversation = await getConversationById(tenantDbName, conversationId);
   // getConversationById resolves purely by _id (findAgentConversationById has
   // no projectId parameter at all) — without this check, a caller who can
   // guess or enumerate another project's thread id gets that project's whole
-  // conversation history back. A scoped token's projectId must always be
-  // undefined-or-equal to the record's own project, never silently ignored.
-  if (!conversation || (projectId !== undefined && conversation.projectId !== projectId)) {
+  // conversation history back. `projectId` is required, not optional, on
+  // purpose: every caller here has `ctx.projectId` (ApiTokenContext types it
+  // as a plain `string`), and an optional parameter would leave a silent
+  // "pass nothing, check nothing" bypass for the next caller added.
+  if (!conversation || conversation.projectId !== projectId) {
     return { error: { code: 404, message: 'Thread not found' } };
   }
   const agent = await getAgentByKey(tenantDbName, conversation.agentKey, conversation.projectId);
