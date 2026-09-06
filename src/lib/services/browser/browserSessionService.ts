@@ -10,7 +10,7 @@
 import { randomUUID } from 'node:crypto';
 import { createLogger } from '@/lib/core/logger';
 import { getConfig } from '@/lib/core/config';
-import { routeInstanceCall } from '@/lib/core/cluster';
+import { getThisNodeName, routeInstanceCall } from '@/lib/core/cluster';
 import type { QueuePayload } from '@/lib/core/queue';
 import { getDatabase, runWithTenantScope, type DatabaseProvider } from '@/lib/database';
 import { downloadFile, uploadFile } from '@/lib/services/files';
@@ -180,6 +180,11 @@ export async function createBrowserSession(
     eventCount: 0,
     metadata: input.metadata,
     createdBy: input.createdBy,
+    // browserManager.openSession below always runs on whichever node handled
+    // this request (session creation is not itself assignment-routed) — this
+    // is what boot reconciliation checks before treating an unknown session
+    // as orphaned.
+    ownerNode: getThisNodeName(),
   });
 
   const sessionId = created._id ? String(created._id) : '';

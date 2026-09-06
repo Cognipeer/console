@@ -1876,6 +1876,7 @@ export const TENANT_SCHEMA_SQL = `
     userId TEXT,
     apiTokenId TEXT,
     actorType TEXT,
+    ownerNode TEXT,
     createdBy TEXT NOT NULL,
     updatedBy TEXT,
     createdAt TEXT NOT NULL,

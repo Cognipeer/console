@@ -167,11 +167,11 @@ export function BrowserMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         (id, tenantId, projectId, browserId, sessionKey, name, agentId, agentKey, status,
          config, currentUrl, pageTitle, lastActivityAt, lastScreenshot, artifactBucketKey,
          startedAt, endedAt, errorMessage, eventCount, metadata, userId, apiTokenId, actorType,
-         createdBy, updatedBy, createdAt, updatedAt)
+         ownerNode, createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @browserId, @sessionKey, @name, @agentId, @agentKey, @status,
          @config, @currentUrl, @pageTitle, @lastActivityAt, @lastScreenshot, @artifactBucketKey,
          @startedAt, @endedAt, @errorMessage, @eventCount, @metadata, @userId, @apiTokenId, @actorType,
-         @createdBy, @updatedBy, @createdAt, @updatedAt)
+         @ownerNode, @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
         tenantId: record.tenantId,
@@ -196,6 +196,7 @@ export function BrowserMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         userId: record.userId ?? null,
         apiTokenId: record.apiTokenId ?? null,
         actorType: record.actorType ?? null,
+        ownerNode: record.ownerNode ?? null,
         createdBy: record.createdBy,
         updatedBy: record.updatedBy ?? null,
         createdAt: now,
@@ -214,7 +215,7 @@ export function BrowserMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       const params: Record<string, unknown> = { id, updatedAt: now };
       const stringFields = [
         'sessionKey', 'name', 'agentId', 'agentKey', 'status', 'currentUrl', 'pageTitle',
-        'artifactBucketKey', 'errorMessage', 'updatedBy', 'projectId', 'browserId',
+        'artifactBucketKey', 'errorMessage', 'updatedBy', 'projectId', 'browserId', 'ownerNode',
       ];
       for (const f of stringFields) {
         if ((data as Record<string, unknown>)[f] !== undefined) {
@@ -336,6 +337,7 @@ export function BrowserMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         userId: (row.userId as string | null) ?? undefined,
         apiTokenId: (row.apiTokenId as string | null) ?? undefined,
         actorType: (row.actorType as IBrowserSession['actorType'] | null) ?? undefined,
+        ownerNode: (row.ownerNode as string | null) ?? undefined,
         createdBy: row.createdBy as string,
         updatedBy: (row.updatedBy as string) ?? undefined,
         createdAt: this.toDate(row.createdAt),
