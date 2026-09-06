@@ -56,6 +56,8 @@ import {
   createVectorIndex,
   queryVectorIndex,
   upsertVectors,
+  VectorAttachRequiresDetailsError,
+  VectorAttachNotFoundError,
 } from '@/lib/services/vector/vectorService';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -263,6 +265,110 @@ describe('createVectorIndex', () => {
     await expect(
       createVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, makeInput('bad')),
     ).rejects.toThrow(/not active/i);
+  });
+
+  it('requires dimension when creating a new index in the provider', async () => {
+    await expect(
+      createVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
+        name: 'No Dimension',
+        providerKey: PROVIDER_KEY,
+        createdBy: CREATED_BY,
+      }),
+    ).rejects.toThrow(/dimension is required/i);
+  });
+});
+
+// ── createVectorIndex — attach existing (createInProvider: false) ────────────
+
+describe('createVectorIndex — attach existing', () => {
+  let db: ReturnType<typeof createMockDb>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    db = createMockDb({ findVectorIndexByKey: vi.fn().mockResolvedValue(null) });
+    (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
+    (loadProviderRuntimeData as ReturnType<typeof vi.fn>).mockResolvedValue({
+      record: MOCK_PROVIDER_RECORD,
+      credentials: MOCK_CREDENTIALS,
+    });
+    (providerRegistry.createRuntime as ReturnType<typeof vi.fn>).mockResolvedValue(MOCK_RUNTIME);
+    db.createVectorIndex.mockResolvedValue(MOCK_INDEX_RECORD);
+  });
+
+  const makeAttachInput = (overrides: Record<string, unknown> = {}) => ({
+    name: 'Existing Index',
+    providerKey: PROVIDER_KEY,
+    createdBy: CREATED_BY,
+    createInProvider: false,
+    ...overrides,
+  });
+
+  it('never calls runtime.createIndex', async () => {
+    MOCK_RUNTIME.listIndexes.mockResolvedValue([
+      { externalId: 'existing-ext', name: 'Existing Index', dimension: 768, metric: 'cosine' },
+    ]);
+
+    await createVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, makeAttachInput());
+
+    expect(MOCK_RUNTIME.createIndex).not.toHaveBeenCalled();
+  });
+
+  it('auto-fills dimension/metric/externalId from a matching remote index', async () => {
+    MOCK_RUNTIME.listIndexes.mockResolvedValue([
+      { externalId: 'existing-ext', name: 'Existing Index', dimension: 768, metric: 'dot' },
+    ]);
+
+    await createVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, makeAttachInput());
+
+    const createCall = db.createVectorIndex.mock.calls[0][0];
+    expect(createCall.externalId).toBe('existing-ext');
+    expect(createCall.dimension).toBe(768);
+    expect(createCall.metric).toBe('dot');
+  });
+
+  it('rejects when the caller-supplied dimension conflicts with the provider', async () => {
+    MOCK_RUNTIME.listIndexes.mockResolvedValue([
+      { externalId: 'existing-ext', name: 'Existing Index', dimension: 768, metric: 'cosine' },
+    ]);
+
+    await expect(
+      createVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, makeAttachInput({ dimension: 1536 })),
+    ).rejects.toThrow(/dimension 768/);
+  });
+
+  it('throws VectorAttachNotFoundError when listIndexes succeeds but no match exists', async () => {
+    MOCK_RUNTIME.listIndexes.mockResolvedValue([
+      { externalId: 'other', name: 'Some Other Index', dimension: 768, metric: 'cosine' },
+    ]);
+
+    await expect(
+      createVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, makeAttachInput()),
+    ).rejects.toThrow(VectorAttachNotFoundError);
+  });
+
+  it('throws VectorAttachRequiresDetailsError when listIndexes fails and no manual details are supplied', async () => {
+    MOCK_RUNTIME.listIndexes.mockRejectedValue(new Error('403 Forbidden'));
+
+    await expect(
+      createVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, makeAttachInput()),
+    ).rejects.toThrow(VectorAttachRequiresDetailsError);
+  });
+
+  it('attaches using manually supplied details when listIndexes fails', async () => {
+    MOCK_RUNTIME.listIndexes.mockRejectedValue(new Error('403 Forbidden'));
+
+    await createVectorIndex(
+      TENANT_DB,
+      TENANT_ID,
+      PROJECT_ID,
+      makeAttachInput({ dimension: 1536, metric: 'cosine', externalId: 'manual-ext' }),
+    );
+
+    expect(MOCK_RUNTIME.createIndex).not.toHaveBeenCalled();
+    const createCall = db.createVectorIndex.mock.calls[0][0];
+    expect(createCall.externalId).toBe('manual-ext');
+    expect(createCall.dimension).toBe(1536);
+    expect(createCall.metric).toBe('cosine');
   });
 });
 

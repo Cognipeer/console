@@ -16,12 +16,26 @@ export type VectorMetric = IVectorIndexRecord['metric'];
 export type VectorIndexRecord = IVectorIndexRecord;
 
 export interface CreateVectorIndexRequest
-  extends Omit<CreateVectorIndexInput, 'metric'> {
+  extends Omit<CreateVectorIndexInput, 'metric' | 'dimension'> {
   providerKey: string;
   key?: string;
+  /** Required when `createInProvider` is true (the default). */
+  dimension?: number;
   metric?: CreateVectorIndexInput['metric'];
   metadata?: Record<string, unknown>;
   createdBy: string;
+  /**
+   * When false, attach an index that already exists on the provider instead
+   * of calling `runtime.createIndex()`. Defaults to true. Attaching without a
+   * discoverable remote match requires `dimension`, `metric` and `externalId`.
+   */
+  createInProvider?: boolean;
+  /**
+   * Provider-native identifier to attach to, for providers whose external ID
+   * cannot be derived from `name` and that can't be listed to discover it
+   * (e.g. read-only credentials). Ignored when `createInProvider` is true.
+   */
+  externalId?: string;
 }
 
 export interface UpdateVectorIndexRequest {
