@@ -1,0 +1,22 @@
+name: Release Workflow Checks
+
+on:
+  pull_request:
+    paths: ['.github/workflows/**', 'ci/**']
+  push:
+    branches: [main]
+    paths: ['.github/workflows/**', 'ci/**']
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node --test ci/*.test.mjs
