@@ -93,21 +93,24 @@ export function safeReadJsonBody<T = Record<string, any>>(request: FastifyReques
   }
 }
 
+/**
+ * The caller's IP as resolved through the server's configured proxy trust
+ * boundary (`config.network.trustedProxies` → Fastify's `trustProxy`).
+ *
+ * There is deliberately no X-Forwarded-For / X-Real-IP fallback here any
+ * more. Fastify already derives `request.ip` from X-Forwarded-For when — and
+ * only when — the immediate peer is trusted; re-reading those headers here
+ * did the opposite, taking a caller-settable header at face value no matter
+ * what `trustProxy` said, which is exactly the spoof F-09 reported. Since
+ * `request.ip` falls back to the raw socket address on its own, the old
+ * branches were also unreachable in practice.
+ *
+ * Deployment note: a proxy that sets ONLY `X-Real-IP` and not
+ * `X-Forwarded-For` will now show up as the proxy's own address. Set
+ * `X-Forwarded-For` on it (nginx's `proxy_set_header X-Forwarded-For
+ * $proxy_add_x_forwarded_for`) and list the proxy in `TRUSTED_PROXIES`.
+ */
 export function getClientIp(request: FastifyRequest): string {
-  const forwarded = request.headers['x-forwarded-for'];
-  if (typeof forwarded === 'string' && forwarded.trim().length > 0) {
-    return forwarded.split(',')[0].trim();
-  }
-
-  if (Array.isArray(forwarded) && forwarded[0]) {
-    return forwarded[0].split(',')[0].trim();
-  }
-
-  const realIp = request.headers['x-real-ip'];
-  if (typeof realIp === 'string' && realIp.trim().length > 0) {
-    return realIp.trim();
-  }
-
   return request.ip || 'unknown';
 }
 
