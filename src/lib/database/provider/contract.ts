@@ -1584,6 +1584,15 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     options?: { limit?: number; skip?: number; type?: string },
   ): Promise<ICrawlResult[]>;
   findCrawlResultById(id: string): Promise<ICrawlResult | null>;
+  /**
+   * Patch a crawl result's Knowledge Engine ingest outcome. Used both by the
+   * live per-page ingest during a crawl and by a manual re-sync of a
+   * previously-fetched job's results (no re-crawl involved).
+   */
+  updateCrawlResult(
+    id: string,
+    data: Partial<Pick<ICrawlResult, 'ragDocumentId' | 'ragStatus' | 'errorMessage'>>,
+  ): Promise<ICrawlResult | null>;
   countCrawlResults(jobId: string): Promise<number>;
   /**
    * Delete all crawl results for a job. Used when an interrupted job is

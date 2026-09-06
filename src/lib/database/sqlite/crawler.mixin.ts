@@ -445,6 +445,30 @@ export function CrawlerMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       return row ? this.mapCrawlResult(row) : null;
     }
 
+    async updateCrawlResult(
+      id: string,
+      data: Partial<Pick<ICrawlResult, 'ragDocumentId' | 'ragStatus' | 'errorMessage'>>,
+    ): Promise<ICrawlResult | null> {
+      const db = this.getTenantDb();
+      const sets: string[] = [];
+      const params: Record<string, unknown> = { id };
+      if (data.ragDocumentId !== undefined) {
+        sets.push('ragDocumentId = @ragDocumentId');
+        params.ragDocumentId = data.ragDocumentId ?? null;
+      }
+      if (data.ragStatus !== undefined) {
+        sets.push('ragStatus = @ragStatus');
+        params.ragStatus = data.ragStatus ?? null;
+      }
+      if (data.errorMessage !== undefined) {
+        sets.push('errorMessage = @errorMessage');
+        params.errorMessage = data.errorMessage ?? null;
+      }
+      if (sets.length === 0) return this.findCrawlResultById(id);
+      db.prepare(`UPDATE ${TABLES.crawlResults} SET ${sets.join(', ')} WHERE id = @id`).run(params);
+      return this.findCrawlResultById(id);
+    }
+
     async countCrawlResults(jobId: string): Promise<number> {
       const db = this.getTenantDb();
       const row = db.prepare(

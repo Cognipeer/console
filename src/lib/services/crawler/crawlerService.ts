@@ -21,6 +21,7 @@ import type {
 } from '@/lib/database';
 import { resolveUsageAttribution } from '@/lib/services/usage/usageEvents';
 import { crawlerEntityId } from './crawlerEntityId';
+import { ingestCrawlPage } from './crawlerRagBridge';
 import {
   maskHttpConfig,
   maskWebhookConfig,
@@ -39,6 +40,8 @@ import type {
   CrawlRunSummary,
   CrawlerView,
   RunCrawlerOptions,
+  SyncCrawlJobToRagOptions,
+  SyncCrawlJobToRagSummary,
   UpdateCrawlerInput,
 } from './types';
 
@@ -561,6 +564,68 @@ export async function getCrawlResult(
   if (!record) return null;
   if (record.jobId !== jobId) return null;
   return serializeResult(record);
+}
+
+/**
+ * Push a job's already-fetched pages into a Knowledge Engine module without
+ * re-crawling. Lets a user turn on (or repoint) RAG ingestion after the fact —
+ * e.g. after switching which module/engine a crawler feeds — and backfill it
+ * from content that's already sitting in `crawl_results`.
+ */
+export async function syncCrawlJobToRag(
+  ctx: CrawlerContext,
+  jobId: string,
+  options: SyncCrawlJobToRagOptions,
+  actor: string,
+): Promise<SyncCrawlJobToRagSummary> {
+  const job = await getCrawlJob(ctx, jobId);
+  if (!job) throw new Error(`Crawl job ${jobId} not found`);
+
+  const ragModuleKey = options.ragModuleKey ?? job.planSnapshot?.rag?.ragModuleKey;
+  if (!ragModuleKey) {
+    throw new Error('Invalid request: no Knowledge Engine module selected for this crawler or run');
+  }
+
+  const db = await withTenantDb(ctx.tenantDbName);
+  const results = await db.listCrawlResults(jobId);
+  const eligible = results.filter(
+    (r) => (r.type === 'html' || r.type === 'file') && r.bodyMarkdown && r.bodyMarkdown.trim().length > 0,
+  );
+
+  let indexed = 0;
+  let skipped = 0;
+  let failed = 0;
+
+  for (const result of eligible) {
+    const outcome = await ingestCrawlPage({
+      tenantDbName: ctx.tenantDbName,
+      tenantId: job.tenantId,
+      projectId: job.projectId,
+      rag: { enabled: true, ragModuleKey },
+      crawlerKey: job.crawlerKey,
+      jobId,
+      url: result.url,
+      title: result.title,
+      bodyMarkdown: result.bodyMarkdown ?? '',
+      depth: result.depth,
+      createdBy: actor,
+    });
+    if (outcome.ragStatus === 'indexed') indexed += 1;
+    else if (outcome.ragStatus === 'skipped') skipped += 1;
+    else failed += 1;
+
+    await db.updateCrawlResult(String(result._id), {
+      ragDocumentId: outcome.ragDocumentId,
+      ragStatus: outcome.ragStatus,
+      errorMessage: outcome.errorMessage,
+    });
+  }
+
+  logger.info('Manual Knowledge Engine sync completed', {
+    jobId, ragModuleKey, total: eligible.length, indexed, skipped, failed,
+  });
+
+  return { jobId, ragModuleKey, total: eligible.length, indexed, skipped, failed };
 }
 
 export async function cancelCrawlJob(

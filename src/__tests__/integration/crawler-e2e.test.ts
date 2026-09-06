@@ -84,6 +84,7 @@ import {
   runAdhocCrawl,
   runCrawler,
   startCrawlerQueueConsumer,
+  syncCrawlJobToRag,
 } from '@/lib/services/crawler';
 
 let originServer: Server;
@@ -532,5 +533,55 @@ describe('crawler e2e — RAG binding routes ingest to the tenant DB', () => {
     expect(results.length).toBe(1);
     expect(results[0]!.ragStatus).toBe('indexed');
     expect(results[0]!.ragDocumentId).toBe('ragdoc-1');
+  }, 45_000);
+});
+
+describe('crawler e2e — manual sync to Knowledge Engine (no re-crawl)', () => {
+  it('backfills already-fetched pages into a module chosen after the fact', async () => {
+    ragIngestCalls.length = 0;
+    const ctx = { tenantDbName: TENANT_DB_NAME, tenantId: TENANT_ID };
+
+    // No `rag` binding at crawl time — pages are fetched and stored, but
+    // never ingested. This is the state a user is in before deciding they
+    // now want them in a Knowledge Engine module.
+    const created = await createCrawler(ctx, {
+      name: 'Sync-later crawler',
+      seeds: [originUrl],
+      engine: 'axios',
+      maxDepth: 0,
+      maxPages: 1,
+      autoCrawl: false,
+      http: { allowPrivateNetwork: true },
+      createdBy: ACTOR,
+    });
+
+    const summary = await runCrawler(ctx, created.key, {
+      triggerActor: ACTOR,
+      trigger: 'manual',
+    });
+
+    const beforeSync = await listCrawlJobResults(ctx, summary.jobId);
+    expect(beforeSync.length).toBe(1);
+    expect(beforeSync[0]!.ragStatus).toBeUndefined();
+    expect(ragIngestCalls.length).toBe(0);
+
+    // The manual sync pushes the stored page into a module picked after the
+    // crawl — no seeds, no HTTP fetch, no `runCrawler` call involved.
+    const syncSummary = await syncCrawlJobToRag(
+      ctx,
+      summary.jobId,
+      { ragModuleKey: 'kb-module-backfilled' },
+      ACTOR,
+    );
+
+    expect(syncSummary.total).toBe(1);
+    expect(syncSummary.indexed).toBe(1);
+    expect(syncSummary.failed).toBe(0);
+    expect(ragIngestCalls.length).toBe(1);
+    expect(ragIngestCalls[0]!.ragModuleKey).toBe('kb-module-backfilled');
+
+    const afterSync = await listCrawlJobResults(ctx, summary.jobId);
+    expect(afterSync[0]!.ragStatus).toBe('indexed');
+    expect(afterSync[0]!.ragDocumentId).toBe('ragdoc-1');
   }, 45_000);
 });
