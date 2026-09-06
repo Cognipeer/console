@@ -23,7 +23,7 @@
 
 import { isIP } from 'node:net';
 import { lookup } from 'node:dns/promises';
-import { Agent, buildConnector, type Dispatcher } from 'undici';
+import { Agent, buildConnector } from 'undici';
 
 import { getConfig } from '@/lib/core/config';
 
@@ -167,7 +167,7 @@ export function isAllowlistedHost(host: string, allowedHosts: string[]): boolean
  * addresses that verdict was based on. Cached per the guard's existing TTL —
  * the addresses are cached alongside the verdict, not re-resolved
  * separately, but `assertPublicUrl` always does its own connection-time
- * `dns.lookup()` for the pin (see `resolvePinnedAddress`) rather than trust
+ * `dns.lookup()` for the pin (see `resolvePinnedAddresses`) rather than trust
  * this cache for that: a stale-but-still-public cache entry is fine for the
  * policy question "is this host allowed at all", but pinning specifically
  * exists to close the gap between "resolved" and "connected", which a cache
@@ -212,16 +212,14 @@ async function resolvesToPrivateNetwork(host: string): Promise<{ privateNetwork:
  * address on this fresh lookup (caller re-runs the guard, which will reject
  * it the normal way).
  */
-async function resolvePinnedAddress(host: string): Promise<ResolvedAddress | null> {
+async function resolvePinnedAddresses(host: string): Promise<ResolvedAddress[]> {
   const bare = host.replace(/^\[|\]$/g, '');
-  if (isIP(bare)) return null; // nothing to pin -- the destination already is the address
+  if (isIP(bare)) return []; // nothing to pin -- the destination already is the address
   try {
     const records = await lookup(bare, { all: true, verbatim: true });
-    const first = records[0];
-    if (!first) return null;
-    return { address: first.address, family: first.family as 4 | 6 };
+    return records.map((record) => ({ address: record.address, family: record.family as 4 | 6 }));
   } catch {
-    return null;
+    return [];
   }
 }
 
@@ -230,15 +228,41 @@ async function resolvePinnedAddress(host: string): Promise<ResolvedAddress | nul
  * of what DNS says for the hostname in the request URL. Built fresh per
  * fetch call (never shared/cached) so it can never be reused for an
  * unrelated request.
+ *
+ * ALL validated addresses are handed to the connector, not just the first:
+ * every one of them was checked as public a moment ago, and pinning to a
+ * single record would silently drop the dual-stack failover a normal
+ * `fetch` has — a host whose first DNS answer is an AAAA record this
+ * container cannot route would go from "works" to "always fails".
+ *
+ * Keep-alive is turned down to the minimum because this dispatcher serves
+ * exactly ONE request and is then dropped: undici's default would hold the
+ * socket open for another request that, by construction, never comes — one
+ * leaked file descriptor per outbound call, which a crawl run reaches the
+ * process FD limit with.
  */
-function pinnedDispatcher(pinned: ResolvedAddress): Dispatcher {
+function pinnedDispatcher(pinned: ResolvedAddress[]): Agent {
   return new Agent({
     connect: buildConnector({
-      family: pinned.family,
       lookup: (_hostname, _options, callback) => {
-        callback(null, [{ address: pinned.address, family: pinned.family }]);
+        callback(null, pinned.map(({ address, family }) => ({ address, family })));
       },
     }),
+    keepAliveTimeout: 1,
+    keepAliveMaxTimeout: 1,
+  });
+}
+
+/**
+ * Close a per-request dispatcher once nothing will read from it again.
+ * `destroy()` (not `close()`) because a redirect hop's response body is
+ * deliberately abandoned unread — `close()` waits for in-flight requests to
+ * drain, which for an unread body means waiting forever.
+ */
+function discardDispatcher(dispatcher: Agent | undefined): void {
+  if (!dispatcher) return;
+  void dispatcher.destroy().catch(() => {
+    /* the socket is going away regardless; nothing to recover here */
   });
 }
 
@@ -276,7 +300,7 @@ export async function assertPublicUrl(rawUrl: string, options?: OutboundGuardOpt
 async function checkPublicUrl(
   rawUrl: string,
   options?: OutboundGuardOptions,
-): Promise<{ url: URL; pinned: ResolvedAddress | null }> {
+): Promise<{ url: URL; pinned: ResolvedAddress[] }> {
   let url: URL;
   try {
     url = new URL(rawUrl);
@@ -290,8 +314,8 @@ async function checkPublicUrl(
 
   if (!options?.forceBlock) {
     const { blockPrivateNetwork, allowedHosts } = getConfig().outboundHttp;
-    if (!blockPrivateNetwork || options?.allowPrivate) return { url, pinned: null };
-    if (isAllowlistedHost(url.hostname, allowedHosts)) return { url, pinned: null };
+    if (!blockPrivateNetwork || options?.allowPrivate) return { url, pinned: [] };
+    if (isAllowlistedHost(url.hostname, allowedHosts)) return { url, pinned: [] };
   }
 
   const { privateNetwork } = await resolvesToPrivateNetwork(url.hostname);
@@ -301,11 +325,14 @@ async function checkPublicUrl(
     );
   }
 
-  // Fresh, connection-time resolution for the pin (see resolvePinnedAddress)
+  // Fresh, connection-time resolution for the pin (see resolvePinnedAddresses)
   // -- re-checked for privacy in case DNS answers differently on this second
-  // lookup than it did a moment ago on the cached/policy one above.
-  const pinned = await resolvePinnedAddress(url.hostname);
-  if (pinned && isPrivateIpAddress(pinned.address)) {
+  // lookup than it did a moment ago on the cached/policy one above. EVERY
+  // returned address must be public: handing the connector a list where only
+  // the first was checked would let a second, private record be the one it
+  // actually connects to.
+  const pinned = await resolvePinnedAddresses(url.hostname);
+  if (pinned.some((record) => isPrivateIpAddress(record.address))) {
     throw new OutboundNetworkError(
       `Refusing outbound request to private/loopback host: ${url.hostname}`,
     );
@@ -363,27 +390,49 @@ export async function safeFetch(
     else externalSignal.addEventListener('abort', onExternalAbort, { once: true });
   }
 
+  // The dispatcher belonging to the response this function ultimately
+  // RETURNS must outlive the call: the caller has not read the body yet.
+  // Every other one (each redirect hop, and any hop that threw) is finished
+  // the moment we stop using it, and is destroyed below.
+  let liveDispatcher: Agent | undefined;
+
   try {
     let currentUrl = rawUrl;
     for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
       const { url, pinned } = await checkPublicUrl(currentUrl, options);
-      const response = await fetch(url, {
-        ...init,
-        signal: controller.signal,
-        redirect: 'manual',
-        // Pins the socket to the exact address just validated instead of
-        // letting undici re-resolve DNS itself at connect time -- otherwise
-        // an attacker controlling DNS for this host can answer differently
-        // between the check above and the connection below (TOCTOU / DNS
-        // rebinding). Absent (plain fetch) when there was nothing to pin:
-        // a literal-IP URL, or the private-network guard was bypassed
-        // (allowlisted host / allowPrivate / blocking disabled).
-        ...(pinned ? { dispatcher: pinnedDispatcher(pinned) } : {}),
-      } as RequestInit);
+      // Pins the socket to the exact addresses just validated instead of
+      // letting undici re-resolve DNS itself at connect time -- otherwise
+      // an attacker controlling DNS for this host can answer differently
+      // between the check above and the connection below (TOCTOU / DNS
+      // rebinding). Absent (plain fetch) when there was nothing to pin:
+      // a literal-IP URL, or the private-network guard was bypassed
+      // (allowlisted host / allowPrivate / blocking disabled).
+      const dispatcher = pinned.length > 0 ? pinnedDispatcher(pinned) : undefined;
+      discardDispatcher(liveDispatcher); // previous hop's, now unread
+      liveDispatcher = dispatcher;
+
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          ...init,
+          signal: controller.signal,
+          redirect: 'manual',
+          ...(dispatcher ? { dispatcher } : {}),
+        } as RequestInit);
+      } catch (error) {
+        discardDispatcher(dispatcher);
+        liveDispatcher = undefined;
+        throw error;
+      }
 
       if (response.status >= 300 && response.status < 400) {
         const location = response.headers.get('location');
-        if (!location) return response;
+        if (!location) {
+          // Returned to the caller as-is: its body is theirs to read, so the
+          // dispatcher stays alive with it.
+          liveDispatcher = undefined;
+          return response;
+        }
         if (hop === MAX_REDIRECTS) {
           throw new OutboundNetworkError(`Too many redirects fetching ${rawUrl}`);
         }
@@ -402,11 +451,16 @@ export async function safeFetch(
         continue;
       }
 
+      liveDispatcher = undefined; // handed to the caller together with the body
       return response;
     }
     throw new OutboundNetworkError(`Too many redirects fetching ${rawUrl}`);
   } finally {
     clearTimeout(timer);
     externalSignal?.removeEventListener('abort', onExternalAbort);
+    // Anything still held here belongs to a hop nobody will read (the redirect
+    // cap threw, or the loop fell through) -- releasing it is what keeps a
+    // redirect chain from leaking one socket per hop.
+    discardDispatcher(liveDispatcher);
   }
 }
