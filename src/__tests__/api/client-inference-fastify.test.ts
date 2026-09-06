@@ -57,6 +57,7 @@ vi.mock('@/lib/quota/quotaGuard', () => ({
   checkBudget: vi.fn().mockResolvedValue({ allowed: true }),
   checkPerRequestLimits: vi.fn().mockResolvedValue({ allowed: true }),
   checkRateLimit: vi.fn().mockResolvedValue({ allowed: true }),
+  settleUsageBudget: vi.fn().mockResolvedValue(undefined),
 }));
 
 import { requireApiTokenFromHeader } from '@/lib/services/apiTokenAuth';
@@ -64,6 +65,7 @@ import { getDatabase } from '@/lib/database';
 import { authorizeServiceRequest, getPermissionServiceForPath } from '@/lib/security/rbac';
 import { handleChatCompletion } from '@/lib/services/models/inferenceService';
 import { OutputTokenLimitError } from '@/lib/services/models/openaiErrors';
+import { settleUsageBudget } from '@/lib/quota/quotaGuard';
 import { clientInferenceApiPlugin } from '@/server/api/plugins/client-inference';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
 
@@ -168,5 +170,119 @@ describe('Fastify client inference errors', () => {
       code: 'invalid_request',
     });
     expect(body.error.message).toContain('messages[0].content[1].image_url');
+  });
+});
+
+describe('Fastify client inference — streaming budget settlement (F-05)', () => {
+  let app: Awaited<ReturnType<typeof createFastifyApiTestApp>>;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    mockFn(requireApiTokenFromHeader).mockResolvedValue(AUTH_CTX);
+    mockFn(getDatabase).mockResolvedValue({
+      runWithTenant: <T>(_tenantDbName: string, operation: () => T) => operation(),
+    });
+    mockFn(getPermissionServiceForPath).mockReturnValue('models');
+    mockFn(authorizeServiceRequest).mockReturnValue({ allowed: true });
+    app = await createFastifyApiTestApp(clientInferenceApiPlugin);
+  });
+
+  afterEach(async () => {
+    await app.close();
+  });
+
+  // Regression for the F-05 finding (2026-09-05 assessment): a streamed
+  // chat completion's real usage is only known long after this route has
+  // already returned the (still-open) stream to the caller, so the OLD
+  // post-hoc `if (result.usage) { ...checkBudget... }` block here never ran
+  // for it — the budget counter never debited a single streamed request,
+  // no matter how much it cost. `handleChatCompletion` is mocked here (its
+  // own streaming/cost logic is covered directly in inference-service.test.ts),
+  // so this test stands for the route's wiring alone: does it pass a working
+  // `onUsageSettled` through, and does calling it actually reach the budget
+  // counter for BOTH stream and non-stream calls.
+  it('settles the budget from a streamed completion, not only a non-streaming one', async () => {
+    mockFn(handleChatCompletion).mockImplementation(async (params: {
+      onUsageSettled?: (cost: { currency: string; totalCost: number }) => void;
+    }) => {
+      params.onUsageSettled?.({ currency: 'USD', totalCost: 0.42 });
+      return {
+        stream: new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+            controller.close();
+          },
+        }),
+        requestId: 'stream-req-1',
+      };
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/chat/completions',
+      headers: { authorization: 'Bearer tok_abc' },
+      payload: {
+        model: 'test-model',
+        messages: [{ role: 'user', content: 'Hello' }],
+        stream: true,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(settleUsageBudget).toHaveBeenCalledTimes(1);
+    expect(settleUsageBudget).toHaveBeenCalledWith(
+      expect.objectContaining({ resourceKey: 'test-model' }),
+      { currency: 'USD', totalCost: 0.42 },
+    );
+  });
+
+  it('still settles the budget for a non-streaming completion', async () => {
+    mockFn(handleChatCompletion).mockImplementation(async (params: {
+      onUsageSettled?: (cost: { currency: string; totalCost: number }) => void;
+    }) => {
+      params.onUsageSettled?.({ currency: 'USD', totalCost: 0.07 });
+      return {
+        response: { id: 'chatcmpl-1', choices: [] },
+        usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+        requestId: 'req-1',
+      };
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/chat/completions',
+      headers: { authorization: 'Bearer tok_abc' },
+      payload: {
+        model: 'test-model',
+        messages: [{ role: 'user', content: 'Hello' }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(settleUsageBudget).toHaveBeenCalledWith(
+      expect.objectContaining({ resourceKey: 'test-model' }),
+      { currency: 'USD', totalCost: 0.07 },
+    );
+  });
+
+  it('does not settle the budget when the call produced no billable usage', async () => {
+    mockFn(handleChatCompletion).mockResolvedValue({
+      response: { id: 'chatcmpl-2', choices: [] },
+      usage: {},
+      requestId: 'req-2',
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/chat/completions',
+      headers: { authorization: 'Bearer tok_abc' },
+      payload: {
+        model: 'test-model',
+        messages: [{ role: 'user', content: 'Hello' }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(settleUsageBudget).not.toHaveBeenCalled();
   });
 });

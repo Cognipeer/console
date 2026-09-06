@@ -20,6 +20,7 @@ import {
   checkBudget,
   checkPerRequestLimits,
   checkRateLimit,
+  settleUsageBudget,
 } from '@/lib/quota/quotaGuard';
 import {
   anthropicErrorBody,
@@ -246,6 +247,16 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
         stream: Boolean(body.stream),
         tenantDbName: auth.tenantDbName,
         tenantId: auth.tenantId,
+        // Settling here (rather than after the call returns, as before) is
+        // what makes this work for BOTH stream and non-stream: a streamed
+        // response's real usage isn't known until long after this function
+        // has already returned the still-open stream below, so a post-hoc
+        // `if (result.usage)` check here silently never fired for it — the
+        // budget counter never debited a single streamed request. See the
+        // 2026-09-05 assessment, F-05.
+        onUsageSettled: (cost) => {
+          void settleUsageBudget(quotaContext, cost);
+        },
       });
 
       const actualOutputTokens = result.usage?.outputTokens || 0;
@@ -253,28 +264,6 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
         void checkRateLimit(quotaContext, { tokens: actualOutputTokens }).catch((error) =>
           logger.error('Failed to update chat rate limit usage', { error }),
         );
-      }
-
-      if (result.usage) {
-        const usage = result.usage;
-        void getModelByKey(auth.tenantDbName, modelKey, auth.projectId)
-          .then((model) => {
-            if (!model) {
-              return undefined;
-            }
-
-            const cost = calculateCost(model.pricing, usage);
-            if (
-              cost.currency !== 'USD'
-              || !Number.isFinite(cost.totalCost)
-              || cost.totalCost <= 0
-            ) {
-              return undefined;
-            }
-
-            return checkBudget(quotaContext, { usd: cost.totalCost });
-          })
-          .catch((error) => logger.error('Failed to update chat budget usage', { error }));
       }
 
       if (result.stream) {
