@@ -44,4 +44,10 @@ export type { HealthStatus, HealthCheckResult, HealthReport, HealthCheckFn } fro
 export { runtimePool, hashCredentials } from './runtimePool';
 
 // Async Tasks
-export { fireAndForget, drainPendingTasks, pendingTaskCount } from './asyncTask';
+export {
+  fireAndForget,
+  criticalFireAndForget,
+  drainPendingTasks,
+  pendingTaskCount,
+  pendingCriticalTaskCount,
+} from './asyncTask';
