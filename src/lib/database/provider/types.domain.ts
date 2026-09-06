@@ -2379,6 +2379,15 @@ export interface IBrowserSession extends IUsageAttributionFields {
   /** Raw counters for fast list views. */
   eventCount?: number;
   metadata?: Record<string, unknown>;
+  /**
+   * Name of the cluster node (nodeRegistry.getThisNodeName()) that launched
+   * this session, i.e. the only process whose in-memory browserManager can
+   * actually know this session is alive. Boot reconciliation cross-checks
+   * this against the node registry before expiring an active-status session
+   * — a session is only truly orphaned when its owner node is gone, not
+   * merely unknown to whichever replica happens to be reconciling.
+   */
+  ownerNode?: string;
   createdBy: string;
   updatedBy?: string;
   createdAt?: Date;

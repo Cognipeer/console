@@ -1,5 +1,6 @@
 import { getDatabase, runWithTenantScope } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
+import { listClusterNodes } from '@/lib/core/cluster';
 import { browserManager } from './browserManager';
 
 const logger = createLogger('browser:operations');
@@ -12,6 +13,15 @@ export async function reconcileOrphanedBrowserSessions(): Promise<{
 }> {
   const mainDb = await getDatabase();
   const tenants = await mainDb.listTenants();
+
+  // A session unknown to THIS process's browserManager is not necessarily
+  // dead — it may simply belong to a different, still-live replica. Only a
+  // session whose owner node is itself gone (or was created before this
+  // field existed) is a real orphan. One registry read per sweep, not one
+  // per session.
+  const onlineNodes = new Set(
+    (await listClusterNodes({ status: 'online' })).map((node) => node.name),
+  );
 
   let tenantsScanned = 0;
   let sessionsReconciled = 0;
@@ -28,6 +38,7 @@ export async function reconcileOrphanedBrowserSessions(): Promise<{
         for (const session of sessions) {
           if (!ACTIVE_SESSION_STATUSES.has(session.status)) continue;
           if (browserManager.hasSession(session.sessionKey)) continue;
+          if (session.ownerNode && onlineNodes.has(session.ownerNode)) continue;
 
           await tenantDb.updateBrowserSession(String(session._id), {
             endedAt: new Date(),
