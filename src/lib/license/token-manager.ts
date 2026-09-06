@@ -42,13 +42,21 @@ export class TokenManager {
     // already understands anything JWT_EXPIRES_IN could reasonably be set
     // to. The previous hardcoded {'1d','7d','30d'} map silently fell back to
     // 7 days for any other value -- an operator setting e.g. "12h" got a
-    // week-long token instead, with no error to notice it by. An operator
-    // who sets something jose truly cannot parse now gets a loud failure
-    // here (every login fails, visibly) instead of a silent, wrong duration.
+    // week-long token instead, with no error to notice it by.
+    //
+    // One shape jose only accepts as a NUMBER is a bare count of seconds, so
+    // `JWT_EXPIRES_IN=604800` is converted rather than rejected. Anything
+    // jose still cannot parse has already failed `validateConfig`'s
+    // JWT_EXPIRES_IN check at boot (production refuses to start), so this
+    // cannot become a surprise at first login.
+    const expiration: string | number = /^\d+$/.test(expiresIn.trim())
+      ? Number.parseInt(expiresIn.trim(), 10)
+      : expiresIn;
+
     const token = await new SignJWT(payload as Record<string, unknown>)
       .setProtectedHeader({ alg: 'HS256' })
       .setIssuedAt()
-      .setExpirationTime(expiresIn)
+      .setExpirationTime(expiration)
       .sign(this.getSecretKey());
 
     return token;

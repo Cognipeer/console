@@ -545,6 +545,23 @@ export interface ConfigValidationError {
  * Validate critical config values.  Returns an array of problems.
  * An empty array means the config is valid.
  */
+/**
+ * Mirrors jose's own `secs()` duration grammar (the parser `SignJWT
+ * .setExpirationTime` runs on a string), plus a bare number of seconds,
+ * which jose accepts only as an actual number — so `JWT_EXPIRES_IN=604800`,
+ * a perfectly reasonable thing for an operator to write, stays valid.
+ * `token-manager.ts` normalizes it the same way.
+ */
+const JWT_DURATION_RE =
+  /^(\d+|\d+\.\d+) ?(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d|weeks?|w|years?|yrs?|y)$/i;
+
+export function isParsableJwtDuration(value: string): boolean {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return false;
+  if (/^\d+$/.test(trimmed)) return true; // bare seconds
+  return JWT_DURATION_RE.test(trimmed);
+}
+
 export function validateConfig(cfg: AppConfig): ConfigValidationError[] {
   const errors: ConfigValidationError[] = [];
 
@@ -557,6 +574,19 @@ export function validateConfig(cfg: AppConfig): ConfigValidationError[] {
     errors.push({
       key: 'JWT_SECRET',
       message: 'JWT_SECRET must be at least 32 characters (use a high-entropy random value)',
+    });
+  }
+  // Checked at BOOT, not at first login: `generateToken` hands this string
+  // straight to jose's duration parser now (it used to silently coerce
+  // anything unrecognised to 7 days), so an unparseable value would
+  // otherwise surface as every login failing at runtime rather than as a
+  // config error the operator sees while starting the process.
+  if (!isParsableJwtDuration(cfg.auth.jwtExpiresIn)) {
+    errors.push({
+      key: 'JWT_EXPIRES_IN',
+      message:
+        `JWT_EXPIRES_IN="${cfg.auth.jwtExpiresIn}" is not a duration this build can parse. `
+        + 'Use a number of seconds ("604800") or a value with a unit ("30m", "12h", "7d", "2 weeks").',
     });
   }
   if (!cfg.auth.providerEncryptionSecret) {

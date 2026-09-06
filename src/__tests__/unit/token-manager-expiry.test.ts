@@ -6,7 +6,7 @@
  * it by.
  */
 import { describe, it, expect, afterEach } from 'vitest';
-import { getConfigSource, setConfigSource, type ConfigSource } from '@/lib/core/config';
+import { getConfigSource, isParsableJwtDuration, setConfigSource, type ConfigSource } from '@/lib/core/config';
 import { TokenManager } from '@/lib/license/token-manager';
 import type { LicenseType } from '@/lib/license/license-manager';
 
@@ -58,5 +58,19 @@ describe('TokenManager.generateToken — JWT_EXPIRES_IN parsing', () => {
   it('fails loudly instead of silently issuing a 7-day token for an unparseable value', async () => {
     setConfigSource(sourceWith({ JWT_EXPIRES_IN: 'seven days please' }));
     await expect(TokenManager.generateToken(BASE_PAYLOAD)).rejects.toThrow();
+  });
+});
+
+describe('JWT_EXPIRES_IN config validation (F-08 follow-up)', () => {
+  it('accepts every duration shape jose understands, plus bare seconds', () => {
+    for (const value of ['7d', '12h', '30m', '45s', '2 weeks', '1 year', '604800', '0']) {
+      expect(isParsableJwtDuration(value)).toBe(true);
+    }
+  });
+
+  it('rejects what would otherwise fail at first login instead of at boot', () => {
+    for (const value of ['', '   ', 'forever', '7 fortnights', 'd7', '7dd']) {
+      expect(isParsableJwtDuration(value)).toBe(false);
+    }
   });
 });
