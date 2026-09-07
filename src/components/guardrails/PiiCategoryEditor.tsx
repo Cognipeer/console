@@ -462,9 +462,12 @@ export default function PiiCategoryEditor({ keys, readOnly }: PolicyResourceDeta
                     checked={on}
                     disabled={readOnly || saving}
                     aria-label={categoryLabel(category, locale)}
-                    onChange={(event) =>
-                      setDraft((prev) => ({ ...prev, [category.id]: event.currentTarget.checked }))
-                    }
+                    onChange={(event) => {
+                      // Read it HERE: a functional update runs during the next
+                      // render, by which time `currentTarget` is null.
+                      const checked = event.currentTarget.checked;
+                      setDraft((prev) => ({ ...prev, [category.id]: checked }));
+                    }}
                   />
                   <div style={{ flex: 1 }}>
                     <Group gap={6}>

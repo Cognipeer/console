@@ -32,6 +32,7 @@ import type {
   BrowserScreenshotInput,
   BrowserSessionEventView,
   BrowserSessionView,
+  BrowserTarget,
   CreateBrowserSessionInput,
 } from './types';
 import type {
@@ -506,6 +507,23 @@ export async function captureSnapshot(
     data: { length: snapshot.length },
   });
   return { ariaSnapshot: snapshot, url };
+}
+
+/**
+ * Turn a snapshot `ref` into the durable target a step should store.
+ *
+ * The element list hands back a ref; a flow cannot keep one. For a named
+ * element role+name is the answer, and for an unnamed one this is what finds
+ * a real handle (a test id, an id, a structural path) instead of storing a
+ * bare role that would match the first element of that kind on the page.
+ */
+export async function describeSessionElement(
+  ctx: SessionContext,
+  sessionKey: string,
+  ref: string,
+): Promise<{ target: BrowserTarget; path: string; tag: string; text?: string } | null> {
+  await loadSessionForKey(ctx, sessionKey);
+  return browserManager.describeElement(sessionKey, ref);
 }
 
 /**

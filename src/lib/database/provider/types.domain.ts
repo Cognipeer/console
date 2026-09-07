@@ -2454,6 +2454,33 @@ export interface IBrowserFlowInput {
 }
 
 /**
+ * One field of the JSON a run hands back.
+ *
+ * Undeclared, a run returns whatever `captureAs` happened to collect — a
+ * shape that changes the moment someone renames a capture or reorders the
+ * steps, and one a caller (an agent picking the flow out of a list, a client
+ * API consumer) cannot know before running it. Declaring the fields here
+ * makes the return value a contract that survives the steps being rewritten
+ * underneath it.
+ */
+export interface IBrowserFlowOutput {
+  /** Key in the returned JSON. */
+  name: string;
+  /** Template over captures and inputs — usually one `{{step.x}}`. */
+  source: string;
+  /**
+   * Cast applied to the resolved value. Left off, the value is passed
+   * through exactly as captured (an `extract` with `multiple` stays an
+   * array); a cast that fails leaves the field unresolved rather than
+   * emitting `NaN`.
+   */
+  type?: 'string' | 'number' | 'boolean' | 'json';
+  /** A run that cannot resolve this field fails, even if every step passed. */
+  required?: boolean;
+  description?: string;
+}
+
+/**
  * What a step does when it fails.
  *
  * `abort` is the default because a half-finished form is usually worse than
@@ -2502,6 +2529,8 @@ export interface IBrowserFlow {
   /** Browser profile the flow runs under — supplies session config and egress rules. */
   browserId: string;
   inputs?: IBrowserFlowInput[];
+  /** Declared shape of the JSON a run returns. Empty means "the raw captures". */
+  outputs?: IBrowserFlowOutput[];
   steps: IBrowserFlowStep[];
   /** Session config overrides applied for the flow's own sessions. */
   sessionConfig?: IBrowserSessionConfig;
@@ -2559,8 +2588,14 @@ export interface IBrowserFlowRun {
   /** Non-secret inputs only; `secret` parameters are never persisted. */
   inputs?: Record<string, unknown>;
   stepResults?: IBrowserFlowStepResult[];
-  /** Values collected by `captureAs`, keyed by name. */
+  /**
+   * The run's return value, in the shape `flow.outputs` declares. A flow
+   * that declares nothing returns `captures` verbatim, which is what every
+   * run did before outputs existed.
+   */
   outputs?: Record<string, unknown>;
+  /** Raw values collected by `captureAs`, keyed by name — the debugging view. */
+  captures?: Record<string, unknown>;
   startedAt?: Date;
   endedAt?: Date;
   durationMs?: number;

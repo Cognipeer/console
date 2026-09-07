@@ -427,6 +427,7 @@ export function BrowserMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         status: row.status as IBrowserFlow['status'],
         browserId: row.browserId as string,
         inputs: this.parseJson(row.inputs, [] as IBrowserFlow['inputs']),
+        outputs: this.parseJson(row.outputs, [] as IBrowserFlow['outputs']),
         steps: this.parseJson(row.steps, [] as IBrowserFlow['steps']) ?? [],
         sessionConfig: this.parseJson(
           row.sessionConfig,
@@ -451,11 +452,11 @@ export function BrowserMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       const now = this.now();
       db.prepare(`
         INSERT INTO ${TABLES.browserFlows}
-        (id, tenantId, projectId, key, name, description, status, browserId, inputs, steps,
+        (id, tenantId, projectId, key, name, description, status, browserId, inputs, outputs, steps,
          sessionConfig, recordedFromSessionId, version, lastRun, metadata,
          createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @key, @name, @description, @status, @browserId,
-         @inputs, @steps, @sessionConfig, @recordedFromSessionId, @version, @lastRun, @metadata,
+         @inputs, @outputs, @steps, @sessionConfig, @recordedFromSessionId, @version, @lastRun, @metadata,
          @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
@@ -467,6 +468,7 @@ export function BrowserMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         status: record.status,
         browserId: record.browserId,
         inputs: this.toJson(record.inputs ?? []),
+        outputs: this.toJson(record.outputs ?? []),
         steps: this.toJson(record.steps ?? []),
         sessionConfig: record.sessionConfig ? this.toJson(record.sessionConfig) : null,
         recordedFromSessionId: record.recordedFromSessionId ?? null,
@@ -500,6 +502,7 @@ export function BrowserMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         updatedBy: (v) => v,
         projectId: (v) => v,
         inputs: (v) => this.toJson(v ?? []),
+        outputs: (v) => this.toJson(v ?? []),
         steps: (v) => this.toJson(v ?? []),
         sessionConfig: (v) => (v ? this.toJson(v) : null),
         lastRun: (v) => (v ? this.toJson(v) : null),
@@ -598,6 +601,7 @@ export function BrowserMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         inputs: this.parseJson(row.inputs, {} as Record<string, unknown>),
         stepResults: this.parseJson(row.stepResults, [] as IBrowserFlowRun['stepResults']),
         outputs: this.parseJson(row.outputs, {} as Record<string, unknown>),
+        captures: this.parseJson(row.captures, {} as Record<string, unknown>),
         startedAt: row.startedAt ? this.toDate(row.startedAt) : undefined,
         endedAt: row.endedAt ? this.toDate(row.endedAt) : undefined,
         durationMs: row.durationMs == null ? undefined : Number(row.durationMs),
@@ -618,10 +622,10 @@ export function BrowserMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       db.prepare(`
         INSERT INTO ${TABLES.browserFlowRuns}
         (id, tenantId, projectId, flowId, flowKey, flowVersion, status, trigger,
-         sessionId, sessionKey, inputs, stepResults, outputs, startedAt, endedAt,
+         sessionId, sessionKey, inputs, stepResults, outputs, captures, startedAt, endedAt,
          durationMs, errorMessage, failedStepIndex, createdBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @flowId, @flowKey, @flowVersion, @status, @trigger,
-         @sessionId, @sessionKey, @inputs, @stepResults, @outputs, @startedAt, @endedAt,
+         @sessionId, @sessionKey, @inputs, @stepResults, @outputs, @captures, @startedAt, @endedAt,
          @durationMs, @errorMessage, @failedStepIndex, @createdBy, @createdAt, @updatedAt)
       `).run({
         id,
@@ -637,6 +641,7 @@ export function BrowserMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         inputs: this.toJson(record.inputs ?? {}),
         stepResults: this.toJson(record.stepResults ?? []),
         outputs: this.toJson(record.outputs ?? {}),
+        captures: this.toJson(record.captures ?? {}),
         startedAt: record.startedAt ? record.startedAt.toISOString() : null,
         endedAt: record.endedAt ? record.endedAt.toISOString() : null,
         durationMs: record.durationMs ?? null,
@@ -667,6 +672,7 @@ export function BrowserMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         inputs: (v) => this.toJson(v ?? {}),
         stepResults: (v) => this.toJson(v ?? []),
         outputs: (v) => this.toJson(v ?? {}),
+        captures: (v) => this.toJson(v ?? {}),
         startedAt: (v) => (v instanceof Date ? v.toISOString() : v),
         endedAt: (v) => (v instanceof Date ? v.toISOString() : v),
       };
