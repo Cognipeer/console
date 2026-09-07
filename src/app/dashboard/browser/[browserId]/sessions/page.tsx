@@ -16,6 +16,7 @@ import {
   Modal,
   Paper,
   ScrollArea,
+  Select,
   Stack,
   Switch,
   Table,
@@ -327,6 +328,7 @@ function SessionDrawer({
   const [events, setEvents] = useState<BrowserSessionEventView[]>([]);
   const [polling, setPolling] = useState(true);
   const [navigateUrl, setNavigateUrl] = useState('');
+  const [waitUntil, setWaitUntil] = useState<'domcontentloaded' | 'load' | 'networkidle'>('domcontentloaded');
   const [actionLoading, setActionLoading] = useState(false);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -392,7 +394,7 @@ function SessionDrawer({
       await fetch(`/api/browser/sessions/${session.sessionKey}/actions`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ type: 'goto', url: navigateUrl }),
+        body: JSON.stringify({ type: 'goto', url: navigateUrl, waitUntil }),
       });
       onMutated();
       const eventsRes = await fetch(`/api/browser/sessions/${session.id}/events?limit=25`, { cache: 'no-store' }).catch(() => null);
@@ -452,6 +454,17 @@ function SessionDrawer({
               value={navigateUrl}
               onChange={(e) => setNavigateUrl(e.currentTarget.value)}
               style={{ flex: 1 }}
+            />
+            <Select
+              data={[
+                { value: 'domcontentloaded', label: 'DOM ready (default)' },
+                { value: 'load', label: 'Full load' },
+                { value: 'networkidle', label: 'Network idle' },
+              ]}
+              value={waitUntil}
+              onChange={(v) => setWaitUntil((v as typeof waitUntil) ?? 'domcontentloaded')}
+              w={170}
+              size="sm"
             />
             <Button leftSection={<IconPlayerPlay size={14} />} onClick={runNavigate} loading={actionLoading}>Go</Button>
           </Group>

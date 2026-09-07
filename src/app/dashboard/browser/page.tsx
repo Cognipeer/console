@@ -82,15 +82,20 @@ export default function BrowsersListPage() {
       description: '',
       artifactBucketKey: '',
       defaultModelKey: '',
-      // Defaults mirror the server's own (`config.browser.*`), so a browser
-      // created without touching this section behaves exactly as before.
       headless: true,
       viewportWidth: 1280,
       viewportHeight: 800,
       locale: '',
       timezoneId: '',
       actionTimeoutMs: 15_000,
-      navigationTimeoutMs: 30_000,
+      // A real page behind a corporate egress proxy, or one that's just
+      // heavier than a synthetic test target, routinely needs more than 30s
+      // to navigate — and once a browser is saved with an explicit value
+      // here, it always wins over BROWSER_DEFAULT_NAVIGATION_TIMEOUT_MS (a
+      // per-browser override is supposed to win), so a low default baked in
+      // by every browser created through this form silently defeats that
+      // env var raising the deployment-wide default.
+      navigationTimeoutMs: 60_000,
       idleTimeoutMs: 300_000,
       allowList: '',
       blockList: '',

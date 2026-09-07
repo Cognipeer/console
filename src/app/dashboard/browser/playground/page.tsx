@@ -192,6 +192,7 @@ export default function BrowserPlaygroundPage() {
   // ── Action composer ───────────────────────────────────────
   const [actionType, setActionType] = useState('goto');
   const [url, setUrl] = useState('');
+  const [gotoWaitUntil, setGotoWaitUntil] = useState<'domcontentloaded' | 'load' | 'networkidle'>('domcontentloaded');
   const [value, setValue] = useState('');
   const [keyName, setKeyName] = useState('Enter');
   const [waitMs, setWaitMs] = useState('1000');
@@ -285,6 +286,7 @@ export default function BrowserPlaygroundPage() {
     if (actionType === 'goto') {
       if (!url.trim()) return null;
       action.url = url.trim();
+      action.waitUntil = gotoWaitUntil;
     }
     if (actionType === 'type') action.text = value;
     if (actionType === 'select') action.labels = [value];
@@ -514,14 +516,27 @@ export default function BrowserPlaygroundPage() {
             />
 
             {actionType === 'goto' ? (
-              <TextInput
-                size="xs"
-                label="URL"
-                placeholder="https://example.com"
-                value={url}
-                onChange={(event) => setUrl(event.currentTarget.value)}
-                onKeyDown={(event) => { if (event.key === 'Enter') void run(); }}
-              />
+              <>
+                <TextInput
+                  size="xs"
+                  label="URL"
+                  placeholder="https://example.com"
+                  value={url}
+                  onChange={(event) => setUrl(event.currentTarget.value)}
+                  onKeyDown={(event) => { if (event.key === 'Enter') void run(); }}
+                />
+                <Select
+                  size="xs"
+                  label="Wait until"
+                  data={[
+                    { value: 'domcontentloaded', label: 'DOM ready (default)' },
+                    { value: 'load', label: 'Full load' },
+                    { value: 'networkidle', label: 'Network idle' },
+                  ]}
+                  value={gotoWaitUntil}
+                  onChange={(v) => setGotoWaitUntil((v as typeof gotoWaitUntil) ?? 'domcontentloaded')}
+                />
+              </>
             ) : null}
 
             {actionType === 'type' || actionType === 'select' ? (
